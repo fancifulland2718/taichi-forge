@@ -583,12 +583,12 @@ _OPERATIONS = (
         "fixed_function",
         "native_command",
         "implementation_defined",
-        ("python", "graph"),
+        ("python",),
         "native_command",
-        "recordable",
+        "unsupported",
         "runtime_ordered",
-        "graph_owned",
-        "planned",
+        "provider_owned",
+        "existing_public",
         resource_effects=(
             "read:geometry",
             "write:acceleration_structure",
@@ -597,7 +597,13 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="rebuild",
         requirements=("VK_KHR_acceleration_structure",),
-        public_api="ti.hardware.ray",
+        public_api="ti.hardware.ray.TriangleScene",
+        dtypes=("vertex:f32", "index:i32"),
+        layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
+        notes=(
+            "Static geometry and one identity TLAS instance only.",
+            "Construction records a rebuild; refit remains a separate planned route.",
+        ),
     ),
     _operation(
         "ray.as_refit.vulkan",
@@ -637,8 +643,8 @@ _OPERATIONS = (
         "native_command",
         "recordable",
         "runtime_ordered",
-        "caller_owned",
-        "planned",
+        "provider_owned",
+        "existing_public",
         resource_effects=(
             "read:acceleration_structure",
             "read:rays",
@@ -647,7 +653,18 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="rebind",
         requirements=("VK_KHR_acceleration_structure", "VK_KHR_ray_query"),
-        public_api="ti.hardware.ray",
+        public_api="ti.hardware.ray.TriangleScene.trace",
+        dtypes=("ray:f32", "hit:f32"),
+        shapes_or_tiles=("rays:(N,8)", "hits:(N,4)", "workgroup:128"),
+        layouts=("scalar 2D", "AOS vector"),
+        numeric_contracts=(
+            "ray:[origin.xyz,tmin,direction.xyz,tmax]",
+            "hit:[t,primitive_id,instance_id,hit_flag]",
+            "miss:[-1,-1,-1,0]",
+        ),
+        notes=(
+            "Explicit Python or Graph native command; never selected by an ordinary kernel.",
+        ),
     ),
     _operation(
         "ray.query.inline.vulkan",
@@ -1090,24 +1107,48 @@ def _runtime_facts():
 
 
 def _passive_core_statuses(runtime_initialized, backend):
-    if not runtime_initialized or backend != "cuda":
+    if not runtime_initialized or backend not in ("cuda", "vulkan"):
         return {}
     from taichi_forge.lang import impl  # pylint: disable=C0415
 
     program = impl.get_runtime().prog
-    available = bool(
-        program is not None
-        and program.cuda_matrix_mma_f16_f32_available()
-    )
-    return {
-        "matrix.mma.cuda": {
-            "available": available,
-            "native_facts": {
-                "provider_available": available,
-                "capability_query": "cuda_driver_compute_capability",
-                "capability_query_loads_ptx": False,
-            },
+    if backend == "cuda":
+        available = bool(
+            program is not None
+            and program.cuda_matrix_mma_f16_f32_available()
+        )
+        return {
+            "matrix.mma.cuda": {
+                "available": available,
+                "native_facts": {
+                    "provider_available": available,
+                    "capability_query": "cuda_driver_compute_capability",
+                    "capability_query_loads_ptx": False,
+                },
+            }
         }
+    available = bool(
+        program is not None and program.vulkan_ray_query_available()
+    )
+    native_facts = {
+        "provider_available": available,
+        "capability_query": "active_vulkan_feature_chain",
+        "required_features": (
+            "bufferDeviceAddress",
+            "accelerationStructure",
+            "rayQuery",
+        ),
+        "capability_query_builds_acceleration_structure": False,
+    }
+    return {
+        "ray.as_build.vulkan": {
+            "available": available,
+            "native_facts": native_facts,
+        },
+        "ray.query.batch.vulkan": {
+            "available": available,
+            "native_facts": native_facts,
+        },
     }
 
 

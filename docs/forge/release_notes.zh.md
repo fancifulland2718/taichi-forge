@@ -62,6 +62,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   设备上，通过 CUDA Driver/PTX WMMA 显式执行 compact row-major `m16n16k16`、f16
   输入、f32 累加/输出，支持 direct 与 root Graph。它不依赖 CUDA Toolkit runtime 或
   厂商算法包；普通矩阵乘法不会被改写，kernel 内调用仍不支持。
+- 新增首个 D0 `ti.hardware.ray` 切片：通过 direct Python 与 root Graph 显式构建
+  static-triangle Vulkan BLAS/TLAS 并执行 batch Ray Query。provider 要求对应 device
+  feature，使用构建期嵌入的 SPIR-V，不隐式 host readback，也不增加 SDK runtime 依赖或
+  官方 wheel 变体。refit、多 instance、procedural geometry 与 kernel-inline query
+  仍不支持。
 
 ## 0.6.2 {#062}
 

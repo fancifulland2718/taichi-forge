@@ -3836,7 +3836,8 @@ void VulkanDevice::create_vma_allocator() {
 
   allocatorInfo.pVulkanFunctions = &vk_vma_functions;
 
-  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer)) {
+  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) ||
+      vk_caps().buffer_device_address) {
     allocatorInfo.flags |= VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
   }
 

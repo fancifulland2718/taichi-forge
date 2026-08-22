@@ -86,6 +86,38 @@ both. This is a Python native executable and is not kernel-callable.
 output bindings participate in an exact effect contract. This D0 API adds no
 dependency or wheel variant.
 
+### `ti.hardware.ray.TriangleScene` (0.6.3 in development)
+
+An explicit D0 Vulkan hardware ray-query provider for an immutable triangle
+mesh and one identity TLAS instance:
+
+```python
+with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
+    scene.trace(rays, hits)
+
+    recording = scene.record(ray_count)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="auto")
+    graph = builder.compile()
+    graph.run({"rays": rays, "hits": hits})
+```
+
+Vertices are f32 and indices are i32, using scalar `(N, 3)` or AOS vector-3
+layout. Rays are f32 `(N, 8)` values
+`[ox, oy, oz, tmin, dx, dy, dz, tmax]`; hits are f32 `(N, 4)` values
+`[t, primitive_id, instance_id, hit_flag]`, with misses encoded as
+`[-1, -1, -1, 0]`. Construction explicitly records one BLAS/TLAS build, while
+`trace()` and the root-Graph recording issue batch ray queries without host
+readback. Input indices must be nonnegative and in range; the provider does
+not read them back to validate mesh topology.
+
+The provider requires Vulkan 1.2 plus buffer-device-address,
+`VK_KHR_acceleration_structure`, and `VK_KHR_ray_query`. Its SPIR-V shader is
+embedded at build time, so it adds no Vulkan SDK runtime dependency and no
+official wheel variant. It is not callable inside `@ti.kernel`, never replaces
+ordinary kernels or collision detection, and currently excludes refit,
+transforms, multiple instances, procedural geometry, and inline kernel query.
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 Creates an explicit non-owning zero-copy dense storage view over a qualified

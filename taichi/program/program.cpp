@@ -8534,6 +8534,8 @@ void Program::finalize() {
   best_effort("clear primitive workspace arena",
               [&] { primitive_workspace_arena_.clear(); });
   if (compile_config().arch == Arch::vulkan) {
+    best_effort("clear Vulkan ray scenes",
+                [&] { vulkan_clear_ray_scenes(); });
     best_effort("clear Vulkan primitive caches",
                 [&] { vulkan_clear_primitive_caches(); });
   }

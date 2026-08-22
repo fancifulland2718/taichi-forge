@@ -464,6 +464,40 @@ The qualified slice is deliberately narrow and fail-closed:
   already present in official wheels. It adds no SDK, vendor package, or wheel
   variant.
 
+### Current M6 Vulkan ray-query qualification boundary
+
+`ti.hardware.ray.TriangleScene` is the first public acceleration-structure
+resource. Creating it is an explicit Python operation: Forge copies one
+immutable f32 triangle mesh into provider-owned buffers and records a one-time
+BLAS followed by a one-instance identity TLAS build. `trace()` and `record()`
+then expose the same batch Ray Query as direct execution or one root-Graph
+backend command. Scene construction is deliberately not Graph-recordable in
+this slice because resource creation, sizing, scratch allocation, and lifetime
+ownership are setup operations rather than replay work.
+
+The route is qualified as fixed-function traversal rather than a generic
+collision accelerator:
+
+- it requires the complete Vulkan buffer-device-address, acceleration-
+  structure, and Ray Query feature cluster and fails closed otherwise;
+- shader compilation targets Vulkan 1.2/SPIR-V 1.4, but the resulting C array
+  is embedded in the runtime. `glslc` is build-only and no SDK library becomes
+  a wheel dependency;
+- build-input, AS-storage, and scratch buffers use explicit usage and device-
+  address contracts; BLAS-to-TLAS and build-to-query dependencies are recorded
+  with Vulkan AS access and pipeline-stage barriers;
+- replay rerecords one runtime-ordered compute command, retains the scene and
+  bound ndarrays through submission, and rejects execution after scene close
+  or runtime-generation change; and
+- only static indexed triangles, one identity instance, closest opaque hit,
+  and the documented f32 ray/hit layouts are qualified. Refit, transforms,
+  multi-instance/procedural geometry, indirect builds, serialization, and
+  inline kernel query remain planned.
+
+This is a manual hardware interface. No existing software ray tracer,
+renderer, contact query, or ordinary Taichi kernel is automatically rewritten
+to call it.
+
 ## Cache boundaries
 
 One universal cache key would invalidate too much portable work and still be

@@ -1,0 +1,48 @@
+#version 460
+#extension GL_EXT_ray_query : require
+
+layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+
+struct RayRecord {
+  vec4 origin_tmin;
+  vec4 direction_tmax;
+};
+
+layout(std430, set = 0, binding = 1) readonly buffer RayBuffer {
+  RayRecord rays[];
+};
+
+layout(std430, set = 0, binding = 2) writeonly buffer HitBuffer {
+  vec4 hits[];
+};
+
+layout(push_constant) uniform Parameters {
+  uint ray_count;
+} parameters;
+
+void main() {
+  uint ray_index = gl_GlobalInvocationID.x;
+  if (ray_index >= parameters.ray_count) {
+    return;
+  }
+
+  RayRecord ray = rays[ray_index];
+  rayQueryEXT query;
+  rayQueryInitializeEXT(query, scene, gl_RayFlagsOpaqueEXT, 0xff,
+                        ray.origin_tmin.xyz, ray.origin_tmin.w,
+                        ray.direction_tmax.xyz, ray.direction_tmax.w);
+  while (rayQueryProceedEXT(query)) {
+  }
+
+  if (rayQueryGetIntersectionTypeEXT(query, true) ==
+      gl_RayQueryCommittedIntersectionTriangleEXT) {
+    hits[ray_index] = vec4(
+        rayQueryGetIntersectionTEXT(query, true),
+        float(rayQueryGetIntersectionPrimitiveIndexEXT(query, true)),
+        float(rayQueryGetIntersectionInstanceCustomIndexEXT(query, true)), 1.0);
+  } else {
+    hits[ray_index] = vec4(-1.0, -1.0, -1.0, 0.0);
+  }
+}

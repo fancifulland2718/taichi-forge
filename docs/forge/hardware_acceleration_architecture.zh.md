@@ -407,6 +407,33 @@ list、render pass、graphics pipeline，执行 rasterizer、depth test/write �
 - provider 只复用官方 wheel 已有的 Vulkan/GGUI D0 runtime 与内建 shader，不新增 SDK、
   vendor package 或 wheel 发行变体。
 
+### 当前 M6 Vulkan Ray Query 资格边界
+
+`ti.hardware.ray.TriangleScene` 是首个公开的 acceleration-structure resource。
+创建该对象属于显式 Python 操作：Forge 把一份 immutable f32 triangle mesh 复制到
+provider-owned buffer，并依次记录一次 BLAS build 与一个 identity-instance TLAS build。
+随后 `trace()` 和 `record()` 把同一 batch Ray Query 暴露为 direct execution 或一条
+root-Graph backend command。当前切片不允许把 scene construction 录入 Graph，因为
+resource creation、size query、scratch allocation 与 lifetime ownership 属于 setup，而不是
+replay work。
+
+该路线被资格化为 fixed-function traversal，而不是通用 collision accelerator：
+
+- 必须同时具备 Vulkan buffer-device-address、acceleration-structure 与 Ray Query feature，
+  否则 fail closed；
+- shader 以 Vulkan 1.2/SPIR-V 1.4 为目标构建，但产物以 C array 嵌入 runtime；`glslc`
+  仅为 build-only 工具，不会变成 wheel dependency；
+- build-input、AS-storage 与 scratch buffer 使用显式 usage/device-address 合同；
+  BLAS-to-TLAS 与 build-to-query dependency 使用 Vulkan AS access/stage barrier；
+- replay 在 runtime-ordered compute queue 上重录一条 command，并让 scene 与绑定 ndarray
+  在 submission 期间保持存活；scene close 或 runtime generation 改变后明确拒绝执行；
+- 当前只资格化 static indexed triangle、一个 identity instance、closest opaque hit 与文档
+  指定的 f32 ray/hit layout。refit、transform、多 instance/procedural geometry、indirect
+  build、serialization 与 kernel-inline query 仍为规划项。
+
+这是手动调用的硬件接口。现有软件光追、renderer、contact query 或普通 Taichi kernel
+均不会被自动改写为调用它。
+
 ## Cache 边界
 
 一个全局 cache key 会错误失效过多 portable work，同时仍不足以保护 native

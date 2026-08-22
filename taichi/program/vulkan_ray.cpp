@@ -1,0 +1,644 @@
+#include "taichi/program/program.h"
+
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <utility>
+
+#if defined(TI_WITH_VULKAN)
+#include "taichi/rhi/vulkan/vulkan_device.h"
+
+namespace taichi::lang {
+namespace {
+
+constexpr std::uint32_t kRayQueryWorkgroupSize = 128;
+
+static const std::uint32_t kRayQueryTrianglesSpv[] =
+#include "taichi/program/vulkan_sort_shaders/ray_query_triangles.comp.spv.h"
+    ;
+
+template <typename Function>
+Function load_vulkan_device_function(VkDevice device, const char *name) {
+  auto function = reinterpret_cast<Function>(vkGetDeviceProcAddr(device, name));
+  TI_ERROR_IF(function == nullptr,
+              "Vulkan ray provider could not load required function '{}'.",
+              name);
+  return function;
+}
+
+std::size_t checked_mul(std::size_t lhs,
+                        std::size_t rhs,
+                        const char *description) {
+  TI_ERROR_IF(lhs != 0 && rhs > (std::numeric_limits<std::size_t>::max)() / lhs,
+              "Vulkan ray {} size overflow.", description);
+  return lhs * rhs;
+}
+
+VkDeviceAddress aligned_address(VkDeviceAddress address,
+                                VkDeviceSize alignment) {
+  TI_ASSERT(alignment != 0 && (alignment & (alignment - 1)) == 0);
+  return (address + alignment - 1) & ~(alignment - 1);
+}
+
+}  // namespace
+
+class VulkanTriangleRayScene {
+ public:
+  VulkanTriangleRayScene(Program *program,
+                         std::size_t vertex_count,
+                         std::size_t triangle_count)
+      : program_(program),
+        vertex_count_(vertex_count),
+        triangle_count_(triangle_count) {
+    TI_ERROR_IF(program_ == nullptr,
+                "Vulkan triangle ray scene requires a live Program.");
+    device_ = static_cast<vulkan::VulkanDevice *>(
+        program_->get_compute_device());
+    TI_ERROR_IF(device_ == nullptr ||
+                    !device_->vk_caps().acceleration_structure ||
+                    !device_->vk_caps().ray_query,
+                "Vulkan triangle ray scene requires acceleration-structure "
+                "and ray-query support.");
+    TI_ERROR_IF(vertex_count_ == 0 ||
+                    vertex_count_ > static_cast<std::size_t>(
+                                        (std::numeric_limits<
+                                            std::uint32_t>::max)()),
+                "Vulkan triangle ray vertex_count must be in [1, UINT32_MAX].");
+    TI_ERROR_IF(triangle_count_ == 0 ||
+                    triangle_count_ > static_cast<std::size_t>(
+                                          (std::numeric_limits<
+                                              std::uint32_t>::max)()),
+                "Vulkan triangle ray triangle_count must be in [1, "
+                "UINT32_MAX].");
+
+    get_build_sizes_ = load_vulkan_device_function<
+        PFN_vkGetAccelerationStructureBuildSizesKHR>(
+        device_->vk_device(), "vkGetAccelerationStructureBuildSizesKHR");
+    get_as_address_ = load_vulkan_device_function<
+        PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+        device_->vk_device(), "vkGetAccelerationStructureDeviceAddressKHR");
+    cmd_build_ =
+        load_vulkan_device_function<PFN_vkCmdBuildAccelerationStructuresKHR>(
+            device_->vk_device(), "vkCmdBuildAccelerationStructuresKHR");
+
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR as_properties{};
+    as_properties.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    VkPhysicalDeviceProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    properties.pNext = &as_properties;
+    vkGetPhysicalDeviceProperties2(device_->vk_physical_device(), &properties);
+    scratch_alignment_ =
+        as_properties.minAccelerationStructureScratchOffsetAlignment;
+    TI_ERROR_IF(scratch_alignment_ == 0,
+                "Vulkan ray provider reported zero scratch alignment.");
+
+    vertex_bytes_ = checked_mul(vertex_count_, 3 * sizeof(float), "vertex");
+    index_bytes_ =
+        checked_mul(triangle_count_, 3 * sizeof(std::uint32_t), "index");
+    vertex_buffer_ = allocate(
+        vertex_bytes_, AllocUsage::AccelerationStructureBuildInput |
+                           AllocUsage::DeviceAddress);
+    index_buffer_ = allocate(
+        index_bytes_, AllocUsage::AccelerationStructureBuildInput |
+                          AllocUsage::DeviceAddress);
+
+    create_blas();
+    create_tlas();
+    create_query_pipeline();
+  }
+
+  ~VulkanTriangleRayScene() {
+    query_bindings_.reset();
+    query_pipeline_.reset();
+    tlas_.reset();
+    blas_.reset();
+    release(tlas_scratch_);
+    release(blas_scratch_);
+    release(tlas_storage_);
+    release(blas_storage_);
+    release(instance_buffer_);
+    release(index_buffer_);
+    release(vertex_buffer_);
+  }
+
+  VulkanTriangleRayScene(const VulkanTriangleRayScene &) = delete;
+  VulkanTriangleRayScene &operator=(const VulkanTriangleRayScene &) = delete;
+
+  void record_build(CommandList *command_list,
+                    DeviceAllocation source_vertices,
+                    DeviceAllocation source_indices) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
+    auto command_buffer = vk_commands->vk_command_buffer();
+
+    command_list->buffer_copy(vertex_buffer_.get_ptr(),
+                              source_vertices.get_ptr(), vertex_bytes_);
+    command_list->buffer_copy(index_buffer_.get_ptr(), source_indices.get_ptr(),
+                              index_bytes_);
+
+    VkMemoryBarrier input_barrier{};
+    input_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    input_barrier.srcAccessMask =
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    input_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &input_barrier, 0, nullptr, 0, nullptr);
+
+    const auto blas_geometry = make_blas_geometry();
+    auto blas_build = make_blas_build_info(blas_geometry);
+    const VkAccelerationStructureBuildRangeInfoKHR blas_range{
+        static_cast<std::uint32_t>(triangle_count_), 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR *blas_ranges[] = {
+        &blas_range};
+    cmd_build_(command_buffer->buffer, 1, &blas_build, blas_ranges);
+
+    VkMemoryBarrier blas_barrier{};
+    blas_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    blas_barrier.srcAccessMask =
+        VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    blas_barrier.dstAccessMask =
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
+        &blas_barrier, 0, nullptr, 0, nullptr);
+
+    const auto tlas_geometry = make_tlas_geometry();
+    auto tlas_build = make_tlas_build_info(tlas_geometry);
+    const VkAccelerationStructureBuildRangeInfoKHR tlas_range{1, 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR *tlas_ranges[] = {
+        &tlas_range};
+    cmd_build_(command_buffer->buffer, 1, &tlas_build, tlas_ranges);
+
+    VkMemoryBarrier query_barrier{};
+    query_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    query_barrier.srcAccessMask =
+        VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    query_barrier.dstAccessMask =
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &query_barrier, 0, nullptr,
+        0, nullptr);
+
+    retain_build_resources(command_buffer);
+  }
+
+  void record_query(CommandList *command_list,
+                    DeviceAllocation rays,
+                    DeviceAllocation hits,
+                    std::size_t ray_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(command_list);
+    TI_ERROR_IF(ray_count == 0 ||
+                    ray_count > static_cast<std::size_t>(
+                                    (std::numeric_limits<std::uint32_t>::max)()),
+                "Vulkan ray query count must be in [1, UINT32_MAX].");
+    const std::size_t ray_bytes =
+        checked_mul(ray_count, 8 * sizeof(float), "query input");
+    const std::size_t hit_bytes =
+        checked_mul(ray_count, 4 * sizeof(float), "query output");
+
+    command_list->buffer_barrier(rays);
+    auto *bindings =
+        static_cast<vulkan::VulkanResourceSet *>(query_bindings_.get());
+    bindings->acceleration_structure(0, tlas_);
+    bindings->rw_buffer(1, rays.get_ptr(), ray_bytes);
+    bindings->rw_buffer(2, hits.get_ptr(), hit_bytes);
+    command_list->bind_pipeline(query_pipeline_.get());
+    const auto bind_result = command_list->bind_shader_resources(bindings, 0);
+    TI_ERROR_IF(bind_result != RhiResult::success,
+                "Failed to bind Vulkan ray query resources: RhiResult({}).",
+                bind_result);
+    const auto count = static_cast<std::uint32_t>(ray_count);
+    vk_commands->push_constants(&count, sizeof(count));
+    const auto dispatch_result = command_list->dispatch(
+        static_cast<std::uint32_t>((ray_count + kRayQueryWorkgroupSize - 1) /
+                                   kRayQueryWorkgroupSize));
+    TI_ERROR_IF(dispatch_result != RhiResult::success,
+                "Failed to dispatch Vulkan ray query: RhiResult({}).",
+                dispatch_result);
+    command_list->buffer_barrier(hits);
+  }
+
+ private:
+  DeviceAllocation allocate(std::size_t bytes,
+                            AllocUsage usage,
+                            bool host_write = false) {
+    Device::AllocParams params;
+    params.size = bytes;
+    params.host_write = host_write;
+    params.usage = usage;
+    DeviceAllocation allocation{kDeviceNullAllocation};
+    const auto result = device_->allocate_memory(params, &allocation);
+    TI_ERROR_IF(result != RhiResult::success,
+                "Failed to allocate Vulkan ray buffer ({} bytes): "
+                "RhiResult({}).",
+                bytes, result);
+    return allocation;
+  }
+
+  void release(DeviceAllocation &allocation) noexcept {
+    if (allocation != kDeviceNullAllocation && device_ != nullptr) {
+      device_->dealloc_memory(allocation);
+      allocation = kDeviceNullAllocation;
+    }
+  }
+
+  VkDeviceAddress scratch_address(DeviceAllocation allocation) const {
+    return aligned_address(device_->get_buffer_device_address(allocation),
+                           scratch_alignment_);
+  }
+
+  DeviceAllocation allocate_scratch(VkDeviceSize bytes) {
+    TI_ERROR_IF(bytes > (std::numeric_limits<std::size_t>::max)() -
+                            scratch_alignment_,
+                "Vulkan ray scratch size overflow.");
+    return allocate(static_cast<std::size_t>(bytes + scratch_alignment_),
+                    AllocUsage::Storage | AllocUsage::DeviceAddress);
+  }
+
+  VkAccelerationStructureGeometryKHR make_blas_geometry() const {
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+    triangles.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress =
+        device_->get_buffer_device_address(vertex_buffer_);
+    triangles.vertexStride = 3 * sizeof(float);
+    triangles.maxVertex = static_cast<std::uint32_t>(vertex_count_ - 1);
+    triangles.indexType = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress =
+        device_->get_buffer_device_address(index_buffer_);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.triangles = triangles;
+    return geometry;
+  }
+
+  VkAccelerationStructureBuildGeometryInfoKHR make_blas_build_info(
+      const VkAccelerationStructureGeometryKHR &geometry) const {
+    VkAccelerationStructureBuildGeometryInfoKHR info{};
+    info.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    info.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.dstAccelerationStructure = blas_ ? blas_->accel : VK_NULL_HANDLE;
+    info.geometryCount = 1;
+    info.pGeometries = &geometry;
+    if (blas_scratch_ != kDeviceNullAllocation) {
+      info.scratchData.deviceAddress = scratch_address(blas_scratch_);
+    }
+    return info;
+  }
+
+  VkAccelerationStructureGeometryKHR make_tlas_geometry() const {
+    VkAccelerationStructureGeometryInstancesDataKHR instances{};
+    instances.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    instances.arrayOfPointers = VK_FALSE;
+    instances.data.deviceAddress =
+        device_->get_buffer_device_address(instance_buffer_);
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.geometry.instances = instances;
+    return geometry;
+  }
+
+  VkAccelerationStructureBuildGeometryInfoKHR make_tlas_build_info(
+      const VkAccelerationStructureGeometryKHR &geometry) const {
+    VkAccelerationStructureBuildGeometryInfoKHR info{};
+    info.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    info.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    info.flags =
+        VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    info.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    info.dstAccelerationStructure = tlas_ ? tlas_->accel : VK_NULL_HANDLE;
+    info.geometryCount = 1;
+    info.pGeometries = &geometry;
+    if (tlas_scratch_ != kDeviceNullAllocation) {
+      info.scratchData.deviceAddress = scratch_address(tlas_scratch_);
+    }
+    return info;
+  }
+
+  void create_blas() {
+    const auto geometry = make_blas_geometry();
+    auto build_info = make_blas_build_info(geometry);
+    const auto primitive_count = static_cast<std::uint32_t>(triangle_count_);
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    get_build_sizes_(device_->vk_device(),
+                     VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                     &build_info, &primitive_count, &sizes);
+    blas_storage_ = allocate(
+        static_cast<std::size_t>(sizes.accelerationStructureSize),
+        AllocUsage::AccelerationStructureStorage);
+    blas_ = vkapi::create_acceleration_structure(
+        0, device_->get_vkbuffer(blas_storage_.get_ptr()), 0,
+        sizes.accelerationStructureSize,
+        VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
+    TI_ERROR_IF(!blas_, "Failed to create Vulkan triangle BLAS.");
+    blas_scratch_ = allocate_scratch(sizes.buildScratchSize);
+  }
+
+  void create_tlas() {
+    VkAccelerationStructureDeviceAddressInfoKHR address_info{};
+    address_info.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR;
+    address_info.accelerationStructure = blas_->accel;
+    const VkDeviceAddress blas_address =
+        get_as_address_(device_->vk_device(), &address_info);
+    TI_ERROR_IF(blas_address == 0,
+                "Vulkan triangle BLAS returned a null device address.");
+
+    instance_buffer_ = allocate(
+        sizeof(VkAccelerationStructureInstanceKHR),
+        AllocUsage::AccelerationStructureBuildInput | AllocUsage::DeviceAddress,
+        true);
+    VkAccelerationStructureInstanceKHR instance{};
+    instance.transform.matrix[0][0] = 1.0f;
+    instance.transform.matrix[1][1] = 1.0f;
+    instance.transform.matrix[2][2] = 1.0f;
+    instance.instanceCustomIndex = 0;
+    instance.mask = 0xff;
+    instance.instanceShaderBindingTableRecordOffset = 0;
+    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    instance.accelerationStructureReference = blas_address;
+    void *mapped = nullptr;
+    const auto map_result = device_->map(instance_buffer_, &mapped);
+    TI_ERROR_IF(map_result != RhiResult::success || mapped == nullptr,
+                "Failed to map Vulkan TLAS instance buffer: RhiResult({}).",
+                map_result);
+    std::memcpy(mapped, &instance, sizeof(instance));
+    device_->unmap(instance_buffer_);
+
+    const auto geometry = make_tlas_geometry();
+    auto build_info = make_tlas_build_info(geometry);
+    const std::uint32_t primitive_count = 1;
+    VkAccelerationStructureBuildSizesInfoKHR sizes{};
+    sizes.sType =
+        VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    get_build_sizes_(device_->vk_device(),
+                     VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+                     &build_info, &primitive_count, &sizes);
+    tlas_storage_ = allocate(
+        static_cast<std::size_t>(sizes.accelerationStructureSize),
+        AllocUsage::AccelerationStructureStorage);
+    tlas_ = vkapi::create_acceleration_structure(
+        0, device_->get_vkbuffer(tlas_storage_.get_ptr()), 0,
+        sizes.accelerationStructureSize,
+        VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
+    TI_ERROR_IF(!tlas_, "Failed to create Vulkan triangle TLAS.");
+    tlas_scratch_ = allocate_scratch(sizes.buildScratchSize);
+  }
+
+  void create_query_pipeline() {
+    PipelineSourceDesc source{PipelineSourceType::spirv_binary,
+                              kRayQueryTrianglesSpv,
+                              sizeof(kRayQueryTrianglesSpv),
+                              PipelineStageType::compute};
+    auto [pipeline, result] = device_->create_pipeline_unique(
+        source, "vulkan_ray_query_triangles");
+    TI_ERROR_IF(result != RhiResult::success || !pipeline,
+                "Failed to create Vulkan ray query pipeline: RhiResult({}).",
+                result);
+    query_pipeline_ = std::move(pipeline);
+    query_bindings_.reset(device_->create_resource_set());
+  }
+
+  void retain_build_resources(
+      const vkapi::IVkCommandBuffer &command_buffer) const {
+    const std::array<DeviceAllocation, 7> allocations{
+        vertex_buffer_, index_buffer_, instance_buffer_, blas_storage_,
+        tlas_storage_,  blas_scratch_,  tlas_scratch_};
+    for (const auto allocation : allocations) {
+      command_buffer->refs.push_back(
+          device_->get_vkbuffer(allocation.get_ptr()));
+    }
+    command_buffer->refs.push_back(blas_);
+    command_buffer->refs.push_back(tlas_);
+  }
+
+  Program *program_{nullptr};
+  vulkan::VulkanDevice *device_{nullptr};
+  std::size_t vertex_count_{0};
+  std::size_t triangle_count_{0};
+  std::size_t vertex_bytes_{0};
+  std::size_t index_bytes_{0};
+  VkDeviceSize scratch_alignment_{1};
+  DeviceAllocation vertex_buffer_{kDeviceNullAllocation};
+  DeviceAllocation index_buffer_{kDeviceNullAllocation};
+  DeviceAllocation instance_buffer_{kDeviceNullAllocation};
+  DeviceAllocation blas_storage_{kDeviceNullAllocation};
+  DeviceAllocation tlas_storage_{kDeviceNullAllocation};
+  DeviceAllocation blas_scratch_{kDeviceNullAllocation};
+  DeviceAllocation tlas_scratch_{kDeviceNullAllocation};
+  vkapi::IVkAccelerationStructureKHR blas_{nullptr};
+  vkapi::IVkAccelerationStructureKHR tlas_{nullptr};
+  std::unique_ptr<Pipeline> query_pipeline_;
+  std::unique_ptr<ShaderResourceSet> query_bindings_;
+  PFN_vkGetAccelerationStructureBuildSizesKHR get_build_sizes_{nullptr};
+  PFN_vkGetAccelerationStructureDeviceAddressKHR get_as_address_{nullptr};
+  PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_{nullptr};
+  std::mutex mutex_;
+};
+
+bool Program::vulkan_ray_query_available() const {
+  if (compile_config().arch != Arch::vulkan || !program_impl_) {
+    return false;
+  }
+  auto *device = static_cast<vulkan::VulkanDevice *>(
+      const_cast<Program *>(this)->get_compute_device());
+  return device && device->vk_caps().buffer_device_address &&
+         device->vk_caps().acceleration_structure &&
+         device->vk_caps().ray_query;
+}
+
+std::uint64_t Program::create_vulkan_triangle_ray_scene(
+    Ndarray *vertices,
+    Ndarray *indices,
+    std::size_t vertex_count,
+    std::size_t triangle_count) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_ray_query_available(),
+              "Vulkan triangle ray scenes require "
+              "VK_KHR_acceleration_structure and VK_KHR_ray_query.");
+  TI_ERROR_IF(!vertices || !indices,
+              "Vulkan triangle ray scene received a null ndarray.");
+  const auto check_array = [](const char *name, Ndarray *array, DataType dtype,
+                              std::size_t item_count, std::size_t width) {
+    const auto element_shape = array->get_element_shape();
+    const bool scalar_layout =
+        element_shape.empty() &&
+        array->get_nelement() == checked_mul(item_count, width, name) &&
+        array->get_element_size() == sizeof(std::uint32_t);
+    const bool vector_layout =
+        element_shape == std::vector<int>{static_cast<int>(width)} &&
+        array->get_nelement() == item_count &&
+        array->get_element_size() == width * sizeof(std::uint32_t);
+    TI_ERROR_IF(array->get_element_data_type() != dtype ||
+                    (!scalar_layout && !vector_layout),
+                "Vulkan triangle ray {} must be a compact scalar ndarray with "
+                "shape (N, {}) or an AOS vector-{} ndarray with shape (N,).",
+                name, width, width);
+  };
+  check_array("vertices", vertices, PrimitiveType::f32, vertex_count, 3);
+  check_array("indices", indices, PrimitiveType::i32, triangle_count, 3);
+  TI_ERROR_IF(vertices->owning_program() != this ||
+                  indices->owning_program() != this,
+              "Vulkan triangle ray geometry must belong to the active runtime.");
+
+  auto leases = acquire_ndarray_leases({vertices, indices});
+  pin_ndarray_launch_leases(leases);
+  auto scene = std::make_shared<VulkanTriangleRayScene>(
+      this, vertex_count, triangle_count);
+  const auto vertex_allocation = vertices->get_device_allocation();
+  const auto index_allocation = indices->get_device_allocation();
+  enqueue_compute_op_lambda(
+      [scene, vertex_allocation, index_allocation](Device *,
+                                                   CommandList *commands) {
+        scene->record_build(commands, vertex_allocation, index_allocation);
+      },
+      {});
+
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  TI_ERROR_IF(next_vulkan_ray_scene_handle_ == 0,
+              "Vulkan ray scene handle space exhausted.");
+  const std::uint64_t handle = next_vulkan_ray_scene_handle_++;
+  vulkan_ray_scenes_.emplace(handle, std::move(scene));
+  return handle;
+}
+
+std::size_t Program::vulkan_triangle_ray_query(std::uint64_t handle,
+                                               Ndarray *rays,
+                                               Ndarray *hits,
+                                               std::size_t ray_count) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!rays || !hits,
+              "Vulkan triangle ray query received a null ndarray.");
+  TI_ERROR_IF(ray_count == 0 ||
+                  ray_count > static_cast<std::size_t>(
+                                  (std::numeric_limits<std::uint32_t>::max)()),
+              "Vulkan ray query count must be in [1, UINT32_MAX].");
+  const auto check_array = [ray_count](const char *name, Ndarray *array,
+                                       std::size_t width) {
+    const auto element_shape = array->get_element_shape();
+    const bool scalar_layout =
+        element_shape.empty() &&
+        array->get_nelement() == checked_mul(ray_count, width, name) &&
+        array->get_element_size() == sizeof(float);
+    const bool vector_layout =
+        element_shape == std::vector<int>{static_cast<int>(width)} &&
+        array->get_nelement() == ray_count &&
+        array->get_element_size() == width * sizeof(float);
+    TI_ERROR_IF(array->get_element_data_type() != PrimitiveType::f32 ||
+                    (!scalar_layout && !vector_layout),
+                "Vulkan triangle ray {} must be a compact scalar f32 ndarray "
+                "with shape (N, {}) or an AOS vector-{} ndarray with shape "
+                "(N,).",
+                name, width, width);
+  };
+  check_array("rays", rays, 8);
+  check_array("hits", hits, 4);
+  TI_ERROR_IF(rays->owning_program() != this || hits->owning_program() != this,
+              "Vulkan triangle ray query arrays must belong to the active "
+              "runtime.");
+  TI_ERROR_IF(rays->get_device_allocation() == hits->get_device_allocation(),
+              "Vulkan triangle ray hits must not alias rays.");
+
+  std::shared_ptr<VulkanTriangleRayScene> scene;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    const auto found = vulkan_ray_scenes_.find(handle);
+    TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+                "Vulkan triangle ray scene handle is stale or closed.");
+    scene = found->second;
+  }
+  auto leases = acquire_ndarray_leases({rays, hits});
+  pin_ndarray_launch_leases(leases);
+  const auto ray_allocation = rays->get_device_allocation();
+  const auto hit_allocation = hits->get_device_allocation();
+  enqueue_compute_op_lambda(
+      [scene, ray_allocation, hit_allocation, ray_count](Device *,
+                                                         CommandList *commands) {
+        scene->record_query(commands, ray_allocation, hit_allocation,
+                            ray_count);
+      },
+      {});
+  return 0;
+}
+
+void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
+  std::shared_ptr<VulkanTriangleRayScene> scene;
+  {
+    auto submission_guard = acquire_runtime_resource_submission_guard();
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    const auto found = vulkan_ray_scenes_.find(handle);
+    if (found == vulkan_ray_scenes_.end()) {
+      return;
+    }
+    scene = found->second;
+    vulkan_ray_scenes_.erase(found);
+  }
+  if (!runtime_has_fatal_fault()) {
+    synchronize();
+  }
+}
+
+void Program::vulkan_clear_ray_scenes() {
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  vulkan_ray_scenes_.clear();
+}
+
+}  // namespace taichi::lang
+
+#else
+
+namespace taichi::lang {
+
+bool Program::vulkan_ray_query_available() const {
+  return false;
+}
+
+std::uint64_t Program::create_vulkan_triangle_ray_scene(
+    Ndarray *,
+    Ndarray *,
+    std::size_t,
+    std::size_t) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::size_t Program::vulkan_triangle_ray_query(std::uint64_t,
+                                               Ndarray *,
+                                               Ndarray *,
+                                               std::size_t) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t) {
+}
+
+void Program::vulkan_clear_ray_scenes() {
+}
+
+}  // namespace taichi::lang
+
+#endif

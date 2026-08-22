@@ -105,6 +105,7 @@ struct VulkanBufferCommand {
 };
 
 class Program;
+class VulkanTriangleRayScene;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
@@ -904,6 +905,22 @@ class TI_DLL_EXPORT Program {
                                       Ndarray *b,
                                       Ndarray *output,
                                       std::size_t batch_count);
+
+  bool vulkan_ray_query_available() const;
+
+  std::uint64_t create_vulkan_triangle_ray_scene(Ndarray *vertices,
+                                                 Ndarray *indices,
+                                                 std::size_t vertex_count,
+                                                 std::size_t triangle_count);
+
+  std::size_t vulkan_triangle_ray_query(std::uint64_t handle,
+                                        Ndarray *rays,
+                                        Ndarray *hits,
+                                        std::size_t ray_count);
+
+  void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
+
+  void vulkan_clear_ray_scenes();
 
   bool cuda_device_transform_available() const;
 
@@ -3624,6 +3641,10 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<RuntimeCompletionCudaEventPool>
       runtime_completion_cuda_event_pool_;
   PrimitiveWorkspaceArena primitive_workspace_arena_;
+  std::mutex vulkan_ray_scene_mutex_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleRayScene>>
+      vulkan_ray_scenes_;
+  std::uint64_t next_vulkan_ray_scene_handle_{1};
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};

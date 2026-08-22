@@ -270,7 +270,7 @@ if (TI_WITH_VULKAN)
         message(STATUS "glslc not found; checking checked-in Vulkan sort SPIR-V headers from ${TI_VULKAN_SORT_SHADER_SOURCE_DIR}")
     endif()
 
-    macro(ti_vulkan_sort_shader source output)
+    macro(ti_vulkan_builtin_shader source output target_env)
         set(output_path "${TI_VULKAN_SORT_GENERATED_SHADER_DIR}/${output}")
         if (TI_GLSLC_EXECUTABLE)
             add_custom_command(
@@ -278,7 +278,7 @@ if (TI_WITH_VULKAN)
                 COMMAND ${CMAKE_COMMAND} -E make_directory
                         "${TI_VULKAN_SORT_GENERATED_SHADER_DIR}"
                 COMMAND "${TI_GLSLC_EXECUTABLE}"
-                        --target-env=vulkan1.1
+                        --target-env=${target_env}
                         ${ARGN}
                         -mfmt=c
                         "${TI_VULKAN_SORT_SHADER_SOURCE_DIR}/${source}"
@@ -295,6 +295,10 @@ if (TI_WITH_VULKAN)
             endif()
             list(APPEND TI_VULKAN_SORT_PREGENERATED_SPV_HEADERS "${pregenerated_path}")
         endif()
+    endmacro()
+
+    macro(ti_vulkan_sort_shader source output)
+        ti_vulkan_builtin_shader(${source} ${output} vulkan1.1 ${ARGN})
     endmacro()
 
     ti_vulkan_sort_shader(init_i32.comp init_i32.comp.spv.h)
@@ -545,6 +549,11 @@ if (TI_WITH_VULKAN)
     ti_vulkan_sort_shader(reduce_i32_sum_atomic.comp
         reduce_i32_sum_atomic.comp.spv.h)
     ti_vulkan_sort_shader(radix8_spine.comp radix8_spine.comp.spv.h)
+    # Ray queries require SPIR-V 1.4, which is core in the provider's Vulkan
+    # 1.2 floor. The generated C array is linked into the runtime, so glslc is
+    # a build-only tool and never becomes a wheel/runtime dependency.
+    ti_vulkan_builtin_shader(ray_query_triangles.comp
+        ray_query_triangles.comp.spv.h vulkan1.2)
 
     foreach(shift 0 4 8 12 16 20 24 28)
         ti_vulkan_sort_shader(rank_hist.comp

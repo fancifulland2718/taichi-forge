@@ -2031,6 +2031,23 @@ void export_lang(py::module &m) {
                &Program::cuda_matrix_mma_f16_f32),
            py::arg("a"), py::arg("b"), py::arg("output"),
            py::arg("batch_count"), py::call_guard<py::gil_scoped_release>())
+      .def("vulkan_ray_query_available",
+           &Program::vulkan_ray_query_available)
+      .def("_create_vulkan_triangle_ray_scene",
+           tracked_native_program_method(
+               &Program::create_vulkan_triangle_ray_scene),
+           py::arg("vertices"), py::arg("indices"), py::arg("vertex_count"),
+           py::arg("triangle_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_triangle_ray_query",
+           tracked_native_program_method(
+               &Program::vulkan_triangle_ray_query),
+           py::arg("handle"), py::arg("rays"), py::arg("hits"),
+           py::arg("ray_count"), py::call_guard<py::gil_scoped_release>())
+      .def("_destroy_vulkan_triangle_ray_scene",
+           tracked_native_program_method(
+               &Program::destroy_vulkan_triangle_ray_scene),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

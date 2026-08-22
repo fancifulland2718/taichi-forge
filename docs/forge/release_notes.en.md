@@ -75,6 +75,12 @@ grouped under the behavior they shipped.
   accumulation/output on NVIDIA compute capability 7.0 or newer. It does not
   require a CUDA Toolkit runtime or vendor algorithm package. Ordinary matrix
   multiplication is not rewritten, and kernel invocation remains unsupported.
+- Added the first D0 `ti.hardware.ray` slice: explicit static-triangle Vulkan
+  BLAS/TLAS construction plus batch Ray Query through direct Python execution
+  and root Graph. The provider requires the corresponding device features,
+  embeds build-time SPIR-V, performs no implicit host readback, and adds no SDK
+  runtime dependency or official wheel variant. Refit, multi-instance scenes,
+  procedural geometry, and kernel-inline query remain unsupported.
 
 ## 0.6.2
 
