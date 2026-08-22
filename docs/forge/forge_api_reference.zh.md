@@ -74,32 +74,43 @@ kernel 内调用；由于 VBO helper dispatch 和 output binding 尚未并入精
 
 ### `ti.hardware.ray.TriangleScene`（0.6.3 开发中）
 
-面向 immutable triangle mesh 与一个 identity TLAS instance 的显式 D0 Vulkan
+面向可更新 triangle mesh 与一个 identity TLAS instance 的显式 D0 Vulkan
 硬件 Ray Query provider：
 
 ```python
 with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
     scene.trace(rays, hits)
 
+    # 只更新 vertex；vertex 数量与 index topology 保持不变。
+    scene.refit(updated_vertices)
+
     recording = scene.record(ray_count)
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
     graph.run({"rays": rays, "hits": hits})
+
+    refit = scene.record_refit(vertices="positions")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(refit, admission="auto")
+    builder.compile().run({"positions": updated_vertices})
 ```
 
 vertex 为 f32、index 为 i32，可使用 scalar `(N, 3)` 或 AOS vector-3 layout。
 ray 为 f32 `(N, 8)`：`[ox, oy, oz, tmin, dx, dy, dz, tmax]`；hit 为 f32
 `(N, 4)`：`[t, primitive_id, instance_id, hit_flag]`，miss 编码为
-`[-1, -1, -1, 0]`。构造时显式记录一次 BLAS/TLAS build；`trace()` 与 root-Graph
-recording 执行无 host readback 的 batch Ray Query。index 必须非负且在 vertex 范围内；
-provider 不会为验证 mesh topology 而把 index 回读到 host。
+`[-1, -1, -1, 0]`。构造时显式记录一次允许 UPDATE 的 BLAS/TLAS build；
+`refit()` 或 `record_refit()` 会把替换 vertex 复制到 provider-owned build input 后执行
+Vulkan BLAS UPDATE；`trace()` 与 root-Graph recording 执行无 host readback 的 batch
+Ray Query。index 必须非负且在 vertex 范围内；provider 不会为验证 mesh topology 而把
+index 回读到 host。refit 会保持 vertex count、index buffer、geometry flag，以及
+identity TLAS 引用的稳定 BLAS address 不变。
 
 该 provider 要求 Vulkan 1.2、buffer device address、
 `VK_KHR_acceleration_structure` 与 `VK_KHR_ray_query`。其 SPIR-V shader 在构建时
 嵌入 runtime，因此不新增 Vulkan SDK runtime 依赖或官方 wheel 变体。它不能在
-`@ti.kernel` 内调用，不会替换普通 kernel 或 collision detection；当前也不支持 refit、
-transform、多 instance、procedural geometry 与 kernel-inline query。
+`@ti.kernel` 内调用，不会替换普通 kernel 或 collision detection。改变 topology 的
+rebuild、transform、多 instance、procedural geometry 与 kernel-inline query 仍不支持。
 
 ### `ti.hardware.fft.CufftPlan1D`（0.6.3 开发中）
 

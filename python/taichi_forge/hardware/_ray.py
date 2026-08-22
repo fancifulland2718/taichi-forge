@@ -158,13 +158,115 @@ class _VulkanRayQueryNode(NativeGraphNode):
         return _VulkanRayQueryExecutable(self._recording)
 
 
+class VulkanRayRefitRecording(BackendCommandRecording):
+    """One vertex-only BLAS update for a :class:`TriangleScene`."""
+
+    def __init__(self, scene, *, vertices="vertices"):
+        if not isinstance(scene, TriangleScene):
+            raise TypeError("Vulkan ray refit recording requires a TriangleScene")
+        if not isinstance(vertices, str) or not vertices:
+            raise ValueError(
+                "Vulkan ray refit binding name must be a nonempty string"
+            )
+        super().__init__(
+            backend="vulkan",
+            binding_names=(vertices,),
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="internal",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "scene", scene)
+        object.__setattr__(self, "vertices", vertices)
+
+    @property
+    def resource_effects(self):
+        return (ResourceEffect(self.vertices, GraphAccess.READ),)
+
+    def execute(self, bindings):
+        required = frozenset(self.binding_names)
+        provided = frozenset(bindings)
+        if provided != required:
+            missing = sorted(required.difference(provided))
+            unexpected = sorted(provided.difference(required))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise TaichiRuntimeError(
+                "Vulkan ray refit bindings do not match the recording: "
+                + "; ".join(details)
+            )
+        self.validate_graph_lifetime()
+        vertices = bindings[self.vertices]
+        if _item_count(vertices, 3, f32, self.vertices) != self.scene.vertex_count:
+            raise TaichiRuntimeError(
+                f"Vulkan ray binding {self.vertices!r} has the wrong vertex count"
+            )
+        self.scene._execute_refit(vertices)
+
+    def validate_graph_lifetime(self):
+        self.scene._validate_lifetime()
+
+    def _as_graph_native_node(self):
+        return _VulkanRayRefitNode(self)
+
+
+class _VulkanRayRefitExecutable(NativeGraphExecutable):
+    def __init__(self, recording):
+        self._recording = recording
+        self._action = BackendCommandGraphAction(recording)
+
+    def run(self, runtime_args):
+        return self._recording.execute(runtime_args)
+
+    @property
+    def runtime_arg_schema(self):
+        return (RuntimeBinding(self._recording.vertices, "ndarray"),)
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def lifetime_leases(self):
+        return (self._recording.scene,)
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "vulkan_triangle_ray_refit",
+            "vertex_count": self._recording.scene.vertex_count,
+            "scene_kind": "updatable_triangle_blas_tlas",
+        }
+
+
+class _VulkanRayRefitNode(NativeGraphNode):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return _VulkanRayRefitExecutable(self._recording)
+
+
 class TriangleScene:
-    """One immutable triangle BLAS and one identity-instance TLAS.
+    """One updatable triangle BLAS and one identity-instance TLAS.
 
     ``vertices`` and ``indices`` accept scalar ``(N, 3)`` ndarrays or AOS
     vector-3 ndarrays with shape ``(N,)``. Indices are signed i32 for parity
     with Forge mesh storage but must all be nonnegative and in range; this
     low-level provider does not perform a host readback to validate them.
+
+    :meth:`refit` updates vertex positions in hardware without rebuilding the
+    topology. The vertex count and indices are fixed for the scene lifetime.
     """
 
     def __init__(self, vertices, indices):
@@ -214,10 +316,25 @@ class TriangleScene:
         recording.execute({"rays": rays, "hits": hits})
         return hits
 
+    def record_refit(self, *, vertices="vertices"):
+        self._validate_lifetime()
+        return VulkanRayRefitRecording(self, vertices=vertices)
+
+    def refit(self, vertices):
+        recording = self.record_refit()
+        recording.execute({"vertices": vertices})
+        return self
+
     def _execute_query(self, rays, hits, ray_count):
         self._validate_lifetime()
         self._runtime_prog._vulkan_triangle_ray_query(
             self._handle, rays.arr, hits.arr, ray_count
+        )
+
+    def _execute_refit(self, vertices):
+        self._validate_lifetime()
+        self._runtime_prog._vulkan_triangle_ray_refit(
+            self._handle, vertices.arr, self.vertex_count
         )
 
     def _validate_lifetime(self):
@@ -268,4 +385,9 @@ def is_available():
     )
 
 
-__all__ = ["TriangleScene", "VulkanRayQueryRecording", "is_available"]
+__all__ = [
+    "TriangleScene",
+    "VulkanRayQueryRecording",
+    "VulkanRayRefitRecording",
+    "is_available",
+]

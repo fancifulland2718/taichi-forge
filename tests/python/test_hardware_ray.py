@@ -22,6 +22,13 @@ def test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime():
     assert descriptor.execution_kind == "native_command"
     assert descriptor.workspace_ownership == "provider_owned"
 
+    refit = ti.hardware.capability("ray.as_refit.vulkan")
+    assert refit.implementation_status == "existing_public"
+    assert refit.scopes == ("python", "graph")
+    assert refit.graph_support == "recordable"
+    assert refit.hardware_acceleration == "implementation_defined"
+    assert refit.workspace_ownership == "provider_owned"
+
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_triangle_ray_query_executes_directly_and_through_graph():
@@ -86,6 +93,61 @@ def test_vulkan_triangle_ray_query_executes_directly_and_through_graph():
         graph.run({"rays": rays, "hits": hits})
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_triangle_ray_refit_executes_directly_and_through_graph():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    updated = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    rays = ti.ndarray(ti.f32, shape=(1, 8))
+    hits = ti.ndarray(ti.f32, shape=(1, 4))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    rays.from_numpy(
+        np.array([[0, 0, 1, 0.001, 0, 0, -1, 100]], dtype=np.float32)
+    )
+
+    scene = ti.hardware.ray.TriangleScene(vertices, indices)
+    updated.from_numpy(
+        np.array([[-1, -1, -2], [1, -1, -2], [0, 1, -2]], dtype=np.float32)
+    )
+    assert scene.refit(updated) is scene
+    scene.trace(rays, hits)
+    ti.sync()
+    np.testing.assert_allclose(
+        hits.to_numpy(), np.array([[3, 0, 0, 1]], dtype=np.float32), atol=1e-5
+    )
+
+    updated.from_numpy(
+        np.array([[-1, -1, 0.5], [1, -1, 0.5], [0, 1, 0.5]], dtype=np.float32)
+    )
+    recording = scene.record_refit(vertices="positions")
+    assert tuple(
+        (effect.resource, effect.access) for effect in recording.resource_effects
+    ) == (("positions", GraphAccess.READ),)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="auto")
+    graph = builder.compile()
+    graph.run({"positions": updated})
+    ti.sync()
+    scene.trace(rays, hits)
+    ti.sync()
+    np.testing.assert_allclose(
+        hits.to_numpy(), np.array([[0.5, 0, 0, 1]], dtype=np.float32), atol=1e-5
+    )
+
+    wrong_vertices = ti.ndarray(ti.f32, shape=(4, 3))
+    with pytest.raises(RuntimeError, match="wrong vertex count"):
+        scene.refit(wrong_vertices)
+    scene.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        graph.run({"positions": updated})
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_triangle_ray_layout_and_recording_validation():
     if not ti.hardware.ray.is_available():
@@ -98,6 +160,8 @@ def test_vulkan_triangle_ray_layout_and_recording_validation():
 
     with pytest.raises(TypeError, match="TriangleScene"):
         ti.hardware.ray.VulkanRayQueryRecording(object(), 1)
+    with pytest.raises(TypeError, match="TriangleScene"):
+        ti.hardware.ray.VulkanRayRefitRecording(object())
     uninitialized_scene = object.__new__(ti.hardware.ray.TriangleScene)
     with pytest.raises(ValueError, match="count"):
         ti.hardware.ray.VulkanRayQueryRecording(uninitialized_scene, 0)

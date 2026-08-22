@@ -75,12 +75,15 @@ grouped under the behavior they shipped.
   accumulation/output on NVIDIA compute capability 7.0 or newer. It does not
   require a CUDA Toolkit runtime or vendor algorithm package. Ordinary matrix
   multiplication is not rewritten, and kernel invocation remains unsupported.
-- Added the first D0 `ti.hardware.ray` slice: explicit static-triangle Vulkan
+- Added the first D0 `ti.hardware.ray` slice: explicit fixed-topology Vulkan
   BLAS/TLAS construction plus batch Ray Query through direct Python execution
   and root Graph. The provider requires the corresponding device features,
   embeds build-time SPIR-V, performs no implicit host readback, and adds no SDK
-  runtime dependency or official wheel variant. Refit, multi-instance scenes,
-  procedural geometry, and kernel-inline query remain unsupported.
+  runtime dependency or official wheel variant. The same provider now exposes
+  direct and root-Graph vertex-only BLAS refit through Vulkan UPDATE while
+  preserving vertex count and index topology. Multi-instance scenes,
+  topology-changing rebuilds, procedural geometry, and kernel-inline query
+  remain unsupported.
 - Added optional D1 `ti.hardware.fft.CufftPlan1D` for fixed-size, batched,
   single-precision 1D C2C transforms through direct Python and root Graph.
   Explicit probing remains transient and side-effect free; plan creation alone

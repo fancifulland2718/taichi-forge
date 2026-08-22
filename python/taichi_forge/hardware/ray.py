@@ -3,7 +3,13 @@
 from taichi_forge.hardware._ray import (
     TriangleScene,
     VulkanRayQueryRecording,
+    VulkanRayRefitRecording,
     is_available,
 )
 
-__all__ = ["TriangleScene", "VulkanRayQueryRecording", "is_available"]
+__all__ = [
+    "TriangleScene",
+    "VulkanRayQueryRecording",
+    "VulkanRayRefitRecording",
+    "is_available",
+]

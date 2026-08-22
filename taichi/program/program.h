@@ -926,6 +926,10 @@ class TI_DLL_EXPORT Program {
                                         Ndarray *hits,
                                         std::size_t ray_count);
 
+  std::size_t vulkan_triangle_ray_refit(std::uint64_t handle,
+                                        Ndarray *vertices,
+                                        std::size_t vertex_count);
+
   void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
 
   void vulkan_clear_ray_scenes();

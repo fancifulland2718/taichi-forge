@@ -510,13 +510,14 @@ The qualified slice is deliberately narrow and fail-closed:
 ### Current M6 Vulkan ray-query qualification boundary
 
 `ti.hardware.ray.TriangleScene` is the first public acceleration-structure
-resource. Creating it is an explicit Python operation: Forge copies one
-immutable f32 triangle mesh into provider-owned buffers and records a one-time
-BLAS followed by a one-instance identity TLAS build. `trace()` and `record()`
-then expose the same batch Ray Query as direct execution or one root-Graph
-backend command. Scene construction is deliberately not Graph-recordable in
-this slice because resource creation, sizing, scratch allocation, and lifetime
-ownership are setup operations rather than replay work.
+resource. Creating it is an explicit Python operation: Forge copies one f32
+triangle mesh into provider-owned buffers and records an update-enabled BLAS
+followed by a one-instance identity TLAS build. `refit()` and `record_refit()`
+replace only vertex positions through Vulkan UPDATE; `trace()` and `record()`
+expose batch Ray Query as direct execution or a root-Graph backend command.
+Scene construction is deliberately not Graph-recordable because resource
+creation, sizing, scratch allocation, and lifetime ownership are setup rather
+than replay work.
 
 The route is qualified as fixed-function traversal rather than a generic
 collision accelerator:
@@ -532,8 +533,9 @@ collision accelerator:
 - replay rerecords one runtime-ordered compute command, retains the scene and
   bound ndarrays through submission, and rejects execution after scene close
   or runtime-generation change; and
-- only static indexed triangles, one identity instance, closest opaque hit,
-  and the documented f32 ray/hit layouts are qualified. Refit, transforms,
+- only indexed triangles with fixed vertex count and topology, vertex-only
+  refit, one identity instance, closest opaque hit, and the documented f32
+  ray/hit layouts are qualified. Topology-changing rebuilds, transforms,
   multi-instance/procedural geometry, indirect builds, serialization, and
   inline kernel query remain planned.
 

@@ -602,8 +602,8 @@ _OPERATIONS = (
         dtypes=("vertex:f32", "index:i32"),
         layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
         notes=(
-            "Static geometry and one identity TLAS instance only.",
-            "Construction records a rebuild; refit remains a separate planned route.",
+            "Indexed triangles and one identity TLAS instance only.",
+            "Construction records an update-enabled build; vertex-only refit is a separate public route.",
         ),
     ),
     _operation(
@@ -619,8 +619,8 @@ _OPERATIONS = (
         "native_command",
         "recordable",
         "runtime_ordered",
-        "graph_owned",
-        "planned",
+        "provider_owned",
+        "existing_public",
         resource_effects=(
             "read:geometry",
             "read_write:acceleration_structure",
@@ -629,7 +629,14 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="refit",
         requirements=("VK_KHR_acceleration_structure",),
-        public_api="ti.hardware.ray",
+        public_api="ti.hardware.ray.TriangleScene.refit",
+        dtypes=("vertex:f32",),
+        layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
+        notes=(
+            "Explicit Python or Graph native command; never selected by an ordinary kernel.",
+            "Vertex-only BLAS update; vertex count and index topology remain fixed.",
+            "The identity TLAS retains the stable BLAS device address.",
+        ),
     ),
     _operation(
         "ray.query.batch.vulkan",

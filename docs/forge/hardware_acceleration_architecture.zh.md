@@ -444,12 +444,12 @@ list、render pass、graphics pipeline，执行 rasterizer、depth test/write �
 ### 当前 M6 Vulkan Ray Query 资格边界
 
 `ti.hardware.ray.TriangleScene` 是首个公开的 acceleration-structure resource。
-创建该对象属于显式 Python 操作：Forge 把一份 immutable f32 triangle mesh 复制到
-provider-owned buffer，并依次记录一次 BLAS build 与一个 identity-instance TLAS build。
-随后 `trace()` 和 `record()` 把同一 batch Ray Query 暴露为 direct execution 或一条
-root-Graph backend command。当前切片不允许把 scene construction 录入 Graph，因为
-resource creation、size query、scratch allocation 与 lifetime ownership 属于 setup，而不是
-replay work。
+创建该对象属于显式 Python 操作：Forge 把一份 f32 triangle mesh 复制到
+provider-owned buffer，并依次记录一次允许 UPDATE 的 BLAS build 与一个 identity-instance
+TLAS build。`refit()` 和 `record_refit()` 只通过 Vulkan UPDATE 替换 vertex position；
+`trace()` 和 `record()` 把 batch Ray Query 暴露为 direct execution 或 root-Graph backend
+command。scene construction 不允许录入 Graph，因为 resource creation、size query、
+scratch allocation 与 lifetime ownership 属于 setup，而不是 replay work。
 
 该路线被资格化为 fixed-function traversal，而不是通用 collision accelerator：
 
@@ -461,9 +461,10 @@ replay work。
   BLAS-to-TLAS 与 build-to-query dependency 使用 Vulkan AS access/stage barrier；
 - replay 在 runtime-ordered compute queue 上重录一条 command，并让 scene 与绑定 ndarray
   在 submission 期间保持存活；scene close 或 runtime generation 改变后明确拒绝执行；
-- 当前只资格化 static indexed triangle、一个 identity instance、closest opaque hit 与文档
-  指定的 f32 ray/hit layout。refit、transform、多 instance/procedural geometry、indirect
-  build、serialization 与 kernel-inline query 仍为规划项。
+- 当前只资格化 vertex count/topology 固定的 indexed triangle、vertex-only refit、一个
+  identity instance、closest opaque hit 与文档指定的 f32 ray/hit layout。改变 topology
+  的 rebuild、transform、多 instance/procedural geometry、indirect build、serialization
+  与 kernel-inline query 仍为规划项。
 
 这是手动调用的硬件接口。现有软件光追、renderer、contact query 或普通 Taichi kernel
 均不会被自动改写为调用它。

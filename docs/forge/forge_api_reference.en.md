@@ -88,35 +88,48 @@ dependency or wheel variant.
 
 ### `ti.hardware.ray.TriangleScene` (0.6.3 in development)
 
-An explicit D0 Vulkan hardware ray-query provider for an immutable triangle
+An explicit D0 Vulkan hardware ray-query provider for an updatable triangle
 mesh and one identity TLAS instance:
 
 ```python
 with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
     scene.trace(rays, hits)
 
+    # Vertex-only BLAS update; count and index topology stay fixed.
+    scene.refit(updated_vertices)
+
     recording = scene.record(ray_count)
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
     graph.run({"rays": rays, "hits": hits})
+
+    refit = scene.record_refit(vertices="positions")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(refit, admission="auto")
+    builder.compile().run({"positions": updated_vertices})
 ```
 
 Vertices are f32 and indices are i32, using scalar `(N, 3)` or AOS vector-3
 layout. Rays are f32 `(N, 8)` values
 `[ox, oy, oz, tmin, dx, dy, dz, tmax]`; hits are f32 `(N, 4)` values
 `[t, primitive_id, instance_id, hit_flag]`, with misses encoded as
-`[-1, -1, -1, 0]`. Construction explicitly records one BLAS/TLAS build, while
+`[-1, -1, -1, 0]`. Construction explicitly records one update-enabled
+BLAS/TLAS build. `refit()` or `record_refit()` performs a Vulkan BLAS UPDATE
+after copying replacement vertices into the provider-owned build input;
 `trace()` and the root-Graph recording issue batch ray queries without host
 readback. Input indices must be nonnegative and in range; the provider does
-not read them back to validate mesh topology.
+not read them back to validate mesh topology. Refit preserves the vertex
+count, index buffer, geometry flags, and stable BLAS address referenced by the
+identity TLAS.
 
 The provider requires Vulkan 1.2 plus buffer-device-address,
 `VK_KHR_acceleration_structure`, and `VK_KHR_ray_query`. Its SPIR-V shader is
 embedded at build time, so it adds no Vulkan SDK runtime dependency and no
-official wheel variant. It is not callable inside `@ti.kernel`, never replaces
-ordinary kernels or collision detection, and currently excludes refit,
-transforms, multiple instances, procedural geometry, and inline kernel query.
+official wheel variant. It is not callable inside `@ti.kernel` and never
+replaces ordinary kernels or collision detection. Topology-changing rebuilds,
+transforms, multiple instances, procedural geometry, and inline kernel query
+remain unsupported.
 
 ### `ti.hardware.fft.CufftPlan1D` (0.6.3 in development)
 
