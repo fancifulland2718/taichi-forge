@@ -47,6 +47,7 @@ def _write_runtime_wheel(
     dependency_class: str = "toolkit-reference",
     include_export_manifest: bool = True,
     export_manifest_schema: int = 2,
+    requirements: tuple[str, ...] = (),
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -70,7 +71,10 @@ def _write_runtime_wheel(
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
             f"{dist_info}/METADATA",
-            f"Metadata-Version: 2.1\nName: taichi-forge-runtime\nVersion: {version}\n",
+            f"Metadata-Version: 2.1\nName: taichi-forge-runtime\nVersion: {version}\n"
+            + "".join(
+                f"Requires-Dist: {requirement}\n" for requirement in requirements
+            ),
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
@@ -660,6 +664,63 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("platform", "tag", "member"),
+    (
+        (
+            "windows",
+            "win_amd64",
+            "taichi_forge_runtime/_lib/runtime_native/cublas64_13.dll",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime.libs/libnvoptix.so.1",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime/_lib/runtime_native/libcufft.so.12",
+        ),
+    ),
+)
+def test_runtime_wheel_rejects_bundled_optional_provider_libraries(
+    tmp_path, platform, tag, member
+):
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform=platform,
+        version="0.6.3",
+        cuda_major=13,
+        dependency_class="driver-only",
+    )
+    with ZipFile(wheel, "a") as zf:
+        zf.writestr(member, b"optional provider library")
+
+    with pytest.raises(RuntimeError, match="bundles optional CUDA"):
+        validate_runtime_wheel.inspect_runtime_wheel(
+            wheel, expected_dependency_class="driver-only"
+        )
+
+
+def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform="windows",
+        version="0.6.3",
+        cuda_major=13,
+        dependency_class="driver-only",
+        requirements=("nvidia-cublas-cu13>=13",),
+    )
+
+    with pytest.raises(RuntimeError, match="must not declare mandatory"):
+        validate_runtime_wheel.inspect_runtime_wheel(
+            wheel, expected_dependency_class="driver-only"
+        )
+
+
+@pytest.mark.parametrize(
     ("platform", "tag"),
     [
         ("windows", "cp310-cp310-win_amd64"),
@@ -1058,6 +1119,10 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "--wheel-dir dist --platform pair" in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
     assert workflow.count("--dependency-class driver-only") == 4
+    assert workflow.count("TI_WITH_CUDA:BOOL=ON") == 4
+    assert workflow.count("TI_WITH_VULKAN:BOOL=ON") == 4
+    assert workflow.count("TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON") == 4
+    assert workflow.count("TI_WITH_PYTHON:BOOL=ON") == 4
     assert workflow.count("TI_WITH_CUDA_TOOLKIT:BOOL=OFF") == 4
     assert (
         workflow.count(

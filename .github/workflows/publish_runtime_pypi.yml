@@ -68,6 +68,7 @@ jobs:
         -DTI_WITH_CUPTI:BOOL=OFF
         -DTI_WITH_LLVM:BOOL=ON
         -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_PYTHON:BOOL=ON
         -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
@@ -158,7 +159,10 @@ jobs:
           grep -F "TI_WITH_CUDA_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUPTI:BOOL=OFF" "$cache"
+          grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
+          grep -F "TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON" "$cache"
+          grep -F "TI_WITH_PYTHON:BOOL=ON" "$cache"
 
       - name: Repair runtime wheel contents
         run: |
@@ -224,6 +228,7 @@ jobs:
         -DTI_WITH_CUPTI:BOOL=OFF
         -DTI_WITH_LLVM:BOOL=ON
         -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON
+        -DTI_WITH_PYTHON:BOOL=ON
         -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
@@ -301,7 +306,10 @@ jobs:
               "TI_WITH_CUDA_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF",
               "TI_WITH_CUPTI:BOOL=OFF",
-              "TI_WITH_VULKAN:BOOL=ON"
+              "TI_WITH_CUDA:BOOL=ON",
+              "TI_WITH_VULKAN:BOOL=ON",
+              "TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON",
+              "TI_WITH_PYTHON:BOOL=ON"
             )) {
             if (-not $content.Contains($expected)) {
               Write-Error "Expected CMake cache entry was not found: $expected"

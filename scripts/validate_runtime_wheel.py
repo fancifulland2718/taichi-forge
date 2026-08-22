@@ -23,6 +23,16 @@ EXPORT_MANIFEST = (
     f"{PACKAGE}/_lib/runtime_native/taichi_runtime.exports.json"
 )
 CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
+FORBIDDEN_VENDOR_RUNTIME = re.compile(
+    r"(?:"
+    r"(?:cublas(?:lt)?64_|cusparse64_|cusolver64_|cufft(?:w)?64_|"
+    r"curand64_|cupti64_|nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda)"
+    r"[^/]*\.dll"
+    r"|lib(?:cublas(?:lt)?|cusparse|cusolver|cufft(?:w)?|curand|cupti|"
+    r"nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda)(?:-[^.]+)?\.so(?:\..*)?"
+    r")",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -324,6 +334,23 @@ def inspect_runtime_wheel(
         if CUDA_VARIANT.search(version):
             raise RuntimeError(
                 f"CUDA-versioned runtime wheel versions are forbidden: {version}"
+            )
+        requirements = metadata.get_all("Requires-Dist", [])
+        if requirements:
+            raise RuntimeError(
+                "Runtime wheels must not declare mandatory Python or provider "
+                f"dependencies: {requirements}"
+            )
+
+        bundled_vendor_runtimes = sorted(
+            name
+            for name in names
+            if FORBIDDEN_VENDOR_RUNTIME.fullmatch(Path(name).name)
+        )
+        if bundled_vendor_runtimes:
+            raise RuntimeError(
+                "Runtime wheel bundles optional CUDA or hardware-provider "
+                f"libraries: {bundled_vendor_runtimes}"
             )
 
         manifests = [name for name in names if name == MANIFEST]

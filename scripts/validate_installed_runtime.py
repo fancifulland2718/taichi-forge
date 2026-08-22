@@ -243,6 +243,59 @@ def _validate_private_runtime_symbol_scope() -> None:
     )
 
 
+def _validate_hardware_distribution_boundary() -> None:
+    if ti.hardware.DEPENDENCY_TIERS != (
+        "core",
+        "lazy_external",
+        "build_external",
+    ):
+        raise RuntimeError(
+            "installed hardware dependency tiers do not match the official "
+            "D0/D1/D2 distribution contract"
+        )
+
+    def validate_passive_report(stage: str) -> None:
+        report = ti.hardware.report()
+        if report.external_components_probed:
+            raise RuntimeError(f"{stage} hardware report probed a D1 component")
+        external = [
+            operation
+            for operation in report.operations
+            if operation.descriptor.dependency_tier
+            in ("lazy_external", "build_external")
+        ]
+        if not external:
+            raise RuntimeError("installed hardware catalog has no D1/D2 routes")
+        for operation in external:
+            if operation.enablement != "disabled":
+                raise RuntimeError(
+                    f"{stage} report enabled optional provider "
+                    f"{operation.descriptor.provider_id}"
+                )
+            if operation.selection == "selected":
+                raise RuntimeError(
+                    f"{stage} report selected optional provider "
+                    f"{operation.descriptor.provider_id}"
+                )
+            if operation.native_facts.get("external_component_probed", False):
+                raise RuntimeError(
+                    f"{stage} report loaded optional provider "
+                    f"{operation.descriptor.provider_id}"
+                )
+
+    ti.reset()
+    validate_passive_report("pre-init")
+    try:
+        ti.init(arch=ti.cpu, offline_cache=False)
+        validate_passive_report("CPU initialized")
+    finally:
+        ti.reset()
+    _checkpoint(
+        "hardware distribution boundary: passed "
+        "(D0 core, D1/D2 disabled and unprobed)"
+    )
+
+
 def _validate_cpu_native_ad() -> None:
     n = 8
     _checkpoint("cpu native AD: init")
@@ -449,6 +502,7 @@ def main() -> None:
     _checkpoint(f"native build identity: passed ({commit})")
     _validate_private_runtime_symbol_scope()
     _validate_contract_manifest()
+    _validate_hardware_distribution_boundary()
     cudart, cudart_major = _validate_packaged_cuda_runtime()
     _checkpoint("packaged CUDA runtime: passed")
     _validate_cpu_field_roundtrips()
