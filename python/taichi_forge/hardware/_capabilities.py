@@ -672,8 +672,30 @@ _OPERATIONS = (
         resource_effects=("read:texture",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
-        requirements=("SPIR-V image and sampler operations",),
+        dtypes=(
+            "sampled:f32",
+            "storage:f32",
+            "storage:i32",
+            "storage:u32",
+        ),
+        shapes_or_tiles=("1D", "2D", "3D"),
+        layouts=("sampled_image", "storage_image"),
+        numeric_contracts=(
+            "sample_lod:explicit_lod_vec4_f32",
+            "fetch:texel_vec4_f32",
+            "storage_load_store:format_sampled_type",
+        ),
+        deterministic=False,
+        requirements=(
+            "SPIR-V OpImageSampleExplicitLod and OpImageFetch",
+            "Vulkan combined image sampler",
+        ),
         public_api="ti.Texture",
+        notes=(
+            "The current default sampler uses linear filtering, repeat addressing, "
+            "normalized coordinates, and no anisotropy or comparison; it is not "
+            "publicly configurable.",
+        ),
     ),
     _operation(
         "sampling.texture.cuda",
@@ -689,12 +711,13 @@ _OPERATIONS = (
         "inline",
         "current",
         "none",
-        "qualification_required",
+        "planned",
         resource_effects=("read:texture",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
         requirements=("CUDA texture-object lowering",),
         public_api="ti.Texture",
+        notes=("LLVM CUDA TextureOp lowering is not implemented.",),
     ),
     _operation(
         "matrix.mma.cuda",

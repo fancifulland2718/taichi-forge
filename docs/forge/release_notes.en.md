@@ -60,6 +60,11 @@ grouped under the behavior they shipped.
   execution and root-Graph automatic admission. Replay is currently
   runtime-ordered `rerecord`; kernel calls, structured Graphs, and AOT are not
   qualified.
+- Qualified the existing D0 Vulkan `ti.Texture` hardware-sampling route:
+  explicit texture operations are automatically lowered to SPIR-V image and
+  sampler instructions, while ordinary field/ndarray access is never silently
+  substituted. CUDA texture lowering is not implemented and remains
+  `planned`. No official wheel variant is added.
 
 ## 0.6.2
 

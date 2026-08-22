@@ -50,6 +50,18 @@ mismatches, Graph use after reset, and recordings over 4096 commands fail.
 The route uses only D0 runtime code already present in official wheels and does
 not add a wheel variant.
 
+### Vulkan `ti.Texture` hardware-sampling qualification (0.6.3 in development)
+
+Explicit `ti.Texture.sample_lod()` and `fetch()` calls inside Vulkan kernels
+are automatically lowered to SPIR-V image/sampler instructions. Query the
+contract with `ti.hardware.capability("sampling.texture.vulkan")`. The current
+slice covers 1D/2D/3D sampled textures and format-matched `rw_texture` storage
+images. Its default sampler is fixed to linear/repeat/normalized behavior, is
+not configurable, and does not promise cross-device bitwise determinism.
+Ordinary field or ndarray access is never converted to texture sampling, and
+the CUDA backend has no texture lowering yet. This D0 route adds no wheel
+variant.
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 Creates an explicit non-owning zero-copy dense storage view over a qualified

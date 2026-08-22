@@ -123,6 +123,24 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
         "ti.graph.VulkanBufferCommandRecording"
     )
 
+    texture = ti.hardware.capability("sampling.texture.vulkan")
+    assert texture.implementation_status == "existing_public"
+    assert texture.hardware_acceleration == "qualified"
+    assert texture.scopes == ("kernel",)
+    assert texture.execution_kind == "kernel_intrinsic"
+    assert texture.graph_support == "inline"
+    assert texture.shapes_or_tiles == ("1D", "2D", "3D")
+    assert texture.layouts == ("sampled_image", "storage_image")
+    assert "SPIR-V OpImageSampleExplicitLod and OpImageFetch" in texture.requirements
+    assert texture.deterministic is False
+
+    cuda_texture = ti.hardware.capability("sampling.texture.cuda")
+    assert cuda_texture.implementation_status == "planned"
+    assert cuda_texture.hardware_acceleration == "implementation_defined"
+    assert cuda_texture.notes == (
+        "LLVM CUDA TextureOp lowering is not implemented.",
+    )
+
     raster = ti.hardware.capability("raster.draw.vulkan")
     assert raster.semantic_family == "raster.draw"
     assert raster.public_api == "ti.hardware.raster"
@@ -327,18 +345,21 @@ def test_multibackend_core_route_requires_every_backend(monkeypatch):
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_buffer_command_route_is_passively_eligible():
     report = ti.hardware.report()
-    operation = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.operation_id
-        == "runtime.buffer_commands.vulkan"
-    )
+    for operation_id in (
+        "runtime.buffer_commands.vulkan",
+        "sampling.texture.vulkan",
+    ):
+        operation = next(
+            operation
+            for operation in report.operations
+            if operation.descriptor.operation_id == operation_id
+        )
 
-    assert operation.discovery == "available"
-    assert operation.enablement == "enabled"
-    assert operation.selection == "eligible"
-    assert operation.unavailable_reason == "none"
-    assert not operation.native_facts["external_component_probed"]
+        assert operation.discovery == "available"
+        assert operation.enablement == "enabled"
+        assert operation.selection == "eligible"
+        assert operation.unavailable_reason == "none"
+        assert not operation.native_facts["external_component_probed"]
 
 
 def _native_probe_payload(discovery, unavailable_reason, **overrides):

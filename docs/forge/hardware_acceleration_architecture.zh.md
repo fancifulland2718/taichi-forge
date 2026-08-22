@@ -350,6 +350,20 @@ graph.run({"source": source, "destination": destination})
 - 当前只资格化 root `GraphBuilder.append_native(...)`。structured `Sequential` 中的
   backend command 会明确拒绝；AOT serialization 也不在本合同内。
 
+### 当前 M4 Texture/Sampler 资格边界
+
+`ti.Texture` 的创建与 `sample_lod()` / `fetch()` 调用是显式 API；当目标为 Vulkan 时，
+编译器会自动把这些有类型的 texture op lowering 到 SPIR-V image/sampler 指令。这是
+“显式请求某种语义、编译器自动选择硬件实现”，不是把普通 field/ndarray load 自动替换
+为 texture sampling，也没有软件采样 fallback。
+
+当前资格范围为 Vulkan 1D/2D/3D sampled texture，`sample_lod()` 与 `fetch()` 返回
+`vec4<f32>`。默认 sampler 固定为 linear filter、repeat address、normalized coordinate，
+未公开 filter/address/anisotropy/compare 配置。`ti.types.rw_texture` 的 storage image
+load/store 另支持格式对应的 `f32`、`i32`、`u32` sampled type。浮点过滤结果不承诺跨设备
+bitwise deterministic。CUDA GPU 虽有 texture unit，但 LLVM CUDA backend 尚未实现
+`TextureOpStmt` lowering，所以该路线保持 `planned`，不能因硬件存在而报告可用。
+
 ## Cache 边界
 
 一个全局 cache key 会错误失效过多 portable work，同时仍不足以保护 native

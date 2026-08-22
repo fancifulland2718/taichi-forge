@@ -29,6 +29,45 @@ integer_storage_image_cases = [
 ]
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_texture_hardware_sampling_qualification():
+    tex = ti.Texture(ti.Format.r32f, (2, 2))
+    out = ti.ndarray(dtype=ti.f32, shape=5)
+
+    @ti.kernel
+    def write(
+        texture: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        texture.store(ti.Vector([0, 0]), ti.Vector([0.0, 0.0, 0.0, 0.0]))
+        texture.store(ti.Vector([1, 0]), ti.Vector([1.0, 0.0, 0.0, 0.0]))
+        texture.store(ti.Vector([0, 1]), ti.Vector([2.0, 0.0, 0.0, 0.0]))
+        texture.store(ti.Vector([1, 1]), ti.Vector([3.0, 0.0, 0.0, 0.0]))
+
+    @ti.kernel
+    def sample(
+        texture: ti.types.texture(num_dimensions=2),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        result[0] = texture.fetch(ti.Vector([0, 0]), 0).x
+        result[1] = texture.fetch(ti.Vector([1, 0]), 0).x
+        result[2] = texture.fetch(ti.Vector([0, 1]), 0).x
+        result[3] = texture.fetch(ti.Vector([1, 1]), 0).x
+        result[4] = texture.sample_lod(ti.Vector([0.5, 0.5]), 0.0).x
+
+    write(tex)
+    sample(tex, out)
+    np.testing.assert_allclose(
+        out.to_numpy(), np.asarray([0.0, 1.0, 2.0, 3.0, 1.5], dtype=np.float32)
+    )
+
+    capability = ti.hardware.capability("sampling.texture.vulkan")
+    assert capability.hardware_acceleration == "qualified"
+    assert capability.execution_kind == "kernel_intrinsic"
+    assert capability.graph_support == "inline"
+
+
 @ti.func
 def taichi_logo(pos: ti.template(), scale: float = 1 / 1.11):
     p = (pos - 0.5) / scale + 0.5

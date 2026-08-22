@@ -393,6 +393,25 @@ The current qualification boundary is:
   in a structured `Sequential` are rejected, and AOT serialization is outside
   this contract.
 
+### Current M4 Texture/Sampler qualification boundary
+
+Creating a `ti.Texture` and calling `sample_lod()` or `fetch()` are explicit
+API choices. For Vulkan, the compiler automatically lowers those typed texture
+operations to SPIR-V image/sampler instructions. This means an explicit
+semantic request receives an automatic hardware implementation; ordinary
+field or ndarray loads are not silently replaced with texture sampling, and
+there is no software-sampling fallback.
+
+The qualified slice is Vulkan 1D/2D/3D sampled textures whose `sample_lod()`
+and `fetch()` operations return `vec4<f32>`. The default sampler is fixed to
+linear filtering, repeat addressing, and normalized coordinates; filter,
+address, anisotropy, and comparison controls are not public. Storage-image
+load/store through `ti.types.rw_texture` additionally supports format-matched
+`f32`, `i32`, and `u32` sampled types. Floating-point filtering is not claimed
+bitwise deterministic across devices. Although CUDA GPUs have texture units,
+the LLVM CUDA backend has no `TextureOpStmt` lowering, so that route remains
+`planned` rather than being reported available merely because hardware exists.
+
 ## Cache boundaries
 
 One universal cache key would invalidate too much portable work and still be

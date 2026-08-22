@@ -42,6 +42,15 @@ runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
 都会失败。该功能完全使用官方 wheel 已包含的 D0 runtime，不增加 wheel 发行矩阵。
 
+### Vulkan `ti.Texture` 硬件采样资格（0.6.3 开发中）
+
+Vulkan kernel 内显式调用 `ti.Texture` 的 `sample_lod()` / `fetch()` 会由编译器自动
+lowering 到 SPIR-V image/sampler 指令，可在 `ti.hardware.capability(
+"sampling.texture.vulkan")` 查询合同。当前覆盖 1D/2D/3D sampled texture 和
+format-matched `rw_texture` storage image；默认 sampler 固定为 linear/repeat/normalized，
+不可配置且不承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为
+texture，CUDA backend 也尚未实现 texture lowering。该 D0 路线不新增 wheel 变体。
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 为经过资格验证的 Forge `Ndarray`、`DenseNdarrayView` 或 root-dense field 创建显式、
