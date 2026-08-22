@@ -72,6 +72,7 @@ native algorithms、最初的 Graph modernization、DisplayFrame 和 compile pro
 
 ### Graph 与执行
 
+- [硬件加速架构与执行规划](docs/forge/hardware_acceleration_architecture.zh.md)
 - [Graph 兼容性与迁移指南](docs/forge/graph_migration_guide.zh.md)
 - [Graph Runtime 与优化](docs/forge/graph_runtime_optimization.zh.md)
 - [Dense Field Graph](docs/forge/dense_field_graph.zh.md)
