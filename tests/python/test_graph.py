@@ -36,6 +36,8 @@ from taichi_forge.graph._ir import (
     plan_temporary_memory,
 )
 from taichi_forge.graph._native import (
+    BackendCommandGraphAction,
+    BackendCommandRecording,
     DispatchGraphAction,
     NativeGraphExecutable,
     NativeGraphNode,
@@ -1620,6 +1622,71 @@ class _RecordedDispatchExecutable(NativeGraphExecutable):
         return {"kind": "recorded_dispatch"}
 
 
+class _TrackedBackendCommandRecording(BackendCommandRecording):
+    def __init__(self, tracker, *, backend="cpu", workspace_ownership="none"):
+        super().__init__(
+            backend=backend,
+            binding_names=("values",),
+            command_count=2,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="explicit",
+            workspace_ownership=workspace_ownership,
+            replay_mode="rerecord",
+        )
+        object.__setattr__(self, "tracker", tracker)
+
+    def execute(self, bindings):
+        self.tracker["recordings"] += 1
+        self.tracker["binding_names"].append(tuple(bindings))
+
+
+class _BackendCommandExecutable(NativeGraphExecutable):
+    def __init__(self, tracker, *, backend="cpu", workspace_ownership="none"):
+        self._tracker = tracker
+        self._action = BackendCommandGraphAction(
+            _TrackedBackendCommandRecording(
+                tracker,
+                backend=backend,
+                workspace_ownership=workspace_ownership,
+            )
+        )
+
+    def run(self, runtime_args):
+        self._tracker["fallback_runs"] += 1
+        raise AssertionError("backend command action used its fallback path")
+
+    @property
+    def runtime_arg_schema(self):
+        return (RuntimeBinding("values", "ndarray"),)
+
+    @property
+    def resource_effects(self):
+        return (ResourceEffect("values", GraphAccess.READ_WRITE),)
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return {"kind": "tracked_backend_command"}
+
+
+class _BackendCommandNode(NativeGraphNode):
+    def __init__(self, tracker, *, backend="cpu", workspace_ownership="none"):
+        self._tracker = tracker
+        self._backend = backend
+        self._workspace_ownership = workspace_ownership
+
+    def compile(self):
+        return _BackendCommandExecutable(
+            self._tracker,
+            backend=self._backend,
+            workspace_ownership=self._workspace_ownership,
+        )
+
+
 class _RecordedDispatchNode(NativeGraphNode):
     def __init__(self, kernel, args, tracker, lease, fixed_bindings=None):
         self._kernel = kernel
@@ -2418,6 +2485,87 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     assert all(dispatch["opaque"] for dispatch in dispatches)
 
 
+@test_utils.test(arch=ti.cpu)
+def test_backend_command_action_has_explicit_execution_contract_and_replay():
+    tracker = {"recordings": 0, "binding_names": [], "fallback_runs": 0}
+    node = _BackendCommandNode(tracker)
+    executable = node.compile()
+    values = ti.ndarray(ti.i32, shape=8)
+
+    executable.recordable_action.execute({"values": values})
+    assert tracker["recordings"] == 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(node, admission="auto")
+    graph = builder.compile()
+    assert graph._debug_info["optimization"] == {
+        "backend": "cpu",
+        "input_segments": 1,
+        "output_segments": 1,
+        "mixed_backend_regions": 0,
+        "lowered_native_nodes": 0,
+        "opaque_native_nodes": 0,
+        "backend_command_nodes": 1,
+    }
+    graph.run({"values": values})
+    ticket = graph.submit({"values": values}, telemetry=True)
+    ticket.wait()
+
+    assert tracker["recordings"] == 3
+    assert tracker["binding_names"] == [("values",)] * 3
+    assert tracker["fallback_runs"] == 0
+    pipeline = ticket.pipeline_report()
+    assert pipeline.native_action_count == 1
+    assert pipeline.recordable_native_action_count == 1
+    assert pipeline.opaque_native_action_count == 0
+    manifest = pipeline.stages[0].native_actions[0]
+    assert manifest.schema_version == 3
+    assert manifest.recordable
+    assert not manifest.opaque
+    assert manifest.automatic_admissible
+    assert manifest.execution_kind == "backend_command"
+    assert manifest.recording_kind == "native_command"
+    assert manifest.queue == "compute"
+    assert manifest.stream_binding == "runtime_ordered"
+    assert manifest.barrier_policy == "explicit"
+    assert manifest.workspace_ownership == "none"
+    assert manifest.replay_mode == "rerecord"
+    assert manifest.dispatch_count == 0
+    assert manifest.backend_command_count == 2
+    assert manifest.backend_command_count_exact
+    assert not manifest.backend_command_replay
+    assert manifest.fragmentation_reason == "none"
+
+    ti.reset()
+    with pytest.raises(TaichiRuntimeError, match="before ti.reset"):
+        graph.run({"values": values})
+
+
+@test_utils.test(arch=ti.cpu)
+def test_backend_command_action_rejects_device_and_structured_mismatch():
+    tracker = {"recordings": 0, "binding_names": [], "fallback_runs": 0}
+    node = _BackendCommandNode(tracker, backend="vulkan")
+
+    with pytest.raises(TaichiRuntimeError, match="compiled for vulkan"):
+        ti.graph.GraphBuilder().append_native(node)
+
+    sequential = ti.graph.GraphBuilder().create_sequential()
+    with pytest.raises(TaichiRuntimeError, match="not yet qualified"):
+        sequential.append_native(_BackendCommandNode(tracker))
+
+
+@test_utils.test(arch=ti.cpu)
+def test_backend_command_provider_workspace_requires_lifetime_lease():
+    tracker = {"recordings": 0, "binding_names": [], "fallback_runs": 0}
+    with pytest.raises(TaichiRuntimeError, match="requires a lifetime lease"):
+        ti.graph.GraphBuilder().append_native(
+            _BackendCommandNode(
+                tracker,
+                workspace_ownership="provider_generation",
+            )
+        )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     @ti.kernel
@@ -2547,12 +2695,19 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     assert stage.bounded_dispatches == ()
     manifest = stage.native_actions[0]
     assert isinstance(manifest, ti.graph.NativeActionManifest)
-    assert manifest.schema_version == 2
+    assert manifest.schema_version == 3
     assert manifest.name == "recorded_dispatch"
     assert manifest.recordable
     assert not manifest.opaque
     assert manifest.dispatch_count == 1
     assert manifest.synchronization_domain == "runtime_ordered"
+    assert manifest.execution_kind == "kernel_dispatch"
+    assert manifest.recording_kind == "cgraph_dispatch"
+    assert manifest.queue == "compute"
+    assert manifest.stream_binding == "runtime_ordered"
+    assert manifest.barrier_policy == "declared_effects"
+    assert manifest.workspace_ownership == "none"
+    assert manifest.replay_mode == "backend_graph"
     assert manifest.update_policy == "rebind"
     assert manifest.fixed_binding_names == (sym_offset.name,)
     assert manifest.temporary_bindings == ()

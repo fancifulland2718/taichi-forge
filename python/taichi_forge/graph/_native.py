@@ -153,6 +153,13 @@ class NativeActionManifest:
     fixed_binding_names: tuple
     temporary_bindings: tuple
     lifetime_lease_count: int
+    execution_kind: str = "opaque_host"
+    recording_kind: str = "opaque"
+    queue: str = "host"
+    stream_binding: str = "opaque"
+    barrier_policy: str = "opaque"
+    workspace_ownership: str = "provider"
+    replay_mode: str = "opaque"
     backend_command_count: object = None
     backend_command_count_exact: bool = False
     loose_helper_count: object = None
@@ -188,6 +195,13 @@ class NativeActionManifest:
             "fixed_binding_names": self.fixed_binding_names,
             "temporary_bindings": self.temporary_bindings,
             "lifetime_lease_count": self.lifetime_lease_count,
+            "execution_kind": self.execution_kind,
+            "recording_kind": self.recording_kind,
+            "queue": self.queue,
+            "stream_binding": self.stream_binding,
+            "barrier_policy": self.barrier_policy,
+            "workspace_ownership": self.workspace_ownership,
+            "replay_mode": self.replay_mode,
             "backend_command_count": self.backend_command_count,
             "backend_command_count_exact": self.backend_command_count_exact,
             "loose_helper_count": self.loose_helper_count,
@@ -231,6 +245,77 @@ class BackendCommandPlan:
             raise ValueError("Exact backend helper plans require a count")
         if not self.fragmentation_reason:
             raise ValueError("Backend command fragmentation reason is required")
+
+
+@dataclass(frozen=True)
+class BackendCommandRecording:
+    """Executable backend-command contract owned by one native action.
+
+    Subclasses implement :meth:`execute` by entering a native runtime API that
+    records the complete command sequence.  The Graph runtime invokes it once
+    per action; a Python loop over individual driver or RHI commands is not an
+    admissible implementation.
+    """
+
+    backend: str
+    binding_names: tuple
+    command_count: int
+    queue: str = "compute"
+    stream_binding: str = "runtime_ordered"
+    barrier_policy: str = "declared_effects"
+    workspace_ownership: str = "none"
+    replay_mode: str = "rerecord"
+    no_host_readback: bool = True
+
+    def __post_init__(self):
+        binding_names = tuple(self.binding_names)
+        if self.backend not in ("cpu", "cuda", "vulkan"):
+            raise ValueError("Unsupported backend command recording backend")
+        if any(not isinstance(name, str) or not name for name in binding_names):
+            raise ValueError("Backend command binding names must be nonempty")
+        if len(binding_names) != len(set(binding_names)):
+            raise ValueError("Backend command binding names must be unique")
+        if (
+            isinstance(self.command_count, bool)
+            or not isinstance(self.command_count, int)
+            or self.command_count <= 0
+        ):
+            raise ValueError("Backend command recording requires a positive count")
+        if self.queue not in ("compute", "graphics", "transfer"):
+            raise ValueError("Unsupported backend command queue")
+        if self.stream_binding not in ("runtime_ordered", "explicit_stream"):
+            raise ValueError("Unsupported backend command stream binding")
+        if self.barrier_policy not in (
+            "declared_effects",
+            "internal",
+            "explicit",
+        ):
+            raise ValueError("Unsupported backend command barrier policy")
+        if self.workspace_ownership not in (
+            "none",
+            "graph_temporary",
+            "provider_generation",
+        ):
+            raise ValueError("Unsupported backend command workspace ownership")
+        if self.replay_mode not in ("rerecord", "native_replay", "stream_capture"):
+            raise ValueError("Unsupported backend command replay mode")
+        object.__setattr__(self, "binding_names", binding_names)
+
+    def execute(self, bindings):
+        raise NotImplementedError
+
+    def to_dict(self):
+        return {
+            "backend": self.backend,
+            "binding_names": self.binding_names,
+            "command_count": self.command_count,
+            "queue": self.queue,
+            "stream_binding": self.stream_binding,
+            "barrier_policy": self.barrier_policy,
+            "workspace_ownership": self.workspace_ownership,
+            "replay_mode": self.replay_mode,
+            "no_host_readback": self.no_host_readback,
+        }
 
 
 @dataclass(frozen=True)
@@ -291,6 +376,10 @@ class RecordableGraphAction:
     @property
     def dispatches(self):
         return ()
+
+    @property
+    def backend_command_recording(self):
+        return None
 
     @property
     def fixed_bindings(self):
@@ -369,6 +458,123 @@ class DispatchGraphAction(RecordableGraphAction):
     @property
     def allows_unused_public_bindings(self):
         return self._allows_unused_public_bindings
+
+
+class BackendCommandGraphAction(RecordableGraphAction):
+    """Recordable action backed by one native command recording entrypoint."""
+
+    def __init__(
+        self,
+        recording,
+        *,
+        conditional_body_safe=False,
+        fixed_bindings=None,
+        temporary_bindings=None,
+        address_stable=True,
+        update_policy="rebind",
+    ):
+        if not isinstance(recording, BackendCommandRecording):
+            raise TypeError(
+                "Backend command actions require a BackendCommandRecording"
+            )
+        if not recording.no_host_readback:
+            raise ValueError("Recordable backend commands cannot read back to host")
+        if recording.stream_binding != "runtime_ordered":
+            raise ValueError(
+                "Graph backend commands must use the runtime-ordered stream"
+            )
+        bindings = {} if fixed_bindings is None else dict(fixed_bindings)
+        temporary = (
+            {} if temporary_bindings is None else dict(temporary_bindings)
+        )
+        if any(not isinstance(name, str) or not name for name in bindings):
+            raise ValueError("Backend command fixed binding names must be nonempty")
+        if any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(requirement, str)
+            or not requirement
+            for name, requirement in temporary.items()
+        ):
+            raise ValueError(
+                "Backend command temporary bindings must use nonempty names"
+            )
+        if recording.workspace_ownership == "graph_temporary" and not temporary:
+            raise ValueError(
+                "Graph-owned backend command workspace requires a temporary binding"
+            )
+        if recording.workspace_ownership != "graph_temporary" and temporary:
+            raise ValueError(
+                "Backend command temporary bindings require graph_temporary ownership"
+            )
+        private_names = set(bindings) | set(temporary)
+        if not private_names <= set(recording.binding_names):
+            raise ValueError(
+                "Backend command private bindings must be declared by the recording"
+            )
+        if set(bindings) & set(temporary):
+            raise ValueError(
+                "Backend command fixed and temporary bindings must be disjoint"
+            )
+        self._recording = recording
+        self._capabilities = RecordableActionCapabilities(
+            backends=(recording.backend,),
+            conditional_body_safe=bool(conditional_body_safe),
+            address_stable=bool(address_stable),
+            update_policy=update_policy,
+            synchronization_domain=recording.stream_binding,
+        )
+        self._fixed_bindings = MappingProxyType(bindings)
+        self._temporary_bindings = MappingProxyType(temporary)
+
+    @property
+    def capabilities(self):
+        return self._capabilities
+
+    @property
+    def backend_command_recording(self):
+        return self._recording
+
+    @property
+    def fixed_bindings(self):
+        return self._fixed_bindings
+
+    @property
+    def temporary_bindings(self):
+        return self._temporary_bindings
+
+    def bind_graph_temporaries(self, temporaries):
+        return MappingProxyType(
+            {
+                symbol: temporaries[requirement]
+                for symbol, requirement in self._temporary_bindings.items()
+            }
+        )
+
+    def execute(self, bindings):
+        required = frozenset(self._recording.binding_names)
+        provided = frozenset(bindings)
+        if provided != required:
+            missing = sorted(required.difference(provided))
+            unexpected = sorted(provided.difference(required))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise TaichiRuntimeError(
+                "Backend command bindings do not match the recording: "
+                + "; ".join(details)
+            )
+        backend = _ti_core.arch_name(impl.current_cfg().arch)
+        if backend in ("x64", "arm64"):
+            backend = "cpu"
+        if backend != self._recording.backend:
+            raise TaichiRuntimeError(
+                "Backend command recording is compiled for "
+                f"{self._recording.backend}, not the active {backend} backend"
+            )
+        return self._recording.execute(MappingProxyType(dict(bindings)))
 
 
 class NativeGraphExecutable:
@@ -559,6 +765,7 @@ def native_action_manifest(
         dispatch_count = 0
         update_policy = "opaque"
         synchronization_domain = "opaque"
+        recording = None
     else:
         capabilities = action.capabilities
         if not isinstance(capabilities, RecordableActionCapabilities):
@@ -571,9 +778,57 @@ def native_action_manifest(
         dispatch_count = len(tuple(action.dispatches))
         update_policy = capabilities.update_policy
         synchronization_domain = capabilities.synchronization_domain
+        recording = action.backend_command_recording
+        if recording is not None and not isinstance(
+            recording, BackendCommandRecording
+        ):
+            raise TaichiRuntimeError(
+                "Backend command actions must expose a BackendCommandRecording"
+            )
+        if recording is not None and tuple(action.dispatches):
+            raise TaichiRuntimeError(
+                "A native action cannot mix backend commands and dispatches"
+            )
+        if recording is None and dispatch_count == 0:
+            raise TaichiRuntimeError(
+                "Recordable native actions require dispatches or a backend command"
+            )
+        if (
+            recording is not None
+            and recording.workspace_ownership == "provider_generation"
+            and not tuple(executable.lifetime_leases)
+        ):
+            raise TaichiRuntimeError(
+                "Provider-owned backend command workspace requires a lifetime lease"
+            )
+
+    if recording is not None:
+        execution_kind = "backend_command"
+        recording_kind = "native_command"
+        queue = recording.queue
+        stream_binding = recording.stream_binding
+        barrier_policy = recording.barrier_policy
+        workspace_ownership = recording.workspace_ownership
+        replay_mode = recording.replay_mode
+    elif action is not None:
+        execution_kind = "kernel_dispatch"
+        recording_kind = "cgraph_dispatch"
+        queue = "compute"
+        stream_binding = synchronization_domain
+        barrier_policy = "declared_effects"
+        workspace_ownership = "graph_temporary" if temporaries else "none"
+        replay_mode = "backend_graph"
+    else:
+        execution_kind = "opaque_host"
+        recording_kind = "opaque"
+        queue = "host"
+        stream_binding = "opaque"
+        barrier_policy = "opaque"
+        workspace_ownership = "provider"
+        replay_mode = "opaque"
 
     return NativeActionManifest(
-        schema_version=2,
+        schema_version=3,
         name=name,
         recordable=action is not None,
         opaque=bool(getattr(ir_node, "opaque", action is None)),
@@ -591,11 +846,21 @@ def native_action_manifest(
         fixed_binding_names=fixed_binding_names,
         temporary_bindings=temporary_bindings,
         lifetime_lease_count=len(tuple(executable.lifetime_leases)),
+        execution_kind=execution_kind,
+        recording_kind=recording_kind,
+        queue=queue,
+        stream_binding=stream_binding,
+        barrier_policy=barrier_policy,
+        workspace_ownership=workspace_ownership,
+        replay_mode=replay_mode,
         backend_command_count=(
-            None if command_plan is None else command_plan.command_count
+            recording.command_count
+            if recording is not None
+            else (None if command_plan is None else command_plan.command_count)
         ),
         backend_command_count_exact=bool(
-            command_plan is not None and command_plan.command_count_exact
+            recording is not None
+            or (command_plan is not None and command_plan.command_count_exact)
         ),
         loose_helper_count=(
             None if command_plan is None else command_plan.helper_count
@@ -604,7 +869,11 @@ def native_action_manifest(
             command_plan is not None and command_plan.helper_count_exact
         ),
         backend_command_replay=bool(
-            command_plan is not None and command_plan.provider_replay
+            (
+                recording is not None
+                and recording.replay_mode in ("native_replay", "stream_capture")
+            )
+            or (command_plan is not None and command_plan.provider_replay)
         ),
         automatic_admissible=action is not None,
         fragmentation_reason=(

@@ -39,6 +39,7 @@ from taichi_forge.types.annotations import template
 from taichi_forge.types.primitive_types import f32, i32, u32
 from taichi_forge.types.texture_type import FORMAT2TY_CH, TY_CH2FORMAT
 from taichi_forge.graph._native import (
+    BackendCommandGraphAction,
     BoundedPublicationTarget,
     GraphTemporaryBuffer,
     NativeActionManifest,
@@ -5125,12 +5126,16 @@ class _CompiledNativeGraphNode:
             *tuple(executable.lifetime_leases),
         )
         if self.recordable_action is not None:
-            recorder_names = frozenset().union(
-                *(
-                    _runtime_arg_names(args)
-                    for _, args in self.recordable_action.dispatches
+            recording = self.recordable_action.backend_command_recording
+            if recording is None:
+                recorder_names = frozenset().union(
+                    *(
+                        _runtime_arg_names(args)
+                        for _, args in self.recordable_action.dispatches
+                    )
                 )
-            )
+            else:
+                recorder_names = frozenset(recording.binding_names)
             required_private_names = frozenset(
                 (
                     *self.fixed_runtime_args,
@@ -5145,11 +5150,16 @@ class _CompiledNativeGraphNode:
             )
             if not complete and not valid_subset:
                 raise TaichiRuntimeError(
-                    "Recordable action dispatch arguments must match its "
-                    "public, derived, and fixed bindings"
+                    "Recordable action bindings must match its public, "
+                    "derived, temporary, and fixed bindings"
                 )
 
     def run(self, context, temporaries=None):
+        if isinstance(self.recordable_action, BackendCommandGraphAction):
+            all_args = context.runtime_args()
+            names = self.recordable_action.backend_command_recording.binding_names
+            bindings = {name: all_args[name] for name in names}
+            return self.recordable_action.execute(bindings)
         runtime_args = None
         if self.needs_runtime_args:
             all_args = context.runtime_args()
@@ -8939,15 +8949,28 @@ def _lower_mixed_backend_regions(nodes):
         lowered_native_count += region_native_count
         cursor = end
 
-    total_native_count = sum(getattr(node, "source_native_count", 0) for node in nodes)
-    return tuple(lowered), {
+    backend_command_nodes = sum(
+        isinstance(node, _CompiledNativeGraphNode)
+        and node.recordable_action is not None
+        and node.recordable_action.backend_command_recording is not None
+        for node in nodes
+    )
+    opaque_native_nodes = sum(
+        isinstance(node, _CompiledNativeGraphNode)
+        and node.recordable_action is None
+        for node in nodes
+    )
+    statistics = {
         "backend": backend,
         "input_segments": len(nodes),
         "output_segments": len(lowered),
         "mixed_backend_regions": mixed_region_count,
         "lowered_native_nodes": lowered_native_count,
-        "opaque_native_nodes": total_native_count - lowered_native_count,
+        "opaque_native_nodes": opaque_native_nodes,
     }
+    if backend_command_nodes:
+        statistics["backend_command_nodes"] = backend_command_nodes
+    return tuple(lowered), statistics
 
 
 def _structured_control_resource_names(node):
@@ -11016,6 +11039,11 @@ class Sequential:
                 f"Recordable action does not support the active {backend} backend"
             )
         dispatches = tuple(action.dispatches)
+        if action.backend_command_recording is not None:
+            raise TaichiRuntimeError(
+                "Backend command actions are not yet qualified inside a "
+                "structured Graph Sequential"
+            )
         if not dispatches:
             raise TaichiRuntimeError(
                 "Recordable action must provide at least one dispatch"
@@ -12270,6 +12298,17 @@ class GraphBuilder:
             sequence = Sequential()
             sequence._append_recordable_sequence(structured, executable)
             return self.append(sequence)
+        action = executable.recordable_action
+        if action is not None and action.backend_command_recording is not None:
+            backend = _backend_name(
+                _ti_core.arch_name(impl.current_cfg().arch)
+            )
+            if not action.supports_backend(backend):
+                raise TaichiRuntimeError(
+                    "Backend command action is compiled for "
+                    f"{action.backend_command_recording.backend}, not the active "
+                    f"{backend} backend"
+                )
         if admission == "auto":
             backend = _backend_name(
                 _ti_core.arch_name(impl.current_cfg().arch)
