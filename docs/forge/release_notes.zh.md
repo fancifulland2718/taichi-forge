@@ -97,6 +97,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   specialization 的 selection。该路线不新增公开 CUDA 指令语法、Toolkit runtime、
   package 或 wheel 变体。Vulkan mesh shader 因 RHI 尚未实现完整 feature、shader、
   pipeline 与 command chain，继续保持 `planned`。
+- 收口其余 provider 审计且不增加半实现路线：CUDA texture 需要完整 LLVM/CUDA texture
+  resource 与 lowering 链；Vulkan cooperative matrix 需要 feature/property、typed-tile IR 与
+  SPIR-V；inline Ray Query 需要 kernel-visible AS/resource/IR 合同；mesh shader 需要完整
+  RHI pipeline；OptiX 继续作为 license 与 SDK-header/ABI 约束的 user-built plugin 候选；
+  CUB 继续只保留 D2 reference。所有路线均 fail closed，且不新增官方 wheel 变体。
 
 ## 0.6.2 {#062}
 

@@ -122,6 +122,13 @@ grouped under the behavior they shipped.
   package, or wheel variant is added. Vulkan mesh shaders remain `planned`
   because the RHI does not yet implement their feature, shader, pipeline, and
   command chain.
+- Closed the remaining provider audit without adding partial routes. CUDA
+  texture needs a complete LLVM/CUDA texture resource and lowering chain;
+  Vulkan cooperative matrix needs feature/property, typed-tile IR, and SPIR-V
+  support; inline Ray Query needs a kernel-visible AS/resource/IR contract;
+  mesh shaders need the full RHI pipeline; OptiX remains a licensed,
+  SDK-header/ABI-defined user-built plugin candidate; and CUB remains D2
+  reference-only. All stay fail-closed and add no official wheel variant.
 
 ## 0.6.2
 

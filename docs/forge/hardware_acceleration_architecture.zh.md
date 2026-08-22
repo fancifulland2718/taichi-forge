@@ -596,6 +596,27 @@ pipeline 也绝不能在不兼容 runtime 中复用。
 
 Sparse MMA、DPX、公开 TMA 调用和所有 D3 provider 继续延期。
 
+### 剩余 provider 候选收口审计
+
+其余 planned entry 已沿 frontend semantic、typed IR/codegen、feature enablement、resource
+binding、command submission 与 packaging 完整追踪，因此不会交付只有一段链条的半实现：
+
+| 候选 | 物理/渲染价值 | 当前代码树缺失链条 | 决策 |
+| --- | --- | --- | --- |
+| CUDA texture/sampler | SDF、grid、volume 与 material lookup。 | LLVM/CUDA `Program` texture allocation/lifetime、CUDA array 与 texture-object upload、kernel argument ABI、`TextureOpStmt` lowering 全部缺失；当前 `Texture` 只由 GFX Program 分配。 | 保持 `planned`；它需要完整 CUDA texture resource family，不是一条 intrinsic。 |
+| Vulkan cooperative matrix | 批量 FEM element matrix、小块 solver 与 preconditioner。 | 不存在 feature query/enablement、property enumeration、opaque tile type、typed IR 或 SPIR-V load/mul-add/store lowering；Vulkan 规范要求枚举设备支持的 M/N/K/type/scope tuple。 | 保持 `planned`，不得照搬 CUDA `m16n16k16` 合同。 |
+| Vulkan inline Ray Query | kernel-local visibility、picking 与专用 ray-mesh query。 | batch provider 已有 AS resource 与独立嵌入 shader，但没有 kernel-visible AS argument、effect/lifetime binding、RayQuery IR/control 或 SPIR-V lowering。 | 保持 `planned`；使用已资格化的 direct/root-Graph batch query。 |
+| Vulkan mesh shader | dynamic render geometry。 | 不存在 extension feature chain、mesh/task shader codegen、mesh pipeline construction 或 draw-mesh-tasks command recording。 | 保持 internal `planned`；相对完整 RHI 成本，physics ROI 较低。 |
+| OptiX | NVIDIA ray rendering。 | 缺少由 SDK header 定义的 function-table ABI、license gate、device program、module/program-group/pipeline/SBT、GAS/IAS 与 lifetime contract。 | 只作为 user-built plugin/source-build 候选，不新增官方 wheel 变体。 |
+| CUB/CCCL | sort/scan/reduce primitive。 | header template、CUDA device compiler 与 CUDART 都是 build-time requirement。 | 保留现有 D2 reference 路线；官方 wheel 继续使用 Forge-owned primitive。 |
+
+Vulkan cooperative matrix 与 Ray Query 的必要链条遵循
+[Khronos Vulkan/SPIR-V 规范](https://registry.khronos.org/vulkan/specs/latest-ratified/pdf/vkspec.pdf)。
+OptiX 初始化与 versioned function table 继续由
+[NVIDIA OptiX SDK API](https://raytracing-docs.nvidia.com/optix9/api/OptiX_API_Reference.pdf)
+定义，SDK 下载还需要独立接受 license。Sparse MMA、公开 TMA/WGMMA/DPX 与代际专用指令
+继续保持内部或延期，直到存在稳定的 physics operation 与可测 workload。
+
 ## 里程碑
 
 ### M0：架构合同

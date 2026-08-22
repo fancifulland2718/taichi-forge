@@ -149,9 +149,14 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     cuda_texture = ti.hardware.capability("sampling.texture.cuda")
     assert cuda_texture.implementation_status == "planned"
     assert cuda_texture.hardware_acceleration == "implementation_defined"
-    assert cuda_texture.notes == (
-        "LLVM CUDA TextureOp lowering is not implemented.",
-    )
+    assert "GFX Program" in cuda_texture.notes[0]
+    assert "TextureOp" in cuda_texture.notes[1]
+    assert len(cuda_texture.requirements) == 4
+
+    inline_ray = ti.hardware.capability("ray.query.inline.vulkan")
+    assert inline_ray.implementation_status == "planned"
+    assert "RayQuery IR" in inline_ray.requirements[1]
+    assert "separate embedded SPIR-V shader" in inline_ray.notes[0]
 
     cuda_atomic = ti.hardware.capability("kernel.atomic.cuda")
     vulkan_atomic = ti.hardware.capability("kernel.atomic.vulkan")
@@ -225,6 +230,16 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     )
     assert "kernel calls remain unsupported" in matrix.notes[0]
 
+    vulkan_matrix = ti.hardware.capability("matrix.mma.vulkan")
+    assert vulkan_matrix.implementation_status == "planned"
+    assert "tuple enumeration" in vulkan_matrix.requirements[1]
+    assert "rather than copying" in vulkan_matrix.notes[1]
+
+    optix = ti.hardware.capability("ray.query.batch.optix")
+    assert optix.implementation_status == "planned"
+    assert "optixQueryFunctionTable" in optix.requirements[1]
+    assert "user-built plugin" in optix.notes[1]
+
     cusparse = ti.hardware.capability("linalg.spmv.cusparse")
     assert cusparse.implementation_status == "existing_public"
     assert cusparse.scopes == ("python",)
@@ -297,7 +312,7 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
 
     assert payload["schema_version"] == 1
     assert payload["operation_id"] == descriptor.operation_id
-    assert payload["requirements"] == ("VK_KHR_cooperative_matrix",)
+    assert "tuple enumeration" in payload["requirements"][1]
     assert payload["hardware_acceleration"] == "implementation_defined"
     assert payload["implementation_status"] == "planned"
     assert payload["load_mode"] == "built_in"
@@ -310,7 +325,7 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     assert payload["fallback_equivalent"] is None
 
     payload["requirements"] = ()
-    assert descriptor.requirements == ("VK_KHR_cooperative_matrix",)
+    assert "SPV_KHR_cooperative_matrix" in descriptor.requirements[3]
 
 
 def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch):

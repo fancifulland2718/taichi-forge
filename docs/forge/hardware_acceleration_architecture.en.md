@@ -692,6 +692,30 @@ current Forge foundations, and qualification cost.
 
 Sparse MMA, DPX, public TMA calls, and any D3 provider remain deferred.
 
+### Closed audit of remaining provider candidates
+
+The remaining planned entries were traced through frontend semantics, typed
+IR/code generation, feature enablement, resource binding, command submission,
+and packaging. They are deliberately not partial implementations:
+
+| Candidate | Physics/rendering value | Missing chain in the current tree | Decision |
+| --- | --- | --- | --- |
+| CUDA texture/sampler | SDF, grid, volume, and material lookup. | LLVM/CUDA `Program` texture allocation/lifetime, CUDA array and texture-object upload, kernel argument ABI, and `TextureOpStmt` lowering are all absent; current `Texture` allocation exists only in the GFX Program. | Keep `planned`. This needs a complete CUDA texture resource family, not one intrinsic. |
+| Vulkan cooperative matrix | Batched FEM element matrices, small-block solvers, and preconditioners. | No feature query/enablement, property enumeration, opaque tile type, typed IR, or SPIR-V load/mul-add/store lowering exists. The Vulkan specification requires enumerating device-supported M/N/K/type/scope tuples. | Keep `planned`; do not clone the CUDA `m16n16k16` contract. |
+| Inline Vulkan Ray Query | Kernel-local visibility, picking, and specialized ray-mesh queries. | The batch provider has AS resources and an embedded standalone shader, but no kernel-visible AS argument, effect/lifetime binding, RayQuery IR/control, or SPIR-V lowering. | Keep `planned`; use the qualified direct/root-Graph batch query. |
+| Vulkan mesh shader | Dynamic render geometry. | No extension feature chain, mesh/task shader codegen, mesh pipeline construction, or draw-mesh-tasks command recording exists. | Keep internal and `planned`; low physics ROI relative to the full RHI cost. |
+| OptiX | NVIDIA ray rendering. | SDK-header-defined function-table ABI, license gate, device programs, module/program-group/pipeline/SBT, GAS/IAS, and lifetime contracts are absent. | User-built plugin/source-build candidate only; do not add an official wheel variant. |
+| CUB/CCCL | Sort/scan/reduce primitives. | Header templates, a CUDA device compiler, and CUDART are build-time requirements. | Retain the existing D2 reference path; official wheels use Forge-owned primitives. |
+
+The Vulkan cooperative-matrix and Ray Query requirements follow the
+[Khronos Vulkan/SPIR-V specifications](https://registry.khronos.org/vulkan/specs/latest-ratified/pdf/vkspec.pdf).
+OptiX initialization and its versioned function table remain defined by the
+[NVIDIA OptiX SDK API](https://raytracing-docs.nvidia.com/optix9/api/OptiX_API_Reference.pdf),
+whose SDK download also carries a separate license acceptance. Sparse MMA,
+public TMA/WGMMA/DPX, and generation-specific instructions remain internal or
+deferred until a portable physics operation and a measurable workload justify
+them.
+
 ## Milestones
 
 ### M0: architecture contract

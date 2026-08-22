@@ -691,8 +691,17 @@ _OPERATIONS = (
         resource_effects=("read:acceleration_structure",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
-        requirements=("SPV_KHR_ray_query", "VK_KHR_ray_query"),
+        requirements=(
+            "acceleration-structure kernel argument and lifetime/effect contract",
+            "typed RayQuery IR and structured query control",
+            "SPV_KHR_ray_query type/instruction lowering and descriptor binding",
+            "VK_KHR_ray_query device feature",
+        ),
         public_api="ti.hardware.ray",
+        notes=(
+            "The existing TriangleScene batch provider uses a separate embedded SPIR-V shader; it does not supply a kernel-visible AS value or RayQuery IR.",
+            "Batch direct/root-Graph query remains the qualified route until the complete inline compiler and resource-binding chain exists.",
+        ),
     ),
     _operation(
         "sampling.texture.vulkan",
@@ -755,9 +764,17 @@ _OPERATIONS = (
         resource_effects=("read:texture",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
-        requirements=("CUDA texture-object lowering",),
+        requirements=(
+            "LLVM/CUDA Program texture resource allocation and lifetime",
+            "CUDA array plus texture-object creation and upload",
+            "CUDA texture kernel-argument ABI",
+            "LLVM TextureOpStmt lowering",
+        ),
         public_api="ti.Texture",
-        notes=("LLVM CUDA TextureOp lowering is not implemented.",),
+        notes=(
+            "Texture resources are currently allocated only by the GFX Program; the LLVM/CUDA Program returns a null texture allocation.",
+            "LLVM CUDA TextureOp lowering is not implemented, so hardware presence alone cannot admit this route.",
+        ),
     ),
     _operation(
         "kernel.atomic.cuda",
@@ -1017,8 +1034,17 @@ _OPERATIONS = (
         "planned",
         lifetime_policy="runtime_generation",
         update_policy="immutable",
-        requirements=("VK_KHR_cooperative_matrix",),
+        requirements=(
+            "VK_KHR_cooperative_matrix feature query and device enablement",
+            "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR tuple enumeration",
+            "opaque cooperative-matrix tile type and typed kernel IR",
+            "SPV_KHR_cooperative_matrix load/mul-add/store lowering",
+        ),
         public_api="ti.hardware.matrix",
+        notes=(
+            "The repository has no Vulkan cooperative-matrix feature, type, IR, or code-generation chain yet.",
+            "Supported M/N/K, component types, scope, layout, and saturation must come from device properties rather than copying the CUDA m16n16k16 contract.",
+        ),
     ),
     _operation(
         "interop.external_buffer.cuda_vulkan",
@@ -1192,8 +1218,17 @@ _OPERATIONS = (
         resource_effects=("read:scene", "read:rays", "write:hits"),
         lifetime_policy="provider_plan",
         update_policy="rebuild",
-        requirements=("qualified OPTIX_ABI_VERSION", "OptiX license gate"),
+        requirements=(
+            "user-provided licensed OptiX SDK headers for a qualified OPTIX_ABI_VERSION",
+            "lazy optixQueryFunctionTable loader with ABI isolation",
+            "OptiX module/program-group/pipeline/SBT and GAS/IAS resource contracts",
+            "qualified device-program build or artifact strategy",
+        ),
         public_api="ti.hardware.ray",
+        notes=(
+            "OptiX function-table layout and initialization are SDK-header/ABI defined; a shared library name alone is not a safe provider contract.",
+            "Keep this as a user-built plugin/source-build candidate until header licensing, ABI coverage, device programs, and pipeline lifetime are closed.",
+        ),
     ),
     _operation(
         "algorithms.primitives.cub",
