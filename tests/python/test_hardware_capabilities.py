@@ -57,7 +57,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         operations[0].backends[0] = "cpu"
     with pytest.raises(ValueError, match="unqualified implementations"):
         replace(
-            ti.hardware.capability("matrix.mma.cuda"),
+            ti.hardware.capability("matrix.mma.vulkan"),
             hardware_acceleration="qualified",
         )
     with pytest.raises(ValueError, match="load_mode must match"):
@@ -154,6 +154,24 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert raster.deterministic is False
     assert "Kernel calls are impossible" in raster.notes[0]
     assert ti.hardware.capability(raster.operation_id) is raster
+
+    matrix = ti.hardware.capability("matrix.mma.cuda")
+    assert matrix.semantic_family == "matrix.mma"
+    assert matrix.public_api == "ti.hardware.matrix.mma_f16_f32"
+    assert matrix.implementation_status == "existing_public"
+    assert matrix.hardware_acceleration == "qualified"
+    assert matrix.scopes == ("python", "graph")
+    assert matrix.execution_kind == "native_command"
+    assert matrix.graph_support == "recordable"
+    assert matrix.stream_binding == "runtime_ordered"
+    assert matrix.workspace_ownership == "none"
+    assert matrix.shapes_or_tiles == ("m16n16k16", "compact batch")
+    assert matrix.layouts == (
+        "row_major_a",
+        "row_major_b",
+        "row_major_output",
+    )
+    assert "kernel calls remain unsupported" in matrix.notes[0]
 
     with pytest.raises(KeyError, match="unknown hardware operation"):
         ti.hardware.capability("missing.operation")
@@ -349,6 +367,37 @@ def test_multibackend_core_route_requires_every_backend(monkeypatch):
     assert interop.selection == "rejected"
     assert interop.unavailable_reason == "backend_not_compiled"
     assert interop.native_facts["provider_backends_compiled"] == ("cuda",)
+
+
+def test_cuda_matrix_capability_rejects_an_unqualified_active_device(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        _capabilities,
+        "_runtime_facts",
+        lambda: (True, "cuda", {"cuda": True, "vulkan": True}),
+    )
+    monkeypatch.setattr(
+        _capabilities,
+        "_passive_core_statuses",
+        lambda runtime_initialized, backend: {
+            "matrix.mma.cuda": {
+                "available": False,
+                "native_facts": {"provider_available": False},
+            }
+        },
+    )
+
+    operation = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "matrix.mma.cuda"
+    )
+    assert operation.discovery == "incompatible"
+    assert operation.enablement == "enabled"
+    assert operation.selection == "rejected"
+    assert operation.unavailable_reason == "hardware_requirement_not_met"
+    assert operation.native_facts["provider_available"] is False
 
 
 @test_utils.test(arch=ti.vulkan)

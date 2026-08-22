@@ -3,6 +3,7 @@
 #include <cstddef>
 
 #include <taichi/rhi/cuda/primitives/linear_ptx.h>
+#include <taichi/rhi/cuda/primitives/matrix_ptx.h>
 
 namespace taichi::lang::cuda {
 

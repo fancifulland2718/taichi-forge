@@ -2024,6 +2024,13 @@ void export_lang(py::module &m) {
              py::gil_scoped_release release;
              program->copy_ndarray_to_host(src, info.ptr, bytes);
            })
+      .def("cuda_matrix_mma_f16_f32_available",
+           &Program::cuda_matrix_mma_f16_f32_available)
+      .def("_cuda_matrix_mma_f16_f32",
+           tracked_native_program_method(
+               &Program::cuda_matrix_mma_f16_f32),
+           py::arg("a"), py::arg("b"), py::arg("output"),
+           py::arg("batch_count"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

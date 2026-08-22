@@ -898,6 +898,13 @@ class TI_DLL_EXPORT Program {
       std::size_t count);
   GraphObservationStagingStatistics graph_observation_staging_statistics();
 
+  bool cuda_matrix_mma_f16_f32_available() const;
+
+  std::size_t cuda_matrix_mma_f16_f32(Ndarray *a,
+                                      Ndarray *b,
+                                      Ndarray *output,
+                                      std::size_t batch_count);
+
   bool cuda_device_transform_available() const;
 
   bool cuda_toolkit_transform_available() const;

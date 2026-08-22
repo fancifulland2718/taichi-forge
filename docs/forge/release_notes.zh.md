@@ -58,6 +58,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   graphics pipeline，提供 mesh/instance/particle/line 的显式 offscreen 硬件光栅与
   独立 color/depth readback。当前为 Python direct recording；kernel 与 Graph 均明确
   不支持，不增加依赖或官方 wheel 变体。
+- 新增首个 D0 `ti.hardware.matrix` 切片：在 NVIDIA compute capability 7.0 及以上
+  设备上，通过 CUDA Driver/PTX WMMA 显式执行 compact row-major `m16n16k16`、f16
+  输入、f32 累加/输出，支持 direct 与 root Graph。它不依赖 CUDA Toolkit runtime 或
+  厂商算法包；普通矩阵乘法不会被改写，kernel 内调用仍不支持。
 
 ## 0.6.2 {#062}
 

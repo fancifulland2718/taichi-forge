@@ -9944,6 +9944,65 @@ Program::debug_snode_runtime_directory_statistics() const {
   return program_impl_->get_snode_runtime_directory_statistics();
 }
 
+bool Program::cuda_matrix_mma_f16_f32_available() const {
+#ifdef TI_WITH_CUDA
+  return compile_config().arch == Arch::cuda &&
+         cuda::driver_matrix_mma_f16_f32_available();
+#else
+  return false;
+#endif
+}
+
+std::size_t Program::cuda_matrix_mma_f16_f32(Ndarray *a,
+                                              Ndarray *b,
+                                              Ndarray *output,
+                                              std::size_t batch_count) {
+  auto native_ndarray_submission_guard =
+      acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA matrix MMA is only available on CUDA.");
+  TI_ERROR_IF(!a || !b || !output,
+              "CUDA matrix MMA received a null ndarray.");
+  TI_ERROR_IF(batch_count == 0 ||
+                  batch_count > static_cast<std::size_t>(
+                                    std::numeric_limits<int>::max()),
+              "CUDA matrix MMA batch count must be in [1, INT_MAX].");
+  TI_ERROR_IF(batch_count >
+                  std::numeric_limits<std::size_t>::max() / 256,
+              "CUDA matrix MMA batch size overflow.");
+  const std::size_t scalar_count = batch_count * 256;
+  auto check_array = [scalar_count](const char *name, Ndarray *array,
+                                    DataType dtype, std::size_t item_bytes) {
+    TI_ERROR_IF(!array->get_element_shape().empty() ||
+                    array->get_element_data_type() != dtype ||
+                    array->get_nelement() != scalar_count ||
+                    array->get_element_size() != item_bytes,
+                "CUDA matrix MMA {} must be a compact scalar ndarray with "
+                "exactly batch_count * 256 entries.",
+                name);
+  };
+  check_array("A", a, PrimitiveType::f16, sizeof(std::uint16_t));
+  check_array("B", b, PrimitiveType::f16, sizeof(std::uint16_t));
+  check_array("output", output, PrimitiveType::f32, sizeof(float32));
+  TI_ERROR_IF(output->get_device_allocation() == a->get_device_allocation() ||
+                  output->get_device_allocation() ==
+                      b->get_device_allocation(),
+              "CUDA matrix MMA output must not alias an input allocation.");
+#ifdef TI_WITH_CUDA
+  TI_ERROR_IF(!cuda::driver_matrix_mma_f16_f32_available(),
+              "CUDA matrix MMA requires NVIDIA compute capability 7.0 or "
+              "newer.");
+  auto *a_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(a));
+  auto *b_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(b));
+  auto *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  return cuda::driver_matrix_mma_f16_f32(
+      a_ptr, b_ptr, output_ptr, static_cast<int>(batch_count));
+#else
+  TI_ERROR("CUDA matrix MMA requires TI_WITH_CUDA=ON.");
+#endif
+}
+
 bool Program::cuda_device_transform_available() const {
 #ifdef TI_WITH_CUDA
   return compile_config().arch == Arch::cuda &&

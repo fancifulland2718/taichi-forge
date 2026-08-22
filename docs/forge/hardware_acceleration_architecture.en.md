@@ -147,8 +147,8 @@ how a provider is selected.
 | Invocation mode | User contract | Provider behavior | Examples |
 | --- | --- | --- | --- |
 | Transparent optimization | No new public call. Existing semantics must be preserved. | Compiler or provider selects a device mechanism automatically. | `cp.async`, TMA, and mesh-shader specialization. |
-| Explicit kernel semantic | The kernel calls a typed, backend-neutral operation. | Code generation chooses an admitted intrinsic implementation. | Matrix MMA, texture sampling, and a future inline Vulkan ray query. |
-| Explicit resource/executable | Python code creates a resource or executable and runs or records it. | Runtime manages native commands, stream order, workspace, and lifetime. | Raster pass, AS build/refit, batch ray query, OptiX launch. |
+| Explicit kernel semantic | The kernel calls a typed, backend-neutral operation. | Code generation chooses an admitted intrinsic implementation. | Texture sampling, future typed Matrix MMA, and future inline Vulkan ray query. |
+| Explicit resource/executable | Python code creates a resource or executable and runs or records it. | Runtime manages native commands, stream order, workspace, and lifetime. | Current CUDA Matrix MMA, raster pass, AS build/refit, batch ray query, OptiX launch. |
 | Optional algorithm provider | A domain API names `auto`, `builtin`, or a provider. | A D1 library is considered only after opt-in. | cuBLAS, cuSPARSE, cuSOLVER, cuFFT. |
 
 The first Matrix MMA API is explicit. Forge must not silently replace an
@@ -167,7 +167,7 @@ current modules.
 | Semantic family | Public owner | Scope |
 | --- | --- | --- |
 | Capability and provider report | `ti.hardware` | Python scope. |
-| Matrix MMA | `ti.hardware.matrix` | Taichi kernel scope. |
+| Matrix MMA | `ti.hardware.matrix` | The first CUDA slice is Python and Graph scoped; a typed kernel intrinsic remains planned. |
 | Rasterization | `ti.hardware.raster` | Python and Graph scope. |
 | Acceleration structures and batch ray query | `ti.hardware.ray` | Python and Graph scope; selected inline query operations may also be kernel scoped. |
 | Texture and sampling | Existing `ti.Texture` and texture argument types | Kernel scope; reflected by `ti.hardware` reports without duplicating the API. |
@@ -194,6 +194,27 @@ has already loaded one of these libraries through its real lazy loader, a later
 passive `report()` observes the cached loader/capability state and reports it as
 `enabled/eligible`; observation itself never calls `load_*`.
 
+The first qualified matrix slice is deliberately narrow:
+
+```python
+output = ti.ndarray(ti.f32, shape=(batch, 16, 16))
+ti.hardware.matrix.mma_f16_f32(a_f16, b_f16, output)
+
+recording = ti.hardware.matrix.CudaMatrixMmaRecording(batch)
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"a": a_f16, "b": b_f16, "output": output})
+```
+
+This is a D0 CUDA Driver/PTX native command for compact row-major
+`m16n16k16`, f16 inputs, f32 accumulation, and f32 output. One warp executes
+one tile on NVIDIA compute capability 7.0 or newer. It does not require the
+CUDA Toolkit runtime or a vendor algorithm package. The call is explicit;
+ordinary `ti.Matrix` multiplication is never rewritten to this route, and
+Graph `admission="auto"` only validates integration of the already explicit
+recording.
+
 ## Kernel boundary
 
 A hardware operation can be called inside a Taichi kernel only when all of the
@@ -205,8 +226,10 @@ following hold:
 4. resource arguments have a kernel ABI and generation-safe binding; and
 5. unsupported combinations fail during compilation or graph admission.
 
-Matrix MMA and texture sampling fit this model. Vulkan ray query can fit it
-after acceleration-structure arguments and SPIR-V ray-query IR exist.
+Texture sampling already fits this model. A future Matrix MMA kernel API and
+Vulkan ray query can fit it after opaque tile or acceleration-structure types
+and their typed backend IR exist. The current CUDA Matrix MMA provider is a
+native command between kernels, so calling it from a kernel fails closed.
 
 Raster commands, acceleration-structure build/refit, OptiX launches, and
 vendor library calls do not fit this model. They execute between kernels or as
@@ -480,7 +503,7 @@ current Forge foundations, and qualification cost.
 | 2 | cuBLAS/cuSPARSE/cuSOLVER provider normalization | Linear solves, sparse operators, and preconditioners; existing lazy loaders reduce implementation cost. | D1, domain algorithm operation. |
 | 3 | Vulkan AS build/refit and ray query | Ray rendering, visibility, picking, and genuine ray-mesh queries; not general overlap or contact. | D0, resource plus native command or typed shader operation. |
 | 4 | Texture and sampler qualification | Grid, SDF, volume, material, and rendering lookup. | D0, explicit kernel semantic. |
-| 5 | Matrix MMA | Batched local FEM matrices, small blocks, dense batches, and block preconditioners under explicit numeric contracts. | D0, explicit kernel semantic. |
+| 5 | Matrix MMA | Batched local FEM matrices, small blocks, dense batches, and block preconditioners under explicit numeric contracts. | D0; current slice is an explicit native command, with typed kernel semantics planned. |
 | 6 | cuFFT | Spectral methods, convolution, and selected Poisson or fluid formulations. | D1, external-library plan and execution. |
 | 7 | OptiX | High ray-rendering value on qualified NVIDIA RTX devices, with a narrower device and ABI range. | D1, vendor hardware executable. |
 | 8 | Async tile and mesh-shader specialization | Dense tiled kernels and dynamic rendering geometry after public semantics are stable. | D0, transparent provider implementation. |
@@ -528,9 +551,14 @@ Sparse MMA, DPX, public TMA calls, and any D3 provider remain deferred.
 
 ### M5: matrix hardware
 
-- add opaque cooperative matrix tile types and typed IR;
-- enumerate admitted tile, dtype, scope, and accumulation contracts;
-- lower to qualified CUDA PTX and Vulkan Cooperative Matrix operations; and
+- first land a qualified explicit CUDA Driver/PTX native command for compact
+  row-major `m16n16k16`, f16 inputs, f32 accumulation/output, direct execution,
+  and root Graph replay;
+- enumerate admitted tile, dtype, layout, scope, alignment, and accumulation
+  contracts without silently rewriting ordinary matrix multiplication;
+- keep opaque cooperative-matrix tile types, typed kernel IR, and Vulkan
+  Cooperative Matrix lowering planned until they have independent route and
+  correctness qualification; and
 - keep async copy, TMA, WGMMA, and later generation mechanisms internal.
 
 ### M6: ray and acceleration structures

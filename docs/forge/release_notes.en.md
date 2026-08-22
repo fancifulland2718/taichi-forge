@@ -70,6 +70,11 @@ grouped under the behavior they shipped.
   meshes, instances, particles, and lines with separate color/depth readback.
   The current slice is a direct Python recording; kernel and Graph calls fail
   closed. It adds no dependency or official wheel variant.
+- Added the first D0 `ti.hardware.matrix` slice: explicit direct and root-Graph
+  CUDA Driver/PTX WMMA for compact row-major `m16n16k16`, f16 inputs, and f32
+  accumulation/output on NVIDIA compute capability 7.0 or newer. It does not
+  require a CUDA Toolkit runtime or vendor algorithm package. Ordinary matrix
+  multiplication is not rewritten, and kernel invocation remains unsupported.
 
 ## 0.6.2
 

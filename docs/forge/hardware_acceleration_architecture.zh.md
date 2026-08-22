@@ -129,8 +129,8 @@ workspace_ownership:
 | 调用模式 | 用户合同 | Provider 行为 | 例子 |
 | --- | --- | --- | --- |
 | 透明自动优化 | 不增加公开调用，并保持已有语义。 | compiler/provider 自动选择设备机制。 | `cp.async`、TMA、mesh-shader specialization。 |
-| 显式 kernel 语义 | kernel 调用 typed、backend-neutral operation。 | codegen 选择通过 admission 的 intrinsic 实现。 | Matrix MMA、Texture sampling、未来的 Vulkan inline Ray Query。 |
-| 显式资源/可执行体 | Python 创建资源或 executable，再直接运行或记录到 Graph。 | runtime 管理 native command、stream order、workspace 与 lifetime。 | Raster pass、AS build/refit、batch RayQuery、OptiX launch。 |
+| 显式 kernel 语义 | kernel 调用 typed、backend-neutral operation。 | codegen 选择通过 admission 的 intrinsic 实现。 | Texture sampling、未来的 typed Matrix MMA 与 Vulkan inline Ray Query。 |
+| 显式资源/可执行体 | Python 创建资源或 executable，再直接运行或记录到 Graph。 | runtime 管理 native command、stream order、workspace 与 lifetime。 | 当前 CUDA Matrix MMA、Raster pass、AS build/refit、batch RayQuery、OptiX launch。 |
 | 可选算法 provider | 领域 API 指定 `auto`、`builtin` 或 provider。 | 只有显式 opt-in 后才考虑 D1 library。 | cuBLAS、cuSPARSE、cuSOLVER、cuFFT。 |
 
 第一版 Matrix MMA 必须显式调用。在无法证明 dtype、accumulation、rounding、
@@ -146,7 +146,7 @@ determinism 与 error contract 兼容前，Forge 不得把普通矩阵乘法静�
 | 语义 family | 公开位置 | Scope |
 | --- | --- | --- |
 | Capability 与 provider report | `ti.hardware` | Python scope。 |
-| Matrix MMA | `ti.hardware.matrix` | Taichi kernel scope。 |
+| Matrix MMA | `ti.hardware.matrix` | 首个 CUDA 切片属于 Python/Graph scope；typed kernel intrinsic 仍为规划项。 |
 | Rasterization | `ti.hardware.raster` | Python 与 Graph scope。 |
 | Acceleration structure 与 batch RayQuery | `ti.hardware.ray` | Python 与 Graph scope；部分 inline query 将来可具备 kernel scope。 |
 | Texture 与 sampling | 既有 `ti.Texture` 和 texture argument type | Kernel scope；由 `ti.hardware` report 反映但不复制 API。 |
@@ -170,6 +170,25 @@ native library handle，关闭 handle 后返回不可变 snapshot，不改变 en
 观察已缓存 loader/capability 状态，并报告 `enabled/eligible`；该观察本身不会调用
 `load_*`。静态 operation/provider descriptor 与 resolved report 都是不可变值。
 
+首个已资格化的 Matrix 切片刻意保持狭窄：
+
+```python
+output = ti.ndarray(ti.f32, shape=(batch, 16, 16))
+ti.hardware.matrix.mma_f16_f32(a_f16, b_f16, output)
+
+recording = ti.hardware.matrix.CudaMatrixMmaRecording(batch)
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"a": a_f16, "b": b_f16, "output": output})
+```
+
+这是 D0 CUDA Driver/PTX native command，只接收 compact row-major
+`m16n16k16`、f16 输入、f32 累加与 f32 输出；NVIDIA compute capability 7.0
+及以上设备由一个 warp 执行一个 tile。它不依赖 CUDA Toolkit runtime 或厂商算法包。
+调用是显式的：普通 `ti.Matrix` 乘法不会被改写为该路线；Graph
+`admission="auto"` 也只是验证已经显式声明的 recording 能否完整集成。
+
 ## Kernel 边界
 
 只有同时满足以下条件时，硬件操作才能在 Taichi kernel 内调用：
@@ -180,8 +199,10 @@ native library handle，关闭 handle 后返回不可变 snapshot，不改变 en
 4. resource argument 具有 kernel ABI 和 generation-safe binding；
 5. 不支持的组合会在编译或 Graph admission 阶段失败。
 
-Matrix MMA 和 texture sampling 符合这一模型。Vulkan Ray Query 需要先建立
-acceleration-structure argument 与 SPIR-V ray-query IR，之后也可符合。
+Texture sampling 已符合这一模型。未来的 Matrix MMA kernel API 与 Vulkan Ray Query
+只有在 opaque tile/acceleration-structure type 及对应 typed backend IR 完成后才符合。
+当前 CUDA Matrix MMA provider 是 kernel 之间的 native command，因此 kernel 内调用会
+fail closed。
 
 Raster command、acceleration-structure build/refit、OptiX launch 与厂商 library
 调用不符合该模型；它们应在 kernel 之间或作为 Graph native action 执行。Device
@@ -423,7 +444,7 @@ pipeline 也绝不能在不兼容 runtime 中复用。
 | 2 | cuBLAS/cuSPARSE/cuSOLVER provider 统一 | 线性求解、稀疏算子、预条件器；已有 lazy loader，实施成本较低。 | D1，领域算法 operation。 |
 | 3 | Vulkan AS build/refit 与 RayQuery | Ray rendering、visibility、picking 和真实 ray-mesh 查询；不覆盖通用 overlap/contact。 | D0，resource + native command 或 typed shader operation。 |
 | 4 | Texture/Sampler 资格化 | Grid、SDF、volume、material 与 rendering lookup。 | D0，显式 kernel 语义。 |
-| 5 | Matrix MMA | 在显式数值合同下服务 FEM 局部矩阵、小块批处理、dense batch 与 block preconditioner。 | D0，显式 kernel 语义。 |
+| 5 | Matrix MMA | 在显式数值合同下服务 FEM 局部矩阵、小块批处理、dense batch 与 block preconditioner。 | D0；当前切片是显式 native command，typed kernel 语义仍为规划项。 |
 | 6 | cuFFT | Spectral method、convolution，以及部分 Poisson/fluid formulation。 | D1，external-library plan/execution。 |
 | 7 | OptiX | 在已资格化 NVIDIA RTX 设备上有高 ray-rendering 价值，但设备与 ABI 范围更窄。 | D1，vendor hardware executable。 |
 | 8 | Async tile 与 mesh-shader specialization | 在公开语义稳定后优化 dense tiled kernel 与 dynamic rendering geometry。 | D0，透明 provider 实现。 |
@@ -469,9 +490,12 @@ Sparse MMA、DPX、公开 TMA 调用和所有 D3 provider 继续延期。
 
 ### M5：Matrix hardware
 
-- 增加 opaque cooperative-matrix tile type 与 typed IR；
-- 枚举可 admission 的 tile、dtype、scope 与 accumulation contract；
-- lowering 到已资格化的 CUDA PTX 与 Vulkan Cooperative Matrix operation；
+- 先实现已资格化的显式 CUDA Driver/PTX native command，限定 compact row-major
+  `m16n16k16`、f16 输入、f32 累加/输出、direct execution 与 root Graph replay；
+- 枚举可 admission 的 tile、dtype、layout、scope、alignment 与 accumulation
+  contract，且不静默改写普通矩阵乘法；
+- opaque cooperative-matrix tile type、typed kernel IR 与 Vulkan Cooperative Matrix
+  lowering 保持规划状态，直到分别完成 route 与 correctness 资格验证；
 - async copy、TMA、WGMMA 与后续代际机制保持内部实现。
 
 ### M6：Ray 与 acceleration structure

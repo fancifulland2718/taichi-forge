@@ -12,6 +12,7 @@ target_sources(${CUDA_RHI}
     primitives/hierarchical_ptx.cpp
     primitives/graph_ptx.cpp
     primitives/linear_ptx.cpp
+    primitives/matrix_ptx.cpp
     primitives/solver_ptx.cpp
     cupti_toolkit.cpp
   )

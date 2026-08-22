@@ -743,17 +743,33 @@ _OPERATIONS = (
         "core",
         "hardware_intrinsic",
         "hardware_instruction",
-        "implementation_defined",
-        ("kernel",),
-        "kernel_intrinsic",
-        "inline",
-        "current",
+        "qualified",
+        ("python", "graph"),
+        "native_command",
+        "recordable",
+        "runtime_ordered",
         "none",
-        "planned",
+        "existing_public",
+        resource_effects=("read:a", "read:b", "write:output"),
         lifetime_policy="runtime_generation",
-        update_policy="immutable",
-        requirements=("CUDA compute capability", "CUDA PTX version"),
-        public_api="ti.hardware.matrix",
+        update_policy="rebind",
+        dtypes=("a:f16", "b:f16", "accumulator:f32", "output:f32"),
+        shapes_or_tiles=("m16n16k16", "compact batch"),
+        layouts=("row_major_a", "row_major_b", "row_major_output"),
+        numeric_contracts=("output=A*B", "f16_inputs:f32_accumulate"),
+        deterministic=False,
+        requirements=(
+            "NVIDIA compute capability >= 7.0",
+            "PTX ISA >= 6.3",
+            "warp size 32",
+            "32-byte aligned compact buffers",
+        ),
+        public_api="ti.hardware.matrix.mma_f16_f32",
+        notes=(
+            "Explicit Driver/PTX native command; ordinary ti.Matrix matmul is "
+            "not rewritten and kernel calls remain unsupported.",
+            "No CUDA Toolkit runtime or vendor algorithm package is required.",
+        ),
     ),
     _operation(
         "matrix.mma.vulkan",
@@ -1073,6 +1089,28 @@ def _runtime_facts():
     )
 
 
+def _passive_core_statuses(runtime_initialized, backend):
+    if not runtime_initialized or backend != "cuda":
+        return {}
+    from taichi_forge.lang import impl  # pylint: disable=C0415
+
+    program = impl.get_runtime().prog
+    available = bool(
+        program is not None
+        and program.cuda_matrix_mma_f16_f32_available()
+    )
+    return {
+        "matrix.mma.cuda": {
+            "available": available,
+            "native_facts": {
+                "provider_available": available,
+                "capability_query": "cuda_driver_compute_capability",
+                "capability_query_loads_ptx": False,
+            },
+        }
+    }
+
+
 def _passive_resolution(
     descriptor,
     *,
@@ -1080,6 +1118,7 @@ def _passive_resolution(
     backend,
     compiled_backends,
     external_status=None,
+    core_status=None,
 ):
     compiled = all(compiled_backends[item] for item in descriptor.backends)
     facts = {
@@ -1194,6 +1233,20 @@ def _passive_resolution(
             unavailable_reason="backend_not_active",
             native_facts=facts,
         )
+
+    if core_status is not None:
+        facts.update(dict(core_status.get("native_facts", {})))
+        if not core_status.get("available", False):
+            return ResolvedHardwareOperation(
+                descriptor=descriptor,
+                backend=backend,
+                runtime_initialized=True,
+                discovery="incompatible",
+                enablement="enabled",
+                selection="rejected",
+                unavailable_reason="hardware_requirement_not_met",
+                native_facts=facts,
+            )
 
     if descriptor.implementation_status == "existing_public":
         return ResolvedHardwareOperation(
@@ -1331,6 +1384,7 @@ def report():
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()
     external_statuses = _passive_external_statuses()
+    core_statuses = _passive_core_statuses(runtime_initialized, backend)
     return HardwareCapabilityReport(
         runtime_initialized=runtime_initialized,
         backend=backend,
@@ -1344,6 +1398,7 @@ def report():
                 external_status=external_statuses.get(
                     descriptor.provider_id
                 ),
+                core_status=core_statuses.get(descriptor.operation_id),
             )
             for descriptor in _OPERATIONS
         ),
