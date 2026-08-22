@@ -1,12 +1,13 @@
 # Taichi Forge API Reference
 
-> Applies to the **published Taichi Forge 0.6.2 release contract**. This page lists Forge-only public API
-> entry points. New options added to Taichi-compatible APIs, such as
+> Covers the **published Taichi Forge 0.6.2 contract** and public APIs marked
+> **0.6.3 in development**. This page lists Forge-only public API entry points.
+> New options added to Taichi-compatible APIs, such as
 > `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
 > [Forge options](forge_options.en.md).
 > API introduction versions are indexed separately in
-> [release notes](release_notes.en.md). The entries on this page are part of
-> 0.6.2; experimental and source-build-only labels continue to limit support.
+> [release notes](release_notes.en.md). Experimental, in-development, and
+> source-build-only labels continue to limit support.
 
 Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
 control, native device primitives, graph replay, display submission, sparse
@@ -20,6 +21,32 @@ Import Forge as:
 ```python
 import taichi_forge as ti
 ```
+
+### `ti.hardware` capabilities and explicit probes (0.6.3 in development)
+
+`ti.hardware.operations()`, `capability(operation_id)`, and `providers()`
+return immutable schema-v1 static contracts. `report()` returns a passive
+runtime snapshot without loading, enabling, or selecting an optional provider.
+`probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
+current cuBLAS, cuSPARSE, and cuSOLVER probes check exact symbols through a
+transient native handle, close it before returning, and do not change later
+selection. Unknown operations/providers and unimplemented probes fail closed.
+
+### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
+
+These D0 APIs describe and submit one Vulkan RHI buffer-command sequence:
+`fill_u32()`, `copy()`, `buffer_barrier()`, and `memory_barrier()`. Execute it
+manually with `recording.execute(bindings)`, or append it to a root Graph with
+`GraphBuilder.append_native(recording, admission="auto")`.
+
+The current contract is limited to runtime-owned Vulkan `ti.ndarray` values,
+four-byte-aligned ranges, explicit barriers, the runtime-ordered compute queue,
+and `rerecord` replay. It is not callable inside `@ti.kernel`, is not qualified
+inside a structured `Sequential` or for AOT serialization, and is not itself a
+RasterPass or AS provider. Bounds errors, overlapping copies, backend/device
+mismatches, Graph use after reset, and recordings over 4096 commands fail.
+The route uses only D0 runtime code already present in official wheels and does
+not add a wheel variant.
 
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 

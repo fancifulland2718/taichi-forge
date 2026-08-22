@@ -174,17 +174,22 @@ current modules.
 | Dense, sparse, solver, and FFT algorithms | Existing `ti.linalg` or `ti.algorithms` entry points | Python and Graph scope, with provider selection on the domain operation. |
 | CUDA-Vulkan memory and semaphore sharing | Existing `ti.interop` | Python and Graph resource scope. |
 
-The initial introspection shape is expected to provide:
+Hardware Capability schema v1 currently provides:
 
 ```python
 ti.hardware.report()
 ti.hardware.capability(operation)
 ti.hardware.providers()
+ti.hardware.operations()
+ti.hardware.probe(provider)
 ```
 
-These names remain a design contract until the Hardware Capability schema is
-implemented and approved. This architecture document does not add them to the
-current public API by itself.
+`report()` reads only static contracts, compiled backends, and current runtime
+facts; it does not load or enable optional libraries. `probe()` is a separate,
+explicit D1 probe. The current cuBLAS, cuSPARSE, and cuSOLVER probes use a
+transient native library handle, close it before returning an immutable
+snapshot, and do not change enablement or selection. Static operation/provider
+descriptors and resolved reports are immutable values.
 
 ## Kernel boundary
 
@@ -330,6 +335,60 @@ recordable action with an executable backend contract.
 Resources become invalid after their owning runtime generation is reset. A
 Graph compiled against one provider ABI, device, or resource generation must
 not replay against another without an admitted rebind or rebuild.
+
+### Current M3 Vulkan buffer-command contract
+
+`ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` provide the
+first real D0 backend-command route. This is low-level RHI substrate for later
+RasterPass and AS build/refit providers; it does not claim that those feature
+providers already exist.
+
+```python
+command = ti.graph.VulkanBufferCommand
+recording = ti.graph.VulkanBufferCommandRecording((
+    command.fill_u32("destination", byte_count, 0),
+    command.buffer_barrier("destination"),
+    command.copy("destination", "source", byte_count),
+    command.memory_barrier(),
+))
+
+# Explicit manual execution.
+recording.execute({"source": source, "destination": destination})
+
+# Automatic admission only decides whether this is a real backend command in
+# the current Graph.
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"source": source, "destination": destination})
+```
+
+Two meanings of "automatic" must remain separate. Graph
+`admission="auto"` validates the executable contract, but it does not
+automatically replace an ordinary kernel with this operation and does not make
+it kernel-callable. Creating the recording, selecting commands, and declaring
+barriers are explicit. A future feature provider may select this D0 route
+inside its domain API only while preserving semantics and reporting the route.
+
+The current qualification boundary is:
+
+- Vulkan compute queue and the runtime-ordered stream only, with no new Vulkan
+  SDK or runtime-package dependency;
+- current-Program `ti.ndarray` bindings only, with four-byte-aligned fill/copy
+  ranges;
+- rejection before submission for same-allocation overlapping copies,
+  out-of-bounds ranges, wrong backend/device, stale/reset generations, and
+  recordings longer than 4096 commands;
+- barriers are explicit recording semantics; the runtime does not infer extra
+  provider barriers;
+- workspace ownership is `none`, there is no host readback, and Graph
+  submission retains ndarray leases through backend completion;
+- replay mode is `rerecord`: each replay uses one native entry point to record
+  the complete sequence into one runtime command list; this is not a claim of
+  cached Vulkan command-buffer replay; and
+- only root `GraphBuilder.append_native(...)` is qualified. Backend commands
+  in a structured `Sequential` are rejected, and AOT serialization is outside
+  this contract.
 
 ## Cache boundaries
 

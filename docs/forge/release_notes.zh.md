@@ -14,7 +14,7 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.3 开发版本 | 当前 `master` | 尚无已记录的用户可见变更 |
+| [待发布](#unreleased) | 0.6.3 开发版本 | 当前 `master` | Hardware Capability schema、发行边界守卫与 Vulkan native-command Graph 基础 |
 | [0.6.2](#062) | 最新正式发布版本 | `662affa64` | execution-plan 收口、dynamic-work/Worklist 合同、生产 Graph replay、runtime export 控制、device-convergent 线性代数与最小 MUSA 准入 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
@@ -43,7 +43,13 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-尚无已记录的 `0.6.3` 用户可见变更。
+- 新增 `ti.hardware` schema-v1 静态 operation/provider 合同、无副作用 `report()` 与显式
+  D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider。
+- 官方 wheel 构建与验证会拒绝 D1/D2 vendor runtime 成为必需依赖或新增发行变体；D0
+  CUDA/Vulkan runtime 边界保持不变。
+- 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式
+  buffer fill/copy/barrier 直接执行和 root Graph automatic admission。当前 replay 为
+  runtime-ordered `rerecord`，不支持 kernel 内调用、structured Graph 或 AOT。
 
 ## 0.6.2 {#062}
 

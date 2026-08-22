@@ -5,6 +5,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.graph._ir import (
+    GraphAccess,
     NativeCallNode,
     ResourceEffect,
     RuntimeBinding,
@@ -514,6 +515,36 @@ class VulkanBufferCommandRecording(BackendCommandRecording):
                 )
             )
         impl.get_runtime().prog._record_vulkan_buffer_commands(native_commands)
+
+    @property
+    def resource_effects(self):
+        access_by_name = {}
+
+        def merge(name, access):
+            if not name:
+                return
+            previous = access_by_name.get(name)
+            access_by_name[name] = (
+                access
+                if previous is None or previous == access
+                else GraphAccess.READ_WRITE
+            )
+
+        for command in self.commands:
+            if command.kind == "fill_u32":
+                merge(command.destination, GraphAccess.WRITE)
+            elif command.kind == "copy":
+                merge(command.source, GraphAccess.READ)
+                merge(command.destination, GraphAccess.WRITE)
+            elif command.kind == "buffer_barrier":
+                merge(command.destination, GraphAccess.READ_WRITE)
+        return tuple(
+            ResourceEffect(name, access_by_name[name])
+            for name in self.binding_names
+        )
+
+    def _as_graph_native_node(self):
+        return _VulkanBufferCommandNode(self)
 
 
 @dataclass(frozen=True)
@@ -1093,6 +1124,42 @@ class NativeGraphNode:
 
     def compile(self):
         raise NotImplementedError
+
+
+class _VulkanBufferCommandExecutable(NativeGraphExecutable):
+    def __init__(self, recording):
+        self._recording = recording
+        self._action = BackendCommandGraphAction(recording)
+
+    def run(self, runtime_args):
+        return self._recording.execute(runtime_args)
+
+    @property
+    def runtime_arg_schema(self):
+        return tuple(
+            RuntimeBinding(name, "ndarray")
+            for name in self._recording.binding_names
+        )
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return {"kind": "vulkan_buffer_commands"}
+
+
+class _VulkanBufferCommandNode(NativeGraphNode):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return _VulkanBufferCommandExecutable(self._recording)
 
 
 def compile_native_graph_node(node):

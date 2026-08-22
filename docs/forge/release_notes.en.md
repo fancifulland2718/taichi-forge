@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.3 development | current `master` | no user-visible changes recorded yet |
+| [Unreleased](#unreleased) | 0.6.3 development | current `master` | Hardware Capability schema, distribution guards, and Vulkan native-command Graph substrate |
 | [0.6.2](#062) | latest published release | `662affa64` | execution-plan closeout, dynamic-work/Worklist contracts, production Graph replay, runtime export control, device-convergent linear algebra, and minimal MUSA admission |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
@@ -47,7 +47,18 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-No user-visible `0.6.3` changes have been recorded yet.
+- Added immutable schema-v1 `ti.hardware` operation/provider contracts, a
+  side-effect-free `report()`, and explicit D1 `probe()`. The cuBLAS,
+  cuSPARSE, and cuSOLVER probes use transient handles and never enable a
+  provider implicitly.
+- Official wheel builds and validation reject making D1/D2 vendor runtimes a
+  required dependency or a new distribution variant; the D0 CUDA/Vulkan
+  runtime boundary is unchanged.
+- Added D0 `ti.graph.VulkanBufferCommand` and
+  `VulkanBufferCommandRecording` for explicit buffer fill/copy/barrier direct
+  execution and root-Graph automatic admission. Replay is currently
+  runtime-ordered `rerecord`; kernel calls, structured Graphs, and AOT are not
+  qualified.
 
 ## 0.6.2
 

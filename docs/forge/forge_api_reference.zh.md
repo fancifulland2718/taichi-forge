@@ -1,10 +1,11 @@
 # Taichi Forge API 参考
 
-> 适用于 **Taichi Forge 0.6.2 正式发行合同**。本文只列 Forge-only 的公开 API 入口。
+> 覆盖 **Taichi Forge 0.6.2 正式发行合同**与标记为 **0.6.3 开发中**的公开 API。
+> 本文只列 Forge-only 的公开 API 入口。
 > 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
 > `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
-> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；本文条目均归入 0.6.2，
-> experimental 与 source-build-only 标记仍继续限定支持边界。
+> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；experimental、开发中与
+> source-build-only 标记仍继续限定支持边界。
 
 Taichi Forge 保留 vanilla Taichi 的 DSL 模型，同时增加了编译控制、native
 device primitive、graph replay、显示帧提交、稀疏布局实验能力和诊断 API。
@@ -17,6 +18,27 @@ device primitive、graph replay、显示帧提交、稀疏布局实验能力和�
 ```python
 import taichi_forge as ti
 ```
+
+### `ti.hardware` capability 与显式 probe（0.6.3 开发中）
+
+`ti.hardware.operations()`、`capability(operation_id)` 与 `providers()` 返回 schema-v1
+不可变静态合同。`report()` 返回只读 runtime snapshot，不加载、启用或选择可选 provider。
+`probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；当前 cuBLAS、cuSPARSE、
+cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续 selection。
+未知 operation/provider 和未实现的 probe 均 fail closed。
+
+### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
+
+这两个 D0 API 描述并一次性提交 Vulkan RHI buffer command sequence：`fill_u32()`、
+`copy()`、`buffer_barrier()` 与 `memory_barrier()`。可通过
+`recording.execute(bindings)` 手动执行，也可通过
+`GraphBuilder.append_native(recording, admission="auto")` 加入 root Graph。
+
+当前只支持 runtime-owned Vulkan `ti.ndarray`、4-byte 对齐 range、显式 barrier、
+runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 内调用，
+不支持 structured `Sequential` 或 AOT serialization，也不等于 RasterPass/AS provider。
+越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
+都会失败。该功能完全使用官方 wheel 已包含的 D0 runtime，不增加 wheel 发行矩阵。
 
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 

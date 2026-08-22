@@ -516,6 +516,28 @@ def _operation(
 
 _OPERATIONS = (
     _operation(
+        "runtime.buffer_commands.vulkan",
+        "runtime.buffer_commands",
+        "vulkan_rhi",
+        ("vulkan",),
+        "core",
+        "compute_native",
+        "native_command",
+        "qualified",
+        ("python", "graph"),
+        "native_command",
+        "recordable",
+        "runtime_ordered",
+        "none",
+        "existing_public",
+        resource_effects=("read:source_buffers", "write:destination_buffers"),
+        lifetime_policy="runtime_generation",
+        update_policy="rebind",
+        requirements=("Vulkan RHI command list",),
+        public_api="ti.graph.VulkanBufferCommandRecording",
+        notes=("low-level substrate; not a RasterPass or AS provider",),
+    ),
+    _operation(
         "raster.draw.vulkan",
         "raster.draw",
         "vulkan_raster",

@@ -153,16 +153,20 @@ determinism 与 error contract 兼容前，Forge 不得把普通矩阵乘法静�
 | Dense、sparse、solver 与 FFT 算法 | 既有 `ti.linalg` 或 `ti.algorithms` 入口 | Python 与 Graph scope，由领域 operation 选择 provider。 |
 | CUDA-Vulkan memory/semaphore sharing | 既有 `ti.interop` | Python 与 Graph resource scope。 |
 
-第一版 introspection 预计提供：
+当前 Hardware Capability schema v1 已提供：
 
 ```python
 ti.hardware.report()
 ti.hardware.capability(operation)
 ti.hardware.providers()
+ti.hardware.operations()
+ti.hardware.probe(provider)
 ```
 
-这些名称在 Hardware Capability schema 实现并通过评审前仍属于设计合同。仅加入本文
-不会把它们加入当前公开 API。
+`report()` 只读取静态合同、已编译 backend 与当前 runtime fact，不加载或启用可选库。
+`probe()` 是独立的显式 D1 探测；当前 cuBLAS、cuSPARSE 与 cuSOLVER 探测使用瞬时
+native library handle，关闭 handle 后返回不可变 snapshot，不改变 enablement 或 selection。
+静态 operation/provider descriptor 与 resolved report 都是不可变值。
 
 ## Kernel 边界
 
@@ -299,6 +303,50 @@ Hardware resource 与 executable operation 必须扩展现有 NativeAction 合�
 Resource 在所属 runtime generation reset 后失效。Graph 如果基于某个 provider ABI、
 device 或 resource generation 编译，除非合同允许 rebind/rebuild，否则不能在另一个
 generation 上 replay。
+
+### 当前 M3 Vulkan buffer command 合同
+
+`ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording` 是第一条真实 D0
+backend-command 路线。它是 RasterPass、AS build/refit 等 provider 复用的低层 RHI
+基础，不代表这些 feature provider 已经实现。
+
+```python
+command = ti.graph.VulkanBufferCommand
+recording = ti.graph.VulkanBufferCommandRecording((
+    command.fill_u32("destination", byte_count, 0),
+    command.buffer_barrier("destination"),
+    command.copy("destination", "source", byte_count),
+    command.memory_barrier(),
+))
+
+# 显式手动执行。
+recording.execute({"source": source, "destination": destination})
+
+# 自动 admission 只决定能否作为真实 backend command 进入当前 Graph。
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"source": source, "destination": destination})
+```
+
+这里必须区分两类“自动”：Graph 的 `admission="auto"` 会检查 executable contract，
+但不会自动选择该操作替代普通 kernel，也不会让它可从 kernel 内调用。创建 recording、
+选择 command 和声明 barrier 都是显式操作。Feature provider 将来可以在自己的领域 API
+内部自动选择这条 D0 路线，但必须保留原语义与 report。
+
+当前资格边界如下：
+
+- 只支持 Vulkan compute queue 与 runtime-ordered stream；不增加 Vulkan SDK/runtime 包依赖；
+- 只绑定当前 Program 拥有的 `ti.ndarray`，fill/copy range 必须按 4 bytes 对齐；
+- 同 allocation overlap copy、越界、错误 backend/device、stale/reset generation 与超过
+  4096 条 command 都会在提交前失败；
+- barrier 是 recording 的显式语义；runtime 不猜测 provider 需要的额外 barrier；
+- workspace ownership 为 `none`，无 host readback；Graph submission 持有 ndarray lease
+  直到 backend completion；
+- replay mode 是 `rerecord`：每次 replay 通过一个 native 入口向一个 runtime command list
+  录制完整 sequence，不声称缓存 Vulkan command buffer；
+- 当前只资格化 root `GraphBuilder.append_native(...)`。structured `Sequential` 中的
+  backend command 会明确拒绝；AOT serialization 也不在本合同内。
 
 ## Cache 边界
 

@@ -8,6 +8,7 @@ from tests import test_utils
 
 
 _OPERATION_IDS = (
+    "runtime.buffer_commands.vulkan",
     "raster.draw.vulkan",
     "ray.as_build.vulkan",
     "ray.as_refit.vulkan",
@@ -110,6 +111,17 @@ def test_kernel_and_executable_scope_contracts_do_not_overlap_accidentally():
 
 
 def test_capability_and_provider_queries_are_stable_and_fail_closed():
+    buffer_commands = ti.hardware.capability(
+        "runtime.buffer_commands.vulkan"
+    )
+    assert buffer_commands.implementation_status == "existing_public"
+    assert buffer_commands.hardware_acceleration == "qualified"
+    assert buffer_commands.scopes == ("python", "graph")
+    assert buffer_commands.execution_kind == "native_command"
+    assert buffer_commands.public_api == (
+        "ti.graph.VulkanBufferCommandRecording"
+    )
+
     raster = ti.hardware.capability("raster.draw.vulkan")
     assert raster.semantic_family == "raster.draw"
     assert raster.public_api == "ti.hardware.raster"
@@ -212,6 +224,23 @@ def test_multibackend_core_route_requires_every_backend(monkeypatch):
     assert interop.selection == "rejected"
     assert interop.unavailable_reason == "backend_not_compiled"
     assert interop.native_facts["provider_backends_compiled"] == ("cuda",)
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_buffer_command_route_is_passively_eligible():
+    report = ti.hardware.report()
+    operation = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id
+        == "runtime.buffer_commands.vulkan"
+    )
+
+    assert operation.discovery == "available"
+    assert operation.enablement == "enabled"
+    assert operation.selection == "eligible"
+    assert operation.unavailable_reason == "none"
+    assert not operation.native_facts["external_component_probed"]
 
 
 def _native_probe_payload(discovery, unavailable_reason, **overrides):

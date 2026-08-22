@@ -1687,46 +1687,6 @@ class _BackendCommandNode(NativeGraphNode):
         )
 
 
-class _VulkanBufferCommandExecutable(NativeGraphExecutable):
-    def __init__(self, commands):
-        self._action = BackendCommandGraphAction(
-            ti.graph.VulkanBufferCommandRecording(commands)
-        )
-
-    def run(self, runtime_args):
-        raise AssertionError("Vulkan buffer commands used their fallback path")
-
-    @property
-    def runtime_arg_schema(self):
-        return (
-            RuntimeBinding("source", "ndarray"),
-            RuntimeBinding("destination", "ndarray"),
-        )
-
-    @property
-    def resource_effects(self):
-        return (
-            ResourceEffect("source", GraphAccess.READ),
-            ResourceEffect("destination", GraphAccess.WRITE),
-        )
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {"kind": "vulkan_buffer_commands"}
-
-
-class _VulkanBufferCommandNode(NativeGraphNode):
-    def __init__(self, commands):
-        self._commands = tuple(commands)
-
-    def compile(self):
-        return _VulkanBufferCommandExecutable(self._commands)
-
-
 class _RecordedDispatchNode(NativeGraphNode):
     def __init__(self, kernel, args, tracker, lease, fixed_bindings=None):
         self._kernel = kernel
@@ -2592,6 +2552,8 @@ def test_backend_command_action_rejects_device_and_structured_mismatch():
     recording = ti.graph.VulkanBufferCommandRecording(
         (ti.graph.VulkanBufferCommand.memory_barrier(),)
     )
+    with pytest.raises(TaichiRuntimeError, match="compiled for vulkan"):
+        ti.graph.GraphBuilder().append_native(recording, admission="auto")
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
         recording.execute({})
 
@@ -2620,6 +2582,19 @@ def test_vulkan_buffer_command_descriptors_fail_closed():
         command.copy("destination", "source", 6)
     with pytest.raises(ValueError, match="do not take buffer operands"):
         command("memory_barrier", destination="destination")
+    recording = ti.graph.VulkanBufferCommandRecording(
+        (
+            command.fill_u32("destination", 4, 0),
+            command.copy("destination", "source", 4),
+            command.buffer_barrier("destination"),
+        )
+    )
+    assert tuple(
+        (effect.resource, effect.access) for effect in recording.resource_effects
+    ) == (
+        ("destination", GraphAccess.READ_WRITE),
+        ("source", GraphAccess.READ),
+    )
 
 
 @test_utils.test(arch=ti.vulkan)
@@ -2642,8 +2617,12 @@ def test_vulkan_buffer_commands_execute_directly_and_through_graph():
     ti.sync()
     np.testing.assert_array_equal(destination.to_numpy(), direct_values)
 
+    sequential = ti.graph.GraphBuilder().create_sequential()
+    with pytest.raises(TaichiRuntimeError, match="not yet qualified"):
+        sequential.append_native(recording)
+
     builder = ti.graph.GraphBuilder()
-    builder.append_native(_VulkanBufferCommandNode(commands), admission="auto")
+    builder.append_native(recording, admission="auto")
     graph = builder.compile()
     replay_values = np.arange(16, dtype=np.int32) * -5 + 11
     source.from_numpy(replay_values)
