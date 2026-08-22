@@ -1963,6 +1963,49 @@ void export_lang(py::module &m) {
              program->copy_ndarray_fast(dst, src);
            },
            py::call_guard<py::gil_scoped_release>())
+      .def(
+          "_record_vulkan_buffer_commands",
+          [](Program *program, const py::sequence &raw_commands) {
+            std::vector<VulkanBufferCommand> commands;
+            commands.reserve(raw_commands.size());
+            for (const py::handle raw : raw_commands) {
+              const py::tuple item = py::cast<py::tuple>(raw);
+              TI_ERROR_IF(item.size() != 7,
+                          "Vulkan buffer commands require seven fields.");
+              const std::string kind = py::cast<std::string>(item[0]);
+              VulkanBufferCommand command;
+              if (kind == "fill_u32") {
+                command.kind = VulkanBufferCommandKind::kFillU32;
+              } else if (kind == "copy") {
+                command.kind = VulkanBufferCommandKind::kCopy;
+              } else if (kind == "buffer_barrier") {
+                command.kind = VulkanBufferCommandKind::kBufferBarrier;
+              } else if (kind == "memory_barrier") {
+                command.kind = VulkanBufferCommandKind::kMemoryBarrier;
+              } else {
+                TI_ERROR("Unsupported Vulkan buffer command kind: {}", kind);
+              }
+              command.destination =
+                  item[1].is_none() ? nullptr : py::cast<Ndarray *>(item[1]);
+              command.source =
+                  item[2].is_none() ? nullptr : py::cast<Ndarray *>(item[2]);
+              command.destination_offset = py::cast<std::size_t>(item[3]);
+              command.source_offset = py::cast<std::size_t>(item[4]);
+              command.bytes = py::cast<std::size_t>(item[5]);
+              command.value = py::cast<std::uint32_t>(item[6]);
+              commands.push_back(command);
+            }
+            try {
+              py::gil_scoped_release release;
+              program->record_vulkan_buffer_commands(commands);
+              program->record_runtime_submission_stat(
+                  RuntimeSubmissionKind::kNative);
+            } catch (...) {
+              program->record_runtime_submission_failure();
+              throw;
+            }
+          },
+          py::arg("commands"))
       .def("copy_ndarray_from_host",
            [](Program *program, Ndarray *dst, py::buffer src) {
              py::buffer_info info = src.request();

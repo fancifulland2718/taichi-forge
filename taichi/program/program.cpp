@@ -9256,6 +9256,145 @@ void Program::copy_ndarray_fast(Ndarray *dst, Ndarray *src) {
   stream->submit_synced(cmdlist.get());
 }
 
+void Program::record_vulkan_buffer_commands(
+    const std::vector<VulkanBufferCommand> &commands) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Vulkan buffer command recording requires the Vulkan backend.");
+  TI_ERROR_IF(commands.empty(),
+              "Vulkan buffer command recording requires at least one command.");
+  TI_ERROR_IF(commands.size() > 4096,
+              "Vulkan buffer command recording exceeds the 4096-command "
+              "safety limit.");
+
+  auto resource_submission_guard = acquire_runtime_resource_submission_guard();
+  Device *device = program_impl_->get_compute_device();
+  TI_ERROR_IF(!device,
+              "Vulkan buffer command recording has no compute device.");
+
+  struct ResolvedCommand {
+    VulkanBufferCommandKind kind;
+    DeviceAllocation destination;
+    DeviceAllocation source;
+    std::size_t destination_offset;
+    std::size_t source_offset;
+    std::size_t bytes;
+    std::uint32_t value;
+  };
+  std::vector<ResolvedCommand> resolved;
+  std::vector<const Ndarray *> views;
+  resolved.reserve(commands.size());
+  views.reserve(commands.size() * 2);
+
+  auto storage_bytes = [](const Ndarray *array) {
+    TI_ERROR_IF(!array,
+                "Vulkan buffer command received a null ndarray binding.");
+    const std::size_t elements = array->get_nelement();
+    const std::size_t element_bytes = array->get_element_size();
+    TI_ERROR_IF(
+        element_bytes != 0 &&
+            elements > std::numeric_limits<std::size_t>::max() / element_bytes,
+        "Vulkan buffer command ndarray size overflows size_t.");
+    return elements * element_bytes;
+  };
+  auto validate_range = [&](const Ndarray *array, std::size_t offset,
+                            std::size_t bytes, const char *role) {
+    const std::size_t available = storage_bytes(array);
+    TI_ERROR_IF(offset > available || bytes > available - offset,
+                "Vulkan buffer command {} range offset {} plus {} bytes "
+                "exceeds {} bytes.",
+                role, offset, bytes, available);
+    TI_ERROR_IF((offset & 3u) != 0 || (bytes & 3u) != 0,
+                "Vulkan buffer command {} offset and size must be "
+                "four-byte aligned.",
+                role);
+    const DeviceAllocation allocation = array->get_device_allocation();
+    TI_ERROR_IF(array->owning_program() != this || allocation.device != device,
+                "Vulkan buffer command {} belongs to another runtime or "
+                "device.",
+                role);
+  };
+
+  for (const auto &command : commands) {
+    ResolvedCommand item{command.kind,          kDeviceNullAllocation,
+                         kDeviceNullAllocation, command.destination_offset,
+                         command.source_offset, command.bytes,
+                         command.value};
+    switch (command.kind) {
+      case VulkanBufferCommandKind::kFillU32:
+        TI_ERROR_IF(command.bytes == 0,
+                    "Vulkan buffer fill requires a nonzero byte count.");
+        validate_range(command.destination, command.destination_offset,
+                       command.bytes, "destination");
+        item.destination = command.destination->get_device_allocation();
+        views.push_back(command.destination);
+        break;
+      case VulkanBufferCommandKind::kCopy: {
+        TI_ERROR_IF(command.bytes == 0,
+                    "Vulkan buffer copy requires a nonzero byte count.");
+        validate_range(command.destination, command.destination_offset,
+                       command.bytes, "destination");
+        validate_range(command.source, command.source_offset, command.bytes,
+                       "source");
+        item.destination = command.destination->get_device_allocation();
+        item.source = command.source->get_device_allocation();
+        if (item.destination == item.source) {
+          const std::size_t destination_end =
+              command.destination_offset + command.bytes;
+          const std::size_t source_end = command.source_offset + command.bytes;
+          TI_ERROR_IF(command.destination_offset < source_end &&
+                          command.source_offset < destination_end,
+                      "Vulkan buffer copy regions overlap within one "
+                      "allocation.");
+        }
+        views.push_back(command.destination);
+        views.push_back(command.source);
+        break;
+      }
+      case VulkanBufferCommandKind::kBufferBarrier:
+        TI_ERROR_IF(!command.destination,
+                    "Vulkan buffer barrier requires a destination binding.");
+        validate_range(command.destination, 0, 0, "barrier");
+        item.destination = command.destination->get_device_allocation();
+        views.push_back(command.destination);
+        break;
+      case VulkanBufferCommandKind::kMemoryBarrier:
+        break;
+      default:
+        TI_ERROR("Vulkan buffer command kind is invalid.");
+    }
+    resolved.push_back(item);
+  }
+
+  auto leases = acquire_ndarray_leases(views);
+  enqueue_compute_op_lambda(
+      [resolved = std::move(resolved)](Device * /*device*/,
+                                       CommandList *cmdlist) {
+        for (const auto &command : resolved) {
+          switch (command.kind) {
+            case VulkanBufferCommandKind::kFillU32:
+              cmdlist->buffer_fill(
+                  command.destination.get_ptr(command.destination_offset),
+                  command.bytes, command.value);
+              break;
+            case VulkanBufferCommandKind::kCopy:
+              cmdlist->buffer_copy(
+                  command.destination.get_ptr(command.destination_offset),
+                  command.source.get_ptr(command.source_offset), command.bytes);
+              break;
+            case VulkanBufferCommandKind::kBufferBarrier:
+              cmdlist->buffer_barrier(command.destination);
+              break;
+            case VulkanBufferCommandKind::kMemoryBarrier:
+              cmdlist->memory_barrier();
+              break;
+          }
+        }
+      },
+      {});
+  mark_runtime_submission_pending();
+  pin_ndarray_launch_leases(leases);
+}
+
 void Program::copy_ndarray_from_host(Ndarray *dst,
                                      const void *src,
                                      std::size_t bytes) {

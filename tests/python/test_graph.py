@@ -1687,6 +1687,46 @@ class _BackendCommandNode(NativeGraphNode):
         )
 
 
+class _VulkanBufferCommandExecutable(NativeGraphExecutable):
+    def __init__(self, commands):
+        self._action = BackendCommandGraphAction(
+            ti.graph.VulkanBufferCommandRecording(commands)
+        )
+
+    def run(self, runtime_args):
+        raise AssertionError("Vulkan buffer commands used their fallback path")
+
+    @property
+    def runtime_arg_schema(self):
+        return (
+            RuntimeBinding("source", "ndarray"),
+            RuntimeBinding("destination", "ndarray"),
+        )
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect("source", GraphAccess.READ),
+            ResourceEffect("destination", GraphAccess.WRITE),
+        )
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return {"kind": "vulkan_buffer_commands"}
+
+
+class _VulkanBufferCommandNode(NativeGraphNode):
+    def __init__(self, commands):
+        self._commands = tuple(commands)
+
+    def compile(self):
+        return _VulkanBufferCommandExecutable(self._commands)
+
+
 class _RecordedDispatchNode(NativeGraphNode):
     def __init__(self, kernel, args, tracker, lease, fixed_bindings=None):
         self._kernel = kernel
@@ -2549,6 +2589,12 @@ def test_backend_command_action_rejects_device_and_structured_mismatch():
     with pytest.raises(TaichiRuntimeError, match="compiled for vulkan"):
         ti.graph.GraphBuilder().append_native(node)
 
+    recording = ti.graph.VulkanBufferCommandRecording(
+        (ti.graph.VulkanBufferCommand.memory_barrier(),)
+    )
+    with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
+        recording.execute({})
+
     sequential = ti.graph.GraphBuilder().create_sequential()
     with pytest.raises(TaichiRuntimeError, match="not yet qualified"):
         sequential.append_native(_BackendCommandNode(tracker))
@@ -2564,6 +2610,108 @@ def test_backend_command_provider_workspace_requires_lifetime_lease():
                 workspace_ownership="provider_generation",
             )
         )
+
+
+def test_vulkan_buffer_command_descriptors_fail_closed():
+    command = ti.graph.VulkanBufferCommand
+    with pytest.raises(ValueError, match="destination must be a string"):
+        command.fill_u32(1, 4, 0)
+    with pytest.raises(ValueError, match="four-byte aligned"):
+        command.copy("destination", "source", 6)
+    with pytest.raises(ValueError, match="do not take buffer operands"):
+        command("memory_barrier", destination="destination")
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_buffer_commands_execute_directly_and_through_graph():
+    command = ti.graph.VulkanBufferCommand
+    commands = (
+        command.fill_u32("destination", 64, 0xDEADBEEF),
+        command.buffer_barrier("destination"),
+        command.copy("destination", "source", 64),
+        command.memory_barrier(),
+    )
+    recording = ti.graph.VulkanBufferCommandRecording(commands)
+    source = ti.ndarray(ti.i32, shape=16)
+    destination = ti.ndarray(ti.i32, shape=16)
+
+    direct_values = np.arange(16, dtype=np.int32) * 3 - 7
+    source.from_numpy(direct_values)
+    destination.fill(0)
+    recording.execute({"source": source, "destination": destination})
+    ti.sync()
+    np.testing.assert_array_equal(destination.to_numpy(), direct_values)
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(_VulkanBufferCommandNode(commands), admission="auto")
+    graph = builder.compile()
+    replay_values = np.arange(16, dtype=np.int32) * -5 + 11
+    source.from_numpy(replay_values)
+    graph.run({"source": source, "destination": destination})
+    np.testing.assert_array_equal(destination.to_numpy(), replay_values)
+
+    submitted_values = np.arange(16, dtype=np.int32) * 7 + 2
+    submitted_source = ti.ndarray(ti.i32, shape=16)
+    submitted_source.from_numpy(submitted_values)
+    ticket = graph.submit(
+        {"source": submitted_source, "destination": destination},
+        telemetry=True,
+    )
+    del submitted_source
+    gc.collect()
+    ticket.wait()
+    np.testing.assert_array_equal(destination.to_numpy(), submitted_values)
+
+    pipeline = ticket.pipeline_report()
+    assert pipeline.native_action_count == 1
+    assert pipeline.recordable_native_action_count == 1
+    assert pipeline.opaque_native_action_count == 0
+    manifest = pipeline.stages[0].native_actions[0]
+    assert manifest.schema_version == 3
+    assert manifest.execution_kind == "backend_command"
+    assert manifest.recording_kind == "native_command"
+    assert manifest.queue == "compute"
+    assert manifest.stream_binding == "runtime_ordered"
+    assert manifest.barrier_policy == "explicit"
+    assert manifest.workspace_ownership == "none"
+    assert manifest.replay_mode == "rerecord"
+    assert manifest.dispatch_count == 0
+    assert manifest.backend_command_count == 4
+    assert manifest.backend_command_count_exact
+    assert not manifest.backend_command_replay
+
+    ti.reset()
+    with pytest.raises(TaichiRuntimeError, match="before ti.reset"):
+        graph.run({"source": source, "destination": destination})
+
+
+@test_utils.test(arch=ti.vulkan)
+def test_vulkan_buffer_commands_reject_bounds_and_overlap():
+    command = ti.graph.VulkanBufferCommand
+    source = ti.ndarray(ti.i32, shape=8)
+    destination = ti.ndarray(ti.i32, shape=8)
+    oversized = BackendCommandGraphAction(
+        ti.graph.VulkanBufferCommandRecording(
+            (command.copy("destination", "source", 36),)
+        )
+    )
+    with pytest.raises(RuntimeError, match="exceeds 32 bytes"):
+        oversized.execute({"source": source, "destination": destination})
+
+    overlapping = BackendCommandGraphAction(
+        ti.graph.VulkanBufferCommandRecording(
+            (
+                command.copy(
+                    "destination",
+                    "source",
+                    16,
+                    destination_offset=4,
+                ),
+            )
+        )
+    )
+    with pytest.raises(RuntimeError, match="regions overlap"):
+        overlapping.execute({"source": source, "destination": source})
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

@@ -319,6 +319,204 @@ class BackendCommandRecording:
 
 
 @dataclass(frozen=True)
+class VulkanBufferCommand:
+    """One immutable symbolic command in a Vulkan RHI buffer recording."""
+
+    kind: str
+    destination: str = ""
+    source: str = ""
+    destination_offset: int = 0
+    source_offset: int = 0
+    bytes: int = 0
+    value: int = 0
+
+    def __post_init__(self):
+        for name in ("destination", "source"):
+            binding = getattr(self, name)
+            if not isinstance(binding, str):
+                raise ValueError(
+                    f"Vulkan buffer command {name} must be a string"
+                )
+        if self.kind not in (
+            "fill_u32",
+            "copy",
+            "buffer_barrier",
+            "memory_barrier",
+        ):
+            raise ValueError("Unsupported Vulkan buffer command kind")
+        for name in ("destination_offset", "source_offset", "bytes", "value"):
+            field = getattr(self, name)
+            if isinstance(field, bool) or not isinstance(field, int) or field < 0:
+                raise ValueError(
+                    f"Vulkan buffer command {name} must be a nonnegative integer"
+                )
+        if self.value > 0xFFFFFFFF:
+            raise ValueError("Vulkan buffer fill value must fit uint32")
+        if self.kind in ("fill_u32", "copy"):
+            if not self.destination or self.bytes <= 0:
+                raise ValueError(
+                    "Vulkan buffer fill and copy require a destination and bytes"
+                )
+            if self.destination_offset % 4 or self.bytes % 4:
+                raise ValueError(
+                    "Vulkan buffer command destination range must be four-byte aligned"
+                )
+        if self.kind == "copy":
+            if not self.source or self.source_offset % 4:
+                raise ValueError(
+                    "Vulkan buffer copy requires a four-byte-aligned source"
+                )
+        elif self.source or self.source_offset:
+            raise ValueError(
+                "Only Vulkan buffer copy commands may declare a source"
+            )
+        if self.kind == "buffer_barrier":
+            if not self.destination:
+                raise ValueError("Vulkan buffer barrier requires a destination")
+            if self.destination_offset or self.bytes or self.value:
+                raise ValueError(
+                    "Vulkan buffer barriers cover the complete symbolic buffer"
+                )
+        if self.kind == "memory_barrier" and (
+            self.destination
+            or self.source
+            or self.destination_offset
+            or self.source_offset
+            or self.bytes
+            or self.value
+        ):
+            raise ValueError("Vulkan memory barriers do not take buffer operands")
+
+    @classmethod
+    def fill_u32(cls, destination, bytes, value, *, offset=0):
+        return cls(
+            "fill_u32",
+            destination=destination,
+            destination_offset=offset,
+            bytes=bytes,
+            value=value,
+        )
+
+    @classmethod
+    def copy(
+        cls,
+        destination,
+        source,
+        bytes,
+        *,
+        destination_offset=0,
+        source_offset=0,
+    ):
+        return cls(
+            "copy",
+            destination=destination,
+            source=source,
+            destination_offset=destination_offset,
+            source_offset=source_offset,
+            bytes=bytes,
+        )
+
+    @classmethod
+    def buffer_barrier(cls, resource):
+        return cls("buffer_barrier", destination=resource)
+
+    @classmethod
+    def memory_barrier(cls):
+        return cls("memory_barrier")
+
+    @property
+    def binding_names(self):
+        return tuple(
+            name for name in (self.destination, self.source) if name
+        )
+
+
+class VulkanBufferCommandRecording(BackendCommandRecording):
+    """A whole Vulkan buffer command sequence recorded by one C++ call."""
+
+    def __init__(self, commands):
+        commands = tuple(commands)
+        if not commands or not all(
+            isinstance(command, VulkanBufferCommand) for command in commands
+        ):
+            raise TypeError(
+                "Vulkan buffer recordings require VulkanBufferCommand values"
+            )
+        binding_names = tuple(
+            dict.fromkeys(
+                name
+                for command in commands
+                for name in command.binding_names
+            )
+        )
+        super().__init__(
+            backend="vulkan",
+            binding_names=binding_names,
+            command_count=len(commands),
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="explicit",
+            workspace_ownership="none",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "commands", commands)
+
+    @staticmethod
+    def _native_array(value, name):
+        if isinstance(value, GraphTemporaryBuffer):
+            value = value.storage
+        native_array = getattr(value, "arr", None)
+        if native_array is None:
+            raise TaichiRuntimeError(
+                f"Vulkan buffer binding {name!r} must be a Taichi ndarray"
+            )
+        return native_array
+
+    def execute(self, bindings):
+        required = frozenset(self.binding_names)
+        provided = frozenset(bindings)
+        if provided != required:
+            missing = sorted(required.difference(provided))
+            unexpected = sorted(provided.difference(required))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise TaichiRuntimeError(
+                "Vulkan buffer bindings do not match the recording: "
+                + "; ".join(details)
+            )
+        native_commands = []
+        for command in self.commands:
+            destination = (
+                None
+                if not command.destination
+                else self._native_array(
+                    bindings[command.destination], command.destination
+                )
+            )
+            source = (
+                None
+                if not command.source
+                else self._native_array(bindings[command.source], command.source)
+            )
+            native_commands.append(
+                (
+                    command.kind,
+                    destination,
+                    source,
+                    command.destination_offset,
+                    command.source_offset,
+                    command.bytes,
+                    command.value,
+                )
+            )
+        impl.get_runtime().prog._record_vulkan_buffer_commands(native_commands)
+
+
+@dataclass(frozen=True)
 class BoundedPublicationTarget:
     """Graph-owned physical target for an optional producer specialization.
 

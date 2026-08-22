@@ -46,6 +46,8 @@ from taichi_forge.graph._native import (
     PreparedGraphBindings,
     ProviderOwnedNdarrayBinding,
     RecordableGraphAction,
+    VulkanBufferCommand,
+    VulkanBufferCommandRecording,
     compile_native_graph_node,
     native_action_manifest,
 )
@@ -13727,6 +13729,8 @@ __all__ = [
     "SubmissionTicket",
     "SubmissionPacer",
     "NativeActionManifest",
+    "VulkanBufferCommand",
+    "VulkanBufferCommandRecording",
     "GraphExecutionCounters",
     "GraphReplayAttribution",
     "GraphExecutionSegmentReport",

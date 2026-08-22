@@ -85,6 +85,25 @@ struct SNodeMetadataStatistics {
   std::size_t global_snode_ids_issued{0};
 };
 
+class Ndarray;
+
+enum class VulkanBufferCommandKind : std::uint8_t {
+  kFillU32,
+  kCopy,
+  kBufferBarrier,
+  kMemoryBarrier,
+};
+
+struct VulkanBufferCommand {
+  VulkanBufferCommandKind kind{VulkanBufferCommandKind::kMemoryBarrier};
+  Ndarray *destination{nullptr};
+  Ndarray *source{nullptr};
+  std::size_t destination_offset{0};
+  std::size_t source_offset{0};
+  std::size_t bytes{0};
+  std::uint32_t value{0};
+};
+
 class Program;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
@@ -843,6 +862,9 @@ class TI_DLL_EXPORT Program {
   void fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val);
 
   void copy_ndarray_fast(Ndarray *dst, Ndarray *src);
+
+  void record_vulkan_buffer_commands(
+      const std::vector<VulkanBufferCommand> &commands);
 
   void copy_ndarray_from_host(Ndarray *dst,
                               const void *src,
