@@ -21,6 +21,7 @@ from taichi_forge import (
     algorithms,
     experimental,
     graph,
+    hardware,
     interop,
     linalg,
     math,
