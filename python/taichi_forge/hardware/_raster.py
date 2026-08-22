@@ -5,7 +5,12 @@ from types import MappingProxyType
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
-from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native import (
+    BackendCommandPlan,
+    BackendCommandRecording,
+    NativeGraphExecutable,
+    NativeGraphNode,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -51,9 +56,9 @@ class VulkanRasterPassRecording(BackendCommandRecording):
 
     The semantic draw list is queued first, then one native offscreen-frame
     entry point records and submits the complete Vulkan graphics command list.
-    It intentionally has no Graph adapter yet: GGUI vertex preparation and its
-    provider-owned color/depth targets do not expose the bindings required for
-    a truthful enclosing-Graph effect contract.
+    Its Graph adapter is deliberately opaque and explicit-only: GGUI vertex
+    preparation and provider-owned color/depth targets do not expose the
+    bindings required for truthful automatic admission into one backend Graph.
     """
 
     def __init__(self, owner, draws, camera, ambient, point_lights):
@@ -134,6 +139,58 @@ class VulkanRasterPassRecording(BackendCommandRecording):
 
     def validate_graph_lifetime(self):
         self._owner._validate_lifetime()
+
+    def _as_graph_native_node(self):
+        return _VulkanRasterPassNode(self)
+
+
+class _VulkanRasterPassExecutable(NativeGraphExecutable):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def run(self, runtime_args=None):
+        if runtime_args:
+            raise TaichiRuntimeError(
+                "Vulkan raster Graph execution has no public runtime bindings"
+            )
+        return self._recording.execute()
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def lifetime_leases(self):
+        return (self._recording._owner,)
+
+    @property
+    def backend_command_plan(self):
+        return BackendCommandPlan(
+            backend="vulkan",
+            helper_count=None,
+            helper_count_exact=False,
+            command_count=1,
+            command_count_exact=False,
+            provider_replay=False,
+            no_host_readback=True,
+            fragmentation_reason="ggui_helpers_and_hidden_attachments",
+        )
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "vulkan_raster_pass",
+            "draw_count": len(self._recording._draws),
+            "graph_mode": "explicit_segmented",
+        }
+
+
+class _VulkanRasterPassNode(NativeGraphNode):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return _VulkanRasterPassExecutable(self._recording)
 
 
 class RasterPass:

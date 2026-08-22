@@ -526,9 +526,11 @@ The qualified slice is deliberately narrow and fail-closed:
   explicit synchronous observations, and one execution can be consumed by
   only one of them before another execution is required;
 - it is not kernel-callable and never silently replaces a software renderer.
-  Graph admission remains unsupported because Scene VBO preparation still
-  includes helper kernels and provider-owned color/depth targets do not yet
-  expose an exact enclosing-Graph binding/effect contract; and
+  Explicit root-Graph admission records one opaque segmented node, preserving
+  ordering and lifetime but not fusing its GGUI helper dispatches. Automatic
+  admission, structured regions, and AOT remain unsupported because current
+  Scene VBO preparation contains helper kernels while color/depth are
+  provider-owned targets that cannot yet provide exact bindings/effects; and
 - the provider reuses only the Vulkan/GGUI D0 runtime and built-in shaders
   already present in official wheels. It adds no SDK, vendor package, or wheel
   variant.

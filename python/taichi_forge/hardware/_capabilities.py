@@ -547,9 +547,9 @@ _OPERATIONS = (
         "fixed_function",
         "fixed_function",
         "qualified",
-        ("python",),
+        ("python", "graph"),
         "native_command",
-        "unsupported",
+        "opaque",
         "runtime_ordered",
         "provider_owned",
         "existing_public",
@@ -570,9 +570,8 @@ _OPERATIONS = (
         ),
         public_api="ti.hardware.raster.RasterPass",
         notes=(
-            "Direct Python recording only. Kernel calls are impossible; Graph "
-            "admission remains unsupported until GGUI helper dispatches and "
-            "provider-owned color/depth targets expose exact bindings and effects.",
+            "Direct Python and explicit segmented root-Graph execution are supported; kernel calls are impossible.",
+            "Automatic Graph admission remains rejected until GGUI helper dispatches and provider-owned color/depth targets expose exact bindings and effects.",
         ),
     ),
     _operation(

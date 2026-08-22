@@ -153,6 +153,10 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
     recording = raster.record()  # freezes draw topology and resource bindings
     recording.execute()          # graphics submission without host readback
     rgba = raster.color_numpy()  # separate explicit synchronous observation
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()     # explicit segmented root-Graph execution
 ```
 
 `mesh_instance()`, `particles()`, `lines()`, `point_light()`, and `clear()` are
@@ -161,9 +165,12 @@ latest contents on replay. The current slice is Vulkan-only and uses a hidden
 window's provider-owned color/depth targets plus built-in GGUI shaders. One
 execution can be consumed by either `color_numpy()` or `depth_numpy()`, not
 both. This is a Python native executable and is not kernel-callable.
-`GraphBuilder.append_native()` rejects it until VBO helper dispatches and
-output bindings participate in an exact effect contract. This D0 API adds no
-dependency or wheel variant.
+An explicit root `GraphBuilder.append_native(..., admission="explicit")`
+records it as an opaque segmented node and preserves ordering and lifetime;
+it does not fuse GGUI helper dispatches into the enclosing backend Graph.
+`admission="auto"`, structured Graph regions, and AOT reject it until helper
+dispatches and provider-owned output bindings participate in an exact effect
+contract. This D0 API adds no dependency or wheel variant.
 
 ### `ti.hardware.ray.TriangleScene` (0.6.3 in development)
 

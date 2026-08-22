@@ -454,9 +454,11 @@ list、render pass、graphics pipeline，执行 rasterizer、depth test/write �
   field/ndarray 的新内容；每次 replay 重新录制 graphics command list；
 - execution 本身没有 host readback；`color_numpy()` 或 `depth_numpy()` 是显式同步读取，
   每次 execution 最多消费其中一个 attachment，读取另一个前必须再次 execute；
-- 它不能从 kernel 内调用，也不自动替换软件 renderer。Graph admission 暂不支持：当前
-  Scene 的 VBO preparation 仍包含 helper kernel，color/depth 又是 provider-owned target，
-  尚不能向 enclosing Graph 提供精确 binding/effect；
+- 它不能从 kernel 内调用，也不自动替换软件 renderer。显式 root-Graph admission 会记录一个
+  opaque segmented node，保持顺序与 lifetime，但不会融合 GGUI helper dispatch。automatic
+  admission、structured region 与 AOT 仍不支持：当前 Scene 的 VBO preparation 包含 helper
+  kernel，color/depth 又是 provider-owned target，尚不能向 enclosing Graph 提供精确
+  binding/effect；
 - provider 只复用官方 wheel 已有的 Vulkan/GGUI D0 runtime 与内建 shader，不新增 SDK、
   vendor package 或 wheel 发行变体。
 

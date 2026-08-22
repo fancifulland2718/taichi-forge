@@ -130,14 +130,21 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
     recording = raster.record()  # 固定 draw topology 与 resource binding
     recording.execute()          # 无 host readback 的 graphics submission
     rgba = raster.color_numpy()  # 单独、显式的同步 readback
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()     # 显式分段 root-Graph execution
 ```
 
 还支持 `mesh_instance()`、`particles()`、`lines()`、`point_light()` 与 `clear()`。
 recording 绑定同一 resource object，但 replay 会读取其最新内容。当前只支持 Vulkan、
 隐藏窗口的 provider-owned color/depth target 与 GGUI 内建 shader；一次 execution 只能被
 `color_numpy()` 或 `depth_numpy()` 之一消费。该对象是 Python native executable，不能在
-kernel 内调用；由于 VBO helper dispatch 和 output binding 尚未并入精确 effect contract，
-`GraphBuilder.append_native()` 会明确拒绝。该 D0 API 不新增依赖或 wheel 变体。
+kernel 内调用。显式 root `GraphBuilder.append_native(..., admission="explicit")` 会把它记录为
+opaque segmented node，保持顺序与 lifetime，但不会把 GGUI helper dispatch 融入 enclosing
+backend Graph。`admission="auto"`、structured Graph region 与 AOT 继续拒绝，直到 helper
+dispatch 和 provider-owned output binding 并入精确 effect contract。该 D0 API 不新增依赖或
+wheel 变体。
 
 ### `ti.hardware.ray.TriangleScene`（0.6.3 开发中）
 

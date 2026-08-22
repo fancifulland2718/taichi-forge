@@ -58,10 +58,16 @@ def test_vulkan_raster_pass_executes_hardware_graphics_pipeline():
             for effect in recording.resource_effects
         )
 
-        with pytest.raises(RuntimeError, match="Only DSL-defined native graph nodes"):
+        with pytest.raises(
+            RuntimeError,
+            match="ggui_helpers_and_hidden_attachments",
+        ):
             ti.graph.GraphBuilder().append_native(recording, admission="auto")
 
-        recording.execute()
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="explicit")
+        graph = builder.compile()
+        graph.run({})
         color = raster_pass.color_numpy()
         recording.execute()
         depth = raster_pass.depth_numpy()

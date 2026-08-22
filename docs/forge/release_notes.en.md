@@ -88,8 +88,10 @@ grouped under the behavior they shipped.
 - Added D0 `ti.hardware.raster.RasterPass`, reusing the current Program's
   Vulkan GGUI/RHI graphics pipeline for explicit offscreen hardware raster of
   meshes, instances, particles, and lines with separate color/depth readback.
-  The current slice is a direct Python recording; kernel and Graph calls fail
-  closed. It adds no dependency or official wheel variant.
+  Direct Python and explicit segmented root-Graph execution are supported;
+  kernel calls, automatic Graph admission, structured regions, and AOT fail
+  closed. The segmented route preserves ordering/lifetime but does not claim
+  backend-Graph fusion. It adds no dependency or official wheel variant.
 - Added the first D0 `ti.hardware.matrix` slice: explicit direct and root-Graph
   CUDA Driver/PTX WMMA for compact row-major `m16n16k16`, f16 inputs, and f32
   accumulation/output on NVIDIA compute capability 7.0 or newer. It does not

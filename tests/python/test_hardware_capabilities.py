@@ -197,13 +197,14 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert raster.public_api == "ti.hardware.raster.RasterPass"
     assert raster.implementation_status == "existing_public"
     assert raster.hardware_acceleration == "qualified"
-    assert raster.scopes == ("python",)
+    assert raster.scopes == ("python", "graph")
     assert raster.execution_kind == "native_command"
-    assert raster.graph_support == "unsupported"
+    assert raster.graph_support == "opaque"
+    assert "explicit segmented root-Graph" in raster.notes[0]
     assert raster.workspace_ownership == "provider_owned"
     assert raster.layouts == ("mesh", "mesh_instance", "particles", "lines")
     assert raster.deterministic is False
-    assert "Kernel calls are impossible" in raster.notes[0]
+    assert "kernel calls are impossible" in raster.notes[0]
     assert ti.hardware.capability(raster.operation_id) is raster
 
     matrix = ti.hardware.capability("matrix.mma.cuda")
