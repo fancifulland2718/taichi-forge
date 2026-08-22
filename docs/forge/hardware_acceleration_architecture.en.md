@@ -708,9 +708,10 @@ Performance claims use fail-closed rules:
   10% AB/BA median drift;
 - the fifth percentile of paired speedups must exceed one before
   `performance_claim_eligible=true`; and
-- JSON records the source revision, local native-artifact SHA-256, workload,
-  raw samples, correctness, route, and rejection reason. Device, driver, or
-  workload changes require a new run; one machine's result is not a portable
+- JSON records the source revision and dirty status, SHA-256 for both the local
+  Python extension and split-runtime binary, workload, raw samples,
+  correctness, route, and rejection reason. Device, driver, or workload
+  changes require a new run; one machine's result is not a portable
   performance promise.
 
 The defaults target dense local/batched algebra, spectral transforms, sparse

@@ -132,6 +132,22 @@ def _error(actual, expected):
     return absolute, absolute / scale
 
 
+def _artifact_provenance(path):
+    artifact_path = pathlib.Path(path).resolve()
+    digest = hashlib.sha256()
+    with open(artifact_path, "rb") as artifact:
+        while True:
+            block = artifact.read(1 << 20)
+            if not block:
+                break
+            digest.update(block)
+    return {
+        "path": str(artifact_path),
+        "bytes": artifact_path.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
 def _time_block(action, repetitions):
     _debug(f"start block {getattr(action, '__name__', 'action')} x{repetitions}")
     started = time.perf_counter_ns()
@@ -1094,28 +1110,40 @@ def _parent(args):
         capture_output=True,
         text=True,
     )
-    local_artifact = None
+    source_status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=source_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    local_python_extension = None
     if _LOCAL_PYD:
-        artifact_path = pathlib.Path(_LOCAL_PYD).resolve()
-        digest = hashlib.sha256()
-        with open(artifact_path, "rb") as artifact:
-            while True:
-                block = artifact.read(1 << 20)
-                if not block:
-                    break
-                digest.update(block)
-        local_artifact = {
-            "path": str(artifact_path),
-            "bytes": artifact_path.stat().st_size,
-            "sha256": digest.hexdigest(),
-        }
+        local_python_extension = _artifact_provenance(_LOCAL_PYD)
+    local_runtime_artifacts = []
+    if _RUNTIME_DIR:
+        runtime_root = pathlib.Path(_RUNTIME_DIR)
+        for name in (
+            "taichi_runtime.dll",
+            "libtaichi_runtime.so",
+            "libtaichi_runtime.dylib",
+        ):
+            candidate = runtime_root / name
+            if candidate.is_file():
+                local_runtime_artifacts.append(_artifact_provenance(candidate))
     report = {
         "schema": SCHEMA,
         "generated_at_ns": time.time_ns(),
         "source_revision": (
             revision.stdout.strip() if revision.returncode == 0 else None
         ),
-        "local_runtime_artifact": local_artifact,
+        "source_status": (
+            tuple(source_status.stdout.splitlines())
+            if source_status.returncode == 0
+            else None
+        ),
+        "local_python_extension": local_python_extension,
+        "local_runtime_artifacts": local_runtime_artifacts,
         "policy": {
             "fresh_process_orders": ("ab", "ba"),
             "workers_per_order": args.workers_per_order,

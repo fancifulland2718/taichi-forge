@@ -84,3 +84,17 @@ def test_complex_error_checks_both_components():
 
     assert absolute == 2.0
     assert relative > 1.0
+
+
+def test_artifact_provenance_records_identity_and_digest(tmp_path):
+    artifact = tmp_path / "runtime.bin"
+    artifact.write_bytes(b"taichi-forge-runtime")
+
+    provenance = qualification._artifact_provenance(artifact)
+
+    assert provenance["path"] == str(artifact.resolve())
+    assert provenance["bytes"] == 20
+    assert (
+        provenance["sha256"]
+        == "3bdb141509c6111dee71c967b1c7e38875c39a5f646009caeb61aa7fc2c5a418"
+    )

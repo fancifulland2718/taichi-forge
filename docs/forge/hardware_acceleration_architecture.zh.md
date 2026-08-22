@@ -604,9 +604,9 @@ library 被记为 `skipped`，不会改变官方 wheel 安装合同。
 - hardware 与 baseline 各自必须满足 CV 不超过 10%，AB/BA median drift 不超过 10%；
 - 配对 speedup 的第 5 百分位必须大于 1，才设置
   `performance_claim_eligible=true`；
-- JSON 同时记录 source revision、本地 native artifact SHA-256、workload、原始 sample、
-  correctness、route 与拒绝原因。设备、driver 或 workload 变化后必须重新运行，单机结果
-  不是通用性能承诺。
+- JSON 同时记录 source revision 与 dirty status、本地 Python extension 和 split-runtime
+  binary 的 SHA-256、workload、原始 sample、correctness、route 与拒绝原因。设备、driver
+  或 workload 变化后必须重新运行，单机结果不是通用性能承诺。
 
 默认 workload 面向物理引擎中常见的 dense local/batched algebra、spectral transform、
 sparse operator 与动态 triangle scene。cuFFT baseline 是设备端 radix-2 f32 complex FFT，
