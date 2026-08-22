@@ -189,7 +189,10 @@ facts; it does not load or enable optional libraries. `probe()` is a separate,
 explicit D1 probe. The current cuBLAS, cuSPARSE, and cuSOLVER probes use a
 transient native library handle, close it before returning an immutable
 snapshot, and do not change enablement or selection. Static operation/provider
-descriptors and resolved reports are immutable values.
+descriptors and resolved reports are immutable values. If a domain algorithm
+has already loaded one of these libraries through its real lazy loader, a later
+passive `report()` observes the cached loader/capability state and reports it as
+`enabled/eligible`; observation itself never calls `load_*`.
 
 ## Kernel boundary
 

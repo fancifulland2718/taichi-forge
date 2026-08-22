@@ -30,7 +30,9 @@ runtime snapshot without loading, enabling, or selecting an optional provider.
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
 current cuBLAS, cuSPARSE, and cuSOLVER probes check exact symbols through a
 transient native handle, close it before returning, and do not change later
-selection. Unknown operations/providers and unimplemented probes fail closed.
+selection. If an actual algorithm already lazy-loaded a library, passive
+`report()` observes its cached state as `enabled/eligible` without invoking the
+loader. Unknown operations/providers and unimplemented probes fail closed.
 
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 

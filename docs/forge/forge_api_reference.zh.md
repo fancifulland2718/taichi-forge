@@ -25,7 +25,9 @@ import taichi_forge as ti
 不可变静态合同。`report()` 返回只读 runtime snapshot，不加载、启用或选择可选 provider。
 `probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；当前 cuBLAS、cuSPARSE、
 cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续 selection。
-未知 operation/provider 和未实现的 probe 均 fail closed。
+若实际算法此前已经 lazy-load 某库，被动 `report()` 会观察其缓存状态并报告
+`enabled/eligible`，但绝不自行调用 loader。未知 operation/provider 和未实现的 probe
+均 fail closed。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 

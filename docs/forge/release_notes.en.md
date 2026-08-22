@@ -50,7 +50,8 @@ grouped under the behavior they shipped.
 - Added immutable schema-v1 `ti.hardware` operation/provider contracts, a
   side-effect-free `report()`, and explicit D1 `probe()`. The cuBLAS,
   cuSPARSE, and cuSOLVER probes use transient handles and never enable a
-  provider implicitly.
+  provider implicitly. Passive reports can observe singleton state already
+  loaded by a real algorithm without invoking the loader.
 - Official wheel builds and validation reject making D1/D2 vendor runtimes a
   required dependency or a new distribution variant; the D0 CUDA/Vulkan
   runtime boundary is unchanged.

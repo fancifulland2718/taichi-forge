@@ -44,7 +44,8 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 ## 待发布 {#unreleased}
 
 - 新增 `ti.hardware` schema-v1 静态 operation/provider 合同、无副作用 `report()` 与显式
-  D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider。
+  D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider；
+  被动 report 可观察已被实际算法加载的 singleton 状态，但不会触发 loader。
 - 官方 wheel 构建与验证会拒绝 D1/D2 vendor runtime 成为必需依赖或新增发行变体；D0
   CUDA/Vulkan runtime 边界保持不变。
 - 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式

@@ -301,6 +301,60 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
   result["native_facts"] = std::move(native_facts);
   return result;
 }
+
+py::dict cuda_external_library_status(const std::string &provider_id) {
+  if (provider_id != "cublas" && provider_id != "cusparse" &&
+      provider_id != "cusolver") {
+    throw std::invalid_argument("unsupported CUDA external provider: " +
+                                provider_id);
+  }
+
+  py::dict result;
+  py::dict native_facts;
+  result["provider_id"] = provider_id;
+  result["library_loaded"] = false;
+  result["provider_abi"] = py::none();
+  result["provider_version"] = py::none();
+  native_facts["status_policy"] = "passive_existing_loader";
+  native_facts["external_component_probed"] = false;
+  native_facts["provider_enablement_changed"] = false;
+  native_facts["provider_selection_changed"] = false;
+
+  if (provider_id == "cublas") {
+    auto &driver = lang::CUBLASDriver::get_instance();
+    const bool loaded = driver.is_loaded();
+    result["library_loaded"] = loaded;
+    result["provider_abi"] = "cublas-dynamic-symbols-v1";
+    native_facts["workspace_symbol_loaded"] =
+        loaded && driver.cubSetWorkspace.available();
+  } else if (provider_id == "cusparse") {
+    auto &driver = lang::CUSPARSEDriver::get_instance();
+    const bool loaded = driver.is_loaded();
+    result["library_loaded"] = loaded;
+    result["provider_abi"] = "cusparse-dynamic-symbols-v1";
+    const auto capabilities = driver.capabilities();
+    native_facts["bsr_descriptor_available"] =
+        loaded && capabilities.bsr_descriptor_available;
+    native_facts["generic_bsr_spmv_available"] =
+        loaded && capabilities.generic_bsr_spmv_available;
+    native_facts["spmv_preprocess_available"] =
+        loaded && capabilities.spmv_preprocess_available;
+    if (loaded && capabilities.library_version_major >= 0 &&
+        capabilities.library_version_minor >= 0 &&
+        capabilities.library_version_patch >= 0) {
+      result["provider_version"] =
+          fmt::format("{}.{}.{}", capabilities.library_version_major,
+                      capabilities.library_version_minor,
+                      capabilities.library_version_patch);
+    }
+  } else {
+    auto &driver = lang::CUSOLVERDriver::get_instance();
+    result["library_loaded"] = driver.is_loaded();
+    result["provider_abi"] = "cusolver-dynamic-symbols-v1";
+  }
+  result["native_facts"] = std::move(native_facts);
+  return result;
+}
 #endif
 
 }  // namespace
@@ -333,6 +387,7 @@ void print_all_units() {
 void export_misc(py::module &m) {
 #if defined(TI_WITH_CUDA)
   m.def("probe_cuda_external_library", &probe_cuda_external_library);
+  m.def("cuda_external_library_status", &cuda_external_library_status);
 #else
   m.def("probe_cuda_external_library", [](const std::string &provider_id) {
     if (provider_id != "cublas" && provider_id != "cusparse" &&
@@ -353,6 +408,25 @@ void export_misc(py::module &m) {
     result["provider_version"] = py::none();
     result["last_error"] = py::none();
     result["failure_scope"] = py::none();
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  });
+  m.def("cuda_external_library_status", [](const std::string &provider_id) {
+    if (provider_id != "cublas" && provider_id != "cusparse" &&
+        provider_id != "cusolver") {
+      throw std::invalid_argument("unsupported CUDA external provider: " +
+                                  provider_id);
+    }
+    py::dict native_facts;
+    native_facts["status_policy"] = "passive_existing_loader";
+    native_facts["external_component_probed"] = false;
+    native_facts["provider_enablement_changed"] = false;
+    native_facts["provider_selection_changed"] = false;
+    py::dict result;
+    result["provider_id"] = provider_id;
+    result["library_loaded"] = false;
+    result["provider_abi"] = py::none();
+    result["provider_version"] = py::none();
     result["native_facts"] = std::move(native_facts);
     return result;
   });

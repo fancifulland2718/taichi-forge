@@ -1034,7 +1034,14 @@ def _runtime_facts():
     )
 
 
-def _passive_resolution(descriptor, *, runtime_initialized, backend, compiled_backends):
+def _passive_resolution(
+    descriptor,
+    *,
+    runtime_initialized,
+    backend,
+    compiled_backends,
+    external_status=None,
+):
     compiled = all(compiled_backends[item] for item in descriptor.backends)
     facts = {
         "probe_policy": "passive",
@@ -1052,6 +1059,53 @@ def _passive_resolution(descriptor, *, runtime_initialized, backend, compiled_ba
             selection="rejected",
             unavailable_reason="backend_not_compiled",
             native_facts=facts,
+        )
+
+    if (
+        descriptor.dependency_tier == "lazy_external"
+        and external_status is not None
+        and external_status.get("library_loaded", False)
+    ):
+        facts.update(dict(external_status.get("native_facts", {})))
+        provider_abi = external_status.get("provider_abi")
+        provider_version = external_status.get("provider_version")
+        if not runtime_initialized:
+            return ResolvedHardwareOperation(
+                descriptor=descriptor,
+                backend=None,
+                runtime_initialized=False,
+                discovery="available",
+                enablement="enabled",
+                selection="not_considered",
+                unavailable_reason="runtime_not_initialized",
+                native_facts=facts,
+                provider_abi=provider_abi,
+                provider_version=provider_version,
+            )
+        if backend not in descriptor.backends:
+            return ResolvedHardwareOperation(
+                descriptor=descriptor,
+                backend=backend,
+                runtime_initialized=True,
+                discovery="available",
+                enablement="enabled",
+                selection="rejected",
+                unavailable_reason="backend_not_active",
+                native_facts=facts,
+                provider_abi=provider_abi,
+                provider_version=provider_version,
+            )
+        return ResolvedHardwareOperation(
+            descriptor=descriptor,
+            backend=backend,
+            runtime_initialized=True,
+            discovery="available",
+            enablement="enabled",
+            selection="eligible",
+            unavailable_reason="none",
+            native_facts=facts,
+            provider_abi=provider_abi,
+            provider_version=provider_version,
         )
 
     if descriptor.dependency_tier == "lazy_external":
@@ -1176,6 +1230,33 @@ def _native_external_probe(provider_id):
     return dict(_ti_core.probe_cuda_external_library(provider_id))
 
 
+def _native_external_status(provider_id):
+    from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+
+    status = getattr(_ti_core, "cuda_external_library_status", None)
+    if status is None:
+        return {
+            "provider_id": provider_id,
+            "library_loaded": False,
+            "provider_abi": None,
+            "provider_version": None,
+            "native_facts": {
+                "status_policy": "passive_status_unavailable",
+                "external_component_probed": False,
+                "provider_enablement_changed": False,
+                "provider_selection_changed": False,
+            },
+        }
+    return dict(status(provider_id))
+
+
+def _passive_external_statuses():
+    return {
+        provider_id: _native_external_status(provider_id)
+        for provider_id in _TRANSIENT_NATIVE_PROVIDERS
+    }
+
+
 def _explicit_external_probe_resolution(descriptor, *, runtime_initialized, backend, native_result):
     try:
         if native_result.get("provider_id") != descriptor.provider_id:
@@ -1210,6 +1291,7 @@ def report():
     """Return a passive report without loading or enabling optional providers."""
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()
+    external_statuses = _passive_external_statuses()
     return HardwareCapabilityReport(
         runtime_initialized=runtime_initialized,
         backend=backend,
@@ -1220,6 +1302,9 @@ def report():
                 runtime_initialized=runtime_initialized,
                 backend=backend,
                 compiled_backends=compiled_backends,
+                external_status=external_statuses.get(
+                    descriptor.provider_id
+                ),
             )
             for descriptor in _OPERATIONS
         ),
@@ -1240,12 +1325,14 @@ def probe(provider_id):
         raise ValueError("only lazy_external providers support runtime probing")
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()
+    external_statuses = _passive_external_statuses()
     passive = tuple(
         _passive_resolution(
             descriptor,
             runtime_initialized=runtime_initialized,
             backend=backend,
             compiled_backends=compiled_backends,
+            external_status=external_statuses.get(descriptor.provider_id),
         )
         for descriptor in _OPERATIONS
     )

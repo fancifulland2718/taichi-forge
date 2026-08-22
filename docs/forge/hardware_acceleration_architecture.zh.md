@@ -166,7 +166,9 @@ ti.hardware.probe(provider)
 `report()` 只读取静态合同、已编译 backend 与当前 runtime fact，不加载或启用可选库。
 `probe()` 是独立的显式 D1 探测；当前 cuBLAS、cuSPARSE 与 cuSOLVER 探测使用瞬时
 native library handle，关闭 handle 后返回不可变 snapshot，不改变 enablement 或 selection。
-静态 operation/provider descriptor 与 resolved report 都是不可变值。
+如果某个领域算法此前已通过实际 lazy loader 加载这些库，后续被动 `report()` 会只读地
+观察已缓存 loader/capability 状态，并报告 `enabled/eligible`；该观察本身不会调用
+`load_*`。静态 operation/provider descriptor 与 resolved report 都是不可变值。
 
 ## Kernel 边界
 

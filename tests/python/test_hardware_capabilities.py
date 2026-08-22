@@ -3,6 +3,7 @@ from dataclasses import FrozenInstanceError, replace
 import pytest
 
 import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
 from taichi_forge.hardware import _capabilities
 from tests import test_utils
 
@@ -179,6 +180,20 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
         raise AssertionError("passive reports must not invoke a native D1 probe")
 
     monkeypatch.setattr(_capabilities, "_native_external_probe", reject_implicit_probe)
+    monkeypatch.setattr(
+        _capabilities,
+        "_native_external_status",
+        lambda provider_id: {
+            "provider_id": provider_id,
+            "library_loaded": False,
+            "provider_abi": None,
+            "provider_version": None,
+            "native_facts": {
+                "status_policy": "passive_existing_loader",
+                "external_component_probed": False,
+            },
+        },
+    )
     ti.reset()
     report = ti.hardware.report()
 
@@ -204,6 +219,89 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     assert cublas.provider_version is None
     assert cublas.last_error is None
     assert cublas.failure_scope is None
+
+
+def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
+    monkeypatch.setattr(
+        _capabilities,
+        "_runtime_facts",
+        lambda: (True, "cuda", {"cuda": True, "vulkan": True}),
+    )
+
+    def provider_status(provider_id):
+        return {
+            "provider_id": provider_id,
+            "library_loaded": provider_id == "cusparse",
+            "provider_abi": f"{provider_id}-dynamic-symbols-v1",
+            "provider_version": "12.6.3" if provider_id == "cusparse" else None,
+            "native_facts": {
+                "status_policy": "passive_existing_loader",
+                "external_component_probed": False,
+                "provider_enablement_changed": False,
+                "provider_selection_changed": False,
+                "generic_bsr_spmv_available": provider_id == "cusparse",
+            },
+        }
+
+    monkeypatch.setattr(
+        _capabilities, "_native_external_status", provider_status
+    )
+    report = ti.hardware.report()
+    cusparse = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.provider_id == "cusparse"
+    )
+    cublas = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.provider_id == "cublas"
+    )
+
+    assert cusparse.discovery == "available"
+    assert cusparse.enablement == "enabled"
+    assert cusparse.selection == "eligible"
+    assert cusparse.unavailable_reason == "none"
+    assert cusparse.provider_abi == "cusparse-dynamic-symbols-v1"
+    assert cusparse.provider_version == "12.6.3"
+    assert cusparse.native_facts["generic_bsr_spmv_available"]
+    assert not cusparse.native_facts["external_component_probed"]
+    assert cublas.enablement == "disabled"
+    assert cublas.selection == "not_considered"
+
+
+def test_native_passive_status_does_not_load_external_libraries():
+    before = {
+        provider_id: dict(
+            ti_core.cuda_external_library_status(provider_id)
+        )
+        for provider_id in ("cublas", "cusparse", "cusolver")
+    }
+    report = ti.hardware.report()
+    after = {
+        provider_id: dict(
+            ti_core.cuda_external_library_status(provider_id)
+        )
+        for provider_id in ("cublas", "cusparse", "cusolver")
+    }
+
+    assert report.external_components_probed is False
+    assert {
+        provider_id: status["library_loaded"]
+        for provider_id, status in after.items()
+    } == {
+        provider_id: status["library_loaded"]
+        for provider_id, status in before.items()
+    }
+    assert all(
+        status["native_facts"]["status_policy"]
+        == "passive_existing_loader"
+        for status in after.values()
+    )
+    assert all(
+        not status["native_facts"]["external_component_probed"]
+        for status in after.values()
+    )
 
 
 def test_multibackend_core_route_requires_every_backend(monkeypatch):
