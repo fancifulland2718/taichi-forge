@@ -47,11 +47,14 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-- Added immutable schema-v1 `ti.hardware` operation/provider contracts, a
+- Added immutable schema-v2 `ti.hardware` operation/provider contracts, a
   side-effect-free `report()`, and explicit D1 `probe()`. The cuBLAS,
   cuSPARSE, and cuSOLVER probes use transient handles and never enable a
   provider implicitly. Passive reports can observe singleton state already
-  loaded by a real algorithm without invoking the loader.
+  loaded by a real algorithm without invoking the loader. The schema exposes
+  `activation_mode` to distinguish explicit hardware APIs, explicit kernel
+  intrinsics, automatic provider selection inside a requested domain
+  operation, and fully automatic compiler/runtime optimizations.
 - Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
   `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
   execution lazy-loads the user's compatible cuBLAS and reuses one handle per
@@ -66,6 +69,11 @@ grouped under the behavior they shipped.
   output and root-Graph recording over the existing matrix-owned provider
   state. None is a kernel rewrite; vendor libraries remain optional and
   unbundled.
+- Qualified source-ordered root-Graph composition across CUDA
+  `cuBLAS -> kernel -> cuSPARSE -> kernel` and Vulkan
+  `AS refit -> batch Ray Query`. Backend commands remain distinct segmented
+  nodes rather than claiming backend-Graph fusion; provider-generation leases
+  retain cuSPARSE/AS state and cuSPARSE replay reuses its cached plan.
 - Cataloged existing D0 kernel hardware routes and made their call boundary
   explicit. Atomics, CUDA warp operations, the implemented Vulkan subgroup
   subset, `SharedArray`, and `ti.block_local` are explicit inline kernel

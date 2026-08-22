@@ -206,7 +206,7 @@ bit 不能选择该 provider。Vulkan 规范要求 query 并 enable
 | Dense、sparse、solver 与 FFT 算法 | 既有 `ti.linalg` 或 `ti.algorithms` 入口 | Python 与 Graph scope，由领域 operation 选择 provider。 |
 | CUDA-Vulkan memory/semaphore sharing | 既有 `ti.interop` | Python 与 Graph resource scope。 |
 
-当前 Hardware Capability schema v1 已提供：
+当前 Hardware Capability schema v2 已提供：
 
 ```python
 ti.hardware.report()
@@ -298,7 +298,7 @@ Discovery 不等于 enablement。被动 report 不能因为系统恰好安装了
 
 ## Hardware Capability schema
 
-Hardware Capability schema v1 与现有 Primitive Capability schema 相互独立。以后
+Hardware Capability schema v2 与现有 Primitive Capability schema 相互独立。以后
 primitive operation 可以引用 hardware provider ID，但不能仅为了复制 deployment
 字段就提升 primitive schema 版本。
 
@@ -323,6 +323,7 @@ classification:
     provider_class
     execution_class
     hardware_acceleration
+    activation_mode
 
 execution:
     scope
@@ -356,6 +357,18 @@ Static descriptor 定义稳定语义，native probe 提供 runtime fact。Python
 结果，但不能仅根据 vendor name 或 compute capability 推断 extension、ABI 或
 硬件单元。
 
+`activation_mode` 是不可含糊的自动/手动边界：
+
+| Mode | 发起者 | 例子 |
+| --- | --- | --- |
+| `explicit_hardware_api` | 调用方显式调用 Python/Graph hardware command 或 resource。 | `ti.hardware.linalg.gemm_f32`、`RasterPass`、batch Ray Query。 |
+| `explicit_kernel_intrinsic` | kernel 作者显式写 intrinsic/hint，由 backend inline lowering。 | atomic、`SharedArray`、texture sampling、`ti.block_local`。 |
+| `domain_api_auto_provider` | 调用方请求领域 operation，由实现自动选择硬件 provider。 | CUDA `SparseMatrix @ ndarray`、`SparseSolver`。 |
+| `compiler_automatic` | compiler/runtime 在现有语义后自动识别并选择优化。 | grouped reduction、Vulkan listgen ballot、合格的 `cp.async`。 |
+
+该字段只回答“路线如何被激活”，不保证最终指令。`hardware_acceleration`、精确
+requirement 与 fallback 字段仍是独立的资格轴。
+
 ## Graph、RHI、resource 与 lifetime
 
 Hardware resource 与 executable operation 必须扩展现有 NativeAction 合同，不得
@@ -379,6 +392,25 @@ Hardware resource 与 executable operation 必须扩展现有 NativeAction 合�
 Resource 在所属 runtime generation reset 后失效。Graph 如果基于某个 provider ABI、
 device 或 resource generation 编译，除非合同允许 rebind/rebuild，否则不能在另一个
 generation 上 replay。
+
+### 当前 root-Graph 组合边界
+
+可 automatic-admit 的 backend command 与相邻 Taichi CGraph stage、其他 provider command
+保持 source order。当前资格测试同时覆盖 CUDA
+`cuBLAS -> kernel -> cuSPARSE -> kernel` 链和 Vulkan `AS refit -> batch Ray Query` 链。
+后者依靠 scene-generation lease 与 provider 内部 AS barrier；公开的 vertex/ray/hit array
+仍使用声明的 effect。关闭 resource 或 reset 所属 runtime 后，组合 Graph 会在 replay 前
+失效。
+
+这种有序组合不等于 backend fusion。append backend command 会 flush ordinary CGraph
+builder，并保留为独立 native-command node。因此多个 command 可以共享一个 root Graph
+合同和 submission lifetime，但 backend work 仍然分段。manifest 与
+`backend_command_nodes` 会公开精确数量；文档和 benchmark 不得把它报告成单个 CUDA
+Graph 或单个 Vulkan command buffer。此类 command 仍不能进入 structured `Sequential`。
+
+Provider cache 也继续由 provider 持有。显式 cuSPARSE SpMV replay 会复用 matrix 的单个
+handle、descriptor、workspace 与成功的可选 preprocess plan；Graph 不复制这些资源，也不
+把它们重复计入 Graph workspace。matrix-generation lifetime lease 负责维持该状态有效。
 
 ### 当前 M3 Vulkan buffer command 合同
 
@@ -498,8 +530,9 @@ column-major `cublasSgemm_v2` 时交换 operand 与输出维度，绑定 host sc
 Program 默认 CUDA stream，并复用一个 handle 直到 Program finalize。direct execution
 与 root-Graph `rerecord` 共用该路线。
 
-`is_available()` 使用现有无副作用 transient cuBLAS probe；真实执行另行 lazy-load 用户
-已有的兼容 library。被动 `report()` 可以观察已加载状态，但不会发起加载。provider 只向
+`cublas_is_available()` 使用现有无副作用 transient cuBLAS probe；`is_available()` 保留为
+兼容 alias。真实执行另行 lazy-load 用户已有的兼容 library。被动 `report()` 可以观察已加载
+状态，但不会发起加载。provider 只向
 现有动态函数表增加一个稳定 ABI symbol，不新增 Toolkit header、link dependency、
 bundled library、package dependency、build switch 或 wheel 变体。missing/incompatible
 provider 只使该 command fail，不影响 CUDA 初始化。该命令没有 Graph 独占 workspace。
@@ -632,7 +665,7 @@ OptiX 初始化与 versioned function table 继续由
 
 ### M1：Capability schema 与只读 report
 
-- 独立于 primitive schema 实现 Hardware Capability schema v1；
+- 独立于 primitive schema 实现 Hardware Capability schema v2；
 - 公开 immutable descriptor 与 resolved native probe fact；
 - optional-library probe 必须显式，且不能副作用式改变 enablement/selection；
 - 覆盖 discovery、incompatibility 与 failure-scope test。

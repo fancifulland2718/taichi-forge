@@ -416,7 +416,7 @@ def spmv_f32(matrix, input, output):
     return output
 
 
-def is_available():
+def cublas_is_available():
     """Explicitly probe whether a compatible cuBLAS provider is present."""
 
     if impl.get_runtime().prog is None or _active_backend() != "cuda":
@@ -430,6 +430,12 @@ def is_available():
         if item.descriptor.operation_id == "linalg.gemm.cublas"
     )
     return operation.discovery == "available"
+
+
+def is_available():
+    """Compatibility alias for :func:`cublas_is_available`."""
+
+    return cublas_is_available()
 
 
 def cusparse_is_available():
@@ -451,6 +457,7 @@ def cusparse_is_available():
 __all__ = [
     "CublasGemmRecording",
     "CusparseSpmvRecording",
+    "cublas_is_available",
     "cusparse_is_available",
     "gemm_f32",
     "is_available",

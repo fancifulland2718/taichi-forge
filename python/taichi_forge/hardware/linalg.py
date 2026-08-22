@@ -3,6 +3,7 @@
 from taichi_forge.hardware._linalg import (
     CublasGemmRecording,
     CusparseSpmvRecording,
+    cublas_is_available,
     cusparse_is_available,
     gemm_f32,
     is_available,
@@ -12,6 +13,7 @@ from taichi_forge.hardware._linalg import (
 __all__ = [
     "CublasGemmRecording",
     "CusparseSpmvRecording",
+    "cublas_is_available",
     "cusparse_is_available",
     "gemm_f32",
     "is_available",

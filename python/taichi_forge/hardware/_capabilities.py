@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
 
-HARDWARE_CAPABILITY_SCHEMA_VERSION = 1
+HARDWARE_CAPABILITY_SCHEMA_VERSION = 2
 
 DEPENDENCY_TIERS = (
     "core",
@@ -99,6 +99,13 @@ OPERATION_SCOPES = (
     "internal",
 )
 
+ACTIVATION_MODES = (
+    "explicit_hardware_api",
+    "explicit_kernel_intrinsic",
+    "domain_api_auto_provider",
+    "compiler_automatic",
+)
+
 IMPLEMENTATION_STATUSES = (
     "existing_public",
     "existing_internal",
@@ -176,6 +183,7 @@ class HardwareOperationDescriptor:
     stream_binding: str
     workspace_ownership: str
     implementation_status: str
+    activation_mode: str
     dependency_name: Optional[str] = None
     load_mode: Optional[str] = None
     resource_effects: Tuple[str, ...] = ()
@@ -242,6 +250,7 @@ class HardwareOperationDescriptor:
             self.implementation_status,
             IMPLEMENTATION_STATUSES,
         )
+        _validate_member("activation mode", self.activation_mode, ACTIVATION_MODES)
         if self.implementation_status in (
             "qualification_required",
             "planned",
@@ -301,6 +310,7 @@ class HardwareOperationDescriptor:
             "lifetime_policy": self.lifetime_policy,
             "update_policy": self.update_policy,
             "implementation_status": self.implementation_status,
+            "activation_mode": self.activation_mode,
             "dtypes": self.dtypes,
             "shapes_or_tiles": self.shapes_or_tiles,
             "layouts": self.layouts,
@@ -468,6 +478,7 @@ def _operation(
     workspace_ownership,
     implementation_status,
     *,
+    activation_mode,
     dependency_name=None,
     resource_effects=(),
     lifetime_policy="implementation_defined",
@@ -498,6 +509,7 @@ def _operation(
         stream_binding=stream_binding,
         workspace_ownership=workspace_ownership,
         implementation_status=implementation_status,
+        activation_mode=activation_mode,
         dependency_name=dependency_name,
         resource_effects=tuple(resource_effects),
         lifetime_policy=lifetime_policy,
@@ -531,6 +543,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=("read:source_buffers", "write:destination_buffers"),
         lifetime_policy="runtime_generation",
         update_policy="rebind",
@@ -553,6 +566,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=("read:geometry", "write:color", "write:depth"),
         lifetime_policy="resource_generation",
         update_policy="immutable",
@@ -589,6 +603,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=(
             "read:geometry",
             "write:acceleration_structure",
@@ -620,6 +635,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=(
             "read:geometry",
             "read_write:acceleration_structure",
@@ -652,6 +668,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=(
             "read:acceleration_structure",
             "read:rays",
@@ -688,6 +705,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "planned",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read:acceleration_structure",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
@@ -718,6 +736,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read:texture",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
@@ -761,6 +780,7 @@ _OPERATIONS = (
         "current",
         "none",
         "planned",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read:texture",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
@@ -791,6 +811,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read_write:target",),
         lifetime_policy="runtime_generation",
         update_policy="per_dispatch",
@@ -818,6 +839,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read_write:target",),
         lifetime_policy="runtime_generation",
         update_policy="per_dispatch",
@@ -845,6 +867,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         lifetime_policy="runtime_generation",
         update_policy="immutable",
         dtypes=("i32", "u32 mask", "f32 shuffle"),
@@ -870,6 +893,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         lifetime_policy="runtime_generation",
         update_policy="immutable",
         dtypes=("i32/u32", "f32 capability-dependent"),
@@ -896,6 +920,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read_write:block_local_storage",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
@@ -922,6 +947,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_kernel_intrinsic",
         resource_effects=("read_write:block_local_cache",),
         lifetime_policy="runtime_generation",
         update_policy="per_dispatch",
@@ -948,6 +974,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_internal",
+        activation_mode="compiler_automatic",
         resource_effects=("read:lane_values", "atomic:destination",),
         lifetime_policy="runtime_generation",
         update_policy="per_dispatch",
@@ -972,6 +999,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_internal",
+        activation_mode="compiler_automatic",
         resource_effects=("read:active_lanes", "atomic:list_counter", "write:list_entries"),
         lifetime_policy="runtime_generation",
         update_policy="per_dispatch",
@@ -996,6 +1024,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=("read:a", "read:b", "write:output"),
         lifetime_policy="runtime_generation",
         update_policy="rebind",
@@ -1032,6 +1061,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "none",
         "planned",
+        activation_mode="explicit_kernel_intrinsic",
         lifetime_policy="runtime_generation",
         update_policy="immutable",
         requirements=(
@@ -1061,6 +1091,7 @@ _OPERATIONS = (
         "explicit",
         "caller_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         resource_effects=("read_write:external_buffer",),
         lifetime_policy="resource_generation",
         update_policy="rebind",
@@ -1086,6 +1117,7 @@ _OPERATIONS = (
         "explicit",
         "none",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         dependency_name="cuBLAS",
         resource_effects=("read:inputs", "read_write:output"),
         lifetime_policy="runtime_generation",
@@ -1116,6 +1148,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="domain_api_auto_provider",
         dependency_name="cuSPARSE",
         resource_effects=("read:sparse_matrix", "read:input", "write:output"),
         lifetime_policy="resource_generation",
@@ -1146,6 +1179,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         dependency_name="cuSPARSE",
         resource_effects=("read:sparse_matrix", "read:input", "write:output"),
         lifetime_policy="resource_generation",
@@ -1176,6 +1210,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="domain_api_auto_provider",
         dependency_name="cuSOLVER",
         resource_effects=("read:system", "write:solution", "write:workspace"),
         lifetime_policy="provider_plan",
@@ -1212,6 +1247,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "provider_owned",
         "existing_public",
+        activation_mode="explicit_hardware_api",
         dependency_name="cuFFT",
         resource_effects=("read:input", "write:output", "write:workspace"),
         lifetime_policy="provider_plan",
@@ -1244,6 +1280,7 @@ _OPERATIONS = (
         "explicit",
         "provider_owned",
         "planned",
+        activation_mode="explicit_hardware_api",
         dependency_name="OptiX",
         resource_effects=("read:scene", "read:rays", "write:hits"),
         lifetime_policy="provider_plan",
@@ -1275,6 +1312,7 @@ _OPERATIONS = (
         "explicit",
         "caller_owned",
         "reference_only",
+        activation_mode="explicit_hardware_api",
         dependency_name="CCCL/CUB",
         resource_effects=("read:input", "write:output", "write:workspace"),
         lifetime_policy="call",
@@ -1298,6 +1336,7 @@ _OPERATIONS = (
         "current",
         "none",
         "existing_internal",
+        activation_mode="compiler_automatic",
         dtypes=("i32", "u32", "f32", "i64", "u64", "f64"),
         shapes_or_tiles=("compiler-generated struct-for BLS >= 8192 bytes",),
         lifetime_policy="runtime_generation",
@@ -1328,6 +1367,7 @@ _OPERATIONS = (
         "runtime_ordered",
         "graph_owned",
         "planned",
+        activation_mode="compiler_automatic",
         resource_effects=("read:geometry", "write:raster_primitives"),
         lifetime_policy="graph_generation",
         update_policy="rebind",

@@ -47,7 +47,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
 
     assert tuple(operation.operation_id for operation in operations) == _OPERATION_IDS
     assert all(
-        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 1 for operation in operations
+        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 2 for operation in operations
     )
     assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
     assert ti.hardware.DEPENDENCY_TIERS == (
@@ -57,6 +57,12 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
     )
     assert "wheel_variant" not in ti.hardware.DEPENDENCY_TIERS
     assert ti.hardware.LOAD_MODES == ("built_in", "runtime_lazy", "build_only")
+    assert ti.hardware.ACTIVATION_MODES == (
+        "explicit_hardware_api",
+        "explicit_kernel_intrinsic",
+        "domain_api_auto_provider",
+        "compiler_automatic",
+    )
     assert all(operation.backends for operation in operations)
     assert all(operation.scopes for operation in operations)
     assert all(operation.provider_id for operation in operations)
@@ -72,6 +78,62 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         )
     with pytest.raises(ValueError, match="load_mode must match"):
         replace(ti.hardware.capability("linalg.gemm.cublas"), load_mode="built_in")
+    with pytest.raises(ValueError, match="activation mode"):
+        replace(
+            ti.hardware.capability("linalg.gemm.cublas"),
+            activation_mode="automatic_or_maybe_manual",
+        )
+
+
+def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
+    by_id = {
+        operation.operation_id: operation
+        for operation in ti.hardware.operations()
+    }
+    expected = {
+        "domain_api_auto_provider": {
+            "linalg.spmv.cusparse",
+            "linalg.solve.cusolver",
+        },
+        "compiler_automatic": {
+            "internal.reduction.grouped.cuda_vulkan",
+            "internal.listgen.subgroup_ballot.vulkan",
+            "internal.tile.async.cuda",
+            "internal.raster.mesh_shader.vulkan",
+        },
+        "explicit_kernel_intrinsic": {
+            "ray.query.inline.vulkan",
+            "sampling.texture.vulkan",
+            "sampling.texture.cuda",
+            "kernel.atomic.cuda",
+            "kernel.atomic.vulkan",
+            "kernel.simt.warp.cuda",
+            "kernel.simt.subgroup.vulkan",
+            "kernel.shared_memory.cuda_vulkan",
+            "kernel.block_local.cuda",
+            "matrix.mma.vulkan",
+        },
+    }
+    for mode, operation_ids in expected.items():
+        assert {
+            operation_id
+            for operation_id, operation in by_id.items()
+            if operation.activation_mode == mode
+        } == operation_ids
+    explicit = {
+        operation_id
+        for operation_id, operation in by_id.items()
+        if operation.activation_mode == "explicit_hardware_api"
+    }
+    assert explicit == set(by_id).difference(
+        set().union(*expected.values())
+    )
+    assert by_id["linalg.spmv.cusparse"].activation_mode == (
+        "domain_api_auto_provider"
+    )
+    assert by_id["linalg.spmv.cusparse_explicit"].activation_mode == (
+        "explicit_hardware_api"
+    )
 
 
 def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
@@ -305,7 +367,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "cub_reference" in provider_ids
     assert all(provider.operation_ids for provider in providers)
     assert next(provider for provider in providers if provider.provider_id == "cublas").to_dict() == {
-        "schema_version": 1,
+        "schema_version": 2,
         "provider_id": "cublas",
         "dependency_tier": "lazy_external",
         "dependency_name": "cuBLAS",
@@ -322,11 +384,12 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     descriptor = ti.hardware.capability("matrix.mma.vulkan")
     payload = descriptor.to_dict()
 
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == 2
     assert payload["operation_id"] == descriptor.operation_id
     assert "tuple enumeration" in payload["requirements"][1]
     assert payload["hardware_acceleration"] == "implementation_defined"
     assert payload["implementation_status"] == "planned"
+    assert payload["activation_mode"] == "explicit_kernel_intrinsic"
     assert payload["load_mode"] == "built_in"
     assert payload["resource_effects"] == ()
     assert payload["lifetime_policy"] == "runtime_generation"
@@ -362,7 +425,7 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     ti.reset()
     report = ti.hardware.report()
 
-    assert report.schema_version == 1
+    assert report.schema_version == 2
     assert report.runtime_initialized is False
     assert report.backend is None
     assert report.external_components_probed is False

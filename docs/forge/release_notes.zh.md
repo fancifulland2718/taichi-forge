@@ -43,9 +43,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-- 新增 `ti.hardware` schema-v1 静态 operation/provider 合同、无副作用 `report()` 与显式
+- 新增 `ti.hardware` schema-v2 静态 operation/provider 合同、无副作用 `report()` 与显式
   D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider；
-  被动 report 可观察已被实际算法加载的 singleton 状态，但不会触发 loader。
+  被动 report 可观察已被实际算法加载的 singleton 状态，但不会触发 loader。schema 用
+  `activation_mode` 区分显式 hardware API、显式 kernel intrinsic、用户请求领域 operation
+  后的自动 provider 选择，以及完全自动的 compiler/runtime 优化。
 - 新增可选 D1 `ti.hardware.linalg.gemm_f32`，通过 direct Python 与 root Graph 对 compact
   row-major f32 matrix 执行 `C = alpha * A @ B + beta * C`。真实执行才 lazy-load 用户的
   兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、
@@ -57,6 +59,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   `CusparseSpmvRecording` 路线，支持调用方持有 output，并在复用 matrix-owned provider
   state 的同时录入 root Graph。所有路线都不是 kernel rewrite，vendor library 继续保持
   可选且不捆绑。
+- 资格化 CUDA `cuBLAS -> kernel -> cuSPARSE -> kernel` 与 Vulkan
+  `AS refit -> batch Ray Query` 的 source-ordered root-Graph 组合。backend command 仍为
+  独立分段 node，不声称 backend-Graph fusion；provider-generation lease 持有 cuSPARSE/AS
+  state，cuSPARSE replay 复用缓存 plan。
 - 在 catalog 中记录现有 D0 kernel 硬件路线并明确其调用边界：atomic、CUDA warp、Vulkan
   已实现的 subgroup 子集、`SharedArray` 与 `ti.block_local` 是显式的 kernel-inline 语义；
   grouped reduction aggregation 与 opt-in Vulkan list-generation ballot aggregation 是带普通

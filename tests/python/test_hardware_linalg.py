@@ -149,9 +149,114 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     np.testing.assert_allclose(output.to_numpy(), expected)
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
     assert graph._spec.lifetime_leases
+    stats = matrix._debug_runtime_stats()
+    assert stats["operations"]["spmv_calls"] == 2
+    assert stats["operations"]["spmv_handle_creations"] == 1
+    assert stats["operations"]["spmv_plan_builds"] == 1
+    assert stats["operations"]["spmv_plan_reuses"] == 1
+    if stats["provider"]["spmv_preprocess_available"]:
+        assert stats["operations"]["spmv_preprocess_builds"] == 1
+        assert stats["operations"]["spmv_preprocess_reuses"] == 1
 
     wrong = ti.ndarray(ti.f32, shape=n + 1)
     with pytest.raises(RuntimeError, match="shape"):
         ti.hardware.linalg.spmv_f32(matrix, wrong, output)
     with pytest.raises(RuntimeError, match="must not alias"):
         ti.hardware.linalg.spmv_f32(matrix, input_array, input_array)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_vendor_commands_preserve_cross_provider_graph_order():
+    if not (
+        ti.hardware.linalg.cublas_is_available()
+        and ti.hardware.linalg.cusparse_is_available()
+    ):
+        pytest.skip("compatible cuBLAS and cuSPARSE libraries are required")
+
+    n = 4
+    sparse_builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=n
+    )
+
+    @ti.kernel
+    def fill_sparse(a: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            a[i, i] += ti.cast(i + 1, ti.f32)
+
+    @ti.kernel
+    def reduce_rows(
+        matrix: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        vector: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in vector:
+            total = 0.0
+            for j in ti.static(range(n)):
+                total += matrix[i, j]
+            vector[i] = total
+
+    @ti.kernel
+    def finish(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in source:
+            destination[i] = source[i] + 1.0
+
+    fill_sparse(sparse_builder)
+    sparse = sparse_builder.build()
+    a_values = np.arange(1, n * n + 1, dtype=np.float32).reshape(n, n)
+    b_values = np.eye(n, dtype=np.float32) * 0.5
+    a = ti.ndarray(ti.f32, shape=(n, n))
+    b = ti.ndarray(ti.f32, shape=(n, n))
+    dense_output = ti.ndarray(ti.f32, shape=(n, n))
+    row_sums = ti.ndarray(ti.f32, shape=n)
+    sparse_output = ti.ndarray(ti.f32, shape=n)
+    result = ti.ndarray(ti.f32, shape=n)
+    a.from_numpy(a_values)
+    b.from_numpy(b_values)
+
+    dense_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "dense_output", ti.f32, ndim=2
+    )
+    rows_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "row_sums", ti.f32, ndim=1
+    )
+    sparse_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "sparse_output", ti.f32, ndim=1
+    )
+    result_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        ti.hardware.linalg.CublasGemmRecording(
+            n, n, n, output="dense_output"
+        ),
+        admission="auto",
+    )
+    builder.dispatch(reduce_rows, dense_arg, rows_arg)
+    builder.append_native(
+        ti.hardware.linalg.CusparseSpmvRecording(
+            sparse, input="row_sums", output="sparse_output"
+        ),
+        admission="auto",
+    )
+    builder.dispatch(finish, sparse_arg, result_arg)
+    graph = builder.compile()
+    graph.run(
+        {
+            "a": a,
+            "b": b,
+            "dense_output": dense_output,
+            "row_sums": row_sums,
+            "sparse_output": sparse_output,
+            "result": result,
+        }
+    )
+    ti.sync()
+
+    expected_dense = a_values @ b_values
+    expected_rows = expected_dense.sum(axis=1)
+    expected = expected_rows * np.arange(1, n + 1, dtype=np.float32) + 1
+    np.testing.assert_allclose(result.to_numpy(), expected, rtol=1e-6)
+    assert graph._debug_info["optimization"]["backend_command_nodes"] == 2

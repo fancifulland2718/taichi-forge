@@ -243,7 +243,7 @@ current modules.
 | Dense, sparse, solver, and FFT algorithms | Existing `ti.linalg` or `ti.algorithms` entry points | Python and Graph scope, with provider selection on the domain operation. |
 | CUDA-Vulkan memory and semaphore sharing | Existing `ti.interop` | Python and Graph resource scope. |
 
-Hardware Capability schema v1 currently provides:
+Hardware Capability schema v2 currently provides:
 
 ```python
 ti.hardware.report()
@@ -347,7 +347,7 @@ happened to be installed.
 
 ## Hardware Capability schema
 
-Hardware Capability schema v1 is independent of the existing Primitive
+Hardware Capability schema v2 is independent of the existing Primitive
 Capability schema. Primitive operations may reference a hardware provider ID
 later, but the primitive schema is not version-bumped merely to duplicate
 deployment fields.
@@ -373,6 +373,7 @@ classification:
     provider_class
     execution_class
     hardware_acceleration
+    activation_mode
 
 execution:
     scope
@@ -406,6 +407,19 @@ Static descriptors define stable semantics. Native probes provide runtime
 facts. Python code may normalize the result but must not infer an extension,
 ABI, or hardware unit from vendor name or compute capability alone.
 
+`activation_mode` is the non-negotiable automatic/manual boundary:
+
+| Mode | Who initiates the work | Example |
+| --- | --- | --- |
+| `explicit_hardware_api` | The caller explicitly invokes a Python/Graph hardware command or resource. | `ti.hardware.linalg.gemm_f32`, `RasterPass`, batch Ray Query. |
+| `explicit_kernel_intrinsic` | The kernel author explicitly writes an intrinsic or hint; lowering is inline. | atomics, `SharedArray`, texture sampling, `ti.block_local`. |
+| `domain_api_auto_provider` | The caller requests a domain operation; that implementation selects the hardware provider. | CUDA `SparseMatrix @ ndarray`, `SparseSolver`. |
+| `compiler_automatic` | Compiler/runtime recognition selects an optimization behind existing semantics. | grouped reduction, Vulkan listgen ballot, qualified `cp.async`. |
+
+The mode says how a route is activated, not whether the eventual instruction
+is guaranteed. `hardware_acceleration`, exact requirements, and fallback fields
+remain separate qualification axes.
+
 ## Graph, RHI, resources, and lifetime
 
 Hardware resources and executable operations extend the existing NativeAction
@@ -430,6 +444,29 @@ recordable action with an executable backend contract.
 Resources become invalid after their owning runtime generation is reset. A
 Graph compiled against one provider ABI, device, or resource generation must
 not replay against another without an admitted rebind or rebuild.
+
+### Current root-Graph composition boundary
+
+Automatic-admissible backend commands preserve source order with adjacent
+Taichi CGraph stages and other provider commands. Qualification now exercises
+both a CUDA `cuBLAS -> kernel -> cuSPARSE -> kernel` chain and a Vulkan
+`AS refit -> batch Ray Query` chain. The latter relies on the scene-generation
+lease plus the provider's internal AS barriers; public vertex/ray/hit arrays
+retain their declared effects. Closing a resource or resetting its runtime
+invalidates the composed Graph before replay.
+
+This ordering is not backend fusion. A backend-command append flushes the
+ordinary CGraph builder and remains a distinct native-command node. Multiple
+commands can therefore share one root Graph contract and one submission
+lifetime while still producing segmented backend work. Manifests and
+`backend_command_nodes` expose the exact count; documentation and benchmarks
+must not report it as one CUDA Graph or one Vulkan command buffer. Structured
+`Sequential` admission remains unsupported for these commands.
+
+Provider caches also remain provider-owned. Replaying explicit cuSPARSE SpMV
+reuses the matrix's one handle, descriptors, workspace, and successful optional
+preprocess plan; Graph does not copy or separately budget those resources. The
+matrix-generation lifetime lease is what keeps that state valid.
 
 ### Current M3 Vulkan buffer-command contract
 
@@ -580,8 +617,9 @@ dimensions when calling column-major `cublasSgemm_v2`, binds host scalar mode
 and the Program's default CUDA stream, and retains one handle until Program
 finalization. Direct execution and root-Graph `rerecord` share this route.
 
-`is_available()` performs the existing transient, side-effect-free cuBLAS
-probe. Actual execution separately lazy-loads the user's compatible library;
+`cublas_is_available()` performs the existing transient, side-effect-free
+cuBLAS probe; `is_available()` remains its compatibility alias. Actual
+execution separately lazy-loads the user's compatible library;
 passive `report()` observes that loaded state but never initiates it. The
 provider adds one stable ABI symbol to the existing dynamic table and adds no
 Toolkit header, link dependency, bundled library, package dependency, build
@@ -731,7 +769,7 @@ them.
 
 ### M1: capability schema and read-only report
 
-- implement Hardware Capability schema v1 independently of primitive schema;
+- implement Hardware Capability schema v2 independently of primitive schema;
 - expose immutable descriptors and resolved native probe facts;
 - keep optional-library probing explicit and side-effect-free with respect to
   enablement and selection; and

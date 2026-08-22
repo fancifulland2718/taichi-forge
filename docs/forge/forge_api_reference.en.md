@@ -25,7 +25,10 @@ import taichi_forge as ti
 ### `ti.hardware` capabilities and explicit probes (0.6.3 in development)
 
 `ti.hardware.operations()`, `capability(operation_id)`, and `providers()`
-return immutable schema-v1 static contracts. `report()` returns a passive
+return immutable schema-v2 static contracts. Every operation has an
+`activation_mode` that separates four cases without reading prose:
+`explicit_hardware_api`, `explicit_kernel_intrinsic`,
+`domain_api_auto_provider`, and `compiler_automatic`. `report()` returns a passive
 runtime snapshot without loading, enabling, or selecting an optional provider.
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
 current cuBLAS, cuSPARSE, and cuSOLVER probes check exact symbols through a
@@ -85,7 +88,8 @@ operands to preserve the documented row-major result, binds the Program's
 default CUDA stream, and reuses one handle per Program.
 
 The compatible cuBLAS shared library is lazy-loaded only by real execution;
-`is_available()` uses the explicit transient probe, and passive `report()`
+`cublas_is_available()` uses the explicit transient probe (`is_available()` is
+its compatibility alias), and passive `report()`
 does not load it. Forge copies the stable ABI declarations but includes no
 Toolkit header, link dependency, bundled library, package dependency, build
 switch, or wheel variant. The API is direct/root-Graph only: it is not
@@ -2146,6 +2150,14 @@ slot, or do not qualify the current backend fail before submission.
 Consecutive ordinary CGraph and compatible recordable-provider segments are
 compiled as one backend region; conflicting fixed or private bindings fail
 before backend work is submitted.
+
+`BackendCommandRecording` actions are the explicit exception: each append
+flushes an ordinary CGraph segment and remains a separate native-command node.
+The root Graph preserves ordering and lifetime across those nodes, but does not
+claim CUDA-Graph/Vulkan-command-buffer fusion. CUDA cuBLAS/cuSPARSE composition
+and Vulkan AS-refit/query composition are correctness-qualified in this
+segmented form. Backend commands remain unsupported inside a structured
+`Sequential`.
 
 The default `admission="explicit"` preserves backward compatibility for
 provider-local native nodes. It does not make a segmented provider part of one

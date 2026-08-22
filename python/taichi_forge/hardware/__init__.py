@@ -3,6 +3,7 @@
 from taichi_forge.hardware import fft, linalg, matrix, raster, ray
 
 from taichi_forge.hardware._capabilities import (
+    ACTIVATION_MODES,
     DEPENDENCY_TIERS,
     DISCOVERY_STATES,
     ENABLEMENT_STATES,
@@ -33,6 +34,7 @@ from taichi_forge.hardware._capabilities import (
 )
 
 __all__ = [
+    "ACTIVATION_MODES",
     "DEPENDENCY_TIERS",
     "DISCOVERY_STATES",
     "ENABLEMENT_STATES",

@@ -21,8 +21,11 @@ import taichi_forge as ti
 
 ### `ti.hardware` capability 与显式 probe（0.6.3 开发中）
 
-`ti.hardware.operations()`、`capability(operation_id)` 与 `providers()` 返回 schema-v1
-不可变静态合同。`report()` 返回只读 runtime snapshot，不加载、启用或选择可选 provider。
+`ti.hardware.operations()`、`capability(operation_id)` 与 `providers()` 返回 schema-v2
+不可变静态合同。每个 operation 都用机器可读的 `activation_mode` 区分四种情况：
+`explicit_hardware_api`、`explicit_kernel_intrinsic`、
+`domain_api_auto_provider` 与 `compiler_automatic`。`report()` 返回只读 runtime
+snapshot，不加载、启用或选择可选 provider。
 `probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；当前 cuBLAS、cuSPARSE、
 cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续 selection。
 若实际算法此前已经 lazy-load 某库，被动 `report()` 会观察其缓存状态并报告
@@ -72,8 +75,9 @@ CUDA runtime 上互不 alias 的 compact scalar f32 ndarray。执行时交换 op
 column-major cuBLAS SGEMM 映射为文档规定的 row-major 结果，绑定 Program 默认 CUDA
 stream，并在每个 Program 内复用一个 handle。
 
-只有真实执行才 lazy-load 兼容 cuBLAS shared library；`is_available()` 使用显式瞬时
-probe，被动 `report()` 不加载它。Forge 只复制稳定 ABI 声明，不包含 Toolkit header、
+只有真实执行才 lazy-load 兼容 cuBLAS shared library；`cublas_is_available()` 使用显式
+瞬时 probe（`is_available()` 是兼容 alias），被动 `report()` 不加载它。Forge 只复制稳定
+ABI 声明，不包含 Toolkit header、
 link dependency、bundled library、package dependency、新 build switch 或 wheel 变体。
 该 API 只支持 direct/root-Graph，不能在 kernel 内调用，也不会改写普通矩阵乘法。
 
@@ -1792,6 +1796,12 @@ workspace requirement；Graph 为每个 invocation 分配有界 arena storage，
 不能绑定当前 slot 或尚未资格化当前 backend 的 provider 会在提交前明确失败。
 连续的 ordinary CGraph 与兼容 recordable-provider segment 会编译为一个 backend region；
 fixed/private binding 冲突会在提交 backend work 前明确失败。
+
+`BackendCommandRecording` action 是明确例外：每次 append 都会 flush ordinary CGraph
+segment，并保留为独立 native-command node。root Graph 维持这些 node 之间的顺序与
+lifetime，但不声称 CUDA-Graph/Vulkan-command-buffer fusion。CUDA cuBLAS/cuSPARSE 组合
+以及 Vulkan AS-refit/query 组合已按这种分段形式通过正确性资格；backend command 仍不支持
+放入 structured `Sequential`。
 
 默认 `admission="explicit"` 为 provider-local native node 保持向后兼容，但不会把 segmented
 provider 变成同一个 backend Graph 的一部分。生产自动选择应使用 `admission="auto"`；

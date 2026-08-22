@@ -131,21 +131,21 @@ def test_vulkan_triangle_ray_refit_executes_directly_and_through_graph():
     ) == (("positions", GraphAccess.READ),)
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
+    builder.append_native(scene.record(1), admission="auto")
     graph = builder.compile()
-    graph.run({"positions": updated})
-    ti.sync()
-    scene.trace(rays, hits)
+    graph.run({"positions": updated, "rays": rays, "hits": hits})
     ti.sync()
     np.testing.assert_allclose(
         hits.to_numpy(), np.array([[0.5, 0, 0, 1]], dtype=np.float32), atol=1e-5
     )
+    assert graph._debug_info["optimization"]["backend_command_nodes"] == 2
 
     wrong_vertices = ti.ndarray(ti.f32, shape=(4, 3))
     with pytest.raises(RuntimeError, match="wrong vertex count"):
         scene.refit(wrong_vertices)
     scene.close()
     with pytest.raises(RuntimeError, match="closed"):
-        graph.run({"positions": updated})
+        graph.run({"positions": updated, "rays": rays, "hits": hits})
 
 
 @test_utils.test(arch=ti.vulkan)

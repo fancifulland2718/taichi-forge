@@ -384,6 +384,7 @@ user_api[ti.algorithms] = [
     "sort_by_key",
 ]
 user_api[ti.hardware] = [
+    "ACTIVATION_MODES",
     "DEPENDENCY_TIERS",
     "DISCOVERY_STATES",
     "ENABLEMENT_STATES",
@@ -407,9 +408,14 @@ user_api[ti.hardware] = [
     "UPDATE_POLICIES",
     "WORKSPACE_OWNERSHIP",
     "capability",
+    "fft",
+    "linalg",
+    "matrix",
     "operations",
     "probe",
     "providers",
+    "raster",
+    "ray",
     "report",
 ]
 user_api[ti.Field] = [
