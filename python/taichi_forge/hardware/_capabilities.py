@@ -957,6 +957,8 @@ def _build_provider_catalog():
 
 
 _PROVIDERS = _build_provider_catalog()
+_PROVIDERS_BY_ID = MappingProxyType({provider.provider_id: provider for provider in _PROVIDERS})
+_TRANSIENT_NATIVE_PROVIDERS = frozenset(("cublas", "cusparse", "cusolver"))
 
 
 def operations():
@@ -980,6 +982,15 @@ def providers():
     """Return immutable provider group descriptors without probing libraries."""
 
     return _PROVIDERS
+
+
+def _provider(provider_id):
+    if not isinstance(provider_id, str) or not provider_id:
+        raise TypeError("provider_id must be a nonempty string")
+    try:
+        return _PROVIDERS_BY_ID[provider_id]
+    except KeyError as exc:
+        raise KeyError(f"unknown hardware provider: {provider_id}") from exc
 
 
 def _runtime_facts():
@@ -1026,7 +1037,7 @@ def _passive_resolution(descriptor, *, runtime_initialized, backend, compiled_ba
             descriptor=descriptor,
             backend=backend,
             runtime_initialized=runtime_initialized,
-            discovery="present",
+            discovery=None,
             enablement="disabled",
             selection="not_considered",
             unavailable_reason="external_probe_not_requested",
@@ -1099,6 +1110,80 @@ def _passive_resolution(descriptor, *, runtime_initialized, backend, compiled_ba
     )
 
 
+def _unimplemented_external_probe_resolution(descriptor, *, runtime_initialized, backend):
+    return ResolvedHardwareOperation(
+        descriptor=descriptor,
+        backend=backend,
+        runtime_initialized=runtime_initialized,
+        discovery=None,
+        enablement="disabled",
+        selection="not_considered",
+        unavailable_reason="native_probe_not_implemented",
+        native_facts={
+            "probe_policy": "explicit",
+            "external_component_probed": False,
+            "provider_enablement_changed": False,
+            "provider_selection_changed": False,
+        },
+    )
+
+
+def _failed_external_probe_resolution(descriptor, *, runtime_initialized, backend, error):
+    return ResolvedHardwareOperation(
+        descriptor=descriptor,
+        backend=backend,
+        runtime_initialized=runtime_initialized,
+        discovery="incompatible",
+        enablement="disabled",
+        selection="not_considered",
+        unavailable_reason="native_probe_failed",
+        native_facts={
+            "probe_policy": "explicit_transient_load",
+            "external_component_probed": True,
+            "provider_enablement_changed": False,
+            "provider_selection_changed": False,
+        },
+        last_error=str(error) or type(error).__name__,
+        failure_scope="provider",
+    )
+
+
+def _native_external_probe(provider_id):
+    from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+
+    return dict(_ti_core.probe_cuda_external_library(provider_id))
+
+
+def _explicit_external_probe_resolution(descriptor, *, runtime_initialized, backend, native_result):
+    try:
+        if native_result.get("provider_id") != descriptor.provider_id:
+            raise ValueError("native probe returned a mismatched provider_id")
+        native_facts = dict(native_result["native_facts"])
+        external_component_probed = bool(native_result["external_component_probed"])
+        native_facts["external_component_probed"] = external_component_probed
+        return ResolvedHardwareOperation(
+            descriptor=descriptor,
+            backend=backend,
+            runtime_initialized=runtime_initialized,
+            discovery=native_result["discovery"],
+            enablement="disabled",
+            selection="not_considered",
+            unavailable_reason=native_result["unavailable_reason"],
+            native_facts=native_facts,
+            provider_abi=native_result.get("provider_abi"),
+            provider_version=native_result.get("provider_version"),
+            last_error=native_result.get("last_error"),
+            failure_scope=native_result.get("failure_scope"),
+        )
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        return _failed_external_probe_resolution(
+            descriptor,
+            runtime_initialized=runtime_initialized,
+            backend=backend,
+            error=exc,
+        )
+
+
 def report():
     """Return a passive report without loading or enabling optional providers."""
 
@@ -1117,6 +1202,85 @@ def report():
             for descriptor in _OPERATIONS
         ),
         external_components_probed=False,
+    )
+
+
+def probe(provider_id):
+    """Explicitly probe one D1 provider without enabling or selecting it.
+
+    Existing CUDA library probes use a transient native library handle and do
+    not mutate the runtime provider singleton. Planned providers fail closed
+    until they acquire an equally side-effect-free native probe.
+    """
+
+    provider = _provider(provider_id)
+    if provider.dependency_tier != "lazy_external":
+        raise ValueError("only lazy_external providers support runtime probing")
+
+    runtime_initialized, backend, compiled_backends = _runtime_facts()
+    passive = tuple(
+        _passive_resolution(
+            descriptor,
+            runtime_initialized=runtime_initialized,
+            backend=backend,
+            compiled_backends=compiled_backends,
+        )
+        for descriptor in _OPERATIONS
+    )
+    provider_operations = tuple(operation for operation in _OPERATIONS if operation.provider_id == provider_id)
+    provider_backends_compiled = all(
+        compiled_backends[backend_name] for operation in provider_operations for backend_name in operation.backends
+    )
+    if not provider_backends_compiled:
+        resolved_provider_operations = {
+            operation.descriptor.operation_id: operation
+            for operation in passive
+            if operation.descriptor.provider_id == provider_id
+        }
+    elif provider_id not in _TRANSIENT_NATIVE_PROVIDERS:
+        resolved_provider_operations = {
+            descriptor.operation_id: _unimplemented_external_probe_resolution(
+                descriptor,
+                runtime_initialized=runtime_initialized,
+                backend=backend,
+            )
+            for descriptor in provider_operations
+        }
+    else:
+        try:
+            native_result = _native_external_probe(provider_id)
+        except Exception as exc:  # Native loader failures must remain inspectable.
+            resolved_provider_operations = {
+                descriptor.operation_id: _failed_external_probe_resolution(
+                    descriptor,
+                    runtime_initialized=runtime_initialized,
+                    backend=backend,
+                    error=exc,
+                )
+                for descriptor in provider_operations
+            }
+        else:
+            resolved_provider_operations = {
+                descriptor.operation_id: _explicit_external_probe_resolution(
+                    descriptor,
+                    runtime_initialized=runtime_initialized,
+                    backend=backend,
+                    native_result=native_result,
+                )
+                for descriptor in provider_operations
+            }
+
+    operations = tuple(
+        resolved_provider_operations.get(operation.descriptor.operation_id, operation) for operation in passive
+    )
+    return HardwareCapabilityReport(
+        runtime_initialized=runtime_initialized,
+        backend=backend,
+        compiled_backends=compiled_backends,
+        operations=operations,
+        external_components_probed=any(
+            operation.native_facts.get("external_component_probed", False) for operation in operations
+        ),
     )
 
 
@@ -1146,5 +1310,6 @@ __all__ = [
     "capability",
     "operations",
     "providers",
+    "probe",
     "report",
 ]

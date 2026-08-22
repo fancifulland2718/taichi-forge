@@ -860,6 +860,13 @@ if(TI_WITH_PYTHON)
     # Remove symbols from static libs: https://stackoverflow.com/a/14863432/12003165
     if (LINUX)
         target_link_options(${CORE_WITH_PYBIND_LIBRARY_NAME} PUBLIC -Wl,--exclude-libs=ALL)
+        if (TI_WITH_CUDA)
+            # Explicit hardware provider probes use transient dlopen/dlsym
+            # handles in the pybind shim and must not depend on private split
+            # runtime C++ symbols.
+            target_link_libraries(${CORE_WITH_PYBIND_LIBRARY_NAME}
+                PRIVATE ${CMAKE_DL_LIBS})
+        endif()
         if (NOT ANDROID)
             # Excluding Android
             # Android defaults to static linking with libc++, no tinkering needed.

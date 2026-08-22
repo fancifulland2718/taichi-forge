@@ -25,6 +25,7 @@ from taichi_forge.hardware._capabilities import (
     ResolvedHardwareOperation,
     capability,
     operations,
+    probe,
     providers,
     report,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "WORKSPACE_OWNERSHIP",
     "capability",
     "operations",
+    "probe",
     "providers",
     "report",
 ]

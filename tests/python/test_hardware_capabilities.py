@@ -162,7 +162,11 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     assert descriptor.requirements == ("VK_KHR_cooperative_matrix",)
 
 
-def test_passive_report_does_not_probe_or_enable_external_components():
+def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch):
+    def reject_implicit_probe(_provider_id):
+        raise AssertionError("passive reports must not invoke a native D1 probe")
+
+    monkeypatch.setattr(_capabilities, "_native_external_probe", reject_implicit_probe)
     ti.reset()
     report = ti.hardware.report()
 
@@ -175,6 +179,8 @@ def test_passive_report_does_not_probe_or_enable_external_components():
 
     by_id = {operation.descriptor.operation_id: operation for operation in report.operations}
     cublas = by_id["linalg.gemm.cublas"]
+    if cublas.unavailable_reason == "external_probe_not_requested":
+        assert cublas.discovery is None
     assert cublas.enablement == "disabled"
     assert cublas.selection == "not_considered"
     assert cublas.unavailable_reason in (
@@ -206,6 +212,139 @@ def test_multibackend_core_route_requires_every_backend(monkeypatch):
     assert interop.selection == "rejected"
     assert interop.unavailable_reason == "backend_not_compiled"
     assert interop.native_facts["provider_backends_compiled"] == ("cuda",)
+
+
+def _native_probe_payload(discovery, unavailable_reason, **overrides):
+    payload = {
+        "provider_id": "cublas",
+        "external_component_probed": True,
+        "discovery": discovery,
+        "unavailable_reason": unavailable_reason,
+        "provider_abi": None,
+        "provider_version": None,
+        "last_error": None,
+        "failure_scope": None,
+        "native_facts": {
+            "probe_policy": "explicit_transient_load",
+            "provider_enablement_changed": False,
+            "provider_selection_changed": False,
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.parametrize(
+    (
+        "native_payload",
+        "expected_discovery",
+        "expected_reason",
+        "expected_failure_scope",
+    ),
+    [
+        (
+            _native_probe_payload(
+                "available",
+                "none",
+                provider_abi="cublas-dynamic-symbols-v1",
+            ),
+            "available",
+            "none",
+            None,
+        ),
+        (
+            _native_probe_payload("missing", "external_library_not_found"),
+            "missing",
+            "external_library_not_found",
+            None,
+        ),
+        (
+            _native_probe_payload(
+                "incompatible",
+                "required_provider_symbol_missing",
+                provider_abi="cublas-dynamic-symbols-v1",
+                last_error="required provider symbol missing: cublasCreate_v2",
+                failure_scope="provider",
+            ),
+            "incompatible",
+            "required_provider_symbol_missing",
+            "provider",
+        ),
+    ],
+)
+def test_explicit_external_probe_normalizes_native_facts_without_enabling(
+    monkeypatch,
+    native_payload,
+    expected_discovery,
+    expected_reason,
+    expected_failure_scope,
+):
+    monkeypatch.setattr(
+        _capabilities,
+        "_runtime_facts",
+        lambda: (False, None, {"cuda": True, "vulkan": True}),
+    )
+    monkeypatch.setattr(_capabilities, "_native_external_probe", lambda provider_id: native_payload)
+
+    report = ti.hardware.probe("cublas")
+    cublas = next(operation for operation in report.operations if operation.descriptor.provider_id == "cublas")
+
+    assert cublas.discovery == expected_discovery
+    assert cublas.unavailable_reason == expected_reason
+    assert cublas.failure_scope == expected_failure_scope
+    assert cublas.enablement == "disabled"
+    assert cublas.selection == "not_considered"
+    assert cublas.native_facts["external_component_probed"] is True
+    assert cublas.native_facts["provider_enablement_changed"] is False
+    assert cublas.native_facts["provider_selection_changed"] is False
+    assert report.external_components_probed is True
+
+
+def test_explicit_external_probe_failures_remain_provider_scoped(monkeypatch):
+    monkeypatch.setattr(
+        _capabilities,
+        "_runtime_facts",
+        lambda: (False, None, {"cuda": True, "vulkan": True}),
+    )
+
+    def fail_probe(_provider_id):
+        raise RuntimeError("isolated loader failure")
+
+    monkeypatch.setattr(_capabilities, "_native_external_probe", fail_probe)
+    report = ti.hardware.probe("cusparse")
+    operation = next(operation for operation in report.operations if operation.descriptor.provider_id == "cusparse")
+
+    assert operation.discovery == "incompatible"
+    assert operation.unavailable_reason == "native_probe_failed"
+    assert operation.last_error == "isolated loader failure"
+    assert operation.failure_scope == "provider"
+    assert operation.enablement == "disabled"
+    assert operation.selection == "not_considered"
+
+
+def test_planned_external_probe_and_invalid_tiers_fail_closed(monkeypatch):
+    monkeypatch.setattr(
+        _capabilities,
+        "_runtime_facts",
+        lambda: (False, None, {"cuda": True, "vulkan": True}),
+    )
+
+    report = ti.hardware.probe("optix")
+    optix = next(operation for operation in report.operations if operation.descriptor.provider_id == "optix")
+    assert optix.discovery is None
+    assert optix.unavailable_reason == "native_probe_not_implemented"
+    assert optix.enablement == "disabled"
+    assert optix.selection == "not_considered"
+    assert report.external_components_probed is False
+
+    with pytest.raises(ValueError, match="only lazy_external"):
+        ti.hardware.probe("vulkan_texture")
+    with pytest.raises(ValueError, match="only lazy_external"):
+        ti.hardware.probe("cub_reference")
+    with pytest.raises(KeyError, match="unknown hardware provider"):
+        ti.hardware.probe("missing")
+    with pytest.raises(TypeError, match="nonempty string"):
+        ti.hardware.probe(None)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)

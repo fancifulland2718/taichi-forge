@@ -25,6 +25,11 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/rhi/cuda/primitives/graph_ptx.h"
 #include "taichi/rhi/cuda/primitives/solver_ptx.h"
+#ifdef WIN32
+#include "taichi/platform/windows/windows.h"
+#else
+#include <dlfcn.h>
+#endif
 #endif
 
 #include "taichi/platform/amdgpu/detect_amdgpu.h"
@@ -45,6 +50,260 @@
 #endif
 
 namespace taichi {
+
+namespace {
+
+#if defined(TI_WITH_CUDA)
+class TransientExternalLibrary {
+ public:
+  explicit TransientExternalLibrary(const std::string &path) {
+#ifdef WIN32
+    handle_ = LoadLibraryA(path.c_str());
+#else
+    handle_ = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+#endif
+  }
+
+  TransientExternalLibrary(const TransientExternalLibrary &) = delete;
+  TransientExternalLibrary &operator=(const TransientExternalLibrary &) =
+      delete;
+
+  ~TransientExternalLibrary() {
+#ifdef WIN32
+    if (handle_ != nullptr) {
+      FreeLibrary(handle_);
+    }
+#else
+    if (handle_ != nullptr) {
+      dlclose(handle_);
+    }
+#endif
+  }
+
+  bool loaded() const {
+    return handle_ != nullptr;
+  }
+
+  void *load_function_optional(const std::string &name) const {
+    if (handle_ == nullptr) {
+      return nullptr;
+    }
+#ifdef WIN32
+    return reinterpret_cast<void *>(GetProcAddress(handle_, name.c_str()));
+#else
+    dlerror();
+    void *symbol = dlsym(handle_, name.c_str());
+    return dlerror() == nullptr ? symbol : nullptr;
+#endif
+  }
+
+ private:
+#ifdef WIN32
+  HMODULE handle_{nullptr};
+#else
+  void *handle_{nullptr};
+#endif
+};
+
+bool external_library_is_loaded(const std::string &path) {
+#ifdef WIN32
+  return GetModuleHandleA(path.c_str()) != nullptr;
+#else
+  void *handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_NOLOAD);
+  if (handle == nullptr) {
+    return false;
+  }
+  dlclose(handle);
+  return true;
+#endif
+}
+
+std::vector<std::string> cuda_external_library_candidates(
+    const std::string &library_name,
+    const std::vector<int> &versions) {
+  std::vector<std::string> candidates;
+  const auto append_unique = [&](const std::string &candidate) {
+    if (std::find(candidates.begin(), candidates.end(), candidate) ==
+        candidates.end()) {
+      candidates.push_back(candidate);
+    }
+  };
+  for (const int version : versions) {
+    if (version <= 0) {
+      continue;
+    }
+#ifdef WIN32
+    append_unique(library_name + "64_" + std::to_string(version) + ".dll");
+#else
+    append_unique("lib" + library_name + ".so." + std::to_string(version));
+#endif
+  }
+#ifndef WIN32
+  append_unique("lib" + library_name + ".so");
+#endif
+  return candidates;
+}
+
+py::dict probe_cuda_external_library(const std::string &provider_id) {
+  if (provider_id != "cublas" && provider_id != "cusparse" &&
+      provider_id != "cusolver") {
+    throw std::invalid_argument("unsupported CUDA external provider: " +
+                                provider_id);
+  }
+
+  py::dict result;
+  py::dict native_facts;
+  result["provider_id"] = provider_id;
+  result["external_component_probed"] = false;
+  result["discovery"] = "missing";
+  result["unavailable_reason"] = "cuda_driver_not_loaded";
+  result["provider_abi"] = py::none();
+  result["provider_version"] = py::none();
+  result["last_error"] = py::none();
+  result["failure_scope"] = py::none();
+  native_facts["probe_policy"] = "explicit_transient_load";
+  native_facts["provider_enablement_changed"] = false;
+  native_facts["provider_selection_changed"] = false;
+
+  auto &cuda_driver = lang::CUDADriver::get_instance_without_context();
+  if (!cuda_driver.detected()) {
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  }
+
+  const int cuda_major = cuda_driver.get_version_major();
+  std::string library_name;
+  std::vector<int> versions;
+  std::string provider_abi;
+  std::vector<std::string> required_symbols;
+  std::vector<std::string> optional_symbols;
+  if (provider_id == "cublas") {
+    library_name = "cublas";
+    versions = {cuda_major, cuda_major - 1, 11, 10};
+    provider_abi = "cublas-dynamic-symbols-v1";
+#define PER_CUBLAS_FUNCTION(name, symbol_name, ...) \
+  required_symbols.emplace_back(#symbol_name)
+#include "taichi/rhi/cuda/cublas_functions.inc.h"
+#undef PER_CUBLAS_FUNCTION
+    optional_symbols = {"cublasSetWorkspace_v2", "cublasSetWorkspace"};
+  } else if (provider_id == "cusparse") {
+    library_name = "cusparse";
+    versions = {cuda_major, cuda_major - 1};
+    provider_abi = "cusparse-dynamic-symbols-v1";
+#define PER_CUSPARSE_FUNCTION(name, symbol_name, ...) \
+  required_symbols.emplace_back(#symbol_name)
+#include "taichi/rhi/cuda/cusparse_functions.inc.h"
+#undef PER_CUSPARSE_FUNCTION
+    optional_symbols = {"cusparseGetProperty", "cusparseCreateBsr",
+                        "cusparseSpMV_preprocess"};
+  } else {
+    library_name = "cusolver";
+    versions = {cuda_major, cuda_major - 1};
+    provider_abi = "cusolver-dynamic-symbols-v1";
+#define PER_CUSOLVER_FUNCTION(name, symbol_name, ...) \
+  required_symbols.emplace_back(#symbol_name)
+#include "taichi/rhi/cuda/cusolver_functions.inc.h"
+#undef PER_CUSOLVER_FUNCTION
+  }
+
+  const auto candidates =
+      cuda_external_library_candidates(library_name, versions);
+  std::unique_ptr<TransientExternalLibrary> loader;
+  std::string selected_candidate;
+  bool library_loaded_before = false;
+  for (const auto &candidate : candidates) {
+    const bool candidate_loaded_before = external_library_is_loaded(candidate);
+    auto candidate_loader =
+        std::make_unique<TransientExternalLibrary>(candidate);
+    if (candidate_loader->loaded()) {
+      selected_candidate = candidate;
+      library_loaded_before = candidate_loaded_before;
+      loader = std::move(candidate_loader);
+      break;
+    }
+  }
+  native_facts["library_candidates"] = candidates;
+  if (!loader) {
+    result["external_component_probed"] = true;
+    result["unavailable_reason"] = "external_library_not_found";
+    native_facts["library_loaded_transiently"] = false;
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  }
+
+  native_facts["library_loaded_transiently"] = true;
+  native_facts["library_candidate"] = selected_candidate;
+  native_facts["library_loaded_before"] = library_loaded_before;
+  native_facts["required_symbol_count"] = required_symbols.size();
+  std::vector<std::string> missing_required_symbols;
+  for (const auto &symbol : required_symbols) {
+    if (loader->load_function_optional(symbol) == nullptr) {
+      missing_required_symbols.push_back(symbol);
+    }
+  }
+  native_facts["missing_required_symbols"] = missing_required_symbols;
+
+  py::dict optional_symbol_facts;
+  for (const auto &symbol : optional_symbols) {
+    optional_symbol_facts[py::str(symbol)] =
+        loader->load_function_optional(symbol) != nullptr;
+  }
+  native_facts["optional_symbols"] = std::move(optional_symbol_facts);
+  result["external_component_probed"] = true;
+  result["provider_abi"] = provider_abi;
+
+  if (!missing_required_symbols.empty()) {
+    result["discovery"] = "incompatible";
+    result["unavailable_reason"] = "required_provider_symbol_missing";
+    result["last_error"] =
+        "required provider symbol missing: " + missing_required_symbols.front();
+    result["failure_scope"] = "provider";
+    loader.reset();
+    native_facts["library_loaded_after"] =
+        external_library_is_loaded(selected_candidate);
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  }
+
+  int version_major = -1;
+  int version_minor = -1;
+  int version_patch = -1;
+  bool version_query_succeeded = false;
+  if (provider_id == "cusparse") {
+    auto *symbol = loader->load_function_optional("cusparseGetProperty");
+    if (symbol != nullptr) {
+      using GetProperty = int (*)(int, int *);
+      auto get_property = reinterpret_cast<GetProperty>(symbol);
+      version_query_succeeded = get_property(0, &version_major) == 0 &&
+                                get_property(1, &version_minor) == 0 &&
+                                get_property(2, &version_patch) == 0;
+    }
+  } else if (provider_id == "cusolver") {
+    auto *symbol = loader->load_function_optional("cusolverGetProperty");
+    if (symbol != nullptr) {
+      using GetProperty = int (*)(int, void *);
+      auto get_property = reinterpret_cast<GetProperty>(symbol);
+      version_query_succeeded = get_property(0, &version_major) == 0 &&
+                                get_property(1, &version_minor) == 0 &&
+                                get_property(2, &version_patch) == 0;
+    }
+  }
+  native_facts["version_query_succeeded"] = version_query_succeeded;
+  if (version_query_succeeded) {
+    result["provider_version"] =
+        fmt::format("{}.{}.{}", version_major, version_minor, version_patch);
+  }
+  result["discovery"] = "available";
+  result["unavailable_reason"] = "none";
+  loader.reset();
+  native_facts["library_loaded_after"] =
+      external_library_is_loaded(selected_candidate);
+  result["native_facts"] = std::move(native_facts);
+  return result;
+}
+#endif
+
+}  // namespace
 
 void test_raise_error() {
   raise_assertion_failure_in_python("Just a test.");
@@ -72,6 +331,32 @@ void print_all_units() {
 }
 
 void export_misc(py::module &m) {
+#if defined(TI_WITH_CUDA)
+  m.def("probe_cuda_external_library", &probe_cuda_external_library);
+#else
+  m.def("probe_cuda_external_library", [](const std::string &provider_id) {
+    if (provider_id != "cublas" && provider_id != "cusparse" &&
+        provider_id != "cusolver") {
+      throw std::invalid_argument("unsupported CUDA external provider: " +
+                                  provider_id);
+    }
+    py::dict native_facts;
+    native_facts["probe_policy"] = "explicit_transient_load";
+    native_facts["provider_enablement_changed"] = false;
+    native_facts["provider_selection_changed"] = false;
+    py::dict result;
+    result["provider_id"] = provider_id;
+    result["external_component_probed"] = false;
+    result["discovery"] = "missing";
+    result["unavailable_reason"] = "cuda_backend_not_compiled";
+    result["provider_abi"] = py::none();
+    result["provider_version"] = py::none();
+    result["last_error"] = py::none();
+    result["failure_scope"] = py::none();
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  });
+#endif
   py::class_<Config>(m, "Config");  // NOLINT(bugprone-unused-raii)
   py::register_exception_translator([](std::exception_ptr p) {
     try {

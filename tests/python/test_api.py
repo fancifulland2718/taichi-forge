@@ -408,6 +408,7 @@ user_api[ti.hardware] = [
     "WORKSPACE_OWNERSHIP",
     "capability",
     "operations",
+    "probe",
     "providers",
     "report",
 ]
