@@ -177,6 +177,28 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     )
     assert "kernel calls remain unsupported" in matrix.notes[0]
 
+    cusparse = ti.hardware.capability("linalg.spmv.cusparse")
+    assert cusparse.implementation_status == "existing_public"
+    assert cusparse.scopes == ("python",)
+    assert cusparse.graph_support == "unsupported"
+    assert cusparse.stream_binding == "runtime_ordered"
+    assert cusparse.workspace_ownership == "provider_owned"
+    assert cusparse.public_api == "ti.linalg.SparseMatrix.__matmul__"
+    assert "selects cuSPARSE automatically on CUDA" in cusparse.notes[0]
+
+    cusolver = ti.hardware.capability("linalg.solve.cusolver")
+    assert cusolver.implementation_status == "existing_public"
+    assert cusolver.scopes == ("python",)
+    assert cusolver.graph_support == "unsupported"
+    assert cusolver.stream_binding == "runtime_ordered"
+    assert cusolver.workspace_ownership == "provider_owned"
+    assert cusolver.public_api == "ti.linalg.SparseSolver"
+    assert "selects this provider automatically" in cusolver.notes[0]
+    assert cusolver.requirements == (
+        "compatible cuSOLVER shared library",
+        "compatible cuSPARSE shared library",
+    )
+
     async_tile = ti.hardware.capability("internal.tile.async.cuda")
     assert async_tile.implementation_status == "existing_internal"
     assert async_tile.hardware_acceleration == "qualified"

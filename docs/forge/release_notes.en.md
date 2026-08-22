@@ -58,6 +58,12 @@ grouped under the behavior they shipped.
   Program; Forge adds no Toolkit header, link dependency, bundled runtime,
   package dependency, build switch, or wheel variant. Ordinary matrix
   multiplication and kernels are not rewritten.
+- Qualified two existing D1 CUDA sparse routes in the hardware catalog:
+  `SparseMatrix @ ndarray` automatically selects cuSPARSE SpMV, while
+  `SparseSolver` automatically selects cuSPARSE plus cuSOLVER after the user
+  explicitly requests the domain operation. Both are direct Python APIs, not
+  kernel rewrites or Graph actions, and keep vendor libraries optional and
+  unbundled.
 - Official wheel builds and validation reject making D1/D2 vendor runtimes a
   required dependency or a new distribution variant; the D0 CUDA/Vulkan
   runtime boundary is unchanged.

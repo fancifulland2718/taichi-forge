@@ -64,6 +64,28 @@ Toolkit header, link dependency, bundled library, package dependency, build
 switch, or wheel variant. The API is direct/root-Graph only: it is not
 kernel-callable and ordinary matrix multiplication is never rewritten.
 
+### Existing CUDA sparse provider selection (0.6.3 qualification)
+
+Two existing `ti.linalg` domain APIs already select optional vendor libraries
+on CUDA; these are not new `ti.hardware` commands:
+
+- `SparseMatrix @ ndarray` executes f32 scalar-CSR cuSPARSE SpMV (and the
+  qualified fixed-block BSR slice). The matrix resource caches its provider
+  handle, dense-vector descriptors, workspace, and optional SpMV preprocessing
+  across calls. This stored-matrix route is direct Python execution, not a
+  recordable Graph action.
+- `ti.linalg.SparseSolver` selects cuSPARSE plus cuSOLVER on CUDA. Explicit
+  `analyze_pattern()`, `factorize()`, and `solve()` stages own the provider
+  plan/workspace. The current f32 scalar-CSR slice maps LLT/LDLT to its sparse
+  Cholesky path and LU to a host-assisted sparse LU path; it is not
+  Graph-recordable.
+
+Both routes lazy-load user-provided compatible libraries only when their
+domain objects are used. They add no Python package requirement, linked or
+bundled vendor library, build switch, or wheel variant. This is automatic
+provider selection inside an explicitly requested sparse operation—not a
+compiler rewrite of arbitrary kernels.
+
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 
 These D0 APIs describe and submit one Vulkan RHI buffer-command sequence:

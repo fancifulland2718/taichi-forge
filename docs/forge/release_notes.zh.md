@@ -51,6 +51,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、
   link dependency、bundled runtime、package dependency、build switch 或 wheel 变体，
   也不会改写普通 matrix multiplication 或 kernel。
+- 在 hardware catalog 中资格化两条已有 D1 CUDA sparse 路线：用户显式请求领域操作后，
+  `SparseMatrix @ ndarray` 自动选择 cuSPARSE SpMV，`SparseSolver` 自动选择 cuSPARSE 与
+  cuSOLVER。两者都是 direct Python API，不是 kernel rewrite 或 Graph action，并继续让
+  vendor library 保持可选且不捆绑。
 - 官方 wheel 构建与验证会拒绝 D1/D2 vendor runtime 成为必需依赖或新增发行变体；D0
   CUDA/Vulkan runtime 边界保持不变。
 - 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式
