@@ -157,9 +157,22 @@ class VulkanResourceSet : public ShaderResourceSet {
     }
   };
 
+  struct AccelerationStructure {
+    vkapi::IVkAccelerationStructureKHR acceleration_structure{nullptr};
+
+    bool operator==(const AccelerationStructure &rhs) const {
+      return acceleration_structure == rhs.acceleration_structure;
+    }
+
+    bool operator!=(const AccelerationStructure &rhs) const {
+      return !(*this == rhs);
+    }
+  };
+
   struct Binding {
     VkDescriptorType type{VK_DESCRIPTOR_TYPE_MAX_ENUM};
-    std::variant<Buffer, Image, Texture, BufferArray> res{Buffer()};
+    std::variant<Buffer, Image, Texture, BufferArray, AccelerationStructure> res{
+        Buffer()};
 
     bool operator==(const Binding &other) const {
       return other.type == type && other.res == res;
@@ -186,6 +199,10 @@ class VulkanResourceSet : public ShaderResourceSet {
         for (const auto &b : ba->buffers) {
           rhi_impl::hash_combine(hash, (void *)b.get());
         }
+      } else if (const AccelerationStructure *as =
+                     std::get_if<AccelerationStructure>(&res)) {
+        rhi_impl::hash_combine(
+            hash, (void *)as->acceleration_structure.get());
       }
       return hash;
     }
@@ -269,6 +286,13 @@ class VulkanResourceSet : public ShaderResourceSet {
   ShaderResourceSet &rw_buffer_array(
       uint32_t binding,
       const std::vector<DeviceAllocation> &allocs) final;
+
+  // Vulkan-only descriptor used by explicit ray-query providers. This is not
+  // part of the backend-neutral ShaderResourceSet contract because other
+  // backends expose different acceleration-structure object models.
+  VulkanResourceSet &acceleration_structure(
+      uint32_t binding,
+      vkapi::IVkAccelerationStructureKHR acceleration_structure);
 
   rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> finalize();
   RhiResult prepare_for_replay(bool patch_existing) final;
@@ -790,6 +814,9 @@ struct VulkanCapabilities {
   bool present_mode_fifo_latest_ready{false};
   bool descriptor_update_after_bind{false};
   bool conditional_rendering{false};
+  bool buffer_device_address{false};
+  bool acceleration_structure{false};
+  bool ray_query{false};
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
@@ -931,6 +958,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   AllocUsage allocation_usage(DeviceAllocation handle) const {
     return get_alloc_internal(handle).usage;
   }
+
+  VkDeviceAddress get_buffer_device_address(DeviceAllocation handle) const;
 
   void set_interop_cleanup_callbacks(
       InteropAllocationReleaseCallback allocation_release,

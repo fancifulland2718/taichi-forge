@@ -1,6 +1,7 @@
 #include "taichi/rhi/vulkan/vulkan_device_creator.h"
 
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -627,6 +628,34 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   vkEnumerateDeviceExtensionProperties(
       physical_device_, nullptr, &extension_count, extension_properties.data());
 
+  const auto has_device_extension = [&](const char *extension_name) {
+    return std::any_of(
+        extension_properties.begin(), extension_properties.end(),
+        [&](const VkExtensionProperties &extension) {
+          return std::strcmp(extension.extensionName, extension_name) == 0;
+        });
+  };
+  const auto extension_was_requested = [&](const char *extension_name) {
+    return std::find(params_.additional_device_extensions.begin(),
+                     params_.additional_device_extensions.end(),
+                     extension_name) !=
+           params_.additional_device_extensions.end();
+  };
+  // Keep the first hardware-ray slice deliberately narrow: Vulkan 1.2 gives
+  // us core SPIR-V 1.4 and buffer-device-address dependencies, while the three
+  // KHR extensions below provide AS construction and inline shader queries.
+  // Explicitly configured devices retain their existing opt-in contract.
+  const bool ray_extension_cluster_requested =
+      !manual_create ||
+      (extension_was_requested(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+       extension_was_requested(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+       extension_was_requested(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME));
+  const bool ray_extension_cluster_available =
+      vk_api_version >= VK_API_VERSION_1_2 && ray_extension_cluster_requested &&
+      has_device_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
+      has_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+      has_device_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+
   bool has_swapchain = false;
   // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
   // object still needs the platform-specific handle extension, so report the
@@ -728,6 +757,11 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     } else if (name == VK_KHR_8BIT_STORAGE_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_16BIT_STORAGE_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if (ray_extension_cluster_available &&
+               (name == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ||
+                name == VK_KHR_RAY_QUERY_EXTENSION_NAME ||
+                name == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (std::find(params_.additional_device_extensions.begin(),
                          params_.additional_device_extensions.end(),
@@ -834,6 +868,13 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       buffer_device_address_feature{};
   buffer_device_address_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
+  VkPhysicalDeviceAccelerationStructureFeaturesKHR
+      acceleration_structure_feature{};
+  acceleration_structure_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+  VkPhysicalDeviceRayQueryFeaturesKHR ray_query_feature{};
+  ray_query_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
@@ -968,8 +1009,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       features2.pNext = &buffer_device_address_feature;
       query_physical_device_features2(&features2);
 
-      if (CHECK_VERSION(1, 3) ||
-          buffer_device_address_feature.bufferDeviceAddress) {
+      if (buffer_device_address_feature.bufferDeviceAddress) {
+        ti_device_->vk_caps().buffer_device_address = true;
         if (device_supported_features.shaderInt64) {
 // Temporarily disable it on macOS:
 // https://github.com/taichi-dev/taichi/issues/6295
@@ -981,6 +1022,28 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       }
       *pNextEnd = &buffer_device_address_feature;
       pNextEnd = &buffer_device_address_feature.pNext;
+    }
+
+    // Acceleration structures and ray queries are one atomic provider
+    // capability. Never advertise a partially enabled extension cluster.
+    if (ray_extension_cluster_available &&
+        ti_device_->vk_caps().buffer_device_address) {
+      features2.pNext = &acceleration_structure_feature;
+      query_physical_device_features2(&features2);
+      features2.pNext = &ray_query_feature;
+      query_physical_device_features2(&features2);
+
+      if (acceleration_structure_feature.accelerationStructure &&
+          ray_query_feature.rayQuery) {
+        acceleration_structure_feature.accelerationStructure = VK_TRUE;
+        ray_query_feature.rayQuery = VK_TRUE;
+        *pNextEnd = &acceleration_structure_feature;
+        pNextEnd = &acceleration_structure_feature.pNext;
+        *pNextEnd = &ray_query_feature;
+        pNextEnd = &ray_query_feature.pNext;
+        ti_device_->vk_caps().acceleration_structure = true;
+        ti_device_->vk_caps().ray_query = true;
+      }
     }
 
     // Dynamic rendering

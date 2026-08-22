@@ -368,6 +368,9 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
           set.rw_image(desc_binding->binding, kDeviceNullAllocation, {});
+        } else if (desc_binding->descriptor_type ==
+                   SPV_REFLECT_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
+          set.acceleration_structure(desc_binding->binding, nullptr);
         } else {
           RHI_LOG_ERROR("Unrecognized binding ignored");
         }
@@ -793,6 +796,15 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
   return *this;
 }
 
+VulkanResourceSet &VulkanResourceSet::acceleration_structure(
+    uint32_t binding,
+    vkapi::IVkAccelerationStructureKHR acceleration_structure) {
+  set_binding(binding,
+              {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+               AccelerationStructure{std::move(acceleration_structure)}});
+  return *this;
+}
+
 RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize() {
   return finalize_impl(/*replay_dedicated=*/false,
                        /*patch_existing=*/false);
@@ -862,6 +874,8 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
 
   std::forward_list<VkDescriptorBufferInfo> buffer_infos;
   std::forward_list<VkDescriptorImageInfo> image_infos;
+  std::forward_list<VkWriteDescriptorSetAccelerationStructureKHR>
+      acceleration_structure_infos;
   // C-2.5 (2026-05): per-BufferArray storage. Each binding owns its own
   // contiguous std::vector; the std::list keeps inner vectors stable in
   // memory across emplaces so VkWriteDescriptorSet::pBufferInfo remains
@@ -951,6 +965,20 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
         }
         write.descriptorCount = static_cast<uint32_t>(infos.size());
         write.pBufferInfo = infos.data();
+      } else if (AccelerationStructure *as =
+                     std::get_if<AccelerationStructure>(&resource)) {
+        auto &as_info = acceleration_structure_infos.emplace_front();
+        as_info.sType =
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+        as_info.pNext = nullptr;
+        as_info.accelerationStructureCount = 1;
+        as_info.pAccelerationStructures = as->acceleration_structure
+                                              ? &as->acceleration_structure->accel
+                                              : nullptr;
+        write.pNext = &as_info;
+        if (as->acceleration_structure) {
+          set_->ref_binding_objs.push_back(as->acceleration_structure);
+        }
       } else {
         RHI_LOG_ERROR("Ignoring unsupported Descriptor Type");
       }
@@ -2161,6 +2189,24 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   if (int(params.usage & AllocUsage::Conditional)) {
     buffer_info.usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
   }
+  if (int(params.usage & AllocUsage::AccelerationStructureBuildInput)) {
+    buffer_info.usage |=
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+  }
+  if (int(params.usage & AllocUsage::AccelerationStructureStorage)) {
+    buffer_info.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
+  }
+  const bool needs_device_address =
+      int(params.usage & AllocUsage::DeviceAddress) ||
+      int(params.usage & AllocUsage::AccelerationStructureBuildInput) ||
+      int(params.usage & AllocUsage::AccelerationStructureStorage);
+  if (needs_device_address) {
+    if (!vk_caps().buffer_device_address) {
+      allocations_.release(&alloc);
+      return RhiResult::not_supported;
+    }
+    buffer_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+  }
 
   uint32_t queue_family_indices[] = {compute_queue_family_index_,
                                      graphics_queue_family_index_};
@@ -2248,7 +2294,8 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   alloc.mapped_offset = 0;
   alloc.mapped_size = VK_WHOLE_SIZE;
 
-  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer)) {
+  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) ||
+      needs_device_address) {
     VkBufferDeviceAddressInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
     info.buffer = alloc.buffer->buffer;
@@ -2258,6 +2305,11 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
 
   *out_devalloc = DeviceAllocation{this, (uint64_t)&alloc};
   return RhiResult::success;
+}
+
+VkDeviceAddress VulkanDevice::get_buffer_device_address(
+    DeviceAllocation handle) const {
+  return get_alloc_internal(handle).addr;
 }
 
 RhiResult VulkanDevice::map_internal(AllocationInternal &alloc_int,
@@ -3299,7 +3351,12 @@ DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
   alloc_int.usage = usage;
   alloc_int.buffer = buffer;
   alloc_int.mapped = nullptr;
-  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer)) {
+  const bool import_needs_device_address =
+      int(usage & AllocUsage::DeviceAddress) ||
+      int(usage & AllocUsage::AccelerationStructureBuildInput) ||
+      int(usage & AllocUsage::AccelerationStructureStorage);
+  if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) ||
+      import_needs_device_address) {
     VkBufferDeviceAddressInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     info.buffer = buffer->buffer;
@@ -3822,6 +3879,10 @@ RhiResult VulkanDevice::new_descriptor_pool_locked() {
       {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 128},
       {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 128},
       {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 128}};
+  if (vk_caps().acceleration_structure) {
+    pool_sizes.push_back(
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64});
+  }
   VkDescriptorPoolCreateInfo pool_info = {};
   pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;

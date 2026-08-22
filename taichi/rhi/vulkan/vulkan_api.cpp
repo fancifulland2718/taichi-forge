@@ -94,7 +94,9 @@ DeviceObjVkAccelerationStructureKHR::~DeviceObjVkAccelerationStructureKHR() {
           taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
           "vkDestroyAccelerationStructureKHR"));
 
-  destroy_raytracing_pipeline_khr(device, accel, nullptr);
+  if (destroy_raytracing_pipeline_khr != nullptr && accel != VK_NULL_HANDLE) {
+    destroy_raytracing_pipeline_khr(device, accel, nullptr);
+  }
 }
 DeviceObjVkQueryPool::~DeviceObjVkQueryPool() {
   vkDestroyQueryPool(device, query_pool, nullptr);
@@ -653,6 +655,9 @@ IVkAccelerationStructureKHR create_acceleration_structure(
           taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
           "vkCreateAccelerationStructureKHR"));
 
+  if (create_acceleration_structure_khr == nullptr) {
+    return nullptr;
+  }
   VkResult res = create_acceleration_structure_khr(buffer->device, &info,
                                                    nullptr, &obj->accel);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res,

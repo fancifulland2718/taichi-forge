@@ -661,6 +661,12 @@ enum class AllocUsage : int {
   Upload = 16,
   Indirect = 32,
   Conditional = 64,
+  // Vulkan ray acceleration structures consume device addresses and require
+  // distinct usage bits for their build inputs and opaque storage. Backends
+  // without a matching hardware primitive may safely ignore these flags.
+  AccelerationStructureBuildInput = 128,
+  AccelerationStructureStorage = 256,
+  DeviceAddress = 512,
 };
 
 MAKE_ENUM_FLAGS(AllocUsage)
