@@ -77,24 +77,27 @@ probe，被动 `report()` 不加载它。Forge 只复制稳定 ABI 声明，不�
 link dependency、bundled library、package dependency、新 build switch 或 wheel 变体。
 该 API 只支持 direct/root-Graph，不能在 kernel 内调用，也不会改写普通矩阵乘法。
 
-### 现有 CUDA sparse provider selection（0.6.3 资格化）
+### CUDA sparse provider selection 与显式 SpMV（0.6.3 资格化）
 
-两个已有的 `ti.linalg` 领域 API 会在 CUDA 上自动选择可选 vendor library；它们不是新增
-的 `ti.hardware` command：
+两个已有的 `ti.linalg` 领域 API 会在 CUDA 上自动选择可选 vendor library：
 
 - `SparseMatrix @ ndarray` 执行 f32 scalar-CSR cuSPARSE SpMV（以及已资格化的
   fixed-block BSR 切片）。matrix resource 会跨调用缓存 provider handle、dense-vector
-  descriptor、workspace 与可选 SpMV preprocessing。当前 stored-matrix 路线是 direct
-  Python execution，不是 recordable Graph action。
+  descriptor、workspace 与可选 SpMV preprocessing。这条自动领域路线仍为 direct Python。
+- `ti.hardware.linalg.spmv_f32(matrix, input, output)` 把同一 stored-matrix operation
+  写入调用方提供的 output；`CusparseSpmvRecording(matrix)` 可把该手动操作作为 root-Graph
+  backend command，带显式读写 effect 与 matrix-generation lifetime lease。每次 Graph run
+  重录一个 runtime-ordered cuSPARSE command，同时复用 matrix 持有的 handle、descriptor、
+  workspace 与 preprocessing。
 - `ti.linalg.SparseSolver` 在 CUDA 上选择 cuSPARSE 与 cuSOLVER。显式的
   `analyze_pattern()`、`factorize()`、`solve()` 阶段持有 provider plan/workspace。当前
   f32 scalar-CSR 切片把 LLT/LDLT 映射到 sparse Cholesky 路线，把 LU 映射到 host-assisted
   sparse LU；它不支持 Graph recording。
 
-两条路线都只在实际使用相应领域对象时 lazy-load 用户提供的兼容 library，不新增 Python
+所有路线都只在实际使用相应领域对象时 lazy-load 用户提供的兼容 library，不新增 Python
 package requirement、链接或捆绑的 vendor library、build switch 或 wheel 变体。这属于
-“用户显式请求 sparse operation 后，领域 API 自动选择 provider”，不是编译器改写任意
-kernel。
+“用户显式请求 sparse operation 后，领域 API 自动选择 provider”，另有一条独立的手动
+direct/root-Graph 接口；它们都不是编译器改写任意 kernel，也都不能在 kernel 内调用。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 

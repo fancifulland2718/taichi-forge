@@ -31,6 +31,7 @@ _OPERATION_IDS = (
     "interop.external_buffer.cuda_vulkan",
     "linalg.gemm.cublas",
     "linalg.spmv.cusparse",
+    "linalg.spmv.cusparse_explicit",
     "linalg.solve.cusolver",
     "fft.transform.cufft",
     "ray.query.batch.optix",
@@ -248,6 +249,17 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cusparse.workspace_ownership == "provider_owned"
     assert cusparse.public_api == "ti.linalg.SparseMatrix.__matmul__"
     assert "selects cuSPARSE automatically on CUDA" in cusparse.notes[0]
+
+    explicit_cusparse = ti.hardware.capability(
+        "linalg.spmv.cusparse_explicit"
+    )
+    assert explicit_cusparse.implementation_status == "existing_public"
+    assert explicit_cusparse.scopes == ("python", "graph")
+    assert explicit_cusparse.graph_support == "recordable"
+    assert explicit_cusparse.stream_binding == "runtime_ordered"
+    assert explicit_cusparse.workspace_ownership == "provider_owned"
+    assert explicit_cusparse.public_api == "ti.hardware.linalg.spmv_f32"
+    assert "manual hardware interface" in explicit_cusparse.notes[2]
 
     cusolver = ti.hardware.capability("linalg.solve.cusolver")
     assert cusolver.implementation_status == "existing_public"

@@ -61,8 +61,10 @@ grouped under the behavior they shipped.
 - Qualified two existing D1 CUDA sparse routes in the hardware catalog:
   `SparseMatrix @ ndarray` automatically selects cuSPARSE SpMV, while
   `SparseSolver` automatically selects cuSPARSE plus cuSOLVER after the user
-  explicitly requests the domain operation. Both are direct Python APIs, not
-  kernel rewrites or Graph actions, and keep vendor libraries optional and
+  explicitly requests the domain operation. Added the separate manual
+  `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route for caller-owned
+  output and root-Graph recording over the existing matrix-owned provider
+  state. None is a kernel rewrite; vendor libraries remain optional and
   unbundled.
 - Cataloged existing D0 kernel hardware routes and made their call boundary
   explicit. Atomics, CUDA warp operations, the implemented Vulkan subgroup

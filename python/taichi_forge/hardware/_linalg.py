@@ -1,4 +1,4 @@
-"""Optional CUDA cuBLAS dense linear-algebra provider."""
+"""Optional CUDA vendor linear-algebra providers."""
 
 import math
 from numbers import Real
@@ -214,6 +214,184 @@ class _CublasGemmNode(NativeGraphNode):
         return _CublasGemmExecutable(self._recording)
 
 
+class CusparseSpmvRecording(BackendCommandRecording):
+    """One f32 stored-matrix SpMV executed by the user's cuSPARSE."""
+
+    def __init__(self, matrix, *, input="input", output="output"):
+        from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
+            SparseMatrix,
+        )
+
+        if not isinstance(matrix, SparseMatrix):
+            raise TypeError("CUDA cuSPARSE SpMV matrix must be a SparseMatrix")
+        matrix._ensure_valid()  # pylint: disable=W0212
+        contract = matrix._get_format_contract()  # pylint: disable=W0212
+        identity = contract["identity"]
+        if identity["backend_family"] != "cuda":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV requires a CUDA SparseMatrix; the matrix "
+                f"backend is {identity['backend_family']}"
+            )
+        if identity["storage_format"] not in ("csr", "bsr"):
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV requires scalar CSR or fixed-block BSR "
+                "storage"
+            )
+        if identity["dtype"] != "f32":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV requires an f32 SparseMatrix"
+            )
+        if not contract["operations"]["ndarray_spmv"]:
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV is unavailable for this SparseMatrix"
+            )
+        names = (input, output)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError(
+                "CUDA cuSPARSE binding names must be nonempty strings"
+            )
+        if input == output:
+            raise ValueError("CUDA cuSPARSE binding names must be unique")
+        super().__init__(
+            backend="cuda",
+            binding_names=names,
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="declared_effects",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "input", input)
+        object.__setattr__(self, "output", output)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.input, GraphAccess.READ),
+            ResourceEffect(self.output, GraphAccess.WRITE),
+        )
+
+    @staticmethod
+    def _validate_array(value, name, shape):
+        if not isinstance(value, Ndarray):
+            raise TaichiRuntimeError(
+                f"CUDA cuSPARSE binding {name!r} must be a Taichi ndarray"
+            )
+        program = impl.get_runtime().prog
+        if value.arr is None or value._runtime_prog is not program:
+            raise TaichiRuntimeError(
+                f"CUDA cuSPARSE binding {name!r} belongs to another "
+                "Taichi runtime"
+            )
+        if (
+            value.dtype != f32
+            or tuple(value.element_shape) != ()
+            or tuple(value.shape) != shape
+        ):
+            raise TaichiRuntimeError(
+                f"CUDA cuSPARSE binding {name!r} must have compact scalar "
+                f"f32 shape {shape}"
+            )
+        return value.arr
+
+    def execute(self, bindings):
+        required = frozenset(self.binding_names)
+        provided = frozenset(bindings)
+        if provided != required:
+            missing = sorted(required.difference(provided))
+            unexpected = sorted(provided.difference(required))
+            details = []
+            if missing:
+                details.append("missing " + ", ".join(missing))
+            if unexpected:
+                details.append("unexpected " + ", ".join(unexpected))
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE bindings do not match the recording: "
+                + "; ".join(details)
+            )
+        if _active_backend() != "cuda":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV requires the CUDA backend; the active "
+                f"backend is {_active_backend()}"
+            )
+        program = impl.get_runtime().prog
+        if program is None:
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV requires an active runtime"
+            )
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+        input_value = bindings[self.input]
+        output_value = bindings[self.output]
+        input_array = self._validate_array(
+            input_value, self.input, (self.matrix.m,)
+        )
+        output_array = self._validate_array(
+            output_value, self.output, (self.matrix.n,)
+        )
+        if (
+            input_value._runtime_allocation_identity
+            == output_value._runtime_allocation_identity
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMV output must not alias the input"
+            )
+        self.matrix.matrix.spmv(program, input_array, output_array)
+
+    def validate_graph_lifetime(self):
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+
+    def _as_graph_native_node(self):
+        return _CusparseSpmvNode(self)
+
+
+class _CusparseSpmvExecutable(NativeGraphExecutable):
+    def __init__(self, recording):
+        self._recording = recording
+        self._action = BackendCommandGraphAction(recording)
+
+    def run(self, runtime_args):
+        return self._recording.execute(runtime_args)
+
+    @property
+    def runtime_arg_schema(self):
+        return tuple(
+            RuntimeBinding(name, "ndarray")
+            for name in self._recording.binding_names
+        )
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def lifetime_leases(self):
+        return (self._recording,)
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        contract = self._recording.matrix._get_format_contract()  # pylint: disable=W0212
+        return {
+            "kind": "cuda_cusparse_spmv_f32",
+            "shape": self._recording.matrix.shape,
+            "storage_format": contract["identity"]["storage_format"],
+        }
+
+
+class _CusparseSpmvNode(NativeGraphNode):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return _CusparseSpmvExecutable(self._recording)
+
+
 def gemm_f32(a, b, output, *, alpha=1.0, beta=0.0):
     """Compute row-major ``output = alpha * a @ b + beta * output``."""
 
@@ -227,6 +405,14 @@ def gemm_f32(a, b, output, *, alpha=1.0, beta=0.0):
         a_shape[0], b_shape[1], a_shape[1], alpha=alpha, beta=beta
     )
     recording.execute({"a": a, "b": b, "output": output})
+    return output
+
+
+def spmv_f32(matrix, input, output):
+    """Compute ``output = matrix @ input`` with stored CUDA cuSPARSE state."""
+
+    recording = CusparseSpmvRecording(matrix)
+    recording.execute({"input": input, "output": output})
     return output
 
 
@@ -246,4 +432,27 @@ def is_available():
     return operation.discovery == "available"
 
 
-__all__ = ["CublasGemmRecording", "gemm_f32", "is_available"]
+def cusparse_is_available():
+    """Explicitly probe whether a compatible cuSPARSE provider is present."""
+
+    if impl.get_runtime().prog is None or _active_backend() != "cuda":
+        return False
+    from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
+
+    report = probe("cusparse")
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.spmv.cusparse_explicit"
+    )
+    return operation.discovery == "available"
+
+
+__all__ = [
+    "CublasGemmRecording",
+    "CusparseSpmvRecording",
+    "cusparse_is_available",
+    "gemm_f32",
+    "is_available",
+    "spmv_f32",
+]

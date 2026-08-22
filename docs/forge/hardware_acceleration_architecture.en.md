@@ -593,7 +593,7 @@ or solvers. Batched/strided GEMM, mixed precision, tensor-core algorithm
 selection, transposed layouts, in-place aliases, kernel calls, and AOT remain
 outside this qualified slice.
 
-### Existing domain-selected cuSPARSE and cuSOLVER routes
+### Domain-selected and explicit cuSPARSE routes
 
 The hardware catalog now describes two pre-existing public routes instead of
 leaving them mislabeled as internal foundations. They illustrate a distinct
@@ -601,22 +601,26 @@ selection boundary:
 
 - the user explicitly requests a sparse domain operation;
 - the `ti.linalg` implementation selects its backend provider automatically;
-- no compiler pass rewrites an unrelated kernel, and there is no public
-  low-level `ti.hardware` instruction call.
+- no compiler pass rewrites an unrelated kernel.
 
 On CUDA, `SparseMatrix @ ndarray` selects cuSPARSE for f32 scalar-CSR SpMV and
 qualified fixed-block BSR SpMV. The matrix resource retains descriptors,
-workspace, and optional preprocessing for repeated direct calls. The stored
-matrix does not expose a recordable Graph action. `SparseSolver` selects both
-cuSPARSE and cuSOLVER, owns analysis/factorization state and workspace, and is
-also direct-only. Its f32 scalar-CSR LLT/LDLT modes use the implementation's
-sparse Cholesky route; LU is host-assisted and includes explicit transfers.
+workspace, and optional preprocessing for repeated direct calls. This remains
+the automatic domain route. Separately,
+`ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` exposes a manual direct or
+root-Graph command over the same stored matrix. Its Graph action declares the
+dense input/output effects, leases the matrix generation, re-records one
+runtime-ordered provider command, and reuses all matrix-owned provider state.
+It is not kernel-callable. `SparseSolver` selects both cuSPARSE and cuSOLVER,
+owns analysis/factorization state and workspace, and remains direct-only. Its
+f32 scalar-CSR LLT/LDLT modes use the implementation's sparse Cholesky route;
+LU is host-assisted and includes explicit transfers.
 
 Both libraries remain D1: real object construction/use lazy-loads the user's
 compatible shared libraries, while passive reporting never does. Qualification
-does not add code, dependencies, linked or bundled libraries, build switches,
-or wheel variants; it corrects discovery and support boundaries around routes
-that already execute in released runtime code.
+adds no dependency, linked or bundled library, build switch, or wheel variant.
+The explicit command is Python/Graph orchestration around the existing native
+provider entry and does not change the provider ABI or loader.
 
 ### Current M7 optional cuFFT qualification boundary
 

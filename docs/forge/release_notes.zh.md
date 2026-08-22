@@ -53,8 +53,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   也不会改写普通 matrix multiplication 或 kernel。
 - 在 hardware catalog 中资格化两条已有 D1 CUDA sparse 路线：用户显式请求领域操作后，
   `SparseMatrix @ ndarray` 自动选择 cuSPARSE SpMV，`SparseSolver` 自动选择 cuSPARSE 与
-  cuSOLVER。两者都是 direct Python API，不是 kernel rewrite 或 Graph action，并继续让
-  vendor library 保持可选且不捆绑。
+  cuSOLVER。另新增独立的手动 `ti.hardware.linalg.spmv_f32`/
+  `CusparseSpmvRecording` 路线，支持调用方持有 output，并在复用 matrix-owned provider
+  state 的同时录入 root Graph。所有路线都不是 kernel rewrite，vendor library 继续保持
+  可选且不捆绑。
 - 在 catalog 中记录现有 D0 kernel 硬件路线并明确其调用边界：atomic、CUDA warp、Vulkan
   已实现的 subgroup 子集、`SharedArray` 与 `ti.block_local` 是显式的 kernel-inline 语义；
   grouped reduction aggregation 与 opt-in Vulkan list-generation ballot aggregation 是带普通

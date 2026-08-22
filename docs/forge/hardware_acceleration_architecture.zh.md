@@ -508,25 +508,29 @@ provider 只使该 command fail，不影响 CUDA 初始化。该命令没有 Gra
 GEMM、mixed precision、tensor-core algorithm selection、transposed layout、in-place alias、
 kernel call 与 AOT 均不在当前资格范围。
 
-### 现有领域自动选择的 cuSPARSE/cuSOLVER 路线
+### 领域自动选择与显式 cuSPARSE 路线
 
 hardware catalog 现在把两条已有公开路线从错误的“内部基础”标签改为精确合同。它们体现
 另一种 selection 边界：
 
 - 用户显式请求 sparse 领域操作；
 - `ti.linalg` 实现根据 backend 自动选择 provider；
-- compiler 不会改写无关 kernel，也不存在公开的低层 `ti.hardware` 指令调用。
+- compiler 不会改写无关 kernel。
 
 在 CUDA 上，`SparseMatrix @ ndarray` 为 f32 scalar-CSR SpMV 和已资格化 fixed-block BSR
 SpMV 选择 cuSPARSE。matrix resource 为重复 direct call 保留 descriptor、workspace 与
-可选 preprocessing；stored matrix 不公开 recordable Graph action。`SparseSolver` 同时选择
-cuSPARSE 与 cuSOLVER，持有 analysis/factorization state 和 workspace，也只支持 direct。
-其 f32 scalar-CSR LLT/LDLT 使用实现中的 sparse Cholesky 路线；LU 为 host-assisted，包含
-显式 transfer。
+可选 preprocessing；这是自动领域路线。作为独立入口，
+`ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 在同一 stored matrix 上公开手动
+direct 或 root-Graph command。Graph action 声明 dense input/output effect、租用 matrix
+generation、每次重录一个 runtime-ordered provider command，并复用所有 matrix-owned
+provider state；它不能在 kernel 内调用。`SparseSolver` 同时选择 cuSPARSE 与 cuSOLVER，
+持有 analysis/factorization state 和 workspace，并继续只支持 direct。其 f32 scalar-CSR
+LLT/LDLT 使用实现中的 sparse Cholesky 路线；LU 为 host-assisted，包含显式 transfer。
 
 两类 library 仍属于 D1：只有真实 object construction/use 才 lazy-load 用户的兼容 shared
-library，被动 report 不加载。该资格化不新增代码、依赖、链接或捆绑的 library、build
-switch 或 wheel 变体；它只校正已在发行 runtime 中执行的路线的 discovery/support 边界。
+library，被动 report 不加载。该资格化不新增依赖、链接或捆绑的 library、build switch
+或 wheel 变体。显式 command 只是已有 native provider entry 的 Python/Graph orchestration，
+不改变 provider ABI 或 loader。
 
 ### 当前 M7 可选 cuFFT 资格边界
 
