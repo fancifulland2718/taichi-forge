@@ -51,6 +51,27 @@ format-matched `rw_texture` storage image；默认 sampler 固定为 linear/repe
 不可配置且不承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为
 texture，CUDA backend 也尚未实现 texture lowering。该 D0 路线不新增 wheel 变体。
 
+### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
+
+显式、可复用的 Vulkan offscreen 硬件光栅 provider：
+
+```python
+with ti.hardware.raster.RasterPass((1280, 720)) as raster:
+    raster.set_camera(camera).ambient_light((0.2, 0.2, 0.2))
+    raster.mesh(vertices, indices=indices, normals=normals, two_sided=True)
+
+    recording = raster.record()  # 固定 draw topology 与 resource binding
+    recording.execute()          # 无 host readback 的 graphics submission
+    rgba = raster.color_numpy()  # 单独、显式的同步 readback
+```
+
+还支持 `mesh_instance()`、`particles()`、`lines()`、`point_light()` 与 `clear()`。
+recording 绑定同一 resource object，但 replay 会读取其最新内容。当前只支持 Vulkan、
+隐藏窗口的 provider-owned color/depth target 与 GGUI 内建 shader；一次 execution 只能被
+`color_numpy()` 或 `depth_numpy()` 之一消费。该对象是 Python native executable，不能在
+kernel 内调用；由于 VBO helper dispatch 和 output binding 尚未并入精确 effect contract，
+`GraphBuilder.append_native()` 会明确拒绝。该 D0 API 不新增依赖或 wheel 变体。
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 为经过资格验证的 Forge `Ndarray`、`DenseNdarrayView` 或 root-dense field 创建显式、

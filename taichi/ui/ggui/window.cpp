@@ -124,6 +124,23 @@ bool Window::can_render_frame() {
          !(gui_ && gui_->has_widgets()) && renderer_->can_accept_frame();
 }
 
+void Window::begin_offscreen_frame() {
+  TI_ERROR_IF(config_.show_window,
+              "Explicit offscreen rendering requires a hidden GGUI window");
+  if (drawn_frame_) {
+    prepare_for_next_frame();
+  }
+}
+
+bool Window::render_offscreen_frame() {
+  TI_ERROR_IF(config_.show_window,
+              "Explicit offscreen rendering requires a hidden GGUI window");
+  if (drawn_frame_) {
+    return true;
+  }
+  return draw_frame(/*blocking_acquire=*/true);
+}
+
 CanvasBase *Window::get_canvas() {
   return canvas_.get();
 }

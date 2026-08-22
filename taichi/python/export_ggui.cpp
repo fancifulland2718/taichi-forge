@@ -785,6 +785,15 @@ struct PyWindow {
     return window->can_render_frame();
   }
 
+  void begin_offscreen_frame() {
+    static_cast<vulkan::Window *>(window.get())->begin_offscreen_frame();
+  }
+
+  bool render_offscreen_frame() {
+    return static_cast<vulkan::Window *>(window.get())
+        ->render_offscreen_frame();
+  }
+
   bool is_headless_display() const {
     return headless_display_;
   }
@@ -894,6 +903,8 @@ void export_ggui(py::module &m) {
       .def("get_scene", &PyWindow::get_scene)
       .def("show", &PyWindow::show)
       .def("can_render_frame", &PyWindow::can_render_frame)
+      .def("_begin_offscreen_frame", &PyWindow::begin_offscreen_frame)
+      .def("_render_offscreen_frame", &PyWindow::render_offscreen_frame)
       .def("is_headless_display", &PyWindow::is_headless_display)
       .def("record_display_frame_accepted",
            &PyWindow::record_display_frame_accepted,

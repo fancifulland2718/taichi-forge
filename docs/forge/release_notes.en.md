@@ -65,6 +65,11 @@ grouped under the behavior they shipped.
   sampler instructions, while ordinary field/ndarray access is never silently
   substituted. CUDA texture lowering is not implemented and remains
   `planned`. No official wheel variant is added.
+- Added D0 `ti.hardware.raster.RasterPass`, reusing the current Program's
+  Vulkan GGUI/RHI graphics pipeline for explicit offscreen hardware raster of
+  meshes, instances, particles, and lines with separate color/depth readback.
+  The current slice is a direct Python recording; kernel and Graph calls fail
+  closed. It adds no dependency or official wheel variant.
 
 ## 0.6.2
 

@@ -364,6 +364,28 @@ load/store 另支持格式对应的 `f32`、`i32`、`u32` sampled type。浮点�
 bitwise deterministic。CUDA GPU 虽有 texture unit，但 LLVM CUDA backend 尚未实现
 `TextureOpStmt` lowering，所以该路线保持 `planned`，不能因硬件存在而报告可用。
 
+### 当前 M4 Vulkan RasterPass 资格边界
+
+`ti.hardware.raster.RasterPass` 是第一条公开的固定功能 graphics provider。用户显式
+创建 pass、声明 camera/light/draw 并调用 `record()` / `execute()`；一次 execution 由
+现有 D0 GGUI/RHI 在当前 Program 的 `GraphicsDevice` 上创建 Vulkan graphics command
+list、render pass、graphics pipeline，执行 rasterizer、depth test/write 与 color output。
+这里真正使用的是硬件 raster/depth/ROP 路线，不是用普通 native CPU 代码重写软件光栅。
+
+当前边界有意保持窄且 fail closed：
+
+- 只支持 Vulkan、隐藏窗口的 2D offscreen target，以及 mesh、mesh instance、particle、
+  line 四种 GGUI 内建 shader 路线；
+- `VulkanRasterPassRecording` 固定 resource binding 与 draw topology，但可以重读同一
+  field/ndarray 的新内容；每次 replay 重新录制 graphics command list；
+- execution 本身没有 host readback；`color_numpy()` 或 `depth_numpy()` 是显式同步读取，
+  每次 execution 最多消费其中一个 attachment，读取另一个前必须再次 execute；
+- 它不能从 kernel 内调用，也不自动替换软件 renderer。Graph admission 暂不支持：当前
+  Scene 的 VBO preparation 仍包含 helper kernel，color/depth 又是 provider-owned target，
+  尚不能向 enclosing Graph 提供精确 binding/effect；
+- provider 只复用官方 wheel 已有的 Vulkan/GGUI D0 runtime 与内建 shader，不新增 SDK、
+  vendor package 或 wheel 发行变体。
+
 ## Cache 边界
 
 一个全局 cache key 会错误失效过多 portable work，同时仍不足以保护 native

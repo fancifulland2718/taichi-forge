@@ -143,7 +143,16 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
 
     raster = ti.hardware.capability("raster.draw.vulkan")
     assert raster.semantic_family == "raster.draw"
-    assert raster.public_api == "ti.hardware.raster"
+    assert raster.public_api == "ti.hardware.raster.RasterPass"
+    assert raster.implementation_status == "existing_public"
+    assert raster.hardware_acceleration == "qualified"
+    assert raster.scopes == ("python",)
+    assert raster.execution_kind == "native_command"
+    assert raster.graph_support == "unsupported"
+    assert raster.workspace_ownership == "provider_owned"
+    assert raster.layouts == ("mesh", "mesh_instance", "particles", "lines")
+    assert raster.deterministic is False
+    assert "Kernel calls are impossible" in raster.notes[0]
     assert ti.hardware.capability(raster.operation_id) is raster
 
     with pytest.raises(KeyError, match="unknown hardware operation"):
@@ -347,6 +356,7 @@ def test_vulkan_buffer_command_route_is_passively_eligible():
     report = ti.hardware.report()
     for operation_id in (
         "runtime.buffer_commands.vulkan",
+        "raster.draw.vulkan",
         "sampling.texture.vulkan",
     ):
         operation = next(

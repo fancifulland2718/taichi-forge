@@ -412,6 +412,35 @@ bitwise deterministic across devices. Although CUDA GPUs have texture units,
 the LLVM CUDA backend has no `TextureOpStmt` lowering, so that route remains
 `planned` rather than being reported available merely because hardware exists.
 
+### Current M4 Vulkan RasterPass qualification boundary
+
+`ti.hardware.raster.RasterPass` is the first public fixed-function graphics
+provider. The user explicitly creates a pass, declares camera/light/draw
+state, and calls `record()` or `execute()`. Each execution uses the existing
+D0 GGUI/RHI and the current Program's `GraphicsDevice` to create a Vulkan
+graphics command list, render pass, and graphics pipeline, then runs hardware
+rasterization, depth test/write, and color output. This is a real hardware
+raster/depth/ROP route, not ordinary native CPU code replacing a software
+rasterizer.
+
+The qualified slice is deliberately narrow and fail-closed:
+
+- Vulkan only, with a hidden-window 2D offscreen target and built-in GGUI
+  shaders for meshes, mesh instances, particles, and lines;
+- `VulkanRasterPassRecording` freezes resource bindings and draw topology but
+  rereads new contents from the same field/ndarray objects; each replay
+  rerecords the graphics command list;
+- execution performs no host readback. `color_numpy()` and `depth_numpy()` are
+  explicit synchronous observations, and one execution can be consumed by
+  only one of them before another execution is required;
+- it is not kernel-callable and never silently replaces a software renderer.
+  Graph admission remains unsupported because Scene VBO preparation still
+  includes helper kernels and provider-owned color/depth targets do not yet
+  expose an exact enclosing-Graph binding/effect contract; and
+- the provider reuses only the Vulkan/GGUI D0 runtime and built-in shaders
+  already present in official wheels. It adds no SDK, vendor package, or wheel
+  variant.
+
 ## Cache boundaries
 
 One universal cache key would invalidate too much portable work and still be

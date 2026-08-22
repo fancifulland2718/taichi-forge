@@ -1,5 +1,7 @@
 """Hardware capability contracts and provider-independent introspection."""
 
+from taichi_forge.hardware import raster
+
 from taichi_forge.hardware._capabilities import (
     DEPENDENCY_TIERS,
     DISCOVERY_STATES,
@@ -58,4 +60,5 @@ __all__ = [
     "probe",
     "providers",
     "report",
+    "raster",
 ]

@@ -40,6 +40,9 @@ class Window final : public WindowBase {
   bool show() override;
   bool can_render_frame() override;
 
+  void begin_offscreen_frame();
+  bool render_offscreen_frame();
+
   CanvasBase *get_canvas() override;
   SceneBase *get_scene() override;
   GuiBase *gui() override;

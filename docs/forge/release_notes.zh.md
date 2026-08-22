@@ -54,6 +54,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 - 资格化现有 D0 Vulkan `ti.Texture` 硬件采样路线：显式 texture op 会自动 lowering 到
   SPIR-V image/sampler 指令；普通 field/ndarray 不会自动替换。CUDA texture lowering
   尚未实现并保持 `planned`。该变更不增加官方 wheel 变体。
+- 新增 D0 `ti.hardware.raster.RasterPass`，复用当前 Program 的 Vulkan GGUI/RHI
+  graphics pipeline，提供 mesh/instance/particle/line 的显式 offscreen 硬件光栅与
+  独立 color/depth readback。当前为 Python direct recording；kernel 与 Graph 均明确
+  不支持，不增加依赖或官方 wheel 变体。
 
 ## 0.6.2 {#062}
 

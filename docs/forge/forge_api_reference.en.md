@@ -62,6 +62,30 @@ Ordinary field or ndarray access is never converted to texture sampling, and
 the CUDA backend has no texture lowering yet. This D0 route adds no wheel
 variant.
 
+### `ti.hardware.raster.RasterPass` (0.6.3 in development)
+
+An explicit, reusable Vulkan offscreen hardware-raster provider:
+
+```python
+with ti.hardware.raster.RasterPass((1280, 720)) as raster:
+    raster.set_camera(camera).ambient_light((0.2, 0.2, 0.2))
+    raster.mesh(vertices, indices=indices, normals=normals, two_sided=True)
+
+    recording = raster.record()  # freezes draw topology and resource bindings
+    recording.execute()          # graphics submission without host readback
+    rgba = raster.color_numpy()  # separate explicit synchronous observation
+```
+
+`mesh_instance()`, `particles()`, `lines()`, `point_light()`, and `clear()` are
+also available. A recording binds the same resource objects but rereads their
+latest contents on replay. The current slice is Vulkan-only and uses a hidden
+window's provider-owned color/depth targets plus built-in GGUI shaders. One
+execution can be consumed by either `color_numpy()` or `depth_numpy()`, not
+both. This is a Python native executable and is not kernel-callable.
+`GraphBuilder.append_native()` rejects it until VBO helper dispatches and
+output bindings participate in an exact effect contract. This D0 API adds no
+dependency or wheel variant.
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 Creates an explicit non-owning zero-copy dense storage view over a qualified
