@@ -118,6 +118,37 @@ official wheel variant. It is not callable inside `@ti.kernel`, never replaces
 ordinary kernels or collision detection, and currently excludes refit,
 transforms, multiple instances, procedural geometry, and inline kernel query.
 
+### `ti.hardware.fft.CufftPlan1D` (0.6.3 in development)
+
+An explicit D1 single-GPU cuFFT provider:
+
+```python
+if ti.hardware.fft.is_available():  # explicit transient provider probe
+    with ti.hardware.fft.CufftPlan1D(length, batch_count=batch) as plan:
+        plan.execute(source, spectrum, direction="forward")
+
+        recording = plan.record(
+            direction="inverse", input="spectrum", output="signal"
+        )
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+```
+
+Complex values use compact scalar f32 shape `(length, 2)` or
+`(batch, length, 2)`, with the final axis storing `[real, imag]`. Forward and
+inverse transforms are out-of-place C2C operations; inverse output is
+unnormalized. The fixed-size plan owns cuFFT's internal workspace, binds the
+runtime default CUDA stream, and can be replayed through a root Graph. Closing
+the plan invalidates its recordings.
+
+`is_available()` is an explicit transient probe. Actual provider enablement
+happens only when a plan is created; a missing or incompatible library fails
+that plan without disabling the CUDA backend. Forge neither bundles nor links
+cuFFT, adds no mandatory package, and adds no official wheel variant. Users
+install and expose a compatible shared library separately. The first slice
+does not support in-place operation, arbitrary strides, R2C/C2R, callbacks,
+LTO, multi-GPU, kernel invocation, or AOT serialization.
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 Creates an explicit non-owning zero-copy dense storage view over a qualified

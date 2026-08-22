@@ -184,7 +184,7 @@ set(TI_CUDA_LIBDEVICE_MAJOR "${CMAKE_MATCH_1}")
 set(TI_CUDA_LIBDEVICE_VERSION "${TI_CUDA_LIBDEVICE_MAJOR}.0")
 
 if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
-file(GLOB TAICHI_CORE_SOURCE
+file(GLOB TAICHI_CORE_SOURCE CONFIGURE_DEPENDS
     "taichi/analysis/*.cpp" "taichi/analysis/*.h"
     "taichi/ir/*"
     "taichi/jit/*"

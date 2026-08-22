@@ -81,6 +81,11 @@ grouped under the behavior they shipped.
   embeds build-time SPIR-V, performs no implicit host readback, and adds no SDK
   runtime dependency or official wheel variant. Refit, multi-instance scenes,
   procedural geometry, and kernel-inline query remain unsupported.
+- Added optional D1 `ti.hardware.fft.CufftPlan1D` for fixed-size, batched,
+  single-precision 1D C2C transforms through direct Python and root Graph.
+  Explicit probing remains transient and side-effect free; plan creation alone
+  lazy-loads the user's compatible cuFFT shared library. Forge bundles and
+  links no vendor library and adds no package or official wheel variant.
 
 ## 0.6.2
 

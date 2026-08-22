@@ -432,4 +432,35 @@ class CUBLASDriver : protected CUDADriverBase {
   std::mutex lock_;
   bool cublas_loaded_{false};
 };
+
+struct CUFFTProviderCapabilities {
+  int library_version{0};
+};
+
+class CUFFTDriver : protected CUDADriverBase {
+ public:
+  static CUFFTDriver &get_instance();
+
+#define PER_CUFFT_FUNCTION(name, symbol_name, ...) \
+  CUDADriverFunction<__VA_ARGS__> name;
+#include "taichi/rhi/cuda/cufft_functions.inc.h"
+#undef PER_CUFFT_FUNCTION
+
+  bool load_cufft();
+
+  CUFFTProviderCapabilities capabilities() const {
+    return capabilities_;
+  }
+
+  inline bool is_loaded() {
+    return cufft_loaded_.load(std::memory_order_acquire);
+  }
+
+ private:
+  CUFFTDriver();
+  std::mutex load_lock_;
+  std::mutex lock_;
+  std::atomic<bool> cufft_loaded_{false};
+  CUFFTProviderCapabilities capabilities_;
+};
 }  // namespace taichi::lang

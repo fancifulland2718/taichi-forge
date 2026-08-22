@@ -75,6 +75,9 @@ def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
     assert optix.dependency_tier == cufft.dependency_tier == "lazy_external"
     assert optix.provider_class == "vendor_hardware_runtime"
     assert cufft.provider_class == "vendor_algorithm"
+    assert cufft.implementation_status == "existing_public"
+    assert cufft.graph_support == "recordable"
+    assert cufft.public_api == "ti.hardware.fft.CufftPlan1D"
     assert cub.dependency_tier == "build_external"
     assert cub.implementation_status == "reference_only"
     assert interop.dependency_tier == "core"
@@ -320,14 +323,14 @@ def test_native_passive_status_does_not_load_external_libraries():
         provider_id: dict(
             ti_core.cuda_external_library_status(provider_id)
         )
-        for provider_id in ("cublas", "cusparse", "cusolver")
+        for provider_id in ("cublas", "cusparse", "cusolver", "cufft")
     }
     report = ti.hardware.report()
     after = {
         provider_id: dict(
             ti_core.cuda_external_library_status(provider_id)
         )
-        for provider_id in ("cublas", "cusparse", "cusolver")
+        for provider_id in ("cublas", "cusparse", "cusolver", "cufft")
     }
 
     assert report.external_components_probed is False
@@ -564,8 +567,13 @@ def test_passive_report_on_cpu_rejects_gpu_routes_without_loading_them():
         assert operation.selection != "selected"
         assert operation.native_facts["probe_policy"] == "passive"
         if operation.descriptor.dependency_tier == "lazy_external":
-            assert operation.enablement == "disabled"
-            assert operation.selection == "not_considered"
+            if operation.enablement == "enabled":
+                assert operation.discovery == "available"
+                assert operation.selection == "rejected"
+                assert operation.unavailable_reason == "backend_not_active"
+            else:
+                assert operation.enablement == "disabled"
+                assert operation.selection == "not_considered"
 
     payload = report.to_dict()
     assert payload["external_components_probed"] is False

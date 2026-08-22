@@ -105,6 +105,7 @@ struct VulkanBufferCommand {
 };
 
 class Program;
+class CudaFftPlan;
 class VulkanTriangleRayScene;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
@@ -921,6 +922,18 @@ class TI_DLL_EXPORT Program {
   void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
 
   void vulkan_clear_ray_scenes();
+
+  std::uint64_t create_cuda_cufft_plan_1d(std::size_t length,
+                                          std::size_t batch_count);
+
+  std::size_t cuda_cufft_execute_c2c(std::uint64_t handle,
+                                     Ndarray *input,
+                                     Ndarray *output,
+                                     int direction);
+
+  void destroy_cuda_cufft_plan(std::uint64_t handle);
+
+  void cuda_clear_cufft_plans();
 
   bool cuda_device_transform_available() const;
 
@@ -3645,6 +3658,10 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleRayScene>>
       vulkan_ray_scenes_;
   std::uint64_t next_vulkan_ray_scene_handle_{1};
+  std::mutex cuda_cufft_plan_mutex_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
+      cuda_cufft_plans_;
+  std::uint64_t next_cuda_cufft_plan_handle_{1};
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};

@@ -569,4 +569,44 @@ bool CUBLASDriver::load_cublas() {
   return cublas_loaded_;
 }
 
+CUFFTDriver::CUFFTDriver() {
+}
+
+CUFFTDriver &CUFFTDriver::get_instance() {
+  static CUFFTDriver *instance = new CUFFTDriver();
+  return *instance;
+}
+
+bool CUFFTDriver::load_cufft() {
+  std::lock_guard<std::mutex> load_guard(load_lock_);
+  if (cufft_loaded_) {
+    return true;
+  }
+  const int cuda_version = CUDADriver::get_instance().get_version_major();
+  if (!try_load_lib_any_version(
+          "cufft", "64_", {cuda_version, cuda_version - 1, 12, 11, 10})) {
+    return false;
+  }
+
+  bool symbols_available = true;
+#define PER_CUFFT_FUNCTION(name, symbol_name, ...)                 \
+  name.set(loader_->load_function_optional(#symbol_name));        \
+  name.set_lock(&lock_);                                          \
+  name.set_names(#name, #symbol_name);                            \
+  symbols_available = symbols_available && name.available();
+#include "taichi/rhi/cuda/cufft_functions.inc.h"
+#undef PER_CUFFT_FUNCTION
+  capabilities_ = {};
+  if (!symbols_available) {
+    cufft_loaded_.store(false, std::memory_order_release);
+    return false;
+  }
+  int version = 0;
+  if (get_version.call(&version) == 0) {
+    capabilities_.library_version = version;
+  }
+  cufft_loaded_.store(true, std::memory_order_release);
+  return true;
+}
+
 }  // namespace taichi::lang

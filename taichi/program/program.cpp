@@ -8539,6 +8539,9 @@ void Program::finalize() {
     best_effort("clear Vulkan primitive caches",
                 [&] { vulkan_clear_primitive_caches(); });
   }
+  if (compile_config().arch == Arch::cuda) {
+    best_effort("clear CUDA cuFFT plans", [&] { cuda_clear_cufft_plans(); });
+  }
   best_effort("finalize ArgPack resources",
               [&] { argpack_resources_.finalize({kArgPackResourceKind}); });
   best_effort("finalize Ndarray resources",

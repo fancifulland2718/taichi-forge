@@ -910,17 +910,26 @@ _OPERATIONS = (
         "implementation_defined",
         ("python", "graph"),
         "external_library",
-        "stream_capture",
-        "explicit",
+        "recordable",
+        "runtime_ordered",
         "provider_owned",
-        "planned",
+        "existing_public",
         dependency_name="cuFFT",
         resource_effects=("read:input", "write:output", "write:workspace"),
         lifetime_policy="provider_plan",
-        update_policy="rebuild",
+        update_policy="rebind",
         requirements=("compatible cuFFT shared library",),
-        public_api="ti.algorithms",
-        notes=("first version excludes callbacks, LTO, and multi-GPU plans",),
+        public_api="ti.hardware.fft.CufftPlan1D",
+        dtypes=("complex-pair:f32",),
+        shapes_or_tiles=("input/output:(length,2) or (batch,length,2)",),
+        layouts=("compact out-of-place C2C",),
+        numeric_contracts=(
+            "forward sign:-1",
+            "inverse sign:+1 unnormalized",
+        ),
+        notes=(
+            "First version excludes callbacks, LTO, multi-GPU, arbitrary strides, R2C, and C2R.",
+        ),
     ),
     _operation(
         "ray.query.batch.optix",
@@ -1052,7 +1061,9 @@ def _build_provider_catalog():
 
 _PROVIDERS = _build_provider_catalog()
 _PROVIDERS_BY_ID = MappingProxyType({provider.provider_id: provider for provider in _PROVIDERS})
-_TRANSIENT_NATIVE_PROVIDERS = frozenset(("cublas", "cusparse", "cusolver"))
+_TRANSIENT_NATIVE_PROVIDERS = frozenset(
+    ("cublas", "cusparse", "cusolver", "cufft")
+)
 
 
 def operations():

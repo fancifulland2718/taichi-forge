@@ -498,6 +498,34 @@ This is a manual hardware interface. No existing software ray tracer,
 renderer, contact query, or ordinary Taichi kernel is automatically rewritten
 to call it.
 
+### Current M7 optional cuFFT qualification boundary
+
+`ti.hardware.fft.CufftPlan1D` is the first new D1 vendor-algorithm provider.
+`ti.hardware.fft.is_available()` delegates to the explicit transient probe:
+it tries versioned shared-library candidates, verifies only the five basic C2C
+symbols, queries the component version, and closes the handle before return.
+Passive `ti.hardware.report()` never performs this probe. Creating a plan is
+the separate enablement action and keeps the successful runtime loader alive;
+later passive reports can then observe it.
+
+The qualified slice is deliberately limited:
+
+- one fixed-size, single-GPU, single-precision 1D C2C plan with compact
+  `[real, imag]` pairs, an explicit batch count, and distinct input/output;
+- forward and unnormalized inverse execution on the runtime default CUDA
+  stream, with provider-owned workspace and no host readback;
+- direct Python execution and root-Graph `rerecord` replay; plan close or
+  runtime-generation change invalidates all recordings; and
+- dynamic lookup of `cufftPlan1d`, `cufftDestroy`, `cufftSetStream`,
+  `cufftExecC2C`, and `cufftGetVersion`, with no `cufft.h`, link dependency,
+  bundled library, new build switch, or wheel variant.
+
+The user's cuFFT installation may itself require compatible companion
+components. Such failures remain plan/provider scoped. Forge does not expose
+callbacks, LTO, multi-GPU, arbitrary strides, R2C/C2R, in-place execution,
+kernel calls, or AOT in this slice, and does not automatically substitute
+cuFFT for existing transforms or solvers.
+
 ## Cache boundaries
 
 One universal cache key would invalidate too much portable work and still be

@@ -2048,6 +2048,17 @@ void export_lang(py::module &m) {
            tracked_native_program_method(
                &Program::destroy_vulkan_triangle_ray_scene),
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_cuda_cufft_plan_1d",
+           tracked_native_program_method(&Program::create_cuda_cufft_plan_1d),
+           py::arg("length"), py::arg("batch_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cufft_execute_c2c",
+           tracked_native_program_method(&Program::cuda_cufft_execute_c2c),
+           py::arg("handle"), py::arg("input"), py::arg("output"),
+           py::arg("direction"), py::call_guard<py::gil_scoped_release>())
+      .def("_destroy_cuda_cufft_plan",
+           tracked_native_program_method(&Program::destroy_cuda_cufft_plan),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

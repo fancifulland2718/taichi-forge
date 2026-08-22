@@ -434,6 +434,30 @@ replay work。
 这是手动调用的硬件接口。现有软件光追、renderer、contact query 或普通 Taichi kernel
 均不会被自动改写为调用它。
 
+### 当前 M7 可选 cuFFT 资格边界
+
+`ti.hardware.fft.CufftPlan1D` 是首个新增 D1 vendor-algorithm provider。
+`ti.hardware.fft.is_available()` 委托给显式瞬时 probe：尝试带版本的 shared-library
+candidate，只检查五个基础 C2C symbol、查询 component version，并在返回前关闭 handle。
+被动 `ti.hardware.report()` 永远不会执行该 probe。创建 plan 是独立的 enablement 动作，
+成功后 runtime loader 保持存活，后续被动 report 可以观察到它。
+
+当前资格切片刻意保持狭窄：
+
+- 一个固定尺寸、single-GPU、single-precision 1D C2C plan，使用 compact
+  `[real, imag]` pair、显式 batch count 与不同的 input/output；
+- 在 runtime 默认 CUDA stream 上执行 forward 和不归一化的 inverse，workspace 由
+  provider 拥有且无 host readback；
+- 支持 direct Python 与 root-Graph `rerecord` replay；plan close 或 runtime generation
+  改变后所有 recording 立即失效；
+- 仅动态查找 `cufftPlan1d`、`cufftDestroy`、`cufftSetStream`、`cufftExecC2C` 与
+  `cufftGetVersion`，不需要 `cufft.h`、link dependency、bundled library、新 build
+  switch 或 wheel 变体。
+
+用户的 cuFFT 安装本身可能需要兼容 companion component；此类错误保持在 plan/provider
+scope。当前不公开 callback、LTO、multi-GPU、任意 stride、R2C/C2R、in-place、kernel
+调用或 AOT，也不会把既有 transform/solver 自动替换为 cuFFT。
+
 ## Cache 边界
 
 一个全局 cache key 会错误失效过多 portable work，同时仍不足以保护 native

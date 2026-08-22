@@ -67,6 +67,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   feature，使用构建期嵌入的 SPIR-V，不隐式 host readback，也不增加 SDK runtime 依赖或
   官方 wheel 变体。refit、多 instance、procedural geometry 与 kernel-inline query
   仍不支持。
+- 新增可选 D1 `ti.hardware.fft.CufftPlan1D`，通过 direct Python 与 root Graph 执行
+  fixed-size、batched、single-precision 1D C2C transform。显式 probe 仍为无副作用的
+  transient load；只有创建 plan 才会 lazy-load 用户提供的兼容 cuFFT shared library。
+  Forge 不捆绑或链接 vendor library，也不新增 package 或官方 wheel 变体。
 
 ## 0.6.2 {#062}
 

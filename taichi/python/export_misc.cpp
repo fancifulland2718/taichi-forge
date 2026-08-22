@@ -146,7 +146,7 @@ std::vector<std::string> cuda_external_library_candidates(
 
 py::dict probe_cuda_external_library(const std::string &provider_id) {
   if (provider_id != "cublas" && provider_id != "cusparse" &&
-      provider_id != "cusolver") {
+      provider_id != "cusolver" && provider_id != "cufft") {
     throw std::invalid_argument("unsupported CUDA external provider: " +
                                 provider_id);
   }
@@ -196,7 +196,7 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
 #undef PER_CUSPARSE_FUNCTION
     optional_symbols = {"cusparseGetProperty", "cusparseCreateBsr",
                         "cusparseSpMV_preprocess"};
-  } else {
+  } else if (provider_id == "cusolver") {
     library_name = "cusolver";
     versions = {cuda_major, cuda_major - 1};
     provider_abi = "cusolver-dynamic-symbols-v1";
@@ -204,6 +204,14 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
   required_symbols.emplace_back(#symbol_name)
 #include "taichi/rhi/cuda/cusolver_functions.inc.h"
 #undef PER_CUSOLVER_FUNCTION
+  } else {
+    library_name = "cufft";
+    versions = {cuda_major, cuda_major - 1, 12, 11, 10};
+    provider_abi = "cufft-basic-c2c-dynamic-symbols-v1";
+#define PER_CUFFT_FUNCTION(name, symbol_name, ...) \
+  required_symbols.emplace_back(#symbol_name)
+#include "taichi/rhi/cuda/cufft_functions.inc.h"
+#undef PER_CUFFT_FUNCTION
   }
 
   const auto candidates =
@@ -287,6 +295,19 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
                                 get_property(1, &version_minor) == 0 &&
                                 get_property(2, &version_patch) == 0;
     }
+  } else if (provider_id == "cufft") {
+    auto *symbol = loader->load_function_optional("cufftGetVersion");
+    if (symbol != nullptr) {
+      using GetVersion = int (*)(int *);
+      int version = 0;
+      version_query_succeeded =
+          reinterpret_cast<GetVersion>(symbol)(&version) == 0;
+      if (version_query_succeeded) {
+        version_major = version / 1000;
+        version_minor = (version % 1000) / 100;
+        version_patch = version % 100;
+      }
+    }
   }
   native_facts["version_query_succeeded"] = version_query_succeeded;
   if (version_query_succeeded) {
@@ -304,7 +325,7 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
 
 py::dict cuda_external_library_status(const std::string &provider_id) {
   if (provider_id != "cublas" && provider_id != "cusparse" &&
-      provider_id != "cusolver") {
+      provider_id != "cusolver" && provider_id != "cufft") {
     throw std::invalid_argument("unsupported CUDA external provider: " +
                                 provider_id);
   }
@@ -347,10 +368,21 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
                       capabilities.library_version_minor,
                       capabilities.library_version_patch);
     }
-  } else {
+  } else if (provider_id == "cusolver") {
     auto &driver = lang::CUSOLVERDriver::get_instance();
     result["library_loaded"] = driver.is_loaded();
     result["provider_abi"] = "cusolver-dynamic-symbols-v1";
+  } else {
+    auto &driver = lang::CUFFTDriver::get_instance();
+    const bool loaded = driver.is_loaded();
+    result["library_loaded"] = loaded;
+    result["provider_abi"] = "cufft-basic-c2c-dynamic-symbols-v1";
+    const int version = driver.capabilities().library_version;
+    if (loaded && version > 0) {
+      result["provider_version"] =
+          fmt::format("{}.{}.{}", version / 1000,
+                      (version % 1000) / 100, version % 100);
+    }
   }
   result["native_facts"] = std::move(native_facts);
   return result;
@@ -391,7 +423,7 @@ void export_misc(py::module &m) {
 #else
   m.def("probe_cuda_external_library", [](const std::string &provider_id) {
     if (provider_id != "cublas" && provider_id != "cusparse" &&
-        provider_id != "cusolver") {
+        provider_id != "cusolver" && provider_id != "cufft") {
       throw std::invalid_argument("unsupported CUDA external provider: " +
                                   provider_id);
     }
@@ -413,7 +445,7 @@ void export_misc(py::module &m) {
   });
   m.def("cuda_external_library_status", [](const std::string &provider_id) {
     if (provider_id != "cublas" && provider_id != "cusparse" &&
-        provider_id != "cusolver") {
+        provider_id != "cusolver" && provider_id != "cufft") {
       throw std::invalid_argument("unsupported CUDA external provider: " +
                                   provider_id);
     }

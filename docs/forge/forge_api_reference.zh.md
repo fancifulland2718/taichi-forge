@@ -101,6 +101,34 @@ provider 不会为验证 mesh topology 而把 index 回读到 host。
 `@ti.kernel` 内调用，不会替换普通 kernel 或 collision detection；当前也不支持 refit、
 transform、多 instance、procedural geometry 与 kernel-inline query。
 
+### `ti.hardware.fft.CufftPlan1D`（0.6.3 开发中）
+
+显式 D1 single-GPU cuFFT provider：
+
+```python
+if ti.hardware.fft.is_available():  # 显式瞬时 provider probe
+    with ti.hardware.fft.CufftPlan1D(length, batch_count=batch) as plan:
+        plan.execute(source, spectrum, direction="forward")
+
+        recording = plan.record(
+            direction="inverse", input="spectrum", output="signal"
+        )
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+```
+
+complex value 使用 compact scalar f32 shape `(length, 2)` 或
+`(batch, length, 2)`，最后一轴为 `[real, imag]`。forward/inverse 均为
+out-of-place C2C；inverse 结果不自动归一化。固定尺寸 plan 拥有 cuFFT 内部 workspace、
+绑定 runtime 默认 CUDA stream，并可在 root Graph 中 replay；关闭 plan 后 recording
+立即失效。
+
+`is_available()` 属于显式瞬时 probe，只有创建 plan 才真正 enable provider；库缺失或
+ABI 不兼容只让该 plan 失败，不会禁用 CUDA backend。Forge 不捆绑、不链接 cuFFT，
+不新增 mandatory package 或官方 wheel 变体；用户需自行安装并暴露兼容 shared library。
+首个切片不支持 in-place、任意 stride、R2C/C2R、callback、LTO、multi-GPU、kernel
+调用或 AOT serialization。
+
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
 为经过资格验证的 Forge `Ndarray`、`DenseNdarrayView` 或 root-dense field 创建显式、
