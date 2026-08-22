@@ -86,6 +86,17 @@ grouped under the behavior they shipped.
   Explicit probing remains transient and side-effect free; plan creation alone
   lazy-loads the user's compatible cuFFT shared library. Forge bundles and
   links no vendor library and adds no package or official wheel variant.
+- Added the first qualified D0 transparent specialization. On CUDA
+  compute capability 8.0+/PTX 7.0+, compiler-generated `ti.block_local`
+  struct-for prologues of at least 8 KiB automatically use PTX `cp.async` for
+  direct primitive 4/8/16-byte global-to-BLS copies in read-only caches without
+  a write-back epilogue. Smaller, non-direct, read-write, or older-target
+  workloads keep synchronous lowering. `ti.hardware.report()`
+  distinguishes provider eligibility from selection by an actually compiled
+  kernel specialization. No public CUDA instruction syntax, Toolkit runtime,
+  package, or wheel variant is added. Vulkan mesh shaders remain `planned`
+  because the RHI does not yet implement their feature, shader, pipeline, and
+  command chain.
 
 ## 0.6.2
 

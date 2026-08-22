@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 
 namespace taichi::lang::cuda::detail {
 
@@ -69,6 +70,26 @@ constexpr ComputeCapabilityResolution resolve_compute_capability_target(
   return {device_compute_capability, selected.compute_capability,
           selected.ptx_version,
           selected.compute_capability != device_compute_capability};
+}
+
+// cp.async first appears in PTX 7.0 and requires sm_80.  Keep the mechanism
+// internal: this admission describes the compiler-generated block-local fetch
+// read-only pattern, not a public CUDA instruction API.  The 8 KiB floor is
+// the first qualified workload slice; smaller or read-write prologues retain
+// the ordinary synchronous load/store lowering because they are outside the
+// qualified performance and correctness envelope.
+inline constexpr std::size_t kCudaAsyncTileMinBlsBytes = 8 * 1024;
+
+constexpr bool cuda_async_tile_copy_admitted(int compute_capability,
+                                             int ptx_version,
+                                             std::size_t bls_bytes,
+                                             int copy_bytes,
+                                             bool direct_global_to_bls_copy,
+                                             bool read_only_bls) {
+  return compute_capability >= 80 && ptx_version >= 70 &&
+         bls_bytes >= kCudaAsyncTileMinBlsBytes &&
+         (copy_bytes == 4 || copy_bytes == 8 || copy_bytes == 16) &&
+         direct_global_to_bls_copy && read_only_bls;
 }
 
 }  // namespace taichi::lang::cuda::detail

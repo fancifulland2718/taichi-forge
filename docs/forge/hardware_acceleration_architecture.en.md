@@ -158,6 +158,49 @@ accumulation, rounding, determinism, and error contract are compatible.
 Transparent optimization can report the chosen mechanism for diagnostics, but
 the implementation mechanism is not a compatibility promise.
 
+The first qualified transparent specialization is
+`internal.tile.async.cuda`. It does not add a kernel call. A CUDA kernel that
+already requests the backend-neutral `ti.block_local` caching semantic may
+lower the compiler-generated global-to-block-local prologue to PTX
+`cp.async` only when all of these gates pass:
+
+- the target is NVIDIA compute capability 8.0 or newer and PTX ISA 7.0 or
+  newer;
+- the struct-for block-local allocation is at least 8 KiB; and
+- the IR site is a direct primitive 4-, 8-, or 16-byte global-to-BLS copy; and
+- the block-local cache is read-only and has no write-back epilogue.
+
+Every other site, including scatter/read-write BLS, retains the existing
+synchronous load/store lowering. The
+asynchronous group completes before the existing block barrier, so the body
+observes the same block-local values. A Graph that calls such a compiled
+kernel simply inherits its kernel PTX; this is not a separately recordable
+native command. `ti.hardware.report()` reports the provider as `eligible`
+before a qualifying kernel is compiled and `selected` afterward, together
+with Program-generation lowering and copy-site counters. These counters are
+diagnostics, not a stable instruction-selection promise. Reusing an offline
+cached executable does not perform a new lowering and therefore need not
+advance these current-Program counters.
+
+The 8 KiB workload floor is evidence-based and intentionally narrow. On the
+2026-08-23 qualification host (RTX 5090, compute capability 12.0, driver
+610.62), an eight-f32-field 16-by-16 block-local workload produced three
+fresh-process median pairs of 53.167--55.105 microseconds for synchronous
+lowering and 45.333--45.810 microseconds for `cp.async` lowering. The
+median-of-medians reduction was 15.1 percent; a four-field workload did not
+clear the noise gate and therefore remains synchronous. This is route and
+admission evidence for the bounded workload, not a general kernel-speed claim.
+The instruction and completion requirements follow the
+[NVIDIA PTX ISA asynchronous-copy contract](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-asynchronous-copy).
+
+Vulkan mesh shaders remain `planned`. The repository currently has generated
+Vulkan header declarations but no active `VK_EXT_mesh_shader` feature chain,
+SPIR-V mesh-stage lowering, mesh pipeline construction, or
+`vkCmdDrawMeshTasksEXT` command route. A device extension bit alone cannot
+select this provider. The Vulkan specification requires both querying and
+enabling `VkPhysicalDeviceMeshShaderFeaturesEXT`; see the
+[ratified Vulkan specification](https://registry.khronos.org/vulkan/specs/latest-ratified/pdf/vkspec.pdf).
+
 ## Public API ownership
 
 The `ti.hardware` module owns normalized hardware capability discovery and new
@@ -639,9 +682,12 @@ Sparse MMA, DPX, public TMA calls, and any D3 provider remain deferred.
 
 ### M8: internal specialization
 
-- select async tile movement for admitted dense kernels;
-- select mesh shader inside a raster provider where capability and workload
-  qualify; and
+- select PTX `cp.async` only for the qualified compiler-generated
+  global-to-BLS pattern and retain synchronous lowering outside admission;
+- report per-Program eligibility and actual compiled-specialization selection;
+- keep mesh shader fail-closed until feature enablement, SPIR-V codegen,
+  pipeline construction, command recording, and workload qualification all
+  exist; and
 - do not expose the selected vendor mechanism as stable public syntax.
 
 ## Qualification and release gates

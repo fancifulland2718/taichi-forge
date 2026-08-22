@@ -902,6 +902,13 @@ class TI_DLL_EXPORT Program {
 
   bool cuda_matrix_mma_f16_f32_available() const;
 
+  bool cuda_async_tile_available() const;
+
+  void record_cuda_async_tile_lowering(std::size_t copy_sites) noexcept;
+
+  std::unordered_map<std::string, std::uint64_t>
+  cuda_async_tile_statistics() const;
+
   std::size_t cuda_matrix_mma_f16_f32(Ndarray *a,
                                       Ndarray *b,
                                       Ndarray *output,
@@ -3662,6 +3669,8 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;
   std::uint64_t next_cuda_cufft_plan_handle_{1};
+  std::atomic<std::uint64_t> cuda_async_tile_lowered_specializations_{0};
+  std::atomic<std::uint64_t> cuda_async_tile_copy_sites_{0};
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};

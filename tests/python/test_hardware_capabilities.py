@@ -1,5 +1,6 @@
 from dataclasses import FrozenInstanceError, replace
 
+import numpy as np
 import pytest
 
 import taichi_forge as ti
@@ -175,6 +176,25 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
         "row_major_output",
     )
     assert "kernel calls remain unsupported" in matrix.notes[0]
+
+    async_tile = ti.hardware.capability("internal.tile.async.cuda")
+    assert async_tile.implementation_status == "existing_internal"
+    assert async_tile.hardware_acceleration == "qualified"
+    assert async_tile.scopes == ("internal",)
+    assert async_tile.execution_kind == "kernel_intrinsic"
+    assert async_tile.public_api is None
+    assert async_tile.shapes_or_tiles == (
+        "compiler-generated struct-for BLS >= 8192 bytes",
+    )
+    assert "no public cp.async or TMA API" in async_tile.notes[0]
+
+    mesh_shader = ti.hardware.capability(
+        "internal.raster.mesh_shader.vulkan"
+    )
+    assert mesh_shader.implementation_status == "planned"
+    assert mesh_shader.hardware_acceleration == "none"
+    assert "feature query and device enablement" in mesh_shader.requirements[0]
+    assert "headers alone" in mesh_shader.notes[1]
 
     with pytest.raises(KeyError, match="unknown hardware operation"):
         ti.hardware.capability("missing.operation")
@@ -401,6 +421,196 @@ def test_cuda_matrix_capability_rejects_an_unqualified_active_device(
     assert operation.selection == "rejected"
     assert operation.unavailable_reason == "hardware_requirement_not_met"
     assert operation.native_facts["provider_available"] is False
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_async_tile_is_automatic_workload_gated_and_reported():
+    initial = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    if not initial.native_facts.get("provider_available", False):
+        pytest.skip("CUDA async tile requires sm_80 and PTX 7.0 or newer")
+
+    assert initial.selection == "eligible"
+    assert initial.native_facts["minimum_bls_bytes"] == 8192
+    assert initial.native_facts["lowered_specializations"] == 0
+
+    small_input = ti.field(ti.f32)
+    small_output = ti.field(ti.f32)
+    ti.root.dense(ti.i, 64).place(small_input, small_output)
+
+    x0 = ti.field(ti.f32)
+    x1 = ti.field(ti.f32)
+    x2 = ti.field(ti.f32)
+    x3 = ti.field(ti.f32)
+    x4 = ti.field(ti.f32)
+    x5 = ti.field(ti.f32)
+    x6 = ti.field(ti.f32)
+    x7 = ti.field(ti.f32)
+    output = ti.field(ti.f32)
+    block = ti.root.pointer(ti.ij, 1).dense(ti.ij, (16, 16))
+    block.place(x0, x1, x2, x3, x4, x5, x6, x7, output)
+
+    @ti.kernel
+    def initialize():
+        for i in small_input:
+            small_input[i] = i
+        for i, j in ti.ndrange(16, 16):
+            base = i * 16 + j
+            x0[i, j] = base
+            x1[i, j] = base + 1
+            x2[i, j] = base + 2
+            x3[i, j] = base + 3
+            x4[i, j] = base + 4
+            x5[i, j] = base + 5
+            x6[i, j] = base + 6
+            x7[i, j] = base + 7
+
+    @ti.kernel
+    def small_copy():
+        ti.loop_config(block_dim=64)
+        ti.block_local(small_input)
+        for i in small_input:
+            small_output[i] = small_input[i]
+
+    @ti.kernel
+    def admitted_copy():
+        ti.loop_config(block_dim=256)
+        ti.block_local(x0, x1, x2, x3, x4, x5, x6, x7)
+        for i, j in x0:
+            output[i, j] = (
+                x0[i, j]
+                + x1[i, j]
+                + x2[i, j]
+                + x3[i, j]
+                + x4[i, j]
+                + x5[i, j]
+                + x6[i, j]
+                + x7[i, j]
+            )
+
+    initialize()
+    small_copy()
+    ti.sync()
+    after_small = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    assert after_small.selection == "eligible"
+    assert after_small.native_facts["lowered_specializations"] == 0
+
+    admitted_copy()
+    ti.sync()
+    base = np.arange(256, dtype=np.float32).reshape(16, 16)
+    np.testing.assert_array_equal(output.to_numpy(), base * 8 + 28)
+
+    selected = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    assert selected.discovery == "available"
+    assert selected.enablement == "enabled"
+    assert selected.selection == "selected"
+    assert selected.unavailable_reason == "none"
+    assert selected.native_facts["lowered_specializations"] >= 1
+    assert selected.native_facts["copy_sites"] >= 8
+
+
+@test_utils.test(
+    arch=ti.cuda, require=ti.extension.data64, offline_cache=False
+)
+def test_cuda_async_tile_preserves_f64_block_local_values():
+    initial = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    if not initial.native_facts.get("provider_available", False):
+        pytest.skip("CUDA async tile requires sm_80 and PTX 7.0 or newer")
+
+    x0 = ti.field(ti.f64)
+    x1 = ti.field(ti.f64)
+    x2 = ti.field(ti.f64)
+    x3 = ti.field(ti.f64)
+    output = ti.field(ti.f64)
+    block = ti.root.pointer(ti.ij, 1).dense(ti.ij, (16, 16))
+    block.place(x0, x1, x2, x3, output)
+
+    @ti.kernel
+    def initialize():
+        for i, j in ti.ndrange(16, 16):
+            base = ti.cast(i * 16 + j, ti.f64) * 0.25
+            x0[i, j] = base
+            x1[i, j] = base + 1.0
+            x2[i, j] = base + 2.0
+            x3[i, j] = base + 3.0
+
+    @ti.kernel
+    def admitted_copy():
+        ti.loop_config(block_dim=256)
+        ti.block_local(x0, x1, x2, x3)
+        for i, j in x0:
+            output[i, j] = x0[i, j] + x1[i, j] + x2[i, j] + x3[i, j]
+
+    initialize()
+    admitted_copy()
+    ti.sync()
+    base = np.arange(256, dtype=np.float64).reshape(16, 16) * 0.25
+    np.testing.assert_array_equal(output.to_numpy(), base * 4 + 6)
+
+    selected = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    assert selected.selection == "selected"
+    assert selected.native_facts["copy_sites"] >= 4
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_async_tile_rejects_read_write_block_local_cache():
+    initial = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    if not initial.native_facts.get("provider_available", False):
+        pytest.skip("CUDA async tile requires sm_80 and PTX 7.0 or newer")
+
+    values = ti.field(ti.f32)
+    ti.root.pointer(ti.ij, 1).dense(ti.ij, (64, 64)).place(values)
+
+    @ti.kernel
+    def initialize():
+        for i, j in ti.ndrange(64, 64):
+            values[i, j] = 1.0
+
+    @ti.kernel
+    def update():
+        ti.loop_config(block_dim=256)
+        ti.block_local(values)
+        for i, j in values:
+            values[i, j] += 1.0
+
+    initialize()
+    update()
+    ti.sync()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full((64, 64), 2.0, dtype=np.float32)
+    )
+
+    after_update = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    assert after_update.selection == "eligible"
+    assert after_update.native_facts["lowered_specializations"] == 0
+    assert after_update.native_facts["copy_sites"] == 0
 
 
 @test_utils.test(arch=ti.vulkan)

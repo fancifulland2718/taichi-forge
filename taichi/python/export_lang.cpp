@@ -12,6 +12,7 @@
 #include "taichi/ir/snode.h"
 #include "taichi/common/commit_hash.h"
 #include "taichi/common/runtime_contract.h"
+#include "taichi/rhi/cuda/cuda_capability.h"
 
 #if TI_WITH_LLVM
 #include "llvm/Config/llvm-config.h"
@@ -2026,6 +2027,28 @@ void export_lang(py::module &m) {
            })
       .def("cuda_matrix_mma_f16_f32_available",
            &Program::cuda_matrix_mma_f16_f32_available)
+      .def("_cuda_async_tile_status", [](Program *program) {
+        py::dict result;
+        result["provider_available"] =
+            program->cuda_async_tile_available();
+        auto statistics = program->cuda_async_tile_statistics();
+        result["lowered_specializations"] =
+            statistics.at("lowered_specializations");
+        result["copy_sites"] = statistics.at("copy_sites");
+        result["minimum_bls_bytes"] =
+            taichi::lang::cuda::detail::kCudaAsyncTileMinBlsBytes;
+#ifdef TI_WITH_CUDA
+        if (program->compile_config().arch == Arch::cuda) {
+          auto &context = CUDAContext::get_instance();
+          result["device_compute_capability"] =
+              context.get_compute_capability();
+          result["codegen_compute_capability"] =
+              context.get_codegen_compute_capability();
+          result["ptx_version"] = context.get_ptx_version();
+        }
+#endif
+        return result;
+      })
       .def("_cuda_matrix_mma_f16_f32",
            tracked_native_program_method(
                &Program::cuda_matrix_mma_f16_f32),

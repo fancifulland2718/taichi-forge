@@ -101,6 +101,7 @@ OPERATION_SCOPES = (
 
 IMPLEMENTATION_STATUSES = (
     "existing_public",
+    "existing_internal",
     "internal_foundation",
     "qualification_required",
     "planned",
@@ -984,17 +985,27 @@ _OPERATIONS = (
         "core",
         "hardware_intrinsic",
         "hardware_instruction",
-        "implementation_defined",
+        "qualified",
         ("internal",),
         "kernel_intrinsic",
         "inline",
         "current",
         "none",
-        "planned",
+        "existing_internal",
+        dtypes=("i32", "u32", "f32", "i64", "u64", "f64"),
+        shapes_or_tiles=("compiler-generated struct-for BLS >= 8192 bytes",),
         lifetime_policy="runtime_generation",
         update_policy="immutable",
-        requirements=("admitted PTX ISA", "admitted CUDA compute capability"),
-        notes=("provider implementation detail; no public TMA API",),
+        requirements=(
+            "PTX ISA >= 7.0",
+            "CUDA compute capability >= 8.0",
+            "direct 4/8/16-byte global-to-BLS compiler copy",
+            "read-only BLS with no write-back epilogue",
+        ),
+        notes=(
+            "transparent compiler specialization; no public cp.async or TMA API",
+            "smaller or non-admitted prologues retain synchronous lowering",
+        ),
     ),
     _operation(
         "internal.raster.mesh_shader.vulkan",
@@ -1014,8 +1025,15 @@ _OPERATIONS = (
         resource_effects=("read:geometry", "write:raster_primitives"),
         lifetime_policy="graph_generation",
         update_policy="rebind",
-        requirements=("VK_EXT_mesh_shader",),
-        notes=("Raster provider specialization; not a public shader model",),
+        requirements=(
+            "VK_EXT_mesh_shader feature query and device enablement",
+            "SPV_EXT_mesh_shader code generation",
+            "mesh pipeline and vkCmdDrawMeshTasksEXT recording",
+        ),
+        notes=(
+            "Raster provider specialization; not a public shader model",
+            "Vulkan headers alone do not constitute an implemented provider",
+        ),
     ),
 )
 
@@ -1124,19 +1142,54 @@ def _passive_core_statuses(runtime_initialized, backend):
 
     program = impl.get_runtime().prog
     if backend == "cuda":
-        available = bool(
+        matrix_available = bool(
             program is not None
             and program.cuda_matrix_mma_f16_f32_available()
         )
+        async_tile_status = (
+            dict(program._cuda_async_tile_status())
+            if program is not None
+            else {}
+        )
+        async_tile_available = bool(
+            async_tile_status.get("provider_available", False)
+        )
+        lowered_specializations = int(
+            async_tile_status.get("lowered_specializations", 0)
+        )
         return {
             "matrix.mma.cuda": {
-                "available": available,
+                "available": matrix_available,
                 "native_facts": {
-                    "provider_available": available,
+                    "provider_available": matrix_available,
                     "capability_query": "cuda_driver_compute_capability",
                     "capability_query_loads_ptx": False,
                 },
-            }
+            },
+            "internal.tile.async.cuda": {
+                "available": async_tile_available,
+                "selected": lowered_specializations > 0,
+                "native_facts": {
+                    "provider_available": async_tile_available,
+                    "capability_query": "active_cuda_codegen_target",
+                    "capability_query_compiles_kernel": False,
+                    "device_compute_capability": async_tile_status.get(
+                        "device_compute_capability"
+                    ),
+                    "codegen_compute_capability": async_tile_status.get(
+                        "codegen_compute_capability"
+                    ),
+                    "ptx_version": async_tile_status.get("ptx_version"),
+                    "minimum_bls_bytes": async_tile_status.get(
+                        "minimum_bls_bytes", 8192
+                    ),
+                    "lowered_specializations": lowered_specializations,
+                    "copy_sites": int(
+                        async_tile_status.get("copy_sites", 0)
+                    ),
+                    "selection_scope": "current_program_codegen",
+                },
+            },
         }
     available = bool(
         program is not None and program.vulkan_ray_query_available()
@@ -1300,7 +1353,22 @@ def _passive_resolution(
                 native_facts=facts,
             )
 
-    if descriptor.implementation_status == "existing_public":
+    if core_status is not None and core_status.get("selected", False):
+        return ResolvedHardwareOperation(
+            descriptor=descriptor,
+            backend=backend,
+            runtime_initialized=True,
+            discovery="available",
+            enablement="enabled",
+            selection="selected",
+            unavailable_reason="none",
+            native_facts=facts,
+        )
+
+    if descriptor.implementation_status in (
+        "existing_public",
+        "existing_internal",
+    ):
         return ResolvedHardwareOperation(
             descriptor=descriptor,
             backend=backend,

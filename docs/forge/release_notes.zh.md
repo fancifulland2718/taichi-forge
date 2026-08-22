@@ -71,6 +71,15 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   fixed-size、batched、single-precision 1D C2C transform。显式 probe 仍为无副作用的
   transient load；只有创建 plan 才会 lazy-load 用户提供的兼容 cuFFT shared library。
   Forge 不捆绑或链接 vendor library，也不新增 package 或官方 wheel 变体。
+- 新增首个已资格化的 D0 透明 specialization。在 CUDA compute capability 8.0+
+  与 PTX 7.0+ 上，至少 8 KiB 的 compiler-generated `ti.block_local` struct-for
+  prologue 会对 primitive 4/8/16-byte direct global-to-BLS copy 自动使用 PTX
+  `cp.async`，但仅限没有 write-back epilogue 的 read-only cache；较小、非 direct、
+  read-write 或较旧 target 的 workload 保留同步 lowering。
+  `ti.hardware.report()` 会区分 provider eligibility 与实际 compiled kernel
+  specialization 的 selection。该路线不新增公开 CUDA 指令语法、Toolkit runtime、
+  package 或 wheel 变体。Vulkan mesh shader 因 RHI 尚未实现完整 feature、shader、
+  pipeline 与 command chain，继续保持 `planned`。
 
 ## 0.6.2 {#062}
 

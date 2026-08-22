@@ -20,6 +20,8 @@
 #include "taichi/codegen/codegen_utils.h"
 #include "taichi/inc/constants.h"
 
+#include "llvm/IR/InlineAsm.h"
+
 namespace taichi::lang {
 
 using namespace llvm;
@@ -82,6 +84,93 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     }
     return create_print("[cuda codegen debug] " + tag + " " + format + "\n",
                         {value->getType()}, {value});
+  }
+
+  void begin_bls_prologue(OffloadedStmt *stmt) override {
+    TI_ASSERT(stmt == current_offload);
+    const auto target = cuda::detail::resolve_compute_capability_target(
+        target_compute_capability_);
+    emitting_bls_prologue_ = cuda::detail::cuda_async_tile_copy_admitted(
+        target_compute_capability_, target.ptx_version, stmt->bls_size,
+        /*copy_bytes=*/4, /*direct_global_to_bls_copy=*/true,
+        /*read_only_bls=*/stmt->bls_epilogue == nullptr);
+    emitted_async_tile_copy_ = false;
+    async_tile_copy_sites_ = 0;
+  }
+
+  void end_bls_prologue(OffloadedStmt *stmt) override {
+    TI_ASSERT(stmt == current_offload);
+    if (emitted_async_tile_copy_) {
+      auto *asm_type = llvm::FunctionType::get(
+          llvm::Type::getVoidTy(*llvm_context), /*isVarArg=*/false);
+      auto *wait = llvm::InlineAsm::get(asm_type, "cp.async.wait_all;", "",
+                                        /*hasSideEffects=*/true);
+      builder->CreateCall(wait);
+      prog->record_cuda_async_tile_lowering(async_tile_copy_sites_);
+    }
+    emitting_bls_prologue_ = false;
+  }
+
+  bool emit_async_tile_copy(GlobalStoreStmt *stmt) {
+    if (!emitting_bls_prologue_ ||
+        !stmt->dest->is<BlockLocalPtrStmt>()) {
+      return false;
+    }
+    auto *load = stmt->val->cast<GlobalLoadStmt>();
+    if (load == nullptr) {
+      return false;
+    }
+    auto *source_pointer_type = load->src->ret_type->cast<PointerType>();
+    auto *destination_pointer_type =
+        stmt->dest->ret_type->cast<PointerType>();
+    if (source_pointer_type == nullptr ||
+        destination_pointer_type == nullptr ||
+        source_pointer_type->is_bit_pointer() ||
+        destination_pointer_type->is_bit_pointer() ||
+        !stmt->val->ret_type->is<PrimitiveType>()) {
+      return false;
+    }
+    const int copy_bytes = data_type_size(stmt->val->ret_type);
+    const auto target = cuda::detail::resolve_compute_capability_target(
+        target_compute_capability_);
+    if (!cuda::detail::cuda_async_tile_copy_admitted(
+            target_compute_capability_, target.ptx_version,
+            current_offload->bls_size, copy_bytes,
+            /*direct_global_to_bls_copy=*/true,
+            /*read_only_bls=*/current_offload->bls_epilogue == nullptr)) {
+      return false;
+    }
+
+    auto *i64_type = llvm::Type::getInt64Ty(*llvm_context);
+    auto *destination =
+        builder->CreatePtrToInt(llvm_val[stmt->dest], i64_type);
+    auto *source = builder->CreatePtrToInt(llvm_val[load->src], i64_type);
+    auto *asm_type = llvm::FunctionType::get(
+        llvm::Type::getVoidTy(*llvm_context), {i64_type, i64_type},
+        /*isVarArg=*/false);
+    auto *copy = llvm::InlineAsm::get(
+        asm_type,
+        fmt::format("{{\n\t.reg .b64 shared_address_64;\n\t"
+                    ".reg .b64 global_address_64;\n\t"
+                    ".reg .b32 shared_address_32;\n\t"
+                    "cvta.to.shared.u64 shared_address_64, $0;\n\t"
+                    "cvta.to.global.u64 global_address_64, $1;\n\t"
+                    "cvt.u32.u64 shared_address_32, shared_address_64;\n\t"
+                    "cp.async.ca.shared.global [shared_address_32], "
+                    "[global_address_64], "
+                    "{};\n}}",
+                    copy_bytes),
+        "l,l,~{memory}", /*hasSideEffects=*/true);
+    builder->CreateCall(copy, {destination, source});
+    emitted_async_tile_copy_ = true;
+    ++async_tile_copy_sites_;
+    return true;
+  }
+
+  void visit(GlobalStoreStmt *stmt) override {
+    if (!emit_async_tile_copy(stmt)) {
+      TaskCodeGenLLVM::visit(stmt);
+    }
   }
 
   llvm::Value *create_print(const std::string &format,
@@ -928,6 +1017,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   int target_compute_capability_{0};
+  bool emitting_bls_prologue_{false};
+  bool emitted_async_tile_copy_{false};
+  std::size_t async_tile_copy_sites_{0};
 
   std::tuple<llvm::Value *, llvm::Value *> get_spmd_info() override {
     auto thread_idx =

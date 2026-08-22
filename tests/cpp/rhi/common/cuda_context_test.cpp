@@ -207,6 +207,28 @@ TEST(CUDADevice, RejectsStaleWrongDeviceAndOutOfRangeAllocations) {
   device.dealloc_memory(replacement);
 }
 
+TEST(CUDACapability, AsyncTileAdmissionRequiresHardwareAndQualifiedWorkload) {
+  using cuda::detail::cuda_async_tile_copy_admitted;
+  using cuda::detail::kCudaAsyncTileMinBlsBytes;
+
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      75, 70, kCudaAsyncTileMinBlsBytes, 4, true, true));
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      80, 63, kCudaAsyncTileMinBlsBytes, 4, true, true));
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      80, 70, kCudaAsyncTileMinBlsBytes - 1, 4, true, true));
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      80, 70, kCudaAsyncTileMinBlsBytes, 2, true, true));
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      80, 70, kCudaAsyncTileMinBlsBytes, 4, false, true));
+  EXPECT_FALSE(cuda_async_tile_copy_admitted(
+      80, 70, kCudaAsyncTileMinBlsBytes, 4, true, false));
+  EXPECT_TRUE(cuda_async_tile_copy_admitted(
+      80, 70, kCudaAsyncTileMinBlsBytes, 4, true, true));
+  EXPECT_TRUE(cuda_async_tile_copy_admitted(
+      120, 87, kCudaAsyncTileMinBlsBytes, 8, true, true));
+}
+
 TEST(CUDADevice, GraphAllocationLeasePinsARetiredGeneration) {
   if (!CUDADriver::get_instance_without_context().detected()) {
     GTEST_SKIP();

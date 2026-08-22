@@ -9958,6 +9958,43 @@ bool Program::cuda_matrix_mma_f16_f32_available() const {
 #endif
 }
 
+bool Program::cuda_async_tile_available() const {
+#ifdef TI_WITH_CUDA
+  if (compile_config().arch != Arch::cuda) {
+    return false;
+  }
+  auto &context = CUDAContext::get_instance();
+  return cuda::detail::cuda_async_tile_copy_admitted(
+      context.get_compute_capability(), context.get_ptx_version(),
+      cuda::detail::kCudaAsyncTileMinBlsBytes, /*copy_bytes=*/4,
+      /*direct_global_to_bls_copy=*/true, /*read_only_bls=*/true);
+#else
+  return false;
+#endif
+}
+
+void Program::record_cuda_async_tile_lowering(
+    std::size_t copy_sites) noexcept {
+  if (copy_sites == 0) {
+    return;
+  }
+  cuda_async_tile_lowered_specializations_.fetch_add(
+      1, std::memory_order_relaxed);
+  cuda_async_tile_copy_sites_.fetch_add(copy_sites,
+                                        std::memory_order_relaxed);
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::cuda_async_tile_statistics() const {
+  return {
+      {"lowered_specializations",
+       cuda_async_tile_lowered_specializations_.load(
+           std::memory_order_relaxed)},
+      {"copy_sites",
+       cuda_async_tile_copy_sites_.load(std::memory_order_relaxed)},
+  };
+}
+
 std::size_t Program::cuda_matrix_mma_f16_f32(Ndarray *a,
                                               Ndarray *b,
                                               Ndarray *output,

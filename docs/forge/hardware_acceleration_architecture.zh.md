@@ -138,6 +138,40 @@ determinism 与 error contract 兼容前，Forge 不得把普通矩阵乘法静�
 
 透明优化可以在诊断中报告所选机制，但该内部机制不构成兼容性承诺。
 
+首个通过资格验证的透明 specialization 是 `internal.tile.async.cuda`。它不新增
+kernel 调用。已经请求 backend-neutral `ti.block_local` cache 语义的 CUDA kernel，只有
+同时通过以下 gate 时，才会把 compiler-generated global-to-block-local prologue lowering
+为 PTX `cp.async`：
+
+- target 至少为 NVIDIA compute capability 8.0 与 PTX ISA 7.0；
+- struct-for block-local allocation 至少为 8 KiB；
+- IR site 是 primitive 4/8/16-byte direct global-to-BLS copy；
+- block-local cache 为 read-only，且没有 write-back epilogue。
+
+其他 site（包括 scatter/read-write BLS）全部保留原有同步 load/store lowering。async group 在已有 block barrier 之前
+完成，所以 kernel body 观察到相同的 block-local value。调用该 compiled kernel 的 Graph
+只会继承 kernel PTX；它不是独立可录制的 native command。合格 kernel 编译前，
+`ti.hardware.report()` 报告 provider 为 `eligible`；编译后报告为 `selected`，并给出当前
+Program generation 的 lowering 与 copy-site counter。这些 counter 只用于诊断，不构成
+稳定的指令选择承诺。复用 offline-cache executable 不会发生新的 lowering，因此不保证
+推进这些 current-Program counter。
+
+8 KiB workload floor 来自有界证据，刻意保持窄范围。在 2026-08-23 qualification host
+（RTX 5090、compute capability 12.0、driver 610.62）上，8 个 f32 field、16×16
+block-local workload 的三个 fresh-process median：同步 lowering 为
+53.167--55.105 microseconds，`cp.async` lowering 为 45.333--45.810 microseconds；
+median-of-medians 降低 15.1%。4-field workload 未越过 noise gate，因此继续使用同步
+路线。这是该有界 workload 的 route/admission 证据，不是通用 kernel 加速声明。指令与
+完成语义遵循
+[NVIDIA PTX ISA asynchronous-copy contract](https://docs.nvidia.com/cuda/parallel-thread-execution/#data-movement-and-conversion-instructions-asynchronous-copy)。
+
+Vulkan mesh shader 继续保持 `planned`。当前仓库只有生成的 Vulkan header declaration，
+没有 active `VK_EXT_mesh_shader` feature chain、SPIR-V mesh-stage lowering、mesh
+pipeline construction 或 `vkCmdDrawMeshTasksEXT` command route；只有 device extension
+bit 不能选择该 provider。Vulkan 规范要求 query 并 enable
+`VkPhysicalDeviceMeshShaderFeaturesEXT`；参见
+[已批准的 Vulkan 规范](https://registry.khronos.org/vulkan/specs/latest-ratified/pdf/vkspec.pdf)。
+
 ## 公开 API 所属位置
 
 `ti.hardware` 负责统一硬件 capability discovery，以及新增的硬件资源/可执行体。
@@ -564,8 +598,11 @@ Sparse MMA、DPX、公开 TMA 调用和所有 D3 provider 继续延期。
 
 ### M8：内部 specialization
 
-- 为通过 admission 的 dense kernel 选择 async tile movement；
-- capability 与 workload 均满足时在 Raster provider 内选择 mesh shader；
+- 只为已资格化的 compiler-generated global-to-BLS pattern 选择 PTX `cp.async`，
+  admission 外保留同步 lowering；
+- 报告 per-Program eligibility 与实际 compiled-specialization selection；
+- mesh shader 在 feature enablement、SPIR-V codegen、pipeline construction、command
+  recording 与 workload qualification 全部具备前保持 fail-closed；
 - 不把所选厂商机制变成稳定公开语法。
 
 ## 资格验证与发行门槛

@@ -2656,7 +2656,9 @@ void TaskCodeGenLLVM::create_offload_struct_for(OffloadedStmt *stmt) {
 
     if (stmt->bls_prologue) {
       call("block_barrier");  // "__syncthreads()"
+      begin_bls_prologue(stmt);
       stmt->bls_prologue->accept(this);
+      end_bls_prologue(stmt);
       call("block_barrier");  // "__syncthreads()"
     }
 

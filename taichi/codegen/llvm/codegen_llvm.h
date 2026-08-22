@@ -372,6 +372,17 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
 
   void create_offload_struct_for(OffloadedStmt *stmt);
 
+  // Backend hooks around the compiler-generated block-local-storage fetch.
+  // The generic path deliberately remains a synchronous load/store sequence.
+  // CUDA may replace individually admitted copies with an asynchronous device
+  // instruction and must complete them in the matching end hook before the
+  // existing block barrier publishes the shared-memory contents.
+  virtual void begin_bls_prologue(OffloadedStmt *stmt) {
+  }
+
+  virtual void end_bls_prologue(OffloadedStmt *stmt) {
+  }
+
   void visit(LoopIndexStmt *stmt) override;
 
   void visit(LoopLinearIndexStmt *stmt) override;
