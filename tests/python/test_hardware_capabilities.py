@@ -18,6 +18,14 @@ _OPERATION_IDS = (
     "ray.query.inline.vulkan",
     "sampling.texture.vulkan",
     "sampling.texture.cuda",
+    "kernel.atomic.cuda",
+    "kernel.atomic.vulkan",
+    "kernel.simt.warp.cuda",
+    "kernel.simt.subgroup.vulkan",
+    "kernel.shared_memory.cuda_vulkan",
+    "kernel.block_local.cuda",
+    "internal.reduction.grouped.cuda_vulkan",
+    "internal.listgen.subgroup_ballot.vulkan",
     "matrix.mma.cuda",
     "matrix.mma.vulkan",
     "interop.external_buffer.cuda_vulkan",
@@ -144,6 +152,45 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cuda_texture.notes == (
         "LLVM CUDA TextureOp lowering is not implemented.",
     )
+
+    cuda_atomic = ti.hardware.capability("kernel.atomic.cuda")
+    vulkan_atomic = ti.hardware.capability("kernel.atomic.vulkan")
+    assert cuda_atomic.implementation_status == "existing_public"
+    assert vulkan_atomic.implementation_status == "existing_public"
+    assert cuda_atomic.public_api == vulkan_atomic.public_api == "ti.atomic_*"
+    assert cuda_atomic.scopes == vulkan_atomic.scopes == ("kernel",)
+    assert cuda_atomic.graph_support == vulkan_atomic.graph_support == "inline"
+    assert "atomic-CAS" in cuda_atomic.notes[1]
+
+    warp = ti.hardware.capability("kernel.simt.warp.cuda")
+    subgroup = ti.hardware.capability("kernel.simt.subgroup.vulkan")
+    assert warp.public_api == "ti.simt.warp"
+    assert subgroup.public_api == "ti.simt.subgroup"
+    assert warp.backends == ("cuda",)
+    assert subgroup.backends == ("vulkan",)
+    assert "fail closed" in subgroup.notes[1]
+
+    shared = ti.hardware.capability("kernel.shared_memory.cuda_vulkan")
+    block_local = ti.hardware.capability("kernel.block_local.cuda")
+    assert shared.backends == ("cuda", "vulkan")
+    assert shared.public_api == "ti.simt.block.SharedArray"
+    assert block_local.public_api == "ti.block_local"
+    assert block_local.requirements[0] == "ti.extension.bls"
+    assert "not qualified" in block_local.notes[1]
+
+    grouped_reduction = ti.hardware.capability(
+        "internal.reduction.grouped.cuda_vulkan"
+    )
+    listgen = ti.hardware.capability(
+        "internal.listgen.subgroup_ballot.vulkan"
+    )
+    assert grouped_reduction.implementation_status == "existing_internal"
+    assert listgen.implementation_status == "existing_internal"
+    assert grouped_reduction.scopes == listgen.scopes == ("internal",)
+    assert grouped_reduction.public_api is None
+    assert listgen.public_api is None
+    assert "Automatic" in grouped_reduction.notes[0]
+    assert "Automatic" in listgen.notes[0]
 
     raster = ti.hardware.capability("raster.draw.vulkan")
     assert raster.semantic_family == "raster.draw"
@@ -654,6 +701,32 @@ def test_vulkan_buffer_command_route_is_passively_eligible():
         assert operation.selection == "eligible"
         assert operation.unavailable_reason == "none"
         assert not operation.native_facts["external_component_probed"]
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    offline_cache=False,
+    spirv_listgen_subgroup_ballot=True,
+)
+def test_vulkan_subgroup_ballot_listgen_opt_in_preserves_sparse_iteration():
+    values = ti.field(ti.i32)
+    ti.root.pointer(ti.i, 64).dense(ti.i, 4).place(values)
+    result = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def populate():
+        for i in range(32):
+            values[(i * 29) % 256] = i + 1
+
+    @ti.kernel
+    def reduce_active_values():
+        for i in values:
+            ti.atomic_add(result[None], values[i])
+
+    populate()
+    reduce_active_values()
+
+    assert result[None] == sum(range(1, 33))
 
 
 def _native_probe_payload(discovery, unavailable_reason, **overrides):

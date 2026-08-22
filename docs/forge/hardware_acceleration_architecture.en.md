@@ -146,8 +146,8 @@ how a provider is selected.
 
 | Invocation mode | User contract | Provider behavior | Examples |
 | --- | --- | --- | --- |
-| Transparent optimization | No new public call. Existing semantics must be preserved. | Compiler or provider selects a device mechanism automatically. | `cp.async`, TMA, and mesh-shader specialization. |
-| Explicit kernel semantic | The kernel calls a typed, backend-neutral operation. | Code generation chooses an admitted intrinsic implementation. | Texture sampling, future typed Matrix MMA, and future inline Vulkan ray query. |
+| Transparent optimization | No new public call. Existing semantics must be preserved. | Compiler or provider selects a device mechanism automatically. | Grouped reductions, opt-in Vulkan list-generation ballot aggregation, qualified `cp.async`, and future mesh-shader specialization. |
+| Explicit kernel semantic | The kernel calls a typed operation or compiler hint. | Code generation chooses an admitted intrinsic implementation. | Atomics, warp/subgroup operations, shared memory, block-local caching, texture sampling, future typed Matrix MMA, and future inline Vulkan ray query. |
 | Explicit resource/executable | Python code creates a resource or executable and runs or records it. | Runtime manages native commands, stream order, workspace, and lifetime. | Current CUDA Matrix MMA, raster pass, AS build/refit, batch ray query, OptiX launch. |
 | Optional algorithm provider | A domain API names `auto`, `builtin`, or a provider. | A D1 library is considered only after opt-in. | cuBLAS, cuSPARSE, cuSOLVER, cuFFT. |
 
@@ -157,6 +157,32 @@ accumulation, rounding, determinism, and error contract are compatible.
 
 Transparent optimization can report the chosen mechanism for diagnostics, but
 the implementation mechanism is not a compatibility promise.
+
+### Existing core kernel routes
+
+The catalog now records eight existing D0 route entries without creating new
+public syntax. Six entries cover five explicit kernel semantic families:
+CUDA/Vulkan atomics, CUDA warp operations, the implemented Vulkan subgroup
+subset, CUDA/Vulkan `SharedArray`, and CUDA `ti.block_local`. They are inline
+kernel lowering, not
+Python native actions. The supported dtype and operation slice remains
+backend- and capability-dependent; the catalog therefore reports
+`hardware_acceleration=implementation_defined` instead of inferring one exact
+instruction from the API name. The current `ti.block_local` qualification is
+limited to supported gather/read-cache patterns. Sparse pointer-SNode
+scatter/write-back is explicitly excluded because its existing CUDA
+correctness test fails reproducibly.
+
+Two routes are automatic and internal: compiler-recognized reductions can
+aggregate within a CUDA block or Vulkan subgroup before publishing fewer
+global atomics, and opt-in Vulkan list generation can reserve one contiguous
+range per active subgroup via ballot/elect/broadcast. Unsupported reduction
+patterns retain ordinary atomics; list generation retains the legacy
+per-active-lane atomic path unless both the option and subgroup-ballot feature
+are present. The explicit `ti.block_local` semantic can subsequently select the
+automatic `internal.tile.async.cuda` specialization described below. Thus one
+kernel can contain an explicit semantic while its final hardware mechanism is
+chosen automatically.
 
 The first qualified transparent specialization is
 `internal.tile.async.cuda`. It does not add a kernel call. A CUDA kernel that

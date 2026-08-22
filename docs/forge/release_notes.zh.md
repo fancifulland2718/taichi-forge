@@ -55,6 +55,12 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   `SparseMatrix @ ndarray` 自动选择 cuSPARSE SpMV，`SparseSolver` 自动选择 cuSPARSE 与
   cuSOLVER。两者都是 direct Python API，不是 kernel rewrite 或 Graph action，并继续让
   vendor library 保持可选且不捆绑。
+- 在 catalog 中记录现有 D0 kernel 硬件路线并明确其调用边界：atomic、CUDA warp、Vulkan
+  已实现的 subgroup 子集、`SharedArray` 与 `ti.block_local` 是显式的 kernel-inline 语义；
+  grouped reduction aggregation 与 opt-in Vulkan list-generation ballot aggregation 是带普通
+  atomic fallback 的自动内部选路。该变更不增加语法、依赖、Python native action 或 wheel
+  变体。稀疏 pointer-SNode block-local scatter/write-back 因 CUDA 正确性失败可稳定复现，
+  继续保持未资格化。
 - 官方 wheel 构建与验证会拒绝 D1/D2 vendor runtime 成为必需依赖或新增发行变体；D0
   CUDA/Vulkan runtime 边界保持不变。
 - 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式

@@ -29,6 +29,27 @@ cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle
 `enabled/eligible`，但绝不自行调用 loader。未知 operation/provider 和未实现的 probe
 均 fail closed。
 
+### 核心 kernel 硬件路线（0.6.3 资格化）
+
+hardware catalog 也描述现有 D0 CUDA/Vulkan kernel 路线。它们不新增依赖、wheel
+变体、Python native executable 或 DSL 语法；调用位置本身就是合同的一部分：
+
+- `@ti.kernel` 内显式调用：`ti.atomic_*`、CUDA `ti.simt.warp`、Vulkan 已实现的
+  `ti.simt.subgroup` 子集、`ti.simt.block.SharedArray` 与 `ti.block_local`。这些操作
+  inline lowering，不能从 Python 当作 native command 调用；不支持的 dtype、operation
+  或 device combination 会在 admission/compile 时失败。
+- compiler/runtime 自动选择：识别出的 CUDA block 与 Vulkan subgroup reduction 会先聚合
+  lane value，再发布较少的 global atomic；只有显式设置
+  `spirv_listgen_subgroup_ballot=True` 且设备合格时，Vulkan list generation 才会使用
+  subgroup ballot aggregation。两者都保留普通 atomic fallback，且没有公开调用入口。
+- 分层 selection：`ti.block_local` 是显式 cache hint，随后是否对合格的只读 copy 使用
+  PTX `cp.async` 才是自动选择。当前 block-local 资格范围只覆盖受支持的 gather/read-cache
+  pattern；稀疏 pointer-SNode scatter/write-back 因 CUDA 正确性失败可稳定复现而明确排除。
+
+所有这些 catalog entry 都使用 `hardware_acceleration="implementation_defined"`：codegen
+可能根据具体 operation/device 选择 native atomic、CAS、subgroup instruction 或 shared
+memory。仅凭 API 名称不能证明使用了某条特定指令。
+
 ### `ti.hardware.linalg.gemm_f32`（0.6.3 开发中）
 
 面向 compact row-major f32 matrix 的显式 D1 cuBLAS provider：

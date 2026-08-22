@@ -34,6 +34,33 @@ selection. If an actual algorithm already lazy-loaded a library, passive
 `report()` observes its cached state as `enabled/eligible` without invoking the
 loader. Unknown operations/providers and unimplemented probes fail closed.
 
+### Core kernel hardware routes (0.6.3 qualification)
+
+The hardware catalog also describes existing D0 CUDA/Vulkan kernel routes.
+They add no dependency, wheel variant, Python native executable, or new DSL
+syntax. The call boundary is part of the contract:
+
+- Explicit inside `@ti.kernel`: `ti.atomic_*`, `ti.simt.warp` on CUDA,
+  the implemented `ti.simt.subgroup` subset on Vulkan,
+  `ti.simt.block.SharedArray`, and `ti.block_local`. These operations lower
+  inline and cannot be called from Python as native commands. Unsupported
+  dtype/operation/device combinations fail during admission or compilation.
+- Automatic compiler/runtime selection: recognized CUDA block and Vulkan
+  subgroup reductions aggregate lane values before publishing fewer global
+  atomics. Vulkan list generation can use subgroup ballot aggregation only
+  when `spirv_listgen_subgroup_ballot=True` and the device qualifies. Both
+  retain their ordinary atomic fallbacks and expose no public call.
+- Layered selection: `ti.block_local` is an explicit cache hint, while the
+  later choice of PTX `cp.async` for a qualified read-only copy is automatic.
+  The current block-local qualification covers supported gather/read-cache
+  patterns; sparse pointer-SNode scatter/write-back is excluded after a
+  reproducible CUDA correctness failure.
+
+All catalog entries use `hardware_acceleration="implementation_defined"`:
+code generation may choose native atomics, CAS, subgroup instructions, or
+shared memory according to the exact operation and device. An API name alone
+is not evidence of a particular instruction.
+
 ### `ti.hardware.linalg.gemm_f32` (0.6.3 in development)
 
 An explicit D1 cuBLAS provider for compact row-major f32 matrices:

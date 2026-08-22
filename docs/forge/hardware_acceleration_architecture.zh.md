@@ -128,8 +128,8 @@ workspace_ownership:
 
 | 调用模式 | 用户合同 | Provider 行为 | 例子 |
 | --- | --- | --- | --- |
-| 透明自动优化 | 不增加公开调用，并保持已有语义。 | compiler/provider 自动选择设备机制。 | `cp.async`、TMA、mesh-shader specialization。 |
-| 显式 kernel 语义 | kernel 调用 typed、backend-neutral operation。 | codegen 选择通过 admission 的 intrinsic 实现。 | Texture sampling、未来的 typed Matrix MMA 与 Vulkan inline Ray Query。 |
+| 透明自动优化 | 不增加公开调用，并保持已有语义。 | compiler/provider 自动选择设备机制。 | grouped reduction、opt-in Vulkan list-generation ballot aggregation、已资格化 `cp.async` 与未来 mesh-shader specialization。 |
+| 显式 kernel 语义 | kernel 调用 typed operation 或 compiler hint。 | codegen 选择通过 admission 的 intrinsic 实现。 | atomic、warp/subgroup、shared memory、block-local cache、texture sampling、未来 typed Matrix MMA 与 Vulkan inline Ray Query。 |
 | 显式资源/可执行体 | Python 创建资源或 executable，再直接运行或记录到 Graph。 | runtime 管理 native command、stream order、workspace 与 lifetime。 | 当前 CUDA Matrix MMA、Raster pass、AS build/refit、batch RayQuery、OptiX launch。 |
 | 可选算法 provider | 领域 API 指定 `auto`、`builtin` 或 provider。 | 只有显式 opt-in 后才考虑 D1 library。 | cuBLAS、cuSPARSE、cuSOLVER、cuFFT。 |
 
@@ -137,6 +137,25 @@ workspace_ownership:
 determinism 与 error contract 兼容前，Forge 不得把普通矩阵乘法静默替换为 MMA。
 
 透明优化可以在诊断中报告所选机制，但该内部机制不构成兼容性承诺。
+
+### 现有核心 kernel 路线
+
+catalog 现在记录八条现有 D0 route entry，不新增公开语法。其中六条 entry 覆盖五类显式
+kernel 语义：CUDA/Vulkan atomic、CUDA warp operation、Vulkan 已实现的 subgroup 子集、
+CUDA/Vulkan `SharedArray` 与 CUDA `ti.block_local`。它们都属于 kernel-inline lowering，不是 Python
+native action。支持的 dtype/operation 切片取决于 backend 与 device capability，因此 catalog
+使用 `hardware_acceleration=implementation_defined`，不会根据 API 名称推断一条确定指令。
+当前 `ti.block_local` 资格范围只覆盖受支持的 gather/read-cache pattern；稀疏
+pointer-SNode scatter/write-back 因现有 CUDA 正确性测试稳定失败而明确排除。
+
+两条路线为自动内部实现：compiler 识别的 reduction 可先在 CUDA block 或 Vulkan subgroup
+内聚合，再发布较少的 global atomic；opt-in Vulkan list generation 可通过
+ballot/elect/broadcast 让每个 active subgroup 只保留一次连续区间。reduction pattern 不受支持
+时保留普通 atomic；只有 option 与 subgroup-ballot feature 同时存在时才选择新的 listgen
+路线，否则保留 legacy per-active-lane atomic。显式 `ti.block_local` 语义的已资格化只读
+prologue 随后还能自动选择下文的
+`internal.tile.async.cuda` specialization。因此，同一 kernel 可以含有显式语义，而最终硬件
+机制仍由 compiler 自动决定。
 
 首个通过资格验证的透明 specialization 是 `internal.tile.async.cuda`。它不新增
 kernel 调用。已经请求 backend-neutral `ti.block_local` cache 语义的 CUDA kernel，只有

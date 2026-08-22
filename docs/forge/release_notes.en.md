@@ -64,6 +64,14 @@ grouped under the behavior they shipped.
   explicitly requests the domain operation. Both are direct Python APIs, not
   kernel rewrites or Graph actions, and keep vendor libraries optional and
   unbundled.
+- Cataloged existing D0 kernel hardware routes and made their call boundary
+  explicit. Atomics, CUDA warp operations, the implemented Vulkan subgroup
+  subset, `SharedArray`, and `ti.block_local` are explicit inline kernel
+  semantics; grouped reduction aggregation and opt-in Vulkan list-generation
+  ballot aggregation are automatic internal selections with ordinary atomic
+  fallbacks. This adds no syntax, dependency, Python native action, or wheel
+  variant. Sparse pointer-SNode block-local scatter/write-back remains
+  unqualified after a reproducible CUDA correctness failure.
 - Official wheel builds and validation reject making D1/D2 vendor runtimes a
   required dependency or a new distribution variant; the D0 CUDA/Vulkan
   runtime boundary is unchanged.
