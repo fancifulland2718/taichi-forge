@@ -589,6 +589,41 @@ candidate，只检查五个基础 C2C symbol、查询 component version，并在
 scope。当前不公开 callback、LTO、multi-GPU、任意 stride、R2C/C2R、in-place、kernel
 调用或 AOT，也不会把既有 transform/solver 自动替换为 cuFFT。
 
+### M14 物理工作负载资格方法
+
+`tests/python/hardware_acceleration_qualification.py` 是手动运行、输出 JSON 的资格套件，
+不是 pytest 性能门禁。它覆盖 cuFFT C2C、cuBLAS GEMM、Driver/PTX MMA、显式 cuSPARSE
+SpMV、Vulkan BLAS refit 相对 rebuild，以及 Vulkan exact texel fetch 相对 storage-buffer
+load。每个 case 同时验证数值结果和 `ti.hardware.report()` 解析出的真实 route；缺失的 D1
+library 被记为 `skipped`，不会改变官方 wheel 安装合同。
+
+性能声明采用 fail-closed 规则：
+
+- parent 为每个 case 启动独立 AB 与 BA 进程；cold timing 单独记录，不进入 warm speedup；
+- 每个计时 block 以 `ti.sync()` 等待设备完成，并记录原始 completion-latency sample；
+- hardware 与 baseline 各自必须满足 CV 不超过 10%，AB/BA median drift 不超过 10%；
+- 配对 speedup 的第 5 百分位必须大于 1，才设置
+  `performance_claim_eligible=true`；
+- JSON 同时记录 source revision、本地 native artifact SHA-256、workload、原始 sample、
+  correctness、route 与拒绝原因。设备、driver 或 workload 变化后必须重新运行，单机结果
+  不是通用性能承诺。
+
+默认 workload 面向物理引擎中常见的 dense local/batched algebra、spectral transform、
+sparse operator 与动态 triangle scene。cuFFT baseline 是设备端 radix-2 f32 complex FFT，
+不是含 PCIe transfer 的 NumPy 对比。texture case 只资格化等价的 integer texel fetch；它
+不能证明 linear-filtered `sample_lod()` 相对 buffer 实现更快。RasterPass 已由真实 color/depth
+测试资格化固定功能 route，但软件 renderer 没有相同 draw/visibility/depth 合同，因此套件
+不制造不等价 speedup。`SparseSolver` 的 factorization/solve 收益依赖矩阵结构与重复次数，
+继续使用现有 solver qualification matrix，不从单个合成系统推广。
+
+```bash
+python tests/python/hardware_acceleration_qualification.py \
+  --output hardware-qualification.json
+```
+
+本地 source build 可额外设置 `TAICHI_FORGE_LOCAL_PYD` 与
+`TAICHI_FORGE_RUNTIME_DIR`；两个变量都会原样传给 fresh worker。
+
 ## Cache 边界
 
 一个全局 cache key 会错误失效过多 portable work，同时仍不足以保护 native

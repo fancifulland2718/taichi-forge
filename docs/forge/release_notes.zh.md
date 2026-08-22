@@ -96,6 +96,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   fixed-size、batched、single-precision 1D C2C transform。显式 probe 仍为无副作用的
   transient load；只有创建 plan 才会 lazy-load 用户提供的兼容 cuFFT shared library。
   Forge 不捆绑或链接 vendor library，也不新增 package 或官方 wheel 变体。
+- 新增手动、机器可读的硬件资格套件，使用 fresh-process AB/BA、独立 cold/warm
+  timing、设备完成同步、correctness/route gate、CV 与跨顺序 drift gate，以及配对 speedup
+  第 5 百分位门槛。套件覆盖 cuFFT、cuBLAS、MMA、显式 cuSPARSE、Vulkan AS refit 和
+  exact texture fetch；它不是 pytest 性能门禁，不把单机数据推广为通用声明，也不为
+  RasterPass 制造不等价的软件基线。
 - 新增首个已资格化的 D0 透明 specialization。在 CUDA compute capability 8.0+
   与 PTX 7.0+ 上，至少 8 KiB 的 compiler-generated `ti.block_local` struct-for
   prologue 会对 primitive 4/8/16-byte direct global-to-BLS copy 自动使用 PTX

@@ -688,6 +688,52 @@ callbacks, LTO, multi-GPU, arbitrary strides, R2C/C2R, in-place execution,
 kernel calls, or AOT in this slice, and does not automatically substitute
 cuFFT for existing transforms or solvers.
 
+### M14 physics-workload qualification method
+
+`tests/python/hardware_acceleration_qualification.py` is a manually invoked,
+JSON-producing qualification suite, not a pytest performance gate. It covers
+cuFFT C2C, cuBLAS GEMM, Driver/PTX MMA, explicit cuSPARSE SpMV, Vulkan BLAS
+refit versus rebuild, and Vulkan exact texel fetch versus a storage-buffer
+load. Every case checks both numerical output and the real route resolved by
+`ti.hardware.report()`. A missing D1 library is recorded as `skipped` and does
+not change the official-wheel installation contract.
+
+Performance claims use fail-closed rules:
+
+- the parent launches independent AB and BA processes for every case; cold
+  timings are recorded separately and excluded from warm speedup;
+- every timed block ends with `ti.sync()` and records raw device-completion
+  latency samples;
+- hardware and baseline variants must each have at most 10% CV and at most
+  10% AB/BA median drift;
+- the fifth percentile of paired speedups must exceed one before
+  `performance_claim_eligible=true`; and
+- JSON records the source revision, local native-artifact SHA-256, workload,
+  raw samples, correctness, route, and rejection reason. Device, driver, or
+  workload changes require a new run; one machine's result is not a portable
+  performance promise.
+
+The defaults target dense local/batched algebra, spectral transforms, sparse
+operators, and dynamic triangle scenes used by physics engines. The cuFFT
+baseline is a device-side radix-2 f32 complex FFT, not a NumPy comparison that
+includes PCIe transfers. The texture case qualifies only equivalent integer
+texel fetches; it cannot establish a speedup for linearly filtered
+`sample_lod()` over a buffer implementation. Real color/depth tests qualify
+the RasterPass fixed-function route, but the software renderer has no matching
+draw, visibility, and depth contract, so the suite does not manufacture an
+inequivalent speedup. `SparseSolver` factorization/solve gains depend on matrix
+structure and reuse count and remain covered by the existing solver
+qualification matrix rather than one synthetic-system generalization.
+
+```bash
+python tests/python/hardware_acceleration_qualification.py \
+  --output hardware-qualification.json
+```
+
+A local source build may additionally set `TAICHI_FORGE_LOCAL_PYD` and
+`TAICHI_FORGE_RUNTIME_DIR`; both variables are propagated unchanged to fresh
+workers.
+
 ## Cache boundaries
 
 One universal cache key would invalidate too much portable work and still be
