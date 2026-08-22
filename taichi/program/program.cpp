@@ -8541,6 +8541,8 @@ void Program::finalize() {
   }
   if (compile_config().arch == Arch::cuda) {
     best_effort("clear CUDA cuFFT plans", [&] { cuda_clear_cufft_plans(); });
+    best_effort("clear CUDA cuBLAS GEMM provider",
+                [&] { cuda_clear_cublas_gemm(); });
   }
   best_effort("finalize ArgPack resources",
               [&] { argpack_resources_.finalize({kArgPackResourceKind}); });

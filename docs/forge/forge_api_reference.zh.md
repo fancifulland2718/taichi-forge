@@ -29,6 +29,33 @@ cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle
 `enabled/eligible`，但绝不自行调用 loader。未知 operation/provider 和未实现的 probe
 均 fail closed。
 
+### `ti.hardware.linalg.gemm_f32`（0.6.3 开发中）
+
+面向 compact row-major f32 matrix 的显式 D1 cuBLAS provider：
+
+```python
+if ti.hardware.linalg.is_available():  # 显式瞬时 provider probe
+    ti.hardware.linalg.gemm_f32(a, b, output, alpha=1.0, beta=0.0)
+
+    recording = ti.hardware.linalg.CublasGemmRecording(
+        rows, columns, inner, alpha=1.0, beta=0.0
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="auto")
+    builder.compile().run({"a": a, "b": b, "output": output})
+```
+
+数值合同为 `output = alpha * a @ b + beta * output`；输入 shape 分别为
+`(rows, inner)` 和 `(inner, columns)`，输出为 `(rows, columns)`。所有数组必须是当前
+CUDA runtime 上互不 alias 的 compact scalar f32 ndarray。执行时交换 operand，把
+column-major cuBLAS SGEMM 映射为文档规定的 row-major 结果，绑定 Program 默认 CUDA
+stream，并在每个 Program 内复用一个 handle。
+
+只有真实执行才 lazy-load 兼容 cuBLAS shared library；`is_available()` 使用显式瞬时
+probe，被动 `report()` 不加载它。Forge 只复制稳定 ABI 声明，不包含 Toolkit header、
+link dependency、bundled library、package dependency、新 build switch 或 wheel 变体。
+该 API 只支持 direct/root-Graph，不能在 kernel 内调用，也不会改写普通矩阵乘法。
+
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 
 这两个 D0 API 描述并一次性提交 Vulkan RHI buffer command sequence：`fill_u32()`、

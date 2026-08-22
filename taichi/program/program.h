@@ -946,6 +946,17 @@ class TI_DLL_EXPORT Program {
 
   void cuda_clear_cufft_plans();
 
+  std::size_t cuda_cublas_gemm_f32(Ndarray *a,
+                                    Ndarray *b,
+                                    Ndarray *output,
+                                    std::size_t rows,
+                                    std::size_t columns,
+                                    std::size_t inner,
+                                    float alpha,
+                                    float beta);
+
+  void cuda_clear_cublas_gemm();
+
   bool cuda_device_transform_available() const;
 
   bool cuda_toolkit_transform_available() const;
@@ -3673,6 +3684,8 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;
   std::uint64_t next_cuda_cufft_plan_handle_{1};
+  std::mutex cuda_cublas_gemm_mutex_;
+  void *cuda_cublas_gemm_handle_{nullptr};
   std::atomic<std::uint64_t> cuda_async_tile_lowered_specializations_{0};
   std::atomic<std::uint64_t> cuda_async_tile_copy_sites_{0};
   struct RuntimeBackendTelemetryBaseline {

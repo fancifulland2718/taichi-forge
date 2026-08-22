@@ -543,6 +543,28 @@ This is a manual hardware interface. No existing software ray tracer,
 renderer, contact query, or ordinary Taichi kernel is automatically rewritten
 to call it.
 
+### Current optional cuBLAS GEMM qualification boundary
+
+`ti.hardware.linalg.gemm_f32` is an explicit D1 vendor-library command. It
+accepts three distinct compact row-major f32 ndarrays and computes
+`C = alpha * A @ B + beta * C`. The implementation swaps operands and output
+dimensions when calling column-major `cublasSgemm_v2`, binds host scalar mode
+and the Program's default CUDA stream, and retains one handle until Program
+finalization. Direct execution and root-Graph `rerecord` share this route.
+
+`is_available()` performs the existing transient, side-effect-free cuBLAS
+probe. Actual execution separately lazy-loads the user's compatible library;
+passive `report()` observes that loaded state but never initiates it. The
+provider adds one stable ABI symbol to the existing dynamic table and adds no
+Toolkit header, link dependency, bundled library, package dependency, build
+switch, or wheel variant. Missing/incompatible providers fail at this command,
+not CUDA initialization. The provider has no Graph-exclusive workspace.
+
+This route does not rewrite `ti.Matrix` operations, kernels, linear operators,
+or solvers. Batched/strided GEMM, mixed precision, tensor-core algorithm
+selection, transposed layouts, in-place aliases, kernel calls, and AOT remain
+outside this qualified slice.
+
 ### Current M7 optional cuFFT qualification boundary
 
 `ti.hardware.fft.CufftPlan1D` is the first new D1 vendor-algorithm provider.

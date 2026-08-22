@@ -1,6 +1,6 @@
 """Hardware capability contracts and provider-independent introspection."""
 
-from taichi_forge.hardware import fft, matrix, raster, ray
+from taichi_forge.hardware import fft, linalg, matrix, raster, ray
 
 from taichi_forge.hardware._capabilities import (
     DEPENDENCY_TIERS,
@@ -61,6 +61,7 @@ __all__ = [
     "providers",
     "report",
     "fft",
+    "linalg",
     "matrix",
     "raster",
     "ray",

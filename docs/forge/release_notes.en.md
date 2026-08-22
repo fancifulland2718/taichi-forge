@@ -52,6 +52,12 @@ grouped under the behavior they shipped.
   cuSPARSE, and cuSOLVER probes use transient handles and never enable a
   provider implicitly. Passive reports can observe singleton state already
   loaded by a real algorithm without invoking the loader.
+- Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
+  `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
+  execution lazy-loads the user's compatible cuBLAS and reuses one handle per
+  Program; Forge adds no Toolkit header, link dependency, bundled runtime,
+  package dependency, build switch, or wheel variant. Ordinary matrix
+  multiplication and kernels are not rewritten.
 - Official wheel builds and validation reject making D1/D2 vendor runtimes a
   required dependency or a new distribution variant; the D0 CUDA/Vulkan
   runtime boundary is unchanged.

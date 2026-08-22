@@ -2087,6 +2087,11 @@ void export_lang(py::module &m) {
       .def("_destroy_cuda_cufft_plan",
            tracked_native_program_method(&Program::destroy_cuda_cufft_plan),
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cublas_gemm_f32",
+           tracked_native_program_method(&Program::cuda_cublas_gemm_f32),
+           py::arg("a"), py::arg("b"), py::arg("output"), py::arg("rows"),
+           py::arg("columns"), py::arg("inner"), py::arg("alpha"),
+           py::arg("beta"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

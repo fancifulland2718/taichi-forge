@@ -46,6 +46,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 - 新增 `ti.hardware` schema-v1 静态 operation/provider 合同、无副作用 `report()` 与显式
   D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider；
   被动 report 可观察已被实际算法加载的 singleton 状态，但不会触发 loader。
+- 新增可选 D1 `ti.hardware.linalg.gemm_f32`，通过 direct Python 与 root Graph 对 compact
+  row-major f32 matrix 执行 `C = alpha * A @ B + beta * C`。真实执行才 lazy-load 用户的
+  兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、
+  link dependency、bundled runtime、package dependency、build switch 或 wheel 变体，
+  也不会改写普通 matrix multiplication 或 kernel。
 - 官方 wheel 构建与验证会拒绝 D1/D2 vendor runtime 成为必需依赖或新增发行变体；D0
   CUDA/Vulkan runtime 边界保持不变。
 - 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式

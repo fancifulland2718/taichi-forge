@@ -34,6 +34,36 @@ selection. If an actual algorithm already lazy-loaded a library, passive
 `report()` observes its cached state as `enabled/eligible` without invoking the
 loader. Unknown operations/providers and unimplemented probes fail closed.
 
+### `ti.hardware.linalg.gemm_f32` (0.6.3 in development)
+
+An explicit D1 cuBLAS provider for compact row-major f32 matrices:
+
+```python
+if ti.hardware.linalg.is_available():  # explicit transient provider probe
+    ti.hardware.linalg.gemm_f32(a, b, output, alpha=1.0, beta=0.0)
+
+    recording = ti.hardware.linalg.CublasGemmRecording(
+        rows, columns, inner, alpha=1.0, beta=0.0
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="auto")
+    builder.compile().run({"a": a, "b": b, "output": output})
+```
+
+The operation is `output = alpha * a @ b + beta * output`; inputs have shapes
+`(rows, inner)` and `(inner, columns)`, and output has shape
+`(rows, columns)`. All arrays are distinct, compact scalar f32 ndarrays on the
+current CUDA runtime. Execution uses a column-major cuBLAS SGEMM with swapped
+operands to preserve the documented row-major result, binds the Program's
+default CUDA stream, and reuses one handle per Program.
+
+The compatible cuBLAS shared library is lazy-loaded only by real execution;
+`is_available()` uses the explicit transient probe, and passive `report()`
+does not load it. Forge copies the stable ABI declarations but includes no
+Toolkit header, link dependency, bundled library, package dependency, build
+switch, or wheel variant. The API is direct/root-Graph only: it is not
+kernel-callable and ordinary matrix multiplication is never rewritten.
+
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 
 These D0 APIs describe and submit one Vulkan RHI buffer-command sequence:

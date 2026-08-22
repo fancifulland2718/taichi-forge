@@ -469,6 +469,24 @@ scratch allocation 与 lifetime ownership 属于 setup，而不是 replay work�
 这是手动调用的硬件接口。现有软件光追、renderer、contact query 或普通 Taichi kernel
 均不会被自动改写为调用它。
 
+### 当前可选 cuBLAS GEMM 资格边界
+
+`ti.hardware.linalg.gemm_f32` 是显式 D1 vendor-library command，接收三个互不 alias 的
+compact row-major f32 ndarray，计算 `C = alpha * A @ B + beta * C`。实现调用
+column-major `cublasSgemm_v2` 时交换 operand 与输出维度，绑定 host scalar mode 和
+Program 默认 CUDA stream，并复用一个 handle 直到 Program finalize。direct execution
+与 root-Graph `rerecord` 共用该路线。
+
+`is_available()` 使用现有无副作用 transient cuBLAS probe；真实执行另行 lazy-load 用户
+已有的兼容 library。被动 `report()` 可以观察已加载状态，但不会发起加载。provider 只向
+现有动态函数表增加一个稳定 ABI symbol，不新增 Toolkit header、link dependency、
+bundled library、package dependency、build switch 或 wheel 变体。missing/incompatible
+provider 只使该 command fail，不影响 CUDA 初始化。该命令没有 Graph 独占 workspace。
+
+该路线不会改写 `ti.Matrix` operation、kernel、linear operator 或 solver。batched/strided
+GEMM、mixed precision、tensor-core algorithm selection、transposed layout、in-place alias、
+kernel call 与 AOT 均不在当前资格范围。
+
 ### 当前 M7 可选 cuFFT 资格边界
 
 `ti.hardware.fft.CufftPlan1D` 是首个新增 D1 vendor-algorithm provider。

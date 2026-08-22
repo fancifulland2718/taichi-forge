@@ -613,6 +613,14 @@ typedef enum {
   CUBLAS_POINTER_MODE_DEVICE = 1
 } cublasPointerMode_t;
 
+typedef enum {
+  CUBLAS_OP_N = 0,
+  CUBLAS_OP_T = 1,
+  CUBLAS_OP_C = 2,
+  CUBLAS_OP_HERMITAN = 2,
+  CUBLAS_OP_CONJG = 3
+} cublasOperation_t;
+
 /* Opaque structure holding CUBLAS library context */
 struct cublasContext;
 typedef struct cublasContext *cublasHandle_t;
