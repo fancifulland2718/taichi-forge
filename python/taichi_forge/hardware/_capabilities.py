@@ -603,7 +603,7 @@ _OPERATIONS = (
         update_policy="immutable",
         dtypes=(
             "vertex:declared BufferFormat",
-            "index:i32/u32",
+            "index:u32",
             "color:attachment format",
             "depth:depth32f",
         ),
@@ -1030,7 +1030,7 @@ _OPERATIONS = (
         public_api="ti.block_local",
         notes=(
             "This explicit compiler hint lowers admitted field tiles into block-local storage; the current qualified slice covers supported gather/read-cache access patterns.",
-            "Sparse pointer-SNode scatter/write-back is not qualified because the existing CUDA regression test is reproducibly incorrect; callers must retain the ordinary atomic path for that pattern.",
+            "Sparse SNode scatter/write-back automatically retains the ordinary global store/atomic path because a whole-pad BLS epilogue is not semantics-preserving.",
             "The separate internal.tile.async.cuda descriptor reports when an admitted read-only copy is further specialized to cp.async.",
         ),
     ),
@@ -1612,11 +1612,14 @@ def _passive_core_statuses(runtime_initialized, backend):
                 },
             },
         }
-    available = bool(
+    graphics_available = bool(
+        program is not None and program.vulkan_graphics_pipeline_available()
+    )
+    ray_available = bool(
         program is not None and program.vulkan_ray_query_available()
     )
-    native_facts = {
-        "provider_available": available,
+    ray_facts = {
+        "provider_available": ray_available,
         "capability_query": "active_vulkan_feature_chain",
         "required_features": (
             "bufferDeviceAddress",
@@ -1626,13 +1629,43 @@ def _passive_core_statuses(runtime_initialized, backend):
         "capability_query_builds_acceleration_structure": False,
     }
     return {
+        "runtime.buffer_commands.vulkan": {
+            "available": True,
+            "native_facts": {
+                "provider_available": True,
+                "capability_query": "active_vulkan_runtime",
+                "admission_scope": "provider_route",
+            },
+        },
+        "image.copy.vulkan": {
+            "available": True,
+            "native_facts": {
+                "provider_available": True,
+                "capability_query": "active_vulkan_runtime",
+                "admission_scope": "provider_route",
+                "resource_requirements_evaluated": False,
+            },
+        },
+        "raster.draw.vulkan": {
+            "available": graphics_available,
+            "native_facts": {
+                "provider_available": graphics_available,
+                "capability_query": "active_vulkan_graphics_pipeline",
+                "admission_scope": "provider_route",
+                "resource_requirements_evaluated": False,
+            },
+        },
         "ray.as_build.vulkan": {
-            "available": available,
-            "native_facts": native_facts,
+            "available": ray_available,
+            "native_facts": ray_facts,
+        },
+        "ray.as_refit.vulkan": {
+            "available": ray_available,
+            "native_facts": ray_facts,
         },
         "ray.query.batch.vulkan": {
-            "available": available,
-            "native_facts": native_facts,
+            "available": ray_available,
+            "native_facts": ray_facts,
         },
     }
 
@@ -1783,6 +1816,22 @@ def _passive_resolution(
             enablement="enabled",
             selection="selected",
             unavailable_reason="none",
+            native_facts=facts,
+        )
+
+    if core_status is None and descriptor.implementation_status in (
+        "existing_public",
+        "existing_internal",
+    ):
+        facts["operation_requirements_evaluated"] = False
+        return ResolvedHardwareOperation(
+            descriptor=descriptor,
+            backend=backend,
+            runtime_initialized=True,
+            discovery="present",
+            enablement="enabled",
+            selection="not_considered",
+            unavailable_reason="operation_requirements_not_evaluated",
             native_facts=facts,
         )
 

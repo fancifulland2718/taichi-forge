@@ -257,7 +257,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert shared.public_api == "ti.simt.block.SharedArray"
     assert block_local.public_api == "ti.block_local"
     assert block_local.requirements[0] == "ti.extension.bls"
-    assert "not qualified" in block_local.notes[1]
+    assert "automatically retains" in block_local.notes[1]
 
     grouped_reduction = ti.hardware.capability(
         "internal.reduction.grouped.cuda_vulkan"
@@ -281,6 +281,8 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert raster.scopes == ("python", "graph")
     assert raster.execution_kind == "native_command"
     assert raster.graph_support == "recordable"
+    assert "index:u32" in raster.dtypes
+    assert all("index:i32" not in dtype for dtype in raster.dtypes)
     assert "kernel calls are impossible" in raster.notes[0]
     assert raster.workspace_ownership == "provider_owned"
     assert raster.layouts[0] == "declared vertex bindings and attributes"
@@ -838,12 +840,12 @@ def test_sparse_block_local_scatter_falls_back_to_global_atomics():
 
 
 @test_utils.test(arch=ti.vulkan)
-def test_vulkan_buffer_command_route_is_passively_eligible():
+def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
     report = ti.hardware.report()
     for operation_id in (
         "runtime.buffer_commands.vulkan",
+        "image.copy.vulkan",
         "raster.draw.vulkan",
-        "sampling.texture.vulkan",
     ):
         operation = next(
             operation
@@ -856,6 +858,35 @@ def test_vulkan_buffer_command_route_is_passively_eligible():
         assert operation.selection == "eligible"
         assert operation.unavailable_reason == "none"
         assert not operation.native_facts["external_component_probed"]
+
+    sampling = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id == "sampling.texture.vulkan"
+    )
+    assert sampling.discovery == "present"
+    assert sampling.enablement == "enabled"
+    assert sampling.selection == "not_considered"
+    assert (
+        sampling.unavailable_reason
+        == "operation_requirements_not_evaluated"
+    )
+    assert not sampling.native_facts["operation_requirements_evaluated"]
+
+    ray_routes = {
+        operation.descriptor.operation_id: operation
+        for operation in report.operations
+        if operation.descriptor.operation_id
+        in ("ray.as_build.vulkan", "ray.as_refit.vulkan", "ray.query.batch.vulkan")
+    }
+    assert len(ray_routes) == 3
+    assert len({operation.discovery for operation in ray_routes.values()}) == 1
+    assert len({operation.selection for operation in ray_routes.values()}) == 1
+    assert all(
+        operation.native_facts["capability_query"]
+        == "active_vulkan_feature_chain"
+        for operation in ray_routes.values()
+    )
 
 
 @test_utils.test(

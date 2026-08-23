@@ -268,6 +268,10 @@ def test_vulkan_graphics_indexed_draw_uses_declared_bounds():
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")
 
+    descriptor = ti.hardware.capability("raster.draw.vulkan")
+    assert "index:u32" in descriptor.dtypes
+    assert all("index:i32" not in dtype for dtype in descriptor.dtypes)
+
     with _triangle_pipeline() as pipeline:
         vertices = _triangle_vertices()
         indices = ti.ndarray(ti.u32, shape=(3,))

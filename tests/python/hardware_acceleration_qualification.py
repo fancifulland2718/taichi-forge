@@ -253,6 +253,20 @@ def _resolved_operation(operation_id):
     return operation.to_dict()
 
 
+def _executed_core_route_is_consistent(route):
+    if route["discovery"] == "available":
+        return route["selection"] in ("eligible", "selected")
+    return (
+        route["discovery"] == "present"
+        and route["selection"] == "not_considered"
+        and route["unavailable_reason"]
+        == "operation_requirements_not_evaluated"
+        and not route["native_facts"].get(
+            "operation_requirements_evaluated", True
+        )
+    )
+
+
 def _provenance(case, order):
     backend = _ti_core.arch_name(ti.lang.impl.current_cfg().arch)
     try:
@@ -941,7 +955,7 @@ def _vulkan_texture_fetch_case(order, args):
     route = _resolved_operation("sampling.texture.vulkan")
     passed = (
         hardware_error[0] == 0.0
-        and route["discovery"] == "available"
+        and _executed_core_route_is_consistent(route)
         and route["hardware_acceleration"] == "qualified"
     )
     result = _provenance("vulkan-texture-fetch", order)
@@ -1062,7 +1076,7 @@ def _vulkan_texture_sample_case(order, args):
     route = _resolved_operation("sampling.texture.vulkan")
     passed = (
         sample_error[0] <= tolerance
-        and route["discovery"] == "available"
+        and _executed_core_route_is_consistent(route)
         and route["hardware_acceleration"] == "qualified"
     )
     result = _provenance("vulkan-texture-sample", order)
@@ -1295,7 +1309,7 @@ def _vulkan_texture_stencil_case(order, args):
     passed = (
         hardware_error[0] <= tolerance
         and baseline_error[0] <= tolerance
-        and route["discovery"] == "available"
+        and _executed_core_route_is_consistent(route)
         and route["hardware_acceleration"] == "qualified"
     )
     result = _provenance("vulkan-texture-stencil", order)
