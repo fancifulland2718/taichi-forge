@@ -86,7 +86,6 @@ English public docs are grouped by use case:
 
 ### Graph and execution
 
-- [Hardware acceleration architecture and execution plan](docs/forge/hardware_acceleration_architecture.en.md)
 - [Graph compatibility and migration guide](docs/forge/graph_migration_guide.en.md)
 - [Graph runtime and optimization](docs/forge/graph_runtime_optimization.en.md)
 - [Dense Field Graph](docs/forge/dense_field_graph.en.md)
