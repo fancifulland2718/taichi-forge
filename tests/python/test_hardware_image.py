@@ -34,13 +34,14 @@ def test_vulkan_image_copy_direct_graph_ordering_and_lifetime():
         for i, j in ti.ndrange(4, 4):
             result[i, j] = texture.fetch(ti.Vector([i, j]), 0).x
 
-    write(source)
-    assert ti.hardware.image.copy(destination, source) is destination
-    read(destination, output)
-    np.testing.assert_allclose(
-        output.to_numpy(),
-        np.fromfunction(lambda i, j: i * 10 + j, (4, 4), dtype=np.float32),
+    expected = np.fromfunction(
+        lambda i, j: i * 10 + j, (4, 4), dtype=np.float32
     )
+    for _ in range(16):
+        write(source)
+        assert ti.hardware.image.copy(destination, source) is destination
+        read(destination, output)
+        np.testing.assert_allclose(output.to_numpy(), expected)
 
     recording = ti.hardware.image.VulkanImageCopyRecording(
         source="input", destination="output"
