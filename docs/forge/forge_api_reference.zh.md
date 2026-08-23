@@ -125,9 +125,40 @@ format-matched `rw_texture` storage image；默认 sampler 固定为 linear/repe
 不可配置且不承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为
 texture，CUDA backend 也尚未实现 texture lowering。该 D0 路线不新增 wheel 变体。
 
+### `ti.hardware.graphics.VulkanGraphicsPipeline`（0.6.3 开发中）
+
+这是 renderer-neutral 的底层 Vulkan 光栅接口。调用方提供 SPIR-V shader binary、精确
+vertex layout、runtime-owned `ti.ndarray` vertex/index buffer，以及 runtime-owned
+`ti.Texture` color/depth attachment：
+
+```python
+with ti.hardware.graphics.VulkanGraphicsPipeline(
+    vertex_spirv,
+    fragment_spirv,
+    vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 20),),
+    vertex_attributes=(
+        ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+        ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 8),
+    ),
+) as pipeline:
+    pipeline.draw(
+        color_target,
+        {0: vertices},
+        draw=ti.hardware.graphics.Draw(3),
+    )
+```
+
+`record()` 生成可自动加入 root Graph 的 backend-command node；vertex/index buffer 是
+精确 READ effect，attachment 是 WRITE effect。产生几何的 kernel、graphics submission
+和后续读取 kernel 之间由 runtime 排序，不隐式等待 host。接口只公开 pipeline state 与
+draw recording，不拥有 camera、material、light、scene、mesh、shader compiler、
+presentation 或 renderer policy。它只支持 Vulkan、不能在 `@ti.kernel` 内调用，以预编译
+SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。driver 持有的 pipeline
+与 shader-module 内存按 opaque memory 报告，不做虚假估算。
+
 ### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
 
-显式、可复用的 Vulkan offscreen 硬件光栅 provider：
+现有 GGUI renderer 之上的兼容与资格验证 adapter：
 
 ```python
 with ti.hardware.raster.RasterPass((1280, 720)) as raster:

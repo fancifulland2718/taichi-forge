@@ -107,6 +107,7 @@ struct VulkanBufferCommand {
 class Program;
 class CudaFftPlan;
 class VulkanTriangleRayScene;
+class VulkanGraphicsPipelineResource;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
@@ -118,6 +119,30 @@ struct VulkanTriangleRaySceneMemoryStatistics {
   std::size_t build_scratch_requested_bytes{0};
   std::size_t known_requested_bytes{0};
   std::size_t known_allocation_count{0};
+};
+
+struct VulkanGraphicsVertexBinding {
+  std::uint32_t binding{0};
+  std::size_t stride{0};
+  bool instance{false};
+};
+
+struct VulkanGraphicsVertexAttribute {
+  std::uint32_t location{0};
+  std::uint32_t binding{0};
+  BufferFormat format{BufferFormat::unknown};
+  std::uint32_t offset{0};
+};
+
+struct VulkanGraphicsDrawInfo {
+  std::uint32_t element_count{0};
+  std::uint32_t instance_count{1};
+  std::uint32_t first_vertex{0};
+  std::uint32_t first_index{0};
+  std::uint32_t first_instance{0};
+  bool indexed{false};
+  std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
+  std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};
 };
 namespace storage {
 class DenseStorageDescriptor;
@@ -923,6 +948,34 @@ class TI_DLL_EXPORT Program {
                                       std::size_t batch_count);
 
   bool vulkan_ray_query_available() const;
+
+  bool vulkan_graphics_pipeline_available() const;
+
+  std::uint64_t create_vulkan_graphics_pipeline(
+      const std::vector<std::uint32_t> &vertex_spirv,
+      const std::vector<std::uint32_t> &fragment_spirv,
+      const std::vector<VulkanGraphicsVertexBinding> &vertex_bindings,
+      const std::vector<VulkanGraphicsVertexAttribute> &vertex_attributes,
+      int topology,
+      int polygon_mode,
+      bool front_face_cull,
+      bool back_face_cull,
+      bool depth_test,
+      bool depth_write,
+      bool blending,
+      const std::string &name);
+
+  std::size_t vulkan_graphics_draw(
+      std::uint64_t handle,
+      Texture *color,
+      Texture *depth,
+      const std::vector<std::pair<std::uint32_t, Ndarray *>> &vertex_buffers,
+      Ndarray *index_buffer,
+      const VulkanGraphicsDrawInfo &draw);
+
+  void destroy_vulkan_graphics_pipeline(std::uint64_t handle);
+
+  void vulkan_clear_graphics_pipelines();
 
   std::uint64_t create_vulkan_triangle_ray_scene(Ndarray *vertices,
                                                  Ndarray *indices,
@@ -3300,6 +3353,16 @@ class TI_DLL_EXPORT Program {
       std::function<void(Device *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs);
 
+  /** Enqueue a custom graphics op in the current Program execution flow.
+   *
+   * Graphics work remains a command-scope operation outside Taichi kernels.
+   * The GfxRuntime implementation establishes compute -> graphics -> compute
+   * semaphore ordering even when Vulkan uses distinct queue families.
+   */
+  void enqueue_graphics_op_lambda(
+      std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+      const std::vector<ComputeOpImageRef> &image_refs);
+
   /**
    * TODO(zhanlue): Remove this interface
    *
@@ -3687,6 +3750,11 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<RuntimeCompletionCudaEventPool>
       runtime_completion_cuda_event_pool_;
   PrimitiveWorkspaceArena primitive_workspace_arena_;
+  std::mutex vulkan_graphics_pipeline_mutex_;
+  std::unordered_map<std::uint64_t,
+                     std::shared_ptr<VulkanGraphicsPipelineResource>>
+      vulkan_graphics_pipelines_;
+  std::uint64_t next_vulkan_graphics_pipeline_handle_{1};
   std::mutex vulkan_ray_scene_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleRayScene>>
       vulkan_ray_scenes_;

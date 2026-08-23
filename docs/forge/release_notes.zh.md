@@ -77,8 +77,14 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 - 资格化现有 D0 Vulkan `ti.Texture` 硬件采样路线：显式 texture op 会自动 lowering 到
   SPIR-V image/sampler 指令；普通 field/ndarray 不会自动替换。CUDA texture lowering
   尚未实现并保持 `planned`。该变更不增加官方 wheel 变体。
+- 新增 D0 `ti.hardware.graphics.VulkanGraphicsPipeline`，在调用方提供的 SPIR-V、精确
+  vertex/index layout、runtime-owned color/depth texture 上提供 renderer-neutral 的 direct
+  或 root-Graph draw recording。compute/graphics 排序使用 device-side semaphore bridge，
+  不隐式等待 host。接口刻意不提供 scene、camera、material、lighting、shader compiler 或
+  presentation policy，不新增依赖或官方 wheel 变体；driver pipeline 内存按 opaque 报告。
 - 新增 D0 `ti.hardware.raster.RasterPass`，复用当前 Program 的 Vulkan GGUI/RHI
-  graphics pipeline，提供 mesh/instance/particle/line 的显式 offscreen 硬件光栅与
+  graphics pipeline，作为兼容/资格 adapter 提供 mesh/instance/particle/line 的显式
+  offscreen 硬件光栅与
   独立 color/depth readback。当前支持 Python direct 与显式分段 root-Graph；kernel 调用、
   automatic Graph admission、structured region 与 AOT 均明确拒绝。分段路线保持顺序与
   lifetime，但不声称 backend-Graph fusion；不增加依赖或官方 wheel 变体。

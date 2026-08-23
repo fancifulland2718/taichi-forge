@@ -1474,6 +1474,16 @@ vkapi::IVkCommandBuffer VulkanCommandList::vk_command_buffer() {
   return buffer_;
 }
 
+void VulkanCommandList::set_next_renderpass_color_final_layout(
+    ImageLayout layout) {
+  TI_ERROR_IF(layout != ImageLayout::color_attachment &&
+                  layout != ImageLayout::present_src,
+              "Vulkan render-pass color final layout must be color_attachment "
+              "or present_src.");
+  current_renderpass_desc_.color_final_layout =
+      image_layout_ti_to_vk(layout);
+}
+
 void VulkanCommandList::begin_renderpass(int x0,
                                          int y0,
                                          int x1,
@@ -1720,7 +1730,14 @@ void VulkanCommandList::image_transition(DeviceAllocation img,
   barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
   barrier.image = image->image;
-  barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  if (format == VK_FORMAT_D16_UNORM || format == VK_FORMAT_D32_SFLOAT) {
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+  } else if (format == VK_FORMAT_D24_UNORM_S8_UINT) {
+    barrier.subresourceRange.aspectMask =
+        VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+  } else {
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+  }
   barrier.subresourceRange.baseMipLevel = 0;
   barrier.subresourceRange.levelCount = 1;
   barrier.subresourceRange.baseArrayLayer = 0;
@@ -3557,7 +3574,7 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
     description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     description.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    description.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    description.finalLayout = desc.color_final_layout;
 
     VkAttachmentReference &ref = color_attachments.emplace_back();
     ref.attachment = i;

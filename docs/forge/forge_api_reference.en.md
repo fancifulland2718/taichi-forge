@@ -151,9 +151,44 @@ Ordinary field or ndarray access is never converted to texture sampling, and
 the CUDA backend has no texture lowering yet. This D0 route adds no wheel
 variant.
 
+### `ti.hardware.graphics.VulkanGraphicsPipeline` (0.6.3 in development)
+
+This is the low-level, renderer-neutral Vulkan raster interface. The caller
+provides SPIR-V shader binaries, exact vertex layouts, runtime-owned
+`ti.ndarray` vertex/index buffers, and runtime-owned `ti.Texture` color/depth
+attachments:
+
+```python
+with ti.hardware.graphics.VulkanGraphicsPipeline(
+    vertex_spirv,
+    fragment_spirv,
+    vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 20),),
+    vertex_attributes=(
+        ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+        ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 8),
+    ),
+) as pipeline:
+    pipeline.draw(
+        color_target,
+        {0: vertices},
+        draw=ti.hardware.graphics.Draw(3),
+    )
+```
+
+`record()` creates an automatically admissible root-Graph backend-command
+node with exact read effects for vertex/index buffers and write effects for
+attachments. Kernel work that produces geometry, graphics submission, and
+later kernel reads are ordered without an implicit host wait. The API exposes
+pipeline state and draw recording only: it has no camera, material, light,
+scene, mesh ownership, shader compiler, presentation, or renderer policy.
+It is Vulkan-only, is not callable from `@ti.kernel`, accepts precompiled
+SPIR-V rather than adding a shader-toolchain dependency, and adds no official
+wheel variant. Driver-owned pipeline and shader-module memory is reported as
+opaque rather than estimated.
+
 ### `ti.hardware.raster.RasterPass` (0.6.3 in development)
 
-An explicit, reusable Vulkan offscreen hardware-raster provider:
+A compatibility and qualification adapter over the existing GGUI renderer:
 
 ```python
 with ti.hardware.raster.RasterPass((1280, 720)) as raster:

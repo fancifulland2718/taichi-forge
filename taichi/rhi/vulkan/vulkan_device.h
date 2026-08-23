@@ -55,12 +55,16 @@ struct VulkanRenderPassDesc {
   std::vector<std::pair<VkFormat, bool>> color_attachments;
   VkFormat depth_attachment{VK_FORMAT_UNDEFINED};
   bool clear_depth{false};
+  VkImageLayout color_final_layout{VK_IMAGE_LAYOUT_PRESENT_SRC_KHR};
 
   bool operator==(const VulkanRenderPassDesc &other) const {
     if (other.depth_attachment != depth_attachment) {
       return false;
     }
     if (other.clear_depth != clear_depth) {
+      return false;
+    }
+    if (other.color_final_layout != color_final_layout) {
       return false;
     }
     return other.color_attachments == color_attachments;
@@ -71,6 +75,9 @@ struct RenderPassDescHasher {
   std::size_t operator()(const VulkanRenderPassDesc &desc) const {
     size_t hash = std::hash<uint64_t>()((uint64_t(desc.depth_attachment) << 1) |
                                         uint64_t(desc.clear_depth));
+    rhi_impl::hash_combine(
+        hash, std::hash<uint32_t>()(
+                  static_cast<uint32_t>(desc.color_final_layout)));
     for (auto &pair : desc.color_attachments) {
       size_t hash_pair = std::hash<uint64_t>()((uint64_t(pair.first) << 1) |
                                                uint64_t(pair.second));
@@ -507,6 +514,11 @@ class VulkanCommandList : public CommandList {
                         std::vector<float> *clear_colors,
                         DeviceAllocation *depth_attachment,
                         bool depth_clear) override;
+
+  // Offscreen render passes keep their color target in attachment layout so
+  // the caller can record an explicit post-pass transition. Swapchain callers
+  // retain the historical present-src default.
+  void set_next_renderpass_color_final_layout(ImageLayout layout);
   void end_renderpass() override;
   void set_raster_viewport_and_scissor(int x0,
                                        int y0,

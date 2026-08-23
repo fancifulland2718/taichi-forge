@@ -197,6 +197,12 @@ void VulkanProgramImpl::enqueue_compute_op_lambda(
   runtime_->enqueue_compute_op_lambda(op, image_refs);
 }
 
+void VulkanProgramImpl::enqueue_graphics_op_lambda(
+    std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+    const std::vector<ComputeOpImageRef> &image_refs) {
+  runtime_->enqueue_graphics_op_lambda(std::move(op), image_refs);
+}
+
 void VulkanProgramImpl::finalize() {
   GfxProgramImpl::finalize();
   embedded_device_.reset();

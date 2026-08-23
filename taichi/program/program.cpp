@@ -8534,6 +8534,8 @@ void Program::finalize() {
   best_effort("clear primitive workspace arena",
               [&] { primitive_workspace_arena_.clear(); });
   if (compile_config().arch == Arch::vulkan) {
+    best_effort("clear Vulkan graphics pipelines",
+                [&] { vulkan_clear_graphics_pipelines(); });
     best_effort("clear Vulkan ray scenes",
                 [&] { vulkan_clear_ray_scenes(); });
     best_effort("clear Vulkan primitive caches",
@@ -21877,6 +21879,19 @@ void Program::enqueue_compute_op_lambda(
   }
 #endif
   program_impl_->enqueue_compute_op_lambda(op, image_refs);
+}
+
+void Program::enqueue_graphics_op_lambda(
+    std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+    const std::vector<ComputeOpImageRef> &image_refs) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan,
+              "Runtime-ordered graphics commands currently require Vulkan.");
+#ifdef TI_WITH_VULKAN
+  TI_ERROR_IF(vulkan_native_command_recording_context != nullptr,
+              "Graphics commands cannot be nested into a compute native "
+              "command recording.");
+#endif
+  program_impl_->enqueue_graphics_op_lambda(std::move(op), image_refs);
 }
 
 }  // namespace taichi::lang

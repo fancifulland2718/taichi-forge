@@ -95,8 +95,16 @@ grouped under the behavior they shipped.
   sampler instructions, while ordinary field/ndarray access is never silently
   substituted. CUDA texture lowering is not implemented and remains
   `planned`. No official wheel variant is added.
+- Added D0 `ti.hardware.graphics.VulkanGraphicsPipeline`, a renderer-neutral
+  interface over caller-provided SPIR-V, exact vertex/index layouts,
+  runtime-owned color/depth textures, and direct or root-Graph draw recording.
+  Compute/graphics ordering uses device-side semaphore bridges without an
+  implicit host wait. The interface deliberately provides no scene, camera,
+  material, lighting, shader compiler, or presentation policy and adds no
+  dependency or official wheel variant. Driver pipeline memory remains opaque.
 - Added D0 `ti.hardware.raster.RasterPass`, reusing the current Program's
-  Vulkan GGUI/RHI graphics pipeline for explicit offscreen hardware raster of
+  Vulkan GGUI/RHI graphics pipeline as a compatibility/qualification adapter
+  for explicit offscreen hardware raster of
   meshes, instances, particles, and lines with separate color/depth readback.
   Direct Python and explicit segmented root-Graph execution are supported;
   kernel calls, automatic Graph admission, structured regions, and AOT fail

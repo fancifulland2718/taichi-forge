@@ -62,7 +62,12 @@ Ndarray::Ndarray(Program *prog,
   }
   AllocUsage usage = AllocUsage::Storage;
   if (prog->compile_config().arch == Arch::vulkan) {
-    usage = usage | AllocUsage::Indirect;
+    // Vulkan ndarrays are the common zero-copy storage exchanged between
+    // kernels and low-level native commands. Vertex/index capability changes
+    // only VkBuffer usage flags, not allocation size or the ndarray ABI, and
+    // avoids provider-owned staging buffers for graphics draws.
+    usage = usage | AllocUsage::Indirect | AllocUsage::Vertex |
+            AllocUsage::Index;
   }
   if (host_read) {
     ndarray_alloc_ = prog->allocate_host_read_memory_on_device(

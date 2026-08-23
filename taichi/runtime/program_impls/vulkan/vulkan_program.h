@@ -54,6 +54,10 @@ class VulkanProgramImpl : public GfxProgramImpl {
       std::function<void(Device *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs) override;
 
+  void enqueue_graphics_op_lambda(
+      std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+      const std::vector<ComputeOpImageRef> &image_refs) override;
+
  private:
   std::unique_ptr<vulkan::VulkanDeviceCreator> embedded_device_{nullptr};
 };

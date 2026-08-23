@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -2007,6 +2008,116 @@ void export_lang(py::module &m) {
             }
           },
           py::arg("commands"))
+      .def("vulkan_graphics_pipeline_available",
+           &Program::vulkan_graphics_pipeline_available)
+      .def(
+          "_create_vulkan_graphics_pipeline",
+          [](Program *program, py::bytes vertex_bytes,
+             py::bytes fragment_bytes, const py::sequence &raw_bindings,
+             const py::sequence &raw_attributes, int topology,
+             int polygon_mode, bool front_face_cull, bool back_face_cull,
+             bool depth_test, bool depth_write, bool blending,
+             const std::string &name) {
+            auto decode_spirv = [](py::bytes value, const char *stage) {
+              const std::string bytes = py::cast<std::string>(value);
+              TI_ERROR_IF(bytes.empty() ||
+                              bytes.size() % sizeof(std::uint32_t) != 0,
+                          "Vulkan graphics {} SPIR-V must be nonempty and "
+                          "four-byte aligned.",
+                          stage);
+              std::vector<std::uint32_t> words(
+                  bytes.size() / sizeof(std::uint32_t));
+              std::memcpy(words.data(), bytes.data(), bytes.size());
+              return words;
+            };
+            std::vector<VulkanGraphicsVertexBinding> bindings;
+            bindings.reserve(raw_bindings.size());
+            for (const py::handle raw : raw_bindings) {
+              const py::tuple item = py::cast<py::tuple>(raw);
+              TI_ERROR_IF(item.size() != 3,
+                          "Vulkan graphics vertex bindings require binding, "
+                          "stride, and instance fields.");
+              bindings.push_back({py::cast<std::uint32_t>(item[0]),
+                                  py::cast<std::size_t>(item[1]),
+                                  py::cast<bool>(item[2])});
+            }
+            std::vector<VulkanGraphicsVertexAttribute> attributes;
+            attributes.reserve(raw_attributes.size());
+            for (const py::handle raw : raw_attributes) {
+              const py::tuple item = py::cast<py::tuple>(raw);
+              TI_ERROR_IF(item.size() != 4,
+                          "Vulkan graphics vertex attributes require "
+                          "location, binding, format, and offset fields.");
+              attributes.push_back(
+                  {py::cast<std::uint32_t>(item[0]),
+                   py::cast<std::uint32_t>(item[1]),
+                   py::cast<BufferFormat>(item[2]),
+                   py::cast<std::uint32_t>(item[3])});
+            }
+            auto vertex_spirv = decode_spirv(vertex_bytes, "vertex");
+            auto fragment_spirv = decode_spirv(fragment_bytes, "fragment");
+            py::gil_scoped_release release;
+            return program->create_vulkan_graphics_pipeline(
+                vertex_spirv, fragment_spirv, bindings, attributes, topology,
+                polygon_mode, front_face_cull, back_face_cull, depth_test,
+                depth_write, blending, name);
+          },
+          py::arg("vertex_spirv"), py::arg("fragment_spirv"),
+          py::arg("vertex_bindings"), py::arg("vertex_attributes"),
+          py::arg("topology"), py::arg("polygon_mode"),
+          py::arg("front_face_cull"), py::arg("back_face_cull"),
+          py::arg("depth_test"), py::arg("depth_write"),
+          py::arg("blending"), py::arg("name"))
+      .def(
+          "_vulkan_graphics_draw",
+          [](Program *program, std::uint64_t handle, Texture *color,
+             Texture *depth, const py::sequence &raw_vertex_buffers,
+             Ndarray *index_buffer, std::uint32_t element_count,
+             std::uint32_t instance_count, std::uint32_t first_vertex,
+             std::uint32_t first_index, std::uint32_t first_instance,
+             bool indexed, const std::array<float, 4> &clear_color,
+             const std::array<std::uint32_t, 4> &viewport) {
+            std::vector<std::pair<std::uint32_t, Ndarray *>> vertex_buffers;
+            vertex_buffers.reserve(raw_vertex_buffers.size());
+            for (const py::handle raw : raw_vertex_buffers) {
+              const py::tuple item = py::cast<py::tuple>(raw);
+              TI_ERROR_IF(item.size() != 2,
+                          "Vulkan graphics vertex-buffer bindings require "
+                          "binding and ndarray fields.");
+              vertex_buffers.emplace_back(
+                  py::cast<std::uint32_t>(item[0]),
+                  py::cast<Ndarray *>(item[1]));
+            }
+            VulkanGraphicsDrawInfo draw;
+            draw.element_count = element_count;
+            draw.instance_count = instance_count;
+            draw.first_vertex = first_vertex;
+            draw.first_index = first_index;
+            draw.first_instance = first_instance;
+            draw.indexed = indexed;
+            draw.clear_color = clear_color;
+            draw.viewport = viewport;
+            try {
+              py::gil_scoped_release release;
+              const auto result = program->vulkan_graphics_draw(
+                  handle, color, depth, vertex_buffers, index_buffer, draw);
+              program->record_runtime_submission_stat(
+                  RuntimeSubmissionKind::kNative);
+              return result;
+            } catch (...) {
+              program->record_runtime_submission_failure();
+              throw;
+            }
+          },
+          py::arg("handle"), py::arg("color"), py::arg("depth"),
+          py::arg("vertex_buffers"), py::arg("index_buffer"),
+          py::arg("element_count"), py::arg("instance_count"),
+          py::arg("first_vertex"), py::arg("first_index"),
+          py::arg("first_instance"), py::arg("indexed"),
+          py::arg("clear_color"), py::arg("viewport"))
+      .def("_destroy_vulkan_graphics_pipeline",
+           &Program::destroy_vulkan_graphics_pipeline, py::arg("handle"),
+           py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarray_from_host",
            [](Program *program, Ndarray *dst, py::buffer src) {
              py::buffer_info info = src.request();

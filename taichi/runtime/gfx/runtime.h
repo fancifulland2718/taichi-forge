@@ -551,6 +551,15 @@ class TI_DLL_EXPORT GfxRuntime {
       std::function<void(Device *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs);
 
+  // Submit one graphics command list between two compute-stream completion
+  // points. Vulkan may select a compute-only queue family, so graphics work
+  // must never be recorded into current_cmdlist_. The returned-to-compute
+  // semaphore bridge keeps later kernels, RuntimeCompletion, and resource
+  // retirement in the existing runtime ordering domain without a host wait.
+  void enqueue_graphics_op_lambda(
+      std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+      const std::vector<ComputeOpImageRef> &image_refs);
+
   bool used_in_kernel(DeviceAllocationId id) {
     std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
     return ndarrays_in_use_.count(id) > 0 || argpacks_in_use_.count(id) > 0;
@@ -575,6 +584,12 @@ class TI_DLL_EXPORT GfxRuntime {
   // locking is intentional: public operations compose other public operations
   // (for example copy_image -> transition_image and synchronize -> flush).
   mutable std::recursive_mutex host_api_mutex_;
+
+  // Latest completion on the runtime compute stream. A graphics submission
+  // consumes it, then publishes a new compute-stream bridge completion. This
+  // is deliberately a binary-semaphore chain rather than a host-side wait.
+  StreamSemaphore latest_compute_completion_;
+  bool graphics_submission_used_{false};
 
   void ensure_current_cmdlist();
   void submit_current_cmdlist_if_timeout();

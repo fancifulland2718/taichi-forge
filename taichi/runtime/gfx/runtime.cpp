@@ -5050,6 +5050,15 @@ void GfxRuntime::synchronize() {
 void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   flush_if_pending();
   device_->get_compute_stream()->command_sync();
+  if (graphics_submission_used_) {
+    // Every runtime graphics submission publishes a compute-stream bridge, so
+    // graphics is already complete here. Synchronizing its stream retires the
+    // command buffers and their pipeline/image references without extending
+    // ordinary execution with a host wait.
+    auto *graphics_device = dynamic_cast<GraphicsDevice *>(device_);
+    TI_ASSERT(graphics_device != nullptr);
+    graphics_device->get_graphics_stream()->command_sync();
+  }
   // The stream is idle, so every retirement-requested state can now release
   // its graph-owned command/resource objects.
   collect_ready_graph_replays();
@@ -5097,6 +5106,7 @@ StreamSemaphore GfxRuntime::flush() {
     sema = device_->get_compute_stream()->submit(cmdlist.get());
   }
   current_cmdlist_dispatch_count_ = 0;
+  latest_compute_completion_ = sema;
   return sema;
 }
 
@@ -5129,6 +5139,9 @@ StreamSemaphore GfxRuntime::end_submission_batch() {
     }
     StreamSemaphore completion =
         device_->get_compute_stream()->end_submission_batch();
+    if (completion) {
+      latest_compute_completion_ = completion;
+    }
     host_api_mutex_.unlock();
     return completion;
   } catch (...) {
@@ -5622,6 +5635,80 @@ void GfxRuntime::enqueue_compute_op_lambda(
   for (const auto &ref : image_refs) {
     last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
   }
+}
+
+void GfxRuntime::enqueue_graphics_op_lambda(
+    std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+    const std::vector<ComputeOpImageRef> &image_refs) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  TI_ERROR_IF(!op, "Runtime graphics operation must not be empty");
+  auto *graphics_device = dynamic_cast<GraphicsDevice *>(device_);
+  TI_ERROR_IF(graphics_device == nullptr,
+              "The active runtime device does not support graphics commands");
+
+  for (const auto &ref : image_refs) {
+    TI_ERROR_IF(last_image_layouts_.find(ref.image.alloc_id) ==
+                    last_image_layouts_.end(),
+                "Runtime graphics operation references an untracked image");
+  }
+
+  // Publish all preceding runtime work before crossing to the graphics queue.
+  // If there is no current list, latest_compute_completion_ still represents
+  // the most recent explicit flush or the bridge from an earlier graphics op.
+  if (StreamSemaphore flushed = flush_if_pending()) {
+    latest_compute_completion_ = std::move(flushed);
+  }
+
+  Stream *graphics_stream = graphics_device->get_graphics_stream();
+  auto [graphics_commands, graphics_result] =
+      graphics_stream->new_command_list_unique();
+  TI_ERROR_IF(graphics_result != RhiResult::success,
+              "Runtime graphics command-list allocation failed: RhiResult({})",
+              graphics_result);
+
+  for (const auto &ref : image_refs) {
+    const ImageLayout previous = last_image_layouts_.at(ref.image.alloc_id);
+    if (previous != ref.initial_layout) {
+      graphics_commands->image_transition(ref.image, previous,
+                                          ref.initial_layout);
+    }
+  }
+
+  op(graphics_device, graphics_commands.get());
+
+  for (const auto &ref : image_refs) {
+    if (ref.initial_layout != ref.final_layout) {
+      graphics_commands->image_transition(ref.image, ref.initial_layout,
+                                          ref.final_layout);
+    }
+    last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
+  }
+
+  std::vector<StreamSemaphore> graphics_waits;
+  if (latest_compute_completion_) {
+    graphics_waits.push_back(latest_compute_completion_);
+  }
+  StreamSemaphore graphics_completion =
+      graphics_stream->submit(graphics_commands.get(), graphics_waits);
+  TI_ERROR_IF(!graphics_completion,
+              "Runtime graphics submission returned no completion token");
+
+  // Bring the dependency back to the compute stream immediately. All later
+  // kernel submissions and RuntimeCompletion tickets already use this stream,
+  // so no second lifetime/completion domain is introduced.
+  Stream *compute_stream = device_->get_compute_stream();
+  auto [bridge_commands, bridge_result] =
+      compute_stream->new_command_list_unique();
+  TI_ERROR_IF(bridge_result != RhiResult::success,
+              "Runtime graphics completion bridge allocation failed: "
+              "RhiResult({})",
+              bridge_result);
+  bridge_commands->memory_barrier();
+  latest_compute_completion_ =
+      compute_stream->submit(bridge_commands.get(), {graphics_completion});
+  TI_ERROR_IF(!latest_compute_completion_,
+              "Runtime graphics completion bridge returned no token");
+  graphics_submission_used_ = true;
 }
 
 GfxRuntime::RegisterParams run_codegen(

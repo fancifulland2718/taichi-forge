@@ -1,6 +1,6 @@
 """Hardware capability contracts and provider-independent introspection."""
 
-from taichi_forge.hardware import fft, linalg, matrix, raster, ray
+from taichi_forge.hardware import fft, graphics, linalg, matrix, raster, ray
 
 from taichi_forge.hardware._capabilities import (
     ACTIVATION_MODES,
@@ -71,6 +71,7 @@ __all__ = [
     "providers",
     "report",
     "fft",
+    "graphics",
     "linalg",
     "matrix",
     "raster",

@@ -89,7 +89,7 @@ pipeline = ti.hardware.graphics.VulkanGraphicsPipeline(
 recording = pipeline.record(
     color="color",
     vertex_buffers={0: "vertices"},
-    draw=ti.hardware.graphics.Draw(vertex_count=3),
+    draw=ti.hardware.graphics.Draw(element_count=3),
     clear_color=(0, 0, 0, 1),
 )
 recording.execute({"color": color_texture, "vertices": vertex_ndarray})

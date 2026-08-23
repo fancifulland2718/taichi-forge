@@ -91,6 +91,8 @@ std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format) {
       return std::make_pair(PrimitiveType::f32, 3);
     case BufferFormat::rgba32f:
       return std::make_pair(PrimitiveType::f32, 4);
+    case BufferFormat::depth32f:
+      return std::make_pair(PrimitiveType::f32, 1);
     default:
       TI_ERROR("Invalid buffer format");
       return {};
@@ -219,6 +221,15 @@ Texture::Texture(Program *prog,
   img_params.y = height;
   img_params.z = depth;
   img_params.initial_layout = ImageLayout::undefined;
+  if (format == BufferFormat::depth16 ||
+      format == BufferFormat::depth24stencil8 ||
+      format == BufferFormat::depth32f) {
+    // Depth attachments are sampled/read after rendering but are not storage
+    // images. Advertising VK_IMAGE_USAGE_STORAGE_BIT for depth formats is not
+    // portable and can make image creation fail before the graphics API runs.
+    img_params.usage =
+        ImageAllocUsage::Sampled | ImageAllocUsage::Attachment;
+  }
   texture_alloc_ = prog_->allocate_texture(img_params);
 
   format_ = img_params.format;

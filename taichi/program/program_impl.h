@@ -174,6 +174,12 @@ class ProgramImpl {
     TI_NOT_IMPLEMENTED;
   }
 
+  virtual void enqueue_graphics_op_lambda(
+      std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
+      const std::vector<ComputeOpImageRef> &image_refs) {
+    TI_NOT_IMPLEMENTED;
+  }
+
   virtual void print_memory_profiler_info(
       std::vector<std::unique_ptr<SNodeTree>> &snode_trees_,
       uint64 *result_buffer) {

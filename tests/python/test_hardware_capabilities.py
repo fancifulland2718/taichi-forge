@@ -12,6 +12,7 @@ from tests import test_utils
 _OPERATION_IDS = (
     "runtime.buffer_commands.vulkan",
     "raster.draw.vulkan",
+    "raster.adapter.ggui.vulkan",
     "ray.as_build.vulkan",
     "ray.as_refit.vulkan",
     "ray.query.batch.vulkan",
@@ -262,18 +263,24 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
 
     raster = ti.hardware.capability("raster.draw.vulkan")
     assert raster.semantic_family == "raster.draw"
-    assert raster.public_api == "ti.hardware.raster.RasterPass"
+    assert raster.public_api == "ti.hardware.graphics.VulkanGraphicsPipeline"
     assert raster.implementation_status == "existing_public"
     assert raster.hardware_acceleration == "qualified"
     assert raster.scopes == ("python", "graph")
     assert raster.execution_kind == "native_command"
-    assert raster.graph_support == "opaque"
-    assert "explicit segmented root-Graph" in raster.notes[0]
-    assert raster.workspace_ownership == "provider_owned"
-    assert raster.layouts == ("mesh", "mesh_instance", "particles", "lines")
-    assert raster.deterministic is False
+    assert raster.graph_support == "recordable"
     assert "kernel calls are impossible" in raster.notes[0]
+    assert raster.workspace_ownership == "provider_owned"
+    assert raster.layouts[0] == "declared vertex bindings and attributes"
+    assert raster.deterministic is False
     assert ti.hardware.capability(raster.operation_id) is raster
+
+    adapter = ti.hardware.capability("raster.adapter.ggui.vulkan")
+    assert adapter.semantic_family == "raster.adapter"
+    assert adapter.public_api == "ti.hardware.raster.RasterPass"
+    assert adapter.graph_support == "opaque"
+    assert adapter.layouts == ("mesh", "mesh_instance", "particles", "lines")
+    assert "qualification adapter only" in adapter.notes[0]
 
     matrix = ti.hardware.capability("matrix.mma.cuda")
     assert matrix.semantic_family == "matrix.mma"
