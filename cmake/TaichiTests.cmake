@@ -218,20 +218,9 @@ endif()
 # runnable.  The main C++ test executable also includes LLVM-only tests, which
 # may be unavailable in a lightweight backend runtime build.
 if (TI_WITH_VULKAN AND TI_WITH_CUDA)
-  set(TAICHI_BACKEND_SAFETY_TESTS_NAME taichi_backend_safety_tests)
-  add_executable(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
-    tests/cpp/common/threading_test.cpp
-    tests/cpp/rhi/common/allocation_registry_test.cpp
-    tests/cpp/rhi/common/cpu_device_test.cpp
-    tests/cpp/rhi/common/cuda_context_test.cpp
-    tests/cpp/rhi/common/cuda_profiler_test.cpp
-    tests/cpp/aot/graph_replay_identity_test.cpp
-    tests/cpp/aot/gfx_utils.cpp
-    tests/cpp/aot/vulkan/device_test.cpp)
-  target_link_libraries(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
-    PRIVATE
-      taichi_core
-      gtest_main
+  add_library(taichi_backend_test_dependencies INTERFACE)
+  target_link_libraries(taichi_backend_test_dependencies
+    INTERFACE
       taichi_common
       taichi_util
       compilation_manager
@@ -255,6 +244,22 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
       llvm_rhi
       opengl_rhi
       vulkan_rhi)
+
+  set(TAICHI_BACKEND_SAFETY_TESTS_NAME taichi_backend_safety_tests)
+  add_executable(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    tests/cpp/common/threading_test.cpp
+    tests/cpp/rhi/common/allocation_registry_test.cpp
+    tests/cpp/rhi/common/cpu_device_test.cpp
+    tests/cpp/rhi/common/cuda_context_test.cpp
+    tests/cpp/rhi/common/cuda_profiler_test.cpp
+    tests/cpp/aot/graph_replay_identity_test.cpp
+    tests/cpp/aot/gfx_utils.cpp
+    tests/cpp/aot/vulkan/device_test.cpp)
+  target_link_libraries(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    PRIVATE
+      taichi_core
+      gtest_main
+      taichi_backend_test_dependencies)
   target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     PRIVATE
       ${PROJECT_SOURCE_DIR}
