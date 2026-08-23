@@ -1053,6 +1053,17 @@ class TI_DLL_EXPORT Program {
                                           std::size_t batch_count,
                                           int transform_kind = 0);
 
+  std::uint64_t create_cuda_cufft_plan_many(
+      std::vector<int> dimensions,
+      std::vector<int> input_embed,
+      int input_stride,
+      int input_distance,
+      std::vector<int> output_embed,
+      int output_stride,
+      int output_distance,
+      int batch_count,
+      int transform_kind);
+
   std::size_t cuda_cufft_execute(std::uint64_t handle,
                                  Ndarray *input,
                                  Ndarray *output,
@@ -1062,6 +1073,12 @@ class TI_DLL_EXPORT Program {
                                      Ndarray *input,
                                      Ndarray *output,
                                      int direction);
+
+  std::unordered_map<std::string, std::uint64_t>
+  cuda_cufft_plan_memory_statistics(std::uint64_t handle);
+
+  std::unordered_map<std::string, std::uint64_t>
+  cuda_cufft_plan_cache_statistics();
 
   void destroy_cuda_cufft_plan(std::uint64_t handle);
 
@@ -3831,6 +3848,11 @@ class TI_DLL_EXPORT Program {
   std::mutex cuda_cufft_plan_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;
+  std::unordered_map<std::string, std::weak_ptr<CudaFftPlan>>
+      cuda_cufft_plan_cache_;
+  std::uint64_t cuda_cufft_plan_create_requests_{0};
+  std::uint64_t cuda_cufft_plan_cache_hits_{0};
+  std::uint64_t cuda_cufft_plan_cache_misses_{0};
   std::uint64_t next_cuda_cufft_plan_handle_{1};
   std::mutex cuda_cublas_gemm_mutex_;
   void *cuda_cublas_gemm_handle_{nullptr};

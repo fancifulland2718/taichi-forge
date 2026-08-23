@@ -61,8 +61,15 @@ def test_cuda_provider_memory_reports_do_not_invent_vendor_workspace_bytes():
         plan = ti.hardware.fft.CufftPlan1D(8)
         report = plan.memory_report()
         assert report.provider == "cufft_c2c_1d"
-        assert report.known_resident_requested_bytes == 0
+        workspace = next(
+            component
+            for component in report.components
+            if component.name == "automatic_workspace"
+        )
+        assert workspace.requested_bytes_exact
+        assert report.known_resident_requested_bytes == workspace.requested_bytes
         assert not report.resident_requested_bytes_complete
+        assert report.opaque_component_count == 1
         graph_builder = ti.graph.GraphBuilder()
         graph_builder.append_native(plan.record(), admission="auto")
         graph = graph_builder.compile()

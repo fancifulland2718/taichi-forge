@@ -2321,6 +2321,15 @@ void export_lang(py::module &m) {
            py::arg("length"), py::arg("batch_count"),
            py::arg("transform_kind") = 0,
            py::call_guard<py::gil_scoped_release>())
+      .def("_create_cuda_cufft_plan_many",
+           tracked_native_program_method(
+               &Program::create_cuda_cufft_plan_many),
+           py::arg("dimensions"), py::arg("input_embed"),
+           py::arg("input_stride"), py::arg("input_distance"),
+           py::arg("output_embed"), py::arg("output_stride"),
+           py::arg("output_distance"), py::arg("batch_count"),
+           py::arg("transform_kind"),
+           py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cufft_execute",
            tracked_native_program_method(&Program::cuda_cufft_execute),
            py::arg("handle"), py::arg("input"), py::arg("output"),
@@ -2332,6 +2341,12 @@ void export_lang(py::module &m) {
       .def("_destroy_cuda_cufft_plan",
            tracked_native_program_method(&Program::destroy_cuda_cufft_plan),
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cufft_plan_memory_statistics",
+           &Program::cuda_cufft_plan_memory_statistics, py::arg("handle"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cufft_plan_cache_statistics",
+           &Program::cuda_cufft_plan_cache_statistics,
+           py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cublas_gemm_f32",
            tracked_native_program_method(&Program::cuda_cublas_gemm_f32),
            py::arg("a"), py::arg("b"), py::arg("output"), py::arg("rows"),

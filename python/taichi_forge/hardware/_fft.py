@@ -1,5 +1,7 @@
 """Optional single-GPU cuFFT plan and execution provider."""
 
+from dataclasses import dataclass
+
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
 from taichi_forge.graph._native import (
@@ -37,6 +39,79 @@ def _positive_int(value, name):
     return value
 
 
+def _positive_int_tuple(values, name):
+    try:
+        result = tuple(values)
+    except TypeError as exc:
+        raise TypeError(f"CUDA cuFFT {name} must be an integer sequence") from exc
+    if not result:
+        raise ValueError(f"CUDA cuFFT {name} must not be empty")
+    return tuple(_positive_int(value, name) for value in result)
+
+
+def _product(values):
+    result = 1
+    for value in values:
+        result *= value
+    return result
+
+
+def _layout_span(logical_dimensions, embed, stride):
+    offset = 0
+    for axis, logical in enumerate(logical_dimensions):
+        if axis:
+            offset *= embed[axis]
+        offset += logical - 1
+    return offset * stride + 1
+
+
+@dataclass(frozen=True)
+class CufftLayout:
+    """Physical element layout for one cuFFT input or output batch."""
+
+    embed: object = None
+    stride: int = 1
+    batch_distance: object = None
+
+    def __post_init__(self):
+        if self.embed is not None:
+            object.__setattr__(
+                self, "embed", _positive_int_tuple(self.embed, "layout embed")
+            )
+        object.__setattr__(self, "stride", _positive_int(self.stride, "layout stride"))
+        if self.batch_distance is not None:
+            object.__setattr__(
+                self,
+                "batch_distance",
+                _positive_int(self.batch_distance, "layout batch_distance"),
+            )
+
+
+def _resolve_layout(layout, logical_dimensions, name):
+    compact = layout is None
+    if compact:
+        layout = CufftLayout()
+    if not isinstance(layout, CufftLayout):
+        raise TypeError(f"CUDA cuFFT {name}_layout must be a CufftLayout")
+    embed = logical_dimensions if layout.embed is None else layout.embed
+    if len(embed) != len(logical_dimensions):
+        raise ValueError(f"CUDA cuFFT {name} embed rank must match transform rank")
+    if any(physical < logical for physical, logical in zip(embed, logical_dimensions)):
+        raise ValueError(f"CUDA cuFFT {name} embed must cover every logical dimension")
+    span = _layout_span(logical_dimensions, embed, layout.stride)
+    distance = (
+        _product(embed) * layout.stride
+        if layout.batch_distance is None
+        else layout.batch_distance
+    )
+    if distance < span:
+        raise ValueError(
+            f"CUDA cuFFT {name} batch_distance must not overlap transform storage"
+        )
+    normalized = CufftLayout(embed, layout.stride, distance)
+    return normalized, span, compact
+
+
 def _transform_value(transform):
     try:
         return _TRANSFORMS[transform]
@@ -71,8 +146,8 @@ class CufftRecording(BackendCommandRecording):
         input="input",
         output="output",
     ):
-        if not isinstance(plan, CufftPlan1D):
-            raise TypeError("CUDA cuFFT recording requires a CufftPlan1D")
+        if not isinstance(plan, _CufftPlanBase):
+            raise TypeError("CUDA cuFFT recording requires a cuFFT plan")
         direction, direction_value = _resolve_direction(plan.transform, direction)
         if any(not isinstance(name, str) or not name for name in (input, output)):
             raise ValueError("CUDA cuFFT binding names must be nonempty strings")
@@ -173,12 +248,17 @@ class _CufftExecutable(NativeGraphExecutable):
     @property
     def debug_info(self):
         return {
-            "kind": f"cuda_cufft_{self._recording.plan.transform}_1d",
-            "length": self._recording.plan.length,
+            "kind": (
+                f"cuda_cufft_{self._recording.plan.transform}_"
+                f"{self._recording.plan.rank}d"
+            ),
+            "dimensions": self._recording.plan.dimensions,
             "batch_count": self._recording.plan.batch_count,
             "transform": self._recording.plan.transform,
             "direction": self._recording.direction,
             "output_scale": self._recording.output_scale,
+            "input_layout": self._recording.plan.input_layout,
+            "output_layout": self._recording.plan.output_layout,
         }
 
 
@@ -190,38 +270,72 @@ class _CufftNode(NativeGraphNode):
         return _CufftExecutable(self._recording)
 
 
-class CufftPlan1D:
-    """One fixed-size, provider-owned single-precision cuFFT plan.
-
-    ``transform`` selects complex-to-complex (``c2c``), real-to-Hermitian
-    (``r2c``), or Hermitian-to-real (``c2r``). Complex values use a final
-    scalar axis ``[real, imag]``. Native inverse transforms are intentionally
-    unnormalized. Multiply their output by :attr:`inverse_scale` when unit
-    inverse normalization is required.
-    """
-
-    def __init__(self, length, *, batch_count=1, transform="c2c"):
-        self.length = _positive_int(length, "length")
+class _CufftPlanBase:
+    def _initialize(
+        self,
+        dimensions,
+        *,
+        batch_count,
+        transform,
+        input_layout=None,
+        output_layout=None,
+    ):
+        self.dimensions = _positive_int_tuple(dimensions, "dimensions")
+        self.rank = len(self.dimensions)
         self.batch_count = _positive_int(batch_count, "batch_count")
         self.transform = transform
         self.transform_value = _transform_value(transform)
+        input_dimensions = list(self.dimensions)
+        output_dimensions = list(self.dimensions)
+        if transform == "c2r":
+            input_dimensions[-1] = input_dimensions[-1] // 2 + 1
+        if transform == "r2c":
+            output_dimensions[-1] = output_dimensions[-1] // 2 + 1
+        self.input_dimensions = tuple(input_dimensions)
+        self.output_dimensions = tuple(output_dimensions)
+        self.input_layout, input_span, input_compact = _resolve_layout(
+            input_layout, self.input_dimensions, "input"
+        )
+        self.output_layout, output_span, output_compact = _resolve_layout(
+            output_layout, self.output_dimensions, "output"
+        )
+        self._input_compact = input_compact
+        self._output_compact = output_compact
+        self.input_storage_scalars = (
+            (self.batch_count - 1) * self.input_layout.batch_distance + input_span
+        ) * (1 if transform == "r2c" else 2)
+        self.output_storage_scalars = (
+            (self.batch_count - 1) * self.output_layout.batch_distance + output_span
+        ) * (1 if transform == "c2r" else 2)
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError(
-                "CufftPlan1D requires an initialized Taichi runtime"
+                "CUDA cuFFT plans require an initialized Taichi runtime"
             )
         if _active_backend() != "cuda":
             raise TaichiRuntimeError(
-                "CufftPlan1D requires the CUDA backend; the active backend is "
+                "A CUDA cuFFT plan requires the CUDA backend; the active backend is "
                 f"{_active_backend()}"
             )
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
-        self._handle = int(
-            program._create_cuda_cufft_plan_1d(
-                self.length, self.batch_count, self.transform_value
+        if self.rank == 1 and input_compact and output_compact:
+            handle = program._create_cuda_cufft_plan_1d(
+                self.dimensions[0], self.batch_count, self.transform_value
             )
-        )
+        else:
+            handle = program._create_cuda_cufft_plan_many(
+                self.dimensions,
+                self.input_layout.embed,
+                self.input_layout.stride,
+                self.input_layout.batch_distance,
+                self.output_layout.embed,
+                self.output_layout.stride,
+                self.output_layout.batch_distance,
+                self.batch_count,
+                self.transform_value,
+            )
+        self._handle = int(handle)
 
     @property
     def closed(self):
@@ -235,22 +349,24 @@ class CufftPlan1D:
 
     @property
     def input_shape(self):
-        logical_length = (
-            self.length if self.transform != "c2r" else self.length // 2 + 1
-        )
+        if not self._input_compact:
+            return (self.input_storage_scalars,)
         components = 1 if self.transform == "r2c" else 2
-        shape = (logical_length,) if components == 1 else (logical_length, 2)
+        shape = (
+            self.input_dimensions if components == 1 else (*self.input_dimensions, 2)
+        )
         if self.batch_count == 1:
             return shape
         return (self.batch_count, *shape)
 
     @property
     def output_shape(self):
-        logical_length = (
-            self.length if self.transform != "r2c" else self.length // 2 + 1
-        )
+        if not self._output_compact:
+            return (self.output_storage_scalars,)
         components = 1 if self.transform == "c2r" else 2
-        shape = (logical_length,) if components == 1 else (logical_length, 2)
+        shape = (
+            self.output_dimensions if components == 1 else (*self.output_dimensions, 2)
+        )
         if self.batch_count == 1:
             return shape
         return (self.batch_count, *shape)
@@ -259,7 +375,7 @@ class CufftPlan1D:
     def inverse_scale(self):
         """Scale required after an unnormalized C2C inverse or C2R transform."""
 
-        return 1.0 / self.length
+        return 1.0 / _product(self.dimensions)
 
     def record(
         self,
@@ -305,36 +421,51 @@ class CufftPlan1D:
 
     def _validate_lifetime(self):
         if self._handle is None:
-            raise TaichiRuntimeError("CufftPlan1D has been closed")
+            raise TaichiRuntimeError("CUDA cuFFT plan has been closed")
         if (
             impl.get_runtime().prog is not self._runtime_prog
             or int(impl.runtime_generation()) != self._runtime_generation
         ):
             raise TaichiRuntimeError(
-                "CufftPlan1D belongs to a previous Taichi runtime generation"
+                "CUDA cuFFT plan belongs to a previous Taichi runtime generation"
             )
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
 
     def memory_report(self):
-        """Report plan residency without inventing cuFFT workspace bytes."""
+        """Report exact workspace bytes without inventing opaque plan bytes."""
 
         handle_present = self._handle is not None
         runtime_valid = handle_present and (
             impl.get_runtime().prog is self._runtime_prog
             and int(impl.runtime_generation()) == self._runtime_generation
         )
+        workspace_bytes = None
+        if runtime_valid:
+            workspace_bytes = int(
+                self._runtime_prog._cuda_cufft_plan_memory_statistics(self._handle)[
+                    "workspace_bytes"
+                ]
+            )
         return make_memory_report(
-            f"cufft_{self.transform}_1d",
+            f"cufft_{self.transform}_{self.rank}d",
             "cuda",
             (
                 HardwareMemoryComponent(
-                    "plan_and_automatic_workspace",
+                    "plan_state",
                     None,
                     False,
                     "provider_generation",
                     "driver",
+                    resident=runtime_valid,
+                ),
+                HardwareMemoryComponent(
+                    "automatic_workspace",
+                    workspace_bytes,
+                    workspace_bytes is not None,
+                    "provider_generation",
+                    "provider",
                     resident=runtime_valid,
                 ),
             ),
@@ -348,6 +479,17 @@ class CufftPlan1D:
 
     def _graph_provider_memory_report(self):
         return self.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return (
+            "cufft_plan",
+            self._runtime_generation,
+            self.dimensions,
+            self.batch_count,
+            self.transform,
+            self.input_layout,
+            self.output_layout,
+        )
 
     def close(self):
         if self._handle is None:
@@ -372,6 +514,77 @@ class CufftPlan1D:
         return False
 
 
+class CufftPlan1D(_CufftPlanBase):
+    """One compact 1D C2C, R2C, or C2R plan.
+
+    Complex values use a final scalar axis ``[real, imag]``. Native inverse
+    transforms are unnormalized; multiply by :attr:`inverse_scale` when unit
+    inverse normalization is required.
+    """
+
+    def __init__(self, length, *, batch_count=1, transform="c2c"):
+        self.length = _positive_int(length, "length")
+        self._initialize(
+            (self.length,),
+            batch_count=batch_count,
+            transform=transform,
+        )
+
+
+class CufftPlanND(_CufftPlanBase):
+    """One batched 2D/3D plan with optional explicit physical layouts."""
+
+    def __init__(
+        self,
+        dimensions,
+        *,
+        batch_count=1,
+        transform="c2c",
+        input_layout=None,
+        output_layout=None,
+    ):
+        dimensions = _positive_int_tuple(dimensions, "dimensions")
+        if len(dimensions) not in (2, 3):
+            raise ValueError("CufftPlanND dimensions must have rank 2 or 3")
+        self._initialize(
+            dimensions,
+            batch_count=batch_count,
+            transform=transform,
+            input_layout=input_layout,
+            output_layout=output_layout,
+        )
+
+
+@dataclass(frozen=True)
+class CufftPlanCacheStatistics:
+    create_requests: int
+    cache_hits: int
+    cache_misses: int
+    live_handles: int
+    live_plans: int
+    workspace_bytes_live: int
+
+
+def cache_statistics():
+    """Return passive current-runtime plan/cache/workspace counters."""
+
+    program = impl.get_runtime().prog
+    if program is None or _active_backend() != "cuda":
+        values = {
+            "create_requests": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+            "live_handles": 0,
+            "live_plans": 0,
+            "workspace_bytes_live": 0,
+        }
+    else:
+        values = dict(program._cuda_cufft_plan_cache_statistics())
+    return CufftPlanCacheStatistics(
+        **{name: int(value) for name, value in values.items()}
+    )
+
+
 def is_available():
     """Explicitly probe whether a compatible basic cuFFT provider is present."""
 
@@ -388,4 +601,12 @@ def is_available():
     return operation.discovery == "available"
 
 
-__all__ = ["CufftPlan1D", "CufftRecording", "is_available"]
+__all__ = [
+    "CufftLayout",
+    "CufftPlan1D",
+    "CufftPlanND",
+    "CufftPlanCacheStatistics",
+    "CufftRecording",
+    "cache_statistics",
+    "is_available",
+]

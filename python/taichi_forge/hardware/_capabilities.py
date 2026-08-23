@@ -1387,21 +1387,26 @@ _OPERATIONS = (
         lifetime_policy="provider_plan",
         update_policy="rebind",
         requirements=("compatible cuFFT shared library",),
-        public_api="ti.hardware.fft.CufftPlan1D",
+        public_api="ti.hardware.fft.CufftPlan1D / CufftPlanND",
         dtypes=("real:f32", "complex-pair:f32"),
         shapes_or_tiles=(
             "C2C:(length,2) or (batch,length,2)",
             "R2C:real length to Hermitian length//2+1",
             "C2R:Hermitian length//2+1 to real length",
+            "CufftPlanND:batched rank-2/rank-3",
         ),
-        layouts=("compact out-of-place C2C/R2C/C2R",),
+        layouts=(
+            "compact out-of-place C2C/R2C/C2R",
+            "explicit embed/element-stride/batch-distance",
+        ),
         numeric_contracts=(
             "forward sign:-1",
             "inverse sign:+1 unnormalized",
             "inverse_scale:1/length",
         ),
         notes=(
-            "Callbacks, LTO, multi-GPU, and arbitrary strides are excluded from the 1D plan.",
+            "Callbacks, LTO, multi-GPU, and independently arbitrary per-axis strides are excluded.",
+            "Identical plan descriptors reuse a runtime-generation cuFFT plan; workspace bytes are queried from cuFFT.",
         ),
     ),
     _operation(

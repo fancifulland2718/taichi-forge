@@ -207,7 +207,7 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
   } else {
     library_name = "cufft";
     versions = {cuda_major, cuda_major - 1, 12, 11, 10};
-    provider_abi = "cufft-basic-transform-dynamic-symbols-v2";
+    provider_abi = "cufft-plan-many-dynamic-symbols-v3";
 #define PER_CUFFT_FUNCTION(name, symbol_name, ...) \
   required_symbols.emplace_back(#symbol_name)
 #include "taichi/rhi/cuda/cufft_functions.inc.h"
@@ -376,7 +376,7 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
     auto &driver = lang::CUFFTDriver::get_instance();
     const bool loaded = driver.is_loaded();
     result["library_loaded"] = loaded;
-    result["provider_abi"] = "cufft-basic-transform-dynamic-symbols-v2";
+    result["provider_abi"] = "cufft-plan-many-dynamic-symbols-v3";
     const int version = driver.capabilities().library_version;
     if (loaded && version > 0) {
       result["provider_version"] =

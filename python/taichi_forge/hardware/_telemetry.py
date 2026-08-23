@@ -127,13 +127,17 @@ def telemetry():
     if _ti_core.with_cuda():
         for provider_id in ("cublas", "cusparse", "cusolver", "cufft"):
             status = dict(_ti_core.cuda_external_library_status(provider_id))
-            providers[provider_id] = _frozen_mapping(
-                {
-                    "library_loaded": bool(status["library_loaded"]),
-                    "provider_abi": status["provider_abi"],
-                    "provider_version": status["provider_version"],
-                }
-            )
+            provider_facts = {
+                "library_loaded": bool(status["library_loaded"]),
+                "provider_abi": status["provider_abi"],
+                "provider_version": status["provider_version"],
+            }
+            if provider_id == "cufft" and backend == "cuda":
+                cache = dict(program._cuda_cufft_plan_cache_statistics())
+                provider_facts.update(
+                    {f"plan_{name}": int(value) for name, value in cache.items()}
+                )
+            providers[provider_id] = _frozen_mapping(provider_facts)
 
     return HardwareTelemetryReport(
         schema_version=HARDWARE_TELEMETRY_SCHEMA_VERSION,

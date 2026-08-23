@@ -205,7 +205,7 @@ def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
     assert cufft.provider_class == "vendor_algorithm"
     assert cufft.implementation_status == "existing_public"
     assert cufft.graph_support == "recordable"
-    assert cufft.public_api == "ti.hardware.fft.CufftPlan1D"
+    assert cufft.public_api == "ti.hardware.fft.CufftPlan1D / CufftPlanND"
     assert cub.dependency_tier == "build_external"
     assert cub.implementation_status == "reference_only"
     assert interop.dependency_tier == "core"
