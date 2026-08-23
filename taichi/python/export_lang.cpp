@@ -1930,6 +1930,10 @@ void export_lang(py::module &m) {
            &Program::debug_texture_resource_stats)
       .def("_debug_texture_resource_identity",
            &Program::debug_texture_resource_identity)
+      .def("_debug_vulkan_image_sampler_cache_size",
+           &Program::debug_vulkan_image_sampler_cache_size)
+      .def("_debug_vulkan_graphics_pipeline_count",
+           &Program::debug_vulkan_graphics_pipeline_count)
       .def("_debug_dense_field_staging_stats",
            &Program::debug_dense_field_staging_stats)
       .def("_debug_dense_storage_binding_stats",

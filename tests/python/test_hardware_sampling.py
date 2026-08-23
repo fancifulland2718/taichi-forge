@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -19,6 +20,8 @@ def test_sampler_config_validation():
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_texture_sampler_filter_address_and_exact_fetch():
+    program = impl.get_runtime().prog
+    initial_sampler_count = program._debug_vulkan_image_sampler_cache_size()
     nearest_repeat = _config(min_filter="nearest", mag_filter="nearest")
     linear_repeat = _config()
     nearest_clamp = _config(
@@ -63,3 +66,16 @@ def test_vulkan_texture_sampler_filter_address_and_exact_fetch():
     values = out.to_numpy()
     np.testing.assert_allclose(values[[0, 2, 3, 4, 5]], [0, 0, 1, 3, 3])
     assert 1.3 < values[1] < 1.6
+
+    populated_sampler_count = program._debug_vulkan_image_sampler_cache_size()
+    assert initial_sampler_count < populated_sampler_count <= initial_sampler_count + 3
+    duplicate = ti.Texture(
+        ti.Format.r32f, (2, 2), sampler=nearest_repeat
+    )
+    write(duplicate)
+    sample(duplicate, linear, clamp, out)
+    ti.sync()
+    assert (
+        program._debug_vulkan_image_sampler_cache_size()
+        == populated_sampler_count
+    )

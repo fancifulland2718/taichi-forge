@@ -60,7 +60,9 @@ CASES = (
     "cuda-mma",
     "cuda-spmv",
     "vulkan-ray-update",
+    "vulkan-image-copy",
     "vulkan-texture-fetch",
+    "vulkan-texture-sample",
     "vulkan-texture-stencil",
 )
 
@@ -966,6 +968,232 @@ def _vulkan_texture_fetch_case(order, args):
     return result
 
 
+def _vulkan_texture_sample_case(order, args):
+    _init_vulkan()
+    size = args.texture_size
+    source_host = np.fromfunction(
+        lambda i, j: (i + 2.0 * j) / (3.0 * max(size - 1, 1)),
+        (size, size),
+        dtype=np.float32,
+    ).astype(np.float32)
+    source = ti.ndarray(ti.f32, shape=(size, size))
+    hardware_output = ti.ndarray(ti.f32, shape=(size, size))
+    baseline_output = ti.ndarray(ti.f32, shape=(size, size))
+    sampler = ti.hardware.sampling.SamplerConfig(
+        address_mode_u="clamp_to_edge",
+        address_mode_v="clamp_to_edge",
+    )
+    texture = ti.Texture(ti.Format.r32f, (size, size), sampler=sampler)
+    source.from_numpy(source_host)
+
+    @ti.kernel
+    def upload(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        target: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        for i, j in values:
+            target.store(
+                ti.Vector([i, j]),
+                ti.Vector([values[i, j], 0.0, 0.0, 0.0]),
+            )
+
+    @ti.kernel
+    def hardware_sample(
+        image: ti.types.texture(num_dimensions=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in output:
+            x = ti.cast((i * 17 + j * 3) % size, ti.f32) + 0.37
+            y = ti.cast((i * 5 + j * 11) % size, ti.f32) + 0.61
+            output[i, j] = image.sample_lod(
+                ti.Vector([x / size, y / size]), 0.0
+            ).x
+
+    @ti.kernel
+    def baseline_sample(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in output:
+            x = ti.cast((i * 17 + j * 3) % size, ti.f32) + 0.37 - 0.5
+            y = ti.cast((i * 5 + j * 11) % size, ti.f32) + 0.61 - 0.5
+            x0 = ti.cast(ti.floor(x), ti.i32)
+            y0 = ti.cast(ti.floor(y), ti.i32)
+            tx = x - ti.cast(x0, ti.f32)
+            ty = y - ti.cast(y0, ti.f32)
+            x1 = ti.min(ti.max(x0 + 1, 0), size - 1)
+            y1 = ti.min(ti.max(y0 + 1, 0), size - 1)
+            x0 = ti.min(ti.max(x0, 0), size - 1)
+            y0 = ti.min(ti.max(y0, 0), size - 1)
+            lower = values[x0, y0] * (1.0 - tx) + values[x1, y0] * tx
+            upper = values[x0, y1] * (1.0 - tx) + values[x1, y1] * tx
+            output[i, j] = lower * (1.0 - ty) + upper * ty
+
+    setup_started = time.perf_counter_ns()
+    upload(source, texture)
+    ti.sync()
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+
+    def hardware():
+        hardware_sample(texture, hardware_output)
+
+    def baseline():
+        baseline_sample(source, baseline_output)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_values = hardware_output.to_numpy()
+    baseline_values = baseline_output.to_numpy()
+    sample_error = _error(hardware_values, baseline_values)
+    # Vulkan filtering weights have device-defined sub-texel precision. A
+    # smooth grid keeps the semantic check sensitive to coordinate/address
+    # mistakes without requiring bitwise equality to manual f32 interpolation.
+    tolerance = max(2.0e-5, 2.0 / max(size - 1, 1) / 256.0)
+    route = _resolved_operation("sampling.texture.vulkan")
+    passed = (
+        sample_error[0] <= tolerance
+        and route["discovery"] == "available"
+        and route["hardware_acceleration"] == "qualified"
+    )
+    result = _provenance("vulkan-texture-sample", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "width": size,
+                "height": size,
+                "samples": size * size,
+                "upload_ms": setup_ms,
+                "hardware": "Vulkan linear clamp-to-edge sample_lod",
+                "baseline": "Taichi ndarray manual bilinear clamp",
+            },
+            "timing": timing,
+            "correctness": {
+                "tolerance": float(tolerance),
+                "hardware_vs_manual_max_abs": sample_error[0],
+                "hardware_vs_manual_max_rel": sample_error[1],
+            },
+            "route": route,
+        }
+    )
+    ti.reset()
+    return result
+
+
+def _vulkan_image_copy_case(order, args):
+    _init_vulkan()
+    size = args.texture_size
+    source_host = (
+        np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
+    ) / np.float32(1021.0)
+    source_values = ti.ndarray(ti.f32, shape=(size, size))
+    hardware_values = ti.ndarray(ti.f32, shape=(size, size))
+    baseline_values = ti.ndarray(ti.f32, shape=(size, size))
+    source = ti.Texture(ti.Format.r32f, (size, size))
+    hardware_destination = ti.Texture(ti.Format.r32f, (size, size))
+    baseline_destination = ti.Texture(ti.Format.r32f, (size, size))
+    source_values.from_numpy(source_host)
+
+    @ti.kernel
+    def upload(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        target: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        for i, j in values:
+            target.store(
+                ti.Vector([i, j]),
+                ti.Vector([values[i, j], 0.0, 0.0, 0.0]),
+            )
+
+    @ti.kernel
+    def kernel_copy(
+        source_image: ti.types.texture(num_dimensions=2),
+        destination_image: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        for i, j in ti.ndrange(size, size):
+            destination_image.store(
+                ti.Vector([i, j]),
+                source_image.fetch(ti.Vector([i, j]), 0),
+            )
+
+    @ti.kernel
+    def observe(
+        image: ti.types.texture(num_dimensions=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in output:
+            output[i, j] = image.fetch(ti.Vector([i, j]), 0).x
+
+    setup_started = time.perf_counter_ns()
+    upload(source_values, source)
+    ti.sync()
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+
+    def hardware():
+        ti.hardware.image.copy(hardware_destination, source)
+
+    def baseline():
+        kernel_copy(source, baseline_destination)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    observe(hardware_destination, hardware_values)
+    observe(baseline_destination, baseline_values)
+    hardware_error = _error(hardware_values.to_numpy(), source_host)
+    baseline_error = _error(baseline_values.to_numpy(), source_host)
+    route = _resolved_operation("image.copy.vulkan")
+    passed = (
+        hardware_error[0] == 0.0
+        and baseline_error[0] == 0.0
+        and route["discovery"] == "available"
+        and route["hardware_acceleration"] == "implementation_defined"
+    )
+    result = _provenance("vulkan-image-copy", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "width": size,
+                "height": size,
+                "bytes": size * size * np.dtype(np.float32).itemsize,
+                "upload_ms": setup_ms,
+                "hardware": "Vulkan whole-image copy command",
+                "baseline": "Taichi texture fetch/store copy kernel",
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_vs_host_max_abs": hardware_error[0],
+                "baseline_vs_host_max_abs": baseline_error[0],
+            },
+            "route": route,
+        }
+    )
+    ti.reset()
+    return result
+
+
 def _vulkan_texture_stencil_case(order, args):
     _init_vulkan()
     size = args.texture_size
@@ -1105,7 +1333,9 @@ _CASE_RUNNERS = {
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
+    "vulkan-image-copy": _vulkan_image_copy_case,
     "vulkan-texture-fetch": _vulkan_texture_fetch_case,
+    "vulkan-texture-sample": _vulkan_texture_sample_case,
     "vulkan-texture-stencil": _vulkan_texture_stencil_case,
 }
 

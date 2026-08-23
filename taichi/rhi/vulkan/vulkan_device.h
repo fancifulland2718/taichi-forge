@@ -1004,6 +1004,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
                                            int lod) const;
   vkapi::IVkSampler get_sampler(const ImageSamplerConfig &config);
   vkapi::IVkSampler get_default_sampler();
+  std::size_t image_sampler_cache_size() const {
+    std::lock_guard<std::mutex> lock(descriptor_mutex_);
+    return image_samplers_.size();
+  }
 
   vkapi::IVkRenderPass get_renderpass(const VulkanRenderPassDesc &desc);
 

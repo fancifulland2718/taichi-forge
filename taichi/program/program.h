@@ -895,6 +895,8 @@ class TI_DLL_EXPORT Program {
 
   void vulkan_copy_texture(Texture *destination, Texture *source);
 
+  std::size_t debug_vulkan_image_sampler_cache_size();
+
   intptr_t get_ndarray_data_ptr_as_int(const Ndarray *ndarray);
 
   void fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val);
@@ -953,6 +955,8 @@ class TI_DLL_EXPORT Program {
   bool vulkan_ray_query_available() const;
 
   bool vulkan_graphics_pipeline_available() const;
+
+  std::size_t debug_vulkan_graphics_pipeline_count();
 
   std::uint64_t create_vulkan_graphics_pipeline(
       const std::vector<std::uint32_t> &vertex_spirv,

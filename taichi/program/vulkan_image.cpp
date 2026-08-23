@@ -1,6 +1,7 @@
 #include "taichi/program/program.h"
 
 #if defined(TI_WITH_VULKAN)
+#include "taichi/rhi/vulkan/vulkan_device.h"
 
 namespace taichi::lang {
 
@@ -52,6 +53,14 @@ void Program::vulkan_copy_texture(Texture *destination, Texture *source) {
   pin_texture_launch_leases(leases);
 }
 
+std::size_t Program::debug_vulkan_image_sampler_cache_size() {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan || !program_impl_,
+              "Vulkan image sampler statistics require the Vulkan backend.");
+  auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
+  TI_ERROR_IF(device == nullptr, "Vulkan image sampler device is unavailable.");
+  return device->image_sampler_cache_size();
+}
+
 }  // namespace taichi::lang
 
 #else
@@ -60,6 +69,10 @@ namespace taichi::lang {
 
 void Program::vulkan_copy_texture(Texture *, Texture *) {
   TI_ERROR("Vulkan texture copy is unavailable in this build.");
+}
+
+std::size_t Program::debug_vulkan_image_sampler_cache_size() {
+  TI_ERROR("Vulkan image sampler statistics are unavailable in this build.");
 }
 
 }  // namespace taichi::lang

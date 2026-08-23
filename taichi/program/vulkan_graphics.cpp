@@ -235,6 +235,11 @@ bool Program::vulkan_graphics_pipeline_available() const {
          const_cast<Program *>(this)->get_graphics_device() != nullptr;
 }
 
+std::size_t Program::debug_vulkan_graphics_pipeline_count() {
+  std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+  return vulkan_graphics_pipelines_.size();
+}
+
 std::uint64_t Program::create_vulkan_graphics_pipeline(
     const std::vector<std::uint32_t> &vertex_spirv,
     const std::vector<std::uint32_t> &fragment_spirv,
@@ -515,6 +520,10 @@ namespace taichi::lang {
 
 bool Program::vulkan_graphics_pipeline_available() const {
   return false;
+}
+
+std::size_t Program::debug_vulkan_graphics_pipeline_count() {
+  return 0;
 }
 
 std::uint64_t Program::create_vulkan_graphics_pipeline(

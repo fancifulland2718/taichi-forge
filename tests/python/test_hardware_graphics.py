@@ -7,6 +7,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.lang import impl
 from tests import test_utils
 
 
@@ -137,3 +138,17 @@ def test_vulkan_graphics_draw_validates_bindings_and_runtime_generation():
     ti.reset()
     with pytest.raises(RuntimeError, match="previous Taichi runtime"):
         pipeline.record(ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"})
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_pipeline_close_releases_program_resources():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    program = impl.get_runtime().prog
+    baseline = program._debug_vulkan_graphics_pipeline_count()
+    for _ in range(16):
+        pipeline = _triangle_pipeline()
+        assert program._debug_vulkan_graphics_pipeline_count() == baseline + 1
+        pipeline.close()
+        assert program._debug_vulkan_graphics_pipeline_count() == baseline
