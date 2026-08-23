@@ -53,7 +53,7 @@ import taichi_forge as ti  # pylint: disable=C0413
 from taichi_forge._lib import core as _ti_core  # pylint: disable=C0413
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v2"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v3"
 CASES = (
     "cuda-fft",
     "cuda-gemm",
@@ -284,6 +284,7 @@ def _provenance(case, order):
         "python": platform.python_version(),
         "platform": platform.platform(),
         "forge_version": getattr(ti, "__version__", None),
+        "forge_commit": _ti_core.get_commit_hash(),
         "backend": backend,
         "cuda_compute_capability": cuda_compute_capability,
         "pid": os.getpid(),
@@ -956,7 +957,7 @@ def _vulkan_texture_fetch_case(order, args):
     passed = (
         hardware_error[0] == 0.0
         and _executed_core_route_is_consistent(route)
-        and route["hardware_acceleration"] == "qualified"
+        and route["hardware_route"] == "qualified"
     )
     result = _provenance("vulkan-texture-fetch", order)
     result.update(
@@ -1077,7 +1078,7 @@ def _vulkan_texture_sample_case(order, args):
     passed = (
         sample_error[0] <= tolerance
         and _executed_core_route_is_consistent(route)
-        and route["hardware_acceleration"] == "qualified"
+        and route["hardware_route"] == "qualified"
     )
     result = _provenance("vulkan-texture-sample", order)
     result.update(
@@ -1182,7 +1183,7 @@ def _vulkan_image_copy_case(order, args):
         hardware_error[0] == 0.0
         and baseline_error[0] == 0.0
         and route["discovery"] == "available"
-        and route["hardware_acceleration"] == "implementation_defined"
+        and route["hardware_route"] == "implementation_defined"
     )
     result = _provenance("vulkan-image-copy", order)
     result.update(
@@ -1310,7 +1311,7 @@ def _vulkan_texture_stencil_case(order, args):
         hardware_error[0] <= tolerance
         and baseline_error[0] <= tolerance
         and _executed_core_route_is_consistent(route)
-        and route["hardware_acceleration"] == "qualified"
+        and route["hardware_route"] == "qualified"
     )
     result = _provenance("vulkan-texture-stencil", order)
     result.update(
@@ -1381,6 +1382,8 @@ def _aggregate(case, workers, cv_limit, drift_limit):
             "status": "error",
             "workers": workers,
             "performance_claim_eligible": False,
+            "performance_state": "not_measured",
+            "performance_scope": {},
         }
     if all(status == "skipped" for status in statuses):
         return {
@@ -1388,6 +1391,8 @@ def _aggregate(case, workers, cv_limit, drift_limit):
             "status": "skipped",
             "workers": workers,
             "performance_claim_eligible": False,
+            "performance_state": "not_measured",
+            "performance_scope": {},
         }
     if any(status != "passed" for status in statuses):
         return {
@@ -1395,6 +1400,8 @@ def _aggregate(case, workers, cv_limit, drift_limit):
             "status": "failed",
             "workers": workers,
             "performance_claim_eligible": False,
+            "performance_state": "not_measured",
+            "performance_scope": {},
         }
     variants = {}
     stable = True
@@ -1441,9 +1448,31 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         for worker in workers
         for variant in ("hardware", "baseline")
     )
-    claim_eligible = (
-        stable and minimum_block_qualified and speedup["p05"] > 1.0
-    )
+    if not stable or not minimum_block_qualified:
+        performance_state = "unstable"
+    elif speedup["p05"] > 1.0:
+        performance_state = "stable_positive"
+    elif speedup["p95"] < 1.0:
+        performance_state = "stable_negative"
+    else:
+        performance_state = "unstable"
+    claim_eligible = performance_state == "stable_positive"
+    performance_scope = {
+        "harness_schema": SCHEMA,
+        "case": case,
+        "workload": workers[0]["workload"],
+        "backend": workers[0].get("backend"),
+        "device": {
+            "cuda_compute_capability": workers[0].get(
+                "cuda_compute_capability"
+            )
+        },
+        "revision": {
+            "forge_version": workers[0].get("forge_version"),
+            "forge_commit": workers[0].get("forge_commit"),
+        },
+        "baseline": workers[0]["workload"].get("baseline"),
+    }
     return {
         "case": case,
         "status": "passed",
@@ -1451,6 +1480,8 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         "noise_status": "stable" if stable else "unstable",
         "minimum_block_qualified": minimum_block_qualified,
         "performance_claim_eligible": claim_eligible,
+        "performance_state": performance_state,
+        "performance_scope": performance_scope,
         "median_speedup": ratio,
         "paired_speedup": speedup,
         "variants": variants,
@@ -1464,6 +1495,7 @@ def _aggregate(case, workers, cv_limit, drift_limit):
                     "backend",
                     "cuda_compute_capability",
                     "forge_version",
+                    "forge_commit",
                     "python",
                     "platform",
                     "launch_index",

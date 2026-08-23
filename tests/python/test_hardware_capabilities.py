@@ -49,7 +49,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
 
     assert tuple(operation.operation_id for operation in operations) == _OPERATION_IDS
     assert all(
-        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 2 for operation in operations
+        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 3 for operation in operations
     )
     assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
     assert ti.hardware.DEPENDENCY_TIERS == (
@@ -64,6 +64,17 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         "explicit_kernel_intrinsic",
         "domain_api_auto_provider",
         "compiler_automatic",
+    )
+    assert ti.hardware.HARDWARE_ROUTE_LEVELS == (
+        "qualified",
+        "implementation_defined",
+        "none",
+    )
+    assert ti.hardware.PERFORMANCE_STATES == (
+        "stable_positive",
+        "stable_negative",
+        "unstable",
+        "not_measured",
     )
     assert all(operation.backends for operation in operations)
     assert all(operation.scopes for operation in operations)
@@ -136,6 +147,49 @@ def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
     assert by_id["linalg.spmv.cusparse_explicit"].activation_mode == (
         "explicit_hardware_api"
     )
+
+
+def test_hardware_route_and_scoped_performance_evidence_are_separate():
+    operations = ti.hardware.operations()
+    assert all(
+        operation.hardware_route
+        == (
+            "qualified"
+            if operation.hardware_acceleration in ("guaranteed", "qualified")
+            else operation.hardware_acceleration
+        )
+        for operation in operations
+    )
+
+    report = ti.hardware.report()
+    assert all(
+        operation.performance_state == "not_measured"
+        and not operation.performance_scope
+        for operation in report.operations
+    )
+    payload = report.operations[0].to_dict()
+    assert payload["hardware_route"] == "qualified"
+    assert payload["hardware_acceleration"] == "qualified"
+    assert payload["performance_state"] == "not_measured"
+    assert payload["performance_scope"] == {}
+
+    measured = replace(
+        report.operations[0],
+        performance_state="stable_positive",
+        performance_scope={
+            "workload": "synthetic",
+            "device": "test-device",
+            "revision": "test-revision",
+            "baseline": "test-baseline",
+        },
+    )
+    assert measured.to_dict()["performance_state"] == "stable_positive"
+    with pytest.raises(ValueError, match="require a performance scope"):
+        replace(report.operations[0], performance_state="stable_negative")
+    with pytest.raises(ValueError, match="cannot carry a performance scope"):
+        replace(report.operations[0], performance_scope={"workload": "stale"})
+    with pytest.raises(ValueError, match="must match the legacy"):
+        replace(operations[0], hardware_route="none")
 
 
 def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
@@ -388,7 +442,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "cub_reference" in provider_ids
     assert all(provider.operation_ids for provider in providers)
     assert next(provider for provider in providers if provider.provider_id == "cublas").to_dict() == {
-        "schema_version": 2,
+        "schema_version": 3,
         "provider_id": "cublas",
         "dependency_tier": "lazy_external",
         "dependency_name": "cuBLAS",
@@ -405,7 +459,7 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     descriptor = ti.hardware.capability("matrix.mma.vulkan")
     payload = descriptor.to_dict()
 
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["operation_id"] == descriptor.operation_id
     assert "tuple enumeration" in payload["requirements"][1]
     assert payload["hardware_acceleration"] == "implementation_defined"
@@ -446,7 +500,7 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     ti.reset()
     report = ti.hardware.report()
 
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.runtime_initialized is False
     assert report.backend is None
     assert report.external_components_probed is False

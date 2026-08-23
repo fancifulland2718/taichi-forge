@@ -5,7 +5,7 @@ from types import MappingProxyType
 from typing import Mapping, Optional, Tuple
 
 
-HARDWARE_CAPABILITY_SCHEMA_VERSION = 2
+HARDWARE_CAPABILITY_SCHEMA_VERSION = 3
 
 DEPENDENCY_TIERS = (
     "core",
@@ -44,6 +44,19 @@ HARDWARE_ACCELERATION_LEVELS = (
     "qualified",
     "implementation_defined",
     "none",
+)
+
+HARDWARE_ROUTE_LEVELS = (
+    "qualified",
+    "implementation_defined",
+    "none",
+)
+
+PERFORMANCE_STATES = (
+    "stable_positive",
+    "stable_negative",
+    "unstable",
+    "not_measured",
 )
 
 EXECUTION_KINDS = (
@@ -184,6 +197,7 @@ class HardwareOperationDescriptor:
     workspace_ownership: str
     implementation_status: str
     activation_mode: str
+    hardware_route: Optional[str] = None
     dependency_name: Optional[str] = None
     load_mode: Optional[str] = None
     resource_effects: Tuple[str, ...] = ()
@@ -239,6 +253,14 @@ class HardwareOperationDescriptor:
             self.hardware_acceleration,
             HARDWARE_ACCELERATION_LEVELS,
         )
+        hardware_route = self.hardware_route
+        if hardware_route is None:
+            hardware_route = (
+                "qualified"
+                if self.hardware_acceleration in ("guaranteed", "qualified")
+                else self.hardware_acceleration
+            )
+        _validate_member("hardware route level", hardware_route, HARDWARE_ROUTE_LEVELS)
         _validate_member("execution kind", self.execution_kind, EXECUTION_KINDS)
         _validate_member("Graph support", self.graph_support, GRAPH_SUPPORT_MODES)
         _validate_member("stream binding", self.stream_binding, STREAM_BINDINGS)
@@ -255,9 +277,21 @@ class HardwareOperationDescriptor:
             "qualification_required",
             "planned",
             "reference_only",
-        ) and self.hardware_acceleration in ("guaranteed", "qualified"):
+        ) and (
+            self.hardware_acceleration in ("guaranteed", "qualified")
+            or hardware_route == "qualified"
+        ):
             raise ValueError(
                 "unqualified implementations cannot claim guaranteed or qualified " "hardware acceleration"
+            )
+        legacy_route = (
+            "qualified"
+            if self.hardware_acceleration in ("guaranteed", "qualified")
+            else self.hardware_acceleration
+        )
+        if hardware_route != legacy_route:
+            raise ValueError(
+                "hardware_route must match the legacy hardware_acceleration field"
             )
         if self.public_api is not None and (not isinstance(self.public_api, str) or not self.public_api):
             raise TypeError("public_api must be None or a nonempty string")
@@ -278,6 +312,7 @@ class HardwareOperationDescriptor:
         if self.execution_kind == "kernel_intrinsic" and self.graph_support != "inline":
             raise ValueError("kernel intrinsics must report graph_support='inline'")
         object.__setattr__(self, "backends", backends)
+        object.__setattr__(self, "hardware_route", hardware_route)
         object.__setattr__(self, "scopes", scopes)
         object.__setattr__(self, "load_mode", load_mode)
         object.__setattr__(self, "resource_effects", resource_effects)
@@ -301,6 +336,7 @@ class HardwareOperationDescriptor:
             "provider_class": self.provider_class,
             "execution_class": self.execution_class,
             "hardware_acceleration": self.hardware_acceleration,
+            "hardware_route": self.hardware_route,
             "scopes": self.scopes,
             "execution_kind": self.execution_kind,
             "graph_support": self.graph_support,
@@ -377,6 +413,8 @@ class ResolvedHardwareOperation:
     selection: str
     unavailable_reason: str
     native_facts: Mapping[str, object] = field(default_factory=dict)
+    performance_state: str = "not_measured"
+    performance_scope: Mapping[str, object] = field(default_factory=dict)
     provider_abi: Optional[str] = None
     provider_version: Optional[str] = None
     last_error: Optional[str] = None
@@ -397,6 +435,7 @@ class ResolvedHardwareOperation:
             raise TypeError("last_error must be None or a nonempty string")
         if self.failure_scope is not None:
             _validate_member("failure scope", self.failure_scope, FAILURE_SCOPES)
+        _validate_member("performance state", self.performance_state, PERFORMANCE_STATES)
         for field_name in ("provider_abi", "provider_version"):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -405,6 +444,16 @@ class ResolvedHardwareOperation:
         if any(not isinstance(name, str) or not name for name in facts):
             raise TypeError("native fact names must be nonempty strings")
         object.__setattr__(self, "native_facts", MappingProxyType(facts))
+        performance_scope = dict(self.performance_scope)
+        if any(not isinstance(name, str) or not name for name in performance_scope):
+            raise TypeError("performance scope names must be nonempty strings")
+        if self.performance_state == "not_measured" and performance_scope:
+            raise ValueError("not_measured operations cannot carry a performance scope")
+        if self.performance_state != "not_measured" and not performance_scope:
+            raise ValueError("measured performance states require a performance scope")
+        object.__setattr__(
+            self, "performance_scope", MappingProxyType(performance_scope)
+        )
 
     def to_dict(self):
         result = self.descriptor.to_dict()
@@ -419,6 +468,8 @@ class ResolvedHardwareOperation:
                 "provider_abi": self.provider_abi,
                 "provider_version": self.provider_version,
                 "native_facts": dict(self.native_facts),
+                "performance_state": self.performance_state,
+                "performance_scope": dict(self.performance_scope),
                 "last_error": self.last_error,
                 "failure_scope": self.failure_scope,
             }
@@ -2087,6 +2138,7 @@ __all__ = [
     "GRAPH_SUPPORT_MODES",
     "HARDWARE_ACCELERATION_LEVELS",
     "HARDWARE_CAPABILITY_SCHEMA_VERSION",
+    "HARDWARE_ROUTE_LEVELS",
     "HardwareCapabilityReport",
     "HardwareOperationDescriptor",
     "HardwareProviderDescriptor",
@@ -2094,6 +2146,7 @@ __all__ = [
     "LIFETIME_POLICIES",
     "LOAD_MODES",
     "OPERATION_SCOPES",
+    "PERFORMANCE_STATES",
     "PROVIDER_CLASSES",
     "ResolvedHardwareOperation",
     "SELECTION_STATES",
