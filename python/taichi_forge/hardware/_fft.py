@@ -17,6 +17,8 @@ from taichi_forge.types.primitive_types import f32
 
 
 _DIRECTIONS = {"forward": -1, "inverse": 1}
+_TRANSFORMS = {"c2c": 0, "r2c": 1, "c2r": 2}
+_NATURAL_DIRECTIONS = {"c2c": "forward", "r2c": "forward", "c2r": "inverse"}
 
 
 def _active_backend():
@@ -35,30 +37,43 @@ def _positive_int(value, name):
     return value
 
 
-def _direction_value(direction):
+def _transform_value(transform):
     try:
-        return _DIRECTIONS[direction]
+        return _TRANSFORMS[transform]
     except (KeyError, TypeError) as exc:
+        raise ValueError("CUDA cuFFT transform must be 'c2c', 'r2c', or 'c2r'") from exc
+
+
+def _resolve_direction(transform, direction):
+    if direction is None:
+        direction = _NATURAL_DIRECTIONS[transform]
+    try:
+        direction_value = _DIRECTIONS[direction]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("CUDA cuFFT direction must be 'forward' or 'inverse'") from exc
+    expected = _NATURAL_DIRECTIONS[transform]
+    if transform != "c2c" and direction != expected:
         raise ValueError(
-            "CUDA cuFFT direction must be 'forward' or 'inverse'"
-        ) from exc
+            f"CUDA cuFFT {transform.upper()} requires direction={expected!r}"
+        )
+    return direction, direction_value
 
 
 @instrument_hardware_recording("fft.transform.cufft")
 class CufftRecording(BackendCommandRecording):
-    """One out-of-place C2C execution against a fixed cuFFT plan."""
+    """One out-of-place C2C, R2C, or C2R execution against a fixed plan."""
 
     def __init__(
         self,
         plan,
         *,
-        direction="forward",
+        direction=None,
         input="input",
         output="output",
     ):
         if not isinstance(plan, CufftPlan1D):
             raise TypeError("CUDA cuFFT recording requires a CufftPlan1D")
-        direction_value = _direction_value(direction)
+        direction, direction_value = _resolve_direction(plan.transform, direction)
         if any(not isinstance(name, str) or not name for name in (input, output)):
             raise ValueError("CUDA cuFFT binding names must be nonempty strings")
         if input == output:
@@ -77,6 +92,11 @@ class CufftRecording(BackendCommandRecording):
         object.__setattr__(self, "plan", plan)
         object.__setattr__(self, "direction", direction)
         object.__setattr__(self, "direction_value", direction_value)
+        object.__setattr__(
+            self,
+            "output_scale",
+            plan.inverse_scale if direction == "inverse" else 1.0,
+        )
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "output", output)
 
@@ -99,13 +119,14 @@ class CufftRecording(BackendCommandRecording):
             if unexpected:
                 details.append("unexpected " + ", ".join(unexpected))
             raise TaichiRuntimeError(
-                "CUDA cuFFT bindings do not match the recording: "
-                + "; ".join(details)
+                "CUDA cuFFT bindings do not match the recording: " + "; ".join(details)
             )
         self.validate_graph_lifetime()
-        source = self.plan._validate_array(bindings[self.input], self.input)
+        source = self.plan._validate_array(
+            bindings[self.input], self.input, self.plan.input_shape
+        )
         destination = self.plan._validate_array(
-            bindings[self.output], self.output
+            bindings[self.output], self.output, self.plan.output_shape
         )
         if bindings[self.input] is bindings[self.output]:
             raise TaichiRuntimeError(
@@ -134,8 +155,7 @@ class _CufftExecutable(NativeGraphExecutable):
     @property
     def runtime_arg_schema(self):
         return tuple(
-            RuntimeBinding(name, "ndarray")
-            for name in self._recording.binding_names
+            RuntimeBinding(name, "ndarray") for name in self._recording.binding_names
         )
 
     @property
@@ -153,10 +173,12 @@ class _CufftExecutable(NativeGraphExecutable):
     @property
     def debug_info(self):
         return {
-            "kind": "cuda_cufft_c2c_1d",
+            "kind": f"cuda_cufft_{self._recording.plan.transform}_1d",
             "length": self._recording.plan.length,
             "batch_count": self._recording.plan.batch_count,
+            "transform": self._recording.plan.transform,
             "direction": self._recording.direction,
+            "output_scale": self._recording.output_scale,
         }
 
 
@@ -169,16 +191,20 @@ class _CufftNode(NativeGraphNode):
 
 
 class CufftPlan1D:
-    """One fixed-size, provider-owned single-precision cuFFT C2C plan.
+    """One fixed-size, provider-owned single-precision cuFFT plan.
 
-    Complex values use a final scalar axis ``[real, imag]``. The inverse
-    transform is intentionally unnormalized, matching the native cuFFT
-    contract.
+    ``transform`` selects complex-to-complex (``c2c``), real-to-Hermitian
+    (``r2c``), or Hermitian-to-real (``c2r``). Complex values use a final
+    scalar axis ``[real, imag]``. Native inverse transforms are intentionally
+    unnormalized. Multiply their output by :attr:`inverse_scale` when unit
+    inverse normalization is required.
     """
 
-    def __init__(self, length, *, batch_count=1):
+    def __init__(self, length, *, batch_count=1, transform="c2c"):
         self.length = _positive_int(length, "length")
         self.batch_count = _positive_int(batch_count, "batch_count")
+        self.transform = transform
+        self.transform_value = _transform_value(transform)
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError(
@@ -192,7 +218,9 @@ class CufftPlan1D:
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self._handle = int(
-            program._create_cuda_cufft_plan_1d(self.length, self.batch_count)
+            program._create_cuda_cufft_plan_1d(
+                self.length, self.batch_count, self.transform_value
+            )
         )
 
     @property
@@ -201,14 +229,42 @@ class CufftPlan1D:
 
     @property
     def shape(self):
+        """Legacy alias for :attr:`input_shape`; C2C shapes are unchanged."""
+
+        return self.input_shape
+
+    @property
+    def input_shape(self):
+        logical_length = (
+            self.length if self.transform != "c2r" else self.length // 2 + 1
+        )
+        components = 1 if self.transform == "r2c" else 2
+        shape = (logical_length,) if components == 1 else (logical_length, 2)
         if self.batch_count == 1:
-            return (self.length, 2)
-        return (self.batch_count, self.length, 2)
+            return shape
+        return (self.batch_count, *shape)
+
+    @property
+    def output_shape(self):
+        logical_length = (
+            self.length if self.transform != "r2c" else self.length // 2 + 1
+        )
+        components = 1 if self.transform == "c2r" else 2
+        shape = (logical_length,) if components == 1 else (logical_length, 2)
+        if self.batch_count == 1:
+            return shape
+        return (self.batch_count, *shape)
+
+    @property
+    def inverse_scale(self):
+        """Scale required after an unnormalized C2C inverse or C2R transform."""
+
+        return 1.0 / self.length
 
     def record(
         self,
         *,
-        direction="forward",
+        direction=None,
         input="input",
         output="output",
     ):
@@ -220,12 +276,12 @@ class CufftPlan1D:
             output=output,
         )
 
-    def execute(self, input, output, *, direction="forward"):
+    def execute(self, input, output, *, direction=None):
         recording = self.record(direction=direction)
         recording.execute({"input": input, "output": output})
         return output
 
-    def _validate_array(self, value, name):
+    def _validate_array(self, value, name, expected_shape):
         if not isinstance(value, Ndarray):
             raise TaichiRuntimeError(
                 f"CUDA cuFFT binding {name!r} must be a Taichi ndarray"
@@ -233,17 +289,17 @@ class CufftPlan1D:
         if (
             value.dtype != f32
             or tuple(value.element_shape) != ()
-            or tuple(value.shape) != self.shape
+            or tuple(value.shape) != expected_shape
         ):
             raise TaichiRuntimeError(
                 f"CUDA cuFFT binding {name!r} must have scalar f32 shape "
-                f"{self.shape}"
+                f"{expected_shape}"
             )
         return value.arr
 
     def _execute(self, input_array, output_array, direction):
         self._validate_lifetime()
-        self._runtime_prog._cuda_cufft_execute_c2c(
+        self._runtime_prog._cuda_cufft_execute(
             self._handle, input_array, output_array, direction
         )
 
@@ -270,7 +326,7 @@ class CufftPlan1D:
             and int(impl.runtime_generation()) == self._runtime_generation
         )
         return make_memory_report(
-            "cufft_c2c_1d",
+            f"cufft_{self.transform}_1d",
             "cuda",
             (
                 HardwareMemoryComponent(
@@ -285,9 +341,7 @@ class CufftPlan1D:
             lifecycle_state=(
                 "ready"
                 if runtime_valid
-                else "closed"
-                if not handle_present
-                else "runtime_invalid"
+                else "closed" if not handle_present else "runtime_invalid"
             ),
             ownership_scope="plan_generation",
         )

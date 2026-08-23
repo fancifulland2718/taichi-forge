@@ -2319,7 +2319,12 @@ void export_lang(py::module &m) {
       .def("_create_cuda_cufft_plan_1d",
            tracked_native_program_method(&Program::create_cuda_cufft_plan_1d),
            py::arg("length"), py::arg("batch_count"),
+           py::arg("transform_kind") = 0,
            py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cufft_execute",
+           tracked_native_program_method(&Program::cuda_cufft_execute),
+           py::arg("handle"), py::arg("input"), py::arg("output"),
+           py::arg("direction"), py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cufft_execute_c2c",
            tracked_native_program_method(&Program::cuda_cufft_execute_c2c),
            py::arg("handle"), py::arg("input"), py::arg("output"),

@@ -1050,7 +1050,13 @@ class TI_DLL_EXPORT Program {
   void vulkan_clear_ray_scenes();
 
   std::uint64_t create_cuda_cufft_plan_1d(std::size_t length,
-                                          std::size_t batch_count);
+                                          std::size_t batch_count,
+                                          int transform_kind = 0);
+
+  std::size_t cuda_cufft_execute(std::uint64_t handle,
+                                 Ndarray *input,
+                                 Ndarray *output,
+                                 int direction);
 
   std::size_t cuda_cufft_execute_c2c(std::uint64_t handle,
                                      Ndarray *input,

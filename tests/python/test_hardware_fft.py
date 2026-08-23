@@ -11,6 +11,8 @@ def test_cufft_plan_rejects_non_cuda_runtime_and_bad_contracts():
     assert not ti.hardware.fft.is_available()
     with pytest.raises(ValueError, match="length"):
         ti.hardware.fft.CufftPlan1D(0)
+    with pytest.raises(ValueError, match="transform"):
+        ti.hardware.fft.CufftPlan1D(8, transform="z2z")
     with pytest.raises(RuntimeError, match="requires the CUDA backend"):
         ti.hardware.fft.CufftPlan1D(8)
 
@@ -65,11 +67,9 @@ def test_cufft_c2c_executes_directly_and_through_graph():
     assert resolved.discovery == "available"
     assert resolved.enablement == "enabled"
     assert resolved.selection == "eligible"
-    assert resolved.provider_abi == "cufft-basic-c2c-dynamic-symbols-v1"
+    assert resolved.provider_abi == "cufft-basic-transform-dynamic-symbols-v2"
 
-    recording = plan.record(
-        direction="inverse", input="spectrum", output="signal"
-    )
+    recording = plan.record(direction="inverse", input="spectrum", output="signal")
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
     ) == (("spectrum", GraphAccess.READ), ("signal", GraphAccess.WRITE))
@@ -108,3 +108,67 @@ def test_cufft_recording_validation_is_fail_closed():
             plan.execute(output, output)
     finally:
         plan.close()
+
+
+@pytest.mark.parametrize("length", (7, 8))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_real_transforms_preserve_hermitian_layout_and_scale(length):
+    if not ti.hardware.fft.is_available():
+        pytest.skip("a compatible optional cuFFT shared library is unavailable")
+
+    batch_count = 2
+    rng = np.random.default_rng(20260824 + length)
+    values = rng.standard_normal((batch_count, length)).astype(np.float32)
+    hermitian_length = length // 2 + 1
+
+    signal = ti.ndarray(ti.f32, shape=(batch_count, length))
+    spectrum = ti.ndarray(ti.f32, shape=(batch_count, hermitian_length, 2))
+    recovered = ti.ndarray(ti.f32, shape=(batch_count, length))
+    signal.from_numpy(values)
+
+    forward = ti.hardware.fft.CufftPlan1D(
+        length, batch_count=batch_count, transform="r2c"
+    )
+    inverse = ti.hardware.fft.CufftPlan1D(
+        length, batch_count=batch_count, transform="c2r"
+    )
+    try:
+        assert forward.input_shape == (batch_count, length)
+        assert forward.output_shape == (batch_count, hermitian_length, 2)
+        assert inverse.input_shape == forward.output_shape
+        assert inverse.output_shape == forward.input_shape
+        assert inverse.inverse_scale == pytest.approx(1.0 / length)
+
+        forward.execute(signal, spectrum)
+        ti.sync()
+        packed = spectrum.to_numpy()
+        actual_spectrum = packed[..., 0] + 1j * packed[..., 1]
+        np.testing.assert_allclose(
+            actual_spectrum,
+            np.fft.rfft(values, axis=-1),
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        recording = inverse.record(input="spectrum", output="signal")
+        assert recording.direction == "inverse"
+        assert recording.output_scale == pytest.approx(1.0 / length)
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+        graph = builder.compile()
+        graph.run({"spectrum": spectrum, "signal": recovered})
+        ti.sync()
+        np.testing.assert_allclose(
+            recovered.to_numpy() * recording.output_scale,
+            values,
+            rtol=2e-5,
+            atol=2e-5,
+        )
+
+        with pytest.raises(ValueError, match="forward"):
+            forward.record(direction="inverse")
+        with pytest.raises(ValueError, match="inverse"):
+            inverse.record(direction="forward")
+    finally:
+        forward.close()
+        inverse.close()
