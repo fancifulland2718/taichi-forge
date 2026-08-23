@@ -18,6 +18,37 @@ using namespace taichi::lang::vulkan;
 namespace taichi::lang {
 
 namespace {
+#ifndef ANDROID
+class GlfwProbeWindow {
+ public:
+  GlfwProbeWindow() : context_acquired_(window_system::glfw_context_acquire()) {
+    if (!context_acquired_) {
+      return;
+    }
+    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
+    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+    window_ = glfwCreateWindow(1, 1, "Dummy Window", nullptr, nullptr);
+  }
+
+  ~GlfwProbeWindow() {
+    if (window_ != nullptr) {
+      glfwDestroyWindow(window_);
+    }
+    if (context_acquired_) {
+      window_system::glfw_context_release();
+    }
+  }
+
+  GLFWwindow *get() const {
+    return window_;
+  }
+
+ private:
+  bool context_acquired_{false};
+  GLFWwindow *window_{nullptr};
+};
+#endif
+
 std::vector<std::string> get_required_instance_extensions() {
 #ifdef ANDROID
   std::vector<std::string> extensions;
@@ -80,17 +111,10 @@ void VulkanProgramImpl::materialize_runtime(KernelProfilerBase *profiler,
 // the device and other states is left to the caller/host.
 // The following code is only used when Taichi is running on its own.
 #ifndef ANDROID
-  GLFWwindow *glfw_window = nullptr;
-
-  if (window_system::glfw_context_acquire()) {
-    // glfw init success
-    glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfw_window = glfwCreateWindow(1, 1, "Dummy Window", nullptr, nullptr);
-
-    if (glfwVulkanSupported() != GLFW_TRUE) {
-      TI_WARN("GLFW reports no Vulkan support");
-    }
+  GlfwProbeWindow glfw_probe;
+  GLFWwindow *glfw_window = glfw_probe.get();
+  if (glfw_window != nullptr && glfwVulkanSupported() != GLFW_TRUE) {
+    TI_WARN("GLFW reports no Vulkan support");
   }
 #endif
 

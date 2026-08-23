@@ -134,7 +134,7 @@ TEST(RuntimeCompletion, WaitReleasesResourcesExactlyOnce) {
   EXPECT_EQ(statistics.synchronization.completion_waits, 2u);
 }
 
-TEST(RuntimeCompletion, GpuTimingIsTicketOwnedAndReadableAfterCompletion) {
+TEST(RuntimeCompletion, GpuTimingIsFrozenAndReadableAfterCompletion) {
   auto semaphore = std::make_shared<FakeSemaphore>();
   std::atomic<int> released{0};
   auto timing = std::make_shared<FakeGpuTiming>(&released);
@@ -172,7 +172,13 @@ TEST(RuntimeCompletion, GpuTimingIsTicketOwnedAndReadableAfterCompletion) {
 
   timing.reset();
   region_timing.reset();
-  EXPECT_EQ(released.load(std::memory_order_relaxed), 0);
+  EXPECT_EQ(released.load(std::memory_order_relaxed), 2);
+  auto cached = completion.gpu_timing_snapshot();
+  EXPECT_TRUE(cached.available);
+  EXPECT_EQ(cached.duration_ns, 1234u);
+  auto cached_regions = completion.gpu_region_timing_snapshots();
+  ASSERT_EQ(cached_regions.size(), 1u);
+  EXPECT_EQ(cached_regions[0].timing.duration_ns, 1234u);
   completion = RuntimeCompletion{};
   EXPECT_EQ(released.load(std::memory_order_relaxed), 2);
 }

@@ -507,6 +507,7 @@ struct RuntimeCompletion::State {
                                   CompletionStatus::failed);
         throw;
       }
+      freeze_gpu_timings_locked(CompletionStatus::completed);
       status.store(CompletionStatus::completed, std::memory_order_release);
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
@@ -551,6 +552,7 @@ struct RuntimeCompletion::State {
                                   CompletionStatus::failed);
         throw;
       }
+      freeze_gpu_timings_locked(CompletionStatus::completed);
       status.store(CompletionStatus::completed, std::memory_order_release);
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
@@ -585,10 +587,18 @@ struct RuntimeCompletion::State {
       // resource batch until the last ticket reference is destroyed.
       if (current != CompletionStatus::failed &&
           current != CompletionStatus::invalidated) {
-        status.store(CompletionStatus::completed, std::memory_order_release);
         if (primitive) {
           primitive->mark_backend_completed();
         }
+      }
+      freeze_gpu_timings_locked(
+          current == CompletionStatus::failed ||
+                  current == CompletionStatus::invalidated
+              ? current
+              : CompletionStatus::completed);
+      if (current != CompletionStatus::failed &&
+          current != CompletionStatus::invalidated) {
+        status.store(CompletionStatus::completed, std::memory_order_release);
       }
       retired_primitive = std::move(primitive);
       retired_resources = std::move(resources);
@@ -629,43 +639,51 @@ struct RuntimeCompletion::State {
   }
 
   StreamGpuTimingSnapshot timing_snapshot() const {
-    StreamGpuTiming timing;
     CompletionStatus current;
     {
       std::lock_guard<std::mutex> lock(mutex);
       current = status.load(std::memory_order_relaxed);
-      timing = gpu_timing;
+      if (!gpu_timing && !gpu_timings_frozen) {
+        return {};
+      }
+      if (current == CompletionStatus::pending) {
+        StreamGpuTimingSnapshot result;
+        result.status = "pending";
+        result.measurement_path_changed = true;
+        return result;
+      }
+      if (current == CompletionStatus::failed ||
+          current == CompletionStatus::invalidated) {
+        StreamGpuTimingSnapshot result;
+        result.status = "failed";
+        result.measurement_path_changed = true;
+        return result;
+      }
+      if (gpu_timing_error) {
+        std::rethrow_exception(gpu_timing_error);
+      }
+      if (gpu_timings_frozen) {
+        return gpu_timing_result;
+      }
+      // Defensive fallback for a backend that marks a completion synchronously
+      // without passing through wait(), done(), or Program synchronization.
+      return gpu_timing ? gpu_timing->snapshot()
+                        : StreamGpuTimingSnapshot{};
     }
-    if (!timing) {
-      return {};
-    }
-    if (current == CompletionStatus::pending) {
-      StreamGpuTimingSnapshot result;
-      result.status = "pending";
-      result.measurement_path_changed = true;
-      return result;
-    }
-    if (current == CompletionStatus::failed ||
-        current == CompletionStatus::invalidated) {
-      StreamGpuTimingSnapshot result;
-      result.status = "failed";
-      result.measurement_path_changed = true;
-      return result;
-    }
-    return timing->snapshot();
   }
 
   std::vector<RuntimeGpuRegionTimingSnapshot> region_timing_snapshots() const {
-    std::vector<RuntimeGpuRegionTiming> timings;
-    CompletionStatus current;
-    {
-      std::lock_guard<std::mutex> lock(mutex);
-      current = status.load(std::memory_order_relaxed);
-      timings = gpu_region_timings;
-    }
+    std::lock_guard<std::mutex> lock(mutex);
+    const CompletionStatus current = status.load(std::memory_order_relaxed);
     std::vector<RuntimeGpuRegionTimingSnapshot> results;
-    results.reserve(timings.size());
-    for (const auto &region : timings) {
+    if (gpu_timings_frozen) {
+      if (gpu_region_timing_error) {
+        std::rethrow_exception(gpu_region_timing_error);
+      }
+      return gpu_region_timing_results;
+    }
+    results.reserve(gpu_region_timings.size());
+    for (const auto &region : gpu_region_timings) {
       StreamGpuTimingSnapshot snapshot;
       if (!region.timing) {
         snapshot.status = "unsupported";
@@ -683,6 +701,59 @@ struct RuntimeCompletion::State {
       results.push_back({region.path_id, std::move(snapshot)});
     }
     return results;
+  }
+
+  void freeze_gpu_timings_locked(CompletionStatus completion_status) noexcept {
+    if (gpu_timings_frozen) {
+      return;
+    }
+    gpu_timings_frozen = true;
+
+    auto timing = std::move(gpu_timing);
+    auto region_timings = std::move(gpu_region_timings);
+    const bool failed = completion_status == CompletionStatus::failed ||
+                        completion_status == CompletionStatus::invalidated;
+    if (timing) {
+      if (failed) {
+        gpu_timing_result.status = "failed";
+        gpu_timing_result.measurement_path_changed = true;
+      } else {
+        try {
+          gpu_timing_result = timing->snapshot();
+        } catch (...) {
+          gpu_timing_error = std::current_exception();
+          gpu_timing_result.status = "failed";
+          gpu_timing_result.measurement_path_changed = true;
+        }
+      }
+    }
+
+    gpu_region_timing_results.reserve(region_timings.size());
+    for (const auto &region : region_timings) {
+      StreamGpuTimingSnapshot snapshot;
+      if (!region.timing) {
+        snapshot.status = "unsupported";
+        snapshot.measurement_path_changed = true;
+      } else if (failed) {
+        snapshot.status = "failed";
+        snapshot.measurement_path_changed = true;
+      } else {
+        try {
+          snapshot = region.timing->snapshot();
+        } catch (...) {
+          if (!gpu_region_timing_error) {
+            gpu_region_timing_error = std::current_exception();
+          }
+          snapshot.status = "failed";
+          snapshot.measurement_path_changed = true;
+        }
+      }
+      gpu_region_timing_results.push_back(
+          {region.path_id, std::move(snapshot)});
+    }
+    // The local shared_ptrs release CUDA events/Vulkan query pools here while
+    // the owning backend device is still valid. Tickets retain only immutable
+    // host snapshots and can therefore outlive ti.reset().
   }
 
   void record_first_error_locked(std::exception_ptr error,
@@ -720,6 +791,11 @@ struct RuntimeCompletion::State {
   std::unique_ptr<CompletionPrimitive> primitive;
   StreamGpuTiming gpu_timing;
   std::vector<RuntimeGpuRegionTiming> gpu_region_timings;
+  bool gpu_timings_frozen{false};
+  StreamGpuTimingSnapshot gpu_timing_result;
+  std::vector<RuntimeGpuRegionTimingSnapshot> gpu_region_timing_results;
+  std::exception_ptr gpu_timing_error;
+  std::exception_ptr gpu_region_timing_error;
   std::shared_ptr<RuntimeCompletionResources> resources;
   std::exception_ptr first_error;
   std::string first_error_text;

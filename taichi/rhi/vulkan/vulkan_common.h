@@ -23,14 +23,16 @@
 namespace taichi::lang {
 namespace vulkan {
 
-#define BAIL_ON_VK_BAD_RESULT_NO_RETURN(result, msg)                         \
-  {                                                                          \
-    if ((result) != VK_SUCCESS) {                                            \
-      char vk_msg_buf[512];                                                  \
-      std::snprintf(vk_msg_buf, sizeof(vk_msg_buf), "(%d) %s", result, msg); \
-      RHI_LOG_ERROR(vk_msg_buf);                                             \
-      RHI_ASSERT(false && "Error without return code");                      \
-    };                                                                       \
+#define BAIL_ON_VK_BAD_RESULT_NO_RETURN(result, msg)                  \
+  {                                                                   \
+    const VkResult vk_result__ = (result);                             \
+    if (vk_result__ != VK_SUCCESS) {                                   \
+      char vk_msg_buf[512];                                           \
+      std::snprintf(vk_msg_buf, sizeof(vk_msg_buf), "(%d) %s",       \
+                    static_cast<int>(vk_result__), msg);               \
+      RHI_LOG_ERROR(vk_msg_buf);                                      \
+      RHI_ASSERT(false && "Error without return code");               \
+    };                                                                \
   }
 
 #define BAIL_ON_VK_BAD_RESULT(result, msg, retcode, retval)                  \

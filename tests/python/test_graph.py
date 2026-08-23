@@ -2663,6 +2663,23 @@ def test_vulkan_buffer_commands_execute_directly_and_through_graph():
     with pytest.raises(TaichiRuntimeError, match="before ti.reset"):
         graph.run({"source": source, "destination": destination})
 
+    # A completed ticket may outlive the runtime, but it must only retain host-side
+    # telemetry snapshots. In particular, Vulkan query pools must be released before
+    # reset destroys the logical device so that a new device can be materialized.
+    post_reset_pipeline = ticket.pipeline_report()
+    assert post_reset_pipeline.gpu_timestamp_status == pipeline.gpu_timestamp_status
+    assert post_reset_pipeline.gpu_duration_ns == pipeline.gpu_duration_ns
+    assert post_reset_pipeline.stages == pipeline.stages
+
+    ti.init(arch=ti.vulkan, enable_fallback=False)
+    post_reset_probe = ti.ndarray(ti.i32, shape=4)
+    post_reset_probe.fill(7)
+    ti.sync()
+    np.testing.assert_array_equal(
+        post_reset_probe.to_numpy(), np.full(4, 7, dtype=np.int32)
+    )
+    ti.reset()
+
 
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_buffer_commands_reject_bounds_and_overlap():
