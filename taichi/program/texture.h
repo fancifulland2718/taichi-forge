@@ -32,7 +32,8 @@ class TI_DLL_EXPORT Texture {
                    BufferFormat format,
                    int width,
                    int height,
-                   int depth = 1);
+                   int depth = 1,
+                   ImageSamplerConfig sampler_config = {});
 
   /* Constructs a Texture from an existing DeviceAllocation
    * It doesn't handle the allocation and deallocation.

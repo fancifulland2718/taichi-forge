@@ -552,6 +552,37 @@ _OPERATIONS = (
         notes=("low-level substrate; not a RasterPass or AS provider",),
     ),
     _operation(
+        "image.copy.vulkan",
+        "image.copy",
+        "vulkan_rhi",
+        ("vulkan",),
+        "core",
+        "compute_native",
+        "native_command",
+        "implementation_defined",
+        ("python", "graph"),
+        "native_command",
+        "recordable",
+        "runtime_ordered",
+        "none",
+        "existing_public",
+        activation_mode="explicit_hardware_api",
+        resource_effects=("read:source_image", "write:destination_image"),
+        lifetime_policy="runtime_generation",
+        update_policy="rebind",
+        layouts=("whole color image",),
+        requirements=("Vulkan RHI vkCmdCopyImage path",),
+        public_api="ti.hardware.image.VulkanImageCopyRecording",
+        notes=(
+            "This is a native device image command, but Vulkan does not promise "
+            "which physical engine executes the copy; it is not labeled "
+            "dedicated-hardware acceleration.",
+            "The current slice requires matching format and extent, rejects "
+            "aliases and depth/stencil, and restores both images to "
+            "shader-read layout.",
+        ),
+    ),
+    _operation(
         "raster.draw.vulkan",
         "raster.draw",
         "vulkan_graphics",
@@ -801,11 +832,12 @@ _OPERATIONS = (
             "SPIR-V OpImageSampleExplicitLod and OpImageFetch",
             "Vulkan combined image sampler",
         ),
-        public_api="ti.Texture",
+        public_api="ti.Texture(..., sampler=ti.hardware.sampling.SamplerConfig(...))",
         notes=(
-            "The current default sampler uses linear filtering, repeat addressing, "
-            "normalized coordinates, and no anisotropy or comparison; it is not "
-            "publicly configurable.",
+            "sample_lod uses immutable per-texture min/mag filter and U/V/W "
+            "address modes; Vulkan sampler objects are cached per device.",
+            "The current one-mip contract uses normalized coordinates and exposes no anisotropy or comparison mode.",
+            "fetch uses integer texel coordinates and ignores sampler configuration.",
         ),
     ),
     _operation(

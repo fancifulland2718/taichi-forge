@@ -74,9 +74,17 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 - 新增 D0 `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`，支持显式
   buffer fill/copy/barrier 直接执行和 root Graph automatic admission。当前 replay 为
   runtime-ordered `rerecord`，不支持 kernel 内调用、structured Graph 或 AOT。
+- 新增 D0 `ti.hardware.image.VulkanImageCopyRecording`，通过 direct 或自动加入 root
+  Graph 的命令执行完整 color image copy，精确声明 source READ / destination WRITE，持有
+  runtime Texture lease，并在不 readback host 的情况下与 kernel 排序。它要求 format 与
+  extent 相同，拒绝 alias 和 depth/stencil。由于 Vulkan 不保证物理 copy engine，catalog
+  只声明 native device command 与 implementation-defined hardware acceleration。
 - 资格化现有 D0 Vulkan `ti.Texture` 硬件采样路线：显式 texture op 会自动 lowering 到
   SPIR-V image/sampler 指令；普通 field/ndarray 不会自动替换。CUDA texture lowering
-  尚未实现并保持 `planned`。该变更不增加官方 wheel 变体。
+  尚未实现并保持 `planned`。新增 immutable `ti.hardware.sampling.SamplerConfig` min/mag
+  filter 与逐轴 repeat/mirrored-repeat/clamp-to-edge address，由 device sampler cache
+  复用；精确 `fetch()` 继续与 sampler 无关，边界仍是单 mip normalized sampling。该变更
+  不增加官方 wheel 变体。
 - 新增 D0 `ti.hardware.graphics.VulkanGraphicsPipeline`，在调用方提供的 SPIR-V、精确
   vertex/index layout、runtime-owned color/depth texture 上提供 renderer-neutral 的 direct
   或 root-Graph draw recording。compute/graphics 排序使用 device-side semaphore bridge，

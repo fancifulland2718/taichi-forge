@@ -90,11 +90,21 @@ grouped under the behavior they shipped.
   execution and root-Graph automatic admission. Replay is currently
   runtime-ordered `rerecord`; kernel calls, structured Graphs, and AOT are not
   qualified.
+- Added D0 `ti.hardware.image.VulkanImageCopyRecording` for direct or
+  automatically admitted root-Graph whole-color-image copies with exact
+  source READ and destination WRITE effects, runtime Texture leases, and
+  kernel ordering without host readback. It requires identical formats and
+  extents and rejects aliasing and depth/stencil. Because Vulkan does not
+  identify the physical copy engine, the route is reported as a native device
+  command with implementation-defined hardware acceleration.
 - Qualified the existing D0 Vulkan `ti.Texture` hardware-sampling route:
   explicit texture operations are automatically lowered to SPIR-V image and
   sampler instructions, while ordinary field/ndarray access is never silently
-  substituted. CUDA texture lowering is not implemented and remains
-  `planned`. No official wheel variant is added.
+  substituted. Added immutable `ti.hardware.sampling.SamplerConfig` min/mag
+  filter and per-axis repeat/mirrored-repeat/clamp-to-edge addressing, backed
+  by a device sampler cache. Exact `fetch()` remains sampler-independent;
+  one-mip normalized sampling remains the boundary. CUDA texture lowering is
+  not implemented and remains `planned`. No official wheel variant is added.
 - Added D0 `ti.hardware.graphics.VulkanGraphicsPipeline`, a renderer-neutral
   interface over caller-provided SPIR-V, exact vertex/index layouts,
   runtime-owned color/depth textures, and direct or root-Graph draw recording.

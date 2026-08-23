@@ -198,7 +198,8 @@ Texture::Texture(Program *prog,
                  BufferFormat format,
                  int width,
                  int height,
-                 int depth)
+                 int depth,
+                 ImageSamplerConfig sampler_config)
     : format_(format),
       width_(width),
       height_(height),
@@ -221,6 +222,7 @@ Texture::Texture(Program *prog,
   img_params.y = height;
   img_params.z = depth;
   img_params.initial_layout = ImageLayout::undefined;
+  img_params.sampler_config = sampler_config;
   if (format == BufferFormat::depth16 ||
       format == BufferFormat::depth24stencil8 ||
       format == BufferFormat::depth32f) {

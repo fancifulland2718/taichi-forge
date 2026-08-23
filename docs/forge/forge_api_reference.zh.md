@@ -116,13 +116,54 @@ runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
 都会失败。该功能完全使用官方 wheel 已包含的 D0 runtime，不增加 wheel 发行矩阵。
 
+### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3 开发中）
+
+该 D0 底层命令把一个完整 Vulkan color `ti.Texture` 复制到 format 与 extent 相同的另一个
+Texture：
+
+```python
+ti.hardware.image.copy(destination, source)
+
+recording = ti.hardware.image.VulkanImageCopyRecording(
+    source="input", destination="output"
+)
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"input": source, "output": destination})
+```
+
+recording 精确声明 source READ 与 destination WRITE，在异步 submission 期间持有 runtime
+Texture lease，并在不 readback host 的情况下与前后 kernel 排序。alias、format/extent
+不同、depth/stencil image、旧 runtime 与非 Vulkan backend 都 fail closed。它记录真实
+Vulkan image-copy path，但 Vulkan 不保证 copy 由哪一种物理 engine 执行，因此 catalog 将
+hardware acceleration 标为 `implementation_defined`，不声称专用 copy unit。offset/region
+copy、buffer-image transfer、blit 与公开 raw layout transition 等待 bounds、format 和
+effect 合同闭合后再实现。该路线不新增依赖或 wheel 变体。
+
 ### Vulkan `ti.Texture` 硬件采样资格（0.6.3 开发中）
 
 Vulkan kernel 内显式调用 `ti.Texture` 的 `sample_lod()` / `fetch()` 会由编译器自动
 lowering 到 SPIR-V image/sampler 指令，可在 `ti.hardware.capability(
 "sampling.texture.vulkan")` 查询合同。当前覆盖 1D/2D/3D sampled texture 和
-format-matched `rw_texture` storage image；默认 sampler 固定为 linear/repeat/normalized，
-不可配置且不承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为
+format-matched `rw_texture` storage image。`ti.hardware.sampling.SamplerConfig` 在创建
+texture 时选择 immutable min/mag filter 与 U/V/W address state：
+
+```python
+sampler = ti.hardware.sampling.SamplerConfig(
+    min_filter="nearest",
+    mag_filter="nearest",
+    address_mode_u="clamp_to_edge",
+    address_mode_v="clamp_to_edge",
+)
+grid = ti.Texture(ti.Format.r32f, (nx, ny), sampler=sampler)
+```
+
+filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_repeat` 或
+`clamp_to_edge`；Vulkan sampler object 按 immutable 配置在 device 内缓存。当前 texture
+只有一个 mip 且使用 normalized coordinate，暂不公开 anisotropy 与 comparison sampling。
+`sample_lod()` 使用 sampler，精确整数 coordinate 的 `fetch()` 忽略它；浮点 filtering 不
+承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为
 texture，CUDA backend 也尚未实现 texture lowering。该 D0 路线不新增 wheel 变体。
 
 ### `ti.hardware.graphics.VulkanGraphicsPipeline`（0.6.3 开发中）

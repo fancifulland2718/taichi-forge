@@ -151,11 +151,17 @@ requires a qualified depth-format and final-layout contract.
 
 ### P1: image commands and samplers
 
-- Add typed image transition, buffer-to-image, image-to-buffer, image copy,
-  and blit recordings while retaining `ti.Texture` Program ownership.
-- Replace the empty RHI `ImageSamplerConfig` with immutable filter, mipmap,
-  address-mode, normalized-coordinate, anisotropy, and compare settings owned
-  by a Vulkan sampler cache.
+- Land whole-color-image copy first with exact source/destination effects,
+  runtime Texture leases, matching format/extent validation, and automatic
+  root-Graph admission. Offset/region copy, buffer-to-image, image-to-buffer,
+  blit, and raw transition interfaces remain deferred until bounds, format,
+  and externally observable layout contracts can be closed without exposing
+  unsafe backend state.
+- Replace the empty RHI `ImageSamplerConfig` first with immutable min/mag
+  filter and per-axis address state owned by a Vulkan sampler cache. The
+  current one-mip texture contract keeps normalized coordinates; mipmap,
+  anisotropy, and compare controls remain deferred until their image/resource,
+  device-feature, and typed-operation contracts exist.
 - Sampler configuration is texture-binding/resource semantics. `fetch()` does
   not filter; `sample_lod()` uses the explicit sampler. Buffer loads are never
   automatically changed to texture loads.
@@ -172,6 +178,15 @@ requires a qualified depth-format and final-layout contract.
 - Build/refit/query stay command-scoped. Kernel-inline Ray Query requires a
   new AS argument type, effect/lifetime binding, typed IR, and SPIR-V lowering
   and remains an independent P2 item.
+
+The implementation audit found that the current provider allocates private
+geometry copies, one BLAS, one identity-instance TLAS, build/refit scratch,
+and an embedded batch-query pipeline as one indivisible resource. A truthful
+BLAS/TLAS split therefore cannot reuse `TriangleScene` handles as a public
+low-level abstraction. It remains explicitly deferred until independently
+owned BLAS/TLAS resources, instance updates, query descriptor binding, and
+hit-schema tests can land together; the qualified `TriangleScene` provider is
+retained unchanged.
 
 ### P2: explicit deferrals
 

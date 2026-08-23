@@ -890,7 +890,10 @@ class TI_DLL_EXPORT Program {
       const storage::ResolvedDenseBinding &binding);
 
   Texture *create_texture(BufferFormat buffer_format,
-                          const std::vector<int> &shape);
+                          const std::vector<int> &shape,
+                          ImageSamplerConfig sampler_config = {});
+
+  void vulkan_copy_texture(Texture *destination, Texture *source);
 
   intptr_t get_ndarray_data_ptr_as_int(const Ndarray *ndarray);
 

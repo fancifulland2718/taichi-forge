@@ -560,9 +560,12 @@ field or ndarray loads are not silently replaced with texture sampling, and
 there is no software-sampling fallback.
 
 The qualified slice is Vulkan 1D/2D/3D sampled textures whose `sample_lod()`
-and `fetch()` operations return `vec4<f32>`. The default sampler is fixed to
-linear filtering, repeat addressing, and normalized coordinates; filter,
-address, anisotropy, and comparison controls are not public. Storage-image
+and `fetch()` operations return `vec4<f32>`. A texture can carry immutable
+`SamplerConfig` min/mag filtering and independent U/V/W repeat,
+mirrored-repeat, or clamp-to-edge addressing. Samplers are cached by the
+Vulkan device. The current one-mip contract keeps normalized coordinates and
+does not expose anisotropy or comparison controls. `fetch()` ignores sampler
+state and retains exact integer texel coordinates. Storage-image
 load/store through `ti.types.rw_texture` additionally supports format-matched
 `f32`, `i32`, and `u32` sampled types. Floating-point filtering is not claimed
 bitwise deterministic across devices. Although CUDA GPUs have texture units,

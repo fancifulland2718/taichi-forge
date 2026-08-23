@@ -11,6 +11,7 @@ from tests import test_utils
 
 _OPERATION_IDS = (
     "runtime.buffer_commands.vulkan",
+    "image.copy.vulkan",
     "raster.draw.vulkan",
     "raster.adapter.ggui.vulkan",
     "ray.as_build.vulkan",
@@ -199,6 +200,15 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
         "ti.graph.VulkanBufferCommandRecording"
     )
 
+    image_copy = ti.hardware.capability("image.copy.vulkan")
+    assert image_copy.implementation_status == "existing_public"
+    assert image_copy.hardware_acceleration == "implementation_defined"
+    assert image_copy.scopes == ("python", "graph")
+    assert image_copy.resource_effects == (
+        "read:source_image",
+        "write:destination_image",
+    )
+
     texture = ti.hardware.capability("sampling.texture.vulkan")
     assert texture.implementation_status == "existing_public"
     assert texture.hardware_acceleration == "qualified"
@@ -208,6 +218,8 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert texture.shapes_or_tiles == ("1D", "2D", "3D")
     assert texture.layouts == ("sampled_image", "storage_image")
     assert "SPIR-V OpImageSampleExplicitLod and OpImageFetch" in texture.requirements
+    assert "SamplerConfig" in texture.public_api
+    assert "fetch uses integer texel coordinates" in texture.notes[2]
     assert texture.deterministic is False
 
     cuda_texture = ti.hardware.capability("sampling.texture.cuda")

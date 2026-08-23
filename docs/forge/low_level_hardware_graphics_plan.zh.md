@@ -133,10 +133,14 @@ P0 中请求 load/preserve。color 最终转到调用方声明的 `shader_read`�
 
 ### P1：image command 与 sampler
 
-- 增加 typed image transition、buffer-to-image、image-to-buffer、image copy/blit recording，
-  复用 `ti.Texture` 的 Program ownership；
-- 将 RHI 空的 `ImageSamplerConfig` 补为 filter、mipmap、address mode、normalized coordinate、
-  anisotropy 与 compare 的 immutable 配置，并由 Vulkan sampler cache 持有；
+- 先实现完整 color image copy：精确 source/destination effect、runtime Texture lease、
+  matching format/extent validation 与 root Graph automatic admission。offset/region copy、
+  buffer-to-image、image-to-buffer、blit 与 raw transition 等待 bounds、format 和外部可观察
+  layout 合同闭合后再公开，避免泄漏不安全的 backend state；
+- 先将 RHI 空的 `ImageSamplerConfig` 补为 immutable min/mag filter 与逐轴 address state，
+  并由 Vulkan sampler cache 持有。当前单 mip texture 合同保持 normalized coordinate；
+  mipmap、anisotropy 与 compare 等待 image/resource、device feature 与 typed operation
+  合同同时闭合后再公开；
 - sampler 配置属于 texture binding/resource 语义。`fetch()` 不使用 filtering；
   `sample_lod()` 使用显式 sampler。普通 buffer load 永不自动变为 texture load；
 - exact fetch 已有稳定负性能结果，所以 P1 的目标是正确的 filtering/addressing/SDF/volume
@@ -149,6 +153,12 @@ P0 中请求 load/preserve。color 最终转到调用方声明的 `shader_read`�
   barycentric/primitive/instance 数据；
 - build/refit/query 保持 command-scope，不进入 kernel；kernel-inline Ray Query 需要新的
   AS argument type、effect/lifetime binding、typed IR 与 SPIR-V lowering，作为独立 P2。
+
+实现审计表明，当前 provider 把私有 geometry copy、一个 BLAS、一个 identity-instance
+TLAS、build/refit scratch 与内嵌 batch-query pipeline 组成不可拆的单一资源。直接复用
+`TriangleScene` handle 不能形成真实的底层 BLAS/TLAS 抽象。因此在 independently-owned
+BLAS/TLAS、instance update、query descriptor binding 与 hit-schema 测试能够一次闭合前，
+该拆分明确延期；现有已资格化 `TriangleScene` provider 保持不变。
 
 ### P2：明确延期
 

@@ -747,13 +747,11 @@ ShaderResourceSet &VulkanResourceSet::buffer(uint32_t binding,
 ShaderResourceSet &VulkanResourceSet::image(uint32_t binding,
                                             DeviceAllocation alloc,
                                             ImageSamplerConfig sampler_config) {
-  (void)sampler_config;
-
   vkapi::IVkSampler sampler = nullptr;
   vkapi::IVkImageView view = nullptr;
 
   if (alloc != kDeviceNullAllocation) {
-    sampler = device_->get_default_sampler();
+    sampler = device_->get_sampler(sampler_config);
     view = device_->get_vk_imageview(alloc);
   }
 
@@ -2098,7 +2096,7 @@ VulkanDevice::~VulkanDevice() {
   desc_set_cache_lru_.clear();
   desc_set_layouts_.clear();
   desc_pool_ = nullptr;
-  default_sampler_ = nullptr;
+  image_samplers_.clear();
 
   vmaDestroyAllocator(allocator_);
   vmaDestroyAllocator(allocator_export_);
@@ -3333,26 +3331,52 @@ vkapi::IVkFramebuffer VulkanDevice::get_framebuffer(
   return framebuffer;
 }
 
-vkapi::IVkSampler VulkanDevice::get_default_sampler() {
+vkapi::IVkSampler VulkanDevice::get_sampler(
+    const ImageSamplerConfig &config) {
   std::lock_guard<std::mutex> lock(descriptor_mutex_);
-  if (!default_sampler_) {
-    VkSamplerCreateInfo sampler_info{};
-    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sampler_info.magFilter = VK_FILTER_LINEAR;
-    sampler_info.minFilter = VK_FILTER_LINEAR;
-    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    sampler_info.anisotropyEnable = VK_FALSE;
-    sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-    sampler_info.unnormalizedCoordinates = VK_FALSE;
-    sampler_info.compareEnable = VK_FALSE;
-    sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
-    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-
-    default_sampler_ = vkapi::create_sampler(device_, sampler_info);
+  for (const auto &[key, sampler] : image_samplers_) {
+    if (key == config) {
+      return sampler;
+    }
   }
-  return default_sampler_;
+
+  const auto to_filter = [](ImageFilter filter) {
+    return filter == ImageFilter::nearest ? VK_FILTER_NEAREST
+                                          : VK_FILTER_LINEAR;
+  };
+  const auto to_address_mode = [](ImageAddressMode mode) {
+    switch (mode) {
+      case ImageAddressMode::repeat:
+        return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+      case ImageAddressMode::mirrored_repeat:
+        return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+      case ImageAddressMode::clamp_to_edge:
+        return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
+    TI_NOT_IMPLEMENTED;
+  };
+
+  VkSamplerCreateInfo sampler_info{};
+  sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+  sampler_info.magFilter = to_filter(config.mag_filter);
+  sampler_info.minFilter = to_filter(config.min_filter);
+  sampler_info.addressModeU = to_address_mode(config.address_mode_u);
+  sampler_info.addressModeV = to_address_mode(config.address_mode_v);
+  sampler_info.addressModeW = to_address_mode(config.address_mode_w);
+  sampler_info.anisotropyEnable = VK_FALSE;
+  sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+  sampler_info.unnormalizedCoordinates = VK_FALSE;
+  sampler_info.compareEnable = VK_FALSE;
+  sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+  sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+
+  auto sampler = vkapi::create_sampler(device_, sampler_info);
+  image_samplers_.emplace_back(config, sampler);
+  return sampler;
+}
+
+vkapi::IVkSampler VulkanDevice::get_default_sampler() {
+  return get_sampler({});
 }
 
 DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,

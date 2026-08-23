@@ -2137,7 +2137,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
         bindings->rw_image(bind.binding, texture, 0);
       } else {
         transition_image(texture, ImageLayout::shader_read);
-        bindings->image(bind.binding, texture, {});
+        const auto sampler = image_sampler_configs_.find(texture.alloc_id);
+        bindings->image(bind.binding, texture,
+                        sampler == image_sampler_configs_.end()
+                            ? ImageSamplerConfig{}
+                            : sampler->second);
       }
     }
 
@@ -5022,16 +5026,19 @@ DeviceAllocation GfxRuntime::create_image(const ImageParams &params) {
   DeviceAllocation image = gfx_device->create_image(params);
   track_image(image, ImageLayout::undefined);
   last_image_layouts_.at(image.alloc_id) = params.initial_layout;
+  image_sampler_configs_.at(image.alloc_id) = params.sampler_config;
   return image;
 }
 
 void GfxRuntime::track_image(DeviceAllocation image, ImageLayout layout) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   last_image_layouts_[image.alloc_id] = layout;
+  image_sampler_configs_.try_emplace(image.alloc_id, ImageSamplerConfig{});
 }
 void GfxRuntime::untrack_image(DeviceAllocation image) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   last_image_layouts_.erase(image.alloc_id);
+  image_sampler_configs_.erase(image.alloc_id);
 }
 void GfxRuntime::transition_image(DeviceAllocation image, ImageLayout layout) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);

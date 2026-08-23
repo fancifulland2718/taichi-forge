@@ -1002,6 +1002,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   vkapi::IVkImageView get_vk_lod_imageview(const DeviceAllocation &alloc,
                                            int lod) const;
+  vkapi::IVkSampler get_sampler(const ImageSamplerConfig &config);
   vkapi::IVkSampler get_default_sampler();
 
   vkapi::IVkRenderPass get_renderpass(const VulkanRenderPassDesc &desc);
@@ -1247,7 +1248,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   size_t desc_set_cache_evictions_{0};
   vkapi::IVkDescriptorPool desc_pool_{nullptr};
   bool descriptor_set_cache_enabled_{false};
-  vkapi::IVkSampler default_sampler_{nullptr};
+  std::vector<std::pair<ImageSamplerConfig, vkapi::IVkSampler>>
+      image_samplers_;
   PipelineCache *default_pipeline_cache_{nullptr};
 
   // Internal implementaion functions

@@ -139,14 +139,60 @@ mismatches, Graph use after reset, and recordings over 4096 commands fail.
 The route uses only D0 runtime code already present in official wheels and does
 not add a wheel variant.
 
+### `ti.hardware.image.VulkanImageCopyRecording` (0.6.3 in development)
+
+This D0 low-level command copies one complete, format- and extent-matched
+Vulkan color `ti.Texture` into another:
+
+```python
+ti.hardware.image.copy(destination, source)
+
+recording = ti.hardware.image.VulkanImageCopyRecording(
+    source="input", destination="output"
+)
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+graph.run({"input": source, "output": destination})
+```
+
+The recording declares an exact source READ and destination WRITE, retains
+runtime Texture leases through asynchronous submission, and orders preceding
+and following kernels without host readback. Aliasing, different formats or
+extents, depth/stencil images, stale runtimes, and non-Vulkan backends fail
+closed. It records the native Vulkan image-copy path, but Vulkan does not
+promise which physical engine executes a copy, so the catalog labels hardware
+acceleration `implementation_defined` rather than claiming a dedicated copy
+unit. Offset/region copies, buffer-image transfers, blits, and raw public
+layout transitions remain deferred until their bounds, format, and effect
+contracts are complete. No dependency or wheel variant is added.
+
 ### Vulkan `ti.Texture` hardware-sampling qualification (0.6.3 in development)
 
 Explicit `ti.Texture.sample_lod()` and `fetch()` calls inside Vulkan kernels
 are automatically lowered to SPIR-V image/sampler instructions. Query the
 contract with `ti.hardware.capability("sampling.texture.vulkan")`. The current
 slice covers 1D/2D/3D sampled textures and format-matched `rw_texture` storage
-images. Its default sampler is fixed to linear/repeat/normalized behavior, is
-not configurable, and does not promise cross-device bitwise determinism.
+images. `ti.hardware.sampling.SamplerConfig` selects immutable min/mag filter
+and U/V/W address state at texture creation:
+
+```python
+sampler = ti.hardware.sampling.SamplerConfig(
+    min_filter="nearest",
+    mag_filter="nearest",
+    address_mode_u="clamp_to_edge",
+    address_mode_v="clamp_to_edge",
+)
+grid = ti.Texture(ti.Format.r32f, (nx, ny), sampler=sampler)
+```
+
+The current choices are `nearest`/`linear` filtering and `repeat`,
+`mirrored_repeat`, or `clamp_to_edge` independently per axis. Vulkan sampler
+objects are cached by immutable configuration. Textures currently have one
+mip level and normalized coordinates; anisotropy and comparison sampling are
+not exposed. `sample_lod()` uses the sampler while exact integer-coordinate
+`fetch()` ignores it. Floating filtering does not promise cross-device
+bitwise determinism.
 Ordinary field or ndarray access is never converted to texture sampling, and
 the CUDA backend has no texture lowering yet. This D0 route adds no wheel
 variant.

@@ -486,8 +486,10 @@ graph.run({"source": source, "destination": destination})
 为 texture sampling，也没有软件采样 fallback。
 
 当前资格范围为 Vulkan 1D/2D/3D sampled texture，`sample_lod()` 与 `fetch()` 返回
-`vec4<f32>`。默认 sampler 固定为 linear filter、repeat address、normalized coordinate，
-未公开 filter/address/anisotropy/compare 配置。`ti.types.rw_texture` 的 storage image
+`vec4<f32>`。texture 可携带 immutable `SamplerConfig`，分别配置 min/mag filter 与 U/V/W
+的 repeat、mirrored-repeat 或 clamp-to-edge address；真实 Vulkan sampler 由 device cache
+复用。当前单 mip 合同保持 normalized coordinate，暂不公开 anisotropy/compare；`fetch()`
+忽略 sampler state，继续使用精确整数 texel coordinate。`ti.types.rw_texture` 的 storage image
 load/store 另支持格式对应的 `f32`、`i32`、`u32` sampled type。浮点过滤结果不承诺跨设备
 bitwise deterministic。CUDA GPU 虽有 texture unit，但 LLVM CUDA backend 尚未实现
 `TextureOpStmt` lowering，所以该路线保持 `planned`，不能因硬件存在而报告可用。

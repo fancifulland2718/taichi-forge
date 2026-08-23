@@ -109,10 +109,22 @@ class Texture:
         shape (Tuple[int]): Shape of the Texture.
     """
 
-    def __init__(self, fmt, arr_shape):
+    def __init__(self, fmt, arr_shape, *, sampler=None):
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
-        self.tex = self._runtime_prog.create_texture(fmt, arr_shape)
+        if sampler is None:
+            sampler_config = _ti_core.ImageSamplerConfig()
+        else:
+            from taichi_forge.hardware._sampling import SamplerConfig
+
+            if not isinstance(sampler, SamplerConfig):
+                raise TypeError(
+                    "sampler must be a ti.hardware.sampling.SamplerConfig"
+                )
+            sampler_config = sampler._as_core_config()
+        self.tex = self._runtime_prog.create_texture(
+            fmt, arr_shape, sampler_config
+        )
         self.fmt = fmt
         self.num_dims = len(arr_shape)
         self.shape = arr_shape

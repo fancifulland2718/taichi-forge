@@ -9022,7 +9022,8 @@ void Program::delete_argpack(ArgPack *argpack) {
 }
 
 Texture *Program::create_texture(BufferFormat buffer_format,
-                                 const std::vector<int> &shape) {
+                                 const std::vector<int> &shape,
+                                 ImageSamplerConfig sampler_config) {
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   {
@@ -9033,13 +9034,15 @@ Texture *Program::create_texture(BufferFormat buffer_format,
 
   std::unique_ptr<Texture> texture;
   if (shape.size() == 1) {
-    texture = std::make_unique<Texture>(this, buffer_format, shape[0], 1, 1);
+    texture = std::make_unique<Texture>(this, buffer_format, shape[0], 1, 1,
+                                        sampler_config);
   } else if (shape.size() == 2) {
     texture =
-        std::make_unique<Texture>(this, buffer_format, shape[0], shape[1], 1);
+        std::make_unique<Texture>(this, buffer_format, shape[0], shape[1], 1,
+                                  sampler_config);
   } else if (shape.size() == 3) {
     texture = std::make_unique<Texture>(this, buffer_format, shape[0],
-                                        shape[1], shape[2]);
+                                        shape[1], shape[2], sampler_config);
   } else {
     TI_ERROR("Texture shape invalid");
   }

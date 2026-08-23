@@ -1938,9 +1938,12 @@ void export_lang(py::module &m) {
            &Program::debug_external_dense_storage_stats)
       .def(
           "create_texture",
-          [&](Program *program, BufferFormat fmt, const std::vector<int> &shape)
-              -> Texture * { return program->create_texture(fmt, shape); },
-          py::arg("fmt"), py::arg("shape") = py::tuple(),
+          [&](Program *program, BufferFormat fmt,
+              const std::vector<int> &shape,
+              const ImageSamplerConfig &sampler_config) -> Texture * {
+            return program->create_texture(fmt, shape, sampler_config);
+          },
+          py::arg("fmt"), py::arg("shape"), py::arg("sampler_config"),
           py::return_value_policy::reference)
       .def("get_ndarray_data_ptr_as_int",
            [](Program *program, Ndarray *ndarray) {
@@ -1964,6 +1967,10 @@ void export_lang(py::module &m) {
            [](Program *program, Ndarray *dst, Ndarray *src) {
              program->copy_ndarray_fast(dst, src);
            },
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_copy_texture",
+           tracked_native_program_method(&Program::vulkan_copy_texture),
+           py::arg("destination"), py::arg("source"),
            py::call_guard<py::gil_scoped_release>())
       .def(
           "_record_vulkan_buffer_commands",
@@ -4191,6 +4198,23 @@ void export_lang(py::module &m) {
 #include "taichi/inc/rhi_constants.inc.h"
 #undef PER_EXTENSION
       ;
+
+  py::enum_<ImageFilter>(m, "ImageFilter")
+      .value("nearest", ImageFilter::nearest)
+      .value("linear", ImageFilter::linear);
+
+  py::enum_<ImageAddressMode>(m, "ImageAddressMode")
+      .value("repeat", ImageAddressMode::repeat)
+      .value("mirrored_repeat", ImageAddressMode::mirrored_repeat)
+      .value("clamp_to_edge", ImageAddressMode::clamp_to_edge);
+
+  py::class_<ImageSamplerConfig>(m, "ImageSamplerConfig")
+      .def(py::init<>())
+      .def_readwrite("min_filter", &ImageSamplerConfig::min_filter)
+      .def_readwrite("mag_filter", &ImageSamplerConfig::mag_filter)
+      .def_readwrite("address_mode_u", &ImageSamplerConfig::address_mode_u)
+      .def_readwrite("address_mode_v", &ImageSamplerConfig::address_mode_v)
+      .def_readwrite("address_mode_w", &ImageSamplerConfig::address_mode_w);
 
   py::class_<Texture>(m, "Texture")
       .def("device_allocation_ptr", &Texture::get_device_allocation_ptr_as_int)

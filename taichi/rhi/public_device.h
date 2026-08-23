@@ -138,8 +138,38 @@ struct RHI_DLL_EXPORT DevicePtr : public DeviceAllocation {
 constexpr DeviceAllocation kDeviceNullAllocation{};
 constexpr DevicePtr kDeviceNullPtr{};
 
-// TODO: fill this with the required options
-struct ImageSamplerConfig {};
+enum class ImageFilter : uint8_t {
+  nearest,
+  linear,
+};
+
+enum class ImageAddressMode : uint8_t {
+  repeat,
+  mirrored_repeat,
+  clamp_to_edge,
+};
+
+// Immutable sampled-image binding state. Taichi textures currently expose one
+// mip level and normalized coordinates, so mip/compare/anisotropy controls are
+// intentionally not part of this first portable contract.
+struct ImageSamplerConfig {
+  ImageFilter min_filter{ImageFilter::linear};
+  ImageFilter mag_filter{ImageFilter::linear};
+  ImageAddressMode address_mode_u{ImageAddressMode::repeat};
+  ImageAddressMode address_mode_v{ImageAddressMode::repeat};
+  ImageAddressMode address_mode_w{ImageAddressMode::repeat};
+
+  bool operator==(const ImageSamplerConfig &other) const {
+    return min_filter == other.min_filter && mag_filter == other.mag_filter &&
+           address_mode_u == other.address_mode_u &&
+           address_mode_v == other.address_mode_v &&
+           address_mode_w == other.address_mode_w;
+  }
+
+  bool operator!=(const ImageSamplerConfig &other) const {
+    return !(*this == other);
+  }
+};
 
 // A set of shader resources (that is bound at once)
 class RHI_DLL_EXPORT ShaderResourceSet {
@@ -1197,6 +1227,7 @@ struct ImageParams {
   bool export_sharing{false};
   ImageAllocUsage usage{ImageAllocUsage::Storage | ImageAllocUsage::Sampled |
                         ImageAllocUsage::Attachment};
+  ImageSamplerConfig sampler_config{};
 };
 
 struct BlendFunc {
