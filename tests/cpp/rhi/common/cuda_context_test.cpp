@@ -15,6 +15,50 @@
 
 namespace taichi::lang {
 
+namespace {
+
+class ControllableTelemetryMutex {
+ public:
+  void lock() {
+    bool expected = true;
+    while (!available_.compare_exchange_weak(
+        expected, false, std::memory_order_acquire,
+        std::memory_order_relaxed)) {
+      expected = true;
+      std::this_thread::yield();
+    }
+  }
+
+  bool try_lock() {
+    try_lock_called_.store(true, std::memory_order_release);
+    bool expected = true;
+    return available_.compare_exchange_strong(
+        expected, false, std::memory_order_acquire,
+        std::memory_order_relaxed);
+  }
+
+  void unlock() {
+    available_.store(true, std::memory_order_release);
+  }
+
+  void block() {
+    try_lock_called_.store(false, std::memory_order_relaxed);
+    available_.store(false, std::memory_order_release);
+  }
+
+  void wait_for_try_lock() const {
+    while (!try_lock_called_.load(std::memory_order_acquire)) {
+      std::this_thread::yield();
+    }
+  }
+
+ private:
+  std::atomic<bool> available_{true};
+  std::atomic<bool> try_lock_called_{false};
+};
+
+}  // namespace
+
 TEST(CUDAVersion, ReportsTheBundledLibdeviceCompatibilityVersion) {
   const auto version = get_cuda_version_string();
   EXPECT_FALSE(version.empty());
@@ -112,29 +156,26 @@ TEST(CUDADiagnostics, SamplesLockContentionWithoutChangingLockOwnership) {
   EXPECT_EQ(telemetry.snapshot().sampled_acquisitions, 1u);
   EXPECT_EQ(telemetry.snapshot().contended_acquisitions, 0u);
 
-  std::atomic<bool> ready{false};
-  std::atomic<bool> start_contention{false};
-  std::thread contender([&] {
-    for (uint32_t i = 1; i < CUDASampledLockTelemetry::kSamplingPeriod; ++i) {
-      auto lock = telemetry.acquire(mutex);
-    }
-    ready.store(true, std::memory_order_release);
-    while (!start_contention.load(std::memory_order_acquire)) {
-      std::this_thread::yield();
-    }
-    auto lock = telemetry.acquire(mutex);
+  SampledLockTelemetry<ControllableTelemetryMutex> contended_telemetry;
+  ControllableTelemetryMutex controllable_mutex;
+  for (uint32_t i = 1;
+       i < SampledLockTelemetry<ControllableTelemetryMutex>::kSamplingPeriod;
+       ++i) {
+    auto lock = contended_telemetry.acquire(controllable_mutex);
+  }
+
+  controllable_mutex.block();
+  std::thread releaser([&] {
+    controllable_mutex.wait_for_try_lock();
+    controllable_mutex.unlock();
   });
-  while (!ready.load(std::memory_order_acquire)) {
-    std::this_thread::yield();
+  {
+    auto lock = contended_telemetry.acquire(controllable_mutex);
   }
-  mutex.lock();
-  start_contention.store(true, std::memory_order_release);
-  while (telemetry.snapshot().sampled_acquisitions < 2) {
-    std::this_thread::yield();
-  }
-  mutex.unlock();
-  contender.join();
-  EXPECT_EQ(telemetry.snapshot().contended_acquisitions, 1u);
+  releaser.join();
+
+  EXPECT_EQ(contended_telemetry.snapshot().sampled_acquisitions, 1u);
+  EXPECT_EQ(contended_telemetry.snapshot().contended_acquisitions, 1u);
 }
 
 TEST(CUDADevice, MapLifecycleRejectsInvalidTransitions) {

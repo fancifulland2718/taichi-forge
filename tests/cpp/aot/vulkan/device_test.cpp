@@ -294,7 +294,7 @@ TEST(VulkanDeviceCapabilityTest, ImageTypesDeclareRequiredCapabilities) {
   builder.texture_argument(/*num_channels=*/4, /*num_dimensions=*/1,
                            /*descriptor_set=*/0, /*binding=*/0);
   builder.storage_image_argument(
-      /*num_channels=*/4, /*num_dimensions=*/2, /*descriptor_set=*/0,
+      /*num_channels=*/4, /*num_dimensions=*/1, /*descriptor_set=*/0,
       /*binding=*/1, BufferFormat::r16f);
 
   const auto capabilities = spirv_capabilities(builder.finalize());
