@@ -147,6 +147,28 @@ struct VulkanGraphicsDrawInfo {
   std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
   std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};
 };
+
+struct VulkanGraphicsShaderBufferBinding {
+  std::uint32_t set_index{0};
+  std::uint32_t binding{0};
+  Ndarray *array{nullptr};
+  bool storage{false};
+};
+
+struct VulkanGraphicsDrawCommand {
+  std::uint64_t pipeline_handle{0};
+  std::vector<std::pair<std::uint32_t, Ndarray *>> vertex_buffers;
+  Ndarray *index_buffer{nullptr};
+  std::vector<VulkanGraphicsShaderBufferBinding> shader_buffers;
+  VulkanGraphicsDrawInfo draw;
+};
+
+struct VulkanGraphicsPassInfo {
+  bool color_clear{true};
+  bool depth_clear{true};
+  std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
+  std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};
+};
 namespace storage {
 class DenseStorageDescriptor;
 class RuntimeStorageArgument;
@@ -982,6 +1004,12 @@ class TI_DLL_EXPORT Program {
       const std::vector<std::pair<std::uint32_t, Ndarray *>> &vertex_buffers,
       Ndarray *index_buffer,
       const VulkanGraphicsDrawInfo &draw);
+
+  std::size_t vulkan_graphics_pass(
+      Texture *color,
+      Texture *depth,
+      const std::vector<VulkanGraphicsDrawCommand> &commands,
+      const VulkanGraphicsPassInfo &pass);
 
   void destroy_vulkan_graphics_pipeline(std::uint64_t handle);
 

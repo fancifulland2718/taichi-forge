@@ -67,7 +67,7 @@ Ndarray::Ndarray(Program *prog,
     // only VkBuffer usage flags, not allocation size or the ndarray ABI, and
     // avoids provider-owned staging buffers for graphics draws.
     usage = usage | AllocUsage::Indirect | AllocUsage::Vertex |
-            AllocUsage::Index;
+            AllocUsage::Index | AllocUsage::Uniform;
   }
   if (host_read) {
     ndarray_alloc_ = prog->allocate_host_read_memory_on_device(

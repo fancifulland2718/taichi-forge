@@ -2132,6 +2132,90 @@ void export_lang(py::module &m) {
           py::arg("first_instance"), py::arg("vertex_offset"),
           py::arg("index_min"), py::arg("index_max"), py::arg("indexed"),
           py::arg("clear_color"), py::arg("viewport"))
+      .def(
+          "_vulkan_graphics_pass",
+          [](Program *program, Texture *color, Texture *depth,
+             const py::sequence &raw_draws, bool color_clear,
+             bool depth_clear, const std::array<float, 4> &clear_color,
+             const std::array<std::uint32_t, 4> &viewport) {
+            std::vector<VulkanGraphicsDrawCommand> commands;
+            commands.reserve(raw_draws.size());
+            for (const py::handle raw : raw_draws) {
+              const py::tuple item = py::cast<py::tuple>(raw);
+              TI_ERROR_IF(
+                  item.size() != 13,
+                  "Vulkan graphics pass draws require pipeline, vertex "
+                  "buffers, index buffer, shader buffers, and nine draw "
+                  "fields.");
+              VulkanGraphicsDrawCommand command;
+              command.pipeline_handle = py::cast<std::uint64_t>(item[0]);
+              const py::sequence raw_vertex_buffers =
+                  py::cast<py::sequence>(item[1]);
+              command.vertex_buffers.reserve(raw_vertex_buffers.size());
+              for (const py::handle raw_vertex : raw_vertex_buffers) {
+                const py::tuple vertex = py::cast<py::tuple>(raw_vertex);
+                TI_ERROR_IF(
+                    vertex.size() != 2,
+                    "Vulkan graphics vertex-buffer bindings require binding "
+                    "and ndarray fields.");
+                command.vertex_buffers.emplace_back(
+                    py::cast<std::uint32_t>(vertex[0]),
+                    py::cast<Ndarray *>(vertex[1]));
+              }
+              command.index_buffer = py::cast<Ndarray *>(item[2]);
+              const py::sequence raw_shader_buffers =
+                  py::cast<py::sequence>(item[3]);
+              command.shader_buffers.reserve(raw_shader_buffers.size());
+              for (const py::handle raw_shader : raw_shader_buffers) {
+                const py::tuple shader = py::cast<py::tuple>(raw_shader);
+                TI_ERROR_IF(
+                    shader.size() != 4,
+                    "Vulkan graphics shader-buffer bindings require set, "
+                    "binding, ndarray, and storage fields.");
+                command.shader_buffers.push_back(
+                    {py::cast<std::uint32_t>(shader[0]),
+                     py::cast<std::uint32_t>(shader[1]),
+                     py::cast<Ndarray *>(shader[2]),
+                     py::cast<bool>(shader[3])});
+              }
+              command.draw.element_count =
+                  py::cast<std::uint32_t>(item[4]);
+              command.draw.instance_count =
+                  py::cast<std::uint32_t>(item[5]);
+              command.draw.first_vertex =
+                  py::cast<std::uint32_t>(item[6]);
+              command.draw.first_index =
+                  py::cast<std::uint32_t>(item[7]);
+              command.draw.first_instance =
+                  py::cast<std::uint32_t>(item[8]);
+              command.draw.vertex_offset = py::cast<std::int32_t>(item[9]);
+              command.draw.index_min =
+                  py::cast<std::uint32_t>(item[10]);
+              command.draw.index_max =
+                  py::cast<std::uint32_t>(item[11]);
+              command.draw.indexed = py::cast<bool>(item[12]);
+              commands.push_back(std::move(command));
+            }
+            VulkanGraphicsPassInfo pass;
+            pass.color_clear = color_clear;
+            pass.depth_clear = depth_clear;
+            pass.clear_color = clear_color;
+            pass.viewport = viewport;
+            try {
+              py::gil_scoped_release release;
+              const auto result = program->vulkan_graphics_pass(
+                  color, depth, commands, pass);
+              program->record_runtime_submission_stat(
+                  RuntimeSubmissionKind::kNative);
+              return result;
+            } catch (...) {
+              program->record_runtime_submission_failure();
+              throw;
+            }
+          },
+          py::arg("color"), py::arg("depth"), py::arg("draws"),
+          py::arg("color_clear"), py::arg("depth_clear"),
+          py::arg("clear_color"), py::arg("viewport"))
       .def("_destroy_vulkan_graphics_pipeline",
            &Program::destroy_vulkan_graphics_pipeline, py::arg("handle"),
            py::call_guard<py::gil_scoped_release>())

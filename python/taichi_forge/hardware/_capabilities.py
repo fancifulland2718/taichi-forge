@@ -649,12 +649,17 @@ _OPERATIONS = (
         "provider_owned",
         "existing_public",
         activation_mode="explicit_hardware_api",
-        resource_effects=("read:geometry", "write:color", "write:depth"),
+        resource_effects=(
+            "read:geometry_and_uniform_buffers",
+            "read_write:storage_buffers",
+            "write_or_read_write:color_depth_attachments",
+        ),
         lifetime_policy="resource_generation",
         update_policy="immutable",
         dtypes=(
             "vertex:declared BufferFormat",
             "index:u32",
+            "shader:uniform_or_storage_ndarray",
             "color:attachment format",
             "depth:depth32f",
         ),
@@ -662,7 +667,9 @@ _OPERATIONS = (
         layouts=(
             "declared vertex bindings and attributes",
             "optional uint32 index buffer",
-            "one color and optional depth attachment",
+            "explicit uniform/storage descriptor buffers",
+            "one color and optional depth attachment with clear/load and store",
+            "one or more draws recorded into one render pass",
         ),
         numeric_contracts=(
             "depth:test_and_write",
@@ -677,6 +684,7 @@ _OPERATIONS = (
         notes=(
             "Explicit direct or root-Graph native command; kernel calls are impossible.",
             "This interface owns no renderer semantics: the caller supplies shaders, raw vertex/index buffers, attachments, draw ranges, and scheduling policy.",
+            "VulkanGraphicsPassRecording batches N draws into one backend pass action; the legacy single-draw API is a compatibility wrapper.",
             "Compute-to-graphics-to-compute ordering uses backend semaphores and does not add a host wait.",
         ),
     ),
