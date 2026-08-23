@@ -3,7 +3,7 @@ import numpy as np
 import hardware_acceleration_qualification as qualification
 
 
-def _worker(order, hardware, baseline, paired):
+def _worker(order, hardware, baseline, paired, *, block_satisfied=True):
     return {
         "status": "passed",
         "order": order,
@@ -15,6 +15,16 @@ def _worker(order, hardware, baseline, paired):
         "python": "3.10",
         "platform": "test",
         "timing": {
+            "calibration": {
+                variant: {
+                    "requested_repetitions": 1,
+                    "effective_repetitions": 10,
+                    "observed_block_ms": 10.0,
+                    "minimum_block_ms": 10.0,
+                    "satisfied": block_satisfied,
+                }
+                for variant in ("hardware", "baseline")
+            },
             "samples_ms": {
                 "hardware": hardware,
                 "baseline": baseline,
@@ -40,6 +50,8 @@ def test_aggregate_accepts_only_stable_conservative_speedup():
     assert report["performance_claim_eligible"]
     assert report["paired_speedup"]["p05"] == 2.0
     assert "p05_ms" not in report["paired_speedup"]
+    assert len(report["worker_calibration"]) == 2
+    assert report["worker_calibration"][0]["variants"]["hardware"]["satisfied"]
 
 
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():
@@ -74,6 +86,35 @@ def test_aggregate_rejects_no_speedup_and_worker_errors():
     )
     assert error["status"] == "error"
     assert not error["performance_claim_eligible"]
+
+
+def test_aggregate_rejects_undersized_timing_blocks():
+    workers = (
+        _worker(
+            "ab",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_satisfied=False,
+        ),
+        _worker("ba", [1.0] * 5, [2.0] * 5, [2.0] * 5),
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.10, 0.10)
+
+    assert report["noise_status"] == "stable"
+    assert not report["minimum_block_qualified"]
+    assert not report["performance_claim_eligible"]
+
+
+def test_balanced_worker_schedule_cancels_first_order_bias():
+    assert qualification._balanced_worker_schedule(1) == (("ab", 0), ("ba", 0))
+    assert qualification._balanced_worker_schedule(2) == (
+        ("ab", 0),
+        ("ba", 0),
+        ("ba", 1),
+        ("ab", 1),
+    )
 
 
 def test_complex_error_checks_both_components():

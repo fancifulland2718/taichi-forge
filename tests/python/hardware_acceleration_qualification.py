@@ -1,9 +1,10 @@
 """Fresh-process hardware-acceleration qualification benchmark.
 
 This is a manual, auditable benchmark rather than a pytest performance gate.
-The parent process launches one AB and one BA worker per case, keeps cold and
-warm timings separate, synchronizes every timed block, checks numerical output
-and the resolved hardware route, and fails closed on noisy performance claims.
+The parent process launches a balanced AB/BA/BA/AB fresh-process schedule per
+case, keeps cold and warm timings separate, calibrates both variants to a
+minimum synchronized block duration, checks numerical output and the resolved
+hardware route, and fails closed on noisy performance claims.
 
 Examples::
 
@@ -52,7 +53,7 @@ import taichi_forge as ti  # pylint: disable=C0413
 from taichi_forge._lib import core as _ti_core  # pylint: disable=C0413
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v1"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v2"
 CASES = (
     "cuda-fft",
     "cuda-gemm",
@@ -159,7 +160,46 @@ def _time_block(action, repetitions):
     return elapsed
 
 
-def _measure_pair(hardware, baseline, order, warmup, rounds, repetitions):
+def _calibrate_repetitions(
+    action,
+    minimum_repetitions,
+    minimum_block_ms,
+    maximum_repetitions,
+):
+    repetitions = minimum_repetitions
+    elapsed_per_operation_ms = None
+    while True:
+        elapsed_per_operation_ms = _time_block(action, repetitions)
+        block_duration_ms = elapsed_per_operation_ms * repetitions
+        if block_duration_ms >= minimum_block_ms or repetitions >= maximum_repetitions:
+            break
+        if elapsed_per_operation_ms <= 0.0:
+            proposed = repetitions * 2
+        else:
+            proposed = math.ceil(minimum_block_ms / elapsed_per_operation_ms * 1.10)
+        repetitions = min(
+            maximum_repetitions,
+            max(repetitions * 2, proposed),
+        )
+    return {
+        "requested_repetitions": minimum_repetitions,
+        "effective_repetitions": repetitions,
+        "observed_block_ms": block_duration_ms,
+        "minimum_block_ms": minimum_block_ms,
+        "satisfied": block_duration_ms >= minimum_block_ms,
+    }
+
+
+def _measure_pair(
+    hardware,
+    baseline,
+    order,
+    warmup,
+    rounds,
+    repetitions,
+    minimum_block_ms,
+    maximum_repetitions,
+):
     actions = {"hardware": hardware, "baseline": baseline}
     sequence = (
         ("hardware", "baseline")
@@ -173,17 +213,29 @@ def _measure_pair(hardware, baseline, order, warmup, rounds, repetitions):
         for name in sequence:
             actions[name]()
     ti.sync()
+    calibration = {
+        name: _calibrate_repetitions(
+            actions[name],
+            repetitions,
+            minimum_block_ms,
+            maximum_repetitions,
+        )
+        for name in sequence
+    }
     samples = {"hardware": [], "baseline": []}
     paired_ratios = []
     for _ in range(rounds):
         block = {}
         for name in sequence:
-            elapsed = _time_block(actions[name], repetitions)
+            elapsed = _time_block(
+                actions[name], calibration[name]["effective_repetitions"]
+            )
             samples[name].append(elapsed)
             block[name] = elapsed
         paired_ratios.append(block["baseline"] / block["hardware"])
     return {
         "cold_ms": cold,
+        "calibration": calibration,
         "samples_ms": samples,
         "paired_speedups": paired_ratios,
     }
@@ -277,6 +329,8 @@ def _cuda_gemm_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     _debug("CUDA GEMM timings complete")
     expected = a_host @ b_host
@@ -416,6 +470,8 @@ def _cuda_fft_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     expected = np.fft.fft(complex_values, axis=-1)
     hardware_values = hardware_output.to_numpy()
@@ -505,6 +561,8 @@ def _cuda_mma_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     expected = np.matmul(a_host.astype(np.float32), b_host.astype(np.float32))
     hardware_error = _error(hardware_output.to_numpy(), expected)
@@ -619,6 +677,8 @@ def _cuda_spmv_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     expected = np.sum(
         values_host.reshape(n, width)
@@ -751,6 +811,8 @@ def _vulkan_ray_update_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     hardware_values = hardware_hits.to_numpy()
     baseline_values = baseline_hits.to_numpy()
@@ -867,6 +929,8 @@ def _vulkan_texture_fetch_case(order, args):
         args.warmup,
         args.rounds,
         args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
     )
     hardware_values = hardware_output.to_numpy()
     baseline_values = baseline_output.to_numpy()
@@ -991,12 +1055,22 @@ def _aggregate(case, workers, cv_limit, drift_limit):
     ratio = variants["baseline"]["median_ms"] / variants["hardware"][
         "median_ms"
     ]
-    claim_eligible = stable and speedup["p05"] > 1.0
+    minimum_block_qualified = all(
+        worker["timing"].get("calibration", {}).get(variant, {}).get(
+            "satisfied", False
+        )
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    )
+    claim_eligible = (
+        stable and minimum_block_qualified and speedup["p05"] > 1.0
+    )
     return {
         "case": case,
         "status": "passed",
         "correctness_and_route_qualified": True,
         "noise_status": "stable" if stable else "unstable",
+        "minimum_block_qualified": minimum_block_qualified,
         "performance_claim_eligible": claim_eligible,
         "median_speedup": ratio,
         "paired_speedup": speedup,
@@ -1013,7 +1087,18 @@ def _aggregate(case, workers, cv_limit, drift_limit):
                     "forge_version",
                     "python",
                     "platform",
+                    "launch_index",
+                    "worker_index",
                 )
+            }
+            for worker in workers
+        ],
+        "worker_calibration": [
+            {
+                "order": worker["order"],
+                "launch_index": worker.get("launch_index"),
+                "worker_index": worker.get("worker_index"),
+                "variants": worker["timing"]["calibration"],
             }
             for worker in workers
         ],
@@ -1021,6 +1106,14 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         "correctness": [worker["correctness"] for worker in workers],
         "route": workers[0]["route"],
     }
+
+
+def _balanced_worker_schedule(workers_per_order):
+    schedule = []
+    for worker_index in range(workers_per_order):
+        orders = ("ab", "ba") if worker_index % 2 == 0 else ("ba", "ab")
+        schedule.extend((order, worker_index) for order in orders)
+    return tuple(schedule)
 
 
 def _parent(args):
@@ -1034,71 +1127,79 @@ def _parent(args):
         temp_path = pathlib.Path(temp)
         for case in cases:
             workers = []
-            for order in ("ab", "ba"):
-                for worker_index in range(args.workers_per_order):
-                    worker_output = temp_path / f"{case}-{order}-{worker_index}.json"
-                    command = [
-                        sys.executable,
-                        str(script),
-                        "--worker",
-                        "--case",
-                        case,
-                        "--order",
-                        order,
-                        "--worker-output",
-                        str(worker_output),
-                        "--warmup",
-                        str(args.warmup),
-                        "--rounds",
-                        str(args.rounds),
-                        "--repetitions",
-                        str(args.repetitions),
-                        "--fft-length",
-                        str(args.fft_length),
-                        "--fft-batch",
-                        str(args.fft_batch),
-                        "--gemm-size",
-                        str(args.gemm_size),
-                        "--mma-batch",
-                        str(args.mma_batch),
-                        "--spmv-rows",
-                        str(args.spmv_rows),
-                        "--spmv-width",
-                        str(args.spmv_width),
-                        "--ray-grid",
-                        str(args.ray_grid),
-                        "--ray-query-side",
-                        str(args.ray_query_side),
-                        "--texture-size",
-                        str(args.texture_size),
-                    ]
-                    completed = subprocess.run(
-                        command,
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        env=os.environ.copy(),
+            schedule = _balanced_worker_schedule(args.workers_per_order)
+            for launch_index, (order, worker_index) in enumerate(schedule):
+                worker_output = temp_path / f"{case}-{order}-{worker_index}.json"
+                command = [
+                    sys.executable,
+                    str(script),
+                    "--worker",
+                    "--case",
+                    case,
+                    "--order",
+                    order,
+                    "--worker-output",
+                    str(worker_output),
+                    "--warmup",
+                    str(args.warmup),
+                    "--rounds",
+                    str(args.rounds),
+                    "--repetitions",
+                    str(args.repetitions),
+                    "--minimum-block-ms",
+                    str(args.minimum_block_ms),
+                    "--maximum-repetitions",
+                    str(args.maximum_repetitions),
+                    "--fft-length",
+                    str(args.fft_length),
+                    "--fft-batch",
+                    str(args.fft_batch),
+                    "--gemm-size",
+                    str(args.gemm_size),
+                    "--mma-batch",
+                    str(args.mma_batch),
+                    "--spmv-rows",
+                    str(args.spmv_rows),
+                    "--spmv-width",
+                    str(args.spmv_width),
+                    "--ray-grid",
+                    str(args.ray_grid),
+                    "--ray-query-side",
+                    str(args.ray_query_side),
+                    "--texture-size",
+                    str(args.texture_size),
+                ]
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=os.environ.copy(),
+                )
+                if not worker_output.exists():
+                    workers.append(
+                        {
+                            "schema": SCHEMA,
+                            "case": case,
+                            "order": order,
+                            "status": "error",
+                            "error_type": "WorkerProcessError",
+                            "error": (
+                                f"exit={completed.returncode}; "
+                                f"stdout={completed.stdout[-1000:]!r}; "
+                                f"stderr={completed.stderr[-1000:]!r}"
+                            ),
+                            "launch_index": launch_index,
+                            "worker_index": worker_index,
+                        }
                     )
-                    if not worker_output.exists():
-                        workers.append(
-                            {
-                                "schema": SCHEMA,
-                                "case": case,
-                                "order": order,
-                                "status": "error",
-                                "error_type": "WorkerProcessError",
-                                "error": (
-                                    f"exit={completed.returncode}; "
-                                    f"stdout={completed.stdout[-1000:]!r}; "
-                                    f"stderr={completed.stderr[-1000:]!r}"
-                                ),
-                            }
-                        )
-                        continue
-                    with open(worker_output, "r", encoding="utf-8") as source:
-                        worker = json.load(source)
-                    worker["worker_exit_code"] = completed.returncode
-                    workers.append(worker)
+                    continue
+                with open(worker_output, "r", encoding="utf-8") as source:
+                    worker = json.load(source)
+                worker["worker_exit_code"] = completed.returncode
+                worker["launch_index"] = launch_index
+                worker["worker_index"] = worker_index
+                workers.append(worker)
             case_reports.append(
                 _aggregate(case, workers, args.cv_limit, args.drift_limit)
             )
@@ -1147,9 +1248,18 @@ def _parent(args):
         "policy": {
             "fresh_process_orders": ("ab", "ba"),
             "workers_per_order": args.workers_per_order,
+            "worker_schedule": tuple(
+                order
+                for order, _worker_index in _balanced_worker_schedule(
+                    args.workers_per_order
+                )
+            ),
+            "worker_schedule_policy": "alternating_pair_order",
             "warmup": args.warmup,
             "rounds": args.rounds,
             "repetitions": args.repetitions,
+            "minimum_block_ms": args.minimum_block_ms,
+            "maximum_repetitions": args.maximum_repetitions,
             "cv_limit": args.cv_limit,
             "order_drift_limit": args.drift_limit,
             "timing": "synchronized wall completion latency",
@@ -1185,10 +1295,12 @@ def _parse_args():
     parser.add_argument("--worker-output")
     parser.add_argument("--cases", default=",".join(CASES))
     parser.add_argument("--output", default="hardware-qualification.json")
-    parser.add_argument("--workers-per-order", type=int, default=1)
+    parser.add_argument("--workers-per-order", type=int, default=2)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=12)
     parser.add_argument("--repetitions", type=int, default=25)
+    parser.add_argument("--minimum-block-ms", type=float, default=50.0)
+    parser.add_argument("--maximum-repetitions", type=int, default=1048576)
     parser.add_argument("--cv-limit", type=float, default=0.10)
     parser.add_argument("--drift-limit", type=float, default=0.10)
     parser.add_argument("--fft-length", type=int, default=4096)
@@ -1209,6 +1321,8 @@ def _parse_args():
         or args.warmup < 0
         or args.rounds < 5
         or args.repetitions <= 0
+        or args.minimum_block_ms <= 0.0
+        or args.maximum_repetitions < args.repetitions
         or not 0.0 < args.cv_limit < 1.0
         or not 0.0 < args.drift_limit < 1.0
         or args.fft_length < 2
