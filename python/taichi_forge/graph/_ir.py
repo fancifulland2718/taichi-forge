@@ -24,13 +24,24 @@ class ResourceEffect:
     resource: str
     access: GraphAccess
     runtime_bound: bool = True
+    subresource: object = None
+
+    def __post_init__(self):
+        if self.subresource is not None:
+            try:
+                hash(self.subresource)
+            except TypeError as exc:
+                raise TypeError("Graph effect subresource must be hashable") from exc
 
     def to_dict(self):
-        return {
+        result = {
             "resource": self.resource,
             "access": self.access.value,
             "runtime_bound": self.runtime_bound,
         }
+        if self.subresource is not None:
+            result["subresource"] = self.subresource
+        return result
 
 
 @dataclass(frozen=True)
@@ -797,7 +808,7 @@ def _parallel_branch_metadata(region, branch_index):
                 blockers.append(
                     f"branch_{branch_index}:opaque_effect:{effect.resource}"
                 )
-            key = (effect.resource, effect.runtime_bound)
+            key = (effect.resource, effect.runtime_bound, effect.subresource)
             previous = effects.get(key)
             effects[key] = (
                 effect.access
@@ -819,8 +830,10 @@ def _parallel_branch_metadata(region, branch_index):
         index=branch_index,
         node_names=tuple(node_names),
         effects=tuple(
-            ResourceEffect(resource, access, runtime_bound)
-            for (resource, runtime_bound), access in sorted(effects.items())
+            ResourceEffect(resource, access, runtime_bound, subresource)
+            for (resource, runtime_bound, subresource), access in sorted(
+                effects.items(), key=lambda item: repr(item[0])
+            )
         ),
         temporary_peak_bytes=temporary_plan.planned_peak_bytes,
         temporary_opaque_bytes=temporary_plan.opaque_bytes,

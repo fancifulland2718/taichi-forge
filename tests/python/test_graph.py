@@ -1459,6 +1459,43 @@ def test_parallel_candidate_analysis_is_fail_closed_and_memory_aware():
     assert overlapping.conflicts[0].alias == "proven_overlap"
     assert overlapping.conflicts[0].dependencies == ("atomic_overlap",)
 
+    subresources = analyze_parallel_candidate(
+        (
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "write_image_region",
+                        effects=(
+                            ResourceEffect(
+                                "image",
+                                GraphAccess.WRITE,
+                                subresource=("region", 0),
+                            ),
+                        ),
+                        opaque=False,
+                    ),
+                )
+            ),
+            SequentialRegion(
+                (
+                    DispatchNode(
+                        "read_other_image_region",
+                        effects=(
+                            ResourceEffect(
+                                "image",
+                                GraphAccess.READ,
+                                subresource=("region", 1),
+                            ),
+                        ),
+                        opaque=False,
+                    ),
+                )
+            ),
+        )
+    )
+    assert subresources.decision == "rejected"
+    assert subresources.conflicts[0].dependencies == ("raw",)
+
     opaque = analyze_parallel_candidate(
         (
             SequentialRegion((DispatchNode("opaque"),)),

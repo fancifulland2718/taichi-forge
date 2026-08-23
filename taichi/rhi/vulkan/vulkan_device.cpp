@@ -1857,10 +1857,18 @@ void VulkanCommandList::copy_image(DeviceAllocation dst_img,
                                    ImageLayout src_img_layout,
                                    const ImageCopyParams &params) {
   VkImageCopy copy{};
-  copy.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  copy.srcSubresource.layerCount = 1;
-  copy.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  copy.dstSubresource.layerCount = 1;
+  copy.srcSubresource.aspectMask = params.image_aspect_flag;
+  copy.srcSubresource.mipLevel = params.source_mip_level;
+  copy.srcSubresource.baseArrayLayer = params.source_base_layer;
+  copy.srcSubresource.layerCount = params.layer_count;
+  copy.srcOffset = {params.source_offset.x, params.source_offset.y,
+                    params.source_offset.z};
+  copy.dstSubresource.aspectMask = params.image_aspect_flag;
+  copy.dstSubresource.mipLevel = params.destination_mip_level;
+  copy.dstSubresource.baseArrayLayer = params.destination_base_layer;
+  copy.dstSubresource.layerCount = params.layer_count;
+  copy.dstOffset = {params.destination_offset.x, params.destination_offset.y,
+                    params.destination_offset.z};
   copy.extent.width = params.width;
   copy.extent.height = params.height;
   copy.extent.depth = params.depth;
@@ -1880,17 +1888,32 @@ void VulkanCommandList::blit_image(DeviceAllocation dst_img,
                                    DeviceAllocation src_img,
                                    ImageLayout dst_img_layout,
                                    ImageLayout src_img_layout,
-                                   const ImageCopyParams &params) {
-  VkOffset3D blit_size{/*x*/ int(params.width),
-                       /*y*/ int(params.height),
-                       /*z*/ int(params.depth)};
+                                   const ImageBlitParams &params) {
   VkImageBlit blit{};
-  blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  blit.srcSubresource.layerCount = 1;
-  blit.srcOffsets[1] = blit_size;
-  blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-  blit.dstSubresource.layerCount = 1;
-  blit.dstOffsets[1] = blit_size;
+  blit.srcSubresource.aspectMask = params.image_aspect_flag;
+  blit.srcSubresource.mipLevel = params.source.mip_level;
+  blit.srcSubresource.baseArrayLayer = params.source.base_layer;
+  blit.srcSubresource.layerCount = params.layer_count;
+  blit.srcOffsets[0] = {params.source.offset.x, params.source.offset.y,
+                        params.source.offset.z};
+  blit.srcOffsets[1] = {
+      params.source.offset.x + static_cast<int32_t>(params.source.extent.x),
+      params.source.offset.y + static_cast<int32_t>(params.source.extent.y),
+      params.source.offset.z + static_cast<int32_t>(params.source.extent.z)};
+  blit.dstSubresource.aspectMask = params.image_aspect_flag;
+  blit.dstSubresource.mipLevel = params.destination.mip_level;
+  blit.dstSubresource.baseArrayLayer = params.destination.base_layer;
+  blit.dstSubresource.layerCount = params.layer_count;
+  blit.dstOffsets[0] = {params.destination.offset.x,
+                        params.destination.offset.y,
+                        params.destination.offset.z};
+  blit.dstOffsets[1] = {
+      params.destination.offset.x +
+          static_cast<int32_t>(params.destination.extent.x),
+      params.destination.offset.y +
+          static_cast<int32_t>(params.destination.extent.y),
+      params.destination.offset.z +
+          static_cast<int32_t>(params.destination.extent.z)};
 
   auto [dst_vk_image, dst_view, dst_format] = ti_device_->get_vk_image(dst_img);
   auto [src_vk_image, src_view, src_format] = ti_device_->get_vk_image(src_img);
@@ -1898,7 +1921,7 @@ void VulkanCommandList::blit_image(DeviceAllocation dst_img,
   vkCmdBlitImage(buffer_->buffer, src_vk_image->image,
                  image_layout_ti_to_vk(src_img_layout), dst_vk_image->image,
                  image_layout_ti_to_vk(dst_img_layout), 1, &blit,
-                 VK_FILTER_NEAREST);
+                 params.linear_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
 
   buffer_->refs.push_back(dst_vk_image);
   buffer_->refs.push_back(src_vk_image);
@@ -2325,6 +2348,32 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
 
   *out_devalloc = DeviceAllocation{this, (uint64_t)&alloc};
   return RhiResult::success;
+}
+
+bool VulkanDevice::image_blit_supported(BufferFormat source_format,
+                                        BufferFormat destination_format,
+                                        bool linear_filter) const {
+  auto [source_result, source_vk_format] =
+      buffer_format_ti_to_vk(source_format);
+  auto [destination_result, destination_vk_format] =
+      buffer_format_ti_to_vk(destination_format);
+  if (source_result != RhiResult::success ||
+      destination_result != RhiResult::success) {
+    return false;
+  }
+  VkFormatProperties source_properties{};
+  VkFormatProperties destination_properties{};
+  vkGetPhysicalDeviceFormatProperties(physical_device_, source_vk_format,
+                                      &source_properties);
+  vkGetPhysicalDeviceFormatProperties(physical_device_, destination_vk_format,
+                                      &destination_properties);
+  const VkFormatFeatureFlags source_required =
+      VK_FORMAT_FEATURE_BLIT_SRC_BIT |
+      (linear_filter ? VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT : 0);
+  return (source_properties.optimalTilingFeatures & source_required) ==
+             source_required &&
+         (destination_properties.optimalTilingFeatures &
+          VK_FORMAT_FEATURE_BLIT_DST_BIT) != 0;
 }
 
 VkDeviceAddress VulkanDevice::get_buffer_device_address(

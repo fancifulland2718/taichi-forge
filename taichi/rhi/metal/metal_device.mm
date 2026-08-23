@@ -959,16 +959,23 @@ void MetalCommandList::copy_image(DeviceAllocation dst_img,
 
   @autoreleasepool {
     MTLBlitCommandEncoder_id encoder = [cmdbuf_ blitCommandEncoder];
-    [encoder
-          copyFromTexture:src_image.mtl_texture()
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(0, 0, 0)
-               sourceSize:MTLSizeMake(params.width, params.height, params.depth)
-                toTexture:dst_image.mtl_texture()
-         destinationSlice:0
-         destinationLevel:0
-        destinationOrigin:MTLOriginMake(0, 0, 0)];
+    for (uint32_t layer = 0; layer < params.layer_count; ++layer) {
+      [encoder
+            copyFromTexture:src_image.mtl_texture()
+                sourceSlice:params.source_base_layer + layer
+                sourceLevel:params.source_mip_level
+               sourceOrigin:MTLOriginMake(params.source_offset.x,
+                                          params.source_offset.y,
+                                          params.source_offset.z)
+                 sourceSize:MTLSizeMake(params.width, params.height,
+                                        params.depth)
+                  toTexture:dst_image.mtl_texture()
+           destinationSlice:params.destination_base_layer + layer
+           destinationLevel:params.destination_mip_level
+          destinationOrigin:MTLOriginMake(params.destination_offset.x,
+                                           params.destination_offset.y,
+                                           params.destination_offset.z)];
+    }
     [encoder endEncoding];
   }
 }
@@ -977,8 +984,29 @@ void MetalCommandList::blit_image(DeviceAllocation dst_img,
                                   DeviceAllocation src_img,
                                   ImageLayout dst_img_layout,
                                   ImageLayout src_img_layout,
-                                  const ImageCopyParams &params) {
-  copy_image(dst_img, src_img, dst_img_layout, src_img_layout, params);
+                                  const ImageBlitParams &params) {
+  if (params.linear_filter ||
+      params.source.extent.x != params.destination.extent.x ||
+      params.source.extent.y != params.destination.extent.y ||
+      params.source.extent.z != params.destination.extent.z) {
+    RHI_NOT_IMPLEMENTED
+  }
+  ImageCopyParams copy_params{};
+  copy_params.width = params.source.extent.x;
+  copy_params.height = params.source.extent.y;
+  copy_params.depth = params.source.extent.z;
+  copy_params.source_offset = {params.source.offset.x, params.source.offset.y,
+                               params.source.offset.z};
+  copy_params.destination_offset = {
+      params.destination.offset.x, params.destination.offset.y,
+      params.destination.offset.z};
+  copy_params.source_mip_level = params.source.mip_level;
+  copy_params.destination_mip_level = params.destination.mip_level;
+  copy_params.source_base_layer = params.source.base_layer;
+  copy_params.destination_base_layer = params.destination.base_layer;
+  copy_params.layer_count = params.layer_count;
+  copy_params.image_aspect_flag = params.image_aspect_flag;
+  copy_image(dst_img, src_img, dst_img_layout, src_img_layout, copy_params);
 }
 
 MTLCommandBuffer_id MetalCommandList::finalize() { return cmdbuf_; }

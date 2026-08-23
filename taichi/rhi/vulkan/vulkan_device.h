@@ -560,7 +560,7 @@ class VulkanCommandList : public CommandList {
                   DeviceAllocation src_img,
                   ImageLayout dst_img_layout,
                   ImageLayout src_img_layout,
-                  const ImageCopyParams &params) override;
+                  const ImageBlitParams &params) override;
 
   vkapi::IVkRenderPass current_renderpass();
 
@@ -945,6 +945,10 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   uint32_t graphics_queue_family_index() const {
     return graphics_queue_family_index_;
   }
+
+  bool image_blit_supported(BufferFormat source_format,
+                            BufferFormat destination_format,
+                            bool linear_filter) const;
 
   uint32_t queue_timestamp_valid_bits(uint32_t queue_family_index) const;
 

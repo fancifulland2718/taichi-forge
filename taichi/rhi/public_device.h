@@ -396,6 +396,42 @@ struct ImageCopyParams {
   uint32_t width{1};
   uint32_t height{1};
   uint32_t depth{1};
+  struct {
+    int32_t x{0};
+    int32_t y{0};
+    int32_t z{0};
+  } source_offset;
+  struct {
+    int32_t x{0};
+    int32_t y{0};
+    int32_t z{0};
+  } destination_offset;
+  uint32_t source_mip_level{0};
+  uint32_t destination_mip_level{0};
+  uint32_t source_base_layer{0};
+  uint32_t destination_base_layer{0};
+  uint32_t layer_count{1};
+  uint32_t image_aspect_flag{1};
+};
+
+struct ImageBlitParams {
+  struct Region {
+    struct {
+      int32_t x{0};
+      int32_t y{0};
+      int32_t z{0};
+    } offset;
+    struct {
+      uint32_t x{1};
+      uint32_t y{1};
+      uint32_t z{1};
+    } extent;
+    uint32_t mip_level{0};
+    uint32_t base_layer{0};
+  } source, destination;
+  uint32_t layer_count{1};
+  uint32_t image_aspect_flag{1};
+  bool linear_filter{false};
 };
 
 class RHI_DLL_EXPORT CommandList {
@@ -669,7 +705,7 @@ class RHI_DLL_EXPORT CommandList {
                           DeviceAllocation src_img,
                           ImageLayout dst_img_layout,
                           ImageLayout src_img_layout,
-                          const ImageCopyParams &params) {
+                          const ImageBlitParams &params) {
     RHI_NOT_IMPLEMENTED
   }
 };

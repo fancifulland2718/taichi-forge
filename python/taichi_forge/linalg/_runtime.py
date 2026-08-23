@@ -2847,7 +2847,12 @@ class _LinearOperatorCompositionGraphExecutable(NativeGraphExecutable):
             for effect in child.resource_effects:
                 if effect.runtime_bound:
                     continue
-                key = (effect.resource, effect.access, effect.runtime_bound)
+                key = (
+                    effect.resource,
+                    effect.access,
+                    effect.runtime_bound,
+                    effect.subresource,
+                )
                 if key not in seen_effects:
                     seen_effects.add(key)
                     state_effects.append(effect)

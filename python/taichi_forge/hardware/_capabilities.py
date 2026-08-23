@@ -618,19 +618,30 @@ _OPERATIONS = (
         "none",
         "existing_public",
         activation_mode="explicit_hardware_api",
-        resource_effects=("read:source_image", "write:destination_image"),
+        resource_effects=(
+            "read:source_image_or_buffer",
+            "write:destination_image_or_buffer",
+        ),
         lifetime_policy="runtime_generation",
         update_policy="rebind",
-        layouts=("whole color image",),
-        requirements=("Vulkan RHI vkCmdCopyImage path",),
-        public_api="ti.hardware.image.VulkanImageCopyRecording",
+        layouts=(
+            "whole/region color image",
+            "buffer-image row length/image height/byte offset",
+            "base mip/layer descriptor with current Texture admission",
+        ),
+        requirements=(
+            "Vulkan RHI copy-image and buffer-image paths",
+            "format-feature-qualified blit",
+        ),
+        public_api="ti.hardware.image transfer recordings",
         notes=(
             "This is a native device image command, but Vulkan does not promise "
             "which physical engine executes the copy; it is not labeled "
             "dedicated-hardware acceleration.",
-            "The current slice requires matching format and extent, rejects "
-            "aliases and depth/stencil, and restores both images to "
-            "shader-read layout.",
+            "Image copy requires matching formats; region extents may differ "
+            "for blit only. Depth/stencil and aliases are rejected.",
+            "Current Texture resources expose one mip and one layer; descriptors "
+            "carry subresource identity and fail closed for unsupported slices.",
         ),
     ),
     _operation(

@@ -259,8 +259,8 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert image_copy.hardware_acceleration == "implementation_defined"
     assert image_copy.scopes == ("python", "graph")
     assert image_copy.resource_effects == (
-        "read:source_image",
-        "write:destination_image",
+        "read:source_image_or_buffer",
+        "write:destination_image_or_buffer",
     )
 
     texture = ti.hardware.capability("sampling.texture.vulkan")

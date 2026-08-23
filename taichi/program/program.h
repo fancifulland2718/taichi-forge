@@ -924,6 +924,54 @@ class TI_DLL_EXPORT Program {
 
   void vulkan_copy_texture(Texture *destination, Texture *source);
 
+  void vulkan_copy_texture_region(Texture *destination,
+                                  Texture *source,
+                                  std::vector<int> source_offset,
+                                  std::vector<int> destination_offset,
+                                  std::vector<int> extent,
+                                  std::uint32_t source_mip_level,
+                                  std::uint32_t destination_mip_level,
+                                  std::uint32_t source_base_layer,
+                                  std::uint32_t destination_base_layer,
+                                  std::uint32_t layer_count);
+
+  void vulkan_copy_ndarray_to_texture(
+      Texture *destination,
+      Ndarray *source,
+      std::size_t buffer_offset,
+      std::uint32_t buffer_row_length,
+      std::uint32_t buffer_image_height,
+      std::vector<int> image_offset,
+      std::vector<int> image_extent,
+      std::uint32_t image_mip_level,
+      std::uint32_t image_base_layer,
+      std::uint32_t image_layer_count);
+
+  void vulkan_copy_texture_to_ndarray(
+      Ndarray *destination,
+      Texture *source,
+      std::size_t buffer_offset,
+      std::uint32_t buffer_row_length,
+      std::uint32_t buffer_image_height,
+      std::vector<int> image_offset,
+      std::vector<int> image_extent,
+      std::uint32_t image_mip_level,
+      std::uint32_t image_base_layer,
+      std::uint32_t image_layer_count);
+
+  void vulkan_blit_texture(Texture *destination,
+                           Texture *source,
+                           std::vector<int> source_offset,
+                           std::vector<int> source_extent,
+                           std::vector<int> destination_offset,
+                           std::vector<int> destination_extent,
+                           std::uint32_t source_mip_level,
+                           std::uint32_t destination_mip_level,
+                           std::uint32_t source_base_layer,
+                           std::uint32_t destination_base_layer,
+                           std::uint32_t layer_count,
+                           bool linear_filter);
+
   std::size_t debug_vulkan_image_sampler_cache_size();
 
   intptr_t get_ndarray_data_ptr_as_int(const Ndarray *ndarray);

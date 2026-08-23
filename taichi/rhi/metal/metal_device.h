@@ -398,7 +398,7 @@ class MetalCommandList final : public CommandList {
                   DeviceAllocation src_img,
                   ImageLayout dst_img_layout,
                   ImageLayout src_img_layout,
-                  const ImageCopyParams &params) override;
+                  const ImageBlitParams &params) override;
   void set_line_width(float width) override;
 
   MTLCommandBuffer_id finalize();

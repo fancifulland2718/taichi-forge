@@ -1980,6 +1980,43 @@ void export_lang(py::module &m) {
            tracked_native_program_method(&Program::vulkan_copy_texture),
            py::arg("destination"), py::arg("source"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_copy_texture_region",
+           tracked_native_program_method(
+               &Program::vulkan_copy_texture_region),
+           py::arg("destination"), py::arg("source"),
+           py::arg("source_offset"), py::arg("destination_offset"),
+           py::arg("extent"), py::arg("source_mip_level"),
+           py::arg("destination_mip_level"), py::arg("source_base_layer"),
+           py::arg("destination_base_layer"), py::arg("layer_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_copy_ndarray_to_texture",
+           tracked_native_program_method(
+               &Program::vulkan_copy_ndarray_to_texture),
+           py::arg("destination"), py::arg("source"),
+           py::arg("buffer_offset"), py::arg("buffer_row_length"),
+           py::arg("buffer_image_height"), py::arg("image_offset"),
+           py::arg("image_extent"), py::arg("image_mip_level"),
+           py::arg("image_base_layer"), py::arg("image_layer_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_copy_texture_to_ndarray",
+           tracked_native_program_method(
+               &Program::vulkan_copy_texture_to_ndarray),
+           py::arg("destination"), py::arg("source"),
+           py::arg("buffer_offset"), py::arg("buffer_row_length"),
+           py::arg("buffer_image_height"), py::arg("image_offset"),
+           py::arg("image_extent"), py::arg("image_mip_level"),
+           py::arg("image_base_layer"), py::arg("image_layer_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_blit_texture",
+           tracked_native_program_method(&Program::vulkan_blit_texture),
+           py::arg("destination"), py::arg("source"),
+           py::arg("source_offset"), py::arg("source_extent"),
+           py::arg("destination_offset"), py::arg("destination_extent"),
+           py::arg("source_mip_level"),
+           py::arg("destination_mip_level"), py::arg("source_base_layer"),
+           py::arg("destination_base_layer"), py::arg("layer_count"),
+           py::arg("linear_filter"),
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "_record_vulkan_buffer_commands",
           [](Program *program, const py::sequence &raw_commands) {
