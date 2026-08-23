@@ -741,7 +741,7 @@ _OPERATIONS = (
         "fixed_function",
         "native_command",
         "implementation_defined",
-        ("python",),
+        ("python", "graph"),
         "native_command",
         "unsupported",
         "runtime_ordered",
@@ -756,12 +756,16 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="rebuild",
         requirements=("VK_KHR_acceleration_structure",),
-        public_api="ti.hardware.ray.TriangleScene",
+        public_api=(
+            "ti.hardware.ray.TriangleBLAS / "
+            "ti.hardware.ray.InstanceTLAS"
+        ),
         dtypes=("vertex:f32", "index:i32"),
         layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
         notes=(
-            "Indexed triangles and one identity TLAS instance only.",
-            "Construction records an update-enabled build; vertex-only refit is a separate public route.",
+            "Independent fixed-topology triangle BLAS and fixed-order instance TLAS resources.",
+            "Instance descriptors expose row-major 3x4 transforms, 8-bit masks, and 24-bit custom indices.",
+            "TriangleScene remains the identity-instance compatibility wrapper.",
         ),
     ),
     _operation(
@@ -788,13 +792,17 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="refit",
         requirements=("VK_KHR_acceleration_structure",),
-        public_api="ti.hardware.ray.TriangleScene.refit",
+        public_api=(
+            "ti.hardware.ray.TriangleBLAS.refit / "
+            "ti.hardware.ray.InstanceTLAS.refit"
+        ),
         dtypes=("vertex:f32",),
         layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
         notes=(
             "Explicit Python or Graph native command; never selected by an ordinary kernel.",
-            "Vertex-only BLAS update; vertex count and index topology remain fixed.",
-            "The identity TLAS retains the stable BLAS device address.",
+            "BLAS refit is vertex-only; TLAS refit may update transforms, masks, and custom indices.",
+            "BLAS counts and TLAS BLAS count/order remain fixed for the resource lifetime.",
+            "TriangleScene retains its identity-TLAS compatibility refit route.",
         ),
     ),
     _operation(
@@ -821,7 +829,10 @@ _OPERATIONS = (
         lifetime_policy="resource_generation",
         update_policy="rebind",
         requirements=("VK_KHR_acceleration_structure", "VK_KHR_ray_query"),
-        public_api="ti.hardware.ray.TriangleScene.trace",
+        public_api=(
+            "ti.hardware.ray.InstanceTLAS.trace / "
+            "ti.hardware.ray.TriangleScene.trace"
+        ),
         dtypes=("ray:f32", "hit:f32"),
         shapes_or_tiles=("rays:(N,8)", "hits:(N,4)", "workgroup:128"),
         layouts=("scalar 2D", "AOS vector"),

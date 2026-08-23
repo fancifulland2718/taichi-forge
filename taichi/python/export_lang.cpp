@@ -819,6 +819,12 @@ void export_lang(py::module &m) {
           py::arg("program"), py::arg("context"),
           py::call_guard<py::gil_scoped_release>());
 
+  py::class_<VulkanRayInstanceInfo>(m, "VulkanRayInstanceInfo")
+      .def(py::init<>())
+      .def_readwrite("transform", &VulkanRayInstanceInfo::transform)
+      .def_readwrite("mask", &VulkanRayInstanceInfo::mask)
+      .def_readwrite("custom_index", &VulkanRayInstanceInfo::custom_index);
+
   py::class_<Program>(m, "Program")
       .def(py::init<>())
       .def("config", &Program::compile_config,
@@ -2352,6 +2358,50 @@ void export_lang(py::module &m) {
       .def("_destroy_vulkan_triangle_ray_scene",
            tracked_native_program_method(
                &Program::destroy_vulkan_triangle_ray_scene),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_triangle_blas_resource",
+           tracked_native_program_method(
+               &Program::create_vulkan_triangle_blas_resource),
+           py::arg("vertex_count"), py::arg("triangle_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_triangle_blas_build",
+           tracked_native_program_method(
+               &Program::vulkan_triangle_blas_build),
+           py::arg("handle"), py::arg("vertices"), py::arg("indices"),
+           py::arg("vertex_count"), py::arg("triangle_count"),
+           py::arg("update"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_instance_tlas_resource",
+           tracked_native_program_method(
+               &Program::create_vulkan_instance_tlas_resource),
+           py::arg("blas_handles"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_instance_tlas_build",
+           tracked_native_program_method(&Program::vulkan_instance_tlas_build),
+           py::arg("handle"), py::arg("instances"), py::arg("update"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_instance_tlas_query",
+           tracked_native_program_method(&Program::vulkan_instance_tlas_query),
+           py::arg("handle"), py::arg("rays"), py::arg("hits"),
+           py::arg("ray_count"), py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_ray_resource_memory_stats",
+           [](Program &program, std::uint64_t handle) {
+             const auto stats =
+                 program.vulkan_ray_resource_memory_statistics(handle);
+             py::dict result;
+             result["geometry_input_requested_bytes"] =
+                 stats.geometry_input_requested_bytes;
+             result["acceleration_structure_requested_bytes"] =
+                 stats.acceleration_structure_requested_bytes;
+             result["build_scratch_requested_bytes"] =
+                 stats.build_scratch_requested_bytes;
+             result["known_requested_bytes"] = stats.known_requested_bytes;
+             result["known_allocation_count"] = stats.known_allocation_count;
+             result["opaque_driver_bytes"] = py::none();
+             return result;
+           },
+           py::arg("handle"))
+      .def("_destroy_vulkan_ray_resource",
+           tracked_native_program_method(&Program::destroy_vulkan_ray_resource),
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("_create_cuda_cufft_plan_1d",
            tracked_native_program_method(&Program::create_cuda_cufft_plan_1d),

@@ -111,6 +111,7 @@ struct VulkanBufferCommand {
 class Program;
 class CudaFftPlan;
 class VulkanTriangleRayScene;
+class VulkanRayResource;
 class VulkanGraphicsPipelineResource;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
@@ -123,6 +124,14 @@ struct VulkanTriangleRaySceneMemoryStatistics {
   std::size_t build_scratch_requested_bytes{0};
   std::size_t known_requested_bytes{0};
   std::size_t known_allocation_count{0};
+};
+
+struct VulkanRayInstanceInfo {
+  std::array<float, 12> transform{1.0f, 0.0f, 0.0f, 0.0f,
+                                  0.0f, 1.0f, 0.0f, 0.0f,
+                                  0.0f, 0.0f, 1.0f, 0.0f};
+  std::uint32_t mask{0xff};
+  std::uint32_t custom_index{0};
 };
 
 struct VulkanGraphicsVertexBinding {
@@ -1094,6 +1103,35 @@ class TI_DLL_EXPORT Program {
   debug_vulkan_ray_resource_stats();
 
   void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
+
+  std::uint64_t create_vulkan_triangle_blas_resource(
+      std::size_t vertex_count,
+      std::size_t triangle_count);
+
+  std::size_t vulkan_triangle_blas_build(std::uint64_t handle,
+                                         Ndarray *vertices,
+                                         Ndarray *indices,
+                                         std::size_t vertex_count,
+                                         std::size_t triangle_count,
+                                         bool update);
+
+  std::uint64_t create_vulkan_instance_tlas_resource(
+      const std::vector<std::uint64_t> &blas_handles);
+
+  std::size_t vulkan_instance_tlas_build(
+      std::uint64_t handle,
+      const std::vector<VulkanRayInstanceInfo> &instances,
+      bool update);
+
+  std::size_t vulkan_instance_tlas_query(std::uint64_t handle,
+                                         Ndarray *rays,
+                                         Ndarray *hits,
+                                         std::size_t ray_count);
+
+  VulkanTriangleRaySceneMemoryStatistics
+  vulkan_ray_resource_memory_statistics(std::uint64_t handle);
+
+  void destroy_vulkan_ray_resource(std::uint64_t handle);
 
   void vulkan_clear_ray_scenes();
 
@@ -3726,18 +3764,21 @@ class TI_DLL_EXPORT Program {
     std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>>
         vulkan_graphics_pipelines;
     std::vector<std::shared_ptr<VulkanTriangleRayScene>> vulkan_ray_scenes;
+    std::vector<std::shared_ptr<VulkanRayResource>> vulkan_ray_resources;
 
     std::size_t retained_resource_count(
         std::uint32_t kind) const noexcept override;
     bool empty() const noexcept {
       return argpacks.empty() && ndarrays.empty() && textures.empty() &&
              external_dense_storage.empty() &&
-             vulkan_graphics_pipelines.empty() && vulkan_ray_scenes.empty();
+             vulkan_graphics_pipelines.empty() && vulkan_ray_scenes.empty() &&
+             vulkan_ray_resources.empty();
     }
   };
 
   static constexpr std::uint32_t kVulkanGraphicsPipelineResourceKind = 6;
   static constexpr std::uint32_t kVulkanRaySceneResourceKind = 7;
+  static constexpr std::uint32_t kVulkanRayResourceKind = 8;
 
   struct DenseFieldHostCopyStagingResource {
     DeviceAllocationUnique upload;
@@ -3893,6 +3934,11 @@ class TI_DLL_EXPORT Program {
   std::vector<std::shared_ptr<VulkanTriangleRayScene>>
       vulkan_ray_scene_retirements_;
   std::uint64_t next_vulkan_ray_scene_handle_{1};
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanRayResource>>
+      vulkan_ray_resources_;
+  std::vector<std::shared_ptr<VulkanRayResource>>
+      vulkan_ray_resource_retirements_;
+  std::uint64_t next_vulkan_ray_resource_handle_{1};
   std::mutex cuda_cufft_plan_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;

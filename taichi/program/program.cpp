@@ -7520,6 +7520,7 @@ void Program::release_completed_external_dense_storage_leases() {
 void Program::release_completed_vulkan_native_resources() {
   std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>> graphics;
   std::vector<std::shared_ptr<VulkanTriangleRayScene>> ray_scenes;
+  std::vector<std::shared_ptr<VulkanRayResource>> ray_resources;
   {
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
     graphics.swap(vulkan_graphics_pipeline_retirements_);
@@ -7527,9 +7528,11 @@ void Program::release_completed_vulkan_native_resources() {
   {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
     ray_scenes.swap(vulkan_ray_scene_retirements_);
+    ray_resources.swap(vulkan_ray_resource_retirements_);
   }
   graphics.clear();
   ray_scenes.clear();
+  ray_resources.clear();
 }
 
 std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
@@ -7551,6 +7554,9 @@ std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
   }
   if (kind == kVulkanRaySceneResourceKind) {
     return vulkan_ray_scenes.size();
+  }
+  if (kind == kVulkanRayResourceKind) {
+    return vulkan_ray_resources.size();
   }
   return 0;
 }
@@ -7580,7 +7586,8 @@ Program::detach_runtime_completion_resources() {
   }
   if (!has_resources) {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
-    has_resources = !vulkan_ray_scene_retirements_.empty();
+    has_resources = !vulkan_ray_scene_retirements_.empty() ||
+                    !vulkan_ray_resource_retirements_.empty();
   }
   if (!has_resources) {
     return nullptr;
@@ -7613,6 +7620,7 @@ Program::detach_runtime_completion_resources() {
   {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
     batch->vulkan_ray_scenes.swap(vulkan_ray_scene_retirements_);
+    batch->vulkan_ray_resources.swap(vulkan_ray_resource_retirements_);
   }
   TI_ASSERT(!batch->empty());
   return batch;
@@ -7971,6 +7979,8 @@ Program::debug_runtime_completion_stats() const {
            kVulkanGraphicsPipelineResourceKind)},
       {"retained_vulkan_ray_scenes",
        runtime_completion_resource_count(kVulkanRaySceneResourceKind)},
+      {"retained_vulkan_ray_resources",
+       runtime_completion_resource_count(kVulkanRayResourceKind)},
       {"cuda_completion_events_created", cuda_events.created},
       {"cuda_completion_events_reused", cuda_events.reused},
       {"cuda_completion_events_returned", cuda_events.returned},

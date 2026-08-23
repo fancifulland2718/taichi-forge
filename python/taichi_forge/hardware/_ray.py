@@ -1,5 +1,8 @@
 """Explicit Vulkan acceleration-structure and batch ray-query provider."""
 
+from dataclasses import dataclass
+import math
+
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
 from taichi_forge.graph._native import (
@@ -44,11 +47,14 @@ def _item_count(value, width, dtype, name):
 
 @instrument_hardware_recording("ray.query.batch.vulkan")
 class VulkanRayQueryRecording(BackendCommandRecording):
-    """One batch query against a fixed :class:`TriangleScene` generation."""
+    """One batch query against a fixed scene or TLAS generation."""
 
     def __init__(self, scene, ray_count, *, rays="rays", hits="hits"):
-        if not isinstance(scene, TriangleScene):
-            raise TypeError("Vulkan ray query recording requires a TriangleScene")
+        if not isinstance(scene, (TriangleScene, InstanceTLAS)):
+            raise TypeError(
+                "Vulkan ray query recording requires a TriangleScene or "
+                "InstanceTLAS"
+            )
         if (
             isinstance(ray_count, bool)
             or not isinstance(ray_count, int)
@@ -81,6 +87,9 @@ class VulkanRayQueryRecording(BackendCommandRecording):
         return (
             ResourceEffect(self.rays, GraphAccess.READ),
             ResourceEffect(self.hits, GraphAccess.WRITE),
+            ResourceEffect(
+                self.scene._effect_name, GraphAccess.READ, runtime_bound=False
+            ),
         )
 
     def execute(self, bindings):
@@ -152,7 +161,7 @@ class _VulkanRayQueryExecutable(NativeGraphExecutable):
         return {
             "kind": "vulkan_triangle_ray_query",
             "ray_count": self._recording.ray_count,
-            "scene_kind": "static_triangle_blas_tlas",
+            "scene_kind": self._recording.scene._scene_kind,
         }
 
 
@@ -191,7 +200,12 @@ class VulkanRayRefitRecording(BackendCommandRecording):
 
     @property
     def resource_effects(self):
-        return (ResourceEffect(self.vertices, GraphAccess.READ),)
+        return (
+            ResourceEffect(self.vertices, GraphAccess.READ),
+            ResourceEffect(
+                self.scene._effect_name, GraphAccess.WRITE, runtime_bound=False
+            ),
+        )
 
     def execute(self, bindings):
         required = frozenset(self.binding_names)
@@ -309,6 +323,10 @@ class TriangleScene:
         )
         self.vertex_count = vertex_count
         self.triangle_count = triangle_count
+        self._effect_name = (
+            f"vulkan-ray-scene:{self._runtime_generation}:{self._handle}"
+        )
+        self._scene_kind = "updatable_triangle_blas_tlas"
         self._memory_stats = dict(
             program._vulkan_triangle_ray_scene_memory_stats(self._handle)
         )
@@ -448,6 +466,711 @@ class TriangleScene:
         return False
 
 
+class _VulkanRayResourceExecutable(NativeGraphExecutable):
+    def __init__(self, recording):
+        self._recording = recording
+        self._action = BackendCommandGraphAction(recording)
+
+    def run(self, runtime_args):
+        return self._recording.execute(runtime_args)
+
+    @property
+    def runtime_arg_schema(self):
+        return tuple(
+            RuntimeBinding(name, "ndarray")
+            for name in self._recording.binding_names
+        )
+
+    @property
+    def resource_effects(self):
+        return self._recording.resource_effects
+
+    @property
+    def lifetime_leases(self):
+        return self._recording.lifetime_leases
+
+    @property
+    def recordable_action(self):
+        return self._action
+
+    @property
+    def debug_info(self):
+        return self._recording.debug_info
+
+
+class _VulkanRayResourceNode(NativeGraphNode):
+    def __init__(self, recording):
+        self._recording = recording
+
+    def compile(self):
+        return _VulkanRayResourceExecutable(self._recording)
+
+
+def _validate_recording_bindings(recording, bindings, operation):
+    required = frozenset(recording.binding_names)
+    provided = frozenset(bindings)
+    if provided == required:
+        return
+    missing = sorted(required.difference(provided))
+    unexpected = sorted(provided.difference(required))
+    details = []
+    if missing:
+        details.append("missing " + ", ".join(missing))
+    if unexpected:
+        details.append("unexpected " + ", ".join(unexpected))
+    raise TaichiRuntimeError(
+        f"Vulkan {operation} bindings do not match the recording: "
+        + "; ".join(details)
+    )
+
+
+@instrument_hardware_recording("ray.as_build.vulkan")
+class VulkanBLASBuildRecording(BackendCommandRecording):
+    """One explicit triangle BLAS rebuild with fixed allocation shape."""
+
+    def __init__(self, blas, *, vertices="vertices", indices="indices"):
+        if not isinstance(blas, TriangleBLAS):
+            raise TypeError("Vulkan BLAS build recording requires a TriangleBLAS")
+        if any(
+            not isinstance(name, str) or not name
+            for name in (vertices, indices)
+        ):
+            raise ValueError("Vulkan BLAS binding names must be nonempty strings")
+        if vertices == indices:
+            raise ValueError("Vulkan BLAS binding names must be unique")
+        super().__init__(
+            backend="vulkan",
+            binding_names=(vertices, indices),
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="internal",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "blas", blas)
+        object.__setattr__(self, "vertices", vertices)
+        object.__setattr__(self, "indices", indices)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.vertices, GraphAccess.READ),
+            ResourceEffect(self.indices, GraphAccess.READ),
+            ResourceEffect(
+                self.blas._effect_name, GraphAccess.WRITE, runtime_bound=False
+            ),
+        )
+
+    @property
+    def lifetime_leases(self):
+        return (self.blas,)
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "vulkan_triangle_blas_build",
+            "vertex_count": self.blas.vertex_count,
+            "triangle_count": self.blas.triangle_count,
+        }
+
+    def execute(self, bindings):
+        _validate_recording_bindings(self, bindings, "BLAS build")
+        self.validate_graph_lifetime()
+        vertices = bindings[self.vertices]
+        indices = bindings[self.indices]
+        if _item_count(vertices, 3, f32, self.vertices) != self.blas.vertex_count:
+            raise TaichiRuntimeError(
+                f"Vulkan ray binding {self.vertices!r} has the wrong vertex count"
+            )
+        if _item_count(indices, 3, i32, self.indices) != self.blas.triangle_count:
+            raise TaichiRuntimeError(
+                f"Vulkan ray binding {self.indices!r} has the wrong triangle count"
+            )
+        self.blas._execute_build(vertices, indices, update=False)
+
+    def validate_graph_lifetime(self):
+        self.blas._validate_lifetime()
+
+    def memory_report(self):
+        return self.blas.memory_report()
+
+    def _as_graph_native_node(self):
+        return _VulkanRayResourceNode(self)
+
+
+@instrument_hardware_recording("ray.as_refit.vulkan")
+class VulkanBLASRefitRecording(BackendCommandRecording):
+    """One vertex-only triangle BLAS update with fixed topology."""
+
+    def __init__(self, blas, *, vertices="vertices"):
+        if not isinstance(blas, TriangleBLAS):
+            raise TypeError("Vulkan BLAS refit recording requires a TriangleBLAS")
+        if not isinstance(vertices, str) or not vertices:
+            raise ValueError("Vulkan BLAS binding name must be a nonempty string")
+        super().__init__(
+            backend="vulkan",
+            binding_names=(vertices,),
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="internal",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "blas", blas)
+        object.__setattr__(self, "vertices", vertices)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.vertices, GraphAccess.READ),
+            ResourceEffect(
+                self.blas._effect_name, GraphAccess.WRITE, runtime_bound=False
+            ),
+        )
+
+    @property
+    def lifetime_leases(self):
+        return (self.blas,)
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": "vulkan_triangle_blas_refit",
+            "vertex_count": self.blas.vertex_count,
+        }
+
+    def execute(self, bindings):
+        _validate_recording_bindings(self, bindings, "BLAS refit")
+        self.validate_graph_lifetime()
+        vertices = bindings[self.vertices]
+        if _item_count(vertices, 3, f32, self.vertices) != self.blas.vertex_count:
+            raise TaichiRuntimeError(
+                f"Vulkan ray binding {self.vertices!r} has the wrong vertex count"
+            )
+        self.blas._execute_build(vertices, None, update=True)
+
+    def validate_graph_lifetime(self):
+        self.blas._validate_lifetime()
+
+    def memory_report(self):
+        return self.blas.memory_report()
+
+    def _as_graph_native_node(self):
+        return _VulkanRayResourceNode(self)
+
+
+class TriangleBLAS:
+    """Independent fixed-topology Vulkan triangle BLAS resource."""
+
+    def __init__(self, vertices, indices):
+        program = _require_vulkan_ray_runtime("TriangleBLAS")
+        vertex_count = _item_count(vertices, 3, f32, "vertices")
+        triangle_count = _item_count(indices, 3, i32, "indices")
+        self._runtime_prog = program
+        self._runtime_generation = int(impl.runtime_generation())
+        self.vertex_count = vertex_count
+        self.triangle_count = triangle_count
+        self._handle = int(
+            program._create_vulkan_triangle_blas_resource(
+                vertex_count, triangle_count
+            )
+        )
+        self._effect_name = (
+            f"vulkan-ray-blas:{self._runtime_generation}:{self._handle}"
+        )
+        try:
+            self._memory_stats = dict(
+                program._vulkan_ray_resource_memory_stats(self._handle)
+            )
+            self.build(vertices, indices)
+        except Exception:
+            self.close()
+            raise
+
+    @property
+    def closed(self):
+        return self._handle is None
+
+    def record_build(self, *, vertices="vertices", indices="indices"):
+        self._validate_lifetime()
+        return VulkanBLASBuildRecording(
+            self, vertices=vertices, indices=indices
+        )
+
+    def build(self, vertices, indices):
+        self.record_build().execute({"vertices": vertices, "indices": indices})
+        return self
+
+    def record_refit(self, *, vertices="vertices"):
+        self._validate_lifetime()
+        return VulkanBLASRefitRecording(self, vertices=vertices)
+
+    def refit(self, vertices):
+        self.record_refit().execute({"vertices": vertices})
+        return self
+
+    def _execute_build(self, vertices, indices, *, update):
+        self._validate_lifetime()
+        self._runtime_prog._vulkan_triangle_blas_build(
+            self._handle,
+            vertices.arr,
+            None if indices is None else indices.arr,
+            self.vertex_count,
+            self.triangle_count,
+            bool(update),
+        )
+
+    def _validate_runtime_identity(self):
+        if (
+            impl.get_runtime().prog is not self._runtime_prog
+            or int(impl.runtime_generation()) != self._runtime_generation
+        ):
+            raise TaichiRuntimeError(
+                "TriangleBLAS belongs to a previous Taichi runtime generation"
+            )
+
+    def _validate_lifetime(self):
+        if self._handle is None:
+            raise TaichiRuntimeError("TriangleBLAS has been closed")
+        self._validate_runtime_identity()
+
+    def validate_graph_lifetime(self):
+        self._validate_lifetime()
+
+    def memory_report(self):
+        return _independent_ray_memory_report(
+            self,
+            provider="vulkan_triangle_blas",
+            geometry_name="geometry_build_inputs",
+            storage_name="blas_storage",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
+
+    def close(self):
+        if self._handle is None:
+            return None
+        handle = self._handle
+        self._handle = None
+        if (
+            impl.get_runtime().prog is self._runtime_prog
+            and int(impl.runtime_generation()) == self._runtime_generation
+        ):
+            self._runtime_prog._destroy_vulkan_ray_resource(handle)
+        return None
+
+    destroy = close
+
+    def __enter__(self):
+        self._validate_lifetime()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+
+_IDENTITY_TRANSFORM_3X4 = (
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+)
+
+
+def _normalize_transform(transform):
+    try:
+        values = tuple(transform)
+    except TypeError as exc:
+        raise TypeError("Vulkan ray instance transform must be iterable") from exc
+    if len(values) == 3 and all(hasattr(row, "__iter__") for row in values):
+        values = tuple(value for row in values for value in row)
+    if len(values) != 12:
+        raise ValueError(
+            "Vulkan ray instance transform must be a row-major 3x4 matrix"
+        )
+    try:
+        values = tuple(float(value) for value in values)
+    except (TypeError, ValueError) as exc:
+        raise TypeError("Vulkan ray instance transform must be numeric") from exc
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Vulkan ray instance transform must be finite")
+    return values
+
+
+@dataclass(frozen=True)
+class RayInstance:
+    """One low-level TLAS instance descriptor with a fixed BLAS reference."""
+
+    blas: TriangleBLAS
+    transform: tuple = _IDENTITY_TRANSFORM_3X4
+    mask: int = 0xFF
+    custom_index: int = 0
+
+    def __post_init__(self):
+        if not isinstance(self.blas, TriangleBLAS):
+            raise TypeError("Vulkan ray instance blas must be a TriangleBLAS")
+        if isinstance(self.mask, bool) or not isinstance(self.mask, int):
+            raise TypeError("Vulkan ray instance mask must be an integer")
+        if self.mask < 0 or self.mask > 0xFF:
+            raise ValueError("Vulkan ray instance mask must be in [0, 255]")
+        if isinstance(self.custom_index, bool) or not isinstance(
+            self.custom_index, int
+        ):
+            raise TypeError("Vulkan ray instance custom_index must be an integer")
+        if self.custom_index < 0 or self.custom_index > 0xFFFFFF:
+            raise ValueError(
+                "Vulkan ray instance custom_index must be in [0, 16777215]"
+            )
+        object.__setattr__(self, "transform", _normalize_transform(self.transform))
+
+    def _to_core(self):
+        result = _ti_core.VulkanRayInstanceInfo()
+        result.transform = self.transform
+        result.mask = self.mask
+        result.custom_index = self.custom_index
+        return result
+
+
+class _VulkanTLASRecording(BackendCommandRecording):
+    def __init__(self, tlas, instances, *, update):
+        if not isinstance(tlas, InstanceTLAS):
+            raise TypeError("Vulkan TLAS recording requires an InstanceTLAS")
+        normalized = tlas._normalize_instances(instances, require_live=False)
+        super().__init__(
+            backend="vulkan",
+            binding_names=(),
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="internal",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "tlas", tlas)
+        object.__setattr__(self, "instances", normalized)
+        object.__setattr__(self, "update", bool(update))
+
+    @property
+    def resource_effects(self):
+        effects = [
+            ResourceEffect(
+                instance.blas._effect_name,
+                GraphAccess.READ,
+                runtime_bound=False,
+            )
+            for instance in self.instances
+        ]
+        effects.append(
+            ResourceEffect(
+                self.tlas._effect_name, GraphAccess.WRITE, runtime_bound=False
+            )
+        )
+        return tuple(effects)
+
+    @property
+    def lifetime_leases(self):
+        return (self.tlas,)
+
+    @property
+    def debug_info(self):
+        return {
+            "kind": (
+                "vulkan_instance_tlas_refit"
+                if self.update
+                else "vulkan_instance_tlas_build"
+            ),
+            "instance_count": len(self.instances),
+            "topology_fixed": True,
+        }
+
+    def execute(self, bindings):
+        _validate_recording_bindings(self, bindings, "TLAS build")
+        self.validate_graph_lifetime()
+        self.tlas._execute_build(self.instances, update=self.update)
+
+    def validate_graph_lifetime(self):
+        self.tlas._validate_lifetime()
+        self.tlas._validate_topology(self.instances)
+
+    def memory_report(self):
+        return self.tlas.memory_report()
+
+    def _as_graph_native_node(self):
+        return _VulkanRayResourceNode(self)
+
+
+@instrument_hardware_recording("ray.as_build.vulkan")
+class VulkanTLASBuildRecording(_VulkanTLASRecording):
+    """One explicit TLAS rebuild with captured instance descriptors."""
+
+    def __init__(self, tlas, instances):
+        super().__init__(tlas, instances, update=False)
+
+
+@instrument_hardware_recording("ray.as_refit.vulkan")
+class VulkanTLASRefitRecording(_VulkanTLASRecording):
+    """One TLAS update with fixed BLAS order and captured descriptors."""
+
+    def __init__(self, tlas, instances):
+        super().__init__(tlas, instances, update=True)
+
+
+class InstanceTLAS:
+    """Independent Vulkan TLAS with fixed BLAS topology and mutable metadata."""
+
+    def __init__(self, instances):
+        program = _require_vulkan_ray_runtime("InstanceTLAS")
+        self._runtime_prog = program
+        self._runtime_generation = int(impl.runtime_generation())
+        normalized = self._normalize_instances(instances, require_live=True)
+        self._topology = tuple(instance.blas for instance in normalized)
+        self._instances = normalized
+        self._handle = int(
+            program._create_vulkan_instance_tlas_resource(
+                [blas._handle for blas in self._topology]
+            )
+        )
+        self._effect_name = (
+            f"vulkan-ray-tlas:{self._runtime_generation}:{self._handle}"
+        )
+        self._scene_kind = "independent_instance_tlas"
+        try:
+            self._memory_stats = dict(
+                program._vulkan_ray_resource_memory_stats(self._handle)
+            )
+            self.build(normalized)
+        except Exception:
+            self.close()
+            raise
+
+    @property
+    def closed(self):
+        return self._handle is None
+
+    @property
+    def instance_count(self):
+        return len(self._topology)
+
+    def _normalize_instances(self, instances, *, require_live):
+        try:
+            normalized = tuple(instances)
+        except TypeError as exc:
+            raise TypeError("Vulkan TLAS instances must be iterable") from exc
+        if not normalized:
+            raise ValueError("Vulkan TLAS requires at least one RayInstance")
+        for instance in normalized:
+            if not isinstance(instance, RayInstance):
+                raise TypeError("Vulkan TLAS entries must be RayInstance objects")
+            if require_live:
+                instance.blas._validate_lifetime()
+            else:
+                instance.blas._validate_runtime_identity()
+            if instance.blas._runtime_prog is not self._runtime_prog:
+                raise TaichiRuntimeError(
+                    "Vulkan TLAS and all BLAS resources must share one runtime"
+                )
+        return normalized
+
+    def _validate_topology(self, instances):
+        if len(instances) != len(self._topology) or any(
+            instance.blas is not expected
+            for instance, expected in zip(instances, self._topology)
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan TLAS build/refit must preserve BLAS count and order"
+            )
+
+    def record_build(self, instances=None):
+        self._validate_lifetime()
+        return VulkanTLASBuildRecording(
+            self, self._instances if instances is None else instances
+        )
+
+    def build(self, instances=None):
+        recording = self.record_build(instances)
+        recording.execute({})
+        self._instances = recording.instances
+        return self
+
+    def record_refit(self, instances=None):
+        self._validate_lifetime()
+        return VulkanTLASRefitRecording(
+            self, self._instances if instances is None else instances
+        )
+
+    def refit(self, instances=None):
+        recording = self.record_refit(instances)
+        recording.execute({})
+        self._instances = recording.instances
+        return self
+
+    def record(self, ray_count, *, rays="rays", hits="hits"):
+        self._validate_lifetime()
+        return VulkanRayQueryRecording(
+            self, ray_count, rays=rays, hits=hits
+        )
+
+    def trace(self, rays, hits):
+        ray_count = _item_count(rays, 8, f32, "rays")
+        recording = self.record(ray_count)
+        recording.execute({"rays": rays, "hits": hits})
+        return hits
+
+    def _execute_build(self, instances, *, update):
+        self._validate_lifetime()
+        self._validate_topology(instances)
+        self._runtime_prog._vulkan_instance_tlas_build(
+            self._handle,
+            [instance._to_core() for instance in instances],
+            bool(update),
+        )
+
+    def _execute_query(self, rays, hits, ray_count):
+        self._validate_lifetime()
+        self._runtime_prog._vulkan_instance_tlas_query(
+            self._handle, rays.arr, hits.arr, ray_count
+        )
+
+    def _validate_lifetime(self):
+        if self._handle is None:
+            raise TaichiRuntimeError("InstanceTLAS has been closed")
+        if (
+            impl.get_runtime().prog is not self._runtime_prog
+            or int(impl.runtime_generation()) != self._runtime_generation
+        ):
+            raise TaichiRuntimeError(
+                "InstanceTLAS belongs to a previous Taichi runtime generation"
+            )
+
+    def validate_graph_lifetime(self):
+        self._validate_lifetime()
+
+    def memory_report(self):
+        return _independent_ray_memory_report(
+            self,
+            provider="vulkan_instance_tlas",
+            geometry_name="instance_build_inputs",
+            storage_name="tlas_storage",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
+
+    def close(self):
+        if self._handle is None:
+            return None
+        handle = self._handle
+        self._handle = None
+        if (
+            impl.get_runtime().prog is self._runtime_prog
+            and int(impl.runtime_generation()) == self._runtime_generation
+        ):
+            self._runtime_prog._destroy_vulkan_ray_resource(handle)
+        return None
+
+    destroy = close
+
+    def __enter__(self):
+        self._validate_lifetime()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+
+def _require_vulkan_ray_runtime(resource_name):
+    program = impl.get_runtime().prog
+    if program is None:
+        raise TaichiRuntimeError(
+            f"{resource_name} requires an initialized Taichi runtime"
+        )
+    if _active_backend() != "vulkan":
+        raise TaichiRuntimeError(
+            f"{resource_name} requires the Vulkan backend; the active backend "
+            f"is {_active_backend()}"
+        )
+    if not program.vulkan_ray_query_available():
+        raise TaichiRuntimeError(
+            f"{resource_name} requires VK_KHR_acceleration_structure and "
+            "VK_KHR_ray_query"
+        )
+    return program
+
+
+def _independent_ray_memory_report(
+    resource, *, provider, geometry_name, storage_name
+):
+    handle_present = resource._handle is not None
+    runtime_valid = handle_present and (
+        impl.get_runtime().prog is resource._runtime_prog
+        and int(impl.runtime_generation()) == resource._runtime_generation
+    )
+    stats = resource._memory_stats
+    components = (
+        HardwareMemoryComponent(
+            geometry_name,
+            int(stats["geometry_input_requested_bytes"]),
+            True,
+            "provider_generation",
+            "provider",
+            resident=runtime_valid,
+        ),
+        HardwareMemoryComponent(
+            storage_name,
+            int(stats["acceleration_structure_requested_bytes"]),
+            True,
+            "provider_generation",
+            "provider",
+            resident=runtime_valid,
+        ),
+        HardwareMemoryComponent(
+            "build_refit_scratch",
+            int(stats["build_scratch_requested_bytes"]),
+            True,
+            "provider_generation",
+            "provider",
+            resident=runtime_valid,
+        ),
+        HardwareMemoryComponent(
+            "pipeline_descriptors_and_driver_state",
+            None,
+            False,
+            "provider_generation",
+            "driver",
+            resident=runtime_valid,
+        ),
+    )
+    return make_memory_report(
+        provider,
+        "vulkan",
+        components,
+        lifecycle_state=(
+            "ready"
+            if runtime_valid
+            else "closed"
+            if not handle_present
+            else "runtime_invalid"
+        ),
+        ownership_scope="resource_generation",
+    )
+
+
 def is_available():
     """Return whether the active runtime supports the complete Vulkan slice."""
 
@@ -460,8 +1183,15 @@ def is_available():
 
 
 __all__ = [
+    "InstanceTLAS",
+    "RayInstance",
+    "TriangleBLAS",
     "TriangleScene",
+    "VulkanBLASBuildRecording",
+    "VulkanBLASRefitRecording",
     "VulkanRayQueryRecording",
     "VulkanRayRefitRecording",
+    "VulkanTLASBuildRecording",
+    "VulkanTLASRefitRecording",
     "is_available",
 ]
