@@ -223,6 +223,28 @@ native library handle，关闭 handle 后返回不可变 snapshot，不改变 en
 观察已缓存 loader/capability 状态，并报告 `enabled/eligible`；该观察本身不会调用
 `load_*`。静态 operation/provider descriptor 与 resolved report 都是不可变值。
 
+### 内存可观测性边界
+
+会在生命周期内保留设备状态的显式 provider 资源提供 `memory_report()`。Hardware Memory
+schema v1 逐 component 报告 requested bytes、ownership、lifetime、resident、reuse 与
+exactness。Vulkan ray scene 在请求边界精确报告 geometry input、BLAS/TLAS storage 和可复用
+build/refit scratch；stored cuSPARSE operation 报告可知的 matrix/workspace storage，而在共享
+pattern 无法安全求和或 descriptor 字节不可知时保持 opaque。cuFFT automatic workspace、
+Vulkan pipeline/descriptor storage 与隐藏 raster attachment 因 basic loaded ABI 无法给出可信
+字节数而继续明确为未知。
+
+`Graph.execution_stats()` schema v7 对它持有的 provider generation 去重，并与 Graph-owned
+persistent storage 分开报告。requested bytes 不能被解释成 raw VRAM：allocator rounding、
+driver cache、code object 与厂商 library pool 由 runtime memory statistics 负责，或保持明确未知。
+该可观测性不新增 SDK、toolkit、import-time library 或 wheel variant。
+
+本轮发现的连续 Vulkan reinitialize 失败是生命周期缺陷，不是 OOM：已完成的 timestamp
+ticket 仍持有 `VkQueryPool`，导致 reset 在仍有 live child object 时销毁 device。现在
+completion 会先冻结 host 可读的 timing snapshot，并在 device teardown 前释放 backend
+timing ownership。四轮 timestamp-ticket/reset/reinitialize stress 会保留一个无关 allocation、
+检查 pending completion lease 为零、在 reset 后读取缓存 report，最后重新 materialize
+Vulkan device。
+
 首个已资格化的 Matrix 切片刻意保持狭窄：
 
 ```python
@@ -597,10 +619,14 @@ SpMV、Vulkan BLAS refit 相对 rebuild，以及 Vulkan exact texel fetch 相对
 load。每个 case 同时验证数值结果和 `ti.hardware.report()` 解析出的真实 route；缺失的 D1
 library 被记为 `skipped`，不会改变官方 wheel 安装合同。
 
-性能声明采用 fail-closed 规则：
+性能声明采用 fail-closed 规则。资格 artifact schema v2：
 
-- parent 为每个 case 启动独立 AB 与 BA 进程；cold timing 单独记录，不进入 warm speedup；
-- 每个计时 block 以 `ti.sync()` 等待设备完成，并记录原始 completion-latency sample；
+- 默认每个 order 启动两个 fresh worker，并按 AB/BA/BA/AB 排列，避免 order 与机器经过时间
+  永久完全相关；
+- cold timing 单独记录，不进入 warm speedup；每个 variant 会校准到至少 50 ms 的同步工作
+  （重复次数有上限），达不到下限时直接不具备性能声明资格；
+- 每个计时 block 以 `ti.sync()` 等待设备完成，并记录原始 completion-latency sample、
+  校准后的重复次数与实测 block duration；
 - hardware 与 baseline 各自必须满足 CV 不超过 10%，AB/BA median drift 不超过 10%；
 - 配对 speedup 的第 5 百分位必须大于 1，才设置
   `performance_claim_eligible=true`；
@@ -623,6 +649,23 @@ python tests/python/hardware_acceleration_qualification.py \
 
 本地 source build 可额外设置 `TAICHI_FORGE_LOCAL_PYD` 与
 `TAICHI_FORGE_RUNTIME_DIR`；两个变量都会原样传给 fresh worker。
+
+2026-08-23 的 RTX 5090 v2 诊断运行得到以下有界证据。数值是单 operation 的同步 median，
+不是端到端 solver 声明：
+
+| Case | Median speedup | 配对 p05 | v2 判断 | 物理解读 |
+| --- | ---: | ---: | --- | --- |
+| cuFFT C2C | 36.811x | 35.832x | 合格 | 当前 workload 的 spectral-transform 机制很强，但仍是显式 plan。 |
+| cuBLAS GEMM | 1.592x | 1.545x | 全量运行不稳定；确认运行以 1.577x 稳定 | 保持手动/按 workload 选择；一次稳定复跑不能消除跨运行不稳定。 |
+| Driver/PTX MMA | 2.399x | 2.351x | 合格 | 在精确 f32 合同下适合显式 tiled small-dense batch。 |
+| cuSPARSE SpMV | 2.031x | 1.972x | 不稳定；确认运行仍不稳定 | median 有机制收益，但当前主机持续存在 process/order effect，不作可移植性能声明。 |
+| Vulkan BLAS refit + ray query | 9.397x | 9.222x | 合格 | 固定 topology 的动态 ray-mesh query 价值高；不能推广到通用 contact/broad phase。 |
+| Vulkan exact texel fetch | 0.219x | 0.210x | 稳定负结果 | 不自动替换 storage-buffer load；texture 只保留显式 filtering/addressing/rendering 语义。 |
+
+全量运行与 GEMM/SpMV 确认运行的 artifact 在 `.qualification_tmp/` 中保留 raw sample、
+calibration block、route、correctness、binary hash 与 dirty-source provenance。该目录是本地
+证据 cache，不是 release asset；正式 release 声明需要 clean matching build 复跑，且至少
+两次独立运行都合格。
 
 ## Cache 边界
 
@@ -655,16 +698,16 @@ pipeline 也绝不能在不兼容 runtime 中复用。
 
 实施顺序综合考虑仿真可用性、可能收益、Forge 当前基础和资格验证成本。
 
-| 优先级 | 操作 | 物理/渲染用途 | 部署与 scope |
-| --- | --- | --- | --- |
-| 1 | Vulkan RasterPass | 替换仿真可视化的软件光栅化。 | D0，显式 native executable。 |
-| 2 | cuBLAS/cuSPARSE/cuSOLVER provider 统一 | 线性求解、稀疏算子、预条件器；已有 lazy loader，实施成本较低。 | D1，领域算法 operation。 |
-| 3 | Vulkan AS build/refit 与 RayQuery | Ray rendering、visibility、picking 和真实 ray-mesh 查询；不覆盖通用 overlap/contact。 | D0，resource + native command 或 typed shader operation。 |
-| 4 | Texture/Sampler 资格化 | Grid、SDF、volume、material 与 rendering lookup。 | D0，显式 kernel 语义。 |
-| 5 | Matrix MMA | 在显式数值合同下服务 FEM 局部矩阵、小块批处理、dense batch 与 block preconditioner。 | D0；当前切片是显式 native command，typed kernel 语义仍为规划项。 |
-| 6 | cuFFT | Spectral method、convolution，以及部分 Poisson/fluid formulation。 | D1，external-library plan/execution。 |
-| 7 | OptiX | 在已资格化 NVIDIA RTX 设备上有高 ray-rendering 价值，但设备与 ABI 范围更窄。 | D1，vendor hardware executable。 |
-| 8 | Async tile 与 mesh-shader specialization | 在公开语义稳定后优化 dense tiled kernel 与 dynamic rendering geometry。 | D0，透明 provider 实现。 |
+| Physics ROI | 操作 | 调用方式与 kernel 边界 | 当前证据与决策 |
+| ---: | --- | --- | --- |
+| 1 | 稀疏/稠密线性代数与 solver provider | `SparseMatrix @ ndarray` 可在领域 API 内选择 cuSPARSE；显式 cuSPARSE/cuBLAS recording 是 Python/Graph command，不能从 kernel 调用。 | solver 复用价值最高。当前主机的 SpMV 性能仍不合格；保留 workload cost gate 与 solver-level qualification。 |
+| 2 | Sort、scan、reduce、compaction 与 async tile movement | Forge 自有 primitive 和已 admission 的 compiler lowering 可以自动；不公开 TMA/CUB 调用。只有稳定 primitive 语义可在 kernel 使用。 | 广泛服务 broadphase、active set、neighbor list、reduction 与 assembly；继续使用可移植 D0 实现。 |
+| 3 | Matrix MMA 与批量小稠密块 | 当前 CUDA MMA 是显式 Python/Graph native command，不能从 kernel 调用；未来 typed tile intrinsic 必须按 backend 资格化 shape。 | 2.399x 机制结果合格；在显式数值合同下对 FEM local block 和 block preconditioner 潜力高。 |
+| 4 | AS refit 与 RayQuery | 显式 `TriangleScene` resource + Python/Graph executable；当前没有 inline kernel query。 | 固定 topology 动态 ray-mesh query 为 9.397x 且合格；不得据此推导 overlap/contact 支持。 |
+| 5 | FFT plan | 显式 cuFFT plan/execute，scope 为 Python/Graph；绝不自动替换既有 solver。 | transform 结果 36.811x 且合格；只适用于本身符合合同的 spectral/convolution formulation。 |
+| 6 | Texture/Sampler 语义 | 显式 texture argument 与 kernel `fetch`/`sample_lod`；compiler lowering 用户请求的语义，但绝不改写普通 field/ndarray load。 | exact fetch 稳定只有 0.219x；用于 filtering、addressing、SDF/volume 语义，不作为通用 load 加速。 |
+| 7 | Rasterization | kernel 外的显式 native executable。 | 可视化 ROI 很高，但不加速 solver step；放在 rendering track，不用于排序 physics speedup。 |
+| 8 | OptiX、mesh shader、sparse MMA、DPX 与公开 TMA | 只作为可选 user-built provider 或内部 specialization。 | device/ABI 范围窄或语义链未闭合；不扩大官方 wheel matrix，也暂不公开宣称。 |
 
 Sparse MMA、DPX、公开 TMA 调用和所有 D3 provider 继续延期。
 

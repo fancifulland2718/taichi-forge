@@ -263,6 +263,34 @@ has already loaded one of these libraries through its real lazy loader, a later
 passive `report()` observes the cached loader/capability state and reports it as
 `enabled/eligible`; observation itself never calls `load_*`.
 
+### Memory observability boundary
+
+Explicit provider resources expose `memory_report()` when their lifetime can
+retain device state. Hardware Memory schema v1 reports requested bytes by
+component, ownership, lifetime, residency, reuse, and exactness. Vulkan ray
+scenes report geometry inputs, BLAS/TLAS storage, and reusable build/refit
+scratch exactly at the request boundary. Stored cuSPARSE operations report
+known matrix/workspace storage while preserving shared-pattern and descriptor
+bytes as opaque where summation would be unsafe. cuFFT automatic workspace,
+Vulkan pipeline/descriptor storage, and hidden raster attachments remain
+unknown because the basic loaded ABI does not expose a trustworthy byte count.
+
+`Graph.execution_stats()` schema v7 deduplicates the provider generations it
+retains and reports them separately from Graph-owned persistent storage. It
+does not infer raw VRAM consumption from requested bytes: allocator rounding,
+driver caches, code objects, and vendor-library pools belong to runtime memory
+statistics or remain explicitly unknown. This observability adds no SDK,
+toolkit, import-time library, or wheel variant.
+
+The consecutive Vulkan reinitialization failure found during this work was a
+lifetime defect, not an out-of-memory condition: a completed timestamp ticket
+still retained its `VkQueryPool`, so reset attempted to destroy a device with a
+live child object. Completion now freezes host-readable timing snapshots and
+releases backend timing ownership before device teardown. A four-cycle
+timestamp-ticket/reset/reinitialize stress keeps an unrelated allocation live,
+checks zero pending completion leases, reads the cached report after reset,
+and finally materializes a new Vulkan device.
+
 The first qualified matrix slice is deliberately narrow:
 
 ```python
@@ -698,12 +726,16 @@ load. Every case checks both numerical output and the real route resolved by
 `ti.hardware.report()`. A missing D1 library is recorded as `skipped` and does
 not change the official-wheel installation contract.
 
-Performance claims use fail-closed rules:
+Performance claims use fail-closed rules. Qualification artifact schema v2:
 
-- the parent launches independent AB and BA processes for every case; cold
-  timings are recorded separately and excluded from warm speedup;
-- every timed block ends with `ti.sync()` and records raw device-completion
-  latency samples;
+- launches two fresh workers per order by default in AB/BA/BA/AB order, so
+  order and elapsed-machine-time effects do not stay perfectly correlated;
+- records cold timings separately, excludes them from warm speedup, and
+  calibrates each variant to at least 50 ms of synchronized work (up to a
+  bounded repetition cap); a case that cannot reach the floor is ineligible;
+- ends every timed block with `ti.sync()` and records raw device-completion
+  latency samples plus the calibrated repetition count and observed block
+  duration;
 - hardware and baseline variants must each have at most 10% CV and at most
   10% AB/BA median drift;
 - the fifth percentile of paired speedups must exceed one before
@@ -734,6 +766,25 @@ python tests/python/hardware_acceleration_qualification.py \
 A local source build may additionally set `TAICHI_FORGE_LOCAL_PYD` and
 `TAICHI_FORGE_RUNTIME_DIR`; both variables are propagated unchanged to fresh
 workers.
+
+The 2026-08-23 RTX 5090 diagnostic run with the v2 policy produced the
+following bounded evidence. These are per-operation synchronized medians, not
+end-to-end solver claims:
+
+| Case | Median speedup | Paired p05 | v2 decision | Physics interpretation |
+| --- | ---: | ---: | --- | --- |
+| cuFFT C2C | 36.811x | 35.832x | eligible | Strong spectral-transform mechanism on this workload; still explicit and plan-based. |
+| cuBLAS GEMM | 1.592x | 1.545x | unstable in the full run; one confirmation run was stable at 1.577x | Keep manual/workload-gated; one good rerun does not erase cross-run instability. |
+| Driver/PTX MMA | 2.399x | 2.351x | eligible | Useful for explicitly tiled small dense batches under the exact f32 contract. |
+| cuSPARSE SpMV | 2.031x | 1.972x | unstable; confirmation also unstable | Median mechanism gain exists, but the current host shows persistent process/order effects. Do not make a portable speed claim. |
+| Vulkan BLAS refit + ray query | 9.397x | 9.222x | eligible | High value for dynamic ray-mesh queries with fixed topology; not evidence for general contact or broad phase. |
+| Vulkan exact texel fetch | 0.219x | 0.210x | stable negative result | Do not replace storage-buffer loads automatically. Texture remains an explicit semantic for filtering/addressing and rendering use. |
+
+The full-run artifact and the GEMM/SpMV confirmation artifact retain raw
+samples, calibration blocks, routes, correctness, binary hashes, and dirty
+source provenance under `.qualification_tmp/`. Because that directory is a
+local evidence cache rather than a release asset, release claims require a
+clean matching-build rerun and at least two independently eligible runs.
 
 ## Cache boundaries
 
@@ -768,16 +819,16 @@ incompatible runtime.
 The implementation order weights simulation usefulness, attainable speedup,
 current Forge foundations, and qualification cost.
 
-| Priority | Operation | Physics and rendering use | Deployment and scope |
-| --- | --- | --- | --- |
-| 1 | Vulkan raster pass | Replaces software rasterization for simulation visualization. | D0, explicit native executable. |
-| 2 | cuBLAS/cuSPARSE/cuSOLVER provider normalization | Linear solves, sparse operators, and preconditioners; existing lazy loaders reduce implementation cost. | D1, domain algorithm operation. |
-| 3 | Vulkan AS build/refit and ray query | Ray rendering, visibility, picking, and genuine ray-mesh queries; not general overlap or contact. | D0, resource plus native command or typed shader operation. |
-| 4 | Texture and sampler qualification | Grid, SDF, volume, material, and rendering lookup. | D0, explicit kernel semantic. |
-| 5 | Matrix MMA | Batched local FEM matrices, small blocks, dense batches, and block preconditioners under explicit numeric contracts. | D0; current slice is an explicit native command, with typed kernel semantics planned. |
-| 6 | cuFFT | Spectral methods, convolution, and selected Poisson or fluid formulations. | D1, external-library plan and execution. |
-| 7 | OptiX | High ray-rendering value on qualified NVIDIA RTX devices, with a narrower device and ABI range. | D1, vendor hardware executable. |
-| 8 | Async tile and mesh-shader specialization | Dense tiled kernels and dynamic rendering geometry after public semantics are stable. | D0, transparent provider implementation. |
+| Physics ROI | Operation | Invocation and kernel boundary | Current evidence and decision |
+| ---: | --- | --- | --- |
+| 1 | Sparse/dense linear algebra and solver providers | `SparseMatrix @ ndarray` may select cuSPARSE inside the domain API; explicit cuSPARSE/cuBLAS recordings are Python/Graph commands and cannot be called inside kernels. | Highest solver reuse. SpMV performance remains unqualified on the current host; keep workload-specific cost gates and solver-level qualification. |
+| 2 | Sort, scan, reduce, compaction, and async tile movement | Forge-owned primitives and admitted compiler lowerings may be automatic; public TMA/CUB calls are not exposed. Kernel-callable only through stable primitive semantics. | Broadphase, active-set, neighbor-list, reduction, and assembly value across solvers; retain portable D0 implementations. |
+| 3 | Matrix MMA and batched small dense blocks | Current CUDA MMA is an explicit Python/Graph native command, not kernel-callable. A future typed tile intrinsic requires backend-specific shape qualification. | 2.399x eligible mechanism result; high FEM local-block and block-preconditioner potential under explicit numeric contracts. |
+| 4 | AS refit and ray query | Explicit `TriangleScene` resource plus Python/Graph executable; no current inline kernel query. | 9.397x eligible for fixed-topology dynamic ray-mesh queries. Never infer overlap/contact support from this result. |
+| 5 | FFT plans | Explicit cuFFT plan/execute at Python/Graph scope; never substituted into an existing solver automatically. | 36.811x eligible transform result; valuable only for spectral/convolution formulations that already match the contract. |
+| 6 | Texture/sampler semantics | Explicit texture argument and kernel `fetch`/`sample_lod`; compiler lowers the requested semantic, but never rewrites ordinary field/ndarray loads. | Exact fetch was a stable 0.219x negative result. Keep for filtering, addressing, SDF/volume semantics, not generic load acceleration. |
+| 7 | Rasterization | Explicit native executable outside kernels. | Very high visualization ROI but no solver-step acceleration; keep on the rendering track rather than using it to rank physics speedups. |
+| 8 | OptiX, mesh shaders, sparse MMA, DPX, and public TMA | Optional user-built provider or internal specialization only. | Narrow device/ABI scope or incomplete semantic chain; no official-wheel matrix expansion and no public claim yet. |
 
 Sparse MMA, DPX, public TMA calls, and any D3 provider remain deferred.
 
