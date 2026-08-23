@@ -4,12 +4,12 @@ from dataclasses import dataclass
 
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    validate_exact_bindings,
+    validate_runtime_generation,
 )
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -187,20 +187,7 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
         object.__setattr__(self, "_runtime_generation", int(impl.runtime_generation()))
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan image bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan image")
         self.validate_graph_lifetime()
         for name, kind in self._binding_kinds:
             expected = Texture if kind == "texture" else Ndarray
@@ -211,17 +198,18 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
         return self._execute(bindings)
 
     def validate_graph_lifetime(self):
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "Vulkan image recording belongs to a previous Taichi runtime "
-                "generation"
-            )
+        validate_runtime_generation(
+            self,
+            "Vulkan image recording belongs to a previous Taichi runtime "
+            "generation",
+        )
 
     def _as_graph_native_node(self):
-        return _VulkanImageTransferNode(self)
+        return native_recording_node(
+            self,
+            runtime_bindings=lambda item: item._binding_kinds,
+            debug_info=lambda item: {"kind": item.debug_kind},
+        )
 
 
 class VulkanImageCopyRecording(_VulkanImageTransferRecording):
@@ -481,41 +469,6 @@ class VulkanImageBlitRecording(_VulkanImageTransferRecording):
     @property
     def debug_kind(self):
         return "vulkan_image_blit"
-
-
-class _VulkanImageTransferExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, kind) for name, kind in self._recording._binding_kinds
-        )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {"kind": self._recording.debug_kind}
-
-
-class _VulkanImageTransferNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanImageTransferExecutable(self._recording)
 
 
 def copy(destination, source, *, source_region=None, destination_region=None):

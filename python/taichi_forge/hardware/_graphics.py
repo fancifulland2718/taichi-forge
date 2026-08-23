@@ -9,15 +9,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
-)
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    runtime_generation_matches,
+    validate_exact_bindings,
+    validate_runtime_generation,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
@@ -355,20 +356,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         return tuple(effects)
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan graphics bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan graphics")
         self.validate_graph_lifetime()
         color = bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
@@ -425,52 +413,24 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         return self.pipeline.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanGraphicsDrawNode(self)
-
-
-class _VulkanGraphicsDrawExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        texture_names = {self._recording.color, self._recording.depth}
-        return tuple(
-            RuntimeBinding(name, "texture" if name in texture_names else "ndarray")
-            for name in self._recording.binding_names
+        return native_recording_node(
+            self,
+            runtime_bindings=lambda item: tuple(
+                (
+                    name,
+                    "texture"
+                    if name in {item.color, item.depth}
+                    else "ndarray",
+                )
+                for name in item.binding_names
+            ),
+            lifetime_leases=lambda item: (item.pipeline,),
+            debug_info=lambda item: {
+                "kind": "vulkan_graphics_draw",
+                "indexed": item.index_buffer is not None,
+                "vertex_binding_count": len(item.vertex_buffers),
+            },
         )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return (self._recording.pipeline,)
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "vulkan_graphics_draw",
-            "indexed": self._recording.index_buffer is not None,
-            "vertex_binding_count": len(self._recording.vertex_buffers),
-        }
-
-
-class _VulkanGraphicsDrawNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanGraphicsDrawExecutable(self._recording)
 
 
 def _merge_graphics_access(left, right):
@@ -617,20 +577,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         return self._resource_effects
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan graphics pass bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan graphics pass")
         self.validate_graph_lifetime()
         color = bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
@@ -730,57 +677,29 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         )
 
     def _as_graph_native_node(self):
-        return _VulkanGraphicsPassNode(self)
-
-
-class _VulkanGraphicsPassExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        texture_names = {self._recording.color, self._recording.depth}
-        return tuple(
-            RuntimeBinding(name, "texture" if name in texture_names else "ndarray")
-            for name in self._recording.binding_names
-        )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return self._recording.pipelines
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "vulkan_graphics_pass",
-            "draw_count": len(self._recording.draws),
-            "pipeline_count": len(self._recording.pipelines),
-            "indexed_draw_count": sum(
-                item.index_buffer is not None for item in self._recording.draws
+        return native_recording_node(
+            self,
+            runtime_bindings=lambda item: tuple(
+                (
+                    name,
+                    "texture"
+                    if name in {item.color, item.depth}
+                    else "ndarray",
+                )
+                for name in item.binding_names
             ),
-            "color_load_op": self._recording.color_load_op,
-            "depth_load_op": self._recording.depth_load_op,
-        }
-
-
-class _VulkanGraphicsPassNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanGraphicsPassExecutable(self._recording)
+            lifetime_leases=lambda item: item.pipelines,
+            debug_info=lambda item: {
+                "kind": "vulkan_graphics_pass",
+                "draw_count": len(item.draws),
+                "pipeline_count": len(item.pipelines),
+                "indexed_draw_count": sum(
+                    draw.index_buffer is not None for draw in item.draws
+                ),
+                "color_load_op": item.color_load_op,
+                "depth_load_op": item.depth_load_op,
+            },
+        )
 
 
 class VulkanGraphicsPipeline:
@@ -950,23 +869,17 @@ class VulkanGraphicsPipeline:
     def _validate_lifetime(self):
         if self._handle is None:
             raise TaichiRuntimeError("VulkanGraphicsPipeline has been closed")
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "VulkanGraphicsPipeline belongs to a previous Taichi runtime generation"
-            )
+        validate_runtime_generation(
+            self,
+            "VulkanGraphicsPipeline belongs to a previous Taichi runtime generation",
+        )
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
 
     def memory_report(self):
         handle_present = self._handle is not None
-        runtime_valid = handle_present and (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        )
+        runtime_valid = handle_present and runtime_generation_matches(self)
         return make_memory_report(
             "vulkan_graphics_pipeline",
             "vulkan",
@@ -996,10 +909,7 @@ class VulkanGraphicsPipeline:
             return None
         handle = self._handle
         self._handle = None
-        if (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        ):
+        if runtime_generation_matches(self):
             self._runtime_prog._destroy_vulkan_graphics_pipeline(handle)
         return None
 

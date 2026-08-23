@@ -4,15 +4,17 @@ from dataclasses import dataclass
 import math
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
-)
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    runtime_generation_matches,
+    static_resource_effect,
+    validate_exact_bindings,
+    validate_runtime_generation,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -87,26 +89,11 @@ class VulkanRayQueryRecording(BackendCommandRecording):
         return (
             ResourceEffect(self.rays, GraphAccess.READ),
             ResourceEffect(self.hits, GraphAccess.WRITE),
-            ResourceEffect(
-                self.scene._effect_name, GraphAccess.READ, runtime_bound=False
-            ),
+            static_resource_effect(self.scene._effect_name, GraphAccess.READ),
         )
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan ray query bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan ray query")
         self.validate_graph_lifetime()
         rays = bindings[self.rays]
         hits = bindings[self.hits]
@@ -127,50 +114,15 @@ class VulkanRayQueryRecording(BackendCommandRecording):
         return self.scene.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanRayQueryNode(self)
-
-
-class _VulkanRayQueryExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray") for name in self._recording.binding_names
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item.scene,),
+            debug_info=lambda item: {
+                "kind": "vulkan_triangle_ray_query",
+                "ray_count": item.ray_count,
+                "scene_kind": item.scene._scene_kind,
+            },
         )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return (self._recording.scene,)
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "vulkan_triangle_ray_query",
-            "ray_count": self._recording.ray_count,
-            "scene_kind": self._recording.scene._scene_kind,
-        }
-
-
-class _VulkanRayQueryNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanRayQueryExecutable(self._recording)
 
 
 @instrument_hardware_recording("ray.as_refit.vulkan")
@@ -202,26 +154,11 @@ class VulkanRayRefitRecording(BackendCommandRecording):
     def resource_effects(self):
         return (
             ResourceEffect(self.vertices, GraphAccess.READ),
-            ResourceEffect(
-                self.scene._effect_name, GraphAccess.WRITE, runtime_bound=False
-            ),
+            static_resource_effect(self.scene._effect_name, GraphAccess.WRITE),
         )
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan ray refit bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan ray refit")
         self.validate_graph_lifetime()
         vertices = bindings[self.vertices]
         if _item_count(vertices, 3, f32, self.vertices) != self.scene.vertex_count:
@@ -237,48 +174,15 @@ class VulkanRayRefitRecording(BackendCommandRecording):
         return self.scene.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanRayRefitNode(self)
-
-
-class _VulkanRayRefitExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return (RuntimeBinding(self._recording.vertices, "ndarray"),)
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return (self._recording.scene,)
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "vulkan_triangle_ray_refit",
-            "vertex_count": self._recording.scene.vertex_count,
-            "scene_kind": "updatable_triangle_blas_tlas",
-        }
-
-
-class _VulkanRayRefitNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanRayRefitExecutable(self._recording)
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item.scene,),
+            debug_info=lambda item: {
+                "kind": "vulkan_triangle_ray_refit",
+                "vertex_count": item.scene.vertex_count,
+                "scene_kind": "updatable_triangle_blas_tlas",
+            },
+        )
 
 
 class TriangleScene:
@@ -371,13 +275,10 @@ class TriangleScene:
     def _validate_lifetime(self):
         if self._handle is None:
             raise TaichiRuntimeError("TriangleScene has been closed")
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "TriangleScene belongs to a previous Taichi runtime generation"
-            )
+        validate_runtime_generation(
+            self,
+            "TriangleScene belongs to a previous Taichi runtime generation",
+        )
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
@@ -386,10 +287,7 @@ class TriangleScene:
         """Return exact requested buffers and explicitly opaque driver state."""
 
         handle_present = self._handle is not None
-        runtime_valid = handle_present and (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        )
+        runtime_valid = handle_present and runtime_generation_matches(self)
         resident = runtime_valid
         stats = self._memory_stats
         components = (
@@ -448,10 +346,7 @@ class TriangleScene:
             return None
         handle = self._handle
         self._handle = None
-        if (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        ):
+        if runtime_generation_matches(self):
             self._runtime_prog._destroy_vulkan_triangle_ray_scene(handle)
         return None
 
@@ -464,64 +359,6 @@ class TriangleScene:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
         return False
-
-
-class _VulkanRayResourceExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray")
-            for name in self._recording.binding_names
-        )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return self._recording.lifetime_leases
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return self._recording.debug_info
-
-
-class _VulkanRayResourceNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _VulkanRayResourceExecutable(self._recording)
-
-
-def _validate_recording_bindings(recording, bindings, operation):
-    required = frozenset(recording.binding_names)
-    provided = frozenset(bindings)
-    if provided == required:
-        return
-    missing = sorted(required.difference(provided))
-    unexpected = sorted(provided.difference(required))
-    details = []
-    if missing:
-        details.append("missing " + ", ".join(missing))
-    if unexpected:
-        details.append("unexpected " + ", ".join(unexpected))
-    raise TaichiRuntimeError(
-        f"Vulkan {operation} bindings do not match the recording: "
-        + "; ".join(details)
-    )
 
 
 @instrument_hardware_recording("ray.as_build.vulkan")
@@ -558,9 +395,7 @@ class VulkanBLASBuildRecording(BackendCommandRecording):
         return (
             ResourceEffect(self.vertices, GraphAccess.READ),
             ResourceEffect(self.indices, GraphAccess.READ),
-            ResourceEffect(
-                self.blas._effect_name, GraphAccess.WRITE, runtime_bound=False
-            ),
+            static_resource_effect(self.blas._effect_name, GraphAccess.WRITE),
         )
 
     @property
@@ -576,7 +411,7 @@ class VulkanBLASBuildRecording(BackendCommandRecording):
         }
 
     def execute(self, bindings):
-        _validate_recording_bindings(self, bindings, "BLAS build")
+        validate_exact_bindings(self, bindings, "Vulkan BLAS build")
         self.validate_graph_lifetime()
         vertices = bindings[self.vertices]
         indices = bindings[self.indices]
@@ -597,7 +432,11 @@ class VulkanBLASBuildRecording(BackendCommandRecording):
         return self.blas.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanRayResourceNode(self)
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: item.lifetime_leases,
+            debug_info=lambda item: item.debug_info,
+        )
 
 
 @instrument_hardware_recording("ray.as_refit.vulkan")
@@ -627,9 +466,7 @@ class VulkanBLASRefitRecording(BackendCommandRecording):
     def resource_effects(self):
         return (
             ResourceEffect(self.vertices, GraphAccess.READ),
-            ResourceEffect(
-                self.blas._effect_name, GraphAccess.WRITE, runtime_bound=False
-            ),
+            static_resource_effect(self.blas._effect_name, GraphAccess.WRITE),
         )
 
     @property
@@ -644,7 +481,7 @@ class VulkanBLASRefitRecording(BackendCommandRecording):
         }
 
     def execute(self, bindings):
-        _validate_recording_bindings(self, bindings, "BLAS refit")
+        validate_exact_bindings(self, bindings, "Vulkan BLAS refit")
         self.validate_graph_lifetime()
         vertices = bindings[self.vertices]
         if _item_count(vertices, 3, f32, self.vertices) != self.blas.vertex_count:
@@ -660,7 +497,11 @@ class VulkanBLASRefitRecording(BackendCommandRecording):
         return self.blas.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanRayResourceNode(self)
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: item.lifetime_leases,
+            debug_info=lambda item: item.debug_info,
+        )
 
 
 class TriangleBLAS:
@@ -725,13 +566,10 @@ class TriangleBLAS:
         )
 
     def _validate_runtime_identity(self):
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "TriangleBLAS belongs to a previous Taichi runtime generation"
-            )
+        validate_runtime_generation(
+            self,
+            "TriangleBLAS belongs to a previous Taichi runtime generation",
+        )
 
     def _validate_lifetime(self):
         if self._handle is None:
@@ -757,10 +595,7 @@ class TriangleBLAS:
             return None
         handle = self._handle
         self._handle = None
-        if (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        ):
+        if runtime_generation_matches(self):
             self._runtime_prog._destroy_vulkan_ray_resource(handle)
         return None
 
@@ -868,17 +703,11 @@ class _VulkanTLASRecording(BackendCommandRecording):
     @property
     def resource_effects(self):
         effects = [
-            ResourceEffect(
-                instance.blas._effect_name,
-                GraphAccess.READ,
-                runtime_bound=False,
-            )
+            static_resource_effect(instance.blas._effect_name, GraphAccess.READ)
             for instance in self.instances
         ]
         effects.append(
-            ResourceEffect(
-                self.tlas._effect_name, GraphAccess.WRITE, runtime_bound=False
-            )
+            static_resource_effect(self.tlas._effect_name, GraphAccess.WRITE)
         )
         return tuple(effects)
 
@@ -899,7 +728,7 @@ class _VulkanTLASRecording(BackendCommandRecording):
         }
 
     def execute(self, bindings):
-        _validate_recording_bindings(self, bindings, "TLAS build")
+        validate_exact_bindings(self, bindings, "Vulkan TLAS build")
         self.validate_graph_lifetime()
         self.tlas._execute_build(self.instances, update=self.update)
 
@@ -911,7 +740,11 @@ class _VulkanTLASRecording(BackendCommandRecording):
         return self.tlas.memory_report()
 
     def _as_graph_native_node(self):
-        return _VulkanRayResourceNode(self)
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: item.lifetime_leases,
+            debug_info=lambda item: item.debug_info,
+        )
 
 
 @instrument_hardware_recording("ray.as_build.vulkan")
@@ -1049,13 +882,10 @@ class InstanceTLAS:
     def _validate_lifetime(self):
         if self._handle is None:
             raise TaichiRuntimeError("InstanceTLAS has been closed")
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "InstanceTLAS belongs to a previous Taichi runtime generation"
-            )
+        validate_runtime_generation(
+            self,
+            "InstanceTLAS belongs to a previous Taichi runtime generation",
+        )
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
@@ -1076,10 +906,7 @@ class InstanceTLAS:
             return None
         handle = self._handle
         self._handle = None
-        if (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        ):
+        if runtime_generation_matches(self):
             self._runtime_prog._destroy_vulkan_ray_resource(handle)
         return None
 
@@ -1117,10 +944,7 @@ def _independent_ray_memory_report(
     resource, *, provider, geometry_name, storage_name
 ):
     handle_present = resource._handle is not None
-    runtime_valid = handle_present and (
-        impl.get_runtime().prog is resource._runtime_prog
-        and int(impl.runtime_generation()) == resource._runtime_generation
-    )
+    runtime_valid = handle_present and runtime_generation_matches(resource)
     stats = resource._memory_stats
     components = (
         HardwareMemoryComponent(

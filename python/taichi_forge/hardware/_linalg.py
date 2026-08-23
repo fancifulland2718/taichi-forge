@@ -4,14 +4,13 @@ import math
 from numbers import Real
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
-)
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    validate_exact_bindings,
+)
 from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
     operation_executed,
@@ -122,20 +121,7 @@ class CublasGemmRecording(BackendCommandRecording):
         return value.arr
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "CUDA cuBLAS bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "CUDA cuBLAS")
         if _active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA cuBLAS GEMM requires the CUDA backend; the active "
@@ -172,7 +158,15 @@ class CublasGemmRecording(BackendCommandRecording):
         )
 
     def _as_graph_native_node(self):
-        return _CublasGemmNode(self)
+        return native_recording_node(
+            self,
+            debug_info=lambda item: {
+                "kind": "cuda_cublas_gemm_f32",
+                "shape": (item.rows, item.columns, item.inner),
+                "alpha": item.alpha,
+                "beta": item.beta,
+            },
+        )
 
     def memory_report(self):
         """cuBLAS state is runtime-global and opaque to the basic ABI slice."""
@@ -192,51 +186,6 @@ class CublasGemmRecording(BackendCommandRecording):
             ),
             ownership_scope="runtime_global",
         )
-
-
-class _CublasGemmExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray")
-            for name in self._recording.binding_names
-        )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "cuda_cublas_gemm_f32",
-            "shape": (
-                self._recording.rows,
-                self._recording.columns,
-                self._recording.inner,
-            ),
-            "alpha": self._recording.alpha,
-            "beta": self._recording.beta,
-        }
-
-
-class _CublasGemmNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _CublasGemmExecutable(self._recording)
 
 
 @instrument_hardware_recording("linalg.spmv.cusparse_explicit")
@@ -329,20 +278,7 @@ class CusparseSpmvRecording(BackendCommandRecording):
         return value.arr
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "CUDA cuSPARSE bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "CUDA cuSPARSE")
         if _active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA cuSPARSE SpMV requires the CUDA backend; the active "
@@ -443,52 +379,19 @@ class CusparseSpmvRecording(BackendCommandRecording):
         return ("cusparse_spmv_f32", id(self.matrix))
 
     def _as_graph_native_node(self):
-        return _CusparseSpmvNode(self)
+        def debug_info(item):
+            contract = item.matrix._get_format_contract()  # pylint: disable=W0212
+            return {
+                "kind": "cuda_cusparse_spmv_f32",
+                "shape": item.matrix.shape,
+                "storage_format": contract["identity"]["storage_format"],
+            }
 
-
-class _CusparseSpmvExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray")
-            for name in self._recording.binding_names
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item,),
+            debug_info=debug_info,
         )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return (self._recording,)
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        contract = self._recording.matrix._get_format_contract()  # pylint: disable=W0212
-        return {
-            "kind": "cuda_cusparse_spmv_f32",
-            "shape": self._recording.matrix.shape,
-            "storage_format": contract["identity"]["storage_format"],
-        }
-
-
-class _CusparseSpmvNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _CusparseSpmvExecutable(self._recording)
 
 
 def gemm_f32(a, b, output, *, alpha=1.0, beta=0.0):

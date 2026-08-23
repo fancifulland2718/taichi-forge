@@ -11,6 +11,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._native_adapter import validate_exact_bindings
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
@@ -117,20 +118,7 @@ class VulkanRasterPassRecording(BackendCommandRecording):
 
     def execute(self, bindings=None):
         bindings = self._fixed_bindings if bindings is None else bindings
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "Vulkan raster bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "Vulkan raster")
         self.validate_graph_lifetime()
         return self._owner._execute_recording(
             self._draws,

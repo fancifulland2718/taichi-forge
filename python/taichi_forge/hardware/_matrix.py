@@ -1,12 +1,11 @@
 """CUDA Driver PTX matrix-multiply-accumulate provider."""
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    validate_exact_bindings,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge._hardware_telemetry import (
@@ -95,20 +94,7 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
         return value.arr
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "CUDA matrix MMA bindings do not match the recording: "
-                + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "CUDA matrix MMA")
         if _active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA matrix MMA requires the CUDA backend; the active "
@@ -125,7 +111,14 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
         program._cuda_matrix_mma_f16_f32(a, b, output, self.batch_count)
 
     def _as_graph_native_node(self):
-        return _CudaMatrixMmaNode(self)
+        return native_recording_node(
+            self,
+            debug_info=lambda item: {
+                "kind": "cuda_matrix_mma_f16_f32",
+                "batch_count": item.batch_count,
+                "tile": "m16n16k16",
+            },
+        )
 
     def memory_report(self):
         """MMA owns no persistent workspace; driver/JIT state is runtime-opaque."""
@@ -145,45 +138,6 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
             ),
             ownership_scope="runtime_global",
         )
-
-
-class _CudaMatrixMmaExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray") for name in self._recording.binding_names
-        )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": "cuda_matrix_mma_f16_f32",
-            "batch_count": self._recording.batch_count,
-            "tile": "m16n16k16",
-        }
-
-
-class _CudaMatrixMmaNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _CudaMatrixMmaExecutable(self._recording)
 
 
 def mma_f16_f32(a, b, output):

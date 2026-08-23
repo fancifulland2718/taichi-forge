@@ -3,15 +3,16 @@
 from dataclasses import dataclass
 
 from taichi_forge._lib import core as _ti_core
-from taichi_forge.graph._ir import GraphAccess, ResourceEffect, RuntimeBinding
-from taichi_forge.graph._native import (
-    BackendCommandGraphAction,
-    BackendCommandRecording,
-    NativeGraphExecutable,
-    NativeGraphNode,
-)
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
+from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._native_adapter import (
+    native_recording_node,
+    runtime_generation_matches,
+    validate_exact_bindings,
+    validate_runtime_generation,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -183,19 +184,7 @@ class CufftRecording(BackendCommandRecording):
         )
 
     def execute(self, bindings):
-        required = frozenset(self.binding_names)
-        provided = frozenset(bindings)
-        if provided != required:
-            missing = sorted(required.difference(provided))
-            unexpected = sorted(provided.difference(required))
-            details = []
-            if missing:
-                details.append("missing " + ", ".join(missing))
-            if unexpected:
-                details.append("unexpected " + ", ".join(unexpected))
-            raise TaichiRuntimeError(
-                "CUDA cuFFT bindings do not match the recording: " + "; ".join(details)
-            )
+        validate_exact_bindings(self, bindings, "CUDA cuFFT")
         self.validate_graph_lifetime()
         source = self.plan._validate_array(
             bindings[self.input], self.input, self.plan.input_shape
@@ -216,58 +205,20 @@ class CufftRecording(BackendCommandRecording):
         return self.plan.memory_report()
 
     def _as_graph_native_node(self):
-        return _CufftNode(self)
-
-
-class _CufftExecutable(NativeGraphExecutable):
-    def __init__(self, recording):
-        self._recording = recording
-        self._action = BackendCommandGraphAction(recording)
-
-    def run(self, runtime_args):
-        return self._recording.execute(runtime_args)
-
-    @property
-    def runtime_arg_schema(self):
-        return tuple(
-            RuntimeBinding(name, "ndarray") for name in self._recording.binding_names
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item.plan,),
+            debug_info=lambda item: {
+                "kind": f"cuda_cufft_{item.plan.transform}_{item.plan.rank}d",
+                "dimensions": item.plan.dimensions,
+                "batch_count": item.plan.batch_count,
+                "transform": item.plan.transform,
+                "direction": item.direction,
+                "output_scale": item.output_scale,
+                "input_layout": item.plan.input_layout,
+                "output_layout": item.plan.output_layout,
+            },
         )
-
-    @property
-    def resource_effects(self):
-        return self._recording.resource_effects
-
-    @property
-    def lifetime_leases(self):
-        return (self._recording.plan,)
-
-    @property
-    def recordable_action(self):
-        return self._action
-
-    @property
-    def debug_info(self):
-        return {
-            "kind": (
-                f"cuda_cufft_{self._recording.plan.transform}_"
-                f"{self._recording.plan.rank}d"
-            ),
-            "dimensions": self._recording.plan.dimensions,
-            "batch_count": self._recording.plan.batch_count,
-            "transform": self._recording.plan.transform,
-            "direction": self._recording.direction,
-            "output_scale": self._recording.output_scale,
-            "input_layout": self._recording.plan.input_layout,
-            "output_layout": self._recording.plan.output_layout,
-        }
-
-
-class _CufftNode(NativeGraphNode):
-    def __init__(self, recording):
-        self._recording = recording
-
-    def compile(self):
-        return _CufftExecutable(self._recording)
 
 
 class _CufftPlanBase:
@@ -422,13 +373,10 @@ class _CufftPlanBase:
     def _validate_lifetime(self):
         if self._handle is None:
             raise TaichiRuntimeError("CUDA cuFFT plan has been closed")
-        if (
-            impl.get_runtime().prog is not self._runtime_prog
-            or int(impl.runtime_generation()) != self._runtime_generation
-        ):
-            raise TaichiRuntimeError(
-                "CUDA cuFFT plan belongs to a previous Taichi runtime generation"
-            )
+        validate_runtime_generation(
+            self,
+            "CUDA cuFFT plan belongs to a previous Taichi runtime generation",
+        )
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
@@ -437,10 +385,7 @@ class _CufftPlanBase:
         """Report exact workspace bytes without inventing opaque plan bytes."""
 
         handle_present = self._handle is not None
-        runtime_valid = handle_present and (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        )
+        runtime_valid = handle_present and runtime_generation_matches(self)
         workspace_bytes = None
         if runtime_valid:
             workspace_bytes = int(
@@ -496,10 +441,7 @@ class _CufftPlanBase:
             return None
         handle = self._handle
         self._handle = None
-        if (
-            impl.get_runtime().prog is self._runtime_prog
-            and int(impl.runtime_generation()) == self._runtime_generation
-        ):
+        if runtime_generation_matches(self):
             self._runtime_prog._destroy_cuda_cufft_plan(handle)
         return None
 
