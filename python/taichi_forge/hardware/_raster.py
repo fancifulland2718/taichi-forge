@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import (
     BackendCommandPlan,
@@ -14,6 +13,7 @@ from taichi_forge.graph._native import (
 from taichi_forge.hardware._native_adapter import validate_exact_bindings
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -34,12 +34,6 @@ _RESOURCE_ARGUMENTS = {
         "per_vertex_radius",
     ),
 }
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _tuple_of_floats(value, size, name):
     value = tuple(float(component) for component in value)
@@ -217,10 +211,10 @@ class RasterPass:
             raise TaichiRuntimeError(
                 "RasterPass requires an initialized Taichi runtime"
             )
-        if _active_backend() != "vulkan":
+        if active_backend() != "vulkan":
             raise TaichiRuntimeError(
                 "RasterPass requires the Vulkan backend; the active backend is "
-                f"{_active_backend()}"
+                f"{active_backend()}"
             )
 
         from taichi_forge.ui.window import Window

@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
-from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._native_adapter import (
@@ -11,16 +10,11 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _index(value, name, *, minimum=0):
     if isinstance(value, bool) or not isinstance(value, int):
@@ -165,7 +159,7 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 "Vulkan image command requires an initialized Taichi runtime"
             )
-        backend = _active_backend()
+        backend = active_backend()
         if backend != "vulkan":
             raise TaichiRuntimeError(
                 "Vulkan image command requires the Vulkan backend; the active "

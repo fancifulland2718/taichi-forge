@@ -1,6 +1,5 @@
 """CUDA Driver PTX matrix-multiply-accumulate provider."""
 
-from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._native_adapter import (
@@ -8,6 +7,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
     operation_executed,
@@ -16,12 +16,6 @@ from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f16, f32
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _expected_shape(batch_count):
     return (16, 16) if batch_count == 1 else (batch_count, 16, 16)
@@ -95,10 +89,10 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA matrix MMA")
-        if _active_backend() != "cuda":
+        if active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA matrix MMA requires the CUDA backend; the active "
-                f"backend is {_active_backend()}"
+                f"backend is {active_backend()}"
             )
         program = impl.get_runtime().prog
         if program is None or not program.cuda_matrix_mma_f16_f32_available():
@@ -167,7 +161,7 @@ def is_available():
     program = impl.get_runtime().prog
     return bool(
         program is not None
-        and _active_backend() == "cuda"
+        and active_backend() == "cuda"
         and program.cuda_matrix_mma_f16_f32_available()
     )
 

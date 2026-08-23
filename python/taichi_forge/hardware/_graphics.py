@@ -19,6 +19,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
@@ -36,12 +37,6 @@ _ATTACHMENT_LOAD_OPS = frozenset(("clear", "load"))
 _ATTACHMENT_STORE_OPS = frozenset(("store",))
 _SHADER_BUFFER_KINDS = frozenset(("uniform", "storage"))
 _SHADER_BUFFER_ACCESSES = frozenset(("read", "write", "read_write"))
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _u32(value, name, *, positive=False):
     if isinstance(value, bool) or not isinstance(value, int):
@@ -726,10 +721,10 @@ class VulkanGraphicsPipeline:
             raise TaichiRuntimeError(
                 "VulkanGraphicsPipeline requires an initialized Taichi runtime"
             )
-        if _active_backend() != "vulkan":
+        if active_backend() != "vulkan":
             raise TaichiRuntimeError(
                 "VulkanGraphicsPipeline requires the Vulkan backend; the active "
-                f"backend is {_active_backend()}"
+                f"backend is {active_backend()}"
             )
         if not program.vulkan_graphics_pipeline_available():
             raise TaichiRuntimeError(
@@ -930,7 +925,7 @@ def is_available():
     program = impl.get_runtime().prog
     return bool(
         program is not None
-        and _active_backend() == "vulkan"
+        and active_backend() == "vulkan"
         and program.vulkan_graphics_pipeline_available()
     )
 

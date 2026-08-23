@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
@@ -13,6 +12,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -22,12 +22,6 @@ from taichi_forge.types.primitive_types import f32
 _DIRECTIONS = {"forward": -1, "inverse": 1}
 _TRANSFORMS = {"c2c": 0, "r2c": 1, "c2r": 2}
 _NATURAL_DIRECTIONS = {"c2c": "forward", "r2c": "forward", "c2r": "inverse"}
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _positive_int(value, name):
     if (
@@ -263,10 +257,10 @@ class _CufftPlanBase:
             raise TaichiRuntimeError(
                 "CUDA cuFFT plans require an initialized Taichi runtime"
             )
-        if _active_backend() != "cuda":
+        if active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "A CUDA cuFFT plan requires the CUDA backend; the active backend is "
-                f"{_active_backend()}"
+                f"{active_backend()}"
             )
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
@@ -511,7 +505,7 @@ def cache_statistics():
     """Return passive current-runtime plan/cache/workspace counters."""
 
     program = impl.get_runtime().prog
-    if program is None or _active_backend() != "cuda":
+    if program is None or active_backend() != "cuda":
         values = {
             "create_requests": 0,
             "cache_hits": 0,
@@ -530,7 +524,7 @@ def cache_statistics():
 def is_available():
     """Explicitly probe whether a compatible basic cuFFT provider is present."""
 
-    if impl.get_runtime().prog is None or _active_backend() != "cuda":
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
         return False
     from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
 

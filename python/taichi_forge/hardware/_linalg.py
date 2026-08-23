@@ -3,7 +3,6 @@
 import math
 from numbers import Real
 
-from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
@@ -11,6 +10,7 @@ from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     validate_exact_bindings,
 )
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
     operation_executed,
@@ -19,12 +19,6 @@ from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _dimension(value, name):
     if (
@@ -122,10 +116,10 @@ class CublasGemmRecording(BackendCommandRecording):
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuBLAS")
-        if _active_backend() != "cuda":
+        if active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA cuBLAS GEMM requires the CUDA backend; the active "
-                f"backend is {_active_backend()}"
+                f"backend is {active_backend()}"
             )
         program = impl.get_runtime().prog
         if program is None:
@@ -279,10 +273,10 @@ class CusparseSpmvRecording(BackendCommandRecording):
 
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuSPARSE")
-        if _active_backend() != "cuda":
+        if active_backend() != "cuda":
             raise TaichiRuntimeError(
                 "CUDA cuSPARSE SpMV requires the CUDA backend; the active "
-                f"backend is {_active_backend()}"
+                f"backend is {active_backend()}"
             )
         program = impl.get_runtime().prog
         if program is None:
@@ -421,7 +415,7 @@ def spmv_f32(matrix, input, output):
 def cublas_is_available():
     """Explicitly probe whether a compatible cuBLAS provider is present."""
 
-    if impl.get_runtime().prog is None or _active_backend() != "cuda":
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
         return False
     from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
 
@@ -443,7 +437,7 @@ def is_available():
 def cusparse_is_available():
     """Explicitly probe whether a compatible cuSPARSE provider is present."""
 
-    if impl.get_runtime().prog is None or _active_backend() != "cuda":
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
         return False
     from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
 

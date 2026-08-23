@@ -15,16 +15,11 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32, i32
-
-
-def _active_backend():
-    arch = _ti_core.arch_name(impl.current_cfg().arch)
-    return "cpu" if arch in ("x64", "arm64") else arch
-
 
 def _item_count(value, width, dtype, name):
     if not isinstance(value, Ndarray):
@@ -203,10 +198,10 @@ class TriangleScene:
             raise TaichiRuntimeError(
                 "TriangleScene requires an initialized Taichi runtime"
             )
-        if _active_backend() != "vulkan":
+        if active_backend() != "vulkan":
             raise TaichiRuntimeError(
                 "TriangleScene requires the Vulkan backend; the active backend is "
-                f"{_active_backend()}"
+                f"{active_backend()}"
             )
         if not program.vulkan_ray_query_available():
             raise TaichiRuntimeError(
@@ -927,10 +922,10 @@ def _require_vulkan_ray_runtime(resource_name):
         raise TaichiRuntimeError(
             f"{resource_name} requires an initialized Taichi runtime"
         )
-    if _active_backend() != "vulkan":
+    if active_backend() != "vulkan":
         raise TaichiRuntimeError(
             f"{resource_name} requires the Vulkan backend; the active backend "
-            f"is {_active_backend()}"
+            f"is {active_backend()}"
         )
     if not program.vulkan_ray_query_available():
         raise TaichiRuntimeError(
@@ -1001,7 +996,7 @@ def is_available():
     program = impl.get_runtime().prog
     return bool(
         program is not None
-        and _active_backend() == "vulkan"
+        and active_backend() == "vulkan"
         and program.vulkan_ray_query_available()
     )
 
