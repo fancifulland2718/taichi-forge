@@ -396,11 +396,13 @@ user_api[ti.hardware] = [
     "HARDWARE_CAPABILITY_SCHEMA_VERSION",
     "HARDWARE_MEMORY_SCHEMA_VERSION",
     "HARDWARE_ROUTE_LEVELS",
+    "HARDWARE_TELEMETRY_SCHEMA_VERSION",
     "HardwareCapabilityReport",
     "HardwareMemoryComponent",
     "HardwareMemoryReport",
     "HardwareOperationDescriptor",
     "HardwareProviderDescriptor",
+    "HardwareTelemetryReport",
     "IMPLEMENTATION_STATUSES",
     "LIFETIME_POLICIES",
     "LOAD_MODES",
@@ -425,6 +427,7 @@ user_api[ti.hardware] = [
     "ray",
     "report",
     "sampling",
+    "telemetry",
 ]
 user_api[ti.Field] = [
     "copy_from",
