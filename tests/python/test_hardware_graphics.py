@@ -60,6 +60,32 @@ def _depth_triangle_pipeline(*, enabled):
     )
 
 
+def _instanced_triangle_pipeline():
+    vertex_path = (
+        Path(__file__).parent
+        / "assets"
+        / "hardware_graphics_instanced.vert.spv.h"
+    )
+    words = [
+        int(value, 16)
+        for value in re.findall(r"0x[0-9a-fA-F]+", vertex_path.read_text())
+    ]
+    vertex_spirv = struct.pack(f"<{len(words)}I", *words)
+    return ti.hardware.graphics.VulkanGraphicsPipeline(
+        vertex_spirv,
+        _spirv_header("2_triangle.frag.spv.h"),
+        vertex_bindings=(
+            ti.hardware.graphics.VertexBinding(0, 20),
+            ti.hardware.graphics.VertexBinding(1, 8, instance=True),
+        ),
+        vertex_attributes=(
+            ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+            ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 8),
+            ti.hardware.graphics.VertexAttribute(2, 1, ti.Format.rg32f, 0),
+        ),
+    )
+
+
 def _triangle_vertices():
     vertices = ti.ndarray(ti.f32, shape=(15,))
     vertices.from_numpy(
@@ -181,9 +207,21 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
-    graph.run({"target": color, "vertices": vertices})
+    graph_color = ti.Texture(ti.Format.rgba8, (64, 64))
+    pipeline.draw(
+        graph_color,
+        {0: vertices},
+        draw=draw,
+        clear_color=(0.0, 0.0, 1.0, 1.0),
+    )
     ti.sync()
-    assert np.asarray(color.to_image())[32, 32].max() > 32
+    assert np.asarray(graph_color.to_image())[2, 2].max() > 32
+
+    graph.run({"target": graph_color, "vertices": vertices})
+    ti.sync()
+    graph_image = np.asarray(graph_color.to_image())
+    assert graph_image[32, 32].max() > 32
+    assert graph_image[2, 2].max() == 0
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 
     report = pipeline.memory_report()
@@ -274,6 +312,34 @@ def test_vulkan_graphics_indexed_draw_uses_declared_bounds():
                 ti.hardware.graphics.Draw(3, index_bounds=(0, 2)),
                 vertex_buffers={0: "vertices"},
             )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_instanced_draw_uses_all_vertex_bindings():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    with _instanced_triangle_pipeline() as pipeline:
+        vertices = _triangle_vertices()
+        offsets = ti.ndarray(ti.f32, shape=(6,))
+        offsets.from_numpy(
+            np.array([8.0, 8.0, -0.5, 0.0, 0.5, 0.0], dtype=np.float32)
+        )
+        color = ti.Texture(ti.Format.rgba8, (64, 64))
+        pipeline.draw(
+            color,
+            {0: vertices, 1: offsets},
+            draw=ti.hardware.graphics.Draw(
+                3,
+                instance_count=2,
+                first_instance=1,
+            ),
+        )
+        ti.sync()
+        image = np.asarray(color.to_image())
+        assert image[32, 16].max() > 32
+        assert image[32, 48].max() > 32
+        assert image[2, 2].max() == 0
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False, debug=True)

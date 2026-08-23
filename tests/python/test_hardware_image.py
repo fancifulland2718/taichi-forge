@@ -19,11 +19,16 @@ def test_vulkan_image_copy_direct_graph_ordering_and_lifetime():
     output = ti.ndarray(ti.f32, shape=(4, 4))
 
     @ti.kernel
-    def write(texture: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0)):
+    def write(
+        texture: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+        base: ti.f32,
+    ):
         for i, j in ti.ndrange(4, 4):
             texture.store(
                 ti.Vector([i, j]),
-                ti.Vector([i * 10.0 + j, 0.0, 0.0, 0.0]),
+                ti.Vector([base + i * 10.0 + j, 0.0, 0.0, 0.0]),
             )
 
     @ti.kernel
@@ -34,14 +39,14 @@ def test_vulkan_image_copy_direct_graph_ordering_and_lifetime():
         for i, j in ti.ndrange(4, 4):
             result[i, j] = texture.fetch(ti.Vector([i, j]), 0).x
 
-    expected = np.fromfunction(
-        lambda i, j: i * 10 + j, (4, 4), dtype=np.float32
-    )
-    for _ in range(16):
-        write(source)
+    pattern = np.fromfunction(lambda i, j: i * 10 + j, (4, 4), dtype=np.float32)
+    for iteration in range(16):
+        base = float(iteration * 100)
+        write(source, base)
+        write(destination, -1000.0 - base)
         assert ti.hardware.image.copy(destination, source) is destination
         read(destination, output)
-        np.testing.assert_allclose(output.to_numpy(), expected)
+        np.testing.assert_allclose(output.to_numpy(), pattern + base)
 
     recording = ti.hardware.image.VulkanImageCopyRecording(
         source="input", destination="output"
@@ -52,9 +57,11 @@ def test_vulkan_image_copy_direct_graph_ordering_and_lifetime():
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
+    write(source, 2000.0)
+    write(destination, -2000.0)
     graph.run({"input": source, "output": destination})
     read(destination, output)
-    np.testing.assert_allclose(output.to_numpy()[3, 2], 32.0)
+    np.testing.assert_allclose(output.to_numpy(), pattern + 2000.0)
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 
     ti.reset()
