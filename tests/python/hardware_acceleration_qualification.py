@@ -61,6 +61,7 @@ CASES = (
     "cuda-spmv",
     "vulkan-ray-update",
     "vulkan-texture-fetch",
+    "vulkan-texture-stencil",
 )
 
 
@@ -965,6 +966,139 @@ def _vulkan_texture_fetch_case(order, args):
     return result
 
 
+def _vulkan_texture_stencil_case(order, args):
+    _init_vulkan()
+    size = args.texture_size
+    radius = args.texture_stencil_radius
+    output_size = size - 2 * radius
+    taps = (2 * radius + 1) ** 2
+    source_host = (
+        np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
+    ) / np.float32(1021.0)
+    source = ti.ndarray(ti.f32, shape=(size, size))
+    hardware_output = ti.ndarray(
+        ti.f32, shape=(output_size, output_size)
+    )
+    baseline_output = ti.ndarray(
+        ti.f32, shape=(output_size, output_size)
+    )
+    texture = ti.Texture(ti.Format.r32f, (size, size))
+    source.from_numpy(source_host)
+
+    @ti.kernel
+    def upload(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        target: ti.types.rw_texture(
+            num_dimensions=2, fmt=ti.Format.r32f, lod=0
+        ),
+    ):
+        for i, j in values:
+            target.store(
+                ti.Vector([i, j]),
+                ti.Vector([values[i, j], 0.0, 0.0, 0.0]),
+            )
+
+    @ti.kernel
+    def texture_stencil(
+        image: ti.types.texture(num_dimensions=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in output:
+            total = 0.0
+            for di, dj in ti.static(
+                ti.ndrange(
+                    (-radius, radius + 1), (-radius, radius + 1)
+                )
+            ):
+                total += image.fetch(
+                    ti.Vector([i + radius + di, j + radius + dj]), 0
+                ).x
+            output[i, j] = total
+
+    @ti.kernel
+    def buffer_stencil(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in output:
+            total = 0.0
+            for di, dj in ti.static(
+                ti.ndrange(
+                    (-radius, radius + 1), (-radius, radius + 1)
+                )
+            ):
+                total += values[i + radius + di, j + radius + dj]
+            output[i, j] = total
+
+    setup_started = time.perf_counter_ns()
+    upload(source, texture)
+    ti.sync()
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+
+    def hardware():
+        texture_stencil(texture, hardware_output)
+
+    def baseline():
+        buffer_stencil(source, baseline_output)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_values = hardware_output.to_numpy()
+    baseline_values = baseline_output.to_numpy()
+    expected = np.zeros_like(baseline_values)
+    for di in range(-radius, radius + 1):
+        for dj in range(-radius, radius + 1):
+            expected += source_host[
+                radius + di : radius + di + output_size,
+                radius + dj : radius + dj + output_size,
+            ]
+    hardware_error = _error(hardware_values, expected)
+    baseline_error = _error(baseline_values, expected)
+    tolerance = float(taps * np.finfo(np.float32).eps * 4.0)
+    route = _resolved_operation("sampling.texture.vulkan")
+    passed = (
+        hardware_error[0] <= tolerance
+        and baseline_error[0] <= tolerance
+        and route["discovery"] == "available"
+        and route["hardware_acceleration"] == "qualified"
+    )
+    result = _provenance("vulkan-texture-stencil", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "width": size,
+                "height": size,
+                "radius": radius,
+                "taps_per_output": taps,
+                "outputs": output_size * output_size,
+                "upload_ms": setup_ms,
+                "hardware": "Vulkan sampled-image local texelFetch stencil",
+                "baseline": "Taichi storage-buffer local-load stencil",
+            },
+            "timing": timing,
+            "correctness": {
+                "tolerance": tolerance,
+                "hardware_vs_host_max_abs": hardware_error[0],
+                "hardware_vs_host_max_rel": hardware_error[1],
+                "baseline_vs_host_max_abs": baseline_error[0],
+                "baseline_vs_host_max_rel": baseline_error[1],
+            },
+            "route": route,
+        }
+    )
+    ti.reset()
+    return result
+
+
 _CASE_RUNNERS = {
     "cuda-fft": _cuda_fft_case,
     "cuda-gemm": _cuda_gemm_case,
@@ -972,6 +1106,7 @@ _CASE_RUNNERS = {
     "cuda-spmv": _cuda_spmv_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-texture-fetch": _vulkan_texture_fetch_case,
+    "vulkan-texture-stencil": _vulkan_texture_stencil_case,
 }
 
 
@@ -1168,6 +1303,8 @@ def _parent(args):
                     str(args.ray_query_side),
                     "--texture-size",
                     str(args.texture_size),
+                    "--texture-stencil-radius",
+                    str(args.texture_stencil_radius),
                 ]
                 completed = subprocess.run(
                     command,
@@ -1312,6 +1449,7 @@ def _parse_args():
     parser.add_argument("--ray-grid", type=int, default=128)
     parser.add_argument("--ray-query-side", type=int, default=128)
     parser.add_argument("--texture-size", type=int, default=1024)
+    parser.add_argument("--texture-stencil-radius", type=int, default=2)
     args = parser.parse_args()
     if args.worker:
         if not args.case or not args.order or not args.worker_output:
@@ -1335,6 +1473,8 @@ def _parse_args():
         or args.ray_grid < 2
         or args.ray_query_side <= 0
         or args.texture_size <= 0
+        or args.texture_stencil_radius <= 0
+        or 2 * args.texture_stencil_radius >= args.texture_size
     ):
         parser.error("invalid qualification bounds")
     return args
