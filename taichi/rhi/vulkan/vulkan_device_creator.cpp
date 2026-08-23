@@ -797,6 +797,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     device_features.shaderFloat64 = true;
     caps.set(DeviceCapability::spirv_has_float64, true);
   }
+  if (device_supported_features.shaderStorageImageExtendedFormats) {
+    device_features.shaderStorageImageExtendedFormats = true;
+    caps.set(DeviceCapability::spirv_has_storage_image_extended_formats, true);
+  }
   if (device_supported_features.wideLines) {
     device_features.wideLines = true;
     ti_device_->vk_caps().wide_line = true;

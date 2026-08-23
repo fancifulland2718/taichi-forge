@@ -284,6 +284,26 @@ TEST(VulkanDeviceCapabilityTest, AtomicFloatHeaderMatchesScalarWidth) {
                                    "SPV_EXT_shader_atomic_float_add"));
 }
 
+TEST(VulkanDeviceCapabilityTest, ImageTypesDeclareRequiredCapabilities) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  caps.set(DeviceCapability::spirv_has_storage_image_extended_formats, true);
+
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  builder.texture_argument(/*num_channels=*/4, /*num_dimensions=*/1,
+                           /*descriptor_set=*/0, /*binding=*/0);
+  builder.storage_image_argument(
+      /*num_channels=*/4, /*num_dimensions=*/2, /*descriptor_set=*/0,
+      /*binding=*/1, BufferFormat::r16f);
+
+  const auto capabilities = spirv_capabilities(builder.finalize());
+  EXPECT_TRUE(capabilities.count(spv::CapabilitySampled1D));
+  EXPECT_TRUE(capabilities.count(spv::CapabilityImage1D));
+  EXPECT_TRUE(
+      capabilities.count(spv::CapabilityStorageImageExtendedFormats));
+}
+
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
   if (!vulkan::is_vulkan_api_available()) {
     return;

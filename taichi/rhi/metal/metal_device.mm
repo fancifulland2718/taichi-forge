@@ -1063,6 +1063,7 @@ DeviceCapabilityConfig collect_metal_device_caps(MTLDevice_id mtl_device) {
   caps.set(DeviceCapability::spirv_has_int16, 1);
   caps.set(DeviceCapability::spirv_has_float16, 1);
   caps.set(DeviceCapability::spirv_has_subgroup_basic, 1);
+  caps.set(DeviceCapability::spirv_has_storage_image_extended_formats, 1);
 
   if (feature_64_bit_integer_math) {
     caps.set(DeviceCapability::spirv_has_int64, 1);

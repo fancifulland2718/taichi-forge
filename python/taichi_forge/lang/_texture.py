@@ -1,3 +1,5 @@
+import operator
+
 import numpy as np
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
@@ -110,6 +112,28 @@ class Texture:
     """
 
     def __init__(self, fmt, arr_shape, *, sampler=None):
+        try:
+            arr_shape = tuple(arr_shape)
+        except TypeError as exc:
+            raise TypeError("Texture shape must be an iterable of dimensions") from exc
+        if not 1 <= len(arr_shape) <= 3:
+            raise ValueError("Texture shape must have one, two, or three dimensions")
+        normalized_shape = []
+        for axis, extent in enumerate(arr_shape):
+            if isinstance(extent, bool):
+                raise TypeError(f"Texture shape axis {axis} must be an integer")
+            try:
+                extent = operator.index(extent)
+            except TypeError as exc:
+                raise TypeError(
+                    f"Texture shape axis {axis} must be an integer"
+                ) from exc
+            if not 0 < extent <= 0x7FFFFFFF:
+                raise ValueError(
+                    f"Texture shape axis {axis} must be in [1, 2^31 - 1]"
+                )
+            normalized_shape.append(extent)
+        arr_shape = tuple(normalized_shape)
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
         if sampler is None:

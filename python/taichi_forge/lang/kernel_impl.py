@@ -670,6 +670,11 @@ class TaichiCallableTemplateMapper:
                 raise TaichiRuntimeTypeError(
                     f"TextureType dimension mismatch for argument {arg_name}: expected {descriptor.ndim}, got {arg.num_dims}"
                 )
+            if texture_type.rw_texture_sampled_type(arg.fmt) != primitive_types.f32:
+                raise TaichiRuntimeTypeError(
+                    f"Sampled texture format mismatch for argument {arg_name}: "
+                    f"expected a floating-point or normalized format, got {arg.fmt}"
+                )
             return (arg.num_dims,)
         if isinstance(anno, texture_type.RWTextureType):
             descriptor = describe_annotation(anno)

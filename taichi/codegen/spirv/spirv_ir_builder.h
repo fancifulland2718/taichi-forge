@@ -2,6 +2,7 @@
 
 #include <array>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <spirv/unified1/spirv.hpp>
 #include "taichi/util/lang_util.h"
@@ -620,6 +621,7 @@ class IRBuilder {
   Value rand_i32(Value global_tmp_);
 
  private:
+  void declare_capability(spv::Capability capability);
   Value get_const(const SType &dtype, const uint64_t *pvalue, bool cache);
   SType declare_primitive_type(DataType dt);
 
@@ -630,6 +632,8 @@ class IRBuilder {
 
   // internal instruction builder
   InstrBuilder ib_;
+  std::size_t capability_end_{0};
+  std::unordered_set<spv::Capability> dynamic_capabilities_;
   // Current label
   Label curr_label_;
   // The current maximum id

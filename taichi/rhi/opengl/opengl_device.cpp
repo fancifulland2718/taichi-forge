@@ -510,6 +510,7 @@ GLDevice::GLDevice() : stream_(this) {
     // 64bit isn't supported in ES profile
     caps.set(DeviceCapability::spirv_has_int64, true);
     caps.set(DeviceCapability::spirv_has_float64, true);
+    caps.set(DeviceCapability::spirv_has_storage_image_extended_formats, true);
   }
 
   if (GLAD_GL_NV_gpu_shader5) {

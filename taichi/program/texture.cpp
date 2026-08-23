@@ -199,7 +199,8 @@ Texture::Texture(Program *prog,
                  int width,
                  int height,
                  int depth,
-                 ImageSamplerConfig sampler_config)
+                 ImageSamplerConfig sampler_config,
+                 ImageDimension dimension)
     : format_(format),
       width_(width),
       height_(height),
@@ -216,7 +217,7 @@ Texture::Texture(Program *prog,
   TI_ASSERT(num_channels > 0 && num_channels <= 4);
 
   ImageParams img_params{};
-  img_params.dimension = depth > 1 ? ImageDimension::d3D : ImageDimension::d2D;
+  img_params.dimension = dimension;
   img_params.format = format;
   img_params.x = width;
   img_params.y = height;

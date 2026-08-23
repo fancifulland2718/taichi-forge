@@ -9,6 +9,36 @@ namespace spirv {
 
 using cap = DeviceCapability;
 
+namespace {
+
+bool storage_image_format_requires_extended_capability(BufferFormat format) {
+  switch (format) {
+    case BufferFormat::r8:
+    case BufferFormat::rg8:
+    case BufferFormat::r8u:
+    case BufferFormat::rg8u:
+    case BufferFormat::r8i:
+    case BufferFormat::rg8i:
+    case BufferFormat::r16:
+    case BufferFormat::rg16:
+    case BufferFormat::rgba16:
+    case BufferFormat::r16u:
+    case BufferFormat::rg16u:
+    case BufferFormat::r16i:
+    case BufferFormat::rg16i:
+    case BufferFormat::r16f:
+    case BufferFormat::rg16f:
+    case BufferFormat::rg32u:
+    case BufferFormat::rg32i:
+    case BufferFormat::rg32f:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
 void IRBuilder::init_header() {
   TI_ASSERT(header_.size() == 0U);
   header_.push_back(spv::MagicNumber);
@@ -122,6 +152,8 @@ void IRBuilder::init_header() {
         .commit(&header_);
   }
 
+  capability_end_ = header_.size();
+
   ib_.begin(spv::OpExtension)
       .add("SPV_KHR_storage_buffer_storage_class")
       .commit(&header_);
@@ -194,6 +226,17 @@ void IRBuilder::init_header() {
   }
 
   this->init_pre_defs();
+}
+
+void IRBuilder::declare_capability(spv::Capability capability) {
+  if (!dynamic_capabilities_.insert(capability).second) {
+    return;
+  }
+  std::vector<std::uint32_t> instruction;
+  ib_.begin(spv::OpCapability).add(capability).commit(&instruction);
+  header_.insert(header_.begin() + capability_end_, instruction.begin(),
+                 instruction.end());
+  capability_end_ += instruction.size();
 }
 
 std::vector<uint32_t> IRBuilder::finalize() {
@@ -514,6 +557,7 @@ SType IRBuilder::get_underlying_image_type(const SType &primitive_type,
   int img_id = id_counter_++;
   spv::Dim dim;
   if (num_dimensions == 1) {
+    declare_capability(spv::CapabilitySampled1D);
     dim = spv::Dim1D;
   } else if (num_dimensions == 2) {
     dim = spv::Dim2D;
@@ -569,6 +613,8 @@ SType IRBuilder::get_storage_image_type(BufferFormat format,
 
   spv::Dim dim;
   if (num_dimensions == 1) {
+    declare_capability(spv::CapabilitySampled1D);
+    declare_capability(spv::CapabilityImage1D);
     dim = spv::Dim1D;
   } else if (num_dimensions == 2) {
     dim = spv::Dim2D;
@@ -617,6 +663,13 @@ SType IRBuilder::get_storage_image_type(BufferFormat format,
     TI_ERROR("Unsupported image format", num_dimensions);
   }
   spv::ImageFormat spv_format = format2spv.at(format);
+  if (storage_image_format_requires_extended_capability(format)) {
+    TI_ERROR_IF(
+        !caps_->get(cap::spirv_has_storage_image_extended_formats),
+        "Storage image format {} requires extended-format shader support.",
+        static_cast<std::uint32_t>(format));
+    declare_capability(spv::CapabilityStorageImageExtendedFormats);
+  }
 
   const SType sampled_type = get_storage_image_sampled_type(format);
   ib_.begin(spv::OpTypeImage)
