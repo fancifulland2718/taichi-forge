@@ -492,29 +492,23 @@ load/store 另支持格式对应的 `f32`、`i32`、`u32` sampled type。浮点�
 bitwise deterministic。CUDA GPU 虽有 texture unit，但 LLVM CUDA backend 尚未实现
 `TextureOpStmt` lowering，所以该路线保持 `planned`，不能因硬件存在而报告可用。
 
-### 当前 M4 Vulkan RasterPass 资格边界
+### 当前 M4 Vulkan RasterPass 兼容边界
 
-`ti.hardware.raster.RasterPass` 是第一条公开的固定功能 graphics provider。用户显式
-创建 pass、声明 camera/light/draw 并调用 `record()` / `execute()`；一次 execution 由
-现有 D0 GGUI/RHI 在当前 Program 的 `GraphicsDevice` 上创建 Vulkan graphics command
-list、render pass、graphics pipeline，执行 rasterizer、depth test/write 与 color output。
-这里真正使用的是硬件 raster/depth/ROP 路线，不是用普通 native CPU 代码重写软件光栅。
+`ti.hardware.raster.RasterPass` 能证明现有 D0 GGUI/RHI 确实提交 Vulkan graphics command
+并使用 raster/depth/ROP，而不是用普通 native CPU code 重写软件光栅；但它包含 camera、
+light、mesh/particle/line 与隐藏 attachment 等 renderer 语义，不是 Forge 继续扩展的底层
+抽象。
 
-当前边界有意保持窄且 fail closed：
+它从本规划起只保留为兼容和 route 资格验证 adapter：不再增加 scene、material、lighting
+或渲染算法。新的图形能力必须落到显式 image/attachment、SPIR-V graphics pipeline、
+vertex/index binding、draw 与 synchronization command，并由外部 renderer 组合。该低层
+切片、queue/Graph/lifetime 合同与 commit 门禁见
+[`low_level_hardware_graphics_plan.zh.md`](low_level_hardware_graphics_plan.zh.md)。
 
-- 只支持 Vulkan、隐藏窗口的 2D offscreen target，以及 mesh、mesh instance、particle、
-  line 四种 GGUI 内建 shader 路线；
-- `VulkanRasterPassRecording` 固定 resource binding 与 draw topology，但可以重读同一
-  field/ndarray 的新内容；每次 replay 重新录制 graphics command list；
-- execution 本身没有 host readback；`color_numpy()` 或 `depth_numpy()` 是显式同步读取，
-  每次 execution 最多消费其中一个 attachment，读取另一个前必须再次 execute；
-- 它不能从 kernel 内调用，也不自动替换软件 renderer。显式 root-Graph admission 会记录一个
-  opaque segmented node，保持顺序与 lifetime，但不会融合 GGUI helper dispatch。automatic
-  admission、structured region 与 AOT 仍不支持：当前 Scene 的 VBO preparation 包含 helper
-  kernel，color/depth 又是 provider-owned target，尚不能向 enclosing Graph 提供精确
-  binding/effect；
-- provider 只复用官方 wheel 已有的 Vulkan/GGUI D0 runtime 与内建 shader，不新增 SDK、
-  vendor package 或 wheel 发行变体。
+现有 adapter 仍保持 Vulkan-only、显式 execution、无隐式软件 renderer 替换、无新增
+SDK/vendor package/wheel 变体。由于其 GGUI helper 与隐藏 attachment 不能提供精确
+binding/effect，它仍只是 opaque segmented root-Graph node，不能作为新低层接口的 Graph
+能力声明。
 
 ### 当前 M6 Vulkan Ray Query 资格边界
 
@@ -764,7 +758,8 @@ OptiX 初始化与 versioned function table 继续由
 
 ### M4：首批高 ROI provider
 
-- 通过 native-command 基础公开 Vulkan RasterPass；
+- 将现有 Vulkan RasterPass 限定为兼容/资格 adapter，并通过 native-command 基础公开
+  renderer 可组合的底层 graphics resource 与 draw command；
 - 统一已有 cuBLAS、cuSPARSE、cuSOLVER loader report 与故障隔离；
 - 资格化现有 texture/Vulkan sampler；CUDA texture-object 在真实 lowering 与测试
   完成前保持 `planned`。

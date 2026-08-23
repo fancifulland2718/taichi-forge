@@ -584,8 +584,8 @@ _OPERATIONS = (
         ),
         public_api="ti.hardware.raster.RasterPass",
         notes=(
-            "Direct Python and explicit segmented root-Graph execution are supported; kernel calls are impossible.",
-            "Automatic Graph admission remains rejected until GGUI helper dispatches and provider-owned color/depth targets expose exact bindings and effects.",
+            "Compatibility/qualification adapter: direct Python and explicit segmented root-Graph execution are supported; kernel calls are impossible.",
+            "Renderer semantics remain outside Forge; new raster capability belongs in low-level image, pipeline, draw, and synchronization commands. Automatic Graph admission remains rejected until GGUI helper dispatches and provider-owned color/depth targets expose exact bindings and effects.",
         ),
     ),
     _operation(

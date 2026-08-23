@@ -569,36 +569,28 @@ bitwise deterministic across devices. Although CUDA GPUs have texture units,
 the LLVM CUDA backend has no `TextureOpStmt` lowering, so that route remains
 `planned` rather than being reported available merely because hardware exists.
 
-### Current M4 Vulkan RasterPass qualification boundary
+### Current M4 Vulkan RasterPass compatibility boundary
 
-`ti.hardware.raster.RasterPass` is the first public fixed-function graphics
-provider. The user explicitly creates a pass, declares camera/light/draw
-state, and calls `record()` or `execute()`. Each execution uses the existing
-D0 GGUI/RHI and the current Program's `GraphicsDevice` to create a Vulkan
-graphics command list, render pass, and graphics pipeline, then runs hardware
-rasterization, depth test/write, and color output. This is a real hardware
-raster/depth/ROP route, not ordinary native CPU code replacing a software
-rasterizer.
+`ti.hardware.raster.RasterPass` proves that the existing D0 GGUI/RHI submits
+real Vulkan graphics commands and uses raster/depth/ROP rather than replacing
+a software rasterizer with ordinary native CPU code. However, it contains
+renderer semantics such as cameras, lights, mesh/particle/line declarations,
+and hidden attachments, so it is not the low-level abstraction Forge will
+continue extending.
 
-The qualified slice is deliberately narrow and fail-closed:
+It is now retained only as a compatibility and route-qualification adapter.
+Forge will not add scene, material, lighting, or rendering algorithms to it.
+New graphics capability must land as explicit image/attachment, SPIR-V
+graphics-pipeline, vertex/index-binding, draw, and synchronization commands
+that an external renderer composes. The low-level slice, queue/Graph/lifetime
+contracts, and commit gates are specified in
+[`low_level_hardware_graphics_plan.en.md`](low_level_hardware_graphics_plan.en.md).
 
-- Vulkan only, with a hidden-window 2D offscreen target and built-in GGUI
-  shaders for meshes, mesh instances, particles, and lines;
-- `VulkanRasterPassRecording` freezes resource bindings and draw topology but
-  rereads new contents from the same field/ndarray objects; each replay
-  rerecords the graphics command list;
-- execution performs no host readback. `color_numpy()` and `depth_numpy()` are
-  explicit synchronous observations, and one execution can be consumed by
-  only one of them before another execution is required;
-- it is not kernel-callable and never silently replaces a software renderer.
-  Explicit root-Graph admission records one opaque segmented node, preserving
-  ordering and lifetime but not fusing its GGUI helper dispatches. Automatic
-  admission, structured regions, and AOT remain unsupported because current
-  Scene VBO preparation contains helper kernels while color/depth are
-  provider-owned targets that cannot yet provide exact bindings/effects; and
-- the provider reuses only the Vulkan/GGUI D0 runtime and built-in shaders
-  already present in official wheels. It adds no SDK, vendor package, or wheel
-  variant.
+The existing adapter remains Vulkan-only and explicit, never replaces a
+software renderer implicitly, and adds no SDK, vendor package, or wheel
+variant. Because its GGUI helpers and hidden attachments cannot declare exact
+bindings and effects, it remains an opaque segmented root-Graph node and is
+not evidence for the new low-level interface's Graph capability.
 
 ### Current M6 Vulkan ray-query qualification boundary
 
@@ -889,7 +881,9 @@ them.
 
 ### M4: first high-ROI providers
 
-- expose a Vulkan raster pass through the native-command substrate;
+- constrain the existing Vulkan RasterPass to a compatibility/qualification
+  adapter and expose renderer-composable low-level graphics resources and draw
+  commands through the native-command substrate;
 - normalize existing cuBLAS, cuSPARSE, and cuSOLVER loader reports and failure
   isolation; and
 - qualify the existing texture and Vulkan sampler route while leaving CUDA
