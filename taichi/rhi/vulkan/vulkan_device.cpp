@@ -98,9 +98,10 @@ const BidirMap<ImageLayout, VkImageLayout> image_layout_map = {
     {ImageLayout::color_attachment, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
     {ImageLayout::color_attachment_read,
      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
-    {ImageLayout::depth_attachment, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL},
+    {ImageLayout::depth_attachment,
+     VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL},
     {ImageLayout::depth_attachment_read,
-     VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
+     VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL},
     {ImageLayout::transfer_dst, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL},
     {ImageLayout::transfer_src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL},
     {ImageLayout::present_src, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR}};
@@ -1558,7 +1559,7 @@ void VulkanCommandList::begin_renderpass(int x0,
       depth_attachment_info.pNext = nullptr;
       depth_attachment_info.imageView = view->view;
       depth_attachment_info.imageLayout =
-          VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+          image_layout_ti_to_vk(ImageLayout::depth_attachment);
       depth_attachment_info.resolveMode = VK_RESOLVE_MODE_NONE;
       depth_attachment_info.resolveImageView = VK_NULL_HANDLE;
       depth_attachment_info.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1753,8 +1754,10 @@ void VulkanCommandList::image_transition(DeviceAllocation img,
       VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
   stages[VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL] =
       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-  stages[VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL] =
+  stages[VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL] =
       VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+  stages[VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL] =
+      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
   stages[VK_IMAGE_LAYOUT_PRESENT_SRC_KHR] = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
   static std::unordered_map<VkImageLayout, VkAccessFlagBits> access;
@@ -1766,9 +1769,11 @@ void VulkanCommandList::image_transition(DeviceAllocation img,
   access[VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL] = VK_ACCESS_MEMORY_READ_BIT;
   access[VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL] =
       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-  access[VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL] =
+  access[VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL] =
       VkAccessFlagBits(VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT);
+  access[VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL] =
+      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
   access[VK_IMAGE_LAYOUT_PRESENT_SRC_KHR] = VK_ACCESS_MEMORY_READ_BIT;
 
   if (stages.find(old_layout) == stages.end() ||

@@ -1,3 +1,4 @@
+import gc
 import re
 import struct
 from pathlib import Path
@@ -35,6 +36,30 @@ def _triangle_pipeline():
     )
 
 
+def _depth_triangle_pipeline(*, enabled):
+    vertex_path = (
+        Path(__file__).parent
+        / "assets"
+        / "hardware_graphics_depth.vert.spv.h"
+    )
+    words = [
+        int(value, 16)
+        for value in re.findall(r"0x[0-9a-fA-F]+", vertex_path.read_text())
+    ]
+    vertex_spirv = struct.pack(f"<{len(words)}I", *words)
+    return ti.hardware.graphics.VulkanGraphicsPipeline(
+        vertex_spirv,
+        _spirv_header("2_triangle.frag.spv.h"),
+        vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 24),),
+        vertex_attributes=(
+            ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rgb32f, 0),
+            ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 12),
+        ),
+        depth_test=enabled,
+        depth_write=enabled,
+    )
+
+
 def _triangle_vertices():
     vertices = ti.ndarray(ti.f32, shape=(15,))
     vertices.from_numpy(
@@ -55,6 +80,54 @@ def _triangle_vertices():
                 0.0,
                 0.0,
                 1.0,
+            ],
+            dtype=np.float32,
+        )
+    )
+    return vertices
+
+
+def _overlapping_depth_vertices():
+    vertices = ti.ndarray(ti.f32, shape=(36,))
+    vertices.from_numpy(
+        np.array(
+            [
+                -0.6,
+                -0.6,
+                0.75,
+                0.0,
+                1.0,
+                0.0,
+                0.6,
+                -0.6,
+                0.75,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.6,
+                0.75,
+                0.0,
+                1.0,
+                0.0,
+                -0.6,
+                -0.6,
+                0.25,
+                1.0,
+                0.0,
+                0.0,
+                0.6,
+                -0.6,
+                0.25,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.6,
+                0.25,
+                1.0,
+                0.0,
+                0.0,
             ],
             dtype=np.float32,
         )
@@ -201,6 +274,32 @@ def test_vulkan_graphics_indexed_draw_uses_declared_bounds():
                 ti.hardware.graphics.Draw(3, index_bounds=(0, 2)),
                 vertex_buffers={0: "vertices"},
             )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False, debug=True)
+def test_vulkan_graphics_depth_attachment_controls_visibility_and_lifetime():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    vertices = _overlapping_depth_vertices()
+    draw = ti.hardware.graphics.Draw(6)
+
+    with _depth_triangle_pipeline(enabled=False) as pipeline:
+        color_without_depth = ti.Texture(ti.Format.rgba8, (64, 64))
+        pipeline.draw(color_without_depth, {0: vertices}, draw=draw)
+        ti.sync()
+        without_depth = np.asarray(color_without_depth.to_image())[32, 32]
+        assert without_depth[0] > without_depth[1]
+
+    with _depth_triangle_pipeline(enabled=True) as pipeline:
+        color_with_depth = ti.Texture(ti.Format.rgba8, (64, 64))
+        depth = ti.Texture(ti.Format.depth32f, (64, 64))
+        pipeline.draw(color_with_depth, {0: vertices}, depth=depth, draw=draw)
+        del depth
+        gc.collect()
+        ti.sync()
+        with_depth = np.asarray(color_with_depth.to_image())[32, 32]
+        assert with_depth[1] > with_depth[0]
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
