@@ -1737,7 +1737,7 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 
 ### `Graph.execution_stats()`
 
-返回冻结的 schema v6 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
+返回冻结的 schema v7 `GraphExecutionReport` snapshot。这是稳定公开诊断 API；应用代码
 不应直接读取 `_graph_stats`。
 
 顶层 report 包含：
@@ -1748,8 +1748,8 @@ handle。这不是原地恢复：真实 CUDA context loss 或 Vulkan device loss
 - 不包含 pointer 的 static layout fingerprint；
 - 最近一次聚合 execution path 与 fallback reason；
 - backend Graph、backend replay、ordinary fallback segment 数；
-- temporary、observation、telemetry、internal storage 与 workspace lane 的
-  memory/ownership counter；
+- temporary、observation、telemetry、internal storage、workspace lane 与 Graph
+  持有的 provider generation memory/ownership counter；
 - immutable per-segment report 与 counter completeness 状态。
 
 per-segment 数据可区分 CPU `ordinary`、CUDA capture/exact replay/patched
@@ -1758,12 +1758,27 @@ replay/recapture、Vulkan record/replay、native dispatch 和 ordinary fallback�
 CUDA conditional replay 还会报告异步 control upload、因两个 deferred batch 上限产生的等待，
 以及 deferred batch 峰值。
 
-schema v6 保留逐 segment 的 `replay_attribution` 结构，但生产 CGraph replay 固定关闭它，
+schema v7 保留 v6 的逐 segment `replay_attribution` 结构，并增加去重后的
+`provider_memory` tuple。`memory.provider_generation_*` 只汇总 Graph 实际持有的 provider
+generation requested bytes，不会混入 Graph-owned `persistent_bytes`。厂商库或 driver ABI
+无法给出字节数时，使用 `None`、false completeness bit 与 `opaque_component_count` 保留未知，
+不会伪报为零；raw、committed 与 cached device memory 仍以 runtime allocator statistics 为准。
+
+生产 CGraph replay 固定关闭 `replay_attribution`，
 不读取时钟，也不更新累计归因 counter。`execution_stats()` 是无副作用 snapshot：重复调用
 不能改变 replay 资格、启用 backend instrumentation 或让后续执行增加 readback。未采集的详细
 counter 保持为零，并明确报告 `counters_complete=False`。需要测量某次执行时，应使用
 `Graph.submit(..., telemetry="summary")` 或 `"timestamps"`；普通 Graph replay 不读取
 telemetry。
+
+### 硬件 provider 内存报告
+
+`ti.hardware.ray.TriangleScene`、`ti.hardware.fft.CufftPlan1D`、
+`ti.hardware.raster.RasterPass` 和已存储 cuSPARSE recording 等可复用硬件资源提供
+`memory_report()`。冻结的 `HardwareMemoryReport` 使用 schema v1，区分可知的 requested
+bytes 与不透明 driver/provider component，不把未知字节数当成零。provider 关闭后 resident
+requested bytes 变为零，但保留已知 capacity 供规划；属于旧 runtime generation 时报告
+`runtime_invalid`。
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 

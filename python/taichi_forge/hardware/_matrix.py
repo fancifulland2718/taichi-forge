@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -120,6 +121,24 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
 
     def _as_graph_native_node(self):
         return _CudaMatrixMmaNode(self)
+
+    def memory_report(self):
+        """MMA owns no persistent workspace; driver/JIT state is runtime-opaque."""
+
+        return make_memory_report(
+            "cuda_matrix_mma_f16_f32",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    "runtime_compiler_and_driver_state",
+                    None,
+                    False,
+                    "runtime",
+                    "driver",
+                ),
+            ),
+            ownership_scope="runtime_global",
+        )
 
 
 class _CudaMatrixMmaExecutable(NativeGraphExecutable):

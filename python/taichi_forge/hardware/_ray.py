@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -111,6 +112,9 @@ class VulkanRayQueryRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.scene._validate_lifetime()
 
+    def memory_report(self):
+        return self.scene.memory_report()
+
     def _as_graph_native_node(self):
         return _VulkanRayQueryNode(self)
 
@@ -212,6 +216,9 @@ class VulkanRayRefitRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.scene._validate_lifetime()
 
+    def memory_report(self):
+        return self.scene.memory_report()
+
     def _as_graph_native_node(self):
         return _VulkanRayRefitNode(self)
 
@@ -299,6 +306,9 @@ class TriangleScene:
         )
         self.vertex_count = vertex_count
         self.triangle_count = triangle_count
+        self._memory_stats = dict(
+            program._vulkan_triangle_ray_scene_memory_stats(self._handle)
+        )
 
     @property
     def closed(self):
@@ -350,6 +360,67 @@ class TriangleScene:
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
+
+    def memory_report(self):
+        """Return exact requested buffers and explicitly opaque driver state."""
+
+        handle_present = self._handle is not None
+        runtime_valid = handle_present and (
+            impl.get_runtime().prog is self._runtime_prog
+            and int(impl.runtime_generation()) == self._runtime_generation
+        )
+        resident = runtime_valid
+        stats = self._memory_stats
+        components = (
+            HardwareMemoryComponent(
+                "geometry_build_inputs",
+                int(stats["geometry_input_requested_bytes"]),
+                True,
+                "provider_generation",
+                "provider",
+                resident=resident,
+            ),
+            HardwareMemoryComponent(
+                "blas_tlas_storage",
+                int(stats["acceleration_structure_requested_bytes"]),
+                True,
+                "provider_generation",
+                "provider",
+                resident=resident,
+            ),
+            HardwareMemoryComponent(
+                "build_refit_scratch",
+                int(stats["build_scratch_requested_bytes"]),
+                True,
+                "provider_generation",
+                "provider",
+                resident=resident,
+            ),
+            HardwareMemoryComponent(
+                "pipeline_descriptors_and_driver_state",
+                None,
+                False,
+                "provider_generation",
+                "driver",
+                resident=resident,
+            ),
+        )
+        return make_memory_report(
+            "vulkan_triangle_ray",
+            "vulkan",
+            components,
+            lifecycle_state=(
+                "ready"
+                if runtime_valid
+                else "closed"
+                if not handle_present
+                else "runtime_invalid"
+            ),
+            ownership_scope="scene_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
 
     def close(self):
         if self._handle is None:

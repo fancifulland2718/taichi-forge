@@ -491,11 +491,12 @@ fallback 计数不足以证明优化成立。
 
 ## 诊断
 
-应使用稳定、冻结的 `Graph.execution_stats()` schema v6 report。它公开 definition count、
+应使用稳定、冻结的 `Graph.execution_stats()` schema v7 report。它公开 definition count、
 compiled task count、segment-local runtime argument、带 generation 的 static dependency、
 不含 pointer 的 layout fingerprint、execution/fallback path、replay eligibility、
-persistent argument bytes 与 immutable per-segment counter。应用代码不应读取内部
-`Graph._graph_stats` cache。
+persistent argument bytes 与 immutable per-segment counter。schema v7 还公开去重后的
+provider-generation 内存报告，且不会把 provider requested bytes 混入 Graph 自有的
+persistent bytes。应用代码不应读取内部 `Graph._graph_stats` cache。
 
 每个 CGraph segment 仍公开 `replay_attribution` 结构，但生产执行固定保持关闭：replay 不读取
 时钟，也不更新逐次归因 counter。逐 submission 测量应使用显式 ticket telemetry；私有 debug

@@ -32,6 +32,11 @@ from taichi_forge.hardware._capabilities import (
     providers,
     report,
 )
+from taichi_forge.hardware._memory import (
+    HARDWARE_MEMORY_SCHEMA_VERSION,
+    HardwareMemoryComponent,
+    HardwareMemoryReport,
+)
 
 __all__ = [
     "ACTIVATION_MODES",
@@ -44,7 +49,10 @@ __all__ = [
     "GRAPH_SUPPORT_MODES",
     "HARDWARE_ACCELERATION_LEVELS",
     "HARDWARE_CAPABILITY_SCHEMA_VERSION",
+    "HARDWARE_MEMORY_SCHEMA_VERSION",
     "HardwareCapabilityReport",
+    "HardwareMemoryComponent",
+    "HardwareMemoryReport",
     "HardwareOperationDescriptor",
     "HardwareProviderDescriptor",
     "IMPLEMENTATION_STATUSES",

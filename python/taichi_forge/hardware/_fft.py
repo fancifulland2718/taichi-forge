@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -112,6 +113,9 @@ class CufftRecording(BackendCommandRecording):
 
     def validate_graph_lifetime(self):
         self.plan._validate_lifetime()
+
+    def memory_report(self):
+        return self.plan.memory_report()
 
     def _as_graph_native_node(self):
         return _CufftNode(self)
@@ -254,6 +258,40 @@ class CufftPlan1D:
 
     def validate_graph_lifetime(self):
         self._validate_lifetime()
+
+    def memory_report(self):
+        """Report plan residency without inventing cuFFT workspace bytes."""
+
+        handle_present = self._handle is not None
+        runtime_valid = handle_present and (
+            impl.get_runtime().prog is self._runtime_prog
+            and int(impl.runtime_generation()) == self._runtime_generation
+        )
+        return make_memory_report(
+            "cufft_c2c_1d",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    "plan_and_automatic_workspace",
+                    None,
+                    False,
+                    "provider_generation",
+                    "driver",
+                    resident=runtime_valid,
+                ),
+            ),
+            lifecycle_state=(
+                "ready"
+                if runtime_valid
+                else "closed"
+                if not handle_present
+                else "runtime_invalid"
+            ),
+            ownership_scope="plan_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
 
     def close(self):
         if self._handle is None:

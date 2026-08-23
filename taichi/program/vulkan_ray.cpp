@@ -127,6 +127,22 @@ class VulkanTriangleRayScene {
   VulkanTriangleRayScene(const VulkanTriangleRayScene &) = delete;
   VulkanTriangleRayScene &operator=(const VulkanTriangleRayScene &) = delete;
 
+  VulkanTriangleRaySceneMemoryStatistics memory_statistics() const {
+    VulkanTriangleRaySceneMemoryStatistics result;
+    result.geometry_input_requested_bytes =
+        vertex_bytes_ + index_bytes_ + instance_buffer_bytes_;
+    result.acceleration_structure_requested_bytes =
+        blas_storage_bytes_ + tlas_storage_bytes_;
+    result.build_scratch_requested_bytes =
+        blas_scratch_bytes_ + tlas_scratch_bytes_;
+    result.known_requested_bytes =
+        result.geometry_input_requested_bytes +
+        result.acceleration_structure_requested_bytes +
+        result.build_scratch_requested_bytes;
+    result.known_allocation_count = 7;
+    return result;
+  }
+
   void record_build(CommandList *command_list,
                     DeviceAllocation source_vertices,
                     DeviceAllocation source_indices) {
@@ -307,12 +323,11 @@ class VulkanTriangleRayScene {
                            scratch_alignment_);
   }
 
-  DeviceAllocation allocate_scratch(VkDeviceSize bytes) {
+  std::size_t scratch_allocation_bytes(VkDeviceSize bytes) const {
     TI_ERROR_IF(bytes > (std::numeric_limits<std::size_t>::max)() -
                             scratch_alignment_,
                 "Vulkan ray scratch size overflow.");
-    return allocate(static_cast<std::size_t>(bytes + scratch_alignment_),
-                    AllocUsage::Storage | AllocUsage::DeviceAddress);
+    return static_cast<std::size_t>(bytes + scratch_alignment_);
   }
 
   VkAccelerationStructureGeometryKHR make_blas_geometry() const {
@@ -402,16 +417,19 @@ class VulkanTriangleRayScene {
     get_build_sizes_(device_->vk_device(),
                      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                      &build_info, &primitive_count, &sizes);
-    blas_storage_ = allocate(
-        static_cast<std::size_t>(sizes.accelerationStructureSize),
-        AllocUsage::AccelerationStructureStorage);
+    blas_storage_bytes_ =
+        static_cast<std::size_t>(sizes.accelerationStructureSize);
+    blas_storage_ =
+        allocate(blas_storage_bytes_, AllocUsage::AccelerationStructureStorage);
     blas_ = vkapi::create_acceleration_structure(
         0, device_->get_vkbuffer(blas_storage_.get_ptr()), 0,
         sizes.accelerationStructureSize,
         VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR);
     TI_ERROR_IF(!blas_, "Failed to create Vulkan triangle BLAS.");
-    blas_scratch_ = allocate_scratch(
+    blas_scratch_bytes_ = scratch_allocation_bytes(
         std::max(sizes.buildScratchSize, sizes.updateScratchSize));
+    blas_scratch_ = allocate(blas_scratch_bytes_,
+                             AllocUsage::Storage | AllocUsage::DeviceAddress);
   }
 
   void create_tlas() {
@@ -424,8 +442,9 @@ class VulkanTriangleRayScene {
     TI_ERROR_IF(blas_address == 0,
                 "Vulkan triangle BLAS returned a null device address.");
 
+    instance_buffer_bytes_ = sizeof(VkAccelerationStructureInstanceKHR);
     instance_buffer_ = allocate(
-        sizeof(VkAccelerationStructureInstanceKHR),
+        instance_buffer_bytes_,
         AllocUsage::AccelerationStructureBuildInput | AllocUsage::DeviceAddress,
         true);
     VkAccelerationStructureInstanceKHR instance{};
@@ -454,15 +473,18 @@ class VulkanTriangleRayScene {
     get_build_sizes_(device_->vk_device(),
                      VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
                      &build_info, &primitive_count, &sizes);
-    tlas_storage_ = allocate(
-        static_cast<std::size_t>(sizes.accelerationStructureSize),
-        AllocUsage::AccelerationStructureStorage);
+    tlas_storage_bytes_ =
+        static_cast<std::size_t>(sizes.accelerationStructureSize);
+    tlas_storage_ =
+        allocate(tlas_storage_bytes_, AllocUsage::AccelerationStructureStorage);
     tlas_ = vkapi::create_acceleration_structure(
         0, device_->get_vkbuffer(tlas_storage_.get_ptr()), 0,
         sizes.accelerationStructureSize,
         VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR);
     TI_ERROR_IF(!tlas_, "Failed to create Vulkan triangle TLAS.");
-    tlas_scratch_ = allocate_scratch(sizes.buildScratchSize);
+    tlas_scratch_bytes_ = scratch_allocation_bytes(sizes.buildScratchSize);
+    tlas_scratch_ = allocate(tlas_scratch_bytes_,
+                             AllocUsage::Storage | AllocUsage::DeviceAddress);
   }
 
   void create_query_pipeline() {
@@ -498,6 +520,11 @@ class VulkanTriangleRayScene {
   std::size_t triangle_count_{0};
   std::size_t vertex_bytes_{0};
   std::size_t index_bytes_{0};
+  std::size_t instance_buffer_bytes_{0};
+  std::size_t blas_storage_bytes_{0};
+  std::size_t tlas_storage_bytes_{0};
+  std::size_t blas_scratch_bytes_{0};
+  std::size_t tlas_scratch_bytes_{0};
   VkDeviceSize scratch_alignment_{1};
   DeviceAllocation vertex_buffer_{kDeviceNullAllocation};
   DeviceAllocation index_buffer_{kDeviceNullAllocation};
@@ -694,6 +721,16 @@ std::size_t Program::vulkan_triangle_ray_refit(std::uint64_t handle,
   return 0;
 }
 
+VulkanTriangleRaySceneMemoryStatistics
+Program::vulkan_triangle_ray_scene_memory_statistics(
+    std::uint64_t handle) {
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  const auto found = vulkan_ray_scenes_.find(handle);
+  TI_ERROR_IF(found == vulkan_ray_scenes_.end(),
+              "Vulkan triangle ray scene handle is stale or closed.");
+  return found->second->memory_statistics();
+}
+
 void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
   std::shared_ptr<VulkanTriangleRayScene> scene;
   {
@@ -745,6 +782,11 @@ std::size_t Program::vulkan_triangle_ray_refit(std::uint64_t,
                                                Ndarray *,
                                                std::size_t) {
   TI_ERROR("Vulkan ray refit requires TI_WITH_VULKAN=ON.");
+}
+
+VulkanTriangleRaySceneMemoryStatistics
+Program::vulkan_triangle_ray_scene_memory_statistics(std::uint64_t) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
 }
 
 void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t) {

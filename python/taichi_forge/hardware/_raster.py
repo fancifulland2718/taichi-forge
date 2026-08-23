@@ -11,6 +11,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -139,6 +140,9 @@ class VulkanRasterPassRecording(BackendCommandRecording):
 
     def validate_graph_lifetime(self):
         self._owner._validate_lifetime()
+
+    def memory_report(self):
+        return self._owner.memory_report()
 
     def _as_graph_native_node(self):
         return _VulkanRasterPassNode(self)
@@ -366,6 +370,39 @@ class RasterPass:
             raise TaichiRuntimeError(
                 "RasterPass belongs to a previous Taichi runtime generation"
             )
+
+    def memory_report(self):
+        """Report lifecycle while keeping hidden GGUI/driver bytes opaque."""
+
+        window_present = self._window is not None and self._window.window is not None
+        runtime_valid = (
+            window_present and impl.get_runtime().prog is self._runtime_prog
+        )
+        return make_memory_report(
+            "vulkan_raster_pass",
+            "vulkan",
+            (
+                HardwareMemoryComponent(
+                    "ggui_window_attachments_and_pipeline",
+                    None,
+                    False,
+                    "provider_generation",
+                    "driver",
+                    resident=runtime_valid,
+                ),
+            ),
+            lifecycle_state=(
+                "ready"
+                if runtime_valid
+                else "closed"
+                if not window_present
+                else "runtime_invalid"
+            ),
+            ownership_scope="raster_pass_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
 
     def destroy(self):
         if self._window is None:

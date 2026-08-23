@@ -2083,7 +2083,7 @@ required. Graphs and tickets from the old Program never become valid again.
 
 ### `Graph.execution_stats()`
 
-Returns a frozen `GraphExecutionReport` snapshot with schema version 6. The
+Returns a frozen `GraphExecutionReport` snapshot with schema version 7. The
 report is a stable public diagnostic API; do not consume `_graph_stats`
 directly in application code.
 
@@ -2095,8 +2095,8 @@ The top-level report includes:
 - a pointer-free static layout fingerprint;
 - the last aggregate execution path and fallback reason;
 - backend-graph, backend-replay, and ordinary-fallback segment counts;
-- temporary, observation, telemetry, internal-storage, and workspace-lane
-  memory/ownership counters; and
+- temporary, observation, telemetry, internal-storage, workspace-lane, and
+  retained provider-generation memory/ownership counters; and
 - immutable per-segment reports and counter-completeness state.
 
 Per-segment data distinguishes CPU `ordinary`, CUDA capture/exact
@@ -2107,7 +2107,16 @@ CUDA conditional replay additionally reports asynchronous control uploads,
 waits caused by the two-batch deferred-resource bound, and the peak number of
 deferred batches.
 
-Schema v6 includes the `segment.replay_attribution` shape, but production
+Schema v7 retains the v6 `segment.replay_attribution` shape and adds a
+deduplicated `provider_memory` tuple. `memory.provider_generation_*` aggregates
+only provider generations retained by the Graph. These requested-byte values
+are reported separately from Graph-owned `persistent_bytes`; `None`, a false
+completeness bit, and `opaque_component_count` preserve vendor-library and
+driver allocations that cannot be measured through the loaded ABI. Runtime
+allocator statistics remain the source for raw, committed, and cached device
+memory.
+
+Production
 CGraph replay leaves it disabled and performs no clock reads or cumulative
 counter updates. `execution_stats()` is a side-effect-free snapshot: repeated
 calls cannot change replay qualification, enable backend instrumentation, or
@@ -2115,6 +2124,17 @@ add a later readback. Uncollected detailed counters remain zero and explicitly
 report `counters_complete=False`. Use `Graph.submit(..., telemetry="summary")`
 or `"timestamps"` when a particular execution must be measured; ordinary
 Graph replay performs no telemetry readback.
+
+### Hardware provider memory reports
+
+Reusable hardware resources such as `ti.hardware.ray.TriangleScene`,
+`ti.hardware.fft.CufftPlan1D`, `ti.hardware.raster.RasterPass`, and stored
+cuSPARSE recordings expose `memory_report()`. The frozen
+`HardwareMemoryReport` uses schema version 1 and separates known requested
+bytes from opaque driver/provider components. It never treats an unavailable
+byte count as zero. Closing a provider changes resident requested bytes to
+zero while retaining its known capacity for planning; a prior runtime
+generation reports `runtime_invalid`.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 

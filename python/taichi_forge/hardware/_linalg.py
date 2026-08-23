@@ -11,6 +11,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -168,6 +169,24 @@ class CublasGemmRecording(BackendCommandRecording):
     def _as_graph_native_node(self):
         return _CublasGemmNode(self)
 
+    def memory_report(self):
+        """cuBLAS state is runtime-global and opaque to the basic ABI slice."""
+
+        return make_memory_report(
+            "cublas_gemm_f32",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    "runtime_handle_and_driver_state",
+                    None,
+                    False,
+                    "runtime",
+                    "driver",
+                ),
+            ),
+            ownership_scope="runtime_global",
+        )
+
 
 class _CublasGemmExecutable(NativeGraphExecutable):
     def __init__(self, recording):
@@ -266,6 +285,11 @@ class CusparseSpmvRecording(BackendCommandRecording):
         object.__setattr__(self, "matrix", matrix)
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "output", output)
+        object.__setattr__(
+            self,
+            "_memory_resources",
+            dict(matrix._debug_runtime_stats()["resources"]),  # pylint: disable=W0212
+        )
 
     @property
     def resource_effects(self):
@@ -342,6 +366,74 @@ class CusparseSpmvRecording(BackendCommandRecording):
 
     def validate_graph_lifetime(self):
         self.matrix._ensure_valid()  # pylint: disable=W0212
+
+    def memory_report(self):
+        """Report matrix/workspace bytes and keep vendor descriptors opaque."""
+
+        lifecycle_state = "ready"
+        resident = True
+        resources = self._memory_resources
+        try:
+            resources = dict(
+                self.matrix._debug_runtime_stats()["resources"]  # pylint: disable=W0212
+            )
+            object.__setattr__(self, "_memory_resources", resources)
+        except TaichiRuntimeError:
+            lifecycle_state = "runtime_invalid"
+            resident = False
+
+        pattern_shared = bool(resources["pattern_storage_shared"])
+        owned_bytes = int(
+            resources[
+                "operator_exclusive_reserved_bytes"
+                if pattern_shared
+                else "operator_owned_reserved_bytes"
+            ]
+        )
+        components = [
+            HardwareMemoryComponent(
+                "matrix_values_and_spmv_workspace",
+                owned_bytes,
+                True,
+                "provider_generation",
+                "shared_user_object",
+                resident=resident,
+            )
+        ]
+        if pattern_shared:
+            components.append(
+                HardwareMemoryComponent(
+                    "shared_sparse_pattern",
+                    None,
+                    False,
+                    "provider_generation",
+                    "shared_user_object",
+                    resident=resident,
+                )
+            )
+        components.append(
+            HardwareMemoryComponent(
+                "cusparse_descriptors_and_preprocess_state",
+                None,
+                False,
+                "provider_generation",
+                "driver",
+                resident=resident,
+            )
+        )
+        return make_memory_report(
+            "cusparse_spmv_f32",
+            "cuda",
+            components,
+            lifecycle_state=lifecycle_state,
+            ownership_scope="sparse_matrix_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return ("cusparse_spmv_f32", id(self.matrix))
 
     def _as_graph_native_node(self):
         return _CusparseSpmvNode(self)

@@ -111,6 +111,14 @@ class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
 struct ExternalStreamDomain;
+
+struct VulkanTriangleRaySceneMemoryStatistics {
+  std::size_t geometry_input_requested_bytes{0};
+  std::size_t acceleration_structure_requested_bytes{0};
+  std::size_t build_scratch_requested_bytes{0};
+  std::size_t known_requested_bytes{0};
+  std::size_t known_allocation_count{0};
+};
 namespace storage {
 class DenseStorageDescriptor;
 class RuntimeStorageArgument;
@@ -929,6 +937,9 @@ class TI_DLL_EXPORT Program {
   std::size_t vulkan_triangle_ray_refit(std::uint64_t handle,
                                         Ndarray *vertices,
                                         std::size_t vertex_count);
+
+  VulkanTriangleRaySceneMemoryStatistics
+  vulkan_triangle_ray_scene_memory_statistics(std::uint64_t handle);
 
   void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
 

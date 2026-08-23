@@ -1733,6 +1733,11 @@ class GraphMemoryReport:
     workspace_lane_waits: int
     workspace_lane_saturation_errors: int
     workspace_lane_saturation_policy: str
+    provider_generation_report_count: int
+    provider_generation_known_resident_requested_bytes: int
+    provider_generation_known_capacity_requested_bytes: int
+    provider_generation_requested_bytes_complete: bool
+    provider_generation_opaque_component_count: int
     opaque_driver_bytes: Optional[int]
 
 
@@ -1767,6 +1772,7 @@ class GraphExecutionReport:
     counters_complete: bool
     segments: Tuple[GraphExecutionSegmentReport, ...]
     memory: GraphMemoryReport
+    provider_memory: Tuple[object, ...]
 
 
 @dataclass(frozen=True)
@@ -4295,6 +4301,7 @@ def _execution_report(
     observation_arena_stats=None,
     telemetry_arena_stats=None,
     internal_storage_stats=None,
+    provider_memory=(),
 ):
     flat_backend_stats = tuple(_flatten_backend_stats(backend_stats))
     segments = []
@@ -4533,6 +4540,7 @@ def _execution_report(
         observation_arena_stats.get("reserved_bytes", 0)
     )
     persistent_telemetry_bytes = int(telemetry_arena_stats.get("reserved_bytes", 0))
+    provider_memory = tuple(provider_memory)
     memory = GraphMemoryReport(
         persistent_argument_bytes=persistent_argument_bytes,
         persistent_bounded_control_bytes=persistent_bounded_control_bytes,
@@ -4610,10 +4618,23 @@ def _execution_report(
         workspace_lane_saturation_policy=str(
             internal_storage_stats.get("lane_saturation_policy", "wait")
         ),
+        provider_generation_report_count=len(provider_memory),
+        provider_generation_known_resident_requested_bytes=sum(
+            report.known_resident_requested_bytes for report in provider_memory
+        ),
+        provider_generation_known_capacity_requested_bytes=sum(
+            report.known_capacity_requested_bytes for report in provider_memory
+        ),
+        provider_generation_requested_bytes_complete=all(
+            report.resident_requested_bytes_complete for report in provider_memory
+        ),
+        provider_generation_opaque_component_count=sum(
+            report.opaque_component_count for report in provider_memory
+        ),
         opaque_driver_bytes=None,
     )
     return GraphExecutionReport(
-        schema_version=6,
+        schema_version=7,
         arch=arch,
         lifecycle_state=lifecycle_state,
         node_count=len(segments),
@@ -4642,6 +4663,7 @@ def _execution_report(
         counters_complete=all(segment.counters_complete for segment in segments),
         segments=tuple(segments),
         memory=memory,
+        provider_memory=provider_memory,
     )
 
 
@@ -9301,6 +9323,21 @@ class _GraphSpec:
             if validate is not None:
                 validate()
 
+    def provider_memory_reports(self):
+        reports = []
+        seen = set()
+        for lease in self.lifetime_leases:
+            observe = getattr(lease, "_graph_provider_memory_report", None)
+            if observe is None:
+                continue
+            identity = getattr(lease, "_graph_provider_memory_identity", None)
+            identity = identity() if identity is not None else ("lease", id(lease))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            reports.append(observe())
+        return tuple(reports)
+
     def graph_submission_owners(self):
         owners = []
         seen = set()
@@ -13498,6 +13535,7 @@ class Graph:
                 observation_arena_stats=observation_arena_stats,
                 telemetry_arena_stats=telemetry_arena_stats,
                 internal_storage_stats=internal_storage_stats,
+                provider_memory=self._spec.provider_memory_reports(),
             )
 
     @property

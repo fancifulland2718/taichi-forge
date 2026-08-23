@@ -630,11 +630,13 @@ eliminating fallback counts alone is not a sufficient optimization result.
 
 ## Diagnostics
 
-Use the stable, frozen `Graph.execution_stats()` schema v6 report. It exposes
+Use the stable, frozen `Graph.execution_stats()` schema v7 report. It exposes
 definition counts, compiled task count, segment-local runtime arguments,
 generation-qualified static dependencies, a pointer-free layout fingerprint,
 execution/fallback path, replay eligibility, persistent argument bytes, and
-immutable per-segment counters. Application code should not read the internal
+immutable per-segment counters. Schema v7 also reports deduplicated
+provider-generation memory reports without folding requested provider bytes into
+Graph-owned persistent bytes. Application code should not read the internal
 `Graph._graph_stats` cache.
 
 Each CGraph segment also exposes a `replay_attribution` shape. Production
