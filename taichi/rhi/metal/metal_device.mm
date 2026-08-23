@@ -785,7 +785,7 @@ void MetalCommandList::draw_instance(uint32_t num_verticies,
 }
 
 void MetalCommandList::draw_indexed(uint32_t num_indicies,
-                                    uint32_t start_vertex,
+                                    int32_t vertex_offset,
                                     uint32_t start_index) {
   @autoreleasepool {
 
@@ -810,7 +810,7 @@ void MetalCommandList::draw_indexed(uint32_t num_indicies,
                    indexBuffer:current_raster_resources_->index_binding.buffer
              indexBufferOffset:index_offset
                  instanceCount:1
-                    baseVertex:start_vertex
+                    baseVertex:vertex_offset
                   baseInstance:0];
     [rce endEncoding];
   }
@@ -818,7 +818,7 @@ void MetalCommandList::draw_indexed(uint32_t num_indicies,
 
 void MetalCommandList::draw_indexed_instance(uint32_t num_indicies,
                                              uint32_t num_instances,
-                                             uint32_t start_vertex,
+                                             int32_t vertex_offset,
                                              uint32_t start_index,
                                              uint32_t start_instance) {
   @autoreleasepool {
@@ -841,7 +841,7 @@ void MetalCommandList::draw_indexed_instance(uint32_t num_indicies,
                    indexBuffer:current_raster_resources_->index_binding.buffer
              indexBufferOffset:index_offset
                  instanceCount:num_instances
-                    baseVertex:start_vertex
+                    baseVertex:vertex_offset
                   baseInstance:start_instance];
     [rce endEncoding];
   }

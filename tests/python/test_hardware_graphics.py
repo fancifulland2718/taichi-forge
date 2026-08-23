@@ -69,6 +69,10 @@ def test_vulkan_graphics_contract_rejects_non_vulkan_runtime():
         _triangle_pipeline()
     with pytest.raises(ValueError, match="positive uint32"):
         ti.hardware.graphics.Draw(0)
+    with pytest.raises(ValueError, match="minimum must not exceed maximum"):
+        ti.hardware.graphics.Draw(3, index_bounds=(2, 1))
+    with pytest.raises(ValueError, match="signed int32"):
+        ti.hardware.graphics.Draw(3, vertex_offset=1 << 31)
     with pytest.raises(TypeError, match="ti.Format"):
         ti.hardware.graphics.VertexAttribute(0, 0, "rg32f")
 
@@ -145,6 +149,57 @@ def test_vulkan_graphics_viewport_uses_offset_and_extent():
                 {0: vertices},
                 draw=draw,
                 viewport=(48, 48, 32, 32),
+            )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_indexed_draw_uses_declared_bounds():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    with _triangle_pipeline() as pipeline:
+        vertices = _triangle_vertices()
+        indices = ti.ndarray(ti.u32, shape=(3,))
+        indices.from_numpy(np.array([1, 2, 3], dtype=np.uint32))
+        color = ti.Texture(ti.Format.rgba8, (64, 64))
+
+        draw = ti.hardware.graphics.Draw(
+            3,
+            vertex_offset=-1,
+            index_bounds=(1, 3),
+        )
+        pipeline.draw(color, {0: vertices}, index_buffer=indices, draw=draw)
+        ti.sync()
+        assert np.asarray(color.to_image())[32, 32].max() > 32
+
+        with pytest.raises(RuntimeError, match="vertex binding 0 is too small"):
+            pipeline.draw(
+                color,
+                {0: vertices},
+                index_buffer=indices,
+                draw=ti.hardware.graphics.Draw(3, index_bounds=(0, 99)),
+            )
+
+        signed_indices = ti.ndarray(ti.i32, shape=(3,))
+        signed_indices.from_numpy(np.array([0, 1, 2], dtype=np.int32))
+        with pytest.raises(RuntimeError, match="index buffer must use u32"):
+            pipeline.draw(
+                color,
+                {0: vertices},
+                index_buffer=signed_indices,
+                draw=ti.hardware.graphics.Draw(3, index_bounds=(0, 2)),
+            )
+
+        with pytest.raises(ValueError, match="require declared index_bounds"):
+            pipeline.record(
+                ti.hardware.graphics.Draw(3),
+                vertex_buffers={0: "vertices"},
+                index_buffer="indices",
+            )
+        with pytest.raises(ValueError, match="index_bounds require"):
+            pipeline.record(
+                ti.hardware.graphics.Draw(3, index_bounds=(0, 2)),
+                vertex_buffers={0: "vertices"},
             )
 
 

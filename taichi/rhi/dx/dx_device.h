@@ -138,7 +138,7 @@ class Dx11CommandList : public CommandList {
   void draw(uint32_t num_verticies, uint32_t start_vertex = 0) override;
   void set_line_width(float width) override;
   void draw_indexed(uint32_t num_indicies,
-                    uint32_t start_vertex = 0,
+                    int32_t vertex_offset = 0,
                     uint32_t start_index = 0) override;
   void image_transition(DeviceAllocation img,
                         ImageLayout old_layout,

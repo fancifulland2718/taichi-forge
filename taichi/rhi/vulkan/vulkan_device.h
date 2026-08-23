@@ -530,11 +530,11 @@ class VulkanCommandList : public CommandList {
                      uint32_t start_vertex = 0,
                      uint32_t start_instance = 0) override;
   void draw_indexed(uint32_t num_indicies,
-                    uint32_t start_vertex = 0,
+                    int32_t vertex_offset = 0,
                     uint32_t start_index = 0) override;
   void draw_indexed_instance(uint32_t num_indicies,
                              uint32_t num_instances,
-                             uint32_t start_vertex = 0,
+                             int32_t vertex_offset = 0,
                              uint32_t start_index = 0,
                              uint32_t start_instance = 0) override;
   void set_line_width(float width) override;

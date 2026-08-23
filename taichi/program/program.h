@@ -140,6 +140,9 @@ struct VulkanGraphicsDrawInfo {
   std::uint32_t first_vertex{0};
   std::uint32_t first_index{0};
   std::uint32_t first_instance{0};
+  std::int32_t vertex_offset{0};
+  std::uint32_t index_min{0};
+  std::uint32_t index_max{0};
   bool indexed{false};
   std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
   std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};

@@ -426,7 +426,7 @@ void GLCommandList::set_line_width(float width) {
 }
 
 void GLCommandList::draw_indexed(uint32_t num_indicies,
-                                 uint32_t start_vertex,
+                                 int32_t vertex_offset,
                                  uint32_t start_index) {
   TI_NOT_IMPLEMENTED;
 }

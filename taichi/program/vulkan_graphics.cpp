@@ -351,7 +351,15 @@ std::size_t Program::vulkan_graphics_draw(
       records = static_cast<std::uint64_t>(draw.first_instance) +
                 draw.instance_count;
     } else if (draw.indexed) {
-      records = static_cast<std::uint64_t>(draw.first_vertex) + 1;
+      const std::int64_t first_record =
+          static_cast<std::int64_t>(draw.index_min) + draw.vertex_offset;
+      const std::int64_t last_record =
+          static_cast<std::int64_t>(draw.index_max) + draw.vertex_offset;
+      TI_ERROR_IF(first_record < 0 || last_record < first_record,
+                  "Vulkan graphics indexed vertex binding {} has an invalid "
+                  "declared index range after applying vertex_offset.",
+                  binding.binding);
+      records = static_cast<std::uint64_t>(last_record) + 1;
     } else {
       records = static_cast<std::uint64_t>(draw.first_vertex) +
                 draw.element_count;
@@ -370,9 +378,8 @@ std::size_t Program::vulkan_graphics_draw(
                     index_buffer->get_device_allocation().device != device,
                 "Vulkan graphics index buffer belongs to another runtime or "
                 "device.");
-    TI_ERROR_IF(index_buffer->get_element_data_type() != PrimitiveType::i32 &&
-                    index_buffer->get_element_data_type() != PrimitiveType::u32,
-                "Vulkan graphics index buffer must use i32 or u32.");
+    TI_ERROR_IF(index_buffer->get_element_data_type() != PrimitiveType::u32,
+                "Vulkan graphics index buffer must use u32.");
     TI_ERROR_IF(!int(device->allocation_usage(
                          index_buffer->get_device_allocation()) &
                      AllocUsage::Index),
@@ -465,10 +472,10 @@ std::size_t Program::vulkan_graphics_draw(
                     bind_result);
         if (draw.indexed && draw.instance_count > 1) {
           commands->draw_indexed_instance(
-              draw.element_count, draw.instance_count, draw.first_vertex,
+              draw.element_count, draw.instance_count, draw.vertex_offset,
               draw.first_index, draw.first_instance);
         } else if (draw.indexed) {
-          commands->draw_indexed(draw.element_count, draw.first_vertex,
+          commands->draw_indexed(draw.element_count, draw.vertex_offset,
                                  draw.first_index);
         } else if (draw.instance_count > 1) {
           commands->draw_instance(draw.element_count, draw.instance_count,

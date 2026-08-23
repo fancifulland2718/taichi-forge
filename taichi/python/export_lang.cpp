@@ -2086,6 +2086,8 @@ void export_lang(py::module &m) {
              Ndarray *index_buffer, std::uint32_t element_count,
              std::uint32_t instance_count, std::uint32_t first_vertex,
              std::uint32_t first_index, std::uint32_t first_instance,
+             std::int32_t vertex_offset, std::uint32_t index_min,
+             std::uint32_t index_max,
              bool indexed, const std::array<float, 4> &clear_color,
              const std::array<std::uint32_t, 4> &viewport) {
             std::vector<std::pair<std::uint32_t, Ndarray *>> vertex_buffers;
@@ -2105,6 +2107,9 @@ void export_lang(py::module &m) {
             draw.first_vertex = first_vertex;
             draw.first_index = first_index;
             draw.first_instance = first_instance;
+            draw.vertex_offset = vertex_offset;
+            draw.index_min = index_min;
+            draw.index_max = index_max;
             draw.indexed = indexed;
             draw.clear_color = clear_color;
             draw.viewport = viewport;
@@ -2124,7 +2129,8 @@ void export_lang(py::module &m) {
           py::arg("vertex_buffers"), py::arg("index_buffer"),
           py::arg("element_count"), py::arg("instance_count"),
           py::arg("first_vertex"), py::arg("first_index"),
-          py::arg("first_instance"), py::arg("indexed"),
+          py::arg("first_instance"), py::arg("vertex_offset"),
+          py::arg("index_min"), py::arg("index_max"), py::arg("indexed"),
           py::arg("clear_color"), py::arg("viewport"))
       .def("_destroy_vulkan_graphics_pipeline",
            &Program::destroy_vulkan_graphics_pipeline, py::arg("handle"),

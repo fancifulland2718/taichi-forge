@@ -47,6 +47,14 @@ def _u32(value, name, *, positive=False):
     return value
 
 
+def _i32(value, name):
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer")
+    if not -(1 << 31) <= value < (1 << 31):
+        raise ValueError(f"{name} must be a signed int32 value")
+    return value
+
+
 def _name(value, label):
     if not isinstance(value, str) or not value:
         raise ValueError(f"{label} must be a nonempty string")
@@ -96,13 +104,15 @@ class VertexAttribute:
 
 @dataclass(frozen=True)
 class Draw:
-    """Immutable direct-draw range; index presence is declared by recording."""
+    """Immutable direct or indexed draw range."""
 
     element_count: int
     instance_count: int = 1
     first_vertex: int = 0
     first_index: int = 0
     first_instance: int = 0
+    vertex_offset: int = 0
+    index_bounds: tuple | None = None
 
     def __post_init__(self):
         _u32(self.element_count, "element_count", positive=True)
@@ -110,6 +120,21 @@ class Draw:
         _u32(self.first_vertex, "first_vertex")
         _u32(self.first_index, "first_index")
         _u32(self.first_instance, "first_instance")
+        _i32(self.vertex_offset, "vertex_offset")
+        if self.index_bounds is not None:
+            if not isinstance(self.index_bounds, (tuple, list)):
+                raise TypeError("index_bounds must contain minimum and maximum indices")
+            if len(self.index_bounds) != 2:
+                raise ValueError(
+                    "index_bounds must contain minimum and maximum indices"
+                )
+            index_bounds = tuple(
+                _u32(value, f"index_bounds[{index}]")
+                for index, value in enumerate(self.index_bounds)
+            )
+            if index_bounds[0] > index_bounds[1]:
+                raise ValueError("index_bounds minimum must not exceed maximum")
+            object.__setattr__(self, "index_bounds", index_bounds)
 
 
 class VulkanGraphicsDrawRecording(BackendCommandRecording):
@@ -138,6 +163,19 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             depth = _name(depth, "depth binding")
         if index_buffer is not None:
             index_buffer = _name(index_buffer, "index-buffer binding")
+            if draw.index_bounds is None:
+                raise ValueError("indexed draws require declared index_bounds")
+            if draw.first_vertex != 0:
+                raise ValueError(
+                    "indexed draws use vertex_offset instead of first_vertex"
+                )
+        else:
+            if draw.index_bounds is not None:
+                raise ValueError("index_bounds require an indexed draw")
+            if draw.vertex_offset != 0:
+                raise ValueError("vertex_offset requires an indexed draw")
+            if draw.first_index != 0:
+                raise ValueError("first_index requires an indexed draw")
         if not isinstance(vertex_buffers, dict):
             raise TypeError("vertex_buffers must map binding integers to names")
         normalized_vertices = {}
@@ -240,6 +278,9 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         if index is not None and not isinstance(index, Ndarray):
             raise TaichiRuntimeError("graphics index binding must be a Taichi ndarray")
         draw = self.draw
+        index_min, index_max = (
+            (0, 0) if draw.index_bounds is None else draw.index_bounds
+        )
         self.pipeline._runtime_prog._vulkan_graphics_draw(
             self.pipeline._handle,
             color.tex,
@@ -251,6 +292,9 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             draw.first_vertex,
             draw.first_index,
             draw.first_instance,
+            draw.vertex_offset,
+            index_min,
+            index_max,
             index is not None,
             self.clear_color,
             self.viewport,
