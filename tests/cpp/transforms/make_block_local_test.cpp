@@ -190,5 +190,44 @@ TEST_F(MakeBlockLocalTest, Basic) {
   }
 }
 
+TEST_F(MakeBlockLocalTest, SparseWriteBackFallsBackToGlobalAtomic) {
+  initialize(/*pointer_size=*/2, /*block_size=*/4);
+
+  auto *loop_idx0 = builder_.get_loop_index(for_stmt_.get(), /*index=*/0);
+  auto *loop_idx1 = builder_.get_loop_index(for_stmt_.get(), /*index=*/1);
+  auto *global_ptr = builder_.create_global_ptr(
+      bls_place_snode_, /*indices=*/{loop_idx0, loop_idx1});
+  auto *one = builder_.get_float32(1.0f);
+  auto *atomic = builder_.create_atomic_add(global_ptr, one);
+
+  irpass::make_block_local(for_stmt_.get(), CompileConfig{},
+                           MakeBlockLocalPass::Args{});
+
+  EXPECT_EQ(for_stmt_->bls_prologue, nullptr);
+  EXPECT_EQ(for_stmt_->bls_epilogue, nullptr);
+  EXPECT_TRUE(atomic->dest->is<GlobalPtrStmt>());
+  EXPECT_EQ(atomic->dest, global_ptr);
+}
+
+TEST_F(MakeBlockLocalTest, SparseStoreFallsBackToGlobalMemory) {
+  initialize(/*pointer_size=*/2, /*block_size=*/4);
+
+  auto *loop_idx0 = builder_.get_loop_index(for_stmt_.get(), /*index=*/0);
+  auto *loop_idx1 = builder_.get_loop_index(for_stmt_.get(), /*index=*/1);
+  auto *global_ptr = builder_.create_global_ptr(
+      bls_place_snode_, /*indices=*/{loop_idx0, loop_idx1});
+  auto *one = builder_.get_float32(1.0f);
+  auto *store = dynamic_cast<GlobalStoreStmt *>(
+      for_stmt_->body->push_back<GlobalStoreStmt>(global_ptr, one));
+
+  irpass::make_block_local(for_stmt_.get(), CompileConfig{},
+                           MakeBlockLocalPass::Args{});
+
+  EXPECT_EQ(for_stmt_->bls_prologue, nullptr);
+  EXPECT_EQ(for_stmt_->bls_epilogue, nullptr);
+  EXPECT_TRUE(store->dest->is<GlobalPtrStmt>());
+  EXPECT_EQ(store->dest, global_ptr);
+}
+
 }  // namespace
 }  // namespace taichi::lang

@@ -9,6 +9,16 @@ namespace taichi::lang {
 
 namespace {
 
+bool has_sparse_ancestor(const SNode *snode) {
+  for (auto *ancestor = snode->parent; ancestor != nullptr;
+       ancestor = ancestor->parent) {
+    if (ancestor->need_activation()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 void make_block_local_offload(OffloadedStmt *offload,
                               const CompileConfig &config,
                               const std::string &kernel_name,
@@ -69,6 +79,14 @@ void make_block_local_offload(OffloadedStmt *offload,
     bool bls_has_read = pad.second.total_flags & AccessFlag::read;
     bool bls_has_write = pad.second.total_flags & AccessFlag::write;
     bool bls_has_accumulate = pad.second.total_flags & AccessFlag::accumulate;
+
+    // A sparse write-back epilogue is not semantics-preserving: it visits the
+    // whole inferred pad and can activate sparse containers for elements that
+    // the original store/atomic never touched. Keep the original global
+    // accesses instead. Read-only sparse gathers remain eligible for BLS.
+    if ((bls_has_write || bls_has_accumulate) && has_sparse_ancestor(snode)) {
+      continue;
+    }
 
     TI_ASSERT_INFO(!bls_has_write, "BLS with write accesses is not supported.")
     TI_ASSERT_INFO(!(bls_has_accumulate && bls_has_read),

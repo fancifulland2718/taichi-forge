@@ -792,6 +792,51 @@ def test_cuda_async_tile_rejects_read_write_block_local_cache():
     assert after_update.native_facts["copy_sites"] == 0
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_sparse_block_local_scatter_falls_back_to_global_atomics():
+    source = ti.field(ti.i32)
+    destination = ti.field(ti.i32)
+    ti.root.pointer(ti.i, 16).dense(ti.i, 8).place(source)
+    ti.root.pointer(ti.i, 16).dense(ti.i, 8).place(destination)
+    active_destination_elements = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def initialize():
+        for lane in range(8):
+            source[lane] = lane + 1
+            source[32 + lane] = 101 + lane
+
+    @ti.kernel
+    def scatter():
+        ti.block_local(destination)
+        for i in source:
+            ti.atomic_add(destination[2 * i], source[i])
+
+    @ti.kernel
+    def count_active_destination_elements():
+        for _ in destination:
+            ti.atomic_add(active_destination_elements[None], 1)
+
+    initialize()
+    scatter()
+    count_active_destination_elements()
+    ti.sync()
+
+    expected = np.zeros(128, dtype=np.int32)
+    expected[2 * np.arange(8)] = np.arange(1, 9, dtype=np.int32)
+    expected[64 + 2 * np.arange(8)] = np.arange(101, 109, dtype=np.int32)
+    np.testing.assert_array_equal(destination.to_numpy(), expected)
+    assert active_destination_elements[None] == 32
+
+    async_tile = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "internal.tile.async.cuda"
+    )
+    assert async_tile.native_facts["lowered_specializations"] == 0
+    assert async_tile.native_facts["copy_sites"] == 0
+
+
 @test_utils.test(arch=ti.vulkan)
 def test_vulkan_buffer_command_route_is_passively_eligible():
     report = ti.hardware.report()
