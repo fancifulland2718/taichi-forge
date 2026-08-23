@@ -428,7 +428,8 @@ std::size_t Program::vulkan_graphics_draw(
 
   enqueue_graphics_op_lambda(
       [resource, allocations = std::move(allocations), index_allocation, draw,
-       viewport, color_allocation, depth_allocation, width,
+       viewport, viewport_x_end, viewport_y_end, color_allocation,
+       depth_allocation, width,
        height](GraphicsDevice *graphics, CommandList *commands) {
         auto *vulkan_commands =
             static_cast<vulkan::VulkanCommandList *>(commands);
@@ -454,7 +455,8 @@ std::size_t Program::vulkan_graphics_draw(
                                    depth_target_ptr != nullptr);
         commands->set_raster_viewport_and_scissor(
             static_cast<int>(viewport[0]), static_cast<int>(viewport[1]),
-            static_cast<int>(viewport[2]), static_cast<int>(viewport[3]));
+            static_cast<int>(viewport_x_end),
+            static_cast<int>(viewport_y_end));
         commands->bind_pipeline(resource->pipeline());
         const RhiResult bind_result =
             commands->bind_raster_resources(raster.get());

@@ -119,6 +119,36 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_viewport_uses_offset_and_extent():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    with _triangle_pipeline() as pipeline:
+        vertices = _triangle_vertices()
+        color = ti.Texture(ti.Format.rgba8, (64, 64))
+        draw = ti.hardware.graphics.Draw(3)
+
+        pipeline.draw(
+            color,
+            {0: vertices},
+            draw=draw,
+            viewport=(16, 16, 32, 32),
+        )
+        ti.sync()
+        image = np.asarray(color.to_image())
+        assert image[32, 32].max() > 32
+        assert image[8, 8].max() == 0
+
+        with pytest.raises(RuntimeError, match="inside the color attachment"):
+            pipeline.draw(
+                color,
+                {0: vertices},
+                draw=draw,
+                viewport=(48, 48, 32, 32),
+            )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_graphics_draw_validates_bindings_and_runtime_generation():
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")
