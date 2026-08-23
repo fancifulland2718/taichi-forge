@@ -17,6 +17,7 @@ def test_hardware_memory_schema_separates_known_requested_and_opaque_bytes():
         True,
         "provider_generation",
         "provider",
+        resident=True,
     )
     opaque = ti.hardware.HardwareMemoryComponent(
         "driver_state",
@@ -24,6 +25,7 @@ def test_hardware_memory_schema_separates_known_requested_and_opaque_bytes():
         False,
         "provider_generation",
         "driver",
+        resident=True,
     )
     report = ti.hardware.HardwareMemoryReport(
         schema_version=ti.hardware.HARDWARE_MEMORY_SCHEMA_VERSION,
@@ -52,8 +54,8 @@ def test_cuda_provider_memory_reports_do_not_invent_vendor_workspace_bytes():
     for report in opaque_reports:
         assert report.backend == "cuda"
         assert report.known_resident_requested_bytes == 0
-        assert not report.resident_requested_bytes_complete
-        assert report.opaque_component_count == 1
+        assert report.resident_requested_bytes_complete
+        assert report.opaque_component_count == 0
 
     if ti.hardware.fft.is_available():
         plan = ti.hardware.fft.CufftPlan1D(8)
