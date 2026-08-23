@@ -600,6 +600,7 @@ std::uint64_t Program::create_vulkan_triangle_ray_scene(
         scene->record_build(commands, vertex_allocation, index_allocation);
       },
       {});
+  mark_runtime_submission_pending();
 
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   TI_ERROR_IF(next_vulkan_ray_scene_handle_ == 0,
@@ -665,6 +666,7 @@ std::size_t Program::vulkan_triangle_ray_query(std::uint64_t handle,
                             ray_count);
       },
       {});
+  mark_runtime_submission_pending();
   return 0;
 }
 
@@ -718,6 +720,7 @@ std::size_t Program::vulkan_triangle_ray_refit(std::uint64_t handle,
         scene->record_refit(commands, vertex_allocation);
       },
       {});
+  mark_runtime_submission_pending();
   return 0;
 }
 
@@ -731,8 +734,26 @@ Program::vulkan_triangle_ray_scene_memory_statistics(
   return found->second->memory_statistics();
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_vulkan_ray_resource_stats() {
+  std::uint64_t live = 0;
+  std::uint64_t queued_for_completion = 0;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    live = vulkan_ray_scenes_.size();
+    queued_for_completion = vulkan_ray_scene_retirements_.size();
+  }
+  const auto completion_retained =
+      runtime_completion_resource_count(kVulkanRaySceneResourceKind);
+  return {{"live", live},
+          {"retiring", queued_for_completion + completion_retained},
+          {"queued_for_completion", queued_for_completion},
+          {"completion_retained", completion_retained}};
+}
+
 void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
   std::shared_ptr<VulkanTriangleRayScene> scene;
+  bool record_retirement = false;
   {
     auto submission_guard = acquire_runtime_resource_submission_guard();
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
@@ -742,15 +763,21 @@ void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t handle) {
     }
     scene = found->second;
     vulkan_ray_scenes_.erase(found);
+    if (!runtime_has_fatal_fault() &&
+        runtime_submission_pending_.load(std::memory_order_acquire)) {
+      vulkan_ray_scene_retirements_.push_back(std::move(scene));
+      record_retirement = true;
+    }
   }
-  if (!runtime_has_fatal_fault()) {
-    synchronize();
+  if (record_retirement) {
+    record_runtime_completion();
   }
 }
 
 void Program::vulkan_clear_ray_scenes() {
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   vulkan_ray_scenes_.clear();
+  vulkan_ray_scene_retirements_.clear();
 }
 
 }  // namespace taichi::lang
@@ -787,6 +814,14 @@ std::size_t Program::vulkan_triangle_ray_refit(std::uint64_t,
 VulkanTriangleRaySceneMemoryStatistics
 Program::vulkan_triangle_ray_scene_memory_statistics(std::uint64_t) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_vulkan_ray_resource_stats() {
+  return {{"live", 0},
+          {"retiring", 0},
+          {"queued_for_completion", 0},
+          {"completion_retained", 0}};
 }
 
 void Program::destroy_vulkan_triangle_ray_scene(std::uint64_t) {

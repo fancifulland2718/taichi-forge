@@ -983,6 +983,9 @@ class TI_DLL_EXPORT Program {
 
   std::size_t debug_vulkan_graphics_pipeline_count();
 
+  std::unordered_map<std::string, std::uint64_t>
+  debug_vulkan_graphics_resource_stats();
+
   std::uint64_t create_vulkan_graphics_pipeline(
       const std::vector<std::uint32_t> &vertex_spirv,
       const std::vector<std::uint32_t> &fragment_spirv,
@@ -1031,6 +1034,9 @@ class TI_DLL_EXPORT Program {
 
   VulkanTriangleRaySceneMemoryStatistics
   vulkan_triangle_ray_scene_memory_statistics(std::uint64_t handle);
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_vulkan_ray_resource_stats();
 
   void destroy_vulkan_triangle_ray_scene(std::uint64_t handle);
 
@@ -3639,14 +3645,21 @@ class TI_DLL_EXPORT Program {
     NdarrayInflightLeaseMap ndarrays;
     TextureInflightLeaseMap textures;
     ExternalDenseStorageInflightLeaseMap external_dense_storage;
+    std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>>
+        vulkan_graphics_pipelines;
+    std::vector<std::shared_ptr<VulkanTriangleRayScene>> vulkan_ray_scenes;
 
     std::size_t retained_resource_count(
         std::uint32_t kind) const noexcept override;
     bool empty() const noexcept {
       return argpacks.empty() && ndarrays.empty() && textures.empty() &&
-             external_dense_storage.empty();
+             external_dense_storage.empty() &&
+             vulkan_graphics_pipelines.empty() && vulkan_ray_scenes.empty();
     }
   };
+
+  static constexpr std::uint32_t kVulkanGraphicsPipelineResourceKind = 6;
+  static constexpr std::uint32_t kVulkanRaySceneResourceKind = 7;
 
   struct DenseFieldHostCopyStagingResource {
     DeviceAllocationUnique upload;
@@ -3708,6 +3721,7 @@ class TI_DLL_EXPORT Program {
   void pin_external_dense_storage_launch_leases(
       ExternalDenseStorageLaunchLeases &leases);
   void release_completed_external_dense_storage_leases();
+  void release_completed_vulkan_native_resources();
   void begin_external_access_epoch(
       ExternalAccessEpoch &epoch,
       const ExternalDenseStorageLaunchLeases &leases);
@@ -3792,10 +3806,14 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::uint64_t,
                      std::shared_ptr<VulkanGraphicsPipelineResource>>
       vulkan_graphics_pipelines_;
+  std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>>
+      vulkan_graphics_pipeline_retirements_;
   std::uint64_t next_vulkan_graphics_pipeline_handle_{1};
   std::mutex vulkan_ray_scene_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanTriangleRayScene>>
       vulkan_ray_scenes_;
+  std::vector<std::shared_ptr<VulkanTriangleRayScene>>
+      vulkan_ray_scene_retirements_;
   std::uint64_t next_vulkan_ray_scene_handle_{1};
   std::mutex cuda_cufft_plan_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>

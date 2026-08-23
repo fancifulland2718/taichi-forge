@@ -541,6 +541,39 @@ def test_vulkan_graphics_pipeline_close_releases_program_resources():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_close_defers_inflight_resource_without_waiting():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    program = impl.get_runtime().prog
+    ti.sync()
+    baseline = dict(program._debug_vulkan_graphics_resource_stats())
+    pipeline = _triangle_pipeline()
+    color = ti.Texture(ti.Format.rgba8, (64, 64))
+    vertices = _triangle_vertices()
+    pipeline.draw(color, {0: vertices}, draw=ti.hardware.graphics.Draw(3))
+    waits_before = program._runtime_statistics_snapshot()["synchronization"][
+        "backend_waits"
+    ]
+
+    pipeline.close()
+
+    waits_after = program._runtime_statistics_snapshot()["synchronization"][
+        "backend_waits"
+    ]
+    retiring = dict(program._debug_vulkan_graphics_resource_stats())
+    assert waits_after == waits_before
+    assert retiring["live"] == baseline["live"]
+    assert retiring["retiring"] == baseline["retiring"] + 1
+    assert retiring["completion_retained"] >= 1
+
+    ti.sync()
+    completed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert completed["live"] == baseline["live"]
+    assert completed["retiring"] == baseline["retiring"]
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_graphics_pass_batches_multiple_draws_and_graph_nodes():
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")

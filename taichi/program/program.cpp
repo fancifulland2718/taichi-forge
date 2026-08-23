@@ -5702,6 +5702,7 @@ void Program::launch_kernel_impl(
       release_completed_ndarray_leases();
       release_completed_texture_leases();
       release_completed_external_dense_storage_leases();
+      release_completed_vulkan_native_resources();
       throw;
     }
   };
@@ -7258,6 +7259,7 @@ void Program::with_resolved_dense_storage_bindings(
         program_impl_->synchronize();
         release_completed_ndarray_leases();
         release_completed_external_dense_storage_leases();
+        release_completed_vulkan_native_resources();
       } catch (...) {
       }
     }
@@ -7312,6 +7314,7 @@ void Program::with_resolved_runtime_storage_arguments(
         program_impl_->synchronize();
         release_completed_ndarray_leases();
         release_completed_external_dense_storage_leases();
+        release_completed_vulkan_native_resources();
       } catch (...) {
       }
     }
@@ -7514,6 +7517,21 @@ void Program::release_completed_external_dense_storage_leases() {
   completed.clear();
 }
 
+void Program::release_completed_vulkan_native_resources() {
+  std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>> graphics;
+  std::vector<std::shared_ptr<VulkanTriangleRayScene>> ray_scenes;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+    graphics.swap(vulkan_graphics_pipeline_retirements_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    ray_scenes.swap(vulkan_ray_scene_retirements_);
+  }
+  graphics.clear();
+  ray_scenes.clear();
+}
+
 std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
     std::uint32_t kind) const noexcept {
   if (kind == kArgPackResourceKind) {
@@ -7527,6 +7545,12 @@ std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
   }
   if (kind == kExternalDenseStorageResourceKind) {
     return external_dense_storage.size();
+  }
+  if (kind == kVulkanGraphicsPipelineResourceKind) {
+    return vulkan_graphics_pipelines.size();
+  }
+  if (kind == kVulkanRaySceneResourceKind) {
+    return vulkan_ray_scenes.size();
   }
   return 0;
 }
@@ -7551,6 +7575,14 @@ Program::detach_runtime_completion_resources() {
     has_resources = !external_dense_storage_inflight_leases_.empty();
   }
   if (!has_resources) {
+    std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+    has_resources = !vulkan_graphics_pipeline_retirements_.empty();
+  }
+  if (!has_resources) {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    has_resources = !vulkan_ray_scene_retirements_.empty();
+  }
+  if (!has_resources) {
     return nullptr;
   }
 
@@ -7572,6 +7604,15 @@ Program::detach_runtime_completion_resources() {
   {
     std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
     batch->external_dense_storage.swap(external_dense_storage_inflight_leases_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+    batch->vulkan_graphics_pipelines.swap(
+        vulkan_graphics_pipeline_retirements_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    batch->vulkan_ray_scenes.swap(vulkan_ray_scene_retirements_);
   }
   TI_ASSERT(!batch->empty());
   return batch;
@@ -7798,6 +7839,7 @@ RuntimeCompletion Program::record_runtime_completion(
         release_completed_ndarray_leases();
         release_completed_texture_leases();
         release_completed_external_dense_storage_leases();
+        release_completed_vulkan_native_resources();
       }
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
@@ -7814,6 +7856,7 @@ RuntimeCompletion Program::record_runtime_completion(
         release_completed_ndarray_leases();
         release_completed_texture_leases();
         release_completed_external_dense_storage_leases();
+        release_completed_vulkan_native_resources();
         last_runtime_completion_submission_epoch_.store(
             submission_epoch, std::memory_order_release);
         std::rethrow_exception(submission_error);
@@ -7835,6 +7878,7 @@ RuntimeCompletion Program::record_runtime_completion(
           release_completed_ndarray_leases();
           release_completed_texture_leases();
           release_completed_external_dense_storage_leases();
+          release_completed_vulkan_native_resources();
           last_runtime_completion_submission_epoch_.store(
               submission_epoch, std::memory_order_release);
         }
@@ -7846,6 +7890,7 @@ RuntimeCompletion Program::record_runtime_completion(
       release_completed_ndarray_leases();
       release_completed_texture_leases();
       release_completed_external_dense_storage_leases();
+      release_completed_vulkan_native_resources();
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
       throw;
@@ -7921,6 +7966,11 @@ Program::debug_runtime_completion_stats() const {
        runtime_completion_resource_count(kNdarrayResourceKind)},
       {"retained_textures",
        runtime_completion_resource_count(kTextureResourceKind)},
+      {"retained_vulkan_graphics_pipelines",
+       runtime_completion_resource_count(
+           kVulkanGraphicsPipelineResourceKind)},
+      {"retained_vulkan_ray_scenes",
+       runtime_completion_resource_count(kVulkanRaySceneResourceKind)},
       {"cuda_completion_events_created", cuda_events.created},
       {"cuda_completion_events_reused", cuda_events.reused},
       {"cuda_completion_events_returned", cuda_events.returned},
@@ -8333,6 +8383,7 @@ void Program::synchronize() {
         release_completed_ndarray_leases();
         release_completed_texture_leases();
         release_completed_external_dense_storage_leases();
+        release_completed_vulkan_native_resources();
       }
       throw;
     }
@@ -8351,6 +8402,7 @@ void Program::synchronize() {
     release_completed_ndarray_leases();
     release_completed_texture_leases();
     release_completed_external_dense_storage_leases();
+    release_completed_vulkan_native_resources();
     last_runtime_completion_submission_epoch_.store(
         submission_epoch, std::memory_order_release);
   }
@@ -8514,6 +8566,7 @@ void Program::finalize() {
       release_completed_ndarray_leases();
       release_completed_texture_leases();
       release_completed_external_dense_storage_leases();
+      release_completed_vulkan_native_resources();
       last_runtime_completion_submission_epoch_.store(
           submission_epoch, std::memory_order_release);
     });
@@ -8530,6 +8583,7 @@ void Program::finalize() {
     release_completed_ndarray_leases();
     release_completed_texture_leases();
     release_completed_external_dense_storage_leases();
+    release_completed_vulkan_native_resources();
   }
   best_effort("clear primitive workspace arena",
               [&] { primitive_workspace_arena_.clear(); });

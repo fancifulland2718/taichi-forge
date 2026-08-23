@@ -258,6 +258,23 @@ std::size_t Program::debug_vulkan_graphics_pipeline_count() {
   return vulkan_graphics_pipelines_.size();
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_vulkan_graphics_resource_stats() {
+  std::uint64_t live = 0;
+  std::uint64_t queued_for_completion = 0;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+    live = vulkan_graphics_pipelines_.size();
+    queued_for_completion = vulkan_graphics_pipeline_retirements_.size();
+  }
+  const auto completion_retained = runtime_completion_resource_count(
+      kVulkanGraphicsPipelineResourceKind);
+  return {{"live", live},
+          {"retiring", queued_for_completion + completion_retained},
+          {"queued_for_completion", queued_for_completion},
+          {"completion_retained", completion_retained}};
+}
+
 std::uint64_t Program::create_vulkan_graphics_pipeline(
     const std::vector<std::uint32_t> &vertex_spirv,
     const std::vector<std::uint32_t> &fragment_spirv,
@@ -613,6 +630,7 @@ std::size_t Program::vulkan_graphics_pass(
 
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
   std::shared_ptr<VulkanGraphicsPipelineResource> resource;
+  bool record_retirement = false;
   {
     auto submission_guard = acquire_runtime_resource_submission_guard();
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
@@ -622,15 +640,21 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
     }
     resource = found->second;
     vulkan_graphics_pipelines_.erase(found);
+    if (!runtime_has_fatal_fault() &&
+        runtime_submission_pending_.load(std::memory_order_acquire)) {
+      vulkan_graphics_pipeline_retirements_.push_back(std::move(resource));
+      record_retirement = true;
+    }
   }
-  if (!runtime_has_fatal_fault()) {
-    synchronize();
+  if (record_retirement) {
+    record_runtime_completion();
   }
 }
 
 void Program::vulkan_clear_graphics_pipelines() {
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   vulkan_graphics_pipelines_.clear();
+  vulkan_graphics_pipeline_retirements_.clear();
 }
 
 }  // namespace taichi::lang
@@ -645,6 +669,14 @@ bool Program::vulkan_graphics_pipeline_available() const {
 
 std::size_t Program::debug_vulkan_graphics_pipeline_count() {
   return 0;
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::debug_vulkan_graphics_resource_stats() {
+  return {{"live", 0},
+          {"retiring", 0},
+          {"queued_for_completion", 0},
+          {"completion_retained", 0}};
 }
 
 std::uint64_t Program::create_vulkan_graphics_pipeline(
