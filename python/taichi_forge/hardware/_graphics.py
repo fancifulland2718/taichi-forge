@@ -16,6 +16,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -238,6 +239,7 @@ class GraphicsPassDraw:
         object.__setattr__(self, "shader_buffers", MappingProxyType(normalized_shader))
 
 
+@instrument_hardware_recording("raster.draw.vulkan")
 class VulkanGraphicsDrawRecording(BackendCommandRecording):
     """One immutable Vulkan graphics draw with runtime-bound resources."""
 
@@ -479,6 +481,7 @@ def _merge_graphics_access(left, right):
     return GraphAccess.READ_WRITE
 
 
+@instrument_hardware_recording("raster.draw.vulkan")
 class VulkanGraphicsPassRecording(BackendCommandRecording):
     """One renderer-neutral Vulkan render pass containing one or more draws."""
 

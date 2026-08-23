@@ -674,7 +674,9 @@ def test_cuda_async_tile_is_automatic_workload_gated_and_reported():
 
     small_input = ti.field(ti.f32)
     small_output = ti.field(ti.f32)
-    ti.root.dense(ti.i, 64).place(small_input, small_output)
+    ti.root.pointer(ti.i, 1).dense(ti.i, 64).place(
+        small_input, small_output
+    )
 
     x0 = ti.field(ti.f32)
     x1 = ti.field(ti.f32)
@@ -736,6 +738,11 @@ def test_cuda_async_tile_is_automatic_workload_gated_and_reported():
     )
     assert after_small.selection == "eligible"
     assert after_small.native_facts["lowered_specializations"] == 0
+    assert after_small.native_facts["candidates"] >= 1
+    assert after_small.native_facts["admitted"] == 0
+    assert after_small.native_facts["rejected"] >= 1
+    assert after_small.native_facts["fallback"] >= 1
+    assert after_small.native_facts["below_size"] >= 1
 
     admitted_copy()
     ti.sync()
@@ -753,6 +760,24 @@ def test_cuda_async_tile_is_automatic_workload_gated_and_reported():
     assert selected.unavailable_reason == "none"
     assert selected.native_facts["lowered_specializations"] >= 1
     assert selected.native_facts["copy_sites"] >= 8
+    assert selected.native_facts["admitted"] >= 8
+    assert selected.native_facts["lowered"] >= 8
+    assert selected.native_facts["candidates"] == (
+        selected.native_facts["admitted"] + selected.native_facts["rejected"]
+    )
+    assert sum(
+        selected.native_facts[name]
+        for name in (
+            "below_size",
+            "read_write_bls",
+            "unsupported_width",
+            "non_direct_address",
+            "alias_unknown",
+            "shared_memory_pressure",
+            "target_capability",
+            "cost_gate",
+        )
+    ) == selected.native_facts["rejected"]
 
 
 @test_utils.test(
@@ -846,6 +871,9 @@ def test_cuda_async_tile_rejects_read_write_block_local_cache():
     assert after_update.selection == "eligible"
     assert after_update.native_facts["lowered_specializations"] == 0
     assert after_update.native_facts["copy_sites"] == 0
+    assert after_update.native_facts["candidates"] >= 1
+    assert after_update.native_facts["admitted"] == 0
+    assert after_update.native_facts["read_write_bls"] >= 1
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

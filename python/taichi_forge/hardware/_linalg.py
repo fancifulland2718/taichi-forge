@@ -12,6 +12,10 @@ from taichi_forge.graph._native import (
     NativeGraphNode,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge._hardware_telemetry import (
+    instrument_hardware_recording,
+    operation_executed,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -43,6 +47,7 @@ def _scalar(value, name):
     return result
 
 
+@instrument_hardware_recording("linalg.gemm.cublas", runtime_resource=True)
 class CublasGemmRecording(BackendCommandRecording):
     """One compact row-major f32 GEMM executed by the user's cuBLAS."""
 
@@ -182,6 +187,7 @@ class CublasGemmRecording(BackendCommandRecording):
                     False,
                     "runtime",
                     "driver",
+                    resident=operation_executed("linalg.gemm.cublas"),
                 ),
             ),
             ownership_scope="runtime_global",
@@ -233,6 +239,7 @@ class _CublasGemmNode(NativeGraphNode):
         return _CublasGemmExecutable(self._recording)
 
 
+@instrument_hardware_recording("linalg.spmv.cusparse_explicit")
 class CusparseSpmvRecording(BackendCommandRecording):
     """One f32 stored-matrix SpMV executed by the user's cuSPARSE."""
 

@@ -11,6 +11,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -52,6 +53,7 @@ class _RasterDraw:
     arguments: object
 
 
+@instrument_hardware_recording("raster.draw.vulkan")
 class VulkanRasterPassRecording(BackendCommandRecording):
     """Immutable direct-execution recording for one offscreen raster pass.
 

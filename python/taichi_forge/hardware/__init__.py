@@ -48,6 +48,11 @@ from taichi_forge.hardware._memory import (
     HardwareMemoryComponent,
     HardwareMemoryReport,
 )
+from taichi_forge.hardware._telemetry import (
+    HARDWARE_TELEMETRY_SCHEMA_VERSION,
+    HardwareTelemetryReport,
+    telemetry,
+)
 
 __all__ = [
     "ACTIVATION_MODES",
@@ -62,9 +67,11 @@ __all__ = [
     "HARDWARE_CAPABILITY_SCHEMA_VERSION",
     "HARDWARE_ROUTE_LEVELS",
     "HARDWARE_MEMORY_SCHEMA_VERSION",
+    "HARDWARE_TELEMETRY_SCHEMA_VERSION",
     "HardwareCapabilityReport",
     "HardwareMemoryComponent",
     "HardwareMemoryReport",
+    "HardwareTelemetryReport",
     "HardwareOperationDescriptor",
     "HardwareProviderDescriptor",
     "IMPLEMENTATION_STATUSES",
@@ -83,6 +90,7 @@ __all__ = [
     "probe",
     "providers",
     "report",
+    "telemetry",
     "fft",
     "graphics",
     "image",

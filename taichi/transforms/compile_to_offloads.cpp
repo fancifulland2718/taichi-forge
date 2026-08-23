@@ -540,7 +540,8 @@ void offload_to_executable(IRNode *ir,
 
   if (make_block_local) {
     TI_COMPILE_PROFILER("cpp.ir.exec.make_block_local");
-    irpass::make_block_local(ir, config, {kernel->get_name(), verbose});
+    irpass::make_block_local(
+        ir, config, {kernel->get_name(), verbose, kernel->program});
     print("Make block local");
   }
 

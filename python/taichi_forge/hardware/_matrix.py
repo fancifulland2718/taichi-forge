@@ -9,6 +9,10 @@ from taichi_forge.graph._native import (
     NativeGraphNode,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge._hardware_telemetry import (
+    instrument_hardware_recording,
+    operation_executed,
+)
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -24,6 +28,7 @@ def _expected_shape(batch_count):
     return (16, 16) if batch_count == 1 else (batch_count, 16, 16)
 
 
+@instrument_hardware_recording("matrix.mma.cuda", runtime_resource=True)
 class CudaMatrixMmaRecording(BackendCommandRecording):
     """One symbolic batched ``m16n16k16`` CUDA WMMA command.
 
@@ -135,6 +140,7 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
                     False,
                     "runtime",
                     "driver",
+                    resident=operation_executed("matrix.mma.cuda"),
                 ),
             ),
             ownership_scope="runtime_global",

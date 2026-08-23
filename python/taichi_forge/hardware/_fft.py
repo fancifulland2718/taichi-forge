@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -43,6 +44,7 @@ def _direction_value(direction):
         ) from exc
 
 
+@instrument_hardware_recording("fft.transform.cufft")
 class CufftRecording(BackendCommandRecording):
     """One out-of-place C2C execution against a fixed cuFFT plan."""
 

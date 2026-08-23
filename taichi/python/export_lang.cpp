@@ -2251,6 +2251,13 @@ void export_lang(py::module &m) {
         result["lowered_specializations"] =
             statistics.at("lowered_specializations");
         result["copy_sites"] = statistics.at("copy_sites");
+        for (const auto *key :
+             {"candidates", "admitted", "lowered", "fallback", "rejected",
+              "below_size", "read_write_bls", "unsupported_width",
+              "non_direct_address", "alias_unknown",
+              "shared_memory_pressure", "target_capability", "cost_gate"}) {
+          result[key] = statistics.at(key);
+        }
         result["minimum_bls_bytes"] =
             taichi::lang::cuda::detail::kCudaAsyncTileMinBlsBytes;
 #ifdef TI_WITH_CUDA

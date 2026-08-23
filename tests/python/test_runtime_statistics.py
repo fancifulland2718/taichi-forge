@@ -266,9 +266,10 @@ def test_runtime_statistics_graph_adapter_matches_execution_report():
     builder.dispatch(advance)
     builder.dispatch(scale)
     graph = builder.compile()
-    # The existing detailed report is opt-in. Enable it before both snapshots
-    # so its counters and the always-on unified counters cover the same runs.
-    graph.execution_stats()
+    # execution_stats() is a passive structural snapshot. Runtime replay
+    # counters live in the always-on Program statistics unless a submission
+    # explicitly requests ticket-owned telemetry.
+    structural_before = graph.execution_stats()
 
     prog = ti.lang.impl.get_runtime().prog
     before = prog._runtime_statistics_snapshot()
@@ -282,6 +283,7 @@ def test_runtime_statistics_graph_adapter_matches_execution_report():
 
     report = graph.execution_stats()
     segment = report.segments[0]
+    assert segment.counters == structural_before.segments[0].counters
     after = prog._runtime_statistics_snapshot()
     submission_delta = {
         key: after["submission"][key] - before["submission"][key]
@@ -298,26 +300,18 @@ def test_runtime_statistics_graph_adapter_matches_execution_report():
     assert submission_delta["graph_submissions"] == run_count
 
     if arch == ti.cuda:
-        replay_count = (
-            segment.counters.exact_replays
-            + segment.counters.patched_replays
-        )
-        assert graph_delta["captures"] == segment.counters.captures
-        assert graph_delta["recaptures"] == segment.counters.recaptures
-        assert graph_delta["replays"] == replay_count
+        assert graph_delta["captures"] >= 1
+        assert graph_delta["recaptures"] == 0
         assert submission_delta["graph_backend_submissions"] == (
-            segment.counters.captures + replay_count
+            graph_delta["captures"] + graph_delta["replays"]
         )
         assert graph_delta["ordinary_fallbacks"] == 0
     elif arch == ti.vulkan:
-        assert graph_delta["captures"] == segment.counters.records
-        assert graph_delta["replays"] == segment.counters.replays
+        assert graph_delta["captures"] >= 1
         assert submission_delta["graph_backend_submissions"] == (
-            segment.counters.records + segment.counters.replays
+            graph_delta["captures"] + graph_delta["replays"]
         )
-        assert graph_delta["replay_slot_saturation_fallbacks"] == (
-            segment.counters.replay_slot_saturation_fallbacks
-        )
+        assert graph_delta["replay_slot_saturation_fallbacks"] == 0
         assert graph_delta["ordinary_fallbacks"] == 0
     else:
         assert report.execution_path == "ordinary"

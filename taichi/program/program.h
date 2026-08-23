@@ -47,6 +47,10 @@
 
 namespace taichi::lang {
 
+namespace cuda::detail {
+enum class CudaAsyncTileAdmissionReason : std::uint8_t;
+}
+
 struct VulkanSparseAssemblyDispatchInfo {
   std::size_t radix_sort_workspace_bytes{0};
   std::size_t scan_workspace_bytes{0};
@@ -968,6 +972,9 @@ class TI_DLL_EXPORT Program {
   bool cuda_async_tile_available() const;
 
   void record_cuda_async_tile_lowering(std::size_t copy_sites) noexcept;
+
+  void record_cuda_async_tile_candidate(
+      cuda::detail::CudaAsyncTileAdmissionReason reason) noexcept;
 
   std::unordered_map<std::string, std::uint64_t>
   cuda_async_tile_statistics() const;
@@ -3823,6 +3830,11 @@ class TI_DLL_EXPORT Program {
   void *cuda_cublas_gemm_handle_{nullptr};
   std::atomic<std::uint64_t> cuda_async_tile_lowered_specializations_{0};
   std::atomic<std::uint64_t> cuda_async_tile_copy_sites_{0};
+  std::atomic<std::uint64_t> cuda_async_tile_candidates_{0};
+  std::atomic<std::uint64_t> cuda_async_tile_admitted_{0};
+  std::atomic<std::uint64_t> cuda_async_tile_rejected_{0};
+  std::array<std::atomic<std::uint64_t>, 8>
+      cuda_async_tile_rejection_reasons_{};
   struct RuntimeBackendTelemetryBaseline {
     std::uint64_t backend_waits{0};
     std::uint64_t backend_wait_ns{0};

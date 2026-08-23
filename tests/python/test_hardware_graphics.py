@@ -552,6 +552,7 @@ def test_vulkan_graphics_close_defers_inflight_resource_without_waiting():
     color = ti.Texture(ti.Format.rgba8, (64, 64))
     vertices = _triangle_vertices()
     pipeline.draw(color, {0: vertices}, draw=ti.hardware.graphics.Draw(3))
+    memory_before_close = program._runtime_statistics_snapshot()["memory"]
     waits_before = program._runtime_statistics_snapshot()["synchronization"][
         "backend_waits"
     ]
@@ -562,10 +563,27 @@ def test_vulkan_graphics_close_defers_inflight_resource_without_waiting():
         "backend_waits"
     ]
     retiring = dict(program._debug_vulkan_graphics_resource_stats())
+    hardware = ti.hardware.telemetry()
+    runtime_memory = program._runtime_statistics_snapshot()["memory"]
     assert waits_after == waits_before
     assert retiring["live"] == baseline["live"]
     assert retiring["retiring"] == baseline["retiring"] + 1
     assert retiring["completion_retained"] >= 1
+    assert runtime_memory["live_resources"] == (
+        memory_before_close["live_resources"] - 1
+    )
+    assert runtime_memory["retiring_resources"] >= (
+        memory_before_close["retiring_resources"] + 1
+    )
+    assert runtime_memory["inflight_resources"] >= (
+        memory_before_close["inflight_resources"] + 1
+    )
+    assert hardware.resources["vulkan_graphics_pipeline"]["retiring"] >= 1
+    assert hardware.runtime["physical_queue_counts_exact"]
+    operation = hardware.operations["raster.draw.vulkan"]
+    assert operation.recordings >= 1
+    assert operation.executed >= 1
+    assert operation.executed_backend_commands >= 1
 
     ti.sync()
     completed = dict(program._debug_vulkan_graphics_resource_stats())

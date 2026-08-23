@@ -1667,6 +1667,24 @@ def _passive_core_statuses(runtime_initialized, backend):
                     "copy_sites": int(
                         async_tile_status.get("copy_sites", 0)
                     ),
+                    **{
+                        name: int(async_tile_status.get(name, 0))
+                        for name in (
+                            "candidates",
+                            "admitted",
+                            "lowered",
+                            "fallback",
+                            "rejected",
+                            "below_size",
+                            "read_write_bls",
+                            "unsupported_width",
+                            "non_direct_address",
+                            "alias_unknown",
+                            "shared_memory_pressure",
+                            "target_capability",
+                            "cost_gate",
+                        )
+                    },
                     "selection_scope": "current_program_codegen",
                 },
             },

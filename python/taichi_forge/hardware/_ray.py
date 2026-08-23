@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -41,6 +42,7 @@ def _item_count(value, width, dtype, name):
     return count
 
 
+@instrument_hardware_recording("ray.query.batch.vulkan")
 class VulkanRayQueryRecording(BackendCommandRecording):
     """One batch query against a fixed :class:`TriangleScene` generation."""
 
@@ -162,6 +164,7 @@ class _VulkanRayQueryNode(NativeGraphNode):
         return _VulkanRayQueryExecutable(self._recording)
 
 
+@instrument_hardware_recording("ray.as_refit.vulkan")
 class VulkanRayRefitRecording(BackendCommandRecording):
     """One vertex-only BLAS update for a :class:`TriangleScene`."""
 

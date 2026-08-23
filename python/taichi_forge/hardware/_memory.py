@@ -15,7 +15,7 @@ class HardwareMemoryComponent:
     requested_bytes_exact: bool
     lifetime: str
     ownership: str
-    resident: bool = True
+    resident: bool = False
     reusable: bool = True
 
     def __post_init__(self):
@@ -30,6 +30,8 @@ class HardwareMemoryComponent:
             )
         if self.requested_bytes is None and self.requested_bytes_exact:
             raise ValueError("unknown hardware memory bytes cannot be exact")
+        if not isinstance(self.resident, bool):
+            raise TypeError("hardware memory component resident must be bool")
         if self.lifetime not in ("runtime", "provider_generation",
                                  "invocation"):
             raise ValueError("unsupported hardware memory component lifetime")

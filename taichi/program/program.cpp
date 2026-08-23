@@ -7996,6 +7996,13 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
   snapshot.memory.inflight_resources =
       argpacks.at("inflight") + ndarrays.at("inflight") +
       textures.at("inflight");
+  const auto graphics = debug_vulkan_graphics_resource_stats();
+  const auto ray = debug_vulkan_ray_resource_stats();
+  snapshot.memory.live_resources += graphics.at("live") + ray.at("live");
+  snapshot.memory.retiring_resources +=
+      graphics.at("retiring") + ray.at("retiring");
+  snapshot.memory.inflight_resources +=
+      graphics.at("completion_retained") + ray.at("completion_retained");
 
   const HostMemoryPoolStats host =
       HostMemoryPool::get_instance().get_stats();
@@ -10046,9 +10053,84 @@ void Program::record_cuda_async_tile_lowering(
                                         std::memory_order_relaxed);
 }
 
+void Program::record_cuda_async_tile_candidate(
+    cuda::detail::CudaAsyncTileAdmissionReason reason) noexcept {
+  using Reason = cuda::detail::CudaAsyncTileAdmissionReason;
+  cuda_async_tile_candidates_.fetch_add(1, std::memory_order_relaxed);
+  if (reason == Reason::kAdmitted) {
+    cuda_async_tile_admitted_.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
+  cuda_async_tile_rejected_.fetch_add(1, std::memory_order_relaxed);
+  std::size_t index = 0;
+  switch (reason) {
+    case Reason::kBelowSize:
+      index = 0;
+      break;
+    case Reason::kReadWriteBls:
+      index = 1;
+      break;
+    case Reason::kUnsupportedWidth:
+      index = 2;
+      break;
+    case Reason::kNonDirectAddress:
+      index = 3;
+      break;
+    case Reason::kAliasUnknown:
+      index = 4;
+      break;
+    case Reason::kSharedMemoryPressure:
+      index = 5;
+      break;
+    case Reason::kTargetCapability:
+      index = 6;
+      break;
+    case Reason::kCostGate:
+      index = 7;
+      break;
+    case Reason::kAdmitted:
+      TI_UNREACHABLE;
+  }
+  cuda_async_tile_rejection_reasons_[index].fetch_add(
+      1, std::memory_order_relaxed);
+}
+
 std::unordered_map<std::string, std::uint64_t>
 Program::cuda_async_tile_statistics() const {
   return {
+      {"candidates",
+       cuda_async_tile_candidates_.load(std::memory_order_relaxed)},
+      {"admitted",
+       cuda_async_tile_admitted_.load(std::memory_order_relaxed)},
+      {"lowered", cuda_async_tile_copy_sites_.load(std::memory_order_relaxed)},
+      {"fallback",
+       cuda_async_tile_rejected_.load(std::memory_order_relaxed)},
+      {"rejected",
+       cuda_async_tile_rejected_.load(std::memory_order_relaxed)},
+      {"below_size",
+       cuda_async_tile_rejection_reasons_[0].load(
+           std::memory_order_relaxed)},
+      {"read_write_bls",
+       cuda_async_tile_rejection_reasons_[1].load(
+           std::memory_order_relaxed)},
+      {"unsupported_width",
+       cuda_async_tile_rejection_reasons_[2].load(
+           std::memory_order_relaxed)},
+      {"non_direct_address",
+       cuda_async_tile_rejection_reasons_[3].load(
+           std::memory_order_relaxed)},
+      {"alias_unknown",
+       cuda_async_tile_rejection_reasons_[4].load(
+           std::memory_order_relaxed)},
+      {"shared_memory_pressure",
+       cuda_async_tile_rejection_reasons_[5].load(
+           std::memory_order_relaxed)},
+      {"target_capability",
+       cuda_async_tile_rejection_reasons_[6].load(
+           std::memory_order_relaxed)},
+      {"cost_gate",
+       cuda_async_tile_rejection_reasons_[7].load(
+           std::memory_order_relaxed)},
       {"lowered_specializations",
        cuda_async_tile_lowered_specializations_.load(
            std::memory_order_relaxed)},

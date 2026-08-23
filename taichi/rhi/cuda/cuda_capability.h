@@ -80,16 +80,53 @@ constexpr ComputeCapabilityResolution resolve_compute_capability_target(
 // qualified performance and correctness envelope.
 inline constexpr std::size_t kCudaAsyncTileMinBlsBytes = 8 * 1024;
 
+enum class CudaAsyncTileAdmissionReason : std::uint8_t {
+  kAdmitted,
+  kBelowSize,
+  kReadWriteBls,
+  kUnsupportedWidth,
+  kNonDirectAddress,
+  kAliasUnknown,
+  kSharedMemoryPressure,
+  kTargetCapability,
+  kCostGate,
+};
+
+constexpr CudaAsyncTileAdmissionReason cuda_async_tile_copy_admission(
+    int compute_capability,
+    int ptx_version,
+    std::size_t bls_bytes,
+    int copy_bytes,
+    bool direct_global_to_bls_copy,
+    bool read_only_bls) {
+  if (compute_capability < 80 || ptx_version < 70) {
+    return CudaAsyncTileAdmissionReason::kTargetCapability;
+  }
+  if (bls_bytes < kCudaAsyncTileMinBlsBytes) {
+    return CudaAsyncTileAdmissionReason::kBelowSize;
+  }
+  if (!read_only_bls) {
+    return CudaAsyncTileAdmissionReason::kReadWriteBls;
+  }
+  if (copy_bytes != 4 && copy_bytes != 8 && copy_bytes != 16) {
+    return CudaAsyncTileAdmissionReason::kUnsupportedWidth;
+  }
+  if (!direct_global_to_bls_copy) {
+    return CudaAsyncTileAdmissionReason::kNonDirectAddress;
+  }
+  return CudaAsyncTileAdmissionReason::kAdmitted;
+}
+
 constexpr bool cuda_async_tile_copy_admitted(int compute_capability,
                                              int ptx_version,
                                              std::size_t bls_bytes,
                                              int copy_bytes,
                                              bool direct_global_to_bls_copy,
                                              bool read_only_bls) {
-  return compute_capability >= 80 && ptx_version >= 70 &&
-         bls_bytes >= kCudaAsyncTileMinBlsBytes &&
-         (copy_bytes == 4 || copy_bytes == 8 || copy_bytes == 16) &&
-         direct_global_to_bls_copy && read_only_bls;
+  return cuda_async_tile_copy_admission(
+             compute_capability, ptx_version, bls_bytes, copy_bytes,
+             direct_global_to_bls_copy, read_only_bls) ==
+         CudaAsyncTileAdmissionReason::kAdmitted;
 }
 
 }  // namespace taichi::lang::cuda::detail

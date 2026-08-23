@@ -90,10 +90,17 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     TI_ASSERT(stmt == current_offload);
     const auto target = cuda::detail::resolve_compute_capability_target(
         target_compute_capability_);
-    emitting_bls_prologue_ = cuda::detail::cuda_async_tile_copy_admitted(
-        target_compute_capability_, target.ptx_version, stmt->bls_size,
-        /*copy_bytes=*/4, /*direct_global_to_bls_copy=*/true,
-        /*read_only_bls=*/stmt->bls_epilogue == nullptr);
+    async_tile_prologue_admission_ =
+        cuda::detail::cuda_async_tile_copy_admission(
+            target_compute_capability_, target.ptx_version, stmt->bls_size,
+            /*copy_bytes=*/4, /*direct_global_to_bls_copy=*/true,
+            /*read_only_bls=*/stmt->bls_epilogue == nullptr);
+    if (async_tile_prologue_admission_ !=
+        cuda::detail::CudaAsyncTileAdmissionReason::kAdmitted) {
+      prog->record_cuda_async_tile_candidate(
+          async_tile_prologue_admission_);
+    }
+    in_bls_prologue_ = true;
     emitted_async_tile_copy_ = false;
     async_tile_copy_sites_ = 0;
   }
@@ -108,17 +115,24 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       builder->CreateCall(wait);
       prog->record_cuda_async_tile_lowering(async_tile_copy_sites_);
     }
-    emitting_bls_prologue_ = false;
+    in_bls_prologue_ = false;
   }
 
   bool emit_async_tile_copy(GlobalStoreStmt *stmt) {
-    if (!emitting_bls_prologue_ ||
-        !stmt->dest->is<BlockLocalPtrStmt>()) {
+    using AdmissionReason = cuda::detail::CudaAsyncTileAdmissionReason;
+    if (!in_bls_prologue_ || !stmt->dest->is<BlockLocalPtrStmt>()) {
+      return false;
+    }
+    const auto reject = [&](AdmissionReason reason) {
+      prog->record_cuda_async_tile_candidate(reason);
+      return false;
+    };
+    if (async_tile_prologue_admission_ != AdmissionReason::kAdmitted) {
       return false;
     }
     auto *load = stmt->val->cast<GlobalLoadStmt>();
     if (load == nullptr) {
-      return false;
+      return reject(AdmissionReason::kNonDirectAddress);
     }
     auto *source_pointer_type = load->src->ret_type->cast<PointerType>();
     auto *destination_pointer_type =
@@ -128,18 +142,20 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         source_pointer_type->is_bit_pointer() ||
         destination_pointer_type->is_bit_pointer() ||
         !stmt->val->ret_type->is<PrimitiveType>()) {
-      return false;
+      return reject(AdmissionReason::kNonDirectAddress);
     }
     const int copy_bytes = data_type_size(stmt->val->ret_type);
     const auto target = cuda::detail::resolve_compute_capability_target(
         target_compute_capability_);
-    if (!cuda::detail::cuda_async_tile_copy_admitted(
-            target_compute_capability_, target.ptx_version,
-            current_offload->bls_size, copy_bytes,
-            /*direct_global_to_bls_copy=*/true,
-            /*read_only_bls=*/current_offload->bls_epilogue == nullptr)) {
-      return false;
+    const auto admission = cuda::detail::cuda_async_tile_copy_admission(
+        target_compute_capability_, target.ptx_version,
+        current_offload->bls_size, copy_bytes,
+        /*direct_global_to_bls_copy=*/true,
+        /*read_only_bls=*/current_offload->bls_epilogue == nullptr);
+    if (admission != AdmissionReason::kAdmitted) {
+      return reject(admission);
     }
+    prog->record_cuda_async_tile_candidate(AdmissionReason::kAdmitted);
 
     auto *i64_type = llvm::Type::getInt64Ty(*llvm_context);
     auto *destination =
@@ -1017,7 +1033,10 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
   int target_compute_capability_{0};
-  bool emitting_bls_prologue_{false};
+  bool in_bls_prologue_{false};
+  cuda::detail::CudaAsyncTileAdmissionReason
+      async_tile_prologue_admission_{
+          cuda::detail::CudaAsyncTileAdmissionReason::kCostGate};
   bool emitted_async_tile_copy_{false};
   std::size_t async_tile_copy_sites_{0};
 

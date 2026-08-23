@@ -4,6 +4,10 @@ from types import MappingProxyType
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
+from taichi_forge._hardware_telemetry import (
+    instrument_hardware_recording,
+    record_graph_recording,
+)
 from taichi_forge.graph._ir import (
     GraphAccess,
     NativeCallNode,
@@ -432,6 +436,7 @@ class VulkanBufferCommand:
         )
 
 
+@instrument_hardware_recording("runtime.buffer_commands.vulkan")
 class VulkanBufferCommandRecording(BackendCommandRecording):
     """A whole Vulkan buffer command sequence recorded by one C++ call."""
 
@@ -746,6 +751,7 @@ class BackendCommandGraphAction(RecordableGraphAction):
                 "Backend command fixed and temporary bindings must be disjoint"
             )
         self._recording = recording
+        record_graph_recording(recording)
         self._capabilities = RecordableActionCapabilities(
             backends=(recording.backend,),
             conditional_body_safe=bool(conditional_body_safe),

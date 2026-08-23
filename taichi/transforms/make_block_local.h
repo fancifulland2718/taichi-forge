@@ -4,6 +4,8 @@
 
 namespace taichi::lang {
 
+class Program;
+
 class MakeBlockLocalPass : public Pass {
  public:
   static const PassID id;
@@ -11,6 +13,7 @@ class MakeBlockLocalPass : public Pass {
   struct Args {
     std::string kernel_name;
     bool verbose;
+    Program *program{nullptr};
   };
 };
 

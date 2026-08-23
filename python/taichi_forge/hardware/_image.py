@@ -8,6 +8,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.lang import impl
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -18,6 +19,7 @@ def _active_backend():
     return "cpu" if arch in ("x64", "arm64") else arch
 
 
+@instrument_hardware_recording("image.copy.vulkan")
 class VulkanImageCopyRecording(BackendCommandRecording):
     """One reusable whole-image Vulkan color copy command."""
 
