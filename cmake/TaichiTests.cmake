@@ -231,10 +231,29 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
   target_link_libraries(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     PRIVATE
       taichi_core
-      taichi_common
       gtest_main
+      taichi_common
+      taichi_util
+      compilation_manager
+      ti_device_api
+      cpu_codegen
+      cpu_runtime
+      cuda_codegen
+      cuda_runtime
+      llvm_program_impl
+      llvm_codegen
+      llvm_runtime
+      gfx_program_impl
+      opengl_program_impl
+      vulkan_program_impl
+      spirv_codegen
       gfx_runtime
+      common_rhi
+      interop_rhi
+      cpu_rhi
       cuda_rhi
+      llvm_rhi
+      opengl_rhi
       vulkan_rhi)
   target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     PRIVATE
