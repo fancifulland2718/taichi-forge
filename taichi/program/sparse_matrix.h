@@ -1037,7 +1037,11 @@ class CuSparseMatrix : public SparseMatrix {
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
 
+  void nd_spmv_kernel(Program *prog, const Ndarray &x, const Ndarray &y);
+
   void spmv(size_t x, size_t y, CUstream stream = nullptr);
+
+  void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
 
   bool supports_spmv_stream_binding() const;
 
@@ -1117,7 +1121,9 @@ class CuSparseBsrMatrix final : public SparseMatrix {
   ~CuSparseBsrMatrix() override;
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
+  void nd_spmv_kernel(Program *prog, const Ndarray &x, const Ndarray &y);
   void spmv(size_t x, size_t y, CUstream stream = nullptr);
+  void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
   bool supports_spmv_stream_binding() const;
   void update_values(Program *prog, const Ndarray &values) override;
   SparseMatrixRuntimeStatistics debug_runtime_statistics() const override;

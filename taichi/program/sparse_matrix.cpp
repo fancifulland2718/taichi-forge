@@ -19,6 +19,7 @@
 #include "taichi/program/kernel.h"
 #include "taichi/program/linear_operator.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/rhi/cuda/primitives/hierarchical_ptx.h"
 #include "taichi/util/environ_config.h"
 
 #define BUILD(TYPE)                                                         \
@@ -3438,6 +3439,21 @@ void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
 #endif
 }
 
+void CuSparseMatrix::spmv_kernel(size_t dX,
+                                 size_t dY,
+                                 CUstream stream) {
+#if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  record_spmv_call();
+  cuda::driver_sparse_csr_spmv_f32(
+      csr_row_ptr_, csr_col_ind_, csr_val_, reinterpret_cast<void *>(dX),
+      reinterpret_cast<void *>(dY), rows_, stream);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
 #if defined(TI_WITH_CUDA)
   std::lock_guard<std::mutex> lock(spmv_mutex_);
@@ -3695,6 +3711,22 @@ void CuSparseBsrMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
 #endif
 }
 
+void CuSparseBsrMatrix::spmv_kernel(size_t dX,
+                                    size_t dY,
+                                    CUstream stream) {
+#if defined(TI_WITH_CUDA)
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  record_spmv_call();
+  cuda::driver_sparse_bsr_spmv_f32(
+      pattern_->cuda_row_offsets(), pattern_->cuda_column_indices(), values_,
+      reinterpret_cast<void *>(dX), reinterpret_cast<void *>(dY), block_rows_,
+      block_size_, stream);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 void CuSparseBsrMatrix::nd_spmv(Program *prog,
                                 const Ndarray &x,
                                 const Ndarray &y) {
@@ -3713,6 +3745,29 @@ void CuSparseBsrMatrix::nd_spmv(Program *prog,
               cols_, rows_);
   spmv(prog->get_ndarray_data_ptr_as_int(&x),
        prog->get_ndarray_data_ptr_as_int(&y));
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void CuSparseBsrMatrix::nd_spmv_kernel(Program *prog,
+                                       const Ndarray &x,
+                                       const Ndarray &y) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!prog || prog != pattern_->program() ||
+                  !arch_is_cuda(prog->compile_config().arch),
+              "Internal BSR kernel SpMV requires its owning CUDA Program.");
+  TI_ERROR_IF(x.get_element_data_type() != PrimitiveType::f32 ||
+                  !x.get_element_shape().empty() ||
+                  x.get_nelement() != static_cast<std::size_t>(cols_) ||
+                  y.get_element_data_type() != PrimitiveType::f32 ||
+                  !y.get_element_shape().empty() ||
+                  y.get_nelement() != static_cast<std::size_t>(rows_),
+              "Internal BSR kernel SpMV expects scalar f32 vectors with shapes "
+              "({},) and ({},).",
+              cols_, rows_);
+  spmv_kernel(prog->get_ndarray_data_ptr_as_int(&x),
+              prog->get_ndarray_data_ptr_as_int(&y));
 #else
   TI_NOT_IMPLEMENTED;
 #endif
@@ -4853,6 +4908,28 @@ void CuSparseMatrix::nd_spmv(Program *prog,
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
   size_t dY = prog->get_ndarray_data_ptr_as_int(&y);
   spmv(dX, dY);
+#endif
+}
+
+void CuSparseMatrix::nd_spmv_kernel(Program *prog,
+                                    const Ndarray &x,
+                                    const Ndarray &y) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!prog || !arch_is_cuda(prog->compile_config().arch),
+              "CUDA CSR kernel SpMV requires its owning CUDA Program.");
+  TI_ERROR_IF(x.get_element_data_type() != PrimitiveType::f32 ||
+                  !x.get_element_shape().empty() ||
+                  x.get_nelement() != static_cast<std::size_t>(cols_) ||
+                  y.get_element_data_type() != PrimitiveType::f32 ||
+                  !y.get_element_shape().empty() ||
+                  y.get_nelement() != static_cast<std::size_t>(rows_),
+              "CUDA CSR kernel SpMV expects scalar f32 vectors with shapes "
+              "({},) and ({},).",
+              cols_, rows_);
+  spmv_kernel(prog->get_ndarray_data_ptr_as_int(&x),
+              prog->get_ndarray_data_ptr_as_int(&y));
+#else
+  TI_NOT_IMPLEMENTED;
 #endif
 }
 

@@ -1315,7 +1315,9 @@ _OPERATIONS = (
         layouts=("scalar CSR", "fixed-block BSR when provider supports it"),
         numeric_contracts=("output = sparse_matrix @ input",),
         notes=(
-            "The public sparse-matrix domain API selects cuSPARSE automatically on CUDA; users do not call a ti.hardware command.",
+            "The public sparse-matrix domain API considers cuSPARSE automatically on CUDA; users do not call a ti.hardware command.",
+            "Without stable matrix-scoped cost evidence, auto fails closed to the embedded CUDA CSR/BSR kernel route.",
+            "Admission scopes rows, columns, nnz, format, provider version, reuse, transfer/conversion cost, warmup, sample count, CV, and order drift.",
             "CSR SpMV caches matrix/vector descriptors, workspace, and optional provider preprocessing for repeated calls.",
             "The current stored SparseMatrix route is direct Python execution and is not a recordable Graph action.",
         ),

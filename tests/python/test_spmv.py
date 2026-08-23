@@ -238,3 +238,81 @@ def test_cuda_spmv_preprocess_runtime_disable(monkeypatch):
     assert operations["spmv_preprocess_builds"] == 0
     assert operations["spmv_preprocess_reuses"] == 0
     assert operations["spmv_preprocess_fallbacks"] == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_sparse_domain_auto_spmv_fails_closed_without_cost_evidence():
+    import numpy as np
+
+    n = 8
+    builder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=2 * n, dtype=ti.f32, storage_format="row_major"
+    )
+
+    @ti.kernel
+    def fill(matrix: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            matrix[i, i] += ti.cast(i + 1, ti.f32)
+            if i + 1 < n:
+                matrix[i, i + 1] += 0.5
+
+    fill(builder)
+    matrix = builder.build()
+    vector_values = np.arange(1, n + 1, dtype=np.float32)
+    vector = ti.ndarray(dtype=ti.f32, shape=n)
+    vector.from_numpy(vector_values)
+    expected = np.arange(1, n + 1, dtype=np.float32) * vector_values
+    expected[:-1] += 0.5 * vector_values[1:]
+
+    fallback = matrix @ vector
+    ti.sync()
+    np.testing.assert_allclose(fallback.to_numpy(), expected, rtol=1e-6)
+    stats = matrix._debug_runtime_stats()
+    assert stats["auto_provider"]["candidates"] == 1
+    assert stats["auto_provider"]["admitted"] == 0
+    assert stats["auto_provider"]["kernel_fallbacks"] == 1
+    assert stats["auto_provider"]["rejection_reasons"] == {
+        "missing_cost_evidence": 1
+    }
+    assert stats["operations"]["spmv_plan_builds"] == 0
+
+    matrix.set_spmv_auto_cost_evidence(
+        provider_median_ns=200,
+        fallback_median_ns=100,
+        provider_samples=8,
+        fallback_samples=8,
+        expected_reuse=16,
+        provider_cv=0.02,
+        fallback_cv=0.02,
+        order_drift=0.01,
+        warmup_ns=0,
+    )
+    rejected = matrix @ vector
+    ti.sync()
+    np.testing.assert_allclose(rejected.to_numpy(), expected, rtol=1e-6)
+    stats = matrix._debug_runtime_stats()
+    assert stats["auto_provider"]["rejection_reasons"]["cost_gate"] == 1
+    assert stats["operations"]["spmv_plan_builds"] == 0
+
+    matrix.set_spmv_auto_cost_evidence(
+        provider_median_ns=50,
+        fallback_median_ns=100,
+        provider_samples=8,
+        fallback_samples=8,
+        expected_reuse=16,
+        provider_cv=0.02,
+        fallback_cv=0.02,
+        order_drift=0.01,
+        warmup_ns=0,
+    )
+    admitted = matrix @ vector
+    ti.sync()
+    np.testing.assert_allclose(admitted.to_numpy(), expected, rtol=1e-6)
+    stats = matrix._debug_runtime_stats()
+    assert stats["auto_provider"]["candidates"] == 3
+    assert stats["auto_provider"]["admitted"] == 1
+    assert stats["auto_provider"]["last_decision"]["route"] == "provider"
+    assert stats["auto_provider"]["last_decision"]["reason"] == (
+        "measured_cost_advantage"
+    )
+    assert stats["operations"]["spmv_plan_builds"] == 1

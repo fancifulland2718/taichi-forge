@@ -395,6 +395,23 @@ void driver_sparse_assembly_finalize_control(void *active_count,
                                              int capacity,
                                              void *stream);
 
+void driver_sparse_csr_spmv_f32(void *row_offsets,
+                                void *column_indices,
+                                void *values,
+                                void *input,
+                                void *output,
+                                int rows,
+                                void *stream);
+
+void driver_sparse_bsr_spmv_f32(void *row_offsets,
+                                void *column_indices,
+                                void *values,
+                                void *input,
+                                void *output,
+                                int block_rows,
+                                int block_size,
+                                void *stream);
+
 std::size_t driver_stable_radix_sort_strided(
     void *keys,
     void *values,

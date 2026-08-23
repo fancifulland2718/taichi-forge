@@ -3009,3 +3009,52 @@ extern "C" __global__ void sparse_assembly_finalize_control(
     control[0] = active;
   }
 }
+
+extern "C" __global__ void sparse_csr_spmv_f32(
+    const i32 *row_offsets,
+    const i32 *column_indices,
+    const float *values,
+    const float *input,
+    float *output,
+    u32 rows) {
+  for (u32 row = blockIdx.x * blockDim.x + threadIdx.x; row < rows;
+       row += blockDim.x * gridDim.x) {
+    float sum = 0.0f;
+    const i32 begin = row_offsets[row];
+    const i32 end = row_offsets[row + 1u];
+    for (i32 index = begin; index < end; ++index) {
+      sum += values[index] * input[column_indices[index]];
+    }
+    output[row] = sum;
+  }
+}
+
+extern "C" __global__ void sparse_bsr_spmv_f32(
+    const i32 *row_offsets,
+    const i32 *column_indices,
+    const float *values,
+    const float *input,
+    float *output,
+    u32 block_rows,
+    u32 block_size) {
+  const u32 rows = block_rows * block_size;
+  for (u32 row = blockIdx.x * blockDim.x + threadIdx.x; row < rows;
+       row += blockDim.x * gridDim.x) {
+    const u32 block_row = row / block_size;
+    const u32 local_row = row - block_row * block_size;
+    float sum = 0.0f;
+    const i32 begin = row_offsets[block_row];
+    const i32 end = row_offsets[block_row + 1u];
+    for (i32 block = begin; block < end; ++block) {
+      const u32 input_base =
+          static_cast<u32>(column_indices[block]) * block_size;
+      const u32 value_base =
+          static_cast<u32>(block) * block_size * block_size +
+          local_row * block_size;
+      for (u32 column = 0; column < block_size; ++column) {
+        sum += values[value_base + column] * input[input_base + column];
+      }
+    }
+    output[row] = sum;
+  }
+}

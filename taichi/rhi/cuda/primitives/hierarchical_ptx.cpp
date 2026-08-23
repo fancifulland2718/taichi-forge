@@ -99,6 +99,8 @@ struct KernelSet {
   void *sparse_assembly_reduce_segments{nullptr};
   void *sparse_assembly_emit_csr{nullptr};
   void *sparse_assembly_finalize_control{nullptr};
+  void *sparse_csr_spmv_f32{nullptr};
+  void *sparse_bsr_spmv_f32{nullptr};
 };
 
 std::once_flag kernel_set_once;
@@ -310,6 +312,10 @@ void load_kernel_set_once() {
   driver.module_get_function(&kernel_set.sparse_assembly_finalize_control,
                              kernel_set.module,
                              "sparse_assembly_finalize_control");
+  driver.module_get_function(&kernel_set.sparse_csr_spmv_f32,
+                             kernel_set.module, "sparse_csr_spmv_f32");
+  driver.module_get_function(&kernel_set.sparse_bsr_spmv_f32,
+                             kernel_set.module, "sparse_bsr_spmv_f32");
 }
 
 KernelSet &kernels() {
@@ -1836,6 +1842,62 @@ void driver_sparse_assembly_finalize_control(void *active_count,
       kernels().sparse_assembly_finalize_control,
       "cuda_driver_sparse_assembly_finalize_control", args, {}, 1, 1, 0,
       stream);
+}
+
+void driver_sparse_csr_spmv_f32(void *row_offsets,
+                                void *column_indices,
+                                void *values,
+                                void *input,
+                                void *output,
+                                int rows,
+                                void *stream) {
+  TI_ERROR_IF(rows <= 0 || !row_offsets || !column_indices || !values ||
+                  !input || !output,
+              "CUDA Driver CSR SpMV received an invalid size or pointer.");
+  void *row_offsets_arg = row_offsets;
+  void *column_indices_arg = column_indices;
+  void *values_arg = values;
+  void *input_arg = input;
+  void *output_arg = output;
+  std::uint32_t rows_arg = static_cast<std::uint32_t>(rows);
+  std::vector<void *> args{&row_offsets_arg, &column_indices_arg, &values_arg,
+                           &input_arg, &output_arg, &rows_arg};
+  const unsigned grid = (rows_arg + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_csr_spmv_f32, "cuda_driver_sparse_csr_spmv_f32", args,
+      {}, grid, kBlockDim, 0, stream);
+}
+
+void driver_sparse_bsr_spmv_f32(void *row_offsets,
+                                void *column_indices,
+                                void *values,
+                                void *input,
+                                void *output,
+                                int block_rows,
+                                int block_size,
+                                void *stream) {
+  TI_ERROR_IF(block_rows <= 0 || block_size <= 0 || !row_offsets ||
+                  !column_indices || !values || !input || !output,
+              "CUDA Driver BSR SpMV received an invalid size or pointer.");
+  TI_ERROR_IF(block_rows >
+                  (std::numeric_limits<std::uint32_t>::max)() /
+                      static_cast<std::uint32_t>(block_size),
+              "CUDA Driver BSR SpMV row count overflow.");
+  void *row_offsets_arg = row_offsets;
+  void *column_indices_arg = column_indices;
+  void *values_arg = values;
+  void *input_arg = input;
+  void *output_arg = output;
+  std::uint32_t block_rows_arg = static_cast<std::uint32_t>(block_rows);
+  std::uint32_t block_size_arg = static_cast<std::uint32_t>(block_size);
+  const std::uint32_t rows = block_rows_arg * block_size_arg;
+  std::vector<void *> args{&row_offsets_arg, &column_indices_arg, &values_arg,
+                           &input_arg, &output_arg, &block_rows_arg,
+                           &block_size_arg};
+  const unsigned grid = (rows + kBlockDim - 1u) / kBlockDim;
+  CUDAContext::get_instance().launch(
+      kernels().sparse_bsr_spmv_f32, "cuda_driver_sparse_bsr_spmv_f32", args,
+      {}, grid, kBlockDim, 0, stream);
 }
 
 std::size_t driver_stable_radix_sort_strided(

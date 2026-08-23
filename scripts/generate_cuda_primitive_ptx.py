@@ -67,6 +67,8 @@ REQUIRED_ENTRIES = (
     "sparse_assembly_reduce_segments",
     "sparse_assembly_emit_csr",
     "sparse_assembly_finalize_control",
+    "sparse_csr_spmv_f32",
+    "sparse_bsr_spmv_f32",
 )
 
 

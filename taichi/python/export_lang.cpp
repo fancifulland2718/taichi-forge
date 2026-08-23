@@ -6665,6 +6665,7 @@ void export_lang(py::module &m) {
       .def(py::init<int, int, DataType>())
       .def(py::init<const CuSparseMatrix &>())
       .def("spmv", &CuSparseMatrix::nd_spmv)
+      .def("spmv_kernel", &CuSparseMatrix::nd_spmv_kernel)
       .def(py::self + py::self)
       .def(py::self - py::self)
       .def(py::self * float32())
@@ -6675,7 +6676,8 @@ void export_lang(py::module &m) {
       .def("to_string", &CuSparseMatrix::to_string);
 
   py::class_<CuSparseBsrMatrix, SparseMatrix>(m, "CuSparseBsrMatrix")
-      .def("spmv", &CuSparseBsrMatrix::nd_spmv);
+      .def("spmv", &CuSparseBsrMatrix::nd_spmv)
+      .def("spmv_kernel", &CuSparseBsrMatrix::nd_spmv_kernel);
 
   py::class_<VulkanSparseMatrix, SparseMatrix>(m, "VulkanSparseMatrix")
       .def("spmv", &VulkanSparseMatrix::nd_spmv);
