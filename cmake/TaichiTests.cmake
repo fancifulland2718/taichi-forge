@@ -252,6 +252,7 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     tests/cpp/rhi/common/cpu_device_test.cpp
     tests/cpp/rhi/common/cuda_context_test.cpp
     tests/cpp/rhi/common/cuda_profiler_test.cpp
+    tests/cpp/transforms/make_block_local_test.cpp
     tests/cpp/aot/graph_replay_identity_test.cpp
     tests/cpp/aot/gfx_utils.cpp
     tests/cpp/aot/vulkan/device_test.cpp)
