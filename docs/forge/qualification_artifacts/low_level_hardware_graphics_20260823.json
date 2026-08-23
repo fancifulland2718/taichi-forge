@@ -1,0 +1,964 @@
+{
+  "all_correctness_and_routes_qualified": true,
+  "all_performance_claims_eligible": false,
+  "cases": [
+    {
+      "case": "vulkan-image-copy",
+      "correctness": [
+        {
+          "baseline_vs_host_max_abs": 0.0,
+          "hardware_vs_host_max_abs": 0.0
+        },
+        {
+          "baseline_vs_host_max_abs": 0.0,
+          "hardware_vs_host_max_abs": 0.0
+        },
+        {
+          "baseline_vs_host_max_abs": 0.0,
+          "hardware_vs_host_max_abs": 0.0
+        },
+        {
+          "baseline_vs_host_max_abs": 0.0,
+          "hardware_vs_host_max_abs": 0.0
+        }
+      ],
+      "correctness_and_route_qualified": true,
+      "median_speedup": 5.133426592537376,
+      "minimum_block_qualified": true,
+      "noise_status": "stable",
+      "paired_speedup": {
+        "count": 48,
+        "cv": 0.02612096627545163,
+        "max": 5.627215365608445,
+        "mean": 5.156318678914859,
+        "median": 5.117323021119498,
+        "min": 4.883305642915834,
+        "p05": 5.032103163459251,
+        "p95": 5.514940485099787,
+        "samples": [
+          5.126683499581405,
+          5.179135906650395,
+          5.0892982753372005,
+          5.009878585010178,
+          5.126241848717729,
+          5.073582920998972,
+          5.2902363618105825,
+          5.0772276362498445,
+          5.083497901235198,
+          5.116097354743906,
+          5.096782879307422,
+          5.194228487734785,
+          5.147716237055335,
+          5.116508848281628,
+          5.213757421758857,
+          5.170043677563238,
+          5.086373703941041,
+          5.075839614057083,
+          5.154728587142762,
+          5.144321260250284,
+          5.564039437926953,
+          5.094904774408065,
+          5.21552315914694,
+          5.032103163459251,
+          5.101595811013775,
+          5.112515187046237,
+          5.514940485099787,
+          5.233568393786073,
+          5.105195155093542,
+          5.091796518606016,
+          5.104305015547364,
+          5.10458564987099,
+          5.627215365608445,
+          5.050734731211139,
+          5.3203817925082895,
+          5.076442795274852,
+          5.156847026471934,
+          5.1382834360214185,
+          5.390931893225977,
+          5.118137193957367,
+          5.064679845334946,
+          5.04622805373394,
+          4.883305642915834,
+          5.166894381500712,
+          5.2138995980647715,
+          5.142898197660937,
+          5.106299567095779,
+          5.15286330889405
+        ],
+        "stdev": 0.13468802631741633
+      },
+      "performance_claim_eligible": true,
+      "route": {
+        "activation_mode": "explicit_hardware_api",
+        "backend": "vulkan",
+        "backends": [
+          "vulkan"
+        ],
+        "dependency_name": null,
+        "dependency_tier": "core",
+        "deterministic": null,
+        "discovery": "available",
+        "dtypes": [],
+        "enablement": "enabled",
+        "execution_class": "native_command",
+        "execution_kind": "native_command",
+        "failure_scope": null,
+        "fallback_equivalent": null,
+        "fallback_provider": null,
+        "graph_support": "recordable",
+        "hardware_acceleration": "implementation_defined",
+        "implementation_status": "existing_public",
+        "last_error": null,
+        "layouts": [
+          "whole color image"
+        ],
+        "lifetime_policy": "runtime_generation",
+        "load_mode": "built_in",
+        "native_facts": {
+          "external_component_probed": false,
+          "probe_policy": "passive",
+          "provider_backends_compiled": [
+            "vulkan"
+          ]
+        },
+        "notes": [
+          "This is a native device image command, but Vulkan does not promise which physical engine executes the copy; it is not labeled dedicated-hardware acceleration.",
+          "The current slice requires matching format and extent, rejects aliases and depth/stencil, and restores both images to shader-read layout."
+        ],
+        "numeric_contracts": [],
+        "operation_id": "image.copy.vulkan",
+        "provider_abi": null,
+        "provider_class": "compute_native",
+        "provider_id": "vulkan_rhi",
+        "provider_version": null,
+        "public_api": "ti.hardware.image.VulkanImageCopyRecording",
+        "requirements": [
+          "Vulkan RHI vkCmdCopyImage path"
+        ],
+        "resource_effects": [
+          "read:source_image",
+          "write:destination_image"
+        ],
+        "runtime_initialized": true,
+        "schema_version": 2,
+        "scopes": [
+          "python",
+          "graph"
+        ],
+        "selection": "eligible",
+        "semantic_family": "image.copy",
+        "shapes_or_tiles": [],
+        "stream_binding": "runtime_ordered",
+        "unavailable_reason": "none",
+        "update_policy": "rebind",
+        "workspace_ownership": "none"
+      },
+      "status": "passed",
+      "variants": {
+        "baseline": {
+          "count": 48,
+          "cv": 0.024078873672172936,
+          "max_ms": 0.10454797441364605,
+          "mean_ms": 0.09674338443570031,
+          "median_ms": 0.09618247191011237,
+          "min_ms": 0.0938164677804296,
+          "order_drift": 0.00035187518553052413,
+          "order_medians_ms": {
+            "ab": 0.09614862768496421,
+            "ba": 0.09618247191011237
+          },
+          "p05_ms": 0.09450767590618338,
+          "p95_ms": 0.10293027718550106,
+          "samples_ms": [
+            0.09695013404825738,
+            0.0971151474530831,
+            0.09542077747989276,
+            0.09577466487935657,
+            0.09632292225201072,
+            0.09629396782841823,
+            0.09912707774798928,
+            0.0953044235924933,
+            0.09602439678284183,
+            0.0957721179624665,
+            0.0957617962466488,
+            0.09894959785522789,
+            0.09619089887640449,
+            0.09618674157303371,
+            0.09903539325842696,
+            0.09722640449438202,
+            0.0960814606741573,
+            0.09540573033707865,
+            0.09644595505617978,
+            0.09617820224719102,
+            0.10395505617977527,
+            0.09645876404494381,
+            0.09776775280898876,
+            0.09467168539325842,
+            0.0955948827292111,
+            0.09523198294243071,
+            0.10293027718550106,
+            0.09730191897654585,
+            0.09512142857142857,
+            0.09455692963752665,
+            0.09528539445628999,
+            0.09506204690831556,
+            0.10454797441364605,
+            0.09450767590618338,
+            0.10042132196162047,
+            0.0953817697228145,
+            0.09633484486873509,
+            0.09598389021479714,
+            0.10020011933174225,
+            0.09536527446300716,
+            0.09455477326968974,
+            0.0938164677804296,
+            0.0944173031026253,
+            0.09656957040572792,
+            0.0974247016706444,
+            0.0963535799522673,
+            0.09604284009546539,
+            0.09625441527446302
+          ],
+          "stable": true,
+          "stdev_ms": 0.0023294717324456892
+        },
+        "hardware": {
+          "count": 48,
+          "cv": 0.008005460107101233,
+          "max_ms": 0.019334710953346858,
+          "mean_ms": 0.01876359700609843,
+          "median_ms": 0.018736504784140844,
+          "min_ms": 0.018570445478723403,
+          "order_drift": 0.0017394029005822391,
+          "order_medians_ms": {
+            "ab": 0.01874352014010508,
+            "ba": 0.018710929809336772
+          },
+          "p05_ms": 0.018586790060851927,
+          "p95_ms": 0.019049912434325744,
+          "samples_ms": [
+            0.018910887332165793,
+            0.01875122591943958,
+            0.018749299474605956,
+            0.019117162872154116,
+            0.01879016345592528,
+            0.018979480443666083,
+            0.018737740805604204,
+            0.018770957384705193,
+            0.018889433741973147,
+            0.018719760653823702,
+            0.01878867483946293,
+            0.019049912434325744,
+            0.018686130790190734,
+            0.018799291553133517,
+            0.0189950136239782,
+            0.018805722070844688,
+            0.018889972752043595,
+            0.018796049046321525,
+            0.018710190735694823,
+            0.01869599455040872,
+            0.018683378746594002,
+            0.01893239782016349,
+            0.018745531335149862,
+            0.018813542234332424,
+            0.018738231382978723,
+            0.01862722739361702,
+            0.018663896276595746,
+            0.018591888297872342,
+            0.01863228058510638,
+            0.018570445478723403,
+            0.018667652925531915,
+            0.018622872340425534,
+            0.018578989361702127,
+            0.018711668882978722,
+            0.018874833776595743,
+            0.01878909574468085,
+            0.018680958417849898,
+            0.018680147058823527,
+            0.018586790060851927,
+            0.018632809330628802,
+            0.018669447261663284,
+            0.018591404665314403,
+            0.019334710953346858,
+            0.01869006085192698,
+            0.01868557302231237,
+            0.018735268762677487,
+            0.018808696754563894,
+            0.01867979208924949
+          ],
+          "stable": true,
+          "stdev_ms": 0.0001502112272980451
+        }
+      },
+      "worker_calibration": [
+        {
+          "launch_index": 0,
+          "order": "ab",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 746,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 70.9783,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 3426,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 64.8569,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 0
+        },
+        {
+          "launch_index": 1,
+          "order": "ba",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 890,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 90.6665,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 3670,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 69.347,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 0
+        },
+        {
+          "launch_index": 2,
+          "order": "ba",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 938,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 94.1379,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 3008,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 56.601,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 1
+        },
+        {
+          "launch_index": 3,
+          "order": "ab",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 838,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 78.84140000000001,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 3944,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 74.20840000000001,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 1
+        }
+      ],
+      "worker_provenance": [
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 0,
+          "order": "ab",
+          "pid": 38448,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479909063779900,
+          "worker_index": 0
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 1,
+          "order": "ba",
+          "pid": 42400,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479912226095700,
+          "worker_index": 0
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 2,
+          "order": "ba",
+          "pid": 41320,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479915288673500,
+          "worker_index": 1
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 3,
+          "order": "ab",
+          "pid": 41080,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479918432207100,
+          "worker_index": 1
+        }
+      ],
+      "workload": {
+        "baseline": "Taichi texture fetch/store copy kernel",
+        "bytes": 4194304,
+        "hardware": "Vulkan whole-image copy command",
+        "height": 1024,
+        "upload_ms": 52.7865,
+        "width": 1024
+      }
+    },
+    {
+      "case": "vulkan-texture-sample",
+      "correctness": [
+        {
+          "hardware_vs_manual_max_abs": 4.172325134277344e-07,
+          "hardware_vs_manual_max_rel": 4.172501960330832e-07,
+          "tolerance": 2e-05
+        },
+        {
+          "hardware_vs_manual_max_abs": 4.172325134277344e-07,
+          "hardware_vs_manual_max_rel": 4.172501960330832e-07,
+          "tolerance": 2e-05
+        },
+        {
+          "hardware_vs_manual_max_abs": 4.172325134277344e-07,
+          "hardware_vs_manual_max_rel": 4.172501960330832e-07,
+          "tolerance": 2e-05
+        },
+        {
+          "hardware_vs_manual_max_abs": 4.172325134277344e-07,
+          "hardware_vs_manual_max_rel": 4.172501960330832e-07,
+          "tolerance": 2e-05
+        }
+      ],
+      "correctness_and_route_qualified": true,
+      "median_speedup": 0.23566134516075318,
+      "minimum_block_qualified": true,
+      "noise_status": "stable",
+      "paired_speedup": {
+        "count": 48,
+        "cv": 0.03881907473414296,
+        "max": 0.24492054027957974,
+        "mean": 0.23310252642978038,
+        "median": 0.235885935606691,
+        "min": 0.2128647521206028,
+        "p05": 0.2145225565522711,
+        "p95": 0.24239620461761416,
+        "samples": [
+          0.23680235407087982,
+          0.23154493895691763,
+          0.23947381178726018,
+          0.24060291320724816,
+          0.23956022697379425,
+          0.24211731775705067,
+          0.24219448069577149,
+          0.236147910649646,
+          0.22565339041892546,
+          0.24156994196307724,
+          0.23667162689310098,
+          0.23385500280576768,
+          0.23671016650596716,
+          0.23612916894130326,
+          0.2349712712509676,
+          0.2145225565522711,
+          0.2302750451084532,
+          0.21400564038664377,
+          0.22482856273766313,
+          0.21738747966274619,
+          0.2128647521206028,
+          0.2166379392093458,
+          0.21580087800977432,
+          0.2188029758979536,
+          0.24118609662665053,
+          0.22833519508635622,
+          0.23439700645037018,
+          0.2421321643581672,
+          0.2399258040537177,
+          0.24155684093667595,
+          0.23882520985585634,
+          0.23010211832920566,
+          0.23937945434997793,
+          0.24097071766132655,
+          0.2432105004861892,
+          0.22896165307549607,
+          0.23666683660061882,
+          0.23353844994849213,
+          0.2279456416937675,
+          0.23387584891969734,
+          0.23503086868729398,
+          0.24175867841862667,
+          0.21847905766751868,
+          0.24239620461761416,
+          0.24492054027957974,
+          0.2375544099846402,
+          0.23564270227207873,
+          0.23299891570640954
+        ],
+        "stdev": 0.009048824394195179
+      },
+      "performance_claim_eligible": false,
+      "route": {
+        "activation_mode": "explicit_kernel_intrinsic",
+        "backend": "vulkan",
+        "backends": [
+          "vulkan"
+        ],
+        "dependency_name": null,
+        "dependency_tier": "core",
+        "deterministic": false,
+        "discovery": "available",
+        "dtypes": [
+          "sampled:f32",
+          "storage:f32",
+          "storage:i32",
+          "storage:u32"
+        ],
+        "enablement": "enabled",
+        "execution_class": "native_shader_operation",
+        "execution_kind": "kernel_intrinsic",
+        "failure_scope": null,
+        "fallback_equivalent": null,
+        "fallback_provider": null,
+        "graph_support": "inline",
+        "hardware_acceleration": "qualified",
+        "implementation_status": "existing_public",
+        "last_error": null,
+        "layouts": [
+          "sampled_image",
+          "storage_image"
+        ],
+        "lifetime_policy": "runtime_generation",
+        "load_mode": "built_in",
+        "native_facts": {
+          "external_component_probed": false,
+          "probe_policy": "passive",
+          "provider_backends_compiled": [
+            "vulkan"
+          ]
+        },
+        "notes": [
+          "sample_lod uses immutable per-texture min/mag filter and U/V/W address modes; Vulkan sampler objects are cached per device.",
+          "The current one-mip contract uses normalized coordinates and exposes no anisotropy or comparison mode.",
+          "fetch uses integer texel coordinates and ignores sampler configuration."
+        ],
+        "numeric_contracts": [
+          "sample_lod:explicit_lod_vec4_f32",
+          "fetch:texel_vec4_f32",
+          "storage_load_store:format_sampled_type"
+        ],
+        "operation_id": "sampling.texture.vulkan",
+        "provider_abi": null,
+        "provider_class": "fixed_function",
+        "provider_id": "vulkan_texture",
+        "provider_version": null,
+        "public_api": "ti.Texture(..., sampler=ti.hardware.sampling.SamplerConfig(...))",
+        "requirements": [
+          "SPIR-V OpImageSampleExplicitLod and OpImageFetch",
+          "Vulkan combined image sampler"
+        ],
+        "resource_effects": [
+          "read:texture"
+        ],
+        "runtime_initialized": true,
+        "schema_version": 2,
+        "scopes": [
+          "kernel"
+        ],
+        "selection": "eligible",
+        "semantic_family": "sampling.texture",
+        "shapes_or_tiles": [
+          "1D",
+          "2D",
+          "3D"
+        ],
+        "stream_binding": "runtime_ordered",
+        "unavailable_reason": "none",
+        "update_policy": "immutable",
+        "workspace_ownership": "none"
+      },
+      "status": "passed",
+      "variants": {
+        "baseline": {
+          "count": 48,
+          "cv": 0.0056732208286118324,
+          "max_ms": 0.026518771498771496,
+          "mean_ms": 0.0256709494356831,
+          "median_ms": 0.025642994709147125,
+          "min_ms": 0.025538932419196865,
+          "order_drift": 0.0010044821897882894,
+          "order_medians_ms": {
+            "ab": 0.025626151960784313,
+            "ba": 0.025651909892262487
+          },
+          "p05_ms": 0.025576346718903038,
+          "p95_ms": 0.025855827619980412,
+          "samples_ms": [
+            0.025594656862745098,
+            0.02558735294117647,
+            0.025645196078431375,
+            0.025620686274509804,
+            0.025587058823529414,
+            0.025622156862745098,
+            0.02568166666666667,
+            0.0255925,
+            0.025583823529411766,
+            0.02562392156862745,
+            0.025575686274509804,
+            0.025628382352941174,
+            0.025656219392752203,
+            0.025650685602350638,
+            0.025653134182174336,
+            0.025943046033300686,
+            0.025855827619980412,
+            0.025606953966699316,
+            0.025596669931439768,
+            0.02564079333986288,
+            0.025538932419196865,
+            0.025576346718903038,
+            0.025762879529872672,
+            0.025584427032321257,
+            0.02581379482071713,
+            0.025603486055776892,
+            0.025619272908366533,
+            0.025697011952191234,
+            0.02564038844621514,
+            0.025613296812749004,
+            0.025668376494023905,
+            0.02565941235059761,
+            0.02564731075697211,
+            0.025672410358565736,
+            0.025709462151394424,
+            0.025704581673306772,
+            0.02573985257985258,
+            0.025645307125307125,
+            0.025576363636363637,
+            0.025613562653562655,
+            0.025744127764127763,
+            0.02564039312039312,
+            0.025666879606879606,
+            0.025617248157248154,
+            0.026518771498771496,
+            0.025683636363636363,
+            0.02565346437346437,
+            0.025648157248157246
+          ],
+          "stable": true,
+          "stdev_ms": 0.00014563696502875852
+        },
+        "hardware": {
+          "count": 48,
+          "cv": 0.03990955600238808,
+          "max_ms": 0.12093388429752067,
+          "mean_ms": 0.11029265392307776,
+          "median_ms": 0.1088129013761468,
+          "min_ms": 0.10568337155963303,
+          "order_drift": 0.019124170068471683,
+          "order_medians_ms": {
+            "ab": 0.10832493686868687,
+            "ba": 0.11040589330024814
+          },
+          "p05_ms": 0.10582537878787879,
+          "p95_ms": 0.11965550964187327,
+          "samples_ms": [
+            0.10808446969696969,
+            0.11050707070707072,
+            0.10708977272727271,
+            0.10648535353535354,
+            0.1068084595959596,
+            0.10582537878787879,
+            0.10603737373737374,
+            0.10837487373737374,
+            0.11337664141414142,
+            0.10607247474747475,
+            0.10806401515151515,
+            0.10959090909090909,
+            0.1083866391184573,
+            0.10862988980716252,
+            0.10917561983471075,
+            0.12093388429752067,
+            0.1122823691460055,
+            0.11965550964187327,
+            0.11384972451790633,
+            0.11794972451790633,
+            0.11997727272727272,
+            0.1180603305785124,
+            0.11938264462809918,
+            0.11692906336088155,
+            0.10702853598014889,
+            0.11213114143920595,
+            0.10929863523573201,
+            0.10612803970223325,
+            0.10686799007444168,
+            0.10603424317617866,
+            0.10747766749379653,
+            0.11151315136476427,
+            0.1071408188585608,
+            0.10653746898263028,
+            0.10570868486352358,
+            0.11226588089330024,
+            0.10875986238532111,
+            0.1098119266055046,
+            0.11220378440366972,
+            0.1095177752293578,
+            0.10953509174311926,
+            0.10605779816513762,
+            0.11747981651376146,
+            0.10568337155963303,
+            0.108275,
+            0.10811685779816513,
+            0.10886594036697247,
+            0.11007844036697247
+          ],
+          "stable": true,
+          "stdev_ms": 0.004401730848395079
+        }
+      },
+      "worker_calibration": [
+        {
+          "launch_index": 0,
+          "order": "ab",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 2040,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 52.1855,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 792,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 84.1126,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 0
+        },
+        {
+          "launch_index": 1,
+          "order": "ba",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 2042,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 52.261399999999995,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 726,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 84.01039999999999,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 0
+        },
+        {
+          "launch_index": 2,
+          "order": "ba",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 2008,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 51.481700000000004,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 806,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 86.14920000000001,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 1
+        },
+        {
+          "launch_index": 3,
+          "order": "ab",
+          "variants": {
+            "baseline": {
+              "effective_repetitions": 2035,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 52.107400000000005,
+              "requested_repetitions": 25,
+              "satisfied": true
+            },
+            "hardware": {
+              "effective_repetitions": 872,
+              "minimum_block_ms": 50.0,
+              "observed_block_ms": 103.88579999999999,
+              "requested_repetitions": 25,
+              "satisfied": true
+            }
+          },
+          "worker_index": 1
+        }
+      ],
+      "worker_provenance": [
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 0,
+          "order": "ab",
+          "pid": 36300,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479921380045800,
+          "worker_index": 0
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 1,
+          "order": "ba",
+          "pid": 42004,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479924299240800,
+          "worker_index": 0
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 2,
+          "order": "ba",
+          "pid": 42440,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479927258819600,
+          "worker_index": 1
+        },
+        {
+          "backend": "vulkan",
+          "cuda_compute_capability": null,
+          "forge_version": [
+            0,
+            6,
+            2
+          ],
+          "launch_index": 3,
+          "order": "ab",
+          "pid": 36032,
+          "platform": "Windows-10-10.0.26200-SP0",
+          "python": "3.10.20",
+          "timestamp_ns": 1787479930341200300,
+          "worker_index": 1
+        }
+      ],
+      "workload": {
+        "baseline": "Taichi ndarray manual bilinear clamp",
+        "hardware": "Vulkan linear clamp-to-edge sample_lod",
+        "height": 1024,
+        "samples": 1048576,
+        "upload_ms": 50.2375,
+        "width": 1024
+      }
+    }
+  ],
+  "generated_at_ns": 1787479930867604700,
+  "local_python_extension": {
+    "bytes": 13202432,
+    "path": "D:\\taichi\\python\\taichi_forge\\_lib\\core\\taichi_python.cp310-win_amd64.pyd",
+    "sha256": "a249d3d66b80f6aab2bc1691c10c120bdf536b3582f0a4661c2b3b67ea906cf0"
+  },
+  "local_runtime_artifacts": [
+    {
+      "bytes": 65065472,
+      "path": "D:\\taichi\\python\\taichi_forge\\_lib\\core\\taichi_runtime.dll",
+      "sha256": "b3379cb4c5c6db749cafe10b469372d38991999713a2dd7e952d29074f732771"
+    }
+  ],
+  "policy": {
+    "cold_timings_excluded_from_speedup": true,
+    "cv_limit": 0.1,
+    "fresh_process_orders": [
+      "ab",
+      "ba"
+    ],
+    "maximum_repetitions": 1048576,
+    "minimum_block_ms": 50.0,
+    "order_drift_limit": 0.1,
+    "repetitions": 25,
+    "rounds": 12,
+    "timing": "synchronized wall completion latency",
+    "warmup": 3,
+    "worker_schedule": [
+      "ab",
+      "ba",
+      "ba",
+      "ab"
+    ],
+    "worker_schedule_policy": "alternating_pair_order",
+    "workers_per_order": 2
+  },
+  "schema": "taichi_forge.hardware_acceleration_qualification.v2",
+  "source_revision": "60da33f0e32a4fe21b995a4efb56f1e5c7209eb0",
+  "source_status": [
+    " M python/taichi_forge/algorithms/_algorithms.py",
+    " M taichi/common/version.h"
+  ]
+}

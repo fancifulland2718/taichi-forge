@@ -143,9 +143,16 @@ grouped under the behavior they shipped.
   fresh-process AB/BA, separate cold/warm timing, device-completion
   synchronization, correctness/route gates, CV and cross-order drift gates,
   and a paired-speedup fifth-percentile threshold. It covers cuFFT, cuBLAS,
-  MMA, explicit cuSPARSE, Vulkan AS refit, and exact texture fetch. It is not a
-  pytest performance gate, does not generalize one host's data, and does not
-  manufacture an inequivalent software baseline for RasterPass.
+  MMA, explicit cuSPARSE, Vulkan AS refit, image copy, exact texture fetch, and
+  configured texture sampling. It is not a pytest performance gate, does not
+  generalize one host's data, and does not manufacture an inequivalent software
+  baseline for rasterization. On the qualified RTX 5090 snapshot, corrected
+  whole-image copy was a stable 5.13x faster than the equivalent fetch/store
+  kernel, while linear clamp sampling was a stable 0.236x of manual ndarray
+  bilinear interpolation and receives no speedup claim. Qualification also
+  fixed a missing real final-layout transition that had made an earlier copy
+  result both incorrect and artificially faster. See the
+  [bilingual low-level graphics qualification](low_level_hardware_graphics_qualification.en.md).
 - Added the first qualified D0 transparent specialization. On CUDA
   compute capability 8.0+/PTX 7.0+, compiler-generated `ti.block_local`
   struct-for prologues of at least 8 KiB automatically use PTX `cp.async` for

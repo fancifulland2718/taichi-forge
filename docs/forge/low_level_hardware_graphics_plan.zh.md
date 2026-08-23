@@ -1,7 +1,7 @@
 # Forge 底层硬件图形接口执行规划
 
-状态：执行中  
-适用版本：0.6.3 开发分支  
+状态：当前“不增加 wheel 组合”切片已完成；P1/P2 延期项保留
+适用版本：0.6.3 开发分支
 发行约束：不增加官方 wheel 的 backend、CUDA/Vulkan 版本或平台组合
 
 ## 1. 决策
@@ -181,6 +181,19 @@ BLAS/TLAS、instance update、query descriptor binding 与 hit-schema 测试能�
 
 每个 commit 只包含本表对应文件，不吸收工作区内既有用户改动。实现若不能满足 correctness、
 lifetime 或 distribution gate，则留在规划状态并记录缺失链，不提交半实现 public API。
+
+实际交付边界：
+
+| Commit | 已交付边界 |
+| --- | --- |
+| `c7405c16e` | 中英文架构规划与 renderer/non-renderer 边界 |
+| `c4284f072` | 底层 Vulkan graphics pipeline、draw、Graph、queue bridge、测试与公共文档 |
+| `fb46635d0` | 完整 image copy、immutable sampler state/cache、资格测试与 AS 延期审计 |
+| `b1f946536` | compute command 真实 final image transition 与重复 ordering 回归 |
+| `60da33f0e` | image/sampler AB/BA 工具、graphics queue/lifetime/RSS diagnostics 与确定性资源计数器 |
+
+实测结果和剩余工作 ROI 顺序见
+[中英文资格报告](low_level_hardware_graphics_qualification.zh.md)。
 
 ## 9. 验证与停止条件
 

@@ -1,7 +1,7 @@
 # Forge Low-Level Hardware Graphics Execution Plan
 
-Status: in progress  
-Target: 0.6.3 development branch  
+Status: completed for the current no-new-wheel slice; P1/P2 deferrals remain
+Target: 0.6.3 development branch
 Distribution constraint: no new official-wheel backend, CUDA/Vulkan-version,
 or platform combination
 
@@ -211,6 +211,19 @@ Each commit contains only its row's files and does not absorb pre-existing
 user changes. If an implementation cannot meet correctness, lifetime, or
 distribution gates, it remains planned with its missing chain documented;
 Forge does not publish a partial public API.
+
+Actual delivery boundaries:
+
+| Commit | Delivered boundary |
+| --- | --- |
+| `c7405c16e` | Bilingual architecture plan and renderer/non-renderer boundary |
+| `c4284f072` | Low-level Vulkan graphics pipeline, draw, Graph, queue bridge, tests, and public documentation |
+| `fb46635d0` | Whole-image copy, immutable sampler state/cache, qualification tests, and AS deferral audit |
+| `b1f946536` | Real compute-command final image transitions and repeated ordering regression |
+| `60da33f0e` | Image/sampler AB/BA harness, graphics queue/lifetime/RSS diagnostics, and deterministic resource counters |
+
+The measured results and remaining ROI order are in the
+[bilingual qualification report](low_level_hardware_graphics_qualification.en.md).
 
 ## 9. Validation and completion criteria
 

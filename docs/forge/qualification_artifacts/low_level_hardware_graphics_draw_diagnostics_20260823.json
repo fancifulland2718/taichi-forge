@@ -1,0 +1,334 @@
+{
+  "correctness": {
+    "center_nonzero": true,
+    "corner_clear": true
+  },
+  "forge_version": [
+    0,
+    6,
+    2
+  ],
+  "generated_at_ns": 1787479949947187500,
+  "memory": {
+    "graph_memory": {
+      "internal_storage_exclusive": false,
+      "internal_storage_reuses": 0,
+      "internal_storage_waits": 0,
+      "observation_arena_allocations": 0,
+      "observation_arena_capacity": 0,
+      "observation_arena_reuses": 0,
+      "observation_arena_slots": 0,
+      "observation_arena_waits": 0,
+      "observation_completion_attached": true,
+      "observation_host_readback_bytes": 0,
+      "observation_materializations": 0,
+      "observation_readback_mode": "completion_attached_host_visible",
+      "opaque_driver_bytes": null,
+      "opaque_temporary_bytes": 0,
+      "persistent_argument_bytes": 0,
+      "persistent_bounded_control_bytes": 0,
+      "persistent_bytes": 0,
+      "persistent_internal_storage_bytes": 0,
+      "persistent_observation_bytes": 0,
+      "persistent_telemetry_bytes": 0,
+      "persistent_temporary_bytes": 0,
+      "planned_temporary_bytes": 0,
+      "provider_generation_known_capacity_requested_bytes": 0,
+      "provider_generation_known_resident_requested_bytes": 0,
+      "provider_generation_opaque_component_count": 1,
+      "provider_generation_report_count": 1,
+      "provider_generation_requested_bytes_complete": false,
+      "telemetry_arena_allocations": 0,
+      "telemetry_arena_capacity": 0,
+      "telemetry_arena_reuses": 0,
+      "telemetry_arena_slots": 0,
+      "telemetry_arena_waits": 0,
+      "telemetry_host_readback_bytes": 0,
+      "telemetry_materializations": 0,
+      "temporary_arena_allocations": 0,
+      "temporary_arena_capacity": 0,
+      "temporary_arena_reuses": 0,
+      "temporary_arena_slots": 0,
+      "temporary_arena_waits": 0,
+      "temporary_plan_materialized": false,
+      "temporary_reuse_bytes": 0,
+      "transient_temporary_bytes": 0,
+      "workspace_lane_acquisitions": 0,
+      "workspace_lane_capacity": 1,
+      "workspace_lane_saturation_errors": 0,
+      "workspace_lane_saturation_policy": "wait",
+      "workspace_lane_waits": 0,
+      "workspace_lanes_busy": 0,
+      "workspace_lanes_materialized": 1
+    },
+    "pipeline_report": {
+      "backend": "vulkan",
+      "components": [
+        {
+          "lifetime": "provider_generation",
+          "name": "pipeline_shader_modules_and_driver_state",
+          "ownership": "driver",
+          "requested_bytes": null,
+          "requested_bytes_exact": false,
+          "resident": true,
+          "reusable": true
+        }
+      ],
+      "known_capacity_requested_bytes": 0,
+      "known_resident_requested_bytes": 0,
+      "lifecycle_state": "ready",
+      "opaque_component_count": 1,
+      "ownership_scope": "pipeline_generation",
+      "provider": "vulkan_graphics_pipeline",
+      "resident_requested_bytes_complete": false,
+      "schema_version": 1
+    },
+    "process_working_set_bytes": {
+      "after_churn": 398213120,
+      "after_init": 345165824,
+      "after_reset": 321884160,
+      "before_churn": 397959168,
+      "before_init": 65433600,
+      "before_reset": 398270464,
+      "churn_peak": 398213120
+    },
+    "program_pipeline_counts": {
+      "after_churn": 1,
+      "after_close": 0,
+      "before": 0
+    },
+    "rss_interpretation": "Process RSS includes driver/runtime caches and allocator retention; deterministic Program counts are the lifecycle gate.",
+    "texture_registry_after": {
+      "closed": 0,
+      "created_total": 1,
+      "inflight": 0,
+      "leases": 0,
+      "live": 0,
+      "release_errors": 0,
+      "released": 1,
+      "released_total": 1,
+      "retired_total": 1,
+      "retiring": 0,
+      "slots": 1,
+      "views": 0
+    },
+    "texture_registry_before": {
+      "closed": 0,
+      "created_total": 0,
+      "inflight": 0,
+      "leases": 0,
+      "live": 0,
+      "release_errors": 0,
+      "released": 0,
+      "released_total": 0,
+      "retired_total": 0,
+      "retiring": 0,
+      "slots": 0,
+      "views": 0
+    }
+  },
+  "performance_claim_eligible": false,
+  "performance_claim_reason": "no equivalent software raster baseline",
+  "platform": "Windows-10-10.0.26200-SP0",
+  "python": "3.10.20",
+  "queue_submissions": {
+    "after": {
+      "batched_command_buffers": 0,
+      "batched_queue_submit_calls": 0,
+      "queue_submit_calls": 16438,
+      "submitted_command_buffers": 16438,
+      "supported": true
+    },
+    "before": {
+      "batched_command_buffers": 0,
+      "batched_queue_submit_calls": 0,
+      "queue_submit_calls": 22,
+      "submitted_command_buffers": 22,
+      "supported": true
+    }
+  },
+  "schema": "taichi_forge.hardware_graphics_diagnostics.v1",
+  "source_revision": "60da33f0e32a4fe21b995a4efb56f1e5c7209eb0",
+  "source_status": [
+    " M python/taichi_forge/algorithms/_algorithms.py",
+    " M taichi/common/version.h"
+  ],
+  "timing": {
+    "direct": {
+      "cpu_submit_ms_per_draw": {
+        "count": 16,
+        "cv": 0.42968667847494113,
+        "max": 0.293149609375,
+        "mean": 0.2046536865234375,
+        "median": 0.24743437499999998,
+        "min": 0.08684375,
+        "samples": [
+          0.28223515625,
+          0.25141640625,
+          0.262448046875,
+          0.24328984375,
+          0.253470703125,
+          0.24345234375,
+          0.282829296875,
+          0.290537890625,
+          0.291062109375,
+          0.293149609375,
+          0.10430703125,
+          0.105010546875,
+          0.089973828125,
+          0.08684375,
+          0.088087109375,
+          0.1063453125
+        ],
+        "stdev": 0.08793696279990768
+      },
+      "sync_tail_ms_per_round": {
+        "count": 16,
+        "cv": 0.7043505046945905,
+        "max": 26.3266,
+        "mean": 15.3077125,
+        "median": 20.849,
+        "min": 1.6209,
+        "samples": [
+          23.6284,
+          21.5058,
+          24.2922,
+          19.862,
+          23.4947,
+          21.5523,
+          25.8378,
+          26.0232,
+          26.3266,
+          20.1922,
+          2.2575,
+          1.6209,
+          1.9103,
+          2.4678,
+          2.2844,
+          1.6673
+        ],
+        "stdev": 10.781995025094691
+      },
+      "wall_completion_ms_per_draw": {
+        "count": 16,
+        "cv": 0.48997017630339007,
+        "max": 0.393900390625,
+        "mean": 0.2644494384765625,
+        "median": 0.3315322265625,
+        "min": 0.09648359375,
+        "samples": [
+          0.37453359375,
+          0.3354234375,
+          0.357339453125,
+          0.32087578125,
+          0.345246875,
+          0.327641015625,
+          0.383758203125,
+          0.392191015625,
+          0.393900390625,
+          0.372025390625,
+          0.113125390625,
+          0.1113421875,
+          0.0974359375,
+          0.09648359375,
+          0.097010546875,
+          0.112858203125
+        ],
+        "stdev": 0.12957233799369383
+      }
+    },
+    "root_graph": {
+      "cpu_submit_ms_per_draw": {
+        "count": 16,
+        "cv": 0.1185167050806666,
+        "max": 0.121953125,
+        "mean": 0.098780078125,
+        "median": 0.09291582031250001,
+        "min": 0.089076171875,
+        "samples": [
+          0.09956015625,
+          0.09536015625,
+          0.094009765625,
+          0.1215546875,
+          0.091723046875,
+          0.090932421875,
+          0.092515625,
+          0.121953125,
+          0.093316015625,
+          0.089076171875,
+          0.091344921875,
+          0.11299296875,
+          0.08965546875,
+          0.09219140625,
+          0.09023515625,
+          0.11406015625
+        ],
+        "stdev": 0.011707089386985831
+      },
+      "sync_tail_ms_per_round": {
+        "count": 16,
+        "cv": 0.4978066100257024,
+        "max": 1.8703,
+        "mean": 1.01035625,
+        "median": 1.1096,
+        "min": 0.2559,
+        "samples": [
+          0.3469,
+          0.4103,
+          0.9966,
+          0.2559,
+          1.0716,
+          1.1616,
+          1.5997,
+          1.8703,
+          1.1513,
+          1.7555,
+          1.1476,
+          0.6863,
+          1.2792,
+          0.9662,
+          1.172,
+          0.2947
+        ],
+        "stdev": 0.5029620197307811
+      },
+      "wall_completion_ms_per_draw": {
+        "count": 16,
+        "cv": 0.10917235541608658,
+        "max": 0.129258984375,
+        "mean": 0.10272678222656251,
+        "median": 0.09738808593750001,
+        "min": 0.09465234375,
+        "samples": [
+          0.100915234375,
+          0.096962890625,
+          0.097902734375,
+          0.122554296875,
+          0.095908984375,
+          0.095469921875,
+          0.098764453125,
+          0.129258984375,
+          0.09781328125,
+          0.09593359375,
+          0.095827734375,
+          0.115673828125,
+          0.09465234375,
+          0.095965625,
+          0.09481328125,
+          0.115211328125
+        ],
+        "stdev": 0.011214924779989208
+      }
+    }
+  },
+  "workload": {
+    "baseline_policy": "none; no equivalent software renderer",
+    "draws_per_round": 256,
+    "pipeline_cycles": 32,
+    "rounds": 16,
+    "target": [
+      256,
+      256
+    ]
+  }
+}
