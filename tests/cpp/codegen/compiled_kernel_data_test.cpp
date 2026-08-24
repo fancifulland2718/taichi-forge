@@ -17,7 +17,7 @@ class FakeCompiledKernelData : public CompiledKernelData {
       : compiled_data_{{std::move(func_names)}, std::move(so_bin)} {
   }
   FakeCompiledKernelData(const FakeCompiledKernelData &o)
-      : compiled_data_(o.compiled_data_) {
+      : compiled_data_(o.compiled_data_), graph_metadata_(o.graph_metadata_) {
   }
 
   Arch arch() const override {
@@ -32,8 +32,16 @@ class FakeCompiledKernelData : public CompiledKernelData {
     return {};
   }
 
+  bool has_snode_tree_dependencies() const noexcept override {
+    return false;
+  }
+
   std::size_t task_count() const override {
     return 0;
+  }
+
+  std::vector<OffloadedTaskManifest> task_manifest() const override {
+    return {};
   }
 
   const GraphKernelMetadata &graph_metadata() const override {
@@ -45,6 +53,9 @@ class FakeCompiledKernelData : public CompiledKernelData {
   }
 
  protected:
+  void refresh_task_identities() override {
+  }
+
   Err load_impl(const CompiledKernelDataFile &file) override {
     if (file.arch() != kFakeArch) {
       return CompiledKernelData::Err::kArchNotMatched;
