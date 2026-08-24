@@ -50,7 +50,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
 
     assert tuple(operation.operation_id for operation in operations) == _OPERATION_IDS
     assert all(
-        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 3
+        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 4
         for operation in operations
     )
     assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
@@ -78,9 +78,21 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         "unstable",
         "not_measured",
     )
+    assert ti.hardware.GRAPH_INTEGRATION_MODES == (
+        "inline",
+        "root_ordered",
+        "backend_recorded",
+        "stream_captured",
+        "opaque",
+        "unsupported",
+    )
     assert all(operation.backends for operation in operations)
     assert all(operation.scopes for operation in operations)
     assert all(operation.provider_id for operation in operations)
+    assert all(
+        operation.graph_integration in ti.hardware.GRAPH_INTEGRATION_MODES
+        for operation in operations
+    )
 
     with pytest.raises(FrozenInstanceError):
         operations[0].dependency_tier = "wheel_variant"
@@ -189,6 +201,41 @@ def test_hardware_route_and_scoped_performance_evidence_are_separate():
         replace(operations[0], hardware_route="none")
 
 
+def test_stable_hardware_status_layer_excludes_diagnostic_planner_fields():
+    ti.reset()
+
+    report = ti.hardware.execution_report()
+    capability = report.capability("sampling.texture.vulkan")
+    provider = report.provider("vulkan_texture")
+
+    assert isinstance(report, ti.hardware.HardwareExecutionReport)
+    assert isinstance(capability, ti.hardware.HardwareCapability)
+    assert isinstance(provider, ti.hardware.HardwareProviderStatus)
+    assert capability == ti.hardware.status("sampling.texture.vulkan")
+    assert provider == ti.hardware.provider_status("vulkan_texture")
+    assert capability.operation_id == "sampling.texture.vulkan"
+    assert capability.backend is None
+    assert capability.selected_provider is None
+    assert capability.route == "qualified"
+    assert not capability.available
+    assert capability.reason != "none"
+    assert not provider.available
+    assert not provider.selected
+    payload = report.to_dict()
+    assert set(payload) == {
+        "runtime_initialized",
+        "backend",
+        "capabilities",
+        "providers",
+    }
+    assert "dependency_tier" not in capability.to_dict()
+    assert "native_facts" not in capability.to_dict()
+    with pytest.raises(KeyError, match="unknown hardware operation"):
+        report.capability("missing.operation")
+    with pytest.raises(KeyError, match="unknown hardware provider"):
+        report.provider("missing_provider")
+
+
 def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
     by_id = {
         operation.operation_id: operation for operation in ti.hardware.operations()
@@ -203,7 +250,7 @@ def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
     assert optix.provider_class == "vendor_hardware_runtime"
     assert cufft.provider_class == "vendor_algorithm"
     assert cufft.implementation_status == "existing_public"
-    assert cufft.graph_support == "recordable"
+    assert cufft.graph_integration == "root_ordered"
     assert cufft.public_api == "ti.hardware.fft.CufftPlan1D / CufftPlanND"
     assert cub.dependency_tier == "build_external"
     assert cub.implementation_status == "reference_only"
@@ -234,7 +281,7 @@ def test_kernel_and_executable_scope_contracts_do_not_overlap_accidentally():
     for operation in ti.hardware.operations():
         if "kernel" in operation.scopes:
             assert operation.execution_kind == "kernel_intrinsic"
-            assert operation.graph_support == "inline"
+            assert operation.graph_integration == "inline"
         if operation.execution_kind == "external_library":
             assert "kernel" not in operation.scopes
         if operation.operation_id == "ray.query.batch.optix":
@@ -265,7 +312,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert texture.hardware_acceleration == "qualified"
     assert texture.scopes == ("kernel",)
     assert texture.execution_kind == "kernel_intrinsic"
-    assert texture.graph_support == "inline"
+    assert texture.graph_integration == "inline"
     assert texture.shapes_or_tiles == ("1D", "2D", "3D")
     assert texture.layouts == ("sampled_image", "storage_image")
     assert "SPIR-V OpImageSampleExplicitLod and OpImageFetch" in texture.requirements
@@ -291,7 +338,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert vulkan_atomic.implementation_status == "existing_public"
     assert cuda_atomic.public_api == vulkan_atomic.public_api == "ti.atomic_*"
     assert cuda_atomic.scopes == vulkan_atomic.scopes == ("kernel",)
-    assert cuda_atomic.graph_support == vulkan_atomic.graph_support == "inline"
+    assert cuda_atomic.graph_integration == vulkan_atomic.graph_integration == "inline"
     assert "atomic-CAS" in cuda_atomic.notes[1]
 
     warp = ti.hardware.capability("kernel.simt.warp.cuda")
@@ -327,7 +374,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert raster.hardware_acceleration == "qualified"
     assert raster.scopes == ("python", "graph")
     assert raster.execution_kind == "native_command"
-    assert raster.graph_support == "recordable"
+    assert raster.graph_integration == "root_ordered"
     assert "index:u32" in raster.dtypes
     assert all("index:i32" not in dtype for dtype in raster.dtypes)
     assert "kernel calls are impossible" in raster.notes[0]
@@ -339,7 +386,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     adapter = ti.hardware.capability("raster.adapter.ggui.vulkan")
     assert adapter.semantic_family == "raster.adapter"
     assert adapter.public_api == "ti.hardware.raster.RasterPass"
-    assert adapter.graph_support == "opaque"
+    assert adapter.graph_integration == "opaque"
     assert adapter.layouts == ("mesh", "mesh_instance", "particles", "lines")
     assert "qualification adapter only" in adapter.notes[0]
 
@@ -350,7 +397,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert matrix.hardware_acceleration == "qualified"
     assert matrix.scopes == ("python", "graph")
     assert matrix.execution_kind == "native_command"
-    assert matrix.graph_support == "recordable"
+    assert matrix.graph_integration == "root_ordered"
     assert matrix.stream_binding == "runtime_ordered"
     assert matrix.workspace_ownership == "none"
     assert matrix.shapes_or_tiles == ("m16n16k16", "compact batch")
@@ -374,7 +421,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     cusparse = ti.hardware.capability("linalg.spmv.cusparse")
     assert cusparse.implementation_status == "existing_public"
     assert cusparse.scopes == ("python",)
-    assert cusparse.graph_support == "unsupported"
+    assert cusparse.graph_integration == "unsupported"
     assert cusparse.stream_binding == "runtime_ordered"
     assert cusparse.workspace_ownership == "provider_owned"
     assert cusparse.public_api == "ti.linalg.SparseMatrix.__matmul__"
@@ -384,7 +431,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     explicit_cusparse = ti.hardware.capability("linalg.spmv.cusparse_explicit")
     assert explicit_cusparse.implementation_status == "existing_public"
     assert explicit_cusparse.scopes == ("python", "graph")
-    assert explicit_cusparse.graph_support == "recordable"
+    assert explicit_cusparse.graph_integration == "root_ordered"
     assert explicit_cusparse.stream_binding == "runtime_ordered"
     assert explicit_cusparse.workspace_ownership == "provider_owned"
     assert explicit_cusparse.public_api == "ti.hardware.linalg.spmv_f32"
@@ -393,7 +440,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     cudss = ti.hardware.capability("linalg.solve.cudss")
     assert cudss.implementation_status == "existing_public"
     assert cudss.scopes == ("python", "graph")
-    assert cudss.graph_support == "recordable"
+    assert cudss.graph_integration == "root_ordered"
     assert cudss.stream_binding == "runtime_ordered"
     assert cudss.workspace_ownership == "provider_owned"
     assert cudss.public_api == ("ti.hardware.linalg.CudssPlan / CudssSolveRecording")
@@ -404,7 +451,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     automatic_cudss = ti.hardware.capability("linalg.solve.cudss_auto")
     assert automatic_cudss.activation_mode == "domain_api_auto_provider"
     assert automatic_cudss.scopes == ("python",)
-    assert automatic_cudss.graph_support == "unsupported"
+    assert automatic_cudss.graph_integration == "unsupported"
     assert automatic_cudss.public_api == "ti.linalg.SparseSolver(provider='auto')"
     assert automatic_cudss.requirements[0] == "CUDA driver API >= 12.0"
     assert "cuSOLVERSp compatibility route" in automatic_cudss.notes[1]
@@ -441,7 +488,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert next(
         provider for provider in providers if provider.provider_id == "cublas"
     ).to_dict() == {
-        "schema_version": 3,
+        "schema_version": 4,
         "provider_id": "cublas",
         "dependency_tier": "lazy_external",
         "dependency_name": "cuBLAS",
@@ -462,12 +509,14 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     descriptor = ti.hardware.capability("matrix.mma.vulkan")
     payload = descriptor.to_dict()
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["operation_id"] == descriptor.operation_id
     assert "tuple enumeration" in payload["requirements"][1]
     assert payload["hardware_acceleration"] == "implementation_defined"
     assert payload["implementation_status"] == "planned"
     assert payload["activation_mode"] == "explicit_kernel_intrinsic"
+    assert payload["graph_integration"] == "inline"
+    assert "graph_support" not in payload
     assert payload["load_mode"] == "built_in"
     assert payload["resource_effects"] == ()
     assert payload["lifetime_policy"] == "runtime_generation"
@@ -503,7 +552,7 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     ti.reset()
     report = ti.hardware.report()
 
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.runtime_initialized is False
     assert report.backend is None
     assert report.external_components_probed is False

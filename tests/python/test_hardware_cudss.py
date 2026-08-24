@@ -55,13 +55,13 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
     descriptor = ti.hardware.capability("linalg.solve.cudss")
     assert descriptor.activation_mode == "explicit_hardware_api"
     assert descriptor.scopes == ("python", "graph")
-    assert descriptor.graph_support == "recordable"
+    assert descriptor.graph_integration == "root_ordered"
     assert descriptor.dependency_tier == "lazy_external"
     assert descriptor.dependency_name == "cuDSS"
     automatic = ti.hardware.capability("linalg.solve.cudss_auto")
     assert automatic.activation_mode == "domain_api_auto_provider"
     assert automatic.scopes == ("python",)
-    assert automatic.graph_support == "unsupported"
+    assert automatic.graph_integration == "unsupported"
 
     with pytest.raises(TypeError, match="must be a Taichi SparseMatrix"):
         ti.hardware.linalg.CudssPlan(object())

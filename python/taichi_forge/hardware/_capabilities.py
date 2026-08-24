@@ -23,7 +23,7 @@ from taichi_forge.hardware._capability_catalog_vulkan import (
 )
 
 
-HARDWARE_CAPABILITY_SCHEMA_VERSION = 3
+HARDWARE_CAPABILITY_SCHEMA_VERSION = 4
 
 DEPENDENCY_TIERS = (
     "core",
@@ -84,10 +84,11 @@ EXECUTION_KINDS = (
     "compute_kernel",
 )
 
-GRAPH_SUPPORT_MODES = (
+GRAPH_INTEGRATION_MODES = (
     "inline",
-    "recordable",
-    "stream_capture",
+    "root_ordered",
+    "backend_recorded",
+    "stream_captured",
     "opaque",
     "unsupported",
 )
@@ -198,7 +199,11 @@ def _unique_strings(field_name, values, *, nonempty=False):
 
 @dataclass(frozen=True)
 class HardwareOperationDescriptor:
-    """Immutable deployment and execution contract for one provider route."""
+    """Diagnostic deployment and execution contract for one provider route.
+
+    This expert-facing descriptor intentionally carries planner and provider
+    details.  Ordinary availability checks should use ``HardwareCapability``.
+    """
 
     operation_id: str
     semantic_family: str
@@ -210,7 +215,7 @@ class HardwareOperationDescriptor:
     hardware_acceleration: str
     scopes: Tuple[str, ...]
     execution_kind: str
-    graph_support: str
+    graph_integration: str
     stream_binding: str
     workspace_ownership: str
     implementation_status: str
@@ -284,7 +289,9 @@ class HardwareOperationDescriptor:
             )
         _validate_member("hardware route level", hardware_route, HARDWARE_ROUTE_LEVELS)
         _validate_member("execution kind", self.execution_kind, EXECUTION_KINDS)
-        _validate_member("Graph support", self.graph_support, GRAPH_SUPPORT_MODES)
+        _validate_member(
+            "Graph integration", self.graph_integration, GRAPH_INTEGRATION_MODES
+        )
         _validate_member("stream binding", self.stream_binding, STREAM_BINDINGS)
         _validate_member(
             "workspace ownership", self.workspace_ownership, WORKSPACE_OWNERSHIP
@@ -340,8 +347,11 @@ class HardwareOperationDescriptor:
             raise ValueError("internal scope cannot be combined with a public scope")
         if "kernel" in scopes and self.execution_kind != "kernel_intrinsic":
             raise ValueError("kernel-scoped operations must be kernel intrinsics")
-        if self.execution_kind == "kernel_intrinsic" and self.graph_support != "inline":
-            raise ValueError("kernel intrinsics must report graph_support='inline'")
+        if (
+            self.execution_kind == "kernel_intrinsic"
+            and self.graph_integration != "inline"
+        ):
+            raise ValueError("kernel intrinsics must report graph_integration='inline'")
         object.__setattr__(self, "backends", backends)
         object.__setattr__(self, "hardware_route", hardware_route)
         object.__setattr__(self, "scopes", scopes)
@@ -370,7 +380,7 @@ class HardwareOperationDescriptor:
             "hardware_route": self.hardware_route,
             "scopes": self.scopes,
             "execution_kind": self.execution_kind,
-            "graph_support": self.graph_support,
+            "graph_integration": self.graph_integration,
             "stream_binding": self.stream_binding,
             "workspace_ownership": self.workspace_ownership,
             "resource_effects": self.resource_effects,
@@ -438,7 +448,7 @@ class HardwareProviderDescriptor:
 
 @dataclass(frozen=True)
 class ResolvedHardwareOperation:
-    """One passive resolution against the active Forge runtime, if any."""
+    """Diagnostic passive resolution against the active Forge runtime, if any."""
 
     descriptor: HardwareOperationDescriptor
     backend: Optional[str]
@@ -517,10 +527,160 @@ class ResolvedHardwareOperation:
         )
         return result
 
+    def to_capability(self):
+        """Return the small stable status view for ordinary callers."""
+
+        available = (
+            self.discovery == "available"
+            and self.enablement == "enabled"
+            and self.selection != "rejected"
+        )
+        return HardwareCapability(
+            operation_id=self.descriptor.operation_id,
+            available=available,
+            backend=self.backend,
+            selected_provider=(
+                self.descriptor.provider_id if self.selection == "selected" else None
+            ),
+            route=self.descriptor.hardware_route,
+            reason="none" if available else self.unavailable_reason,
+        )
+
+
+@dataclass(frozen=True)
+class HardwareCapability:
+    """Stable, compact availability and route status for one operation."""
+
+    operation_id: str
+    available: bool
+    backend: Optional[str]
+    selected_provider: Optional[str]
+    route: str
+    reason: str
+
+    def __post_init__(self):
+        if not isinstance(self.operation_id, str) or not self.operation_id:
+            raise TypeError("operation_id must be a nonempty string")
+        if not isinstance(self.available, bool):
+            raise TypeError("available must be bool")
+        if self.backend is not None and (
+            not isinstance(self.backend, str) or not self.backend
+        ):
+            raise TypeError("backend must be None or a nonempty string")
+        if self.selected_provider is not None and (
+            not isinstance(self.selected_provider, str) or not self.selected_provider
+        ):
+            raise TypeError("selected_provider must be None or a nonempty string")
+        _validate_member("hardware route level", self.route, HARDWARE_ROUTE_LEVELS)
+        if not isinstance(self.reason, str) or not self.reason:
+            raise TypeError("reason must be a nonempty string")
+        if self.available and self.reason != "none":
+            raise ValueError("available capabilities must report reason='none'")
+
+    def to_dict(self):
+        return {
+            "operation_id": self.operation_id,
+            "available": self.available,
+            "backend": self.backend,
+            "selected_provider": self.selected_provider,
+            "route": self.route,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class HardwareProviderStatus:
+    """Stable, compact status for one provider family."""
+
+    provider_id: str
+    available: bool
+    backend: Optional[str]
+    selected: bool
+    reason: str
+
+    def __post_init__(self):
+        if not isinstance(self.provider_id, str) or not self.provider_id:
+            raise TypeError("provider_id must be a nonempty string")
+        if not isinstance(self.available, bool) or not isinstance(self.selected, bool):
+            raise TypeError("available and selected must be bool")
+        if self.selected and not self.available:
+            raise ValueError("selected providers must be available")
+        if self.backend is not None and (
+            not isinstance(self.backend, str) or not self.backend
+        ):
+            raise TypeError("backend must be None or a nonempty string")
+        if not isinstance(self.reason, str) or not self.reason:
+            raise TypeError("reason must be a nonempty string")
+        if self.available and self.reason != "none":
+            raise ValueError("available providers must report reason='none'")
+
+    def to_dict(self):
+        return {
+            "provider_id": self.provider_id,
+            "available": self.available,
+            "backend": self.backend,
+            "selected": self.selected,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class HardwareExecutionReport:
+    """Stable runtime snapshot without diagnostic planner internals."""
+
+    runtime_initialized: bool
+    backend: Optional[str]
+    capabilities: Tuple[HardwareCapability, ...]
+    providers: Tuple[HardwareProviderStatus, ...]
+
+    def __post_init__(self):
+        if not isinstance(self.runtime_initialized, bool):
+            raise TypeError("runtime_initialized must be bool")
+        if self.backend is not None and (
+            not isinstance(self.backend, str) or not self.backend
+        ):
+            raise TypeError("backend must be None or a nonempty string")
+        capabilities = tuple(self.capabilities)
+        providers = tuple(self.providers)
+        if not all(isinstance(item, HardwareCapability) for item in capabilities):
+            raise TypeError("capabilities must contain HardwareCapability values")
+        if not all(isinstance(item, HardwareProviderStatus) for item in providers):
+            raise TypeError("providers must contain HardwareProviderStatus values")
+        if len({item.operation_id for item in capabilities}) != len(capabilities):
+            raise ValueError("capability operation IDs must be unique")
+        if len({item.provider_id for item in providers}) != len(providers):
+            raise ValueError("provider status IDs must be unique")
+        object.__setattr__(self, "capabilities", capabilities)
+        object.__setattr__(self, "providers", providers)
+
+    def capability(self, operation_id):
+        if not isinstance(operation_id, str) or not operation_id:
+            raise TypeError("operation_id must be a nonempty string")
+        for item in self.capabilities:
+            if item.operation_id == operation_id:
+                return item
+        raise KeyError(f"unknown hardware operation: {operation_id}")
+
+    def provider(self, provider_id):
+        if not isinstance(provider_id, str) or not provider_id:
+            raise TypeError("provider_id must be a nonempty string")
+        for item in self.providers:
+            if item.provider_id == provider_id:
+                return item
+        raise KeyError(f"unknown hardware provider: {provider_id}")
+
+    def to_dict(self):
+        return {
+            "runtime_initialized": self.runtime_initialized,
+            "backend": self.backend,
+            "capabilities": tuple(item.to_dict() for item in self.capabilities),
+            "providers": tuple(item.to_dict() for item in self.providers),
+        }
+
 
 @dataclass(frozen=True)
 class HardwareCapabilityReport:
-    """Side-effect-free snapshot of static contracts and passive runtime facts."""
+    """Diagnostic snapshot of static contracts and passive runtime facts."""
 
     runtime_initialized: bool
     backend: Optional[str]
@@ -557,6 +717,42 @@ class HardwareCapabilityReport:
             "operations": tuple(operation.to_dict() for operation in self.operations),
         }
 
+    def to_execution_report(self):
+        """Project diagnostic operations into the stable user-facing layer."""
+
+        capabilities = tuple(operation.to_capability() for operation in self.operations)
+        grouped = {}
+        for operation, capability in zip(self.operations, capabilities):
+            grouped.setdefault(operation.descriptor.provider_id, []).append(capability)
+        provider_statuses = []
+        for provider_id, provider_capabilities in sorted(grouped.items()):
+            available = any(item.available for item in provider_capabilities)
+            selected = any(
+                item.selected_provider == provider_id for item in provider_capabilities
+            )
+            if available:
+                reason = "none"
+            else:
+                reasons = tuple(
+                    dict.fromkeys(item.reason for item in provider_capabilities)
+                )
+                reason = reasons[0] if len(reasons) == 1 else "no_operation_available"
+            provider_statuses.append(
+                HardwareProviderStatus(
+                    provider_id=provider_id,
+                    available=available,
+                    backend=self.backend,
+                    selected=selected,
+                    reason=reason,
+                )
+            )
+        return HardwareExecutionReport(
+            runtime_initialized=self.runtime_initialized,
+            backend=self.backend,
+            capabilities=capabilities,
+            providers=tuple(provider_statuses),
+        )
+
 
 def _operation(
     operation_id,
@@ -569,7 +765,7 @@ def _operation(
     hardware_acceleration,
     scopes,
     execution_kind,
-    graph_support,
+    graph_integration,
     stream_binding,
     workspace_ownership,
     implementation_status,
@@ -601,7 +797,7 @@ def _operation(
         hardware_acceleration=hardware_acceleration,
         scopes=tuple(scopes),
         execution_kind=execution_kind,
-        graph_support=graph_support,
+        graph_integration=graph_integration,
         stream_binding=stream_binding,
         workspace_ownership=workspace_ownership,
         implementation_status=implementation_status,
@@ -1203,6 +1399,24 @@ def report():
     )
 
 
+def execution_report():
+    """Return the compact stable runtime status without diagnostic details."""
+
+    return report().to_execution_report()
+
+
+def status(operation_id):
+    """Return one compact stable operation status without loading providers."""
+
+    return execution_report().capability(operation_id)
+
+
+def provider_status(provider_id):
+    """Return one compact stable provider status without loading providers."""
+
+    return execution_report().provider(provider_id)
+
+
 def probe(provider_id, *, library_path=None):
     """Explicitly probe one D1 provider without enabling or selecting it.
 
@@ -1303,13 +1517,16 @@ __all__ = [
     "EXECUTION_CLASSES",
     "EXECUTION_KINDS",
     "FAILURE_SCOPES",
-    "GRAPH_SUPPORT_MODES",
+    "GRAPH_INTEGRATION_MODES",
     "HARDWARE_ACCELERATION_LEVELS",
     "HARDWARE_CAPABILITY_SCHEMA_VERSION",
     "HARDWARE_ROUTE_LEVELS",
+    "HardwareCapability",
     "HardwareCapabilityReport",
+    "HardwareExecutionReport",
     "HardwareOperationDescriptor",
     "HardwareProviderDescriptor",
+    "HardwareProviderStatus",
     "IMPLEMENTATION_STATUSES",
     "LIFETIME_POLICIES",
     "LOAD_MODES",
@@ -1322,8 +1539,11 @@ __all__ = [
     "UPDATE_POLICIES",
     "WORKSPACE_OWNERSHIP",
     "capability",
+    "execution_report",
     "operations",
     "providers",
     "probe",
+    "provider_status",
     "report",
+    "status",
 ]

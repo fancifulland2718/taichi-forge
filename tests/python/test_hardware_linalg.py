@@ -38,7 +38,7 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
 
     descriptor = ti.hardware.capability("linalg.gemm.cublas")
     assert descriptor.implementation_status == "existing_public"
-    assert descriptor.graph_support == "recordable"
+    assert descriptor.graph_integration == "root_ordered"
     assert descriptor.public_api == "ti.hardware.linalg.gemm_f32"
 
     matrix = ti.linalg.SparseMatrix(n=4, m=4, dtype=ti.f32)
@@ -50,7 +50,7 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
     spmv_descriptor = ti.hardware.capability(
         "linalg.spmv.cusparse_explicit"
     )
-    assert spmv_descriptor.graph_support == "recordable"
+    assert spmv_descriptor.graph_integration == "root_ordered"
     assert spmv_descriptor.public_api == "ti.hardware.linalg.spmv_f32"
 
 

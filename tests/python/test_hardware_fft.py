@@ -40,7 +40,7 @@ def test_cufft_plan_rejects_non_cuda_runtime_and_bad_contracts():
     assert descriptor.implementation_status == "existing_public"
     assert descriptor.scopes == ("python", "graph")
     assert descriptor.execution_kind == "external_library"
-    assert descriptor.graph_support == "recordable"
+    assert descriptor.graph_integration == "root_ordered"
     assert descriptor.workspace_ownership == "provider_owned"
 
 

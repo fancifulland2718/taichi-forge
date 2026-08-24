@@ -19,14 +19,14 @@ def test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime():
     descriptor = ti.hardware.capability("ray.query.batch.vulkan")
     assert descriptor.implementation_status == "existing_public"
     assert descriptor.scopes == ("python", "graph")
-    assert descriptor.graph_support == "recordable"
+    assert descriptor.graph_integration == "root_ordered"
     assert descriptor.execution_kind == "native_command"
     assert descriptor.workspace_ownership == "provider_owned"
 
     refit = ti.hardware.capability("ray.as_refit.vulkan")
     assert refit.implementation_status == "existing_public"
     assert refit.scopes == ("python", "graph")
-    assert refit.graph_support == "recordable"
+    assert refit.graph_integration == "root_ordered"
     assert refit.hardware_acceleration == "implementation_defined"
     assert refit.workspace_ownership == "provider_owned"
 

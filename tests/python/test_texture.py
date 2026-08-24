@@ -65,7 +65,7 @@ def test_vulkan_texture_hardware_sampling_qualification():
     capability = ti.hardware.capability("sampling.texture.vulkan")
     assert capability.hardware_acceleration == "qualified"
     assert capability.execution_kind == "kernel_intrinsic"
-    assert capability.graph_support == "inline"
+    assert capability.graph_integration == "inline"
 
 
 @ti.func

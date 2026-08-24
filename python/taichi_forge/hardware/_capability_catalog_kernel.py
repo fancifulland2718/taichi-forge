@@ -302,7 +302,7 @@ def kernel_intrinsic_operations(_operation):
             "qualified",
             ("python", "graph"),
             "native_command",
-            "recordable",
+            "root_ordered",
             "runtime_ordered",
             "none",
             "existing_public",
