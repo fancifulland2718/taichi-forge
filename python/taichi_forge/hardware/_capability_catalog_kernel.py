@@ -74,7 +74,8 @@ def kernel_intrinsic_operations(_operation):
             ),
             public_api="ti.Texture",
             notes=(
-                "Texture resources are currently allocated only by the GFX Program; the LLVM/CUDA Program returns a null texture allocation.",
+                "Texture resources are allocated only by the GFX Program; "
+                "public construction rejects LLVM/CUDA before its null texture allocation path.",
                 "LLVM CUDA TextureOp lowering is not implemented, so hardware presence alone cannot admit this route.",
             ),
         ),

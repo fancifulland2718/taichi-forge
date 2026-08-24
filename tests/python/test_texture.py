@@ -32,6 +32,34 @@ integer_storage_image_cases = [
 ]
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_resource_fails_closed_before_allocation():
+    runtime = impl.get_runtime()
+    registry_before = dict(runtime.prog._debug_texture_resource_stats())
+    runtime_objects_before = len(runtime._runtime_object_refs)
+    resolved = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "sampling.texture.cuda"
+    )
+    assert resolved.selection == "rejected"
+    assert resolved.unavailable_reason == "implementation_planned"
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "Texture resources are unavailable on the cuda backend; "
+            "this backend does not implement graphics texture allocation "
+            "and TextureOp lowering"
+        ),
+    ):
+        ti.Texture(ti.Format.r32f, (4, 4))
+
+    ti.sync()
+    assert dict(runtime.prog._debug_texture_resource_stats()) == registry_before
+    assert len(runtime._runtime_object_refs) == runtime_objects_before
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_texture_hardware_sampling_qualification():
     tex = ti.Texture(ti.Format.r32f, (2, 2))

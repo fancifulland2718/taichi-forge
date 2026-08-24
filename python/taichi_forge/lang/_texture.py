@@ -136,6 +136,21 @@ class Texture:
         arr_shape = tuple(normalized_shape)
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
+        arch = impl.current_cfg().arch
+        graphics_texture_arches = (
+            _ti_core.Arch.vulkan,
+            _ti_core.Arch.opengl,
+            _ti_core.Arch.gles,
+            _ti_core.Arch.metal,
+            _ti_core.Arch.dx11,
+        )
+        if arch not in graphics_texture_arches:
+            self._runtime_prog = None
+            raise RuntimeError(
+                f"Texture resources are unavailable on the {arch.name} backend; "
+                "this backend does not implement graphics texture allocation "
+                "and TextureOp lowering"
+            )
         if sampler is None:
             sampler_config = _ti_core.ImageSamplerConfig()
         else:

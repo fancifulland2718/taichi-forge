@@ -325,6 +325,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cuda_texture.implementation_status == "planned"
     assert cuda_texture.hardware_acceleration == "implementation_defined"
     assert "GFX Program" in cuda_texture.notes[0]
+    assert "rejects LLVM/CUDA" in cuda_texture.notes[0]
     assert "TextureOp" in cuda_texture.notes[1]
     assert len(cuda_texture.requirements) == 4
 
