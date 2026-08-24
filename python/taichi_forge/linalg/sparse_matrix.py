@@ -262,6 +262,7 @@ class SparseMatrix:
         runtime = get_runtime()
         self._runtime_prog = runtime.prog
         self._format_contract_cache = None
+        self._topology_fingerprint = None
         self._spmv_auto_cost_evidence = None
         self._spmv_auto_stats = {
             "candidates": 0,
@@ -308,7 +309,11 @@ class SparseMatrix:
             raise TaichiRuntimeError(
                 f"Unsupported SparsePattern storage format {pattern.storage_format!r}; no fallback was performed."
             )
-        return cls(sm=core)
+        matrix = cls(sm=core)
+        matrix._topology_fingerprint = pattern._debug_runtime_stats()[
+            "identity"
+        ].get("topology_fingerprint")
+        return matrix
 
     def _require_operation(self, operation):
         self._ensure_valid()
@@ -766,6 +771,7 @@ class SparseMatrix:
             snapshot[section] = dict(snapshot[section])
         if snapshot["provider"]["library_version"] is not None:
             snapshot["provider"]["library_version"] = dict(snapshot["provider"]["library_version"])
+        snapshot["identity"]["topology_fingerprint"] = self._topology_fingerprint
         snapshot["auto_provider"] = copy.deepcopy(self._spmv_auto_stats)
         snapshot["auto_provider"]["cost_evidence_present"] = (
             self._spmv_auto_cost_evidence is not None
@@ -839,6 +845,7 @@ class SparseMatrix:
                 "shape": (identity["rows"], identity["cols"]),
                 "index_dtype": "i32",
                 "block_size": identity["block_size"],
+                "topology_fingerprint": identity.get("topology_fingerprint"),
             },
             "pattern": {
                 "ownership": (

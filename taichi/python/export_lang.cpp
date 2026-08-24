@@ -6420,6 +6420,7 @@ void export_lang(py::module &m) {
         identity["storage_format"] = stats.storage_format;
         identity["index_dtype"] = stats.index_dtype;
         identity["value_order"] = stats.value_order;
+        identity["topology_fingerprint"] = stats.topology_fingerprint;
         identity["rows"] = stats.rows;
         identity["cols"] = stats.cols;
         identity["nnz"] = stats.nnz;

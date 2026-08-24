@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -1848,6 +1849,51 @@ void validate_compressed_host_pattern(
   }
 }
 
+std::string sparse_topology_fingerprint(
+    const char *storage_format,
+    int rows,
+    int cols,
+    int block_size,
+    const std::vector<int32_t> &row_offsets,
+    const std::vector<int32_t> &column_indices) {
+  // Pattern validation already materializes these host vectors. Computing the
+  // scope identifier here therefore adds no device transfer or synchronization.
+  std::uint64_t low = 14695981039346656037ull;
+  std::uint64_t high = 7809847782465536322ull;
+  constexpr std::uint64_t low_prime = 1099511628211ull;
+  constexpr std::uint64_t high_prime = 14029467366897019727ull;
+  auto mix_byte = [&](std::uint8_t value) {
+    low = (low ^ value) * low_prime;
+    high = (high ^ value) * high_prime;
+  };
+  auto mix_u32 = [&](std::uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8) {
+      mix_byte(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+    }
+  };
+  for (const unsigned char value : std::string("taichi-forge-sparse-v1")) {
+    mix_byte(value);
+  }
+  for (const unsigned char value : std::string(storage_format)) {
+    mix_byte(value);
+  }
+  mix_u32(static_cast<std::uint32_t>(rows));
+  mix_u32(static_cast<std::uint32_t>(cols));
+  mix_u32(static_cast<std::uint32_t>(block_size));
+  mix_u32(static_cast<std::uint32_t>(row_offsets.size()));
+  for (const int32_t value : row_offsets) {
+    mix_u32(static_cast<std::uint32_t>(value));
+  }
+  mix_u32(static_cast<std::uint32_t>(column_indices.size()));
+  for (const int32_t value : column_indices) {
+    mix_u32(static_cast<std::uint32_t>(value));
+  }
+  std::ostringstream result;
+  result << "tf-sp-v1:" << std::hex << std::setfill('0') << std::setw(16)
+         << high << std::setw(16) << low;
+  return result.str();
+}
+
 }  // namespace
 
 SparseCsrPattern::SparseCsrPattern(Program *program,
@@ -1904,6 +1950,8 @@ SparseCsrPattern::SparseCsrPattern(Program *program,
                 column_bytes);
     validate_compressed_host_pattern(
         "CSR", rows, cols, nnz_size, cpu_row_offsets_, cpu_column_indices_);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "csr", rows, cols, 1, cpu_row_offsets_, cpu_column_indices_);
   } else if (arch_is_cuda(arch)) {
 #if defined(TI_WITH_CUDA)
     std::vector<int32_t> host_row_offsets(
@@ -1919,6 +1967,8 @@ SparseCsrPattern::SparseCsrPattern(Program *program,
         host_column_indices.data(), source_column_indices, column_bytes);
     validate_compressed_host_pattern(
         "CSR", rows, cols, nnz_size, host_row_offsets, host_column_indices);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "csr", rows, cols, 1, host_row_offsets, host_column_indices);
 
     void *owned_row_offsets = nullptr;
     void *owned_column_indices = nullptr;
@@ -1958,6 +2008,8 @@ SparseCsrPattern::SparseCsrPattern(Program *program,
                                   host_column_indices.data(), column_bytes);
     validate_compressed_host_pattern(
         "CSR", rows, cols, nnz_size, host_row_offsets, host_column_indices);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "csr", rows, cols, 1, host_row_offsets, host_column_indices);
 
     Ndarray *owned_row_offsets = nullptr;
     Ndarray *owned_column_indices = nullptr;
@@ -2094,6 +2146,7 @@ SparseCsrPattern::debug_runtime_statistics() const {
   result.storage_format = "csr";
   result.index_dtype = "i32";
   result.value_order = "row_major_compressed";
+  result.topology_fingerprint = topology_fingerprint_;
   result.rows = rows_;
   result.cols = cols_;
   result.nnz = nnz_;
@@ -2360,6 +2413,9 @@ SparseBsrPattern::SparseBsrPattern(Program *program,
     validate_compressed_host_pattern(
         "BSR", block_rows, block_cols, block_nnz_size, cpu_row_offsets_,
         cpu_column_indices_);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "bsr", block_rows, block_cols, block_size, cpu_row_offsets_,
+        cpu_column_indices_);
   } else if (arch_is_cuda(arch)) {
 #if defined(TI_WITH_CUDA)
     std::vector<int32_t> host_row_offsets(
@@ -2375,6 +2431,9 @@ SparseBsrPattern::SparseBsrPattern(Program *program,
         host_column_indices.data(), source_column_indices, column_bytes);
     validate_compressed_host_pattern(
         "BSR", block_rows, block_cols, block_nnz_size, host_row_offsets,
+        host_column_indices);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "bsr", block_rows, block_cols, block_size, host_row_offsets,
         host_column_indices);
 
     void *owned_row_offsets = nullptr;
@@ -2415,6 +2474,9 @@ SparseBsrPattern::SparseBsrPattern(Program *program,
                                   host_column_indices.data(), column_bytes);
     validate_compressed_host_pattern(
         "BSR", block_rows, block_cols, block_nnz_size, host_row_offsets,
+        host_column_indices);
+    topology_fingerprint_ = sparse_topology_fingerprint(
+        "bsr", block_rows, block_cols, block_size, host_row_offsets,
         host_column_indices);
 
     Ndarray *owned_row_offsets = nullptr;
@@ -2558,6 +2620,7 @@ SparseBsrPattern::debug_runtime_statistics() const {
   result.storage_format = "bsr";
   result.index_dtype = "i32";
   result.value_order = "block_row_major_dense_row_major";
+  result.topology_fingerprint = topology_fingerprint_;
   result.rows = rows_;
   result.cols = cols_;
   result.nnz = scalar_nnz_;

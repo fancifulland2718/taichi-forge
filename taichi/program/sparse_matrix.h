@@ -109,6 +109,7 @@ struct SparsePatternRuntimeStatistics {
   std::string storage_format{"unknown"};
   std::string index_dtype{"unknown"};
   std::string value_order{"unknown"};
+  std::string topology_fingerprint;
   int rows{0};
   int cols{0};
   int nnz{0};
@@ -554,6 +555,10 @@ class SparseCsrPattern final : public SparsePattern {
     return pattern_id_;
   }
 
+  const std::string &topology_fingerprint() const {
+    return topology_fingerprint_;
+  }
+
   std::uint64_t pattern_reserved_bytes() const;
   std::uint64_t device_to_host_bytes() const {
     return device_to_host_bytes_;
@@ -583,6 +588,7 @@ class SparseCsrPattern final : public SparsePattern {
   int cols_{0};
   int nnz_{0};
   std::uint64_t pattern_id_{0};
+  std::string topology_fingerprint_;
   std::vector<int32_t> cpu_row_offsets_;
   std::vector<int32_t> cpu_column_indices_;
   void *cuda_row_offsets_{nullptr};
@@ -839,6 +845,10 @@ class SparseBsrPattern final : public SparsePattern {
     return pattern_id_;
   }
 
+  const std::string &topology_fingerprint() const {
+    return topology_fingerprint_;
+  }
+
   std::uint64_t pattern_reserved_bytes() const;
   std::uint64_t device_to_host_bytes() const {
     return device_to_host_bytes_;
@@ -873,6 +883,7 @@ class SparseBsrPattern final : public SparsePattern {
   int scalar_nnz_{0};
   std::size_t value_count_{0};
   std::uint64_t pattern_id_{0};
+  std::string topology_fingerprint_;
   std::vector<int32_t> cpu_row_offsets_;
   std::vector<int32_t> cpu_column_indices_;
   void *cuda_row_offsets_{nullptr};

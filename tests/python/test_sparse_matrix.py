@@ -1023,6 +1023,50 @@ def test_public_cpu_bsr_pattern_supports_f64_values():
 
 
 @test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_fixed_sparse_pattern_topology_fingerprint_is_stable_and_exact():
+    def make_pattern(columns):
+        row_offsets = ti.ndarray(dtype=ti.i32, shape=3)
+        column_indices = ti.ndarray(dtype=ti.i32, shape=2)
+        row_offsets.from_numpy(np.asarray([0, 1, 2], dtype=np.int32))
+        column_indices.from_numpy(np.asarray(columns, dtype=np.int32))
+        return ti.linalg.SparsePattern.csr(
+            2, 2, row_offsets, column_indices
+        )
+
+    diagonal = make_pattern([0, 1])
+    diagonal_copy = make_pattern([0, 1])
+    off_diagonal = make_pattern([1, 0])
+    diagonal_fingerprint = diagonal._debug_runtime_stats()["identity"][
+        "topology_fingerprint"
+    ]
+    assert diagonal_fingerprint.startswith("tf-sp-v1:")
+    assert (
+        diagonal_copy._debug_runtime_stats()["identity"][
+            "topology_fingerprint"
+        ]
+        == diagonal_fingerprint
+    )
+    assert (
+        off_diagonal._debug_runtime_stats()["identity"][
+            "topology_fingerprint"
+        ]
+        != diagonal_fingerprint
+    )
+
+    values = ti.ndarray(dtype=ti.f32, shape=2)
+    values.fill(1.0)
+    matrix = diagonal.matrix(values)
+    assert (
+        matrix._debug_runtime_stats()["identity"]["topology_fingerprint"]
+        == diagonal_fingerprint
+    )
+    assert (
+        matrix._get_format_contract()["identity"]["topology_fingerprint"]
+        == diagonal_fingerprint
+    )
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
 def test_public_cpu_rectangular_bsr_keeps_solver_operations_disabled():
     row_offsets = ti.ndarray(dtype=ti.i32, shape=3)
     column_indices = ti.ndarray(dtype=ti.i32, shape=2)

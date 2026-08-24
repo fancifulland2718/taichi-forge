@@ -11,6 +11,13 @@ from taichi_forge.hardware import (
     sampling,
 )
 
+from taichi_forge.hardware._admission import (
+    PROVIDER_ADMISSION_SCHEMA,
+    PROVIDER_ADMISSION_SCHEMA_VERSION,
+    ProviderAdmissionDecision,
+    ProviderAdmissionEvidence,
+    load_provider_admission_evidence,
+)
 from taichi_forge.hardware._capabilities import (
     ACTIVATION_MODES,
     DEPENDENCY_TIERS,
@@ -88,7 +95,11 @@ __all__ = [
     "LOAD_MODES",
     "OPERATION_SCOPES",
     "PERFORMANCE_STATES",
+    "PROVIDER_ADMISSION_SCHEMA",
+    "PROVIDER_ADMISSION_SCHEMA_VERSION",
     "PROVIDER_CLASSES",
+    "ProviderAdmissionDecision",
+    "ProviderAdmissionEvidence",
     "ResolvedHardwareOperation",
     "SELECTION_STATES",
     "STREAM_BINDINGS",
@@ -97,6 +108,7 @@ __all__ = [
     "capability",
     "execution_report",
     "operations",
+    "load_provider_admission_evidence",
     "probe",
     "provider_status",
     "providers",
