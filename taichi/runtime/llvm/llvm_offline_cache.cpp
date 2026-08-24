@@ -397,6 +397,8 @@ LlvmOfflineCache::KernelCacheData LlvmOfflineCache::KernelCacheData::clone()
   result.args = args;
   result.rets = rets;
   result.compiled_data = compiled_data.clone();
+  result.used_snode_tree_ids = used_snode_tree_ids;
+  result.graph_metadata = graph_metadata;
   result.size = size;
   result.created_at = created_at;
   result.last_used_at = last_used_at;
@@ -413,6 +415,8 @@ LlvmOfflineCache::KernelCacheData::convert_to_llvm_ckd_data() const {
   result.args = args;
   result.rets = rets;
   result.compiled_data = compiled_data.clone();
+  result.used_snode_tree_ids = used_snode_tree_ids;
+  result.graph_metadata = graph_metadata;
   result.ret_size = ret_size;
   result.ret_type = ret_type;
   result.args_size = args_size;

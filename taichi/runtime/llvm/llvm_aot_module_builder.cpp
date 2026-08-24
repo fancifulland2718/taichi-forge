@@ -55,23 +55,24 @@ void LlvmAotModuleBuilder::dump(const std::string &output_dir,
   writer.set_data(std::move(cache_));
   writer.dump(output_dir);
 
+  LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
   if (compile_config_.arch == Arch::cuda) {
-    LLVM::LlvmAotMetadata metadata;
     for (const auto capability : {
              DeviceCapability::cuda_compute_capability,
              DeviceCapability::cuda_ptx_version,
          }) {
       metadata.required_caps[to_string(capability)] = caps_.get(capability);
     }
-    const std::string json =
-        liong::json::print(liong::json::serialize(metadata));
-    std::fstream f(
-        taichi::join_path(output_dir, LLVM::kLlvmAotMetadataFilename),
-                   std::ios::trunc | std::ios::out);
-    TI_ERROR_IF(!f.is_open(), "Cannot write CUDA AOT metadata in {}",
-                output_dir);
-    f.write(json.data(), json.size());
   }
+  const std::string json =
+      liong::json::print(liong::json::serialize(metadata));
+  std::fstream f(taichi::join_path(output_dir,
+                                  LLVM::kLlvmAotMetadataFilename),
+                 std::ios::trunc | std::ios::out);
+  TI_ERROR_IF(!f.is_open(), "Cannot write LLVM AOT metadata in {}",
+              output_dir);
+  f.write(json.data(), json.size());
 
   dump_graph(output_dir);
 }
@@ -81,7 +82,9 @@ void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
   auto compiled = compile_kernel(kernel);
   LlvmOfflineCache::KernelCacheData kcache;
   kcache.kernel_key = identifier;
-  kcache.compiled_data = std::move(compiled);
+  kcache.compiled_data = std::move(compiled.compiled_data);
+  kcache.used_snode_tree_ids = std::move(compiled.used_snode_tree_ids);
+  kcache.graph_metadata = std::move(compiled.graph_metadata);
   kcache.args.reserve(kernel->nested_parameters.size());
   for (const auto &p : kernel->nested_parameters)
     kcache.args.push_back(p);
@@ -133,13 +136,13 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
   cache_.fields[snode_tree_id] = std::move(field_cache);
 }
 
-LLVMCompiledKernel LlvmAotModuleBuilder::compile_kernel(Kernel *kernel) {
+LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
+    Kernel *kernel) {
   const auto &ckd =
       compilation_manager_.load_or_compile(compile_config_, caps_, *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
   return dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
-      .get_internal_data()
-      .compiled_data.clone();
+      .get_internal_data();
 }
 
 }  // namespace taichi::lang

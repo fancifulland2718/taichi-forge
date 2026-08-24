@@ -118,7 +118,10 @@ class Kernel;
 //  25 - Tree-local LLVM SNode runtime state (2026-08). Field cache metadata
 //       records deterministic tree-local node ids and cached kernels use the
 //       tree directory instead of Program-global fixed-capacity arrays.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 25;
+//  26 - LLVM AOT kernel dependency metadata (2026-08). Kernel cache payloads
+//       retain used SNodeTree ids and Graph metadata so CUDA AOT launchers bind
+//       the compact roots expected by newly compiled kernels.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 26;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

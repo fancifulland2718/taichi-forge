@@ -30,6 +30,8 @@ struct LlvmOfflineCache {
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> args;
     std::vector<Callable::Ret> rets;
     LLVMCompiledKernel compiled_data;
+    std::vector<int> used_snode_tree_ids;
+    GraphKernelMetadata graph_metadata;
 
     const StructType *ret_type = nullptr;
     size_t ret_size{0};
@@ -53,6 +55,8 @@ struct LlvmOfflineCache {
     TI_IO_DEF(kernel_key,
               args,
               compiled_data,
+              used_snode_tree_ids,
+              graph_metadata,
               size,
               created_at,
               last_used_at,

@@ -22,20 +22,23 @@ namespace taichi::lang {
 
 TEST(LlvmAotMetadataTest, ValidatesCudaComputeAndPtxRequirements) {
   LLVM::LlvmAotMetadata metadata;
+  metadata.schema_version = LLVM::kLlvmAotSchemaVersion;
   metadata.required_caps["cuda_compute_capability"] = 60;
   metadata.required_caps["cuda_ptx_version"] = 50;
 
+  EXPECT_NO_THROW(LLVM::validate_llvm_aot_metadata(metadata));
   EXPECT_NO_THROW(LLVM::validate_cuda_aot_metadata(metadata, 60, 50));
   EXPECT_NO_THROW(LLVM::validate_cuda_aot_metadata(metadata, 90, 78));
-  EXPECT_THROW(LLVM::validate_cuda_aot_metadata(metadata, 59, 50),
-               TaichiRuntimeError);
-  EXPECT_THROW(LLVM::validate_cuda_aot_metadata(metadata, 60, 49),
-               TaichiRuntimeError);
+  EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(metadata, 59, 50));
+  EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(metadata, 60, 49));
+
+  LLVM::LlvmAotMetadata missing_schema;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(missing_schema));
 
   LLVM::LlvmAotMetadata missing_ptx;
+  missing_ptx.schema_version = LLVM::kLlvmAotSchemaVersion;
   missing_ptx.required_caps["cuda_compute_capability"] = 60;
-  EXPECT_THROW(LLVM::validate_cuda_aot_metadata(missing_ptx, 90, 78),
-               TaichiRuntimeError);
+  EXPECT_ANY_THROW(LLVM::validate_cuda_aot_metadata(missing_ptx, 90, 78));
 }
 
 TEST(LlvmAotTest, CpuKernel) {

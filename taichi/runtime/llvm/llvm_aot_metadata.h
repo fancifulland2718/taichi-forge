@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <string>
 
@@ -9,12 +10,22 @@
 namespace taichi::lang::LLVM {
 
 inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
+inline constexpr std::uint32_t kLlvmAotSchemaVersion = 1;
 
 struct LlvmAotMetadata {
+  std::uint32_t schema_version{0};
   std::map<std::string, uint32_t> required_caps;
 
-  TI_IO_DEF(required_caps);
+  TI_IO_DEF(schema_version, required_caps);
 };
+
+inline void validate_llvm_aot_metadata(const LlvmAotMetadata &metadata) {
+  TI_ERROR_IF(metadata.schema_version != kLlvmAotSchemaVersion,
+              "LLVM AOT artifact schema {} is incompatible with runtime "
+              "schema {}. Rebuild the artifact with the current Forge AOT "
+              "compiler.",
+              metadata.schema_version, kLlvmAotSchemaVersion);
+}
 
 inline void validate_cuda_aot_metadata(const LlvmAotMetadata &metadata,
                                        int device_compute_capability,

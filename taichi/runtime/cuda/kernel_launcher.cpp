@@ -77,7 +77,7 @@ void add_cuda_graph_execution_gate(LLVMCompiledKernel &compiled) {
 
 }  // namespace
 
-void KernelLauncher::initialize_root_binding(
+void KernelLauncher::configure_root_binding(
     const LLVM::CompiledKernelData &compiled,
     Context &context) {
   // The result-buffer slot is otherwise unused for a no-return kernel. New
@@ -91,32 +91,41 @@ void KernelLauncher::initialize_root_binding(
 
   TI_ASSERT(compiled.get_internal_data().rets.empty());
   TI_ASSERT(!context.snode_tree_ids.empty());
-  TI_TRACE("Initializing CUDA root binding for {} SNodeTree(s)",
-           context.snode_tree_ids.size());
-  auto *executor = get_runtime_executor();
-  std::vector<void *> roots;
-  roots.reserve(context.snode_tree_ids.size());
-  for (int tree_id : context.snode_tree_ids) {
-    roots.push_back(executor->get_snode_tree_root_ptr(tree_id));
-  }
+}
 
-  if (roots.size() == 1) {
-    context.root_binding = roots.front();
-    TI_TRACE("Using direct CUDA root binding {}", context.root_binding);
+void KernelLauncher::ensure_root_binding(const Context &context) {
+  if (!context.uses_root_binding) {
     return;
   }
 
-  CUDAContext::get_instance().make_current();
-  const std::size_t binding_bytes = roots.size() * sizeof(void *);
-  void *device_binding = nullptr;
-  CUDADriver::get_instance().malloc(&device_binding, binding_bytes);
-  auto owner = own_cuda_allocation(device_binding);
-  CUDADriver::get_instance().memcpy_host_to_device(
-      device_binding, roots.data(), binding_bytes);
-  context.root_binding = device_binding;
-  context.root_binding_owner = std::move(owner);
-  TI_TRACE("Using compact CUDA root table {} ({} bytes)",
-           context.root_binding, binding_bytes);
+  std::call_once(context.root_binding_once, [&] {
+    TI_TRACE("Initializing CUDA root binding for {} SNodeTree(s)",
+             context.snode_tree_ids.size());
+    auto *executor = get_runtime_executor();
+    std::vector<void *> roots;
+    roots.reserve(context.snode_tree_ids.size());
+    for (int tree_id : context.snode_tree_ids) {
+      roots.push_back(executor->get_snode_tree_root_ptr(tree_id));
+    }
+
+    if (roots.size() == 1) {
+      context.root_binding = roots.front();
+      TI_TRACE("Using direct CUDA root binding {}", context.root_binding);
+      return;
+    }
+
+    CUDAContext::get_instance().make_current();
+    const std::size_t binding_bytes = roots.size() * sizeof(void *);
+    void *device_binding = nullptr;
+    CUDADriver::get_instance().malloc(&device_binding, binding_bytes);
+    auto owner = own_cuda_allocation(device_binding);
+    CUDADriver::get_instance().memcpy_host_to_device(
+        device_binding, roots.data(), binding_bytes);
+    context.root_binding = device_binding;
+    context.root_binding_owner = std::move(owner);
+    TI_TRACE("Using compact CUDA root table {} ({} bytes)",
+             context.root_binding, binding_bytes);
+  });
 }
 
 bool KernelLauncher::on_cuda_device(void *ptr) {
@@ -268,6 +277,7 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  ensure_root_binding(*launcher_ctx);
   const auto &parameters = launcher_ctx->parameters;
   const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
   for (const auto &task : offloaded_tasks) {
@@ -729,6 +739,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   auto iter = contexts_.find(handle.get_launch_id());
   TI_ASSERT(iter != contexts_.end());
   launcher_ctx = iter->second;
+  ensure_root_binding(*launcher_ctx);
   auto *executor = get_runtime_executor();
   const bool listgen_reuse_adaptive =
       executor->get_config().cuda_listgen_reuse_adaptive;
@@ -1002,7 +1013,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
     ctx->snode_tree_ids = compiled.snode_tree_ids();
     ctx->parameters = std::move(parameters);
     ctx->offloaded_tasks = std::move(data.tasks);
-    initialize_root_binding(compiled, *ctx);
+    configure_root_binding(compiled, *ctx);
     const bool was_inserted = contexts_.emplace(index, std::move(ctx)).second;
     TI_ASSERT(was_inserted);
 
@@ -1031,7 +1042,7 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   ctx->snode_tree_ids = compiled.snode_tree_ids();
   ctx->parameters = std::move(parameters);
   ctx->offloaded_tasks = std::move(data.tasks);
-  initialize_root_binding(compiled, *ctx);
+  configure_root_binding(compiled, *ctx);
   const bool inserted =
       contexts_.emplace(handle.get_launch_id(), std::move(ctx)).second;
   TI_ASSERT(inserted);

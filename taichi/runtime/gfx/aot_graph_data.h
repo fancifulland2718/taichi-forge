@@ -12,6 +12,24 @@ class KernelImpl : public aot::Kernel {
     ret_size = params_.kernel_attribs.ctx_attribs.rets_bytes();
     args_type = params_.kernel_attribs.ctx_attribs.args_type();
     args_size = params_.kernel_attribs.ctx_attribs.args_bytes();
+    for (const auto &[indices, attrib] :
+         params_.kernel_attribs.ctx_attribs.args()) {
+      CallableBase::Parameter parameter(
+          PrimitiveType::get(attrib.dtype), attrib.is_array,
+          attrib.is_argpack, /*size_unused=*/0,
+          static_cast<int>(attrib.field_dim + attrib.element_shape.size()),
+          attrib.element_shape, attrib.format);
+      parameter.name = attrib.name;
+      parameter.ptype = attrib.ptype;
+      nested_parameters.emplace(indices, std::move(parameter));
+    }
+    for (const auto &[indices, type] :
+         params_.kernel_attribs.ctx_attribs.argpack_types()) {
+      TI_ASSERT(type != nullptr && type->is<taichi::lang::StructType>());
+      argpack_types.emplace(indices,
+                            type->as<taichi::lang::StructType>());
+    }
+    name = params_.kernel_attribs.name;
     arch = Arch::vulkan;  // Only for letting the launch context builder know
                           // the arch does not use LLVM.
                           // TODO: remove arch after the refactoring of

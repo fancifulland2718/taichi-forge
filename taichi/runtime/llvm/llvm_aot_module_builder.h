@@ -31,7 +31,7 @@ class LlvmAotModuleBuilder : public AotModuleBuilder {
                              int column_num) override;
 
  private:
-  LLVMCompiledKernel compile_kernel(Kernel *kernel);
+  LLVM::CompiledKernelData::InternalData compile_kernel(Kernel *kernel);
 
   mutable LlvmOfflineCache cache_;
   KernelCompilationManager &compilation_manager_;

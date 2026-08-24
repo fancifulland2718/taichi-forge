@@ -18,21 +18,27 @@ LlvmAotModule::LlvmAotModule(
       cache_reader_(LlvmOfflineCacheFileReader::make(module_path)) {
   TI_ASSERT(executor_ != nullptr);
 
+  const std::string metadata_path =
+      taichi::join_path(module_path, kLlvmAotMetadataFilename);
+  std::ifstream stream(metadata_path, std::ios::in | std::ios::binary);
+  TI_ERROR_IF(!stream.is_open(),
+              "LLVM AOT artifact is missing required schema metadata at {}. "
+              "Rebuild the artifact with the current Forge AOT compiler.",
+              metadata_path);
+  const std::string contents((std::istreambuf_iterator<char>(stream)),
+                             std::istreambuf_iterator<char>());
+  LlvmAotMetadata metadata;
+  auto json = liong::json::parse(contents.data(),
+                                 contents.data() + contents.size());
+  liong::json::deserialize(json, metadata);
+  validate_llvm_aot_metadata(metadata);
+
+  TI_ERROR_IF(cache_reader_ == nullptr,
+              "LLVM AOT artifact metadata at {} is corrupt or incompatible. "
+              "Rebuild the artifact with the current Forge AOT compiler.",
+              module_path);
+
   if (executor_->get_config().arch == Arch::cuda) {
-    const std::string metadata_path =
-        taichi::join_path(module_path, kLlvmAotMetadataFilename);
-    std::ifstream stream(metadata_path, std::ios::in | std::ios::binary);
-    TI_ERROR_IF(!stream.is_open(),
-                "CUDA AOT artifact is missing required capability metadata "
-                "at {}. Rebuild the artifact with the current Forge AOT "
-                "compiler.",
-                metadata_path);
-    const std::string contents((std::istreambuf_iterator<char>(stream)),
-                               std::istreambuf_iterator<char>());
-    LlvmAotMetadata metadata;
-    auto json = liong::json::parse(contents.data(),
-                                   contents.data() + contents.size());
-    liong::json::deserialize(json, metadata);
     for (const auto &[key, value] : metadata.required_caps) {
       required_caps_.set(str2devcap(key), value);
     }
