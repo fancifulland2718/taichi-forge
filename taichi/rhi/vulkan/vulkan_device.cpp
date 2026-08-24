@@ -3005,6 +3005,7 @@ void VulkanStream::retire_completed_cmdbuffers() {
   if (submitted_cmdbuffers_.empty()) {
     return;
   }
+  std::vector<vkapi::IVkFence> completed_fences;
   std::vector<TrackedCmdbuf> still_submitted;
   still_submitted.reserve(submitted_cmdbuffers_.size());
   for (auto &tracked : submitted_cmdbuffers_) {
@@ -3012,6 +3013,7 @@ void VulkanStream::retire_completed_cmdbuffers() {
     VkResult res = vkGetFenceStatus(tracked.fence->device,
                                     tracked.fence->fence);
     if (res == VK_SUCCESS) {
+      completed_fences.push_back(tracked.fence);
       continue;
     }
     if (res == VK_NOT_READY) {
@@ -3023,6 +3025,11 @@ void VulkanStream::retire_completed_cmdbuffers() {
                                 "Failed to retire a Vulkan command buffer");
   }
   submitted_cmdbuffers_ = std::move(still_submitted);
+  // Profiler samplers are tracked separately from command buffers. If an
+  // already-complete submission is retired here, command_sync() can no longer
+  // discover its fence, so collect its query results before dropping that
+  // ownership edge.
+  device_.profiler_sync_fences(completed_fences);
 }
 void VulkanStream::apply_in_flight_backpressure() {
   if (submitted_cmdbuffers_.size() <

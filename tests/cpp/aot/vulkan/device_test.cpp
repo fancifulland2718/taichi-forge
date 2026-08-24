@@ -1001,12 +1001,18 @@ TEST(VulkanProfilerTest, CommandListScopesKeepTheirOwnQueryPools) {
   second->begin_profiler_scope("second_scope");
   first->end_profiler_scope();
   second->end_profiler_scope();
-  ASSERT_TRUE(stream->submit(first.get()));
+  auto first_completion = stream->submit(first.get());
+  ASSERT_TRUE(first_completion);
+  ASSERT_TRUE(first_completion->wait());
+  // Keep the completed submission in the stream until the next submit. This
+  // deterministically exercises retire_completed_cmdbuffers() instead of
+  // relying on the first fence winning a scheduling race.
   ASSERT_TRUE(stream->submit(second.get()));
   stream->command_sync();
 
   // command_sync() drains completed profiler samplers as part of synchronizing
   // the stream, so the sampled records are ready to consume here.
+  EXPECT_EQ(device->profiler_get_sampler_count(), 0u);
   auto records = device->profiler_flush_sampled_time();
   ASSERT_EQ(records.size(), 2u);
   for (const auto &[name, duration_ms] : records) {
