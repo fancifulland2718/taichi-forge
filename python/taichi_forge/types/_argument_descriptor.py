@@ -167,10 +167,6 @@ def describe_symbolic_arg(symbolic_arg):
     tag = symbolic_arg.tag
     if tag == _ti_core.ArgKind.NDARRAY:
         element_type = symbolic_arg.element_dtype()
-        if tuple(symbolic_arg.element_shape) == (1,):
-            # Preserve the pre-1.6 scalar sentinel accepted by old Graph
-            # metadata. New descriptors encode scalar elements with ().
-            element_type = symbolic_arg.dtype()
         return ArgumentTypeDescriptor(
             "ndarray",
             describe_element_type(element_type),
