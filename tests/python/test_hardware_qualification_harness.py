@@ -109,7 +109,7 @@ def _worker(
     return worker
 
 
-def test_aggregate_accepts_only_stable_conservative_speedup():
+def test_aggregate_separates_stable_speedup_from_formal_claim_evidence():
     workers = (
         _worker("ab", [1.00, 1.01, 0.99], [2.00, 2.01, 1.99], [2.0] * 3),
         _worker("ba", [1.01, 1.00, 0.99], [2.01, 2.00, 1.99], [2.0] * 3),
@@ -121,8 +121,14 @@ def test_aggregate_accepts_only_stable_conservative_speedup():
 
     assert report["correctness_and_route_qualified"]
     assert report["noise_status"] == "stable"
-    assert report["performance_claim_eligible"]
+    assert not report["performance_claim_eligible"]
     assert report["performance_state"] == "stable_positive"
+    assert not report["performance_evidence"]["qualified"]
+    assert report["performance_evidence"]["reasons"] == (
+        "insufficient_fresh_process_coverage",
+        "insufficient_timing_samples",
+        "undersized_timing_blocks",
+    )
     assert report["performance_scope"]["revision"]["forge_commit"] == ("test-revision")
     assert report["paired_speedup"]["p05"] == 2.0
     assert "p05_ms" not in report["paired_speedup"]
@@ -130,6 +136,27 @@ def test_aggregate_accepts_only_stable_conservative_speedup():
     assert report["worker_calibration"][0]["variants"]["hardware"]["satisfied"]
     assert report["memory"] == [workers[0]["memory"]]
     assert report["provider_statistics"] == [workers[1]["provider_statistics"]]
+
+
+def test_aggregate_allows_claim_after_formal_fresh_process_coverage():
+    workers = tuple(
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.10, 0.10)
+
+    assert report["performance_state"] == "stable_positive"
+    assert report["performance_evidence"]["qualified"]
+    assert report["performance_evidence"]["reasons"] == ()
+    assert report["performance_claim_eligible"]
 
 
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():

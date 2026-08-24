@@ -3186,43 +3186,13 @@ def _auto_admission(
     if len(canonical_scopes) != 1:
         return {"eligible": False, "reason": "qualification_scope_mismatch"}
     scope = copy.deepcopy(scopes[0])
-    order_processes = {
-        order: sum(worker["order"] == order for worker in workers)
-        for order in ("ab", "ba")
-    }
-    fresh_processes = len(
-        {(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers}
-    )
-    coverage_qualified = fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES and all(
-        count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
-        for count in order_processes.values()
-    )
-    provider_samples = variants["hardware"]["count"]
-    baseline_samples = variants["baseline"]["count"]
-    samples_qualified = (
-        provider_samples >= AUTO_ADMISSION_MINIMUM_SAMPLES
-        and baseline_samples >= AUTO_ADMISSION_MINIMUM_SAMPLES
-    )
-    stable = (
-        variants["hardware"]["cv"] <= AUTO_ADMISSION_MAXIMUM_CV
-        and variants["baseline"]["cv"] <= AUTO_ADMISSION_MAXIMUM_CV
-        and variants["hardware"]["order_drift"] <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
-        and variants["baseline"]["order_drift"] <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
-    )
-    observed_blocks = [
-        worker["timing"]["calibration"][variant]["observed_block_ms"]
-        for worker in workers
-        for variant in ("hardware", "baseline")
-    ]
-    minimum_block_ms = min(observed_blocks)
-    minimum_block_qualified = (
-        minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
-        and all(
-            worker["timing"]["calibration"][variant]["satisfied"]
-            for worker in workers
-            for variant in ("hardware", "baseline")
-        )
-    )
+    performance_evidence = _performance_evidence_qualification(workers, variants)
+    observed = performance_evidence["observed"]
+    order_processes = observed["order_processes"]
+    fresh_processes = observed["fresh_processes"]
+    provider_samples = observed["samples_per_variant"]["hardware"]
+    baseline_samples = observed["samples_per_variant"]["baseline"]
+    minimum_block_ms = observed["minimum_block_ms"]
     margin_qualified = paired_speedup["p05"] >= 1.0 / (1.0 - minimum_margin)
     provider_median_ns = variants["hardware"]["median_ms"] * 1.0e6
     baseline_median_ns = variants["baseline"]["median_ms"] * 1.0e6
@@ -3247,10 +3217,14 @@ def _auto_admission(
     )
     cost_qualified = provider_cost_ns < baseline_cost_ns * (1.0 - minimum_margin)
     checks = (
-        (coverage_qualified, "insufficient_fresh_process_coverage"),
-        (samples_qualified, "insufficient_timing_samples"),
-        (stable, "unstable_timing"),
-        (minimum_block_qualified, "undersized_timing_blocks"),
+        (
+            performance_evidence["qualified"],
+            (
+                performance_evidence["reasons"][0]
+                if performance_evidence["reasons"]
+                else "qualified"
+            ),
+        ),
         (margin_qualified, "paired_margin_gate"),
         (cost_qualified, "amortized_cost_gate"),
     )
@@ -3290,6 +3264,75 @@ def _auto_admission(
         },
     }
     return {"eligible": True, "reason": "qualified", "evidence": record}
+
+
+def _performance_evidence_qualification(workers, variants):
+    order_processes = {
+        order: sum(worker["order"] == order for worker in workers)
+        for order in ("ab", "ba")
+    }
+    fresh_processes = len(
+        {(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers}
+    )
+    samples_per_variant = {
+        variant: variants[variant]["count"] for variant in ("hardware", "baseline")
+    }
+    observed_blocks = [
+        float(worker["timing"]["calibration"][variant]["observed_block_ms"])
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    ]
+    calibration_satisfied = all(
+        worker["timing"]["calibration"][variant]["satisfied"]
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    )
+    maximum_cv = max(variants[variant]["cv"] for variant in variants)
+    maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
+    coverage_qualified = fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES and all(
+        count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
+        for count in order_processes.values()
+    )
+    samples_qualified = all(
+        count >= AUTO_ADMISSION_MINIMUM_SAMPLES
+        for count in samples_per_variant.values()
+    )
+    stable = (
+        maximum_cv <= AUTO_ADMISSION_MAXIMUM_CV
+        and maximum_order_drift <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
+    )
+    minimum_block_ms = min(observed_blocks)
+    minimum_block_qualified = (
+        calibration_satisfied and minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
+    )
+    checks = (
+        (coverage_qualified, "insufficient_fresh_process_coverage"),
+        (samples_qualified, "insufficient_timing_samples"),
+        (stable, "unstable_timing"),
+        (minimum_block_qualified, "undersized_timing_blocks"),
+    )
+    reasons = tuple(reason for passed, reason in checks if not passed)
+    return {
+        "qualified": not reasons,
+        "reasons": reasons,
+        "requirements": {
+            "fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
+            "processes_per_order": AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER,
+            "samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
+            "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
+            "maximum_cv": AUTO_ADMISSION_MAXIMUM_CV,
+            "maximum_order_drift": AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT,
+        },
+        "observed": {
+            "fresh_processes": fresh_processes,
+            "order_processes": order_processes,
+            "samples_per_variant": samples_per_variant,
+            "minimum_block_ms": minimum_block_ms,
+            "calibration_satisfied": calibration_satisfied,
+            "maximum_cv": maximum_cv,
+            "maximum_order_drift": maximum_order_drift,
+        },
+    }
 
 
 def _aggregate(
@@ -3376,7 +3419,10 @@ def _aggregate(
         performance_state = "stable_negative"
     else:
         performance_state = "unstable"
-    claim_eligible = performance_state == "stable_positive"
+    performance_evidence = _performance_evidence_qualification(workers, variants)
+    claim_eligible = (
+        performance_state == "stable_positive" and performance_evidence["qualified"]
+    )
     performance_scope = {
         "harness_schema": SCHEMA,
         "case": case,
@@ -3405,6 +3451,7 @@ def _aggregate(
         "correctness_and_route_qualified": True,
         "noise_status": "stable" if stable else "unstable",
         "minimum_block_qualified": minimum_block_qualified,
+        "performance_evidence": performance_evidence,
         "performance_claim_eligible": claim_eligible,
         "performance_state": performance_state,
         "performance_scope": performance_scope,
