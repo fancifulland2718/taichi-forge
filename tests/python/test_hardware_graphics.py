@@ -12,6 +12,15 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+def _texture_rgb(texture):
+    """Read an rgba8 texture without binding the hardware oracle to Pillow."""
+    from taichi_forge._kernels import save_texture_to_numpy
+
+    image = np.zeros(texture.shape + (3,), dtype=np.uint8)
+    save_texture_to_numpy(texture, image)
+    return np.rot90(image, 3)
+
+
 def _spirv_header(name):
     path = (
         Path(__file__).parents[2] / "cpp_examples" / "rhi_examples" / "shaders" / name
@@ -322,7 +331,7 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
 
     assert pipeline.draw(color, {0: vertices}, draw=draw) is color
     ti.sync()
-    image = np.asarray(color.to_image())
+    image = _texture_rgb(color)
     assert image[32, 32].max() > 32
     assert image[2, 2].max() == 0
 
@@ -349,11 +358,11 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
         clear_color=(0.0, 0.0, 1.0, 1.0),
     )
     ti.sync()
-    assert np.asarray(graph_color.to_image())[2, 2].max() > 32
+    assert _texture_rgb(graph_color)[2, 2].max() > 32
 
     graph.run({"target": graph_color, "vertices": vertices})
     ti.sync()
-    graph_image = np.asarray(graph_color.to_image())
+    graph_image = _texture_rgb(graph_color)
     assert graph_image[32, 32].max() > 32
     assert graph_image[2, 2].max() == 0
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
@@ -384,7 +393,7 @@ def test_vulkan_graphics_viewport_uses_offset_and_extent():
             viewport=(16, 16, 32, 32),
         )
         ti.sync()
-        image = np.asarray(color.to_image())
+        image = _texture_rgb(color)
         assert image[32, 32].max() > 32
         assert image[8, 8].max() == 0
 
@@ -419,7 +428,7 @@ def test_vulkan_graphics_indexed_draw_uses_declared_bounds():
         )
         pipeline.draw(color, {0: vertices}, index_buffer=indices, draw=draw)
         ti.sync()
-        assert np.asarray(color.to_image())[32, 32].max() > 32
+        assert _texture_rgb(color)[32, 32].max() > 32
 
         with pytest.raises(RuntimeError, match="vertex binding 0 is too small"):
             pipeline.draw(
@@ -472,7 +481,7 @@ def test_vulkan_graphics_instanced_draw_uses_all_vertex_bindings():
             ),
         )
         ti.sync()
-        image = np.asarray(color.to_image())
+        image = _texture_rgb(color)
         assert image[32, 16].max() > 32
         assert image[32, 48].max() > 32
         assert image[2, 2].max() == 0
@@ -490,7 +499,7 @@ def test_vulkan_graphics_depth_attachment_controls_visibility_and_lifetime():
         color_without_depth = ti.Texture(ti.Format.rgba8, (64, 64))
         pipeline.draw(color_without_depth, {0: vertices}, draw=draw)
         ti.sync()
-        without_depth = np.asarray(color_without_depth.to_image())[32, 32]
+        without_depth = _texture_rgb(color_without_depth)[32, 32]
         assert without_depth[0] > without_depth[1]
 
     with _depth_triangle_pipeline(enabled=True) as pipeline:
@@ -500,7 +509,7 @@ def test_vulkan_graphics_depth_attachment_controls_visibility_and_lifetime():
         del depth
         gc.collect()
         ti.sync()
-        with_depth = np.asarray(color_with_depth.to_image())[32, 32]
+        with_depth = _texture_rgb(color_with_depth)[32, 32]
         assert with_depth[1] > with_depth[0]
 
 
@@ -645,7 +654,7 @@ def test_vulkan_graphics_pass_batches_multiple_draws_and_graph_nodes():
             - queue_before["submitted_command_buffers"]
             <= 3
         )
-        image = np.asarray(color.to_image())
+        image = _texture_rgb(color)
         assert image[32, 52, 0] > 32
         assert image[32, 20, 1] > 32
         assert image[2, 2].max() == 0
@@ -656,7 +665,7 @@ def test_vulkan_graphics_pass_batches_multiple_draws_and_graph_nodes():
         graph_color = ti.Texture(ti.Format.rgba8, (64, 64))
         graph.run({"target": graph_color, "vertices": vertices, "indices": indices})
         ti.sync()
-        graph_image = np.asarray(graph_color.to_image())
+        graph_image = _texture_rgb(graph_color)
         assert graph_image[32, 52, 0] > 32
         assert graph_image[32, 20, 1] > 32
         assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
@@ -691,7 +700,7 @@ def test_vulkan_graphics_pass_load_and_depth_semantics():
         )
         load_recording.execute({"target": color, "vertices": vertices})
         ti.sync()
-        image = np.asarray(color.to_image())
+        image = _texture_rgb(color)
         assert image[32, 52, 0] > 32
         assert image[32, 20, 1] > 32
         assert image[2, 2, 2] > 32
@@ -716,7 +725,7 @@ def test_vulkan_graphics_pass_load_and_depth_semantics():
         )
         recording.execute({"target": color, "depth": depth, "vertices": depth_vertices})
         ti.sync()
-        center = np.asarray(color.to_image())[32, 32]
+        center = _texture_rgb(color)[32, 32]
         assert center[1] > center[0]
 
 
@@ -747,7 +756,7 @@ def test_vulkan_graphics_pass_binds_real_uniform_descriptor():
             {"target": color, "vertices": vertices, "parameters": parameters}
         )
         ti.sync()
-        center = np.asarray(color.to_image())[32, 32]
+        center = _texture_rgb(color)[32, 32]
         assert center[0] > 32
         assert center[1] < 8
         assert center[2] < 8
@@ -787,7 +796,7 @@ def test_vulkan_graphics_pass_binds_real_storage_descriptor():
             }
         )
         ti.sync()
-        center = np.asarray(color.to_image())[32, 32]
+        center = _texture_rgb(color)[32, 32]
         assert center[0] < 8
         assert center[1] < 8
         assert center[2] > 32
