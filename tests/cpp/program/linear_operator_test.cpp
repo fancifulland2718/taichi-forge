@@ -156,14 +156,14 @@ TEST(LinearOperator, SolverExecutionPolicyCapabilitiesAreExplicit) {
   EXPECT_TRUE(cuda.host_each_iteration);
   EXPECT_TRUE(cuda.host_check_every_k);
   EXPECT_FALSE(cuda.fixed_budget_masked);
-  EXPECT_FALSE(cuda.device_convergent);
+  EXPECT_TRUE(cuda.device_convergent);
   EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
       Arch::cuda,
       SparseSolveExecutionPolicy::host_each_iteration));
   EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
       Arch::cuda,
       SparseSolveExecutionPolicy::host_check_every_k, 4));
-  EXPECT_ANY_THROW(validate_sparse_solve_execution_policy(
+  EXPECT_NO_THROW(validate_sparse_solve_execution_policy(
       Arch::cuda,
       SparseSolveExecutionPolicy::device_convergent));
 
@@ -486,7 +486,7 @@ TEST(LinearOperator, FixedLinearPreconditionerTracksTargetGeneration) {
   EXPECT_EQ(statistics.target_generation_changes, 1u);
 }
 
-TEST(LinearOperator, PreconditionerRejectsUnsupportedBehaviorAndStaleAction) {
+TEST(LinearOperator, PreconditionerRejectsNonlinearBehaviorAndStaleAction) {
   const OperatorResourceStamp stamp{13, 105, 1, 1, 1, 1};
   auto target_action = make_scale_action(stamp, 2.0f);
   auto preconditioner_action = make_scale_action(stamp, 0.5f);
@@ -494,7 +494,7 @@ TEST(LinearOperator, PreconditionerRejectsUnsupportedBehaviorAndStaleAction) {
 
   EXPECT_ANY_THROW(PreconditionerPlan(
       nullptr, target_plan.descriptor(), OperatorBinding(preconditioner_action),
-      PreconditionerBehavior::variable_linear, "variable",
+      PreconditionerBehavior::nonlinear, "nonlinear",
       [](const OperatorResourceStamp &, bool) {}));
 
   PreconditionerPlan stale_plan(nullptr, target_plan.descriptor(),
