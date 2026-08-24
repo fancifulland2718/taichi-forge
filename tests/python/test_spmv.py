@@ -16,7 +16,9 @@ from tests import test_utils
 @test_utils.test(arch=ti.cpu)
 def test_sparse_matrix_vector_multiplication1(dtype, storage_format):
     n = 8
-    Abuilder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format)
+    Abuilder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format
+    )
     b = ti.field(ti.f32, shape=n)
 
     @ti.kernel
@@ -46,7 +48,9 @@ def test_sparse_matrix_vector_multiplication1(dtype, storage_format):
 @test_utils.test(arch=ti.cpu)
 def test_sparse_matrix_vector_multiplication2(dtype, storage_format):
     n = 8
-    Abuilder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format)
+    Abuilder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format
+    )
     b = ti.field(ti.f32, shape=n)
 
     @ti.kernel
@@ -80,7 +84,9 @@ def test_sparse_matrix_vector_multiplication2(dtype, storage_format):
 @test_utils.test(arch=ti.cpu)
 def test_sparse_matrix_vector_multiplication3(dtype, storage_format):
     n = 8
-    Abuilder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format)
+    Abuilder = ti.linalg.SparseMatrixBuilder(
+        n, n, max_num_triplets=100, dtype=dtype, storage_format=storage_format
+    )
     b = ti.field(ti.f32, shape=n)
 
     @ti.kernel
@@ -179,7 +185,6 @@ def test_sparse_matrix_operator_runtime_statistics():
             assert operations["spmv_preprocess_reuses"] == 0
             assert operations["spmv_preprocess_fallbacks"] == 2
 
-
     values = ti.ndarray(dtype=ti.f32, shape=n)
     values.fill(2)
     matrix._update_values(values)
@@ -241,23 +246,36 @@ def test_cuda_spmv_preprocess_runtime_disable(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_sparse_domain_auto_spmv_fails_closed_without_cost_evidence():
+def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
     import numpy as np
 
-    n = 8
-    builder = ti.linalg.SparseMatrixBuilder(
-        n, n, max_num_triplets=2 * n, dtype=ti.f32, storage_format="row_major"
+    from taichi_forge.hardware import ProviderAdmissionEvidence
+    from taichi_forge.hardware._admission import (
+        _current_cuda_device_scope,
+        _current_runtime_scope,
     )
 
-    @ti.kernel
-    def fill(matrix: ti.types.sparse_matrix_builder()):
-        for i in range(n):
-            matrix[i, i] += ti.cast(i + 1, ti.f32)
-            if i + 1 < n:
-                matrix[i, i + 1] += 0.5
-
-    fill(builder)
-    matrix = builder.build()
+    n = 8
+    row_offsets_host = np.empty(n + 1, dtype=np.int32)
+    columns_host = []
+    values_host = []
+    row_offsets_host[0] = 0
+    for row in range(n):
+        columns_host.append(row)
+        values_host.append(row + 1)
+        if row + 1 < n:
+            columns_host.append(row + 1)
+            values_host.append(0.5)
+        row_offsets_host[row + 1] = len(columns_host)
+    columns_host = np.asarray(columns_host, dtype=np.int32)
+    values_host = np.asarray(values_host, dtype=np.float32)
+    row_offsets = ti.ndarray(dtype=ti.i32, shape=n + 1)
+    columns = ti.ndarray(dtype=ti.i32, shape=len(columns_host))
+    values = ti.ndarray(dtype=ti.f32, shape=len(values_host))
+    row_offsets.from_numpy(row_offsets_host)
+    columns.from_numpy(columns_host)
+    values.from_numpy(values_host)
+    matrix = ti.linalg.SparsePattern.csr(n, n, row_offsets, columns).matrix(values)
     vector_values = np.arange(1, n + 1, dtype=np.float32)
     vector = ti.ndarray(dtype=ti.f32, shape=n)
     vector.from_numpy(vector_values)
@@ -272,39 +290,74 @@ def test_cuda_sparse_domain_auto_spmv_fails_closed_without_cost_evidence():
     assert stats["auto_provider"]["admitted"] == 0
     assert stats["auto_provider"]["kernel_fallbacks"] == 1
     assert stats["auto_provider"]["rejection_reasons"] == {
-        "missing_cost_evidence": 1
+        "missing_admission_evidence": 1
     }
     assert stats["operations"]["spmv_plan_builds"] == 0
 
-    matrix.set_spmv_auto_cost_evidence(
-        provider_median_ns=200,
-        fallback_median_ns=100,
-        provider_samples=8,
-        fallback_samples=8,
-        expected_reuse=16,
-        provider_cv=0.02,
-        fallback_cv=0.02,
-        order_drift=0.01,
-        warmup_ns=0,
-    )
+    def profile(topology_fingerprint):
+        native = matrix._debug_runtime_stats()
+        identity = native["identity"]
+        provider = native["provider"]
+        return ProviderAdmissionEvidence._from_record(
+            {
+                "schema": "taichi_forge.provider_admission.v1",
+                "schema_version": 1,
+                "operation_id": "linalg.spmv.cusparse",
+                "provider_id": "cusparse",
+                "baseline_id": "cuda_driver_kernel",
+                "backend": "cuda",
+                "device_scope": _current_cuda_device_scope(),
+                "provider_scope": {
+                    "provider_abi": "cusparse-dynamic-symbols-v1",
+                    "provider_version": provider["library_version"],
+                },
+                "workload_scope": {
+                    "rows": identity["rows"],
+                    "cols": identity["cols"],
+                    "nnz": identity["nnz"],
+                    "storage_format": identity["storage_format"],
+                    "block_size": identity["block_size"],
+                    "topology_fingerprint": topology_fingerprint,
+                },
+                "runtime_scope": _current_runtime_scope(),
+                "performance": {
+                    "expected_reuse": 16,
+                    "provider_median_ns": 50.0,
+                    "baseline_median_ns": 100.0,
+                    "provider_first_use_overhead_ns": 0.0,
+                    "transfer_ns": 0.0,
+                    "conversion_ns": 0.0,
+                    "provider_samples": 48,
+                    "baseline_samples": 48,
+                    "provider_cv": 0.02,
+                    "baseline_cv": 0.02,
+                    "order_drift": 0.01,
+                    "minimum_block_ms": 100.0,
+                    "minimum_margin": 0.05,
+                    "paired_p05": 1.8,
+                    "fresh_processes": 8,
+                    "order_processes": {"ab": 4, "ba": 4},
+                },
+                "qualification": {
+                    "correctness_and_route_qualified": True,
+                    "stable": True,
+                    "minimum_block_qualified": True,
+                },
+            },
+            source_schema=("taichi_forge.hardware_acceleration_qualification.v4"),
+            source_digest="test-artifact",
+        )
+
+    matrix.set_provider_profile(profile("tf-sp-v1:wrong-topology"))
     rejected = matrix @ vector
     ti.sync()
     np.testing.assert_allclose(rejected.to_numpy(), expected, rtol=1e-6)
     stats = matrix._debug_runtime_stats()
-    assert stats["auto_provider"]["rejection_reasons"]["cost_gate"] == 1
+    assert stats["auto_provider"]["rejection_reasons"]["workload_scope_mismatch"] == 1
     assert stats["operations"]["spmv_plan_builds"] == 0
 
-    matrix.set_spmv_auto_cost_evidence(
-        provider_median_ns=50,
-        fallback_median_ns=100,
-        provider_samples=8,
-        fallback_samples=8,
-        expected_reuse=16,
-        provider_cv=0.02,
-        fallback_cv=0.02,
-        order_drift=0.01,
-        warmup_ns=0,
-    )
+    fingerprint = matrix._debug_runtime_stats()["identity"]["topology_fingerprint"]
+    matrix.set_provider_profile(profile(fingerprint))
     admitted = matrix @ vector
     ti.sync()
     np.testing.assert_allclose(admitted.to_numpy(), expected, rtol=1e-6)
@@ -313,6 +366,15 @@ def test_cuda_sparse_domain_auto_spmv_fails_closed_without_cost_evidence():
     assert stats["auto_provider"]["admitted"] == 1
     assert stats["auto_provider"]["last_decision"]["route"] == "provider"
     assert stats["auto_provider"]["last_decision"]["reason"] == (
-        "measured_cost_advantage"
+        "qualified_cost_advantage"
     )
     assert stats["operations"]["spmv_plan_builds"] == 1
+    assert not hasattr(matrix, "set_spmv_auto_cost_evidence")
+
+    matrix.set_provider_profile(None)
+    explicit = matrix.spmv(vector, method="provider")
+    ti.sync()
+    np.testing.assert_allclose(explicit.to_numpy(), expected, rtol=1e-6)
+    stats = matrix._debug_runtime_stats()
+    assert stats["auto_provider"]["candidates"] == 3
+    assert not stats["auto_provider"]["provider_profile_present"]

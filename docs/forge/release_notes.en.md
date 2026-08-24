@@ -63,8 +63,11 @@ grouped under the behavior they shipped.
   multiplication and kernels are not rewritten.
 - Qualified the CUDA sparse routes in the hardware catalog:
   `SparseMatrix.spmv(method="auto")` considers cuSPARSE only with matching
-  stable matrix-scoped cost evidence, while its explicit provider route is not
-  cost-gated. `SparseSolver(provider="auto")` can select a user-managed cuDSS
+  stable matrix-scoped cost evidence loaded from a strict fresh-process
+  qualification artifact, while its explicit provider route is not cost-gated.
+  Evidence is bound to the exact topology, device, runtime, and provider ABI;
+  the former handwritten timing setter was removed. `SparseSolver(provider="auto")`
+  can select a user-managed cuDSS
   0.8.x provider for eligible CUDA 12+ scalar-f32 CSR systems and retains
   cuSOLVERSp for older, absent, incompatible, or ineligible cases. Added the
   explicit staged `CudssPlan` and its root-ordered solve recording, plus the

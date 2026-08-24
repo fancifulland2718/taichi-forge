@@ -17,6 +17,7 @@ The script propagates both variables to fresh workers.
 """
 
 import argparse
+import copy
 import hashlib
 import importlib.util
 import json
@@ -53,7 +54,14 @@ import taichi_forge as ti  # pylint: disable=C0413
 from taichi_forge._lib import core as _ti_core  # pylint: disable=C0413
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v3"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v4"
+ADMISSION_SCHEMA = "taichi_forge.provider_admission.v1"
+AUTO_ADMISSION_MINIMUM_PROCESSES = 8
+AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER = 4
+AUTO_ADMISSION_MINIMUM_SAMPLES = 40
+AUTO_ADMISSION_MINIMUM_BLOCK_MS = 100.0
+AUTO_ADMISSION_MAXIMUM_CV = 0.05
+AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
 CASES = (
     "cuda-fft",
     "cuda-gemm",
@@ -204,11 +212,7 @@ def _measure_pair(
     maximum_repetitions,
 ):
     actions = {"hardware": hardware, "baseline": baseline}
-    sequence = (
-        ("hardware", "baseline")
-        if order == "ab"
-        else ("baseline", "hardware")
-    )
+    sequence = ("hardware", "baseline") if order == "ab" else ("baseline", "hardware")
     cold = {}
     for name in sequence:
         cold[name] = _time_block(actions[name], 1)
@@ -259,11 +263,8 @@ def _executed_core_route_is_consistent(route):
     return (
         route["discovery"] == "present"
         and route["selection"] == "not_considered"
-        and route["unavailable_reason"]
-        == "operation_requirements_not_evaluated"
-        and not route["native_facts"].get(
-            "operation_requirements_evaluated", True
-        )
+        and route["unavailable_reason"] == "operation_requirements_not_evaluated"
+        and not route["native_facts"].get("operation_requirements_evaluated", True)
     )
 
 
@@ -271,22 +272,27 @@ def _provenance(case, order):
     backend = _ti_core.arch_name(ti.lang.impl.current_cfg().arch)
     try:
         cuda_compute_capability = (
-            ti.lang.impl.get_cuda_compute_capability()
-            if backend == "cuda"
-            else None
+            ti.lang.impl.get_cuda_compute_capability() if backend == "cuda" else None
         )
     except Exception:  # pragma: no cover - provider-specific diagnostic only
         cuda_compute_capability = None
+    try:
+        cuda_device_uuid = (
+            ti.interop.current_cuda_device_uuid().hex() if backend == "cuda" else None
+        )
+    except Exception:  # pragma: no cover - provider-specific diagnostic only
+        cuda_device_uuid = None
     return {
         "schema": SCHEMA,
         "case": case,
         "order": order,
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "forge_version": getattr(ti, "__version__", None),
+        "forge_version": _ti_core.get_version_string(),
         "forge_commit": _ti_core.get_commit_hash(),
         "backend": backend,
         "cuda_compute_capability": cuda_compute_capability,
+        "cuda_device_uuid": cuda_device_uuid,
         "pid": os.getpid(),
         "timestamp_ns": time.time_ns(),
     }
@@ -400,8 +406,7 @@ def _cuda_fft_case(order, args):
         raise ValueError("fft-length must be a power of two")
     rng = np.random.default_rng(20260823)
     complex_values = (
-        rng.standard_normal((batch, length))
-        + 1j * rng.standard_normal((batch, length))
+        rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))
     ).astype(np.complex64)
     packed_values = np.stack(
         (complex_values.real, complex_values.imag), axis=-1
@@ -437,12 +442,8 @@ def _cuda_fft_case(order, args):
     ):
         for batch_index, index in ti.ndrange(batch, length):
             reversed_index = indices[index]
-            output[batch_index, index, 0] = values[
-                batch_index, reversed_index, 0
-            ]
-            output[batch_index, index, 1] = values[
-                batch_index, reversed_index, 1
-            ]
+            output[batch_index, index, 0] = values[batch_index, reversed_index, 0]
+            output[batch_index, index, 1] = values[batch_index, reversed_index, 1]
 
     @ti.kernel
     def radix2_stage(
@@ -637,8 +638,7 @@ def _cuda_spmv_case(order, args):
         starts[:, None] + np.arange(width, dtype=np.int32)[None, :]
     ).reshape(-1)
     values_host = (
-        0.25
-        + (np.arange(n * width, dtype=np.float32) % 17) * np.float32(0.01)
+        0.25 + (np.arange(n * width, dtype=np.float32) % 17) * np.float32(0.01)
     ).astype(np.float32)
     input_host = (
         np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003)) + 0.5
@@ -654,38 +654,21 @@ def _cuda_spmv_case(order, args):
     values.from_numpy(values_host)
     vector.from_numpy(input_host)
     setup_started = time.perf_counter_ns()
-    pattern = ti.linalg.SparsePattern.csr(
-        n, n, row_offsets, column_indices
-    )
+    pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
     matrix = ti.linalg.SparseMatrix.from_pattern(pattern, values)
     setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
 
-    @ti.kernel
-    def scalar_csr(
-        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
-        columns: ti.types.ndarray(dtype=ti.i32, ndim=1),
-        coefficients: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
-    ):
-        for row in output:
-            total = 0.0
-            for entry in range(offsets[row], offsets[row + 1]):
-                total += coefficients[entry] * source[columns[entry]]
-            output[row] = total
-
     recording = ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    program = ti.lang.impl.get_runtime().prog
 
     def hardware():
         recording.execute({"input": vector, "output": hardware_output})
 
     def baseline():
-        scalar_csr(
-            row_offsets,
-            column_indices,
-            values,
-            vector,
-            baseline_output,
+        matrix.matrix.spmv_kernel(
+            program,
+            vector.arr,
+            baseline_output.arr,
         )
 
     timing = _measure_pair(
@@ -715,6 +698,34 @@ def _cuda_spmv_case(order, args):
         and provider_stats["operations"]["spmv_plan_builds"] == 1
     )
     result = _provenance("cuda-spmv", order)
+    admission_scope = {
+        "operation_id": "linalg.spmv.cusparse",
+        "provider_id": "cusparse",
+        "baseline_id": "cuda_driver_kernel",
+        "backend": "cuda",
+        "device_scope": {
+            "cuda_device_uuid": result["cuda_device_uuid"],
+            "cuda_compute_capability": result["cuda_compute_capability"],
+        },
+        "provider_scope": {
+            "provider_abi": resolved["provider_abi"],
+            "provider_version": provider_stats["provider"]["library_version"],
+        },
+        "workload_scope": {
+            "rows": provider_stats["identity"]["rows"],
+            "cols": provider_stats["identity"]["cols"],
+            "nnz": provider_stats["identity"]["nnz"],
+            "storage_format": provider_stats["identity"]["storage_format"],
+            "block_size": provider_stats["identity"]["block_size"],
+            "topology_fingerprint": provider_stats["identity"]["topology_fingerprint"],
+        },
+        "runtime_scope": {
+            "forge_version": result["forge_version"],
+            "forge_commit": result["forge_commit"],
+        },
+        "transfer_ns": 0.0,
+        "conversion_ns": 0.0,
+    }
     result.update(
         {
             "status": "passed" if passed else "failed",
@@ -724,7 +735,7 @@ def _cuda_spmv_case(order, args):
                 "nnz": n * width,
                 "setup_ms": setup_ms,
                 "hardware": "cuSPARSE CSR SpMV",
-                "baseline": "Taichi scalar CSR kernel",
+                "baseline": "embedded CUDA CSR fallback kernel",
             },
             "timing": timing,
             "correctness": {
@@ -735,6 +746,7 @@ def _cuda_spmv_case(order, args):
             },
             "route": resolved,
             "provider_statistics": provider_stats,
+            "admission_scope": admission_scope,
         }
     )
     ti.reset()
@@ -745,9 +757,7 @@ def _vulkan_ray_update_case(order, args):
     _init_vulkan()
     if not ti.hardware.ray.is_available():
         result = _provenance("vulkan-ray-update", order)
-        result.update(
-            {"status": "skipped", "reason": "vulkan_ray_query_unavailable"}
-        )
+        result.update({"status": "skipped", "reason": "vulkan_ray_query_unavailable"})
         ti.reset()
         return result
     grid = args.ray_grid
@@ -800,22 +810,14 @@ def _vulkan_ray_update_case(order, args):
     baseline_state = {"step": 0, "z": 0.0}
 
     def hardware():
-        selected = (
-            raised_vertices
-            if hardware_state["step"] % 2 == 0
-            else base_vertices
-        )
+        selected = raised_vertices if hardware_state["step"] % 2 == 0 else base_vertices
         hardware_state["z"] = 0.25 if selected is raised_vertices else 0.0
         scene.refit(selected)
         scene.trace(rays, hardware_hits)
         hardware_state["step"] += 1
 
     def baseline():
-        selected = (
-            raised_vertices
-            if baseline_state["step"] % 2 == 0
-            else base_vertices
-        )
+        selected = raised_vertices if baseline_state["step"] % 2 == 0 else base_vertices
         baseline_state["z"] = 0.25 if selected is raised_vertices else 0.0
         rebuilt = ti.hardware.ray.TriangleScene(selected, indices)
         rebuilt.trace(rays, baseline_hits)
@@ -836,15 +838,10 @@ def _vulkan_ray_update_case(order, args):
     baseline_values = baseline_hits.to_numpy()
     expected_hardware_t = 2.0 - hardware_state["z"]
     expected_baseline_t = 2.0 - baseline_state["z"]
-    hardware_error = float(
-        np.max(np.abs(hardware_values[:, 0] - expected_hardware_t))
-    )
-    baseline_error = float(
-        np.max(np.abs(baseline_values[:, 0] - expected_baseline_t))
-    )
+    hardware_error = float(np.max(np.abs(hardware_values[:, 0] - expected_hardware_t)))
+    baseline_error = float(np.max(np.abs(baseline_values[:, 0] - expected_baseline_t)))
     all_hits = bool(
-        np.all(hardware_values[:, 3] == 1.0)
-        and np.all(baseline_values[:, 3] == 1.0)
+        np.all(hardware_values[:, 3] == 1.0) and np.all(baseline_values[:, 3] == 1.0)
     )
     refit_route = _resolved_operation("ray.as_refit.vulkan")
     query_route = _resolved_operation("ray.query.batch.vulkan")
@@ -897,9 +894,7 @@ def _vulkan_texture_fetch_case(order, args):
     @ti.kernel
     def upload(
         values: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        target: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        target: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         for i, j in values:
             target.store(
@@ -915,9 +910,7 @@ def _vulkan_texture_fetch_case(order, args):
         for i, j in output:
             x_index = (i * 17 + j * 3) % size
             y_index = (i * 5 + j * 11) % size
-            output[i, j] = image.fetch(
-                ti.Vector([x_index, y_index]), 0
-            ).x
+            output[i, j] = image.fetch(ti.Vector([x_index, y_index]), 0).x
 
     @ti.kernel
     def buffer_fetch(
@@ -1004,9 +997,7 @@ def _vulkan_texture_sample_case(order, args):
     @ti.kernel
     def upload(
         values: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        target: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        target: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         for i, j in values:
             target.store(
@@ -1022,9 +1013,7 @@ def _vulkan_texture_sample_case(order, args):
         for i, j in output:
             x = ti.cast((i * 17 + j * 3) % size, ti.f32) + 0.37
             y = ti.cast((i * 5 + j * 11) % size, ti.f32) + 0.61
-            output[i, j] = image.sample_lod(
-                ti.Vector([x / size, y / size]), 0.0
-            ).x
+            output[i, j] = image.sample_lod(ti.Vector([x / size, y / size]), 0.0).x
 
     @ti.kernel
     def baseline_sample(
@@ -1122,9 +1111,7 @@ def _vulkan_image_copy_case(order, args):
     @ti.kernel
     def upload(
         values: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        target: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        target: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         for i, j in values:
             target.store(
@@ -1219,21 +1206,15 @@ def _vulkan_texture_stencil_case(order, args):
         np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
     ) / np.float32(1021.0)
     source = ti.ndarray(ti.f32, shape=(size, size))
-    hardware_output = ti.ndarray(
-        ti.f32, shape=(output_size, output_size)
-    )
-    baseline_output = ti.ndarray(
-        ti.f32, shape=(output_size, output_size)
-    )
+    hardware_output = ti.ndarray(ti.f32, shape=(output_size, output_size))
+    baseline_output = ti.ndarray(ti.f32, shape=(output_size, output_size))
     texture = ti.Texture(ti.Format.r32f, (size, size))
     source.from_numpy(source_host)
 
     @ti.kernel
     def upload(
         values: ti.types.ndarray(dtype=ti.f32, ndim=2),
-        target: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        target: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         for i, j in values:
             target.store(
@@ -1249,13 +1230,9 @@ def _vulkan_texture_stencil_case(order, args):
         for i, j in output:
             total = 0.0
             for di, dj in ti.static(
-                ti.ndrange(
-                    (-radius, radius + 1), (-radius, radius + 1)
-                )
+                ti.ndrange((-radius, radius + 1), (-radius, radius + 1))
             ):
-                total += image.fetch(
-                    ti.Vector([i + radius + di, j + radius + dj]), 0
-                ).x
+                total += image.fetch(ti.Vector([i + radius + di, j + radius + dj]), 0).x
             output[i, j] = total
 
     @ti.kernel
@@ -1266,9 +1243,7 @@ def _vulkan_texture_stencil_case(order, args):
         for i, j in output:
             total = 0.0
             for di, dj in ti.static(
-                ti.ndrange(
-                    (-radius, radius + 1), (-radius, radius + 1)
-                )
+                ti.ndrange((-radius, radius + 1), (-radius, radius + 1))
             ):
                 total += values[i + radius + di, j + radius + dj]
             output[i, j] = total
@@ -1374,7 +1349,129 @@ def _worker(args):
     return 0 if result["status"] in ("passed", "skipped") else 1
 
 
-def _aggregate(case, workers, cv_limit, drift_limit):
+def _auto_admission(
+    workers,
+    variants,
+    paired_speedup,
+    *,
+    expected_reuse,
+    minimum_margin,
+):
+    scopes = [worker.get("admission_scope") for worker in workers]
+    if not scopes or any(not isinstance(scope, dict) for scope in scopes):
+        return {"eligible": False, "reason": "not_applicable"}
+    canonical_scopes = {
+        json.dumps(scope, sort_keys=True, separators=(",", ":")) for scope in scopes
+    }
+    if len(canonical_scopes) != 1:
+        return {"eligible": False, "reason": "qualification_scope_mismatch"}
+    scope = copy.deepcopy(scopes[0])
+    order_processes = {
+        order: sum(worker["order"] == order for worker in workers)
+        for order in ("ab", "ba")
+    }
+    fresh_processes = len(
+        {(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers}
+    )
+    coverage_qualified = fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES and all(
+        count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
+        for count in order_processes.values()
+    )
+    provider_samples = variants["hardware"]["count"]
+    baseline_samples = variants["baseline"]["count"]
+    samples_qualified = (
+        provider_samples >= AUTO_ADMISSION_MINIMUM_SAMPLES
+        and baseline_samples >= AUTO_ADMISSION_MINIMUM_SAMPLES
+    )
+    stable = (
+        variants["hardware"]["cv"] <= AUTO_ADMISSION_MAXIMUM_CV
+        and variants["baseline"]["cv"] <= AUTO_ADMISSION_MAXIMUM_CV
+        and variants["hardware"]["order_drift"] <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
+        and variants["baseline"]["order_drift"] <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
+    )
+    observed_blocks = [
+        worker["timing"]["calibration"][variant]["observed_block_ms"]
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    ]
+    minimum_block_ms = min(observed_blocks)
+    minimum_block_qualified = (
+        minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
+        and all(
+            worker["timing"]["calibration"][variant]["satisfied"]
+            for worker in workers
+            for variant in ("hardware", "baseline")
+        )
+    )
+    margin_qualified = paired_speedup["p05"] >= 1.0 / (1.0 - minimum_margin)
+    provider_median_ns = variants["hardware"]["median_ms"] * 1.0e6
+    baseline_median_ns = variants["baseline"]["median_ms"] * 1.0e6
+    cold_provider_ns = (
+        statistics.median(worker["timing"]["cold_ms"]["hardware"] for worker in workers)
+        * 1.0e6
+    )
+    first_use_overhead_ns = max(cold_provider_ns - provider_median_ns, 0.0)
+    provider_cost_ns = (
+        provider_median_ns
+        + first_use_overhead_ns / expected_reuse
+        + float(scope.pop("transfer_ns"))
+        + float(scope.pop("conversion_ns"))
+    )
+    cost_qualified = provider_cost_ns < baseline_median_ns * (1.0 - minimum_margin)
+    checks = (
+        (coverage_qualified, "insufficient_fresh_process_coverage"),
+        (samples_qualified, "insufficient_timing_samples"),
+        (stable, "unstable_timing"),
+        (minimum_block_qualified, "undersized_timing_blocks"),
+        (margin_qualified, "paired_margin_gate"),
+        (cost_qualified, "amortized_cost_gate"),
+    )
+    failed = next((reason for passed, reason in checks if not passed), None)
+    if failed is not None:
+        return {"eligible": False, "reason": failed}
+    record = {
+        "schema": ADMISSION_SCHEMA,
+        "schema_version": 1,
+        **scope,
+        "performance": {
+            "expected_reuse": expected_reuse,
+            "provider_median_ns": provider_median_ns,
+            "baseline_median_ns": baseline_median_ns,
+            "provider_first_use_overhead_ns": first_use_overhead_ns,
+            "transfer_ns": scopes[0]["transfer_ns"],
+            "conversion_ns": scopes[0]["conversion_ns"],
+            "provider_samples": provider_samples,
+            "baseline_samples": baseline_samples,
+            "provider_cv": variants["hardware"]["cv"],
+            "baseline_cv": variants["baseline"]["cv"],
+            "order_drift": max(
+                variants["hardware"]["order_drift"],
+                variants["baseline"]["order_drift"],
+            ),
+            "minimum_block_ms": minimum_block_ms,
+            "minimum_margin": minimum_margin,
+            "paired_p05": paired_speedup["p05"],
+            "fresh_processes": fresh_processes,
+            "order_processes": order_processes,
+        },
+        "qualification": {
+            "correctness_and_route_qualified": True,
+            "stable": True,
+            "minimum_block_qualified": True,
+        },
+    }
+    return {"eligible": True, "reason": "qualified", "evidence": record}
+
+
+def _aggregate(
+    case,
+    workers,
+    cv_limit,
+    drift_limit,
+    *,
+    auto_admission_expected_reuse=100,
+    auto_admission_minimum_margin=0.05,
+):
     statuses = tuple(worker["status"] for worker in workers)
     if any(status == "error" for status in statuses):
         return {
@@ -1433,18 +1530,12 @@ def _aggregate(case, workers, cv_limit, drift_limit):
             "stable": variant_stable,
         }
     speedups = [
-        ratio
-        for worker in workers
-        for ratio in worker["timing"]["paired_speedups"]
+        ratio for worker in workers for ratio in worker["timing"]["paired_speedups"]
     ]
     speedup = _ratio_summary(speedups)
-    ratio = variants["baseline"]["median_ms"] / variants["hardware"][
-        "median_ms"
-    ]
+    ratio = variants["baseline"]["median_ms"] / variants["hardware"]["median_ms"]
     minimum_block_qualified = all(
-        worker["timing"].get("calibration", {}).get(variant, {}).get(
-            "satisfied", False
-        )
+        worker["timing"].get("calibration", {}).get(variant, {}).get("satisfied", False)
         for worker in workers
         for variant in ("hardware", "baseline")
     )
@@ -1463,9 +1554,8 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         "workload": workers[0]["workload"],
         "backend": workers[0].get("backend"),
         "device": {
-            "cuda_compute_capability": workers[0].get(
-                "cuda_compute_capability"
-            )
+            "cuda_compute_capability": workers[0].get("cuda_compute_capability"),
+            "cuda_device_uuid": workers[0].get("cuda_device_uuid"),
         },
         "revision": {
             "forge_version": workers[0].get("forge_version"),
@@ -1473,6 +1563,13 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         },
         "baseline": workers[0]["workload"].get("baseline"),
     }
+    auto_admission = _auto_admission(
+        workers,
+        variants,
+        speedup,
+        expected_reuse=auto_admission_expected_reuse,
+        minimum_margin=auto_admission_minimum_margin,
+    )
     return {
         "case": case,
         "status": "passed",
@@ -1482,6 +1579,7 @@ def _aggregate(case, workers, cv_limit, drift_limit):
         "performance_claim_eligible": claim_eligible,
         "performance_state": performance_state,
         "performance_scope": performance_scope,
+        "auto_admission": auto_admission,
         "median_speedup": ratio,
         "paired_speedup": speedup,
         "variants": variants,
@@ -1494,6 +1592,7 @@ def _aggregate(case, workers, cv_limit, drift_limit):
                     "timestamp_ns",
                     "backend",
                     "cuda_compute_capability",
+                    "cuda_device_uuid",
                     "forge_version",
                     "forge_commit",
                     "python",
@@ -1614,7 +1713,14 @@ def _parent(args):
                 worker["worker_index"] = worker_index
                 workers.append(worker)
             case_reports.append(
-                _aggregate(case, workers, args.cv_limit, args.drift_limit)
+                _aggregate(
+                    case,
+                    workers,
+                    args.cv_limit,
+                    args.drift_limit,
+                    auto_admission_expected_reuse=args.spmv_expected_reuse,
+                    auto_admission_minimum_margin=args.auto_admission_margin,
+                )
             )
     source_root = pathlib.Path(__file__).resolve().parents[2]
     revision = subprocess.run(
@@ -1675,6 +1781,18 @@ def _parent(args):
             "maximum_repetitions": args.maximum_repetitions,
             "cv_limit": args.cv_limit,
             "order_drift_limit": args.drift_limit,
+            "auto_admission": {
+                "minimum_fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
+                "minimum_processes_per_order": (
+                    AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
+                ),
+                "minimum_samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
+                "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
+                "maximum_cv": AUTO_ADMISSION_MAXIMUM_CV,
+                "maximum_order_drift": AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT,
+                "minimum_margin": args.auto_admission_margin,
+                "spmv_expected_reuse": args.spmv_expected_reuse,
+            },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
         },
@@ -1694,9 +1812,7 @@ def _parent(args):
         json.dump(report, output, indent=2, sort_keys=True)
         output.write("\n")
     print(json.dumps(report, sort_keys=True))
-    succeeded = all(
-        case["status"] in ("passed", "skipped") for case in case_reports
-    )
+    succeeded = all(case["status"] in ("passed", "skipped") for case in case_reports)
     return 0 if succeeded else 1
 
 
@@ -1708,20 +1824,22 @@ def _parse_args():
     parser.add_argument("--worker-output")
     parser.add_argument("--cases", default=",".join(CASES))
     parser.add_argument("--output", default="hardware-qualification.json")
-    parser.add_argument("--workers-per-order", type=int, default=2)
+    parser.add_argument("--workers-per-order", type=int, default=4)
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--rounds", type=int, default=12)
     parser.add_argument("--repetitions", type=int, default=25)
-    parser.add_argument("--minimum-block-ms", type=float, default=50.0)
+    parser.add_argument("--minimum-block-ms", type=float, default=100.0)
     parser.add_argument("--maximum-repetitions", type=int, default=1048576)
-    parser.add_argument("--cv-limit", type=float, default=0.10)
-    parser.add_argument("--drift-limit", type=float, default=0.10)
+    parser.add_argument("--cv-limit", type=float, default=0.05)
+    parser.add_argument("--drift-limit", type=float, default=0.05)
     parser.add_argument("--fft-length", type=int, default=4096)
     parser.add_argument("--fft-batch", type=int, default=16)
     parser.add_argument("--gemm-size", type=int, default=192)
     parser.add_argument("--mma-batch", type=int, default=1024)
     parser.add_argument("--spmv-rows", type=int, default=131072)
     parser.add_argument("--spmv-width", type=int, default=7)
+    parser.add_argument("--spmv-expected-reuse", type=int, default=100)
+    parser.add_argument("--auto-admission-margin", type=float, default=0.05)
     parser.add_argument("--ray-grid", type=int, default=128)
     parser.add_argument("--ray-query-side", type=int, default=128)
     parser.add_argument("--texture-size", type=int, default=1024)
@@ -1746,6 +1864,8 @@ def _parse_args():
         or args.mma_batch <= 0
         or args.spmv_rows <= 0
         or args.spmv_width <= 0
+        or args.spmv_expected_reuse <= 0
+        or not 0.05 <= args.auto_admission_margin < 1.0
         or args.ray_grid < 2
         or args.ray_query_side <= 0
         or args.texture_size <= 0

@@ -56,7 +56,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   也不会改写普通 matrix multiplication 或 kernel。
 - 在 hardware catalog 中资格化 CUDA sparse 路线：
   `SparseMatrix.spmv(method="auto")` 只有在存在匹配且稳定的 matrix-scoped 成本证据时才
-  考虑 cuSPARSE，显式 provider 路线不受成本 gate 限制；
+  考虑 cuSPARSE；证据只能从严格的 fresh-process qualification artifact 加载，并绑定
+  精确 topology、device、runtime 与 provider ABI，原手填 timing setter 已移除。显式
+  provider 路线不受成本 gate 限制；
   `SparseSolver(provider="auto")` 可为合格的 CUDA 12+ scalar-f32 CSR system 选择用户管理的
   cuDSS 0.8.x，旧版 CUDA、缺失/不兼容 provider 或不合格合同继续使用 cuSOLVERSp。
   新增 staged `CudssPlan` 及其 root-ordered solve recording，另新增独立的手动

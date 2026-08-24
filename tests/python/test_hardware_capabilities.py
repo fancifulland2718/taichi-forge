@@ -424,9 +424,13 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cusparse.graph_integration == "unsupported"
     assert cusparse.stream_binding == "runtime_ordered"
     assert cusparse.workspace_ownership == "provider_owned"
-    assert cusparse.public_api == "ti.linalg.SparseMatrix.__matmul__"
+    assert cusparse.public_api == (
+        "ti.linalg.SparseMatrix.spmv / set_provider_profile"
+    )
     assert "considers cuSPARSE automatically on CUDA" in cusparse.notes[0]
     assert "fails closed" in cusparse.notes[1]
+    assert "handwritten timing fields" in cusparse.notes[2]
+    assert "topology fingerprint" in cusparse.notes[3]
 
     explicit_cusparse = ti.hardware.capability("linalg.spmv.cusparse_explicit")
     assert explicit_cusparse.implementation_status == "existing_public"

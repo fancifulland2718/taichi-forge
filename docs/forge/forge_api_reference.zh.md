@@ -100,6 +100,11 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
   请求。matrix resource 会跨调用缓存 provider handle、dense-vector descriptor、workspace
   与可选 SpMV preprocessing。这条自动领域路线仍为 direct Python。
 - `SparseMatrix @ ndarray` 使用同一条自动路线。
+- `ti.hardware.load_provider_admission_evidence(path, case="cuda-spmv")` 只接受严格的
+  Forge fresh-process qualification artifact。使用 `matrix.set_provider_profile(profile)`
+  绑定不可变结果，传入 `None` 可清除。profile 会精确匹配 sparse-topology fingerprint、
+  device UUID、Forge runtime build、provider ABI/version 与摊销范围；用户不能直接填入
+  手写 timing 字段。
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` 把同一 stored-matrix operation
   写入调用方提供的 output；`CusparseSpmvRecording(matrix)` 可把该手动操作作为 root-Graph
   backend command，带显式读写 effect 与 matrix-generation lifetime lease。每次 Graph run

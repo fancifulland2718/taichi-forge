@@ -121,6 +121,12 @@ on CUDA:
   handle, dense-vector descriptors, workspace, and optional SpMV preprocessing
   across calls. This automatic domain route remains direct Python execution.
 - `SparseMatrix @ ndarray` uses the same automatic route.
+- `ti.hardware.load_provider_admission_evidence(path, case="cuda-spmv")`
+  accepts only a strict Forge fresh-process qualification artifact. Attach the
+  immutable result with `matrix.set_provider_profile(profile)`, or pass `None`
+  to clear it. The profile matches the exact sparse-topology fingerprint,
+  device UUID, Forge runtime build, provider ABI/version, and amortization
+  scope; users cannot install handwritten timing fields.
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` executes the same stored
   matrix operation into caller-owned output. `CusparseSpmvRecording(matrix)`
   makes that manual operation a root-Graph backend command with explicit

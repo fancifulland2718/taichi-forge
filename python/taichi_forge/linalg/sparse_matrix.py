@@ -1,6 +1,5 @@
 import copy
 from functools import reduce
-import math
 
 import numpy as np
 from taichi_forge._lib import core as _ti_core
@@ -19,7 +18,9 @@ def _require_current_scalar_ndarray(value, role, dtype=None, one_dimensional=Fal
         )
     runtime = get_runtime()
     if value.arr is None or value._runtime_prog is not runtime.prog:
-        raise TaichiRuntimeError(f"{role} cannot be used after its Taichi runtime has been reset.")
+        raise TaichiRuntimeError(
+            f"{role} cannot be used after its Taichi runtime has been reset."
+        )
     if dtype is not None and value.dtype != dtype:
         raise TaichiRuntimeError(f"{role} must have dtype {dtype}, got {value.dtype}.")
     if one_dimensional and len(value.shape) != 1:
@@ -79,11 +80,15 @@ class SparsePattern:
         geometry = {"rows": rows, "cols": cols}
         for name, value in geometry.items():
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-                raise TaichiRuntimeError(f"SparsePattern.csr {name} must be an integer, got {type(value).__name__}.")
+                raise TaichiRuntimeError(
+                    f"SparsePattern.csr {name} must be an integer, got {type(value).__name__}."
+                )
         rows = int(rows)
         cols = int(cols)
         if rows <= 0 or cols <= 0:
-            raise TaichiRuntimeError("SparsePattern.csr rows and cols must be positive.")
+            raise TaichiRuntimeError(
+                "SparsePattern.csr rows and cols must be positive."
+            )
         row_offsets = _require_current_scalar_ndarray(
             row_offsets,
             "SparsePattern.csr row_offsets",
@@ -139,14 +144,20 @@ class SparsePattern:
         }
         for name, value in geometry.items():
             if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
-                raise TaichiRuntimeError(f"SparsePattern.bsr {name} must be an integer, got {type(value).__name__}.")
+                raise TaichiRuntimeError(
+                    f"SparsePattern.bsr {name} must be an integer, got {type(value).__name__}."
+                )
         block_rows = int(block_rows)
         block_cols = int(block_cols)
         block_size = int(block_size)
         if block_rows <= 0 or block_cols <= 0:
-            raise TaichiRuntimeError("SparsePattern.bsr block_rows and block_cols must be positive.")
+            raise TaichiRuntimeError(
+                "SparsePattern.bsr block_rows and block_cols must be positive."
+            )
         if block_size not in (2, 3, 6, 12):
-            raise TaichiRuntimeError(f"SparsePattern.bsr block_size must be one of 2, 3, 6, and 12, got {block_size}.")
+            raise TaichiRuntimeError(
+                f"SparsePattern.bsr block_size must be one of 2, 3, 6, and 12, got {block_size}."
+            )
         row_offsets = _require_current_scalar_ndarray(
             row_offsets,
             "SparsePattern.bsr row_offsets",
@@ -186,7 +197,9 @@ class SparsePattern:
 
     def _ensure_valid(self):
         if self._pattern is None or self._runtime_prog is not get_runtime().prog:
-            raise TaichiRuntimeError("SparsePattern cannot be used after its Taichi runtime has been reset.")
+            raise TaichiRuntimeError(
+                "SparsePattern cannot be used after its Taichi runtime has been reset."
+            )
 
     def __del__(self):
         try:
@@ -263,7 +276,7 @@ class SparseMatrix:
         self._runtime_prog = runtime.prog
         self._format_contract_cache = None
         self._topology_fingerprint = None
-        self._spmv_auto_cost_evidence = None
+        self._spmv_provider_profile = None
         self._spmv_auto_stats = {
             "candidates": 0,
             "admitted": 0,
@@ -277,7 +290,9 @@ class SparseMatrix:
             self.dtype = dtype
             self.n = n
             self.m = m if m else n
-            self.matrix = self._runtime_prog.create_sparse_matrix(n, m, dtype, storage_format)
+            self.matrix = self._runtime_prog.create_sparse_matrix(
+                n, m, dtype, storage_format
+            )
         else:
             self.dtype = sm.get_data_type()
             self.n = sm.num_rows()
@@ -293,7 +308,9 @@ class SparseMatrix:
         ndarray on the same current runtime.
         """
         if not isinstance(pattern, SparsePattern):
-            raise TaichiRuntimeError("SparseMatrix.from_pattern expects a SparsePattern.")
+            raise TaichiRuntimeError(
+                "SparseMatrix.from_pattern expects a SparsePattern."
+            )
         pattern._ensure_valid()
         values = _require_current_scalar_ndarray(
             values,
@@ -310,9 +327,9 @@ class SparseMatrix:
                 f"Unsupported SparsePattern storage format {pattern.storage_format!r}; no fallback was performed."
             )
         matrix = cls(sm=core)
-        matrix._topology_fingerprint = pattern._debug_runtime_stats()[
-            "identity"
-        ].get("topology_fingerprint")
+        matrix._topology_fingerprint = pattern._debug_runtime_stats()["identity"].get(
+            "topology_fingerprint"
+        )
         return matrix
 
     def _require_operation(self, operation):
@@ -329,7 +346,9 @@ class SparseMatrix:
 
     def _ensure_valid(self):
         if self.matrix is None or self._runtime_prog is not get_runtime().prog:
-            raise TaichiRuntimeError("SparseMatrix cannot be used after its Taichi runtime has been reset.")
+            raise TaichiRuntimeError(
+                "SparseMatrix cannot be used after its Taichi runtime has been reset."
+            )
 
     def __del__(self):
         try:
@@ -483,190 +502,92 @@ class SparseMatrix:
             f"Sparse matrix-matrix/vector multiplication does not support {type(other)} for now. Supported types are SparseMatrix, ti.field, and numpy ndarray."
         )
 
-    def set_spmv_auto_cost_evidence(
-        self,
-        *,
-        provider_median_ns,
-        fallback_median_ns,
-        provider_samples,
-        fallback_samples,
-        expected_reuse,
-        provider_cv,
-        fallback_cv,
-        order_drift,
-        warmup_ns=None,
-        transfer_ns=0,
-        conversion_ns=0,
-        minimum_margin=0.05,
-    ):
-        """Installs workload-scoped evidence for automatic cuSPARSE admission.
+    def set_provider_profile(self, profile):
+        """Attach validated cuSPARSE auto-admission evidence, or clear it.
 
-        Evidence is intentionally matrix-local and is never inferred from a
-        different device, shape, sparsity pattern, or provider version. The
-        explicit ``ti.hardware.linalg.spmv_f32`` route does not consult it.
+        ``profile`` must be a ``ProviderAdmissionEvidence`` loaded from a
+        Forge fresh-process qualification artifact. Passing ``None`` restores
+        the fail-closed kernel fallback. Explicit provider execution does not
+        consult this profile.
         """
 
+        from taichi_forge.hardware import (  # pylint: disable=C0415
+            ProviderAdmissionEvidence,
+        )
+
         self._ensure_valid()
-        stats = self.matrix._debug_runtime_stats()
-        identity = stats["identity"]
-        provider = stats["provider"]
-        if identity["backend_family"] != "cuda" or provider["name"] != "cusparse":
-            raise TaichiRuntimeError(
-                "SpMV automatic provider cost evidence requires a CUDA "
-                "cuSPARSE matrix"
+        if profile is None:
+            self._spmv_provider_profile = None
+            return self
+        if not isinstance(profile, ProviderAdmissionEvidence):
+            raise TypeError(
+                "SparseMatrix provider profile must be validated "
+                "ProviderAdmissionEvidence or None"
             )
-
-        positive_values = {
-            "provider_median_ns": provider_median_ns,
-            "fallback_median_ns": fallback_median_ns,
-        }
-        nonnegative_values = {
-            "provider_cv": provider_cv,
-            "fallback_cv": fallback_cv,
-            "order_drift": order_drift,
-            "transfer_ns": transfer_ns,
-            "conversion_ns": conversion_ns,
-            "minimum_margin": minimum_margin,
-        }
-        if warmup_ns is not None:
-            nonnegative_values["warmup_ns"] = warmup_ns
-        for name, value in positive_values.items():
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value <= 0
-            ):
-                raise ValueError(f"{name} must be a positive finite number")
-        for name, value in nonnegative_values.items():
-            if (
-                isinstance(value, bool)
-                or not isinstance(value, (int, float))
-                or not math.isfinite(value)
-                or value < 0
-            ):
-                raise ValueError(f"{name} must be a nonnegative finite number")
-        for name, value in {
-            "provider_samples": provider_samples,
-            "fallback_samples": fallback_samples,
-            "expected_reuse": expected_reuse,
-        }.items():
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        if minimum_margin >= 1:
-            raise ValueError("minimum_margin must be less than 1")
-
-        self._spmv_auto_cost_evidence = {
-            "matrix_signature": {
-                "rows": int(identity["rows"]),
-                "cols": int(identity["cols"]),
-                "nnz": int(identity["nnz"]),
-                "storage_format": identity["storage_format"],
-                "block_size": identity.get("block_size"),
-                "provider_version": copy.deepcopy(provider["library_version"]),
-            },
-            "provider_median_ns": float(provider_median_ns),
-            "fallback_median_ns": float(fallback_median_ns),
-            "provider_samples": int(provider_samples),
-            "fallback_samples": int(fallback_samples),
-            "expected_reuse": int(expected_reuse),
-            "provider_cv": float(provider_cv),
-            "fallback_cv": float(fallback_cv),
-            "order_drift": float(order_drift),
-            "warmup_ns": None if warmup_ns is None else float(warmup_ns),
-            "transfer_ns": float(transfer_ns),
-            "conversion_ns": float(conversion_ns),
-            "minimum_margin": float(minimum_margin),
-        }
-        return self
-
-    def clear_spmv_auto_cost_evidence(self):
-        self._spmv_auto_cost_evidence = None
+        if (
+            profile.operation_id != "linalg.spmv.cusparse"
+            or profile.provider_id != "cusparse"
+            or profile.baseline_id != "cuda_driver_kernel"
+        ):
+            raise ValueError(
+                "SparseMatrix provider profile must qualify cuSPARSE SpMV "
+                "against the CUDA Driver kernel fallback"
+            )
+        self._spmv_provider_profile = profile
         return self
 
     def _select_spmv_auto_route(self):
+        from taichi_forge.hardware._admission import (  # pylint: disable=C0415
+            _current_cuda_device_scope,
+            _current_runtime_scope,
+            evaluate_provider_admission,
+        )
+
         native = self.matrix._debug_runtime_stats()
         identity = native["identity"]
         operations = native["operations"]
         provider = native["provider"]
         self._spmv_auto_stats["candidates"] += 1
-        evidence = self._spmv_auto_cost_evidence
-        decision = {
-            "route": "kernel",
-            "reason": None,
+        workload_scope = {
             "rows": int(identity["rows"]),
             "cols": int(identity["cols"]),
             "nnz": int(identity["nnz"]),
             "storage_format": identity["storage_format"],
+            "block_size": identity.get("block_size"),
+            "topology_fingerprint": self._topology_fingerprint,
+        }
+        admission = evaluate_provider_admission(
+            self._spmv_provider_profile,
+            operation_id="linalg.spmv.cusparse",
+            provider_id="cusparse",
+            baseline_id="cuda_driver_kernel",
+            backend="cuda",
+            device_scope=_current_cuda_device_scope(),
+            provider_scope={
+                "provider_abi": "cusparse-dynamic-symbols-v1",
+                "provider_version": copy.deepcopy(provider["library_version"]),
+            },
+            workload_scope=workload_scope,
+            runtime_scope=_current_runtime_scope(),
+            provider_warmed=bool(operations["spmv_plan_builds"]),
+        )
+        decision = {
+            **admission.to_dict(),
+            **workload_scope,
+            "route": "provider" if admission.admitted else "kernel",
             "reuse_count": self._spmv_auto_stats["candidates"],
             "provider_warmed": bool(operations["spmv_plan_builds"]),
-            "provider_amortized_ns": None,
-            "fallback_median_ns": None,
         }
-
-        reason = None
-        if evidence is None:
-            reason = "missing_cost_evidence"
-        else:
-            signature = evidence["matrix_signature"]
-            current_signature = {
-                "rows": int(identity["rows"]),
-                "cols": int(identity["cols"]),
-                "nnz": int(identity["nnz"]),
-                "storage_format": identity["storage_format"],
-                "block_size": identity.get("block_size"),
-                "provider_version": copy.deepcopy(provider["library_version"]),
-            }
-            if signature != current_signature:
-                reason = "cost_scope_mismatch"
-            elif (
-                evidence["provider_samples"] < 5
-                or evidence["fallback_samples"] < 5
-            ):
-                reason = "insufficient_cost_samples"
-            elif (
-                evidence["provider_cv"] > 0.1
-                or evidence["fallback_cv"] > 0.1
-                or evidence["order_drift"] > 0.1
-            ):
-                reason = "unstable_cost_evidence"
-            else:
-                warmup = 0.0
-                if not decision["provider_warmed"]:
-                    if evidence["warmup_ns"] is None:
-                        reason = "provider_warmup_unknown"
-                    else:
-                        warmup = evidence["warmup_ns"] / evidence[
-                            "expected_reuse"
-                        ]
-                if reason is None:
-                    provider_cost = (
-                        evidence["provider_median_ns"]
-                        + evidence["transfer_ns"]
-                        + evidence["conversion_ns"]
-                        + warmup
-                    )
-                    fallback_cost = evidence["fallback_median_ns"]
-                    decision["provider_amortized_ns"] = provider_cost
-                    decision["fallback_median_ns"] = fallback_cost
-                    if provider_cost >= fallback_cost * (
-                        1.0 - evidence["minimum_margin"]
-                    ):
-                        reason = "cost_gate"
-
-        if reason is None:
-            decision["route"] = "provider"
-            decision["reason"] = "measured_cost_advantage"
+        if admission.admitted:
             self._spmv_auto_stats["admitted"] += 1
             self._spmv_auto_stats["provider_dispatches"] += 1
         else:
-            decision["reason"] = reason
             self._spmv_auto_stats["rejected"] += 1
             self._spmv_auto_stats["kernel_fallbacks"] += 1
             reasons = self._spmv_auto_stats["rejection_reasons"]
-            reasons[reason] = reasons.get(reason, 0) + 1
+            reasons[admission.reason] = reasons.get(admission.reason, 0) + 1
         self._spmv_auto_stats["last_decision"] = decision
-        return decision["route"]
+        return "provider" if admission.admitted else "kernel"
 
     def spmv(self, other, *, method="auto"):
         """Multiplies by a device vector using auto, kernel, or provider route."""
@@ -679,7 +600,9 @@ class SparseMatrix:
                 f"Dimension mismatch between sparse matrix ({self.n}, {self.m}) and vector ({other.shape})"
             )
         if method not in ("auto", "kernel", "provider"):
-            raise ValueError("SparseMatrix.spmv method must be 'auto', 'kernel', or 'provider'")
+            raise ValueError(
+                "SparseMatrix.spmv method must be 'auto', 'kernel', or 'provider'"
+            )
 
         result = ScalarNdarray(dtype=other.dtype, arr_shape=(self.n,))
         contract = self._get_format_contract()
@@ -770,11 +693,13 @@ class SparseMatrix:
         ):
             snapshot[section] = dict(snapshot[section])
         if snapshot["provider"]["library_version"] is not None:
-            snapshot["provider"]["library_version"] = dict(snapshot["provider"]["library_version"])
+            snapshot["provider"]["library_version"] = dict(
+                snapshot["provider"]["library_version"]
+            )
         snapshot["identity"]["topology_fingerprint"] = self._topology_fingerprint
         snapshot["auto_provider"] = copy.deepcopy(self._spmv_auto_stats)
-        snapshot["auto_provider"]["cost_evidence_present"] = (
-            self._spmv_auto_cost_evidence is not None
+        snapshot["auto_provider"]["provider_profile_present"] = (
+            self._spmv_provider_profile is not None
         )
         snapshot["auto_provider"]["activation"] = "domain_api_auto_provider"
         snapshot["auto_provider"]["fallback_route"] = "cuda_driver_kernel"
@@ -857,9 +782,7 @@ class SparseMatrix:
                         else "operator_copy"
                     )
                 ),
-                "mutability": (
-                    "provider_mutable" if is_cpu_eigen else "fixed"
-                ),
+                "mutability": ("provider_mutable" if is_cpu_eigen else "fixed"),
                 "canonical_compressed_indices": not is_matrix_free,
                 "empty_supported": not is_matrix_free
                 and not is_bsr
@@ -912,8 +835,7 @@ class SparseMatrix:
                 "public_jacobi_selection": is_cpu_eigen
                 or is_cpu_fixed_csr
                 or is_cuda_csr,
-                "public_block_jacobi_selection": is_cpu_fixed_bsr
-                or is_cuda_fixed_bsr,
+                "public_block_jacobi_selection": is_cpu_fixed_bsr or is_cuda_fixed_bsr,
                 "internal_block_jacobi": is_bsr,
                 "internal_block_pcg": is_bsr,
             },
@@ -958,9 +880,13 @@ class SparseMatrix:
         """
         self._require_operation("triplet_ndarray_build")
         if isinstance(ndarray, Ndarray):
-            num_scalars = reduce(lambda x, y: x * y, ndarray.shape + ndarray.element_shape)
+            num_scalars = reduce(
+                lambda x, y: x * y, ndarray.shape + ndarray.element_shape
+            )
             if num_scalars % 3 != 0:
-                raise TaichiRuntimeError("The number of ndarray elements must have a length that is divisible by 3.")
+                raise TaichiRuntimeError(
+                    "The number of ndarray elements must have a length that is divisible by 3."
+                )
             get_runtime().prog.make_sparse_matrix_from_ndarray(self.matrix, ndarray.arr)
         else:
             raise TaichiRuntimeError(
@@ -1023,7 +949,9 @@ class SparseMatrixBuilder:
                 self.ptr.create_ndarray(self._runtime_prog)
                 runtime.register_runtime_object(self)
             else:
-                raise TaichiRuntimeError("SparseMatrix only supports CPU, CUDA, and Vulkan for now.")
+                raise TaichiRuntimeError(
+                    "SparseMatrix only supports CPU, CUDA, and Vulkan for now."
+                )
 
     def _get_addr(self):
         """Get the address of the sparse matrix"""
@@ -1067,7 +995,9 @@ class SparseMatrixBuilder:
                 raise TaichiRuntimeError("Vulkan sparse matrix only supports f32.")
             sm = self.ptr.build_vulkan()
             return SparseMatrix(sm=sm, dtype=self.dtype)
-        raise TaichiRuntimeError("Sparse matrix only supports CPU, CUDA, and Vulkan backends.")
+        raise TaichiRuntimeError(
+            "Sparse matrix only supports CPU, CUDA, and Vulkan backends."
+        )
 
     def __del__(self):
         try:

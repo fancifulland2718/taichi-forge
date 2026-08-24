@@ -477,6 +477,35 @@ def evaluate_provider_admission(
     )
 
 
+def _current_runtime_scope():
+    from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+
+    return {
+        "forge_version": _ti_core.get_version_string(),
+        "forge_commit": _ti_core.get_commit_hash(),
+    }
+
+
+def _current_cuda_device_scope():
+    from taichi_forge.interop import (  # pylint: disable=C0415
+        current_cuda_device_uuid,
+    )
+    from taichi_forge.lang import impl  # pylint: disable=C0415
+
+    try:
+        device_uuid = current_cuda_device_uuid().hex()
+    except (RuntimeError, ValueError):
+        device_uuid = None
+    try:
+        compute_capability = int(impl.get_cuda_compute_capability())
+    except (RuntimeError, ValueError):
+        compute_capability = None
+    return {
+        "cuda_device_uuid": device_uuid,
+        "cuda_compute_capability": compute_capability,
+    }
+
+
 __all__ = [
     "PROVIDER_ADMISSION_SCHEMA",
     "PROVIDER_ADMISSION_SCHEMA_VERSION",
