@@ -8613,6 +8613,7 @@ void Program::finalize() {
                 [&] { vulkan_clear_primitive_caches(); });
   }
   if (compile_config().arch == Arch::cuda) {
+    best_effort("clear CUDA cuDSS plans", [&] { cuda_clear_cudss_plans(); });
     best_effort("clear CUDA cuFFT plans", [&] { cuda_clear_cufft_plans(); });
     best_effort("clear CUDA cuBLAS GEMM provider",
                 [&] { cuda_clear_cublas_gemm(); });

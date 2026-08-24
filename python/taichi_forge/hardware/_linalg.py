@@ -20,6 +20,7 @@ from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32
 
+
 def _dimension(value, name):
     if (
         isinstance(value, bool)
@@ -124,12 +125,8 @@ class CublasGemmRecording(BackendCommandRecording):
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError("CUDA cuBLAS GEMM requires an active runtime")
-        a = self._validate_array(
-            bindings[self.a], self.a, (self.rows, self.inner)
-        )
-        b = self._validate_array(
-            bindings[self.b], self.b, (self.inner, self.columns)
-        )
+        a = self._validate_array(bindings[self.a], self.a, (self.rows, self.inner))
+        b = self._validate_array(bindings[self.b], self.b, (self.inner, self.columns))
         output = self._validate_array(
             bindings[self.output], self.output, (self.rows, self.columns)
         )
@@ -203,22 +200,17 @@ class CusparseSpmvRecording(BackendCommandRecording):
             )
         if identity["storage_format"] not in ("csr", "bsr"):
             raise TaichiRuntimeError(
-                "CUDA cuSPARSE SpMV requires scalar CSR or fixed-block BSR "
-                "storage"
+                "CUDA cuSPARSE SpMV requires scalar CSR or fixed-block BSR " "storage"
             )
         if identity["dtype"] != "f32":
-            raise TaichiRuntimeError(
-                "CUDA cuSPARSE SpMV requires an f32 SparseMatrix"
-            )
+            raise TaichiRuntimeError("CUDA cuSPARSE SpMV requires an f32 SparseMatrix")
         if not contract["operations"]["ndarray_spmv"]:
             raise TaichiRuntimeError(
                 "CUDA cuSPARSE SpMV is unavailable for this SparseMatrix"
             )
         names = (input, output)
         if any(not isinstance(name, str) or not name for name in names):
-            raise ValueError(
-                "CUDA cuSPARSE binding names must be nonempty strings"
-            )
+            raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
         if input == output:
             raise ValueError("CUDA cuSPARSE binding names must be unique")
         super().__init__(
@@ -257,8 +249,7 @@ class CusparseSpmvRecording(BackendCommandRecording):
         program = impl.get_runtime().prog
         if value.arr is None or value._runtime_prog is not program:
             raise TaichiRuntimeError(
-                f"CUDA cuSPARSE binding {name!r} belongs to another "
-                "Taichi runtime"
+                f"CUDA cuSPARSE binding {name!r} belongs to another " "Taichi runtime"
             )
         if (
             value.dtype != f32
@@ -280,18 +271,12 @@ class CusparseSpmvRecording(BackendCommandRecording):
             )
         program = impl.get_runtime().prog
         if program is None:
-            raise TaichiRuntimeError(
-                "CUDA cuSPARSE SpMV requires an active runtime"
-            )
+            raise TaichiRuntimeError("CUDA cuSPARSE SpMV requires an active runtime")
         self.matrix._ensure_valid()  # pylint: disable=W0212
         input_value = bindings[self.input]
         output_value = bindings[self.output]
-        input_array = self._validate_array(
-            input_value, self.input, (self.matrix.m,)
-        )
-        output_array = self._validate_array(
-            output_value, self.output, (self.matrix.n,)
-        )
+        input_array = self._validate_array(input_value, self.input, (self.matrix.m,))
+        output_array = self._validate_array(output_value, self.output, (self.matrix.n,))
         if (
             input_value._runtime_allocation_identity
             == output_value._runtime_allocation_identity
@@ -322,9 +307,11 @@ class CusparseSpmvRecording(BackendCommandRecording):
         pattern_shared = bool(resources["pattern_storage_shared"])
         owned_bytes = int(
             resources[
-                "operator_exclusive_reserved_bytes"
-                if pattern_shared
-                else "operator_owned_reserved_bytes"
+                (
+                    "operator_exclusive_reserved_bytes"
+                    if pattern_shared
+                    else "operator_owned_reserved_bytes"
+                )
             ]
         )
         components = [
@@ -450,11 +437,232 @@ def cusparse_is_available():
     return operation.discovery == "available"
 
 
+class CudssPlan:
+    """Explicit staged cuDSS 0.8.x direct-solver plan for one CUDA CSR matrix.
+
+    This is a Python-scope hardware provider, not a kernel intrinsic. The
+    caller controls analysis, factorization/refactorization, and solve; Forge
+    never rewrites ``SparseSolver`` or a Taichi kernel to use this plan.
+    """
+
+    _MATRIX_TYPES = {"general": 0, "symmetric": 1, "spd": 3}
+    _MATRIX_VIEWS = {"full": 0, "lower": 1, "upper": 2}
+
+    def __init__(
+        self,
+        matrix,
+        *,
+        matrix_type="general",
+        matrix_view=None,
+        library_path=None,
+    ):
+        from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+            cudss_dll_directories,
+            resolve_cudss_library_path,
+        )
+        from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
+            SparseMatrix,
+        )
+
+        if not isinstance(matrix, SparseMatrix):
+            raise TypeError("CUDA cuDSS matrix must be a Taichi SparseMatrix")
+        matrix._ensure_valid()  # pylint: disable=W0212
+        if active_backend() != "cuda":
+            raise TaichiRuntimeError(
+                "CUDA cuDSS requires the CUDA backend; the active backend is "
+                f"{active_backend()}"
+            )
+        if matrix_type not in self._MATRIX_TYPES:
+            raise ValueError("matrix_type must be general, symmetric, or spd")
+        if matrix_view is None:
+            matrix_view = "full" if matrix_type == "general" else "lower"
+        if matrix_view not in self._MATRIX_VIEWS:
+            raise ValueError("matrix_view must be full, lower, or upper")
+        if matrix_type == "general" and matrix_view != "full":
+            raise ValueError("general cuDSS matrices require matrix_view='full'")
+        contract = matrix._get_format_contract()  # pylint: disable=W0212
+        identity = contract["identity"]
+        if (
+            identity["backend_family"] != "cuda"
+            or identity["storage_format"] != "csr"
+            or matrix.dtype != f32
+            or matrix.n != matrix.m
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuDSS requires a square scalar f32 CUDA CSR matrix; no "
+                "conversion or host fallback was performed"
+            )
+        program = impl.get_runtime().prog
+        if program is None:
+            raise TaichiRuntimeError("CUDA cuDSS requires an active runtime")
+        resolved_library = resolve_cudss_library_path(library_path)
+        with cudss_dll_directories(resolved_library):
+            handle = program._create_cuda_cudss_plan(
+                matrix.matrix,
+                self._MATRIX_TYPES[matrix_type],
+                self._MATRIX_VIEWS[matrix_view],
+                resolved_library,
+            )
+        self._program = program
+        self._runtime_generation = impl.runtime_generation()
+        self._matrix = matrix
+        self._handle = handle
+        self._rows = matrix.n
+        self._nnz = int(matrix.matrix.num_nonzero())
+        self.matrix_type = matrix_type
+        self.matrix_view = matrix_view
+        self.library_path = resolved_library or None
+
+    def _ensure_open(self):
+        if self._handle is None:
+            raise TaichiRuntimeError("CUDA cuDSS plan is closed")
+        if (
+            impl.get_runtime().prog is not self._program
+            or impl.runtime_generation() != self._runtime_generation
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuDSS plan cannot be used after its runtime was reset"
+            )
+
+    def analyze(self):
+        """Run reorder and symbolic factorization for the stored CSR pattern."""
+
+        self._ensure_open()
+        self._program._cuda_cudss_analyze(self._handle)
+        return self
+
+    def factorize(self, *, refactorize=False):
+        """Factor current matrix values after analysis."""
+
+        self._ensure_open()
+        self._program._cuda_cudss_factorize(self._handle, bool(refactorize))
+        return self
+
+    def refactorize(self):
+        """Refactor updated values while retaining the analyzed pattern."""
+
+        return self.factorize(refactorize=True)
+
+    def compute(self):
+        """Run analysis followed by initial numeric factorization."""
+
+        return self.analyze().factorize()
+
+    @staticmethod
+    def _validate_vector(value, role, size):
+        if not isinstance(value, Ndarray):
+            raise TaichiRuntimeError(f"CUDA cuDSS {role} must be a Taichi ndarray")
+        if (
+            value.dtype != f32
+            or tuple(value.element_shape) != ()
+            or tuple(value.shape) != (size,)
+        ):
+            raise TaichiRuntimeError(
+                f"CUDA cuDSS {role} must be a compact scalar f32 ndarray with "
+                f"shape ({size},)"
+            )
+        return value.arr
+
+    def solve(self, rhs, solution):
+        """Solve into an explicit output ndarray; no host fallback is used."""
+
+        self._ensure_open()
+        rhs_array = self._validate_vector(rhs, "right-hand side", self._matrix.n)
+        solution_array = self._validate_vector(solution, "solution", self._matrix.n)
+        if rhs is solution:
+            raise TaichiRuntimeError(
+                "The first CUDA cuDSS slice requires distinct rhs and solution arrays"
+            )
+        self._program._cuda_cudss_solve(self._handle, rhs_array, solution_array)
+        return solution
+
+    def memory_report(self):
+        """Report known shared CSR bytes and opaque provider-owned state."""
+
+        lifecycle_state = "ready"
+        if self._handle is None:
+            lifecycle_state = "closed"
+        elif impl.get_runtime().prog is not self._program:
+            lifecycle_state = "runtime_invalid"
+        csr_bytes = (self._rows + 1 + self._nnz) * 4 + self._nnz * 4
+        return make_memory_report(
+            "cudss_csr_f32",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    "shared_csr_storage",
+                    csr_bytes,
+                    True,
+                    "provider_generation",
+                    "shared_user_object",
+                    resident=lifecycle_state == "ready",
+                ),
+                HardwareMemoryComponent(
+                    "analysis_factors_and_workspace",
+                    None,
+                    False,
+                    "provider_generation",
+                    "provider",
+                    resident=lifecycle_state == "ready",
+                ),
+            ),
+            lifecycle_state=lifecycle_state,
+            ownership_scope="provider_plan",
+        )
+
+    def statistics(self):
+        """Return staged lifecycle state without synchronizing the device."""
+
+        self._ensure_open()
+        return dict(self._program._cuda_cudss_plan_statistics(self._handle))
+
+    def close(self):
+        """Synchronize outstanding use and destroy provider-owned state."""
+
+        handle = self._handle
+        self._handle = None
+        if handle is not None and impl.get_runtime().prog is self._program:
+            self._program._destroy_cuda_cudss_plan(handle)
+        self._matrix = None
+        self._program = None
+
+    def __enter__(self):
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+
+def cudss_is_available(*, library_path=None):
+    """Probe the optional tested cuDSS provider without installing it."""
+
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
+        return False
+    from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
+
+    report = probe("cudss", library_path=library_path)
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.solve.cudss"
+    )
+    return operation.discovery == "available"
+
+
 __all__ = [
+    "CudssPlan",
     "CublasGemmRecording",
     "CusparseSpmvRecording",
     "cublas_is_available",
     "cusparse_is_available",
+    "cudss_is_available",
     "gemm_f32",
     "is_available",
     "spmv_f32",

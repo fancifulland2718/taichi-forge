@@ -1,5 +1,6 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <tuple>
 
@@ -539,27 +540,6 @@ bool CUSOLVERDriver::load_cusolver() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cusolver_functions.inc.h"
 #undef PER_CUSOLVER_FUNCTION
-  capabilities_ = {};
-  if (csGetProperty.available()) {
-    constexpr int kMajorVersion = 0;
-    constexpr int kMinorVersion = 1;
-    constexpr int kPatchLevel = 2;
-    const auto query_property = [&](int property, int &value) {
-      if (csGetProperty.call(static_cast<libraryPropertyType>(property),
-                             &value) != 0) {
-        value = -1;
-      }
-    };
-    query_property(kMajorVersion, capabilities_.library_version_major);
-    query_property(kMinorVersion, capabilities_.library_version_minor);
-    query_property(kPatchLevel, capabilities_.library_version_patch);
-  }
-  capabilities_.sparse_solver_available = true;
-#define PER_CUSOLVER_FUNCTION(name, symbol_name, ...) \
-  capabilities_.sparse_solver_available =             \
-      capabilities_.sparse_solver_available && name.available();
-#include "taichi/rhi/cuda/cusolver_functions.inc.h"
-#undef PER_CUSOLVER_FUNCTION
   return cusolver_loaded_;
 }
 
@@ -657,6 +637,106 @@ bool CUFFTDriver::load_cufft() {
     capabilities_.library_version = version;
   }
   cufft_loaded_.store(true, std::memory_order_release);
+  return true;
+}
+
+CUDSSDriver::CUDSSDriver() {
+}
+
+CUDSSDriver &CUDSSDriver::get_instance() {
+  static CUDSSDriver *instance = new CUDSSDriver();
+  return *instance;
+}
+
+bool CUDSSDriver::load_cudss(const std::string &library_path) {
+  std::lock_guard<std::mutex> load_guard(load_lock_);
+  if (cudss_loaded_.load(std::memory_order_acquire)) {
+    return true;
+  }
+  auto &cuda_driver = CUDADriver::get_instance_without_context();
+  if (!cuda_driver.nvidia_extensions_available()) {
+    return false;
+  }
+
+  // cuDSS is a separately distributed library and depends on cuBLAS. Loading
+  // the latter first also makes a user-managed wheel's dependency visible to
+  // the Windows loader while the Python-side DLL-directory guard is active.
+  auto &cublas = CUBLASDriver::get_instance();
+  if (!cublas.is_loaded() && !cublas.load_cublas()) {
+    return false;
+  }
+
+  std::vector<std::string> candidates;
+  const auto append = [&](const std::string &candidate) {
+    if (!candidate.empty() &&
+        std::find(candidates.begin(), candidates.end(), candidate) ==
+            candidates.end()) {
+      candidates.push_back(candidate);
+    }
+  };
+  append(library_path);
+  if (const char *configured = std::getenv("TI_CUDSS_LIBRARY_PATH")) {
+    append(configured);
+  }
+#if defined(TI_PLATFORM_WINDOWS)
+  append("cudss64_0.dll");
+#else
+  append("libcudss.so.0");
+  append("libcudss.so");
+#endif
+
+  loader_.reset();
+  loaded_library_name_.clear();
+  for (const auto &candidate : candidates) {
+    auto loader = std::make_unique<DynamicLoader>(candidate);
+    if (loader->loaded()) {
+      loader_ = std::move(loader);
+      loaded_library_name_ = candidate;
+      break;
+    }
+  }
+  if (!loader_) {
+    return false;
+  }
+
+  bool symbols_available = true;
+#define PER_CUDSS_FUNCTION(name, symbol_name, ...)                   \
+  name.set(loader_->load_function_optional(#symbol_name));          \
+  name.set_lock(&lock_);                                            \
+  name.set_names(#name, #symbol_name);                              \
+  symbols_available = symbols_available && name.available();
+#include "taichi/rhi/cuda/cudss_functions.inc.h"
+#undef PER_CUDSS_FUNCTION
+  get_property_.set(loader_->load_function_optional("cudssGetProperty"));
+  get_property_.set_lock(&lock_);
+  get_property_.set_names("get_property_", "cudssGetProperty");
+  symbols_available = symbols_available && get_property_.available();
+
+  capabilities_ = {};
+  capabilities_.required_symbols_available = symbols_available;
+  if (get_property_.available()) {
+    const auto query = [&](int property, int &value) {
+      if (get_property_.call(property, &value) != 0) {
+        value = -1;
+      }
+    };
+    query(0, capabilities_.library_version_major);
+    query(1, capabilities_.library_version_minor);
+    query(2, capabilities_.library_version_patch);
+  }
+  // cuDSS remains Preview. Execute only the ABI family qualified in this
+  // source tree; later families must be reviewed instead of being assumed
+  // compatible merely because their symbols have the same names.
+  capabilities_.tested_version_family =
+      capabilities_.library_version_major == 0 &&
+      capabilities_.library_version_minor == 8;
+  if (!capabilities_.required_symbols_available ||
+      !capabilities_.tested_version_family) {
+    loader_.reset();
+    loaded_library_name_.clear();
+    return false;
+  }
+  cudss_loaded_.store(true, std::memory_order_release);
   return true;
 }
 

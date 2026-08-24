@@ -2439,6 +2439,28 @@ void export_lang(py::module &m) {
            py::arg("a"), py::arg("b"), py::arg("output"), py::arg("rows"),
            py::arg("columns"), py::arg("inner"), py::arg("alpha"),
            py::arg("beta"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_cuda_cudss_plan",
+           tracked_native_program_method(&Program::create_cuda_cudss_plan),
+           py::arg("matrix"), py::arg("matrix_type"),
+           py::arg("matrix_view"), py::arg("library_path") = "",
+           py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cudss_analyze",
+           tracked_native_program_method(&Program::cuda_cudss_analyze),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cudss_factorize",
+           tracked_native_program_method(&Program::cuda_cudss_factorize),
+           py::arg("handle"), py::arg("refactorize") = false,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cudss_solve",
+           tracked_native_program_method(&Program::cuda_cudss_solve),
+           py::arg("handle"), py::arg("rhs"), py::arg("solution"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cudss_plan_statistics",
+           &Program::cuda_cudss_plan_statistics, py::arg("handle"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_destroy_cuda_cudss_plan",
+           tracked_native_program_method(&Program::destroy_cuda_cudss_plan),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarrays_to_host",
            [](Program *program, const std::vector<Ndarray *> &srcs,
               const py::sequence &dsts) {

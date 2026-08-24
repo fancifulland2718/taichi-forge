@@ -144,9 +144,10 @@ std::vector<std::string> cuda_external_library_candidates(
   return candidates;
 }
 
-py::dict probe_cuda_external_library(const std::string &provider_id) {
+py::dict probe_cuda_external_library(const std::string &provider_id,
+                                     const std::string &library_path) {
   if (provider_id != "cublas" && provider_id != "cusparse" &&
-      provider_id != "cusolver" && provider_id != "cufft") {
+      provider_id != "cufft" && provider_id != "cudss") {
     throw std::invalid_argument("unsupported CUDA external provider: " +
                                 provider_id);
   }
@@ -202,16 +203,7 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
     optional_symbols = {"cusparseGetProperty", "cusparseCreateBsr",
                         "cusparseSpMV_preprocess"};
     native_facts["operation_contract"] = "spmv_f32";
-  } else if (provider_id == "cusolver") {
-    library_name = "cusolver";
-    versions = {cuda_major, cuda_major - 1};
-    provider_abi = "cusolver-dynamic-symbols-v1";
-#define PER_CUSOLVER_FUNCTION(name, symbol_name, ...) \
-  required_symbols.emplace_back(#symbol_name)
-#include "taichi/rhi/cuda/cusolver_functions.inc.h"
-#undef PER_CUSOLVER_FUNCTION
-    native_facts["operation_contract"] = "sparse_solver_f32";
-  } else {
+  } else if (provider_id == "cufft") {
     library_name = "cufft";
     versions = {cuda_major, cuda_major - 1, 12, 11, 10};
     provider_abi = "cufft-plan-many-dynamic-symbols-v3";
@@ -223,10 +215,41 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
     native_facts["transitive_dependency_check"] =
         "deferred_to_plan_creation";
     native_facts["workspace_allocation_check"] = "deferred_to_plan_creation";
+  } else {
+    library_name = "cudss";
+    provider_abi = "cudss-c-api-0.8";
+    required_symbols = {"cudssGetProperty", "cudssCreate", "cudssDestroy",
+                        "cudssSetStream", "cudssConfigCreate",
+                        "cudssConfigDestroy", "cudssDataCreate",
+                        "cudssDataDestroy", "cudssMatrixCreateCsr",
+                        "cudssMatrixCreateDn", "cudssMatrixDestroy",
+                        "cudssMatrixSetValues", "cudssExecute"};
+    native_facts["operation_contract"] = "staged_csr_f32_direct_solve";
+    native_facts["tested_version_family"] = "0.8.x";
+    native_facts["graph_recording_supported"] = false;
+    native_facts["kernel_scope_supported"] = false;
+    native_facts["transitive_dependency_check"] =
+        "deferred_to_plan_creation";
   }
 
-  const auto candidates =
-      cuda_external_library_candidates(library_name, versions);
+  auto candidates = cuda_external_library_candidates(library_name, versions);
+  if (provider_id == "cudss") {
+    const auto append_unique = [&](const std::string &candidate) {
+      if (!candidate.empty() &&
+          std::find(candidates.begin(), candidates.end(), candidate) ==
+              candidates.end()) {
+        candidates.push_back(candidate);
+      }
+    };
+    if (!library_path.empty()) {
+      candidates.insert(candidates.begin(), library_path);
+    }
+#ifdef WIN32
+    append_unique("cudss64_0.dll");
+#else
+    append_unique("libcudss.so.0");
+#endif
+  }
   std::unique_ptr<TransientExternalLibrary> loader;
   std::string selected_candidate;
   bool library_loaded_before = false;
@@ -306,15 +329,6 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
                                 get_property(1, &version_minor) == 0 &&
                                 get_property(2, &version_patch) == 0;
     }
-  } else if (provider_id == "cusolver") {
-    auto *symbol = loader->load_function_optional("cusolverGetProperty");
-    if (symbol != nullptr) {
-      using GetProperty = int (*)(int, void *);
-      auto get_property = reinterpret_cast<GetProperty>(symbol);
-      version_query_succeeded = get_property(0, &version_major) == 0 &&
-                                get_property(1, &version_minor) == 0 &&
-                                get_property(2, &version_patch) == 0;
-    }
   } else if (provider_id == "cufft") {
     auto *symbol = loader->load_function_optional("cufftGetVersion");
     if (symbol != nullptr) {
@@ -328,6 +342,15 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
         version_patch = version % 100;
       }
     }
+  } else if (provider_id == "cudss") {
+    auto *symbol = loader->load_function_optional("cudssGetProperty");
+    if (symbol != nullptr) {
+      using GetProperty = int (*)(int, int *);
+      auto get_property = reinterpret_cast<GetProperty>(symbol);
+      version_query_succeeded = get_property(0, &version_major) == 0 &&
+                                get_property(1, &version_minor) == 0 &&
+                                get_property(2, &version_patch) == 0;
+    }
   }
   native_facts["version_query_succeeded"] = version_query_succeeded;
   if (version_query_succeeded) {
@@ -340,6 +363,20 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
           ? fmt::format("{}.{}.{}", version_major, version_minor,
                         version_patch)
           : "unknown");
+  if (provider_id == "cudss" &&
+      (!version_query_succeeded || version_major != 0 ||
+       version_minor != 8)) {
+    result["discovery"] = "incompatible";
+    result["unavailable_reason"] = "unsupported_provider_version";
+    result["last_error"] =
+        "cuDSS execution is qualified only for the Preview 0.8.x ABI family";
+    result["failure_scope"] = "provider";
+    loader.reset();
+    native_facts["library_loaded_after"] =
+        external_library_is_loaded(selected_candidate);
+    result["native_facts"] = std::move(native_facts);
+    return result;
+  }
   result["discovery"] = "available";
   result["unavailable_reason"] = "none";
   loader.reset();
@@ -351,7 +388,7 @@ py::dict probe_cuda_external_library(const std::string &provider_id) {
 
 py::dict cuda_external_library_status(const std::string &provider_id) {
   if (provider_id != "cublas" && provider_id != "cusparse" &&
-      provider_id != "cusolver" && provider_id != "cufft") {
+      provider_id != "cufft" && provider_id != "cudss") {
     throw std::invalid_argument("unsupported CUDA external provider: " +
                                 provider_id);
   }
@@ -409,24 +446,7 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
                       capabilities.library_version_minor,
                       capabilities.library_version_patch);
     }
-  } else if (provider_id == "cusolver") {
-    auto &driver = lang::CUSOLVERDriver::get_instance();
-    const bool loaded = driver.is_loaded();
-    result["library_loaded"] = loaded;
-    result["provider_abi"] = "cusolver-dynamic-symbols-v1";
-    const auto capabilities = driver.capabilities();
-    native_facts["library_candidate"] = driver.loaded_library_name();
-    native_facts["sparse_solver_available"] =
-        loaded && capabilities.sparse_solver_available;
-    if (loaded && capabilities.library_version_major >= 0 &&
-        capabilities.library_version_minor >= 0 &&
-        capabilities.library_version_patch >= 0) {
-      result["provider_version"] =
-          fmt::format("{}.{}.{}", capabilities.library_version_major,
-                      capabilities.library_version_minor,
-                      capabilities.library_version_patch);
-    }
-  } else {
+  } else if (provider_id == "cufft") {
     auto &driver = lang::CUFFTDriver::get_instance();
     const bool loaded = driver.is_loaded();
     result["library_loaded"] = loaded;
@@ -437,6 +457,27 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
       result["provider_version"] =
           fmt::format("{}.{}.{}", version / 1000,
                       (version % 1000) / 100, version % 100);
+    }
+  } else {
+    auto &driver = lang::CUDSSDriver::get_instance();
+    const bool loaded = driver.is_loaded();
+    const auto capabilities = driver.capabilities();
+    result["library_loaded"] = loaded;
+    result["provider_abi"] = "cudss-c-api-0.8";
+    native_facts["library_candidate"] = driver.loaded_library_name();
+    native_facts["required_symbols_available"] =
+        capabilities.required_symbols_available;
+    native_facts["tested_version_family"] =
+        capabilities.tested_version_family;
+    native_facts["graph_recording_supported"] = false;
+    native_facts["kernel_scope_supported"] = false;
+    if (capabilities.library_version_major >= 0 &&
+        capabilities.library_version_minor >= 0 &&
+        capabilities.library_version_patch >= 0) {
+      result["provider_version"] =
+          fmt::format("{}.{}.{}", capabilities.library_version_major,
+                      capabilities.library_version_minor,
+                      capabilities.library_version_patch);
     }
   }
   result["native_facts"] = std::move(native_facts);
@@ -473,12 +514,14 @@ void print_all_units() {
 
 void export_misc(py::module &m) {
 #if defined(TI_WITH_CUDA)
-  m.def("probe_cuda_external_library", &probe_cuda_external_library);
+  m.def("probe_cuda_external_library", &probe_cuda_external_library,
+        py::arg("provider_id"), py::arg("library_path") = "");
   m.def("cuda_external_library_status", &cuda_external_library_status);
 #else
-  m.def("probe_cuda_external_library", [](const std::string &provider_id) {
+  m.def("probe_cuda_external_library", [](const std::string &provider_id,
+                                           const std::string &) {
     if (provider_id != "cublas" && provider_id != "cusparse" &&
-        provider_id != "cusolver" && provider_id != "cufft") {
+        provider_id != "cufft" && provider_id != "cudss") {
       throw std::invalid_argument("unsupported CUDA external provider: " +
                                   provider_id);
     }
@@ -497,10 +540,10 @@ void export_misc(py::module &m) {
     result["failure_scope"] = py::none();
     result["native_facts"] = std::move(native_facts);
     return result;
-  });
+  }, py::arg("provider_id"), py::arg("library_path") = "");
   m.def("cuda_external_library_status", [](const std::string &provider_id) {
     if (provider_id != "cublas" && provider_id != "cusparse" &&
-        provider_id != "cusolver" && provider_id != "cufft") {
+        provider_id != "cufft" && provider_id != "cudss") {
       throw std::invalid_argument("unsupported CUDA external provider: " +
                                   provider_id);
     }

@@ -125,7 +125,7 @@ def telemetry():
 
     providers = {}
     if _ti_core.with_cuda():
-        for provider_id in ("cublas", "cusparse", "cusolver", "cufft"):
+        for provider_id in ("cublas", "cusparse", "cufft", "cudss"):
             status = dict(_ti_core.cuda_external_library_status(provider_id))
             provider_facts = {
                 "library_loaded": bool(status["library_loaded"]),

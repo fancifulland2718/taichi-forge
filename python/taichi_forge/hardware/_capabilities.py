@@ -254,11 +254,15 @@ class HardwareOperationDescriptor:
         for scope in scopes:
             _validate_member("operation scope", scope, OPERATION_SCOPES)
         _validate_member("dependency tier", self.dependency_tier, DEPENDENCY_TIERS)
-        load_mode = self.load_mode or _LOAD_MODE_BY_DEPENDENCY_TIER[self.dependency_tier]
+        load_mode = (
+            self.load_mode or _LOAD_MODE_BY_DEPENDENCY_TIER[self.dependency_tier]
+        )
         _validate_member("load mode", load_mode, LOAD_MODES)
         if load_mode != _LOAD_MODE_BY_DEPENDENCY_TIER[self.dependency_tier]:
             raise ValueError("load_mode must match dependency_tier")
-        if self.dependency_name is not None and (not isinstance(self.dependency_name, str) or not self.dependency_name):
+        if self.dependency_name is not None and (
+            not isinstance(self.dependency_name, str) or not self.dependency_name
+        ):
             raise TypeError("dependency_name must be None or a nonempty string")
         if self.dependency_tier == "core" and self.dependency_name is not None:
             raise ValueError("core operations must not name an external dependency")
@@ -282,7 +286,9 @@ class HardwareOperationDescriptor:
         _validate_member("execution kind", self.execution_kind, EXECUTION_KINDS)
         _validate_member("Graph support", self.graph_support, GRAPH_SUPPORT_MODES)
         _validate_member("stream binding", self.stream_binding, STREAM_BINDINGS)
-        _validate_member("workspace ownership", self.workspace_ownership, WORKSPACE_OWNERSHIP)
+        _validate_member(
+            "workspace ownership", self.workspace_ownership, WORKSPACE_OWNERSHIP
+        )
         _validate_member("lifetime policy", self.lifetime_policy, LIFETIME_POLICIES)
         _validate_member("update policy", self.update_policy, UPDATE_POLICIES)
         _validate_member(
@@ -300,7 +306,8 @@ class HardwareOperationDescriptor:
             or hardware_route == "qualified"
         ):
             raise ValueError(
-                "unqualified implementations cannot claim guaranteed or qualified " "hardware acceleration"
+                "unqualified implementations cannot claim guaranteed or qualified "
+                "hardware acceleration"
             )
         legacy_route = (
             "qualified"
@@ -311,7 +318,9 @@ class HardwareOperationDescriptor:
             raise ValueError(
                 "hardware_route must match the legacy hardware_acceleration field"
             )
-        if self.public_api is not None and (not isinstance(self.public_api, str) or not self.public_api):
+        if self.public_api is not None and (
+            not isinstance(self.public_api, str) or not self.public_api
+        ):
             raise TypeError("public_api must be None or a nonempty string")
         if self.deterministic is not None and not isinstance(self.deterministic, bool):
             raise TypeError("deterministic must be None or bool")
@@ -319,10 +328,14 @@ class HardwareOperationDescriptor:
             not isinstance(self.fallback_provider, str) or not self.fallback_provider
         ):
             raise TypeError("fallback_provider must be None or a nonempty string")
-        if self.fallback_equivalent is not None and not isinstance(self.fallback_equivalent, bool):
+        if self.fallback_equivalent is not None and not isinstance(
+            self.fallback_equivalent, bool
+        ):
             raise TypeError("fallback_equivalent must be None or bool")
         if self.fallback_provider is None and self.fallback_equivalent is not None:
-            raise ValueError("fallback_equivalent requires an explicit fallback_provider")
+            raise ValueError(
+                "fallback_equivalent requires an explicit fallback_provider"
+            )
         if "internal" in scopes and len(scopes) != 1:
             raise ValueError("internal scope cannot be combined with a public scope")
         if "kernel" in scopes and self.execution_kind != "kernel_intrinsic":
@@ -401,10 +414,14 @@ class HardwareProviderDescriptor:
             raise ValueError("load_mode must match dependency_tier")
         if self.dependency_tier == "core" and self.dependency_name is not None:
             raise ValueError("core providers must not name an external dependency")
-        if self.dependency_tier != "core" and (not isinstance(self.dependency_name, str) or not self.dependency_name):
+        if self.dependency_tier != "core" and (
+            not isinstance(self.dependency_name, str) or not self.dependency_name
+        ):
             raise ValueError("external providers must name their dependency")
         _validate_member("provider class", self.provider_class, PROVIDER_CLASSES)
-        operation_ids = _unique_strings("operation_ids", self.operation_ids, nonempty=True)
+        operation_ids = _unique_strings(
+            "operation_ids", self.operation_ids, nonempty=True
+        )
         object.__setattr__(self, "operation_ids", operation_ids)
 
     def to_dict(self):
@@ -441,7 +458,9 @@ class ResolvedHardwareOperation:
     def __post_init__(self):
         if not isinstance(self.descriptor, HardwareOperationDescriptor):
             raise TypeError("descriptor must be a HardwareOperationDescriptor")
-        if self.backend is not None and (not isinstance(self.backend, str) or not self.backend):
+        if self.backend is not None and (
+            not isinstance(self.backend, str) or not self.backend
+        ):
             raise TypeError("backend must be None or a nonempty string")
         if self.discovery is not None:
             _validate_member("discovery state", self.discovery, DISCOVERY_STATES)
@@ -449,11 +468,15 @@ class ResolvedHardwareOperation:
         _validate_member("selection state", self.selection, SELECTION_STATES)
         if not isinstance(self.unavailable_reason, str) or not self.unavailable_reason:
             raise TypeError("unavailable_reason must be a nonempty string")
-        if self.last_error is not None and (not isinstance(self.last_error, str) or not self.last_error):
+        if self.last_error is not None and (
+            not isinstance(self.last_error, str) or not self.last_error
+        ):
             raise TypeError("last_error must be None or a nonempty string")
         if self.failure_scope is not None:
             _validate_member("failure scope", self.failure_scope, FAILURE_SCOPES)
-        _validate_member("performance state", self.performance_state, PERFORMANCE_STATES)
+        _validate_member(
+            "performance state", self.performance_state, PERFORMANCE_STATES
+        )
         for field_name in ("provider_abi", "provider_version"):
             value = getattr(self, field_name)
             if value is not None and (not isinstance(value, str) or not value):
@@ -515,9 +538,13 @@ class HardwareCapabilityReport:
         if any(not isinstance(value, bool) for value in compiled_backends.values()):
             raise TypeError("compiled backend values must be bool")
         operations = tuple(self.operations)
-        if not all(isinstance(operation, ResolvedHardwareOperation) for operation in operations):
+        if not all(
+            isinstance(operation, ResolvedHardwareOperation) for operation in operations
+        ):
             raise TypeError("operations must contain resolved hardware operations")
-        object.__setattr__(self, "compiled_backends", MappingProxyType(compiled_backends))
+        object.__setattr__(
+            self, "compiled_backends", MappingProxyType(compiled_backends)
+        )
         object.__setattr__(self, "operations", operations)
 
     def to_dict(self):
@@ -608,7 +635,9 @@ _OPERATIONS = (
     *vulkan_future_operations(_operation),
 )
 
-_OPERATIONS_BY_ID = MappingProxyType({operation.operation_id: operation for operation in _OPERATIONS})
+_OPERATIONS_BY_ID = MappingProxyType(
+    {operation.operation_id: operation for operation in _OPERATIONS}
+)
 if len(_OPERATIONS_BY_ID) != len(_OPERATIONS):
     raise RuntimeError("hardware operation IDs must be unique")
 
@@ -649,10 +678,10 @@ def _build_provider_catalog():
 
 
 _PROVIDERS = _build_provider_catalog()
-_PROVIDERS_BY_ID = MappingProxyType({provider.provider_id: provider for provider in _PROVIDERS})
-_TRANSIENT_NATIVE_PROVIDERS = frozenset(
-    ("cublas", "cusparse", "cusolver", "cufft")
+_PROVIDERS_BY_ID = MappingProxyType(
+    {provider.provider_id: provider for provider in _PROVIDERS}
 )
+_TRANSIENT_NATIVE_PROVIDERS = frozenset(("cublas", "cusparse", "cufft", "cudss"))
 
 
 def operations():
@@ -714,17 +743,12 @@ def _passive_core_statuses(runtime_initialized, backend):
     program = impl.get_runtime().prog
     if backend == "cuda":
         matrix_available = bool(
-            program is not None
-            and program.cuda_matrix_mma_f16_f32_available()
+            program is not None and program.cuda_matrix_mma_f16_f32_available()
         )
         async_tile_status = (
-            dict(program._cuda_async_tile_status())
-            if program is not None
-            else {}
+            dict(program._cuda_async_tile_status()) if program is not None else {}
         )
-        async_tile_available = bool(
-            async_tile_status.get("provider_available", False)
-        )
+        async_tile_available = bool(async_tile_status.get("provider_available", False))
         lowered_specializations = int(
             async_tile_status.get("lowered_specializations", 0)
         )
@@ -755,9 +779,7 @@ def _passive_core_statuses(runtime_initialized, backend):
                         "minimum_bls_bytes", 8192
                     ),
                     "lowered_specializations": lowered_specializations,
-                    "copy_sites": int(
-                        async_tile_status.get("copy_sites", 0)
-                    ),
+                    "copy_sites": int(async_tile_status.get("copy_sites", 0)),
                     **{
                         name: int(async_tile_status.get(name, 0))
                         for name in (
@@ -783,9 +805,7 @@ def _passive_core_statuses(runtime_initialized, backend):
     graphics_available = bool(
         program is not None and program.vulkan_graphics_pipeline_available()
     )
-    ray_available = bool(
-        program is not None and program.vulkan_ray_query_available()
-    )
+    ray_available = bool(program is not None and program.vulkan_ray_query_available())
     ray_facts = {
         "provider_available": ray_available,
         "capability_query": "active_vulkan_feature_chain",
@@ -850,7 +870,9 @@ def _passive_resolution(
     compiled = all(compiled_backends[item] for item in descriptor.backends)
     facts = {
         "probe_policy": "passive",
-        "provider_backends_compiled": tuple(item for item in descriptor.backends if compiled_backends[item]),
+        "provider_backends_compiled": tuple(
+            item for item in descriptor.backends if compiled_backends[item]
+        ),
         "external_component_probed": False,
     }
 
@@ -860,7 +882,9 @@ def _passive_resolution(
             backend=backend,
             runtime_initialized=runtime_initialized,
             discovery="missing",
-            enablement=("enabled" if descriptor.dependency_tier == "core" else "disabled"),
+            enablement=(
+                "enabled" if descriptor.dependency_tier == "core" else "disabled"
+            ),
             selection="rejected",
             unavailable_reason="backend_not_compiled",
             native_facts=facts,
@@ -1036,7 +1060,9 @@ def _passive_resolution(
     )
 
 
-def _unimplemented_external_probe_resolution(descriptor, *, runtime_initialized, backend):
+def _unimplemented_external_probe_resolution(
+    descriptor, *, runtime_initialized, backend
+):
     return ResolvedHardwareOperation(
         descriptor=descriptor,
         backend=backend,
@@ -1054,7 +1080,9 @@ def _unimplemented_external_probe_resolution(descriptor, *, runtime_initialized,
     )
 
 
-def _failed_external_probe_resolution(descriptor, *, runtime_initialized, backend, error):
+def _failed_external_probe_resolution(
+    descriptor, *, runtime_initialized, backend, error
+):
     return ResolvedHardwareOperation(
         descriptor=descriptor,
         backend=backend,
@@ -1074,10 +1102,21 @@ def _failed_external_probe_resolution(descriptor, *, runtime_initialized, backen
     )
 
 
-def _native_external_probe(provider_id):
+def _native_external_probe(provider_id, library_path=None):
     from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
 
-    return dict(_ti_core.probe_cuda_external_library(provider_id))
+    if provider_id != "cudss":
+        if library_path is not None:
+            raise ValueError("library_path is supported for cuDSS probes only")
+        return dict(_ti_core.probe_cuda_external_library(provider_id))
+    from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+        cudss_dll_directories,
+        resolve_cudss_library_path,
+    )
+
+    resolved = resolve_cudss_library_path(library_path)
+    with cudss_dll_directories(resolved):
+        return dict(_ti_core.probe_cuda_external_library(provider_id, resolved))
 
 
 def _native_external_status(provider_id):
@@ -1107,7 +1146,9 @@ def _passive_external_statuses():
     }
 
 
-def _explicit_external_probe_resolution(descriptor, *, runtime_initialized, backend, native_result):
+def _explicit_external_probe_resolution(
+    descriptor, *, runtime_initialized, backend, native_result
+):
     try:
         if native_result.get("provider_id") != descriptor.provider_id:
             raise ValueError("native probe returned a mismatched provider_id")
@@ -1153,9 +1194,7 @@ def report():
                 runtime_initialized=runtime_initialized,
                 backend=backend,
                 compiled_backends=compiled_backends,
-                external_status=external_statuses.get(
-                    descriptor.provider_id
-                ),
+                external_status=external_statuses.get(descriptor.provider_id),
                 core_status=core_statuses.get(descriptor.operation_id),
             )
             for descriptor in _OPERATIONS
@@ -1164,7 +1203,7 @@ def report():
     )
 
 
-def probe(provider_id):
+def probe(provider_id, *, library_path=None):
     """Explicitly probe one D1 provider without enabling or selecting it.
 
     Existing CUDA library probes use a transient native library handle and do
@@ -1175,6 +1214,8 @@ def probe(provider_id):
     provider = _provider(provider_id)
     if provider.dependency_tier != "lazy_external":
         raise ValueError("only lazy_external providers support runtime probing")
+    if library_path is not None and provider_id != "cudss":
+        raise ValueError("library_path is supported for cuDSS probes only")
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()
     external_statuses = _passive_external_statuses()
@@ -1188,9 +1229,13 @@ def probe(provider_id):
         )
         for descriptor in _OPERATIONS
     )
-    provider_operations = tuple(operation for operation in _OPERATIONS if operation.provider_id == provider_id)
+    provider_operations = tuple(
+        operation for operation in _OPERATIONS if operation.provider_id == provider_id
+    )
     provider_backends_compiled = all(
-        compiled_backends[backend_name] for operation in provider_operations for backend_name in operation.backends
+        compiled_backends[backend_name]
+        for operation in provider_operations
+        for backend_name in operation.backends
     )
     if not provider_backends_compiled:
         resolved_provider_operations = {
@@ -1209,7 +1254,11 @@ def probe(provider_id):
         }
     else:
         try:
-            native_result = _native_external_probe(provider_id)
+            native_result = (
+                _native_external_probe(provider_id)
+                if library_path is None
+                else _native_external_probe(provider_id, library_path)
+            )
         except Exception as exc:  # Native loader failures must remain inspectable.
             resolved_provider_operations = {
                 descriptor.operation_id: _failed_external_probe_resolution(
@@ -1232,7 +1281,8 @@ def probe(provider_id):
             }
 
     operations = tuple(
-        resolved_provider_operations.get(operation.descriptor.operation_id, operation) for operation in passive
+        resolved_provider_operations.get(operation.descriptor.operation_id, operation)
+        for operation in passive
     )
     return HardwareCapabilityReport(
         runtime_initialized=runtime_initialized,
@@ -1240,7 +1290,8 @@ def probe(provider_id):
         compiled_backends=compiled_backends,
         operations=operations,
         external_components_probed=any(
-            operation.native_facts.get("external_component_probed", False) for operation in operations
+            operation.native_facts.get("external_component_probed", False)
+            for operation in operations
         ),
     )
 

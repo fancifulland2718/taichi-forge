@@ -90,6 +90,7 @@ struct SNodeMetadataStatistics {
 };
 
 class Ndarray;
+class SparseMatrix;
 
 enum class VulkanBufferCommandKind : std::uint8_t {
   kFillU32,
@@ -110,6 +111,7 @@ struct VulkanBufferCommand {
 
 class Program;
 class CudaFftPlan;
+class CudaCudssPlan;
 class VulkanTriangleRayScene;
 class VulkanRayResource;
 class VulkanGraphicsPipelineResource;
@@ -1180,6 +1182,26 @@ class TI_DLL_EXPORT Program {
                                     float beta);
 
   void cuda_clear_cublas_gemm();
+
+  std::uint64_t create_cuda_cudss_plan(SparseMatrix *matrix,
+                                       int matrix_type,
+                                       int matrix_view,
+                                       const std::string &library_path);
+
+  void cuda_cudss_analyze(std::uint64_t handle);
+
+  void cuda_cudss_factorize(std::uint64_t handle, bool refactorize);
+
+  std::size_t cuda_cudss_solve(std::uint64_t handle,
+                               Ndarray *rhs,
+                               Ndarray *solution);
+
+  std::unordered_map<std::string, std::uint64_t>
+  cuda_cudss_plan_statistics(std::uint64_t handle);
+
+  void destroy_cuda_cudss_plan(std::uint64_t handle);
+
+  void cuda_clear_cudss_plans();
 
   bool cuda_device_transform_available() const;
 
@@ -3950,6 +3972,10 @@ class TI_DLL_EXPORT Program {
   std::uint64_t next_cuda_cufft_plan_handle_{1};
   std::mutex cuda_cublas_gemm_mutex_;
   void *cuda_cublas_gemm_handle_{nullptr};
+  std::mutex cuda_cudss_plan_mutex_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<CudaCudssPlan>>
+      cuda_cudss_plans_;
+  std::uint64_t next_cuda_cudss_plan_handle_{1};
   std::atomic<std::uint64_t> cuda_async_tile_lowered_specializations_{0};
   std::atomic<std::uint64_t> cuda_async_tile_copy_sites_{0};
   std::atomic<std::uint64_t> cuda_async_tile_candidates_{0};
