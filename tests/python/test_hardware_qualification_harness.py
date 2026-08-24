@@ -199,6 +199,24 @@ def test_artifact_provenance_records_identity_and_digest(tmp_path):
     )
 
 
+def test_runtime_bitcode_provenance_records_only_loaded_artifact_kinds(tmp_path):
+    (tmp_path / "runtime_cuda.bc").write_bytes(b"cuda")
+    (tmp_path / "runtime_x64.bc").write_bytes(b"x64")
+    (tmp_path / "slim_libdevice.10.bc").write_bytes(b"libdevice")
+    (tmp_path / "unrelated.bc").write_bytes(b"unrelated")
+
+    provenance = qualification._runtime_bitcode_provenance(tmp_path)
+
+    assert [
+        artifact["path"].replace("\\", "/").rsplit("/", 1)[-1]
+        for artifact in provenance
+    ] == [
+        "runtime_cuda.bc",
+        "runtime_x64.bc",
+        "slim_libdevice.10.bc",
+    ]
+
+
 def test_aggregate_emits_loadable_strict_auto_admission_evidence(tmp_path):
     scope = {
         "operation_id": "linalg.spmv.cusparse",

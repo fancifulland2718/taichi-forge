@@ -11,13 +11,15 @@ Examples::
     python tests/python/hardware_acceleration_qualification.py \
         --cases cuda-gemm,cuda-mma,cuda-spmv --output result.json
 
-Local source builds can set ``TAICHI_FORGE_LOCAL_PYD`` to the built extension
-and ``TAICHI_FORGE_RUNTIME_DIR`` to the directory containing runtime DLLs.
-The script propagates both variables to fresh workers.
+Local source builds can set ``TAICHI_FORGE_LOCAL_PYD`` to the built extension,
+``TAICHI_FORGE_RUNTIME_DIR`` to the directory containing the native runtime,
+and ``TAICHI_RUNTIME_DIR`` to the matching LLVM runtime bitcode directory. The
+script propagates these variables to fresh workers and records their digests.
 """
 
 import argparse
 import copy
+import ctypes
 import hashlib
 import importlib.util
 import json
@@ -36,8 +38,28 @@ import numpy as np
 
 _LOCAL_PYD = os.environ.get("TAICHI_FORGE_LOCAL_PYD")
 _RUNTIME_DIR = os.environ.get("TAICHI_FORGE_RUNTIME_DIR")
-if _RUNTIME_DIR and hasattr(os, "add_dll_directory"):
-    os.add_dll_directory(_RUNTIME_DIR)
+_RUNTIME_DLL_DIRECTORY = None
+_RUNTIME_LIBRARY_HANDLE = None
+if _RUNTIME_DIR:
+    os.environ.setdefault("TAICHI_NATIVE_RUNTIME_DIR", _RUNTIME_DIR)
+    if hasattr(os, "add_dll_directory"):
+        _RUNTIME_DLL_DIRECTORY = os.add_dll_directory(_RUNTIME_DIR)
+    _RUNTIME_LIBRARY_NAMES = {
+        "win32": ("taichi_runtime.dll",),
+        "darwin": ("libtaichi_runtime.dylib",),
+    }.get(sys.platform, ("libtaichi_runtime.so",))
+    for _RUNTIME_LIBRARY_NAME in _RUNTIME_LIBRARY_NAMES:
+        _RUNTIME_LIBRARY = pathlib.Path(_RUNTIME_DIR) / _RUNTIME_LIBRARY_NAME
+        if not _RUNTIME_LIBRARY.is_file():
+            continue
+        if sys.platform == "win32":
+            _RUNTIME_LIBRARY_HANDLE = ctypes.WinDLL(str(_RUNTIME_LIBRARY))
+        else:
+            _RUNTIME_LIBRARY_HANDLE = ctypes.CDLL(
+                str(_RUNTIME_LIBRARY),
+                mode=getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2),
+            )
+        break
 if _LOCAL_PYD:
     _ROOT = pathlib.Path(__file__).resolve().parents[2]
     sys.path.insert(0, str(_ROOT / "python"))
@@ -52,6 +74,7 @@ if _LOCAL_PYD:
 
 import taichi_forge as ti  # pylint: disable=C0413
 from taichi_forge._lib import core as _ti_core  # pylint: disable=C0413
+from taichi_forge._lib.utils import _runtime_bitcode_dir  # pylint: disable=C0413
 from taichi_forge.hardware._admission import (  # pylint: disable=C0413
     _current_runtime_scope,
 )
@@ -264,6 +287,17 @@ def _artifact_provenance(path):
         "bytes": artifact_path.stat().st_size,
         "sha256": digest.hexdigest(),
     }
+
+
+def _runtime_bitcode_provenance(directory):
+    root = pathlib.Path(directory).resolve()
+    candidates = [root / "runtime_cuda.bc", root / "runtime_x64.bc"]
+    candidates.extend(sorted(root.glob("slim_libdevice.*.bc")))
+    return [
+        _artifact_provenance(candidate)
+        for candidate in candidates
+        if candidate.is_file()
+    ]
 
 
 def _time_block(action, repetitions):
@@ -2575,6 +2609,9 @@ def _parent(args):
             candidate = runtime_root / name
             if candidate.is_file():
                 local_runtime_artifacts.append(_artifact_provenance(candidate))
+    local_runtime_bitcode_artifacts = _runtime_bitcode_provenance(
+        _runtime_bitcode_dir()
+    )
     report = {
         "schema": SCHEMA,
         "generated_at_ns": time.time_ns(),
@@ -2588,6 +2625,7 @@ def _parent(args):
         ),
         "local_python_extension": local_python_extension,
         "local_runtime_artifacts": local_runtime_artifacts,
+        "local_runtime_bitcode_artifacts": local_runtime_bitcode_artifacts,
         "policy": {
             "fresh_process_orders": ("ab", "ba"),
             "workers_per_order": args.workers_per_order,
