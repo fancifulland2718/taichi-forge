@@ -66,10 +66,13 @@ grouped under the behavior they shipped.
   stable matrix-scoped cost evidence loaded from a strict fresh-process
   qualification artifact, while its explicit provider route is not cost-gated.
   Evidence is bound to the exact topology, device, runtime, and provider ABI;
-  the former handwritten timing setter was removed. `SparseSolver(provider="auto")`
-  can select a user-managed cuDSS
-  0.8.x provider for eligible CUDA 12+ scalar-f32 CSR systems and retains
-  cuSOLVERSp for older, absent, incompatible, or ineligible cases. Added the
+  the former handwritten timing setter was removed. `SparseSolver(provider="auto",
+  provider_profile=profile)` applies the same exact-scope admission model to
+  user-managed cuDSS 0.8.x, including amortized first-use costs for both cuDSS
+  and cuSOLVERSp. Missing evidence does not probe the optional library and
+  retains cuSOLVERSp; explicit providers remain outside the performance gate.
+  Older, absent, incompatible, ineligible, or unqualified cases also retain
+  cuSOLVERSp, while explicit cuDSS requires CUDA Driver API 12.0 or newer. Added the
   explicit staged `CudssPlan` and its root-ordered solve recording, plus the
   separate manual `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route
   for caller-owned output and root-Graph recording over the existing

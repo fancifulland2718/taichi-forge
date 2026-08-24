@@ -125,25 +125,34 @@ on CUDA:
   accepts only a strict Forge fresh-process qualification artifact. Attach the
   immutable result with `matrix.set_provider_profile(profile)`, or pass `None`
   to clear it. The profile matches the exact sparse-topology fingerprint,
-  device UUID, Forge runtime build, provider ABI/version, and amortization
-  scope; users cannot install handwritten timing fields.
+  device UUID, Forge runtime build, Python provider-contract hash, provider
+  ABI/version, and amortization scope; users cannot install handwritten timing
+  fields.
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` executes the same stored
   matrix operation into caller-owned output. `CusparseSpmvRecording(matrix)`
   makes that manual operation a root-Graph backend command with explicit
   read/write effects and a matrix-generation lifetime lease. It re-records one
   runtime-ordered cuSPARSE command per Graph run and reuses the matrix-owned
   handle, descriptors, workspace, and preprocessing.
-- `ti.linalg.SparseSolver(provider="auto")` considers a user-managed cuDSS
-  0.8.x provider for square scalar-f32 CUDA CSR matrices when the CUDA Driver
-  API is at least 12.0. CUDA 11 and older, missing/incompatible cuDSS, f64, and
-  ineligible layouts retain the embedded cuSOLVERSp compatibility route.
-  `provider="cudss"` and `provider="cusolver_sp"` are explicit choices.
+- `ti.hardware.load_provider_admission_evidence(path,
+  case="cuda-cudss-solve")` can supply the exact-workload profile to
+  `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)`. Auto
+  considers user-managed cuDSS 0.8.x only after the profile matches the
+  topology, device, Forge build, Python provider-contract hash, provider
+  ABI/version, solver contract, and expected solve reuse, and its amortized
+  cost clears the conservative margin against cuSOLVERSp. Both providers'
+  first analysis/factorization cost is
+  included. Without a profile, auto does not probe or load cuDSS and stays on
+  embedded cuSOLVERSp. CUDA 11 and older, missing/incompatible cuDSS, f64,
+  ineligible layouts, or a scope/cost mismatch also retain cuSOLVERSp.
+  `provider="cudss"` and `provider="cusolver_sp"` are explicit,
+  non-performance-gated choices.
 - `ti.hardware.linalg.CudssPlan` exposes explicit `analyze()`, `factorize()` /
   `refactorize()`, and `solve(rhs, solution)` stages. Its current
   `CudssSolveRecording` is a `root_ordered` action over an already successful
   factorization: each root-Graph run reissues one runtime-ordered solve. It is
   not stream capture, is not kernel-callable, and is unsupported in structured
-  Graph and AOT.
+  Graph and AOT. Explicit cuDSS also requires CUDA Driver API 12.0 or newer.
 
 All routes lazy-load user-provided compatible libraries only when their domain
 objects or explicit plans are used. Forge does not install cuDSS, add a Python

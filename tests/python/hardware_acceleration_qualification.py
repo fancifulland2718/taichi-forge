@@ -52,6 +52,9 @@ if _LOCAL_PYD:
 
 import taichi_forge as ti  # pylint: disable=C0413
 from taichi_forge._lib import core as _ti_core  # pylint: disable=C0413
+from taichi_forge.hardware._admission import (  # pylint: disable=C0413
+    _current_runtime_scope,
+)
 
 
 SCHEMA = "taichi_forge.hardware_acceleration_qualification.v4"
@@ -67,6 +70,7 @@ CASES = (
     "cuda-gemm",
     "cuda-mma",
     "cuda-spmv",
+    "cuda-cudss-solve",
     "vulkan-ray-update",
     "vulkan-image-copy",
     "vulkan-texture-fetch",
@@ -719,10 +723,7 @@ def _cuda_spmv_case(order, args):
             "block_size": provider_stats["identity"]["block_size"],
             "topology_fingerprint": provider_stats["identity"]["topology_fingerprint"],
         },
-        "runtime_scope": {
-            "forge_version": result["forge_version"],
-            "forge_commit": result["forge_commit"],
-        },
+        "runtime_scope": _current_runtime_scope(),
         "transfer_ns": 0.0,
         "conversion_ns": 0.0,
     }
@@ -749,6 +750,195 @@ def _cuda_spmv_case(order, args):
             "admission_scope": admission_scope,
         }
     )
+    ti.reset()
+    return result
+
+
+def _cuda_cudss_solve_case(order, args):
+    _init_cuda()
+    library_path = args.cudss_library or os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        result = _provenance("cuda-cudss-solve", order)
+        result.update(
+            {
+                "status": "skipped",
+                "reason": "user_managed_cudss_library_not_configured",
+            }
+        )
+        ti.reset()
+        return result
+    side = args.cudss_grid
+    n = side * side
+    row_offsets_host = [0]
+    column_indices_host = []
+    values_host = []
+    for row in range(side):
+        for column in range(side):
+            index = row * side + column
+            entries = [(index, 4.0)]
+            if row > 0:
+                entries.append((index - side, -1.0))
+            if row + 1 < side:
+                entries.append((index + side, -1.0))
+            if column > 0:
+                entries.append((index - 1, -1.0))
+            if column + 1 < side:
+                entries.append((index + 1, -1.0))
+            for entry_column, entry_value in sorted(entries):
+                column_indices_host.append(entry_column)
+                values_host.append(entry_value)
+            row_offsets_host.append(len(column_indices_host))
+    row_offsets_host = np.asarray(row_offsets_host, dtype=np.int32)
+    column_indices_host = np.asarray(column_indices_host, dtype=np.int32)
+    values_host = np.asarray(values_host, dtype=np.float32)
+    rhs_host = (
+        0.5 + np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003))
+    ).astype(np.float32)
+
+    row_offsets = ti.ndarray(ti.i32, shape=n + 1)
+    column_indices = ti.ndarray(ti.i32, shape=column_indices_host.size)
+    values = ti.ndarray(ti.f32, shape=values_host.size)
+    rhs = ti.ndarray(ti.f32, shape=n)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    values.from_numpy(values_host)
+    rhs.from_numpy(rhs_host)
+    pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
+    matrix = pattern.matrix(values)
+
+    solvers = {"hardware": None, "baseline": None}
+    solutions = {"hardware": None, "baseline": None}
+
+    def hardware():
+        if solvers["hardware"] is None:
+            solvers["hardware"] = ti.linalg.SparseSolver(
+                dtype=ti.f32,
+                solver_type="LLT",
+                ordering="AMD",
+                provider="cudss",
+                library_path=library_path,
+            )
+            solvers["hardware"].compute(matrix)
+        solutions["hardware"] = solvers["hardware"].solve(rhs)
+
+    def baseline():
+        if solvers["baseline"] is None:
+            solvers["baseline"] = ti.linalg.SparseSolver(
+                dtype=ti.f32,
+                solver_type="LLT",
+                ordering="AMD",
+                provider="cusolver_sp",
+            )
+            solvers["baseline"].compute(matrix)
+        solutions["baseline"] = solvers["baseline"].solve(rhs)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_values = solutions["hardware"].to_numpy()
+    baseline_values = solutions["baseline"].to_numpy()
+
+    def residual(solution):
+        product = np.zeros(n, dtype=np.float64)
+        for row in range(n):
+            begin = row_offsets_host[row]
+            end = row_offsets_host[row + 1]
+            product[row] = np.dot(
+                values_host[begin:end].astype(np.float64),
+                solution[column_indices_host[begin:end]].astype(np.float64),
+            )
+        return _error(product, rhs_host)
+
+    hardware_error = residual(hardware_values)
+    baseline_error = residual(baseline_values)
+    provider_report = ti.hardware.probe("cudss", library_path=library_path)
+    resolved = next(
+        item
+        for item in provider_report.operations
+        if item.descriptor.operation_id == "linalg.solve.cudss"
+    ).to_dict()
+    provider_version = tuple(
+        int(part) for part in resolved["provider_version"].split(".")
+    )
+    matrix_stats = matrix._debug_runtime_stats()
+    result = _provenance("cuda-cudss-solve", order)
+    admission_scope = {
+        "operation_id": "linalg.solve.cudss_auto",
+        "provider_id": "cudss",
+        "baseline_id": "cusolver_sp",
+        "backend": "cuda",
+        "device_scope": {
+            "cuda_device_uuid": result["cuda_device_uuid"],
+            "cuda_compute_capability": result["cuda_compute_capability"],
+        },
+        "provider_scope": {
+            "provider_abi": resolved["provider_abi"],
+            "provider_version": {
+                "major": provider_version[0],
+                "minor": provider_version[1],
+                "patch": provider_version[2],
+            },
+        },
+        "workload_scope": {
+            "rows": matrix_stats["identity"]["rows"],
+            "cols": matrix_stats["identity"]["cols"],
+            "nnz": matrix_stats["identity"]["nnz"],
+            "storage_format": matrix_stats["identity"]["storage_format"],
+            "block_size": matrix_stats["identity"]["block_size"],
+            "topology_fingerprint": matrix_stats["identity"]["topology_fingerprint"],
+            "solver_type": "LLT",
+            "ordering": "AMD",
+            "matrix_type": "spd",
+            "matrix_view": "full",
+            "workflow": "analyze_factorize_then_repeated_solve",
+        },
+        "runtime_scope": _current_runtime_scope(),
+        "transfer_ns": 0.0,
+        "conversion_ns": 0.0,
+    }
+    passed = (
+        hardware_error[0] <= 2e-4
+        and baseline_error[0] <= 2e-4
+        and resolved["discovery"] == "available"
+        and solvers["hardware"].selected_provider == "cudss"
+        and solvers["baseline"].selected_provider == "cusolver_sp"
+    )
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "grid": (side, side),
+                "rows": n,
+                "nnz": int(values_host.size),
+                "solver_type": "LLT",
+                "ordering": "AMD",
+                "expected_solves_per_factorization": args.cudss_expected_reuse,
+                "hardware": "user-managed cuDSS 0.8.x",
+                "baseline": "embedded cuSOLVERSp",
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_residual_max_abs": hardware_error[0],
+                "hardware_residual_max_rel": hardware_error[1],
+                "baseline_residual_max_abs": baseline_error[0],
+                "baseline_residual_max_rel": baseline_error[1],
+            },
+            "route": {
+                "provider": resolved,
+                "hardware_selected": solvers["hardware"].selected_provider,
+                "baseline_selected": solvers["baseline"].selected_provider,
+            },
+            "admission_scope": admission_scope,
+        }
+    )
+    solvers["hardware"].solver.close()
     ti.reset()
     return result
 
@@ -1322,6 +1512,7 @@ _CASE_RUNNERS = {
     "cuda-gemm": _cuda_gemm_case,
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
+    "cuda-cudss-solve": _cuda_cudss_solve_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-image-copy": _vulkan_image_copy_case,
     "vulkan-texture-fetch": _vulkan_texture_fetch_case,
@@ -1411,13 +1602,21 @@ def _auto_admission(
         * 1.0e6
     )
     first_use_overhead_ns = max(cold_provider_ns - provider_median_ns, 0.0)
+    cold_baseline_ns = (
+        statistics.median(worker["timing"]["cold_ms"]["baseline"] for worker in workers)
+        * 1.0e6
+    )
+    baseline_first_use_overhead_ns = max(cold_baseline_ns - baseline_median_ns, 0.0)
     provider_cost_ns = (
         provider_median_ns
         + first_use_overhead_ns / expected_reuse
         + float(scope.pop("transfer_ns"))
         + float(scope.pop("conversion_ns"))
     )
-    cost_qualified = provider_cost_ns < baseline_median_ns * (1.0 - minimum_margin)
+    baseline_cost_ns = (
+        baseline_median_ns + baseline_first_use_overhead_ns / expected_reuse
+    )
+    cost_qualified = provider_cost_ns < baseline_cost_ns * (1.0 - minimum_margin)
     checks = (
         (coverage_qualified, "insufficient_fresh_process_coverage"),
         (samples_qualified, "insufficient_timing_samples"),
@@ -1438,6 +1637,7 @@ def _auto_admission(
             "provider_median_ns": provider_median_ns,
             "baseline_median_ns": baseline_median_ns,
             "provider_first_use_overhead_ns": first_use_overhead_ns,
+            "baseline_first_use_overhead_ns": baseline_first_use_overhead_ns,
             "transfer_ns": scopes[0]["transfer_ns"],
             "conversion_ns": scopes[0]["conversion_ns"],
             "provider_samples": provider_samples,
@@ -1672,6 +1872,10 @@ def _parent(args):
                     str(args.spmv_rows),
                     "--spmv-width",
                     str(args.spmv_width),
+                    "--cudss-grid",
+                    str(args.cudss_grid),
+                    "--cudss-expected-reuse",
+                    str(args.cudss_expected_reuse),
                     "--ray-grid",
                     str(args.ray_grid),
                     "--ray-query-side",
@@ -1681,6 +1885,8 @@ def _parent(args):
                     "--texture-stencil-radius",
                     str(args.texture_stencil_radius),
                 ]
+                if args.cudss_library:
+                    command.extend(("--cudss-library", args.cudss_library))
                 completed = subprocess.run(
                     command,
                     check=False,
@@ -1718,7 +1924,11 @@ def _parent(args):
                     workers,
                     args.cv_limit,
                     args.drift_limit,
-                    auto_admission_expected_reuse=args.spmv_expected_reuse,
+                    auto_admission_expected_reuse=(
+                        args.cudss_expected_reuse
+                        if case == "cuda-cudss-solve"
+                        else args.spmv_expected_reuse
+                    ),
                     auto_admission_minimum_margin=args.auto_admission_margin,
                 )
             )
@@ -1792,6 +2002,7 @@ def _parent(args):
                 "maximum_order_drift": AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT,
                 "minimum_margin": args.auto_admission_margin,
                 "spmv_expected_reuse": args.spmv_expected_reuse,
+                "cudss_expected_reuse": args.cudss_expected_reuse,
             },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
@@ -1839,6 +2050,9 @@ def _parse_args():
     parser.add_argument("--spmv-rows", type=int, default=131072)
     parser.add_argument("--spmv-width", type=int, default=7)
     parser.add_argument("--spmv-expected-reuse", type=int, default=100)
+    parser.add_argument("--cudss-grid", type=int, default=64)
+    parser.add_argument("--cudss-expected-reuse", type=int, default=100)
+    parser.add_argument("--cudss-library")
     parser.add_argument("--auto-admission-margin", type=float, default=0.05)
     parser.add_argument("--ray-grid", type=int, default=128)
     parser.add_argument("--ray-query-side", type=int, default=128)
@@ -1865,6 +2079,8 @@ def _parse_args():
         or args.spmv_rows <= 0
         or args.spmv_width <= 0
         or args.spmv_expected_reuse <= 0
+        or args.cudss_grid < 2
+        or args.cudss_expected_reuse <= 0
         or not 0.05 <= args.auto_admission_margin < 1.0
         or args.ray_grid < 2
         or args.ray_query_side <= 0

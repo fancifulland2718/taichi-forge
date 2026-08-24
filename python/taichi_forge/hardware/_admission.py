@@ -64,6 +64,15 @@ def _nonempty_string(value, name):
     return value
 
 
+def _sha256_string(value, name):
+    value = _nonempty_string(value, name)
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
+    return value
+
+
 def _positive_number(value, name):
     if (
         isinstance(value, bool)
@@ -113,6 +122,7 @@ class ProviderAdmissionEvidence:
     provider_median_ns: float
     baseline_median_ns: float
     provider_first_use_overhead_ns: float
+    baseline_first_use_overhead_ns: float
     transfer_ns: float
     conversion_ns: float
     provider_samples: int
@@ -171,6 +181,10 @@ class ProviderAdmissionEvidence:
         first_use_overhead_ns = _nonnegative_number(
             performance.get("provider_first_use_overhead_ns"),
             "provider_first_use_overhead_ns",
+        )
+        baseline_first_use_overhead_ns = _nonnegative_number(
+            performance.get("baseline_first_use_overhead_ns"),
+            "baseline_first_use_overhead_ns",
         )
         transfer_ns = _nonnegative_number(performance.get("transfer_ns"), "transfer_ns")
         conversion_ns = _nonnegative_number(
@@ -231,7 +245,10 @@ class ProviderAdmissionEvidence:
             + transfer_ns
             + conversion_ns
         )
-        if amortized_ns >= baseline_median_ns * (1.0 - minimum_margin):
+        baseline_amortized_ns = (
+            baseline_median_ns + baseline_first_use_overhead_ns / expected_reuse
+        )
+        if amortized_ns >= baseline_amortized_ns * (1.0 - minimum_margin):
             raise ValueError(
                 "amortized provider cost does not meet the admission margin"
             )
@@ -272,6 +289,10 @@ class ProviderAdmissionEvidence:
             runtime_scope.get("forge_commit"),
             "runtime_scope.forge_commit",
         )
+        _sha256_string(
+            runtime_scope.get("python_provider_contract_sha256"),
+            "runtime_scope.python_provider_contract_sha256",
+        )
         if operation_id in (
             "linalg.spmv.cusparse",
             "linalg.solve.cudss_auto",
@@ -293,6 +314,7 @@ class ProviderAdmissionEvidence:
             "provider_median_ns": provider_median_ns,
             "baseline_median_ns": baseline_median_ns,
             "provider_first_use_overhead_ns": first_use_overhead_ns,
+            "baseline_first_use_overhead_ns": baseline_first_use_overhead_ns,
             "transfer_ns": transfer_ns,
             "conversion_ns": conversion_ns,
             "provider_samples": provider_samples,
@@ -332,6 +354,7 @@ class ProviderAdmissionEvidence:
                 "provider_median_ns": self.provider_median_ns,
                 "baseline_median_ns": self.baseline_median_ns,
                 "provider_first_use_overhead_ns": self.provider_first_use_overhead_ns,
+                "baseline_first_use_overhead_ns": self.baseline_first_use_overhead_ns,
                 "transfer_ns": self.transfer_ns,
                 "conversion_ns": self.conversion_ns,
                 "provider_samples": self.provider_samples,
@@ -359,6 +382,7 @@ class ProviderAdmissionDecision:
     reason: str
     provider_amortized_ns: Optional[float] = None
     baseline_median_ns: Optional[float] = None
+    baseline_amortized_ns: Optional[float] = None
 
     def to_dict(self):
         return {
@@ -367,6 +391,7 @@ class ProviderAdmissionDecision:
             "reason": self.reason,
             "provider_amortized_ns": self.provider_amortized_ns,
             "baseline_median_ns": self.baseline_median_ns,
+            "baseline_amortized_ns": self.baseline_amortized_ns,
         }
 
 
@@ -460,13 +485,18 @@ def evaluate_provider_admission(
         + evidence.transfer_ns
         + evidence.conversion_ns
     )
-    if provider_cost >= evidence.baseline_median_ns * (1.0 - evidence.minimum_margin):
+    baseline_cost = (
+        evidence.baseline_median_ns
+        + evidence.baseline_first_use_overhead_ns / evidence.expected_reuse
+    )
+    if provider_cost >= baseline_cost * (1.0 - evidence.minimum_margin):
         return ProviderAdmissionDecision(
             False,
             "fallback",
             "cost_gate",
             provider_amortized_ns=provider_cost,
             baseline_median_ns=evidence.baseline_median_ns,
+            baseline_amortized_ns=baseline_cost,
         )
     return ProviderAdmissionDecision(
         True,
@@ -474,15 +504,29 @@ def evaluate_provider_admission(
         "qualified_cost_advantage",
         provider_amortized_ns=provider_cost,
         baseline_median_ns=evidence.baseline_median_ns,
+        baseline_amortized_ns=baseline_cost,
     )
 
 
 def _current_runtime_scope():
     from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
 
+    contract_digest = hashlib.sha256()
+    package_root = Path(__file__).resolve().parents[1]
+    contract_paths = (
+        Path(__file__).resolve(),
+        package_root / "linalg" / "sparse_matrix.py",
+        package_root / "linalg" / "sparse_solver.py",
+    )
+    for contract_path in contract_paths:
+        contract_digest.update(contract_path.name.encode("utf-8"))
+        contract_digest.update(b"\0")
+        contract_digest.update(contract_path.read_bytes())
+        contract_digest.update(b"\0")
     return {
         "forge_version": _ti_core.get_version_string(),
         "forge_commit": _ti_core.get_commit_hash(),
+        "python_provider_contract_sha256": contract_digest.hexdigest(),
     }
 
 

@@ -193,6 +193,7 @@ def test_aggregate_emits_loadable_strict_auto_admission_evidence(tmp_path):
         "runtime_scope": {
             "forge_version": "0.6.3",
             "forge_commit": "test-revision",
+            "python_provider_contract_sha256": "a" * 64,
         },
         "transfer_ns": 0.0,
         "conversion_ns": 0.0,
@@ -221,6 +222,12 @@ def test_aggregate_emits_loadable_strict_auto_admission_evidence(tmp_path):
 
     assert case["auto_admission"]["eligible"]
     assert case["auto_admission"]["evidence"]["performance"]["fresh_processes"] == 8
+    assert (
+        case["auto_admission"]["evidence"]["performance"][
+            "baseline_first_use_overhead_ns"
+        ]
+        == 100_000.0
+    )
     artifact = tmp_path / "qualification.json"
     artifact.write_text(
         json.dumps(

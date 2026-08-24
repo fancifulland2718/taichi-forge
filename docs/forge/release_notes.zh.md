@@ -59,8 +59,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   考虑 cuSPARSE；证据只能从严格的 fresh-process qualification artifact 加载，并绑定
   精确 topology、device、runtime 与 provider ABI，原手填 timing setter 已移除。显式
   provider 路线不受成本 gate 限制；
-  `SparseSolver(provider="auto")` 可为合格的 CUDA 12+ scalar-f32 CSR system 选择用户管理的
-  cuDSS 0.8.x，旧版 CUDA、缺失/不兼容 provider 或不合格合同继续使用 cuSOLVERSp。
+  `SparseSolver(provider="auto", provider_profile=profile)` 对用户管理的 cuDSS 0.8.x 使用
+  同一套 exact-scope admission，并对称摊销 cuDSS 与 cuSOLVERSp 的首次成本。缺少证据时不会
+  探测可选库并保留 cuSOLVERSp；显式 provider 不受性能 gate 限制。旧版 CUDA、缺失/不兼容
+  provider、不合格合同或未通过成本资格的场景同样继续使用 cuSOLVERSp；显式 cuDSS 要求
+  CUDA Driver API 12.0 或更高版本。
   新增 staged `CudssPlan` 及其 root-ordered solve recording，另新增独立的手动
   `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 路线，支持调用方持有 output，
   并在复用 matrix-owned provider

@@ -103,21 +103,27 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
 - `ti.hardware.load_provider_admission_evidence(path, case="cuda-spmv")` 只接受严格的
   Forge fresh-process qualification artifact。使用 `matrix.set_provider_profile(profile)`
   绑定不可变结果，传入 `None` 可清除。profile 会精确匹配 sparse-topology fingerprint、
-  device UUID、Forge runtime build、provider ABI/version 与摊销范围；用户不能直接填入
-  手写 timing 字段。
+  device UUID、Forge runtime build、Python provider-contract hash、provider ABI/version
+  与摊销范围；用户不能直接填入手写 timing 字段。
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` 把同一 stored-matrix operation
   写入调用方提供的 output；`CusparseSpmvRecording(matrix)` 可把该手动操作作为 root-Graph
   backend command，带显式读写 effect 与 matrix-generation lifetime lease。每次 Graph run
   重录一个 runtime-ordered cuSPARSE command，同时复用 matrix 持有的 handle、descriptor、
   workspace 与 preprocessing。
-- `ti.linalg.SparseSolver(provider="auto")` 会在 CUDA Driver API 至少为 12.0 时，为方形
-  scalar-f32 CUDA CSR matrix 考虑用户管理的 cuDSS 0.8.x provider。CUDA 11 及更低版本、
-  cuDSS 缺失/不兼容、f64 或不合格 layout 保留内嵌 cuSOLVERSp 兼容路线；
-  `provider="cudss"` 与 `provider="cusolver_sp"` 是显式选择。
+- `ti.hardware.load_provider_admission_evidence(path, case="cuda-cudss-solve")`
+  可为 `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)` 提供对应的
+  exact-workload profile。只有 profile 精确匹配 topology、device、Forge build、Python
+  provider-contract hash、provider ABI/version、solver 合同和预期 solve 复用次数，且摊销
+  成本相对 cuSOLVERSp 达到保守收益
+  阈值时，auto 才会考虑用户管理的 cuDSS 0.8.x；两侧首次 analysis/factorization 成本都会
+  纳入计算。没有 profile 时，auto 不探测也不加载 cuDSS，直接保留内嵌 cuSOLVERSp。
+  CUDA 11 及更低版本、cuDSS 缺失/不兼容、f64、不合格 layout、scope 或成本不匹配也保留
+  cuSOLVERSp；`provider="cudss"` 与 `provider="cusolver_sp"` 是不受性能 gate 限制的显式选择。
 - `ti.hardware.linalg.CudssPlan` 暴露显式 `analyze()`、`factorize()`/`refactorize()` 和
   `solve(rhs, solution)` 阶段。当前 `CudssSolveRecording` 只在 factorization 成功后形成
   `root_ordered` action；每次 root-Graph run 重发一次 runtime-ordered solve。它不是 stream
-  capture，不能在 kernel 内调用，也不支持 structured Graph 或 AOT。
+  capture，不能在 kernel 内调用，也不支持 structured Graph 或 AOT；显式 cuDSS 同样要求
+  CUDA Driver API 12.0 或更高版本。
 
 所有路线都只在实际使用相应领域对象或显式 plan 时 lazy-load 用户提供的兼容 library。
 Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆绑 vendor library，

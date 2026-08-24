@@ -325,6 +325,7 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
                     "provider_median_ns": 50.0,
                     "baseline_median_ns": 100.0,
                     "provider_first_use_overhead_ns": 0.0,
+                    "baseline_first_use_overhead_ns": 0.0,
                     "transfer_ns": 0.0,
                     "conversion_ns": 0.0,
                     "provider_samples": 48,

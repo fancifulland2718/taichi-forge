@@ -37,12 +37,14 @@ def _evidence_record():
         "runtime_scope": {
             "forge_version": "0.6.3",
             "forge_commit": "test-revision",
+            "python_provider_contract_sha256": "a" * 64,
         },
         "performance": {
             "expected_reuse": 10,
             "provider_median_ns": 50_000.0,
             "baseline_median_ns": 100_000.0,
             "provider_first_use_overhead_ns": 10_000.0,
+            "baseline_first_use_overhead_ns": 0.0,
             "transfer_ns": 0.0,
             "conversion_ns": 0.0,
             "provider_samples": 48,
@@ -126,6 +128,7 @@ def test_admission_matches_all_scopes_and_rechecks_amortized_cost(tmp_path):
     assert admitted.route == "provider"
     assert admitted.reason == "qualified_cost_advantage"
     assert admitted.provider_amortized_ns == 51_000.0
+    assert admitted.baseline_amortized_ns == 100_000.0
 
     mismatched = dict(evidence.workload_scope)
     mismatched["topology_fingerprint"] = "tf-sp-v1:different"
@@ -167,6 +170,59 @@ def test_admission_rejects_cost_that_does_not_cover_first_use(tmp_path):
 
     with pytest.raises(ValueError, match="amortized provider cost"):
         load_provider_admission_evidence(_write_artifact(tmp_path, _artifact(record)))
+
+
+def test_admission_amortizes_baseline_first_use_cost_symmetrically(tmp_path):
+    record = copy.deepcopy(_evidence_record())
+    record["performance"]["provider_median_ns"] = 90_000.0
+    record["performance"]["provider_first_use_overhead_ns"] = 500_000.0
+    record["performance"]["baseline_first_use_overhead_ns"] = 1_000_000.0
+    record["performance"]["paired_p05"] = 1.1
+
+    evidence = load_provider_admission_evidence(
+        _write_artifact(tmp_path, _artifact(record))
+    )
+    admitted = _evaluate(evidence)
+
+    assert admitted.admitted
+    assert admitted.provider_amortized_ns == 140_000.0
+    assert admitted.baseline_amortized_ns == 200_000.0
+
+
+def test_admission_accepts_exact_cudss_auto_workload_scope(tmp_path):
+    record = copy.deepcopy(_evidence_record())
+    record.update(
+        {
+            "operation_id": "linalg.solve.cudss_auto",
+            "provider_id": "cudss",
+            "baseline_id": "cusolver_sp",
+            "provider_scope": {
+                "provider_abi": "cudss-c-api-0.8",
+                "provider_version": {"major": 0, "minor": 8, "patch": 1},
+            },
+        }
+    )
+    record["workload_scope"].update(
+        {
+            "solver_type": "LLT",
+            "ordering": "AMD",
+            "matrix_type": "spd",
+            "matrix_view": "full",
+            "workflow": "analyze_factorize_then_repeated_solve",
+        }
+    )
+    report = _artifact(record)
+    report["cases"][0]["case"] = "cuda-cudss-solve"
+
+    evidence = load_provider_admission_evidence(
+        _write_artifact(tmp_path, report), case="cuda-cudss-solve"
+    )
+
+    assert evidence.operation_id == "linalg.solve.cudss_auto"
+    assert evidence.provider_scope["provider_abi"] == "cudss-c-api-0.8"
+    assert evidence.workload_scope["workflow"] == (
+        "analyze_factorize_then_repeated_solve"
+    )
 
 
 def test_admission_requires_unambiguous_case_selection(tmp_path):

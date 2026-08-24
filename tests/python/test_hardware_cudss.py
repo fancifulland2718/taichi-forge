@@ -74,6 +74,122 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
+    monkeypatch,
+):
+    def unexpected_probe(*_args, **_kwargs):
+        raise AssertionError("auto without admission evidence must not probe cuDSS")
+
+    monkeypatch.setattr(ti.hardware, "probe", unexpected_probe)
+    row_offsets = ti.ndarray(ti.i32, shape=3)
+    column_indices = ti.ndarray(ti.i32, shape=4)
+    values = ti.ndarray(ti.f32, shape=4)
+    row_offsets.from_numpy(np.array([0, 2, 4], dtype=np.int32))
+    column_indices.from_numpy(np.array([0, 1, 0, 1], dtype=np.int32))
+    values.from_numpy(np.array([3.0, -1.0, -1.0, 3.0], dtype=np.float32))
+    matrix = ti.linalg.SparsePattern.csr(2, 2, row_offsets, column_indices).matrix(
+        values
+    )
+    rhs = ti.ndarray(ti.f32, shape=2)
+    rhs.from_numpy(np.array([1.0, 2.0], dtype=np.float32))
+
+    solver = ti.linalg.SparseSolver(
+        dtype=ti.f32,
+        solver_type="LLT",
+        provider="auto",
+        library_path="must-not-be-probed",
+    )
+    solver.compute(matrix)
+
+    assert solver.selected_provider == "cusolver_sp"
+    assert solver.provider_status()["fallback_reason"] == ("missing_admission_evidence")
+    assert solver.provider_status()["admission"]["reason"] == (
+        "missing_admission_evidence"
+    )
+    solution = solver.solve(rhs)
+    ti.sync()
+    np.testing.assert_allclose(
+        solution.to_numpy(), np.array([0.625, 0.875], dtype=np.float32), rtol=1e-5
+    )
+
+    from taichi_forge.hardware import ProviderAdmissionEvidence
+    from taichi_forge.hardware._admission import (
+        _current_cuda_device_scope,
+        _current_runtime_scope,
+    )
+
+    stats = matrix._debug_runtime_stats()
+    identity = stats["identity"]
+    mismatched_profile = ProviderAdmissionEvidence._from_record(
+        {
+            "schema": "taichi_forge.provider_admission.v1",
+            "schema_version": 1,
+            "operation_id": "linalg.solve.cudss_auto",
+            "provider_id": "cudss",
+            "baseline_id": "cusolver_sp",
+            "backend": "cuda",
+            "device_scope": _current_cuda_device_scope(),
+            "provider_scope": {
+                "provider_abi": "cudss-c-api-0.8",
+                "provider_version": {"major": 0, "minor": 8, "patch": 1},
+            },
+            "workload_scope": {
+                "rows": identity["rows"],
+                "cols": identity["cols"],
+                "nnz": identity["nnz"],
+                "storage_format": identity["storage_format"],
+                "block_size": identity["block_size"],
+                "topology_fingerprint": "tf-sp-v1:wrong-topology",
+                "solver_type": "LLT",
+                "ordering": "AMD",
+                "matrix_type": "spd",
+                "matrix_view": "full",
+                "workflow": "analyze_factorize_then_repeated_solve",
+            },
+            "runtime_scope": _current_runtime_scope(),
+            "performance": {
+                "expected_reuse": 16,
+                "provider_median_ns": 50.0,
+                "baseline_median_ns": 100.0,
+                "provider_first_use_overhead_ns": 0.0,
+                "baseline_first_use_overhead_ns": 0.0,
+                "transfer_ns": 0.0,
+                "conversion_ns": 0.0,
+                "provider_samples": 48,
+                "baseline_samples": 48,
+                "provider_cv": 0.02,
+                "baseline_cv": 0.02,
+                "order_drift": 0.01,
+                "minimum_block_ms": 100.0,
+                "minimum_margin": 0.05,
+                "paired_p05": 1.8,
+                "fresh_processes": 8,
+                "order_processes": {"ab": 4, "ba": 4},
+            },
+            "qualification": {
+                "correctness_and_route_qualified": True,
+                "stable": True,
+                "minimum_block_qualified": True,
+            },
+        },
+        source_schema="taichi_forge.hardware_acceleration_qualification.v4",
+        source_digest="test-artifact",
+    )
+    mismatched = ti.linalg.SparseSolver(
+        dtype=ti.f32,
+        solver_type="LLT",
+        provider="auto",
+        library_path="must-not-be-probed",
+        provider_profile=mismatched_profile,
+    )
+    mismatched.compute(matrix)
+    assert mismatched.selected_provider == "cusolver_sp"
+    assert mismatched.provider_status()["fallback_reason"] == (
+        "workload_scope_mismatch"
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cudss_staged_solve_and_refactorization():
     library_path = os.environ.get("TI_CUDSS_TEST_LIBRARY")
     if not library_path:
@@ -154,12 +270,15 @@ def test_cudss_staged_solve_and_refactorization():
     solver = ti.linalg.SparseSolver(
         dtype=ti.f32,
         solver_type="LLT",
-        provider="auto",
+        provider="cudss",
         library_path=library_path,
     )
     solver.analyze_pattern(matrix)
     assert solver.selected_provider == "cudss"
     assert solver.provider_status()["fallback_reason"] is None
+    assert solver.provider_status()["admission"]["reason"] == (
+        "explicit_provider_request"
+    )
     solver.factorize(replacement_matrix)
     automatic_solution = solver.solve(rhs)
     ti.sync()

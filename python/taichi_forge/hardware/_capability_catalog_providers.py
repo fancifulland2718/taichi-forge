@@ -169,6 +169,7 @@ def d1_provider_operations(_operation):
             lifetime_policy="provider_plan",
             update_policy="rebind",
             requirements=(
+                "CUDA driver API >= 12.0",
                 "user-managed cuDSS 0.8.x shared library",
                 "compatible user-managed cuBLAS dependency",
             ),
@@ -214,15 +215,19 @@ def d1_provider_operations(_operation):
                 "user-managed cuDSS 0.8.x matching CUDA 12 or CUDA 13",
                 "compatible user-managed cuBLAS dependency",
             ),
-            public_api="ti.linalg.SparseSolver(provider='auto')",
+            public_api=(
+                "ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"
+            ),
             dtypes=("matrix:f32", "rhs:f32", "solution:f32"),
             shapes_or_tiles=("single square matrix", "single rhs"),
             layouts=("scalar CSR with i32 offsets and indices",),
             numeric_contracts=("analysis -> factorization -> solve",),
             notes=(
                 "Automatic selection occurs only at SparseSolver analysis, never inside a Taichi kernel.",
-                "CUDA 11 and older, an absent or incompatible optional provider, f64, and ineligible formats retain the embedded cuSOLVERSp compatibility route.",
-                "Only discovery or plan-creation failure may fall back; analysis, factorization, and numerical failures remain visible.",
+                "Auto requires validated evidence matching the exact topology, device, runtime build, provider ABI/version, solver contract, and expected solve reuse.",
+                "Without evidence auto does not probe or load optional cuDSS and retains the embedded cuSOLVERSp route.",
+                "CUDA 11 and older, an absent or incompatible optional provider, f64, ineligible formats, scope mismatches, and failed cost admission retain cuSOLVERSp.",
+                "Explicit provider='cudss' is capability-gated but never performance-gated; analysis, factorization, and numerical failures remain visible.",
             ),
         ),
     )
