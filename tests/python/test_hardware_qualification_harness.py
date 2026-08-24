@@ -9,6 +9,9 @@ from taichi_forge.hardware import load_provider_admission_evidence
 def test_physics_workload_registry_and_cpu_oracles_are_stable():
     assert "cuda-fft-poisson" in qualification.CASES
     assert "cuda-cudss-refactor-solve" in qualification.CASES
+    assert "cuda-cudss-tet-fem" in qualification.CASES
+    assert "cuda-spmv-krylov" in qualification.CASES
+    assert "vulkan-offscreen-simulation" in qualification.CASES
 
     length = 32
     coordinates = 2.0 * np.pi * np.arange(length) / length
@@ -30,6 +33,28 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
             rows[row] : rows[row + 1]
         ]
     np.testing.assert_allclose(dense, dense.T)
+    assert np.min(np.linalg.eigvalsh(dense)) > 0.0
+
+    coordinates, tetrahedra, rows, columns, low_values = (
+        qualification._irregular_tet_fem_csr(3, 2.0)
+    )
+    _, high_tetrahedra, high_rows, high_columns, high_values = (
+        qualification._irregular_tet_fem_csr(3, 5.0)
+    )
+    assert coordinates.shape == (27, 3)
+    assert tetrahedra.shape == (48, 4)
+    assert np.array_equal(tetrahedra, high_tetrahedra)
+    assert np.array_equal(rows, high_rows)
+    assert np.array_equal(columns, high_columns)
+    assert not np.array_equal(low_values, high_values)
+    regular_center = np.full(3, 0.5, dtype=np.float32)
+    assert not np.allclose(coordinates[13], regular_center)
+    dense = np.zeros((81, 81), dtype=np.float64)
+    for row in range(81):
+        dense[row, columns[rows[row] : rows[row + 1]]] = low_values[
+            rows[row] : rows[row + 1]
+        ]
+    np.testing.assert_allclose(dense, dense.T, atol=2e-6)
     assert np.min(np.linalg.eigvalsh(dense)) > 0.0
 
 

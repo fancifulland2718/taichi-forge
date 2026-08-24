@@ -27,7 +27,9 @@ import math
 import os
 import pathlib
 import platform
+import re
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -94,10 +96,13 @@ CASES = (
     "cuda-gemm",
     "cuda-mma",
     "cuda-spmv",
+    "cuda-spmv-krylov",
     "cuda-cudss-solve",
     "cuda-cudss-refactor-solve",
+    "cuda-cudss-tet-fem",
     "vulkan-ray-update",
     "vulkan-image-copy",
+    "vulkan-offscreen-simulation",
     "vulkan-texture-fetch",
     "vulkan-texture-sample",
     "vulkan-texture-stencil",
@@ -248,6 +253,158 @@ def _implicit_grid_csr(side, stiffness):
                 values.append(entry_value)
             row_offsets.append(len(column_indices))
     return (
+        np.asarray(row_offsets, dtype=np.int32),
+        np.asarray(column_indices, dtype=np.int32),
+        np.asarray(values, dtype=np.float32),
+    )
+
+
+def _irregular_tet_fem_csr(
+    grid,
+    young_modulus,
+    *,
+    poisson_ratio=0.30,
+    mass_shift=0.05,
+):
+    """Assemble ``mass_shift * I + K`` for an irregular linear-tet solid.
+
+    The cube-to-tetrahedra topology and every element's 12-by-12 structural
+    entry are retained even when a coefficient is numerically zero.  Material
+    updates therefore change values without silently changing the CSR graph.
+    """
+
+    if grid < 3:
+        raise ValueError("tet FEM grid must be at least three")
+    if young_modulus <= 0.0:
+        raise ValueError("tet FEM Young's modulus must be positive")
+    if not (-1.0 < poisson_ratio < 0.5):
+        raise ValueError("tet FEM Poisson ratio must be in (-1, 0.5)")
+    if mass_shift <= 0.0:
+        raise ValueError("tet FEM mass shift must be positive")
+
+    spacing = 1.0 / (grid - 1)
+    coordinates = np.empty((grid**3, 3), dtype=np.float64)
+
+    def node_index(i, j, k):
+        return i + grid * (j + grid * k)
+
+    for k in range(grid):
+        for j in range(grid):
+            for i in range(grid):
+                point = np.array((i, j, k), dtype=np.float64) * spacing
+                if 0 < i < grid - 1 and 0 < j < grid - 1 and 0 < k < grid - 1:
+                    amplitude = 0.09 * spacing
+                    point += amplitude * np.array(
+                        (
+                            math.sin(1.7 * i + 0.3 * j + 0.5 * k),
+                            math.sin(0.2 * i + 1.9 * j + 0.7 * k),
+                            math.sin(0.6 * i + 0.4 * j + 1.5 * k),
+                        ),
+                        dtype=np.float64,
+                    )
+                coordinates[node_index(i, j, k)] = point
+
+    local_tets = (
+        (0, 1, 3, 7),
+        (0, 3, 2, 7),
+        (0, 2, 6, 7),
+        (0, 6, 4, 7),
+        (0, 4, 5, 7),
+        (0, 5, 1, 7),
+    )
+    tetrahedra = []
+    for k in range(grid - 1):
+        for j in range(grid - 1):
+            for i in range(grid - 1):
+                cube = (
+                    node_index(i, j, k),
+                    node_index(i + 1, j, k),
+                    node_index(i, j + 1, k),
+                    node_index(i + 1, j + 1, k),
+                    node_index(i, j, k + 1),
+                    node_index(i + 1, j, k + 1),
+                    node_index(i, j + 1, k + 1),
+                    node_index(i + 1, j + 1, k + 1),
+                )
+                tetrahedra.extend(
+                    tuple(cube[index] for index in tet) for tet in local_tets
+                )
+    tetrahedra = np.asarray(tetrahedra, dtype=np.int32)
+
+    lame_lambda = (
+        young_modulus
+        * poisson_ratio
+        / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
+    )
+    lame_mu = young_modulus / (2.0 * (1.0 + poisson_ratio))
+    elasticity = np.zeros((6, 6), dtype=np.float64)
+    elasticity[:3, :3] = lame_lambda
+    np.fill_diagonal(elasticity[:3, :3], lame_lambda + 2.0 * lame_mu)
+    np.fill_diagonal(elasticity[3:, 3:], lame_mu)
+
+    dofs = coordinates.shape[0] * 3
+    assembled = [dict() for _ in range(dofs)]
+    for tet in tetrahedra:
+        points = coordinates[tet]
+        affine = np.column_stack((np.ones(4), points))
+        coefficients = np.linalg.inv(affine)
+        gradients = coefficients[1:, :]
+        volume = (
+            abs(
+                np.linalg.det(
+                    np.column_stack(
+                        (
+                            points[1] - points[0],
+                            points[2] - points[0],
+                            points[3] - points[0],
+                        )
+                    )
+                )
+            )
+            / 6.0
+        )
+        if volume <= np.finfo(np.float64).eps:
+            raise RuntimeError("irregular tet mesh contains a degenerate element")
+        strain = np.zeros((6, 12), dtype=np.float64)
+        for local_node in range(4):
+            gx, gy, gz = gradients[:, local_node]
+            column = 3 * local_node
+            strain[0, column] = gx
+            strain[1, column + 1] = gy
+            strain[2, column + 2] = gz
+            strain[3, column] = gy
+            strain[3, column + 1] = gx
+            strain[4, column + 1] = gz
+            strain[4, column + 2] = gy
+            strain[5, column] = gz
+            strain[5, column + 2] = gx
+        element = volume * (strain.T @ elasticity @ strain)
+        element = 0.5 * (element + element.T)
+        element_dofs = np.asarray(
+            [3 * int(node) + axis for node in tet for axis in range(3)],
+            dtype=np.int32,
+        )
+        for local_row, row in enumerate(element_dofs):
+            row_entries = assembled[int(row)]
+            for local_column, column in enumerate(element_dofs):
+                column = int(column)
+                row_entries[column] = (
+                    row_entries.get(column, 0.0) + element[local_row, local_column]
+                )
+    for row in range(dofs):
+        assembled[row][row] = assembled[row].get(row, 0.0) + mass_shift
+
+    row_offsets = [0]
+    column_indices = []
+    values = []
+    for entries in assembled:
+        for column in sorted(entries):
+            column_indices.append(column)
+            values.append(entries[column])
+        row_offsets.append(len(column_indices))
+    return (
+        coordinates.astype(np.float32),
+        tetrahedra,
         np.asarray(row_offsets, dtype=np.int32),
         np.asarray(column_indices, dtype=np.int32),
         np.asarray(values, dtype=np.float32),
@@ -1169,6 +1326,299 @@ def _cuda_spmv_case(order, args):
     return result
 
 
+def _cuda_spmv_krylov_case(order, args):
+    """Compare cuSPARSE and a Taichi CSR kernel inside the same CG recurrence."""
+
+    _init_cuda()
+    if not ti.hardware.linalg.cusparse_is_available():
+        result = _provenance("cuda-spmv-krylov", order)
+        result.update({"status": "skipped", "reason": "cusparse_unavailable"})
+        ti.reset()
+        return result
+    side = args.krylov_grid
+    iterations = args.krylov_iterations
+    n = side * side
+    row_offsets_host, column_indices_host, values_host = _implicit_grid_csr(side, 0.20)
+    rhs_host = (
+        np.sin(np.arange(n, dtype=np.float32) * np.float32(0.017))
+        + np.cos(np.arange(n, dtype=np.float32) * np.float32(0.011))
+    ).astype(np.float32)
+    row_offsets = ti.ndarray(ti.i32, shape=n + 1)
+    column_indices = ti.ndarray(ti.i32, shape=column_indices_host.size)
+    values = ti.ndarray(ti.f32, shape=values_host.size)
+    rhs = ti.ndarray(ti.f32, shape=n)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    values.from_numpy(values_host)
+    rhs.from_numpy(rhs_host)
+    pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
+    matrix = pattern.matrix(values)
+    recording = ti.hardware.linalg.CusparseSpmvRecording(matrix, input="p", output="ap")
+
+    @ti.kernel
+    def clear_scalar(value: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        value[0] = 0.0
+
+    @ti.kernel
+    def initialize(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        r: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rr: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(n):
+            x[index] = 0.0
+            r[index] = source[index]
+            p[index] = source[index]
+            ti.atomic_add(rr[0], source[index] * source[index])
+
+    @ti.kernel
+    def taichi_csr_spmv(
+        rows: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        columns: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        coefficients: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for row in range(n):
+            total = 0.0
+            for entry in range(rows[row], rows[row + 1]):
+                total += coefficients[entry] * p[columns[entry]]
+            ap[row] = total
+
+    @ti.kernel
+    def dot(
+        left: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        right: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(n):
+            ti.atomic_add(output[0], left[index] * right[index])
+
+    @ti.kernel
+    def update_solution_residual(
+        x: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        r: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rr: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        pap: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        alpha = 0.0
+        if rr[0] > 1.0e-20 and ti.abs(pap[0]) > 1.0e-20:
+            alpha = rr[0] / pap[0]
+        for index in range(n):
+            x[index] += alpha * p[index]
+            r[index] -= alpha * ap[index]
+
+    @ti.kernel
+    def update_direction(
+        r: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        p: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rr: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rr_new: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        beta = 0.0
+        if rr[0] > 1.0e-20:
+            beta = rr_new[0] / rr[0]
+        for index in range(n):
+            p[index] = r[index] + beta * p[index]
+
+    @ti.kernel
+    def commit_residual_norm(
+        rr: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        rr_new: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        rr[0] = rr_new[0]
+
+    scalar_args = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
+        for name in ("rr", "pap", "rr_new")
+    }
+    vector_args = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
+        for name in ("rhs", "x", "r", "p", "ap")
+    }
+    row_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "row_offsets", ti.i32, ndim=1)
+    column_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "column_indices", ti.i32, ndim=1
+    )
+    values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1)
+
+    def build_solver_graph(use_hardware):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(clear_scalar, scalar_args["rr"])
+        builder.dispatch(clear_scalar, scalar_args["rr_new"])
+        builder.dispatch(clear_scalar, scalar_args["pap"])
+        builder.dispatch(
+            initialize,
+            vector_args["rhs"],
+            vector_args["x"],
+            vector_args["r"],
+            vector_args["p"],
+            scalar_args["rr"],
+        )
+        for _ in range(iterations):
+            if use_hardware:
+                builder.append_native(recording, admission="explicit")
+            else:
+                builder.dispatch(
+                    taichi_csr_spmv,
+                    row_arg,
+                    column_arg,
+                    values_arg,
+                    vector_args["p"],
+                    vector_args["ap"],
+                )
+            builder.dispatch(clear_scalar, scalar_args["pap"])
+            builder.dispatch(
+                dot,
+                vector_args["p"],
+                vector_args["ap"],
+                scalar_args["pap"],
+            )
+            builder.dispatch(
+                update_solution_residual,
+                vector_args["x"],
+                vector_args["r"],
+                vector_args["p"],
+                vector_args["ap"],
+                scalar_args["rr"],
+                scalar_args["pap"],
+            )
+            builder.dispatch(clear_scalar, scalar_args["rr_new"])
+            builder.dispatch(
+                dot,
+                vector_args["r"],
+                vector_args["r"],
+                scalar_args["rr_new"],
+            )
+            builder.dispatch(
+                update_direction,
+                vector_args["r"],
+                vector_args["p"],
+                scalar_args["rr"],
+                scalar_args["rr_new"],
+            )
+            builder.dispatch(
+                commit_residual_norm,
+                scalar_args["rr"],
+                scalar_args["rr_new"],
+            )
+        return builder.compile()
+
+    hardware_graph = build_solver_graph(True)
+    baseline_graph = build_solver_graph(False)
+
+    def make_bindings():
+        bindings = {
+            "rhs": rhs,
+            "x": ti.ndarray(ti.f32, shape=n),
+            "r": ti.ndarray(ti.f32, shape=n),
+            "p": ti.ndarray(ti.f32, shape=n),
+            "ap": ti.ndarray(ti.f32, shape=n),
+            "rr": ti.ndarray(ti.f32, shape=1),
+            "pap": ti.ndarray(ti.f32, shape=1),
+            "rr_new": ti.ndarray(ti.f32, shape=1),
+        }
+        return bindings
+
+    hardware_bindings = make_bindings()
+    baseline_bindings = make_bindings()
+    baseline_bindings.update(
+        {
+            "row_offsets": row_offsets,
+            "column_indices": column_indices,
+            "values": values,
+        }
+    )
+
+    def hardware():
+        hardware_graph.run(hardware_bindings)
+        ti.sync()
+
+    def baseline():
+        baseline_graph.run(baseline_bindings)
+        ti.sync()
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware()
+    baseline()
+    hardware_solution = hardware_bindings["x"].to_numpy()
+    baseline_solution = baseline_bindings["x"].to_numpy()
+    hardware_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        values_host,
+        hardware_solution,
+        rhs_host,
+    )
+    baseline_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        values_host,
+        baseline_solution,
+        rhs_host,
+    )
+    cross_solution_error = _error(hardware_solution, baseline_solution)
+    resolved = _resolved_operation("linalg.spmv.cusparse_explicit")
+    provider_stats = matrix._debug_runtime_stats()
+    passed = (
+        hardware_residual[1] <= 5e-4
+        and baseline_residual[1] <= 5e-4
+        and cross_solution_error[1] <= 1e-3
+        and resolved["discovery"] == "available"
+        and resolved["selection"] in ("eligible", "selected")
+        and provider_stats["operations"]["spmv_plan_builds"] == 1
+    )
+    result = _provenance("cuda-spmv-krylov", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "equation": "fixed-iteration conjugate gradient for I + 0.2 * graph_laplacian",
+                "grid": (side, side),
+                "rows": n,
+                "nnz": int(values_host.size),
+                "iterations": iterations,
+                "timed_scope": "initialization+fixed_CG_recurrence+SpMV+single_final_synchronization",
+                "hardware": "root Graph with explicit cuSPARSE SpMV nodes",
+                "baseline": "root Graph with hand-written Taichi CSR SpMV kernel",
+                "host_readback_included": False,
+                "auto_admission_training_case": False,
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_residual_max_abs": hardware_residual[0],
+                "hardware_residual_max_rel": hardware_residual[1],
+                "baseline_residual_max_abs": baseline_residual[0],
+                "baseline_residual_max_rel": baseline_residual[1],
+                "cross_solution_max_abs": cross_solution_error[0],
+                "cross_solution_max_rel": cross_solution_error[1],
+            },
+            "route": {
+                "provider": resolved,
+                "hardware_action": "linalg.spmv.cusparse_explicit",
+                "graph_integration": resolved["graph_integration"],
+                "baseline_action": "taichi_kernel_csr_spmv",
+            },
+            "provider_statistics": provider_stats,
+        }
+    )
+    ti.reset()
+    return result
+
+
 def _cuda_cudss_solve_case(order, args):
     _init_cuda()
     library_path = args.cudss_library or os.environ.get("TI_CUDSS_TEST_LIBRARY")
@@ -1591,6 +2041,260 @@ def _cuda_cudss_refactor_solve_case(order, args):
                 "plan_open": open_report,
                 "plan_closed": closed_report,
                 "baseline_matrix": baseline_matrix._debug_runtime_stats(),
+            },
+        }
+    )
+    ti.reset()
+    return result
+
+
+def _cuda_cudss_tet_fem_case(order, args):
+    """Exercise cuDSS refactorization on an assembled 3D irregular tet solid."""
+
+    _init_cuda()
+    library_path = args.cudss_library or os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        result = _provenance("cuda-cudss-tet-fem", order)
+        result.update(
+            {
+                "status": "skipped",
+                "reason": "user_managed_cudss_library_not_configured",
+            }
+        )
+        ti.reset()
+        return result
+    if not ti.hardware.linalg.cudss_is_available(library_path=library_path):
+        result = _provenance("cuda-cudss-tet-fem", order)
+        result.update({"status": "skipped", "reason": "cudss_unavailable"})
+        ti.reset()
+        return result
+
+    grid = args.fem_grid
+    low_young = np.float32(2.0)
+    high_young = np.float32(5.0)
+    phase = np.float32(0.35)
+    coordinates, tetrahedra, row_offsets_host, column_indices_host, low_values_host = (
+        _irregular_tet_fem_csr(grid, float(low_young))
+    )
+    (
+        high_coordinates,
+        high_tetrahedra,
+        high_rows,
+        high_columns,
+        high_values_host,
+    ) = _irregular_tet_fem_csr(grid, float(high_young))
+    if not (
+        np.array_equal(coordinates, high_coordinates)
+        and np.array_equal(tetrahedra, high_tetrahedra)
+        and np.array_equal(row_offsets_host, high_rows)
+        and np.array_equal(column_indices_host, high_columns)
+    ):
+        raise RuntimeError("tet FEM material update changed geometry or CSR topology")
+    current_values_host = (
+        (np.float32(1.0) - phase) * low_values_host + phase * high_values_host
+    ).astype(np.float32)
+    n = coordinates.shape[0] * 3
+    rhs_host = (
+        np.sin(np.arange(n, dtype=np.float32) * np.float32(0.019))
+        + np.float32(0.25) * np.cos(np.arange(n, dtype=np.float32) * np.float32(0.007))
+    ).astype(np.float32)
+
+    row_offsets = ti.ndarray(ti.i32, shape=n + 1)
+    column_indices = ti.ndarray(ti.i32, shape=column_indices_host.size)
+    low_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    high_values = ti.ndarray(ti.f32, shape=high_values_host.size)
+    hardware_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    baseline_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    rhs = ti.ndarray(ti.f32, shape=n)
+    hardware_solution = ti.ndarray(ti.f32, shape=n)
+    baseline_solution = ti.ndarray(ti.f32, shape=n)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    low_values.from_numpy(low_values_host)
+    high_values.from_numpy(high_values_host)
+    hardware_values.from_numpy(low_values_host)
+    baseline_values.from_numpy(low_values_host)
+    rhs.from_numpy(rhs_host)
+    pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
+    hardware_matrix = pattern.matrix(hardware_values)
+    baseline_matrix = pattern.matrix(baseline_values)
+
+    @ti.kernel
+    def update_coefficients(
+        low: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        high: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in output:
+            output[index] = (1.0 - phase) * low[index] + phase * high[index]
+
+    memory_before_plans = _runtime_memory_snapshot()
+    plan = ti.hardware.linalg.CudssPlan(
+        hardware_matrix,
+        matrix_type="spd",
+        matrix_view="full",
+        library_path=library_path,
+    )
+    plan.compute()
+    baseline_solver = ti.linalg.SparseSolver(
+        dtype=ti.f32,
+        solver_type="LLT",
+        ordering="AMD",
+        provider="cusolver_sp",
+    )
+    baseline_solver.analyze_pattern(baseline_matrix)
+    baseline_solver.factorize(baseline_matrix)
+    ti.sync()
+
+    low_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "low_values", ti.f32, ndim=1)
+    high_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "high_values", ti.f32, ndim=1)
+    values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "matrix_values", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(update_coefficients, low_arg, high_arg, values_arg)
+    recording = plan.record_refactor_solve()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()
+    bindings = {
+        "low_values": low_values,
+        "high_values": high_values,
+        "matrix_values": hardware_values,
+        "rhs": rhs,
+        "solution": hardware_solution,
+    }
+    program = ti.lang.impl.get_runtime().prog
+
+    def hardware():
+        graph.run(bindings)
+        ti.sync()
+
+    def baseline():
+        update_coefficients(low_values, high_values, baseline_values)
+        baseline_matrix.update_values(baseline_values)
+        baseline_solver.factorize(baseline_matrix)
+        baseline_solver.solver.solve_rf(
+            program,
+            baseline_matrix.matrix,
+            rhs.arr,
+            baseline_solution.arr,
+        )
+        ti.sync()
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware()
+    baseline()
+    hardware_values_host = hardware_solution.to_numpy()
+    baseline_values_host = baseline_solution.to_numpy()
+    hardware_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        current_values_host,
+        hardware_values_host,
+        rhs_host,
+    )
+    baseline_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        current_values_host,
+        baseline_values_host,
+        rhs_host,
+    )
+    cross_solution_error = _error(hardware_values_host, baseline_values_host)
+    resolved = _resolved_operation("linalg.refactor_solve.cudss")
+    provider_statistics = plan.statistics()
+    memory_after_timing = _runtime_memory_snapshot()
+    open_report = plan.memory_report().to_dict()
+    plan.close()
+    ti.sync()
+    memory_after_close = _runtime_memory_snapshot()
+    closed_report = plan.memory_report().to_dict()
+    tet_points = coordinates[tetrahedra].astype(np.float64)
+    tet_volumes = (
+        np.abs(
+            np.linalg.det(
+                np.stack(
+                    (
+                        tet_points[:, 1] - tet_points[:, 0],
+                        tet_points[:, 2] - tet_points[:, 0],
+                        tet_points[:, 3] - tet_points[:, 0],
+                    ),
+                    axis=2,
+                )
+            )
+        )
+        / 6.0
+    )
+    passed = (
+        hardware_residual[1] <= 5e-4
+        and baseline_residual[1] <= 5e-4
+        and cross_solution_error[1] <= 5e-4
+        and resolved["discovery"] == "available"
+        and resolved["selection"] in ("eligible", "selected")
+        and baseline_solver.selected_provider == "cusolver_sp"
+        and provider_statistics["refactor_solve_attempts"] > 0
+        and provider_statistics["refactor_solve_failures"] == 0
+        and provider_statistics["refactor_solve_inflight"] == 0
+        and memory_after_close["inflight_resources"] == 0
+        and closed_report["lifecycle_state"] == "closed"
+    )
+    result = _provenance("cuda-cudss-tet-fem", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "equation": "3D linear-tet implicit elasticity step",
+                "mesh": "deterministically perturbed structured volume",
+                "grid": (grid, grid, grid),
+                "nodes": int(coordinates.shape[0]),
+                "tetrahedra": int(tetrahedra.shape[0]),
+                "degrees_of_freedom": n,
+                "nnz": int(low_values_host.size),
+                "minimum_tet_volume": float(tet_volumes.min()),
+                "maximum_tet_volume": float(tet_volumes.max()),
+                "poisson_ratio": 0.30,
+                "mass_shift": 0.05,
+                "low_young_modulus": float(low_young),
+                "high_young_modulus": float(high_young),
+                "blend_phase": float(phase),
+                "fixed_topology": True,
+                "timed_scope": "device_material_update+numeric_refactorization+solve+synchronization",
+                "symbolic_analysis_included": False,
+                "hardware": "root Graph transactional cuDSS refactorize+solve",
+                "baseline": "embedded cuSOLVERSp numeric refactorize+solve",
+                "auto_admission_training_case": False,
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_residual_max_abs": hardware_residual[0],
+                "hardware_residual_max_rel": hardware_residual[1],
+                "baseline_residual_max_abs": baseline_residual[0],
+                "baseline_residual_max_rel": baseline_residual[1],
+                "cross_solution_max_abs": cross_solution_error[0],
+                "cross_solution_max_rel": cross_solution_error[1],
+            },
+            "route": {
+                "provider": resolved,
+                "hardware_action": "linalg.refactor_solve.cudss",
+                "baseline_provider": baseline_solver.selected_provider,
+                "graph_integration": resolved["graph_integration"],
+                "replay_mode": recording.replay_mode,
+                "stream_binding": recording.stream_binding,
+            },
+            "provider_statistics": provider_statistics,
+            "memory": {
+                "runtime_before_plans": memory_before_plans,
+                "runtime_after_timing": memory_after_timing,
+                "runtime_after_close": memory_after_close,
+                "plan_open": open_report,
+                "plan_closed": closed_report,
             },
         }
     )
@@ -2041,6 +2745,271 @@ def _vulkan_image_copy_case(order, args):
     return result
 
 
+def _vulkan_offscreen_simulation_case(order, args):
+    """Consume the low-level graphics action in a simulation-to-image graph."""
+
+    _init_vulkan()
+    if not ti.hardware.graphics.is_available():
+        result = _provenance("vulkan-offscreen-simulation", order)
+        result.update({"status": "skipped", "reason": "graphics_unavailable"})
+        ti.reset()
+        return result
+    size = args.offscreen_size
+    tiles = args.offscreen_tiles
+    triangle_count = tiles * tiles
+    shader_root = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "cpp_examples"
+        / "rhi_examples"
+        / "shaders"
+    )
+
+    def spirv_header(name):
+        words = [
+            int(value, 16)
+            for value in re.findall(r"0x[0-9a-fA-F]+", (shader_root / name).read_text())
+        ]
+        return struct.pack(f"<{len(words)}I", *words)
+
+    pipeline = ti.hardware.graphics.VulkanGraphicsPipeline(
+        spirv_header("2_triangle.vert.spv.h"),
+        spirv_header("2_triangle.frag.spv.h"),
+        vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 20),),
+        vertex_attributes=(
+            ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+            ti.hardware.graphics.VertexAttribute(1, 0, ti.Format.rgb32f, 8),
+        ),
+    )
+    hardware_vertices = ti.ndarray(ti.f32, shape=triangle_count * 15)
+    baseline_vertices = ti.ndarray(ti.f32, shape=triangle_count * 15)
+    hardware_phase = ti.ndarray(ti.f32, shape=1)
+    baseline_phase = ti.ndarray(ti.f32, shape=1)
+    baseline_image = ti.ndarray(ti.f32, shape=size * size * 3)
+    target = ti.Texture(ti.Format.rgba8, (size, size))
+
+    @ti.kernel
+    def advance_simulation(
+        phase: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        vertices: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        phase[0] += 0.017
+        radius = (0.72 / tiles) * (0.90 + 0.10 * ti.sin(phase[0]))
+        for triangle in range(triangle_count):
+            tile_x = triangle % tiles
+            tile_y = triangle // tiles
+            center_x = -1.0 + (ti.cast(tile_x, ti.f32) + 0.5) * (2.0 / tiles)
+            center_y = -1.0 + (ti.cast(tile_y, ti.f32) + 0.5) * (2.0 / tiles)
+            base = triangle * 15
+            vertices[base] = center_x
+            vertices[base + 1] = center_y + radius
+            vertices[base + 2] = 1.0
+            vertices[base + 3] = 0.0
+            vertices[base + 4] = 0.0
+            vertices[base + 5] = center_x + radius
+            vertices[base + 6] = center_y - radius
+            vertices[base + 7] = 0.0
+            vertices[base + 8] = 1.0
+            vertices[base + 9] = 0.0
+            vertices[base + 10] = center_x - radius
+            vertices[base + 11] = center_y - radius
+            vertices[base + 12] = 0.0
+            vertices[base + 13] = 0.0
+            vertices[base + 14] = 1.0
+
+    @ti.kernel
+    def clear_software_image(image: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for index in image:
+            image[index] = 0.0
+
+    @ti.kernel
+    def software_rasterize(
+        vertices: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        image: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for triangle in range(triangle_count):
+            triangle_base = triangle * 15
+            x0, y0 = vertices[triangle_base], vertices[triangle_base + 1]
+            x1, y1 = vertices[triangle_base + 5], vertices[triangle_base + 6]
+            x2, y2 = vertices[triangle_base + 10], vertices[triangle_base + 11]
+            denominator = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+            minimum_x = ti.max(
+                0,
+                ti.cast(
+                    ti.floor((ti.min(x0, ti.min(x1, x2)) * 0.5 + 0.5) * size),
+                    ti.i32,
+                ),
+            )
+            maximum_x = ti.min(
+                size - 1,
+                ti.cast(
+                    ti.floor((ti.max(x0, ti.max(x1, x2)) * 0.5 + 0.5) * size),
+                    ti.i32,
+                ),
+            )
+            minimum_y = ti.max(
+                0,
+                ti.cast(
+                    ti.floor((ti.min(y0, ti.min(y1, y2)) * 0.5 + 0.5) * size),
+                    ti.i32,
+                ),
+            )
+            maximum_y = ti.min(
+                size - 1,
+                ti.cast(
+                    ti.floor((ti.max(y0, ti.max(y1, y2)) * 0.5 + 0.5) * size),
+                    ti.i32,
+                ),
+            )
+            for px, py in ti.ndrange(
+                (minimum_x, maximum_x + 1), (minimum_y, maximum_y + 1)
+            ):
+                x = 2.0 * (ti.cast(px, ti.f32) + 0.5) / size - 1.0
+                y = 2.0 * (ti.cast(py, ti.f32) + 0.5) / size - 1.0
+                w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / denominator
+                w1 = ((y2 - y0) * (x - x2) + (x0 - x2) * (y - y2)) / denominator
+                w2 = 1.0 - w0 - w1
+                if w0 >= 0.0 and w1 >= 0.0 and w2 >= 0.0:
+                    base = (py * size + px) * 3
+                    image[base] = w0
+                    image[base + 1] = w1
+                    image[base + 2] = w2
+
+    phase_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "phase", ti.f32, ndim=1)
+    vertices_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vertices", ti.f32, ndim=1)
+    image_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "image", ti.f32, ndim=1)
+    draw = pipeline.pass_draw(
+        ti.hardware.graphics.Draw(triangle_count * 3),
+        vertex_buffers={0: "vertices"},
+    )
+    recording = pipeline.record_pass(
+        (draw,),
+        color="target",
+        clear_color=(0.0, 0.0, 0.0, 1.0),
+    )
+    hardware_builder = ti.graph.GraphBuilder()
+    hardware_builder.dispatch(advance_simulation, phase_arg, vertices_arg)
+    hardware_builder.append_native(recording, admission="explicit")
+    hardware_graph = hardware_builder.compile()
+    baseline_builder = ti.graph.GraphBuilder()
+    baseline_builder.dispatch(advance_simulation, phase_arg, vertices_arg)
+    baseline_builder.dispatch(clear_software_image, image_arg)
+    baseline_builder.dispatch(software_rasterize, vertices_arg, image_arg)
+    baseline_graph = baseline_builder.compile()
+    hardware_bindings = {
+        "phase": hardware_phase,
+        "vertices": hardware_vertices,
+        "target": target,
+    }
+    baseline_bindings = {
+        "phase": baseline_phase,
+        "vertices": baseline_vertices,
+        "image": baseline_image,
+    }
+
+    def hardware():
+        hardware_graph.run(hardware_bindings)
+        ti.sync()
+
+    def baseline():
+        baseline_graph.run(baseline_bindings)
+        ti.sync()
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_phase.from_numpy(np.zeros(1, dtype=np.float32))
+    baseline_phase.from_numpy(np.zeros(1, dtype=np.float32))
+    hardware()
+    baseline()
+    from taichi_forge._kernels import (  # pylint: disable=C0415
+        save_texture_to_numpy,
+    )
+
+    hardware_image = np.zeros((size, size, 3), dtype=np.uint8)
+    save_texture_to_numpy(target, hardware_image)
+    hardware_image = np.rot90(hardware_image, 3)
+    baseline_image_host = np.clip(
+        baseline_image.to_numpy().reshape(size, size, 3), 0.0, 1.0
+    )
+    hardware_normalized = hardware_image.astype(np.float32) / 255.0
+    hardware_mask = np.max(hardware_image, axis=2) > 8
+    baseline_mask = np.max(baseline_image_host, axis=2) > (8.0 / 255.0)
+    coverage_error = abs(int(hardware_mask.sum()) - int(baseline_mask.sum())) / max(
+        1, int(baseline_mask.sum())
+    )
+    mean_color_error = float(
+        np.max(
+            np.abs(
+                hardware_normalized.mean(axis=(0, 1))
+                - baseline_image_host.mean(axis=(0, 1))
+            )
+        )
+    )
+    resolved = _resolved_operation("raster.draw.vulkan")
+    memory_open = pipeline.memory_report().to_dict()
+    pipeline.close()
+    ti.sync()
+    memory_closed = pipeline.memory_report().to_dict()
+    passed = (
+        hardware_mask.any()
+        and baseline_mask.any()
+        and coverage_error <= 0.15
+        and mean_color_error <= 0.08
+        and resolved["discovery"] == "available"
+        and resolved["selection"] in ("eligible", "selected")
+        and memory_closed["lifecycle_state"] == "closed"
+    )
+    result = _provenance("vulkan-offscreen-simulation", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "pipeline": "simulation_buffer_update->graphics_pass->offscreen_image",
+                "resolution": (size, size),
+                "draws_per_frame": 1,
+                "triangle_tiles": (tiles, tiles),
+                "triangles_per_frame": triangle_count,
+                "timed_scope": "simulation_kernel+offscreen_raster+single_final_synchronization",
+                "readback_included": False,
+                "hardware": "Forge low-level Vulkan graphics pass recording",
+                "baseline": "test-only Taichi software raster oracle",
+                "forge_renderer_implemented": False,
+                "auto_admission_training_case": False,
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_covered_pixels": int(hardware_mask.sum()),
+                "baseline_covered_pixels": int(baseline_mask.sum()),
+                "relative_coverage_error": coverage_error,
+                "whole_image_mean_color_max_abs": mean_color_error,
+                "coverage_tolerance": 0.15,
+                "mean_color_tolerance": 0.08,
+            },
+            "route": {
+                "provider": resolved,
+                "hardware_action": "raster.draw.vulkan",
+                "graph_integration": resolved["graph_integration"],
+                "replay_mode": recording.replay_mode,
+                "stream_binding": recording.stream_binding,
+                "baseline_action": "test_only_taichi_software_raster_kernel",
+            },
+            "memory": {
+                "pipeline_open": memory_open,
+                "pipeline_closed": memory_closed,
+            },
+        }
+    )
+    ti.reset()
+    return result
+
+
 def _vulkan_texture_stencil_case(order, args):
     _init_vulkan()
     size = args.texture_size
@@ -2168,10 +3137,13 @@ _CASE_RUNNERS = {
     "cuda-gemm": _cuda_gemm_case,
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
+    "cuda-spmv-krylov": _cuda_spmv_krylov_case,
     "cuda-cudss-solve": _cuda_cudss_solve_case,
     "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
+    "cuda-cudss-tet-fem": _cuda_cudss_tet_fem_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-image-copy": _vulkan_image_copy_case,
+    "vulkan-offscreen-simulation": _vulkan_offscreen_simulation_case,
     "vulkan-texture-fetch": _vulkan_texture_fetch_case,
     "vulkan-texture-sample": _vulkan_texture_sample_case,
     "vulkan-texture-stencil": _vulkan_texture_stencil_case,
@@ -2542,6 +3514,12 @@ def _parent(args):
                     str(args.cudss_grid),
                     "--cudss-expected-reuse",
                     str(args.cudss_expected_reuse),
+                    "--fem-grid",
+                    str(args.fem_grid),
+                    "--krylov-grid",
+                    str(args.krylov_grid),
+                    "--krylov-iterations",
+                    str(args.krylov_iterations),
                     "--ray-grid",
                     str(args.ray_grid),
                     "--ray-query-side",
@@ -2550,6 +3528,10 @@ def _parent(args):
                     str(args.texture_size),
                     "--texture-stencil-radius",
                     str(args.texture_stencil_radius),
+                    "--offscreen-size",
+                    str(args.offscreen_size),
+                    "--offscreen-tiles",
+                    str(args.offscreen_tiles),
                 ]
                 if args.cudss_library:
                     command.extend(("--cudss-library", args.cudss_library))
@@ -2678,6 +3660,11 @@ def _parent(args):
                 "poisson_length": args.poisson_length,
                 "poisson_batch": args.poisson_batch,
                 "implicit_grid": args.cudss_grid,
+                "tet_fem_grid": args.fem_grid,
+                "krylov_grid": args.krylov_grid,
+                "krylov_iterations": args.krylov_iterations,
+                "offscreen_size": args.offscreen_size,
+                "offscreen_tiles": args.offscreen_tiles,
             },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
@@ -2729,12 +3716,17 @@ def _parse_args():
     parser.add_argument("--spmv-expected-reuse", type=int, default=100)
     parser.add_argument("--cudss-grid", type=int, default=64)
     parser.add_argument("--cudss-expected-reuse", type=int, default=100)
+    parser.add_argument("--fem-grid", type=int, default=7)
+    parser.add_argument("--krylov-grid", type=int, default=256)
+    parser.add_argument("--krylov-iterations", type=int, default=48)
     parser.add_argument("--cudss-library")
     parser.add_argument("--auto-admission-margin", type=float, default=0.05)
     parser.add_argument("--ray-grid", type=int, default=128)
     parser.add_argument("--ray-query-side", type=int, default=128)
     parser.add_argument("--texture-size", type=int, default=1024)
     parser.add_argument("--texture-stencil-radius", type=int, default=2)
+    parser.add_argument("--offscreen-size", type=int, default=256)
+    parser.add_argument("--offscreen-tiles", type=int, default=32)
     args = parser.parse_args()
     if args.worker:
         if not args.case or not args.order or not args.worker_output:
@@ -2761,12 +3753,18 @@ def _parse_args():
         or args.spmv_expected_reuse <= 0
         or args.cudss_grid < 2
         or args.cudss_expected_reuse <= 0
+        or args.fem_grid < 3
+        or args.krylov_grid < 2
+        or args.krylov_iterations <= 0
         or not 0.05 <= args.auto_admission_margin < 1.0
         or args.ray_grid < 2
         or args.ray_query_side <= 0
         or args.texture_size <= 0
         or args.texture_stencil_radius <= 0
         or 2 * args.texture_stencil_radius >= args.texture_size
+        or args.offscreen_size < 32
+        or args.offscreen_tiles <= 0
+        or 2 * args.offscreen_tiles > args.offscreen_size
     ):
         parser.error("invalid qualification bounds")
     return args
