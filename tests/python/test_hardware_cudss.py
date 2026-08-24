@@ -22,7 +22,6 @@ def test_cudss_library_discovery_is_user_managed_and_deterministic(
     assert _cudss.resolve_cudss_library_path(provider_dir) == str(library.resolve())
     monkeypatch.setenv("TI_CUDSS_LIBRARY_PATH", str(library))
     assert _cudss.resolve_cudss_library_path() == str(library.resolve())
-
     monkeypatch.delenv("TI_CUDSS_LIBRARY_PATH")
     monkeypatch.setattr(
         _cudss, "_nvidia_namespace_roots", lambda: (tmp_path / "nvidia",)
@@ -30,14 +29,39 @@ def test_cudss_library_discovery_is_user_managed_and_deterministic(
     assert _cudss.resolve_cudss_library_path() == str(library.resolve())
 
 
+def test_cudss_library_discovery_matches_the_cuda_driver_family(tmp_path, monkeypatch):
+    name = "cudss64_0.dll" if os.name == "nt" else "libcudss.so.0"
+    cu13 = tmp_path / "nvidia" / "cu13" / "bin" / name
+    cu12 = tmp_path / "nvidia" / "cudss" / "bin" / name
+    cu13.parent.mkdir(parents=True)
+    cu12.parent.mkdir(parents=True)
+    cu13.write_bytes(b"cu13")
+    cu12.write_bytes(b"cu12")
+    monkeypatch.setattr(
+        _cudss, "_nvidia_namespace_roots", lambda: (tmp_path / "nvidia",)
+    )
+
+    assert _cudss.resolve_cudss_library_path(cuda_driver_api_version=13000) == str(
+        cu13.resolve()
+    )
+    assert _cudss.resolve_cudss_library_path(cuda_driver_api_version=12000) == str(
+        cu12.resolve()
+    )
+    assert _cudss.resolve_cudss_library_path(cuda_driver_api_version=11080) == ""
+
+
 @test_utils.test(arch=ti.cpu)
 def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
     descriptor = ti.hardware.capability("linalg.solve.cudss")
     assert descriptor.activation_mode == "explicit_hardware_api"
-    assert descriptor.scopes == ("python",)
-    assert descriptor.graph_support == "unsupported"
+    assert descriptor.scopes == ("python", "graph")
+    assert descriptor.graph_support == "recordable"
     assert descriptor.dependency_tier == "lazy_external"
     assert descriptor.dependency_name == "cuDSS"
+    automatic = ti.hardware.capability("linalg.solve.cudss_auto")
+    assert automatic.activation_mode == "domain_api_auto_provider"
+    assert automatic.scopes == ("python",)
+    assert automatic.graph_support == "unsupported"
 
     with pytest.raises(TypeError, match="must be a Taichi SparseMatrix"):
         ti.hardware.linalg.CudssPlan(object())
@@ -64,9 +88,8 @@ def test_cudss_staged_solve_and_refactorization():
     column_indices.from_numpy(np.array([0, 1, 0, 1, 2, 1, 2, 3, 2, 3], dtype=np.int32))
     initial_values = np.array([4, -1, -1, 4, -1, -1, 4, -1, -1, 3], dtype=np.float32)
     values.from_numpy(initial_values)
-    matrix = ti.linalg.SparsePattern.csr(4, 4, row_offsets, column_indices).matrix(
-        values
-    )
+    pattern = ti.linalg.SparsePattern.csr(4, 4, row_offsets, column_indices)
+    matrix = pattern.matrix(values)
     rhs_values = np.array([1, 2, 3, 4], dtype=np.float32)
     rhs = ti.ndarray(ti.f32, shape=4)
     solution = ti.ndarray(ti.f32, shape=4)
@@ -105,9 +128,63 @@ def test_cudss_staged_solve_and_refactorization():
             dtype=np.float32,
         )
         np.testing.assert_allclose(second_matrix @ second, rhs_values, rtol=1e-5)
+
+        solution.fill(0)
+        graph = ti.graph.GraphBuilder()
+        recording = plan.recording()
+        assert recording.replay_mode == "rerecord"
+        assert recording.workspace_ownership == "provider_generation"
+        graph.append_native(recording, admission="auto")
+        compiled = graph.compile()
+        compiled.run({"rhs": rhs, "solution": solution})
+        ti.sync()
+        np.testing.assert_allclose(
+            second_matrix @ solution.to_numpy(), rhs_values, rtol=1e-5
+        )
         report = plan.memory_report()
         assert report.known_resident_requested_bytes == 100
         assert not report.resident_requested_bytes_complete
+
+    with pytest.raises(RuntimeError, match="plan is closed"):
+        compiled.run({"rhs": rhs, "solution": solution})
+
+    replacement_values = ti.ndarray(ti.f32, shape=10)
+    replacement_values.from_numpy(initial_values)
+    replacement_matrix = pattern.matrix(replacement_values)
+    solver = ti.linalg.SparseSolver(
+        dtype=ti.f32,
+        solver_type="LLT",
+        provider="auto",
+        library_path=library_path,
+    )
+    solver.analyze_pattern(matrix)
+    assert solver.selected_provider == "cudss"
+    assert solver.provider_status()["fallback_reason"] is None
+    solver.factorize(replacement_matrix)
+    automatic_solution = solver.solve(rhs)
+    ti.sync()
+    np.testing.assert_allclose(
+        first_matrix @ automatic_solution.to_numpy(), rhs_values, rtol=1e-5
+    )
+
+    replacement_values_v2 = ti.ndarray(ti.f32, shape=10)
+    replacement_values_v2.from_numpy(replacement)
+    replacement_matrix.update_values(replacement_values_v2)
+    with pytest.raises(RuntimeError, match="factorization is stale"):
+        solver.solve(rhs)
+
+    legacy = ti.linalg.SparseSolver(
+        dtype=ti.f32, solver_type="LLT", provider="cusolver_sp"
+    )
+    legacy.analyze_pattern(replacement_matrix)
+    assert legacy.selected_provider == "cusolver_sp"
+    assert legacy.provider_status()["fallback_reason"] == "explicit_cusolver_sp"
+    legacy.factorize(replacement_matrix)
+    legacy_solution = legacy.solve(rhs)
+    ti.sync()
+    np.testing.assert_allclose(
+        second_matrix @ legacy_solution.to_numpy(), rhs_values, rtol=5e-3
+    )
 
     status = ti.hardware.telemetry().providers["cudss"]
     assert status["library_loaded"]

@@ -122,19 +122,36 @@ class CudaCudssPlan {
     }
   }
 
-  void analyze() {
+  void analyze(const CuSparseMatrix &matrix) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    TI_ERROR_IF(static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
+                    matrix.num_rows() != matrix.num_cols() ||
+                    matrix.get_data_type() != PrimitiveType::f32,
+                "CUDA cuDSS analyze received a matrix that does not match "
+                "the plan shape or dtype.");
     auto &driver = CUDSSDriver::get_instance();
     require_cudss_success(
         driver.execute.call(context_, kCudssPhaseAnalysis, config_, data_,
                             matrix_, nullptr, nullptr),
         "analysis");
+    analyzed_csr_row_ptr_.resize(rows_ + 1);
+    analyzed_csr_col_ind_.resize(matrix.get_nnz());
+    CUDADriver::get_instance().memcpy_device_to_host(
+        analyzed_csr_row_ptr_.data(), matrix.get_row_ptr(),
+        sizeof(int) * analyzed_csr_row_ptr_.size());
+    CUDADriver::get_instance().memcpy_device_to_host(
+        analyzed_csr_col_ind_.data(), matrix.get_col_ind(),
+        sizeof(int) * analyzed_csr_col_ind_.size());
+    const auto stats = matrix.debug_runtime_statistics();
+    analyzed_matrix_id_ = matrix.matrix_id();
+    analyzed_pattern_version_ = matrix.pattern_version();
+    analyzed_shared_pattern_id_ = stats.shared_pattern_id;
     analyzed_ = true;
     factorized_ = false;
   }
 
-  void factorize(bool refactorize) {
+  void factorize(const CuSparseMatrix &matrix, bool refactorize) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
     TI_ERROR_IF(!analyzed_,
@@ -142,7 +159,14 @@ class CudaCudssPlan {
     TI_ERROR_IF(refactorize && !factorized_,
                 "CUDA cuDSS refactorization requires a prior successful "
                 "factorization.");
+    validate_analyzed_pattern(matrix);
     auto &driver = CUDSSDriver::get_instance();
+    require_cudss_success(
+        driver.matrix_set_csr_pointers.call(
+            matrix_, matrix.get_row_ptr(), nullptr, matrix.get_col_ind(),
+            matrix.get_val_ptr()),
+        "CSR descriptor rebinding");
+    factorized_ = false;
     require_cudss_success(
         driver.execute.call(context_,
                             refactorize ? kCudssPhaseRefactorization
@@ -150,13 +174,23 @@ class CudaCudssPlan {
                             config_, data_, matrix_, nullptr, nullptr),
         refactorize ? "refactorization" : "factorization");
     factorized_ = true;
+    factorized_matrix_id_ = matrix.matrix_id();
+    factorized_pattern_version_ = matrix.pattern_version();
+    factorized_numeric_version_ = matrix.numeric_version();
   }
 
-  void solve(void *rhs, void *solution) {
+  void solve(const CuSparseMatrix &matrix, void *rhs, void *solution) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
     TI_ERROR_IF(!factorized_,
                 "CUDA cuDSS solve requires a successful factorization.");
+    TI_ERROR_IF(
+        factorized_matrix_id_ != matrix.matrix_id() ||
+            factorized_pattern_version_ != matrix.pattern_version() ||
+            factorized_numeric_version_ != matrix.numeric_version(),
+        "CUDA cuDSS factorization is stale because the matrix or its "
+        "pattern/numeric version changed. Call factorize() again before "
+        "solve().");
     auto &driver = CUDSSDriver::get_instance();
     if (!rhs_) {
       try {
@@ -237,6 +271,34 @@ class CudaCudssPlan {
   }
 
  private:
+  void validate_analyzed_pattern(const CuSparseMatrix &matrix) const {
+    TI_ERROR_IF(static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
+                    matrix.num_rows() != matrix.num_cols() ||
+                    matrix.get_data_type() != PrimitiveType::f32 ||
+                    matrix.get_nnz() !=
+                        static_cast<int>(analyzed_csr_col_ind_.size()),
+                "CUDA cuDSS factorize() requires the same sparse pattern "
+                "that was passed to analyze(); shape, dtype, or nonzero "
+                "count changed.");
+    const auto stats = matrix.debug_runtime_statistics();
+    if ((matrix.matrix_id() == analyzed_matrix_id_ &&
+         matrix.pattern_version() == analyzed_pattern_version_) ||
+        (analyzed_shared_pattern_id_ != 0 &&
+         stats.shared_pattern_id == analyzed_shared_pattern_id_)) {
+      return;
+    }
+    std::vector<int> row_ptr(analyzed_csr_row_ptr_.size());
+    std::vector<int> col_ind(analyzed_csr_col_ind_.size());
+    CUDADriver::get_instance().memcpy_device_to_host(
+        row_ptr.data(), matrix.get_row_ptr(), sizeof(int) * row_ptr.size());
+    CUDADriver::get_instance().memcpy_device_to_host(
+        col_ind.data(), matrix.get_col_ind(), sizeof(int) * col_ind.size());
+    TI_ERROR_IF(row_ptr != analyzed_csr_row_ptr_ ||
+                    col_ind != analyzed_csr_col_ind_,
+                "CUDA cuDSS factorize() requires the same sparse pattern "
+                "that was passed to analyze(); a CSR index changed.");
+  }
+
   std::size_t rows_{0};
   void *context_{nullptr};
   void *config_{nullptr};
@@ -247,6 +309,14 @@ class CudaCudssPlan {
   bool analyzed_{false};
   bool factorized_{false};
   bool closed_{false};
+  std::vector<int> analyzed_csr_row_ptr_;
+  std::vector<int> analyzed_csr_col_ind_;
+  std::uint64_t analyzed_matrix_id_{0};
+  std::uint64_t analyzed_pattern_version_{0};
+  std::uint64_t analyzed_shared_pattern_id_{0};
+  std::uint64_t factorized_matrix_id_{0};
+  std::uint64_t factorized_pattern_version_{0};
+  std::uint64_t factorized_numeric_version_{0};
   mutable std::mutex mutex_;
 };
 
@@ -275,7 +345,7 @@ std::uint64_t Program::create_cuda_cudss_plan(
   return handle;
 }
 
-void Program::cuda_cudss_analyze(std::uint64_t handle) {
+void Program::cuda_cudss_analyze(std::uint64_t handle, SparseMatrix *matrix) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   std::shared_ptr<CudaCudssPlan> plan;
   {
@@ -288,11 +358,14 @@ void Program::cuda_cudss_analyze(std::uint64_t handle) {
   auto cuda_submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
-  plan->analyze();
+  const auto &csr = require_cudss_matrix(matrix, this);
+  plan->analyze(csr);
   mark_runtime_submission_pending();
 }
 
-void Program::cuda_cudss_factorize(std::uint64_t handle, bool refactorize) {
+void Program::cuda_cudss_factorize(std::uint64_t handle,
+                                   SparseMatrix *matrix,
+                                   bool refactorize) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   std::shared_ptr<CudaCudssPlan> plan;
   {
@@ -305,11 +378,13 @@ void Program::cuda_cudss_factorize(std::uint64_t handle, bool refactorize) {
   auto cuda_submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
-  plan->factorize(refactorize);
+  const auto &csr = require_cudss_matrix(matrix, this);
+  plan->factorize(csr, refactorize);
   mark_runtime_submission_pending();
 }
 
 std::size_t Program::cuda_cudss_solve(std::uint64_t handle,
+                                      SparseMatrix *matrix,
                                       Ndarray *rhs,
                                       Ndarray *solution) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
@@ -333,12 +408,13 @@ std::size_t Program::cuda_cudss_solve(std::uint64_t handle,
   auto cuda_submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
+  const auto &csr = require_cudss_matrix(matrix, this);
   auto *rhs_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(rhs));
   auto *solution_ptr =
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(solution));
   TI_ERROR_IF(!rhs_ptr || !solution_ptr,
               "CUDA cuDSS received a null dense-vector device pointer.");
-  plan->solve(rhs_ptr, solution_ptr);
+  plan->solve(csr, rhs_ptr, solution_ptr);
   pin_ndarray_launch_leases(acquire_ndarray_leases({rhs, solution}));
   mark_runtime_submission_pending();
   return 0;
@@ -414,15 +490,18 @@ std::uint64_t Program::create_cuda_cudss_plan(SparseMatrix *,
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 
-void Program::cuda_cudss_analyze(std::uint64_t) {
+void Program::cuda_cudss_analyze(std::uint64_t, SparseMatrix *) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 
-void Program::cuda_cudss_factorize(std::uint64_t, bool) {
+void Program::cuda_cudss_factorize(std::uint64_t, SparseMatrix *, bool) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 
-std::size_t Program::cuda_cudss_solve(std::uint64_t, Ndarray *, Ndarray *) {
+std::size_t Program::cuda_cudss_solve(std::uint64_t,
+                                      SparseMatrix *,
+                                      Ndarray *,
+                                      Ndarray *) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 

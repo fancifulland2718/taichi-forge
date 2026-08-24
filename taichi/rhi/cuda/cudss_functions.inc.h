@@ -38,6 +38,13 @@ PER_CUDSS_FUNCTION(matrix_set_values,
                    cudssMatrixSetValues,
                    void *,
                    const void *)
+PER_CUDSS_FUNCTION(matrix_set_csr_pointers,
+                   cudssMatrixSetCsrPointers,
+                   void *,
+                   const void *,
+                   const void *,
+                   const void *,
+                   const void *)
 PER_CUDSS_FUNCTION(execute,
                    cudssExecute,
                    void *,

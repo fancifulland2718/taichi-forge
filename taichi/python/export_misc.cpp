@@ -175,6 +175,9 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
   }
 
   const int cuda_major = cuda_driver.get_version_major();
+  const int cuda_driver_api_version =
+      cuda_major * 1000 + cuda_driver.get_version_minor() * 10;
+  native_facts["cuda_driver_api_version"] = cuda_driver_api_version;
   std::string library_name;
   std::vector<int> versions;
   std::string provider_abi;
@@ -218,15 +221,29 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
   } else {
     library_name = "cudss";
     provider_abi = "cudss-c-api-0.8";
+    native_facts["minimum_cuda_driver_api_version"] = 12000;
+    if (cuda_driver_api_version < 12000) {
+      result["discovery"] = "incompatible";
+      result["unavailable_reason"] =
+          "cuda_driver_api_version_below_12_0";
+      result["last_error"] =
+          "cuDSS requires a CUDA 12.0 or newer driver API";
+      result["failure_scope"] = "provider";
+      result["native_facts"] = std::move(native_facts);
+      return result;
+    }
     required_symbols = {"cudssGetProperty", "cudssCreate", "cudssDestroy",
                         "cudssSetStream", "cudssConfigCreate",
                         "cudssConfigDestroy", "cudssDataCreate",
                         "cudssDataDestroy", "cudssMatrixCreateCsr",
                         "cudssMatrixCreateDn", "cudssMatrixDestroy",
-                        "cudssMatrixSetValues", "cudssExecute"};
+                        "cudssMatrixSetValues",
+                        "cudssMatrixSetCsrPointers", "cudssExecute"};
     native_facts["operation_contract"] = "staged_csr_f32_direct_solve";
     native_facts["tested_version_family"] = "0.8.x";
-    native_facts["graph_recording_supported"] = false;
+    native_facts["graph_recording_supported"] = true;
+    native_facts["graph_replay_mode"] = "runtime_ordered_rerecord";
+    native_facts["cuda_stream_capture_supported"] = false;
     native_facts["kernel_scope_supported"] = false;
     native_facts["transitive_dependency_check"] =
         "deferred_to_plan_creation";
@@ -469,7 +486,9 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
         capabilities.required_symbols_available;
     native_facts["tested_version_family"] =
         capabilities.tested_version_family;
-    native_facts["graph_recording_supported"] = false;
+    native_facts["graph_recording_supported"] = true;
+    native_facts["graph_replay_mode"] = "runtime_ordered_rerecord";
+    native_facts["cuda_stream_capture_supported"] = false;
     native_facts["kernel_scope_supported"] = false;
     if (capabilities.library_version_major >= 0 &&
         capabilities.library_version_minor >= 0 &&

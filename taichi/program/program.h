@@ -1188,11 +1188,14 @@ class TI_DLL_EXPORT Program {
                                        int matrix_view,
                                        const std::string &library_path);
 
-  void cuda_cudss_analyze(std::uint64_t handle);
+  void cuda_cudss_analyze(std::uint64_t handle, SparseMatrix *matrix);
 
-  void cuda_cudss_factorize(std::uint64_t handle, bool refactorize);
+  void cuda_cudss_factorize(std::uint64_t handle,
+                            SparseMatrix *matrix,
+                            bool refactorize);
 
   std::size_t cuda_cudss_solve(std::uint64_t handle,
+                               SparseMatrix *matrix,
                                Ndarray *rhs,
                                Ndarray *solution);
 

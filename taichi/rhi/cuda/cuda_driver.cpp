@@ -657,6 +657,12 @@ bool CUDSSDriver::load_cudss(const std::string &library_path) {
   if (!cuda_driver.nvidia_extensions_available()) {
     return false;
   }
+  // cuDSS has required CUDA 12.0 or newer since its first public release.
+  // Keep the optional provider completely dormant on older driver APIs so
+  // callers can deterministically retain the embedded cuSOLVERSp route.
+  if (cuda_driver.get_version_major() < 12) {
+    return false;
+  }
 
   // cuDSS is a separately distributed library and depends on cuBLAS. Loading
   // the latter first also makes a user-managed wheel's dependency visible to

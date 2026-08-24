@@ -441,8 +441,10 @@ class CudssPlan:
     """Explicit staged cuDSS 0.8.x direct-solver plan for one CUDA CSR matrix.
 
     This is a Python-scope hardware provider, not a kernel intrinsic. The
-    caller controls analysis, factorization/refactorization, and solve; Forge
-    never rewrites ``SparseSolver`` or a Taichi kernel to use this plan.
+    caller controls analysis, factorization/refactorization, and solve. The
+    plan is also the explicit provider object used by ``SparseSolver`` when
+    its automatic CUDA selection admits cuDSS. Taichi kernels are never
+    rewritten to call this plan.
     """
 
     _MATRIX_TYPES = {"general": 0, "symmetric": 1, "spd": 3}
@@ -528,14 +530,26 @@ class CudssPlan:
         """Run reorder and symbolic factorization for the stored CSR pattern."""
 
         self._ensure_open()
-        self._program._cuda_cudss_analyze(self._handle)
+        self._program._cuda_cudss_analyze(self._handle, self._matrix.matrix)
         return self
 
-    def factorize(self, *, refactorize=False):
-        """Factor current matrix values after analysis."""
+    def factorize(self, matrix=None, *, refactorize=False):
+        """Factor values from a matrix with the analyzed CSR pattern."""
 
         self._ensure_open()
-        self._program._cuda_cudss_factorize(self._handle, bool(refactorize))
+        if matrix is None:
+            matrix = self._matrix
+        from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
+            SparseMatrix,
+        )
+
+        if not isinstance(matrix, SparseMatrix):
+            raise TypeError("CUDA cuDSS matrix must be a Taichi SparseMatrix")
+        matrix._ensure_valid()  # pylint: disable=W0212
+        self._program._cuda_cudss_factorize(
+            self._handle, matrix.matrix, bool(refactorize)
+        )
+        self._matrix = matrix
         return self
 
     def refactorize(self):
@@ -573,8 +587,24 @@ class CudssPlan:
             raise TaichiRuntimeError(
                 "The first CUDA cuDSS slice requires distinct rhs and solution arrays"
             )
-        self._program._cuda_cudss_solve(self._handle, rhs_array, solution_array)
+        self._program._cuda_cudss_solve(
+            self._handle, self._matrix.matrix, rhs_array, solution_array
+        )
         return solution
+
+    def recording(self, *, rhs="rhs", solution="solution"):
+        """Return a root-Graph native solve action for this factored plan."""
+
+        return CudssSolveRecording(self, rhs=rhs, solution=solution)
+
+    def validate_graph_lifetime(self):
+        """Fail closed when a compiled Graph outlives or invalidates the plan."""
+
+        self._ensure_open()
+        if not self.statistics()["factorized"]:
+            raise TaichiRuntimeError(
+                "CUDA cuDSS Graph solve requires a successful factorization"
+            )
 
     def memory_report(self):
         """Report known shared CSR bytes and opaque provider-owned state."""
@@ -640,6 +670,67 @@ class CudssPlan:
             pass
 
 
+@instrument_hardware_recording("linalg.solve.cudss", runtime_resource=True)
+class CudssSolveRecording(BackendCommandRecording):
+    """One factored cuDSS solve re-recorded by a root Forge Graph replay."""
+
+    def __init__(self, plan, *, rhs="rhs", solution="solution"):
+        if not isinstance(plan, CudssPlan):
+            raise TypeError("CUDA cuDSS Graph solve requires a CudssPlan")
+        plan.validate_graph_lifetime()
+        names = (rhs, solution)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("CUDA cuDSS binding names must be nonempty strings")
+        if rhs == solution:
+            raise ValueError("CUDA cuDSS binding names must be unique")
+        super().__init__(
+            backend="cuda",
+            binding_names=names,
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="declared_effects",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "rhs", rhs)
+        object.__setattr__(self, "solution", solution)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.rhs, GraphAccess.READ),
+            ResourceEffect(self.solution, GraphAccess.WRITE),
+        )
+
+    def execute(self, bindings):
+        validate_exact_bindings(self, bindings, "CUDA cuDSS")
+        self.plan.validate_graph_lifetime()
+        self.plan.solve(bindings[self.rhs], bindings[self.solution])
+
+    def validate_graph_lifetime(self):
+        self.plan.validate_graph_lifetime()
+
+    def _graph_provider_memory_report(self):
+        return self.plan.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return ("cudss_plan", id(self.plan))
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item.plan,),
+            debug_info=lambda item: {
+                "kind": "cuda_cudss_solve_f32",
+                "shape": (item.plan._rows, item.plan._rows),
+                "replay_mode": "runtime_ordered_rerecord",
+            },
+        )
+
+
 def cudss_is_available(*, library_path=None):
     """Probe the optional tested cuDSS provider without installing it."""
 
@@ -658,6 +749,7 @@ def cudss_is_available(*, library_path=None):
 
 __all__ = [
     "CudssPlan",
+    "CudssSolveRecording",
     "CublasGemmRecording",
     "CusparseSpmvRecording",
     "cublas_is_available",

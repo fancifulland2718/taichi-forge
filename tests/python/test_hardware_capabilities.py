@@ -36,6 +36,7 @@ _OPERATION_IDS = (
     "linalg.spmv.cusparse_explicit",
     "fft.transform.cufft",
     "linalg.solve.cudss",
+    "linalg.solve.cudss_auto",
     "ray.query.batch.optix",
     "algorithms.primitives.cub",
     "internal.tile.async.cuda",
@@ -106,6 +107,7 @@ def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
     expected = {
         "domain_api_auto_provider": {
             "linalg.spmv.cusparse",
+            "linalg.solve.cudss_auto",
         },
         "compiler_automatic": {
             "internal.reduction.grouped.cuda_vulkan",
@@ -390,14 +392,22 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
 
     cudss = ti.hardware.capability("linalg.solve.cudss")
     assert cudss.implementation_status == "existing_public"
-    assert cudss.scopes == ("python",)
-    assert cudss.graph_support == "unsupported"
+    assert cudss.scopes == ("python", "graph")
+    assert cudss.graph_support == "recordable"
     assert cudss.stream_binding == "runtime_ordered"
     assert cudss.workspace_ownership == "provider_owned"
-    assert cudss.public_api == "ti.hardware.linalg.CudssPlan"
+    assert cudss.public_api == ("ti.hardware.linalg.CudssPlan / CudssSolveRecording")
     assert cudss.requirements[0] == "user-managed cuDSS 0.8.x shared library"
     assert "never rewritten" in cudss.notes[0]
     assert "no Forge wheel variant" in cudss.notes[1]
+
+    automatic_cudss = ti.hardware.capability("linalg.solve.cudss_auto")
+    assert automatic_cudss.activation_mode == "domain_api_auto_provider"
+    assert automatic_cudss.scopes == ("python",)
+    assert automatic_cudss.graph_support == "unsupported"
+    assert automatic_cudss.public_api == "ti.linalg.SparseSolver(provider='auto')"
+    assert automatic_cudss.requirements[0] == "CUDA driver API >= 12.0"
+    assert "cuSOLVERSp compatibility route" in automatic_cudss.notes[1]
 
     async_tile = ti.hardware.capability("internal.tile.async.cuda")
     assert async_tile.implementation_status == "existing_internal"

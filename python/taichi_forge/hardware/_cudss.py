@@ -39,7 +39,46 @@ def _nvidia_namespace_roots():
     return tuple(Path(item) for item in spec.submodule_search_locations)
 
 
-def resolve_cudss_library_path(library_path=None):
+def _cuda_driver_api_version():
+    try:
+        from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+
+        return _ti_core.cuda_driver_api_version()
+    except (AttributeError, ImportError, RuntimeError):
+        return None
+
+
+def _relative_roots(cuda_driver_api_version):
+    if cuda_driver_api_version is not None:
+        major = int(cuda_driver_api_version) // 1000
+        if major >= 13:
+            return (
+                ("cu13", "bin"),
+                ("cu13", "lib"),
+                ("cudss", "bin"),
+                ("cudss", "lib"),
+                ("cu12", "bin"),
+                ("cu12", "lib"),
+            )
+        if major == 12:
+            return (
+                ("cudss", "bin"),
+                ("cudss", "lib"),
+                ("cu12", "bin"),
+                ("cu12", "lib"),
+            )
+        return ()
+    return (
+        ("cu13", "bin"),
+        ("cu13", "lib"),
+        ("cudss", "bin"),
+        ("cudss", "lib"),
+        ("cu12", "bin"),
+        ("cu12", "lib"),
+    )
+
+
+def resolve_cudss_library_path(library_path=None, *, cuda_driver_api_version=None):
     """Return an installed cuDSS shared library without installing anything."""
 
     explicit = library_path
@@ -53,14 +92,9 @@ def resolve_cudss_library_path(library_path=None):
         # normal provider-not-found result rather than silently changing it.
         return os.fspath(explicit)
 
-    relative_roots = (
-        ("cu13", "bin"),
-        ("cu13", "lib"),
-        ("cudss", "bin"),
-        ("cudss", "lib"),
-        ("cu12", "bin"),
-        ("cu12", "lib"),
-    )
+    if cuda_driver_api_version is None:
+        cuda_driver_api_version = _cuda_driver_api_version()
+    relative_roots = _relative_roots(cuda_driver_api_version)
     for root in _nvidia_namespace_roots():
         for relative in relative_roots:
             candidate = _path_candidate(root.joinpath(*relative))
@@ -83,6 +117,7 @@ def cudss_dll_directories(library_path):
     for root in _nvidia_namespace_roots():
         for relative in (
             ("cu13", "bin"),
+            ("cu12", "bin"),
             ("cudss", "bin"),
             ("cublas", "bin"),
             ("cuda_runtime", "bin"),
