@@ -2,6 +2,7 @@
 
 from taichi_forge.hardware._linalg import (
     CudssPlan,
+    CudssRefactorSolveRecording,
     CudssSolveRecording,
     CublasGemmRecording,
     CusparseSpmvRecording,
@@ -15,6 +16,7 @@ from taichi_forge.hardware._linalg import (
 
 __all__ = [
     "CudssPlan",
+    "CudssRefactorSolveRecording",
     "CudssSolveRecording",
     "CublasGemmRecording",
     "CusparseSpmvRecording",

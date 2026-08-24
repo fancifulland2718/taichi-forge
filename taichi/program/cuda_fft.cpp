@@ -208,7 +208,7 @@ std::string cufft_plan_cache_key(const CufftPlanDescriptor &descriptor) {
 
 }  // namespace
 
-class CudaFftPlan {
+class CudaFftPlan final : public CudaProviderCompletionResource {
  public:
   CudaFftPlan(CufftPlanDescriptor descriptor,
               bool use_plan_many,

@@ -1,6 +1,7 @@
 #include "taichi/program/program.h"
 
 #include <cstdint>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -80,9 +81,24 @@ void validate_cudss_vector(Ndarray *array,
               "CUDA cuDSS {} must belong to the active runtime.", name);
 }
 
+void validate_cudss_values(Ndarray *array,
+                           std::size_t expected_elements,
+                           Program *program) {
+  TI_ERROR_IF(!array, "CUDA cuDSS matrix values received a null ndarray.");
+  TI_ERROR_IF(!array->get_element_shape().empty() ||
+                  array->get_element_data_type() != PrimitiveType::f32 ||
+                  array->get_nelement() != expected_elements ||
+                  array->get_element_size() != sizeof(float32),
+              "CUDA cuDSS matrix values must be a compact scalar f32 ndarray "
+              "with {} entries.",
+              expected_elements);
+  TI_ERROR_IF(array->owning_program() != program,
+              "CUDA cuDSS matrix values must belong to the active runtime.");
+}
+
 }  // namespace
 
-class CudaCudssPlan {
+class CudaCudssPlan final : public CudaProviderCompletionResource {
  public:
   CudaCudssPlan(const CuSparseMatrix &matrix,
                 int matrix_type,
@@ -90,6 +106,7 @@ class CudaCudssPlan {
                 const std::string &library_path,
                 std::shared_ptr<RuntimeFaultDomain> fault_domain)
       : rows_(static_cast<std::size_t>(matrix.num_rows())),
+        nonzeros_(static_cast<std::size_t>(matrix.get_nnz())),
         fault_domain_(std::move(fault_domain)) {
     validate_cudss_matrix_contract(matrix_type, matrix_view);
     auto &driver = CUDSSDriver::get_instance();
@@ -143,6 +160,7 @@ class CudaCudssPlan {
   void analyze(const CuSparseMatrix &matrix) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    require_no_refactor_solve_inflight("analyze");
     TI_ERROR_IF(static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
                     matrix.num_rows() != matrix.num_cols() ||
                     matrix.get_data_type() != PrimitiveType::f32,
@@ -167,11 +185,13 @@ class CudaCudssPlan {
     analyzed_shared_pattern_id_ = stats.shared_pattern_id;
     analyzed_ = true;
     factorized_ = false;
+    factorized_from_explicit_values_ = false;
   }
 
   void factorize(const CuSparseMatrix &matrix, bool refactorize) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    require_no_refactor_solve_inflight("factorize");
     TI_ERROR_IF(!analyzed_,
                 "CUDA cuDSS factorization requires analyze() first.");
     TI_ERROR_IF(refactorize && !factorized_,
@@ -185,6 +205,8 @@ class CudaCudssPlan {
             matrix.get_val_ptr()),
         "CSR descriptor rebinding");
     factorized_ = false;
+    factorized_from_explicit_values_ = false;
+    ++factor_invalidations_;
     require_cudss_success(
         driver.execute.call(context_,
                             refactorize ? kCudssPhaseRefactorization
@@ -195,13 +217,19 @@ class CudaCudssPlan {
     factorized_matrix_id_ = matrix.matrix_id();
     factorized_pattern_version_ = matrix.pattern_version();
     factorized_numeric_version_ = matrix.numeric_version();
+    ++factor_generation_;
   }
 
   void solve(const CuSparseMatrix &matrix, void *rhs, void *solution) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    require_no_refactor_solve_inflight("solve");
     TI_ERROR_IF(!factorized_,
                 "CUDA cuDSS solve requires a successful factorization.");
+    TI_ERROR_IF(factorized_from_explicit_values_,
+                "CUDA cuDSS factors came from explicit Graph values. Use "
+                "record_refactor_solve() again or factorize the stored "
+                "matrix before a standalone solve.");
     TI_ERROR_IF(
         factorized_matrix_id_ != matrix.matrix_id() ||
             factorized_pattern_version_ != matrix.pattern_version() ||
@@ -209,39 +237,94 @@ class CudaCudssPlan {
         "CUDA cuDSS factorization is stale because the matrix or its "
         "pattern/numeric version changed. Call factorize() again before "
         "solve().");
-    auto &driver = CUDSSDriver::get_instance();
-    if (!rhs_) {
-      try {
-        require_cudss_success(
-            driver.matrix_create_dn.call(
-                &rhs_, static_cast<std::int64_t>(rows_), 1,
-                static_cast<std::int64_t>(rows_), rhs, kCudssDataTypeF32,
-                kCudssLayoutColumnMajor),
-            "right-hand-side descriptor creation");
-        require_cudss_success(
-            driver.matrix_create_dn.call(
-                &solution_, static_cast<std::int64_t>(rows_), 1,
-                static_cast<std::int64_t>(rows_), solution,
-                kCudssDataTypeF32, kCudssLayoutColumnMajor),
-            "solution descriptor creation");
-      } catch (...) {
-        if (rhs_) {
-          driver.matrix_destroy.call_with_warning(rhs_);
-          rhs_ = nullptr;
-        }
-        throw;
-      }
-    } else {
-      require_cudss_success(driver.matrix_set_values.call(rhs_, rhs),
-                            "right-hand-side rebinding");
-      require_cudss_success(
-          driver.matrix_set_values.call(solution_, solution),
-          "solution rebinding");
+    bind_dense_vectors(rhs, solution);
+    execute_solve();
+  }
+
+  std::size_t rows() const noexcept {
+    return rows_;
+  }
+
+  std::size_t nonzeros() const noexcept {
+    return nonzeros_;
+  }
+
+  void reserve_refactor_solve() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    TI_ERROR_IF(!analyzed_ || !factorized_,
+                "CUDA cuDSS refactorize+solve requires a prior successful "
+                "analysis and factorization.");
+    require_no_refactor_solve_inflight("refactorize+solve");
+    TI_ERROR_IF(next_refactor_solve_generation_ ==
+                    (std::numeric_limits<std::uint64_t>::max)(),
+                "CUDA cuDSS refactorize+solve transaction generation "
+                "space exhausted.");
+    refactor_solve_inflight_ = true;
+    refactor_solve_provider_started_ = false;
+    active_refactor_solve_generation_ = next_refactor_solve_generation_++;
+    factorized_ = false;
+    factorized_from_explicit_values_ = false;
+    factorized_matrix_id_ = 0;
+    factorized_pattern_version_ = 0;
+    factorized_numeric_version_ = 0;
+    ++factor_invalidations_;
+    ++refactor_solve_attempts_;
+  }
+
+  void cancel_unsubmitted_refactor_solve() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (refactor_solve_inflight_ && !refactor_solve_provider_started_) {
+      refactor_solve_inflight_ = false;
+      active_refactor_solve_generation_ = 0;
+      ++refactor_solve_failures_;
     }
-    require_cudss_success(
-        driver.execute.call(context_, kCudssPhaseSolve, config_, data_,
-                            matrix_, solution_, rhs_),
-        "solve");
+  }
+
+  void execute_reserved_refactor_solve(void *values,
+                                       void *rhs,
+                                       void *solution) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    TI_ERROR_IF(!refactor_solve_inflight_,
+                "CUDA cuDSS refactorize+solve has no reserved transaction.");
+    auto &driver = CUDSSDriver::get_instance();
+    try {
+      require_cudss_success(driver.matrix_set_values.call(matrix_, values),
+                            "explicit matrix-values rebinding");
+      bind_dense_vectors(rhs, solution);
+      refactor_solve_provider_started_ = true;
+      require_cudss_success(
+          driver.execute.call(context_, kCudssPhaseRefactorization, config_,
+                              data_, matrix_, nullptr, nullptr),
+          "transactional refactorization");
+      execute_solve();
+      factorized_ = true;
+      factorized_from_explicit_values_ = true;
+      ++factor_generation_;
+      ++refactor_solve_successes_;
+    } catch (...) {
+      factorized_ = false;
+      factorized_from_explicit_values_ = false;
+      ++refactor_solve_failures_;
+      throw;
+    }
+  }
+
+  std::uint64_t submission_retirement_token() const override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return refactor_solve_inflight_ ? active_refactor_solve_generation_ : 0;
+  }
+
+  void on_submission_retired(std::uint64_t token) noexcept override {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (refactor_solve_inflight_ && token != 0 &&
+        token == active_refactor_solve_generation_) {
+      refactor_solve_inflight_ = false;
+      refactor_solve_provider_started_ = false;
+      active_refactor_solve_generation_ = 0;
+      ++refactor_solve_retirements_;
+    }
   }
 
   std::unordered_map<std::string, std::uint64_t> statistics() const {
@@ -249,6 +332,17 @@ class CudaCudssPlan {
     return {{"rows", static_cast<std::uint64_t>(rows_)},
             {"analyzed", analyzed_ ? 1u : 0u},
             {"factorized", factorized_ ? 1u : 0u},
+            {"factorized_from_explicit_values",
+             factorized_from_explicit_values_ ? 1u : 0u},
+            {"factor_generation", factor_generation_},
+            {"factor_invalidations", factor_invalidations_},
+            {"refactor_solve_inflight", refactor_solve_inflight_ ? 1u : 0u},
+            {"refactor_solve_transaction_generation",
+             active_refactor_solve_generation_},
+            {"refactor_solve_attempts", refactor_solve_attempts_},
+            {"refactor_solve_successes", refactor_solve_successes_},
+            {"refactor_solve_failures", refactor_solve_failures_},
+            {"refactor_solve_retirements", refactor_solve_retirements_},
             {"closed", closed_ ? 1u : 0u}};
   }
 
@@ -289,6 +383,58 @@ class CudaCudssPlan {
   }
 
  private:
+  void require_no_refactor_solve_inflight(const char *operation) const {
+    TI_ERROR_IF(refactor_solve_inflight_,
+                "CUDA cuDSS {} cannot run while a refactorize+solve "
+                "transaction is in flight. Wait for its completion before "
+                "reusing this plan.",
+                operation);
+  }
+
+  void bind_dense_vectors(void *rhs, void *solution) {
+    auto &driver = CUDSSDriver::get_instance();
+    if (!rhs_) {
+      try {
+        require_cudss_success(
+            driver.matrix_create_dn.call(
+                &rhs_, static_cast<std::int64_t>(rows_), 1,
+                static_cast<std::int64_t>(rows_), rhs, kCudssDataTypeF32,
+                kCudssLayoutColumnMajor),
+            "right-hand-side descriptor creation");
+        require_cudss_success(
+            driver.matrix_create_dn.call(
+                &solution_, static_cast<std::int64_t>(rows_), 1,
+                static_cast<std::int64_t>(rows_), solution,
+                kCudssDataTypeF32, kCudssLayoutColumnMajor),
+            "solution descriptor creation");
+      } catch (...) {
+        if (solution_) {
+          driver.matrix_destroy.call_with_warning(solution_);
+          solution_ = nullptr;
+        }
+        if (rhs_) {
+          driver.matrix_destroy.call_with_warning(rhs_);
+          rhs_ = nullptr;
+        }
+        throw;
+      }
+    } else {
+      require_cudss_success(driver.matrix_set_values.call(rhs_, rhs),
+                            "right-hand-side rebinding");
+      require_cudss_success(
+          driver.matrix_set_values.call(solution_, solution),
+          "solution rebinding");
+    }
+  }
+
+  void execute_solve() {
+    auto &driver = CUDSSDriver::get_instance();
+    require_cudss_success(
+        driver.execute.call(context_, kCudssPhaseSolve, config_, data_,
+                            matrix_, solution_, rhs_),
+        "solve");
+  }
+
   void validate_analyzed_pattern(const CuSparseMatrix &matrix) const {
     TI_ERROR_IF(static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
                     matrix.num_rows() != matrix.num_cols() ||
@@ -318,6 +464,7 @@ class CudaCudssPlan {
   }
 
   std::size_t rows_{0};
+  std::size_t nonzeros_{0};
   void *context_{nullptr};
   void *config_{nullptr};
   void *data_{nullptr};
@@ -326,6 +473,9 @@ class CudaCudssPlan {
   void *solution_{nullptr};
   bool analyzed_{false};
   bool factorized_{false};
+  bool factorized_from_explicit_values_{false};
+  bool refactor_solve_inflight_{false};
+  bool refactor_solve_provider_started_{false};
   bool closed_{false};
   std::vector<int> analyzed_csr_row_ptr_;
   std::vector<int> analyzed_csr_col_ind_;
@@ -335,6 +485,14 @@ class CudaCudssPlan {
   std::uint64_t factorized_matrix_id_{0};
   std::uint64_t factorized_pattern_version_{0};
   std::uint64_t factorized_numeric_version_{0};
+  std::uint64_t factor_generation_{0};
+  std::uint64_t factor_invalidations_{0};
+  std::uint64_t refactor_solve_attempts_{0};
+  std::uint64_t refactor_solve_successes_{0};
+  std::uint64_t refactor_solve_failures_{0};
+  std::uint64_t refactor_solve_retirements_{0};
+  std::uint64_t next_refactor_solve_generation_{1};
+  std::uint64_t active_refactor_solve_generation_{0};
   std::shared_ptr<RuntimeFaultDomain> fault_domain_;
   mutable std::mutex mutex_;
 };
@@ -442,6 +600,57 @@ std::size_t Program::cuda_cudss_solve(std::uint64_t handle,
   return 0;
 }
 
+std::size_t Program::cuda_cudss_refactor_solve(std::uint64_t handle,
+                                               Ndarray *values,
+                                               Ndarray *rhs,
+                                               Ndarray *solution) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA cuDSS refactorize+solve requires the CUDA backend.");
+  std::shared_ptr<CudaCudssPlan> plan;
+  {
+    std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
+    const auto found = cuda_cudss_plans_.find(handle);
+    TI_ERROR_IF(found == cuda_cudss_plans_.end(),
+                "CUDA cuDSS plan handle is stale or closed.");
+    plan = found->second;
+  }
+  validate_cudss_values(values, plan->nonzeros(), this);
+  validate_cudss_vector(rhs, plan->rows(), "right-hand side", this);
+  validate_cudss_vector(solution, plan->rows(), "solution", this);
+  const auto values_allocation = values->get_device_allocation();
+  const auto rhs_allocation = rhs->get_device_allocation();
+  const auto solution_allocation = solution->get_device_allocation();
+  TI_ERROR_IF(values_allocation == rhs_allocation ||
+                  values_allocation == solution_allocation ||
+                  rhs_allocation == solution_allocation,
+              "CUDA cuDSS refactorize+solve values, right-hand side, and "
+              "solution allocations must be distinct.");
+  auto leases = acquire_ndarray_leases({values, rhs, solution});
+  auto cuda_submission_guard =
+      CUDAContext::get_instance().get_submission_lock_guard();
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  auto *values_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(values));
+  auto *rhs_ptr = reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(rhs));
+  auto *solution_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(solution));
+  TI_ERROR_IF(!values_ptr || !rhs_ptr || !solution_ptr,
+              "CUDA cuDSS refactorize+solve received a null device pointer.");
+
+  plan->reserve_refactor_solve();
+  try {
+    pin_cuda_provider_plan(plan);
+    pin_ndarray_launch_leases(leases);
+    mark_runtime_submission_pending();
+  } catch (...) {
+    plan->cancel_unsubmitted_refactor_solve();
+    throw;
+  }
+  plan->execute_reserved_refactor_solve(values_ptr, rhs_ptr, solution_ptr);
+  return 0;
+}
+
 std::unordered_map<std::string, std::uint64_t>
 Program::cuda_cudss_plan_statistics(std::uint64_t handle) {
   std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
@@ -518,6 +727,13 @@ std::size_t Program::cuda_cudss_solve(std::uint64_t,
                                       SparseMatrix *,
                                       Ndarray *,
                                       Ndarray *) {
+  TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
+}
+
+std::size_t Program::cuda_cudss_refactor_solve(std::uint64_t,
+                                               Ndarray *,
+                                               Ndarray *,
+                                               Ndarray *) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 

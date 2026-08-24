@@ -511,6 +511,7 @@ class CudssPlan:
         self._handle = handle
         self._rows = matrix.n
         self._nnz = int(matrix.matrix.num_nonzero())
+        self._effect_name = f"__cudss_plan_{self._runtime_generation}_{self._handle}"
         self.matrix_type = matrix_type
         self.matrix_view = matrix_view
         self.library_path = resolved_library or None
@@ -592,18 +593,55 @@ class CudssPlan:
         )
         return solution
 
+    def refactor_solve(self, values, rhs, solution):
+        """Refactor explicit fixed-pattern values and immediately solve."""
+
+        self._ensure_open()
+        values_array = self._validate_vector(values, "matrix values", self._nnz)
+        rhs_array = self._validate_vector(rhs, "right-hand side", self._rows)
+        solution_array = self._validate_vector(solution, "solution", self._rows)
+        if values is rhs or values is solution or rhs is solution:
+            raise TaichiRuntimeError(
+                "CUDA cuDSS refactorize+solve values, rhs, and solution "
+                "arrays must be distinct"
+            )
+        self._program._cuda_cudss_refactor_solve(
+            self._handle, values_array, rhs_array, solution_array
+        )
+        return solution
+
     def recording(self, *, rhs="rhs", solution="solution"):
         """Return a root-Graph native solve action for this factored plan."""
 
         return CudssSolveRecording(self, rhs=rhs, solution=solution)
 
-    def validate_graph_lifetime(self):
+    def record_refactor_solve(
+        self,
+        *,
+        values="matrix_values",
+        rhs="rhs",
+        solution="solution",
+    ):
+        """Record one root action that refactors current values then solves."""
+
+        return CudssRefactorSolveRecording(
+            self, values=values, rhs=rhs, solution=solution
+        )
+
+    def validate_graph_lifetime(self, *, allow_explicit_values=False):
         """Fail closed when a compiled Graph outlives or invalidates the plan."""
 
         self._ensure_open()
-        if not self.statistics()["factorized"]:
+        statistics = self.statistics()
+        if not statistics["factorized"]:
             raise TaichiRuntimeError(
                 "CUDA cuDSS Graph solve requires a successful factorization"
+            )
+        if statistics["factorized_from_explicit_values"] and not allow_explicit_values:
+            raise TaichiRuntimeError(
+                "CUDA cuDSS standalone solve cannot reuse factors from "
+                "explicit Graph values; refactor the stored matrix or use "
+                "record_refactor_solve()"
             )
 
     def memory_report(self):
@@ -703,6 +741,11 @@ class CudssSolveRecording(BackendCommandRecording):
         return (
             ResourceEffect(self.rhs, GraphAccess.READ),
             ResourceEffect(self.solution, GraphAccess.WRITE),
+            ResourceEffect(
+                self.plan._effect_name,
+                GraphAccess.READ_WRITE,
+                runtime_bound=False,
+            ),
         )
 
     def execute(self, bindings):
@@ -731,6 +774,90 @@ class CudssSolveRecording(BackendCommandRecording):
         )
 
 
+@instrument_hardware_recording("linalg.refactor_solve.cudss", runtime_resource=True)
+class CudssRefactorSolveRecording(BackendCommandRecording):
+    """One transactional fixed-pattern cuDSS refactorize+solve root action."""
+
+    def __init__(
+        self,
+        plan,
+        *,
+        values="matrix_values",
+        rhs="rhs",
+        solution="solution",
+    ):
+        if not isinstance(plan, CudssPlan):
+            raise TypeError("CUDA cuDSS Graph refactorize+solve requires a CudssPlan")
+        plan.validate_graph_lifetime(allow_explicit_values=True)
+        names = (values, rhs, solution)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError(
+                "CUDA cuDSS refactorize+solve binding names must be nonempty strings"
+            )
+        if len(set(names)) != len(names):
+            raise ValueError(
+                "CUDA cuDSS refactorize+solve binding names must be unique"
+            )
+        super().__init__(
+            backend="cuda",
+            binding_names=names,
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="declared_effects",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "values", values)
+        object.__setattr__(self, "rhs", rhs)
+        object.__setattr__(self, "solution", solution)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.values, GraphAccess.READ),
+            ResourceEffect(self.rhs, GraphAccess.READ),
+            ResourceEffect(self.solution, GraphAccess.WRITE),
+            ResourceEffect(
+                self.plan._effect_name,
+                GraphAccess.READ_WRITE,
+                runtime_bound=False,
+            ),
+        )
+
+    def execute(self, bindings):
+        validate_exact_bindings(self, bindings, "CUDA cuDSS refactorize+solve")
+        self.plan.validate_graph_lifetime(allow_explicit_values=True)
+        self.plan.refactor_solve(
+            bindings[self.values],
+            bindings[self.rhs],
+            bindings[self.solution],
+        )
+
+    def validate_graph_lifetime(self):
+        self.plan.validate_graph_lifetime(allow_explicit_values=True)
+
+    def _graph_provider_memory_report(self):
+        return self.plan.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return ("cudss_plan", id(self.plan))
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item,),
+            debug_info=lambda item: {
+                "kind": "cuda_cudss_refactor_solve_f32",
+                "rows": item.plan._rows,
+                "nonzeros": item.plan._nnz,
+                "transaction_policy": "single_inflight_fail_closed",
+            },
+        )
+
+
 def cudss_is_available(*, library_path=None):
     """Probe the optional tested cuDSS provider without installing it."""
 
@@ -749,6 +876,7 @@ def cudss_is_available(*, library_path=None):
 
 __all__ = [
     "CudssPlan",
+    "CudssRefactorSolveRecording",
     "CudssSolveRecording",
     "CublasGemmRecording",
     "CusparseSpmvRecording",

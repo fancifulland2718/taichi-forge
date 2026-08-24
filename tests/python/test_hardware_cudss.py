@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.hardware import _cudss
 from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
@@ -65,6 +66,11 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
     assert automatic.activation_mode == "domain_api_auto_provider"
     assert automatic.scopes == ("python",)
     assert automatic.graph_integration == "unsupported"
+    transactional = ti.hardware.capability("linalg.refactor_solve.cudss")
+    assert transactional.activation_mode == "explicit_hardware_api"
+    assert transactional.scopes == ("python", "graph")
+    assert transactional.graph_integration == "root_ordered"
+    assert transactional.update_policy == "rebind"
 
     with pytest.raises(TypeError, match="must be a Taichi SparseMatrix"):
         ti.hardware.linalg.CudssPlan(object())
@@ -74,6 +80,26 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
 
     with pytest.raises(ValueError, match="cuDSS probes only"):
         ti.hardware.probe("cublas", library_path="ignored")
+
+    fake = object.__new__(ti.hardware.linalg.CudssPlan)
+    fake._rows = 2
+    fake._nnz = 4
+    fake._effect_name = "__test_cudss_plan"
+    fake.validate_graph_lifetime = lambda **_kwargs: None
+    recording = ti.hardware.linalg.CudssRefactorSolveRecording(fake)
+    assert recording.replay_mode == "rerecord"
+    assert recording.workspace_ownership == "provider_generation"
+    assert tuple(
+        (effect.resource, effect.access, effect.runtime_bound)
+        for effect in recording.resource_effects
+    ) == (
+        ("matrix_values", GraphAccess.READ, True),
+        ("rhs", GraphAccess.READ, True),
+        ("solution", GraphAccess.WRITE, True),
+        ("__test_cudss_plan", GraphAccess.READ_WRITE, False),
+    )
+    with pytest.raises(ValueError, match="unique"):
+        ti.hardware.linalg.CudssRefactorSolveRecording(fake, values="same", rhs="same")
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -220,12 +246,14 @@ def test_cudss_staged_solve_and_refactorization():
         matrix_view="full",
         library_path=library_path,
     ) as plan:
-        assert plan.statistics() == {
-            "rows": 4,
-            "analyzed": 0,
-            "factorized": 0,
-            "closed": 0,
-        }
+        initial_statistics = plan.statistics()
+        assert initial_statistics["rows"] == 4
+        assert initial_statistics["analyzed"] == 0
+        assert initial_statistics["factorized"] == 0
+        assert initial_statistics["factor_generation"] == 0
+        assert initial_statistics["factor_invalidations"] == 0
+        assert initial_statistics["refactor_solve_inflight"] == 0
+        assert initial_statistics["closed"] == 0
         plan.compute().solve(rhs, solution)
         ti.sync()
         first = solution.to_numpy()
@@ -248,6 +276,84 @@ def test_cudss_staged_solve_and_refactorization():
         )
         np.testing.assert_allclose(second_matrix @ second, rhs_values, rtol=1e-5)
 
+        @ti.kernel
+        def update_values(
+            source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+            destination: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        ):
+            for i in destination:
+                destination[i] = source[i]
+
+        source_values = ti.ndarray(ti.f32, shape=10)
+        graph_values = ti.ndarray(ti.f32, shape=10)
+        third = np.array([6, -1, -1, 6, -1, -1, 6, -1, -1, 5], dtype=np.float32)
+        source_values.from_numpy(third)
+        graph_values.fill(0)
+        source_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "source_values", ti.f32, ndim=1
+        )
+        values_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "matrix_values", ti.f32, ndim=1
+        )
+        transaction_builder = ti.graph.GraphBuilder()
+        transaction_builder.dispatch(update_values, source_arg, values_arg)
+        transaction_recording = plan.record_refactor_solve()
+        transaction_builder.append_native(transaction_recording, admission="auto")
+        transaction_graph = transaction_builder.compile()
+        transaction_bindings = {
+            "source_values": source_values,
+            "matrix_values": graph_values,
+            "rhs": rhs,
+            "solution": solution,
+        }
+
+        solution.fill(0)
+        transaction_graph.run(transaction_bindings)
+        in_flight = plan.statistics()
+        assert in_flight["factorized"] == 1
+        assert in_flight["factorized_from_explicit_values"] == 1
+        assert in_flight["refactor_solve_inflight"] == 1
+        assert in_flight["refactor_solve_transaction_generation"] == 1
+        with pytest.raises(RuntimeError, match="transaction is in flight"):
+            transaction_graph.run(transaction_bindings)
+        ti.sync()
+        third_matrix = np.array(
+            [[6, -1, 0, 0], [-1, 6, -1, 0], [0, -1, 6, -1], [0, 0, -1, 5]],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            third_matrix @ solution.to_numpy(), rhs_values, rtol=1e-5
+        )
+        with pytest.raises(RuntimeError, match="explicit Graph values"):
+            plan.recording()
+
+        fourth = np.array([7, -1, -1, 7, -1, -1, 7, -1, -1, 6], dtype=np.float32)
+        source_values.from_numpy(fourth)
+        solution.fill(0)
+        transaction_graph.run(transaction_bindings)
+        ti.sync()
+        fourth_matrix = np.array(
+            [[7, -1, 0, 0], [-1, 7, -1, 0], [0, -1, 7, -1], [0, 0, -1, 6]],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            fourth_matrix @ solution.to_numpy(), rhs_values, rtol=1e-5
+        )
+        transaction_statistics = plan.statistics()
+        assert transaction_statistics["factor_generation"] == 4
+        assert transaction_statistics["factor_invalidations"] == 4
+        assert transaction_statistics["refactor_solve_attempts"] == 2
+        assert transaction_statistics["refactor_solve_successes"] == 2
+        assert transaction_statistics["refactor_solve_failures"] == 0
+        assert transaction_statistics["refactor_solve_retirements"] == 2
+        assert transaction_statistics["refactor_solve_inflight"] == 0
+        assert transaction_statistics["refactor_solve_transaction_generation"] == 0
+
+        # Restore factors sourced from the stored matrix before exercising the
+        # pre-existing solve-only Graph contract below.
+        plan.refactorize()
+        assert plan.statistics()["factorized_from_explicit_values"] == 0
+
         solution.fill(0)
         ti.sync()
         graph = ti.graph.GraphBuilder()
@@ -257,7 +363,37 @@ def test_cudss_staged_solve_and_refactorization():
         graph.append_native(recording, admission="auto")
         compiled = graph.compile()
         program = ti.lang.impl.get_runtime().prog
+
+        # A solve-only completion retained before transaction generation 3
+        # must not clear generation 3 when that older completion retires.
+        solution.fill(0)
+        compiled.run({"rhs": rhs, "solution": solution})
+        solve_ticket = program._record_runtime_completion()
+        fifth = np.array([8, -1, -1, 8, -1, -1, 8, -1, -1, 7], dtype=np.float32)
+        source_values.from_numpy(fifth)
+        transaction_graph.run(transaction_bindings)
+        transaction_ticket = program._record_runtime_completion()
+        solve_ticket.wait()
+        generation_three = plan.statistics()
+        assert generation_three["refactor_solve_inflight"] == 1
+        assert generation_three["refactor_solve_transaction_generation"] == 3
+        with pytest.raises(RuntimeError, match="transaction is in flight"):
+            transaction_graph.run(transaction_bindings)
+        transaction_ticket.wait()
+        assert plan.statistics()["refactor_solve_inflight"] == 0
+        ti.sync()
+        fifth_matrix = np.array(
+            [[8, -1, 0, 0], [-1, 8, -1, 0], [0, -1, 8, -1], [0, 0, -1, 7]],
+            dtype=np.float32,
+        )
+        np.testing.assert_allclose(
+            fifth_matrix @ solution.to_numpy(), rhs_values, rtol=1e-5
+        )
+        plan.refactorize()
+        ti.sync()
+
         memory_before = program._runtime_statistics_snapshot()["memory"]
+        solution.fill(0)
         compiled.run({"rhs": rhs, "solution": solution})
         report = plan.memory_report()
         assert report.known_resident_requested_bytes == 100

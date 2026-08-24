@@ -7517,14 +7517,26 @@ void Program::release_completed_external_dense_storage_leases() {
   completed.clear();
 }
 
-void Program::pin_cuda_provider_plan(std::shared_ptr<void> plan) {
+void Program::pin_cuda_provider_plan(
+    std::shared_ptr<CudaProviderCompletionResource> plan) {
   TI_ASSERT(plan != nullptr);
-  cuda_provider_inflight_plans_.try_emplace(plan.get(), std::move(plan));
+  const auto *identity = plan.get();
+  const std::uint64_t token = plan->submission_retirement_token();
+  const auto found = cuda_provider_inflight_plans_.find(identity);
+  if (found == cuda_provider_inflight_plans_.end()) {
+    cuda_provider_inflight_plans_.emplace(
+        identity, CudaProviderInflightPlan{std::move(plan), token});
+  } else if (token != 0) {
+    found->second.retirement_token = token;
+  }
 }
 
 void Program::release_completed_cuda_provider_plans() {
   CudaProviderInflightPlanMap completed;
   completed.swap(cuda_provider_inflight_plans_);
+  for (auto &item : completed) {
+    item.second.resource->on_submission_retired(item.second.retirement_token);
+  }
   completed.clear();
 }
 
@@ -7576,6 +7588,12 @@ std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
     return vulkan_ray_resources.size();
   }
   return 0;
+}
+
+Program::RuntimeCompletionResourceBatch::~RuntimeCompletionResourceBatch() {
+  for (auto &item : cuda_provider_plans) {
+    item.second.resource->on_submission_retired(item.second.retirement_token);
+  }
 }
 
 std::shared_ptr<Program::RuntimeCompletionResourceBatch>

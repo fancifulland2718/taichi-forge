@@ -37,6 +37,7 @@ _OPERATION_IDS = (
     "fft.transform.cufft",
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",
+    "linalg.refactor_solve.cudss",
     "ray.query.batch.optix",
     "algorithms.primitives.cub",
     "internal.tile.async.cuda",
@@ -463,6 +464,22 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "never performance-gated" in automatic_cudss.notes[4]
     assert automatic_cudss.requirements[0] == "CUDA driver API >= 12.0"
     assert "retain cuSOLVERSp" in automatic_cudss.notes[3]
+
+    transactional_cudss = ti.hardware.capability("linalg.refactor_solve.cudss")
+    assert transactional_cudss.activation_mode == "explicit_hardware_api"
+    assert transactional_cudss.scopes == ("python", "graph")
+    assert transactional_cudss.graph_integration == "root_ordered"
+    assert transactional_cudss.stream_binding == "runtime_ordered"
+    assert transactional_cudss.lifetime_policy == "provider_plan"
+    assert transactional_cudss.update_policy == "rebind"
+    assert transactional_cudss.resource_effects == (
+        "read:matrix_values",
+        "read:rhs",
+        "write:solution",
+        "read_write:provider_factor_workspace",
+    )
+    assert "at most one" in transactional_cudss.notes[1]
+    assert "no host numeric-version" in transactional_cudss.notes[2]
 
     async_tile = ti.hardware.capability("internal.tile.async.cuda")
     assert async_tile.implementation_status == "existing_internal"

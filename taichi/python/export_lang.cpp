@@ -2458,6 +2458,12 @@ void export_lang(py::module &m) {
            py::arg("handle"), py::arg("matrix"), py::arg("rhs"),
            py::arg("solution"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_cuda_cudss_refactor_solve",
+           tracked_native_program_method(
+               &Program::cuda_cudss_refactor_solve),
+           py::arg("handle"), py::arg("values"), py::arg("rhs"),
+           py::arg("solution"),
+           py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cudss_plan_statistics",
            &Program::cuda_cudss_plan_statistics, py::arg("handle"),
            py::call_guard<py::gil_scoped_release>())

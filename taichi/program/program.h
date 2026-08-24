@@ -196,6 +196,19 @@ Program *&active_runtime_submission_program() noexcept;
 
 class StructCompiler;
 
+// Internal type-erased owner retained by RuntimeCompletion. Providers with
+// mutable asynchronous state can observe exactly when their submission lease
+// is retired without introducing a provider-specific completion queue.
+class CudaProviderCompletionResource {
+ public:
+  virtual ~CudaProviderCompletionResource() = default;
+  virtual std::uint64_t submission_retirement_token() const {
+    return 0;
+  }
+  virtual void on_submission_retired(std::uint64_t) noexcept {
+  }
+};
+
 /**
  * Note [Backend-specific ProgramImpl]
  * We're working in progress to keep Program class minimal and move all backend
@@ -1198,6 +1211,11 @@ class TI_DLL_EXPORT Program {
                                SparseMatrix *matrix,
                                Ndarray *rhs,
                                Ndarray *solution);
+
+  std::size_t cuda_cudss_refactor_solve(std::uint64_t handle,
+                                        Ndarray *values,
+                                        Ndarray *rhs,
+                                        Ndarray *solution);
 
   std::unordered_map<std::string, std::uint64_t>
   cuda_cudss_plan_statistics(std::uint64_t handle);
@@ -3779,11 +3797,16 @@ class TI_DLL_EXPORT Program {
 
   using ExternalDenseStorageInflightLeaseMap =
       std::unordered_map<std::uint64_t, ExternalDenseStorageLease>;
+  struct CudaProviderInflightPlan {
+    std::shared_ptr<CudaProviderCompletionResource> resource;
+    std::uint64_t retirement_token{0};
+  };
   using CudaProviderInflightPlanMap =
-      std::unordered_map<const void *, std::shared_ptr<void>>;
+      std::unordered_map<const void *, CudaProviderInflightPlan>;
 
   struct RuntimeCompletionResourceBatch final
       : public RuntimeCompletionResources {
+    ~RuntimeCompletionResourceBatch() override;
     ArgPackInflightLeaseMap argpacks;
     NdarrayInflightLeaseMap ndarrays;
     TextureInflightLeaseMap textures;
@@ -3869,7 +3892,8 @@ class TI_DLL_EXPORT Program {
   void pin_external_dense_storage_launch_leases(
       ExternalDenseStorageLaunchLeases &leases);
   void release_completed_external_dense_storage_leases();
-  void pin_cuda_provider_plan(std::shared_ptr<void> plan);
+  void pin_cuda_provider_plan(
+      std::shared_ptr<CudaProviderCompletionResource> plan);
   void release_completed_cuda_provider_plans();
   void release_completed_vulkan_native_resources();
   void begin_external_access_epoch(
