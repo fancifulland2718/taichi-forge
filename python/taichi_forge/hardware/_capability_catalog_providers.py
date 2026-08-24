@@ -132,6 +132,7 @@ def d1_provider_operations(_operation):
                 "SparseSolver selects this provider automatically when constructed on CUDA; it is not a ti.hardware command.",
                 "Pattern analysis, numeric factorization, and solve are explicit domain-API stages and are not Graph-recordable.",
                 "CUDA LU includes device-host transfers; the Cholesky solve remains device-resident after setup.",
+                "The legacy cuSOLVER sparse API is deprecated upstream; Forge keeps this bounded compatibility route but does not treat it as a new long-term provider ABI.",
             ),
         ),
         _operation(
@@ -175,6 +176,7 @@ def d1_provider_operations(_operation):
             notes=(
                 "Callbacks, LTO, multi-GPU, and independently arbitrary per-axis strides are excluded.",
                 "Identical plan descriptors reuse a runtime-generation cuFFT plan; workspace bytes are queried from cuFFT.",
+                "Discovery verifies the operation symbol contract only; transitive provider dependencies and workspace allocation are qualified when the first plan is created.",
             ),
         ),
     )

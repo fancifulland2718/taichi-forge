@@ -85,6 +85,7 @@ bool CUDADriverBase::load_lib(std::string lib_linux, std::string lib_windows) {
     TI_WARN("{} lib not found.", lib_name);
     return false;
   } else {
+    loaded_library_name_ = lib_name;
     TI_TRACE("{} loaded!", lib_name);
     return true;
   }
@@ -138,6 +139,7 @@ bool CUDADriverBase::try_load_lib_any_version(
       loader_ = std::make_unique<DynamicLoader>(lib_name_windows);
       loaded = loader_->loaded();
       if (loaded) {
+        loaded_library_name_ = lib_name_windows;
         break;
       }
     }
@@ -147,6 +149,7 @@ bool CUDADriverBase::try_load_lib_any_version(
       loader_ = std::make_unique<DynamicLoader>(lib_name_linux);
       loaded = loader_->loaded();
       if (loaded) {
+        loaded_library_name_ = lib_name_linux;
         break;
       }
     }
@@ -155,6 +158,9 @@ bool CUDADriverBase::try_load_lib_any_version(
       std::string lib_name_linux = "lib" + lib_name + ".so";
       loader_ = std::make_unique<DynamicLoader>(lib_name_linux);
       loaded = loader_->loaded();
+      if (loaded) {
+        loaded_library_name_ = lib_name_linux;
+      }
     }
 #endif
   }
@@ -481,6 +487,12 @@ bool CUSPARSEDriver::load_cusparse() {
   cpCreateBsr.set_names("cpCreateBsr", "cusparseCreateBsr");
   capabilities_.bsr_descriptor_available = cpCreateBsr.available();
   capabilities_.spmv_preprocess_available = cpSpMVPreprocess.available();
+  capabilities_.scalar_spmv_available =
+      cpCreate.available() && cpDestroy.available() &&
+      cpSetStream.available() && cpGetStream.available() &&
+      cpCreateCsr.available() && cpDestroySpMat.available() &&
+      cpCreateDnVec.available() && cpDestroyDnVec.available() &&
+      cpSpMV_bufferSize.available() && cpSpMV.available();
   const auto version_at_least = [&](int major, int minor, int patch) {
     const auto actual = std::make_tuple(capabilities_.library_version_major,
                                         capabilities_.library_version_minor,
@@ -527,6 +539,27 @@ bool CUSOLVERDriver::load_cusolver() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cusolver_functions.inc.h"
 #undef PER_CUSOLVER_FUNCTION
+  capabilities_ = {};
+  if (csGetProperty.available()) {
+    constexpr int kMajorVersion = 0;
+    constexpr int kMinorVersion = 1;
+    constexpr int kPatchLevel = 2;
+    const auto query_property = [&](int property, int &value) {
+      if (csGetProperty.call(static_cast<libraryPropertyType>(property),
+                             &value) != 0) {
+        value = -1;
+      }
+    };
+    query_property(kMajorVersion, capabilities_.library_version_major);
+    query_property(kMinorVersion, capabilities_.library_version_minor);
+    query_property(kPatchLevel, capabilities_.library_version_patch);
+  }
+  capabilities_.sparse_solver_available = true;
+#define PER_CUSOLVER_FUNCTION(name, symbol_name, ...) \
+  capabilities_.sparse_solver_available =             \
+      capabilities_.sparse_solver_available && name.available();
+#include "taichi/rhi/cuda/cusolver_functions.inc.h"
+#undef PER_CUSOLVER_FUNCTION
   return cusolver_loaded_;
 }
 
@@ -556,6 +589,9 @@ bool CUBLASDriver::load_cublas() {
   name.set_names(#name, #symbol_name);
 #include "taichi/rhi/cuda/cublas_functions.inc.h"
 #undef PER_CUBLAS_FUNCTION
+  cub_get_property_.set(loader_->load_function_optional("cublasGetProperty"));
+  cub_get_property_.set_lock(&lock_);
+  cub_get_property_.set_names("cub_get_property_", "cublasGetProperty");
   auto *set_workspace =
       loader_->load_function_optional("cublasSetWorkspace_v2");
   const char *set_workspace_symbol = "cublasSetWorkspace_v2";
@@ -566,6 +602,21 @@ bool CUBLASDriver::load_cublas() {
   cubSetWorkspace.set(set_workspace);
   cubSetWorkspace.set_lock(&lock_);
   cubSetWorkspace.set_names("cubSetWorkspace", set_workspace_symbol);
+  capabilities_ = {};
+  if (cub_get_property_.available()) {
+    const auto query_property = [&](int property, int &value) {
+      if (cub_get_property_.call(property, &value) != 0) {
+        value = -1;
+      }
+    };
+    query_property(0, capabilities_.library_version_major);
+    query_property(1, capabilities_.library_version_minor);
+    query_property(2, capabilities_.library_version_patch);
+  }
+  capabilities_.gemm_f32_available =
+      cubCreate.available() && cubDestroy.available() &&
+      cubSetStream.available() && cubSetPointerMode.available() &&
+      cubSgemm.available();
   return cublas_loaded_;
 }
 

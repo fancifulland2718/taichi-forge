@@ -229,6 +229,7 @@ class CUDADriverBase {
 
  protected:
   std::unique_ptr<DynamicLoader> loader_;
+  std::string loaded_library_name_;
   CUDADriverBase();
 
   bool load_lib(std::string lib_linux, std::string lib_windows);
@@ -330,6 +331,7 @@ struct CUSPARSEProviderCapabilities {
   bool bsr_descriptor_available{false};
   bool generic_bsr_spmv_available{false};
   bool spmv_preprocess_available{false};
+  bool scalar_spmv_available{false};
 };
 
 class CUSPARSEDriver : protected CUDADriverBase {
@@ -380,12 +382,23 @@ class CUSPARSEDriver : protected CUDADriverBase {
     return cusparse_loaded_;
   }
 
+  const std::string &loaded_library_name() const {
+    return loaded_library_name_;
+  }
+
  private:
   CUSPARSEDriver();
   std::mutex lock_;
   bool cusparse_loaded_{false};
   CUDADriverFunction<int, int *> cp_get_property_;
   CUSPARSEProviderCapabilities capabilities_;
+};
+
+struct CUSOLVERProviderCapabilities {
+  int library_version_major{-1};
+  int library_version_minor{-1};
+  int library_version_patch{-1};
+  bool sparse_solver_available{false};
 };
 
 class CUSOLVERDriver : protected CUDADriverBase {
@@ -404,10 +417,26 @@ class CUSOLVERDriver : protected CUDADriverBase {
     return cusolver_loaded_;
   }
 
+  CUSOLVERProviderCapabilities capabilities() const {
+    return capabilities_;
+  }
+
+  const std::string &loaded_library_name() const {
+    return loaded_library_name_;
+  }
+
  private:
   CUSOLVERDriver();
   std::mutex lock_;
   bool cusolver_loaded_{false};
+  CUSOLVERProviderCapabilities capabilities_;
+};
+
+struct CUBLASProviderCapabilities {
+  int library_version_major{-1};
+  int library_version_minor{-1};
+  int library_version_patch{-1};
+  bool gemm_f32_available{false};
 };
 
 class CUBLASDriver : protected CUDADriverBase {
@@ -427,10 +456,20 @@ class CUBLASDriver : protected CUDADriverBase {
     return cublas_loaded_;
   }
 
+  CUBLASProviderCapabilities capabilities() const {
+    return capabilities_;
+  }
+
+  const std::string &loaded_library_name() const {
+    return loaded_library_name_;
+  }
+
  private:
   CUBLASDriver();
   std::mutex lock_;
   bool cublas_loaded_{false};
+  CUDADriverFunction<int, int *> cub_get_property_;
+  CUBLASProviderCapabilities capabilities_;
 };
 
 struct CUFFTProviderCapabilities {
@@ -454,6 +493,10 @@ class CUFFTDriver : protected CUDADriverBase {
 
   inline bool is_loaded() {
     return cufft_loaded_.load(std::memory_order_acquire);
+  }
+
+  const std::string &loaded_library_name() const {
+    return loaded_library_name_;
   }
 
  private:
