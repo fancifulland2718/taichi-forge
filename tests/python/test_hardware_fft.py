@@ -9,6 +9,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 
 @test_utils.test(arch=ti.cpu)
@@ -491,6 +492,8 @@ def test_cufft_serial_churn_releases_all_generations():
     program = ti.lang.impl.get_runtime().prog
     baseline_cache = ti.hardware.fft.cache_statistics()
     baseline_memory = program._runtime_statistics_snapshot()["memory"]
+    process_memory = ProcessMemoryPlateau("cuda-cufft-churn", ("cuda-cufft",))
+    process_memory.capture("before")
     midpoint = None
 
     for iteration in range(iterations):
@@ -502,6 +505,7 @@ def test_cufft_serial_churn_releases_all_generations():
         if iteration + 1 == max(1, iterations // 2):
             ti.sync()
             midpoint = program._runtime_statistics_snapshot()["memory"]
+            process_memory.capture("midpoint")
             assert ti.hardware.fft.cache_statistics().live_handles == (
                 baseline_cache.live_handles
             )
@@ -509,6 +513,8 @@ def test_cufft_serial_churn_releases_all_generations():
 
     final_cache = ti.hardware.fft.cache_statistics()
     final_memory = program._runtime_statistics_snapshot()["memory"]
+    process_memory.capture("after")
+    process_memory.finish(iterations)
     assert final_cache.live_handles == baseline_cache.live_handles
     assert final_cache.live_plans == baseline_cache.live_plans
     assert final_cache.workspace_bytes_live == baseline_cache.workspace_bytes_live

@@ -8,6 +8,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 
 @test_utils.test(arch=ti.cpu)
@@ -448,6 +449,8 @@ def test_vulkan_ray_serial_churn_releases_all_generations():
     ti.sync()
     program = impl.get_runtime().prog
     baseline = dict(program._debug_vulkan_ray_resource_stats())
+    process_memory = ProcessMemoryPlateau("vulkan-ray-churn", ("vulkan-ray",))
+    process_memory.capture("before")
     midpoint = None
 
     for iteration in range(iterations):
@@ -466,9 +469,12 @@ def test_vulkan_ray_serial_churn_releases_all_generations():
         if iteration + 1 == max(1, iterations // 2):
             ti.sync()
             midpoint = dict(program._debug_vulkan_ray_resource_stats())
+            process_memory.capture("midpoint")
     ti.sync()
 
     final = dict(program._debug_vulkan_ray_resource_stats())
+    process_memory.capture("after")
+    process_memory.finish(iterations)
     for key in (
         "live",
         "retiring",

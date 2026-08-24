@@ -11,6 +11,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 
 def test_cudss_library_discovery_is_user_managed_and_deterministic(
@@ -607,6 +608,8 @@ def test_cudss_serial_churn_releases_all_generations():
     ti.sync()
     program = ti.lang.impl.get_runtime().prog
     baseline = program._runtime_statistics_snapshot()["memory"]
+    process_memory = ProcessMemoryPlateau("cuda-cudss-churn", ("cuda-cudss",))
+    process_memory.capture("before")
     midpoint = None
     iterations = stress_iterations(4)
 
@@ -624,9 +627,12 @@ def test_cudss_serial_churn_releases_all_generations():
         if iteration + 1 == max(1, iterations // 2):
             ti.sync()
             midpoint = program._runtime_statistics_snapshot()["memory"]
+            process_memory.capture("midpoint")
     ti.sync()
 
     final = program._runtime_statistics_snapshot()["memory"]
+    process_memory.capture("after")
+    process_memory.finish(iterations)
     for key in ("live_resources", "retiring_resources", "inflight_resources"):
         assert midpoint[key] == baseline[key]
         assert final[key] == baseline[key]

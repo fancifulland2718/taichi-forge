@@ -13,6 +13,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 
 def _texture_rgb(texture):
@@ -545,11 +546,22 @@ def test_vulkan_graphics_pipeline_close_releases_program_resources():
 
     program = impl.get_runtime().prog
     baseline = program._debug_vulkan_graphics_pipeline_count()
-    for _ in range(stress_iterations(16)):
+    iterations = stress_iterations(16)
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-graphics-pipeline-churn", ("vulkan-graphics",)
+    )
+    process_memory.capture("before")
+    for iteration in range(iterations):
         pipeline = _triangle_pipeline()
         assert program._debug_vulkan_graphics_pipeline_count() == baseline + 1
         pipeline.close()
         assert program._debug_vulkan_graphics_pipeline_count() == baseline
+        if iteration + 1 == max(1, iterations // 2):
+            ti.sync()
+            process_memory.capture("midpoint")
+    ti.sync()
+    process_memory.capture("after")
+    process_memory.finish(iterations)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

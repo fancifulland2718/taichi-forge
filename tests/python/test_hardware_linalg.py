@@ -7,6 +7,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 
 @test_utils.test(arch=ti.cpu)
@@ -310,6 +311,10 @@ def test_cuda_runtime_owned_provider_replay_plateaus():
     program = ti.lang.impl.get_runtime().prog
     baseline_memory = program._runtime_statistics_snapshot()["memory"]
     baseline_sparse = matrix._debug_runtime_stats()["operations"]
+    process_memory = ProcessMemoryPlateau(
+        "cuda-runtime-owned-providers", ("cuda-cublas", "cuda-cusparse")
+    )
+    process_memory.capture("before")
     assert baseline_sparse["spmv_handle_creations"] == 1
     assert baseline_sparse["spmv_plan_builds"] == 1
 
@@ -322,9 +327,12 @@ def test_cuda_runtime_owned_provider_replay_plateaus():
         if iteration + 1 == max(1, iterations // 2):
             ti.sync()
             midpoint = program._runtime_statistics_snapshot()["memory"]
+            process_memory.capture("midpoint")
     ti.sync()
 
     final_memory = program._runtime_statistics_snapshot()["memory"]
+    process_memory.capture("after")
+    process_memory.finish(iterations)
     final_sparse = matrix._debug_runtime_stats()["operations"]
     for key in ("live_resources", "retiring_resources", "inflight_resources"):
         assert midpoint[key] == baseline_memory[key]

@@ -12,6 +12,7 @@ from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
 )
+from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 supported_archs_texture = [ti.vulkan]
 supported_archs_texture_excluding_load_store = [ti.vulkan, ti.opengl]
@@ -452,13 +453,24 @@ def test_texture_registry_resize_churn_conserves_resources():
     baseline_runtime_objects = len(runtime._runtime_object_refs)
 
     iterations = stress_iterations(256)
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-image-texture-churn",
+        ("vulkan-image",),
+        enabled=impl.current_cfg().arch == ti.vulkan,
+    )
+    process_memory.capture("before")
     for i in range(iterations):
         extent = 1 << (i % 5)
         tex = ti.Texture(ti.Format.rgba8, (extent, extent))
         del tex
         if i % 32 == 0:
             gc.collect()
+        if i + 1 == max(1, iterations // 2):
+            gc.collect()
+            process_memory.capture("midpoint")
     gc.collect()
+    process_memory.capture("after")
+    process_memory.finish(iterations)
 
     completed = prog._debug_texture_resource_stats()
     for key in ("live", "retiring", "leases", "views", "inflight"):

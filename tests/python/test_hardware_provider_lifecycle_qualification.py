@@ -20,7 +20,7 @@ def test_lifecycle_matrix_covers_every_formal_provider_and_dimension():
     for entry in lifecycle.QUALIFICATION_MATRIX.values():
         assert tuple(entry["dimensions"]) == lifecycle.REQUIRED_DIMENSIONS
         assert entry["memory_evidence_scope"] == (
-            lifecycle.INTERNAL_MEMORY_EVIDENCE_SCOPE
+            lifecycle.PROCESS_MEMORY_EVIDENCE_SCOPE
         )
 
 
@@ -67,7 +67,7 @@ def test_lifecycle_matrix_rejects_implicit_gaps():
         "provider": {
             "ownership": "provider_generation",
             "availability": "optional",
-            "memory_evidence_scope": lifecycle.INTERNAL_MEMORY_EVIDENCE_SCOPE,
+            "memory_evidence_scope": lifecycle.PROCESS_MEMORY_EVIDENCE_SCOPE,
             "dimensions": {
                 dimension: lifecycle._evidence("tests/test.py::test_case")
                 for dimension in lifecycle.REQUIRED_DIMENSIONS[:-1]
@@ -76,3 +76,20 @@ def test_lifecycle_matrix_rejects_implicit_gaps():
     }
     with pytest.raises(ValueError, match="incomplete or unordered"):
         lifecycle.validate_matrix(broken)
+
+
+def test_lifecycle_process_memory_observation_fails_closed(tmp_path):
+    missing = lifecycle._process_memory_observation(
+        tmp_path / "missing.json", "cuda-cudss"
+    )
+    assert not missing["process_level_memory_qualified"]
+    assert missing["reason"] == "process_memory_artifact_missing"
+
+    path = tmp_path / "memory.json"
+    path.write_text(
+        '{"schema":"taichi_forge.hardware_process_memory.v1","records":[]}',
+        encoding="utf-8",
+    )
+    empty = lifecycle._process_memory_observation(path, "cuda-cudss")
+    assert not empty["process_level_memory_qualified"]
+    assert "process_memory_provider_record_missing" in empty["reasons"]
