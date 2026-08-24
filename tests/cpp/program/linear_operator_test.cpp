@@ -762,14 +762,14 @@ TEST(LinearOperator, MinimalCompositionSupportsCpuProgramViews) {
                                         ExternalArrayLayout::kNull, false);
   auto product = make_composed_operator_binding(
       make_identity_operator_binding(space, &program),
-      make_identity_operator_binding(space, &program));
+      make_identity_operator_binding(space, &program), &program);
   auto scaled =
-      make_scaled_operator_binding(2.0, std::move(product));
+      make_scaled_operator_binding(2.0, std::move(product), &program);
   OperatorPlan plan(
       &program,
       make_sum_operator_binding(
           std::move(scaled),
-          make_identity_operator_binding(space, &program)));
+          make_identity_operator_binding(space, &program), &program));
   const std::array<float, 3> source{1.0f, -2.0f, 0.5f};
   program.copy_ndarray_from_host(input, source.data(), sizeof(source));
 

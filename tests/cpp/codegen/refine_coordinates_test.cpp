@@ -15,6 +15,7 @@
 #include "taichi/program/program.h"
 #include "taichi/runtime/program_impls/llvm/llvm_program.h"
 #include "taichi/codegen/llvm/struct_llvm.h"
+#include "taichi/struct/snode_tree.h"
 
 namespace taichi::lang {
 namespace {
@@ -118,18 +119,26 @@ class RefineCoordinatesTest : public ::testing::Test {
     tlctx_ = llvm_prog_->get_llvm_context();
     executor_ = llvm_prog_->get_runtime_executor();
 
-    root_snode_ = std::make_unique<SNode>(/*depth=*/0, /*t=*/SNodeType::root);
+    auto root_snode =
+        std::make_unique<SNode>(/*depth=*/0, /*t=*/SNodeType::root);
     const std::vector<Axis> axes = {Axis{0}};
-    ptr_snode_ = &(root_snode_->pointer(axes, kPointerSize));
+    ptr_snode_ = &(root_snode->pointer(axes, kPointerSize));
     dense_snode_ = &(ptr_snode_->dense(axes, kDenseSize));
     // Must end with a `place` SNode.
     auto &leaf_snode = dense_snode_->insert_children(SNodeType::place);
     leaf_snode.dt = PrimitiveType::f32;
 
+    // StructCompilerLLVM consumes the same finalized, tree-local SNode IDs as
+    // Program::add_snode_tree(). Keep this unit test independent of runtime
+    // materialization while preserving that production contract.
+    snode_tree_ = std::make_unique<SNodeTree>(
+        /*id=*/0, /*generation=*/1, std::move(root_snode));
+    snode_tree_->root()->set_snode_tree_id(/*id=*/0);
+
     auto sc = std::make_unique<StructCompilerLLVM>(arch_, config_, tlctx_,
                                                    tlctx_->new_module("struct"),
                                                    /*snode_tree_id=*/0);
-    sc->run(*root_snode_);
+    sc->run(*snode_tree_->root());
   }
 
   Arch arch_;
@@ -141,7 +150,7 @@ class RefineCoordinatesTest : public ::testing::Test {
   TaichiLLVMContext *tlctx_{nullptr};
   LlvmRuntimeExecutor *executor_{nullptr};
 
-  std::unique_ptr<SNode> root_snode_{nullptr};
+  std::unique_ptr<SNodeTree> snode_tree_{nullptr};
   SNode *ptr_snode_{nullptr};
   SNode *dense_snode_{nullptr};
 };

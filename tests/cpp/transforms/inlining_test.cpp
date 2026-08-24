@@ -82,8 +82,9 @@ TEST_F(InliningTest, BudgetUsesRecursiveStatementCount) {
   auto func_body = builder.extract_ir();
   EXPECT_TRUE(func_body->is<Block>());
   auto *func_block = func_body->as<Block>();
-  EXPECT_EQ(func_block->size(), 4);
-  EXPECT_GT(irpass::analysis::count_statements(func_block), 4);
+  EXPECT_EQ(func_block->size(), 5);
+  EXPECT_GT(irpass::analysis::count_statements(func_block),
+            func_block->size());
 
   auto *func = prog_->create_function(
       FunctionKey("nested_func", /*func_id=*/1, /*instance_id=*/0));

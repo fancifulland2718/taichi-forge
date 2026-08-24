@@ -55,17 +55,18 @@ TEST(GraphTest, SimpleGraphRun) {
 
   auto g = g_builder->compile();
 
-  auto array = Ndarray(test_prog.prog(), PrimitiveType::i32, {size});
-  array.write_int({0}, 2);
-  array.write_int({2}, 40);
+  auto *array = test_prog.prog()->create_ndarray(PrimitiveType::i32, {size});
+  array->write_int({0}, 2);
+  array->write_int({2}, 40);
   std::unordered_map<std::string, aot::IValue> args;
-  args.insert({"arr", aot::IValue::create(array)});
+  args.insert({"arr", aot::IValue::create(*array)});
   args.insert({"x", aot::IValue::create<int>(2)});
 
   g->jit_run(test_prog.prog()->compile_config(), args);
   test_prog.prog()->synchronize();
-  EXPECT_EQ(array.read_int({0}), 2);
-  EXPECT_EQ(array.read_int({1}), 2);
-  EXPECT_EQ(array.read_int({2}), 42);
+  EXPECT_EQ(array->read_int({0}), 2);
+  EXPECT_EQ(array->read_int({1}), 2);
+  EXPECT_EQ(array->read_int({2}), 42);
+  test_prog.prog()->delete_ndarray(array);
 }
 #endif
