@@ -681,15 +681,17 @@ bool CUDSSDriver::load_cudss(const std::string &library_path) {
     }
   };
   append(library_path);
-  if (const char *configured = std::getenv("TI_CUDSS_LIBRARY_PATH")) {
-    append(configured);
-  }
+  if (library_path.empty()) {
+    if (const char *configured = std::getenv("TI_CUDSS_LIBRARY_PATH")) {
+      append(configured);
+    }
 #if defined(TI_PLATFORM_WINDOWS)
-  append("cudss64_0.dll");
+    append("cudss64_0.dll");
 #else
-  append("libcudss.so.0");
-  append("libcudss.so");
+    append("libcudss.so.0");
+    append("libcudss.so");
 #endif
+  }
 
   loader_.reset();
   loaded_library_name_.clear();

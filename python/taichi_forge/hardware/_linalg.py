@@ -633,7 +633,11 @@ class CudssPlan:
 
         self._ensure_open()
         statistics = self.statistics()
-        if not statistics["factorized"]:
+        if statistics["refactor_solve_inflight"]:
+            raise TaichiRuntimeError(
+                "CUDA cuDSS refactorize+solve transaction is in flight"
+            )
+        if not statistics["factorized"] and not allow_explicit_values:
             raise TaichiRuntimeError(
                 "CUDA cuDSS Graph solve requires a successful factorization"
             )
@@ -683,6 +687,12 @@ class CudssPlan:
 
         self._ensure_open()
         return dict(self._program._cuda_cudss_plan_statistics(self._handle))
+
+    def _debug_fail_next_refactor_solve(self):
+        """Inject one post-provider refactor failure for lifecycle tests."""
+
+        self._ensure_open()
+        self._program._debug_cuda_cudss_fail_next_refactor_solve(self._handle)
 
     def close(self):
         """Release this owner; in-flight work retains state until completion."""

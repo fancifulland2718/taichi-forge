@@ -1,6 +1,8 @@
 """Discovery helpers for the user-managed optional cuDSS provider."""
 
 from contextlib import contextmanager
+from functools import lru_cache
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -103,6 +105,28 @@ def resolve_cudss_library_path(library_path=None, *, cuda_driver_api_version=Non
     return ""
 
 
+@lru_cache(maxsize=16)
+def _resolved_library_sha256(candidate, size, mtime_ns):
+    del size, mtime_ns
+    digest = hashlib.sha256()
+    with Path(candidate).open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def cudss_library_sha256(library_path):
+    """Return the content identity of one resolved user-managed provider."""
+
+    candidate = _path_candidate(library_path)
+    if candidate is None:
+        return None
+    stat = candidate.stat()
+    return _resolved_library_sha256(
+        str(candidate), int(stat.st_size), int(stat.st_mtime_ns)
+    )
+
+
 @contextmanager
 def cudss_dll_directories(library_path):
     """Keep NVIDIA wheel DLL directories active for one native load call."""
@@ -135,4 +159,8 @@ def cudss_dll_directories(library_path):
             handle.close()
 
 
-__all__ = ("cudss_dll_directories", "resolve_cudss_library_path")
+__all__ = (
+    "cudss_dll_directories",
+    "cudss_library_sha256",
+    "resolve_cudss_library_path",
+)

@@ -2,6 +2,7 @@
 
 import copy
 from dataclasses import dataclass
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -10,8 +11,8 @@ from types import MappingProxyType
 from typing import Mapping, Optional
 
 
-PROVIDER_ADMISSION_SCHEMA = "taichi_forge.provider_admission.v1"
-PROVIDER_ADMISSION_SCHEMA_VERSION = 1
+PROVIDER_ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
+PROVIDER_ADMISSION_SCHEMA_VERSION = 2
 _QUALIFICATION_SOURCE_SCHEMA = "taichi_forge.hardware_acceleration_qualification.v4"
 
 _MINIMUM_FRESH_PROCESSES = 8
@@ -293,6 +294,24 @@ class ProviderAdmissionEvidence:
             runtime_scope.get("python_provider_contract_sha256"),
             "runtime_scope.python_provider_contract_sha256",
         )
+        _sha256_string(
+            runtime_scope.get("native_runtime_build_identity"),
+            "runtime_scope.native_runtime_build_identity",
+        )
+        native_artifacts = runtime_scope.get("native_runtime_artifacts")
+        if not isinstance(native_artifacts, Mapping) or not native_artifacts:
+            raise ValueError(
+                "runtime_scope.native_runtime_artifacts must be a mapping"
+            )
+        for artifact_name in (
+            "python_extension_sha256",
+            "native_runtime_binary_sha256",
+            "runtime_bitcode_bundle_sha256",
+        ):
+            _sha256_string(
+                native_artifacts.get(artifact_name),
+                f"runtime_scope.native_runtime_artifacts.{artifact_name}",
+            )
         if operation_id in (
             "linalg.spmv.cusparse",
             "linalg.solve.cudss_auto",
@@ -300,6 +319,11 @@ class ProviderAdmissionEvidence:
             _nonempty_string(
                 workload_scope.get("topology_fingerprint"),
                 "workload_scope.topology_fingerprint",
+            )
+        if operation_id == "linalg.solve.cudss_auto":
+            _sha256_string(
+                provider_scope.get("provider_binary_sha256"),
+                "provider_scope.provider_binary_sha256",
             )
 
         self = object.__new__(cls)
@@ -383,6 +407,8 @@ class ProviderAdmissionDecision:
     provider_amortized_ns: Optional[float] = None
     baseline_median_ns: Optional[float] = None
     baseline_amortized_ns: Optional[float] = None
+    expected_reuse: Optional[int] = None
+    evidence_expected_reuse: Optional[int] = None
 
     def to_dict(self):
         return {
@@ -392,6 +418,8 @@ class ProviderAdmissionDecision:
             "provider_amortized_ns": self.provider_amortized_ns,
             "baseline_median_ns": self.baseline_median_ns,
             "baseline_amortized_ns": self.baseline_amortized_ns,
+            "expected_reuse": self.expected_reuse,
+            "evidence_expected_reuse": self.evidence_expected_reuse,
         }
 
 
@@ -445,6 +473,7 @@ def evaluate_provider_admission(
     workload_scope,
     runtime_scope,
     provider_warmed=False,
+    expected_reuse=None,
 ):
     """Match validated evidence to a current operation and evaluate its cost gate."""
 
@@ -456,6 +485,23 @@ def evaluate_provider_admission(
         return ProviderAdmissionDecision(
             False, "fallback", "invalid_admission_evidence"
         )
+    if expected_reuse is None:
+        expected_reuse = evidence.expected_reuse
+    elif (
+        isinstance(expected_reuse, bool)
+        or not isinstance(expected_reuse, int)
+        or expected_reuse <= 0
+    ):
+        return ProviderAdmissionDecision(
+            False,
+            "fallback",
+            "invalid_expected_reuse",
+            evidence_expected_reuse=evidence.expected_reuse,
+        )
+    reuse_scope = {
+        "expected_reuse": expected_reuse,
+        "evidence_expected_reuse": evidence.expected_reuse,
+    }
     expected_scalars = {
         "operation_id": operation_id,
         "provider_id": provider_id,
@@ -464,7 +510,9 @@ def evaluate_provider_admission(
     }
     for name, actual in expected_scalars.items():
         if getattr(evidence, name) != actual:
-            return ProviderAdmissionDecision(False, "fallback", f"{name}_mismatch")
+            return ProviderAdmissionDecision(
+                False, "fallback", f"{name}_mismatch", **reuse_scope
+            )
     expected_scopes = {
         "device_scope": device_scope,
         "provider_scope": provider_scope,
@@ -475,19 +523,23 @@ def evaluate_provider_admission(
         try:
             normalized = _json_value(actual, name)
         except (TypeError, ValueError):
-            return ProviderAdmissionDecision(False, "fallback", f"{name}_unavailable")
+            return ProviderAdmissionDecision(
+                False, "fallback", f"{name}_unavailable", **reuse_scope
+            )
         if _thaw(getattr(evidence, name)) != normalized:
-            return ProviderAdmissionDecision(False, "fallback", f"{name}_mismatch")
+            return ProviderAdmissionDecision(
+                False, "fallback", f"{name}_mismatch", **reuse_scope
+            )
     first_use = 0.0 if provider_warmed else evidence.provider_first_use_overhead_ns
     provider_cost = (
         evidence.provider_median_ns
-        + first_use / evidence.expected_reuse
+        + first_use / expected_reuse
         + evidence.transfer_ns
         + evidence.conversion_ns
     )
     baseline_cost = (
         evidence.baseline_median_ns
-        + evidence.baseline_first_use_overhead_ns / evidence.expected_reuse
+        + evidence.baseline_first_use_overhead_ns / expected_reuse
     )
     if provider_cost >= baseline_cost * (1.0 - evidence.minimum_margin):
         return ProviderAdmissionDecision(
@@ -497,6 +549,8 @@ def evaluate_provider_admission(
             provider_amortized_ns=provider_cost,
             baseline_median_ns=evidence.baseline_median_ns,
             baseline_amortized_ns=baseline_cost,
+            expected_reuse=expected_reuse,
+            evidence_expected_reuse=evidence.expected_reuse,
         )
     return ProviderAdmissionDecision(
         True,
@@ -505,11 +559,45 @@ def evaluate_provider_admission(
         provider_amortized_ns=provider_cost,
         baseline_median_ns=evidence.baseline_median_ns,
         baseline_amortized_ns=baseline_cost,
+        expected_reuse=expected_reuse,
+        evidence_expected_reuse=evidence.expected_reuse,
     )
 
 
+def _file_sha256(path):
+    if path is None:
+        return None
+    path = Path(path)
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _runtime_bitcode_identity(directory):
+    root = Path(directory)
+    candidates = [root / "runtime_cuda.bc", root / "runtime_x64.bc"]
+    candidates.extend(sorted(root.glob("slim_libdevice.*.bc")))
+    artifacts = {
+        candidate.name: _file_sha256(candidate)
+        for candidate in candidates
+        if candidate.is_file()
+    }
+    if not artifacts:
+        return None
+    payload = json.dumps(
+        artifacts, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+@lru_cache(maxsize=1)
 def _current_runtime_scope():
     from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+    from taichi_forge._lib import utils as runtime_utils  # pylint: disable=C0415
 
     contract_digest = hashlib.sha256()
     package_root = Path(__file__).resolve().parents[1]
@@ -523,10 +611,28 @@ def _current_runtime_scope():
         contract_digest.update(b"\0")
         contract_digest.update(contract_path.read_bytes())
         contract_digest.update(b"\0")
+    native_artifacts = {
+        "python_extension_sha256": _file_sha256(
+            getattr(_ti_core, "__file__", None)
+        ),
+        "native_runtime_binary_sha256": _file_sha256(
+            getattr(runtime_utils, "_loaded_native_runtime_path", None)
+        ),
+        "runtime_bitcode_bundle_sha256": _runtime_bitcode_identity(
+            runtime_utils._runtime_bitcode_dir()  # pylint: disable=W0212
+        ),
+    }
+    identity_payload = json.dumps(
+        native_artifacts, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
     return {
         "forge_version": _ti_core.get_version_string(),
         "forge_commit": _ti_core.get_commit_hash(),
         "python_provider_contract_sha256": contract_digest.hexdigest(),
+        "native_runtime_build_identity": hashlib.sha256(
+            identity_payload
+        ).hexdigest(),
+        "native_runtime_artifacts": native_artifacts,
     }
 
 

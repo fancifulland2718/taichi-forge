@@ -124,10 +124,14 @@ on CUDA:
 - `ti.hardware.load_provider_admission_evidence(path, case="cuda-spmv")`
   accepts only a strict Forge fresh-process qualification artifact. Attach the
   immutable result with `matrix.set_provider_profile(profile)`, or pass `None`
-  to clear it. The profile matches the exact sparse-topology fingerprint,
-  device UUID, Forge runtime build, Python provider-contract hash, provider
-  ABI/version, and amortization scope; users cannot install handwritten timing
-  fields.
+  to clear it. Admission-schema-v2 profiles match the exact sparse-topology
+  fingerprint, device UUID, Python extension, split native runtime and runtime
+  bitcode build identity, Python provider-contract hash, provider ABI/version,
+  and amortization scope; older profiles fail closed. Users cannot install
+  handwritten timing fields. `matrix.set_provider_profile(profile,
+  expected_reuse=N)` may supply the current positive reuse count and
+  re-evaluates both provider and embedded-baseline first-use costs; omitting it
+  adopts the evidence assumption.
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` executes the same stored
   matrix operation into caller-owned output. `CusparseSpmvRecording(matrix)`
   makes that manual operation a root-Graph backend command with explicit
@@ -137,10 +141,11 @@ on CUDA:
 - `ti.hardware.load_provider_admission_evidence(path,
   case="cuda-cudss-solve")` can supply the exact-workload profile to
   `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)`. Auto
-  considers user-managed cuDSS 0.8.x only after the profile matches the
-  topology, device, Forge build, Python provider-contract hash, provider
-  ABI/version, solver contract, and expected solve reuse, and its amortized
-  cost clears the conservative margin against cuSOLVERSp. Both providers'
+  considers user-managed cuDSS 0.8.x only after the profile additionally
+  matches the exact loaded cuDSS binary, solver contract, and expected solve
+  reuse, and its amortized cost clears the conservative margin against
+  cuSOLVERSp. `expected_reuse=N` on `SparseSolver` may replace the evidence
+  assumption for the current workload and re-evaluates both routes. Both providers'
   first analysis/factorization cost is
   included. Without a profile, auto does not probe or load cuDSS and stays on
   embedded cuSOLVERSp. CUDA 11 and older, missing/incompatible cuDSS, f64,
@@ -157,14 +162,19 @@ on CUDA:
   factors, refactorizes, and writes the solution as one provider transaction.
   The values, rhs, and solution arrays must be distinct. A plan permits only
   one unretired refactorize-and-solve transaction; overlapping reuse fails
-  closed. Factors produced from explicit Graph values cannot be consumed by a
+  closed. A provider execution failure invalidates the factors and keeps the
+  transaction reserved until submission retirement; after retirement the same
+  action can recover by fully factorizing the bound values. Factors produced
+  from explicit Graph values cannot be consumed by a
   later solve-only recording until the stored matrix is refactorized. Neither
   recording is stream capture or kernel-callable, and both are unsupported in
   structured Graph and AOT. Explicit cuDSS also requires CUDA Driver API 12.0
   or newer.
 
 All routes lazy-load user-provided compatible libraries only when their domain
-objects or explicit plans are used. Forge does not install cuDSS, add a Python
+objects or explicit plans are used. An explicit cuDSS `library_path` is
+exclusive: probing and execution do not fall back to an environment or default
+library candidate. Forge does not install cuDSS, add a Python
 package requirement, link or bundle a vendor library, add a build switch, or
 create a wheel variant. This is domain-level or explicit-plan selection, not a
 compiler rewrite of arbitrary kernels. None is kernel-callable. Provider

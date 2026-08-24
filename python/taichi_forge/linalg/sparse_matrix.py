@@ -277,6 +277,7 @@ class SparseMatrix:
         self._format_contract_cache = None
         self._topology_fingerprint = None
         self._spmv_provider_profile = None
+        self._spmv_expected_reuse = None
         self._spmv_auto_stats = {
             "candidates": 0,
             "admitted": 0,
@@ -502,13 +503,15 @@ class SparseMatrix:
             f"Sparse matrix-matrix/vector multiplication does not support {type(other)} for now. Supported types are SparseMatrix, ti.field, and numpy ndarray."
         )
 
-    def set_provider_profile(self, profile):
+    def set_provider_profile(self, profile, *, expected_reuse=None):
         """Attach validated cuSPARSE auto-admission evidence, or clear it.
 
         ``profile`` must be a ``ProviderAdmissionEvidence`` loaded from a
         Forge fresh-process qualification artifact. Passing ``None`` restores
         the fail-closed kernel fallback. Explicit provider execution does not
-        consult this profile.
+        consult this profile. ``expected_reuse=None`` explicitly adopts the
+        profile assumption; a positive integer re-evaluates first-use
+        amortization for the current workload.
         """
 
         from taichi_forge.hardware import (  # pylint: disable=C0415
@@ -517,7 +520,12 @@ class SparseMatrix:
 
         self._ensure_valid()
         if profile is None:
+            if expected_reuse is not None:
+                raise ValueError(
+                    "SparseMatrix expected_reuse requires a provider profile"
+                )
             self._spmv_provider_profile = None
+            self._spmv_expected_reuse = None
             return self
         if not isinstance(profile, ProviderAdmissionEvidence):
             raise TypeError(
@@ -533,7 +541,16 @@ class SparseMatrix:
                 "SparseMatrix provider profile must qualify cuSPARSE SpMV "
                 "against the CUDA Driver kernel fallback"
             )
+        if expected_reuse is not None and (
+            isinstance(expected_reuse, bool)
+            or not isinstance(expected_reuse, int)
+            or expected_reuse <= 0
+        ):
+            raise ValueError(
+                "SparseMatrix expected_reuse must be a positive integer"
+            )
         self._spmv_provider_profile = profile
+        self._spmv_expected_reuse = expected_reuse
         return self
 
     def _select_spmv_auto_route(self):
@@ -570,6 +587,7 @@ class SparseMatrix:
             workload_scope=workload_scope,
             runtime_scope=_current_runtime_scope(),
             provider_warmed=bool(operations["spmv_plan_builds"]),
+            expected_reuse=self._spmv_expected_reuse,
         )
         decision = {
             **admission.to_dict(),

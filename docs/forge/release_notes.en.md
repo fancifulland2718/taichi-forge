@@ -65,8 +65,13 @@ grouped under the behavior they shipped.
   `SparseMatrix.spmv(method="auto")` considers cuSPARSE only with matching
   stable matrix-scoped cost evidence loaded from a strict fresh-process
   qualification artifact, while its explicit provider route is not cost-gated.
-  Evidence is bound to the exact topology, device, runtime, and provider ABI;
-  the former handwritten timing setter was removed. `SparseSolver(provider="auto",
+  Admission-schema-v2 evidence is bound to the exact topology, device, Python
+  extension, split native runtime, runtime bitcode, and provider ABI; cuDSS
+  evidence also binds the exact provider binary. Older profiles fail closed,
+  and the former handwritten timing setter was removed. A positive current
+  `expected_reuse` override re-evaluates provider and embedded-baseline
+  first-use costs instead of trusting the qualification assumption blindly.
+  `SparseSolver(provider="auto",
   provider_profile=profile)` applies the same exact-scope admission model to
   user-managed cuDSS 0.8.x, including amortized first-use costs for both cuDSS
   and cuSOLVERSp. Missing evidence does not probe the optional library and
@@ -75,7 +80,10 @@ grouped under the behavior they shipped.
   cuSOLVERSp, while explicit cuDSS requires CUDA Driver API 12.0 or newer. Added the
   explicit staged `CudssPlan`, its root-ordered solve recording, and a
   fixed-pattern transactional `record_refactor_solve()` action that consumes
-  current device values without host-side numeric-version inference, plus the
+  current device values without host-side numeric-version inference. Failed
+  provider execution keeps the transaction reserved through submission
+  retirement, invalidates its factors, and permits a later full-factorization
+  recovery. Also added the
   separate manual `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route
   for caller-owned output and root-Graph recording over the existing
   matrix-owned provider state. None is a kernel rewrite; vendor libraries

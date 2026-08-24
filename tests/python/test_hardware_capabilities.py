@@ -1121,12 +1121,14 @@ def _native_probe_payload(discovery, unavailable_reason, **overrides):
         ),
     ],
 )
+@pytest.mark.parametrize("provider_id", ("cublas", "cusparse", "cufft"))
 def test_explicit_external_probe_normalizes_native_facts_without_enabling(
     monkeypatch,
     native_payload,
     expected_discovery,
     expected_reason,
     expected_failure_scope,
+    provider_id,
 ):
     monkeypatch.setattr(
         _capabilities,
@@ -1134,24 +1136,29 @@ def test_explicit_external_probe_normalizes_native_facts_without_enabling(
         lambda: (False, None, {"cuda": True, "vulkan": True}),
     )
     monkeypatch.setattr(
-        _capabilities, "_native_external_probe", lambda provider_id: native_payload
+        _capabilities,
+        "_native_external_probe",
+        lambda requested_provider: {
+            **native_payload,
+            "provider_id": requested_provider,
+        },
     )
 
-    report = ti.hardware.probe("cublas")
-    cublas = next(
+    report = ti.hardware.probe(provider_id)
+    operation = next(
         operation
         for operation in report.operations
-        if operation.descriptor.provider_id == "cublas"
+        if operation.descriptor.provider_id == provider_id
     )
 
-    assert cublas.discovery == expected_discovery
-    assert cublas.unavailable_reason == expected_reason
-    assert cublas.failure_scope == expected_failure_scope
-    assert cublas.enablement == "disabled"
-    assert cublas.selection == "not_considered"
-    assert cublas.native_facts["external_component_probed"] is True
-    assert cublas.native_facts["provider_enablement_changed"] is False
-    assert cublas.native_facts["provider_selection_changed"] is False
+    assert operation.discovery == expected_discovery
+    assert operation.unavailable_reason == expected_reason
+    assert operation.failure_scope == expected_failure_scope
+    assert operation.enablement == "disabled"
+    assert operation.selection == "not_considered"
+    assert operation.native_facts["external_component_probed"] is True
+    assert operation.native_facts["provider_enablement_changed"] is False
+    assert operation.native_facts["provider_selection_changed"] is False
     assert report.external_components_probed is True
 
 

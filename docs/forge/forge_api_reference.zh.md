@@ -102,9 +102,12 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
 - `SparseMatrix @ ndarray` 使用同一条自动路线。
 - `ti.hardware.load_provider_admission_evidence(path, case="cuda-spmv")` 只接受严格的
   Forge fresh-process qualification artifact。使用 `matrix.set_provider_profile(profile)`
-  绑定不可变结果，传入 `None` 可清除。profile 会精确匹配 sparse-topology fingerprint、
-  device UUID、Forge runtime build、Python provider-contract hash、provider ABI/version
-  与摊销范围；用户不能直接填入手写 timing 字段。
+  绑定不可变结果，传入 `None` 可清除。admission-schema-v2 profile 会精确匹配
+  sparse-topology fingerprint、device UUID、Python extension、split native runtime 与
+  runtime bitcode 的 build identity、Python provider-contract hash、provider ABI/version
+  和摊销范围；旧 profile 会 fail closed。用户不能直接填入手写 timing 字段。
+  `matrix.set_provider_profile(profile, expected_reuse=N)` 可提供当前 workload 的正整数
+  复用次数，并重新计算 provider 和内嵌 baseline 两侧的首次成本；省略时沿用证据中的假设。
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` 把同一 stored-matrix operation
   写入调用方提供的 output；`CusparseSpmvRecording(matrix)` 可把该手动操作作为 root-Graph
   backend command，带显式读写 effect 与 matrix-generation lifetime lease。每次 Graph run
@@ -112,11 +115,11 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
   workspace 与 preprocessing。
 - `ti.hardware.load_provider_admission_evidence(path, case="cuda-cudss-solve")`
   可为 `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)` 提供对应的
-  exact-workload profile。只有 profile 精确匹配 topology、device、Forge build、Python
-  provider-contract hash、provider ABI/version、solver 合同和预期 solve 复用次数，且摊销
-  成本相对 cuSOLVERSp 达到保守收益
+  exact-workload profile。只有 profile 进一步精确匹配实际加载的 cuDSS 二进制、solver 合同
+  和预期 solve 复用次数，且摊销成本相对 cuSOLVERSp 达到保守收益
   阈值时，auto 才会考虑用户管理的 cuDSS 0.8.x；两侧首次 analysis/factorization 成本都会
-  纳入计算。没有 profile 时，auto 不探测也不加载 cuDSS，直接保留内嵌 cuSOLVERSp。
+  纳入计算。`SparseSolver(..., expected_reuse=N)` 可为当前 workload 覆盖证据假设并重新计算
+  两条路线。没有 profile 时，auto 不探测也不加载 cuDSS，直接保留内嵌 cuSOLVERSp。
   CUDA 11 及更低版本、cuDSS 缺失/不兼容、f64、不合格 layout、scope 或成本不匹配也保留
   cuSOLVERSp；`provider="cudss"` 与 `provider="cusolver_sp"` 是不受性能 gate 限制的显式选择。
 - `ti.hardware.linalg.CudssPlan` 暴露显式 `analyze()`、`factorize()`/`refactorize()` 和
@@ -126,12 +129,15 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
   solution="solution")` 则记录一个 fixed-pattern f32 action：读取当前 CSR values 与 rhs、
   使旧 factor 失效、重新 factorize 并写入 solution，整个过程是一个 provider transaction。
   values、rhs 与 solution 必须为不同数组；同一个 plan 最多只能有一个尚未 retire 的
-  refactorize-and-solve transaction，重叠复用会 fail closed。由显式 Graph values 产生的
+  refactorize-and-solve transaction，重叠复用会 fail closed。provider 执行失败会使 factor
+  失效，并保持 transaction reserved 直到 submission retire；退役后同一 action 可对绑定的
+  values 做完整 factorization 来恢复。由显式 Graph values 产生的
   factor 不能交给后续 solve-only recording，必须先用 stored matrix 重新 refactorize。
   两种 recording 都不是 stream capture，不能在 kernel 内调用，也不支持 structured Graph
   或 AOT；显式 cuDSS 同样要求 CUDA Driver API 12.0 或更高版本。
 
 所有路线都只在实际使用相应领域对象或显式 plan 时 lazy-load 用户提供的兼容 library。
+显式 cuDSS `library_path` 是唯一候选，probe 和执行都不会回退到环境变量或默认 library。
 Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆绑 vendor library，
 不增加 build switch 或 wheel 变体。这属于领域级或显式 plan 选择，不是编译器改写任意
 kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生的 analysis、factorization

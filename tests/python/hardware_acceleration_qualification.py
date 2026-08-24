@@ -81,7 +81,7 @@ from taichi_forge.hardware._admission import (  # pylint: disable=C0413
 
 
 SCHEMA = "taichi_forge.hardware_acceleration_qualification.v4"
-ADMISSION_SCHEMA = "taichi_forge.provider_admission.v1"
+ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
 AUTO_ADMISSION_MINIMUM_PROCESSES = 8
 AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER = 4
 AUTO_ADMISSION_MINIMUM_SAMPLES = 40
@@ -1182,6 +1182,23 @@ def _cuda_cudss_solve_case(order, args):
         )
         ti.reset()
         return result
+    from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+        cudss_library_sha256,
+        resolve_cudss_library_path,
+    )
+
+    library_path = resolve_cudss_library_path(library_path)
+    provider_binary_sha256 = cudss_library_sha256(library_path)
+    if provider_binary_sha256 is None:
+        result = _provenance("cuda-cudss-solve", order)
+        result.update(
+            {
+                "status": "skipped",
+                "reason": "cudss_provider_binary_identity_unavailable",
+            }
+        )
+        ti.reset()
+        return result
     side = args.cudss_grid
     n = side * side
     row_offsets_host = [0]
@@ -1300,6 +1317,7 @@ def _cuda_cudss_solve_case(order, args):
                 "minor": provider_version[1],
                 "patch": provider_version[2],
             },
+            "provider_binary_sha256": provider_binary_sha256,
         },
         "workload_scope": {
             "rows": matrix_stats["identity"]["rows"],
@@ -2269,7 +2287,7 @@ def _auto_admission(
         return {"eligible": False, "reason": failed}
     record = {
         "schema": ADMISSION_SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         **scope,
         "performance": {
             "expected_reuse": expected_reuse,

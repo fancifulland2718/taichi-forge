@@ -25,7 +25,7 @@ import sys
 import time
 
 
-SCHEMA = "taichi_forge.hardware_provider_lifecycle_qualification.v1"
+SCHEMA = "taichi_forge.hardware_provider_lifecycle_qualification.v2"
 ITERATIONS_ENV = "TI_HARDWARE_LIFECYCLE_ITERATIONS"
 REQUIRED_DIMENSIONS = (
     "serial_churn",
@@ -33,7 +33,13 @@ REQUIRED_DIMENSIONS = (
     "runtime_reset",
     "memory_plateau",
     "stale_graph",
-    "provider_failure",
+    "contract_failure",
+    "provider_load_failure",
+    "provider_execution_failure",
+)
+
+INTERNAL_MEMORY_EVIDENCE_SCOPE = (
+    "forge_runtime_counters_and_provider_known_workspace_only"
 )
 
 
@@ -49,6 +55,7 @@ QUALIFICATION_MATRIX = {
     "cuda-cublas": {
         "ownership": "runtime_global",
         "availability": "optional_driver_provider",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cuda_runtime_owned_provider_replay_plateaus"
@@ -66,14 +73,21 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cuda_vendor_graphs_fail_closed_after_runtime_reset"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments"
+            ),
+            "provider_load_failure": _evidence(
+                "tests/python/test_hardware_capabilities.py::test_explicit_external_probe_normalizes_native_facts_without_enabling"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic cuBLAS execution fault injection is exposed"
             ),
         },
     },
     "cuda-cusparse": {
         "ownership": "sparse_matrix_generation",
         "availability": "optional_driver_provider",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cuda_runtime_owned_provider_replay_plateaus"
@@ -91,14 +105,21 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cuda_vendor_graphs_fail_closed_after_runtime_reset"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_linalg.py::test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments"
+            ),
+            "provider_load_failure": _evidence(
+                "tests/python/test_hardware_capabilities.py::test_explicit_external_probe_normalizes_native_facts_without_enabling"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic cuSPARSE execution fault injection is exposed"
             ),
         },
     },
     "cuda-cufft": {
         "ownership": "provider_generation",
         "availability": "optional_driver_provider",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_fft.py::test_cufft_serial_churn_releases_all_generations"
@@ -115,14 +136,21 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_fft.py::test_cufft_plan_and_graph_fail_closed_after_runtime_reset"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_fft.py::test_cufft_plan_rejects_non_cuda_runtime_and_bad_contracts"
+            ),
+            "provider_load_failure": _evidence(
+                "tests/python/test_hardware_capabilities.py::test_explicit_external_probe_normalizes_native_facts_without_enabling"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic cuFFT execution fault injection is exposed"
             ),
         },
     },
     "cuda-cudss": {
         "ownership": "provider_generation",
         "availability": "optional_user_managed_library",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_cudss.py::test_cudss_serial_churn_releases_all_generations"
@@ -139,14 +167,21 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_cudss.py::test_cudss_plan_and_graph_fail_closed_after_runtime_reset"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_cudss.py::test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu"
+            ),
+            "provider_load_failure": _evidence(
+                "tests/python/test_hardware_cudss.py::test_cudss_explicit_missing_library_probe_does_not_fallback"
+            ),
+            "provider_execution_failure": _evidence(
+                "tests/python/test_hardware_cudss.py::test_cudss_refactor_failure_retires_transaction_and_recovers"
             ),
         },
     },
     "vulkan-image": {
         "ownership": "runtime_resource_generation",
         "availability": "backend_feature_gated",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_texture.py::test_texture_registry_resize_churn_conserves_resources"
@@ -164,14 +199,21 @@ QUALIFICATION_MATRIX = {
                 "tests/python/test_hardware_image.py::test_vulkan_image_copy_direct_graph_ordering_and_lifetime",
                 "tests/python/test_texture.py::test_texture_launch_context_rejects_stale_resource_generation",
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_image.py::test_vulkan_image_copy_rejects_non_vulkan_runtime"
+            ),
+            "provider_load_failure": _not_applicable(
+                "Vulkan image support is backend feature-gated rather than a lazy external provider"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic Vulkan image execution fault injection is exposed"
             ),
         },
     },
     "vulkan-graphics": {
         "ownership": "provider_generation",
         "availability": "backend_feature_gated",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_graphics.py::test_vulkan_graphics_pipeline_close_releases_program_resources"
@@ -189,14 +231,21 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_graphics.py::test_vulkan_graphics_draw_validates_bindings_and_runtime_generation"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_graphics.py::test_vulkan_graphics_contract_rejects_non_vulkan_runtime"
+            ),
+            "provider_load_failure": _not_applicable(
+                "Vulkan graphics support is backend feature-gated rather than a lazy external provider"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic Vulkan graphics execution fault injection is exposed"
             ),
         },
     },
     "vulkan-ray": {
         "ownership": "blas_tlas_generation",
         "availability": "backend_feature_gated",
+        "memory_evidence_scope": INTERNAL_MEMORY_EVIDENCE_SCOPE,
         "dimensions": {
             "serial_churn": _evidence(
                 "tests/python/test_hardware_ray.py::test_vulkan_ray_serial_churn_releases_all_generations"
@@ -215,8 +264,14 @@ QUALIFICATION_MATRIX = {
             "stale_graph": _evidence(
                 "tests/python/test_hardware_ray.py::test_vulkan_ray_plan_and_graph_fail_closed_after_runtime_reset"
             ),
-            "provider_failure": _evidence(
+            "contract_failure": _evidence(
                 "tests/python/test_hardware_ray.py::test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime"
+            ),
+            "provider_load_failure": _not_applicable(
+                "Vulkan ray support is backend feature-gated rather than a lazy external provider"
+            ),
+            "provider_execution_failure": _not_applicable(
+                "no deterministic Vulkan ray execution fault injection is exposed"
             ),
         },
     },
@@ -240,7 +295,12 @@ def validate_matrix(matrix=QUALIFICATION_MATRIX):
     if not matrix:
         raise ValueError("the lifecycle qualification matrix must not be empty")
     for provider, entry in matrix.items():
-        if not provider or not entry.get("ownership") or not entry.get("availability"):
+        if (
+            not provider
+            or not entry.get("ownership")
+            or not entry.get("availability")
+            or not entry.get("memory_evidence_scope")
+        ):
             raise ValueError(f"incomplete lifecycle identity for {provider!r}")
         dimensions = entry.get("dimensions", {})
         if tuple(dimensions) != REQUIRED_DIMENSIONS:
@@ -360,6 +420,9 @@ def run_parent(args):
                 "provider": provider,
                 "ownership": QUALIFICATION_MATRIX[provider]["ownership"],
                 "availability": QUALIFICATION_MATRIX[provider]["availability"],
+                "memory_evidence_scope": QUALIFICATION_MATRIX[provider][
+                    "memory_evidence_scope"
+                ],
                 "nodes": nodes,
                 "returncode": completed.returncode,
                 "status": status,

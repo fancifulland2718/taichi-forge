@@ -95,6 +95,7 @@ def in_docker():
 _dll_dir_handles = []
 _native_library_handles = []
 _native_runtime_loaded = False
+_loaded_native_runtime_path = None
 _CUDA_RUNTIME_MAJOR_MANIFEST = "cuda_runtime_major.txt"
 
 
@@ -340,6 +341,7 @@ def _preload_cuda_runtime_for_native_runtime():
 
 def _prepare_native_runtime():
     global _native_runtime_loaded  # pylint: disable=global-statement
+    global _loaded_native_runtime_path  # pylint: disable=global-statement
     if _native_runtime_loaded:
         return
 
@@ -377,6 +379,7 @@ def _prepare_native_runtime():
             # available without entering the process-global symbol scope.
             _native_library_handles.append(handle)
             _native_runtime_loaded = True
+            _loaded_native_runtime_path = os.path.realpath(lib_path)
             startup_profile_mark("native_runtime.load.end")
             _native_load_trace("native runtime load passed")
             return

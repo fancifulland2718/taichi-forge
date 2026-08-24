@@ -31,6 +31,10 @@ def test_cudss_library_discovery_is_user_managed_and_deterministic(
         _cudss, "_nvidia_namespace_roots", lambda: (tmp_path / "nvidia",)
     )
     assert _cudss.resolve_cudss_library_path() == str(library.resolve())
+    first_identity = _cudss.cudss_library_sha256(library)
+    library.write_bytes(b"test-only-placeholder-v2")
+    assert _cudss.cudss_library_sha256(library) != first_identity
+    assert _cudss.cudss_library_sha256(tmp_path / "missing") is None
 
 
 def test_cudss_library_discovery_matches_the_cuda_driver_family(tmp_path, monkeypatch):
@@ -103,8 +107,30 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cudss_explicit_missing_library_probe_does_not_fallback(tmp_path):
+    missing = tmp_path / (
+        "missing-cudss64_0.dll"
+        if os.name == "nt"
+        else "missing-libcudss.so.0"
+    )
+    before = ti.hardware.telemetry().providers["cudss"]["library_loaded"]
+
+    report = ti.hardware.probe("cudss", library_path=missing)
+    resolved = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.solve.cudss"
+    )
+
+    assert resolved.discovery == "missing"
+    assert resolved.unavailable_reason == "external_library_not_found"
+    assert resolved.native_facts["library_candidates"] == [str(missing)]
+    assert ti.hardware.telemetry().providers["cudss"]["library_loaded"] == before
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
-    monkeypatch,
+    monkeypatch, tmp_path
 ):
     def unexpected_probe(*_args, **_kwargs):
         raise AssertionError("auto without admission evidence must not probe cuDSS")
@@ -149,10 +175,15 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
 
     stats = matrix._debug_runtime_stats()
     identity = stats["identity"]
+    provider_binary = tmp_path / (
+        "cudss64_0.dll" if os.name == "nt" else "libcudss.so.0"
+    )
+    provider_binary.write_bytes(b"test-provider-identity")
+    provider_binary_sha256 = _cudss.cudss_library_sha256(provider_binary)
     mismatched_profile = ProviderAdmissionEvidence._from_record(
         {
-            "schema": "taichi_forge.provider_admission.v1",
-            "schema_version": 1,
+            "schema": "taichi_forge.provider_admission.v2",
+            "schema_version": 2,
             "operation_id": "linalg.solve.cudss_auto",
             "provider_id": "cudss",
             "baseline_id": "cusolver_sp",
@@ -161,6 +192,7 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
             "provider_scope": {
                 "provider_abi": "cudss-c-api-0.8",
                 "provider_version": {"major": 0, "minor": 8, "patch": 1},
+                "provider_binary_sha256": provider_binary_sha256,
             },
             "workload_scope": {
                 "rows": identity["rows"],
@@ -208,7 +240,7 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
         dtype=ti.f32,
         solver_type="LLT",
         provider="auto",
-        library_path="must-not-be-probed",
+        library_path=provider_binary,
         provider_profile=mismatched_profile,
     )
     mismatched.compute(matrix)
@@ -464,6 +496,91 @@ def test_cudss_staged_solve_and_refactorization():
     assert status["library_loaded"]
     assert status["provider_abi"] == "cudss-c-api-0.8"
     assert status["provider_version"].startswith("0.8.")
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cudss_refactor_failure_retires_transaction_and_recovers():
+    library_path = os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        pytest.skip("set TI_CUDSS_TEST_LIBRARY to a user-managed cuDSS 0.8.x DLL")
+    if not ti.hardware.linalg.cudss_is_available(library_path=library_path):
+        pytest.skip("the configured cuDSS 0.8.x provider is not loadable")
+
+    row_offsets = ti.ndarray(ti.i32, shape=3)
+    column_indices = ti.ndarray(ti.i32, shape=4)
+    stored_values = ti.ndarray(ti.f32, shape=4)
+    row_offsets.from_numpy(np.array([0, 2, 4], dtype=np.int32))
+    column_indices.from_numpy(np.array([0, 1, 0, 1], dtype=np.int32))
+    stored_values.from_numpy(
+        np.array([3.0, -1.0, -1.0, 3.0], dtype=np.float32)
+    )
+    matrix = ti.linalg.SparsePattern.csr(
+        2, 2, row_offsets, column_indices
+    ).matrix(stored_values)
+    values = ti.ndarray(ti.f32, shape=4)
+    rhs = ti.ndarray(ti.f32, shape=2)
+    solution = ti.ndarray(ti.f32, shape=2)
+    values.from_numpy(np.array([4.0, -1.0, -1.0, 4.0], dtype=np.float32))
+    rhs.from_numpy(np.array([1.0, 2.0], dtype=np.float32))
+
+    with ti.hardware.linalg.CudssPlan(
+        matrix,
+        matrix_type="spd",
+        matrix_view="full",
+        library_path=library_path,
+    ).compute() as plan:
+        recording = plan.record_refactor_solve()
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+        graph = builder.compile()
+        bindings = {
+            "matrix_values": values,
+            "rhs": rhs,
+            "solution": solution,
+        }
+
+        plan._debug_fail_next_refactor_solve()
+        with pytest.raises(RuntimeError, match="Injected.*refactorization failure"):
+            graph.run(bindings)
+
+        failed_inflight = plan.statistics()
+        assert failed_inflight["factorized"] == 0
+        assert failed_inflight["factorized_from_explicit_values"] == 0
+        assert failed_inflight["refactor_solve_attempts"] == 1
+        assert failed_inflight["refactor_solve_successes"] == 0
+        assert failed_inflight["refactor_solve_failures"] == 1
+        assert failed_inflight["refactor_solve_inflight"] == 1
+        with pytest.raises(RuntimeError, match="transaction is in flight"):
+            graph.run(bindings)
+
+        ti.sync()
+        retired = plan.statistics()
+        assert retired["factorized"] == 0
+        assert retired["refactor_solve_inflight"] == 0
+        assert retired["refactor_solve_retirements"] == 1
+        with pytest.raises(RuntimeError, match="successful factorization"):
+            plan.recording()
+
+        solution.fill(0)
+        graph.run(bindings)
+        ti.sync()
+        recovered = plan.statistics()
+        assert recovered["factorized"] == 1
+        assert recovered["factorized_from_explicit_values"] == 1
+        assert recovered["refactor_solve_attempts"] == 2
+        assert recovered["refactor_solve_successes"] == 1
+        assert recovered["refactor_solve_failures"] == 1
+        assert recovered["refactor_solve_retirements"] == 2
+        assert recovered["refactor_solve_inflight"] == 0
+        expected_matrix = np.array(
+            [[4.0, -1.0], [-1.0, 4.0]], dtype=np.float32
+        )
+        np.testing.assert_allclose(
+            expected_matrix @ solution.to_numpy(),
+            np.array([1.0, 2.0], dtype=np.float32),
+            rtol=1e-5,
+        )
 
 
 @pytest.mark.run_in_serial

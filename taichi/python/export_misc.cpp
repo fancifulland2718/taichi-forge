@@ -259,13 +259,14 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
       }
     };
     if (!library_path.empty()) {
-      candidates.insert(candidates.begin(), library_path);
-    }
+      candidates = {library_path};
+    } else {
 #ifdef WIN32
-    append_unique("cudss64_0.dll");
+      append_unique("cudss64_0.dll");
 #else
-    append_unique("libcudss.so.0");
+      append_unique("libcudss.so.0");
 #endif
+    }
   }
   std::unique_ptr<TransientExternalLibrary> loader;
   std::string selected_candidate;

@@ -243,6 +243,12 @@ def test_aggregate_emits_loadable_strict_auto_admission_evidence(tmp_path):
             "forge_version": "0.6.3",
             "forge_commit": "test-revision",
             "python_provider_contract_sha256": "a" * 64,
+            "native_runtime_build_identity": "b" * 64,
+            "native_runtime_artifacts": {
+                "python_extension_sha256": "c" * 64,
+                "native_runtime_binary_sha256": "d" * 64,
+                "runtime_bitcode_bundle_sha256": "e" * 64,
+            },
         },
         "transfer_ns": 0.0,
         "conversion_ns": 0.0,

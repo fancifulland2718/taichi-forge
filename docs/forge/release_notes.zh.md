@@ -56,8 +56,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   也不会改写普通 matrix multiplication 或 kernel。
 - 在 hardware catalog 中资格化 CUDA sparse 路线：
   `SparseMatrix.spmv(method="auto")` 只有在存在匹配且稳定的 matrix-scoped 成本证据时才
-  考虑 cuSPARSE；证据只能从严格的 fresh-process qualification artifact 加载，并绑定
-  精确 topology、device、runtime 与 provider ABI，原手填 timing setter 已移除。显式
+  考虑 cuSPARSE；证据只能从严格的 fresh-process qualification artifact 加载。
+  admission-schema-v2 证据绑定精确 topology、device、Python extension、split native runtime、
+  runtime bitcode 与 provider ABI；cuDSS 证据还绑定精确 provider binary，旧 profile 会
+  fail closed。原手填 timing setter 已移除；当前 workload 可提供正整数 `expected_reuse`
+  覆盖值，以重新计算 provider 和内嵌 baseline 两侧首次成本。显式
   provider 路线不受成本 gate 限制；
   `SparseSolver(provider="auto", provider_profile=profile)` 对用户管理的 cuDSS 0.8.x 使用
   同一套 exact-scope admission，并对称摊销 cuDSS 与 cuSOLVERSp 的首次成本。缺少证据时不会
@@ -65,7 +68,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   provider、不合格合同或未通过成本资格的场景同样继续使用 cuSOLVERSp；显式 cuDSS 要求
   CUDA Driver API 12.0 或更高版本。
   新增 staged `CudssPlan`、root-ordered solve recording，以及读取当前 device values、
-  不依赖 host numeric-version 推断的 fixed-pattern 事务化 `record_refactor_solve()` action；
+  不依赖 host numeric-version 推断的 fixed-pattern 事务化 `record_refactor_solve()` action。
+  provider 执行失败会在 submission retire 前保持 transaction reserved 并使 factor 失效，
+  之后可通过完整 factorization 恢复；
   另新增独立的手动
   `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 路线，支持调用方持有 output，
   并在复用 matrix-owned provider

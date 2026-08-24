@@ -19,6 +19,9 @@ def test_lifecycle_matrix_covers_every_formal_provider_and_dimension():
     )
     for entry in lifecycle.QUALIFICATION_MATRIX.values():
         assert tuple(entry["dimensions"]) == lifecycle.REQUIRED_DIMENSIONS
+        assert entry["memory_evidence_scope"] == (
+            lifecycle.INTERNAL_MEMORY_EVIDENCE_SCOPE
+        )
 
 
 def test_lifecycle_matrix_evidence_points_to_real_test_nodes():
@@ -64,6 +67,7 @@ def test_lifecycle_matrix_rejects_implicit_gaps():
         "provider": {
             "ownership": "provider_generation",
             "availability": "optional",
+            "memory_evidence_scope": lifecycle.INTERNAL_MEMORY_EVIDENCE_SCOPE,
             "dimensions": {
                 dimension: lifecycle._evidence("tests/test.py::test_case")
                 for dimension in lifecycle.REQUIRED_DIMENSIONS[:-1]

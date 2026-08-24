@@ -23,6 +23,10 @@ class SparseSolver:
             evidence for ``provider="auto"``. Explicit providers are never
             cost-gated. Without evidence, CUDA auto selection remains on the
             embedded cuSOLVERSp route and does not probe cuDSS.
+        expected_reuse: Expected solves per factorization for the current
+            workload. ``None`` explicitly adopts the evidence profile's
+            assumption; a positive integer re-evaluates amortized cost for
+            this use.
     """
 
     def __init__(
@@ -34,6 +38,7 @@ class SparseSolver:
         provider="auto",
         library_path=None,
         provider_profile=None,
+        expected_reuse=None,
     ):
         self.matrix = None
         self.dtype = dtype
@@ -47,6 +52,7 @@ class SparseSolver:
         self._provider_selection_identity = None
         self._library_path = library_path
         self._provider_profile = provider_profile
+        self._expected_reuse = expected_reuse
         solver_type_list = ["LLT", "LDLT", "LU"]
         solver_ordering = ["AMD", "COLAMD"]
         provider_list = ["auto", "cudss", "cusolver_sp"]
@@ -79,6 +85,16 @@ class SparseSolver:
                     "SparseSolver provider_profile must qualify cuDSS "
                     "against cuSOLVERSp"
                 )
+        if expected_reuse is not None and (
+            isinstance(expected_reuse, bool)
+            or not isinstance(expected_reuse, int)
+            or expected_reuse <= 0
+        ):
+            raise ValueError("SparseSolver expected_reuse must be a positive integer")
+        if expected_reuse is not None and provider_profile is None:
+            raise ValueError(
+                "SparseSolver expected_reuse requires provider_profile"
+            )
         if solver_type in solver_type_list and ordering in solver_ordering:
             taichi_arch = taichi_forge.lang.impl.get_runtime().prog.config().arch
             assert (
@@ -177,6 +193,7 @@ class SparseSolver:
             workload_scope=self._cudss_workload_scope(sparse_matrix),
             runtime_scope=_current_runtime_scope(),
             provider_warmed=False,
+            expected_reuse=self._expected_reuse,
         )
         self._provider_admission = decision.to_dict()
         return decision
@@ -213,6 +230,8 @@ class SparseSolver:
             and identity["storage_format"] == "csr"
             and sparse_matrix.n == sparse_matrix.m
         )
+        resolved_cudss_library = self._library_path
+        cudss_provider_binary_sha256 = None
         if self._provider_request == "cusolver_sp":
             cudss_eligible = False
             self._provider_fallback_reason = "explicit_cusolver_sp"
@@ -245,12 +264,42 @@ class SparseSolver:
             }
         elif cudss_eligible and self._provider_request in ("auto", "cudss"):
             if self._provider_request == "auto":
+                from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+                    cudss_library_sha256,
+                    resolve_cudss_library_path,
+                )
+
+                resolved_cudss_library = resolve_cudss_library_path(
+                    self._library_path,
+                    cuda_driver_api_version=cuda_driver_api_version,
+                )
+                cudss_provider_binary_sha256 = cudss_library_sha256(
+                    resolved_cudss_library
+                )
+                if cudss_provider_binary_sha256 is None:
+                    self._provider_fallback_reason = (
+                        "provider_binary_identity_unavailable"
+                    )
+                    self._provider_admission = {
+                        "admitted": False,
+                        "route": "fallback",
+                        "reason": self._provider_fallback_reason,
+                    }
+                    self.solver = _ti_core.make_cusparse_solver(
+                        self.dtype, self._solver_type, self._ordering
+                    )
+                    self._selected_provider = "cusolver_sp"
+                    self._provider_selection_identity = selection_identity
+                    return
                 preflight = self._evaluate_cudss_admission(
                     sparse_matrix,
                     {
                         "provider_abi": "cudss-c-api-0.8",
                         "provider_version": dict(
                             self._provider_profile.provider_scope["provider_version"]
+                        ),
+                        "provider_binary_sha256": (
+                            cudss_provider_binary_sha256
                         ),
                     },
                 )
@@ -266,7 +315,7 @@ class SparseSolver:
                 probe,
             )
 
-            report = probe("cudss", library_path=self._library_path)
+            report = probe("cudss", library_path=resolved_cudss_library)
             resolved = next(
                 item
                 for item in report.operations
@@ -280,6 +329,9 @@ class SparseSolver:
                             "provider_abi": resolved.provider_abi,
                             "provider_version": self._provider_version_scope(
                                 resolved.provider_version
+                            ),
+                            "provider_binary_sha256": (
+                                cudss_provider_binary_sha256
                             ),
                         },
                     )
@@ -299,7 +351,11 @@ class SparseSolver:
                 }[self._solver_type]
                 if resolved is not None:
                     try:
-                        self.solver = self._make_cudss_plan(sparse_matrix, matrix_type)
+                        self.solver = self._make_cudss_plan(
+                            sparse_matrix,
+                            matrix_type,
+                            library_path=resolved_cudss_library,
+                        )
                     except (RuntimeError, TaichiRuntimeError) as exc:
                         if self._provider_request == "cudss":
                             raise
@@ -335,7 +391,9 @@ class SparseSolver:
         self._selected_provider = "cusolver_sp"
         self._provider_selection_identity = selection_identity
 
-    def _make_cudss_plan(self, sparse_matrix, matrix_type=None):
+    def _make_cudss_plan(
+        self, sparse_matrix, matrix_type=None, *, library_path=None
+    ):
         from taichi_forge.hardware.linalg import (  # pylint: disable=C0415
             CudssPlan,
         )
@@ -350,7 +408,7 @@ class SparseSolver:
             sparse_matrix,
             matrix_type=matrix_type,
             matrix_view="full",
-            library_path=self._library_path,
+            library_path=(self._library_path if library_path is None else library_path),
         )
 
     @staticmethod

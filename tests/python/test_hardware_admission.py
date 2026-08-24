@@ -12,8 +12,8 @@ from taichi_forge.hardware._admission import evaluate_provider_admission
 
 def _evidence_record():
     return {
-        "schema": "taichi_forge.provider_admission.v1",
-        "schema_version": 1,
+        "schema": "taichi_forge.provider_admission.v2",
+        "schema_version": 2,
         "operation_id": "linalg.spmv.cusparse",
         "provider_id": "cusparse",
         "baseline_id": "cuda_driver_kernel",
@@ -38,6 +38,12 @@ def _evidence_record():
             "forge_version": "0.6.3",
             "forge_commit": "test-revision",
             "python_provider_contract_sha256": "a" * 64,
+            "native_runtime_build_identity": "b" * 64,
+            "native_runtime_artifacts": {
+                "python_extension_sha256": "c" * 64,
+                "native_runtime_binary_sha256": "d" * 64,
+                "runtime_bitcode_bundle_sha256": "e" * 64,
+            },
         },
         "performance": {
             "expected_reuse": 10,
@@ -199,6 +205,7 @@ def test_admission_accepts_exact_cudss_auto_workload_scope(tmp_path):
             "provider_scope": {
                 "provider_abi": "cudss-c-api-0.8",
                 "provider_version": {"major": 0, "minor": 8, "patch": 1},
+                "provider_binary_sha256": "f" * 64,
             },
         }
     )
@@ -223,6 +230,12 @@ def test_admission_accepts_exact_cudss_auto_workload_scope(tmp_path):
     assert evidence.workload_scope["workflow"] == (
         "analyze_factorize_then_repeated_solve"
     )
+    current_provider = dict(evidence.provider_scope)
+    assert _evaluate(evidence, provider_scope=current_provider).admitted
+    current_provider["provider_binary_sha256"] = "0" * 64
+    rejected = _evaluate(evidence, provider_scope=current_provider)
+    assert not rejected.admitted
+    assert rejected.reason == "provider_scope_mismatch"
 
 
 def test_admission_requires_unambiguous_case_selection(tmp_path):
@@ -236,3 +249,88 @@ def test_admission_requires_unambiguous_case_selection(tmp_path):
         load_provider_admission_evidence(path)
     selected = load_provider_admission_evidence(path, case="cuda-spmv")
     assert selected.operation_id == "linalg.spmv.cusparse"
+
+
+def test_admission_binds_native_build_identity(tmp_path):
+    evidence = load_provider_admission_evidence(
+        _write_artifact(tmp_path, _artifact())
+    )
+    runtime_scope = dict(evidence.runtime_scope)
+    runtime_scope["native_runtime_build_identity"] = "0" * 64
+
+    rejected = _evaluate(evidence, runtime_scope=runtime_scope)
+
+    assert not rejected.admitted
+    assert rejected.reason == "runtime_scope_mismatch"
+
+
+def test_admission_requires_each_native_build_artifact_digest(tmp_path):
+    record = copy.deepcopy(_evidence_record())
+    del record["runtime_scope"]["native_runtime_artifacts"][
+        "native_runtime_binary_sha256"
+    ]
+
+    with pytest.raises(ValueError, match="native_runtime_binary_sha256"):
+        load_provider_admission_evidence(
+            _write_artifact(tmp_path, _artifact(record))
+        )
+
+
+def test_admission_rechecks_current_expected_reuse(tmp_path):
+    record = copy.deepcopy(_evidence_record())
+    record["performance"]["provider_median_ns"] = 80_000.0
+    record["performance"]["provider_first_use_overhead_ns"] = 100_000.0
+    evidence = load_provider_admission_evidence(
+        _write_artifact(tmp_path, _artifact(record))
+    )
+
+    short_lived = _evaluate(evidence, expected_reuse=1)
+    qualified_reuse = _evaluate(evidence, expected_reuse=10)
+
+    assert not short_lived.admitted
+    assert short_lived.reason == "cost_gate"
+    assert short_lived.expected_reuse == 1
+    assert short_lived.evidence_expected_reuse == 10
+    assert qualified_reuse.admitted
+    assert qualified_reuse.expected_reuse == 10
+
+
+def test_current_runtime_scope_hashes_native_binary_and_bitcode(
+    tmp_path, monkeypatch
+):
+    from taichi_forge._lib import core as ti_core
+    from taichi_forge._lib import utils as runtime_utils
+    from taichi_forge.hardware import _admission
+
+    extension = tmp_path / "taichi_python.test"
+    runtime = tmp_path / "taichi_runtime.test"
+    bitcode = tmp_path / "runtime"
+    bitcode.mkdir()
+    extension.write_bytes(b"extension-v1")
+    runtime.write_bytes(b"runtime-v1")
+    (bitcode / "runtime_cuda.bc").write_bytes(b"cuda-v1")
+    (bitcode / "runtime_x64.bc").write_bytes(b"x64-v1")
+    (bitcode / "slim_libdevice.10.bc").write_bytes(b"libdevice-v1")
+    monkeypatch.setattr(ti_core, "__file__", str(extension))
+    monkeypatch.setattr(
+        runtime_utils, "_loaded_native_runtime_path", str(runtime)
+    )
+    monkeypatch.setattr(
+        runtime_utils, "_runtime_bitcode_dir", lambda: str(bitcode)
+    )
+
+    _admission._current_runtime_scope.cache_clear()
+    first = _admission._current_runtime_scope()
+    (bitcode / "runtime_cuda.bc").write_bytes(b"cuda-v2")
+    cached = _admission._current_runtime_scope()
+    _admission._current_runtime_scope.cache_clear()
+    second = _admission._current_runtime_scope()
+    _admission._current_runtime_scope.cache_clear()
+
+    assert cached == first
+    assert first["native_runtime_build_identity"] != second[
+        "native_runtime_build_identity"
+    ]
+    assert first["native_runtime_artifacts"][
+        "native_runtime_binary_sha256"
+    ] == _admission._file_sha256(runtime)

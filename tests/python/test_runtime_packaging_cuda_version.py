@@ -959,6 +959,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
         runtime_utils, "_native_runtime_dirs", lambda: [str(tmp_path)]
     )
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
+    monkeypatch.setattr(runtime_utils, "_loaded_native_runtime_path", None)
     monkeypatch.setattr(runtime_utils, "_native_library_handles", [])
     monkeypatch.setattr(
         runtime_utils.ctypes,
@@ -969,6 +970,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
     runtime_utils._prepare_native_runtime()
 
     assert runtime_utils._native_runtime_loaded
+    assert runtime_utils._loaded_native_runtime_path == str(runtime.resolve())
     assert runtime_utils._native_library_handles == [handle]
     assert calls == [
         (

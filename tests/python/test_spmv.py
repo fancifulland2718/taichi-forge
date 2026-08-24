@@ -300,8 +300,8 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
         provider = native["provider"]
         return ProviderAdmissionEvidence._from_record(
             {
-                "schema": "taichi_forge.provider_admission.v1",
-                "schema_version": 1,
+                "schema": "taichi_forge.provider_admission.v2",
+                "schema_version": 2,
                 "operation_id": "linalg.spmv.cusparse",
                 "provider_id": "cusparse",
                 "baseline_id": "cuda_driver_kernel",
@@ -369,13 +369,22 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
     assert stats["auto_provider"]["last_decision"]["reason"] == (
         "qualified_cost_advantage"
     )
+    assert stats["auto_provider"]["last_decision"]["expected_reuse"] == 16
     assert stats["operations"]["spmv_plan_builds"] == 1
     assert not hasattr(matrix, "set_spmv_auto_cost_evidence")
+
+    matrix.set_provider_profile(profile(fingerprint), expected_reuse=1)
+    current_use = matrix @ vector
+    ti.sync()
+    np.testing.assert_allclose(current_use.to_numpy(), expected, rtol=1e-6)
+    assert matrix._debug_runtime_stats()["auto_provider"]["last_decision"][
+        "expected_reuse"
+    ] == 1
 
     matrix.set_provider_profile(None)
     explicit = matrix.spmv(vector, method="provider")
     ti.sync()
     np.testing.assert_allclose(explicit.to_numpy(), expected, rtol=1e-6)
     stats = matrix._debug_runtime_stats()
-    assert stats["auto_provider"]["candidates"] == 3
+    assert stats["auto_provider"]["candidates"] == 4
     assert not stats["auto_provider"]["provider_profile_present"]

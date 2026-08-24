@@ -1220,6 +1220,8 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::string, std::uint64_t>
   cuda_cudss_plan_statistics(std::uint64_t handle);
 
+  void debug_cuda_cudss_fail_next_refactor_solve(std::uint64_t handle);
+
   void destroy_cuda_cudss_plan(std::uint64_t handle);
 
   void cuda_clear_cudss_plans();

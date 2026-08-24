@@ -252,16 +252,17 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
   void reserve_refactor_solve() {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
-    TI_ERROR_IF(!analyzed_ || !factorized_,
-                "CUDA cuDSS refactorize+solve requires a prior successful "
-                "analysis and factorization.");
     require_no_refactor_solve_inflight("refactorize+solve");
+    TI_ERROR_IF(!analyzed_,
+                "CUDA cuDSS refactorize+solve requires a prior successful "
+                "analysis.");
     TI_ERROR_IF(next_refactor_solve_generation_ ==
                     (std::numeric_limits<std::uint64_t>::max)(),
                 "CUDA cuDSS refactorize+solve transaction generation "
                 "space exhausted.");
     refactor_solve_inflight_ = true;
     refactor_solve_provider_started_ = false;
+    refactor_solve_uses_full_factorization_ = !factorized_;
     active_refactor_solve_generation_ = next_refactor_solve_generation_++;
     factorized_ = false;
     factorized_from_explicit_values_ = false;
@@ -276,6 +277,7 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
     std::lock_guard<std::mutex> lock(mutex_);
     if (refactor_solve_inflight_ && !refactor_solve_provider_started_) {
       refactor_solve_inflight_ = false;
+      refactor_solve_uses_full_factorization_ = false;
       active_refactor_solve_generation_ = 0;
       ++refactor_solve_failures_;
     }
@@ -294,10 +296,20 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
                             "explicit matrix-values rebinding");
       bind_dense_vectors(rhs, solution);
       refactor_solve_provider_started_ = true;
-      require_cudss_success(
-          driver.execute.call(context_, kCudssPhaseRefactorization, config_,
-                              data_, matrix_, nullptr, nullptr),
-          "transactional refactorization");
+      const auto factorization_phase =
+          refactor_solve_uses_full_factorization_ ? kCudssPhaseFactorization
+                                                  : kCudssPhaseRefactorization;
+      const auto refactor_status = driver.execute.call(
+          context_, factorization_phase, config_, data_, matrix_, nullptr,
+          nullptr);
+      const bool inject_failure =
+          debug_fail_next_refactor_solve_after_provider_call_;
+      debug_fail_next_refactor_solve_after_provider_call_ = false;
+      require_cudss_success(refactor_status, "transactional refactorization");
+      TI_ERROR_IF(
+          inject_failure,
+          "Injected CUDA cuDSS transactional refactorization failure after "
+          "the provider call.");
       execute_solve();
       factorized_ = true;
       factorized_from_explicit_values_ = true;
@@ -311,6 +323,13 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
     }
   }
 
+  void debug_fail_next_refactor_solve() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
+    require_no_refactor_solve_inflight("failure injection");
+    debug_fail_next_refactor_solve_after_provider_call_ = true;
+  }
+
   std::uint64_t submission_retirement_token() const override {
     std::lock_guard<std::mutex> lock(mutex_);
     return refactor_solve_inflight_ ? active_refactor_solve_generation_ : 0;
@@ -322,6 +341,7 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
         token == active_refactor_solve_generation_) {
       refactor_solve_inflight_ = false;
       refactor_solve_provider_started_ = false;
+      refactor_solve_uses_full_factorization_ = false;
       active_refactor_solve_generation_ = 0;
       ++refactor_solve_retirements_;
     }
@@ -476,6 +496,8 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
   bool factorized_from_explicit_values_{false};
   bool refactor_solve_inflight_{false};
   bool refactor_solve_provider_started_{false};
+  bool refactor_solve_uses_full_factorization_{false};
+  bool debug_fail_next_refactor_solve_after_provider_call_{false};
   bool closed_{false};
   std::vector<int> analyzed_csr_row_ptr_;
   std::vector<int> analyzed_csr_col_ind_;
@@ -660,6 +682,19 @@ Program::cuda_cudss_plan_statistics(std::uint64_t handle) {
   return found->second->statistics();
 }
 
+void Program::debug_cuda_cudss_fail_next_refactor_solve(
+    std::uint64_t handle) {
+  std::shared_ptr<CudaCudssPlan> plan;
+  {
+    std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
+    const auto found = cuda_cudss_plans_.find(handle);
+    TI_ERROR_IF(found == cuda_cudss_plans_.end(),
+                "CUDA cuDSS plan handle is stale or closed.");
+    plan = found->second;
+  }
+  plan->debug_fail_next_refactor_solve();
+}
+
 void Program::destroy_cuda_cudss_plan(std::uint64_t handle) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   std::shared_ptr<CudaCudssPlan> plan;
@@ -739,6 +774,10 @@ std::size_t Program::cuda_cudss_refactor_solve(std::uint64_t,
 
 std::unordered_map<std::string, std::uint64_t>
 Program::cuda_cudss_plan_statistics(std::uint64_t) {
+  TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
+}
+
+void Program::debug_cuda_cudss_fail_next_refactor_solve(std::uint64_t) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }
 
