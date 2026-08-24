@@ -1,3 +1,5 @@
+import gc
+
 import numpy as np
 import pytest
 
@@ -386,3 +388,84 @@ def test_cufft_plan_cache_reuses_plan_and_reports_workspace():
     assert after_close.live_handles == before.live_handles
     assert after_close.live_plans == before.live_plans
     assert after_close.workspace_bytes_live == before.workspace_bytes_live
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_inflight_close_is_completion_retained_and_generation_safe():
+    if not ti.hardware.fft.is_available():
+        pytest.skip("a compatible optional cuFFT shared library is unavailable")
+
+    program = ti.lang.impl.get_runtime().prog
+    before = ti.hardware.fft.cache_statistics()
+    plan = ti.hardware.fft.CufftPlan1D(4096)
+    source = ti.ndarray(ti.f32, shape=plan.input_shape)
+    output = ti.ndarray(ti.f32, shape=plan.output_shape)
+    host = np.zeros(plan.input_shape, dtype=np.float32)
+    host[:, 0] = np.arange(4096, dtype=np.float32) % 17
+    source.from_numpy(host)
+    ti.sync()
+    memory_before = program._runtime_statistics_snapshot()["memory"]
+
+    plan.execute(source, output)
+    waits_before = program._runtime_statistics_snapshot()["synchronization"][
+        "backend_waits"
+    ]
+    capacity = plan.memory_report().known_capacity_requested_bytes
+    plan.close()
+
+    assert (
+        program._runtime_statistics_snapshot()["synchronization"]["backend_waits"]
+        == waits_before
+    )
+    closed = plan.memory_report()
+    assert closed.lifecycle_state == "closed"
+    assert closed.known_resident_requested_bytes == 0
+    assert closed.known_capacity_requested_bytes == capacity
+    after_close = ti.hardware.fft.cache_statistics()
+    assert after_close.live_handles == before.live_handles
+    assert after_close.live_plans == before.live_plans
+    assert (
+        program._runtime_statistics_snapshot()["memory"]["inflight_resources"]
+        >= memory_before["inflight_resources"] + 1
+    )
+
+    replacement = ti.hardware.fft.CufftPlan1D(4096)
+    after_replacement = ti.hardware.fft.cache_statistics()
+    assert after_replacement.cache_misses == before.cache_misses + 2
+    assert after_replacement.cache_hits == before.cache_hits
+    ti.sync()
+    assert np.isfinite(output.to_numpy()).all()
+    replacement.close()
+
+    collected = ti.hardware.fft.CufftPlan1D(128)
+    assert ti.hardware.fft.cache_statistics().live_handles == before.live_handles + 1
+    del collected
+    gc.collect()
+    assert ti.hardware.fft.cache_statistics().live_handles == before.live_handles
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_plan_and_graph_fail_closed_after_runtime_reset():
+    if not ti.hardware.fft.is_available():
+        pytest.skip("a compatible optional cuFFT shared library is unavailable")
+
+    plan = ti.hardware.fft.CufftPlan1D(64)
+    source = ti.ndarray(ti.f32, shape=plan.input_shape)
+    output = ti.ndarray(ti.f32, shape=plan.output_shape)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.record(), admission="auto")
+    graph = builder.compile()
+    capacity = plan.memory_report().known_capacity_requested_bytes
+
+    ti.reset()
+
+    invalid = plan.memory_report()
+    assert invalid.lifecycle_state == "runtime_invalid"
+    assert invalid.known_resident_requested_bytes == 0
+    assert invalid.known_capacity_requested_bytes == capacity
+    with pytest.raises(RuntimeError, match="previous Taichi runtime"):
+        plan.record()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        graph.run({"input": source, "output": output})
+    plan.close()
+    assert plan.memory_report().lifecycle_state == "closed"

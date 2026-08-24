@@ -7517,7 +7517,21 @@ void Program::release_completed_external_dense_storage_leases() {
   completed.clear();
 }
 
+void Program::pin_cuda_provider_plan(std::shared_ptr<void> plan) {
+  TI_ASSERT(plan != nullptr);
+  cuda_provider_inflight_plans_.try_emplace(plan.get(), std::move(plan));
+}
+
+void Program::release_completed_cuda_provider_plans() {
+  CudaProviderInflightPlanMap completed;
+  completed.swap(cuda_provider_inflight_plans_);
+  completed.clear();
+}
+
 void Program::release_completed_vulkan_native_resources() {
+  // CUDA provider plans and Vulkan native objects share the same completion
+  // retirement boundary even though their backend-specific ownership differs.
+  release_completed_cuda_provider_plans();
   std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>> graphics;
   std::vector<std::shared_ptr<VulkanTriangleRayScene>> ray_scenes;
   std::vector<std::shared_ptr<VulkanRayResource>> ray_resources;
@@ -7548,6 +7562,9 @@ std::size_t Program::RuntimeCompletionResourceBatch::retained_resource_count(
   }
   if (kind == kExternalDenseStorageResourceKind) {
     return external_dense_storage.size();
+  }
+  if (kind == kCudaProviderPlanResourceKind) {
+    return cuda_provider_plans.size();
   }
   if (kind == kVulkanGraphicsPipelineResourceKind) {
     return vulkan_graphics_pipelines.size();
@@ -7585,6 +7602,9 @@ Program::detach_runtime_completion_resources() {
     has_resources = !vulkan_graphics_pipeline_retirements_.empty();
   }
   if (!has_resources) {
+    has_resources = !cuda_provider_inflight_plans_.empty();
+  }
+  if (!has_resources) {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
     has_resources = !vulkan_ray_scene_retirements_.empty() ||
                     !vulkan_ray_resource_retirements_.empty();
@@ -7612,6 +7632,7 @@ Program::detach_runtime_completion_resources() {
     std::lock_guard<std::mutex> lock(external_dense_storage_lifecycle_mutex_);
     batch->external_dense_storage.swap(external_dense_storage_inflight_leases_);
   }
+  batch->cuda_provider_plans.swap(cuda_provider_inflight_plans_);
   {
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
     batch->vulkan_graphics_pipelines.swap(
@@ -7981,6 +8002,8 @@ Program::debug_runtime_completion_stats() const {
        runtime_completion_resource_count(kVulkanRaySceneResourceKind)},
       {"retained_vulkan_ray_resources",
        runtime_completion_resource_count(kVulkanRayResourceKind)},
+      {"retained_cuda_provider_plans",
+       runtime_completion_resource_count(kCudaProviderPlanResourceKind)},
       {"cuda_completion_events_created", cuda_events.created},
       {"cuda_completion_events_reused", cuda_events.reused},
       {"cuda_completion_events_returned", cuda_events.returned},
@@ -8013,6 +8036,15 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
       graphics.at("retiring") + ray.at("retiring");
   snapshot.memory.inflight_resources +=
       graphics.at("completion_retained") + ray.at("completion_retained");
+  std::size_t pending_cuda_provider_plans = 0;
+  {
+    std::lock_guard<std::recursive_mutex> lock(
+        runtime_resource_submission_mutex_);
+    pending_cuda_provider_plans = cuda_provider_inflight_plans_.size();
+  }
+  snapshot.memory.inflight_resources +=
+      runtime_completion_resource_count(kCudaProviderPlanResourceKind) +
+      pending_cuda_provider_plans;
 
   const HostMemoryPoolStats host =
       HostMemoryPool::get_instance().get_stats();

@@ -246,20 +246,36 @@ def test_cudss_staged_solve_and_refactorization():
         np.testing.assert_allclose(second_matrix @ second, rhs_values, rtol=1e-5)
 
         solution.fill(0)
+        ti.sync()
         graph = ti.graph.GraphBuilder()
         recording = plan.recording()
         assert recording.replay_mode == "rerecord"
         assert recording.workspace_ownership == "provider_generation"
         graph.append_native(recording, admission="auto")
         compiled = graph.compile()
+        program = ti.lang.impl.get_runtime().prog
+        memory_before = program._runtime_statistics_snapshot()["memory"]
         compiled.run({"rhs": rhs, "solution": solution})
+        report = plan.memory_report()
+        assert report.known_resident_requested_bytes == 100
+        assert not report.resident_requested_bytes_complete
+        waits_before = program._runtime_statistics_snapshot()["synchronization"][
+            "backend_waits"
+        ]
+        plan.close()
+        assert (
+            program._runtime_statistics_snapshot()["synchronization"]["backend_waits"]
+            == waits_before
+        )
+        assert (
+            program._runtime_statistics_snapshot()["memory"]["inflight_resources"]
+            >= memory_before["inflight_resources"] + 1
+        )
         ti.sync()
         np.testing.assert_allclose(
             second_matrix @ solution.to_numpy(), rhs_values, rtol=1e-5
         )
-        report = plan.memory_report()
-        assert report.known_resident_requested_bytes == 100
-        assert not report.resident_requested_bytes_complete
+        assert plan.memory_report().lifecycle_state == "closed"
 
     with pytest.raises(RuntimeError, match="plan is closed"):
         compiled.run({"rhs": rhs, "solution": solution})

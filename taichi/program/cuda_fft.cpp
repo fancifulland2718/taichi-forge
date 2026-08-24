@@ -1,5 +1,6 @@
 #include "taichi/program/program.h"
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -209,9 +210,12 @@ std::string cufft_plan_cache_key(const CufftPlanDescriptor &descriptor) {
 
 class CudaFftPlan {
  public:
-  CudaFftPlan(CufftPlanDescriptor descriptor, bool use_plan_many)
+  CudaFftPlan(CufftPlanDescriptor descriptor,
+              bool use_plan_many,
+              std::shared_ptr<RuntimeFaultDomain> fault_domain)
       : descriptor_(std::move(descriptor)),
-        scalar_counts_(cufft_scalar_counts(descriptor_)) {
+        scalar_counts_(cufft_scalar_counts(descriptor_)),
+        fault_domain_(std::move(fault_domain)) {
     auto &driver = CUFFTDriver::get_instance();
     TI_ERROR_IF(!driver.load_cufft(),
                 "CUDA cuFFT could not load a compatible shared library and "
@@ -266,10 +270,19 @@ class CudaFftPlan {
   }
 
   ~CudaFftPlan() {
-    // Program owns the synchronization and provider-call decision. A nonzero
-    // handle here is abandoned only after a fatal backend fault or an
-    // exceptional construction path where calling into the provider is unsafe.
-    handle_ = 0;
+    const bool provider_calls_safe =
+        fault_domain_ && !fault_domain_->has_fatal_fault();
+    if (provider_calls_safe) {
+      try {
+        auto cuda_submission_guard =
+            CUDAContext::get_instance().get_submission_lock_guard();
+        auto context_guard = CUDAContext::get_instance().get_guard();
+        destroy(true);
+        return;
+      } catch (...) {
+      }
+    }
+    destroy(false);
   }
 
   CudaFftPlan(const CudaFftPlan &) = delete;
@@ -339,6 +352,7 @@ class CudaFftPlan {
   CufftScalarCounts scalar_counts_;
   std::size_t workspace_bytes_{0};
   int handle_{0};
+  std::shared_ptr<RuntimeFaultDomain> fault_domain_;
   std::mutex mutex_;
 };
 
@@ -392,7 +406,12 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
   const auto cached = cuda_cufft_plan_cache_.find(cache_key);
   if (cached != cuda_cufft_plan_cache_.end()) {
     plan = cached->second.lock();
-    if (!plan) {
+    const bool has_live_handle =
+        plan && std::any_of(
+                    cuda_cufft_plans_.begin(), cuda_cufft_plans_.end(),
+                    [&plan](const auto &item) { return item.second == plan; });
+    if (!has_live_handle) {
+      plan.reset();
       cuda_cufft_plan_cache_.erase(cached);
     }
   }
@@ -400,7 +419,8 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
     ++cuda_cufft_plan_cache_hits_;
   } else {
     ++cuda_cufft_plan_cache_misses_;
-    plan = std::make_shared<CudaFftPlan>(descriptor, true);
+    plan = std::make_shared<CudaFftPlan>(descriptor, true,
+                                         runtime_fault_domain_);
     cuda_cufft_plan_cache_[cache_key] = plan;
   }
   TI_ERROR_IF(next_cuda_cufft_plan_handle_ == 0,
@@ -459,6 +479,7 @@ std::size_t Program::cuda_cufft_execute(std::uint64_t handle,
   TI_ERROR_IF(!input_ptr || !output_ptr,
               "CUDA cuFFT received a null device pointer.");
   plan->execute(input_ptr, output_ptr, direction);
+  pin_cuda_provider_plan(plan);
   mark_runtime_submission_pending();
   return 0;
 }
@@ -516,10 +537,9 @@ Program::cuda_cufft_plan_cache_statistics() {
 }
 
 void Program::destroy_cuda_cufft_plan(std::uint64_t handle) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   std::shared_ptr<CudaFftPlan> plan;
-  bool last_handle = false;
   {
-    auto submission_guard = acquire_runtime_resource_submission_guard();
     std::lock_guard<std::mutex> lock(cuda_cufft_plan_mutex_);
     const auto found = cuda_cufft_plans_.find(handle);
     if (found == cuda_cufft_plans_.end()) {
@@ -527,20 +547,10 @@ void Program::destroy_cuda_cufft_plan(std::uint64_t handle) {
     }
     plan = found->second;
     cuda_cufft_plans_.erase(found);
-    last_handle = plan.use_count() == 1;
   }
-  if (!last_handle) {
-    return;
-  }
-  if (!runtime_has_fatal_fault()) {
-    synchronize();
-    auto cuda_submission_guard =
-        CUDAContext::get_instance().get_submission_lock_guard();
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    plan->destroy(true);
-  } else {
-    plan->destroy(false);
-  }
+  // The last owner destroys immediately when no submission retains the plan.
+  // Otherwise RuntimeCompletion releases the plan after its CUDA event.
+  plan.reset();
 }
 
 void Program::cuda_clear_cufft_plans() {

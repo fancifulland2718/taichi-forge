@@ -23,6 +23,7 @@ _DIRECTIONS = {"forward": -1, "inverse": 1}
 _TRANSFORMS = {"c2c": 0, "r2c": 1, "c2r": 2}
 _NATURAL_DIRECTIONS = {"c2c": "forward", "r2c": "forward", "c2r": "inverse"}
 
+
 def _positive_int(value, name):
     if (
         isinstance(value, bool)
@@ -281,6 +282,9 @@ class _CufftPlanBase:
                 self.transform_value,
             )
         self._handle = int(handle)
+        self._workspace_bytes = int(
+            program._cuda_cufft_plan_memory_statistics(self._handle)["workspace_bytes"]
+        )
 
     @property
     def closed(self):
@@ -380,13 +384,6 @@ class _CufftPlanBase:
 
         handle_present = self._handle is not None
         runtime_valid = handle_present and runtime_generation_matches(self)
-        workspace_bytes = None
-        if runtime_valid:
-            workspace_bytes = int(
-                self._runtime_prog._cuda_cufft_plan_memory_statistics(self._handle)[
-                    "workspace_bytes"
-                ]
-            )
         return make_memory_report(
             f"cufft_{self.transform}_{self.rank}d",
             "cuda",
@@ -401,8 +398,8 @@ class _CufftPlanBase:
                 ),
                 HardwareMemoryComponent(
                     "automatic_workspace",
-                    workspace_bytes,
-                    workspace_bytes is not None,
+                    self._workspace_bytes,
+                    True,
                     "provider_generation",
                     "provider",
                     resident=runtime_valid,
@@ -448,6 +445,12 @@ class _CufftPlanBase:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
         return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 class CufftPlan1D(_CufftPlanBase):

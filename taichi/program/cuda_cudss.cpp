@@ -87,8 +87,10 @@ class CudaCudssPlan {
   CudaCudssPlan(const CuSparseMatrix &matrix,
                 int matrix_type,
                 int matrix_view,
-                const std::string &library_path)
-      : rows_(static_cast<std::size_t>(matrix.num_rows())) {
+                const std::string &library_path,
+                std::shared_ptr<RuntimeFaultDomain> fault_domain)
+      : rows_(static_cast<std::size_t>(matrix.num_rows())),
+        fault_domain_(std::move(fault_domain)) {
     validate_cudss_matrix_contract(matrix_type, matrix_view);
     auto &driver = CUDSSDriver::get_instance();
     TI_ERROR_IF(!driver.load_cudss(library_path),
@@ -120,6 +122,22 @@ class CudaCudssPlan {
       destroy(true);
       throw;
     }
+  }
+
+  ~CudaCudssPlan() {
+    const bool provider_calls_safe =
+        fault_domain_ && !fault_domain_->has_fatal_fault();
+    if (provider_calls_safe) {
+      try {
+        auto cuda_submission_guard =
+            CUDAContext::get_instance().get_submission_lock_guard();
+        auto context_guard = CUDAContext::get_instance().get_guard();
+        destroy(true);
+        return;
+      } catch (...) {
+      }
+    }
+    destroy(false);
   }
 
   void analyze(const CuSparseMatrix &matrix) {
@@ -317,6 +335,7 @@ class CudaCudssPlan {
   std::uint64_t factorized_matrix_id_{0};
   std::uint64_t factorized_pattern_version_{0};
   std::uint64_t factorized_numeric_version_{0};
+  std::shared_ptr<RuntimeFaultDomain> fault_domain_;
   mutable std::mutex mutex_;
 };
 
@@ -335,8 +354,8 @@ std::uint64_t Program::create_cuda_cudss_plan(
   auto cuda_submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
-  auto plan = std::make_shared<CudaCudssPlan>(csr, matrix_type, matrix_view,
-                                              library_path);
+  auto plan = std::make_shared<CudaCudssPlan>(
+      csr, matrix_type, matrix_view, library_path, runtime_fault_domain_);
   std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
   TI_ERROR_IF(next_cuda_cudss_plan_handle_ == 0,
               "CUDA cuDSS plan handle space exhausted.");
@@ -360,6 +379,7 @@ void Program::cuda_cudss_analyze(std::uint64_t handle, SparseMatrix *matrix) {
   auto context_guard = CUDAContext::get_instance().get_guard();
   const auto &csr = require_cudss_matrix(matrix, this);
   plan->analyze(csr);
+  pin_cuda_provider_plan(plan);
   mark_runtime_submission_pending();
 }
 
@@ -380,6 +400,7 @@ void Program::cuda_cudss_factorize(std::uint64_t handle,
   auto context_guard = CUDAContext::get_instance().get_guard();
   const auto &csr = require_cudss_matrix(matrix, this);
   plan->factorize(csr, refactorize);
+  pin_cuda_provider_plan(plan);
   mark_runtime_submission_pending();
 }
 
@@ -415,6 +436,7 @@ std::size_t Program::cuda_cudss_solve(std::uint64_t handle,
   TI_ERROR_IF(!rhs_ptr || !solution_ptr,
               "CUDA cuDSS received a null dense-vector device pointer.");
   plan->solve(csr, rhs_ptr, solution_ptr);
+  pin_cuda_provider_plan(plan);
   pin_ndarray_launch_leases(acquire_ndarray_leases({rhs, solution}));
   mark_runtime_submission_pending();
   return 0;
@@ -430,9 +452,9 @@ Program::cuda_cudss_plan_statistics(std::uint64_t handle) {
 }
 
 void Program::destroy_cuda_cudss_plan(std::uint64_t handle) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   std::shared_ptr<CudaCudssPlan> plan;
   {
-    auto submission_guard = acquire_runtime_resource_submission_guard();
     std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
     const auto found = cuda_cudss_plans_.find(handle);
     if (found == cuda_cudss_plans_.end()) {
@@ -441,15 +463,9 @@ void Program::destroy_cuda_cudss_plan(std::uint64_t handle) {
     plan = std::move(found->second);
     cuda_cudss_plans_.erase(found);
   }
-  if (!runtime_has_fatal_fault()) {
-    synchronize();
-    auto cuda_submission_guard =
-        CUDAContext::get_instance().get_submission_lock_guard();
-    auto context_guard = CUDAContext::get_instance().get_guard();
-    plan->destroy(true);
-  } else {
-    plan->destroy(false);
-  }
+  // RuntimeCompletion owns any in-flight reference. Destruction therefore
+  // occurs immediately only when no submitted phase still uses this plan.
+  plan.reset();
 }
 
 void Program::cuda_clear_cudss_plans() {

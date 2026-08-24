@@ -3779,6 +3779,8 @@ class TI_DLL_EXPORT Program {
 
   using ExternalDenseStorageInflightLeaseMap =
       std::unordered_map<std::uint64_t, ExternalDenseStorageLease>;
+  using CudaProviderInflightPlanMap =
+      std::unordered_map<const void *, std::shared_ptr<void>>;
 
   struct RuntimeCompletionResourceBatch final
       : public RuntimeCompletionResources {
@@ -3786,6 +3788,7 @@ class TI_DLL_EXPORT Program {
     NdarrayInflightLeaseMap ndarrays;
     TextureInflightLeaseMap textures;
     ExternalDenseStorageInflightLeaseMap external_dense_storage;
+    CudaProviderInflightPlanMap cuda_provider_plans;
     std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>>
         vulkan_graphics_pipelines;
     std::vector<std::shared_ptr<VulkanTriangleRayScene>> vulkan_ray_scenes;
@@ -3795,7 +3798,7 @@ class TI_DLL_EXPORT Program {
         std::uint32_t kind) const noexcept override;
     bool empty() const noexcept {
       return argpacks.empty() && ndarrays.empty() && textures.empty() &&
-             external_dense_storage.empty() &&
+             external_dense_storage.empty() && cuda_provider_plans.empty() &&
              vulkan_graphics_pipelines.empty() && vulkan_ray_scenes.empty() &&
              vulkan_ray_resources.empty();
     }
@@ -3804,6 +3807,7 @@ class TI_DLL_EXPORT Program {
   static constexpr std::uint32_t kVulkanGraphicsPipelineResourceKind = 6;
   static constexpr std::uint32_t kVulkanRaySceneResourceKind = 7;
   static constexpr std::uint32_t kVulkanRayResourceKind = 8;
+  static constexpr std::uint32_t kCudaProviderPlanResourceKind = 9;
 
   struct DenseFieldHostCopyStagingResource {
     DeviceAllocationUnique upload;
@@ -3865,6 +3869,8 @@ class TI_DLL_EXPORT Program {
   void pin_external_dense_storage_launch_leases(
       ExternalDenseStorageLaunchLeases &leases);
   void release_completed_external_dense_storage_leases();
+  void pin_cuda_provider_plan(std::shared_ptr<void> plan);
+  void release_completed_cuda_provider_plans();
   void release_completed_vulkan_native_resources();
   void begin_external_access_epoch(
       ExternalAccessEpoch &epoch,
@@ -4101,6 +4107,7 @@ class TI_DLL_EXPORT Program {
   mutable std::mutex external_dense_storage_lifecycle_mutex_;
   bool external_dense_storage_resources_open_{true};
   ExternalDenseStorageInflightLeaseMap external_dense_storage_inflight_leases_;
+  CudaProviderInflightPlanMap cuda_provider_inflight_plans_;
 };
 
 TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(
