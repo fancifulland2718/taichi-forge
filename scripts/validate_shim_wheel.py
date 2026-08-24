@@ -12,11 +12,30 @@ import subprocess
 import tempfile
 from zipfile import ZipFile
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name, parse_wheel_filename
+
 
 PROJECT = "taichi-forge"
 RUNTIME_PROJECT = "taichi-forge-runtime"
 REQUIRED_PYTHON_DEPENDENCIES = frozenset(
     {"colorama", "dill", "numpy", "rich", RUNTIME_PROJECT}
+)
+REQUIRED_NUMPY_REQUIREMENTS = frozenset(
+    (
+        str(requirement.specifier),
+        str(requirement.marker) if requirement.marker is not None else None,
+    )
+    for requirement in (
+        Requirement("numpy>=1.23.5; python_version < '3.12'"),
+        Requirement(
+            "numpy>=1.26.0; python_version >= '3.12' and python_version < '3.13'"
+        ),
+        Requirement(
+            "numpy>=2.1.0; python_version >= '3.13' and python_version < '3.14'"
+        ),
+        Requirement("numpy>=2.3.4; python_version >= '3.14'"),
+    )
 )
 LINUX_LLVM_ABI_SENTINELS = (
     b"_ZN4llvm23EnableABIBreakingChecksE",
@@ -50,9 +69,7 @@ def _wheel_platform(wheel: Path) -> str:
     raise RuntimeError(f"Unsupported shim wheel platform tag: {wheel.name}")
 
 
-def _strict_dynamic_contract(
-    zf: ZipFile, extension_member: str, platform: str
-) -> None:
+def _strict_dynamic_contract(zf: ZipFile, extension_member: str, platform: str) -> None:
     with tempfile.TemporaryDirectory(prefix="taichi-shim-dynamic-audit-") as td:
         extension = Path(td) / Path(extension_member).name
         extension.write_bytes(zf.read(extension_member))
@@ -88,8 +105,7 @@ def _strict_dynamic_contract(
         )
         if completed.returncode != 0:
             raise RuntimeError(
-                "strict shim dynamic-table audit failed: "
-                f"{completed.stdout.strip()}"
+                "strict shim dynamic-table audit failed: " f"{completed.stdout.strip()}"
             )
         if required_dependency not in completed.stdout:
             raise RuntimeError(
@@ -103,7 +119,10 @@ def _strict_dynamic_contract(
 
 
 def validate_shim_wheel(
-    wheel: Path, expected_platform: str, strict_binary: bool = False
+    wheel: Path,
+    expected_platform: str,
+    strict_binary: bool = False,
+    expected_python_tag: str | None = None,
 ) -> str:
     platform = _wheel_platform(wheel)
     if platform != expected_platform:
@@ -113,6 +132,30 @@ def validate_shim_wheel(
         )
     if not wheel.name.startswith("taichi_forge-"):
         raise RuntimeError(f"Unexpected shim distribution name: {wheel.name}")
+    distribution, filename_version, _, tags = parse_wheel_filename(wheel.name)
+    if canonicalize_name(distribution) != PROJECT:
+        raise RuntimeError(f"Unexpected shim wheel distribution: {distribution}")
+    if not tags:
+        raise RuntimeError(f"Shim wheel has no compatibility tags: {wheel.name}")
+    python_tags = {tag.interpreter for tag in tags}
+    abi_tags = {tag.abi for tag in tags}
+    if len(python_tags) != 1 or not all(
+        re.fullmatch(r"cp[0-9]+", tag) for tag in python_tags
+    ):
+        raise RuntimeError(
+            f"Shim wheel must target exactly one CPython minor: {wheel.name}"
+        )
+    python_tag = next(iter(python_tags))
+    if abi_tags != {python_tag}:
+        raise RuntimeError(
+            "Shim wheel ABI tag must match its CPython interpreter tag: "
+            f"python={sorted(python_tags)}, abi={sorted(abi_tags)}"
+        )
+    if expected_python_tag is not None and python_tag != expected_python_tag:
+        raise RuntimeError(
+            f"Expected Python tag {expected_python_tag}, found {python_tag}: "
+            f"{wheel.name}"
+        )
 
     with ZipFile(wheel) as zf:
         corrupt = zf.testzip()
@@ -122,9 +165,7 @@ def validate_shim_wheel(
         metadata_names = [
             name for name in names if name.endswith(".dist-info/METADATA")
         ]
-        record_names = [
-            name for name in names if name.endswith(".dist-info/RECORD")
-        ]
+        record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
         if len(metadata_names) != 1 or len(record_names) != 1:
             raise RuntimeError(
                 f"Expected one METADATA and RECORD in {wheel.name}, found "
@@ -137,6 +178,11 @@ def validate_shim_wheel(
         version = metadata.get("Version") or ""
         if project != PROJECT:
             raise RuntimeError(f"Unexpected wheel project {project!r}: {wheel.name}")
+        if str(filename_version) != version:
+            raise RuntimeError(
+                "Shim wheel filename and METADATA versions differ: "
+                f"filename={filename_version}, metadata={version}"
+            )
         if CUDA_VARIANT.search(version):
             raise RuntimeError(
                 f"CUDA-versioned shim wheel versions are forbidden: {version}"
@@ -154,6 +200,18 @@ def validate_shim_wheel(
             raise RuntimeError(
                 "Missing required Python dependencies in "
                 f"{wheel.name}: {', '.join(missing_dependencies)}"
+            )
+        numpy_requirements = frozenset(
+            (
+                str(requirement.specifier),
+                str(requirement.marker) if requirement.marker is not None else None,
+            )
+            for requirement in map(Requirement, requirements_by_project["numpy"])
+        )
+        if numpy_requirements != REQUIRED_NUMPY_REQUIREMENTS:
+            raise RuntimeError(
+                "Shim wheel has an unexpected NumPy compatibility contract: "
+                f"{sorted(numpy_requirements)}"
             )
         expected_runtime = f"{RUNTIME_PROJECT}=={version}"
         runtime_requirements = requirements_by_project[RUNTIME_PROJECT]
@@ -233,9 +291,7 @@ def validate_shim_wheel(
             ):
                 forbidden.append(name)
         if forbidden:
-            raise RuntimeError(
-                f"Shim wheel duplicates runtime artifacts: {forbidden}"
-            )
+            raise RuntimeError(f"Shim wheel duplicates runtime artifacts: {forbidden}")
     return version
 
 
@@ -250,6 +306,10 @@ def main() -> None:
         action="store_true",
         help="Inspect the final extension's dynamic dependency table",
     )
+    parser.add_argument(
+        "--python-tag",
+        help="Require the wheel's CPython/ABI tag (for example cp314)",
+    )
     args = parser.parse_args()
 
     wheels = sorted(args.wheel_dir.glob("*.whl"))
@@ -260,7 +320,10 @@ def main() -> None:
         )
     try:
         version = validate_shim_wheel(
-            wheels[0], args.platform, strict_binary=args.strict_binary
+            wheels[0],
+            args.platform,
+            strict_binary=args.strict_binary,
+            expected_python_tag=args.python_tag,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc

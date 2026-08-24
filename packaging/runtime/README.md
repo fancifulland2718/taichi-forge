@@ -5,11 +5,11 @@ runtime bitcode resources. It is installed as a dependency of the Python-facing
 `taichi-forge` distribution.
 
 Each release publishes one runtime wheel per supported platform, not one wheel
-per CUDA version. The build uses one selected compatibility-baseline CUDA
-Toolkit for Forge native primitives and bundles its matching CUDA runtime
-library. The CUDA build version is internal metadata, not part of the
-distribution name, dependency, or wheel tag. Installing `taichi-forge` does
-not require a local CUDA Toolkit.
+per CUDA version. Official wheels use the CUDA driver API and Vulkan loader;
+they do not bundle a CUDA Toolkit runtime or vendor libraries such as cuBLAS,
+cuSPARSE, cuSOLVER, or cuFFT. Those libraries are optional user-provided
+providers and are loaded only when the corresponding hardware operation is
+selected. Installing `taichi-forge` does not require a local CUDA Toolkit.
 
 It intentionally does not expose the public `taichi_forge` Python API. The
 Python package imports `taichi_forge_runtime` only to locate native resources.

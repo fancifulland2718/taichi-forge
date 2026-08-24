@@ -2,10 +2,9 @@ name: Publish wheels to PyPI
 
 # Builds the Python-facing taichi-forge CPython/pybind shim wheels for Windows
 # (x64) and Linux (x86_64, manylinux), then optionally publishes them to PyPI.
-# The platform-native taichi-forge-runtime wheels are published separately by
-# publish_runtime_pypi.yml. This workflow downloads the matching runtime wheel
-# from PyPI/TestPyPI and extracts its native link artifacts before building the
-# shim wheels.
+# The reusable runtime workflow builds platform wheels first. This workflow
+# then links and validates every CPython shim against those exact artifacts;
+# neither project is published until the complete matrix passes.
 #
 # Trigger:
 #   * workflow_dispatch — manual, with a version input. If `publish=true`
@@ -35,10 +34,6 @@ on:
         description: "Version (e.g. 0.6.3 or 0.6.3rc1); leave empty to use version.txt"
         required: false
         default: ""
-      runtime_version:
-        description: "taichi-forge-runtime version to depend on and link against; leaves empty to match version"
-        required: false
-        default: ""
       publish:
         description: "Upload to PyPI after building (true/false)"
         required: false
@@ -57,6 +52,10 @@ permissions:
   # Needed by pypa/gh-action-pypi-publish (Trusted Publishing / OIDC).
   id-token: write
 
+concurrency:
+  group: forge-wheel-release-${{ github.ref }}-${{ github.event.inputs.version || 'version-file' }}
+  cancel-in-progress: false
+
 env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
@@ -65,6 +64,8 @@ env:
   # spending ~20 minutes rebuilding it in-job.
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
+  LLVM20_WIN_SHA256: ${{ vars.LLVM20_WIN_SHA256 }}
+  LLVM20_LINUX_SHA256: ${{ vars.LLVM20_LINUX_SHA256 }}
 
 jobs:
   resolve_version:
@@ -72,10 +73,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set.outputs.version }}
-      runtime_version: ${{ steps.set.outputs.runtime_version }}
       is_tag: ${{ steps.set.outputs.is_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: set
         shell: bash
         run: |
@@ -92,28 +92,39 @@ jobs:
           fi
           ver="${ver#forge-v}"
           ver="${ver#v}"
-          if [[ -n "${{ github.event.inputs.runtime_version }}" ]]; then
-            runtime_ver="${{ github.event.inputs.runtime_version }}"
-            runtime_ver="${runtime_ver#forge-v}"
-            runtime_ver="${runtime_ver#v}"
-          else
-            runtime_ver="$ver"
-          fi
           echo "Resolved version: $ver"
-          echo "Resolved runtime version: $runtime_ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
-          echo "runtime_version=$runtime_ver" >> "$GITHUB_OUTPUT"
+
+  build_runtime:
+    name: Build runtime artifacts
+    needs: resolve_version
+    uses: ./.github/workflows/publish_runtime_pypi.yml
+    with:
+      version: ${{ needs.resolve_version.outputs.version }}
 
   build_linux:
     name: Linux wheel (py${{ matrix.python }})
-    needs: resolve_version
+    needs: [resolve_version, build_runtime]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
       matrix:
-        # NOTE: 3.14 is experimental; scikit-build 0.19 still emits distutils
-        # deprecation warnings on 3.14 but produces a working wheel.
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - python: "3.10"
+            numpy_min: "1.23.5"
+            numpy_min_major: "1"
+          - python: "3.11"
+            numpy_min: "1.23.5"
+            numpy_min_major: "1"
+          - python: "3.12"
+            numpy_min: "1.26.0"
+            numpy_min_major: "1"
+          - python: "3.13"
+            numpy_min: "2.1.0"
+            numpy_min_major: "2"
+          - python: "3.14"
+            numpy_min: "2.3.4"
+            numpy_min_major: "2"
     env:
       PY: ${{ matrix.python }}
       # No CMAKE_POLICY_VERSION_MINIMUM shim: we instead pin cmake<4 in the
@@ -137,13 +148,13 @@ jobs:
         -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Setup Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
 
@@ -170,6 +181,7 @@ jobs:
           curl -fsSL \
             "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
             -o "$sdk_archive"
+          echo "92d698f12a968b024e2b593037830262785b2b734553683457719d4da7c5b0d6  $sdk_archive" | sha256sum -c -
           rm -rf "$sdk_root"
           mkdir -p "$sdk_root"
           tar -xJf "$sdk_archive" -C "$sdk_root" --strip-components=1
@@ -186,6 +198,7 @@ jobs:
       - name: Download prebuilt LLVM 20
         env:
           LLVM20_LINUX_URL: ${{ vars.LLVM20_LINUX_URL || env.LLVM20_LINUX_MANYLINUX_URL }}
+          LLVM20_LINUX_SHA256: ${{ env.LLVM20_LINUX_SHA256 }}
         run: |
           set -euo pipefail
           if [[ -z "${LLVM20_LINUX_URL}" ]]; then
@@ -193,15 +206,20 @@ jobs:
             echo "  Go to Settings → Secrets and variables → Actions → Variables and add the URL."
             exit 1
           fi
+          if [[ ! "${LLVM20_LINUX_SHA256}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "::error::LLVM20_LINUX_SHA256 must be configured as a 64-character repository variable."
+            exit 1
+          fi
           mkdir -p dist
           curl -fsSL "$LLVM20_LINUX_URL" -o /tmp/llvm20.zip
+          echo "${LLVM20_LINUX_SHA256,,}  /tmp/llvm20.zip" | sha256sum -c -
           mkdir -p dist/taichi-llvm-20
           python -m zipfile -e /tmp/llvm20.zip dist/taichi-llvm-20
           echo "LLVM_DIR=$GITHUB_WORKSPACE/dist/taichi-llvm-20/lib/cmake/llvm" >> "$GITHUB_ENV"
 
       - name: Install python build deps
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install "pip==26.2.1"
           # numpy is imported by cmake/PythonNumpyPybind11.cmake at configure
           # time to resolve the numpy include dir.
           #
@@ -209,42 +227,33 @@ jobs:
           # third-party trees still use cmake_minimum_required(VERSION <3.5),
           # which CMake 4 refuses outright. The local Windows build uses the
           # CMake 3.x bundled with Visual Studio 2026; we mirror that here.
-          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+          python -m pip install --requirement packaging/constraints/release-build.txt
+          python -c "import sys, sysconfig; print(sys.version); print(sysconfig.get_config_var('SOABI'))"
+          python -m pip freeze
 
       - name: Override version
         shell: bash
-        env:
-          TAICHI_FORGE_RUNTIME_VERSION: ${{ needs.resolve_version.outputs.runtime_version }}
         run: |
           echo -n "${{ needs.resolve_version.outputs.version }}" > version.txt
           cat version.txt
           python scripts/sync_runtime_dependency.py
 
-      - name: Download runtime wheel for shim link
+      - name: Download runtime artifact for shim link
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wheel-linux-runtime
+          path: runtime-wheel
+
+      - name: Extract runtime artifact for shim link
         shell: bash
         run: |
           set -euo pipefail
-          runtime_version="${{ needs.resolve_version.outputs.runtime_version }}"
-          index_args=()
-          if [[ "${{ needs.resolve_version.outputs.is_tag }}" != "true" && "${{ github.event.inputs.target }}" == "testpypi" ]]; then
-            index_args=(--index-url https://test.pypi.org/simple/)
-          fi
-
-          mkdir -p runtime-wheel runtime-link
-          for attempt in 1 2 3 4 5 6; do
-            if python -m pip download "${index_args[@]}" --only-binary=:all: --no-deps \
-              "taichi-forge-runtime==${runtime_version}" -d runtime-wheel; then
-              break
-            fi
-            if [[ "$attempt" -eq 6 ]]; then
-              echo "::error::Could not download taichi-forge-runtime==${runtime_version}. Publish the runtime workflow first."
-              exit 1
-            fi
-            sleep 20
-          done
+          mkdir -p runtime-link
 
           python scripts/validate_runtime_wheel.py \
-            --wheel-dir runtime-wheel --platform manylinux --strict-binary
+            --wheel-dir runtime-wheel --platform manylinux \
+            --dependency-class driver-only --export-manifest-schema 2 \
+            --strict-binary
 
           python - <<'PY'
           from pathlib import Path
@@ -286,7 +295,6 @@ jobs:
       - name: Audit wheel (auditwheel repair)
         run: |
           set -euo pipefail
-          python -m pip install "auditwheel>=6.7,<7" patchelf
           mkdir -p wheelhouse
           # ubuntu-22.04 ships glibc 2.35, so the wheel will reference glibc 2.35
           # symbols.  auditwheel repair --plat manylinux_2_28_x86_64 would fail because
@@ -314,30 +322,63 @@ jobs:
           TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         run: |
           set -euo pipefail
+          python_tag="cp${PY/./}"
           python scripts/validate_shim_wheel.py \
-            --wheel-dir wheelhouse --platform manylinux --strict-binary
-          python -m pip install --force-reinstall --only-binary=:all: runtime-wheel/*.whl wheelhouse/*.whl
+            --wheel-dir wheelhouse --platform manylinux \
+            --python-tag "$python_tag" --strict-binary
+          python -m pip install --force-reinstall --only-binary=:all: \
+            --constraint packaging/constraints/release-build.txt \
+            runtime-wheel/*.whl wheelhouse/*.whl
           python -m pip check
+          mkdir -p numpy-compat-results
           cd /tmp
           python -I -u -X faulthandler "$GITHUB_WORKSPACE/scripts/validate_installed_runtime.py"
           python -I -u -X faulthandler "$GITHUB_WORKSPACE/scripts/validate_runtime_load_order.py"
+          python -I -u "$GITHUB_WORKSPACE/scripts/validate_numpy_abi.py" --expected-major 2
+          python -I -u "$GITHUB_WORKSPACE/benchmarks/numpy_abi_compat_bench.py" \
+            --label "build-numpy" \
+            --output "$GITHUB_WORKSPACE/numpy-compat-results/build.json"
+          python -m pip install --force-reinstall --no-deps "numpy==${{ matrix.numpy_min }}"
+          python -I -u "$GITHUB_WORKSPACE/scripts/validate_numpy_abi.py" \
+            --expected-major "${{ matrix.numpy_min_major }}"
+          python -m pip check
+          python -I -u "$GITHUB_WORKSPACE/benchmarks/numpy_abi_compat_bench.py" \
+            --label "minimum-numpy" \
+            --output "$GITHUB_WORKSPACE/numpy-compat-results/minimum.json"
 
       - name: Upload artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheel-linux-py${{ matrix.python }}
-          path: wheelhouse/*.whl
+          path: |
+            wheelhouse/*.whl
+            numpy-compat-results/*.json
           if-no-files-found: error
 
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
-    needs: resolve_version
+    needs: [resolve_version, build_runtime]
     runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        include:
+          - python: "3.10"
+            numpy_min: "1.23.5"
+            numpy_min_major: "1"
+          - python: "3.11"
+            numpy_min: "1.23.5"
+            numpy_min_major: "1"
+          - python: "3.12"
+            numpy_min: "1.26.0"
+            numpy_min_major: "1"
+          - python: "3.13"
+            numpy_min: "2.1.0"
+            numpy_min_major: "2"
+          - python: "3.14"
+            numpy_min: "2.3.4"
+            numpy_min_major: "2"
     env:
       PY: ${{ matrix.python }}
       CMAKE_GENERATOR: Ninja
@@ -357,23 +398,23 @@ jobs:
         -DTI_WITH_C_API:BOOL=OFF
         -DTI_BUILD_TESTS:BOOL=OFF
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           submodules: recursive
           fetch-depth: 0
 
       - name: Setup Python ${{ matrix.python }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
 
       - name: Setup MSVC dev cmd
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
 
       - name: Install Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v5
+        uses: seanmiddleditch/gha-setup-ninja@96bed6edff20d1dd61ecff9b75cc519d516e6401 # v5
 
       - name: Install Vulkan SDK
         shell: pwsh
@@ -381,7 +422,12 @@ jobs:
           $version = "1.4.304.1"
           $installer = "$env:TEMP\VulkanSDK.exe"
           Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -Wait
+          $expectedHash = "19cc78a4ba59fcd9339d83958e09662f8396a320e4a3e73660ed382627952bfb"
+          $actualHash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "Vulkan SDK SHA256 mismatch: expected=$expectedHash actual=$actualHash"
+          }
+          Start-Process -FilePath $installer -ArgumentList "--accept-licenses", "--default-answer", "--confirm-command", "install" -WindowStyle Hidden -Wait
           "VULKAN_SDK=C:\VulkanSDK\$version" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
           "PATH=C:\VulkanSDK\$version\Bin;$env:PATH" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
@@ -389,62 +435,56 @@ jobs:
         shell: pwsh
         run: |
           $url = "${{ env.LLVM20_WIN_URL }}"
+          $expectedHash = ("${{ env.LLVM20_WIN_SHA256 }}").ToLowerInvariant()
           if (-not $url) {
             Write-Error "LLVM20_WIN_URL is not configured as a repo variable. Run the 'Build LLVM 20 for Windows' workflow first and set the variable to the release asset URL."
             exit 1
           }
+          if ($expectedHash -notmatch '^[0-9a-f]{64}$') {
+            throw "LLVM20_WIN_SHA256 must be configured as a 64-character repository variable."
+          }
           New-Item -ItemType Directory -Force -Path dist/taichi-llvm-20 | Out-Null
           Invoke-WebRequest -Uri $url -OutFile $env:TEMP/llvm20.zip
+          $actualHash = (Get-FileHash -Algorithm SHA256 $env:TEMP/llvm20.zip).Hash.ToLowerInvariant()
+          if ($actualHash -ne $expectedHash) {
+            throw "LLVM 20 SHA256 mismatch: expected=$expectedHash actual=$actualHash"
+          }
           Expand-Archive -Path $env:TEMP/llvm20.zip -DestinationPath dist/taichi-llvm-20
           "LLVM_DIR=$(Resolve-Path dist/taichi-llvm-20/lib/cmake/llvm)" | Out-File -Append $env:GITHUB_ENV -Encoding utf8
 
       - name: Install python build deps
         shell: pwsh
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install "pip==26.2.1"
           # cmake<4 matches the VS2026-bundled CMake 3.x used by the local
           # Windows build. CMake 4 breaks vendored external/SPIRV-Tools.
           # numpy is required at configure time by PythonNumpyPybind11.cmake.
-          python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+          python -m pip install --requirement packaging/constraints/release-build.txt
+          python -c "import sys, sysconfig; print(sys.version); print(sysconfig.get_config_var('SOABI'))"
+          python -m pip freeze
 
       - name: Override version
         shell: pwsh
-        env:
-          TAICHI_FORGE_RUNTIME_VERSION: ${{ needs.resolve_version.outputs.runtime_version }}
         run: |
           Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
           Get-Content version.txt
           python scripts/sync_runtime_dependency.py
 
-      - name: Download runtime wheel for shim link
+      - name: Download runtime artifact for shim link
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: wheel-windows-runtime
+          path: runtime-wheel
+
+      - name: Extract runtime artifact for shim link
         shell: pwsh
         run: |
-          $runtimeVersion = "${{ needs.resolve_version.outputs.runtime_version }}"
-          New-Item -ItemType Directory -Force -Path runtime-wheel, runtime-link | Out-Null
-
-          $indexArgs = @()
-          if ("${{ needs.resolve_version.outputs.is_tag }}" -ne "true" -and "${{ github.event.inputs.target }}" -eq "testpypi") {
-            $indexArgs = @("--index-url", "https://test.pypi.org/simple/")
-          }
-
-          $ok = $false
-          for ($attempt = 1; $attempt -le 6; $attempt++) {
-            python -m pip download @indexArgs --only-binary=:all: --no-deps "taichi-forge-runtime==$runtimeVersion" -d runtime-wheel
-            if ($LASTEXITCODE -eq 0) {
-              $ok = $true
-              break
-            }
-            if ($attempt -lt 6) {
-              Start-Sleep -Seconds 20
-            }
-          }
-          if (-not $ok) {
-            Write-Error "Could not download taichi-forge-runtime==$runtimeVersion. Publish the runtime workflow first."
-            exit 1
-          }
+          New-Item -ItemType Directory -Force -Path runtime-link | Out-Null
 
           python scripts/validate_runtime_wheel.py `
-            --wheel-dir runtime-wheel --platform windows --strict-binary
+            --wheel-dir runtime-wheel --platform windows `
+            --dependency-class driver-only --export-manifest-schema 2 `
+            --strict-binary
 
           @'
           from pathlib import Path
@@ -486,30 +526,48 @@ jobs:
           TI_NATIVE_RUNTIME_LOAD_TRACE: "1"
         shell: pwsh
         run: |
+          $pythonTag = "cp$($env:PY.Replace('.', ''))"
           python scripts/validate_shim_wheel.py `
-            --wheel-dir dist --platform windows --strict-binary
+            --wheel-dir dist --platform windows `
+            --python-tag $pythonTag --strict-binary
           $runtimeWheel = (Get-ChildItem runtime-wheel\*.whl | Select-Object -First 1).FullName
           $shimWheel = (Get-ChildItem dist\*.whl | Select-Object -First 1).FullName
-          python -m pip install --force-reinstall --only-binary=:all: $runtimeWheel $shimWheel
+          python -m pip install --force-reinstall --only-binary=:all: `
+            --constraint packaging/constraints/release-build.txt `
+            $runtimeWheel $shimWheel
           python -m pip check
+          New-Item -ItemType Directory -Force -Path numpy-compat-results | Out-Null
           Push-Location $env:TEMP
           try {
             python -I -u -X faulthandler "$env:GITHUB_WORKSPACE\scripts\validate_installed_runtime.py"
+            python -I -u "$env:GITHUB_WORKSPACE\scripts\validate_numpy_abi.py" --expected-major 2
+            python -I -u "$env:GITHUB_WORKSPACE\benchmarks\numpy_abi_compat_bench.py" `
+              --label "build-numpy" `
+              --output "$env:GITHUB_WORKSPACE\numpy-compat-results\build.json"
+            python -m pip install --force-reinstall --no-deps "numpy==${{ matrix.numpy_min }}"
+            python -I -u "$env:GITHUB_WORKSPACE\scripts\validate_numpy_abi.py" `
+              --expected-major "${{ matrix.numpy_min_major }}"
+            python -m pip check
+            python -I -u "$env:GITHUB_WORKSPACE\benchmarks\numpy_abi_compat_bench.py" `
+              --label "minimum-numpy" `
+              --output "$env:GITHUB_WORKSPACE\numpy-compat-results\minimum.json"
           } finally {
             Pop-Location
           }
 
       - name: Upload artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: wheel-windows-py${{ matrix.python }}
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            numpy-compat-results/*.json
           if-no-files-found: error
 
   collect_and_release:
     name: GitHub Release + PyPI upload
-    needs: [resolve_version, build_linux, build_windows]
+    needs: [resolve_version, build_runtime, build_linux, build_windows]
     runs-on: ubuntu-latest
     # Only publish when:
     #   * a v-tag was pushed, OR
@@ -521,10 +579,20 @@ jobs:
       name: ${{ (needs.resolve_version.outputs.is_tag == 'true' || github.event.inputs.target == 'pypi') && 'pypi' || 'testpypi' }}
       url: ${{ (needs.resolve_version.outputs.is_tag == 'true' || github.event.inputs.target == 'pypi') && 'https://pypi.org/p/taichi-forge' || 'https://test.pypi.org/p/taichi-forge' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup release validation Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.10"
+
+      - name: Install release validation dependencies
+        run: |
+          python -m pip install "pip==26.2.1"
+          python -m pip install "packaging==26.0"
 
       - name: Download all wheel artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
 
@@ -533,38 +601,34 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           find artifacts -type f -name '*.whl' -exec cp -v {} dist/ \;
-          python - <<'PY'
-          from email.parser import Parser
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          wheels = sorted(Path("dist").glob("*.whl"))
-          if not wheels:
-              raise SystemExit("No wheels gathered")
-
-          for wheel in wheels:
-              with ZipFile(wheel) as zf:
-                  metadata = next(
-                      name for name in zf.namelist()
-                      if name.endswith(".dist-info/METADATA")
-                  )
-                  project = Parser().parsestr(
-                      zf.read(metadata).decode("utf-8", errors="replace")
-                  ).get("Name")
-              if project != "taichi-forge":
-                  raise SystemExit(f"Unexpected wheel project {project!r}: {wheel}")
-              if "linux_x86_64" in wheel.name:
-                  raise SystemExit(f"Unsupported Linux platform tag in upload set: {wheel.name}")
-          print(f"taichi-forge: {len(wheels)} wheel(s)")
-          PY
+          python -m scripts.validate_release_wheel_set \
+            --wheel-dir dist --version "${{ needs.resolve_version.outputs.version }}"
           ls -la dist/
 
+      - name: Reject an already-published version
+        run: |
+          repository="${{ (needs.resolve_version.outputs.is_tag == 'true' || github.event.inputs.target == 'pypi') && 'pypi' || 'testpypi' }}"
+          python scripts/check_pypi_version_available.py \
+            --repository "$repository" \
+            --version "${{ needs.resolve_version.outputs.version }}" \
+            taichi-forge-runtime taichi-forge
+
+      - name: Publish to TestPyPI
+        if: github.event.inputs.target == 'testpypi'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: dist
+
+      - name: Publish to PyPI
+        if: needs.resolve_version.outputs.is_tag == 'true' || github.event.inputs.target == 'pypi'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: dist
+
       - name: Create GitHub Release
-        # Uses GITHUB_TOKEN. Requires `permissions.contents: write` at the
-        # workflow level (set above). On forks, this step will silently
-        # skip if the token cannot create releases; switch to a PAT stored
-        # as a secret named RELEASE_PAT in that case.
-        uses: softprops/action-gh-release@v2
+        # Create the release only after the package upload has succeeded.
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: forge-v${{ needs.resolve_version.outputs.version }}
           name: Taichi Forge v${{ needs.resolve_version.outputs.version }}
@@ -574,18 +638,3 @@ jobs:
           files: dist/*.whl
           fail_on_unmatched_files: true
           token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Publish to TestPyPI
-        if: github.event.inputs.target == 'testpypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          repository-url: https://test.pypi.org/legacy/
-          skip-existing: true
-          packages-dir: dist
-
-      - name: Publish to PyPI
-        if: needs.resolve_version.outputs.is_tag == 'true' || github.event.inputs.target == 'pypi'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
-          packages-dir: dist

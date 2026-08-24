@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 from zipfile import ZipFile
 
+from packaging.utils import canonicalize_name, parse_wheel_filename
+
 
 PROJECT = "taichi-forge-runtime"
 PACKAGE = "taichi_forge_runtime"
@@ -307,6 +309,16 @@ def inspect_runtime_wheel(
     platform = _wheel_platform(wheel)
     if not wheel.name.startswith("taichi_forge_runtime-"):
         raise RuntimeError(f"Unexpected runtime distribution name: {wheel.name}")
+    distribution, filename_version, _, tags = parse_wheel_filename(wheel.name)
+    if canonicalize_name(distribution) != PROJECT:
+        raise RuntimeError(f"Unexpected runtime wheel distribution: {distribution}")
+    if not tags or any(
+        tag.interpreter != "py3" or tag.abi != "none" for tag in tags
+    ):
+        raise RuntimeError(
+            "Runtime wheel must be Python-independent and tagged py3-none: "
+            f"{wheel.name}"
+        )
 
     with ZipFile(wheel) as zf:
         corrupt = zf.testzip()
@@ -331,6 +343,11 @@ def inspect_runtime_wheel(
         version = metadata.get("Version") or ""
         if project != PROJECT:
             raise RuntimeError(f"Unexpected wheel project {project!r}: {wheel.name}")
+        if str(filename_version) != version:
+            raise RuntimeError(
+                "Runtime wheel filename and METADATA versions differ: "
+                f"filename={filename_version}, metadata={version}"
+            )
         if CUDA_VARIANT.search(version):
             raise RuntimeError(
                 f"CUDA-versioned runtime wheel versions are forbidden: {version}"

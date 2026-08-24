@@ -1,7 +1,9 @@
 [build-system]
 requires = [
-  "scikit-build-core>=0.10",
-  "pybind11>=2.13",
+  "scikit-build-core>=1.0.3,<2",
+  "pybind11>=3.0.4,<4",
+  "numpy==2.2.6; python_version < '3.14'",
+  "numpy==2.4.3; python_version >= '3.14'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -31,8 +33,10 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "numpy>=1.23; python_version < '3.14'",
-  "numpy>=2.1; python_version >= '3.14'",
+  "numpy>=1.23.5; python_version < '3.12'",
+  "numpy>=1.26.0; python_version >= '3.12' and python_version < '3.13'",
+  "numpy>=2.1.0; python_version >= '3.13' and python_version < '3.14'",
+  "numpy>=2.3.4; python_version >= '3.14'",
   "colorama",
   "dill",
   "rich",
@@ -47,6 +51,7 @@ Issues = "https://github.com/fancifulland2718/taichi-forge/issues"
 ti = "taichi_forge._main:main"
 
 [tool.scikit-build]
+minimum-version = "build-system.requires"
 # Pin CMake to <4. CMake 4 removed compatibility with policy versions <3.5,
 # which breaks several vendored dependencies under external/ (SPIRV-Tools,
 # glfw, etc. still declare cmake_minimum_required(VERSION 2.8.x / 3.1.x)).

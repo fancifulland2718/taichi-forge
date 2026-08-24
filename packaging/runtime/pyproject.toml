@@ -1,7 +1,9 @@
 [build-system]
 requires = [
-  "scikit-build-core>=0.10",
-  "pybind11>=2.13",
+  "scikit-build-core>=1.0.3,<2",
+  "pybind11>=3.0.4,<4",
+  "numpy==2.2.6; python_version < '3.14'",
+  "numpy==2.4.3; python_version >= '3.14'",
 ]
 build-backend = "scikit_build_core.build"
 
@@ -27,6 +29,7 @@ classifiers = [
 ]
 
 [tool.scikit-build]
+minimum-version = "build-system.requires"
 cmake.source-dir = "../.."
 cmake.version = ">=3.20,<4"
 cmake.build-type = "Release"

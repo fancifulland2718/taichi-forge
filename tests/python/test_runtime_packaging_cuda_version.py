@@ -6,10 +6,13 @@ import re
 from zipfile import ZipFile
 
 import pytest
+from packaging.version import Version
 
+from scripts import check_pypi_version_available
 from scripts import repair_runtime_wheel
 from scripts import sync_runtime_dependency
 from scripts import validate_installed_runtime
+from scripts import validate_release_wheel_set
 from scripts import validate_runtime_wheel
 from scripts import validate_shim_wheel
 from taichi_forge._lib import utils as runtime_utils
@@ -211,8 +214,10 @@ def _write_shim_wheel(
     extension = "taichi_python.pyd" if platform == "windows" else "taichi_python.so"
     requirement_version = runtime_version or version
     requirements = [
-        "numpy>=1.23; python_version < '3.14'",
-        "numpy>=2.1; python_version >= '3.14'",
+        'numpy>=1.23.5; python_version < "3.12"',
+        'numpy>=1.26.0; python_version >= "3.12" and python_version < "3.13"',
+        'numpy>=2.1.0; python_version >= "3.13" and python_version < "3.14"',
+        'numpy>=2.3.4; python_version >= "3.14"',
         "colorama",
         "dill",
         "rich",
@@ -262,6 +267,62 @@ def _write_shim_wheel(
                 "taichi_forge/_lib/runtime/taichi_runtime.dll",
                 b"duplicated runtime",
             )
+
+
+def test_complete_release_set_validator_accepts_expected_matrix(tmp_path):
+    version = "0.6.3"
+    _write_runtime_wheel(
+        tmp_path / f"taichi_forge_runtime-{version}-py3-none-win_amd64.whl",
+        platform="windows",
+        version=version,
+        cuda_major=0,
+        dependency_class="driver-only",
+    )
+    _write_runtime_wheel(
+        tmp_path
+        / f"taichi_forge_runtime-{version}-py3-none-manylinux_2_35_x86_64.whl",
+        platform="manylinux",
+        version=version,
+        cuda_major=0,
+        dependency_class="driver-only",
+    )
+    for platform, suffix in (
+        ("windows", "win_amd64"),
+        ("manylinux", "manylinux_2_35_x86_64"),
+    ):
+        for python_tag in sorted(
+            validate_release_wheel_set.EXPECTED_PYTHON_TAGS
+        ):
+            _write_shim_wheel(
+                tmp_path
+                / f"taichi_forge-{version}-{python_tag}-{python_tag}-{suffix}.whl",
+                platform=platform,
+                version=version,
+            )
+
+    validate_release_wheel_set.validate_release_set(
+        tmp_path, Version(version)
+    )
+
+
+def test_shim_wheel_validator_rejects_abi_tag_mismatch(tmp_path):
+    wheel = tmp_path / "taichi_forge-0.6.3-cp310-abi3-win_amd64.whl"
+    _write_shim_wheel(
+        wheel,
+        platform="windows",
+        version="0.6.3",
+    )
+
+    with pytest.raises(RuntimeError, match="ABI tag must match"):
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
+
+
+def test_pypi_release_preflight_normalizes_versions():
+    versions = check_pypi_version_available._released_versions(
+        {"releases": {"0.6.3": [], "0.6.3.0": [], "0.6.4rc1": []}}
+    )
+
+    assert versions == {Version("0.6.3"), Version("0.6.4rc1")}
 
 
 def test_runtime_repair_discovers_versioned_windows_cudart(tmp_path):
@@ -1045,6 +1106,35 @@ def test_release_version_surfaces_are_aligned():
     assert f"#define TI_VERSION_PATCH {patch}" in version_header
 
 
+def test_release_build_dependencies_and_numpy_contract_are_bounded():
+    root_project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    runtime_project = (
+        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    constraints = (
+        REPO_ROOT / "packaging" / "constraints" / "release-build.txt"
+    ).read_text(encoding="utf-8")
+
+    for project in (root_project, runtime_project):
+        assert 'scikit-build-core>=1.0.3,<2' in project
+        assert 'pybind11>=3.0.4,<4' in project
+        assert 'numpy==2.2.6; python_version < \'3.14\'' in project
+        assert 'numpy==2.4.3; python_version >= \'3.14\'' in project
+        assert 'minimum-version = "build-system.requires"' in project
+    for requirement in (
+        "pip==26.2.1",
+        "build==1.5.0",
+        "auditwheel==6.8.1",
+        "cmake==3.31.10",
+        "ninja==1.13.0",
+        "packaging==26.0",
+        "patchelf==0.19.1.0",
+        "pybind11==3.0.4",
+        "scikit-build-core==1.0.3",
+    ):
+        assert requirement in constraints
+
+
 def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
     cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
         encoding="utf-8"
@@ -1089,12 +1179,20 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "--wheel-dir dist --platform windows" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" not in workflow
     install_commands = re.findall(
-        r"^\s*python -m pip install --force-reinstall.*$", workflow, re.MULTILINE
+        r"^\s*python -m pip install --force-reinstall --only-binary.*$",
+        workflow,
+        re.MULTILINE,
     )
     assert len(install_commands) == 2
     assert all("--no-deps" not in command for command in install_commands)
     assert all("--only-binary=:all:" in command for command in install_commands)
-    assert workflow.count("python -m pip check") == 2
+    assert workflow.count("python -m pip check") == 4
+    assert workflow.count("scripts/validate_numpy_abi.py") == 2
+    assert workflow.count("packaging/constraints/release-build.txt") == 4
+    assert "build_runtime:" in workflow
+    assert "uses: ./.github/workflows/publish_runtime_pypi.yml" in workflow
+    assert "scripts.validate_release_wheel_set" in workflow
+    assert "skip-existing:" not in workflow
     assert '- "forge-v*"' in workflow
     assert "refs/tags/forge-v*" in workflow
     assert "tag_name: forge-v${{" in workflow
@@ -1109,16 +1207,17 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "build_linux_runtime:" in workflow
     assert "build_windows_runtime:" in workflow
     assert "matrix:" not in workflow
-    assert workflow.count("scripts/validate_runtime_wheel.py") == 4
+    assert workflow.count("scripts/validate_runtime_wheel.py") == 3
     assert "--wheel-dir dist-runtime --platform linux" in workflow
     assert (
         workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux")
         == 2
     )
     assert "--wheel-dir dist-runtime --platform windows" in workflow
-    assert "--wheel-dir dist --platform pair" in workflow
+    assert "workflow_call:" in workflow
+    assert "gh-action-pypi-publish" not in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
-    assert workflow.count("--dependency-class driver-only") == 4
+    assert workflow.count("--dependency-class driver-only") == 3
     assert workflow.count("TI_WITH_CUDA:BOOL=ON") == 4
     assert workflow.count("TI_WITH_VULKAN:BOOL=ON") == 4
     assert workflow.count("TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON") == 4

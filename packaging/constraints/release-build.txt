@@ -1,0 +1,18 @@
+# The runtime export closure and every CPython shim must be compiled with the
+# same pybind11 generation. Keep this file exact and use it from all release
+# and optional-reference workflows; pyproject.toml carries the supported range.
+pip==26.2.1
+build==1.5.0
+auditwheel==6.8.1; platform_system == "Linux"
+cmake==3.31.10
+ninja==1.13.0
+packaging==26.0
+patchelf==0.19.1.0; platform_system == "Linux"
+pybind11==3.0.4
+scikit-build-core==1.0.3
+
+# Build against the NumPy 2.x ABI. NumPy 2.3+ no longer supports Python 3.10,
+# while Python 3.14 requires a newer NumPy line, so one exact version cannot
+# cover the complete CPython 3.10-3.14 matrix.
+numpy==2.2.6; python_version < "3.14"
+numpy==2.4.3; python_version >= "3.14"
