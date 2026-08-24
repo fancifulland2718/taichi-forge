@@ -24,18 +24,31 @@ import taichi_forge as ti
 
 ### `ti.hardware` capabilities and explicit probes (0.6.3 in development)
 
-`ti.hardware.operations()`, `capability(operation_id)`, and `providers()`
-return immutable schema-v2 static contracts. Every operation has an
-`activation_mode` that separates four cases without reading prose:
-`explicit_hardware_api`, `explicit_kernel_intrinsic`,
-`domain_api_auto_provider`, and `compiler_automatic`. `report()` returns a passive
-runtime snapshot without loading, enabling, or selecting an optional provider.
+The stable ordinary-user layer consists of `HardwareCapability`,
+`HardwareProviderStatus`, and `HardwareExecutionReport`. Use `status(id)`,
+`provider_status(id)`, or `execution_report()` to read only `available`, active
+`backend`, `selected_provider`/`selected`, hardware qualification `route`, and
+the structured `reason`. These passive calls never load, enable, benchmark, or
+select an optional provider.
+
+`operations()`, `capability(operation_id)`, `providers()`, and `report()` are
+schema-v4 diagnostic contracts. They additionally expose planner/provider
+details such as dependency tier, workspace/lifetime/update policy, ABI,
+performance scope, resource effects, and native facts. Every operation has an
+`activation_mode` that separates `explicit_hardware_api`,
+`explicit_kernel_intrinsic`, `domain_api_auto_provider`, and
+`compiler_automatic`. `graph_integration` independently reports `inline`,
+`root_ordered`, `backend_recorded`, `stream_captured`, `opaque`, or
+`unsupported`. In particular, `root_ordered` means that a Forge root Graph
+preserves ordering and lifetime while replay calls the provider again; it does
+not claim CUDA Graph capture or a persistent Vulkan command buffer.
+
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
-current cuBLAS, cuSPARSE, and cuSOLVER probes check exact symbols through a
+current cuBLAS, cuSPARSE, cuFFT, and cuDSS probes check exact symbols through a
 transient native handle, close it before returning, and do not change later
 selection. If an actual algorithm already lazy-loaded a library, passive
-`report()` observes its cached state as `enabled/eligible` without invoking the
-loader. Unknown operations/providers and unimplemented probes fail closed.
+reports observe its cached state without invoking the loader. Unknown
+operations/providers and unimplemented probes fail closed.
 
 ### Core kernel hardware routes (0.6.3 qualification)
 
@@ -95,33 +108,44 @@ Toolkit header, link dependency, bundled library, package dependency, build
 switch, or wheel variant. The API is direct/root-Graph only: it is not
 kernel-callable and ordinary matrix multiplication is never rewritten.
 
-### CUDA sparse provider selection and explicit SpMV (0.6.3 qualification)
+### CUDA sparse provider selection, explicit SpMV, and cuDSS (0.6.3 qualification)
 
 Two existing `ti.linalg` domain APIs already select optional vendor libraries
 on CUDA:
 
-- `SparseMatrix @ ndarray` executes f32 scalar-CSR cuSPARSE SpMV (and the
-  qualified fixed-block BSR slice). The matrix resource caches its provider
+- `SparseMatrix.spmv(ndarray, method="auto")` considers f32 scalar-CSR
+  cuSPARSE SpMV (and the qualified fixed-block BSR slice). Without matching,
+  stable matrix-scoped cost evidence, automatic selection fails closed to the
+  embedded CUDA CSR/BSR kernel. `method="provider"` remains the explicit
+  provider request. The matrix resource caches its provider
   handle, dense-vector descriptors, workspace, and optional SpMV preprocessing
   across calls. This automatic domain route remains direct Python execution.
+- `SparseMatrix @ ndarray` uses the same automatic route.
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` executes the same stored
   matrix operation into caller-owned output. `CusparseSpmvRecording(matrix)`
   makes that manual operation a root-Graph backend command with explicit
   read/write effects and a matrix-generation lifetime lease. It re-records one
   runtime-ordered cuSPARSE command per Graph run and reuses the matrix-owned
   handle, descriptors, workspace, and preprocessing.
-- `ti.linalg.SparseSolver` selects cuSPARSE plus cuSOLVER on CUDA. Explicit
-  `analyze_pattern()`, `factorize()`, and `solve()` stages own the provider
-  plan/workspace. The current f32 scalar-CSR slice maps LLT/LDLT to its sparse
-  Cholesky path and LU to a host-assisted sparse LU path; it is not
-  Graph-recordable.
+- `ti.linalg.SparseSolver(provider="auto")` considers a user-managed cuDSS
+  0.8.x provider for square scalar-f32 CUDA CSR matrices when the CUDA Driver
+  API is at least 12.0. CUDA 11 and older, missing/incompatible cuDSS, f64, and
+  ineligible layouts retain the embedded cuSOLVERSp compatibility route.
+  `provider="cudss"` and `provider="cusolver_sp"` are explicit choices.
+- `ti.hardware.linalg.CudssPlan` exposes explicit `analyze()`, `factorize()` /
+  `refactorize()`, and `solve(rhs, solution)` stages. Its current
+  `CudssSolveRecording` is a `root_ordered` action over an already successful
+  factorization: each root-Graph run reissues one runtime-ordered solve. It is
+  not stream capture, is not kernel-callable, and is unsupported in structured
+  Graph and AOT.
 
-All routes lazy-load user-provided compatible libraries only when their
-domain objects are used. They add no Python package requirement, linked or
-bundled vendor library, build switch, or wheel variant. This is automatic
-provider selection inside an explicitly requested sparse operation, plus one
-separate manual direct/root-Graph interface—not a compiler rewrite of
-arbitrary kernels. None is kernel-callable.
+All routes lazy-load user-provided compatible libraries only when their domain
+objects or explicit plans are used. Forge does not install cuDSS, add a Python
+package requirement, link or bundle a vendor library, add a build switch, or
+create a wheel variant. This is domain-level or explicit-plan selection, not a
+compiler rewrite of arbitrary kernels. None is kernel-callable. Provider
+analysis, factorization, and numerical failures after explicit selection stay
+visible rather than silently falling back.
 
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 
@@ -263,10 +287,36 @@ it does not fuse GGUI helper dispatches into the enclosing backend Graph.
 dispatches and provider-owned output bindings participate in an exact effect
 contract. This D0 API adds no dependency or wheel variant.
 
-### `ti.hardware.ray.TriangleScene` (0.6.3 in development)
+### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3 in development)
 
-An explicit D0 Vulkan hardware ray-query provider for an updatable triangle
-mesh and one identity TLAS instance:
+The low-level D0 Vulkan hardware ray-query API separates fixed-topology
+triangle BLAS resources from a fixed-order instance TLAS:
+
+```python
+with ti.hardware.ray.TriangleBLAS(vertices, indices) as blas:
+    instances = (
+        ti.hardware.ray.RayInstance(blas, transform=transform_a, mask=0xFF),
+        ti.hardware.ray.RayInstance(blas, transform=transform_b, custom_index=1),
+    )
+    with ti.hardware.ray.InstanceTLAS(instances) as tlas:
+        tlas.trace(rays, hits)
+        tlas.refit(updated_instances)  # same BLAS count and order
+
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(tlas.record(ray_count), admission="auto")
+        graph = builder.compile()
+        graph.run({"rays": rays, "hits": hits})
+```
+
+`TriangleBLAS.record_build()`/`record_refit()` and
+`InstanceTLAS.record_build()`/`record_refit()` are `root_ordered` native
+actions. A `RayInstance` contains one BLAS reference, a finite row-major 3x4
+transform, an 8-bit mask, and a 24-bit custom index. TLAS build/refit preserves
+the number and order of referenced BLAS resources; BLAS refit is vertex-only
+and preserves vertex count and index topology. Batch query reads the TLAS and
+writes caller-owned hits without host readback.
+
+`TriangleScene` remains the single identity-instance compatibility wrapper:
 
 ```python
 with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
@@ -291,26 +341,19 @@ Vertices are f32 and indices are i32, using scalar `(N, 3)` or AOS vector-3
 layout. Rays are f32 `(N, 8)` values
 `[ox, oy, oz, tmin, dx, dy, dz, tmax]`; hits are f32 `(N, 4)` values
 `[t, primitive_id, instance_id, hit_flag]`, with misses encoded as
-`[-1, -1, -1, 0]`. Construction explicitly records one update-enabled
-BLAS/TLAS build. `refit()` or `record_refit()` performs a Vulkan BLAS UPDATE
-after copying replacement vertices into the provider-owned build input;
-`trace()` and the root-Graph recording issue batch ray queries without host
-readback. Input indices must be nonnegative and in range; the provider does
-not read them back to validate mesh topology. Refit preserves the vertex
-count, index buffer, geometry flags, and stable BLAS address referenced by the
-identity TLAS.
+`[-1, -1, -1, 0]`. Input indices must be nonnegative and in range; the provider
+does not read them back to validate mesh topology.
 
 The provider requires Vulkan 1.2 plus buffer-device-address,
 `VK_KHR_acceleration_structure`, and `VK_KHR_ray_query`. Its SPIR-V shader is
 embedded at build time, so it adds no Vulkan SDK runtime dependency and no
 official wheel variant. It is not callable inside `@ti.kernel` and never
-replaces ordinary kernels or collision detection. Topology-changing rebuilds,
-transforms, multiple instances, procedural geometry, and inline kernel query
-remain unsupported.
+replaces ordinary kernels or collision detection. Topology-changing BLAS/TLAS
+changes, procedural geometry, and inline kernel query remain unsupported.
 
-### `ti.hardware.fft.CufftPlan1D` (0.6.3 in development)
+### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3 in development)
 
-An explicit D1 single-GPU cuFFT provider:
+An explicit D1 single-GPU cuFFT provider for C2C, R2C, and C2R transforms:
 
 ```python
 if ti.hardware.fft.is_available():  # explicit transient provider probe
@@ -324,10 +367,11 @@ if ti.hardware.fft.is_available():  # explicit transient provider probe
         builder.append_native(recording, admission="auto")
 ```
 
-Complex values use compact scalar f32 shape `(length, 2)` or
-`(batch, length, 2)`, with the final axis storing `[real, imag]`. Forward and
-inverse transforms are out-of-place C2C operations; inverse output is
-unnormalized. The fixed-size plan owns cuFFT's internal workspace, binds the
+Complex values use a final scalar-f32 pair axis storing `[real, imag]`; R2C/C2R
+use the Hermitian `length // 2 + 1` extent. `CufftPlan1D` covers compact 1D
+transforms, while `CufftPlanND` covers batched rank-2/rank-3 transforms with
+explicit embed, element stride, and batch distance. Inverse C2C and C2R output
+is unnormalized. The fixed-size plan owns cuFFT's internal workspace, binds the
 runtime default CUDA stream, and can be replayed through a root Graph. Closing
 the plan invalidates its recordings.
 
@@ -335,9 +379,9 @@ the plan invalidates its recordings.
 happens only when a plan is created; a missing or incompatible library fails
 that plan without disabling the CUDA backend. Forge neither bundles nor links
 cuFFT, adds no mandatory package, and adds no official wheel variant. Users
-install and expose a compatible shared library separately. The first slice
-does not support in-place operation, arbitrary strides, R2C/C2R, callbacks,
-LTO, multi-GPU, kernel invocation, or AOT serialization.
+install and expose a compatible shared library separately. In-place operation,
+independently arbitrary per-axis strides, callbacks, LTO, multi-GPU, kernel
+invocation, and AOT serialization remain unsupported.
 
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
@@ -2208,8 +2252,9 @@ Graph replay performs no telemetry readback.
 
 ### Hardware provider memory reports
 
-Reusable hardware resources such as `ti.hardware.ray.TriangleScene`,
-`ti.hardware.fft.CufftPlan1D`, `ti.hardware.raster.RasterPass`, and stored
+Reusable hardware resources such as `ti.hardware.ray.TriangleBLAS` /
+`InstanceTLAS`, `ti.hardware.fft.CufftPlan1D`,
+`ti.hardware.linalg.CudssPlan`, `ti.hardware.raster.RasterPass`, and stored
 cuSPARSE recordings expose `memory_report()`. The frozen
 `HardwareMemoryReport` uses schema version 1 and separates known requested
 bytes from opaque driver/provider components. It never treats an unavailable

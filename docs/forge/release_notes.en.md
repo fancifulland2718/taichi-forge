@@ -47,28 +47,31 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-- Added immutable schema-v2 `ti.hardware` operation/provider contracts, a
-  side-effect-free `report()`, and explicit D1 `probe()`. The cuBLAS,
-  cuSPARSE, and cuSOLVER probes use transient handles and never enable a
-  provider implicitly. Passive reports can observe singleton state already
-  loaded by a real algorithm without invoking the loader. The schema exposes
-  `activation_mode` to distinguish explicit hardware APIs, explicit kernel
-  intrinsics, automatic provider selection inside a requested domain
-  operation, and fully automatic compiler/runtime optimizations.
+- Added the compact stable `HardwareCapability`, `HardwareProviderStatus`, and
+  `HardwareExecutionReport` status layer plus schema-v4 diagnostic
+  operation/provider contracts. Passive status/report calls do not load,
+  benchmark, enable, or select optional providers. `graph_integration` now
+  distinguishes inline, root-ordered rerecord, backend-recorded,
+  stream-captured, opaque, and unsupported routes instead of conflating every
+  root-Graph action as recordable. Explicit cuBLAS, cuSPARSE, cuFFT, and cuDSS
+  probes use transient handles and never enable a provider implicitly.
 - Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
   `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
   execution lazy-loads the user's compatible cuBLAS and reuses one handle per
   Program; Forge adds no Toolkit header, link dependency, bundled runtime,
   package dependency, build switch, or wheel variant. Ordinary matrix
   multiplication and kernels are not rewritten.
-- Qualified two existing D1 CUDA sparse routes in the hardware catalog:
-  `SparseMatrix @ ndarray` automatically selects cuSPARSE SpMV, while
-  `SparseSolver` automatically selects cuSPARSE plus cuSOLVER after the user
-  explicitly requests the domain operation. Added the separate manual
-  `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route for caller-owned
-  output and root-Graph recording over the existing matrix-owned provider
-  state. None is a kernel rewrite; vendor libraries remain optional and
-  unbundled.
+- Qualified the CUDA sparse routes in the hardware catalog:
+  `SparseMatrix.spmv(method="auto")` considers cuSPARSE only with matching
+  stable matrix-scoped cost evidence, while its explicit provider route is not
+  cost-gated. `SparseSolver(provider="auto")` can select a user-managed cuDSS
+  0.8.x provider for eligible CUDA 12+ scalar-f32 CSR systems and retains
+  cuSOLVERSp for older, absent, incompatible, or ineligible cases. Added the
+  explicit staged `CudssPlan` and its root-ordered solve recording, plus the
+  separate manual `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route
+  for caller-owned output and root-Graph recording over the existing
+  matrix-owned provider state. None is a kernel rewrite; vendor libraries
+  remain optional and unbundled.
 - Qualified source-ordered root-Graph composition across CUDA
   `cuBLAS -> kernel -> cuSPARSE -> kernel` and Vulkan
   `AS refit -> batch Ray Query`. Backend commands remain distinct segmented
@@ -125,20 +128,21 @@ grouped under the behavior they shipped.
   accumulation/output on NVIDIA compute capability 7.0 or newer. It does not
   require a CUDA Toolkit runtime or vendor algorithm package. Ordinary matrix
   multiplication is not rewritten, and kernel invocation remains unsupported.
-- Added the first D0 `ti.hardware.ray` slice: explicit fixed-topology Vulkan
-  BLAS/TLAS construction plus batch Ray Query through direct Python execution
-  and root Graph. The provider requires the corresponding device features,
-  embeds build-time SPIR-V, performs no implicit host readback, and adds no SDK
-  runtime dependency or official wheel variant. The same provider now exposes
-  direct and root-Graph vertex-only BLAS refit through Vulkan UPDATE while
-  preserving vertex count and index topology. Multi-instance scenes,
-  topology-changing rebuilds, procedural geometry, and kernel-inline query
-  remain unsupported.
-- Added optional D1 `ti.hardware.fft.CufftPlan1D` for fixed-size, batched,
-  single-precision 1D C2C transforms through direct Python and root Graph.
-  Explicit probing remains transient and side-effect free; plan creation alone
-  lazy-loads the user's compatible cuFFT shared library. Forge bundles and
-  links no vendor library and adds no package or official wheel variant.
+- Added low-level D0 `ti.hardware.ray` resources for independent fixed-topology
+  `TriangleBLAS`, fixed-order multi-instance `InstanceTLAS`, instance
+  transforms/masks/custom indices, and batch Ray Query through direct Python
+  and root Graph. BLAS/TLAS build and refit are root-ordered actions; refit
+  preserves BLAS topology and TLAS BLAS count/order. The compatibility
+  `TriangleScene` remains the single identity-instance wrapper. Procedural
+  geometry, topology-changing updates, and kernel-inline query remain
+  unsupported. No SDK runtime dependency or official wheel variant is added.
+- Added optional D1 `ti.hardware.fft.CufftPlan1D`/`CufftPlanND` for fixed-size,
+  batched single-precision C2C/R2C/C2R transforms, including rank-2/rank-3
+  layouts with explicit embed/stride/distance, through direct Python and root
+  Graph. Explicit probing remains transient and side-effect free; plan
+  creation alone lazy-loads the user's compatible cuFFT shared library. Forge
+  bundles and links no vendor library and adds no package or official wheel
+  variant.
 - Added the first qualified D0 transparent specialization. On CUDA
   compute capability 8.0+/PTX 7.0+, compiler-generated `ti.block_local`
   struct-for prologues of at least 8 KiB automatically use PTX `cp.async` for

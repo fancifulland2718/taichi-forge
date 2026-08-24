@@ -43,20 +43,25 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-- 新增 `ti.hardware` schema-v2 静态 operation/provider 合同、无副作用 `report()` 与显式
-  D1 `probe()`。cuBLAS、cuSPARSE、cuSOLVER probe 使用瞬时 handle，不自动启用 provider；
-  被动 report 可观察已被实际算法加载的 singleton 状态，但不会触发 loader。schema 用
-  `activation_mode` 区分显式 hardware API、显式 kernel intrinsic、用户请求领域 operation
-  后的自动 provider 选择，以及完全自动的 compiler/runtime 优化。
+- 新增精简且稳定的 `HardwareCapability`、`HardwareProviderStatus`、
+  `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
+  被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`
+  现在区分 inline、root-ordered rerecord、backend-recorded、stream-captured、opaque 与
+  unsupported，不再把所有 root-Graph action 混称为 recordable。显式 cuBLAS、cuSPARSE、
+  cuFFT 与 cuDSS probe 使用瞬时 handle，不会隐式启用 provider。
 - 新增可选 D1 `ti.hardware.linalg.gemm_f32`，通过 direct Python 与 root Graph 对 compact
   row-major f32 matrix 执行 `C = alpha * A @ B + beta * C`。真实执行才 lazy-load 用户的
   兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、
   link dependency、bundled runtime、package dependency、build switch 或 wheel 变体，
   也不会改写普通 matrix multiplication 或 kernel。
-- 在 hardware catalog 中资格化两条已有 D1 CUDA sparse 路线：用户显式请求领域操作后，
-  `SparseMatrix @ ndarray` 自动选择 cuSPARSE SpMV，`SparseSolver` 自动选择 cuSPARSE 与
-  cuSOLVER。另新增独立的手动 `ti.hardware.linalg.spmv_f32`/
-  `CusparseSpmvRecording` 路线，支持调用方持有 output，并在复用 matrix-owned provider
+- 在 hardware catalog 中资格化 CUDA sparse 路线：
+  `SparseMatrix.spmv(method="auto")` 只有在存在匹配且稳定的 matrix-scoped 成本证据时才
+  考虑 cuSPARSE，显式 provider 路线不受成本 gate 限制；
+  `SparseSolver(provider="auto")` 可为合格的 CUDA 12+ scalar-f32 CSR system 选择用户管理的
+  cuDSS 0.8.x，旧版 CUDA、缺失/不兼容 provider 或不合格合同继续使用 cuSOLVERSp。
+  新增 staged `CudssPlan` 及其 root-ordered solve recording，另新增独立的手动
+  `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 路线，支持调用方持有 output，
+  并在复用 matrix-owned provider
   state 的同时录入 root Graph。所有路线都不是 kernel rewrite，vendor library 继续保持
   可选且不捆绑。
 - 资格化 CUDA `cuBLAS -> kernel -> cuSPARSE -> kernel` 与 Vulkan
@@ -100,14 +105,15 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   设备上，通过 CUDA Driver/PTX WMMA 显式执行 compact row-major `m16n16k16`、f16
   输入、f32 累加/输出，支持 direct 与 root Graph。它不依赖 CUDA Toolkit runtime 或
   厂商算法包；普通矩阵乘法不会被改写，kernel 内调用仍不支持。
-- 新增首个 D0 `ti.hardware.ray` 切片：通过 direct Python 与 root Graph 显式构建
-  fixed-topology Vulkan BLAS/TLAS 并执行 batch Ray Query。provider 要求对应 device
-  feature，使用构建期嵌入的 SPIR-V，不隐式 host readback，也不增加 SDK runtime 依赖或
-  官方 wheel 变体。同一 provider 现支持 direct 与 root-Graph vertex-only BLAS refit，
-  通过 Vulkan UPDATE 执行并保持 vertex count 与 index topology 不变。多 instance、
-  改变 topology 的 rebuild、procedural geometry 与 kernel-inline query 仍不支持。
-- 新增可选 D1 `ti.hardware.fft.CufftPlan1D`，通过 direct Python 与 root Graph 执行
-  fixed-size、batched、single-precision 1D C2C transform。显式 probe 仍为无副作用的
+- 新增底层 D0 `ti.hardware.ray` 独立资源：fixed-topology `TriangleBLAS`、fixed-order
+  multi-instance `InstanceTLAS`、instance transform/mask/custom index，以及 direct Python /
+  root Graph batch Ray Query。BLAS/TLAS build/refit 都是 root-ordered action；refit 保持
+  BLAS topology 和 TLAS 的 BLAS 数量/顺序。`TriangleScene` 保留为单 identity-instance
+  兼容 wrapper。procedural geometry、改变 topology 的 update 与 kernel-inline query 仍不
+  支持；不增加 SDK runtime 依赖或官方 wheel 变体。
+- 新增可选 D1 `ti.hardware.fft.CufftPlan1D`/`CufftPlanND`，通过 direct Python 与 root
+  Graph 执行 fixed-size、batched、single-precision C2C/R2C/C2R transform，并支持带显式
+  embed/stride/distance 的 rank-2/rank-3 layout。显式 probe 仍为无副作用的
   transient load；只有创建 plan 才会 lazy-load 用户提供的兼容 cuFFT shared library。
   Forge 不捆绑或链接 vendor library，也不新增 package 或官方 wheel 变体。
 - 新增首个已资格化的 D0 透明 specialization。在 CUDA compute capability 8.0+

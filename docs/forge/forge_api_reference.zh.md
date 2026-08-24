@@ -21,16 +21,25 @@ import taichi_forge as ti
 
 ### `ti.hardware` capability 与显式 probe（0.6.3 开发中）
 
-`ti.hardware.operations()`、`capability(operation_id)` 与 `providers()` 返回 schema-v2
-不可变静态合同。每个 operation 都用机器可读的 `activation_mode` 区分四种情况：
-`explicit_hardware_api`、`explicit_kernel_intrinsic`、
-`domain_api_auto_provider` 与 `compiler_automatic`。`report()` 返回只读 runtime
-snapshot，不加载、启用或选择可选 provider。
+面向普通用户的稳定层只包含 `HardwareCapability`、`HardwareProviderStatus` 与
+`HardwareExecutionReport`。使用 `status(id)`、`provider_status(id)` 或
+`execution_report()` 读取 `available`、当前 `backend`、`selected_provider`/`selected`、
+硬件资格 `route` 和结构化 `reason`；这些被动查询绝不加载、启用、benchmark 或选择
+可选 provider。
+
+`operations()`、`capability(operation_id)`、`providers()` 与 `report()` 是 schema-v4
+诊断合同，额外公开 dependency tier、workspace/lifetime/update policy、ABI、performance
+scope、resource effect 与 native fact 等专家信息。每个 operation 用 `activation_mode`
+区分 `explicit_hardware_api`、`explicit_kernel_intrinsic`、
+`domain_api_auto_provider` 与 `compiler_automatic`；独立的 `graph_integration` 字段取值为
+`inline`、`root_ordered`、`backend_recorded`、`stream_captured`、`opaque` 或
+`unsupported`。其中 `root_ordered` 只表示 Forge root Graph 保持顺序和 lifetime，并在
+replay 时再次调用 provider；它不表示 CUDA Graph capture 或持久 Vulkan command buffer。
+
 `probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；当前 cuBLAS、cuSPARSE、
-cuSOLVER 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续 selection。
-若实际算法此前已经 lazy-load 某库，被动 `report()` 会观察其缓存状态并报告
-`enabled/eligible`，但绝不自行调用 loader。未知 operation/provider 和未实现的 probe
-均 fail closed。
+cuFFT 与 cuDSS 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续
+selection。若实际算法此前已经 lazy-load 某库，被动 report 会观察其缓存状态，但绝不
+自行调用 loader。未知 operation/provider 和未实现的 probe 均 fail closed。
 
 ### 核心 kernel 硬件路线（0.6.3 资格化）
 
@@ -81,27 +90,35 @@ ABI 声明，不包含 Toolkit header、
 link dependency、bundled library、package dependency、新 build switch 或 wheel 变体。
 该 API 只支持 direct/root-Graph，不能在 kernel 内调用，也不会改写普通矩阵乘法。
 
-### CUDA sparse provider selection 与显式 SpMV（0.6.3 资格化）
+### CUDA sparse provider selection、显式 SpMV 与 cuDSS（0.6.3 资格化）
 
 两个已有的 `ti.linalg` 领域 API 会在 CUDA 上自动选择可选 vendor library：
 
-- `SparseMatrix @ ndarray` 执行 f32 scalar-CSR cuSPARSE SpMV（以及已资格化的
-  fixed-block BSR 切片）。matrix resource 会跨调用缓存 provider handle、dense-vector
-  descriptor、workspace 与可选 SpMV preprocessing。这条自动领域路线仍为 direct Python。
+- `SparseMatrix.spmv(ndarray, method="auto")` 会考虑 f32 scalar-CSR cuSPARSE SpMV
+  （以及已资格化的 fixed-block BSR 切片）。没有匹配且稳定的 matrix-scoped 成本证据时，
+  自动选择 fail closed 到内嵌 CUDA CSR/BSR kernel；`method="provider"` 是显式 provider
+  请求。matrix resource 会跨调用缓存 provider handle、dense-vector descriptor、workspace
+  与可选 SpMV preprocessing。这条自动领域路线仍为 direct Python。
+- `SparseMatrix @ ndarray` 使用同一条自动路线。
 - `ti.hardware.linalg.spmv_f32(matrix, input, output)` 把同一 stored-matrix operation
   写入调用方提供的 output；`CusparseSpmvRecording(matrix)` 可把该手动操作作为 root-Graph
   backend command，带显式读写 effect 与 matrix-generation lifetime lease。每次 Graph run
   重录一个 runtime-ordered cuSPARSE command，同时复用 matrix 持有的 handle、descriptor、
   workspace 与 preprocessing。
-- `ti.linalg.SparseSolver` 在 CUDA 上选择 cuSPARSE 与 cuSOLVER。显式的
-  `analyze_pattern()`、`factorize()`、`solve()` 阶段持有 provider plan/workspace。当前
-  f32 scalar-CSR 切片把 LLT/LDLT 映射到 sparse Cholesky 路线，把 LU 映射到 host-assisted
-  sparse LU；它不支持 Graph recording。
+- `ti.linalg.SparseSolver(provider="auto")` 会在 CUDA Driver API 至少为 12.0 时，为方形
+  scalar-f32 CUDA CSR matrix 考虑用户管理的 cuDSS 0.8.x provider。CUDA 11 及更低版本、
+  cuDSS 缺失/不兼容、f64 或不合格 layout 保留内嵌 cuSOLVERSp 兼容路线；
+  `provider="cudss"` 与 `provider="cusolver_sp"` 是显式选择。
+- `ti.hardware.linalg.CudssPlan` 暴露显式 `analyze()`、`factorize()`/`refactorize()` 和
+  `solve(rhs, solution)` 阶段。当前 `CudssSolveRecording` 只在 factorization 成功后形成
+  `root_ordered` action；每次 root-Graph run 重发一次 runtime-ordered solve。它不是 stream
+  capture，不能在 kernel 内调用，也不支持 structured Graph 或 AOT。
 
-所有路线都只在实际使用相应领域对象时 lazy-load 用户提供的兼容 library，不新增 Python
-package requirement、链接或捆绑的 vendor library、build switch 或 wheel 变体。这属于
-“用户显式请求 sparse operation 后，领域 API 自动选择 provider”，另有一条独立的手动
-direct/root-Graph 接口；它们都不是编译器改写任意 kernel，也都不能在 kernel 内调用。
+所有路线都只在实际使用相应领域对象或显式 plan 时 lazy-load 用户提供的兼容 library。
+Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆绑 vendor library，
+不增加 build switch 或 wheel 变体。这属于领域级或显式 plan 选择，不是编译器改写任意
+kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生的 analysis、factorization
+或数值失败保持可见，不会静默 fallback。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 
@@ -225,10 +242,35 @@ backend Graph。`admission="auto"`、structured Graph region 与 AOT 继续拒�
 dispatch 和 provider-owned output binding 并入精确 effect contract。该 D0 API 不新增依赖或
 wheel 变体。
 
-### `ti.hardware.ray.TriangleScene`（0.6.3 开发中）
+### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3 开发中）
 
-面向可更新 triangle mesh 与一个 identity TLAS instance 的显式 D0 Vulkan
-硬件 Ray Query provider：
+底层 D0 Vulkan 硬件 Ray Query API 将 fixed-topology triangle BLAS 与 fixed-order
+instance TLAS 分离：
+
+```python
+with ti.hardware.ray.TriangleBLAS(vertices, indices) as blas:
+    instances = (
+        ti.hardware.ray.RayInstance(blas, transform=transform_a, mask=0xFF),
+        ti.hardware.ray.RayInstance(blas, transform=transform_b, custom_index=1),
+    )
+    with ti.hardware.ray.InstanceTLAS(instances) as tlas:
+        tlas.trace(rays, hits)
+        tlas.refit(updated_instances)  # BLAS 数量与顺序不变
+
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(tlas.record(ray_count), admission="auto")
+        graph = builder.compile()
+        graph.run({"rays": rays, "hits": hits})
+```
+
+`TriangleBLAS.record_build()`/`record_refit()` 与
+`InstanceTLAS.record_build()`/`record_refit()` 都是 `root_ordered` native action。
+`RayInstance` 包含一个 BLAS 引用、有限的 row-major 3x4 transform、8-bit mask 和 24-bit
+custom index。TLAS build/refit 保持所引用 BLAS 的数量与顺序；BLAS refit 只更新 vertex，
+保持 vertex count 与 index topology。batch query 读取 TLAS、写入调用方持有的 hit，且不做
+host readback。
+
+`TriangleScene` 保留为单 identity instance 的兼容 wrapper：
 
 ```python
 with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
@@ -252,22 +294,18 @@ with ti.hardware.ray.TriangleScene(vertices, indices) as scene:
 vertex 为 f32、index 为 i32，可使用 scalar `(N, 3)` 或 AOS vector-3 layout。
 ray 为 f32 `(N, 8)`：`[ox, oy, oz, tmin, dx, dy, dz, tmax]`；hit 为 f32
 `(N, 4)`：`[t, primitive_id, instance_id, hit_flag]`，miss 编码为
-`[-1, -1, -1, 0]`。构造时显式记录一次允许 UPDATE 的 BLAS/TLAS build；
-`refit()` 或 `record_refit()` 会把替换 vertex 复制到 provider-owned build input 后执行
-Vulkan BLAS UPDATE；`trace()` 与 root-Graph recording 执行无 host readback 的 batch
-Ray Query。index 必须非负且在 vertex 范围内；provider 不会为验证 mesh topology 而把
-index 回读到 host。refit 会保持 vertex count、index buffer、geometry flag，以及
-identity TLAS 引用的稳定 BLAS address 不变。
+`[-1, -1, -1, 0]`。index 必须非负且在 vertex 范围内；provider 不会为验证 mesh
+topology 而把 index 回读到 host。
 
 该 provider 要求 Vulkan 1.2、buffer device address、
 `VK_KHR_acceleration_structure` 与 `VK_KHR_ray_query`。其 SPIR-V shader 在构建时
 嵌入 runtime，因此不新增 Vulkan SDK runtime 依赖或官方 wheel 变体。它不能在
-`@ti.kernel` 内调用，不会替换普通 kernel 或 collision detection。改变 topology 的
-rebuild、transform、多 instance、procedural geometry 与 kernel-inline query 仍不支持。
+`@ti.kernel` 内调用，不会替换普通 kernel 或 collision detection。改变 BLAS/TLAS
+topology、procedural geometry 与 kernel-inline query 仍不支持。
 
-### `ti.hardware.fft.CufftPlan1D`（0.6.3 开发中）
+### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3 开发中）
 
-显式 D1 single-GPU cuFFT provider：
+面向 C2C、R2C 与 C2R transform 的显式 D1 single-GPU cuFFT provider：
 
 ```python
 if ti.hardware.fft.is_available():  # 显式瞬时 provider probe
@@ -281,17 +319,18 @@ if ti.hardware.fft.is_available():  # 显式瞬时 provider probe
         builder.append_native(recording, admission="auto")
 ```
 
-complex value 使用 compact scalar f32 shape `(length, 2)` 或
-`(batch, length, 2)`，最后一轴为 `[real, imag]`。forward/inverse 均为
-out-of-place C2C；inverse 结果不自动归一化。固定尺寸 plan 拥有 cuFFT 内部 workspace、
-绑定 runtime 默认 CUDA stream，并可在 root Graph 中 replay；关闭 plan 后 recording
-立即失效。
+complex value 的最后一个 scalar-f32 pair axis 为 `[real, imag]`；R2C/C2R 使用
+Hermitian `length // 2 + 1` extent。`CufftPlan1D` 覆盖 compact 1D transform，
+`CufftPlanND` 覆盖带显式 embed、element stride 和 batch distance 的 batched rank-2/rank-3
+transform。inverse C2C 与 C2R 结果不自动归一化。固定尺寸 plan 拥有 cuFFT 内部
+workspace、绑定 runtime 默认 CUDA stream，并可在 root Graph 中 replay；关闭 plan 后
+recording 立即失效。
 
 `is_available()` 属于显式瞬时 probe，只有创建 plan 才真正 enable provider；库缺失或
 ABI 不兼容只让该 plan 失败，不会禁用 CUDA backend。Forge 不捆绑、不链接 cuFFT，
 不新增 mandatory package 或官方 wheel 变体；用户需自行安装并暴露兼容 shared library。
-首个切片不支持 in-place、任意 stride、R2C/C2R、callback、LTO、multi-GPU、kernel
-调用或 AOT serialization。
+in-place、逐轴独立任意 stride、callback、LTO、multi-GPU、kernel 调用与 AOT
+serialization 仍不支持。
 
 ### `ti.experimental.ndarray_view(source, *, slices=None, access="readwrite")`
 
@@ -1845,9 +1884,11 @@ telemetry。
 
 ### 硬件 provider 内存报告
 
-`ti.hardware.ray.TriangleScene`、`ti.hardware.fft.CufftPlan1D`、
-`ti.hardware.raster.RasterPass` 和已存储 cuSPARSE recording 等可复用硬件资源提供
-`memory_report()`。冻结的 `HardwareMemoryReport` 使用 schema v1，区分可知的 requested
+`ti.hardware.ray.TriangleScene`/`TriangleBLAS`/`InstanceTLAS`、
+`ti.hardware.fft.CufftPlan1D`、
+`ti.hardware.linalg.CudssPlan`、`ti.hardware.raster.RasterPass` 和已存储 cuSPARSE
+recording 等可复用硬件资源提供 `memory_report()`。冻结的 `HardwareMemoryReport` 使用
+schema v1，区分可知的 requested
 bytes 与不透明 driver/provider component，不把未知字节数当成零。provider 关闭后 resident
 requested bytes 变为零，但保留已知 capacity 供规划；属于旧 runtime generation 时报告
 `runtime_invalid`。
