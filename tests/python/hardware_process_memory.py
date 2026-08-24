@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,18 @@ MINIMUM_QUALIFICATION_ITERATIONS = 1_000
 RSS_PLATEAU_TOLERANCE_BYTES = 64 * 1024 * 1024
 GPU_PLATEAU_TOLERANCE_BYTES = 16 * 1024 * 1024
 _PHASES = ("before", "midpoint", "after")
+_NVML_SUCCESS = 0
+_NVML_ERROR_INSUFFICIENT_SIZE = 7
+_NVML_VALUE_NOT_AVAILABLE = (1 << 64) - 1
+
+
+class _NvmlProcessInfo(ctypes.Structure):
+    _fields_ = [
+        ("pid", ctypes.c_uint),
+        ("used_gpu_memory", ctypes.c_ulonglong),
+        ("gpu_instance_id", ctypes.c_uint),
+        ("compute_instance_id", ctypes.c_uint),
+    ]
 
 
 def _rss_bytes():
@@ -68,7 +81,136 @@ def _rss_bytes():
     return None, None, f"current RSS is unsupported on {sys.platform}"
 
 
-def _nvidia_process_gpu_bytes():
+def _load_nvml_library():
+    candidates = []
+    if sys.platform == "win32":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        candidates.extend(
+            (str(Path(system_root) / "System32" / "nvml.dll"), "nvml.dll")
+        )
+        loader = ctypes.WinDLL
+    elif sys.platform.startswith("linux"):
+        discovered = ctypes.util.find_library("nvidia-ml")
+        candidates.extend(
+            candidate for candidate in (discovered, "libnvidia-ml.so.1") if candidate
+        )
+        loader = ctypes.CDLL
+    else:
+        return None, f"nvml_unsupported_platform:{sys.platform}"
+    errors = []
+    for candidate in dict.fromkeys(candidates):
+        try:
+            return loader(candidate), None
+        except OSError as exc:
+            errors.append(type(exc).__name__)
+    detail = errors[-1] if errors else "no_candidate"
+    return None, f"nvml_library_unavailable:{detail}"
+
+
+def _nvml_device_processes(function, device):
+    function.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint),
+        ctypes.POINTER(_NvmlProcessInfo),
+    )
+    function.restype = ctypes.c_int
+    count = ctypes.c_uint(0)
+    result = function(device, ctypes.byref(count), None)
+    if result == _NVML_SUCCESS and count.value == 0:
+        return (), None
+    if result not in (_NVML_SUCCESS, _NVML_ERROR_INSUFFICIENT_SIZE):
+        return None, f"query_failed:{result}"
+    for _ in range(3):
+        capacity = max(1, int(count.value) + 4)
+        infos = (_NvmlProcessInfo * capacity)()
+        count = ctypes.c_uint(capacity)
+        result = function(device, ctypes.byref(count), infos)
+        if result == _NVML_ERROR_INSUFFICIENT_SIZE:
+            continue
+        if result != _NVML_SUCCESS:
+            return None, f"query_failed:{result}"
+        return tuple(infos[index] for index in range(int(count.value))), None
+    return None, "process_list_changed_repeatedly"
+
+
+def _nvml_process_gpu_bytes():
+    library, load_reason = _load_nvml_library()
+    if library is None:
+        return None, None, load_reason
+    required = (
+        "nvmlInit_v2",
+        "nvmlShutdown",
+        "nvmlDeviceGetCount_v2",
+        "nvmlDeviceGetHandleByIndex_v2",
+        "nvmlDeviceGetComputeRunningProcesses_v3",
+        "nvmlDeviceGetGraphicsRunningProcesses_v3",
+    )
+    missing = tuple(name for name in required if not hasattr(library, name))
+    if missing:
+        return None, None, f"nvml_symbols_unavailable:{','.join(missing)}"
+
+    initialize = library.nvmlInit_v2
+    initialize.argtypes = ()
+    initialize.restype = ctypes.c_int
+    shutdown = library.nvmlShutdown
+    shutdown.argtypes = ()
+    shutdown.restype = ctypes.c_int
+    get_count = library.nvmlDeviceGetCount_v2
+    get_count.argtypes = (ctypes.POINTER(ctypes.c_uint),)
+    get_count.restype = ctypes.c_int
+    get_handle = library.nvmlDeviceGetHandleByIndex_v2
+    get_handle.argtypes = (ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p))
+    get_handle.restype = ctypes.c_int
+
+    result = initialize()
+    if result != _NVML_SUCCESS:
+        return None, None, f"nvml_initialize_failed:{result}"
+    try:
+        count = ctypes.c_uint(0)
+        result = get_count(ctypes.byref(count))
+        if result != _NVML_SUCCESS:
+            return None, None, f"nvml_device_count_failed:{result}"
+        pid = os.getpid()
+        total = 0
+        found_exact = False
+        found_unavailable = False
+        for index in range(int(count.value)):
+            device = ctypes.c_void_p()
+            result = get_handle(index, ctypes.byref(device))
+            if result != _NVML_SUCCESS:
+                return None, None, f"nvml_device_handle_failed:{result}"
+            device_values = []
+            for function_name in (
+                "nvmlDeviceGetComputeRunningProcesses_v3",
+                "nvmlDeviceGetGraphicsRunningProcesses_v3",
+            ):
+                infos, reason = _nvml_device_processes(
+                    getattr(library, function_name), device
+                )
+                if infos is None:
+                    return None, None, f"nvml_{function_name}:{reason}"
+                for info in infos:
+                    if int(info.pid) != pid:
+                        continue
+                    if int(info.used_gpu_memory) == _NVML_VALUE_NOT_AVAILABLE:
+                        found_unavailable = True
+                    else:
+                        device_values.append(int(info.used_gpu_memory))
+            if device_values:
+                found_exact = True
+                # Compute and graphics queries both report process-total memory.
+                # Use the larger value per device instead of double counting it.
+                total += max(device_values)
+        if found_unavailable:
+            return None, None, "nvml_process_memory_unavailable"
+        if not found_exact:
+            return None, None, "nvml_process_not_listed"
+        return total, "nvml_compute_graphics_process_v3", None
+    finally:
+        shutdown()
+
+
+def _nvidia_smi_process_gpu_bytes():
     executable = shutil.which("nvidia-smi")
     if executable is None:
         return None, None, "nvidia-smi_not_found"
@@ -107,6 +249,16 @@ def _nvidia_process_gpu_bytes():
         )
         return None, None, reason
     return sum(values) * 1024 * 1024, "nvidia-smi_compute_process", None
+
+
+def _nvidia_process_gpu_bytes():
+    value, source, nvml_reason = _nvml_process_gpu_bytes()
+    if value is not None:
+        return value, source, None
+    value, source, smi_reason = _nvidia_smi_process_gpu_bytes()
+    if value is not None:
+        return value, source, None
+    return None, None, f"nvml:{nvml_reason};nvidia-smi:{smi_reason}"
 
 
 def _append_record(path, record):

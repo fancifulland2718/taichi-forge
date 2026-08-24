@@ -3,6 +3,66 @@ import json
 from tests.python import hardware_process_memory as memory
 
 
+def test_process_gpu_memory_prefers_package_free_nvml(monkeypatch):
+    monkeypatch.setattr(
+        memory,
+        "_nvml_process_gpu_bytes",
+        lambda: (1234, "nvml_compute_graphics_process_v3", None),
+    )
+
+    def unexpected_smi():
+        raise AssertionError("nvidia-smi fallback should not be called")
+
+    monkeypatch.setattr(memory, "_nvidia_smi_process_gpu_bytes", unexpected_smi)
+
+    assert memory._nvidia_process_gpu_bytes() == (
+        1234,
+        "nvml_compute_graphics_process_v3",
+        None,
+    )
+
+
+def test_process_gpu_memory_falls_back_to_nvidia_smi(monkeypatch):
+    monkeypatch.setattr(
+        memory,
+        "_nvml_process_gpu_bytes",
+        lambda: (None, None, "nvml_process_not_listed"),
+    )
+    monkeypatch.setattr(
+        memory,
+        "_nvidia_smi_process_gpu_bytes",
+        lambda: (64 * 1024 * 1024, "nvidia-smi_compute_process", None),
+    )
+
+    assert memory._nvidia_process_gpu_bytes() == (
+        64 * 1024 * 1024,
+        "nvidia-smi_compute_process",
+        None,
+    )
+
+
+def test_process_gpu_memory_reports_both_observer_failures(monkeypatch):
+    monkeypatch.setattr(
+        memory,
+        "_nvml_process_gpu_bytes",
+        lambda: (None, None, "nvml_process_memory_unavailable"),
+    )
+    monkeypatch.setattr(
+        memory,
+        "_nvidia_smi_process_gpu_bytes",
+        lambda: (None, None, "nvidia-smi_process_memory_unavailable"),
+    )
+
+    value, source, reason = memory._nvidia_process_gpu_bytes()
+
+    assert value is None
+    assert source is None
+    assert reason == (
+        "nvml:nvml_process_memory_unavailable;"
+        "nvidia-smi:nvidia-smi_process_memory_unavailable"
+    )
+
+
 def test_process_memory_plateau_requires_long_run_and_exact_gpu_process_scope(
     tmp_path, monkeypatch
 ):
