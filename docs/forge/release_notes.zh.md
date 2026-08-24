@@ -64,7 +64,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   探测可选库并保留 cuSOLVERSp；显式 provider 不受性能 gate 限制。旧版 CUDA、缺失/不兼容
   provider、不合格合同或未通过成本资格的场景同样继续使用 cuSOLVERSp；显式 cuDSS 要求
   CUDA Driver API 12.0 或更高版本。
-  新增 staged `CudssPlan` 及其 root-ordered solve recording，另新增独立的手动
+  新增 staged `CudssPlan`、root-ordered solve recording，以及读取当前 device values、
+  不依赖 host numeric-version 推断的 fixed-pattern 事务化 `record_refactor_solve()` action；
+  另新增独立的手动
   `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 路线，支持调用方持有 output，
   并在复用 matrix-owned provider
   state 的同时录入 root Graph。所有路线都不是 kernel rewrite，vendor library 继续保持

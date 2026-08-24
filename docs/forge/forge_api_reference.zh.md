@@ -120,10 +120,16 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
   CUDA 11 及更低版本、cuDSS 缺失/不兼容、f64、不合格 layout、scope 或成本不匹配也保留
   cuSOLVERSp；`provider="cudss"` 与 `provider="cusolver_sp"` 是不受性能 gate 限制的显式选择。
 - `ti.hardware.linalg.CudssPlan` 暴露显式 `analyze()`、`factorize()`/`refactorize()` 和
-  `solve(rhs, solution)` 阶段。当前 `CudssSolveRecording` 只在 factorization 成功后形成
-  `root_ordered` action；每次 root-Graph run 重发一次 runtime-ordered solve。它不是 stream
-  capture，不能在 kernel 内调用，也不支持 structured Graph 或 AOT；显式 cuDSS 同样要求
-  CUDA Driver API 12.0 或更高版本。
+  `solve(rhs, solution)` 阶段。`CudssSolveRecording` 对 plan 的 stored matrix 所产生的
+  factor 形成 `root_ordered` action；每次 root-Graph run 重发一次 runtime-ordered solve。
+  `plan.record_refactor_solve(values="matrix_values", rhs="rhs",
+  solution="solution")` 则记录一个 fixed-pattern f32 action：读取当前 CSR values 与 rhs、
+  使旧 factor 失效、重新 factorize 并写入 solution，整个过程是一个 provider transaction。
+  values、rhs 与 solution 必须为不同数组；同一个 plan 最多只能有一个尚未 retire 的
+  refactorize-and-solve transaction，重叠复用会 fail closed。由显式 Graph values 产生的
+  factor 不能交给后续 solve-only recording，必须先用 stored matrix 重新 refactorize。
+  两种 recording 都不是 stream capture，不能在 kernel 内调用，也不支持 structured Graph
+  或 AOT；显式 cuDSS 同样要求 CUDA Driver API 12.0 或更高版本。
 
 所有路线都只在实际使用相应领域对象或显式 plan 时 lazy-load 用户提供的兼容 library。
 Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆绑 vendor library，

@@ -73,7 +73,9 @@ grouped under the behavior they shipped.
   retains cuSOLVERSp; explicit providers remain outside the performance gate.
   Older, absent, incompatible, ineligible, or unqualified cases also retain
   cuSOLVERSp, while explicit cuDSS requires CUDA Driver API 12.0 or newer. Added the
-  explicit staged `CudssPlan` and its root-ordered solve recording, plus the
+  explicit staged `CudssPlan`, its root-ordered solve recording, and a
+  fixed-pattern transactional `record_refactor_solve()` action that consumes
+  current device values without host-side numeric-version inference, plus the
   separate manual `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route
   for caller-owned output and root-Graph recording over the existing
   matrix-owned provider state. None is a kernel rewrite; vendor libraries

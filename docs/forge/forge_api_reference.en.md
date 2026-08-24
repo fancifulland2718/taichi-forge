@@ -148,11 +148,20 @@ on CUDA:
   `provider="cudss"` and `provider="cusolver_sp"` are explicit,
   non-performance-gated choices.
 - `ti.hardware.linalg.CudssPlan` exposes explicit `analyze()`, `factorize()` /
-  `refactorize()`, and `solve(rhs, solution)` stages. Its current
-  `CudssSolveRecording` is a `root_ordered` action over an already successful
-  factorization: each root-Graph run reissues one runtime-ordered solve. It is
-  not stream capture, is not kernel-callable, and is unsupported in structured
-  Graph and AOT. Explicit cuDSS also requires CUDA Driver API 12.0 or newer.
+  `refactorize()`, and `solve(rhs, solution)` stages. `CudssSolveRecording` is
+  a `root_ordered` action over factors produced from the plan's stored matrix:
+  each root-Graph run reissues one runtime-ordered solve.
+  `plan.record_refactor_solve(values="matrix_values", rhs="rhs",
+  solution="solution")` instead records one fixed-pattern f32 action that
+  reads current CSR values and the right-hand side, invalidates the old
+  factors, refactorizes, and writes the solution as one provider transaction.
+  The values, rhs, and solution arrays must be distinct. A plan permits only
+  one unretired refactorize-and-solve transaction; overlapping reuse fails
+  closed. Factors produced from explicit Graph values cannot be consumed by a
+  later solve-only recording until the stored matrix is refactorized. Neither
+  recording is stream capture or kernel-callable, and both are unsupported in
+  structured Graph and AOT. Explicit cuDSS also requires CUDA Driver API 12.0
+  or newer.
 
 All routes lazy-load user-provided compatible libraries only when their domain
 objects or explicit plans are used. Forge does not install cuDSS, add a Python
