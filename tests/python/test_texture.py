@@ -9,6 +9,9 @@ from taichi_forge.lang import impl
 
 import taichi_forge as ti
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 supported_archs_texture = [ti.vulkan]
 supported_archs_texture_excluding_load_store = [ti.vulkan, ti.opengl]
@@ -420,7 +423,7 @@ def test_texture_registry_resize_churn_conserves_resources():
     baseline = prog._debug_texture_resource_stats()
     baseline_runtime_objects = len(runtime._runtime_object_refs)
 
-    iterations = 256
+    iterations = stress_iterations(256)
     for i in range(iterations):
         extent = 1 << (i % 5)
         tex = ti.Texture(ti.Format.rgba8, (extent, extent))

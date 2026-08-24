@@ -647,7 +647,7 @@ class CudssPlan:
         return dict(self._program._cuda_cudss_plan_statistics(self._handle))
 
     def close(self):
-        """Synchronize outstanding use and destroy provider-owned state."""
+        """Release this owner; in-flight work retains state until completion."""
 
         handle = self._handle
         self._handle = None

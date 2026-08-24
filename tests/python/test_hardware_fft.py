@@ -6,6 +6,9 @@ import pytest
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 
 @test_utils.test(arch=ti.cpu)
@@ -469,3 +472,48 @@ def test_cufft_plan_and_graph_fail_closed_after_runtime_reset():
         graph.run({"input": source, "output": output})
     plan.close()
     assert plan.memory_report().lifecycle_state == "closed"
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_serial_churn_releases_all_generations():
+    if not ti.hardware.fft.is_available():
+        pytest.skip("a compatible optional cuFFT shared library is unavailable")
+
+    iterations = stress_iterations(32)
+    length = 16
+    source = ti.ndarray(ti.f32, shape=(length, 2))
+    output = ti.ndarray(ti.f32, shape=(length, 2))
+    host = np.zeros((length, 2), dtype=np.float32)
+    host[:, 0] = np.arange(length, dtype=np.float32)
+    source.from_numpy(host)
+    ti.sync()
+    program = ti.lang.impl.get_runtime().prog
+    baseline_cache = ti.hardware.fft.cache_statistics()
+    baseline_memory = program._runtime_statistics_snapshot()["memory"]
+    midpoint = None
+
+    for iteration in range(iterations):
+        plan = ti.hardware.fft.CufftPlan1D(length)
+        plan.execute(source, output)
+        plan.close()
+        if (iteration + 1) % 64 == 0:
+            ti.sync()
+        if iteration + 1 == max(1, iterations // 2):
+            ti.sync()
+            midpoint = program._runtime_statistics_snapshot()["memory"]
+            assert ti.hardware.fft.cache_statistics().live_handles == (
+                baseline_cache.live_handles
+            )
+    ti.sync()
+
+    final_cache = ti.hardware.fft.cache_statistics()
+    final_memory = program._runtime_statistics_snapshot()["memory"]
+    assert final_cache.live_handles == baseline_cache.live_handles
+    assert final_cache.live_plans == baseline_cache.live_plans
+    assert final_cache.workspace_bytes_live == baseline_cache.workspace_bytes_live
+    assert final_cache.cache_misses == baseline_cache.cache_misses + iterations
+    for key in ("live_resources", "retiring_resources", "inflight_resources"):
+        assert midpoint[key] == baseline_memory[key]
+        assert final_memory[key] == baseline_memory[key]
+    assert np.isfinite(output.to_numpy()).all()

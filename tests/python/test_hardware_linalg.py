@@ -4,6 +4,9 @@ import pytest
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 
 @test_utils.test(arch=ti.cpu)
@@ -260,3 +263,119 @@ def test_cuda_vendor_commands_preserve_cross_provider_graph_order():
     expected = expected_rows * np.arange(1, n + 1, dtype=np.float32) + 1
     np.testing.assert_allclose(result.to_numpy(), expected, rtol=1e-6)
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 2
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_runtime_owned_provider_replay_plateaus():
+    """Stress runtime-owned handles without pretending they have close()."""
+
+    if not (
+        ti.hardware.linalg.cublas_is_available()
+        and ti.hardware.linalg.cusparse_is_available()
+    ):
+        pytest.skip("compatible cuBLAS and cuSPARSE libraries are required")
+
+    iterations = stress_iterations(64)
+    n = 4
+    a = ti.ndarray(ti.f32, shape=(n, n))
+    b = ti.ndarray(ti.f32, shape=(n, n))
+    product = ti.ndarray(ti.f32, shape=(n, n))
+    a_values = np.arange(n * n, dtype=np.float32).reshape(n, n) / 16.0
+    b_values = np.eye(n, dtype=np.float32) * 2.0
+    a.from_numpy(a_values)
+    b.from_numpy(b_values)
+
+    sparse_builder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=n)
+
+    @ti.kernel
+    def fill_diagonal(builder: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            builder[i, i] += ti.cast(i + 1, ti.f32)
+
+    fill_diagonal(sparse_builder)
+    matrix = sparse_builder.build()
+    vector = ti.ndarray(ti.f32, shape=n)
+    spmv_output = ti.ndarray(ti.f32, shape=n)
+    vector_values = np.arange(1, n + 1, dtype=np.float32)
+    vector.from_numpy(vector_values)
+    gemm = ti.hardware.linalg.CublasGemmRecording(n, n, n)
+    spmv = ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    bindings_gemm = {"a": a, "b": b, "output": product}
+    bindings_spmv = {"input": vector, "output": spmv_output}
+
+    gemm.execute(bindings_gemm)
+    spmv.execute(bindings_spmv)
+    ti.sync()
+    program = ti.lang.impl.get_runtime().prog
+    baseline_memory = program._runtime_statistics_snapshot()["memory"]
+    baseline_sparse = matrix._debug_runtime_stats()["operations"]
+    assert baseline_sparse["spmv_handle_creations"] == 1
+    assert baseline_sparse["spmv_plan_builds"] == 1
+
+    midpoint = None
+    for iteration in range(iterations):
+        gemm.execute(bindings_gemm)
+        spmv.execute(bindings_spmv)
+        if (iteration + 1) % 64 == 0:
+            ti.sync()
+        if iteration + 1 == max(1, iterations // 2):
+            ti.sync()
+            midpoint = program._runtime_statistics_snapshot()["memory"]
+    ti.sync()
+
+    final_memory = program._runtime_statistics_snapshot()["memory"]
+    final_sparse = matrix._debug_runtime_stats()["operations"]
+    for key in ("live_resources", "retiring_resources", "inflight_resources"):
+        assert midpoint[key] == baseline_memory[key]
+        assert final_memory[key] == baseline_memory[key]
+    assert final_sparse["spmv_handle_creations"] == 1
+    assert final_sparse["spmv_plan_builds"] == 1
+    assert final_sparse["spmv_plan_reuses"] >= iterations
+    np.testing.assert_allclose(product.to_numpy(), a_values @ b_values, rtol=1e-6)
+    np.testing.assert_allclose(
+        spmv_output.to_numpy(),
+        vector_values * np.arange(1, n + 1, dtype=np.float32),
+        rtol=1e-6,
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_vendor_graphs_fail_closed_after_runtime_reset():
+    if not (
+        ti.hardware.linalg.cublas_is_available()
+        and ti.hardware.linalg.cusparse_is_available()
+    ):
+        pytest.skip("compatible cuBLAS and cuSPARSE libraries are required")
+
+    n = 2
+    sparse_builder = ti.linalg.SparseMatrixBuilder(n, n, max_num_triplets=n)
+
+    @ti.kernel
+    def fill_diagonal(builder: ti.types.sparse_matrix_builder()):
+        for i in range(n):
+            builder[i, i] += 1.0
+
+    fill_diagonal(sparse_builder)
+    matrix = sparse_builder.build()
+    gemm_builder = ti.graph.GraphBuilder()
+    gemm_builder.append_native(
+        ti.hardware.linalg.CublasGemmRecording(n, n, n), admission="auto"
+    )
+    gemm_graph = gemm_builder.compile()
+    spmv_builder = ti.graph.GraphBuilder()
+    spmv_builder.append_native(
+        ti.hardware.linalg.CusparseSpmvRecording(matrix), admission="auto"
+    )
+    spmv_graph = spmv_builder.compile()
+    matrix_array = ti.ndarray(ti.f32, shape=(n, n))
+    vector = ti.ndarray(ti.f32, shape=n)
+
+    ti.reset()
+
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        gemm_graph.run(
+            {"a": matrix_array, "b": matrix_array, "output": matrix_array}
+        )
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        spmv_graph.run({"input": vector, "output": vector})

@@ -10,6 +10,9 @@ import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.lang import impl
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 
 def _texture_rgb(texture):
@@ -542,7 +545,7 @@ def test_vulkan_graphics_pipeline_close_releases_program_resources():
 
     program = impl.get_runtime().prog
     baseline = program._debug_vulkan_graphics_pipeline_count()
-    for _ in range(16):
+    for _ in range(stress_iterations(16)):
         pipeline = _triangle_pipeline()
         assert program._debug_vulkan_graphics_pipeline_count() == baseline + 1
         pipeline.close()

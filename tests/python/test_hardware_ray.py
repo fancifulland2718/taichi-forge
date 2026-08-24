@@ -5,6 +5,9 @@ import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.lang import impl
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 
 @test_utils.test(arch=ti.cpu)
@@ -424,3 +427,85 @@ def test_vulkan_triangle_ray_layout_and_recording_validation():
         ti.hardware.ray.RayInstance(uninitialized_blas, mask=256)
     with pytest.raises(ValueError, match="custom_index"):
         ti.hardware.ray.RayInstance(uninitialized_blas, custom_index=0x1000000)
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_ray_serial_churn_releases_all_generations():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    iterations = stress_iterations(8)
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    rays = ti.ndarray(ti.f32, shape=(1, 8))
+    hits = ti.ndarray(ti.f32, shape=(1, 4))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    rays.from_numpy(np.array([[0, 0, 1, 0.001, 0, 0, -1, 100]], dtype=np.float32))
+    ti.sync()
+    program = impl.get_runtime().prog
+    baseline = dict(program._debug_vulkan_ray_resource_stats())
+    midpoint = None
+
+    for iteration in range(iterations):
+        if iteration % 2 == 0:
+            owner = ti.hardware.ray.TriangleScene(vertices, indices)
+            owner.trace(rays, hits)
+            owner.close()
+        else:
+            blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+            owner = ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)])
+            owner.trace(rays, hits)
+            owner.close()
+            blas.close()
+        if (iteration + 1) % 32 == 0:
+            ti.sync()
+        if iteration + 1 == max(1, iterations // 2):
+            ti.sync()
+            midpoint = dict(program._debug_vulkan_ray_resource_stats())
+    ti.sync()
+
+    final = dict(program._debug_vulkan_ray_resource_stats())
+    for key in (
+        "live",
+        "retiring",
+        "completion_retained",
+        "independent_live",
+        "independent_retiring",
+        "independent_completion_retained",
+    ):
+        assert midpoint[key] == baseline[key]
+        assert final[key] == baseline[key]
+    np.testing.assert_allclose(
+        hits.to_numpy(), np.array([[1, 0, 0, 1]], dtype=np.float32), atol=1e-5
+    )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_ray_plan_and_graph_fail_closed_after_runtime_reset():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    rays = ti.ndarray(ti.f32, shape=(1, 8))
+    hits = ti.ndarray(ti.f32, shape=(1, 4))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    scene = ti.hardware.ray.TriangleScene(vertices, indices)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(scene.record(1), admission="auto")
+    graph = builder.compile()
+
+    ti.reset()
+
+    with pytest.raises(RuntimeError, match="previous Taichi runtime"):
+        scene.record(1)
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        graph.run({"rays": rays, "hits": hits})
+    scene.close()

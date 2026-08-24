@@ -7,6 +7,9 @@ import pytest
 import taichi_forge as ti
 from taichi_forge.hardware import _cudss
 from tests import test_utils
+from tests.python.hardware_provider_lifecycle_qualification import (
+    stress_iterations,
+)
 
 
 def test_cudss_library_discovery_is_user_managed_and_deterministic(
@@ -325,3 +328,94 @@ def test_cudss_staged_solve_and_refactorization():
     assert status["library_loaded"]
     assert status["provider_abi"] == "cudss-c-api-0.8"
     assert status["provider_version"].startswith("0.8.")
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cudss_serial_churn_releases_all_generations():
+    library_path = os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        pytest.skip("set TI_CUDSS_TEST_LIBRARY to a user-managed cuDSS 0.8.x DLL")
+    if not ti.hardware.linalg.cudss_is_available(library_path=library_path):
+        pytest.skip("the configured cuDSS 0.8.x provider is not loadable")
+
+    row_offsets = ti.ndarray(ti.i32, shape=3)
+    column_indices = ti.ndarray(ti.i32, shape=4)
+    values = ti.ndarray(ti.f32, shape=4)
+    row_offsets.from_numpy(np.array([0, 2, 4], dtype=np.int32))
+    column_indices.from_numpy(np.array([0, 1, 0, 1], dtype=np.int32))
+    values.from_numpy(np.array([3.0, -1.0, -1.0, 3.0], dtype=np.float32))
+    matrix = ti.linalg.SparsePattern.csr(2, 2, row_offsets, column_indices).matrix(
+        values
+    )
+    rhs = ti.ndarray(ti.f32, shape=2)
+    solution = ti.ndarray(ti.f32, shape=2)
+    rhs.from_numpy(np.array([1.0, 2.0], dtype=np.float32))
+    ti.sync()
+    program = ti.lang.impl.get_runtime().prog
+    baseline = program._runtime_statistics_snapshot()["memory"]
+    midpoint = None
+    iterations = stress_iterations(4)
+
+    for iteration in range(iterations):
+        plan = ti.hardware.linalg.CudssPlan(
+            matrix,
+            matrix_type="spd",
+            matrix_view="full",
+            library_path=library_path,
+        )
+        plan.compute().solve(rhs, solution)
+        plan.close()
+        if (iteration + 1) % 8 == 0:
+            ti.sync()
+        if iteration + 1 == max(1, iterations // 2):
+            ti.sync()
+            midpoint = program._runtime_statistics_snapshot()["memory"]
+    ti.sync()
+
+    final = program._runtime_statistics_snapshot()["memory"]
+    for key in ("live_resources", "retiring_resources", "inflight_resources"):
+        assert midpoint[key] == baseline[key]
+        assert final[key] == baseline[key]
+    np.testing.assert_allclose(
+        solution.to_numpy(), np.array([0.625, 0.875], dtype=np.float32), rtol=1e-5
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cudss_plan_and_graph_fail_closed_after_runtime_reset():
+    library_path = os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        pytest.skip("set TI_CUDSS_TEST_LIBRARY to a user-managed cuDSS 0.8.x DLL")
+    if not ti.hardware.linalg.cudss_is_available(library_path=library_path):
+        pytest.skip("the configured cuDSS 0.8.x provider is not loadable")
+
+    row_offsets = ti.ndarray(ti.i32, shape=3)
+    column_indices = ti.ndarray(ti.i32, shape=4)
+    values = ti.ndarray(ti.f32, shape=4)
+    row_offsets.from_numpy(np.array([0, 2, 4], dtype=np.int32))
+    column_indices.from_numpy(np.array([0, 1, 0, 1], dtype=np.int32))
+    values.from_numpy(np.array([3.0, -1.0, -1.0, 3.0], dtype=np.float32))
+    matrix = ti.linalg.SparsePattern.csr(2, 2, row_offsets, column_indices).matrix(
+        values
+    )
+    plan = ti.hardware.linalg.CudssPlan(
+        matrix,
+        matrix_type="spd",
+        matrix_view="full",
+        library_path=library_path,
+    ).compute()
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.recording(), admission="auto")
+    graph = builder.compile()
+    rhs = ti.ndarray(ti.f32, shape=2)
+    solution = ti.ndarray(ti.f32, shape=2)
+
+    ti.reset()
+
+    assert plan.memory_report().lifecycle_state == "runtime_invalid"
+    with pytest.raises(RuntimeError, match="runtime was reset"):
+        plan.recording()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        graph.run({"rhs": rhs, "solution": solution})
+    plan.close()
