@@ -6,6 +6,33 @@ import hardware_acceleration_qualification as qualification
 from taichi_forge.hardware import load_provider_admission_evidence
 
 
+def test_physics_workload_registry_and_cpu_oracles_are_stable():
+    assert "cuda-fft-poisson" in qualification.CASES
+    assert "cuda-cudss-refactor-solve" in qualification.CASES
+
+    length = 32
+    coordinates = 2.0 * np.pi * np.arange(length) / length
+    rhs = np.stack((np.sin(coordinates), np.cos(3.0 * coordinates))).astype(np.float32)
+    solution = qualification._periodic_poisson_reference(rhs)
+    residual = qualification._periodic_poisson_residual(solution, rhs)
+    residual_tolerance = qualification._periodic_poisson_residual_tolerance(
+        solution, rhs
+    )
+    inverse = qualification._periodic_poisson_inverse_eigenvalues(length)
+    assert inverse[0] == 0.0
+    assert inverse[1] == inverse[-1]
+    assert residual[1] < min(5e-6, residual_tolerance)
+
+    rows, columns, values = qualification._implicit_grid_csr(3, 0.2)
+    dense = np.zeros((9, 9), dtype=np.float64)
+    for row in range(9):
+        dense[row, columns[rows[row] : rows[row + 1]]] = values[
+            rows[row] : rows[row + 1]
+        ]
+    np.testing.assert_allclose(dense, dense.T)
+    assert np.min(np.linalg.eigvalsh(dense)) > 0.0
+
+
 def _worker(
     order,
     hardware,
@@ -62,6 +89,8 @@ def test_aggregate_accepts_only_stable_conservative_speedup():
         _worker("ab", [1.00, 1.01, 0.99], [2.00, 2.01, 1.99], [2.0] * 3),
         _worker("ba", [1.01, 1.00, 0.99], [2.01, 2.00, 1.99], [2.0] * 3),
     )
+    workers[0]["memory"] = {"runtime_after_close": {"inflight_resources": 0}}
+    workers[1]["provider_statistics"] = {"successes": 3, "failures": 0}
 
     report = qualification._aggregate("synthetic", workers, 0.10, 0.10)
 
@@ -74,6 +103,8 @@ def test_aggregate_accepts_only_stable_conservative_speedup():
     assert "p05_ms" not in report["paired_speedup"]
     assert len(report["worker_calibration"]) == 2
     assert report["worker_calibration"][0]["variants"]["hardware"]["satisfied"]
+    assert report["memory"] == [workers[0]["memory"]]
+    assert report["provider_statistics"] == [workers[1]["provider_statistics"]]
 
 
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():

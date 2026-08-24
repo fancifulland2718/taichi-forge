@@ -67,10 +67,12 @@ AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
 CASES = (
     "cuda-fft",
+    "cuda-fft-poisson",
     "cuda-gemm",
     "cuda-mma",
     "cuda-spmv",
     "cuda-cudss-solve",
+    "cuda-cudss-refactor-solve",
     "vulkan-ray-update",
     "vulkan-image-copy",
     "vulkan-texture-fetch",
@@ -146,6 +148,106 @@ def _error(actual, expected):
     absolute = float(np.max(np.abs(actual - expected)))
     scale = max(float(np.max(np.abs(expected))), np.finfo(np.float64).tiny)
     return absolute, absolute / scale
+
+
+def _periodic_poisson_inverse_eigenvalues(length):
+    """Return the discrete ``-d2/dx2`` inverse on a unit periodic grid."""
+
+    if length <= 0:
+        raise ValueError("periodic Poisson length must be positive")
+    modes = np.arange(length, dtype=np.float64)
+    eigenvalues = 4.0 * length * length * np.sin(np.pi * modes / length) ** 2
+    inverse = np.zeros(length, dtype=np.float64)
+    inverse[1:] = 1.0 / eigenvalues[1:]
+    return inverse.astype(np.float32)
+
+
+def _periodic_poisson_reference(rhs):
+    rhs = np.asarray(rhs, dtype=np.float32)
+    length = rhs.shape[-1]
+    inverse = _periodic_poisson_inverse_eigenvalues(length)[: length // 2 + 1]
+    spectrum = np.fft.rfft(rhs, axis=-1)
+    spectrum *= inverse
+    spectrum[..., 0] = 0.0
+    return np.fft.irfft(spectrum, n=length, axis=-1)
+
+
+def _periodic_poisson_residual(solution, rhs):
+    solution = np.asarray(solution, dtype=np.float64)
+    rhs = np.asarray(rhs, dtype=np.float64)
+    length = solution.shape[-1]
+    applied = (
+        2.0 * solution - np.roll(solution, 1, axis=-1) - np.roll(solution, -1, axis=-1)
+    ) * (length * length)
+    return _error(applied, rhs)
+
+
+def _periodic_poisson_residual_tolerance(solution, rhs):
+    solution = np.asarray(solution, dtype=np.float64)
+    rhs = np.asarray(rhs, dtype=np.float64)
+    length = solution.shape[-1]
+    scale = max(float(np.max(np.abs(rhs))), np.finfo(np.float64).tiny)
+    quantization_bound = (
+        8.0
+        * np.finfo(np.float32).eps
+        * length
+        * length
+        * float(np.max(np.abs(solution)))
+        / scale
+    )
+    return float(max(2e-3, quantization_bound))
+
+
+def _implicit_grid_csr(side, stiffness):
+    """Construct ``I + stiffness * Laplacian`` on a square grid."""
+
+    if side < 2:
+        raise ValueError("implicit grid side must be at least two")
+    row_offsets = [0]
+    column_indices = []
+    values = []
+    for row in range(side):
+        for column in range(side):
+            index = row * side + column
+            neighbors = []
+            if row > 0:
+                neighbors.append(index - side)
+            if row + 1 < side:
+                neighbors.append(index + side)
+            if column > 0:
+                neighbors.append(index - 1)
+            if column + 1 < side:
+                neighbors.append(index + 1)
+            entries = [(index, 1.0 + stiffness * len(neighbors))]
+            entries.extend((neighbor, -stiffness) for neighbor in neighbors)
+            for entry_column, entry_value in sorted(entries):
+                column_indices.append(entry_column)
+                values.append(entry_value)
+            row_offsets.append(len(column_indices))
+    return (
+        np.asarray(row_offsets, dtype=np.int32),
+        np.asarray(column_indices, dtype=np.int32),
+        np.asarray(values, dtype=np.float32),
+    )
+
+
+def _csr_residual(row_offsets, column_indices, values, solution, rhs):
+    solution = np.asarray(solution, dtype=np.float64)
+    rhs = np.asarray(rhs, dtype=np.float64)
+    product = np.zeros(rhs.shape, dtype=np.float64)
+    for row in range(rhs.size):
+        begin = row_offsets[row]
+        end = row_offsets[row + 1]
+        product[row] = np.dot(
+            values[begin:end].astype(np.float64),
+            solution[column_indices[begin:end]],
+        )
+    return _error(product, rhs)
+
+
+def _runtime_memory_snapshot():
+    program = ti.lang.impl.get_runtime().prog
+    return copy.deepcopy(program._runtime_statistics_snapshot()["memory"])
 
 
 def _artifact_provenance(path):
@@ -532,6 +634,285 @@ def _cuda_fft_case(order, args):
         }
     )
     plan.close()
+    ti.reset()
+    return result
+
+
+def _cuda_fft_poisson_case(order, args):
+    _init_cuda()
+    if not ti.hardware.fft.is_available():
+        result = _provenance("cuda-fft-poisson", order)
+        result.update({"status": "skipped", "reason": "cufft_unavailable"})
+        ti.reset()
+        return result
+    length = args.poisson_length
+    batch = args.poisson_batch
+    if length & (length - 1):
+        raise ValueError("poisson-length must be a power of two")
+    rng = np.random.default_rng(20260824)
+    coordinates = 2.0 * np.pi * np.arange(length, dtype=np.float64) / length
+    rhs_host = np.zeros((batch, length), dtype=np.float64)
+    for mode in range(1, 9):
+        sine = rng.standard_normal((batch, 1))
+        cosine = rng.standard_normal((batch, 1))
+        rhs_host += sine * np.sin(mode * coordinates)
+        rhs_host += cosine * np.cos(mode * coordinates)
+    rhs_host = rhs_host.astype(np.float32)
+    rhs_host -= np.mean(rhs_host, axis=1, keepdims=True, dtype=np.float32)
+
+    inverse_host = _periodic_poisson_inverse_eigenvalues(length)
+    half = length // 2 + 1
+    source = ti.ndarray(ti.f32, shape=(batch, length))
+    if batch == 1:
+        hardware_source = ti.ndarray(ti.f32, shape=length)
+        hardware_spectrum = ti.ndarray(ti.f32, shape=(half, 2))
+        hardware_output = ti.ndarray(ti.f32, shape=length)
+        hardware_source.from_numpy(rhs_host[0])
+    else:
+        hardware_source = source
+        hardware_spectrum = ti.ndarray(ti.f32, shape=(batch, half, 2))
+        hardware_output = ti.ndarray(ti.f32, shape=(batch, length))
+    baseline_frequency = ti.ndarray(ti.f32, shape=(batch, length, 2))
+    baseline_inverse = ti.ndarray(ti.f32, shape=(batch, length, 2))
+    baseline_output = ti.ndarray(ti.f32, shape=(batch, length))
+    bit_reversal = ti.ndarray(ti.i32, shape=length)
+    forward_twiddle = ti.ndarray(ti.f32, shape=(length // 2, 2))
+    inverse_twiddle = ti.ndarray(ti.f32, shape=(length // 2, 2))
+    inverse_full = ti.ndarray(ti.f32, shape=length)
+    inverse_half = ti.ndarray(ti.f32, shape=half)
+    source.from_numpy(rhs_host)
+    inverse_full.from_numpy(inverse_host)
+    inverse_half.from_numpy(inverse_host[:half])
+
+    bits = length.bit_length() - 1
+    reversal_host = np.empty(length, dtype=np.int32)
+    for index in range(length):
+        value = index
+        reversed_value = 0
+        for _ in range(bits):
+            reversed_value = (reversed_value << 1) | (value & 1)
+            value >>= 1
+        reversal_host[index] = reversed_value
+    angles = -2.0 * np.pi * np.arange(length // 2) / length
+    forward_host = np.stack((np.cos(angles), np.sin(angles)), axis=-1).astype(
+        np.float32
+    )
+    inverse_host_twiddle = forward_host.copy()
+    inverse_host_twiddle[:, 1] *= -1.0
+    bit_reversal.from_numpy(reversal_host)
+    forward_twiddle.from_numpy(forward_host)
+    inverse_twiddle.from_numpy(inverse_host_twiddle)
+
+    @ti.kernel
+    def reorder_real(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for batch_index, index in ti.ndrange(batch, length):
+            reversed_index = indices[index]
+            output[batch_index, index, 0] = values[batch_index, reversed_index]
+            output[batch_index, index, 1] = 0.0
+
+    @ti.kernel
+    def reorder_complex(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for batch_index, index in ti.ndrange(batch, length):
+            reversed_index = indices[index]
+            output[batch_index, index, 0] = values[batch_index, reversed_index, 0]
+            output[batch_index, index, 1] = values[batch_index, reversed_index, 1]
+
+    @ti.kernel
+    def radix2_stage(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        factors: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        span: ti.i32,
+    ):
+        half_span = span // 2
+        for batch_index, butterfly in ti.ndrange(batch, length // 2):
+            group = butterfly // half_span
+            offset = butterfly - group * half_span
+            even = group * span + offset
+            odd = even + half_span
+            factor_index = offset * (length // span)
+            factor_real = factors[factor_index, 0]
+            factor_imag = factors[factor_index, 1]
+            odd_real = values[batch_index, odd, 0]
+            odd_imag = values[batch_index, odd, 1]
+            rotated_real = factor_real * odd_real - factor_imag * odd_imag
+            rotated_imag = factor_real * odd_imag + factor_imag * odd_real
+            even_real = values[batch_index, even, 0]
+            even_imag = values[batch_index, even, 1]
+            values[batch_index, even, 0] = even_real + rotated_real
+            values[batch_index, even, 1] = even_imag + rotated_imag
+            values[batch_index, odd, 0] = even_real - rotated_real
+            values[batch_index, odd, 1] = even_imag - rotated_imag
+
+    @ti.kernel
+    def multiply_half_spectrum(
+        spectrum: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        multiplier: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for batch_index, mode in ti.ndrange(batch, half):
+            factor = multiplier[mode]
+            spectrum[batch_index, mode, 0] *= factor
+            spectrum[batch_index, mode, 1] *= factor
+
+    @ti.kernel
+    def multiply_half_spectrum_single(
+        spectrum: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        multiplier: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for mode in range(half):
+            factor = multiplier[mode]
+            spectrum[mode, 0] *= factor
+            spectrum[mode, 1] *= factor
+
+    @ti.kernel
+    def multiply_full_spectrum(
+        spectrum: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        multiplier: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for batch_index, mode in ti.ndrange(batch, length):
+            factor = multiplier[mode]
+            spectrum[batch_index, mode, 0] *= factor
+            spectrum[batch_index, mode, 1] *= factor
+
+    @ti.kernel
+    def scale_real(values: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        for batch_index, index in ti.ndrange(batch, length):
+            values[batch_index, index] *= 1.0 / length
+
+    @ti.kernel
+    def scale_real_single(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for index in range(length):
+            values[index] *= 1.0 / length
+
+    @ti.kernel
+    def unpack_inverse(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for batch_index, index in ti.ndrange(batch, length):
+            output[batch_index, index] = values[batch_index, index, 0] / length
+
+    memory_before_plans = _runtime_memory_snapshot()
+    cache_before = vars(ti.hardware.fft.cache_statistics()).copy()
+    forward = ti.hardware.fft.CufftPlan1D(length, batch_count=batch, transform="r2c")
+    inverse = ti.hardware.fft.CufftPlan1D(length, batch_count=batch, transform="c2r")
+    cache_open = vars(ti.hardware.fft.cache_statistics()).copy()
+    stages = tuple(1 << exponent for exponent in range(1, bits + 1))
+
+    def hardware():
+        forward.execute(hardware_source, hardware_spectrum)
+        if batch == 1:
+            multiply_half_spectrum_single(hardware_spectrum, inverse_half)
+        else:
+            multiply_half_spectrum(hardware_spectrum, inverse_half)
+        inverse.execute(hardware_spectrum, hardware_output)
+        if batch == 1:
+            scale_real_single(hardware_output)
+        else:
+            scale_real(hardware_output)
+
+    def baseline():
+        reorder_real(source, bit_reversal, baseline_frequency)
+        for span in stages:
+            radix2_stage(baseline_frequency, forward_twiddle, span)
+        multiply_full_spectrum(baseline_frequency, inverse_full)
+        reorder_complex(baseline_frequency, bit_reversal, baseline_inverse)
+        for span in stages:
+            radix2_stage(baseline_inverse, inverse_twiddle, span)
+        unpack_inverse(baseline_inverse, baseline_output)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_values = hardware_output.to_numpy()
+    if batch == 1:
+        hardware_values = hardware_values.reshape(1, length)
+    baseline_values = baseline_output.to_numpy()
+    expected = _periodic_poisson_reference(rhs_host)
+    hardware_error = _error(hardware_values, expected)
+    baseline_error = _error(baseline_values, expected)
+    hardware_residual = _periodic_poisson_residual(hardware_values, rhs_host)
+    baseline_residual = _periodic_poisson_residual(baseline_values, rhs_host)
+    residual_tolerance = max(
+        _periodic_poisson_residual_tolerance(hardware_values, rhs_host),
+        _periodic_poisson_residual_tolerance(baseline_values, rhs_host),
+    )
+    resolved = _resolved_operation("fft.transform.cufft")
+    memory_after_timing = _runtime_memory_snapshot()
+    forward_open_report = forward.memory_report().to_dict()
+    inverse_open_report = inverse.memory_report().to_dict()
+    forward.close()
+    inverse.close()
+    ti.sync()
+    memory_after_close = _runtime_memory_snapshot()
+    cache_closed = vars(ti.hardware.fft.cache_statistics()).copy()
+    forward_closed_report = forward.memory_report().to_dict()
+    inverse_closed_report = inverse.memory_report().to_dict()
+    passed = (
+        hardware_error[1] <= 5e-5
+        and baseline_error[1] <= 5e-5
+        and hardware_residual[1] <= residual_tolerance
+        and baseline_residual[1] <= residual_tolerance
+        and resolved["discovery"] == "available"
+        and resolved["selection"] in ("eligible", "selected")
+        and memory_after_close["inflight_resources"] == 0
+        and cache_closed["live_handles"] == cache_before["live_handles"]
+        and cache_closed["live_plans"] == cache_before["live_plans"]
+    )
+    result = _provenance("cuda-fft-poisson", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "equation": "periodic discrete -u_xx = f on a unit grid",
+                "length": length,
+                "batch": batch,
+                "spectral_modes": 8,
+                "timed_scope": "forward_transform+spectral_operator+inverse_transform+normalization",
+                "hardware": "cuFFT batched R2C/C2R plus Taichi spectral kernel",
+                "baseline": "Taichi radix-2 f32 complex forward/inverse kernels",
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_solution_max_abs": hardware_error[0],
+                "hardware_solution_max_rel": hardware_error[1],
+                "baseline_solution_max_abs": baseline_error[0],
+                "baseline_solution_max_rel": baseline_error[1],
+                "residual_relative_tolerance": residual_tolerance,
+                "hardware_residual_max_abs": hardware_residual[0],
+                "hardware_residual_max_rel": hardware_residual[1],
+                "baseline_residual_max_abs": baseline_residual[0],
+                "baseline_residual_max_rel": baseline_residual[1],
+            },
+            "route": resolved,
+            "memory": {
+                "runtime_before_plans": memory_before_plans,
+                "runtime_after_timing": memory_after_timing,
+                "runtime_after_close": memory_after_close,
+                "cache_before": cache_before,
+                "cache_open": cache_open,
+                "cache_closed": cache_closed,
+                "forward_open": forward_open_report,
+                "inverse_open": inverse_open_report,
+                "forward_closed": forward_closed_report,
+                "inverse_closed": inverse_closed_report,
+            },
+        }
+    )
     ti.reset()
     return result
 
@@ -939,6 +1320,228 @@ def _cuda_cudss_solve_case(order, args):
         }
     )
     solvers["hardware"].solver.close()
+    ti.reset()
+    return result
+
+
+def _cuda_cudss_refactor_solve_case(order, args):
+    _init_cuda()
+    library_path = args.cudss_library or os.environ.get("TI_CUDSS_TEST_LIBRARY")
+    if not library_path:
+        result = _provenance("cuda-cudss-refactor-solve", order)
+        result.update(
+            {
+                "status": "skipped",
+                "reason": "user_managed_cudss_library_not_configured",
+            }
+        )
+        ti.reset()
+        return result
+    if not ti.hardware.linalg.cudss_is_available(library_path=library_path):
+        result = _provenance("cuda-cudss-refactor-solve", order)
+        result.update({"status": "skipped", "reason": "cudss_unavailable"})
+        ti.reset()
+        return result
+
+    side = args.cudss_grid
+    n = side * side
+    low_stiffness = np.float32(0.08)
+    high_stiffness = np.float32(0.20)
+    phase = np.float32(0.35)
+    row_offsets_host, column_indices_host, low_values_host = _implicit_grid_csr(
+        side, low_stiffness
+    )
+    high_rows, high_columns, high_values_host = _implicit_grid_csr(side, high_stiffness)
+    if not (
+        np.array_equal(row_offsets_host, high_rows)
+        and np.array_equal(column_indices_host, high_columns)
+    ):
+        raise RuntimeError("implicit-grid coefficient update changed CSR topology")
+    current_values_host = (
+        (np.float32(1.0) - phase) * low_values_host + phase * high_values_host
+    ).astype(np.float32)
+    rhs_host = (
+        np.sin(np.arange(n, dtype=np.float32) * np.float32(0.013))
+        + np.cos(np.arange(n, dtype=np.float32) * np.float32(0.007))
+    ).astype(np.float32)
+
+    row_offsets = ti.ndarray(ti.i32, shape=n + 1)
+    column_indices = ti.ndarray(ti.i32, shape=column_indices_host.size)
+    low_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    high_values = ti.ndarray(ti.f32, shape=high_values_host.size)
+    hardware_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    baseline_values = ti.ndarray(ti.f32, shape=low_values_host.size)
+    rhs = ti.ndarray(ti.f32, shape=n)
+    hardware_solution = ti.ndarray(ti.f32, shape=n)
+    baseline_solution = ti.ndarray(ti.f32, shape=n)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    low_values.from_numpy(low_values_host)
+    high_values.from_numpy(high_values_host)
+    hardware_values.from_numpy(low_values_host)
+    baseline_values.from_numpy(low_values_host)
+    rhs.from_numpy(rhs_host)
+    pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
+    hardware_matrix = pattern.matrix(hardware_values)
+    baseline_matrix = pattern.matrix(baseline_values)
+
+    @ti.kernel
+    def update_coefficients(
+        low: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        high: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in output:
+            output[index] = (1.0 - phase) * low[index] + phase * high[index]
+
+    memory_before_plans = _runtime_memory_snapshot()
+    plan = ti.hardware.linalg.CudssPlan(
+        hardware_matrix,
+        matrix_type="spd",
+        matrix_view="full",
+        library_path=library_path,
+    )
+    plan.compute()
+    baseline_solver = ti.linalg.SparseSolver(
+        dtype=ti.f32,
+        solver_type="LLT",
+        ordering="AMD",
+        provider="cusolver_sp",
+    )
+    baseline_solver.analyze_pattern(baseline_matrix)
+    baseline_solver.factorize(baseline_matrix)
+    ti.sync()
+
+    low_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "low_values", ti.f32, ndim=1)
+    high_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "high_values", ti.f32, ndim=1)
+    values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "matrix_values", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(update_coefficients, low_arg, high_arg, values_arg)
+    recording = plan.record_refactor_solve()
+    builder.append_native(recording, admission="auto")
+    graph = builder.compile()
+    bindings = {
+        "low_values": low_values,
+        "high_values": high_values,
+        "matrix_values": hardware_values,
+        "rhs": rhs,
+        "solution": hardware_solution,
+    }
+    program = ti.lang.impl.get_runtime().prog
+
+    def hardware():
+        graph.run(bindings)
+        ti.sync()
+
+    def baseline():
+        update_coefficients(low_values, high_values, baseline_values)
+        baseline_matrix.update_values(baseline_values)
+        baseline_solver.factorize(baseline_matrix)
+        baseline_solver.solver.solve_rf(
+            program,
+            baseline_matrix.matrix,
+            rhs.arr,
+            baseline_solution.arr,
+        )
+        ti.sync()
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_values_host = hardware_solution.to_numpy()
+    baseline_values_host = baseline_solution.to_numpy()
+    hardware_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        current_values_host,
+        hardware_values_host,
+        rhs_host,
+    )
+    baseline_residual = _csr_residual(
+        row_offsets_host,
+        column_indices_host,
+        current_values_host,
+        baseline_values_host,
+        rhs_host,
+    )
+    cross_solution_error = _error(hardware_values_host, baseline_values_host)
+    resolved = _resolved_operation("linalg.refactor_solve.cudss")
+    statistics = plan.statistics()
+    memory_after_timing = _runtime_memory_snapshot()
+    open_report = plan.memory_report().to_dict()
+    plan.close()
+    ti.sync()
+    memory_after_close = _runtime_memory_snapshot()
+    closed_report = plan.memory_report().to_dict()
+    passed = (
+        hardware_residual[1] <= 2e-4
+        and baseline_residual[1] <= 2e-4
+        and cross_solution_error[1] <= 2e-4
+        and resolved["discovery"] == "available"
+        and resolved["selection"] in ("eligible", "selected")
+        and statistics["refactor_solve_attempts"] > 0
+        and statistics["refactor_solve_successes"]
+        == statistics["refactor_solve_attempts"]
+        and statistics["refactor_solve_failures"] == 0
+        and statistics["refactor_solve_retirements"]
+        == statistics["refactor_solve_successes"]
+        and statistics["refactor_solve_inflight"] == 0
+        and memory_after_close["inflight_resources"] == 0
+        and closed_report["lifecycle_state"] == "closed"
+    )
+    result = _provenance("cuda-cudss-refactor-solve", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "equation": "fixed-topology implicit grid step",
+                "operator": "I + stiffness * graph_laplacian",
+                "grid": (side, side),
+                "rows": n,
+                "nnz": int(low_values_host.size),
+                "low_stiffness": float(low_stiffness),
+                "high_stiffness": float(high_stiffness),
+                "blend_phase": float(phase),
+                "timed_scope": "device_coefficient_update+numeric_refactorization+solve+synchronization",
+                "symbolic_analysis_included": False,
+                "hardware": "root-Graph transactional cuDSS refactorize+solve",
+                "baseline": "embedded cuSOLVERSp numeric refactorize+solve",
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_residual_max_abs": hardware_residual[0],
+                "hardware_residual_max_rel": hardware_residual[1],
+                "baseline_residual_max_abs": baseline_residual[0],
+                "baseline_residual_max_rel": baseline_residual[1],
+                "cross_solution_max_abs": cross_solution_error[0],
+                "cross_solution_max_rel": cross_solution_error[1],
+            },
+            "route": {
+                "provider": resolved,
+                "hardware_action": "linalg.refactor_solve.cudss",
+                "baseline_provider": baseline_solver.selected_provider,
+                "graph_integration": resolved["graph_integration"],
+                "replay_mode": recording.replay_mode,
+                "stream_binding": recording.stream_binding,
+            },
+            "provider_statistics": statistics,
+            "memory": {
+                "runtime_before_plans": memory_before_plans,
+                "runtime_after_timing": memory_after_timing,
+                "runtime_after_close": memory_after_close,
+                "plan_open": open_report,
+                "plan_closed": closed_report,
+                "baseline_matrix": baseline_matrix._debug_runtime_stats(),
+            },
+        }
+    )
     ti.reset()
     return result
 
@@ -1509,10 +2112,12 @@ def _vulkan_texture_stencil_case(order, args):
 
 _CASE_RUNNERS = {
     "cuda-fft": _cuda_fft_case,
+    "cuda-fft-poisson": _cuda_fft_poisson_case,
     "cuda-gemm": _cuda_gemm_case,
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
     "cuda-cudss-solve": _cuda_cudss_solve_case,
+    "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-image-copy": _vulkan_image_copy_case,
     "vulkan-texture-fetch": _vulkan_texture_fetch_case,
@@ -1770,7 +2375,7 @@ def _aggregate(
         expected_reuse=auto_admission_expected_reuse,
         minimum_margin=auto_admission_minimum_margin,
     )
-    return {
+    result = {
         "case": case,
         "status": "passed",
         "correctness_and_route_qualified": True,
@@ -1816,6 +2421,11 @@ def _aggregate(
         "correctness": [worker["correctness"] for worker in workers],
         "route": workers[0]["route"],
     }
+    for diagnostic in ("memory", "provider_statistics"):
+        values = [worker[diagnostic] for worker in workers if diagnostic in worker]
+        if values:
+            result[diagnostic] = values
+    return result
 
 
 def _balanced_worker_schedule(workers_per_order):
@@ -1864,6 +2474,10 @@ def _parent(args):
                     str(args.fft_length),
                     "--fft-batch",
                     str(args.fft_batch),
+                    "--poisson-length",
+                    str(args.poisson_length),
+                    "--poisson-batch",
+                    str(args.poisson_batch),
                     "--gemm-size",
                     str(args.gemm_size),
                     "--mma-batch",
@@ -2004,6 +2618,11 @@ def _parent(args):
                 "spmv_expected_reuse": args.spmv_expected_reuse,
                 "cudss_expected_reuse": args.cudss_expected_reuse,
             },
+            "physics_workloads": {
+                "poisson_length": args.poisson_length,
+                "poisson_batch": args.poisson_batch,
+                "implicit_grid": args.cudss_grid,
+            },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
         },
@@ -2045,6 +2664,8 @@ def _parse_args():
     parser.add_argument("--drift-limit", type=float, default=0.05)
     parser.add_argument("--fft-length", type=int, default=4096)
     parser.add_argument("--fft-batch", type=int, default=16)
+    parser.add_argument("--poisson-length", type=int, default=4096)
+    parser.add_argument("--poisson-batch", type=int, default=16)
     parser.add_argument("--gemm-size", type=int, default=192)
     parser.add_argument("--mma-batch", type=int, default=1024)
     parser.add_argument("--spmv-rows", type=int, default=131072)
@@ -2074,6 +2695,9 @@ def _parse_args():
         or args.fft_length < 2
         or args.fft_length & (args.fft_length - 1)
         or args.fft_batch <= 0
+        or args.poisson_length < 2
+        or args.poisson_length & (args.poisson_length - 1)
+        or args.poisson_batch <= 0
         or args.gemm_size <= 0
         or args.mma_batch <= 0
         or args.spmv_rows <= 0
