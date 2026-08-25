@@ -13,7 +13,7 @@ from typing import Mapping, Optional
 
 PROVIDER_ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
 PROVIDER_ADMISSION_SCHEMA_VERSION = 2
-_QUALIFICATION_SOURCE_SCHEMA = "taichi_forge.hardware_acceleration_qualification.v5"
+_QUALIFICATION_SOURCE_SCHEMA = "taichi_forge.hardware_acceleration_qualification.v6"
 
 _MINIMUM_FRESH_PROCESSES = 8
 _MINIMUM_PROCESSES_PER_ORDER = 4

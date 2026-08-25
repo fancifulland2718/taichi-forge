@@ -82,7 +82,7 @@ from taichi_forge.hardware._admission import (  # pylint: disable=C0413
 )
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v5"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v6"
 ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
 AUTO_ADMISSION_MINIMUM_PROCESSES = 8
 AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER = 4
@@ -90,6 +90,9 @@ AUTO_ADMISSION_MINIMUM_SAMPLES = 40
 AUTO_ADMISSION_MINIMUM_BLOCK_MS = 100.0
 AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
+RETENTION_MINIMUM_PAIRED_SPEEDUP = 1.05
+RETENTION_MAXIMUM_PAIRED_CV = 0.05
+RETENTION_MAXIMUM_ORDER_DRIFT = 0.05
 CASES = (
     "cuda-fft",
     "cuda-cufft-mixed-replay",
@@ -3871,6 +3874,107 @@ def _performance_environment_qualification(workers):
     }
 
 
+def _retention_qualification(workers, variants, paired_speedup, performance_environment):
+    """Qualify a robust paired gain without hiding absolute timing noise.
+
+    Retention is deliberately weaker than auto admission or a public
+    performance claim: correlated process noise may make each variant noisy
+    while their paired ratio remains reproducibly positive. Coverage,
+    calibrated blocks, paired-ratio stability, order stability, and any
+    collected environment evidence still fail closed.
+    """
+
+    order_processes = {order: sum(worker["order"] == order for worker in workers) for order in ("ab", "ba")}
+    fresh_processes = len({(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers})
+    samples_per_variant = {variant: variants[variant]["count"] for variant in ("hardware", "baseline")}
+    observed_blocks = [
+        float(worker["timing"]["calibration"][variant]["observed_block_ms"])
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    ]
+    calibration_satisfied = all(
+        worker["timing"]["calibration"][variant]["satisfied"]
+        for worker in workers
+        for variant in ("hardware", "baseline")
+    )
+    minimum_block_ms = min(observed_blocks)
+    maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
+    paired_cv = paired_speedup.get("cv")
+    checks = (
+        (
+            fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES
+            and all(count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER for count in order_processes.values()),
+            "insufficient_fresh_process_coverage",
+        ),
+        (
+            all(count >= AUTO_ADMISSION_MINIMUM_SAMPLES for count in samples_per_variant.values()),
+            "insufficient_timing_samples",
+        ),
+        (
+            calibration_satisfied and minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS,
+            "undersized_timing_blocks",
+        ),
+        (
+            paired_speedup.get("p05") is not None and paired_speedup["p05"] >= RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            "paired_margin_gate",
+        ),
+        (
+            paired_cv is not None and paired_cv <= RETENTION_MAXIMUM_PAIRED_CV,
+            "unstable_paired_ratio",
+        ),
+        (maximum_order_drift <= RETENTION_MAXIMUM_ORDER_DRIFT, "unstable_order_effect"),
+        (
+            performance_environment is None or performance_environment["qualified"],
+            "performance_environment_unqualified",
+        ),
+    )
+    reasons = tuple(reason for passed, reason in checks if not passed)
+    return {
+        "qualified": not reasons,
+        "reasons": reasons,
+        "policy": "robust_paired_positive",
+        "absolute_variant_cv_is_diagnostic": True,
+        "requirements": {
+            "fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
+            "processes_per_order": AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER,
+            "samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
+            "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
+            "minimum_paired_p05": RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            "maximum_paired_cv": RETENTION_MAXIMUM_PAIRED_CV,
+            "maximum_order_drift": RETENTION_MAXIMUM_ORDER_DRIFT,
+        },
+        "observed": {
+            "fresh_processes": fresh_processes,
+            "order_processes": order_processes,
+            "samples_per_variant": samples_per_variant,
+            "minimum_block_ms": minimum_block_ms,
+            "calibration_satisfied": calibration_satisfied,
+            "paired_p05": paired_speedup.get("p05"),
+            "paired_cv": paired_cv,
+            "maximum_order_drift": maximum_order_drift,
+            "absolute_variant_cv": {variant: variants[variant]["cv"] for variant in variants},
+        },
+    }
+
+
+def _apply_replay_retention_gate(result):
+    gate = result.get("replay_proof_gate")
+    if gate is None:
+        return
+    specialized = gate.get("retention_gate_passed")
+    if specialized is None and "physics_roi_gate_passed" in gate:
+        specialized = bool(gate.get("counters_qualified") and gate["physics_roi_gate_passed"])
+    if specialized is True:
+        return
+    result["retention_eligible"] = False
+    retention = result.get("retention_qualification")
+    if retention is not None:
+        retention["qualified"] = False
+        retention["reasons"] = tuple(
+            dict.fromkeys((*retention.get("reasons", ()), "specialized_replay_gate_unqualified"))
+        )
+
+
 def _aggregate(
     case,
     workers,
@@ -3887,6 +3991,7 @@ def _aggregate(
             "status": "error",
             "workers": workers,
             "performance_claim_eligible": False,
+            "retention_eligible": False,
             "performance_state": "not_measured",
             "performance_scope": {},
         }
@@ -3896,6 +4001,7 @@ def _aggregate(
             "status": "skipped",
             "workers": workers,
             "performance_claim_eligible": False,
+            "retention_eligible": False,
             "performance_state": "not_measured",
             "performance_scope": {},
         }
@@ -3905,6 +4011,7 @@ def _aggregate(
             "status": "failed",
             "workers": workers,
             "performance_claim_eligible": False,
+            "retention_eligible": False,
             "performance_state": "not_measured",
             "performance_scope": {},
         }
@@ -3954,7 +4061,11 @@ def _aggregate(
         performance_evidence["reasons"] = tuple(
             dict.fromkeys((*performance_evidence["reasons"], "performance_environment_unqualified"))
         )
-    claim_eligible = performance_state == "stable_positive" and performance_evidence["qualified"]
+    retention_qualification = _retention_qualification(workers, variants, speedup, performance_environment)
+    retention_eligible = retention_qualification["qualified"]
+    claim_eligible = bool(
+        retention_eligible and performance_state == "stable_positive" and performance_evidence["qualified"]
+    )
     performance_scope = {
         "harness_schema": SCHEMA,
         "case": case,
@@ -3991,6 +4102,8 @@ def _aggregate(
         "minimum_block_qualified": minimum_block_qualified,
         "performance_evidence": performance_evidence,
         "performance_environment": performance_environment,
+        "retention_qualification": retention_qualification,
+        "retention_eligible": retention_eligible,
         "performance_claim_eligible": claim_eligible,
         "performance_state": performance_state,
         "performance_scope": performance_scope,
@@ -4408,6 +4521,7 @@ def _aggregate(
                         values = [worker[diagnostic] for worker in workers if diagnostic in worker]
                         if values:
                             result[diagnostic] = values
+                    _apply_replay_retention_gate(result)
                     return result
                 result["replay_proof_gate"] = {
                     "scope": "mechanism_retained_vs_rerecord",
@@ -4450,6 +4564,7 @@ def _aggregate(
                 "retention_gate_passed": False,
             }
             result["performance_claim_eligible"] = False
+    _apply_replay_retention_gate(result)
     for diagnostic in ("memory", "provider_statistics", "replay_proof"):
         values = [worker[diagnostic] for worker in workers if diagnostic in worker]
         if values:
@@ -4532,6 +4647,11 @@ def _apply_build_provenance_gate(case_reports, source_revision):
             packet_timing["gate_passed"] = False
             packet_timing["gate_reason"] = "build_provenance_unqualified"
         case["performance_claim_eligible"] = False
+        case["retention_eligible"] = False
+        retention = case.get("retention_qualification")
+        if retention is not None:
+            retention["qualified"] = False
+            retention["reasons"] = tuple(dict.fromkeys((*retention.get("reasons", ()), "build_provenance_unqualified")))
         auto_admission = case.get("auto_admission")
         if auto_admission is not None and auto_admission.get("eligible"):
             auto_admission.clear()
@@ -4753,6 +4873,9 @@ def _parent(args):
         ),
         "all_performance_claims_eligible": all(
             case["performance_claim_eligible"] for case in case_reports if case["status"] != "skipped"
+        ),
+        "all_retention_eligible": all(
+            case.get("retention_eligible", False) for case in case_reports if case["status"] != "skipped"
         ),
     }
     with open(args.output, "w", encoding="utf-8") as output:

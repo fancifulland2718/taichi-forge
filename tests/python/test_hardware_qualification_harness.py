@@ -205,7 +205,58 @@ def test_aggregate_allows_claim_after_formal_fresh_process_coverage():
     assert report["performance_state"] == "stable_positive"
     assert report["performance_evidence"]["qualified"]
     assert report["performance_evidence"]["reasons"] == ()
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["qualified"]
     assert report["performance_claim_eligible"]
+
+
+def test_aggregate_retains_robust_paired_gain_despite_absolute_process_noise():
+    scales = (0.8, 1.2, 0.9, 1.1) * 2
+    workers = tuple(
+        _worker(
+            "ab" if index < 4 else "ba",
+            [scale] * 5,
+            [scale * 1.3] * 5,
+            [1.3] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index, scale in enumerate(scales)
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.05, 0.05)
+
+    assert report["performance_state"] == "unstable"
+    assert report["variants"]["hardware"]["cv"] > 0.05
+    assert report["variants"]["baseline"]["cv"] > 0.05
+    assert report["paired_speedup"]["p05"] == pytest.approx(1.3)
+    assert report["paired_speedup"]["cv"] == pytest.approx(0.0)
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["absolute_variant_cv_is_diagnostic"]
+    assert report["retention_qualification"]["reasons"] == ()
+    assert not report["auto_admission"]["eligible"]
+    assert not report["performance_claim_eligible"]
+
+
+def test_aggregate_rejects_noisy_paired_gain_from_retention():
+    paired = ([0.9, 1.0, 1.1, 1.3, 1.6],) * 8
+    workers = tuple(
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [1.2] * 5,
+            paired[index],
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.10, 0.10)
+
+    assert not report["retention_eligible"]
+    assert "paired_margin_gate" in report["retention_qualification"]["reasons"]
+    assert "unstable_paired_ratio" in report["retention_qualification"]["reasons"]
 
 
 def test_build_provenance_qualification_requires_one_matching_worker_revision():
@@ -239,6 +290,8 @@ def test_build_provenance_gate_fails_closed_for_claims_and_admission():
         "worker_provenance": [{"forge_commit": "built-revision"}],
         "performance_evidence": {"qualified": True, "reasons": ()},
         "performance_claim_eligible": True,
+        "retention_eligible": True,
+        "retention_qualification": {"qualified": True, "reasons": ()},
         "auto_admission": {"eligible": True, "evidence": {"unsafe": True}},
         "replay_proof_gate": {
             "physics_roi_gate_passed": True,
@@ -254,6 +307,9 @@ def test_build_provenance_gate_fails_closed_for_claims_and_admission():
     assert not case["performance_evidence"]["qualified"]
     assert case["performance_evidence"]["reasons"] == ("build_provenance_unqualified",)
     assert not case["performance_claim_eligible"]
+    assert not case["retention_eligible"]
+    assert not case["retention_qualification"]["qualified"]
+    assert case["retention_qualification"]["reasons"] == ("build_provenance_unqualified",)
     assert case["auto_admission"] == {"eligible": False, "reason": "build_provenance_unqualified"}
     assert case["replay_proof_gate"]["gate_reason"] == "build_provenance_unqualified"
     assert not case["replay_proof_gate"]["performance_gate_passed"]
@@ -266,6 +322,8 @@ def test_build_provenance_gate_preserves_exact_claims():
         "worker_provenance": [{"forge_commit": "source-revision"}],
         "performance_evidence": {"qualified": True, "reasons": ()},
         "performance_claim_eligible": True,
+        "retention_eligible": True,
+        "retention_qualification": {"qualified": True, "reasons": ()},
         "auto_admission": {"eligible": True, "evidence": {"safe": True}},
     }
 
@@ -275,6 +333,7 @@ def test_build_provenance_gate_preserves_exact_claims():
     assert case["build_provenance"]["qualified"]
     assert case["performance_evidence"]["qualified"]
     assert case["performance_claim_eligible"]
+    assert case["retention_eligible"]
     assert case["auto_admission"]["eligible"]
 
 
