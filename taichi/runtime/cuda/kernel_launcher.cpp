@@ -806,7 +806,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
             *static_cast<const std::uint64_t *>(found->second);
         TI_ERROR_IF(texture_object == 0,
                     "CUDA texture argument resolved to a null texture object");
-        ctx.set_struct_arg<std::uint64_t>(key, texture_object);
+        auto texture_object_key = key;
+        texture_object_key.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+        ctx.set_struct_arg<std::uint64_t>(texture_object_key, texture_object);
         continue;
       }
       const auto arr_sz = ctx.array_runtime_sizes[key];

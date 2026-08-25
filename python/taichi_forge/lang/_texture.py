@@ -138,6 +138,7 @@ class Texture:
         self._runtime_prog = runtime.prog
         arch = impl.current_cfg().arch
         graphics_texture_arches = (
+            _ti_core.Arch.cuda,
             _ti_core.Arch.vulkan,
             _ti_core.Arch.opengl,
             _ti_core.Arch.gles,

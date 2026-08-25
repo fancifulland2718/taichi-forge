@@ -3,6 +3,7 @@
 #include <vector>
 #include <set>
 #include <functional>
+#include <string_view>
 
 #include "taichi/common/core.h"
 #include "taichi/util/io.h"
@@ -187,6 +188,125 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     if (!emit_async_tile_copy(stmt)) {
       TaskCodeGenLLVM::visit(stmt);
     }
+  }
+
+  void visit(TexturePtrStmt *stmt) override {
+    TI_ERROR_IF(stmt->is_storage,
+                "CUDA texture resources are sampled-only; RW texture load "
+                "and store are unavailable");
+    auto arg_id = stmt->arg_load_stmt->as<ArgLoadStmt>()->arg_id;
+    arg_id.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
+    llvm_val[stmt] = get_struct_arg(arg_id, /*create_load=*/true);
+  }
+
+  void visit(TextureOpStmt *stmt) override {
+    TI_ERROR_IF(stmt->op != TextureOpType::kSampleLod &&
+                    stmt->op != TextureOpType::kFetchTexel,
+                "CUDA texture lowering supports only sample_lod and fetch");
+    auto *texture_ptr = stmt->texture_ptr->cast<TexturePtrStmt>();
+    TI_ASSERT(texture_ptr != nullptr && !texture_ptr->is_storage);
+    const int dimensions = texture_ptr->dimensions;
+    TI_ASSERT(dimensions >= 1 && dimensions <= 3);
+    TI_ASSERT(stmt->args.size() == static_cast<std::size_t>(dimensions + 1));
+    const auto texture_arg_id =
+        texture_ptr->arg_load_stmt->as<ArgLoadStmt>()->arg_id;
+    for (const auto &cached : texture_op_cache_) {
+      if (cached.block == builder->GetInsertBlock() &&
+          cached.texture_arg_id == texture_arg_id && cached.op == stmt->op &&
+          cached.args == stmt->args) {
+        llvm_val[stmt] = cached.result;
+        return;
+      }
+    }
+
+    auto *i64_type = llvm::Type::getInt64Ty(*llvm_context);
+    auto *f32_type = llvm::Type::getFloatTy(*llvm_context);
+    auto *handle = llvm_val[texture_ptr];
+    if (handle->getType()->isPointerTy()) {
+      handle = builder->CreatePtrToInt(handle, i64_type);
+    } else if (handle->getType() != i64_type) {
+      handle = builder->CreateZExtOrTrunc(handle, i64_type);
+    }
+
+    const bool exact = stmt->op == TextureOpType::kFetchTexel;
+    std::vector<llvm::Type *> input_types{i64_type};
+    std::vector<llvm::Value *> inputs{handle};
+    std::string constraints{"=f,=f,=f,=f,l"};
+    std::string coordinates;
+    for (int hardware_axis = 0; hardware_axis < dimensions;
+         ++hardware_axis) {
+      const int logical_axis = dimensions - 1 - hardware_axis;
+      auto *coordinate = llvm_val[stmt->args[logical_axis]];
+      if (exact) {
+        auto dimension_arg_id = texture_arg_id;
+        dimension_arg_id.push_back(TypeFactory::SHAPE_POS_IN_NDARRAY);
+        dimension_arg_id.push_back(logical_axis);
+        auto *dimension =
+            get_struct_arg(dimension_arg_id, /*create_load=*/true);
+        coordinate = builder->CreateFDiv(
+            builder->CreateFAdd(builder->CreateSIToFP(coordinate, f32_type),
+                                llvm::ConstantFP::get(f32_type, 0.5)),
+            builder->CreateSIToFP(dimension, f32_type));
+      }
+      input_types.push_back(coordinate->getType());
+      inputs.push_back(coordinate);
+      constraints += ",f";
+      if (!coordinates.empty()) {
+        coordinates += ",";
+      }
+      coordinates += fmt::format("${}", 5 + hardware_axis);
+    }
+    if (dimensions == 3) {
+      auto *padding = llvm::ConstantFP::get(f32_type, 0.0);
+      input_types.push_back(padding->getType());
+      inputs.push_back(padding);
+      constraints += ",f";
+      coordinates += "," + fmt::format("${}", 5 + dimensions);
+    }
+
+    const char *geometry =
+        dimensions == 1 ? "1d" : dimensions == 2 ? "2d" : "3d";
+    std::string assembly =
+        "{\n\ttex." + std::string(geometry) + ".v4.f32." +
+        "f32 {$0,$1,$2,$3}, [$4, {" + coordinates + "}];\n}";
+    auto *result_type = llvm::StructType::get(
+        *llvm_context, {f32_type, f32_type, f32_type, f32_type});
+    auto *asm_type =
+        llvm::FunctionType::get(result_type, input_types, false);
+    auto *texture_fetch = llvm::InlineAsm::get(
+        asm_type, assembly, constraints, /*hasSideEffects=*/false);
+    auto *result = builder->CreateCall(texture_fetch, inputs);
+
+    auto *storage_type = llvm::ArrayType::get(f32_type, 4);
+    auto *storage = create_entry_block_alloca(storage_type);
+    for (int i = 0; i < 4; ++i) {
+      auto *component = builder->CreateExtractValue(result, i);
+      auto *destination = builder->CreateGEP(
+          storage_type, storage,
+          {tlctx->get_constant(0), tlctx->get_constant(i)});
+      builder->CreateStore(component, destination);
+    }
+    llvm_val[stmt] = builder->CreateBitCast(
+        storage, llvm::PointerType::get(f32_type, 0));
+    texture_op_cache_.push_back({builder->GetInsertBlock(), texture_arg_id,
+                                 stmt->op, stmt->args, llvm_val[stmt]});
+  }
+
+  void visit(InternalFuncStmt *stmt) override {
+    constexpr std::string_view kTextureExtractPrefix{"composite_extract_"};
+    if (stmt->func_name.rfind(kTextureExtractPrefix, 0) == 0 &&
+        stmt->func_name.size() == kTextureExtractPrefix.size() + 1 &&
+        stmt->args.size() == 1 && stmt->args[0]->is<TextureOpStmt>()) {
+      const char component_character = stmt->func_name.back();
+      TI_ASSERT(component_character >= '0' && component_character <= '3');
+      const int component = component_character - '0';
+      auto *f32_type = llvm::Type::getFloatTy(*llvm_context);
+      auto *component_pointer = builder->CreateGEP(
+          f32_type, llvm_val[stmt->args[0]], tlctx->get_constant(component));
+      llvm_val[stmt] = builder->CreateLoad(f32_type, component_pointer);
+      return;
+    }
+    TaskCodeGenLLVM::visit(stmt);
   }
 
   llvm::Value *create_print(const std::string &format,
@@ -969,6 +1089,16 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   }
 
  private:
+  struct CachedTextureOp {
+    llvm::BasicBlock *block;
+    std::vector<int> texture_arg_id;
+    TextureOpType op;
+    std::vector<Stmt *> args;
+    llvm::Value *result;
+  };
+
+  std::vector<CachedTextureOp> texture_op_cache_;
+
   // CudaBoundedRangeBinding is a private Graph argument prefix whose layout is
   // asserted in taichi/program/context.h. Keep the byte offsets explicit here
   // so the device module does not need a new split-runtime type or symbol.

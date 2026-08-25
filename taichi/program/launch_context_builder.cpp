@@ -575,6 +575,12 @@ void LaunchContextBuilder::set_arg_texture(const std::vector<int> &arg_id,
   }
   intptr_t ptr = tex.get_device_allocation_ptr_as_int();
   set_arg_texture_impl(arg_id, ptr);
+  const auto shape = tex.get_size();
+  for (int i = 0; i < static_cast<int>(shape.size()); ++i) {
+    set_struct_arg(concatenate_vector<int>(
+                       arg_id, {TypeFactory::SHAPE_POS_IN_NDARRAY, i}),
+                   shape[i]);
+  }
 }
 
 void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,

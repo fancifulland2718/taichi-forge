@@ -318,11 +318,18 @@ Texture::Texture(Program *prog,
 
     auto resource = std::make_unique<CudaTextureResource>();
     CUDA_ARRAY3D_DESCRIPTOR array_desc{};
-    array_desc.Width = static_cast<std::size_t>(width);
+    array_desc.Width = static_cast<std::size_t>(
+        dimension == ImageDimension::d1D
+            ? width
+            : dimension == ImageDimension::d2D ? height : depth);
     array_desc.Height =
-        dimension == ImageDimension::d1D ? 0 : static_cast<std::size_t>(height);
+        dimension == ImageDimension::d1D
+            ? 0
+            : static_cast<std::size_t>(dimension == ImageDimension::d2D
+                                           ? width
+                                           : height);
     array_desc.Depth =
-        dimension == ImageDimension::d3D ? static_cast<std::size_t>(depth) : 0;
+        dimension == ImageDimension::d3D ? static_cast<std::size_t>(width) : 0;
     array_desc.Format = cuda_array_format(type);
     array_desc.NumChannels = num_channels;
     array_desc.Flags = 0;
@@ -460,13 +467,23 @@ void Texture::from_ndarray(Ndarray *ndarray) {
     CUDA_MEMCPY3D copy{};
     copy.srcMemoryType = ::CU_MEMORYTYPE_DEVICE;
     copy.srcDevice = reinterpret_cast<CUdeviceptr>(source);
-    copy.srcPitch = static_cast<std::size_t>(width_) * texel_bytes;
-    copy.srcHeight = static_cast<std::size_t>(height_);
+    const std::size_t physical_width = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d1D
+            ? width_
+            : dimension_ == ImageDimension::d2D ? height_ : depth_);
+    const std::size_t physical_height = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d3D
+            ? height_
+            : dimension_ == ImageDimension::d2D ? width_ : 1);
+    const std::size_t physical_depth = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d3D ? width_ : 1);
+    copy.srcPitch = physical_width * texel_bytes;
+    copy.srcHeight = physical_height;
     copy.dstMemoryType = ::CU_MEMORYTYPE_ARRAY;
     copy.dstArray = cuda_texture_->array;
-    copy.WidthInBytes = static_cast<std::size_t>(width_) * texel_bytes;
-    copy.Height = static_cast<std::size_t>(height_);
-    copy.Depth = static_cast<std::size_t>(depth_);
+    copy.WidthInBytes = physical_width * texel_bytes;
+    copy.Height = physical_height;
+    copy.Depth = physical_depth;
     auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memcpy_3d(&copy);
     return;
@@ -524,10 +541,12 @@ void Texture::from_snode(SNode *snode) {
                 "CUDA texture upload requires a dense Field");
     const std::size_t texel_bytes =
         static_cast<std::size_t>(data_type_size(dtype_)) * num_channels_;
-    TI_ERROR_IF(snode->cell_size_bytes != texel_bytes,
-                "CUDA texture upload requires a Field cell size of {} bytes, "
-                "got {}",
-                texel_bytes, snode->cell_size_bytes);
+    const std::size_t source_cell_bytes =
+        static_cast<std::size_t>(snode->parent->cell_size_bytes);
+    TI_ERROR_IF(source_cell_bytes != texel_bytes,
+                "CUDA texture upload requires a tightly packed dense Field "
+                "cell size of {} bytes, got {}",
+                texel_bytes, source_cell_bytes);
     TI_ERROR_IF(snode->shape_along_axis(0) != width_ ||
                     (dimension_ != ImageDimension::d1D &&
                      snode->shape_along_axis(1) != height_) ||
@@ -545,13 +564,23 @@ void Texture::from_snode(SNode *snode) {
     CUDA_MEMCPY3D copy{};
     copy.srcMemoryType = ::CU_MEMORYTYPE_DEVICE;
     copy.srcDevice = reinterpret_cast<CUdeviceptr>(source);
-    copy.srcPitch = static_cast<std::size_t>(width_) * texel_bytes;
-    copy.srcHeight = static_cast<std::size_t>(height_);
+    const std::size_t physical_width = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d1D
+            ? width_
+            : dimension_ == ImageDimension::d2D ? height_ : depth_);
+    const std::size_t physical_height = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d3D
+            ? height_
+            : dimension_ == ImageDimension::d2D ? width_ : 1);
+    const std::size_t physical_depth = static_cast<std::size_t>(
+        dimension_ == ImageDimension::d3D ? width_ : 1);
+    copy.srcPitch = physical_width * texel_bytes;
+    copy.srcHeight = physical_height;
     copy.dstMemoryType = ::CU_MEMORYTYPE_ARRAY;
     copy.dstArray = cuda_texture_->array;
-    copy.WidthInBytes = static_cast<std::size_t>(width_) * texel_bytes;
-    copy.Height = static_cast<std::size_t>(height_);
-    copy.Depth = static_cast<std::size_t>(depth_);
+    copy.WidthInBytes = physical_width * texel_bytes;
+    copy.Height = physical_height;
+    copy.Depth = physical_depth;
     auto context_guard = CUDAContext::get_instance().get_guard();
     CUDADriver::get_instance().memcpy_3d(&copy);
     return;
