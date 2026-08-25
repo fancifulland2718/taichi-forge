@@ -130,6 +130,26 @@ def _storage_image_pipeline():
     )
 
 
+def _bindless_triangle_pipeline(*, descriptor_count=4):
+    vertex_path = (
+        Path(__file__).parent / "assets" / "hardware_graphics_bindless.vert.spv"
+    )
+    return ti.hardware.graphics.VulkanGraphicsPipeline(
+        vertex_path.read_bytes(),
+        _spirv_header("2_triangle.frag.spv.h"),
+        vertex_bindings=(ti.hardware.graphics.VertexBinding(0, 20),),
+        vertex_attributes=(
+            ti.hardware.graphics.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+        ),
+        shader_buffer_bindings=(
+            ti.hardware.graphics.ShaderBufferArrayBinding(
+                0, 0, descriptor_count, "read"
+            ),
+            ti.hardware.graphics.ShaderBufferBinding(0, 1, "uniform", "read"),
+        ),
+    )
+
+
 def _triangle_vertices():
     vertices = ti.ndarray(ti.f32, shape=(15,))
     vertices.from_numpy(
@@ -311,6 +331,8 @@ def _overlapping_depth_vertices():
 @test_utils.test(arch=ti.cpu)
 def test_vulkan_graphics_contract_rejects_non_vulkan_runtime():
     assert not ti.hardware.graphics.is_available()
+    assert not ti.hardware.graphics.is_bindless_buffer_available()
+    assert not any(ti.hardware.graphics.bindless_buffer_capabilities().values())
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
         _triangle_pipeline()
     with pytest.raises(ValueError, match="positive uint32"):
@@ -327,6 +349,124 @@ def test_vulkan_graphics_contract_rejects_non_vulkan_runtime():
         ti.hardware.graphics.IndirectDraw(1, 3, count_offset=2)
     with pytest.raises(ValueError, match="positive uint32"):
         ti.hardware.graphics.IndirectDraw(0, 3)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_bindless_buffer_feature_report_keeps_axes_independent():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+    capabilities = dict(ti.hardware.graphics.bindless_buffer_capabilities())
+    assert set(capabilities) == {
+        "descriptor_indexing",
+        "storage_buffer_non_uniform_indexing",
+        "fixed_count",
+        "partially_bound",
+        "update_after_bind",
+        "variable_count",
+        "runtime_array",
+        "update_unused_while_pending",
+        "max_fixed_count",
+        "max_update_after_bind_descriptors_in_all_pools",
+        "max_per_stage_update_after_bind_storage_buffers",
+        "max_descriptor_set_update_after_bind_storage_buffers",
+    }
+    if capabilities["fixed_count"]:
+        assert capabilities["descriptor_indexing"]
+        assert capabilities["storage_buffer_non_uniform_indexing"]
+        assert capabilities["max_fixed_count"] > 0
+    if capabilities["variable_count"]:
+        assert capabilities["runtime_array"]
+    if capabilities["update_after_bind"]:
+        assert capabilities["max_descriptor_set_update_after_bind_storage_buffers"] > 0
+
+    operation = next(
+        item
+        for item in ti.hardware.report().operations
+        if item.descriptor.operation_id == "raster.draw.vulkan"
+    )
+    assert operation.native_facts["bindless_storage_buffer_fixed_count"] == bool(
+        capabilities["fixed_count"]
+    )
+    assert operation.native_facts["max_bindless_storage_buffer_fixed_count"] == min(
+        capabilities["max_fixed_count"], 64
+    )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation():
+    if not ti.hardware.graphics.is_bindless_buffer_available():
+        pytest.skip("Vulkan bindless graphics buffers are unavailable")
+
+    with _bindless_triangle_pipeline() as pipeline:
+        with pytest.raises(ValueError, match="count must match"):
+            pipeline.pass_draw(
+                ti.hardware.graphics.Draw(3),
+                vertex_buffers={0: "vertices"},
+                shader_buffers={(0, 0): ("c0", "c1"), (0, 1): "selector"},
+            )
+
+        vertices = _triangle_vertices()
+        colors = []
+        for value in (
+            (1.0, 0.0, 0.0, 1.0),
+            (1.0, 1.0, 0.0, 1.0),
+            (0.0, 0.0, 1.0, 1.0),
+            (1.0, 0.0, 1.0, 1.0),
+        ):
+            color = ti.ndarray(ti.f32, shape=4)
+            color.from_numpy(np.array(value, dtype=np.float32))
+            colors.append(color)
+        selector = ti.ndarray(ti.u32, shape=4)
+        selector.from_numpy(np.array([2, 0, 0, 0], dtype=np.uint32))
+
+        draw = pipeline.pass_draw(
+            ti.hardware.graphics.Draw(3),
+            vertex_buffers={0: "vertices"},
+            shader_buffers={
+                (0, 0): ("color0", "color1", "color2", "color3"),
+                (0, 1): "selector",
+            },
+        )
+        recording = pipeline.record_pass((draw,), color="target")
+        assert tuple(
+            (effect.resource, effect.access) for effect in recording.resource_effects
+        ) == (
+            ("target", GraphAccess.WRITE),
+            ("vertices", GraphAccess.READ),
+            ("color0", GraphAccess.READ),
+            ("color1", GraphAccess.READ),
+            ("color2", GraphAccess.READ),
+            ("color3", GraphAccess.READ),
+            ("selector", GraphAccess.READ),
+        )
+
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+        graph = builder.compile()
+        target = ti.Texture(ti.Format.rgba8, (64, 64))
+        bindings = {
+            "target": target,
+            "vertices": vertices,
+            "color0": colors[0],
+            "color1": colors[1],
+            "color2": colors[2],
+            "color3": colors[3],
+            "selector": selector,
+        }
+        graph.run(bindings)
+        ti.sync()
+        first = _texture_rgb(target)[32, 32]
+        assert first[0] < 8 and first[1] < 8 and first[2] > 32
+
+        replacement = ti.ndarray(ti.f32, shape=4)
+        replacement.from_numpy(np.array((0.0, 1.0, 0.0, 1.0), dtype=np.float32))
+        bindings["color2"] = replacement
+        graph.run(bindings)
+        ti.sync()
+        second = _texture_rgb(target)[32, 32]
+        assert second[0] < 8 and second[1] > 32 and second[2] < 8
+
+        assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

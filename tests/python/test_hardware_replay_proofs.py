@@ -1,3 +1,5 @@
+import gc
+
 import numpy as np
 import pytest
 
@@ -332,6 +334,135 @@ def test_vulkan_indirect_retained_replay_keys_command_generation(monkeypatch):
     pipeline.close()
     ti.sync()
     assert program._debug_vulkan_graphics_resource_stats()["retained_replay_slots"] == 0
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_bindless_retained_replay_owns_table_generations(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    if not ti.hardware.graphics.is_bindless_buffer_available():
+        pytest.skip("Vulkan bindless graphics buffers are unavailable")
+
+    from tests.python.test_hardware_graphics import (
+        _bindless_triangle_pipeline,
+        _texture_rgb,
+        _triangle_vertices,
+    )
+
+    def buffer(value):
+        result = ti.ndarray(ti.f32, shape=4)
+        result.from_numpy(np.array(value, dtype=np.float32))
+        return result
+
+    pipeline = _bindless_triangle_pipeline()
+    vertices = _triangle_vertices()
+    selector = ti.ndarray(ti.u32, shape=4)
+    selector.from_numpy(np.array([2, 0, 0, 0], dtype=np.uint32))
+    fixed_colors = (
+        buffer((1.0, 0.0, 0.0, 1.0)),
+        buffer((1.0, 1.0, 0.0, 1.0)),
+        buffer((1.0, 0.0, 1.0, 1.0)),
+    )
+    draw = pipeline.pass_draw(
+        ti.hardware.graphics.Draw(3),
+        vertex_buffers={0: "vertices"},
+        shader_buffers={
+            (0, 0): ("color0", "color1", "color2", "color3"),
+            (0, 1): "selector",
+        },
+    )
+    recording = pipeline.record_pass((draw,), color="target")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()
+
+    def bindings(target, selected):
+        return {
+            "target": target,
+            "vertices": vertices,
+            "color0": fixed_colors[0],
+            "color1": fixed_colors[1],
+            "color2": selected,
+            "color3": fixed_colors[2],
+            "selector": selector,
+        }
+
+    program = ti.lang.impl.get_runtime().prog
+    blue_target = ti.Texture(ti.Format.rgba8, (64, 64))
+    blue = buffer((0.0, 0.0, 1.0, 1.0))
+    blue_bindings = bindings(blue_target, blue)
+    before = dict(program._debug_vulkan_graphics_resource_stats())
+    for _ in range(3):
+        graph.run(blue_bindings)
+        ti.sync()
+    fixed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert fixed["retained_replay_prewarms"] - before["retained_replay_prewarms"] == 1
+    assert fixed["retained_replay_records"] - before["retained_replay_records"] == 1
+    assert fixed["retained_replay_replays"] - before["retained_replay_replays"] == 1
+
+    # Submit two allocation generations without an intervening host wait. Each
+    # retained command owns its immutable descriptor table through completion.
+    green_target = ti.Texture(ti.Format.rgba8, (64, 64))
+    green = buffer((0.0, 1.0, 0.0, 1.0))
+    blue_ticket = graph.submit(blue_bindings)
+    green_ticket = graph.submit(bindings(green_target, green))
+    green_ticket.wait()
+    blue_ticket.wait()
+    concurrent = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        concurrent["retained_replay_binding_misses"]
+        > fixed["retained_replay_binding_misses"]
+    )
+    assert concurrent["retained_replay_slots"] <= 2
+    assert concurrent["retained_replay_submit_failures"] == 0
+    blue_pixel = _texture_rgb(blue_target)[32, 32]
+    green_pixel = _texture_rgb(green_target)[32, 32]
+    assert blue_pixel[0] < 8 and blue_pixel[1] < 8 and blue_pixel[2] > 32
+    assert green_pixel[0] < 8 and green_pixel[1] > 32 and green_pixel[2] < 8
+
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-bindless-retained-generations", ("vulkan-graphics",)
+    )
+    generation_count = 1_000 if process_memory.enabled else 10
+    process_memory.capture("before")
+    churn_before = dict(program._debug_vulkan_graphics_resource_stats())
+    last_bindings = None
+    for generation in range(generation_count):
+        selected = buffer(
+            (0.0, 1.0, 0.0, 1.0) if generation % 2 else (0.0, 0.0, 1.0, 1.0)
+        )
+        last_bindings = bindings(blue_target, selected)
+        for _ in range(3):
+            graph.run(last_bindings)
+            ti.sync()
+        if generation == generation_count // 2 - 1:
+            gc.collect()
+            process_memory.capture("midpoint")
+    gc.collect()
+    process_memory.capture("after")
+    process_memory.finish(generation_count)
+    churn = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        churn["retained_replay_prewarms"] - churn_before["retained_replay_prewarms"]
+        == generation_count
+    )
+    assert (
+        churn["retained_replay_records"] - churn_before["retained_replay_records"]
+        == generation_count
+    )
+    assert (
+        churn["retained_replay_replays"] - churn_before["retained_replay_replays"]
+        == generation_count
+    )
+    assert 1 <= churn["retained_replay_slots"] <= 2
+    assert churn["retained_replay_submit_failures"] == 0
+
+    pipeline.close()
+    ti.sync()
+    closed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert closed["retained_replay_slots"] == 0
+    with pytest.raises(RuntimeError, match="closed"):
+        graph.run(last_bindings)
 
 
 @pytest.mark.run_in_serial
