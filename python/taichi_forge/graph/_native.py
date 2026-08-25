@@ -533,7 +533,10 @@ class VulkanBufferCommandRecording(BackendCommandRecording):
                     command.value,
                 )
             )
-        impl.get_runtime().prog._record_vulkan_buffer_commands(native_commands)
+        from taichi_forge._hardware_telemetry import hardware_failure_phase
+
+        with hardware_failure_phase("provider_execution_failure"):
+            impl.get_runtime().prog._record_vulkan_buffer_commands(native_commands)
 
     @property
     def resource_effects(self):

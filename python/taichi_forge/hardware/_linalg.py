@@ -16,6 +16,8 @@ from taichi_forge.hardware._native_adapter import (
 )
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
+    hardware_provider_call,
     instrument_hardware_recording,
     operation_executed,
 )
@@ -141,16 +143,17 @@ class CublasGemmRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 "CUDA cuBLAS GEMM output must not alias either input"
             )
-        program._cuda_cublas_gemm_f32(
-            a,
-            b,
-            output,
-            self.rows,
-            self.columns,
-            self.inner,
-            self.alpha,
-            self.beta,
-        )
+        with hardware_provider_call("cublas"):
+            program._cuda_cublas_gemm_f32(
+                a,
+                b,
+                output,
+                self.rows,
+                self.columns,
+                self.inner,
+                self.alpha,
+                self.beta,
+            )
 
     def _as_graph_native_node(self):
         return native_recording_node(
@@ -318,7 +321,8 @@ class CusparseSpmvRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 "CUDA cuSPARSE SpMV output must not alias the input"
             )
-        self.matrix.matrix.spmv(program, input_array, output_array)
+        with hardware_provider_call("cusparse"):
+            self.matrix.matrix.spmv(program, input_array, output_array)
 
     def validate_graph_lifetime(self):
         self.matrix._ensure_valid()  # pylint: disable=W0212
@@ -531,14 +535,15 @@ class CudssPlan:
         program = impl.get_runtime().prog
         if program is None:
             raise TaichiRuntimeError("CUDA cuDSS requires an active runtime")
-        resolved_library = resolve_cudss_library_path(library_path)
-        with cudss_dll_directories(resolved_library):
-            handle = program._create_cuda_cudss_plan(
-                matrix.matrix,
-                self._MATRIX_TYPES[matrix_type],
-                self._MATRIX_VIEWS[matrix_view],
-                resolved_library,
-            )
+        with hardware_provider_call("cudss", failure_phase="provider_plan_failure"):
+            resolved_library = resolve_cudss_library_path(library_path)
+            with cudss_dll_directories(resolved_library):
+                handle = program._create_cuda_cudss_plan(
+                    matrix.matrix,
+                    self._MATRIX_TYPES[matrix_type],
+                    self._MATRIX_VIEWS[matrix_view],
+                    resolved_library,
+                )
         self._program = program
         self._runtime_generation = impl.runtime_generation()
         self._matrix = matrix
@@ -795,7 +800,8 @@ class CudssSolveRecording(BackendCommandRecording):
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuDSS")
         self.plan.validate_graph_lifetime()
-        self.plan.solve(bindings[self.rhs], bindings[self.solution])
+        with hardware_failure_phase("provider_execution_failure"):
+            self.plan.solve(bindings[self.rhs], bindings[self.solution])
 
     def validate_graph_lifetime(self):
         self.plan.validate_graph_lifetime()
@@ -874,11 +880,12 @@ class CudssRefactorSolveRecording(BackendCommandRecording):
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA cuDSS refactorize+solve")
         self.plan.validate_graph_lifetime(allow_explicit_values=True)
-        self.plan.refactor_solve(
-            bindings[self.values],
-            bindings[self.rhs],
-            bindings[self.solution],
-        )
+        with hardware_failure_phase("provider_execution_failure"):
+            self.plan.refactor_solve(
+                bindings[self.values],
+                bindings[self.rhs],
+                bindings[self.solution],
+            )
 
     def validate_graph_lifetime(self):
         self.plan.validate_graph_lifetime(allow_explicit_values=True)

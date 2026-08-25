@@ -12,7 +12,10 @@ from types import MappingProxyType
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
-from taichi_forge._hardware_telemetry import instrument_hardware_recording
+from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
+    instrument_hardware_recording,
+)
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -397,17 +400,19 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             index_max,
             index is not None,
         )
-        self.pipeline._runtime_prog._vulkan_graphics_pass(
-            color.tex,
-            None if depth is None else depth.tex,
-            (raw_draw,),
-            True,
-            depth is not None,
-            self.clear_color,
-            self.viewport,
-            self._experimental_retained_replay
-            and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
-        )
+        with hardware_failure_phase("provider_execution_failure"):
+            self.pipeline._runtime_prog._vulkan_graphics_pass(
+                color.tex,
+                None if depth is None else depth.tex,
+                (raw_draw,),
+                True,
+                depth is not None,
+                self.clear_color,
+                self.viewport,
+                self._experimental_retained_replay
+                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF")
+                == "1",
+            )
         return color
 
     def validate_graph_lifetime(self):
@@ -644,17 +649,19 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 )
             )
 
-        self.pipelines[0]._runtime_prog._vulkan_graphics_pass(
-            color.tex,
-            None if depth is None else depth.tex,
-            tuple(raw_draws),
-            self.color_load_op == "clear",
-            depth is not None and self.depth_load_op == "clear",
-            self.clear_color,
-            self.viewport,
-            self._experimental_retained_replay
-            and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
-        )
+        with hardware_failure_phase("provider_execution_failure"):
+            self.pipelines[0]._runtime_prog._vulkan_graphics_pass(
+                color.tex,
+                None if depth is None else depth.tex,
+                tuple(raw_draws),
+                self.color_load_op == "clear",
+                depth is not None and self.depth_load_op == "clear",
+                self.clear_color,
+                self.viewport,
+                self._experimental_retained_replay
+                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF")
+                == "1",
+            )
         return color
 
     def validate_graph_lifetime(self):
@@ -792,28 +799,29 @@ class VulkanGraphicsPipeline:
         self.vertex_attributes = vertex_attributes
         self.shader_buffer_bindings = shader_buffer_bindings
         self._shader_buffer_by_key = MappingProxyType(shader_buffer_by_key)
-        self._handle = int(
-            program._create_vulkan_graphics_pipeline(
-                _bytes(vertex_spirv, "vertex_spirv"),
-                _bytes(fragment_spirv, "fragment_spirv"),
-                tuple(
-                    (item.binding, item.stride, item.instance)
-                    for item in vertex_bindings
-                ),
-                tuple(
-                    (item.location, item.binding, item.format, item.offset)
-                    for item in vertex_attributes
-                ),
-                topology_value,
-                polygon_value,
-                front_cull,
-                back_cull,
-                bool(depth_test),
-                bool(depth_write),
-                bool(blending),
-                name,
+        with hardware_failure_phase("provider_plan_failure"):
+            self._handle = int(
+                program._create_vulkan_graphics_pipeline(
+                    _bytes(vertex_spirv, "vertex_spirv"),
+                    _bytes(fragment_spirv, "fragment_spirv"),
+                    tuple(
+                        (item.binding, item.stride, item.instance)
+                        for item in vertex_bindings
+                    ),
+                    tuple(
+                        (item.location, item.binding, item.format, item.offset)
+                        for item in vertex_attributes
+                    ),
+                    topology_value,
+                    polygon_value,
+                    front_cull,
+                    back_cull,
+                    bool(depth_test),
+                    bool(depth_write),
+                    bool(blending),
+                    name,
+                )
             )
-        )
 
     @property
     def closed(self):

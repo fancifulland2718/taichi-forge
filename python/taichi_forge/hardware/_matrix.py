@@ -9,6 +9,7 @@ from taichi_forge.hardware._native_adapter import (
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
     instrument_hardware_recording,
     operation_executed,
 )
@@ -102,7 +103,8 @@ class CudaMatrixMmaRecording(BackendCommandRecording):
         a = self._validate_array(bindings[self.a], self.a, f16)
         b = self._validate_array(bindings[self.b], self.b, f16)
         output = self._validate_array(bindings[self.output], self.output, f32)
-        program._cuda_matrix_mma_f16_f32(a, b, output, self.batch_count)
+        with hardware_failure_phase("provider_execution_failure"):
+            program._cuda_matrix_mma_f16_f32(a, b, output, self.batch_count)
 
     def _as_graph_native_node(self):
         return native_recording_node(

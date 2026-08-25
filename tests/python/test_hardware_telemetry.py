@@ -2,7 +2,36 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+import taichi_forge._hardware_telemetry as execution_telemetry
+from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
+    hardware_provider_call,
+    instrument_hardware_recording,
+)
 from tests import test_utils
+
+
+@instrument_hardware_recording("test.hardware_failure_phases")
+class _FailurePhaseRecording:
+    command_count = 1
+
+    def __init__(self, phase):
+        self.phase = phase
+
+    def execute(self):
+        if self.phase is None:
+            raise RuntimeError("unattributed validation failure")
+        with hardware_failure_phase(self.phase):
+            raise RuntimeError(f"injected {self.phase}")
+
+
+@instrument_hardware_recording("test.hardware_provider_call")
+class _ProviderCallFailureRecording:
+    command_count = 1
+
+    def execute(self):
+        with hardware_provider_call("test-provider"):
+            raise RuntimeError("injected provider failure")
 
 
 @test_utils.test(arch=ti.cpu)
@@ -32,7 +61,14 @@ def test_hardware_telemetry_is_passive_and_classifies_explicit_failure():
     assert operation.attempted == before.operations["matrix.mma.cuda"].attempted + 1
     assert operation.executed == before.operations["matrix.mma.cuda"].executed
     assert operation.unsupported == before.operations["matrix.mma.cuda"].unsupported + 1
-    assert operation.incompatible == before.operations["matrix.mma.cuda"].incompatible
+    assert (
+        operation.contract_failure
+        == before.operations["matrix.mma.cuda"].contract_failure
+    )
+    assert operation.provider_load_failure == 0
+    assert operation.provider_plan_failure == 0
+    assert operation.provider_execution_failure == 0
+    assert operation.completion_failure == 0
     assert operation.fallback == 0
     assert operation.declared_backend_commands >= 1
     assert not recording.memory_report().components[0].resident
@@ -42,6 +78,52 @@ def test_hardware_telemetry_is_passive_and_classifies_explicit_failure():
         for name in ("cublas", "cusparse", "cufft", "cudss")
     }
     assert provider_loaded_after == provider_loaded_before
+
+
+@test_utils.test(arch=ti.cpu)
+def test_hardware_telemetry_uses_explicit_failure_phases():
+    before = ti.hardware.telemetry().operations["test.hardware_failure_phases"]
+    phases = (
+        "provider_load_failure",
+        "provider_plan_failure",
+        "provider_execution_failure",
+        "completion_failure",
+    )
+    for phase in phases:
+        with pytest.raises(RuntimeError, match=phase):
+            _FailurePhaseRecording(phase).execute()
+    with pytest.raises(RuntimeError, match="validation failure"):
+        _FailurePhaseRecording(None).execute()
+
+    after = ti.hardware.telemetry().operations["test.hardware_failure_phases"]
+    assert after.recordings == before.recordings + len(phases) + 1
+    assert after.attempted == before.attempted + len(phases) + 1
+    assert after.executed == before.executed
+    assert after.contract_failure == before.contract_failure + 1
+    for phase in phases:
+        assert getattr(after, phase) == getattr(before, phase) + 1
+
+
+@test_utils.test(arch=ti.cpu)
+def test_hardware_telemetry_classifies_lazy_provider_load_without_error_text(
+    monkeypatch,
+):
+    states = iter((False, False, True, True))
+    monkeypatch.setattr(
+        execution_telemetry,
+        "_provider_library_loaded",
+        lambda provider_id: next(states),
+    )
+    before = ti.hardware.telemetry().operations["test.hardware_provider_call"]
+
+    with pytest.raises(RuntimeError, match="provider failure"):
+        _ProviderCallFailureRecording().execute()
+    with pytest.raises(RuntimeError, match="provider failure"):
+        _ProviderCallFailureRecording().execute()
+
+    after = ti.hardware.telemetry().operations["test.hardware_provider_call"]
+    assert after.provider_load_failure == before.provider_load_failure + 1
+    assert after.provider_execution_failure == before.provider_execution_failure + 1
 
 
 @test_utils.test(arch=ti.cpu)

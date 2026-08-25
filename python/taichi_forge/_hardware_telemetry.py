@@ -1,5 +1,6 @@
 """Low-overhead execution counters shared by hardware recordings and Graph."""
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import wraps
 from threading import Lock
@@ -12,20 +13,23 @@ _COUNTER_NAMES = (
     "attempted",
     "executed",
     "unsupported",
-    "incompatible",
+    "contract_failure",
     "provider_load_failure",
+    "provider_plan_failure",
+    "provider_execution_failure",
+    "completion_failure",
     "fallback",
     "declared_backend_commands",
     "executed_backend_commands",
     "resource_first_uses",
     "resource_reuses",
 )
-_PROVIDER_FAILURE_MARKERS = (
-    "could not load",
-    "shared library",
-    "failed to create a handle",
-    "failed to create a 1d",
-    "provider load",
+_FAILURE_PHASES = (
+    "contract_failure",
+    "provider_load_failure",
+    "provider_plan_failure",
+    "provider_execution_failure",
+    "completion_failure",
 )
 _UNSUPPORTED_MARKERS = (
     " requires ",
@@ -57,8 +61,11 @@ class HardwareOperationExecutionSnapshot:
     attempted: int
     executed: int
     unsupported: int
-    incompatible: int
+    contract_failure: int
     provider_load_failure: int
+    provider_plan_failure: int
+    provider_execution_failure: int
+    completion_failure: int
     fallback: int
     declared_backend_commands: int
     executed_backend_commands: int
@@ -98,12 +105,65 @@ def _record(operation_id, **increments):
 
 
 def _classify_failure(error):
+    phase = getattr(error, "_taichi_forge_hardware_failure_phase", None)
+    if phase in _FAILURE_PHASES:
+        return phase
     message = f" {str(error).lower()} "
-    if any(marker in message for marker in _PROVIDER_FAILURE_MARKERS):
-        return "provider_load_failure"
     if any(marker in message for marker in _UNSUPPORTED_MARKERS):
         return "unsupported"
-    return "incompatible"
+    return "contract_failure"
+
+
+@contextmanager
+def hardware_failure_phase(phase):
+    """Attribute an exception to the explicit hardware stage that raised it."""
+
+    if phase not in _FAILURE_PHASES:
+        raise ValueError(f"unknown hardware failure phase {phase!r}")
+    try:
+        yield
+    except Exception as error:
+        try:
+            setattr(error, "_taichi_forge_hardware_failure_phase", phase)
+        except (AttributeError, TypeError):
+            pass
+        raise
+
+
+def _provider_library_loaded(provider_id):
+    try:
+        from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
+
+        return bool(
+            _ti_core.cuda_external_library_status(provider_id)["library_loaded"]
+        )
+    except (AttributeError, KeyError, RuntimeError, TypeError):
+        return None
+
+
+@contextmanager
+def hardware_provider_call(provider_id, *, failure_phase="provider_execution_failure"):
+    """Attribute a lazy provider call without parsing the provider error text."""
+
+    if not isinstance(provider_id, str) or not provider_id:
+        raise ValueError("hardware provider_id must be nonempty")
+    if failure_phase not in _FAILURE_PHASES:
+        raise ValueError(f"unknown hardware failure phase {failure_phase!r}")
+    loaded_before = _provider_library_loaded(provider_id)
+    try:
+        yield
+    except Exception as error:
+        loaded_after = _provider_library_loaded(provider_id)
+        phase = (
+            "provider_load_failure"
+            if loaded_before is False and loaded_after is False
+            else failure_phase
+        )
+        try:
+            setattr(error, "_taichi_forge_hardware_failure_phase", phase)
+        except (AttributeError, TypeError):
+            pass
+        raise
 
 
 def _resource_keys(recording, operation_id, runtime_resource):
@@ -225,6 +285,8 @@ def execution_snapshot():
 __all__ = [
     "HardwareOperationExecutionSnapshot",
     "execution_snapshot",
+    "hardware_failure_phase",
+    "hardware_provider_call",
     "instrument_hardware_recording",
     "operation_executed",
     "record_graph_recording",

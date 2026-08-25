@@ -6,7 +6,10 @@ import math
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
-from taichi_forge._hardware_telemetry import instrument_hardware_recording
+from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
+    instrument_hardware_recording,
+)
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -100,7 +103,8 @@ class VulkanRayQueryRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 f"Vulkan ray binding {self.hits!r} has the wrong ray count"
             )
-        self.scene._execute_query(rays, hits, self.ray_count)
+        with hardware_failure_phase("provider_execution_failure"):
+            self.scene._execute_query(rays, hits, self.ray_count)
 
     def validate_graph_lifetime(self):
         self.scene._validate_lifetime()
@@ -160,7 +164,8 @@ class VulkanRayRefitRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 f"Vulkan ray binding {self.vertices!r} has the wrong vertex count"
             )
-        self.scene._execute_refit(vertices)
+        with hardware_failure_phase("provider_execution_failure"):
+            self.scene._execute_refit(vertices)
 
     def validate_graph_lifetime(self):
         self.scene._validate_lifetime()
@@ -418,7 +423,8 @@ class VulkanBLASBuildRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 f"Vulkan ray binding {self.indices!r} has the wrong triangle count"
             )
-        self.blas._execute_build(vertices, indices, update=False)
+        with hardware_failure_phase("provider_execution_failure"):
+            self.blas._execute_build(vertices, indices, update=False)
 
     def validate_graph_lifetime(self):
         self.blas._validate_lifetime()
@@ -483,7 +489,8 @@ class VulkanBLASRefitRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 f"Vulkan ray binding {self.vertices!r} has the wrong vertex count"
             )
-        self.blas._execute_build(vertices, None, update=True)
+        with hardware_failure_phase("provider_execution_failure"):
+            self.blas._execute_build(vertices, None, update=True)
 
     def validate_graph_lifetime(self):
         self.blas._validate_lifetime()
@@ -725,7 +732,8 @@ class _VulkanTLASRecording(BackendCommandRecording):
     def execute(self, bindings):
         validate_exact_bindings(self, bindings, "Vulkan TLAS build")
         self.validate_graph_lifetime()
-        self.tlas._execute_build(self.instances, update=self.update)
+        with hardware_failure_phase("provider_execution_failure"):
+            self.tlas._execute_build(self.instances, update=self.update)
 
     def validate_graph_lifetime(self):
         self.tlas._validate_lifetime()

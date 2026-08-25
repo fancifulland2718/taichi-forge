@@ -8,7 +8,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 
 
-HARDWARE_TELEMETRY_SCHEMA_VERSION = 1
+HARDWARE_TELEMETRY_SCHEMA_VERSION = 2
 
 
 def _frozen_mapping(values):

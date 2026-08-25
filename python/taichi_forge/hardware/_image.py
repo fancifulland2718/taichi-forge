@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass
 
-from taichi_forge._hardware_telemetry import instrument_hardware_recording
+from taichi_forge._hardware_telemetry import (
+    hardware_failure_phase,
+    instrument_hardware_recording,
+)
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._native_adapter import (
@@ -189,7 +192,8 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
                 raise TaichiRuntimeError(
                     f"Vulkan image binding {name!r} must be a Taichi {kind}"
                 )
-        return self._execute(bindings)
+        with hardware_failure_phase("provider_execution_failure"):
+            return self._execute(bindings)
 
     def validate_graph_lifetime(self):
         validate_runtime_generation(

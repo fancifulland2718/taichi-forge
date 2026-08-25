@@ -5,7 +5,10 @@ from dataclasses import dataclass
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording, _CudaGraphCaptureRecipe
-from taichi_forge._hardware_telemetry import instrument_hardware_recording
+from taichi_forge._hardware_telemetry import (
+    hardware_provider_call,
+    instrument_hardware_recording,
+)
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -236,7 +239,8 @@ class CufftRecording(BackendCommandRecording):
             raise TaichiRuntimeError(
                 "The first CUDA cuFFT slice requires distinct input and output arrays"
             )
-        self.plan._execute(source, destination, self.direction_value)
+        with hardware_provider_call("cufft"):
+            self.plan._execute(source, destination, self.direction_value)
 
     def validate_graph_lifetime(self):
         self.plan._validate_lifetime()
@@ -310,22 +314,23 @@ class _CufftPlanBase:
             )
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
-        if self.rank == 1 and input_compact and output_compact:
-            handle = program._create_cuda_cufft_plan_1d(
-                self.dimensions[0], self.batch_count, self.transform_value
-            )
-        else:
-            handle = program._create_cuda_cufft_plan_many(
-                self.dimensions,
-                self.input_layout.embed,
-                self.input_layout.stride,
-                self.input_layout.batch_distance,
-                self.output_layout.embed,
-                self.output_layout.stride,
-                self.output_layout.batch_distance,
-                self.batch_count,
-                self.transform_value,
-            )
+        with hardware_provider_call("cufft", failure_phase="provider_plan_failure"):
+            if self.rank == 1 and input_compact and output_compact:
+                handle = program._create_cuda_cufft_plan_1d(
+                    self.dimensions[0], self.batch_count, self.transform_value
+                )
+            else:
+                handle = program._create_cuda_cufft_plan_many(
+                    self.dimensions,
+                    self.input_layout.embed,
+                    self.input_layout.stride,
+                    self.input_layout.batch_distance,
+                    self.output_layout.embed,
+                    self.output_layout.stride,
+                    self.output_layout.batch_distance,
+                    self.batch_count,
+                    self.transform_value,
+                )
         self._handle = int(handle)
         self._workspace_bytes = int(
             program._cuda_cufft_plan_memory_statistics(self._handle)["workspace_bytes"]
