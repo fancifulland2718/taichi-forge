@@ -1059,6 +1059,9 @@ class TI_DLL_EXPORT Program {
 
   bool vulkan_ray_query_available() const;
 
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_ray_query_properties() const;
+
   bool vulkan_graphics_pipeline_available() const;
 
   std::size_t debug_vulkan_graphics_pipeline_count();
@@ -1146,6 +1149,9 @@ class TI_DLL_EXPORT Program {
 
   VulkanTriangleRaySceneMemoryStatistics
   vulkan_ray_resource_memory_statistics(std::uint64_t handle);
+
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_ray_kernel_resource_properties(std::uint64_t handle);
 
   void destroy_vulkan_ray_resource(std::uint64_t handle);
 

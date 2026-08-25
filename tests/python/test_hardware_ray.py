@@ -17,6 +17,9 @@ def test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime():
     indices = ti.ndarray(ti.i32, shape=(1, 3))
 
     assert not ti.hardware.ray.is_available()
+    properties = dict(impl.get_runtime().prog._vulkan_ray_query_properties())
+    assert properties["available"] == 0
+    assert properties["ray_query"] == 0
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
         ti.hardware.ray.TriangleScene(vertices, indices)
 
@@ -37,6 +40,48 @@ def test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime():
     build = ti.hardware.capability("ray.as_build.vulkan")
     assert build.scopes == ("python", "graph")
     assert "TriangleBLAS" in build.public_api
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_inline_ray_resource_contract_is_generation_qualified():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    program = impl.get_runtime().prog
+    properties = dict(program._vulkan_ray_query_properties())
+    assert properties["available"] == 1
+    assert properties["buffer_device_address"] == 1
+    assert properties["acceleration_structure"] == 1
+    assert properties["ray_query"] == 1
+    assert properties["max_geometry_count"] >= 1
+    assert properties["max_instance_count"] >= 1
+    assert properties["max_primitive_count"] >= 1
+    assert properties["max_per_stage_descriptor_acceleration_structures"] >= 1
+    assert properties["max_descriptor_set_acceleration_structures"] >= 1
+    assert properties["min_acceleration_structure_scratch_offset_alignment"] >= 1
+
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+    tlas = ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)])
+    descriptor = tlas._kernel_resource_descriptor()
+    assert descriptor.handle == tlas._handle
+    assert descriptor.instance_count == 1
+    assert descriptor.runtime_generation == int(impl.runtime_generation())
+    assert tuple(
+        (effect.resource, effect.access, effect.runtime_bound)
+        for effect in descriptor.resource_effects
+    ) == ((tlas._effect_name, GraphAccess.READ, False),)
+    descriptor.validate_lifetime()
+
+    tlas.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        descriptor.validate_lifetime()
+    blas.close()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

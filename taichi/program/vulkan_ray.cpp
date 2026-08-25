@@ -1226,6 +1226,62 @@ bool Program::vulkan_ray_query_available() const {
          device->vk_caps().ray_query;
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_ray_query_properties() const {
+  std::unordered_map<std::string, std::uint64_t> result{
+      {"available", 0},
+      {"buffer_device_address", 0},
+      {"acceleration_structure", 0},
+      {"ray_query", 0},
+      {"max_geometry_count", 0},
+      {"max_instance_count", 0},
+      {"max_primitive_count", 0},
+      {"max_per_stage_descriptor_acceleration_structures", 0},
+      {"max_per_stage_descriptor_update_after_bind_acceleration_structures", 0},
+      {"max_descriptor_set_acceleration_structures", 0},
+      {"max_descriptor_set_update_after_bind_acceleration_structures", 0},
+      {"min_acceleration_structure_scratch_offset_alignment", 0},
+  };
+  if (compile_config().arch != Arch::vulkan || !program_impl_) {
+    return result;
+  }
+  auto *device = static_cast<vulkan::VulkanDevice *>(
+      const_cast<Program *>(this)->get_compute_device());
+  if (device == nullptr) {
+    return result;
+  }
+  const auto &caps = device->vk_caps();
+  result["buffer_device_address"] = caps.buffer_device_address;
+  result["acceleration_structure"] = caps.acceleration_structure;
+  result["ray_query"] = caps.ray_query;
+  result["available"] = vulkan_ray_query_available();
+  if (!caps.acceleration_structure) {
+    return result;
+  }
+
+  VkPhysicalDeviceAccelerationStructurePropertiesKHR properties{};
+  properties.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+  VkPhysicalDeviceProperties2 properties2{};
+  properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+  properties2.pNext = &properties;
+  vkGetPhysicalDeviceProperties2(device->vk_physical_device(), &properties2);
+  result["max_geometry_count"] = properties.maxGeometryCount;
+  result["max_instance_count"] = properties.maxInstanceCount;
+  result["max_primitive_count"] = properties.maxPrimitiveCount;
+  result["max_per_stage_descriptor_acceleration_structures"] =
+      properties.maxPerStageDescriptorAccelerationStructures;
+  result["max_per_stage_descriptor_update_after_bind_acceleration_structures"] =
+      properties.maxPerStageDescriptorUpdateAfterBindAccelerationStructures;
+  result["max_descriptor_set_acceleration_structures"] =
+      properties.maxDescriptorSetAccelerationStructures;
+  result["max_descriptor_set_update_after_bind_acceleration_structures"] =
+      properties.maxDescriptorSetUpdateAfterBindAccelerationStructures;
+  result["min_acceleration_structure_scratch_offset_alignment"] =
+      properties.minAccelerationStructureScratchOffsetAlignment;
+  return result;
+}
+
 std::uint64_t Program::create_vulkan_triangle_ray_scene(
     Ndarray *vertices,
     Ndarray *indices,
@@ -1615,6 +1671,23 @@ Program::vulkan_ray_resource_memory_statistics(std::uint64_t handle) {
   return found->second->memory_statistics();
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_ray_kernel_resource_properties(std::uint64_t handle) {
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  const auto found = vulkan_ray_resources_.find(handle);
+  TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+              "Vulkan ray kernel resource handle is stale or closed.");
+  auto resource =
+      std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  TI_ERROR_IF(!resource,
+              "Vulkan ray kernel resources must be top-level instance AS.");
+  return {{"handle", handle},
+          {"top_level", 1},
+          {"read_only", 1},
+          {"exact_generation", 1},
+          {"instance_count", resource->instance_count()}};
+}
+
 VulkanTriangleRaySceneMemoryStatistics
 Program::vulkan_triangle_ray_scene_memory_statistics(
     std::uint64_t handle) {
@@ -1730,6 +1803,22 @@ bool Program::vulkan_ray_query_available() const {
   return false;
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_ray_query_properties() const {
+  return {{"available", 0},
+          {"buffer_device_address", 0},
+          {"acceleration_structure", 0},
+          {"ray_query", 0},
+          {"max_geometry_count", 0},
+          {"max_instance_count", 0},
+          {"max_primitive_count", 0},
+          {"max_per_stage_descriptor_acceleration_structures", 0},
+          {"max_per_stage_descriptor_update_after_bind_acceleration_structures", 0},
+          {"max_descriptor_set_acceleration_structures", 0},
+          {"max_descriptor_set_update_after_bind_acceleration_structures", 0},
+          {"min_acceleration_structure_scratch_offset_alignment", 0}};
+}
+
 std::uint64_t Program::create_vulkan_triangle_ray_scene(
     Ndarray *,
     Ndarray *,
@@ -1791,6 +1880,11 @@ std::size_t Program::vulkan_instance_tlas_query(std::uint64_t,
 
 VulkanTriangleRaySceneMemoryStatistics
 Program::vulkan_ray_resource_memory_statistics(std::uint64_t) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_ray_kernel_resource_properties(std::uint64_t) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
 }
 

@@ -766,6 +766,36 @@ class VulkanTLASRefitRecording(_VulkanTLASRecording):
         super().__init__(tlas, instances, update=True)
 
 
+@dataclass(frozen=True)
+class _KernelAccelerationStructureDescriptor:
+    """Generation-qualified internal contract for a kernel-visible TLAS.
+
+    This descriptor deliberately carries no query operations.  It is the
+    resource/lifetime half of inline ray query and remains private until the
+    typed IR and SPIR-V lowering are complete.
+    """
+
+    owner: object
+    runtime_generation: int
+    handle: int
+    instance_count: int
+    effect_name: str
+
+    @property
+    def resource_effects(self):
+        return (static_resource_effect(self.effect_name, GraphAccess.READ),)
+
+    def validate_lifetime(self):
+        self.owner._validate_lifetime()
+        if (
+            int(self.owner._runtime_generation) != self.runtime_generation
+            or int(self.owner._handle) != self.handle
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan kernel acceleration-structure descriptor is stale"
+            )
+
+
 class InstanceTLAS:
     """Independent Vulkan TLAS with fixed BLAS topology and mutable metadata."""
 
@@ -866,6 +896,30 @@ class InstanceTLAS:
         recording = self.record(ray_count)
         recording.execute({"rays": rays, "hits": hits})
         return hits
+
+    def _kernel_resource_descriptor(self):
+        self._validate_lifetime()
+        properties = dict(
+            self._runtime_prog._vulkan_ray_kernel_resource_properties(
+                self._handle
+            )
+        )
+        if not (
+            properties.get("top_level") == 1
+            and properties.get("read_only") == 1
+            and properties.get("exact_generation") == 1
+            and properties.get("instance_count") == self.instance_count
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan kernel acceleration-structure contract is inconsistent"
+            )
+        return _KernelAccelerationStructureDescriptor(
+            owner=self,
+            runtime_generation=self._runtime_generation,
+            handle=self._handle,
+            instance_count=self.instance_count,
+            effect_name=self._effect_name,
+        )
 
     def _execute_build(self, instances, *, update):
         self._validate_lifetime()

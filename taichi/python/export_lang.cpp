@@ -2325,6 +2325,8 @@ void export_lang(py::module &m) {
            py::arg("batch_count"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_ray_query_available",
            &Program::vulkan_ray_query_available)
+      .def("_vulkan_ray_query_properties",
+           &Program::vulkan_ray_query_properties)
       .def("_create_vulkan_triangle_ray_scene",
            tracked_native_program_method(
                &Program::create_vulkan_triangle_ray_scene),
@@ -2402,6 +2404,9 @@ void export_lang(py::module &m) {
              result["opaque_driver_bytes"] = py::none();
              return result;
            },
+           py::arg("handle"))
+      .def("_vulkan_ray_kernel_resource_properties",
+           &Program::vulkan_ray_kernel_resource_properties,
            py::arg("handle"))
       .def("_destroy_vulkan_ray_resource",
            tracked_native_program_method(&Program::destroy_vulkan_ray_resource),
