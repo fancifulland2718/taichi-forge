@@ -20,6 +20,7 @@ import hardware_acceleration_qualification as qualification
 FAMILIES = (
     "cuda-fft-poisson-batch",
     "cuda-spmv-krylov-grid",
+    "cuda-spmv-krylov-stencil-radius",
     "cuda-cudss-tet-fem-grid",
 )
 
@@ -74,6 +75,31 @@ def _family_points(args):
             }
             for grid in args.krylov_grids
         ),
+        "cuda-spmv-krylov-stencil-radius": tuple(
+            {
+                "label": f"grid-{args.krylov_radius_grid}-radius-{radius}",
+                "work_units": args.krylov_radius_grid
+                * args.krylov_radius_grid
+                * (2 * radius + 1) ** 2,
+                "worker_arguments": (
+                    "--krylov-grid",
+                    str(args.krylov_radius_grid),
+                    "--krylov-iterations",
+                    str(args.krylov_iterations),
+                    "--krylov-stencil-radius",
+                    str(radius),
+                    "--krylov-baseline",
+                    "taichi",
+                ),
+                "parameters": {
+                    "grid": args.krylov_radius_grid,
+                    "iterations": args.krylov_iterations,
+                    "stencil_radius": radius,
+                    "maximum_stencil_entries": (2 * radius + 1) ** 2,
+                },
+            }
+            for radius in args.krylov_stencil_radii
+        ),
         "cuda-cudss-tet-fem-grid": tuple(
             {
                 "label": f"grid-{grid}",
@@ -90,41 +116,63 @@ def _base_case(family):
     return {
         "cuda-fft-poisson-batch": "cuda-fft-poisson",
         "cuda-spmv-krylov-grid": "cuda-spmv-krylov",
+        "cuda-spmv-krylov-stencil-radius": "cuda-spmv-krylov",
         "cuda-cudss-tet-fem-grid": "cuda-cudss-tet-fem",
     }[family]
 
 
-def _point_is_positive(report):
-    return bool(
-        report.get("status") == "passed"
-        and report.get("correctness_and_route_qualified")
-        and report.get("performance_evidence", {}).get("qualified")
-        and report.get("performance_state") == "stable_positive"
-        and report.get("paired_speedup", {}).get("p05", 0.0) > 1.0
-    )
+def _point_qualifies(report, tier):
+    if report.get("status") != "passed" or not report.get("correctness_and_route_qualified"):
+        return False
+    if tier == "retain":
+        return bool(report.get("retention_eligible"))
+    if tier == "auto_select":
+        return bool(report.get("auto_admission", {}).get("eligible"))
+    if tier == "public_claim":
+        return bool(report.get("performance_claim_eligible"))
+    raise ValueError(f"unknown crossover qualification tier {tier!r}")
+
+
+def _tier_crossover_summary(point_reports, tier):
+    qualified_indices = [
+        index for index, report in enumerate(point_reports) if _point_qualifies(report, tier)
+    ]
+    first_qualified = point_reports[qualified_indices[0]]["point"] if qualified_indices else None
+    reversals = []
+    if qualified_indices:
+        for report in point_reports[qualified_indices[0] + 1 :]:
+            if not _point_qualifies(report, tier):
+                reversals.append(report["point"]["label"])
+    return {
+        "first_qualified_point": first_qualified,
+        "qualified_points": tuple(
+            report["point"]["label"]
+            for report in point_reports
+            if _point_qualifies(report, tier)
+        ),
+        "reversals_after_first_qualified": tuple(reversals),
+        "monotonic_after_first_qualified": bool(first_qualified is not None and not reversals),
+    }
 
 
 def _crossover_summary(point_reports):
     measured = [report for report in point_reports if report.get("status") != "skipped"]
-    positive_indices = [index for index, report in enumerate(point_reports) if _point_is_positive(report)]
-    first_positive = point_reports[positive_indices[0]]["point"] if positive_indices else None
-    reversals = []
-    if positive_indices:
-        for report in point_reports[positive_indices[0] + 1 :]:
-            if not _point_is_positive(report):
-                reversals.append(report["point"]["label"])
+    tiers = {
+        tier: _tier_crossover_summary(point_reports, tier)
+        for tier in ("retain", "auto_select", "public_claim")
+    }
+    first_retained = tiers["retain"]["first_qualified_point"]
     return {
         "status": (
             "not_measured"
             if not measured
-            else ("crossover_observed" if first_positive is not None else "no_qualified_positive_point")
+            else (
+                "retention_crossover_observed"
+                if first_retained is not None
+                else "no_retention_qualified_point"
+            )
         ),
-        "first_qualified_positive_point": first_positive,
-        "qualified_positive_points": tuple(
-            report["point"]["label"] for report in point_reports if _point_is_positive(report)
-        ),
-        "reversals_after_first_positive": tuple(reversals),
-        "monotonic_after_first_positive": bool(first_positive is not None and not reversals),
+        "tiers": tiers,
         "correctness_and_route_complete": bool(
             measured and all(report.get("correctness_and_route_qualified", False) for report in measured)
         ),
@@ -284,6 +332,8 @@ def _parse_args():
     parser.add_argument("--krylov-grids", default="64,128,256")
     parser.add_argument("--krylov-iterations", type=int, default=48)
     parser.add_argument("--krylov-stencil-radius", type=int, default=1)
+    parser.add_argument("--krylov-radius-grid", type=int, default=128)
+    parser.add_argument("--krylov-stencil-radii", default="1,2,3")
     parser.add_argument("--fem-grids", default="4,6,8")
     parser.add_argument("--cudss-library")
     parser.add_argument("--workers-per-order", type=int, default=4)
@@ -299,6 +349,7 @@ def _parse_args():
     try:
         args.poisson_batches = _positive_ints(args.poisson_batches)
         args.krylov_grids = _positive_ints(args.krylov_grids, minimum=2)
+        args.krylov_stencil_radii = _positive_ints(args.krylov_stencil_radii)
         args.fem_grids = _positive_ints(args.fem_grids, minimum=3)
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
@@ -307,6 +358,7 @@ def _parse_args():
         or args.poisson_length & (args.poisson_length - 1)
         or args.krylov_iterations <= 0
         or args.krylov_stencil_radius <= 0
+        or args.krylov_radius_grid < 2
         or args.workers_per_order <= 0
         or args.warmup < 0
         or args.rounds < 5

@@ -73,37 +73,46 @@ def test_physics_crossover_points_are_ordered_and_dimensioned():
         krylov_grids=(64, 128, 256),
         krylov_iterations=48,
         krylov_stencil_radius=1,
+        krylov_radius_grid=128,
+        krylov_stencil_radii=(1, 2, 3),
         fem_grids=(4, 6, 8),
     )
     points = physics_crossover._family_points(args)
     assert [point["work_units"] for point in points["cuda-fft-poisson-batch"]] == [4096, 16384, 65536]
     assert [point["work_units"] for point in points["cuda-spmv-krylov-grid"]] == [4096, 16384, 65536]
+    assert [
+        point["work_units"] for point in points["cuda-spmv-krylov-stencil-radius"]
+    ] == [147456, 409600, 802816]
     assert [point["work_units"] for point in points["cuda-cudss-tet-fem-grid"]] == [192, 648, 1536]
 
 
 def test_physics_crossover_summary_fails_closed_and_reports_reversal():
-    def point(label, work_units, state, *, evidence=True):
+    def point(label, work_units, *, retain=False, auto=False, public=False, evidence=True):
         return {
             "status": "passed",
             "correctness_and_route_qualified": True,
             "performance_evidence": {"qualified": evidence},
-            "performance_state": state,
-            "paired_speedup": {"p05": 1.05 if state == "stable_positive" else 0.95},
+            "retention_eligible": retain,
+            "auto_admission": {"eligible": auto},
+            "performance_claim_eligible": public,
             "point": {"label": label, "work_units": work_units, "parameters": {}},
         }
 
     summary = physics_crossover._crossover_summary(
         (
-            point("small", 1, "stable_negative"),
-            point("medium", 2, "stable_positive"),
-            point("large", 3, "stable_positive", evidence=False),
+            point("small", 1),
+            point("medium", 2, retain=True),
+            point("large", 3, retain=True, auto=True, public=True),
+            point("xlarge", 4, evidence=False),
         )
     )
-    assert summary["status"] == "crossover_observed"
-    assert summary["first_qualified_positive_point"]["label"] == "medium"
-    assert summary["qualified_positive_points"] == ("medium",)
-    assert summary["reversals_after_first_positive"] == ("large",)
-    assert not summary["monotonic_after_first_positive"]
+    assert summary["status"] == "retention_crossover_observed"
+    assert summary["tiers"]["retain"]["first_qualified_point"]["label"] == "medium"
+    assert summary["tiers"]["retain"]["qualified_points"] == ("medium", "large")
+    assert summary["tiers"]["retain"]["reversals_after_first_qualified"] == ("xlarge",)
+    assert not summary["tiers"]["retain"]["monotonic_after_first_qualified"]
+    assert summary["tiers"]["auto_select"]["qualified_points"] == ("large",)
+    assert summary["tiers"]["public_claim"]["qualified_points"] == ("large",)
     assert not summary["all_points_performance_qualified"]
 
 
