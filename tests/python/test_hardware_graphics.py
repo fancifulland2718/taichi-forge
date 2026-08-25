@@ -321,6 +321,12 @@ def test_vulkan_graphics_contract_rejects_non_vulkan_runtime():
         ti.hardware.graphics.Draw(3, vertex_offset=1 << 31)
     with pytest.raises(TypeError, match="ti.Format"):
         ti.hardware.graphics.VertexAttribute(0, 0, "rg32f")
+    with pytest.raises(ValueError, match="four-byte aligned"):
+        ti.hardware.graphics.IndirectDraw(1, 3, command_offset=2)
+    with pytest.raises(ValueError, match="four-byte aligned"):
+        ti.hardware.graphics.IndirectDraw(1, 3, count_offset=2)
+    with pytest.raises(ValueError, match="positive uint32"):
+        ti.hardware.graphics.IndirectDraw(0, 3)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
@@ -683,6 +689,160 @@ def test_vulkan_graphics_pass_batches_multiple_draws_and_graph_nodes():
         graph_image = _texture_rgb(graph_color)
         assert graph_image[32, 52, 0] > 32
         assert graph_image[32, 20, 1] > 32
+        assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_indirect_draw_abis_and_gpu_count_graph():
+    if not ti.hardware.graphics.is_indirect_available():
+        pytest.skip("Vulkan indirect graphics commands are unavailable")
+
+    capabilities = dict(ti.hardware.graphics.indirect_capabilities())
+    assert capabilities["fixed_count"]
+    assert capabilities["max_draw_count"] >= 1
+
+    with _triangle_pipeline() as pipeline:
+        vertices = _triangle_vertices()
+        command = ti.ndarray(ti.u32, shape=4)
+        command.from_numpy(np.array([3, 1, 0, 0], dtype=np.uint32))
+        draw = pipeline.pass_draw(
+            ti.hardware.graphics.IndirectDraw(1, vertex_record_limit=3),
+            vertex_buffers={0: "vertices"},
+            indirect_buffer="commands",
+        )
+        recording = pipeline.record_pass((draw,), color="target")
+        assert tuple(
+            (effect.resource, effect.access) for effect in recording.resource_effects
+        ) == (
+            ("target", GraphAccess.WRITE),
+            ("vertices", GraphAccess.READ),
+            ("commands", GraphAccess.READ),
+        )
+        with pytest.raises(ValueError, match="smaller than the Vulkan"):
+            pipeline.pass_draw(
+                ti.hardware.graphics.IndirectDraw(
+                    1,
+                    vertex_record_limit=3,
+                    command_stride=12,
+                ),
+                vertex_buffers={0: "vertices"},
+                indirect_buffer="commands",
+            )
+        with pytest.raises(ValueError, match="indirect-count binding"):
+            pipeline.pass_draw(
+                ti.hardware.graphics.IndirectDraw(
+                    1,
+                    vertex_record_limit=3,
+                    count_offset=0,
+                ),
+                vertex_buffers={0: "vertices"},
+                indirect_buffer="commands",
+            )
+        color = ti.Texture(ti.Format.rgba8, (64, 64))
+        with pytest.raises(RuntimeError, match="must use u32"):
+            recording.execute(
+                {
+                    "target": color,
+                    "vertices": vertices,
+                    "commands": ti.ndarray(ti.f32, shape=4),
+                }
+            )
+        with pytest.raises(RuntimeError, match="too small"):
+            recording.execute(
+                {
+                    "target": color,
+                    "vertices": vertices,
+                    "commands": ti.ndarray(ti.u32, shape=3),
+                }
+            )
+        with pytest.raises(RuntimeError, match="vertex binding 0 is too small"):
+            recording.execute(
+                {
+                    "target": color,
+                    "vertices": ti.ndarray(ti.f32, shape=10),
+                    "commands": command,
+                }
+            )
+        recording.execute({"target": color, "vertices": vertices, "commands": command})
+        ti.sync()
+        center = _texture_rgb(color)[32, 32]
+        assert center.max() > 32
+
+        indices = ti.ndarray(ti.u32, shape=3)
+        indices.from_numpy(np.array([0, 1, 2], dtype=np.uint32))
+        indexed_command = ti.ndarray(ti.u32, shape=5)
+        indexed_command.from_numpy(np.array([3, 1, 0, 0, 0], dtype=np.uint32))
+        indexed_draw = pipeline.pass_draw(
+            ti.hardware.graphics.IndirectDraw(
+                1,
+                vertex_record_limit=3,
+                index_element_limit=3,
+            ),
+            vertex_buffers={0: "vertices"},
+            index_buffer="indices",
+            indirect_buffer="commands",
+        )
+        indexed_recording = pipeline.record_pass((indexed_draw,), color="target")
+        indexed_color = ti.Texture(ti.Format.rgba8, (64, 64))
+        indexed_recording.execute(
+            {
+                "target": indexed_color,
+                "vertices": vertices,
+                "indices": indices,
+                "commands": indexed_command,
+            }
+        )
+        ti.sync()
+        assert _texture_rgb(indexed_color)[32, 32].max() > 32
+
+    if not ti.hardware.graphics.is_indirect_available(count_buffer=True):
+        return
+
+    @ti.kernel
+    def publish_visible_draw(
+        commands: ti.types.ndarray(dtype=ti.u32, ndim=1),
+        count: ti.types.ndarray(dtype=ti.u32, ndim=1),
+    ):
+        commands[0] = 3
+        commands[1] = 1
+        commands[2] = 3
+        commands[3] = 0
+        count[0] = 1
+
+    with _triangle_pipeline() as pipeline:
+        vertices = _two_triangle_vertices()
+        command = ti.ndarray(ti.u32, shape=4)
+        count = ti.ndarray(ti.u32, shape=1)
+        target = ti.Texture(ti.Format.rgba8, (64, 64))
+        draw = pipeline.pass_draw(
+            ti.hardware.graphics.IndirectDraw(
+                1,
+                vertex_record_limit=6,
+                count_offset=0,
+            ),
+            vertex_buffers={0: "vertices"},
+            indirect_buffer="commands",
+            count_buffer="count",
+        )
+        recording = pipeline.record_pass((draw,), color="target")
+        command_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "commands", ti.u32, ndim=1)
+        count_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "count", ti.u32, ndim=1)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish_visible_draw, command_arg, count_arg)
+        builder.append_native(recording, admission="auto")
+        graph = builder.compile()
+        graph.run(
+            {
+                "target": target,
+                "vertices": vertices,
+                "commands": command,
+                "count": count,
+            }
+        )
+        ti.sync()
+        image = _texture_rgb(target)
+        assert image[32, 20, 1] > 32
+        assert image[32, 52].max() == 0
         assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 
 

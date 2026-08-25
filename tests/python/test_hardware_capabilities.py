@@ -1103,6 +1103,15 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
         assert operation.unavailable_reason == "none"
         assert not operation.native_facts["external_component_probed"]
 
+    raster = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id == "raster.draw.vulkan"
+    )
+    assert raster.native_facts["indirect_fixed_count"]
+    assert raster.native_facts["max_draw_indirect_count"] >= 1
+    assert isinstance(raster.native_facts["indirect_count_buffer"], bool)
+
     sampling = next(
         operation
         for operation in report.operations

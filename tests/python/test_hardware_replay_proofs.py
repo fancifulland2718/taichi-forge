@@ -258,6 +258,84 @@ def test_cuda_cusparse_mixed_command_replay_proof():
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_indirect_retained_replay_keys_command_generation(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    if not ti.hardware.graphics.is_indirect_available():
+        pytest.skip("Vulkan indirect graphics commands are unavailable")
+
+    from tests.python.test_hardware_graphics import (
+        _texture_rgb,
+        _triangle_pipeline,
+        _two_triangle_vertices,
+    )
+
+    pipeline = _triangle_pipeline()
+    vertices = _two_triangle_vertices()
+    target = ti.Texture(ti.Format.rgba8, (64, 64))
+    draw = pipeline.pass_draw(
+        ti.hardware.graphics.IndirectDraw(1, vertex_record_limit=6),
+        vertex_buffers={0: "vertices"},
+        indirect_buffer="commands",
+    )
+    recording = pipeline.record_pass((draw,), color="target")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()
+    program = ti.lang.impl.get_runtime().prog
+    before = dict(program._debug_vulkan_graphics_resource_stats())
+
+    first_command = ti.ndarray(ti.u32, shape=4)
+    first_command.from_numpy(np.array([3, 1, 0, 0], dtype=np.uint32))
+    first_bindings = {
+        "target": target,
+        "vertices": vertices,
+        "commands": first_command,
+    }
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-indirect-retained-replay", ("vulkan-graphics",)
+    )
+    replay_iterations = 1_000 if process_memory.enabled else 3
+    process_memory.capture("before")
+    for replay_index in range(replay_iterations):
+        graph.run(first_bindings)
+        ti.sync()
+        if replay_index == replay_iterations // 2 - 1:
+            process_memory.capture("midpoint")
+    process_memory.capture("after")
+    process_memory.finish(replay_iterations)
+    first = dict(program._debug_vulkan_graphics_resource_stats())
+    assert first["retained_replay_prewarms"] - before["retained_replay_prewarms"] == 1
+    assert first["retained_replay_records"] - before["retained_replay_records"] == 1
+    assert (
+        first["retained_replay_replays"] - before["retained_replay_replays"]
+        == replay_iterations - 2
+    )
+
+    second_command = ti.ndarray(ti.u32, shape=4)
+    second_command.from_numpy(np.array([3, 1, 3, 0], dtype=np.uint32))
+    second_bindings = {**first_bindings, "commands": second_command}
+    for _ in range(3):
+        graph.run(second_bindings)
+        ti.sync()
+    second = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        second["retained_replay_binding_misses"]
+        > first["retained_replay_binding_misses"]
+    )
+    assert second["retained_replay_prewarms"] - first["retained_replay_prewarms"] == 1
+    assert second["retained_replay_records"] - first["retained_replay_records"] == 1
+    assert second["retained_replay_replays"] - first["retained_replay_replays"] == 1
+    image = _texture_rgb(target)
+    assert image[32, 20, 1] > 32
+    assert image[32, 52].max() == 0
+
+    pipeline.close()
+    ti.sync()
+    assert program._debug_vulkan_graphics_resource_stats()["retained_replay_slots"] == 0
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
     monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
     if not ti.hardware.graphics.is_available():
@@ -355,11 +433,18 @@ def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
     tickets = [graph.submit(bindings) for _ in range(2)]
     tickets[-1].wait()
     burst = dict(program._debug_vulkan_graphics_resource_stats())
-    new_records = burst["retained_replay_records"] - burst_before["retained_replay_records"]
-    new_replays = burst["retained_replay_replays"] - burst_before["retained_replay_replays"]
+    new_records = (
+        burst["retained_replay_records"] - burst_before["retained_replay_records"]
+    )
+    new_replays = (
+        burst["retained_replay_replays"] - burst_before["retained_replay_replays"]
+    )
     assert new_records in (0, 1)
     assert new_records + new_replays == 2
-    assert burst["retained_replay_busy_fallbacks"] == burst_before["retained_replay_busy_fallbacks"]
+    assert (
+        burst["retained_replay_busy_fallbacks"]
+        == burst_before["retained_replay_busy_fallbacks"]
+    )
     assert burst["retained_replay_slots"] == 1 + new_records
     assert burst["retained_replay_slot_capacity"] == 2
     assert burst["retained_replay_peak_slots"] == 1 + new_records
