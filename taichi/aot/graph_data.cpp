@@ -2,7 +2,6 @@
 #include "taichi/program/program.h"
 #include "taichi/program/runtime_fault.h"
 #include "taichi/program/ndarray.h"
-#include "taichi/program/sparse_matrix.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/program/texture.h"
 #include "taichi/program/kernel.h"
@@ -60,10 +59,10 @@ Program *jit_graph_program(const CompiledGraph &graph) {
   Program *program = nullptr;
   for (const auto &dispatch : graph.dispatches) {
     if (dispatch.ti_kernel == nullptr) {
-      if (dispatch.cuda_sparse_spmv_dispatch.has_value()) {
-        auto *provider_program = dispatch.cuda_sparse_spmv_dispatch->program;
+      if (dispatch.cuda_capture_command) {
+        auto *provider_program = dispatch.cuda_capture_command->program();
         TI_ERROR_IF(provider_program == nullptr,
-                    "CUDA sparse SpMV Graph dispatch lost its Program");
+                    "CUDA capture command dispatch lost its Program");
         if (program == nullptr) {
           program = provider_program;
         } else {
@@ -737,10 +736,18 @@ bool CompiledGraph::has_dispatch_labels() const {
                      });
 }
 
-bool CompiledGraph::has_cuda_sparse_spmv_dispatches() const {
+bool CompiledGraph::has_cuda_capture_commands() const {
   return std::any_of(
       dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
-        return dispatch.cuda_sparse_spmv_dispatch.has_value();
+        return dispatch.cuda_capture_command != nullptr;
+      });
+}
+
+bool CompiledGraph::cuda_capture_commands_require_exact_bindings() const {
+  return std::any_of(
+      dispatches.begin(), dispatches.end(), [](const auto &dispatch) {
+        return dispatch.cuda_capture_command != nullptr &&
+               dispatch.cuda_capture_command->requires_exact_bindings();
       });
 }
 
@@ -2002,11 +2009,11 @@ bool patch_cuda_bounded_dispatch_controls(
   return true;
 }
 
-void issue_cuda_sparse_spmv_dispatch(
+void record_cuda_capture_command(
     const CompiledDispatch &dispatch,
     const std::unordered_map<std::string, IValue> &args,
     Program &program,
-    CUstream stream);
+    void *stream);
 
 std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
                                          CompiledGraphCudaState &state,
@@ -2023,8 +2030,8 @@ std::uint32_t capture_cuda_graph_packets(const CompiledGraph &graph,
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     auto &packet = state.packets[i];
     const auto &dispatch = graph.dispatches[i];
-    if (dispatch.cuda_sparse_spmv_dispatch.has_value()) {
-      issue_cuda_sparse_spmv_dispatch(dispatch, args, program, capture_stream);
+    if (dispatch.cuda_capture_command) {
+      record_cuda_capture_command(dispatch, args, program, capture_stream);
       continue;
     }
     const auto &metadata = dispatch.cuda_bounded_dispatch;
@@ -2224,84 +2231,14 @@ bool handle_cuda_graph_driver_failure(
   return false;
 }
 
-const Ndarray *cuda_sparse_spmv_ndarray(
-    const aot::Arg &symbol,
-    const std::unordered_map<std::string, IValue> &args,
-    int expected_size) {
-  const auto value_it = args.find(symbol.name);
-  if (value_it == args.end() || value_it->second.tag != ArgKind::kNdarray) {
-    return nullptr;
-  }
-  auto *array = reinterpret_cast<Ndarray *>(value_it->second.val);
-  if (array == nullptr ||
-      array->get_element_data_type() != PrimitiveType::f32 ||
-      !array->get_element_shape().empty() ||
-      array->get_nelement() != static_cast<std::size_t>(expected_size)) {
-    return nullptr;
-  }
-  return array;
-}
-
-bool cuda_sparse_spmv_dispatch_supported(
-    const CompiledDispatch &dispatch,
-    const std::unordered_map<std::string, IValue> &args,
-    Program &program) {
-  if (!dispatch.cuda_sparse_spmv_dispatch.has_value()) {
-    return false;
-  }
-  const auto &provider = *dispatch.cuda_sparse_spmv_dispatch;
-  if (provider.matrix == nullptr || provider.program != &program ||
-      provider.matrix->get_data_type() != PrimitiveType::f32 ||
-      (dynamic_cast<CuSparseMatrix *>(provider.matrix) == nullptr &&
-       dynamic_cast<CuSparseBsrMatrix *>(provider.matrix) == nullptr)) {
-    return false;
-  }
-  const auto *input = cuda_sparse_spmv_ndarray(
-      provider.input_arg, args, provider.matrix->num_cols());
-  const auto *output = cuda_sparse_spmv_ndarray(
-      provider.output_arg, args, provider.matrix->num_rows());
-  return input != nullptr && output != nullptr &&
-         input->get_device_allocation() != output->get_device_allocation();
-}
-
-void issue_cuda_sparse_spmv_dispatch(
+void record_cuda_capture_command(
     const CompiledDispatch &dispatch,
     const std::unordered_map<std::string, IValue> &args,
     Program &program,
-    CUstream stream) {
-  TI_ERROR_IF(!dispatch.cuda_sparse_spmv_dispatch.has_value(),
-              "CUDA sparse SpMV Graph proof lost its provider command");
-  const auto &provider = *dispatch.cuda_sparse_spmv_dispatch;
-  TI_ERROR_IF(provider.matrix == nullptr || provider.program != &program,
-              "CUDA sparse SpMV Graph proof provider generation is stale");
-  TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(provider.matrix) == nullptr &&
-                  dynamic_cast<CuSparseBsrMatrix *>(provider.matrix) == nullptr,
-              "CUDA sparse SpMV Graph proof provider is not cuSPARSE CSR/BSR");
-  const auto *input = cuda_sparse_spmv_ndarray(
-      provider.input_arg, args, provider.matrix->num_cols());
-  const auto *output = cuda_sparse_spmv_ndarray(
-      provider.output_arg, args, provider.matrix->num_rows());
-  TI_ERROR_IF(input == nullptr,
-              "CUDA sparse SpMV Graph proof input {} must be an owning f32 "
-              "ndarray of shape ({}) in the active Program",
-              provider.input_arg.name, provider.matrix->num_cols());
-  TI_ERROR_IF(output == nullptr,
-              "CUDA sparse SpMV Graph proof output {} must be an owning f32 "
-              "ndarray of shape ({}) in the active Program",
-              provider.output_arg.name, provider.matrix->num_rows());
-  TI_ERROR_IF(input->get_device_allocation() == output->get_device_allocation(),
-              "CUDA sparse SpMV Graph proof input/output alias");
-  const auto input_address =
-      static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(input));
-  const auto output_address =
-      static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(output));
-  if (auto *csr = dynamic_cast<CuSparseMatrix *>(provider.matrix)) {
-    csr->spmv(input_address, output_address, stream);
-    return;
-  }
-  auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(provider.matrix);
-  TI_ASSERT(bsr != nullptr);
-  bsr->spmv(input_address, output_address, stream);
+    void *stream) {
+  TI_ERROR_IF(dispatch.cuda_capture_command == nullptr,
+              "CUDA Graph capture dispatch lost its provider command");
+  dispatch.cuda_capture_command->record(args, program, stream);
 }
 
 bool try_run_cuda_graph(const CompiledGraph &graph,
@@ -2335,22 +2272,22 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
-  const bool has_sparse_provider = graph.has_cuda_sparse_spmv_dispatches();
-  if (has_sparse_provider &&
+  const bool has_capture_commands = graph.has_cuda_capture_commands();
+  if (has_capture_commands &&
       get_environ_config("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", 0) == 0) {
     mark_cuda_graph_fallback(*state,
                              CompiledGraphFallbackReason::runtime_mode);
     return false;
   }
-  if (has_sparse_provider) {
+  if (has_capture_commands) {
     const bool has_taichi_dispatch = std::any_of(
         graph.dispatches.begin(), graph.dispatches.end(),
         [](const auto &dispatch) { return dispatch.ti_kernel != nullptr; });
     const bool providers_supported = std::all_of(
         graph.dispatches.begin(), graph.dispatches.end(),
         [&](const auto &dispatch) {
-          return !dispatch.cuda_sparse_spmv_dispatch.has_value() ||
-                 cuda_sparse_spmv_dispatch_supported(dispatch, args, program);
+          return dispatch.cuda_capture_command == nullptr ||
+                 dispatch.cuda_capture_command->supports(args, program);
         });
     if (!has_taichi_dispatch || !providers_supported) {
       mark_cuda_graph_fallback(
@@ -2453,11 +2390,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::resource_unavailable);
     return false;
   }
-  // cuSPARSE dense-vector descriptors are fixed to the captured addresses.
-  // Kernel-argument patching must never turn a provider graph into a false
-  // match; a changed binding retires and recaptures the whole mixed recipe.
+  // Provider commands may retain descriptors or other state fixed to captured
+  // addresses. Kernel-argument patching must never turn an exact-only command
+  // graph into a false match; a changed binding uses another bounded slot.
   const bool structurally_compatible =
-      !has_sparse_provider && state->graph_exec &&
+      !graph.cuda_capture_commands_require_exact_bindings() &&
+      state->graph_exec &&
       cuda_graph_signatures_are_structurally_compatible(
           state->signature, signature->entries);
   if (structurally_compatible) {
@@ -2517,10 +2455,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
 
   for (std::size_t i = 0; i < graph.dispatches.size(); ++i) {
     const auto &dispatch = graph.dispatches[i];
-    if (dispatch.cuda_sparse_spmv_dispatch.has_value()) {
-      // Build descriptors, workspace and optional preprocessing before CUDA
-      // capture. The captured command overwrites this cold warm-up output.
-      issue_cuda_sparse_spmv_dispatch(dispatch, args, program, nullptr);
+    if (dispatch.cuda_capture_command) {
+      // Build provider descriptors, workspace and optional preprocessing
+      // before CUDA capture. A recipe may submit cold warm-up work here.
+      dispatch.cuda_capture_command->prepare(args, program);
       state->packets.emplace_back(capture_stream);
       continue;
     }
@@ -2576,8 +2514,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     state->packets.push_back(std::move(capture_packet));
   }
 
-  if (has_sparse_provider) {
-    // Provider warm-up was submitted on the runtime's legacy default stream;
+  if (has_capture_commands) {
+    // Provider preparation may submit on the runtime's legacy default stream;
     // complete it before capturing onto the dedicated nonblocking stream.
     driver.stream_synchronize(nullptr);
   }
@@ -2592,7 +2530,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   }
 
   state->stats.zero_arg_eligible =
-      !has_sparse_provider && !state->packets.empty() &&
+      !has_capture_commands && !state->packets.empty() &&
       std::all_of(state->packets.begin(), state->packets.end(),
                   [](const CudaGraphCapturePacket &packet) {
                     return packet.packet.arg_buffer_size == 0 &&
@@ -5751,11 +5689,11 @@ void CompiledGraph::jit_run(
   }
 #endif
   for (const auto &dispatch : dispatches) {
-    if (dispatch.cuda_sparse_spmv_dispatch.has_value()) {
+    if (dispatch.cuda_capture_command) {
 #if defined(TI_WITH_CUDA)
       TI_ERROR_IF(compile_config.arch != Arch::cuda,
-                  "CUDA sparse SpMV Graph proof requires the CUDA backend");
-      issue_cuda_sparse_spmv_dispatch(dispatch, args, *program, nullptr);
+                  "CUDA capture command requires the CUDA backend");
+      record_cuda_capture_command(dispatch, args, *program, nullptr);
       continue;
 #else
       TI_NOT_IMPLEMENTED;
@@ -6044,11 +5982,11 @@ void CompiledGraph::jit_run_cached(
       arch_is_cpu(compile_config.arch) || compile_config.arch == Arch::cuda;
   for (std::size_t i = 0; i < dispatches.size(); ++i) {
     const auto &dispatch = dispatches[i];
-    if (dispatch.cuda_sparse_spmv_dispatch.has_value()) {
+    if (dispatch.cuda_capture_command) {
 #if defined(TI_WITH_CUDA)
       TI_ERROR_IF(compile_config.arch != Arch::cuda,
-                  "CUDA sparse SpMV Graph proof requires the CUDA backend");
-      issue_cuda_sparse_spmv_dispatch(dispatch, args, *program, nullptr);
+                  "CUDA capture command requires the CUDA backend");
+      record_cuda_capture_command(dispatch, args, *program, nullptr);
       continue;
 #else
       TI_NOT_IMPLEMENTED;

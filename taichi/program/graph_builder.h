@@ -185,10 +185,10 @@ class GraphBuilder {
 
   // Private JIT-only feasibility proof. This is intentionally not an AOT
   // node and does not broaden the serialized Graph contract.
-  void dispatch_cuda_sparse_spmv(SparseMatrix *matrix,
-                                 Program *program,
-                                 const aot::Arg &input,
-                                 const aot::Arg &output);
+  void dispatch_cuda_capture_cusparse_spmv(SparseMatrix *matrix,
+                                           Program *program,
+                                           const aot::Arg &input,
+                                           const aot::Arg &output);
 
   Sequential *seq() const;
 

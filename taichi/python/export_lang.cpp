@@ -4526,12 +4526,12 @@ void export_lang(py::module &m) {
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("label") = "")
       .def(
-          "_dispatch_cuda_sparse_spmv_proof",
+          "_dispatch_cuda_cusparse_spmv_capture_recipe",
           [](GraphBuilder &builder, const py::object &matrix,
              Program *program, const aot::Arg &input,
              const aot::Arg &output) {
-            builder.dispatch_cuda_sparse_spmv(matrix.cast<SparseMatrix *>(),
-                                              program, input, output);
+            builder.dispatch_cuda_capture_cusparse_spmv(
+                matrix.cast<SparseMatrix *>(), program, input, output);
           },
           py::arg("matrix"), py::arg("program"), py::arg("input"),
           py::arg("output"))

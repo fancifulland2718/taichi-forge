@@ -34,7 +34,6 @@ class Kernel;
 class CompiledKernelData;
 class KernelExecutionHandle;
 class Program;
-class SparseMatrix;
 namespace storage {
 class RuntimeStorageArgument;
 }
@@ -245,14 +244,27 @@ struct CpuBoundedDispatchMetadata {
   std::uint32_t capacity{0};
 };
 
-// JIT-only feasibility proof for one fixed-binding cuSPARSE SpMV command.
-// The provider pointer is retained by the enclosing Forge native executable;
-// it is deliberately excluded from the public/AOT graph schema.
-struct CudaSparseSpmvDispatchMetadata {
-  SparseMatrix *matrix{nullptr};
-  Program *program{nullptr};
-  Arg input_arg;
-  Arg output_arg;
+// JIT-only contract for one provider command that can be prepared outside a
+// CUDA stream capture and then recorded on the capture stream. Concrete
+// provider recipes remain internal and are deliberately excluded from the
+// public/AOT graph schema.
+class CudaGraphCaptureCommand {
+ public:
+  virtual ~CudaGraphCaptureCommand() = default;
+
+  virtual const char *kind() const = 0;
+  virtual Program *program() const = 0;
+  virtual bool supports(
+      const std::unordered_map<std::string, IValue> &args,
+      Program &program) const = 0;
+  virtual void prepare(const std::unordered_map<std::string, IValue> &args,
+                       Program &program) = 0;
+  virtual void record(const std::unordered_map<std::string, IValue> &args,
+                      Program &program,
+                      void *stream) = 0;
+  virtual bool requires_exact_bindings() const {
+    return true;
+  }
 };
 
 struct CompiledDispatch {
@@ -282,9 +294,9 @@ struct CompiledDispatch {
   std::optional<CudaBoundedDispatchMetadata> cuda_bounded_dispatch;
   // JIT-only CPU scheduler metadata; omitted from the public AOT schema.
   std::optional<CpuBoundedDispatchMetadata> cpu_bounded_dispatch;
-  // JIT-only provider command. Graph replay treats every graph containing
-  // this command as exact-binding-only: argument patching is not admissible.
-  std::optional<CudaSparseSpmvDispatchMetadata> cuda_sparse_spmv_dispatch;
+  // JIT-only provider capture recipe. Provider-specific state is retained by
+  // this shared command object and never enters the serialized Graph schema.
+  std::shared_ptr<CudaGraphCaptureCommand> cuda_capture_command;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -732,7 +744,8 @@ struct TI_DLL_EXPORT CompiledGraph {
 
   bool has_indirect_dispatches() const;
   bool has_dispatch_labels() const;
-  bool has_cuda_sparse_spmv_dispatches() const;
+  bool has_cuda_capture_commands() const;
+  bool cuda_capture_commands_require_exact_bindings() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;
   void jit_run(const CompileConfig &compile_config,

@@ -5,7 +5,10 @@ import os
 from numbers import Real
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
-from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native import (
+    BackendCommandRecording,
+    _CudaGraphCaptureRecipe,
+)
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -180,6 +183,27 @@ class CublasGemmRecording(BackendCommandRecording):
         )
 
 
+class _CusparseSpmvCaptureRecipe(_CudaGraphCaptureRecipe):
+    kind = "cusparse_spmv_f32"
+
+    def __init__(self, matrix, input_name, output_name):
+        self._matrix = matrix
+        self._input_name = input_name
+        self._output_name = output_name
+
+    def append_to_graph(self, builder, program):
+        from taichi_forge.graph._graph import Arg, ArgKind  # pylint: disable=C0415
+
+        input_arg = Arg(ArgKind.NDARRAY, self._input_name, f32, ndim=1)
+        output_arg = Arg(ArgKind.NDARRAY, self._output_name, f32, ndim=1)
+        builder._dispatch_cuda_cusparse_spmv_capture_recipe(
+            self._matrix.matrix,
+            program,
+            input_arg,
+            output_arg,
+        )
+
+
 @instrument_hardware_recording("linalg.spmv.cusparse_explicit")
 class CusparseSpmvRecording(BackendCommandRecording):
     """One f32 stored-matrix SpMV executed by the user's cuSPARSE."""
@@ -233,7 +257,9 @@ class CusparseSpmvRecording(BackendCommandRecording):
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "output", output)
         object.__setattr__(
-            self, "_cuda_mixed_command_proof_kind", "cusparse_spmv_f32"
+            self,
+            "_cuda_capture_recipe",
+            _CusparseSpmvCaptureRecipe(matrix, input, output),
         )
         object.__setattr__(
             self,

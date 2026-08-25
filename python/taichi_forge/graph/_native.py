@@ -323,6 +323,20 @@ class BackendCommandRecording:
         }
 
 
+class _CudaGraphCaptureRecipe:
+    """Internal compile-time lowering hook for one CUDA capture command.
+
+    The hook may only append a typed C++ recipe while a Graph is compiled. It
+    is never invoked from capture or replay execution.
+    """
+
+    kind = ""
+    exact_binding_only = True
+
+    def append_to_graph(self, builder, program):
+        raise NotImplementedError
+
+
 @dataclass(frozen=True)
 class VulkanBufferCommand:
     """One immutable symbolic command in a Vulkan RHI buffer recording."""

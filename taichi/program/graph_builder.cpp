@@ -8,32 +8,105 @@
 namespace taichi::lang {
 namespace {
 
-class CudaSparseSpmvDispatch final : public Node {
+const Ndarray *cuda_sparse_spmv_ndarray(
+    const aot::Arg &symbol,
+    const std::unordered_map<std::string, aot::IValue> &args,
+    int expected_size) {
+  const auto value_it = args.find(symbol.name);
+  if (value_it == args.end() || value_it->second.tag != aot::ArgKind::kNdarray) {
+    return nullptr;
+  }
+  auto *array = reinterpret_cast<Ndarray *>(value_it->second.val);
+  if (array == nullptr ||
+      array->get_element_data_type() != PrimitiveType::f32 ||
+      !array->get_element_shape().empty() ||
+      array->get_nelement() != static_cast<std::size_t>(expected_size)) {
+    return nullptr;
+  }
+  return array;
+}
+
+class CudaSparseSpmvCaptureCommand final
+    : public aot::CudaGraphCaptureCommand {
  public:
-  CudaSparseSpmvDispatch(SparseMatrix *matrix,
-                         Program *program,
-                         aot::Arg input,
-                         aot::Arg output)
+  CudaSparseSpmvCaptureCommand(SparseMatrix *matrix,
+                               Program *program,
+                               aot::Arg input,
+                               aot::Arg output)
       : matrix_(matrix),
         program_(program),
         input_(std::move(input)),
         output_(std::move(output)) {
   }
 
-  void compile(
-      std::vector<aot::CompiledDispatch> &compiled_dispatches) override {
-    aot::CompiledDispatch dispatch;
-    dispatch.kernel_name = "cuda_cusparse_spmv_f32";
-    dispatch.symbolic_args = {input_, output_};
-    dispatch.cuda_sparse_spmv_dispatch =
-        aot::CudaSparseSpmvDispatchMetadata{matrix_, program_, input_, output_};
-    // Preserve one logical source item for Forge pipeline attribution. The
-    // default metadata is intentionally opaque: this provider command cannot
-    // participate in kernel composition or AOT serialization.
-    dispatch.source_dispatches.push_back(
-        {dispatch.kernel_name, "", dispatch.symbolic_args, {}});
-    dispatch.compiled_task_count = 0;
-    compiled_dispatches.push_back(std::move(dispatch));
+  const char *kind() const override {
+    return "cusparse_spmv_f32";
+  }
+
+  Program *program() const override {
+    return program_;
+  }
+
+  bool supports(const std::unordered_map<std::string, aot::IValue> &args,
+                Program &program) const override {
+    if (matrix_ == nullptr || program_ != &program ||
+        matrix_->get_data_type() != PrimitiveType::f32 ||
+        (dynamic_cast<CuSparseMatrix *>(matrix_) == nullptr &&
+         dynamic_cast<CuSparseBsrMatrix *>(matrix_) == nullptr)) {
+      return false;
+    }
+    const auto *input =
+        cuda_sparse_spmv_ndarray(input_, args, matrix_->num_cols());
+    const auto *output =
+        cuda_sparse_spmv_ndarray(output_, args, matrix_->num_rows());
+    return input != nullptr && output != nullptr &&
+           input->get_device_allocation() != output->get_device_allocation();
+  }
+
+  void prepare(const std::unordered_map<std::string, aot::IValue> &args,
+               Program &program) override {
+    record(args, program, nullptr);
+  }
+
+  void record(const std::unordered_map<std::string, aot::IValue> &args,
+              Program &program,
+              void *stream) override {
+    TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
+                "CUDA capture recipe provider generation is stale");
+    TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(matrix_) == nullptr &&
+                    dynamic_cast<CuSparseBsrMatrix *>(matrix_) == nullptr,
+                "CUDA capture recipe provider is not cuSPARSE CSR/BSR");
+    const auto *input =
+        cuda_sparse_spmv_ndarray(input_, args, matrix_->num_cols());
+    const auto *output =
+        cuda_sparse_spmv_ndarray(output_, args, matrix_->num_rows());
+    TI_ERROR_IF(input == nullptr,
+                "CUDA cuSPARSE capture input {} must be an owning f32 ndarray "
+                "of shape ({}) in the active Program",
+                input_.name, matrix_->num_cols());
+    TI_ERROR_IF(output == nullptr,
+                "CUDA cuSPARSE capture output {} must be an owning f32 ndarray "
+                "of shape ({}) in the active Program",
+                output_.name, matrix_->num_rows());
+    TI_ERROR_IF(input->get_device_allocation() ==
+                    output->get_device_allocation(),
+                "CUDA cuSPARSE capture input/output alias");
+    const auto input_address =
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(input));
+    const auto output_address =
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(output));
+#if defined(TI_WITH_CUDA)
+    auto capture_stream = reinterpret_cast<CUstream>(stream);
+    if (auto *csr = dynamic_cast<CuSparseMatrix *>(matrix_)) {
+      csr->spmv(input_address, output_address, capture_stream);
+      return;
+    }
+    auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(matrix_);
+    TI_ASSERT(bsr != nullptr);
+    bsr->spmv(input_address, output_address, capture_stream);
+#else
+    TI_NOT_IMPLEMENTED;
+#endif
   }
 
  private:
@@ -41,6 +114,35 @@ class CudaSparseSpmvDispatch final : public Node {
   Program *program_{nullptr};
   aot::Arg input_;
   aot::Arg output_;
+};
+
+class CudaCaptureCommandDispatch final : public Node {
+ public:
+  CudaCaptureCommandDispatch(
+      std::shared_ptr<aot::CudaGraphCaptureCommand> command,
+      std::vector<aot::Arg> symbolic_args)
+      : command_(std::move(command)), symbolic_args_(std::move(symbolic_args)) {
+  }
+
+  void compile(
+      std::vector<aot::CompiledDispatch> &compiled_dispatches) override {
+    TI_ASSERT(command_ != nullptr);
+    aot::CompiledDispatch dispatch;
+    dispatch.kernel_name = "cuda_capture_" + std::string(command_->kind());
+    dispatch.symbolic_args = symbolic_args_;
+    dispatch.cuda_capture_command = command_;
+    // Preserve one logical source item for Forge pipeline attribution. The
+    // provider recipe cannot participate in kernel composition or AOT
+    // serialization.
+    dispatch.source_dispatches.push_back(
+        {dispatch.kernel_name, "", dispatch.symbolic_args, {}});
+    dispatch.compiled_task_count = 0;
+    compiled_dispatches.push_back(std::move(dispatch));
+  }
+
+ private:
+  std::shared_ptr<aot::CudaGraphCaptureCommand> command_;
+  std::vector<aot::Arg> symbolic_args_;
 };
 
 void validate_cuda_sparse_spmv_args(SparseMatrix *matrix,
@@ -375,15 +477,18 @@ void GraphBuilder::dispatch_cpu_bounded(
                               dispatch_label);
 }
 
-void GraphBuilder::dispatch_cuda_sparse_spmv(SparseMatrix *matrix,
-                                             Program *program,
-                                             const aot::Arg &input,
-                                             const aot::Arg &output) {
+void GraphBuilder::dispatch_cuda_capture_cusparse_spmv(
+    SparseMatrix *matrix,
+    Program *program,
+    const aot::Arg &input,
+    const aot::Arg &output) {
   validate_cuda_sparse_spmv_args(matrix, program, input, output);
   register_arg(input);
   register_arg(output);
-  all_nodes_.push_back(std::make_unique<CudaSparseSpmvDispatch>(
-      matrix, program, input, output));
+  auto command = std::make_shared<CudaSparseSpmvCaptureCommand>(
+      matrix, program, input, output);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), std::vector<aot::Arg>{input, output}));
   seq()->append(all_nodes_.back().get());
 }
 

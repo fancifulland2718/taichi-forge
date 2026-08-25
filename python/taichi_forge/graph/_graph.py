@@ -48,6 +48,7 @@ from taichi_forge.graph._native import (
     RecordableGraphAction,
     VulkanBufferCommand,
     VulkanBufferCommandRecording,
+    _CudaGraphCaptureRecipe,
     compile_native_graph_node,
     native_action_manifest,
 )
@@ -12355,32 +12356,16 @@ class GraphBuilder:
                     f"{backend} backend"
                 )
             recording = action.backend_command_recording
+            capture_recipe = getattr(recording, "_cuda_capture_recipe", None)
             if (
                 backend == "cuda"
                 and recording.replay_mode == "stream_capture"
-                and getattr(
-                    recording, "_cuda_mixed_command_proof_kind", None
-                )
-                == "cusparse_spmv_f32"
+                and isinstance(capture_recipe, _CudaGraphCaptureRecipe)
             ):
                 compiled = _CompiledNativeGraphNode(executable)
-                input_arg = Arg(
-                    ArgKind.NDARRAY,
-                    recording.input,
-                    f32,
-                    ndim=1,
-                )
-                output_arg = Arg(
-                    ArgKind.NDARRAY,
-                    recording.output,
-                    f32,
-                    ndim=1,
-                )
-                self._ensure_runtime_graph_builder()._dispatch_cuda_sparse_spmv_proof(
-                    recording.matrix.matrix,
+                capture_recipe.append_to_graph(
+                    self._ensure_runtime_graph_builder(),
                     impl.get_runtime().prog,
-                    input_arg,
-                    output_arg,
                 )
                 self._dispatch_count += 1
                 self._runtime_graph_arg_names.update(
