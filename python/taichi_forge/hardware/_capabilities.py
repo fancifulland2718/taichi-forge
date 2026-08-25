@@ -1002,6 +1002,14 @@ def _passive_core_statuses(runtime_initialized, backend):
         program is not None and program.vulkan_graphics_pipeline_available()
     )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
+    cooperative_matrix_available = bool(
+        program is not None and program.vulkan_cooperative_matrix_available()
+    )
+    cooperative_matrix_properties = (
+        tuple(dict(item) for item in program._vulkan_cooperative_matrix_properties())
+        if cooperative_matrix_available
+        else ()
+    )
     ray_facts = {
         "provider_available": ray_available,
         "capability_query": "active_vulkan_feature_chain",
@@ -1058,6 +1066,17 @@ def _passive_core_statuses(runtime_initialized, backend):
                 "scope": "jit_kernel_intrinsic",
                 "aot_supported": False,
                 "graph_resource_argument_supported": False,
+            },
+        },
+        "matrix.mma.vulkan": {
+            "available": cooperative_matrix_available,
+            "native_facts": {
+                "provider_available": cooperative_matrix_available,
+                "capability_query": (
+                    "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"
+                ),
+                "operation_requirements_evaluated": False,
+                "supported_tuples": cooperative_matrix_properties,
             },
         },
     }

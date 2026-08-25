@@ -655,6 +655,13 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       has_device_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
       has_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
       has_device_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+  const bool cooperative_matrix_extension_requested =
+      !manual_create ||
+      extension_was_requested(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+  const bool cooperative_matrix_extension_available =
+      vk_api_version >= VK_API_VERSION_1_1 &&
+      cooperative_matrix_extension_requested &&
+      has_device_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
 
   bool has_swapchain = false;
   // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
@@ -762,6 +769,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
                (name == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ||
                 name == VK_KHR_RAY_QUERY_EXTENSION_NAME ||
                 name == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if (cooperative_matrix_extension_available &&
+               name == VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (std::find(params_.additional_device_extensions.begin(),
                          params_.additional_device_extensions.end(),
@@ -879,6 +889,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceRayQueryFeaturesKHR ray_query_feature{};
   ray_query_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+  VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_feature{};
+  cooperative_matrix_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR;
   VkPhysicalDeviceDynamicRenderingFeaturesKHR dynamic_rendering_feature{};
   dynamic_rendering_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
@@ -1048,6 +1061,72 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         ti_device_->vk_caps().acceleration_structure = true;
         ti_device_->vk_caps().ray_query = true;
         caps.set(DeviceCapability::spirv_has_ray_query, true);
+      }
+    }
+
+    // Cooperative-matrix shapes and component types are device properties,
+    // not a CUDA-like fixed tile contract. Enable the feature only when the
+    // compute stage is supported and retain the exact admission tuples for
+    // later typed lowering.
+    if (cooperative_matrix_extension_available) {
+      features2.pNext = &cooperative_matrix_feature;
+      query_physical_device_features2(&features2);
+
+      VkPhysicalDeviceCooperativeMatrixPropertiesKHR matrix_stage_properties{};
+      matrix_stage_properties.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+      VkPhysicalDeviceProperties2 properties2{};
+      properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+      properties2.pNext = &matrix_stage_properties;
+      query_physical_device_properties2(&properties2);
+
+      if (cooperative_matrix_feature.cooperativeMatrix &&
+          (matrix_stage_properties.cooperativeMatrixSupportedStages &
+           VK_SHADER_STAGE_COMPUTE_BIT) &&
+          vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR != nullptr) {
+        std::uint32_t property_count = 0;
+        VkResult query_result =
+            vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+                physical_device_, &property_count, nullptr);
+        if (query_result == VK_SUCCESS && property_count > 0) {
+          std::vector<VkCooperativeMatrixPropertiesKHR> properties(
+              property_count);
+          for (auto &property : properties) {
+            property.sType =
+                VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
+          }
+          query_result = vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+              physical_device_, &property_count, properties.data());
+          if (query_result == VK_SUCCESS || query_result == VK_INCOMPLETE) {
+            properties.resize(property_count);
+            auto &vk_caps = ti_device_->vk_caps();
+            vk_caps.cooperative_matrix_supported_stages =
+                matrix_stage_properties.cooperativeMatrixSupportedStages;
+            vk_caps.cooperative_matrix_properties.reserve(properties.size());
+            for (const auto &property : properties) {
+              vk_caps.cooperative_matrix_properties.push_back(
+                  VulkanCooperativeMatrixProperty{
+                      property.MSize,
+                      property.NSize,
+                      property.KSize,
+                      property.AType,
+                      property.BType,
+                      property.CType,
+                      property.ResultType,
+                      property.scope,
+                      property.saturatingAccumulation == VK_TRUE});
+            }
+            if (!vk_caps.cooperative_matrix_properties.empty()) {
+              cooperative_matrix_feature.cooperativeMatrix = VK_TRUE;
+              cooperative_matrix_feature
+                  .cooperativeMatrixRobustBufferAccess = VK_FALSE;
+              *pNextEnd = &cooperative_matrix_feature;
+              pNextEnd = &cooperative_matrix_feature.pNext;
+              vk_caps.cooperative_matrix = true;
+              caps.set(DeviceCapability::spirv_has_cooperative_matrix, true);
+            }
+          }
+        }
       }
     }
 

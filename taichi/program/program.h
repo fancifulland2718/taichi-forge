@@ -1062,6 +1062,11 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::string, std::uint64_t>
   vulkan_ray_query_properties() const;
 
+  bool vulkan_cooperative_matrix_available() const;
+
+  std::vector<std::unordered_map<std::string, std::uint64_t>>
+  vulkan_cooperative_matrix_properties() const;
+
   bool vulkan_graphics_pipeline_available() const;
 
   std::size_t debug_vulkan_graphics_pipeline_count();

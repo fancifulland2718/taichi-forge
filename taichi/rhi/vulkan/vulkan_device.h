@@ -811,6 +811,18 @@ class VulkanStream : public Stream {
   StreamSemaphore submission_batch_completion_;
 };
 
+struct VulkanCooperativeMatrixProperty {
+  std::uint32_t m{0};
+  std::uint32_t n{0};
+  std::uint32_t k{0};
+  VkComponentTypeKHR a_type{VK_COMPONENT_TYPE_MAX_ENUM_KHR};
+  VkComponentTypeKHR b_type{VK_COMPONENT_TYPE_MAX_ENUM_KHR};
+  VkComponentTypeKHR c_type{VK_COMPONENT_TYPE_MAX_ENUM_KHR};
+  VkComponentTypeKHR result_type{VK_COMPONENT_TYPE_MAX_ENUM_KHR};
+  VkScopeKHR scope{VK_SCOPE_MAX_ENUM_KHR};
+  bool saturating_accumulation{false};
+};
+
 struct VulkanCapabilities {
   uint32_t vk_api_version{0};
   // C-2.4.c: VkPhysicalDeviceLimits::maxPerStageDescriptorStorageBuffers,
@@ -829,6 +841,9 @@ struct VulkanCapabilities {
   bool buffer_device_address{false};
   bool acceleration_structure{false};
   bool ray_query{false};
+  bool cooperative_matrix{false};
+  VkShaderStageFlags cooperative_matrix_supported_stages{0};
+  std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;
 };
 
 class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {

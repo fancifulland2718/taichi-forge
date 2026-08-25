@@ -2340,6 +2340,10 @@ void export_lang(py::module &m) {
            &Program::vulkan_ray_query_available)
       .def("_vulkan_ray_query_properties",
            &Program::vulkan_ray_query_properties)
+      .def("vulkan_cooperative_matrix_available",
+           &Program::vulkan_cooperative_matrix_available)
+      .def("_vulkan_cooperative_matrix_properties",
+           &Program::vulkan_cooperative_matrix_properties)
       .def("_create_vulkan_triangle_ray_scene",
            tracked_native_program_method(
                &Program::create_vulkan_triangle_ray_scene),

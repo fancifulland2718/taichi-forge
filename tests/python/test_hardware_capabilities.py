@@ -566,6 +566,46 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     assert "SPV_KHR_cooperative_matrix" in descriptor.requirements[3]
 
 
+@pytest.mark.run_in_serial
+def test_vulkan_cooperative_matrix_properties_are_exact_admission_tuples():
+    ti.init(arch=ti.vulkan)
+    program = ti.lang.impl.get_runtime().prog
+    available = bool(program.vulkan_cooperative_matrix_available())
+    properties = tuple(
+        dict(item) for item in program._vulkan_cooperative_matrix_properties()
+    )
+
+    assert available == bool(properties)
+    required = {
+        "m",
+        "n",
+        "k",
+        "a_type",
+        "b_type",
+        "c_type",
+        "result_type",
+        "scope",
+        "saturating_accumulation",
+        "supported_stages",
+    }
+    for item in properties:
+        assert set(item) == required
+        assert item["m"] > 0 and item["n"] > 0 and item["k"] > 0
+        assert item["scope"] in (1, 2, 3, 5)
+        assert item["supported_stages"] & 0x20  # VK_SHADER_STAGE_COMPUTE_BIT
+
+    resolved = next(
+        operation
+        for operation in ti.hardware.report().operations
+        if operation.descriptor.operation_id == "matrix.mma.vulkan"
+    )
+    assert resolved.native_facts["provider_available"] == available
+    assert tuple(resolved.native_facts["supported_tuples"]) == properties
+    # CM-A reports the native feature without claiming an executable operation.
+    assert resolved.selection == "rejected"
+    assert resolved.unavailable_reason == "implementation_planned"
+
+
 def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch):
     def reject_implicit_probe(_provider_id):
         raise AssertionError("passive reports must not invoke a native D1 probe")
