@@ -622,6 +622,18 @@ void export_lang(py::module &m) {
       item["ray_query_getter_before"] =
           py::int_(s.ray_query_getter_before);
       item["ray_query_getter_after"] = py::int_(s.ray_query_getter_after);
+      item["cooperative_matrix_load_before"] =
+          py::int_(s.cooperative_matrix_load_before);
+      item["cooperative_matrix_load_after"] =
+          py::int_(s.cooperative_matrix_load_after);
+      item["cooperative_matrix_mul_add_before"] =
+          py::int_(s.cooperative_matrix_mul_add_before);
+      item["cooperative_matrix_mul_add_after"] =
+          py::int_(s.cooperative_matrix_mul_add_after);
+      item["cooperative_matrix_store_before"] =
+          py::int_(s.cooperative_matrix_store_before);
+      item["cooperative_matrix_store_after"] =
+          py::int_(s.cooperative_matrix_store_after);
       item["function_variable_before"] =
           py::int_(s.function_variable_before);
       item["function_variable_after"] =

@@ -39,6 +39,7 @@ Program::vulkan_cooperative_matrix_properties() const {
         {"result_type", static_cast<std::uint64_t>(property.result_type)},
         {"scope", static_cast<std::uint64_t>(property.scope)},
         {"saturating_accumulation", property.saturating_accumulation},
+        {"subgroup_size", caps.subgroup_size},
         {"supported_stages", caps.cooperative_matrix_supported_stages},
     });
   }

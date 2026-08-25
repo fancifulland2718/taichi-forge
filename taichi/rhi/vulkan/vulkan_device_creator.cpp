@@ -829,6 +829,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     physical_device_properties.pNext = &subgroup_properties;
 
     query_physical_device_properties2(&physical_device_properties);
+    ti_device_->vk_caps().subgroup_size = subgroup_properties.subgroupSize;
 
     if (subgroup_properties.supportedOperations &
         VK_SUBGROUP_FEATURE_BASIC_BIT) {

@@ -1,5 +1,6 @@
 """Kernel-inline and compiler-internal capability catalog fragments."""
 
+
 def kernel_intrinsic_operations(_operation):
     return (
         _operation(
@@ -113,7 +114,9 @@ def kernel_intrinsic_operations(_operation):
             lifetime_policy="runtime_generation",
             update_policy="per_dispatch",
             dtypes=("integer operation-dependent", "f16/f32/f64 operation-dependent"),
-            numeric_contracts=("returns old value and atomically publishes the update",),
+            numeric_contracts=(
+                "returns old value and atomically publishes the update",
+            ),
             requirements=("supported CUDA dtype/operation/device combination",),
             public_api="ti.atomic_*",
             notes=(
@@ -141,7 +144,9 @@ def kernel_intrinsic_operations(_operation):
             lifetime_policy="runtime_generation",
             update_policy="per_dispatch",
             dtypes=("integer operation-dependent", "f32/f64 capability-dependent"),
-            numeric_contracts=("returns old value and atomically publishes the update",),
+            numeric_contracts=(
+                "returns old value and atomically publishes the update",
+            ),
             requirements=("supported SPIR-V atomic dtype/operation/device capability",),
             public_api="ti.atomic_*",
             notes=(
@@ -169,7 +174,10 @@ def kernel_intrinsic_operations(_operation):
             update_policy="immutable",
             dtypes=("i32", "u32 mask", "f32 shuffle"),
             shapes_or_tiles=("warp:32 lanes",),
-            requirements=("CUDA warp execution", "match operations require compute capability >= 7.0"),
+            requirements=(
+                "CUDA warp execution",
+                "match operations require compute capability >= 7.0",
+            ),
             public_api="ti.simt.warp",
             notes=(
                 "User-written kernel intrinsics expose vote, ballot, shuffle, active-mask, match, and warp synchronization operations.",
@@ -272,10 +280,16 @@ def kernel_intrinsic_operations(_operation):
             "none",
             "existing_internal",
             activation_mode="compiler_automatic",
-            resource_effects=("read:lane_values", "atomic:destination",),
+            resource_effects=(
+                "read:lane_values",
+                "atomic:destination",
+            ),
             lifetime_policy="runtime_generation",
             update_policy="per_dispatch",
-            requirements=("compiler-recognized reduction", "matching device group capability"),
+            requirements=(
+                "compiler-recognized reduction",
+                "matching device group capability",
+            ),
             notes=(
                 "Automatic compiler selection aggregates recognized reductions within a CUDA block or Vulkan subgroup before publishing fewer global atomics.",
                 "User atomic semantics remain unchanged, and unsupported patterns retain the ordinary atomic path.",
@@ -297,10 +311,17 @@ def kernel_intrinsic_operations(_operation):
             "none",
             "existing_internal",
             activation_mode="compiler_automatic",
-            resource_effects=("read:active_lanes", "atomic:list_counter", "write:list_entries"),
+            resource_effects=(
+                "read:active_lanes",
+                "atomic:list_counter",
+                "write:list_entries",
+            ),
             lifetime_policy="runtime_generation",
             update_policy="per_dispatch",
-            requirements=("spirv_has_subgroup_ballot", "spirv_listgen_subgroup_ballot enabled"),
+            requirements=(
+                "spirv_has_subgroup_ballot",
+                "spirv_listgen_subgroup_ballot enabled",
+            ),
             notes=(
                 "Automatic internal lowering lets one elected lane reserve a contiguous list range per subgroup and broadcasts the base to active lanes.",
                 "The legacy per-active-lane atomic path remains the fail-closed fallback.",
@@ -351,26 +372,35 @@ def kernel_intrinsic_operations(_operation):
             "core",
             "hardware_intrinsic",
             "native_shader_operation",
-            "implementation_defined",
+            "qualified",
             ("kernel",),
             "kernel_intrinsic",
             "inline",
             "runtime_ordered",
             "none",
-            "planned",
+            "existing_public",
             activation_mode="explicit_kernel_intrinsic",
+            resource_effects=("read:a", "read:b", "read:c", "write:output"),
             lifetime_policy="runtime_generation",
             update_policy="immutable",
+            dtypes=("a:f16", "b:f16", "c:f32", "output:f32"),
+            shapes_or_tiles=("device_enumerated_MxNxK",),
+            layouts=("row_major_a", "row_major_b", "row_major_c_output"),
+            numeric_contracts=("output=A*B+C", "f16_inputs:f32_accumulate"),
+            deterministic=False,
             requirements=(
                 "VK_KHR_cooperative_matrix feature query and device enablement",
                 "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR tuple enumeration",
-                "opaque cooperative-matrix tile type and typed kernel IR",
-                "SPV_KHR_cooperative_matrix load/mul-add/store lowering",
+                "subgroup-scoped f16/f16/f32/f32 non-saturating tuple",
+                "SPV_KHR_cooperative_matrix load/mul-add/store",
+                "top-level static dense range and subgroup-aligned block_dim",
             ),
-            public_api="ti.hardware.matrix",
+            public_api="ti.hardware.matrix.cooperative_mma_f16_f32",
             notes=(
-                "The repository has no Vulkan cooperative-matrix feature, type, IR, or code-generation chain yet.",
-                "Supported M/N/K, component types, scope, layout, and saturation must come from device properties rather than copying the CUDA m16n16k16 contract.",
+                "Explicit JIT kernel intrinsic; ordinary matrix multiplication is not rewritten and there is no implicit fallback.",
+                "Supported M/N/K and subgroup size come from the active device instead of copying the CUDA m16n16k16 contract.",
+                "Qualified locally on NVIDIA Vulkan; AMD and Intel execution remain unqualified until device evidence is available.",
+                "AOT, graph resource arguments, saturation, column-major layouts, and escaping tile values are not supported.",
             ),
         ),
     )

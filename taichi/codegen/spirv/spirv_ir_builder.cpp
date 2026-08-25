@@ -1320,6 +1320,76 @@ Value IRBuilder::ray_query_closest(Value acceleration_structure,
       result_front_face);
 }
 
+SType IRBuilder::cooperative_matrix_type(const SType &component_type,
+                                         std::uint32_t rows,
+                                         std::uint32_t columns,
+                                         spv::CooperativeMatrixUse use) {
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_cooperative_matrix),
+              "Cooperative-matrix type requested without device support.");
+  declare_capability(spv::CapabilityCooperativeMatrixKHR);
+  declare_extension("SPV_KHR_cooperative_matrix");
+  const std::string key = fmt::format("{}:{}:{}:{}", component_type.id, rows,
+                                      columns, static_cast<std::uint32_t>(use));
+  if (const auto found = cooperative_matrix_types_.find(key);
+      found != cooperative_matrix_types_.end()) {
+    return found->second;
+  }
+
+  const Value scope = uint_immediate_number(t_uint32_, spv::ScopeSubgroup);
+  const Value row_count = uint_immediate_number(t_uint32_, rows);
+  const Value column_count = uint_immediate_number(t_uint32_, columns);
+  const Value matrix_use =
+      uint_immediate_number(t_uint32_, static_cast<std::uint32_t>(use));
+  SType result;
+  result.id = id_counter_++;
+  result.dt = component_type.dt;
+  result.flag = TypeKind::kCooperativeMatrix;
+  ib_.begin(spv::OpTypeCooperativeMatrixKHR)
+      .add_seq(result, component_type, scope, row_count, column_count,
+               matrix_use)
+      .commit(&global_);
+  cooperative_matrix_types_[key] = result;
+  return result;
+}
+
+Value IRBuilder::cooperative_matrix_load(const SType &matrix_type,
+                                         Value pointer,
+                                         spv::CooperativeMatrixLayout layout,
+                                         std::uint32_t stride) {
+  const Value matrix_layout =
+      uint_immediate_number(t_uint32_, static_cast<std::uint32_t>(layout));
+  const Value matrix_stride = uint_immediate_number(t_uint32_, stride);
+  return make_value(spv::OpCooperativeMatrixLoadKHR, matrix_type, pointer,
+                    matrix_layout, matrix_stride);
+}
+
+Value IRBuilder::cooperative_matrix_mul_add(
+    const SType &result_type,
+    Value a,
+    Value b,
+    Value c,
+    spv::CooperativeMatrixOperandsMask operands) {
+  Value result = new_value(result_type, ValueKind::kNormal);
+  ib_.begin(spv::OpCooperativeMatrixMulAddKHR)
+      .add_seq(result_type, result, a, b, c);
+  if (operands != spv::CooperativeMatrixOperandsMaskNone) {
+    ib_.add(static_cast<std::uint32_t>(operands));
+  }
+  ib_.commit(&function_);
+  return result;
+}
+
+void IRBuilder::cooperative_matrix_store(Value pointer,
+                                         Value object,
+                                         spv::CooperativeMatrixLayout layout,
+                                         std::uint32_t stride) {
+  const Value matrix_layout =
+      uint_immediate_number(t_uint32_, static_cast<std::uint32_t>(layout));
+  const Value matrix_stride = uint_immediate_number(t_uint32_, stride);
+  make_inst(spv::OpCooperativeMatrixStoreKHR, pointer, object, matrix_layout,
+            matrix_stride);
+}
+
 Value IRBuilder::sample_texture(Value texture_var,
                                 const std::vector<Value> &args,
                                 Value lod) {

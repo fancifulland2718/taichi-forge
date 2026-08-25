@@ -23,6 +23,12 @@ struct SpvStats {
   std::size_t ray_query_initialize_after{0};
   std::size_t ray_query_getter_before{0};
   std::size_t ray_query_getter_after{0};
+  std::size_t cooperative_matrix_load_before{0};
+  std::size_t cooperative_matrix_load_after{0};
+  std::size_t cooperative_matrix_mul_add_before{0};
+  std::size_t cooperative_matrix_mul_add_after{0};
+  std::size_t cooperative_matrix_store_before{0};
+  std::size_t cooperative_matrix_store_after{0};
   std::size_t function_variable_before{0};
   std::size_t function_variable_after{0};
   std::size_t phi_before{0};

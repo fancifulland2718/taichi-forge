@@ -164,6 +164,7 @@ int var_counter_ = 0;
 
 PRIM(i32)
 PRIM(i64)
+PRIM(f16)
 PRIM(f32)
 PRIM(f64)
 PRIM(u32)
@@ -171,6 +172,7 @@ PRIM(u64)
 DataType i32_void = i32;
 DataType i32_ptr = TypeFactory::get_instance().get_pointer_type(i32, false);
 DataType u32_ptr = TypeFactory::get_instance().get_pointer_type(u32, false);
+DataType f16_ptr = TypeFactory::get_instance().get_pointer_type(f16, false);
 DataType f32_ptr = TypeFactory::get_instance().get_pointer_type(f32, false);
 
 #undef PRIM
@@ -413,6 +415,8 @@ void Operations::init_internals() {
        {i32, "front_face"}});
   PLAIN_OP(vulkan_ray_query_closest, ray_hit_struct, false, f32_ptr, f32, f32,
            f32, f32, f32, f32, f32, f32, u32, u32);
+  PLAIN_OP(vulkan_cooperative_matrix_mma_f16_f32, i32_void, false, f16_ptr,
+           f16_ptr, f32_ptr, f32_ptr, i32, i32, i32, i32, i32);
 
 #undef POLY_OP
 #undef PLAIN_OP

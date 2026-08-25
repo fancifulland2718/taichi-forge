@@ -45,7 +45,8 @@ enum class TypeKind {
   kFunc,
   kImage,
   kAccelerationStructure,
-  kRayQuery
+  kRayQuery,
+  kCooperativeMatrix
 };
 
 // Represent the SPIRV Type
@@ -424,6 +425,24 @@ class IRBuilder {
                           const DataType &result_type,
                           std::uint32_t result_member_mask);
 
+  SType cooperative_matrix_type(const SType &component_type,
+                                std::uint32_t rows,
+                                std::uint32_t columns,
+                                spv::CooperativeMatrixUse use);
+  Value cooperative_matrix_load(const SType &matrix_type,
+                                Value pointer,
+                                spv::CooperativeMatrixLayout layout,
+                                std::uint32_t stride);
+  Value cooperative_matrix_mul_add(const SType &result_type,
+                                   Value a,
+                                   Value b,
+                                   Value c,
+                                   spv::CooperativeMatrixOperandsMask operands);
+  void cooperative_matrix_store(Value pointer,
+                                Value object,
+                                spv::CooperativeMatrixLayout layout,
+                                std::uint32_t stride);
+
   Value sample_texture(Value texture_var,
                        const std::vector<Value> &args,
                        Value lod);
@@ -683,6 +702,7 @@ class IRBuilder {
   SType t_v2_fp32_;
   SType t_acceleration_structure_;
   SType t_ray_query_;
+  std::unordered_map<std::string, SType> cooperative_matrix_types_;
   Value gl_global_invocation_id_;
   Value gl_local_invocation_id_;
   Value gl_num_work_groups_;

@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <mutex>
 
 #include "taichi/codegen/codegen_utils.h"
@@ -73,6 +74,9 @@ SpvStatsState &spv_stats_state() {
 struct DiagnosticOpcodeCounts {
   std::size_t ray_query_initialize{0};
   std::size_t ray_query_getter{0};
+  std::size_t cooperative_matrix_load{0};
+  std::size_t cooperative_matrix_mul_add{0};
+  std::size_t cooperative_matrix_store{0};
   std::size_t function_variable{0};
   std::size_t phi{0};
 };
@@ -105,6 +109,12 @@ DiagnosticOpcodeCounts count_diagnostic_opcodes(
     const auto op = static_cast<spv::Op>(header & 0xffffu);
     counts.ray_query_initialize += op == spv::OpRayQueryInitializeKHR ? 1 : 0;
     counts.ray_query_getter += is_ray_query_getter(op) ? 1 : 0;
+    counts.cooperative_matrix_load +=
+        op == spv::OpCooperativeMatrixLoadKHR ? 1 : 0;
+    counts.cooperative_matrix_mul_add +=
+        op == spv::OpCooperativeMatrixMulAddKHR ? 1 : 0;
+    counts.cooperative_matrix_store +=
+        op == spv::OpCooperativeMatrixStoreKHR ? 1 : 0;
     counts.phi += op == spv::OpPhi ? 1 : 0;
     if (op == spv::OpVariable && word_count >= 4 &&
         words[offset + 3] == spv::StorageClassFunction) {
@@ -161,6 +171,12 @@ std::string spv_stats_task_to_json(const SpvStats &s) {
       "\"ray_query_initialize_before\":{},"
       "\"ray_query_initialize_after\":{},"
       "\"ray_query_getter_before\":{},\"ray_query_getter_after\":{},"
+      "\"cooperative_matrix_load_before\":{},"
+      "\"cooperative_matrix_load_after\":{},"
+      "\"cooperative_matrix_mul_add_before\":{},"
+      "\"cooperative_matrix_mul_add_after\":{},"
+      "\"cooperative_matrix_store_before\":{},"
+      "\"cooperative_matrix_store_after\":{},"
       "\"function_variable_before\":{},\"function_variable_after\":{},"
       "\"phi_before\":{},\"phi_after\":{},"
       "\"duration_us\":{:.3f},\"is_listgen\":{},\"is_pointer\":{},"
@@ -170,6 +186,10 @@ std::string spv_stats_task_to_json(const SpvStats &s) {
       s.opt_run ? "true" : "false", s.opt_ok ? "true" : "false",
       s.ray_query_initialize_before, s.ray_query_initialize_after,
       s.ray_query_getter_before, s.ray_query_getter_after,
+      s.cooperative_matrix_load_before, s.cooperative_matrix_load_after,
+      s.cooperative_matrix_mul_add_before,
+      s.cooperative_matrix_mul_add_after, s.cooperative_matrix_store_before,
+      s.cooperative_matrix_store_after,
       s.function_variable_before, s.function_variable_after, s.phi_before,
       s.phi_after, s.opt_us,
       s.listgen_related ? "true" : "false",
@@ -3499,6 +3519,32 @@ class TaskCodegen : public IRVisitor {
     ir_->register_value(name, var);
   }
 
+  void visit(ExternalTensorBasePtrStmt *stmt) override {
+    const bool uses_physical_storage =
+        caps_->get(DeviceCapability::spirv_has_physical_storage_buffer);
+    const int ndarray_ptr_slot =
+        stmt->is_grad ? TypeFactory::GRAD_PTR_POS_IN_NDARRAY
+                      : TypeFactory::DATA_PTR_POS_IN_NDARRAY;
+    if (uses_physical_storage) {
+      std::vector<int> indices = stmt->arg_id;
+      indices.push_back(ndarray_ptr_slot);
+      auto address_ptr = ir_->make_access_chain(
+          ir_->get_pointer_type(ir_->u64_type(), spv::StorageClassUniform),
+          get_buffer_value(BufferType::Args, PrimitiveType::i32), indices);
+      ir_->register_value(stmt->raw_name(),
+                          ir_->load_variable(address_ptr, ir_->u64_type()));
+    } else {
+      ir_->register_value(stmt->raw_name(),
+                          ir_->int_immediate_number(ir_->i32_type(), 0));
+    }
+
+    std::vector<int> ext_arr_id = stmt->arg_id;
+    if (uses_physical_storage || stmt->is_grad) {
+      ext_arr_id.push_back(ndarray_ptr_slot);
+    }
+    ptr_to_buffers_[stmt] = {BufferType::ExtArr, ext_arr_id};
+  }
+
   void visit(ExternalPtrStmt *stmt) override {
     // Used mostly for transferring data between host (e.g. numpy array) and
     // device.
@@ -4282,6 +4328,101 @@ class TaskCodegen : public IRVisitor {
       val = ir_->ray_query_closest(
           ir_->query_value(stmt->args[0]->raw_name()), args, stmt->ret_type,
           ray_query_result_masks_.at(stmt));
+    } else if (stmt->func_name ==
+               "vulkan_cooperative_matrix_mma_f16_f32") {
+      TI_ERROR_IF(
+          !caps_->get(DeviceCapability::spirv_has_cooperative_matrix),
+          "Vulkan cooperative-matrix MMA is unavailable on this device.");
+      TI_ERROR_IF(stmt->args.size() != 9,
+                  "Vulkan cooperative-matrix MMA expects nine operands.");
+      for (std::size_t index = 0; index < 4; ++index) {
+        TI_ERROR_IF(!stmt->args[index]->is<ExternalTensorBasePtrStmt>(),
+                    "Vulkan cooperative-matrix operands must be compact "
+                    "matrix-element ndarrays.");
+      }
+      TI_ERROR_IF(!stmt->args[4]->is<LoopIndexStmt>(),
+                  "Vulkan cooperative-matrix lane must be the direct range "
+                  "loop index.");
+      const auto constant_i32 = [&](std::size_t index,
+                                    const char *name) -> std::int32_t {
+        TI_ERROR_IF(!stmt->args[index]->is<ConstStmt>(),
+                    "Vulkan cooperative-matrix {} must be compile-time "
+                    "constant.",
+                    name);
+        return stmt->args[index]->as<ConstStmt>()->val.val_int32();
+      };
+      const std::int32_t m = constant_i32(5, "M");
+      const std::int32_t n = constant_i32(6, "N");
+      const std::int32_t k = constant_i32(7, "K");
+      const std::int32_t subgroup_size = constant_i32(8, "subgroup size");
+      TI_ERROR_IF(m <= 0 || n <= 0 || k <= 0 || subgroup_size <= 0,
+                  "Vulkan cooperative-matrix dimensions and subgroup size "
+                  "must be positive.");
+
+      auto *offloaded = stmt->parent ? stmt->parent->parent_stmt() : nullptr;
+      TI_ERROR_IF(offloaded == nullptr || !offloaded->is<OffloadedStmt>() ||
+                      offloaded->as<OffloadedStmt>()->task_type !=
+                          OffloadedTaskType::range_for,
+                  "Vulkan cooperative-matrix MMA must be a top-level dense "
+                  "range-loop operation.");
+      auto *range = offloaded->as<OffloadedStmt>();
+      TI_ERROR_IF(!range->const_begin || range->begin_value != 0 ||
+                      !range->const_end ||
+                      range->end_value % subgroup_size != 0 ||
+                      range->block_dim % subgroup_size != 0,
+                  "Vulkan cooperative-matrix range must start at zero and "
+                  "have compile-time length and block_dim divisible by the "
+                  "device subgroup size {}.",
+                  subgroup_size);
+
+      const auto lane = ir_->query_value(stmt->args[4]->raw_name());
+      const auto tile_index = ir_->div(
+          lane, ir_->int_immediate_number(ir_->i32_type(), subgroup_size));
+      const auto byte_offset = [&](std::int64_t bytes_per_tile) {
+        TI_ERROR_IF(bytes_per_tile > (std::numeric_limits<std::int32_t>::max)(),
+                    "Vulkan cooperative-matrix tile byte size overflow.");
+        return ir_->mul(
+            tile_index,
+            ir_->int_immediate_number(ir_->i32_type(), bytes_per_tile));
+      };
+
+      mark_pointer_access(stmt->args[0], BufferBind::kAccessRead);
+      mark_pointer_access(stmt->args[1], BufferBind::kAccessRead);
+      mark_pointer_access(stmt->args[2], BufferBind::kAccessRead);
+      mark_pointer_access(stmt->args[3], BufferBind::kAccessWrite);
+      const auto a_pointer = at_buffer(
+          stmt->args[0], PrimitiveType::f16,
+          byte_offset(static_cast<std::int64_t>(m) * k * sizeof(std::uint16_t)));
+      const auto b_pointer = at_buffer(
+          stmt->args[1], PrimitiveType::f16,
+          byte_offset(static_cast<std::int64_t>(k) * n * sizeof(std::uint16_t)));
+      const auto c_pointer = at_buffer(
+          stmt->args[2], PrimitiveType::f32,
+          byte_offset(static_cast<std::int64_t>(m) * n * sizeof(float)));
+      const auto output_pointer = at_buffer(
+          stmt->args[3], PrimitiveType::f32,
+          byte_offset(static_cast<std::int64_t>(m) * n * sizeof(float)));
+
+      const auto a_type = ir_->cooperative_matrix_type(
+          ir_->f16_type(), m, k, spv::CooperativeMatrixUseMatrixAKHR);
+      const auto b_type = ir_->cooperative_matrix_type(
+          ir_->f16_type(), k, n, spv::CooperativeMatrixUseMatrixBKHR);
+      const auto accumulator_type = ir_->cooperative_matrix_type(
+          ir_->f32_type(), m, n,
+          spv::CooperativeMatrixUseMatrixAccumulatorKHR);
+      const auto a = ir_->cooperative_matrix_load(
+          a_type, a_pointer, spv::CooperativeMatrixLayoutRowMajorKHR, k);
+      const auto b = ir_->cooperative_matrix_load(
+          b_type, b_pointer, spv::CooperativeMatrixLayoutRowMajorKHR, n);
+      const auto c = ir_->cooperative_matrix_load(
+          accumulator_type, c_pointer,
+          spv::CooperativeMatrixLayoutRowMajorKHR, n);
+      const auto result = ir_->cooperative_matrix_mul_add(
+          accumulator_type, a, b, c,
+          spv::CooperativeMatrixOperandsMaskNone);
+      ir_->cooperative_matrix_store(
+          output_pointer, result, spv::CooperativeMatrixLayoutRowMajorKHR, n);
+      val = ir_->const_i32_zero_;
     } else if (stmt->func_name == "composite_extract_0") {
       val = ir_->make_value(spv::OpCompositeExtract, ir_->f32_type(),
                             ir_->query_value(stmt->args[0]->raw_name()), 0);
@@ -7667,6 +7808,17 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       stats.ray_query_initialize_after = after_counts.ray_query_initialize;
       stats.ray_query_getter_before = before_counts.ray_query_getter;
       stats.ray_query_getter_after = after_counts.ray_query_getter;
+      stats.cooperative_matrix_load_before =
+          before_counts.cooperative_matrix_load;
+      stats.cooperative_matrix_load_after = after_counts.cooperative_matrix_load;
+      stats.cooperative_matrix_mul_add_before =
+          before_counts.cooperative_matrix_mul_add;
+      stats.cooperative_matrix_mul_add_after =
+          after_counts.cooperative_matrix_mul_add;
+      stats.cooperative_matrix_store_before =
+          before_counts.cooperative_matrix_store;
+      stats.cooperative_matrix_store_after =
+          after_counts.cooperative_matrix_store;
       stats.function_variable_before = before_counts.function_variable;
       stats.function_variable_after = after_counts.function_variable;
       stats.phi_before = before_counts.phi;

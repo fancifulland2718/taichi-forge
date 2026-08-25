@@ -842,6 +842,7 @@ struct VulkanCapabilities {
   bool acceleration_structure{false};
   bool ray_query{false};
   bool cooperative_matrix{false};
+  std::uint32_t subgroup_size{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;
 };

@@ -1010,6 +1010,19 @@ def _passive_core_statuses(runtime_initialized, backend):
         if cooperative_matrix_available
         else ()
     )
+    cooperative_matrix_executable = any(
+        (
+            item["a_type"],
+            item["b_type"],
+            item["c_type"],
+            item["result_type"],
+        )
+        == (0, 0, 1, 1)
+        and item["scope"] == 3
+        and not item["saturating_accumulation"]
+        and item["subgroup_size"] > 0
+        for item in cooperative_matrix_properties
+    )
     ray_facts = {
         "provider_available": ray_available,
         "capability_query": "active_vulkan_feature_chain",
@@ -1069,13 +1082,26 @@ def _passive_core_statuses(runtime_initialized, backend):
             },
         },
         "matrix.mma.vulkan": {
-            "available": cooperative_matrix_available,
+            "available": cooperative_matrix_executable,
             "native_facts": {
                 "provider_available": cooperative_matrix_available,
                 "capability_query": (
                     "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR"
                 ),
-                "operation_requirements_evaluated": False,
+                "operation_requirements_evaluated": True,
+                "executable_f16_f32_tuple_count": sum(
+                    (
+                        item["a_type"],
+                        item["b_type"],
+                        item["c_type"],
+                        item["result_type"],
+                    )
+                    == (0, 0, 1, 1)
+                    and item["scope"] == 3
+                    and not item["saturating_accumulation"]
+                    and item["subgroup_size"] > 0
+                    for item in cooperative_matrix_properties
+                ),
                 "supported_tuples": cooperative_matrix_properties,
             },
         },
