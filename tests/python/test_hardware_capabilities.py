@@ -101,7 +101,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         operations[0].backends[0] = "cpu"
     with pytest.raises(ValueError, match="unqualified implementations"):
         replace(
-            ti.hardware.capability("matrix.mma.vulkan"),
+            ti.hardware.capability("ray.query.batch.optix"),
             hardware_acceleration="qualified",
         )
     with pytest.raises(ValueError, match="load_mode must match"):
@@ -421,9 +421,23 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "kernel calls remain unsupported" in matrix.notes[0]
 
     vulkan_matrix = ti.hardware.capability("matrix.mma.vulkan")
-    assert vulkan_matrix.implementation_status == "planned"
+    assert vulkan_matrix.implementation_status == "existing_public"
+    assert vulkan_matrix.hardware_acceleration == "qualified"
+    assert vulkan_matrix.scopes == ("kernel",)
+    assert vulkan_matrix.graph_integration == "inline"
+    assert vulkan_matrix.dtypes == (
+        "a:f16",
+        "b:f16",
+        "c:f32",
+        "output:f32",
+    )
+    assert vulkan_matrix.numeric_contracts == (
+        "output=A*B+C",
+        "f16_inputs:f32_accumulate",
+    )
     assert "tuple enumeration" in vulkan_matrix.requirements[1]
-    assert "rather than copying" in vulkan_matrix.notes[1]
+    assert "instead of copying" in vulkan_matrix.notes[1]
+    assert "NVIDIA Vulkan" in vulkan_matrix.notes[2]
 
     optix = ti.hardware.capability("ray.query.batch.optix")
     assert optix.implementation_status == "planned"
@@ -548,17 +562,27 @@ def test_static_hardware_descriptor_serialization_is_plain_and_complete():
     assert payload["schema_version"] == 4
     assert payload["operation_id"] == descriptor.operation_id
     assert "tuple enumeration" in payload["requirements"][1]
-    assert payload["hardware_acceleration"] == "implementation_defined"
-    assert payload["implementation_status"] == "planned"
+    assert payload["hardware_acceleration"] == "qualified"
+    assert payload["implementation_status"] == "existing_public"
     assert payload["activation_mode"] == "explicit_kernel_intrinsic"
     assert payload["graph_integration"] == "inline"
     assert "graph_support" not in payload
     assert payload["load_mode"] == "built_in"
-    assert payload["resource_effects"] == ()
+    assert payload["resource_effects"] == (
+        "read:a",
+        "read:b",
+        "read:c",
+        "write:output",
+    )
     assert payload["lifetime_policy"] == "runtime_generation"
     assert payload["update_policy"] == "immutable"
-    assert payload["dtypes"] == ()
-    assert payload["deterministic"] is None
+    assert payload["dtypes"] == (
+        "a:f16",
+        "b:f16",
+        "c:f32",
+        "output:f32",
+    )
+    assert payload["deterministic"] is False
     assert payload["fallback_provider"] is None
     assert payload["fallback_equivalent"] is None
 
@@ -586,12 +610,14 @@ def test_vulkan_cooperative_matrix_properties_are_exact_admission_tuples():
         "result_type",
         "scope",
         "saturating_accumulation",
+        "subgroup_size",
         "supported_stages",
     }
     for item in properties:
         assert set(item) == required
         assert item["m"] > 0 and item["n"] > 0 and item["k"] > 0
         assert item["scope"] in (1, 2, 3, 5)
+        assert item["subgroup_size"] > 0
         assert item["supported_stages"] & 0x20  # VK_SHADER_STAGE_COMPUTE_BIT
 
     resolved = next(
@@ -601,9 +627,25 @@ def test_vulkan_cooperative_matrix_properties_are_exact_admission_tuples():
     )
     assert resolved.native_facts["provider_available"] == available
     assert tuple(resolved.native_facts["supported_tuples"]) == properties
-    # CM-A reports the native feature without claiming an executable operation.
-    assert resolved.selection == "rejected"
-    assert resolved.unavailable_reason == "implementation_planned"
+    executable = tuple(
+        item
+        for item in properties
+        if (
+            item["a_type"],
+            item["b_type"],
+            item["c_type"],
+            item["result_type"],
+        )
+        == (0, 0, 1, 1)
+        and item["scope"] == 3
+        and not item["saturating_accumulation"]
+    )
+    assert resolved.native_facts["operation_requirements_evaluated"] is True
+    assert resolved.native_facts["executable_f16_f32_tuple_count"] == len(executable)
+    assert resolved.selection == ("eligible" if executable else "rejected")
+    assert resolved.unavailable_reason == (
+        "none" if executable else "hardware_requirement_not_met"
+    )
 
 
 def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch):
