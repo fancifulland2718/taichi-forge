@@ -297,6 +297,12 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
     const auto &key = kv.first;
     const auto &parameter = kv.second;
     if (parameter.is_array) {
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kTexture) {
+        // Texture objects are generation-qualified host resources. CUDA Graph
+        // capture does not yet retain or rebind that resource identity.
+        return false;
+      }
       const auto arr_sz = ctx.array_runtime_sizes[key];
       if (arr_sz == 0) {
         continue;
@@ -791,6 +797,18 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
     const auto &key = kv.first;
     const auto &parameter = kv.second;
     if (parameter.is_array) {
+      if (ctx.device_allocation_type[key] ==
+          LaunchContextBuilder::DevAllocType::kTexture) {
+        const auto found = ctx.array_ptrs.find(key);
+        TI_ERROR_IF(found == ctx.array_ptrs.end() || found->second == nullptr,
+                    "CUDA texture argument resolved to a null resource");
+        const auto texture_object =
+            *static_cast<const std::uint64_t *>(found->second);
+        TI_ERROR_IF(texture_object == 0,
+                    "CUDA texture argument resolved to a null texture object");
+        ctx.set_struct_arg<std::uint64_t>(key, texture_object);
+        continue;
+      }
       const auto arr_sz = ctx.array_runtime_sizes[key];
       // Note: both numpy and PyTorch support arrays/tensors with zeros
       // in shapes, e.g., shape=(0) or shape=(100, 0, 200). This makes

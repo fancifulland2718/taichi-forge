@@ -28,6 +28,7 @@ typedef struct CUuuid_st {
   char bytes[16];
 } CUuuid;
 using CUsurfObject = uint64_t;
+using CUtexObject = uint64_t;
 using CUstream = void *;
 using CUgraph = void *;
 using CUgraphExec = void *;
@@ -61,6 +62,25 @@ typedef enum CUarray_format_enum {
   CU_AD_FORMAT_FLOAT = 0x20           /**< 32-bit floating point */
 } CUarray_format;
 
+typedef enum CUmemorytype_enum {
+  CU_MEMORYTYPE_HOST = 0x01,
+  CU_MEMORYTYPE_DEVICE = 0x02,
+  CU_MEMORYTYPE_ARRAY = 0x03,
+  CU_MEMORYTYPE_UNIFIED = 0x04
+} CUmemorytype;
+
+typedef enum CUaddress_mode_enum {
+  CU_TR_ADDRESS_MODE_WRAP = 0,
+  CU_TR_ADDRESS_MODE_CLAMP = 1,
+  CU_TR_ADDRESS_MODE_MIRROR = 2,
+  CU_TR_ADDRESS_MODE_BORDER = 3
+} CUaddress_mode;
+
+typedef enum CUfilter_mode_enum {
+  CU_TR_FILTER_MODE_POINT = 0,
+  CU_TR_FILTER_MODE_LINEAR = 1
+} CUfilter_mode;
+
 typedef enum CUfunction_attribute_enum {
   CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK = 0,
   CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES = 1,
@@ -93,6 +113,36 @@ typedef struct CUDA_ARRAY3D_DESCRIPTOR_st {
   unsigned int NumChannels; /**< Channels per array element */
   unsigned int Flags;       /**< Flags */
 } CUDA_ARRAY3D_DESCRIPTOR;
+
+typedef struct CUDA_MEMCPY3D_st {
+  size_t srcXInBytes;
+  size_t srcY;
+  size_t srcZ;
+  size_t srcLOD;
+  CUmemorytype srcMemoryType;
+  const void *srcHost;
+  CUdeviceptr srcDevice;
+  CUarray srcArray;
+  void *reserved0;
+  size_t srcPitch;
+  size_t srcHeight;
+
+  size_t dstXInBytes;
+  size_t dstY;
+  size_t dstZ;
+  size_t dstLOD;
+  CUmemorytype dstMemoryType;
+  void *dstHost;
+  CUdeviceptr dstDevice;
+  CUarray dstArray;
+  void *reserved1;
+  size_t dstPitch;
+  size_t dstHeight;
+
+  size_t WidthInBytes;
+  size_t Height;
+  size_t Depth;
+} CUDA_MEMCPY3D;
 
 /**
  * CUDA Resource descriptor
@@ -128,6 +178,19 @@ typedef struct CUDA_RESOURCE_DESC_st {
 
   unsigned int flags; /**< Flags (must be zero) */
 } CUDA_RESOURCE_DESC;
+
+typedef struct CUDA_TEXTURE_DESC_st {
+  CUaddress_mode addressMode[3];
+  CUfilter_mode filterMode;
+  unsigned int flags;
+  unsigned int maxAnisotropy;
+  CUfilter_mode mipmapFilterMode;
+  float mipmapLevelBias;
+  float minMipmapLevelClamp;
+  float maxMipmapLevelClamp;
+  float borderColor[4];
+  int reserved[12];
+} CUDA_TEXTURE_DESC;
 
 typedef enum CUexternalMemoryHandleType_enum {
   /**

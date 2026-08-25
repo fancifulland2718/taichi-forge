@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "taichi/inc/constants.h"
@@ -47,6 +48,10 @@ class TI_DLL_EXPORT Texture {
 
   intptr_t get_device_allocation_ptr_as_int() const;
 
+  bool is_cuda_texture() const noexcept;
+
+  std::uint64_t get_cuda_texture_object() const;
+
   void from_ndarray(Ndarray *ndarray);
 
   void from_snode(SNode *snode);
@@ -74,6 +79,8 @@ class TI_DLL_EXPORT Texture {
   }
 
  private:
+  struct CudaTextureResource;
+
   friend class Program;
 
   void bind_runtime_resource_handle(RuntimeResourceHandle handle) noexcept {
@@ -81,12 +88,15 @@ class TI_DLL_EXPORT Texture {
   }
 
   DeviceAllocation texture_alloc_{kDeviceNullAllocation};
+  std::unique_ptr<CudaTextureResource> cuda_texture_;
   DataType dtype_;
   BufferFormat format_;
   int num_channels_{4};
   int width_;
   int height_;
   int depth_;
+  ImageDimension dimension_{ImageDimension::d2D};
+  ImageSamplerConfig sampler_config_;
 
   Program *prog_{nullptr};
   // Immutable after Program registry publication. Kernel/Graph/GGUI binding

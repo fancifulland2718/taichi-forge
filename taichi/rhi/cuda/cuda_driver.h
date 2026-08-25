@@ -67,6 +67,7 @@ constexpr uint32 CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING = 41;
 constexpr uint32 CUDA_SUCCESS = 0;
 constexpr uint32 CU_MEMORYTYPE_DEVICE = 2;
 constexpr uint32 CU_LIMIT_STACK_SIZE = 0;
+constexpr uint32 CU_TRSF_NORMALIZED_COORDINATES = 0x02;
 
 std::string get_cuda_error_message(uint32 err);
 
@@ -107,6 +108,9 @@ inline bool driver_symbol_enabled(CUDADriverProvider provider,
          cuda_symbol.rfind("cuDestroyExternal", 0) != 0 &&
          cuda_symbol.rfind("cuExternalMemory", 0) != 0 &&
          cuda_symbol.rfind("cuMipmappedArray", 0) != 0 &&
+         cuda_symbol.rfind("cuArray", 0) != 0 &&
+         cuda_symbol.rfind("cuTexObject", 0) != 0 &&
+         cuda_symbol.rfind("cuMemcpy3D", 0) != 0 &&
          cuda_symbol.rfind("cuSurfObject", 0) != 0 &&
          cuda_symbol.rfind("cuSignalExternal", 0) != 0 &&
          cuda_symbol.rfind("cuWaitExternal", 0) != 0;

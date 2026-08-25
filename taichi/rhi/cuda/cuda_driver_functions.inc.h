@@ -27,6 +27,7 @@ PER_CUDA_FUNCTION(stream_destroy, cuStreamDestroy_v2, void *);
 PER_CUDA_FUNCTION(memcpy_host_to_device, cuMemcpyHtoD_v2, void *, void *, std::size_t);
 PER_CUDA_FUNCTION(memcpy_device_to_host, cuMemcpyDtoH_v2, void *, void *, std::size_t);
 PER_CUDA_FUNCTION(memcpy_device_to_device, cuMemcpyDtoD_v2, void *, void *, std::size_t);
+PER_CUDA_FUNCTION(memcpy_3d, cuMemcpy3D_v2, const CUDA_MEMCPY3D *);
 PER_CUDA_FUNCTION(memcpy_host_to_device_async, cuMemcpyHtoDAsync_v2, void *, void *, std::size_t, void *);
 PER_CUDA_FUNCTION(memcpy_device_to_host_async, cuMemcpyDtoHAsync_v2, void *, void *, std::size_t, void *);
 PER_CUDA_FUNCTION(malloc, cuMemAlloc_v2, void **, std::size_t);
@@ -42,6 +43,10 @@ PER_CUDA_FUNCTION(mem_advise, cuMemAdvise, void *, std::size_t, uint32, uint32);
 PER_CUDA_FUNCTION(mem_get_info, cuMemGetInfo_v2, std::size_t *, std::size_t *);
 PER_CUDA_FUNCTION(mem_get_attribute, cuPointerGetAttribute, void *, uint32, void *);
 PER_CUDA_FUNCTION(mem_pool_set_attribute, cuMemPoolSetAttribute, void *, uint32, void *);
+PER_CUDA_FUNCTION(array_3d_create, cuArray3DCreate_v2, CUarray *, const CUDA_ARRAY3D_DESCRIPTOR *);
+PER_CUDA_FUNCTION(array_destroy, cuArrayDestroy, CUarray);
+PER_CUDA_FUNCTION(tex_object_create, cuTexObjectCreate, CUtexObject *, const CUDA_RESOURCE_DESC *, const CUDA_TEXTURE_DESC *, const void *);
+PER_CUDA_FUNCTION(tex_object_destroy, cuTexObjectDestroy, CUtexObject);
 
 // Module and kernels
 PER_CUDA_FUNCTION(module_get_function, cuModuleGetFunction, void **, void *, const char *);
