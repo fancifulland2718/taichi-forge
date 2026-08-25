@@ -309,6 +309,10 @@ def _parent(args):
             "retention": {
                 "scope": "declared_timed_scope",
                 "minimum_paired_p05_exclusive": qualification.RETENTION_MINIMUM_PAIRED_SPEEDUP,
+                "architecture_minimum_paired_p05_inclusive": (
+                    qualification.RETENTION_ARCHITECTURE_MINIMUM_PAIRED_SPEEDUP
+                ),
+                "architecture_benefit_must_be_machine_verified": True,
                 "cv_and_order_drift_are_diagnostic": True,
                 "raw_minimum_is_diagnostic": True,
             },

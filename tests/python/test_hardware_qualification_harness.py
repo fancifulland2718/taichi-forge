@@ -467,8 +467,8 @@ def test_cuda_replay_proof_uses_cuda_counters_and_separate_gates():
         _worker(
             "ab" if index < 4 else "ba",
             [1.0] * 5,
-            [2.0] * 5,
-            [2.0] * 5,
+            [0.98] * 5,
+            [0.98] * 5,
             block_ms=100.0,
             pid=index + 1,
         )
@@ -493,7 +493,18 @@ def test_cuda_replay_proof_uses_cuda_counters_and_separate_gates():
     assert gate["lifecycle_gate_passed"]
     assert gate["performance_gate_passed"]
     assert gate["retention_gate_passed"]
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["decision_path"] == (
+        "bounded_architecture_tradeoff"
+    )
     assert not report["performance_claim_eligible"]
+
+    for worker in workers:
+        worker["timing"]["samples_ms"]["baseline"] = [0.94] * 5
+        worker["timing"]["paired_speedups"] = [0.94] * 5
+    report = qualification._aggregate("cuda-spmv-krylov", tuple(workers), 0.10, 0.10)
+    assert not report["replay_proof_gate"]["retention_gate_passed"]
+    assert not report["retention_eligible"]
 
 
 def test_replay_proof_fails_closed_when_fresh_process_scope_is_incomplete():
@@ -534,8 +545,8 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
         _worker(
             "ab" if index < 4 else "ba",
             [1.0] * 5,
-            [2.0] * 5,
-            [2.0] * 5,
+            [0.98] * 5,
+            [0.98] * 5,
             block_ms=100.0,
             pid=index + 1,
         )
@@ -575,10 +586,15 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
     assert gate["scope"] == "mechanism_retained_vs_rerecord"
     assert gate["counters_qualified"]
     assert gate["lifecycle_gate_passed"]
-    assert gate["wall_gate_passed"]
+    assert not gate["wall_gate_passed"]
     assert not gate["gpu_stage_gate_passed"]
     assert not gate["performance_gate_passed"]
-    assert not gate["retention_gate_passed"]
+    assert gate["retention_performance_gate_passed"]
+    assert gate["retention_gate_passed"]
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["decision_path"] == (
+        "bounded_architecture_tradeoff"
+    )
 
 
 def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():

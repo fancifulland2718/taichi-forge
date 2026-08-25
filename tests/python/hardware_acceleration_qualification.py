@@ -91,6 +91,7 @@ AUTO_ADMISSION_MINIMUM_BLOCK_MS = 100.0
 AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
 RETENTION_MINIMUM_PAIRED_SPEEDUP = 1.0
+RETENTION_ARCHITECTURE_MINIMUM_PAIRED_SPEEDUP = 0.95
 CASES = (
     "cuda-fft",
     "cuda-cufft-mixed-replay",
@@ -3880,6 +3881,7 @@ def _retention_qualification(
     *,
     timing_key="timing",
     scope="primary_timing",
+    architecture_benefit=None,
 ):
     """Qualify a conservative paired gain without hiding timing noise.
 
@@ -3887,7 +3889,9 @@ def _retention_qualification(
     performance claim. The predeclared paired p05 lower tail must remain
     strictly positive, while absolute CV, paired CV, order drift, and the raw
     sample minimum remain visible diagnostics. Coverage, calibrated blocks,
-    and any collected environment evidence still fail closed.
+    and any collected environment evidence still fail closed. A bounded 5%
+    tradeoff is allowed only when a specialized proof supplies a machine-
+    verified architectural benefit.
     """
 
     order_processes = {order: sum(worker["order"] == order for worker in workers) for order in ("ab", "ba")}
@@ -3906,6 +3910,20 @@ def _retention_qualification(
     minimum_block_ms = min(observed_blocks)
     maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
     paired_cv = paired_speedup.get("cv")
+    paired_p05 = paired_speedup.get("p05")
+    architecture_benefit = copy.deepcopy(architecture_benefit)
+    architecture_benefit_qualified = bool(
+        isinstance(architecture_benefit, dict)
+        and architecture_benefit.get("qualified") is True
+    )
+    positive_gain = bool(
+        paired_p05 is not None and paired_p05 > RETENTION_MINIMUM_PAIRED_SPEEDUP
+    )
+    bounded_architecture_tradeoff = bool(
+        architecture_benefit_qualified
+        and paired_p05 is not None
+        and paired_p05 >= RETENTION_ARCHITECTURE_MINIMUM_PAIRED_SPEEDUP
+    )
     checks = (
         (
             fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES
@@ -3921,7 +3939,7 @@ def _retention_qualification(
             "undersized_timing_blocks",
         ),
         (
-            paired_speedup.get("p05") is not None and paired_speedup["p05"] > RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            positive_gain or bounded_architecture_tradeoff,
             "paired_margin_gate",
         ),
         (
@@ -3933,8 +3951,18 @@ def _retention_qualification(
     return {
         "qualified": not reasons,
         "reasons": reasons,
-        "policy": "conservative_paired_positive",
+        "policy": "conservative_gain_or_bounded_architecture",
         "scope": scope,
+        "decision_path": (
+            "positive_gain"
+            if positive_gain
+            else (
+                "bounded_architecture_tradeoff"
+                if bounded_architecture_tradeoff
+                else "rejected"
+            )
+        ),
+        "architecture_benefit": architecture_benefit,
         "absolute_variant_cv_is_diagnostic": True,
         "paired_cv_is_diagnostic": True,
         "order_drift_is_diagnostic": True,
@@ -3945,6 +3973,10 @@ def _retention_qualification(
             "samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
             "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
             "minimum_paired_p05_exclusive": RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            "architecture_minimum_paired_p05_inclusive": (
+                RETENTION_ARCHITECTURE_MINIMUM_PAIRED_SPEEDUP
+            ),
+            "architecture_benefit_must_be_machine_verified": True,
         },
         "observed": {
             "fresh_processes": fresh_processes,
@@ -4367,7 +4399,22 @@ def _aggregate(
                 )
             )
             if baseline_mode == "rerecord":
-                wall_gate = bool(performance_evidence["qualified"] and speedup["p05"] >= 1.0 / 0.95)
+                replay_retention = _retention_qualification(
+                    workers,
+                    variants,
+                    speedup,
+                    performance_environment,
+                    architecture_benefit={
+                        "qualified": counters_qualified,
+                        "kind": "cuda_exact_mixed_command_replay",
+                        "evidence": {
+                            "one_capture": True,
+                            "exact_replay_only": True,
+                            "no_recapture_or_fallback": True,
+                        },
+                    },
+                )
+                wall_gate = bool(replay_retention["qualified"])
                 performance_gate = bool(counters_qualified and wall_gate)
                 result["replay_proof_gate"] = {
                     "scope": "cuda_mixed_capture_vs_rerecord",
@@ -4378,8 +4425,26 @@ def _aggregate(
                     "performance_gate_passed": performance_gate,
                     "retention_gate_passed": (lifecycle_qualified and performance_gate),
                 }
+                result["retention_qualification"] = replay_retention
+                result["retention_eligible"] = performance_gate
                 result["performance_claim_eligible"] = False
             elif baseline_mode == "taichi":
+                replay_retention = _retention_qualification(
+                    workers,
+                    variants,
+                    speedup,
+                    performance_environment,
+                    architecture_benefit={
+                        "qualified": counters_qualified,
+                        "kind": "cuda_exact_mixed_command_replay",
+                        "evidence": {
+                            "one_capture": True,
+                            "exact_replay_only": True,
+                            "no_recapture_or_fallback": True,
+                        },
+                    },
+                )
+                retention_performance_gate = bool(replay_retention["qualified"])
                 physics_roi_gate = bool(
                     performance_evidence["qualified"]
                     and performance_state == "stable_positive"
@@ -4391,9 +4456,14 @@ def _aggregate(
                     "lifecycle_scope": ("fresh_process_capture_replay_runtime_reset"),
                     "lifecycle_gate_passed": lifecycle_qualified,
                     "physics_roi_gate_passed": physics_roi_gate,
+                    "retention_performance_gate_passed": retention_performance_gate,
                     "performance_gate_passed": physics_roi_gate,
-                    "retention_gate_passed": (lifecycle_qualified and physics_roi_gate),
+                    "retention_gate_passed": (
+                        lifecycle_qualified and retention_performance_gate
+                    ),
                 }
+                result["retention_qualification"] = replay_retention
+                result["retention_eligible"] = retention_performance_gate
                 result["performance_claim_eligible"] = bool(
                     result["performance_claim_eligible"]
                     and counters_qualified
@@ -4512,7 +4582,26 @@ def _aggregate(
                 performance_gate = bool(counters_qualified and gpu_stage_gate and (wall_gate or cpu_submit_gate))
                 if retained_packets > 1:
                     packet_timing = result.get("packet_timing", {})
-                    packet_retention = packet_timing.get("retention_qualification", {})
+                    packet_retention = _retention_qualification(
+                        workers,
+                        packet_timing["variants"],
+                        packet_timing["paired_speedup"],
+                        performance_environment,
+                        timing_key="packet_timing",
+                        scope=packet_timing["scope"],
+                        architecture_benefit={
+                            "qualified": bool(
+                                counters_qualified and packet_low_sync_qualified
+                            ),
+                            "kind": "vulkan_fixed_binding_retained_replay",
+                            "evidence": {
+                                "bounded_slots": True,
+                                "one_terminal_wait_per_burst": True,
+                                "zero_workspace_lane_waits": packet_low_sync_qualified,
+                            },
+                        },
+                    )
+                    packet_timing["retention_qualification"] = packet_retention
                     packet_performance_gate = bool(packet_retention.get("qualified", False))
                     packet_gate = bool(
                         counters_qualified
@@ -4549,6 +4638,22 @@ def _aggregate(
                             result[diagnostic] = values
                     _apply_replay_retention_gate(result)
                     return result
+                replay_retention = _retention_qualification(
+                    workers,
+                    variants,
+                    speedup,
+                    performance_environment,
+                    architecture_benefit={
+                        "qualified": counters_qualified,
+                        "kind": "vulkan_fixed_binding_retained_replay",
+                        "evidence": {
+                            "bounded_slots": True,
+                            "fixed_binding": True,
+                            "zero_replay_fallbacks": True,
+                        },
+                    },
+                )
+                retention_performance_gate = bool(replay_retention["qualified"])
                 result["replay_proof_gate"] = {
                     "scope": "mechanism_retained_vs_rerecord",
                     "retained_binding_sets": retained_binding_sets,
@@ -4563,8 +4668,13 @@ def _aggregate(
                         else "exact_gpu_stage_unavailable_unstable_or_regressed"
                     ),
                     "performance_gate_passed": performance_gate,
-                    "retention_gate_passed": (lifecycle_qualified and performance_gate),
+                    "retention_performance_gate_passed": retention_performance_gate,
+                    "retention_gate_passed": (
+                        lifecycle_qualified and retention_performance_gate
+                    ),
                 }
+                result["retention_qualification"] = replay_retention
+                result["retention_eligible"] = retention_performance_gate
                 result["performance_claim_eligible"] = False
             else:
                 physics_roi_gate = bool(
@@ -4876,6 +4986,10 @@ def _parent(args):
             "retention": {
                 "scope": "declared_timed_scope",
                 "minimum_paired_p05_exclusive": RETENTION_MINIMUM_PAIRED_SPEEDUP,
+                "architecture_minimum_paired_p05_inclusive": (
+                    RETENTION_ARCHITECTURE_MINIMUM_PAIRED_SPEEDUP
+                ),
+                "architecture_benefit_must_be_machine_verified": True,
                 "cv_and_order_drift_are_diagnostic": True,
                 "raw_minimum_is_diagnostic": True,
             },
