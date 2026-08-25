@@ -1676,6 +1676,11 @@ def _cuda_spmv_krylov_case(order, args):
         }
     )
     ti.reset()
+    if result["replay_proof"]["enabled"]:
+        result["replay_proof"]["lifecycle"] = {
+            "scope": "fresh_process_capture_replay_runtime_reset",
+            "runtime_reset_completed": True,
+        }
     return result
 
 
@@ -3961,87 +3966,227 @@ def _aggregate(
             "non_regression_gate_passed": gpu_non_regression,
             "gate_passed": gpu_stable and gpu_non_regression,
         }
-    replay_workers = [
-        worker["replay_proof"]
-        for worker in workers
-        if worker.get("replay_proof", {}).get("enabled")
+    replay_proofs = [worker.get("replay_proof") for worker in workers]
+    enabled_replay_proofs = [
+        proof for proof in replay_proofs if proof is not None and proof.get("enabled")
     ]
-    if replay_workers:
-        baseline_mode = replay_workers[0]["baseline_mode"]
-        retained_binding_sets = int(workers[0]["workload"]["retained_binding_sets"])
-        counters_qualified = all(
-            proof["runtime_statistics"]["retained_replay_prewarms"]
-            == retained_binding_sets
-            and proof["runtime_statistics"]["retained_replay_records"]
-            == retained_binding_sets
-            and proof["runtime_statistics"]["retained_replay_replays"] > 0
-            and proof["runtime_statistics"]["retained_replay_busy_fallbacks"] == 0
-            and proof["runtime_statistics"]["retained_replay_submit_failures"] == 0
-            and proof["runtime_statistics"]["retained_replay_bridge_failures"] == 0
-            and proof["runtime_statistics"]["retained_replay_slots"]
-            == retained_binding_sets
-            and proof["runtime_statistics"]["retained_replay_slot_capacity"]
-            >= retained_binding_sets
-            for proof in replay_workers
-        )
-        lifecycle_qualified = bool(
-            counters_qualified
-            and all(
-                worker["memory"]["pipeline_closed"]["lifecycle_state"] == "closed"
-                and all(
-                    binding["hardware_nonempty"]
-                    and binding["rerecord_exact_image_match"] is True
-                    for binding in worker["correctness"]["binding_sets"]
-                )
-                for worker in workers
-            )
-        )
-        if baseline_mode == "rerecord":
-            wall_gate = bool(
-                performance_evidence["qualified"] and speedup["p05"] >= 1.0 / 0.95
-            )
-            cpu_submit_gate = bool(
-                result.get("submit_timing", {}).get("gate_passed", False)
-            )
-            gpu_stage_gate = bool(
-                result.get("gpu_stage_timing", {}).get("gate_passed", False)
-            )
-            performance_gate = bool(
-                counters_qualified and gpu_stage_gate and (wall_gate or cpu_submit_gate)
-            )
+    if enabled_replay_proofs:
+        replay_backends = {worker.get("backend") for worker in workers}
+        baseline_modes = {
+            proof.get("baseline_mode") for proof in enabled_replay_proofs
+        }
+        if (
+            len(enabled_replay_proofs) != len(workers)
+            or len(replay_backends) != 1
+            or len(baseline_modes) != 1
+        ):
             result["replay_proof_gate"] = {
-                "scope": "mechanism_retained_vs_rerecord",
-                "retained_binding_sets": retained_binding_sets,
-                "counters_qualified": counters_qualified,
-                "lifecycle_gate_passed": lifecycle_qualified,
-                "wall_gate_passed": wall_gate,
-                "cpu_submit_gate_passed": cpu_submit_gate,
-                "gpu_stage_gate_passed": gpu_stage_gate,
-                "gpu_stage_gate_reason": (
-                    "qualified_exact_non_regression"
-                    if gpu_stage_gate
-                    else "exact_gpu_stage_unavailable_unstable_or_regressed"
-                ),
-                "performance_gate_passed": performance_gate,
-                "retention_gate_passed": lifecycle_qualified and performance_gate,
+                "scope": "unqualified_replay_proof",
+                "gate_reason": "incomplete_or_mixed_worker_scope",
+                "counters_qualified": False,
+                "lifecycle_gate_passed": False,
+                "performance_gate_passed": False,
+                "retention_gate_passed": False,
             }
             result["performance_claim_eligible"] = False
+        elif replay_backends == {"cuda"}:
+            baseline_mode = next(iter(baseline_modes))
+            counters_qualified = all(
+                proof.get("graph_statistics") is not None
+                and proof["graph_statistics"].get(
+                    "diagnostics_counters_complete", False
+                )
+                and proof["graph_statistics"].get("backend") == "cuda"
+                and proof["graph_statistics"].get("capture_attempts") == 1
+                and proof["graph_statistics"].get("captures") == 1
+                and proof["graph_statistics"].get("exact_replays", 0) > 0
+                and proof["graph_statistics"].get("patched_replays") == 0
+                and proof["graph_statistics"].get("recaptures") == 0
+                and proof["graph_statistics"].get("ordinary_fallbacks") == 0
+                and proof["graph_statistics"].get("transient_failures") == 0
+                and proof["graph_statistics"].get("capture_exceptions") == 0
+                and proof["graph_statistics"].get("last_path")
+                == "cuda_exact_replay"
+                and proof["graph_statistics"].get(
+                    "backend_replay_signature_slots"
+                )
+                == 1
+                and proof["graph_statistics"].get(
+                    "backend_replay_signature_slot_capacity", 0
+                )
+                >= 1
+                for proof in enabled_replay_proofs
+            )
+            lifecycle_qualified = bool(
+                counters_qualified
+                and all(
+                    proof.get("lifecycle", {}).get("runtime_reset_completed")
+                    is True
+                    for proof in enabled_replay_proofs
+                )
+            )
+            if baseline_mode == "rerecord":
+                wall_gate = bool(
+                    performance_evidence["qualified"]
+                    and speedup["p05"] >= 1.0 / 0.95
+                )
+                performance_gate = bool(counters_qualified and wall_gate)
+                result["replay_proof_gate"] = {
+                    "scope": "cuda_mixed_capture_vs_rerecord",
+                    "counters_qualified": counters_qualified,
+                    "lifecycle_scope": (
+                        "fresh_process_capture_replay_runtime_reset"
+                    ),
+                    "lifecycle_gate_passed": lifecycle_qualified,
+                    "wall_gate_passed": wall_gate,
+                    "performance_gate_passed": performance_gate,
+                    "retention_gate_passed": (
+                        lifecycle_qualified and performance_gate
+                    ),
+                }
+                result["performance_claim_eligible"] = False
+            elif baseline_mode == "taichi":
+                physics_roi_gate = bool(
+                    performance_evidence["qualified"]
+                    and performance_state == "stable_positive"
+                    and speedup["p05"] > 1.0
+                )
+                result["replay_proof_gate"] = {
+                    "scope": "cuda_mixed_capture_vs_software",
+                    "counters_qualified": counters_qualified,
+                    "lifecycle_scope": (
+                        "fresh_process_capture_replay_runtime_reset"
+                    ),
+                    "lifecycle_gate_passed": lifecycle_qualified,
+                    "physics_roi_gate_passed": physics_roi_gate,
+                    "performance_gate_passed": physics_roi_gate,
+                    "retention_gate_passed": (
+                        lifecycle_qualified and physics_roi_gate
+                    ),
+                }
+                result["performance_claim_eligible"] = bool(
+                    result["performance_claim_eligible"]
+                    and counters_qualified
+                    and lifecycle_qualified
+                    and physics_roi_gate
+                )
+            else:
+                result["replay_proof_gate"] = {
+                    "scope": "unqualified_replay_proof",
+                    "gate_reason": "unsupported_cuda_baseline",
+                    "counters_qualified": counters_qualified,
+                    "lifecycle_gate_passed": lifecycle_qualified,
+                    "performance_gate_passed": False,
+                    "retention_gate_passed": False,
+                }
+                result["performance_claim_eligible"] = False
+        elif replay_backends == {"vulkan"}:
+            baseline_mode = next(iter(baseline_modes))
+            retained_binding_sets = int(
+                workers[0]["workload"]["retained_binding_sets"]
+            )
+            counters_qualified = all(
+                proof.get("runtime_statistics") is not None
+                and proof["runtime_statistics"].get("retained_replay_prewarms")
+                == retained_binding_sets
+                and proof["runtime_statistics"].get("retained_replay_records")
+                == retained_binding_sets
+                and proof["runtime_statistics"].get("retained_replay_replays", 0)
+                > 0
+                and proof["runtime_statistics"].get(
+                    "retained_replay_busy_fallbacks"
+                )
+                == 0
+                and proof["runtime_statistics"].get(
+                    "retained_replay_submit_failures"
+                )
+                == 0
+                and proof["runtime_statistics"].get(
+                    "retained_replay_bridge_failures"
+                )
+                == 0
+                and proof["runtime_statistics"].get("retained_replay_slots")
+                == retained_binding_sets
+                and proof["runtime_statistics"].get(
+                    "retained_replay_slot_capacity", 0
+                )
+                >= retained_binding_sets
+                for proof in enabled_replay_proofs
+            )
+            lifecycle_qualified = bool(
+                counters_qualified
+                and all(
+                    worker["memory"]["pipeline_closed"]["lifecycle_state"]
+                    == "closed"
+                    and all(
+                        binding["hardware_nonempty"]
+                        and binding["rerecord_exact_image_match"] is True
+                        for binding in worker["correctness"]["binding_sets"]
+                    )
+                    for worker in workers
+                )
+            )
+            if baseline_mode == "rerecord":
+                wall_gate = bool(
+                    performance_evidence["qualified"]
+                    and speedup["p05"] >= 1.0 / 0.95
+                )
+                cpu_submit_gate = bool(
+                    result.get("submit_timing", {}).get("gate_passed", False)
+                )
+                gpu_stage_gate = bool(
+                    result.get("gpu_stage_timing", {}).get("gate_passed", False)
+                )
+                performance_gate = bool(
+                    counters_qualified
+                    and gpu_stage_gate
+                    and (wall_gate or cpu_submit_gate)
+                )
+                result["replay_proof_gate"] = {
+                    "scope": "mechanism_retained_vs_rerecord",
+                    "retained_binding_sets": retained_binding_sets,
+                    "counters_qualified": counters_qualified,
+                    "lifecycle_gate_passed": lifecycle_qualified,
+                    "wall_gate_passed": wall_gate,
+                    "cpu_submit_gate_passed": cpu_submit_gate,
+                    "gpu_stage_gate_passed": gpu_stage_gate,
+                    "gpu_stage_gate_reason": (
+                        "qualified_exact_non_regression"
+                        if gpu_stage_gate
+                        else "exact_gpu_stage_unavailable_unstable_or_regressed"
+                    ),
+                    "performance_gate_passed": performance_gate,
+                    "retention_gate_passed": (
+                        lifecycle_qualified and performance_gate
+                    ),
+                }
+                result["performance_claim_eligible"] = False
+            else:
+                physics_roi_gate = bool(
+                    performance_evidence["qualified"]
+                    and performance_state == "stable_positive"
+                    and speedup["p05"] > 1.0
+                )
+                result["replay_proof_gate"] = {
+                    "scope": "physics_retained_vs_software",
+                    "counters_qualified": counters_qualified,
+                    "physics_roi_gate_passed": physics_roi_gate,
+                }
+                result["performance_claim_eligible"] = bool(
+                    result["performance_claim_eligible"]
+                    and counters_qualified
+                    and physics_roi_gate
+                )
         else:
-            physics_roi_gate = bool(
-                performance_evidence["qualified"]
-                and performance_state == "stable_positive"
-                and speedup["p05"] > 1.0
-            )
             result["replay_proof_gate"] = {
-                "scope": "physics_retained_vs_software",
-                "counters_qualified": counters_qualified,
-                "physics_roi_gate_passed": physics_roi_gate,
+                "scope": "unqualified_replay_proof",
+                "gate_reason": "unsupported_replay_backend",
+                "counters_qualified": False,
+                "lifecycle_gate_passed": False,
+                "performance_gate_passed": False,
+                "retention_gate_passed": False,
             }
-            result["performance_claim_eligible"] = bool(
-                result["performance_claim_eligible"]
-                and counters_qualified
-                and physics_roi_gate
-            )
+            result["performance_claim_eligible"] = False
     for diagnostic in ("memory", "provider_statistics", "replay_proof"):
         values = [worker[diagnostic] for worker in workers if diagnostic in worker]
         if values:

@@ -74,7 +74,7 @@ def _evidence_record():
 
 def _artifact(record=None):
     return {
-        "schema": "taichi_forge.hardware_acceleration_qualification.v4",
+        "schema": "taichi_forge.hardware_acceleration_qualification.v5",
         "cases": [
             {
                 "case": "cuda-spmv",

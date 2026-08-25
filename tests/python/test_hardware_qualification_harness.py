@@ -171,6 +171,150 @@ def test_aggregate_allows_claim_after_formal_fresh_process_coverage():
     assert report["performance_claim_eligible"]
 
 
+def _cuda_replay_graph_statistics():
+    return {
+        "diagnostics_counters_complete": True,
+        "backend": "cuda",
+        "capture_attempts": 1,
+        "captures": 1,
+        "exact_replays": 39,
+        "patched_replays": 0,
+        "recaptures": 0,
+        "ordinary_fallbacks": 0,
+        "transient_failures": 0,
+        "capture_exceptions": 0,
+        "last_path": "cuda_exact_replay",
+        "backend_replay_signature_slots": 1,
+        "backend_replay_signature_slot_capacity": 2,
+    }
+
+
+def test_cuda_replay_proof_uses_cuda_counters_and_separate_gates():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker["replay_proof"] = {
+            "enabled": True,
+            "baseline_mode": "rerecord",
+            "graph_statistics": _cuda_replay_graph_statistics(),
+            "lifecycle": {
+                "scope": "fresh_process_capture_replay_runtime_reset",
+                "runtime_reset_completed": True,
+            },
+        }
+
+    report = qualification._aggregate(
+        "cuda-spmv-krylov", tuple(workers), 0.10, 0.10
+    )
+
+    gate = report["replay_proof_gate"]
+    assert gate["scope"] == "cuda_mixed_capture_vs_rerecord"
+    assert gate["counters_qualified"]
+    assert gate["lifecycle_gate_passed"]
+    assert gate["performance_gate_passed"]
+    assert gate["retention_gate_passed"]
+    assert not report["performance_claim_eligible"]
+
+
+def test_replay_proof_fails_closed_when_fresh_process_scope_is_incomplete():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers[:-1]:
+        worker["replay_proof"] = {
+            "enabled": True,
+            "baseline_mode": "taichi",
+            "graph_statistics": _cuda_replay_graph_statistics(),
+            "lifecycle": {"runtime_reset_completed": True},
+        }
+
+    report = qualification._aggregate(
+        "cuda-spmv-krylov", tuple(workers), 0.10, 0.10
+    )
+
+    assert report["replay_proof_gate"] == {
+        "scope": "unqualified_replay_proof",
+        "gate_reason": "incomplete_or_mixed_worker_scope",
+        "counters_qualified": False,
+        "lifecycle_gate_passed": False,
+        "performance_gate_passed": False,
+        "retention_gate_passed": False,
+    }
+    assert not report["performance_claim_eligible"]
+
+
+def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker["backend"] = "vulkan"
+        worker["workload"]["retained_binding_sets"] = 1
+        worker["correctness"] = {
+            "binding_sets": [
+                {
+                    "hardware_nonempty": True,
+                    "rerecord_exact_image_match": True,
+                }
+            ]
+        }
+        worker["memory"] = {
+            "pipeline_closed": {"lifecycle_state": "closed"}
+        }
+        worker["replay_proof"] = {
+            "enabled": True,
+            "baseline_mode": "rerecord",
+            "runtime_statistics": {
+                "retained_replay_prewarms": 1,
+                "retained_replay_records": 1,
+                "retained_replay_replays": 39,
+                "retained_replay_busy_fallbacks": 0,
+                "retained_replay_submit_failures": 0,
+                "retained_replay_bridge_failures": 0,
+                "retained_replay_slots": 1,
+                "retained_replay_slot_capacity": 1,
+            },
+        }
+
+    report = qualification._aggregate(
+        "vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10
+    )
+
+    gate = report["replay_proof_gate"]
+    assert gate["scope"] == "mechanism_retained_vs_rerecord"
+    assert gate["counters_qualified"]
+    assert gate["lifecycle_gate_passed"]
+    assert gate["wall_gate_passed"]
+    assert not gate["gpu_stage_gate_passed"]
+    assert not gate["performance_gate_passed"]
+    assert not gate["retention_gate_passed"]
+
+
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():
     workers = (
         _worker("ab", [1.0] * 5, [2.0] * 5, [2.0] * 5),
