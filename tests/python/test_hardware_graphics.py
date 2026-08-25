@@ -150,6 +150,19 @@ def _bindless_triangle_pipeline(*, descriptor_count=4):
     )
 
 
+def _mesh_triangle_pipeline(*, task_shader=False):
+    shader_dir = Path(__file__).parent / "assets"
+    return ti.hardware.graphics.VulkanMeshPipeline(
+        (shader_dir / "hardware_graphics_mesh.mesh.spv").read_bytes(),
+        _spirv_header("2_triangle.frag.spv.h"),
+        task_spirv=(
+            (shader_dir / "hardware_graphics_mesh.task.spv").read_bytes()
+            if task_shader
+            else None
+        ),
+    )
+
+
 def _triangle_vertices():
     vertices = ti.ndarray(ti.f32, shape=(15,))
     vertices.from_numpy(
@@ -333,6 +346,8 @@ def test_vulkan_graphics_contract_rejects_non_vulkan_runtime():
     assert not ti.hardware.graphics.is_available()
     assert not ti.hardware.graphics.is_bindless_buffer_available()
     assert not any(ti.hardware.graphics.bindless_buffer_capabilities().values())
+    assert not ti.hardware.graphics.is_mesh_shader_available()
+    assert not any(ti.hardware.graphics.mesh_shader_capabilities().values())
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
         _triangle_pipeline()
     with pytest.raises(ValueError, match="positive uint32"):
@@ -390,6 +405,111 @@ def test_vulkan_bindless_buffer_feature_report_keeps_axes_independent():
     assert operation.native_facts["max_bindless_storage_buffer_fixed_count"] == min(
         capabilities["max_fixed_count"], 64
     )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_mesh_shader_feature_report_keeps_task_and_limits_independent():
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+    capabilities = dict(ti.hardware.graphics.mesh_shader_capabilities())
+    assert set(capabilities) == {
+        "mesh_shader",
+        "task_shader",
+        "max_task_group_count_x",
+        "max_task_group_count_y",
+        "max_task_group_count_z",
+        "max_task_group_total_count",
+        "max_task_group_invocations",
+        "max_mesh_group_count_x",
+        "max_mesh_group_count_y",
+        "max_mesh_group_count_z",
+        "max_mesh_group_total_count",
+        "max_mesh_group_invocations",
+        "max_mesh_output_vertices",
+        "max_mesh_output_primitives",
+    }
+    if capabilities["mesh_shader"]:
+        assert capabilities["max_mesh_group_count_x"] > 0
+        assert capabilities["max_mesh_group_count_y"] > 0
+        assert capabilities["max_mesh_group_count_z"] > 0
+        assert capabilities["max_mesh_group_total_count"] > 0
+        assert capabilities["max_mesh_output_vertices"] >= 3
+        assert capabilities["max_mesh_output_primitives"] >= 1
+    if capabilities["task_shader"]:
+        assert capabilities["mesh_shader"]
+        assert capabilities["max_task_group_total_count"] > 0
+
+    operation = next(
+        item
+        for item in ti.hardware.report().operations
+        if item.descriptor.operation_id == "raster.mesh_tasks.vulkan"
+    )
+    assert operation.native_facts["mesh_shader"] == bool(capabilities["mesh_shader"])
+    assert operation.native_facts["task_shader"] == bool(capabilities["task_shader"])
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_mesh_shader_executes_directly_and_through_graph():
+    if not ti.hardware.graphics.is_mesh_shader_available():
+        pytest.skip("Vulkan mesh shaders are unavailable")
+
+    with _mesh_triangle_pipeline() as pipeline:
+        with pytest.raises(TypeError, match="MeshDraw"):
+            pipeline.pass_draw(ti.hardware.graphics.Draw(3))
+        draw = pipeline.pass_draw(ti.hardware.graphics.MeshDraw(1, 1, 1))
+        recording = pipeline.record_pass((draw,), color="target")
+        assert tuple(
+            (effect.resource, effect.access) for effect in recording.resource_effects
+        ) == (("target", GraphAccess.WRITE),)
+
+        direct = ti.Texture(ti.Format.rgba8, (64, 64))
+        recording.execute({"target": direct})
+        ti.sync()
+        assert _texture_rgb(direct)[32, 32].max() > 32
+
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(recording, admission="auto")
+        graph = builder.compile()
+        target = ti.Texture(ti.Format.rgba8, (64, 64))
+        graph.run({"target": target})
+        ti.sync()
+        assert _texture_rgb(target)[32, 32].max() > 32
+        assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
+
+        capabilities = ti.hardware.graphics.mesh_shader_capabilities()
+        if capabilities["max_mesh_group_count_x"] < 0xFFFFFFFF:
+            oversized = pipeline.record_pass(
+                (
+                    pipeline.pass_draw(
+                        ti.hardware.graphics.MeshDraw(
+                            capabilities["max_mesh_group_count_x"] + 1, 1, 1
+                        )
+                    ),
+                ),
+                color="target",
+            )
+            with pytest.raises(RuntimeError, match="group counts exceed"):
+                oversized.execute({"target": target})
+
+    telemetry = ti.hardware.telemetry()
+    operation = telemetry.operations["raster.mesh_tasks.vulkan"]
+    assert operation.executed >= 2
+    assert operation.executed_backend_commands >= 2
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_task_mesh_pipeline_uses_independent_task_admission():
+    if not ti.hardware.graphics.is_mesh_shader_available(task_shader=True):
+        pytest.skip("Vulkan task shaders are unavailable")
+
+    with _mesh_triangle_pipeline(task_shader=True) as pipeline:
+        recording = pipeline.record_pass(
+            (pipeline.pass_draw(ti.hardware.graphics.MeshDraw()),), color="target"
+        )
+        target = ti.Texture(ti.Format.rgba8, (64, 64))
+        recording.execute({"target": target})
+        ti.sync()
+        assert _texture_rgb(target)[32, 32].max() > 32
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

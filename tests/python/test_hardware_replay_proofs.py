@@ -467,6 +467,75 @@ def test_vulkan_bindless_retained_replay_owns_table_generations(monkeypatch):
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_mesh_retained_replay_lifecycle_and_memory(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    if not ti.hardware.graphics.is_mesh_shader_available():
+        pytest.skip("Vulkan mesh shaders are unavailable")
+
+    from tests.python.test_hardware_graphics import _mesh_triangle_pipeline
+
+    pipeline = _mesh_triangle_pipeline()
+    target = ti.Texture(ti.Format.rgba8, (64, 64))
+    recording = pipeline.record_pass(
+        (pipeline.pass_draw(ti.hardware.graphics.MeshDraw()),), color="target"
+    )
+    assert recording._experimental_retained_replay
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="explicit")
+    graph = builder.compile()
+    bindings = {"target": target}
+    program = ti.lang.impl.get_runtime().prog
+    before = dict(program._debug_vulkan_graphics_resource_stats())
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-mesh-retained-replay", ("vulkan-graphics",)
+    )
+    replay_count = 1_000 if process_memory.enabled else 3
+    process_memory.capture("before")
+    for replay_index in range(replay_count):
+        graph.run(bindings)
+        ti.sync()
+        if replay_index == replay_count // 2 - 1:
+            process_memory.capture("midpoint")
+    process_memory.capture("after")
+    process_memory.finish(replay_count)
+    fixed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert fixed["retained_replay_prewarms"] - before["retained_replay_prewarms"] == 1
+    assert fixed["retained_replay_records"] - before["retained_replay_records"] == 1
+    assert (
+        fixed["retained_replay_replays"] - before["retained_replay_replays"]
+        == replay_count - 2
+    )
+    assert fixed["retained_replay_slots"] == 1
+    assert fixed["retained_replay_slot_capacity"] == 2
+    assert fixed["retained_replay_submit_failures"] == 0
+
+    tickets = [graph.submit(bindings) for _ in range(2)]
+    pipeline.close()
+    tickets[-1].wait()
+    tickets[0].wait()
+    closing = dict(program._debug_vulkan_graphics_resource_stats())
+    assert closing["retained_replay_slots"] == 0
+    assert closing["live"] == 0
+    with pytest.raises(RuntimeError, match="closed"):
+        graph.run(bindings)
+
+    reset_pipeline = _mesh_triangle_pipeline()
+    reset_recording = reset_pipeline.record_pass(
+        (reset_pipeline.pass_draw(ti.hardware.graphics.MeshDraw()),), color="target"
+    )
+    reset_builder = ti.graph.GraphBuilder()
+    reset_builder.append_native(reset_recording, admission="explicit")
+    reset_graph = reset_builder.compile()
+    reset_target = ti.Texture(ti.Format.rgba8, (32, 32))
+    reset_graph.run({"target": reset_target})
+    ti.sync()
+    ti.reset()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset|previous ti.init"):
+        reset_graph.run({"target": reset_target})
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
     monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
     if not ti.hardware.graphics.is_available():
