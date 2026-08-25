@@ -401,6 +401,19 @@ void Operations::init_internals() {
   POLY_OP(subgroupInclusiveOr, false, Signature({}, {ValueT}, ValueT));
   POLY_OP(subgroupInclusiveXor, false, Signature({}, {ValueT}, ValueT));
 
+  const auto *ray_hit_struct = TypeFactory::get_instance().get_struct_type(
+      {{i32, "hit"},
+       {f32, "t"},
+       {u32, "primitive_index"},
+       {u32, "instance_id"},
+       {u32, "instance_custom_index"},
+       {u32, "geometry_index"},
+       {f32, "barycentric_u"},
+       {f32, "barycentric_v"},
+       {i32, "front_face"}});
+  PLAIN_OP(vulkan_ray_query_closest, ray_hit_struct, false, f32_ptr, f32, f32,
+           f32, f32, f32, f32, f32, f32, u32, u32);
+
 #undef POLY_OP
 #undef PLAIN_OP
 }

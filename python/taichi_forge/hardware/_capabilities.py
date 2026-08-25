@@ -1051,6 +1051,15 @@ def _passive_core_statuses(runtime_initialized, backend):
             "available": ray_available,
             "native_facts": ray_facts,
         },
+        "ray.query.inline.vulkan": {
+            "available": ray_available,
+            "native_facts": {
+                **ray_facts,
+                "scope": "jit_kernel_intrinsic",
+                "aot_supported": False,
+                "graph_resource_argument_supported": False,
+            },
+        },
     }
 
 

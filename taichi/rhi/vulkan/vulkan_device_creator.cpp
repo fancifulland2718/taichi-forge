@@ -1047,6 +1047,7 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         pNextEnd = &ray_query_feature.pNext;
         ti_device_->vk_caps().acceleration_structure = true;
         ti_device_->vk_caps().ray_query = true;
+        caps.set(DeviceCapability::spirv_has_ray_query, true);
       }
     }
 

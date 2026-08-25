@@ -84,6 +84,7 @@ PER_STATEMENT(InternalFuncStmt)
 
 PER_STATEMENT(TexturePtrStmt)
 PER_STATEMENT(TextureOpStmt)
+PER_STATEMENT(AccelerationStructurePtrStmt)
 
 // Quantization
 PER_STATEMENT(BitStructStoreStmt)

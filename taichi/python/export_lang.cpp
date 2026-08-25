@@ -615,6 +615,19 @@ void export_lang(py::module &m) {
       item["snode_id"] = s.snode_id;
       item["word_before"] = py::int_(s.before_words);
       item["word_after"] = py::int_(s.after_words);
+      item["ray_query_initialize_before"] =
+          py::int_(s.ray_query_initialize_before);
+      item["ray_query_initialize_after"] =
+          py::int_(s.ray_query_initialize_after);
+      item["ray_query_getter_before"] =
+          py::int_(s.ray_query_getter_before);
+      item["ray_query_getter_after"] = py::int_(s.ray_query_getter_after);
+      item["function_variable_before"] =
+          py::int_(s.function_variable_before);
+      item["function_variable_after"] =
+          py::int_(s.function_variable_after);
+      item["phi_before"] = py::int_(s.phi_before);
+      item["phi_after"] = py::int_(s.phi_after);
       item["opt_run"] = s.opt_run;
       item["opt_ok"] = s.opt_ok;
       item["duration_us"] = s.opt_us;
@@ -5675,6 +5688,8 @@ void export_lang(py::module &m) {
       .def("insert_texture_param", &Kernel::insert_texture_param)
       .def("insert_pointer_param", &Kernel::insert_pointer_param)
       .def("insert_rw_texture_param", &Kernel::insert_rw_texture_param)
+      .def("insert_acceleration_structure_param",
+           &Kernel::insert_acceleration_structure_param)
       .def("insert_argpack_param_and_push",
            &Kernel::insert_argpack_param_and_push)
       .def("pop_argpack_stack", &Kernel::pop_argpack_stack)
@@ -5738,6 +5753,8 @@ void export_lang(py::module &m) {
                                                generation});
            })
       .def("set_arg_texture", &LaunchContextBuilder::set_arg_texture)
+      .def("set_arg_acceleration_structure",
+           &LaunchContextBuilder::set_arg_acceleration_structure)
       .def("_debug_set_texture_resource_handle",
            [](LaunchContextBuilder &ctx, const std::vector<int> &arg_id,
               std::uint64_t domain, std::uint32_t kind, std::uint32_t index,
@@ -5758,6 +5775,8 @@ void export_lang(py::module &m) {
       .def("insert_texture_param", &Function::insert_texture_param)
       .def("insert_pointer_param", &Function::insert_pointer_param)
       .def("insert_rw_texture_param", &Function::insert_rw_texture_param)
+      .def("insert_acceleration_structure_param",
+           &Function::insert_acceleration_structure_param)
       .def("insert_ret", &Function::insert_ret)
       .def("set_function_body",
            py::overload_cast<const std::function<void()> &>(
@@ -5856,6 +5875,11 @@ void export_lang(py::module &m) {
   m.def("insert_internal_func_call", [&](Operation *op, const ExprGroup &args) {
     return Expr::make<InternalFuncCallExpression>(op, args.exprs);
   });
+
+  m.def("insert_materialized_internal_func_call",
+        [&](Operation *op, const ExprGroup &args) {
+          return Expr::make<InternalFuncCallExpression>(op, args.exprs, true);
+        });
 
   m.def("make_get_element_expr",
         Expr::make<GetElementExpression, const Expr &, std::vector<int>,
@@ -6028,6 +6052,9 @@ void export_lang(py::module &m) {
   m.def("make_rw_texture_ptr_expr",
         Expr::make<TexturePtrExpression, const std::vector<int> &, int, int,
                    const BufferFormat &, int, const DebugInfo &>);
+  m.def("make_acceleration_structure_ptr_expr",
+        Expr::make<AccelerationStructurePtrExpression,
+                   const std::vector<int> &, int, const DebugInfo &>);
 
   auto &&texture =
       py::enum_<TextureOpType>(m, "TextureOpType", py::arithmetic());

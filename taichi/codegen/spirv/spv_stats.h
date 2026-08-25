@@ -19,6 +19,14 @@ struct SpvStats {
   bool opt_ok{true};
   std::size_t before_words{0};
   std::size_t after_words{0};
+  std::size_t ray_query_initialize_before{0};
+  std::size_t ray_query_initialize_after{0};
+  std::size_t ray_query_getter_before{0};
+  std::size_t ray_query_getter_after{0};
+  std::size_t function_variable_before{0};
+  std::size_t function_variable_after{0};
+  std::size_t phi_before{0};
+  std::size_t phi_after{0};
   double opt_us{0.0};
   std::string skipped_passes;
 };

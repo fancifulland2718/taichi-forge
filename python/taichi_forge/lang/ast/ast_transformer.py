@@ -30,7 +30,7 @@ from taichi_forge.lang.matrix import Matrix, MatrixType, Vector
 from taichi_forge.lang.snode import append, deactivate, length
 from taichi_forge.lang.struct import Struct, StructType
 from taichi_forge.lang.util import is_taichi_class, to_taichi_type
-from taichi_forge.types import annotations, ndarray_type, primitive_types, texture_type
+from taichi_forge.types import annotations, ndarray_type, primitive_types, ray_type, texture_type
 from taichi_forge.types.utils import is_integral
 
 # Taichi requires Python >= 3.10, so ast.unparse is always available.
@@ -700,6 +700,11 @@ class ASTTransformer(Builder):
                 return False, (
                     kernel_arguments.decl_rw_texture_arg,
                     (arg_features[0], arg_features[1], arg_features[2], full_name),
+                )
+            if isinstance(annotation, ray_type.AccelerationStructureType):
+                return False, (
+                    kernel_arguments.decl_acceleration_structure_arg,
+                    (full_name,),
                 )
             if isinstance(annotation, MatrixType):
                 return True, kernel_arguments.decl_matrix_arg(annotation, name, arg_depth)

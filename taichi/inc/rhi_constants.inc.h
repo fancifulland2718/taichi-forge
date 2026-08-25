@@ -35,6 +35,7 @@ PER_DEVICE_CAPABILITY(spirv_has_subgroup_ballot)
 PER_DEVICE_CAPABILITY(spirv_has_non_semantic_info)
 PER_DEVICE_CAPABILITY(spirv_has_no_integer_wrap_decoration)
 PER_DEVICE_CAPABILITY(spirv_has_storage_image_extended_formats)
+PER_DEVICE_CAPABILITY(spirv_has_ray_query)
 // CUDA AOT target contract. Values use Taichi's compact integer spelling:
 // compute capability 8.6 is 86, and PTX ISA 7.1 is 71.
 PER_DEVICE_CAPABILITY(cuda_compute_capability)

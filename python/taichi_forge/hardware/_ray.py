@@ -770,9 +770,9 @@ class VulkanTLASRefitRecording(_VulkanTLASRecording):
 class _KernelAccelerationStructureDescriptor:
     """Generation-qualified internal contract for a kernel-visible TLAS.
 
-    This descriptor deliberately carries no query operations.  It is the
-    resource/lifetime half of inline ray query and remains private until the
-    typed IR and SPIR-V lowering are complete.
+    This descriptor deliberately carries no query operations and remains a
+    private resource/lifetime binding contract.  Kernel code sees only the
+    typed, non-escaping acceleration-structure accessor.
     """
 
     owner: object

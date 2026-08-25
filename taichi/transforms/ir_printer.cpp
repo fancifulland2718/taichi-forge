@@ -551,6 +551,12 @@ class IRPrinter : public IRVisitor {
     dbg_info_printer_(stmt);
   }
 
+  void visit(AccelerationStructurePtrStmt *stmt) override {
+    print("<*AccelerationStructure> {} = {}", stmt->name(),
+          stmt->arg_load_stmt->name());
+    dbg_info_printer_(stmt);
+  }
+
   void visit(FrontendReturnStmt *stmt) override {
     print("{}{} : return [{}]", stmt->type_hint(), stmt->name(),
           expr_group_to_string(stmt->values));

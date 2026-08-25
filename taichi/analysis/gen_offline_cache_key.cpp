@@ -101,6 +101,12 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(expr->args.exprs);
   }
 
+  void visit(AccelerationStructurePtrExpression *expr) override {
+    emit(ExprOpCode::AccelerationStructurePtrExpression);
+    emit(expr->arg_id);
+    emit(expr->arg_depth);
+  }
+
   void visit(RandExpression *expr) override {
     emit(ExprOpCode::RandExpression);
     emit(expr->dt);

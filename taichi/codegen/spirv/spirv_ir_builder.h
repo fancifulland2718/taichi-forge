@@ -43,7 +43,9 @@ enum class TypeKind {
   kStruct,
   kPtr,
   kFunc,
-  kImage
+  kImage,
+  kAccelerationStructure,
+  kRayQuery
 };
 
 // Represent the SPIRV Type
@@ -414,6 +416,14 @@ class IRBuilder {
                                uint32_t binding,
                                BufferFormat format);
 
+  Value acceleration_structure_argument(uint32_t descriptor_set,
+                                        uint32_t binding);
+
+  Value ray_query_closest(Value acceleration_structure,
+                          const std::vector<Value> &args,
+                          const DataType &result_type,
+                          std::uint32_t result_member_mask);
+
   Value sample_texture(Value texture_var,
                        const std::vector<Value> &args,
                        Value lod);
@@ -622,6 +632,7 @@ class IRBuilder {
 
  private:
   void declare_capability(spv::Capability capability);
+  void declare_extension(const std::string &extension);
   Value get_const(const SType &dtype, const uint64_t *pvalue, bool cache);
   SType declare_primitive_type(DataType dt);
 
@@ -633,7 +644,9 @@ class IRBuilder {
   // internal instruction builder
   InstrBuilder ib_;
   std::size_t capability_end_{0};
+  std::size_t extension_end_{0};
   std::unordered_set<spv::Capability> dynamic_capabilities_;
+  std::unordered_set<std::string> dynamic_extensions_;
   // Current label
   Label curr_label_;
   // The current maximum id
@@ -668,6 +681,8 @@ class IRBuilder {
   SType t_v4_fp32_;
   SType t_v3_fp32_;
   SType t_v2_fp32_;
+  SType t_acceleration_structure_;
+  SType t_ray_query_;
   Value gl_global_invocation_id_;
   Value gl_local_invocation_id_;
   Value gl_num_work_groups_;
@@ -711,6 +726,8 @@ class IRBuilder {
       sampled_image_ptr_tbl_;
   std::unordered_map<std::pair<uint32_t, int>, SType, SpirvPairHash>
       sampled_image_underlying_image_type_;
+  std::unordered_map<std::pair<const Type *, bool>, SType, SpirvPairHash>
+      taichi_struct_type_tbl_;
 
   std::unordered_map<std::pair<BufferFormat, int>, SType, SpirvPairHash>
       storage_image_ptr_tbl_;

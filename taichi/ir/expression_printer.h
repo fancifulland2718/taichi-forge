@@ -50,6 +50,11 @@ class ExpressionHumanFriendlyPrinter : public ExpressionPrinter {
     emit(")");
   }
 
+  void visit(AccelerationStructurePtrExpression *expr) override {
+    emit(fmt::format("(AccelerationStructure *)(arg[{}])",
+                     fmt::join(expr->arg_id, ", ")));
+  }
+
   void visit(RandExpression *expr) override {
     emit(fmt::format("rand<{}>()", data_type_name(expr->dt)));
   }

@@ -86,6 +86,19 @@ std::vector<int> Callable::insert_rw_texture_param(int total_dim,
   return add_parameter(p);
 }
 
+std::vector<int> Callable::insert_acceleration_structure_param(
+    const std::string &name) {
+  // Resource arguments participate in the same out-of-band runtime-array
+  // layout as textures. No device address is written into the args buffer;
+  // the Vulkan descriptor binding is resolved at submission time.
+  auto *type = TypeFactory::get_instance().get_rwtexture_struct_type();
+  auto p = Parameter(type, /*is_array=*/true, false, 0, /*total_dim=*/0,
+                     std::vector<int>{});
+  p.name = name;
+  p.ptype = ParameterType::kAccelerationStructure;
+  return add_parameter(p);
+}
+
 std::vector<int> Callable::insert_argpack_param_and_push(
     const std::string &name) {
   TI_ASSERT(temp_argpack_stack_.size() == temp_indices_stack_.size() &&

@@ -67,7 +67,8 @@ enum class ParameterType {
   kTexture,
   kRWTexture,
   kTensor,
-  kUnknown
+  kUnknown,
+  kAccelerationStructure
 };
 
 enum class ExternalArrayLayout { kAOS, kSOA, kNull };

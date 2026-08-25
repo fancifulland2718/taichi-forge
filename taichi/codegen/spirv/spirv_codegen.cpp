@@ -19,6 +19,7 @@
 #include "taichi/program/extension.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/ir.h"
+#include "taichi/ir/analysis.h"
 #include "taichi/util/line_appender.h"
 #include "taichi/codegen/spirv/kernel_utils.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
@@ -51,6 +52,8 @@ using BufferBind = TaskAttributes::BufferBind;
 using BufferInfoHasher = TaskAttributes::BufferInfoHasher;
 
 using TextureBind = TaskAttributes::TextureBind;
+using AccelerationStructureBind =
+    TaskAttributes::AccelerationStructureBind;
 
 struct SpvStatsState {
   std::mutex stats_mutex;
@@ -65,6 +68,51 @@ SpvStatsState &spv_stats_state() {
   // Python module teardown and late codegen/stat-query calls on Windows DLLs.
   static auto *state = new SpvStatsState;
   return *state;
+}
+
+struct DiagnosticOpcodeCounts {
+  std::size_t ray_query_initialize{0};
+  std::size_t ray_query_getter{0};
+  std::size_t function_variable{0};
+  std::size_t phi{0};
+};
+
+bool is_ray_query_getter(spv::Op op) {
+  switch (op) {
+    case spv::OpRayQueryGetIntersectionTypeKHR:
+    case spv::OpRayQueryGetIntersectionTKHR:
+    case spv::OpRayQueryGetIntersectionPrimitiveIndexKHR:
+    case spv::OpRayQueryGetIntersectionInstanceIdKHR:
+    case spv::OpRayQueryGetIntersectionInstanceCustomIndexKHR:
+    case spv::OpRayQueryGetIntersectionGeometryIndexKHR:
+    case spv::OpRayQueryGetIntersectionBarycentricsKHR:
+    case spv::OpRayQueryGetIntersectionFrontFaceKHR:
+      return true;
+    default:
+      return false;
+  }
+}
+
+DiagnosticOpcodeCounts count_diagnostic_opcodes(
+    const std::vector<std::uint32_t> &words) {
+  DiagnosticOpcodeCounts counts;
+  for (std::size_t offset = 5; offset < words.size();) {
+    const std::uint32_t header = words[offset];
+    const std::uint32_t word_count = header >> 16;
+    if (word_count == 0 || offset + word_count > words.size()) {
+      break;
+    }
+    const auto op = static_cast<spv::Op>(header & 0xffffu);
+    counts.ray_query_initialize += op == spv::OpRayQueryInitializeKHR ? 1 : 0;
+    counts.ray_query_getter += is_ray_query_getter(op) ? 1 : 0;
+    counts.phi += op == spv::OpPhi ? 1 : 0;
+    if (op == spv::OpVariable && word_count >= 4 &&
+        words[offset + 3] == spv::StorageClassFunction) {
+      counts.function_variable += 1;
+    }
+    offset += word_count;
+  }
+  return counts;
 }
 
 std::string json_escape(const std::string &src) {
@@ -110,11 +158,20 @@ std::string spv_stats_task_to_json(const SpvStats &s) {
       "{{\"kernel\":\"{}\",\"task_id\":{},\"task_name\":\"{}\","
       "\"type\":\"{}\",\"snode_id\":{},\"word_before\":{},"
       "\"word_after\":{},\"opt_run\":{},\"opt_ok\":{},"
+      "\"ray_query_initialize_before\":{},"
+      "\"ray_query_initialize_after\":{},"
+      "\"ray_query_getter_before\":{},\"ray_query_getter_after\":{},"
+      "\"function_variable_before\":{},\"function_variable_after\":{},"
+      "\"phi_before\":{},\"phi_after\":{},"
       "\"duration_us\":{:.3f},\"is_listgen\":{},\"is_pointer\":{},"
       "\"skipped_passes\":\"{}\"}}",
       json_escape(s.kernel_name), s.task_id, json_escape(s.task_name),
       json_escape(s.task_type), s.snode_id, s.before_words, s.after_words,
-      s.opt_run ? "true" : "false", s.opt_ok ? "true" : "false", s.opt_us,
+      s.opt_run ? "true" : "false", s.opt_ok ? "true" : "false",
+      s.ray_query_initialize_before, s.ray_query_initialize_after,
+      s.ray_query_getter_before, s.ray_query_getter_after,
+      s.function_variable_before, s.function_variable_after, s.phi_before,
+      s.phi_after, s.opt_us,
       s.listgen_related ? "true" : "false",
       s.pointer_related ? "true" : "false", json_escape(s.skipped_passes));
 }
@@ -330,6 +387,7 @@ class TaskCodegen : public IRVisitor {
     invoke_default_visitor = true;
 
     fill_snode_to_root();
+    collect_ray_query_result_masks();
     ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_);
   }
 
@@ -3281,6 +3339,14 @@ class TaskCodegen : public IRVisitor {
 
   void visit(GetElementStmt *stmt) override {
     spirv::Value val = ir_->query_value(stmt->src->raw_name());
+    if (val.stype.flag == TypeKind::kStruct) {
+      const auto element_type =
+          ir_->from_taichi_type(stmt->element_type(), false);
+      val = ir_->make_value(spv::OpCompositeExtract, element_type, val,
+                            stmt->index);
+      ir_->register_value(stmt->raw_name(), val);
+      return;
+    }
     const auto *src_struct_type =
         stmt->src->ret_type.ptr_removed()->as<::taichi::lang::StructType>();
     const size_t byte_offset = src_struct_type->get_element_offset(stmt->index);
@@ -4161,10 +4227,62 @@ class TaskCodegen : public IRVisitor {
     }
   }
 
+  void collect_ray_query_result_masks() {
+    constexpr std::uint32_t kAllRayQueryMembers = (1u << 9) - 1u;
+    const auto usages = irpass::analysis::gather_statement_usages(task_ir_);
+    const auto calls = irpass::analysis::gather_statements(
+        task_ir_, [](Stmt *stmt) {
+          const auto *call = stmt->cast<InternalFuncStmt>();
+          return call != nullptr &&
+                 call->func_name == "vulkan_ray_query_closest";
+        });
+    for (Stmt *call : calls) {
+      std::uint32_t mask = 0;
+      if (const auto found = usages.find(call); found != usages.end()) {
+        for (const auto &[user, operand_index] : found->second) {
+          const auto *element = user->cast<GetElementStmt>();
+          if (operand_index != 0 || element == nullptr ||
+              element->src != call || element->index.size() != 1 ||
+              element->index[0] < 0 || element->index[0] >= 9) {
+            mask = kAllRayQueryMembers;
+            break;
+          }
+          mask |= 1u << element->index[0];
+        }
+      }
+      ray_query_result_masks_[call] = mask;
+    }
+  }
+
+  void visit(AccelerationStructurePtrStmt *stmt) override {
+    const auto arg_id = stmt->arg_load_stmt->as<ArgLoadStmt>()->arg_id;
+    spirv::Value value;
+    if (const auto found = argid_to_acceleration_structure_value_.find(arg_id);
+        found != argid_to_acceleration_structure_value_.end()) {
+      value = found->second;
+    } else {
+      const int binding = binding_head_++;
+      value = ir_->acceleration_structure_argument(
+          /*descriptor_set=*/0, binding);
+      acceleration_structure_binds_.push_back({arg_id, binding});
+      argid_to_acceleration_structure_value_[arg_id] = value;
+    }
+    ir_->register_value(stmt->raw_name(), value);
+  }
+
   void visit(InternalFuncStmt *stmt) override {
     spirv::Value val;
 
-    if (stmt->func_name == "composite_extract_0") {
+    if (stmt->func_name == "vulkan_ray_query_closest") {
+      std::vector<spirv::Value> args;
+      args.reserve(stmt->args.size() - 1);
+      for (std::size_t index = 1; index < stmt->args.size(); ++index) {
+        args.push_back(ir_->query_value(stmt->args[index]->raw_name()));
+      }
+      val = ir_->ray_query_closest(
+          ir_->query_value(stmt->args[0]->raw_name()), args, stmt->ret_type,
+          ray_query_result_masks_.at(stmt));
+    } else if (stmt->func_name == "composite_extract_0") {
       val = ir_->make_value(spv::OpCompositeExtract, ir_->f32_type(),
                             ir_->query_value(stmt->args[0]->raw_name()), 0);
     } else if (stmt->func_name == "composite_extract_1") {
@@ -4778,6 +4896,8 @@ class TaskCodegen : public IRVisitor {
     ir_->make_inst(spv::OpFunctionEnd);
     task_attribs_.buffer_binds = get_buffer_binds();
     task_attribs_.texture_binds = get_texture_binds();
+    task_attribs_.acceleration_structure_binds =
+        get_acceleration_structure_binds();
   }
 
   void generate_serial_kernel(OffloadedStmt *stmt) {
@@ -4811,6 +4931,8 @@ class TaskCodegen : public IRVisitor {
 
     task_attribs_.buffer_binds = get_buffer_binds();
     task_attribs_.texture_binds = get_texture_binds();
+    task_attribs_.acceleration_structure_binds =
+        get_acceleration_structure_binds();
   }
 
   void gen_array_range(Stmt *stmt) {
@@ -4976,6 +5098,8 @@ class TaskCodegen : public IRVisitor {
 
     task_attribs_.buffer_binds = get_buffer_binds();
     task_attribs_.texture_binds = get_texture_binds();
+    task_attribs_.acceleration_structure_binds =
+        get_acceleration_structure_binds();
   }
 
   void generate_struct_for_kernel(OffloadedStmt *stmt) {
@@ -5130,6 +5254,8 @@ class TaskCodegen : public IRVisitor {
 
       task_attribs_.buffer_binds = get_buffer_binds();
       task_attribs_.texture_binds = get_texture_binds();
+      task_attribs_.acceleration_structure_binds =
+          get_acceleration_structure_binds();
       return;
     }
 
@@ -5192,6 +5318,8 @@ class TaskCodegen : public IRVisitor {
 
     task_attribs_.buffer_binds = get_buffer_binds();
     task_attribs_.texture_binds = get_texture_binds();
+    task_attribs_.acceleration_structure_binds =
+        get_acceleration_structure_binds();
   }
 
   // Phase 1b/1c/1d (taichi-forge 0.3.x): SPIR-V codegen for
@@ -5408,6 +5536,8 @@ class TaskCodegen : public IRVisitor {
 
       task_attribs_.buffer_binds = get_buffer_binds();
       task_attribs_.texture_binds = get_texture_binds();
+      task_attribs_.acceleration_structure_binds =
+          get_acceleration_structure_binds();
       return;
     }
 
@@ -5866,6 +5996,8 @@ class TaskCodegen : public IRVisitor {
 
     task_attribs_.buffer_binds = get_buffer_binds();
     task_attribs_.texture_binds = get_texture_binds();
+    task_attribs_.acceleration_structure_binds =
+        get_acceleration_structure_binds();
   }
 
   // -----------------------------------------------------------------
@@ -6992,6 +7124,11 @@ class TaskCodegen : public IRVisitor {
     return texture_binds_;
   }
 
+  std::vector<AccelerationStructureBind>
+  get_acceleration_structure_binds() {
+    return acceleration_structure_binds_;
+  }
+
   void push_loop_control_labels(spirv::Label continue_label,
                                 spirv::Label merge_label) {
     continue_label_stack_.push_back(continue_label);
@@ -7063,6 +7200,12 @@ class TaskCodegen : public IRVisitor {
     std::unordered_map<BufferInfo, uint32_t, BufferInfoHasher>
       buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
+  std::vector<AccelerationStructureBind> acceleration_structure_binds_;
+  std::unordered_map<std::vector<int>,
+                     spirv::Value,
+                     hashing::Hasher<std::vector<int>>>
+      argid_to_acceleration_structure_value_;
+  std::unordered_map<Stmt *, std::uint32_t> ray_query_result_masks_;
   std::vector<spirv::Value> shared_array_binds_;
   spirv::Value kernel_function_;
   spirv::Label kernel_return_label_;
@@ -7517,6 +7660,17 @@ void KernelCodegen::run(TaichiKernelAttributes &kernel_attribs,
       stats.opt_ok = opt_ok;
       stats.before_words = task_res.spirv_code.size();
       stats.after_words = optimized_spv.size();
+      const auto before_counts =
+          count_diagnostic_opcodes(task_res.spirv_code);
+      const auto after_counts = count_diagnostic_opcodes(optimized_spv);
+      stats.ray_query_initialize_before = before_counts.ray_query_initialize;
+      stats.ray_query_initialize_after = after_counts.ray_query_initialize;
+      stats.ray_query_getter_before = before_counts.ray_query_getter;
+      stats.ray_query_getter_after = after_counts.ray_query_getter;
+      stats.function_variable_before = before_counts.function_variable;
+      stats.function_variable_after = after_counts.function_variable;
+      stats.phi_before = before_counts.phi;
+      stats.phi_after = after_counts.phi;
       stats.opt_us = opt_us;
       stats.skipped_passes = task_skipped_passes_summary(
           params_.spv_opt_level, task_spv_opt_level, adaptive_quick,

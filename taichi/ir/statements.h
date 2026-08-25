@@ -1793,6 +1793,21 @@ class TextureOpStmt : public Stmt {
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 
+class AccelerationStructurePtrStmt : public Stmt {
+ public:
+  Stmt *arg_load_stmt{nullptr};
+
+  explicit AccelerationStructurePtrStmt(
+      Stmt *stmt,
+      const DebugInfo &dbg_info = DebugInfo())
+      : Stmt(dbg_info), arg_load_stmt(stmt) {
+    TI_STMT_REG_FIELDS;
+  }
+
+  TI_STMT_DEF_FIELDS(arg_load_stmt);
+  TI_DEFINE_ACCEPT_AND_CLONE
+};
+
 /**
  * A local AD-stack.
  */

@@ -4,6 +4,7 @@ import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl, ops
 from taichi_forge.lang._texture import RWTextureAccessor, TextureSampler
+from taichi_forge.lang._ray_query import AccelerationStructureAccessor
 from taichi_forge.lang.any_array import AnyArray
 from taichi_forge.lang.expr import Expr
 from taichi_forge.lang.matrix import MatrixType
@@ -196,6 +197,14 @@ def decl_rw_texture_arg(num_dimensions, buffer_format, lod, name):
         _ti_core.make_rw_texture_ptr_expr(arg_id, num_dimensions, 0, buffer_format, lod, dbg_info),
         num_dimensions,
         buffer_format,
+    )
+
+
+def decl_acceleration_structure_arg(name):
+    arg_id = impl.get_runtime().compiling_callable.insert_acceleration_structure_param(name)
+    dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+    return AccelerationStructureAccessor(
+        _ti_core.make_acceleration_structure_ptr_expr(arg_id, 0, dbg_info)
     )
 
 

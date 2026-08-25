@@ -20,6 +20,7 @@ class LaunchContextBuilder {
     kRWTexture = 3,
     kArgPack = 4,
     kDenseStorage = 5,
+    kAccelerationStructure = 6,
   };
 
   struct NdarrayResourceRef {
@@ -48,6 +49,12 @@ class LaunchContextBuilder {
     const storage::DenseStorageDescriptor *descriptor{nullptr};
     const storage::RuntimeStorageArgument *runtime_argument{nullptr};
     storage::ResolvedDenseBinding resolved;
+  };
+
+  struct AccelerationStructureResourceRef {
+    int arg_offset{-1};
+    Program *owner{nullptr};
+    std::uint64_t handle{0};
   };
 
   explicit LaunchContextBuilder(CallableBase *kernel,
@@ -162,6 +169,9 @@ class LaunchContextBuilder {
                                intptr_t alloc_ptr,
                                const std::array<int, 3> &shape);
   void set_arg_rw_texture(const std::vector<int> &arg_id, const Texture &tex);
+  void set_arg_acceleration_structure(const std::vector<int> &arg_id,
+                                      Program *owner,
+                                      std::uint64_t handle);
 
   void set_arg_matrix(int arg_id, const Matrix &matrix);
 
@@ -243,6 +253,7 @@ class LaunchContextBuilder {
   std::vector<NdarrayResourceRef> ndarray_ptrs;
   std::vector<TextureResourceRef> texture_ptrs;
   std::vector<DenseStorageResourceRef> dense_storage_ptrs;
+  std::vector<AccelerationStructureResourceRef> acceleration_structure_ptrs;
 };
 
 }  // namespace taichi::lang

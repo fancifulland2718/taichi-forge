@@ -442,11 +442,12 @@ class TypeCheck : public IRVisitor {
   }
 
   void visit(GetElementStmt *stmt) override {
-    TI_ASSERT(stmt->src->ret_type->is<PointerType>());
+    TI_ASSERT(stmt->src->ret_type.ptr_removed()->is<StructType>());
     stmt->ret_type =
         stmt->src->ret_type.ptr_removed()->as<StructType>()->get_element_type(
             stmt->index);
     if (stmt->is_ptr) {
+      TI_ASSERT(stmt->src->ret_type->is<PointerType>());
       stmt->ret_type = TypeFactory::get_instance().get_pointer_type(
           stmt->ret_type.ptr_removed());
     }

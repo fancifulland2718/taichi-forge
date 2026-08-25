@@ -225,6 +225,8 @@ void IRBuilder::init_header() {
         .commit(&entry_);
   }
 
+  extension_end_ = header_.size();
+
   this->init_pre_defs();
 }
 
@@ -237,6 +239,18 @@ void IRBuilder::declare_capability(spv::Capability capability) {
   header_.insert(header_.begin() + capability_end_, instruction.begin(),
                  instruction.end());
   capability_end_ += instruction.size();
+  extension_end_ += instruction.size();
+}
+
+void IRBuilder::declare_extension(const std::string &extension) {
+  if (!dynamic_extensions_.insert(extension).second) {
+    return;
+  }
+  std::vector<std::uint32_t> instruction;
+  ib_.begin(spv::OpExtension).add(extension).commit(&instruction);
+  header_.insert(header_.begin() + extension_end_, instruction.begin(),
+                 instruction.end());
+  extension_end_ += instruction.size();
 }
 
 std::vector<uint32_t> IRBuilder::finalize() {
@@ -463,12 +477,20 @@ SType IRBuilder::from_taichi_type(const DataType &dt, bool has_buffer_ptr) {
       return t_uint32_;
     }
   } else if (auto struct_type = dt->cast<lang::StructType>()) {
+    const auto key =
+        std::make_pair(static_cast<const Type *>(dt), has_buffer_ptr);
+    if (const auto found = taichi_struct_type_tbl_.find(key);
+        found != taichi_struct_type_tbl_.end()) {
+      return found->second;
+    }
     std::vector<std::tuple<SType, std::string, size_t>> components;
     for (const auto &[type, name, offset] : struct_type->elements()) {
       components.push_back(std::make_tuple(
           from_taichi_type(type, has_buffer_ptr), name, offset));
     }
-    return create_struct_type(components);
+    const auto result = create_struct_type(components);
+    taichi_struct_type_tbl_[key] = result;
+    return result;
   } else {
     TI_ERROR("Type {} not supported.", dt->to_string());
   }
@@ -1097,6 +1119,205 @@ Value IRBuilder::storage_image_argument(int num_channels,
   this->global_values.push_back(val);
 
   return val;
+}
+
+Value IRBuilder::acceleration_structure_argument(uint32_t descriptor_set,
+                                                 uint32_t binding) {
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_ray_query),
+              "SPIR-V ray query is unavailable on this device");
+  declare_capability(spv::CapabilityRayQueryKHR);
+  declare_extension("SPV_KHR_ray_query");
+  if (t_acceleration_structure_.id == 0) {
+    t_acceleration_structure_.id = id_counter_++;
+    t_acceleration_structure_.flag = TypeKind::kAccelerationStructure;
+    ib_.begin(spv::OpTypeAccelerationStructureKHR)
+        .add(t_acceleration_structure_)
+        .commit(&global_);
+  }
+  auto pointer_type = get_pointer_type(
+      t_acceleration_structure_, spv::StorageClassUniformConstant);
+  Value value = new_value(pointer_type, ValueKind::kVariablePtr);
+  ib_.begin(spv::OpVariable)
+      .add_seq(pointer_type, value, spv::StorageClassUniformConstant)
+      .commit(&global_);
+  decorate(spv::OpDecorate, value, spv::DecorationDescriptorSet,
+           descriptor_set);
+  decorate(spv::OpDecorate, value, spv::DecorationBinding, binding);
+  debug_name(spv::OpName, value, "acceleration_structure");
+  global_values.push_back(value);
+  return value;
+}
+
+Value IRBuilder::ray_query_closest(Value acceleration_structure,
+                                   const std::vector<Value> &args,
+                                   const DataType &result_type,
+                                   std::uint32_t result_member_mask) {
+  TI_ERROR_IF(args.size() != 10,
+              "Vulkan ray-query closest-hit expects ten scalar operands");
+  TI_ERROR_IF(!caps_->get(cap::spirv_has_ray_query),
+              "SPIR-V ray query is unavailable on this device");
+  declare_capability(spv::CapabilityRayQueryKHR);
+  declare_extension("SPV_KHR_ray_query");
+  if (t_ray_query_.id == 0) {
+    t_ray_query_.id = id_counter_++;
+    t_ray_query_.flag = TypeKind::kRayQuery;
+    ib_.begin(spv::OpTypeRayQueryKHR).add(t_ray_query_).commit(&global_);
+  }
+
+  const Value accel = load_variable(acceleration_structure,
+                                    t_acceleration_structure_);
+  const Value origin = make_value(spv::OpCompositeConstruct, t_v3_fp32_,
+                                  args[0], args[1], args[2]);
+  const Value direction = make_value(spv::OpCompositeConstruct, t_v3_fp32_,
+                                     args[3], args[4], args[5]);
+  const Value query = alloca_variable(t_ray_query_);
+  make_inst(spv::OpRayQueryInitializeKHR, query, accel, args[8], args[9],
+            origin, args[6], direction, args[7]);
+
+  const Label loop_header = new_label();
+  const Label loop_continue = new_label();
+  const Label loop_merge = new_label();
+  make_inst(spv::OpBranch, loop_header);
+  start_label(loop_header);
+  make_inst(spv::OpLoopMerge, loop_merge, loop_continue,
+            spv::LoopControlMaskNone);
+  const Value proceed =
+      make_value(spv::OpRayQueryProceedKHR, bool_type(), query);
+  make_inst(spv::OpBranchConditional, proceed, loop_continue, loop_merge);
+  start_label(loop_continue);
+  make_inst(spv::OpBranch, loop_header);
+  start_label(loop_merge);
+
+  const Value committed = uint_immediate_number(
+      u32_type(),
+      spv::RayQueryIntersectionRayQueryCommittedIntersectionKHR);
+  const Value intersection_type = make_value(
+      spv::OpRayQueryGetIntersectionTypeKHR, u32_type(), query, committed);
+  const Value hit = make_value(
+      spv::OpIEqual, bool_type(), intersection_type,
+      uint_immediate_number(
+          u32_type(),
+          spv::RayQueryCommittedIntersectionTypeRayQueryCommittedIntersectionTriangleKHR));
+
+  const Value miss_t = float_immediate_number(f32_type(), -1.0);
+  const Value miss_index = uint_immediate_number(u32_type(), 0xffffffffu);
+  const Value miss_barycentric = float_immediate_number(f32_type(), 0.0);
+  const Value miss_front_face = int_immediate_number(i32_type(), 0);
+
+  Value result_t = miss_t;
+  Value result_primitive_index = miss_index;
+  Value result_instance_id = miss_index;
+  Value result_instance_custom_index = miss_index;
+  Value result_geometry_index = miss_index;
+  Value result_barycentric_u = miss_barycentric;
+  Value result_barycentric_v = miss_barycentric;
+  Value result_front_face = miss_front_face;
+
+  constexpr std::uint32_t kCommittedMemberMask = 0x1feu;
+  if ((result_member_mask & kCommittedMemberMask) != 0) {
+    const Label hit_label = new_label();
+    const Label hit_merge = new_label();
+    const Label miss_parent = current_label();
+    make_inst(spv::OpSelectionMerge, hit_merge,
+              spv::SelectionControlMaskNone);
+    make_inst(spv::OpBranchConditional, hit, hit_label, hit_merge);
+    start_label(hit_label);
+
+    Value committed_t = miss_t;
+    Value committed_primitive_index = miss_index;
+    Value committed_instance_id = miss_index;
+    Value committed_instance_custom_index = miss_index;
+    Value committed_geometry_index = miss_index;
+    Value committed_barycentric_u = miss_barycentric;
+    Value committed_barycentric_v = miss_barycentric;
+    Value committed_front_face = miss_front_face;
+    if ((result_member_mask & (1u << 1)) != 0) {
+      committed_t = make_value(spv::OpRayQueryGetIntersectionTKHR,
+                               f32_type(), query, committed);
+    }
+    if ((result_member_mask & (1u << 2)) != 0) {
+      committed_primitive_index = make_value(
+          spv::OpRayQueryGetIntersectionPrimitiveIndexKHR, u32_type(), query,
+          committed);
+    }
+    if ((result_member_mask & (1u << 3)) != 0) {
+      committed_instance_id = make_value(
+          spv::OpRayQueryGetIntersectionInstanceIdKHR, u32_type(), query,
+          committed);
+    }
+    if ((result_member_mask & (1u << 4)) != 0) {
+      committed_instance_custom_index = make_value(
+          spv::OpRayQueryGetIntersectionInstanceCustomIndexKHR, u32_type(),
+          query, committed);
+    }
+    if ((result_member_mask & (1u << 5)) != 0) {
+      committed_geometry_index = make_value(
+          spv::OpRayQueryGetIntersectionGeometryIndexKHR, u32_type(), query,
+          committed);
+    }
+    if ((result_member_mask & ((1u << 6) | (1u << 7))) != 0) {
+      const Value barycentrics = make_value(
+          spv::OpRayQueryGetIntersectionBarycentricsKHR, t_v2_fp32_, query,
+          committed);
+      if ((result_member_mask & (1u << 6)) != 0) {
+        committed_barycentric_u = make_value(
+            spv::OpCompositeExtract, f32_type(), barycentrics, 0);
+      }
+      if ((result_member_mask & (1u << 7)) != 0) {
+        committed_barycentric_v = make_value(
+            spv::OpCompositeExtract, f32_type(), barycentrics, 1);
+      }
+    }
+    if ((result_member_mask & (1u << 8)) != 0) {
+      const Value front = make_value(
+          spv::OpRayQueryGetIntersectionFrontFaceKHR, bool_type(), query,
+          committed);
+      committed_front_face =
+          select(front, int_immediate_number(i32_type(), 1),
+                 int_immediate_number(i32_type(), 0));
+    }
+    const Label hit_parent = current_label();
+    make_inst(spv::OpBranch, hit_merge);
+    start_label(hit_merge);
+
+    auto merge_hit_value = [&](std::uint32_t member, const SType &type,
+                               const Value &miss_value,
+                               const Value &hit_value) -> Value {
+      if ((result_member_mask & (1u << member)) == 0) {
+        return miss_value;
+      }
+      auto value = make_phi(type, 2);
+      value.set_incoming(0, miss_value, miss_parent);
+      value.set_incoming(1, hit_value, hit_parent);
+      return value;
+    };
+    result_t = merge_hit_value(1, f32_type(), miss_t, committed_t);
+    result_primitive_index = merge_hit_value(
+        2, u32_type(), miss_index, committed_primitive_index);
+    result_instance_id = merge_hit_value(
+        3, u32_type(), miss_index, committed_instance_id);
+    result_instance_custom_index = merge_hit_value(
+        4, u32_type(), miss_index, committed_instance_custom_index);
+    result_geometry_index = merge_hit_value(
+        5, u32_type(), miss_index, committed_geometry_index);
+    result_barycentric_u = merge_hit_value(
+        6, f32_type(), miss_barycentric, committed_barycentric_u);
+    result_barycentric_v = merge_hit_value(
+        7, f32_type(), miss_barycentric, committed_barycentric_v);
+    result_front_face = merge_hit_value(
+        8, i32_type(), miss_front_face, committed_front_face);
+  }
+
+  const SType result_stype = from_taichi_type(result_type, false);
+  const Value hit_i32 = (result_member_mask & 1u) != 0
+                            ? select(hit, int_immediate_number(i32_type(), 1),
+                                     int_immediate_number(i32_type(), 0))
+                            : int_immediate_number(i32_type(), 0);
+  return make_value(
+      spv::OpCompositeConstruct, result_stype, hit_i32, result_t,
+      result_primitive_index, result_instance_id, result_instance_custom_index,
+      result_geometry_index, result_barycentric_u, result_barycentric_v,
+      result_front_face);
 }
 
 Value IRBuilder::sample_texture(Value texture_var,

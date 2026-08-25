@@ -1879,6 +1879,10 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       const auto &indices = array_arg.indices;
       const auto alloc_type = host_ctx.device_allocation_type[indices];
       if (alloc_type != LaunchContextBuilder::DevAllocType::kNone) {
+          if (alloc_type ==
+              LaunchContextBuilder::DevAllocType::kAccelerationStructure) {
+            continue;
+          }
           DeviceAllocation devalloc = kDeviceNullAllocation;
           // NDArray
           if (host_ctx.array_ptrs.count(array_arg.data_ptr_indices)) {
@@ -2143,6 +2147,21 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
                             ? ImageSamplerConfig{}
                             : sampler->second);
       }
+    }
+
+    for (const auto &bind : attribs.acceleration_structure_binds) {
+      const int arg_offset = host_ctx.args_type->get_element_offset(bind.arg_id);
+      const auto found = std::find_if(
+          host_ctx.acceleration_structure_ptrs.begin(),
+          host_ctx.acceleration_structure_ptrs.end(),
+          [arg_offset](const auto &ref) {
+            return ref.arg_offset == arg_offset;
+          });
+      TI_ERROR_IF(found == host_ctx.acceleration_structure_ptrs.end() ||
+                      found->owner == nullptr || found->handle == 0,
+                  "Vulkan acceleration-structure kernel argument is unbound");
+      found->owner->vulkan_bind_ray_kernel_resource(
+          found->handle, bindings, bind.binding, current_cmdlist_.get());
     }
 
     if (attribs.task_type == OffloadedTaskType::listgen) {
@@ -2959,6 +2978,7 @@ bool GfxRuntime::try_launch_graph(
     for (int task_index = 0; task_index < task_attribs.size(); ++task_index) {
       const auto &attribs = task_attribs[task_index];
       if (!attribs.texture_binds.empty() ||
+          !attribs.acceleration_structure_binds.empty() ||
           attribs.task_type == OffloadedTaskType::listgen ||
           attribs.may_mutate_sparse_topology ||
           task_uses_listgen_buffer(attribs)) {

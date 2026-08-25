@@ -138,6 +138,13 @@ struct TaskAttributes {
     TI_IO_DEF(arg_id, binding, is_storage);
   };
 
+  struct AccelerationStructureBind {
+    std::vector<int> arg_id;
+    int binding{0};
+
+    TI_IO_DEF(arg_id, binding);
+  };
+
   std::string name;
   std::string source_path;
   // Host-only stable identity, reconstructed after compile/cache load.
@@ -175,6 +182,7 @@ struct TaskAttributes {
   };
   std::vector<BufferBind> buffer_binds;
   std::vector<TextureBind> texture_binds;
+  std::vector<AccelerationStructureBind> acceleration_structure_binds;
   // Only valid when |task_type| is range_for.
   std::optional<RangeForAttributes> range_for_attribs;
   // VS-3 (2026-05): host-side sparse listgen reuse metadata. Defaults mean
@@ -204,6 +212,7 @@ struct TaskAttributes {
             task_type,
             buffer_binds,
             texture_binds,
+            acceleration_structure_binds,
             range_for_attribs,
             sparse_list_op,
             sparse_list_snode_id,

@@ -1070,6 +1070,20 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     retain(vk_commands->vk_command_buffer());
   }
 
+  void bind_for_kernel(ShaderResourceSet *bindings,
+                       int binding,
+                       CommandList *command_list) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(bindings == nullptr || command_list == nullptr || binding < 0,
+                "Vulkan TLAS kernel binding is invalid.");
+    auto *vulkan_bindings =
+        static_cast<vulkan::VulkanResourceSet *>(bindings);
+    auto *vulkan_commands =
+        static_cast<vulkan::VulkanCommandList *>(command_list);
+    vulkan_bindings->acceleration_structure(binding, tlas_);
+    retain(vulkan_commands->vk_command_buffer());
+  }
+
  private:
   DeviceAllocation allocate(std::size_t bytes, AllocUsage usage) {
     Device::AllocParams params;
@@ -1688,6 +1702,25 @@ Program::vulkan_ray_kernel_resource_properties(std::uint64_t handle) {
           {"instance_count", resource->instance_count()}};
 }
 
+void Program::vulkan_bind_ray_kernel_resource(
+    std::uint64_t handle,
+    ShaderResourceSet *bindings,
+    int binding,
+    CommandList *command_list) {
+  std::shared_ptr<VulkanInstanceTlasResource> resource;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+    const auto found = vulkan_ray_resources_.find(handle);
+    TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                "Vulkan ray kernel resource handle is stale or closed.");
+    resource =
+        std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  }
+  TI_ERROR_IF(!resource,
+              "Vulkan ray kernel resources must be top-level instance AS.");
+  resource->bind_for_kernel(bindings, binding, command_list);
+}
+
 VulkanTriangleRaySceneMemoryStatistics
 Program::vulkan_triangle_ray_scene_memory_statistics(
     std::uint64_t handle) {
@@ -1885,6 +1918,13 @@ Program::vulkan_ray_resource_memory_statistics(std::uint64_t) {
 
 std::unordered_map<std::string, std::uint64_t>
 Program::vulkan_ray_kernel_resource_properties(std::uint64_t) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+void Program::vulkan_bind_ray_kernel_resource(std::uint64_t,
+                                              ShaderResourceSet *,
+                                              int,
+                                              CommandList *) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
 }
 

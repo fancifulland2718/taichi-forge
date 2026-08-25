@@ -13,5 +13,6 @@ from taichi_forge.types.annotations import *
 from taichi_forge.types.compound_types import *
 from taichi_forge.types.ndarray_type import *
 from taichi_forge.types.primitive_types import *
+from taichi_forge.types.ray_type import *
 from taichi_forge.types.texture_type import *
 from taichi_forge.types.utils import *

@@ -423,6 +423,28 @@ class TexturePtrExpression : public Expression {
   TI_DEFINE_ACCEPT_FOR_EXPRESSION
 };
 
+// A Vulkan top-level acceleration structure passed as a kernel resource.
+// The expression carries only an argument identity. Ray-query state is
+// deliberately created and consumed by a non-escaping internal operation.
+class AccelerationStructurePtrExpression : public Expression {
+ public:
+  const std::vector<int> arg_id;
+  int arg_depth;
+
+  explicit AccelerationStructurePtrExpression(
+      const std::vector<int> &arg_id,
+      int arg_depth,
+      const DebugInfo &dbg_info = DebugInfo())
+      : Expression(dbg_info), arg_id(arg_id), arg_depth(arg_depth) {
+  }
+
+  void type_check(const CompileConfig *config) override;
+
+  void flatten(FlattenContext *ctx) override;
+
+  TI_DEFINE_ACCEPT_FOR_EXPRESSION
+};
+
 class RandExpression : public Expression {
  public:
   DataType dt;
@@ -512,9 +534,12 @@ class InternalFuncCallExpression : public Expression {
  public:
   Operation *op;
   std::vector<Expr> args;
+  bool materialize_once;
 
-  InternalFuncCallExpression(Operation *op, const std::vector<Expr> &args_)
-      : op(op), args(args_) {
+  InternalFuncCallExpression(Operation *op,
+                             const std::vector<Expr> &args_,
+                             bool materialize_once = false)
+      : op(op), args(args_), materialize_once(materialize_once) {
   }
 
   void type_check(const CompileConfig *config) override;

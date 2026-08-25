@@ -159,6 +159,8 @@ class TI_DLL_EXPORT Callable : public CallableBase {
   std::vector<int> insert_rw_texture_param(int total_dim,
                                            BufferFormat format,
                                            const std::string &name = "");
+  std::vector<int> insert_acceleration_structure_param(
+      const std::string &name = "");
 
   std::vector<int> insert_argpack_param_and_push(const std::string &name = "");
 

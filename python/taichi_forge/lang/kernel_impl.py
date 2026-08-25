@@ -46,6 +46,7 @@ from taichi_forge.lang.util import cook_dtype, has_paddle, has_pytorch, to_taich
 from taichi_forge.types import (
     ndarray_type,
     primitive_types,
+    ray_type,
     sparse_matrix_builder,
     template,
     texture_type,
@@ -1282,6 +1283,7 @@ class Kernel:
                         ndarray_type.NdarrayType,
                         texture_type.TextureType,
                         texture_type.RWTextureType,
+                        ray_type.AccelerationStructureType,
                     ),
                 ):
                     pass
@@ -1490,6 +1492,16 @@ class Kernel:
             if v.tex is None:
                 raise TaichiRuntimeError("Cannot submit a Texture after its Taichi runtime has been reset")
             launch_ctx.set_arg_rw_texture(indices, v.tex)
+
+        def set_arg_acceleration_structure(indices, v):
+            descriptor = v._kernel_resource_descriptor()
+            if v._runtime_prog is not impl.get_runtime().prog:
+                raise TaichiRuntimeError(
+                    "Acceleration structure belongs to a different Taichi runtime"
+                )
+            launch_ctx.set_arg_acceleration_structure(
+                indices, v._runtime_prog, descriptor.handle
+            )
 
         def set_arg_ext_array(indices, v, needed):
             # Element shapes are already specialized in Taichi codegen.
@@ -1795,6 +1807,19 @@ class Kernel:
                     set_later_list.append((set_arg_rw_texture, (v,)))
                     return 0
                 set_arg_rw_texture(indices, v)
+                return 1
+            if isinstance(needed, ray_type.AccelerationStructureType):
+                from taichi_forge.hardware._ray import InstanceTLAS  # pylint: disable=C0415
+
+                if not isinstance(v, InstanceTLAS):
+                    raise TaichiRuntimeTypeError(
+                        f"Argument {provided} must be a Vulkan InstanceTLAS"
+                    )
+                if in_argpack:
+                    raise TaichiRuntimeTypeError(
+                        "Acceleration structures are not supported inside ArgPack"
+                    )
+                set_arg_acceleration_structure(indices, v)
                 return 1
             if isinstance(needed, ndarray_type.NdarrayType):
                 if in_argpack:

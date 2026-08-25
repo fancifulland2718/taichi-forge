@@ -121,7 +121,10 @@ class Kernel;
 //  26 - LLVM AOT kernel dependency metadata (2026-08). Kernel cache payloads
 //       retain used SNodeTree ids and Graph metadata so CUDA AOT launchers bind
 //       the compact roots expected by newly compiled kernels.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 26;
+//  27 - Vulkan kernel acceleration-structure bindings (2026-08). SPIR-V
+//       TaskAttributes now carry descriptor bindings for kernel-inline ray
+//       queries. Older cache payloads cannot retain or bind the TLAS safely.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 27;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

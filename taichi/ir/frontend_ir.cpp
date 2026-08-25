@@ -195,6 +195,26 @@ void TexturePtrExpression::flatten(FlattenContext *ctx) {
   stmt = ctx->back_stmt();
 }
 
+void AccelerationStructurePtrExpression::type_check(
+    const CompileConfig *config) {
+  if (config->arch != Arch::vulkan) {
+    ErrorEmitter(TaichiTypeError(), this,
+                 "Acceleration-structure kernel arguments require the "
+                 "Vulkan backend");
+  }
+  ret_type = TypeFactory::get_instance().get_pointer_type(
+      PrimitiveType::f32, false);
+}
+
+void AccelerationStructurePtrExpression::flatten(FlattenContext *ctx) {
+  ctx->push_back<ArgLoadStmt>(arg_id, PrimitiveType::f32, /*is_ptr=*/true,
+                              /*create_load=*/true, /*arg_depth=*/arg_depth,
+                              dbg_info);
+  ctx->push_back<AccelerationStructurePtrStmt>(ctx->back_stmt(), dbg_info);
+  stmt = ctx->back_stmt();
+  stmt->ret_type = ret_type;
+}
+
 void RandExpression::type_check(const CompileConfig *) {
   if (!(dt->is<PrimitiveType>() && dt != PrimitiveType::unknown)) {
     ErrorEmitter(
@@ -641,6 +661,9 @@ void InternalFuncCallExpression::type_check(const CompileConfig *) {
 }
 
 void InternalFuncCallExpression::flatten(FlattenContext *ctx) {
+  if (materialize_once && stmt != nullptr) {
+    return;
+  }
   stmt = op->flatten(ctx, args, ret_type);
   stmt->dbg_info = dbg_info;
 }
@@ -1380,14 +1403,15 @@ void ExternalTensorBasePtrExpression::flatten(FlattenContext *ctx) {
 void GetElementExpression::type_check(const CompileConfig *config) {
   TI_ASSERT_TYPE_CHECKED(src);
   auto src_type = src->ret_type;
-  if (!src_type->is<PointerType>()) {
+  auto value_type = src_type.ptr_removed();
+  if (!value_type->is<StructType>()) {
     ErrorEmitter(
         TaichiTypeError(), this,
         fmt::format("Invalid src [{}] for GetElementExpression",
                     ExpressionHumanFriendlyPrinter::expr_to_string(src)));
   }
 
-  ret_type = src_type.ptr_removed()->as<StructType>()->get_element_type(index);
+  ret_type = value_type->as<StructType>()->get_element_type(index);
 }
 
 void GetElementExpression::flatten(FlattenContext *ctx) {

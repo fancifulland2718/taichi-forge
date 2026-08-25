@@ -1153,6 +1153,11 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::string, std::uint64_t>
   vulkan_ray_kernel_resource_properties(std::uint64_t handle);
 
+  void vulkan_bind_ray_kernel_resource(std::uint64_t handle,
+                                       ShaderResourceSet *bindings,
+                                       int binding,
+                                       CommandList *command_list);
+
   void destroy_vulkan_ray_resource(std::uint64_t handle);
 
   void vulkan_clear_ray_scenes();

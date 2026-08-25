@@ -133,6 +133,7 @@ def describe_annotation(annotation):
     from taichi_forge.lang.matrix import MatrixType
     from taichi_forge.lang.struct import StructType
     from taichi_forge.types.ndarray_type import NdarrayType
+    from taichi_forge.types.ray_type import AccelerationStructureType
     from taichi_forge.types.texture_type import RWTextureType, TextureType
 
     if isinstance(annotation, NdarrayType):
@@ -150,6 +151,8 @@ def describe_annotation(annotation):
         return ArgumentTypeDescriptor(
             "texture", ndim=annotation.num_dimensions
         )
+    if isinstance(annotation, AccelerationStructureType):
+        return ArgumentTypeDescriptor("acceleration_structure")
     if isinstance(annotation, MatrixType):
         return ArgumentTypeDescriptor(
             "matrix", describe_element_type(annotation)

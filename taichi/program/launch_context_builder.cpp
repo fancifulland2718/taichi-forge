@@ -593,6 +593,30 @@ void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,
   set_arg_rw_texture_impl(arg_id, ptr, tex.get_size());
 }
 
+void LaunchContextBuilder::set_arg_acceleration_structure(
+    const std::vector<int> &arg_id,
+    Program *owner,
+    std::uint64_t handle) {
+  TI_ERROR_IF(owner == nullptr || handle == 0,
+              "Cannot bind a null acceleration-structure resource");
+  AccelerationStructureResourceRef ref;
+  ref.arg_offset = args_type->get_element_offset(arg_id);
+  ref.owner = owner;
+  ref.handle = handle;
+  const auto found = std::find_if(
+      acceleration_structure_ptrs.begin(), acceleration_structure_ptrs.end(),
+      [offset = ref.arg_offset](const auto &current) {
+        return current.arg_offset == offset;
+      });
+  if (found == acceleration_structure_ptrs.end()) {
+    acceleration_structure_ptrs.push_back(ref);
+  } else {
+    *found = ref;
+  }
+  set_array_device_allocation_type(
+      arg_id, DevAllocType::kAccelerationStructure);
+}
+
 void LaunchContextBuilder::debug_set_texture_resource_handle(
     const std::vector<int> &arg_id,
     RuntimeResourceHandle handle) {

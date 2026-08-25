@@ -24,6 +24,25 @@ from taichi_forge.types.texture_type import RWTextureType, TextureType
 template_types = (NdarrayType, TextureType, template)
 
 
+def reject_acceleration_structure_arguments(kernel, integration):
+    """Fail closed where no serialized acceleration-structure ABI exists."""
+
+    from taichi_forge.types.ray_type import AccelerationStructureType
+
+    names = [
+        arg.name
+        for arg in kernel.arguments
+        if isinstance(arg.annotation, AccelerationStructureType)
+    ]
+    if names:
+        raise TaichiCompilationError(
+            "Vulkan acceleration-structure kernel arguments are JIT-only; "
+            f"{integration} does not support them (arguments: "
+            + ", ".join(names)
+            + ")"
+        )
+
+
 def check_type_match(lhs, rhs):
     return describe_element_type(lhs).matches(describe_element_type(rhs))
 
@@ -160,6 +179,8 @@ def _validate_graph_template_exemplar(arg, symbolic_arg, exemplar):
 
 def produce_injected_args_for_graph(kernel, symbolic_args, template_args=None):
     """Inject compile-time values while preserving Graph runtime arguments."""
+
+    reject_acceleration_structure_arguments(kernel, "Graph dispatch")
 
     if template_args is None:
         has_required_template = any(isinstance(arg.annotation, template) for arg in kernel.arguments)

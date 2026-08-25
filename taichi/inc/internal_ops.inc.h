@@ -51,6 +51,7 @@ PER_INTERNAL_OP(subgroupInclusiveMax)
 PER_INTERNAL_OP(subgroupInclusiveAnd)
 PER_INTERNAL_OP(subgroupInclusiveOr)
 PER_INTERNAL_OP(subgroupInclusiveXor)
+PER_INTERNAL_OP(vulkan_ray_query_closest)
 
 // CUDA
 PER_INTERNAL_OP(block_barrier)

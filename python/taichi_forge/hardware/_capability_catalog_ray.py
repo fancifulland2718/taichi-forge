@@ -123,27 +123,42 @@ def ray_command_operations(_operation):
             "core",
             "fixed_function",
             "native_shader_operation",
-            "implementation_defined",
+            "qualified",
             ("kernel",),
             "kernel_intrinsic",
             "inline",
             "runtime_ordered",
             "none",
-            "planned",
+            "existing_public",
             activation_mode="explicit_kernel_intrinsic",
             resource_effects=("read:acceleration_structure",),
             lifetime_policy="runtime_generation",
             update_policy="immutable",
             requirements=(
-                "acceleration-structure kernel argument and lifetime/effect contract",
-                "typed RayQuery IR and structured query control",
-                "SPV_KHR_ray_query type/instruction lowering and descriptor binding",
-                "VK_KHR_ray_query device feature",
+                "VK_KHR_buffer_device_address",
+                "VK_KHR_acceleration_structure",
+                "VK_KHR_ray_query",
+                "SPV_KHR_ray_query",
             ),
-            public_api="ti.hardware.ray",
+            public_api=(
+                "ti.types.acceleration_structure / "
+                "AccelerationStructureAccessor.trace_closest"
+            ),
+            dtypes=("origin:f32x3", "direction:f32x3", "distance:f32"),
+            numeric_contracts=(
+                "committed closest triangle hit",
+                "miss:t=-1,indexes=UINT32_MAX,hit=0",
+            ),
             notes=(
-                "The existing TriangleScene batch provider uses a separate embedded SPIR-V shader; it does not supply a kernel-visible AS value or RayQuery IR.",
-                "Batch direct/root-Graph query remains the qualified route until the complete inline compiler and resource-binding chain exists.",
+                "Explicit non-escaping kernel intrinsic backed by Vulkan Ray Query hardware.",
+                "Current scope is opaque triangle BLAS/TLAS and committed closest-hit data.",
+                "JIT Vulkan kernels only; AOT and Graph acceleration-structure arguments fail closed.",
+                "The batch Python/Graph native command remains a separate explicit route.",
+                "Qualified physics scope: dense-field particle contact where "
+                "inline traversal eliminates ray staging, hit storage, and two "
+                "extra dispatches.",
+                "Crossover: prepacked ray-buffer workloads should use the batch "
+                "route; inline is not claimed faster in that layout.",
             ),
         ),
     )

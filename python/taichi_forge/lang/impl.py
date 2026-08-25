@@ -116,6 +116,8 @@ def expr_init(rhs):
         return make_matrix(rhs.to_list())
     if isinstance(rhs, SharedArray):
         return rhs
+    if hasattr(rhs, "_ti_expr_init"):
+        return rhs._ti_expr_init()
     if isinstance(rhs, Struct):
         return Struct(rhs.to_dict(include_methods=True, include_ndim=True))
     if isinstance(rhs, list):
