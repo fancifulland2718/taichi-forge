@@ -222,6 +222,8 @@ def test_fake_optix_provider_scene_graph_lifetime_and_memory(monkeypatch):
     with pytest.raises(RuntimeError, match="while triangle scenes are live"):
         provider.close()
     scene.close()
+    with pytest.raises(RuntimeError, match="OptixTriangleScene has been closed"):
+        graph.run({"rays": rays, "hits": hits})
     provider.close()
     assert fake.calls["destroy_scene"] == 1
     assert fake.calls["destroy_context"] == 1
