@@ -1,8 +1,11 @@
+import argparse
 import json
 
 import numpy as np
+import pytest
 
 import hardware_acceleration_qualification as qualification
+import hardware_physics_crossover_qualification as physics_crossover
 from taichi_forge.hardware import load_provider_admission_evidence
 
 
@@ -56,6 +59,52 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
         dense[row, columns[rows[row] : rows[row + 1]]] = low_values[rows[row] : rows[row + 1]]
     np.testing.assert_allclose(dense, dense.T, atol=2e-6)
     assert np.min(np.linalg.eigvalsh(dense)) > 0.0
+
+
+def test_physics_crossover_points_are_ordered_and_dimensioned():
+    parser = physics_crossover._positive_ints
+    assert parser("1,4,16") == (1, 4, 16)
+    with pytest.raises(argparse.ArgumentTypeError, match="strictly increasing"):
+        parser("4,1")
+
+    args = argparse.Namespace(
+        poisson_length=4096,
+        poisson_batches=(1, 4, 16),
+        krylov_grids=(64, 128, 256),
+        krylov_iterations=48,
+        krylov_stencil_radius=1,
+        fem_grids=(4, 6, 8),
+    )
+    points = physics_crossover._family_points(args)
+    assert [point["work_units"] for point in points["cuda-fft-poisson-batch"]] == [4096, 16384, 65536]
+    assert [point["work_units"] for point in points["cuda-spmv-krylov-grid"]] == [4096, 16384, 65536]
+    assert [point["work_units"] for point in points["cuda-cudss-tet-fem-grid"]] == [192, 648, 1536]
+
+
+def test_physics_crossover_summary_fails_closed_and_reports_reversal():
+    def point(label, work_units, state, *, evidence=True):
+        return {
+            "status": "passed",
+            "correctness_and_route_qualified": True,
+            "performance_evidence": {"qualified": evidence},
+            "performance_state": state,
+            "paired_speedup": {"p05": 1.05 if state == "stable_positive" else 0.95},
+            "point": {"label": label, "work_units": work_units, "parameters": {}},
+        }
+
+    summary = physics_crossover._crossover_summary(
+        (
+            point("small", 1, "stable_negative"),
+            point("medium", 2, "stable_positive"),
+            point("large", 3, "stable_positive", evidence=False),
+        )
+    )
+    assert summary["status"] == "crossover_observed"
+    assert summary["first_qualified_positive_point"]["label"] == "medium"
+    assert summary["qualified_positive_points"] == ("medium",)
+    assert summary["reversals_after_first_positive"] == ("large",)
+    assert not summary["monotonic_after_first_positive"]
+    assert not summary["all_points_performance_qualified"]
 
 
 def _worker(
