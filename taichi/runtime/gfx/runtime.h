@@ -1,6 +1,7 @@
 #pragma once
 #include "taichi/util/lang_util.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <chrono>
@@ -597,15 +598,21 @@ class TI_DLL_EXPORT GfxRuntime {
   StreamSemaphore latest_compute_completion_;
   bool graphics_submission_used_{false};
 
-  // Feasibility proof for one exact-binding graphics command list. The slot
-  // is intentionally fixed at one so binding churn cannot grow driver-owned
+  // Feasibility proof for an exact-binding graphics command-list set. The set
+  // is intentionally fixed at two: this covers the qualified two-packet
+  // fixed-binding burst without allowing binding churn to grow driver-owned
   // command buffers without bound. Compute/graphics semaphore bridges remain
   // per submission and are never retained here.
   struct RetainedGraphicsCommandReplay {
+    static constexpr std::size_t kSlotCapacity = 2;
+    struct Slot {
+      std::unique_ptr<CommandList> command_list;
+      StreamSemaphore completion;
+    };
     std::vector<std::uint64_t> key;
     std::vector<DeviceAllocation> images;
-    std::unique_ptr<CommandList> command_list;
-    StreamSemaphore completion;
+    std::array<Slot, kSlotCapacity> slots;
+    std::size_t next_slot{0};
     bool prewarmed{false};
     std::uint64_t attempts{0};
     std::uint64_t prewarms{0};
@@ -620,6 +627,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::uint64_t bridge_failures{0};
     std::uint64_t submit_failures{0};
     std::uint64_t invalidations{0};
+    std::uint64_t peak_slots{0};
     std::uint64_t last_path{0};
   } retained_graphics_replay_;
 

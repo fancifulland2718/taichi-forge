@@ -4417,15 +4417,21 @@ def _aggregate(
                         and proof["runtime_statistics"].get("retained_replay_records") == 0
                         and proof["runtime_statistics"].get("retained_replay_replays") == 0
                         and proof["runtime_statistics"].get("retained_replay_slots") == 0
-                        and proof["runtime_statistics"].get("retained_replay_slot_capacity") == 1
+                        and proof["runtime_statistics"].get("retained_replay_slot_capacity") == 2
                     )
                     or (
                         not binding_rotation_scope
                         and proof["runtime_statistics"].get("retained_replay_prewarms") == 1
-                        and proof["runtime_statistics"].get("retained_replay_records") == 1
+                        and 1
+                        <= proof["runtime_statistics"].get("retained_replay_records", 0)
+                        <= min(retained_packets, 2)
                         and proof["runtime_statistics"].get("retained_replay_replays", 0) > 0
-                        and proof["runtime_statistics"].get("retained_replay_slots") == 1
-                        and proof["runtime_statistics"].get("retained_replay_slot_capacity", 0) >= 1
+                        and proof["runtime_statistics"].get("retained_replay_slots")
+                        == proof["runtime_statistics"].get("retained_replay_records")
+                        and proof["runtime_statistics"].get("retained_replay_slot_capacity") == 2
+                        and 1
+                        <= proof["runtime_statistics"].get("retained_replay_peak_slots", 0)
+                        <= 2
                     )
                 )
                 for proof in enabled_replay_proofs

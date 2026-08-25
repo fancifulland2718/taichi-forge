@@ -5684,6 +5684,8 @@ void GfxRuntime::enqueue_graphics_op_lambda(
 
   bool replay = false;
   bool record_retained = false;
+  std::size_t retained_slot_index =
+      RetainedGraphicsCommandReplay::kSlotCapacity;
   if (replay_requested) {
     ++retained_graphics_replay_.attempts;
     const bool exact_key = retained_graphics_replay_.key == replay_key;
@@ -5713,20 +5715,43 @@ void GfxRuntime::enqueue_graphics_op_lambda(
         ++retained_graphics_replay_.fallbacks;
       }
       retained_graphics_replay_.last_path = 1;
-    } else if (retained_graphics_replay_.command_list) {
-      const bool slot_ready = !retained_graphics_replay_.completion ||
-                              retained_graphics_replay_.completion->is_ready();
-      if (slot_ready) {
-        replay = true;
-        retained_graphics_replay_.last_path = 3;
+    } else if (retained_graphics_replay_.prewarmed) {
+      for (std::size_t offset = 0;
+           offset < RetainedGraphicsCommandReplay::kSlotCapacity; ++offset) {
+        const std::size_t index =
+            (retained_graphics_replay_.next_slot + offset) %
+            RetainedGraphicsCommandReplay::kSlotCapacity;
+        const auto &slot = retained_graphics_replay_.slots[index];
+        if (slot.command_list &&
+            (!slot.completion || slot.completion->is_ready())) {
+          retained_slot_index = index;
+          replay = true;
+          break;
+        }
+      }
+      if (!replay) {
+        for (std::size_t offset = 0;
+             offset < RetainedGraphicsCommandReplay::kSlotCapacity; ++offset) {
+          const std::size_t index =
+              (retained_graphics_replay_.next_slot + offset) %
+              RetainedGraphicsCommandReplay::kSlotCapacity;
+          if (!retained_graphics_replay_.slots[index].command_list) {
+            retained_slot_index = index;
+            record_retained = true;
+            break;
+          }
+        }
+      }
+      if (replay || record_retained) {
+        retained_graphics_replay_.next_slot =
+            (retained_slot_index + 1) %
+            RetainedGraphicsCommandReplay::kSlotCapacity;
+        retained_graphics_replay_.last_path = replay ? 3 : 2;
       } else {
         ++retained_graphics_replay_.fallbacks;
         ++retained_graphics_replay_.busy_fallbacks;
         retained_graphics_replay_.last_path = 4;
       }
-    } else if (retained_graphics_replay_.prewarmed) {
-      record_retained = true;
-      retained_graphics_replay_.last_path = 2;
     }
   } else {
     retained_graphics_replay_.last_path = 0;
@@ -5735,7 +5760,9 @@ void GfxRuntime::enqueue_graphics_op_lambda(
   std::unique_ptr<CommandList> graphics_commands;
   CommandList *submitted_commands = nullptr;
   if (replay) {
-    submitted_commands = retained_graphics_replay_.command_list.get();
+    submitted_commands = retained_graphics_replay_
+                             .slots[retained_slot_index]
+                             .command_list.get();
     for (const auto &ref : image_refs) {
       last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
     }
@@ -5767,8 +5794,16 @@ void GfxRuntime::enqueue_graphics_op_lambda(
     }
 
     if (record_retained) {
-      retained_graphics_replay_.command_list = std::move(graphics_commands);
-      submitted_commands = retained_graphics_replay_.command_list.get();
+      auto &slot = retained_graphics_replay_.slots[retained_slot_index];
+      slot.command_list = std::move(graphics_commands);
+      submitted_commands = slot.command_list.get();
+      retained_graphics_replay_.peak_slots = std::max<std::uint64_t>(
+          retained_graphics_replay_.peak_slots,
+          std::count_if(retained_graphics_replay_.slots.begin(),
+                        retained_graphics_replay_.slots.end(),
+                        [](const auto &candidate) {
+                          return bool(candidate.command_list);
+                        }));
     } else {
       submitted_commands = graphics_commands.get();
     }
@@ -5798,7 +5833,8 @@ void GfxRuntime::enqueue_graphics_op_lambda(
     ++retained_graphics_replay_.replays;
   }
   if (record_retained || replay) {
-    retained_graphics_replay_.completion = graphics_completion;
+    retained_graphics_replay_.slots[retained_slot_index].completion =
+        graphics_completion;
   }
 
   // Bring the dependency back to the compute stream immediately. All later
@@ -5845,12 +5881,17 @@ void GfxRuntime::invalidate_graphics_command_replay_locked(
     }
   }
   if (retained_graphics_replay_.key.empty() &&
-      !retained_graphics_replay_.command_list &&
+      std::none_of(retained_graphics_replay_.slots.begin(),
+                   retained_graphics_replay_.slots.end(),
+                   [](const auto &slot) { return bool(slot.command_list); }) &&
       !retained_graphics_replay_.prewarmed) {
     return;
   }
-  retained_graphics_replay_.command_list.reset();
-  retained_graphics_replay_.completion.reset();
+  for (auto &slot : retained_graphics_replay_.slots) {
+    slot.command_list.reset();
+    slot.completion.reset();
+  }
+  retained_graphics_replay_.next_slot = 0;
   retained_graphics_replay_.key.clear();
   retained_graphics_replay_.images.clear();
   retained_graphics_replay_.prewarmed = false;
@@ -5865,9 +5906,16 @@ void GfxRuntime::invalidate_graphics_command_replay() {
 std::unordered_map<std::string, std::uint64_t>
 GfxRuntime::debug_graphics_command_replay_stats() const {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  const bool inflight = retained_graphics_replay_.command_list &&
-                        retained_graphics_replay_.completion &&
-                        !retained_graphics_replay_.completion->is_ready();
+  const std::uint64_t slots = std::count_if(
+      retained_graphics_replay_.slots.begin(),
+      retained_graphics_replay_.slots.end(),
+      [](const auto &slot) { return bool(slot.command_list); });
+  const std::uint64_t inflight = std::count_if(
+      retained_graphics_replay_.slots.begin(),
+      retained_graphics_replay_.slots.end(), [](const auto &slot) {
+        return slot.command_list && slot.completion &&
+               !slot.completion->is_ready();
+      });
   return {
       {"retained_replay_attempts", retained_graphics_replay_.attempts},
       {"retained_replay_prewarms", retained_graphics_replay_.prewarms},
@@ -5890,10 +5938,11 @@ GfxRuntime::debug_graphics_command_replay_stats() const {
        retained_graphics_replay_.submit_failures},
       {"retained_replay_invalidations",
        retained_graphics_replay_.invalidations},
-      {"retained_replay_slots",
-       retained_graphics_replay_.command_list ? 1u : 0u},
-      {"retained_replay_slot_capacity", 1u},
-      {"retained_replay_inflight_slots", inflight ? 1u : 0u},
+      {"retained_replay_slots", slots},
+      {"retained_replay_slot_capacity",
+       RetainedGraphicsCommandReplay::kSlotCapacity},
+      {"retained_replay_peak_slots", retained_graphics_replay_.peak_slots},
+      {"retained_replay_inflight_slots", inflight},
       {"retained_replay_last_path", retained_graphics_replay_.last_path},
   };
 }

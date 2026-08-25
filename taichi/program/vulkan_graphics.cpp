@@ -804,6 +804,7 @@ Program::debug_vulkan_graphics_resource_stats() {
           {"retained_replay_invalidations", 0},
           {"retained_replay_slots", 0},
           {"retained_replay_slot_capacity", 0},
+          {"retained_replay_peak_slots", 0},
           {"retained_replay_inflight_slots", 0},
           {"retained_replay_last_path", 0}};
 }

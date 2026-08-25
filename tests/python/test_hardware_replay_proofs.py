@@ -342,17 +342,36 @@ def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
         == before["retained_replay_submit_failures"]
     )
     assert fixed["retained_replay_slots"] == 1
-    assert fixed["retained_replay_slot_capacity"] == 1
+    assert fixed["retained_replay_slot_capacity"] == 2
+    assert fixed["retained_replay_peak_slots"] == 1
     assert fixed["retained_replay_inflight_slots"] == 0
     assert fixed["retained_replay_last_path"] == 3
     assert marker.to_numpy()[0] == 1_000
+
+    # Two fixed-binding packets may overlap without rerecord fallback. The
+    # second bounded slot is populated on demand and both slots are ready
+    # after the single terminal wait.
+    burst_before = dict(program._debug_vulkan_graphics_resource_stats())
+    tickets = [graph.submit(bindings) for _ in range(2)]
+    tickets[-1].wait()
+    burst = dict(program._debug_vulkan_graphics_resource_stats())
+    new_records = burst["retained_replay_records"] - burst_before["retained_replay_records"]
+    new_replays = burst["retained_replay_replays"] - burst_before["retained_replay_replays"]
+    assert new_records in (0, 1)
+    assert new_records + new_replays == 2
+    assert burst["retained_replay_busy_fallbacks"] == burst_before["retained_replay_busy_fallbacks"]
+    assert burst["retained_replay_slots"] == 1 + new_records
+    assert burst["retained_replay_slot_capacity"] == 2
+    assert burst["retained_replay_peak_slots"] == 1 + new_records
+    assert burst["retained_replay_inflight_slots"] == 0
+    assert marker.to_numpy()[0] == 1_002
     image = _texture_rgb(target)
     assert image[..., 0].max() > 32
     assert image[..., 1].max() > 32
     assert image[..., 2].max() > 32
 
     # Every allocation generation gets prewarm, record, and one exact replay;
-    # the single retained slot is recycled instead of growing with churn.
+    # the bounded retained set is recycled instead of growing with churn.
     rebound_generations = []
     churn_before = dict(program._debug_vulkan_graphics_resource_stats())
     for _ in range(100):
@@ -391,6 +410,7 @@ def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
         == 100
     )
     assert churn["retained_replay_slots"] == 1
+    assert 1 <= churn["retained_replay_peak_slots"] <= 2
     assert churn["retained_replay_last_path"] == 3
     np.testing.assert_array_equal(rebound["vertices"].to_numpy(), source_host)
     assert rebound["marker"].to_numpy()[0] == 3
@@ -446,6 +466,7 @@ def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
     ti.sync()
     after_pipeline_churn = dict(program._debug_vulkan_graphics_resource_stats())
     assert after_pipeline_churn["retained_replay_slots"] == 0
+    assert 1 <= after_pipeline_churn["retained_replay_peak_slots"] <= 2
     assert after_pipeline_churn["live"] == 0
     assert after_pipeline_churn["retiring"] == 0
     assert after_pipeline_churn["retained_replay_submit_failures"] == 0

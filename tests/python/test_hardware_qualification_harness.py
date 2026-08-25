@@ -509,7 +509,8 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
                 "retained_replay_submit_failures": 0,
                 "retained_replay_bridge_failures": 0,
                 "retained_replay_slots": 1,
-                "retained_replay_slot_capacity": 1,
+                "retained_replay_slot_capacity": 2,
+                "retained_replay_peak_slots": 1,
             },
         }
 
@@ -567,7 +568,8 @@ def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():
                 "retained_replay_submit_failures": 0,
                 "retained_replay_bridge_failures": 0,
                 "retained_replay_slots": 0,
-                "retained_replay_slot_capacity": 1,
+                "retained_replay_slot_capacity": 2,
+                "retained_replay_peak_slots": 1,
             },
         }
 
@@ -596,7 +598,7 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
     ]
     for worker in workers:
         worker["backend"] = "vulkan"
-        worker["workload"].update({"retained_binding_sets": 1, "retained_packets_per_burst": 4})
+        worker["workload"].update({"retained_binding_sets": 1, "retained_packets_per_burst": 2})
         worker["correctness"] = {
             "binding_sets": [
                 {
@@ -611,17 +613,18 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
             "baseline_mode": "rerecord",
             "runtime_statistics": {
                 "retained_replay_prewarms": 1,
-                "retained_replay_records": 1,
+                "retained_replay_records": 2,
                 "retained_replay_replays": 100,
                 "retained_replay_busy_fallbacks": 0,
                 "retained_replay_submit_failures": 0,
                 "retained_replay_bridge_failures": 0,
-                "retained_replay_slots": 1,
-                "retained_replay_slot_capacity": 1,
+                "retained_replay_slots": 2,
+                "retained_replay_slot_capacity": 2,
+                "retained_replay_peak_slots": 2,
             },
         }
         worker["packet_timing"] = {
-            "scope": "four fixed-binding packets with one terminal wait",
+            "scope": "two fixed-binding packets with one terminal wait",
             "samples_ms": {"hardware": [1.0] * 5, "baseline": [1.1] * 5},
             "paired_speedups": [1.1] * 5,
             "calibration": {
@@ -630,11 +633,11 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
             },
         }
         worker["packet_lifecycle"] = {
-            "packets_per_burst": 4,
+            "packets_per_burst": 2,
             "binding_sets": 1,
             "calls": {
-                "hardware": {"bursts": 5, "submissions": 20, "completion_waits": 5},
-                "baseline": {"bursts": 5, "submissions": 20, "completion_waits": 5},
+                "hardware": {"bursts": 5, "submissions": 10, "completion_waits": 5},
+                "baseline": {"bursts": 5, "submissions": 10, "completion_waits": 5},
             },
             "hardware_workspace_lane_waits_delta": 0,
             "baseline_workspace_lane_waits_delta": 0,
