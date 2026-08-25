@@ -1292,6 +1292,55 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
         np.testing.assert_array_equal(shaped_output.to_numpy(), expected)
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+@pytest.mark.parametrize("field_kind", ("vector", "matrix"))
+@pytest.mark.parametrize("method", ("cg", "pcg"))
+def test_packed_field_solveplan_uses_direct_graph_boundary(field_kind, method):
+    if field_kind == "vector":
+        values = np.arange(12, dtype=np.float32).reshape(2, 2, 3) + 1.0
+        rhs = ti.Vector.field(3, ti.f32, shape=(2, 2))
+        solution = ti.Vector.field(3, ti.f32, shape=(2, 2))
+    else:
+        values = np.arange(16, dtype=np.float32).reshape(2, 2, 2, 2) + 1.0
+        rhs = ti.Matrix.field(2, 2, ti.f32, shape=(2, 2))
+        solution = ti.Matrix.field(2, 2, ti.f32, shape=(2, 2))
+    rhs.from_numpy(values)
+
+    operator = _compiled_identity(values.size)
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method=method,
+        preconditioner=operator if method == "pcg" else None,
+        max_iterations=8,
+        atol=1e-6,
+        execution_policy="device_convergent",
+    )
+
+    first = plan.solve(rhs, out=solution)
+    second = plan.solve(rhs, out=solution)
+    assert first.converged and second.converged
+    assert second.solution is solution
+    np.testing.assert_allclose(solution.to_numpy(), values, rtol=1e-6, atol=1e-6)
+
+    stats = plan.statistics()
+    capability = stats["execution_capabilities"]["direct_dense_field_solve"]
+    assert capability["selected"]
+    assert "root_dense_packed_vector_matrix_contiguous" in capability[
+        "qualified_layouts"
+    ]
+    vector_stats = stats["vector_io"]
+    assert vector_stats["staging_buffer_builds"] == 0
+    assert vector_stats["staging_buffer_reuses"] == 0
+    assert vector_stats["pack_calls"] == 0
+    assert vector_stats["unpack_calls"] == 0
+    assert vector_stats["transfer_graph_submissions"] == 0
+    assert vector_stats["transfer_native_submissions"] == 0
+    assert vector_stats["direct_graph_solve_submissions"] == 2
+    assert vector_stats["direct_graph_solve_full_boundary_submissions"] == 2
+    assert vector_stats["direct_graph_solve_field_bindings"] == 4
+    assert vector_stats["direct_dense_field_submissions"] == 2
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_scalar_flat_range_views_apply_and_preserve_disjoint_storage():
     source_values = np.arange(12, dtype=np.float32)
