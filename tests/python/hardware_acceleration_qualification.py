@@ -3873,6 +3873,129 @@ def _performance_environment_qualification(workers):
     }
 
 
+_CUSPARSE_KRYLOV_ARCHITECTURE_CASES = frozenset(
+    (
+        "cuda-spmv-krylov",
+        "cuda-spmv-krylov-grid",
+        "cuda-spmv-krylov-stencil-radius",
+    )
+)
+
+
+def _cusparse_krylov_architecture_benefit(case, workers):
+    """Verify the reusable explicit-provider shape of the Krylov workload.
+
+    This is intentionally narrower than route correctness. It permits a
+    bounded retention tradeoff only for fixed-topology CSR work that replaces
+    a solver-specific Taichi SpMV kernel with a root-Graph cuSPARSE command and
+    proves provider-owned plan, preprocessing, and workspace reuse. It does
+    not qualify the route for automatic selection or a performance claim.
+    """
+
+    if case not in _CUSPARSE_KRYLOV_ARCHITECTURE_CASES:
+        return None
+
+    reasons = []
+    topology_fingerprints = set()
+    minimum_plan_reuses = None
+    minimum_preprocess_reuses = None
+    for worker in workers:
+        workload = worker.get("workload", {})
+        route = worker.get("route", {})
+        provider = route.get("provider", {})
+        statistics = worker.get("provider_statistics", {})
+        identity = statistics.get("identity", {})
+        operations = statistics.get("operations", {})
+        implementation = statistics.get("provider", {})
+        resources = statistics.get("resources", {})
+        transfers = statistics.get("transfers", {})
+
+        checks = (
+            (worker.get("case") == "cuda-spmv-krylov", "unexpected_worker_case"),
+            (worker.get("backend") == "cuda", "unexpected_backend"),
+            (workload.get("host_readback_included") is False, "host_readback_in_timed_scope"),
+            (
+                workload.get("auto_admission_training_case") is False,
+                "auto_admission_scope_not_explicitly_excluded",
+            ),
+            (
+                route.get("hardware_action") == "linalg.spmv.cusparse_explicit",
+                "unexpected_hardware_action",
+            ),
+            (route.get("baseline_action") == "taichi_kernel_csr_spmv", "unexpected_baseline_action"),
+            (route.get("graph_integration") == "root_ordered", "root_graph_integration_unproven"),
+            (provider.get("provider_id") == "cusparse", "cusparse_provider_unproven"),
+            (provider.get("activation_mode") == "explicit_hardware_api", "provider_not_explicit"),
+            (provider.get("fallback_provider") is None, "provider_fallback_present"),
+            (provider.get("workspace_ownership") == "provider_owned", "provider_workspace_unproven"),
+            (identity.get("backend_family") == "cuda", "statistics_backend_mismatch"),
+            (identity.get("storage_format") == "csr", "fixed_csr_topology_unproven"),
+            (bool(identity.get("topology_fingerprint")), "topology_fingerprint_missing"),
+            (operations.get("spmv_plan_builds") == 1, "single_plan_build_unproven"),
+            (operations.get("spmv_plan_reuses", 0) > 0, "plan_reuse_unproven"),
+            (operations.get("spmv_preprocess_builds") == 1, "single_preprocess_build_unproven"),
+            (operations.get("spmv_preprocess_reuses", 0) > 0, "preprocess_reuse_unproven"),
+            (operations.get("spmv_preprocess_fallbacks") == 0, "preprocess_fallback_observed"),
+            (operations.get("spmv_workspace_allocations") == 1, "single_workspace_allocation_unproven"),
+            (implementation.get("name") == "cusparse", "provider_statistics_unproven"),
+            (implementation.get("selected_storage_format") == "csr", "provider_csr_route_unproven"),
+            (resources.get("pattern_storage_shared") is True, "shared_pattern_lifetime_unproven"),
+            (transfers.get("host_to_device_bytes") == 0, "host_to_device_transfer_observed"),
+            (transfers.get("device_to_host_bytes") == 0, "device_to_host_transfer_observed"),
+        )
+        reasons.extend(reason for passed, reason in checks if not passed)
+        fingerprint = identity.get("topology_fingerprint")
+        if fingerprint:
+            topology_fingerprints.add(fingerprint)
+        plan_reuses = operations.get("spmv_plan_reuses")
+        if isinstance(plan_reuses, int):
+            minimum_plan_reuses = (
+                plan_reuses if minimum_plan_reuses is None else min(minimum_plan_reuses, plan_reuses)
+            )
+        preprocess_reuses = operations.get("spmv_preprocess_reuses")
+        if isinstance(preprocess_reuses, int):
+            minimum_preprocess_reuses = (
+                preprocess_reuses
+                if minimum_preprocess_reuses is None
+                else min(minimum_preprocess_reuses, preprocess_reuses)
+            )
+
+    if not workers:
+        reasons.append("no_workers")
+    if len(topology_fingerprints) != 1:
+        reasons.append("topology_not_fixed_across_workers")
+    return {
+        "qualified": not reasons,
+        "kind": "explicit_cusparse_graph_command_reuse",
+        "reasons": tuple(dict.fromkeys(reasons)),
+        "evidence": {
+            "workers_verified": len(workers),
+            "fixed_topology_across_workers": len(topology_fingerprints) == 1,
+            "root_ordered_graph_command": not any(
+                reason == "root_graph_integration_unproven" for reason in reasons
+            ),
+            "provider_owned_reusable_resources": not any(
+                reason
+                in {
+                    "provider_workspace_unproven",
+                    "single_plan_build_unproven",
+                    "plan_reuse_unproven",
+                    "single_preprocess_build_unproven",
+                    "preprocess_reuse_unproven",
+                    "single_workspace_allocation_unproven",
+                }
+                for reason in reasons
+            ),
+            "zero_host_transfer": not any(
+                reason in {"host_to_device_transfer_observed", "device_to_host_transfer_observed"}
+                for reason in reasons
+            ),
+            "minimum_plan_reuses": minimum_plan_reuses,
+            "minimum_preprocess_reuses": minimum_preprocess_reuses,
+        },
+    }
+
+
 def _retention_qualification(
     workers,
     variants,
@@ -4097,7 +4220,14 @@ def _aggregate(
         performance_evidence["reasons"] = tuple(
             dict.fromkeys((*performance_evidence["reasons"], "performance_environment_unqualified"))
         )
-    retention_qualification = _retention_qualification(workers, variants, speedup, performance_environment)
+    architecture_benefit = _cusparse_krylov_architecture_benefit(case, workers)
+    retention_qualification = _retention_qualification(
+        workers,
+        variants,
+        speedup,
+        performance_environment,
+        architecture_benefit=architecture_benefit,
+    )
     retention_eligible = retention_qualification["qualified"]
     claim_eligible = bool(
         retention_eligible and performance_state == "stable_positive" and performance_evidence["qualified"]

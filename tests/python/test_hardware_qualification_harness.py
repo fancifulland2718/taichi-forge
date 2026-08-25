@@ -70,7 +70,7 @@ def test_physics_crossover_points_are_ordered_and_dimensioned():
     args = argparse.Namespace(
         poisson_length=4096,
         poisson_batches=(1, 4, 16),
-        krylov_grids=(64, 128, 256),
+        krylov_grids=(64, 128, 256, 384, 512),
         krylov_iterations=48,
         krylov_stencil_radius=1,
         krylov_radius_grid=128,
@@ -79,7 +79,13 @@ def test_physics_crossover_points_are_ordered_and_dimensioned():
     )
     points = physics_crossover._family_points(args)
     assert [point["work_units"] for point in points["cuda-fft-poisson-batch"]] == [4096, 16384, 65536]
-    assert [point["work_units"] for point in points["cuda-spmv-krylov-grid"]] == [4096, 16384, 65536]
+    assert [point["work_units"] for point in points["cuda-spmv-krylov-grid"]] == [
+        4096,
+        16384,
+        65536,
+        147456,
+        262144,
+    ]
     assert [
         point["work_units"] for point in points["cuda-spmv-krylov-stencil-radius"]
     ] == [147456, 409600, 802816]
@@ -164,6 +170,59 @@ def _worker(
         worker["admission_scope"] = admission_scope
         worker["forge_version"] = "0.6.3"
         worker["cuda_device_uuid"] = admission_scope["device_scope"]["cuda_device_uuid"]
+    return worker
+
+
+def _cusparse_krylov_worker(order, ratio, *, pid, architecture_proof=True):
+    worker = _worker(
+        order,
+        [1.0] * 5,
+        [ratio] * 5,
+        [ratio] * 5,
+        block_ms=100.0,
+        pid=pid,
+    )
+    worker.update(
+        {
+            "case": "cuda-spmv-krylov",
+            "workload": {
+                "baseline": "root Graph with hand-written Taichi CSR SpMV kernel",
+                "host_readback_included": False,
+                "auto_admission_training_case": False,
+            },
+            "route": {
+                "hardware_action": "linalg.spmv.cusparse_explicit",
+                "baseline_action": "taichi_kernel_csr_spmv",
+                "graph_integration": "root_ordered",
+                "provider": {
+                    "provider_id": "cusparse",
+                    "activation_mode": "explicit_hardware_api",
+                    "fallback_provider": None,
+                    "workspace_ownership": "provider_owned",
+                },
+            },
+            "provider_statistics": {
+                "identity": {
+                    "backend_family": "cuda",
+                    "storage_format": "csr",
+                    "topology_fingerprint": "fixed-test-topology",
+                },
+                "operations": {
+                    "spmv_plan_builds": 1,
+                    "spmv_plan_reuses": 99,
+                    "spmv_preprocess_builds": 1,
+                    "spmv_preprocess_reuses": 99,
+                    "spmv_preprocess_fallbacks": 0,
+                    "spmv_workspace_allocations": 1,
+                },
+                "provider": {"name": "cusparse", "selected_storage_format": "csr"},
+                "resources": {"pattern_storage_shared": True},
+                "transfers": {"host_to_device_bytes": 0, "device_to_host_bytes": 0},
+            },
+        }
+    )
+    if not architecture_proof:
+        worker["provider_statistics"]["operations"]["spmv_plan_reuses"] = 0
     return worker
 
 
@@ -312,6 +371,55 @@ def test_aggregate_rejects_break_even_p05_from_retention():
     assert report["paired_speedup"]["p05"] == pytest.approx(1.0)
     assert not report["retention_eligible"]
     assert report["retention_qualification"]["reasons"] == ("paired_margin_gate",)
+
+
+def test_cusparse_krylov_retains_machine_verified_bounded_architecture_tradeoff():
+    workers = tuple(
+        _cusparse_krylov_worker(
+            "ab" if index < 4 else "ba",
+            0.98,
+            pid=index + 1,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("cuda-spmv-krylov-grid", workers, 0.05, 0.05)
+
+    assert report["performance_state"] == "stable_negative"
+    assert report["paired_speedup"]["p05"] == pytest.approx(0.98)
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["decision_path"] == "bounded_architecture_tradeoff"
+    benefit = report["retention_qualification"]["architecture_benefit"]
+    assert benefit["qualified"]
+    assert benefit["kind"] == "explicit_cusparse_graph_command_reuse"
+    assert benefit["evidence"]["fixed_topology_across_workers"]
+    assert benefit["evidence"]["minimum_plan_reuses"] == 99
+    assert not report["auto_admission"]["eligible"]
+    assert not report["performance_claim_eligible"]
+
+
+@pytest.mark.parametrize(("ratio", "architecture_proof"), ((0.949, True), (0.98, False)))
+def test_cusparse_krylov_architecture_tradeoff_fails_closed(ratio, architecture_proof):
+    workers = tuple(
+        _cusparse_krylov_worker(
+            "ab" if index < 4 else "ba",
+            ratio,
+            pid=index + 1,
+            architecture_proof=architecture_proof,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("cuda-spmv-krylov-grid", workers, 0.05, 0.05)
+
+    assert not report["retention_eligible"]
+    assert report["retention_qualification"]["decision_path"] == "rejected"
+    assert "paired_margin_gate" in report["retention_qualification"]["reasons"]
+    if not architecture_proof:
+        assert not report["retention_qualification"]["architecture_benefit"]["qualified"]
+        assert "plan_reuse_unproven" in report["retention_qualification"]["architecture_benefit"]["reasons"]
+    assert not report["auto_admission"]["eligible"]
+    assert not report["performance_claim_eligible"]
 
 
 def test_build_provenance_qualification_requires_one_matching_worker_revision():

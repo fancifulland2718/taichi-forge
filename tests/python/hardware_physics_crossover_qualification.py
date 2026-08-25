@@ -339,7 +339,7 @@ def _parse_args():
     parser.add_argument("--output", default="hardware-physics-crossover.json")
     parser.add_argument("--poisson-length", type=int, default=4096)
     parser.add_argument("--poisson-batches", default="1,4,16")
-    parser.add_argument("--krylov-grids", default="64,128,256")
+    parser.add_argument("--krylov-grids", default="64,128,256,384,512")
     parser.add_argument("--krylov-iterations", type=int, default=48)
     parser.add_argument("--krylov-stencil-radius", type=int, default=1)
     parser.add_argument("--krylov-radius-grid", type=int, default=128)
