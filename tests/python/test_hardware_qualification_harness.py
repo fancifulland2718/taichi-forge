@@ -268,6 +268,31 @@ def test_aggregate_rejects_noisy_paired_gain_from_retention():
     assert "unstable_paired_ratio" in report["retention_qualification"]["reasons"]
 
 
+def test_aggregate_retains_strong_p05_despite_paired_noise_and_order_effect():
+    paired = [1.3, 1.4, 1.5, 2.5, 4.0]
+    workers = tuple(
+        _worker(
+            "ab" if index < 4 else "ba",
+            ([1.0] * 5 if index < 4 else [1.4] * 5),
+            (paired if index < 4 else [1.4 * value for value in paired]),
+            paired,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.05, 0.05)
+
+    assert report["paired_speedup"]["p05"] == pytest.approx(1.3)
+    assert report["paired_speedup"]["cv"] > 0.05
+    assert report["retention_qualification"]["observed"]["maximum_order_drift"] > 0.05
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["strong_margin_noise_override_applied"]
+    assert report["retention_qualification"]["reasons"] == ()
+    assert not report["performance_claim_eligible"]
+
+
 def test_build_provenance_qualification_requires_one_matching_worker_revision():
     workers = ({"forge_commit": "source-revision"}, {"forge_commit": "source-revision"})
 

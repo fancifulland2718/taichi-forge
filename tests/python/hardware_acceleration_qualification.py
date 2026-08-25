@@ -91,6 +91,7 @@ AUTO_ADMISSION_MINIMUM_BLOCK_MS = 100.0
 AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
 RETENTION_MINIMUM_PAIRED_SPEEDUP = 1.05
+RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP = 1.20
 RETENTION_MAXIMUM_PAIRED_CV = 0.05
 RETENTION_MAXIMUM_ORDER_DRIFT = 0.05
 CASES = (
@@ -3900,6 +3901,10 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
     minimum_block_ms = min(observed_blocks)
     maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
     paired_cv = paired_speedup.get("cv")
+    strong_margin = bool(
+        paired_speedup.get("p05") is not None
+        and paired_speedup["p05"] >= RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP
+    )
     checks = (
         (
             fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES
@@ -3919,10 +3924,14 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
             "paired_margin_gate",
         ),
         (
-            paired_cv is not None and paired_cv <= RETENTION_MAXIMUM_PAIRED_CV,
+            paired_cv is not None
+            and (paired_cv <= RETENTION_MAXIMUM_PAIRED_CV or strong_margin),
             "unstable_paired_ratio",
         ),
-        (maximum_order_drift <= RETENTION_MAXIMUM_ORDER_DRIFT, "unstable_order_effect"),
+        (
+            maximum_order_drift <= RETENTION_MAXIMUM_ORDER_DRIFT or strong_margin,
+            "unstable_order_effect",
+        ),
         (
             performance_environment is None or performance_environment["qualified"],
             "performance_environment_unqualified",
@@ -3934,12 +3943,23 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
         "reasons": reasons,
         "policy": "robust_paired_positive",
         "absolute_variant_cv_is_diagnostic": True,
+        "strong_margin_noise_override_applied": bool(
+            strong_margin
+            and (
+                paired_cv is None
+                or paired_cv > RETENTION_MAXIMUM_PAIRED_CV
+                or maximum_order_drift > RETENTION_MAXIMUM_ORDER_DRIFT
+            )
+        ),
         "requirements": {
             "fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
             "processes_per_order": AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER,
             "samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
             "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
             "minimum_paired_p05": RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            "strong_margin_minimum_paired_p05": (
+                RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP
+            ),
             "maximum_paired_cv": RETENTION_MAXIMUM_PAIRED_CV,
             "maximum_order_drift": RETENTION_MAXIMUM_ORDER_DRIFT,
         },
