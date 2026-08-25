@@ -284,6 +284,8 @@ class SparseMatrix:
             "rejected": 0,
             "kernel_fallbacks": 0,
             "provider_dispatches": 0,
+            "kernel_dispatches": 0,
+            "dispatch_failures": 0,
             "rejection_reasons": {},
             "last_decision": None,
         }
@@ -593,12 +595,19 @@ class SparseMatrix:
             **admission.to_dict(),
             **workload_scope,
             "route": "provider" if admission.admitted else "kernel",
-            "reuse_count": self._spmv_auto_stats["candidates"],
+            "requested_expected_reuse": self._spmv_expected_reuse,
+            "effective_expected_reuse": admission.expected_reuse,
+            "observed_auto_attempts": self._spmv_auto_stats["candidates"],
+            "observed_provider_dispatches": self._spmv_auto_stats[
+                "provider_dispatches"
+            ],
+            "observed_kernel_dispatches": self._spmv_auto_stats[
+                "kernel_dispatches"
+            ],
             "provider_warmed": bool(operations["spmv_plan_builds"]),
         }
         if admission.admitted:
             self._spmv_auto_stats["admitted"] += 1
-            self._spmv_auto_stats["provider_dispatches"] += 1
         else:
             self._spmv_auto_stats["rejected"] += 1
             self._spmv_auto_stats["kernel_fallbacks"] += 1
@@ -606,6 +615,24 @@ class SparseMatrix:
             reasons[admission.reason] = reasons.get(admission.reason, 0) + 1
         self._spmv_auto_stats["last_decision"] = decision
         return "provider" if admission.admitted else "kernel"
+
+    def _record_spmv_auto_dispatch(self, route, *, succeeded):
+        if succeeded:
+            self._spmv_auto_stats[f"{route}_dispatches"] += 1
+        else:
+            self._spmv_auto_stats["dispatch_failures"] += 1
+        decision = self._spmv_auto_stats["last_decision"]
+        if decision is not None:
+            decision["observed_auto_attempts"] = self._spmv_auto_stats["candidates"]
+            decision["observed_provider_dispatches"] = self._spmv_auto_stats[
+                "provider_dispatches"
+            ]
+            decision["observed_kernel_dispatches"] = self._spmv_auto_stats[
+                "kernel_dispatches"
+            ]
+            decision["observed_dispatch_failures"] = self._spmv_auto_stats[
+                "dispatch_failures"
+            ]
 
     def spmv(self, other, *, method="auto"):
         """Multiplies by a device vector using auto, kernel, or provider route."""
@@ -635,20 +662,28 @@ class SparseMatrix:
         elif method == "auto":
             route = "provider"
 
-        if route == "kernel":
-            if not is_cuda_cusparse or not hasattr(self.matrix, "spmv_kernel"):
-                raise TaichiRuntimeError(
-                    "SparseMatrix kernel SpMV fallback is available only for "
-                    "CUDA cuSPARSE-backed CSR/BSR f32 matrices"
-                )
-            self.matrix.spmv_kernel(get_runtime().prog, other.arr, result.arr)
-        else:
-            if method == "provider" and not is_cuda_cusparse:
-                raise TaichiRuntimeError(
-                    "SparseMatrix provider SpMV is available only for CUDA "
-                    "cuSPARSE-backed matrices"
-                )
-            self.matrix.spmv(get_runtime().prog, other.arr, result.arr)
+        audited_auto_route = method == "auto" and is_cuda_cusparse
+        try:
+            if route == "kernel":
+                if not is_cuda_cusparse or not hasattr(self.matrix, "spmv_kernel"):
+                    raise TaichiRuntimeError(
+                        "SparseMatrix kernel SpMV fallback is available only for "
+                        "CUDA cuSPARSE-backed CSR/BSR f32 matrices"
+                    )
+                self.matrix.spmv_kernel(get_runtime().prog, other.arr, result.arr)
+            else:
+                if method == "provider" and not is_cuda_cusparse:
+                    raise TaichiRuntimeError(
+                        "SparseMatrix provider SpMV is available only for CUDA "
+                        "cuSPARSE-backed matrices"
+                    )
+                self.matrix.spmv(get_runtime().prog, other.arr, result.arr)
+        except Exception:
+            if audited_auto_route:
+                self._record_spmv_auto_dispatch(route, succeeded=False)
+            raise
+        if audited_auto_route:
+            self._record_spmv_auto_dispatch(route, succeeded=True)
         return result
 
     def __getitem__(self, indices):
@@ -718,6 +753,22 @@ class SparseMatrix:
         snapshot["auto_provider"] = copy.deepcopy(self._spmv_auto_stats)
         snapshot["auto_provider"]["provider_profile_present"] = (
             self._spmv_provider_profile is not None
+        )
+        evidence_expected_reuse = (
+            None
+            if self._spmv_provider_profile is None
+            else self._spmv_provider_profile.expected_reuse
+        )
+        snapshot["auto_provider"]["requested_expected_reuse"] = (
+            self._spmv_expected_reuse
+        )
+        snapshot["auto_provider"]["effective_expected_reuse"] = (
+            self._spmv_expected_reuse
+            if self._spmv_expected_reuse is not None
+            else evidence_expected_reuse
+        )
+        snapshot["auto_provider"]["evidence_expected_reuse"] = (
+            evidence_expected_reuse
         )
         snapshot["auto_provider"]["activation"] = "domain_api_auto_provider"
         snapshot["auto_provider"]["fallback_route"] = "cuda_driver_kernel"

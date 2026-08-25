@@ -88,6 +88,35 @@ def test_sparse_solver_factorize_requires_analysis():
         solver.factorize(matrix)
 
 
+@test_utils.test(arch=ti.cpu)
+def test_sparse_solver_reports_observed_reuse_without_predicting_future_solves():
+    dense = np.array([[4.0, -1.0], [-1.0, 3.0]], dtype=np.float32)
+    matrix = _build_direct_solver_matrix(dense)
+    rhs = np.array([1.0, 2.0], dtype=np.float32)
+    solver = ti.linalg.SparseSolver(dtype=ti.f32, solver_type="LLT")
+
+    solver.analyze_pattern(matrix)
+    solver.factorize(matrix)
+    solver.solve(rhs)
+    solver.solve(rhs)
+
+    reuse = solver.provider_status()["reuse"]
+    assert reuse["requested_expected_reuse"] is None
+    assert reuse["effective_expected_reuse"] is None
+    assert reuse["evidence_expected_reuse"] is None
+    assert reuse["observed_factorization_dispatches"] == 1
+    assert reuse["observed_solve_dispatches"] == 2
+    assert reuse["observed_solve_dispatches_since_factorization"] == 2
+    assert reuse["factorization_generation"] == 1
+    assert reuse["factorization_active"]
+
+    solver.analyze_pattern(matrix)
+    reuse = solver.provider_status()["reuse"]
+    assert reuse["observed_solve_dispatches"] == 2
+    assert reuse["observed_solve_dispatches_since_factorization"] == 0
+    assert not reuse["factorization_active"]
+
+
 @test_utils.test(arch=ti.cuda)
 def test_cuda_sparse_solver_refreshes_values_for_reused_pattern():
     dense_a = np.array(

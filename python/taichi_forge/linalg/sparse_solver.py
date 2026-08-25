@@ -53,6 +53,11 @@ class SparseSolver:
         self._library_path = library_path
         self._provider_profile = provider_profile
         self._expected_reuse = expected_reuse
+        self._factorization_dispatches = 0
+        self._solve_dispatches = 0
+        self._solve_dispatches_since_factorization = 0
+        self._factorization_generation = 0
+        self._factorization_active = False
         solver_type_list = ["LLT", "LDLT", "LU"]
         solver_ordering = ["AMD", "COLAMD"]
         provider_list = ["auto", "cudss", "cusolver_sp"]
@@ -132,6 +137,17 @@ class SparseSolver:
     def provider_status(self):
         """Return the automatic selection decision without probing again."""
 
+        evidence_expected_reuse = (
+            None
+            if self._provider_profile is None
+            else self._provider_profile.expected_reuse
+        )
+        effective_expected_reuse = (
+            self._expected_reuse
+            if self._expected_reuse is not None
+            else evidence_expected_reuse
+        )
+
         return {
             "requested": self._provider_request,
             "selected": self._selected_provider,
@@ -141,7 +157,30 @@ class SparseSolver:
                 if self._provider_admission is None
                 else dict(self._provider_admission)
             ),
+            "reuse": {
+                "requested_expected_reuse": self._expected_reuse,
+                "effective_expected_reuse": effective_expected_reuse,
+                "evidence_expected_reuse": evidence_expected_reuse,
+                "observed_factorization_dispatches": self._factorization_dispatches,
+                "observed_solve_dispatches": self._solve_dispatches,
+                "observed_solve_dispatches_since_factorization": (
+                    self._solve_dispatches_since_factorization
+                ),
+                "factorization_generation": self._factorization_generation,
+                "factorization_active": self._factorization_active,
+            },
         }
+
+    def _record_factorization_dispatch(self):
+        self._factorization_dispatches += 1
+        self._factorization_generation += 1
+        self._solve_dispatches_since_factorization = 0
+        self._factorization_active = True
+
+    def _record_solve_dispatch(self, result):
+        self._solve_dispatches += 1
+        self._solve_dispatches_since_factorization += 1
+        return result
 
     @staticmethod
     def _provider_version_scope(version):
@@ -433,6 +472,7 @@ class SparseSolver:
             taichi_arch = taichi_forge.lang.impl.get_runtime().prog.config().arch
             if taichi_arch == _ti_core.Arch.x64 or taichi_arch == _ti_core.Arch.arm64:
                 self.solver.compute(sparse_matrix.matrix)
+                self._record_factorization_dispatch()
             elif taichi_arch == _ti_core.Arch.cuda:
                 self.analyze_pattern(sparse_matrix)
                 self.factorize(sparse_matrix)
@@ -468,6 +508,8 @@ class SparseSolver:
                 self.solver.analyze()
             else:
                 self.solver.analyze_pattern(sparse_matrix.matrix)
+            self._factorization_active = False
+            self._solve_dispatches_since_factorization = 0
             self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
@@ -498,6 +540,7 @@ class SparseSolver:
                 self.solver.factorize(sparse_matrix)
             else:
                 self.solver.factorize(sparse_matrix.matrix)
+            self._record_factorization_dispatch()
             self.matrix = sparse_matrix
         else:
             self._type_assert(sparse_matrix)
@@ -517,7 +560,7 @@ class SparseSolver:
             if isinstance(b, Ndarray):
                 x = ScalarNdarray(b.dtype, [self.matrix.m])
                 self.solver.solve(b, x)
-                return x
+                return self._record_solve_dispatch(x)
             if isinstance(b, Field):
                 b = b.to_numpy()
             if isinstance(b, np.ndarray):
@@ -525,19 +568,19 @@ class SparseSolver:
                 solution = ScalarNdarray(self.dtype, [self.matrix.m])
                 rhs.from_numpy(np.asarray(b, dtype=np.float32))
                 self.solver.solve(rhs, solution)
-                return solution.to_numpy()
+                return self._record_solve_dispatch(solution.to_numpy())
             raise TaichiRuntimeError(
                 f"The parameter type: {type(b)} is not supported in linear solvers for now."
             )
         self.solver.validate_factorization(self.matrix.matrix)
         if isinstance(b, Field):
-            return self.solver.solve(b.to_numpy())
+            return self._record_solve_dispatch(self.solver.solve(b.to_numpy()))
         if isinstance(b, np.ndarray):
-            return self.solver.solve(b)
+            return self._record_solve_dispatch(self.solver.solve(b))
         if isinstance(b, Ndarray):
             x = ScalarNdarray(b.dtype, [self.matrix.m])
             self.solver.solve_rf(get_runtime().prog, self.matrix.matrix, b.arr, x.arr)
-            return x
+            return self._record_solve_dispatch(x)
         raise TaichiRuntimeError(
             f"The parameter type: {type(b)} is not supported in linear solvers for now."
         )

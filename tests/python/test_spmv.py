@@ -370,6 +370,22 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
         "qualified_cost_advantage"
     )
     assert stats["auto_provider"]["last_decision"]["expected_reuse"] == 16
+    assert stats["auto_provider"]["last_decision"][
+        "requested_expected_reuse"
+    ] is None
+    assert stats["auto_provider"]["last_decision"][
+        "effective_expected_reuse"
+    ] == 16
+    assert stats["auto_provider"]["last_decision"][
+        "evidence_expected_reuse"
+    ] == 16
+    assert stats["auto_provider"]["last_decision"]["observed_auto_attempts"] == 3
+    assert stats["auto_provider"]["last_decision"][
+        "observed_provider_dispatches"
+    ] == 1
+    assert stats["auto_provider"]["last_decision"][
+        "observed_kernel_dispatches"
+    ] == 2
     assert stats["operations"]["spmv_plan_builds"] == 1
     assert not hasattr(matrix, "set_spmv_auto_cost_evidence")
 
@@ -380,6 +396,11 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
     assert matrix._debug_runtime_stats()["auto_provider"]["last_decision"][
         "expected_reuse"
     ] == 1
+    current_stats = matrix._debug_runtime_stats()["auto_provider"]
+    assert current_stats["requested_expected_reuse"] == 1
+    assert current_stats["effective_expected_reuse"] == 1
+    assert current_stats["evidence_expected_reuse"] == 16
+    assert current_stats["last_decision"]["observed_provider_dispatches"] == 2
 
     matrix.set_provider_profile(None)
     explicit = matrix.spmv(vector, method="provider")

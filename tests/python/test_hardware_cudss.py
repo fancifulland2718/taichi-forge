@@ -167,6 +167,13 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
     np.testing.assert_allclose(
         solution.to_numpy(), np.array([0.625, 0.875], dtype=np.float32), rtol=1e-5
     )
+    reuse = solver.provider_status()["reuse"]
+    assert reuse["requested_expected_reuse"] is None
+    assert reuse["effective_expected_reuse"] is None
+    assert reuse["evidence_expected_reuse"] is None
+    assert reuse["observed_factorization_dispatches"] == 1
+    assert reuse["observed_solve_dispatches"] == 1
+    assert reuse["observed_solve_dispatches_since_factorization"] == 1
 
     from taichi_forge.hardware import ProviderAdmissionEvidence
     from taichi_forge.hardware._admission import (
@@ -249,6 +256,12 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
     assert mismatched.provider_status()["fallback_reason"] == (
         "workload_scope_mismatch"
     )
+    reuse = mismatched.provider_status()["reuse"]
+    assert reuse["requested_expected_reuse"] is None
+    assert reuse["effective_expected_reuse"] == 16
+    assert reuse["evidence_expected_reuse"] == 16
+    assert reuse["observed_factorization_dispatches"] == 1
+    assert reuse["observed_solve_dispatches"] == 0
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
