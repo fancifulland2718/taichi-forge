@@ -10,6 +10,7 @@
 namespace taichi::lang {
 class Kernel;
 class GraphBuilder;
+class SparseMatrix;
 
 class Node {
  public:
@@ -181,6 +182,13 @@ class GraphBuilder {
                             const aot::Arg &extent,
                             std::uint32_t capacity,
                             const std::string &dispatch_label = {});
+
+  // Private JIT-only feasibility proof. This is intentionally not an AOT
+  // node and does not broaden the serialized Graph contract.
+  void dispatch_cuda_sparse_spmv(SparseMatrix *matrix,
+                                 Program *program,
+                                 const aot::Arg &input,
+                                 const aot::Arg &output);
 
   Sequential *seq() const;
 

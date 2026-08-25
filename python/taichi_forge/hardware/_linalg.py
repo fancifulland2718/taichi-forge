@@ -1,6 +1,7 @@
 """Optional CUDA vendor linear-algebra providers."""
 
 import math
+import os
 from numbers import Real
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
@@ -221,12 +222,19 @@ class CusparseSpmvRecording(BackendCommandRecording):
             stream_binding="runtime_ordered",
             barrier_policy="declared_effects",
             workspace_ownership="provider_generation",
-            replay_mode="rerecord",
+            replay_mode=(
+                "stream_capture"
+                if os.environ.get("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF") == "1"
+                else "rerecord"
+            ),
             no_host_readback=True,
         )
         object.__setattr__(self, "matrix", matrix)
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "output", output)
+        object.__setattr__(
+            self, "_cuda_mixed_command_proof_kind", "cusparse_spmv_f32"
+        )
         object.__setattr__(
             self,
             "_memory_resources",

@@ -226,11 +226,19 @@ def _periodic_poisson_residual_tolerance(solution, rhs):
     return float(max(2e-3, quantization_bound))
 
 
-def _implicit_grid_csr(side, stiffness):
-    """Construct ``I + stiffness * Laplacian`` on a square grid."""
+def _implicit_grid_csr(side, stiffness, *, stencil_radius=1):
+    """Construct ``I + stiffness * Laplacian`` on a square grid.
+
+    ``stencil_radius`` broadens the symmetric coupling neighborhood.  Radius
+    one preserves the original five-point implicit-grid workload, while wider
+    radii model denser non-local constraints without changing the SPD
+    structure used by the fixed-iteration Krylov comparison.
+    """
 
     if side < 2:
         raise ValueError("implicit grid side must be at least two")
+    if stencil_radius < 1 or stencil_radius >= side:
+        raise ValueError("implicit grid stencil radius is out of bounds")
     row_offsets = [0]
     column_indices = []
     values = []
@@ -238,14 +246,26 @@ def _implicit_grid_csr(side, stiffness):
         for column in range(side):
             index = row * side + column
             neighbors = []
-            if row > 0:
-                neighbors.append(index - side)
-            if row + 1 < side:
-                neighbors.append(index + side)
-            if column > 0:
-                neighbors.append(index - 1)
-            if column + 1 < side:
-                neighbors.append(index + 1)
+            for row_delta in range(-stencil_radius, stencil_radius + 1):
+                for column_delta in range(-stencil_radius, stencil_radius + 1):
+                    if row_delta == 0 and column_delta == 0:
+                        continue
+                    neighbor_row = row + row_delta
+                    neighbor_column = column + column_delta
+                    if not (
+                        0 <= neighbor_row < side
+                        and 0 <= neighbor_column < side
+                    ):
+                        continue
+                    # Keep radius one bit-for-bit compatible with the original
+                    # five-point graph rather than turning it into a nine-point
+                    # stencil.
+                    if (
+                        stencil_radius == 1
+                        and abs(row_delta) + abs(column_delta) != 1
+                    ):
+                        continue
+                    neighbors.append(neighbor_row * side + neighbor_column)
             entries = [(index, 1.0 + stiffness * len(neighbors))]
             entries.extend((neighbor, -stiffness) for neighbor in neighbors)
             for entry_column, entry_value in sorted(entries):
@@ -1338,7 +1358,10 @@ def _cuda_spmv_krylov_case(order, args):
     side = args.krylov_grid
     iterations = args.krylov_iterations
     n = side * side
-    row_offsets_host, column_indices_host, values_host = _implicit_grid_csr(side, 0.20)
+    stencil_radius = args.krylov_stencil_radius
+    row_offsets_host, column_indices_host, values_host = _implicit_grid_csr(
+        side, 0.20, stencil_radius=stencil_radius
+    )
     rhs_host = (
         np.sin(np.arange(n, dtype=np.float32) * np.float32(0.017))
         + np.cos(np.arange(n, dtype=np.float32) * np.float32(0.011))
@@ -1354,6 +1377,23 @@ def _cuda_spmv_krylov_case(order, args):
     pattern = ti.linalg.SparsePattern.csr(n, n, row_offsets, column_indices)
     matrix = pattern.matrix(values)
     recording = ti.hardware.linalg.CusparseSpmvRecording(matrix, input="p", output="ap")
+    rerecord_recording = None
+    if args.krylov_baseline == "rerecord":
+        if recording.replay_mode != "stream_capture":
+            raise RuntimeError(
+                "the rerecord baseline requires "
+                "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1"
+            )
+        proof_flag = os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
+        try:
+            rerecord_recording = ti.hardware.linalg.CusparseSpmvRecording(
+                matrix, input="p", output="ap"
+            )
+        finally:
+            if proof_flag is not None:
+                os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = proof_flag
+        if rerecord_recording.replay_mode != "rerecord":
+            raise RuntimeError("failed to construct the segmented rerecord baseline")
 
     @ti.kernel
     def clear_scalar(value: ti.types.ndarray(dtype=ti.f32, ndim=1)):
@@ -1446,7 +1486,7 @@ def _cuda_spmv_krylov_case(order, args):
     )
     values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1)
 
-    def build_solver_graph(use_hardware):
+    def build_solver_graph(use_hardware, *, selected_recording=None):
         builder = ti.graph.GraphBuilder()
         builder.dispatch(clear_scalar, scalar_args["rr"])
         builder.dispatch(clear_scalar, scalar_args["rr_new"])
@@ -1461,7 +1501,7 @@ def _cuda_spmv_krylov_case(order, args):
         )
         for _ in range(iterations):
             if use_hardware:
-                builder.append_native(recording, admission="explicit")
+                builder.append_native(selected_recording, admission="explicit")
             else:
                 builder.dispatch(
                     taichi_csr_spmv,
@@ -1508,8 +1548,16 @@ def _cuda_spmv_krylov_case(order, args):
             )
         return builder.compile()
 
-    hardware_graph = build_solver_graph(True)
-    baseline_graph = build_solver_graph(False)
+    hardware_graph = build_solver_graph(True, selected_recording=recording)
+    baseline_graph = (
+        build_solver_graph(True, selected_recording=rerecord_recording)
+        if rerecord_recording is not None
+        else build_solver_graph(False)
+    )
+    if recording.replay_mode == "stream_capture":
+        # Diagnostics must be enabled before the first launch; otherwise
+        # replay counters would be partial and unsuitable as mechanism proof.
+        assert hardware_graph._graph_stats[0]["diagnostics_counters_complete"]
 
     def make_bindings():
         bindings = {
@@ -1526,13 +1574,14 @@ def _cuda_spmv_krylov_case(order, args):
 
     hardware_bindings = make_bindings()
     baseline_bindings = make_bindings()
-    baseline_bindings.update(
-        {
-            "row_offsets": row_offsets,
-            "column_indices": column_indices,
-            "values": values,
-        }
-    )
+    if rerecord_recording is None:
+        baseline_bindings.update(
+            {
+                "row_offsets": row_offsets,
+                "column_indices": column_indices,
+                "values": values,
+            }
+        )
 
     def hardware():
         hardware_graph.run(hardware_bindings)
@@ -1588,12 +1637,17 @@ def _cuda_spmv_krylov_case(order, args):
             "workload": {
                 "equation": "fixed-iteration conjugate gradient for I + 0.2 * graph_laplacian",
                 "grid": (side, side),
+                "stencil_radius": stencil_radius,
                 "rows": n,
                 "nnz": int(values_host.size),
                 "iterations": iterations,
                 "timed_scope": "initialization+fixed_CG_recurrence+SpMV+single_final_synchronization",
-                "hardware": "root Graph with explicit cuSPARSE SpMV nodes",
-                "baseline": "root Graph with hand-written Taichi CSR SpMV kernel",
+                "hardware": "fixed-binding CUDA Graph with mixed Taichi and cuSPARSE commands",
+                "baseline": (
+                    "segmented root Graph that rerecords cuSPARSE SpMV"
+                    if rerecord_recording is not None
+                    else "root Graph with hand-written Taichi CSR SpMV kernel"
+                ),
                 "host_readback_included": False,
                 "auto_admission_training_case": False,
             },
@@ -1610,9 +1664,22 @@ def _cuda_spmv_krylov_case(order, args):
                 "provider": resolved,
                 "hardware_action": "linalg.spmv.cusparse_explicit",
                 "graph_integration": resolved["graph_integration"],
-                "baseline_action": "taichi_kernel_csr_spmv",
+                "baseline_action": (
+                    "segmented_cusparse_rerecord"
+                    if rerecord_recording is not None
+                    else "taichi_kernel_csr_spmv"
+                ),
             },
             "provider_statistics": provider_stats,
+            "replay_proof": {
+                "enabled": recording.replay_mode == "stream_capture",
+                "baseline_mode": args.krylov_baseline,
+                "graph_statistics": (
+                    hardware_graph._graph_stats[0]
+                    if recording.replay_mode == "stream_capture"
+                    else None
+                ),
+            },
         }
     )
     ti.reset()
@@ -3492,7 +3559,7 @@ def _aggregate(
         "correctness": [worker["correctness"] for worker in workers],
         "route": workers[0]["route"],
     }
-    for diagnostic in ("memory", "provider_statistics"):
+    for diagnostic in ("memory", "provider_statistics", "replay_proof"):
         values = [worker[diagnostic] for worker in workers if diagnostic in worker]
         if values:
             result[diagnostic] = values
@@ -3567,6 +3634,10 @@ def _parent(args):
                     str(args.krylov_grid),
                     "--krylov-iterations",
                     str(args.krylov_iterations),
+                    "--krylov-stencil-radius",
+                    str(args.krylov_stencil_radius),
+                    "--krylov-baseline",
+                    args.krylov_baseline,
                     "--ray-grid",
                     str(args.ray_grid),
                     "--ray-query-side",
@@ -3710,6 +3781,8 @@ def _parent(args):
                 "tet_fem_grid": args.fem_grid,
                 "krylov_grid": args.krylov_grid,
                 "krylov_iterations": args.krylov_iterations,
+                "krylov_stencil_radius": args.krylov_stencil_radius,
+                "krylov_baseline": args.krylov_baseline,
                 "offscreen_size": args.offscreen_size,
                 "offscreen_tiles": args.offscreen_tiles,
             },
@@ -3766,6 +3839,12 @@ def _parse_args():
     parser.add_argument("--fem-grid", type=int, default=7)
     parser.add_argument("--krylov-grid", type=int, default=256)
     parser.add_argument("--krylov-iterations", type=int, default=48)
+    parser.add_argument("--krylov-stencil-radius", type=int, default=1)
+    parser.add_argument(
+        "--krylov-baseline",
+        choices=("taichi", "rerecord"),
+        default="taichi",
+    )
     parser.add_argument("--cudss-library")
     parser.add_argument("--auto-admission-margin", type=float, default=0.05)
     parser.add_argument("--ray-grid", type=int, default=128)
@@ -3803,6 +3882,8 @@ def _parse_args():
         or args.fem_grid < 3
         or args.krylov_grid < 2
         or args.krylov_iterations <= 0
+        or args.krylov_stencil_radius < 1
+        or args.krylov_stencil_radius >= args.krylov_grid
         or not 0.05 <= args.auto_admission_margin < 1.0
         or args.ray_grid < 2
         or args.ray_query_side <= 0

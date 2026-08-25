@@ -4522,6 +4522,16 @@ void export_lang(py::module &m) {
       .def("dispatch_cpu_bounded", &GraphBuilder::dispatch_cpu_bounded,
            py::arg("kernel"), py::arg("args"), py::arg("extent"),
            py::arg("capacity"), py::arg("label") = "")
+      .def(
+          "_dispatch_cuda_sparse_spmv_proof",
+          [](GraphBuilder &builder, const py::object &matrix,
+             Program *program, const aot::Arg &input,
+             const aot::Arg &output) {
+            builder.dispatch_cuda_sparse_spmv(matrix.cast<SparseMatrix *>(),
+                                              program, input, output);
+          },
+          py::arg("matrix"), py::arg("program"), py::arg("input"),
+          py::arg("output"))
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

@@ -34,6 +34,7 @@ class Kernel;
 class CompiledKernelData;
 class KernelExecutionHandle;
 class Program;
+class SparseMatrix;
 namespace storage {
 class RuntimeStorageArgument;
 }
@@ -244,6 +245,16 @@ struct CpuBoundedDispatchMetadata {
   std::uint32_t capacity{0};
 };
 
+// JIT-only feasibility proof for one fixed-binding cuSPARSE SpMV command.
+// The provider pointer is retained by the enclosing Forge native executable;
+// it is deliberately excluded from the public/AOT graph schema.
+struct CudaSparseSpmvDispatchMetadata {
+  SparseMatrix *matrix{nullptr};
+  Program *program{nullptr};
+  Arg input_arg;
+  Arg output_arg;
+};
+
 struct CompiledDispatch {
   std::string kernel_name;
   // JIT-only invocation metadata. AOT payloads remain source-compatible and
@@ -271,6 +282,9 @@ struct CompiledDispatch {
   std::optional<CudaBoundedDispatchMetadata> cuda_bounded_dispatch;
   // JIT-only CPU scheduler metadata; omitted from the public AOT schema.
   std::optional<CpuBoundedDispatchMetadata> cpu_bounded_dispatch;
+  // JIT-only provider command. Graph replay treats every graph containing
+  // this command as exact-binding-only: argument patching is not admissible.
+  std::optional<CudaSparseSpmvDispatchMetadata> cuda_sparse_spmv_dispatch;
 
   TI_IO_DEF(kernel_name, symbolic_args);
 };
@@ -718,6 +732,7 @@ struct TI_DLL_EXPORT CompiledGraph {
 
   bool has_indirect_dispatches() const;
   bool has_dispatch_labels() const;
+  bool has_cuda_sparse_spmv_dispatches() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;
   void jit_run(const CompileConfig &compile_config,

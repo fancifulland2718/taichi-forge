@@ -10783,6 +10783,12 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
         return fallback_nodes
     result = []
     for record, fallback in zip(records, fallback_nodes):
+        if not isinstance(fallback, DispatchNode):
+            # JIT-only provider commands carry their own NativeCallNode IR.
+            # Core task metadata is kernel-shaped and must not erase or
+            # reinterpret that provider effect/lifetime contract.
+            result.append(fallback)
+            continue
         side_effects = tuple(str(item) for item in record.get("side_effects", ()))
         iteration_domain = _metadata_iteration_domain(record)
         effects = tuple(
@@ -12348,6 +12354,52 @@ class GraphBuilder:
                     f"{action.backend_command_recording.backend}, not the active "
                     f"{backend} backend"
                 )
+            recording = action.backend_command_recording
+            if (
+                backend == "cuda"
+                and recording.replay_mode == "stream_capture"
+                and getattr(
+                    recording, "_cuda_mixed_command_proof_kind", None
+                )
+                == "cusparse_spmv_f32"
+            ):
+                compiled = _CompiledNativeGraphNode(executable)
+                input_arg = Arg(
+                    ArgKind.NDARRAY,
+                    recording.input,
+                    f32,
+                    ndim=1,
+                )
+                output_arg = Arg(
+                    ArgKind.NDARRAY,
+                    recording.output,
+                    f32,
+                    ndim=1,
+                )
+                self._ensure_runtime_graph_builder()._dispatch_cuda_sparse_spmv_proof(
+                    recording.matrix.matrix,
+                    impl.get_runtime().prog,
+                    input_arg,
+                    output_arg,
+                )
+                self._dispatch_count += 1
+                self._runtime_graph_arg_names.update(
+                    compiled.recording_runtime_arg_names
+                )
+                self._runtime_graph_lifetime_leases.extend(
+                    compiled.lifetime_leases
+                )
+                self._runtime_graph_source_native_count += (
+                    compiled.source_native_count
+                )
+                self._runtime_graph_native_action_manifests.extend(
+                    compiled.native_action_manifests
+                )
+                self._pending_ir_nodes.append(compiled.ir_node)
+                # Provider pointers are JIT-only and must never leak into the
+                # backend-neutral serialized Graph schema.
+                self._aot_graph_plan.mark_internal_fixed_bindings()
+                return self
         if admission == "auto":
             backend = _backend_name(
                 _ti_core.arch_name(impl.current_cfg().arch)

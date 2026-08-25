@@ -35,6 +35,18 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
     np.testing.assert_allclose(dense, dense.T)
     assert np.min(np.linalg.eigvalsh(dense)) > 0.0
 
+    wide_rows, wide_columns, wide_values = qualification._implicit_grid_csr(
+        5, 0.2, stencil_radius=2
+    )
+    wide_dense = np.zeros((25, 25), dtype=np.float64)
+    for row in range(25):
+        wide_dense[row, wide_columns[wide_rows[row] : wide_rows[row + 1]]] = (
+            wide_values[wide_rows[row] : wide_rows[row + 1]]
+        )
+    np.testing.assert_allclose(wide_dense, wide_dense.T)
+    assert np.count_nonzero(wide_dense[12]) == 25
+    assert np.min(np.linalg.eigvalsh(wide_dense)) > 0.0
+
     coordinates, tetrahedra, rows, columns, low_values = (
         qualification._irregular_tet_fem_csr(3, 2.0)
     )

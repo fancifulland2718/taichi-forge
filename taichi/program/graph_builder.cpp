@@ -2,9 +2,72 @@
 #include "taichi/program/graph_kernel_composer.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
+#include "taichi/program/sparse_matrix.h"
 #include "taichi/system/profiler_annotation.h"
 
 namespace taichi::lang {
+namespace {
+
+class CudaSparseSpmvDispatch final : public Node {
+ public:
+  CudaSparseSpmvDispatch(SparseMatrix *matrix,
+                         Program *program,
+                         aot::Arg input,
+                         aot::Arg output)
+      : matrix_(matrix),
+        program_(program),
+        input_(std::move(input)),
+        output_(std::move(output)) {
+  }
+
+  void compile(
+      std::vector<aot::CompiledDispatch> &compiled_dispatches) override {
+    aot::CompiledDispatch dispatch;
+    dispatch.kernel_name = "cuda_cusparse_spmv_f32";
+    dispatch.symbolic_args = {input_, output_};
+    dispatch.cuda_sparse_spmv_dispatch =
+        aot::CudaSparseSpmvDispatchMetadata{matrix_, program_, input_, output_};
+    // Preserve one logical source item for Forge pipeline attribution. The
+    // default metadata is intentionally opaque: this provider command cannot
+    // participate in kernel composition or AOT serialization.
+    dispatch.source_dispatches.push_back(
+        {dispatch.kernel_name, "", dispatch.symbolic_args, {}});
+    dispatch.compiled_task_count = 0;
+    compiled_dispatches.push_back(std::move(dispatch));
+  }
+
+ private:
+  SparseMatrix *matrix_{nullptr};
+  Program *program_{nullptr};
+  aot::Arg input_;
+  aot::Arg output_;
+};
+
+void validate_cuda_sparse_spmv_args(SparseMatrix *matrix,
+                                    Program *program,
+                                    const aot::Arg &input,
+                                    const aot::Arg &output) {
+  TI_ERROR_IF(matrix == nullptr || program == nullptr,
+              "CUDA sparse SpMV Graph proof requires a live matrix and Program");
+  TI_ERROR_IF(input.tag != aot::ArgKind::kNdarray ||
+                  output.tag != aot::ArgKind::kNdarray ||
+                  input.dtype_id != PrimitiveTypeID::f32 ||
+                  output.dtype_id != PrimitiveTypeID::f32 ||
+                  input.field_dim != 1 || output.field_dim != 1 ||
+                  !input.element_shape.empty() || !output.element_shape.empty(),
+              "CUDA sparse SpMV Graph proof requires scalar f32 rank-1 "
+              "ndarray bindings");
+  TI_ERROR_IF(input.name == output.name,
+              "CUDA sparse SpMV Graph proof input and output must differ");
+  TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(matrix) == nullptr &&
+                  dynamic_cast<CuSparseBsrMatrix *>(matrix) == nullptr,
+              "CUDA sparse SpMV Graph proof supports cuSPARSE CSR/BSR only");
+  TI_ERROR_IF(matrix->get_data_type() != PrimitiveType::f32,
+              "CUDA sparse SpMV Graph proof supports f32 matrices only");
+}
+
+}  // namespace
+
 aot::CompiledDispatch Dispatch::compile_dispatch() const {
   aot::CompiledDispatch dispatch;
   dispatch.kernel_name = kernel_->get_name();
@@ -310,6 +373,18 @@ void GraphBuilder::dispatch_cpu_bounded(
     const std::string &dispatch_label) {
   seq()->dispatch_cpu_bounded(kernel, args, extent, capacity,
                               dispatch_label);
+}
+
+void GraphBuilder::dispatch_cuda_sparse_spmv(SparseMatrix *matrix,
+                                             Program *program,
+                                             const aot::Arg &input,
+                                             const aot::Arg &output) {
+  validate_cuda_sparse_spmv_args(matrix, program, input, output);
+  register_arg(input);
+  register_arg(output);
+  all_nodes_.push_back(std::make_unique<CudaSparseSpmvDispatch>(
+      matrix, program, input, output));
+  seq()->append(all_nodes_.back().get());
 }
 
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
