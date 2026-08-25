@@ -170,12 +170,26 @@ struct VulkanGraphicsShaderBufferBinding {
   bool storage{false};
 };
 
+struct VulkanGraphicsIndirectInfo {
+  Ndarray *command_buffer{nullptr};
+  Ndarray *count_buffer{nullptr};
+  std::uint32_t command_offset{0};
+  std::uint32_t count_offset{0};
+  std::uint32_t max_draw_count{1};
+  std::uint32_t stride{0};
+  std::uint32_t vertex_record_limit{0};
+  std::uint32_t instance_record_limit{0};
+  std::uint32_t index_element_limit{0};
+  bool first_instance_may_be_nonzero{false};
+};
+
 struct VulkanGraphicsDrawCommand {
   std::uint64_t pipeline_handle{0};
   std::vector<std::pair<std::uint32_t, Ndarray *>> vertex_buffers;
   Ndarray *index_buffer{nullptr};
   std::vector<VulkanGraphicsShaderBufferBinding> shader_buffers;
   VulkanGraphicsDrawInfo draw;
+  std::optional<VulkanGraphicsIndirectInfo> indirect;
 };
 
 struct VulkanGraphicsPassInfo {
@@ -1068,6 +1082,9 @@ class TI_DLL_EXPORT Program {
   vulkan_cooperative_matrix_properties() const;
 
   bool vulkan_graphics_pipeline_available() const;
+
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_graphics_indirect_capabilities() const;
 
   std::size_t debug_vulkan_graphics_pipeline_count();
 

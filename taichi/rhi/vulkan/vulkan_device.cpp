@@ -1714,6 +1714,173 @@ void VulkanCommandList::draw_indexed_instance(uint32_t num_indicies,
                    vertex_offset, start_instance);
 }
 
+namespace {
+
+RhiResult validate_draw_indirect_buffer(VulkanDevice *device,
+                                        DevicePtr indirect,
+                                        uint32_t draw_count,
+                                        uint32_t stride,
+                                        size_t command_size) noexcept {
+  if (indirect.device != device || indirect.alloc_id == 0 || draw_count == 0) {
+    return RhiResult::invalid_usage;
+  }
+  if (!int(device->allocation_usage(indirect) & AllocUsage::Indirect) ||
+      (indirect.offset & (sizeof(uint32_t) - 1)) != 0 ||
+      stride < command_size || (stride & (sizeof(uint32_t) - 1)) != 0) {
+    return RhiResult::invalid_usage;
+  }
+  const auto &caps = device->vk_caps();
+  if (draw_count > caps.max_draw_indirect_count) {
+    return RhiResult::not_supported;
+  }
+  if (draw_count > 1 && !caps.multi_draw_indirect) {
+    return RhiResult::not_supported;
+  }
+  const size_t buffer_size = device->get_vkbuffer_size(indirect);
+  if (indirect.offset > buffer_size) {
+    return RhiResult::invalid_usage;
+  }
+  const size_t count_minus_one = static_cast<size_t>(draw_count - 1);
+  if (count_minus_one >
+      ((std::numeric_limits<size_t>::max)() - command_size) / stride) {
+    return RhiResult::invalid_usage;
+  }
+  const size_t required = count_minus_one * stride + command_size;
+  if (required > buffer_size - indirect.offset) {
+    return RhiResult::invalid_usage;
+  }
+  return RhiResult::success;
+}
+
+RhiResult validate_draw_count_buffer(VulkanDevice *device,
+                                     DevicePtr count) noexcept {
+  if (count.device != device || count.alloc_id == 0 ||
+      !int(device->allocation_usage(count) & AllocUsage::Indirect) ||
+      (count.offset & (sizeof(uint32_t) - 1)) != 0) {
+    return RhiResult::invalid_usage;
+  }
+  const size_t buffer_size = device->get_vkbuffer_size(count);
+  if (count.offset > buffer_size ||
+      sizeof(uint32_t) > buffer_size - count.offset) {
+    return RhiResult::invalid_usage;
+  }
+  return RhiResult::success;
+}
+
+}  // namespace
+
+RhiResult VulkanCommandList::draw_indirect(DevicePtr indirect,
+                                           uint32_t draw_count,
+                                           uint32_t stride) noexcept {
+  if (!current_pipeline_ || !current_pipeline_->is_graphics() ||
+      current_renderpass_ == VK_NULL_HANDLE) {
+    return RhiResult::invalid_usage;
+  }
+  const auto result = validate_draw_indirect_buffer(
+      ti_device_, indirect, draw_count, stride, sizeof(VkDrawIndirectCommand));
+  if (result != RhiResult::success) {
+    return result;
+  }
+  auto buffer = ti_device_->get_vkbuffer(indirect);
+  vkCmdDrawIndirect(buffer_->buffer, buffer->buffer, indirect.offset,
+                    draw_count, stride);
+  buffer_->refs.push_back(buffer);
+  return RhiResult::success;
+}
+
+RhiResult VulkanCommandList::draw_indexed_indirect(
+    DevicePtr indirect,
+    uint32_t draw_count,
+    uint32_t stride) noexcept {
+  if (!current_pipeline_ || !current_pipeline_->is_graphics() ||
+      current_renderpass_ == VK_NULL_HANDLE) {
+    return RhiResult::invalid_usage;
+  }
+  const auto result = validate_draw_indirect_buffer(
+      ti_device_, indirect, draw_count, stride,
+      sizeof(VkDrawIndexedIndirectCommand));
+  if (result != RhiResult::success) {
+    return result;
+  }
+  auto buffer = ti_device_->get_vkbuffer(indirect);
+  vkCmdDrawIndexedIndirect(buffer_->buffer, buffer->buffer, indirect.offset,
+                           draw_count, stride);
+  buffer_->refs.push_back(buffer);
+  return RhiResult::success;
+}
+
+RhiResult VulkanCommandList::draw_indirect_count(
+    DevicePtr indirect,
+    DevicePtr count,
+    uint32_t max_draw_count,
+    uint32_t stride) noexcept {
+  if (!ti_device_->vk_caps().draw_indirect_count || !current_pipeline_ ||
+      !current_pipeline_->is_graphics() ||
+      current_renderpass_ == VK_NULL_HANDLE) {
+    return RhiResult::not_supported;
+  }
+  const auto indirect_result = validate_draw_indirect_buffer(
+      ti_device_, indirect, max_draw_count, stride,
+      sizeof(VkDrawIndirectCommand));
+  if (indirect_result != RhiResult::success) {
+    return indirect_result;
+  }
+  const auto count_result = validate_draw_count_buffer(ti_device_, count);
+  if (count_result != RhiResult::success) {
+    return count_result;
+  }
+  auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
+  auto count_buffer = ti_device_->get_vkbuffer(count);
+  if (ti_device_->vk_caps().vk_api_version >= VK_API_VERSION_1_2) {
+    vkCmdDrawIndirectCount(buffer_->buffer, indirect_buffer->buffer,
+                           indirect.offset, count_buffer->buffer, count.offset,
+                           max_draw_count, stride);
+  } else {
+    vkCmdDrawIndirectCountKHR(buffer_->buffer, indirect_buffer->buffer,
+                              indirect.offset, count_buffer->buffer,
+                              count.offset, max_draw_count, stride);
+  }
+  buffer_->refs.push_back(indirect_buffer);
+  buffer_->refs.push_back(count_buffer);
+  return RhiResult::success;
+}
+
+RhiResult VulkanCommandList::draw_indexed_indirect_count(
+    DevicePtr indirect,
+    DevicePtr count,
+    uint32_t max_draw_count,
+    uint32_t stride) noexcept {
+  if (!ti_device_->vk_caps().draw_indirect_count || !current_pipeline_ ||
+      !current_pipeline_->is_graphics() ||
+      current_renderpass_ == VK_NULL_HANDLE) {
+    return RhiResult::not_supported;
+  }
+  const auto indirect_result = validate_draw_indirect_buffer(
+      ti_device_, indirect, max_draw_count, stride,
+      sizeof(VkDrawIndexedIndirectCommand));
+  if (indirect_result != RhiResult::success) {
+    return indirect_result;
+  }
+  const auto count_result = validate_draw_count_buffer(ti_device_, count);
+  if (count_result != RhiResult::success) {
+    return count_result;
+  }
+  auto indirect_buffer = ti_device_->get_vkbuffer(indirect);
+  auto count_buffer = ti_device_->get_vkbuffer(count);
+  if (ti_device_->vk_caps().vk_api_version >= VK_API_VERSION_1_2) {
+    vkCmdDrawIndexedIndirectCount(
+        buffer_->buffer, indirect_buffer->buffer, indirect.offset,
+        count_buffer->buffer, count.offset, max_draw_count, stride);
+  } else {
+    vkCmdDrawIndexedIndirectCountKHR(
+        buffer_->buffer, indirect_buffer->buffer, indirect.offset,
+        count_buffer->buffer, count.offset, max_draw_count, stride);
+  }
+  buffer_->refs.push_back(indirect_buffer);
+  buffer_->refs.push_back(count_buffer);
+  return RhiResult::success;
+}
+
 void VulkanCommandList::image_transition(DeviceAllocation img,
                                          ImageLayout old_layout_,
                                          ImageLayout new_layout_) {

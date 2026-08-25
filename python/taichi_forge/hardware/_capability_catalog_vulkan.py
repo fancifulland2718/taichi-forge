@@ -1,5 +1,6 @@
 """Vulkan command and interop capability catalog fragments."""
 
+
 def vulkan_command_operations(_operation):
     return (
         _operation(
@@ -85,6 +86,7 @@ def vulkan_command_operations(_operation):
             activation_mode="explicit_hardware_api",
             resource_effects=(
                 "read:geometry_and_uniform_buffers",
+                "read:optional_indirect_command_and_count_buffers",
                 "read_write:storage_buffers",
                 "write_or_read_write:color_depth_attachments",
             ),
@@ -93,6 +95,8 @@ def vulkan_command_operations(_operation):
             dtypes=(
                 "vertex:declared BufferFormat",
                 "index:u32",
+                "indirect_command:u32",
+                "indirect_count:u32",
                 "shader:uniform_or_storage_ndarray",
                 "color:attachment format",
                 "depth:depth32f",
@@ -104,6 +108,7 @@ def vulkan_command_operations(_operation):
                 "explicit uniform/storage descriptor buffers",
                 "one color and optional depth attachment with clear/load and store",
                 "one or more draws recorded into one render pass",
+                "fixed-count or feature-gated count-buffer indirect draws",
             ),
             numeric_contracts=(
                 "depth:test_and_write",
@@ -113,6 +118,7 @@ def vulkan_command_operations(_operation):
             requirements=(
                 "Vulkan RHI graphics pipeline and graphics queue",
                 "caller-provided SPIR-V vertex and fragment shaders",
+                "indirect buffers follow VkDrawIndirectCommand or VkDrawIndexedIndirectCommand ABI",
             ),
             public_api="ti.hardware.graphics.VulkanGraphicsPipeline",
             notes=(
@@ -120,6 +126,8 @@ def vulkan_command_operations(_operation):
                 "This interface owns no renderer semantics: the caller supplies shaders, raw vertex/index buffers, attachments, draw ranges, and scheduling policy.",
                 "VulkanGraphicsPassRecording batches N draws into one backend pass action; the legacy single-draw API is a compatibility wrapper.",
                 "Compute-to-graphics-to-compute ordering uses backend semaphores and does not add a host wait.",
+                "Indirect draws consume kernel-produced command/count ndarrays without host readback; declared geometry bounds are validated conservatively.",
+                "Fixed-count indirect is baseline Vulkan; multi-draw, nonzero firstInstance, and count-buffer variants are admitted from active-device feature facts.",
             ),
         ),
         _operation(

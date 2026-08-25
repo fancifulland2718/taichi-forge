@@ -2093,6 +2093,8 @@ void export_lang(py::module &m) {
           py::arg("commands"))
       .def("vulkan_graphics_pipeline_available",
            &Program::vulkan_graphics_pipeline_available)
+      .def("vulkan_graphics_indirect_capabilities",
+           &Program::vulkan_graphics_indirect_capabilities)
       .def(
           "_create_vulkan_graphics_pipeline",
           [](Program *program, py::bytes vertex_bytes,
@@ -2215,11 +2217,10 @@ void export_lang(py::module &m) {
             commands.reserve(raw_draws.size());
             for (const py::handle raw : raw_draws) {
               const py::tuple item = py::cast<py::tuple>(raw);
-              TI_ERROR_IF(
-                  item.size() != 13,
-                  "Vulkan graphics pass draws require pipeline, vertex "
-                  "buffers, index buffer, shader buffers, and nine draw "
-                  "fields.");
+              const bool indirect = item.size() == 15;
+              TI_ERROR_IF(item.size() != 13 && !indirect,
+                          "Vulkan graphics pass draws require either the "
+                          "13-field direct ABI or 15-field indirect ABI.");
               VulkanGraphicsDrawCommand command;
               command.pipeline_handle = py::cast<std::uint64_t>(item[0]);
               const py::sequence raw_vertex_buffers =
@@ -2251,22 +2252,46 @@ void export_lang(py::module &m) {
                      py::cast<Ndarray *>(shader[2]),
                      py::cast<bool>(shader[3])});
               }
-              command.draw.element_count =
-                  py::cast<std::uint32_t>(item[4]);
-              command.draw.instance_count =
-                  py::cast<std::uint32_t>(item[5]);
-              command.draw.first_vertex =
-                  py::cast<std::uint32_t>(item[6]);
-              command.draw.first_index =
-                  py::cast<std::uint32_t>(item[7]);
-              command.draw.first_instance =
-                  py::cast<std::uint32_t>(item[8]);
-              command.draw.vertex_offset = py::cast<std::int32_t>(item[9]);
-              command.draw.index_min =
-                  py::cast<std::uint32_t>(item[10]);
-              command.draw.index_max =
-                  py::cast<std::uint32_t>(item[11]);
-              command.draw.indexed = py::cast<bool>(item[12]);
+              if (indirect) {
+                VulkanGraphicsIndirectInfo indirect_info;
+                indirect_info.command_buffer = py::cast<Ndarray *>(item[4]);
+                indirect_info.count_buffer = py::cast<Ndarray *>(item[5]);
+                indirect_info.command_offset =
+                    py::cast<std::uint32_t>(item[6]);
+                indirect_info.count_offset =
+                    py::cast<std::uint32_t>(item[7]);
+                indirect_info.max_draw_count =
+                    py::cast<std::uint32_t>(item[8]);
+                indirect_info.stride = py::cast<std::uint32_t>(item[9]);
+                indirect_info.vertex_record_limit =
+                    py::cast<std::uint32_t>(item[10]);
+                indirect_info.instance_record_limit =
+                    py::cast<std::uint32_t>(item[11]);
+                indirect_info.index_element_limit =
+                    py::cast<std::uint32_t>(item[12]);
+                indirect_info.first_instance_may_be_nonzero =
+                    py::cast<bool>(item[13]);
+                command.draw.indexed = py::cast<bool>(item[14]);
+                command.indirect = indirect_info;
+              } else {
+                command.draw.element_count =
+                    py::cast<std::uint32_t>(item[4]);
+                command.draw.instance_count =
+                    py::cast<std::uint32_t>(item[5]);
+                command.draw.first_vertex =
+                    py::cast<std::uint32_t>(item[6]);
+                command.draw.first_index =
+                    py::cast<std::uint32_t>(item[7]);
+                command.draw.first_instance =
+                    py::cast<std::uint32_t>(item[8]);
+                command.draw.vertex_offset =
+                    py::cast<std::int32_t>(item[9]);
+                command.draw.index_min =
+                    py::cast<std::uint32_t>(item[10]);
+                command.draw.index_max =
+                    py::cast<std::uint32_t>(item[11]);
+                command.draw.indexed = py::cast<bool>(item[12]);
+              }
               commands.push_back(std::move(command));
             }
             VulkanGraphicsPassInfo pass;

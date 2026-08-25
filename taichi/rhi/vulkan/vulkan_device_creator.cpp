@@ -662,6 +662,13 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       vk_api_version >= VK_API_VERSION_1_1 &&
       cooperative_matrix_extension_requested &&
       has_device_extension(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+  const bool draw_indirect_count_extension_requested =
+      !manual_create ||
+      extension_was_requested(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+  const bool draw_indirect_count_extension_available =
+      vk_api_version < VK_API_VERSION_1_2 &&
+      draw_indirect_count_extension_requested &&
+      has_device_extension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
 
   bool has_swapchain = false;
   // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
@@ -773,6 +780,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     } else if (cooperative_matrix_extension_available &&
                name == VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
+    } else if (draw_indirect_count_extension_available &&
+               name == VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
     } else if (std::find(params_.additional_device_extensions.begin(),
                          params_.additional_device_extensions.end(),
                          name) != params_.additional_device_extensions.end()) {
@@ -815,6 +825,19 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
     device_features.wideLines = true;
     ti_device_->vk_caps().wide_line = true;
   }
+  if (device_supported_features.multiDrawIndirect) {
+    device_features.multiDrawIndirect = true;
+    ti_device_->vk_caps().multi_draw_indirect = true;
+  }
+  if (device_supported_features.drawIndirectFirstInstance) {
+    device_features.drawIndirectFirstInstance = true;
+    ti_device_->vk_caps().draw_indirect_first_instance = true;
+  }
+  ti_device_->vk_caps().draw_indirect_count =
+      vk_api_version >= VK_API_VERSION_1_2 ||
+      draw_indirect_count_extension_available;
+  ti_device_->vk_caps().max_draw_indirect_count =
+      physical_device_properties.limits.maxDrawIndirectCount;
 
   if (vk_api_version >= VK_API_VERSION_1_1 &&
       ti_device_->vk_caps().physical_device_features2) {

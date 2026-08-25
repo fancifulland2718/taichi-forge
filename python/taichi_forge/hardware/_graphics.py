@@ -42,6 +42,7 @@ _ATTACHMENT_STORE_OPS = frozenset(("store",))
 _SHADER_BUFFER_KINDS = frozenset(("uniform", "storage"))
 _SHADER_BUFFER_ACCESSES = frozenset(("read", "write", "read_write"))
 
+
 def _u32(value, name, *, positive=False):
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError(f"{name} must be an integer")
@@ -143,6 +144,44 @@ class Draw:
 
 
 @dataclass(frozen=True)
+class IndirectDraw:
+    """Vulkan indirect-command ABI and conservative resource bounds.
+
+    The command buffer contains ``VkDrawIndirectCommand`` records for a
+    non-indexed pass or ``VkDrawIndexedIndirectCommand`` records when an index
+    buffer is bound.  Bounds are caller/producer promises used to validate the
+    backing geometry without reading commands back to the host.
+    """
+
+    max_draw_count: int
+    vertex_record_limit: int
+    instance_record_limit: int = 1
+    index_element_limit: int = 0
+    command_offset: int = 0
+    command_stride: int = 0
+    count_offset: int | None = None
+    first_instance_may_be_nonzero: bool = False
+
+    def __post_init__(self):
+        _u32(self.max_draw_count, "max_draw_count", positive=True)
+        _u32(self.vertex_record_limit, "vertex_record_limit", positive=True)
+        _u32(self.instance_record_limit, "instance_record_limit", positive=True)
+        _u32(self.index_element_limit, "index_element_limit")
+        _u32(self.command_offset, "command_offset")
+        _u32(self.command_stride, "command_stride")
+        if self.count_offset is not None:
+            _u32(self.count_offset, "count_offset")
+        if self.command_offset % 4:
+            raise ValueError("command_offset must be four-byte aligned")
+        if self.command_stride % 4:
+            raise ValueError("command_stride must be zero or four-byte aligned")
+        if self.count_offset is not None and self.count_offset % 4:
+            raise ValueError("count_offset must be four-byte aligned")
+        if not isinstance(self.first_instance_may_be_nonzero, bool):
+            raise TypeError("first_instance_may_be_nonzero must be a bool")
+
+
+@dataclass(frozen=True)
 class ShaderBufferBinding:
     """One SPIR-V descriptor buffer declared by a graphics pipeline."""
 
@@ -173,12 +212,16 @@ class GraphicsPassDraw:
     vertex_buffers: object
     index_buffer: str | None = None
     shader_buffers: object = None
+    indirect_buffer: str | None = None
+    count_buffer: str | None = None
 
     def __post_init__(self):
         if not isinstance(self.pipeline, VulkanGraphicsPipeline):
             raise TypeError("pipeline must be a VulkanGraphicsPipeline")
-        if not isinstance(self.draw, Draw):
-            raise TypeError("draw must be a ti.hardware.graphics.Draw value")
+        if not isinstance(self.draw, (Draw, IndirectDraw)):
+            raise TypeError(
+                "draw must be a ti.hardware.graphics.Draw or IndirectDraw value"
+            )
         if not isinstance(self.vertex_buffers, dict):
             raise TypeError("vertex_buffers must map binding integers to names")
         vertices = {}
@@ -194,22 +237,57 @@ class GraphicsPassDraw:
                 "vertex_buffers must bind exactly the pipeline vertex bindings"
             )
 
+        indirect = isinstance(self.draw, IndirectDraw)
+        indirect_buffer = self.indirect_buffer
+        count_buffer = self.count_buffer
+        if indirect:
+            indirect_buffer = _name(indirect_buffer, "indirect-command binding")
+            if self.draw.count_offset is None:
+                if count_buffer is not None:
+                    raise ValueError(
+                        "count_buffer requires an IndirectDraw count_offset"
+                    )
+            else:
+                count_buffer = _name(count_buffer, "indirect-count binding")
+        elif indirect_buffer is not None or count_buffer is not None:
+            raise ValueError("direct draws cannot bind indirect command buffers")
+
         index_buffer = self.index_buffer
         if index_buffer is not None:
             index_buffer = _name(index_buffer, "index-buffer binding")
-            if self.draw.index_bounds is None:
-                raise ValueError("indexed draws require declared index_bounds")
-            if self.draw.first_vertex != 0:
-                raise ValueError(
-                    "indexed draws use vertex_offset instead of first_vertex"
-                )
+            if indirect:
+                if self.draw.index_element_limit == 0:
+                    raise ValueError(
+                        "indexed indirect draws require index_element_limit"
+                    )
+            else:
+                if self.draw.index_bounds is None:
+                    raise ValueError("indexed draws require declared index_bounds")
+                if self.draw.first_vertex != 0:
+                    raise ValueError(
+                        "indexed draws use vertex_offset instead of first_vertex"
+                    )
         else:
-            if self.draw.index_bounds is not None:
-                raise ValueError("index_bounds require an indexed draw")
-            if self.draw.vertex_offset != 0:
-                raise ValueError("vertex_offset requires an indexed draw")
-            if self.draw.first_index != 0:
-                raise ValueError("first_index requires an indexed draw")
+            if indirect:
+                if self.draw.index_element_limit != 0:
+                    raise ValueError(
+                        "index_element_limit requires an indexed indirect draw"
+                    )
+            else:
+                if self.draw.index_bounds is not None:
+                    raise ValueError("index_bounds require an indexed draw")
+                if self.draw.vertex_offset != 0:
+                    raise ValueError("vertex_offset requires an indexed draw")
+                if self.draw.first_index != 0:
+                    raise ValueError("first_index requires an indexed draw")
+
+        if indirect:
+            command_size = 20 if index_buffer is not None else 16
+            stride = self.draw.command_stride or command_size
+            if stride < command_size:
+                raise ValueError(
+                    "command_stride is smaller than the Vulkan indirect command ABI"
+                )
 
         shader_buffers = {} if self.shader_buffers is None else self.shader_buffers
         if not isinstance(shader_buffers, dict):
@@ -237,6 +315,8 @@ class GraphicsPassDraw:
         object.__setattr__(self, "vertex_buffers", MappingProxyType(vertices))
         object.__setattr__(self, "index_buffer", index_buffer)
         object.__setattr__(self, "shader_buffers", MappingProxyType(normalized_shader))
+        object.__setattr__(self, "indirect_buffer", indirect_buffer)
+        object.__setattr__(self, "count_buffer", count_buffer)
 
 
 @instrument_hardware_recording("raster.draw.vulkan")
@@ -410,8 +490,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
                 self.clear_color,
                 self.viewport,
                 self._experimental_retained_replay
-                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF")
-                == "1",
+                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
             )
         return color
 
@@ -427,9 +506,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             runtime_bindings=lambda item: tuple(
                 (
                     name,
-                    "texture"
-                    if name in {item.color, item.depth}
-                    else "ndarray",
+                    "texture" if name in {item.color, item.depth} else "ndarray",
                 )
                 for name in item.binding_names
             ),
@@ -538,6 +615,16 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 effects[item.index_buffer] = _merge_graphics_access(
                     effects.get(item.index_buffer), GraphAccess.READ
                 )
+            for name in (item.indirect_buffer, item.count_buffer):
+                if name is None:
+                    continue
+                if name in attachment_names:
+                    raise ValueError(
+                        "graphics attachment bindings cannot also name indirect resources"
+                    )
+                effects[name] = _merge_graphics_access(
+                    effects.get(name), GraphAccess.READ
+                )
             for key, name in item.shader_buffers.items():
                 if name in attachment_names:
                     raise ValueError(
@@ -604,7 +691,8 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             raise TaichiRuntimeError("graphics depth binding must be a Texture")
         if any(not isinstance(bindings[name], Ndarray) for name in self._ndarray_names):
             raise TaichiRuntimeError(
-                "graphics vertex, index, and shader bindings must be Taichi ndarrays"
+                "graphics vertex, index, shader, and indirect bindings must be "
+                "Taichi ndarrays"
             )
 
         raw_draws = []
@@ -628,26 +716,53 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                     )
                 )
             draw = item.draw
-            index_min, index_max = (
-                (0, 0) if draw.index_bounds is None else draw.index_bounds
-            )
-            raw_draws.append(
-                (
-                    item.pipeline._handle,
-                    vertices,
-                    index,
-                    tuple(shader_buffers),
-                    draw.element_count,
-                    draw.instance_count,
-                    draw.first_vertex,
-                    draw.first_index,
-                    draw.first_instance,
-                    draw.vertex_offset,
-                    index_min,
-                    index_max,
-                    index is not None,
+            if isinstance(draw, IndirectDraw):
+                command = bindings[item.indirect_buffer].arr
+                count = (
+                    None
+                    if item.count_buffer is None
+                    else bindings[item.count_buffer].arr
                 )
-            )
+                raw_draws.append(
+                    (
+                        item.pipeline._handle,
+                        vertices,
+                        index,
+                        tuple(shader_buffers),
+                        command,
+                        count,
+                        draw.command_offset,
+                        0 if draw.count_offset is None else draw.count_offset,
+                        draw.max_draw_count,
+                        draw.command_stride or (20 if index is not None else 16),
+                        draw.vertex_record_limit,
+                        draw.instance_record_limit,
+                        draw.index_element_limit,
+                        draw.first_instance_may_be_nonzero,
+                        index is not None,
+                    )
+                )
+            else:
+                index_min, index_max = (
+                    (0, 0) if draw.index_bounds is None else draw.index_bounds
+                )
+                raw_draws.append(
+                    (
+                        item.pipeline._handle,
+                        vertices,
+                        index,
+                        tuple(shader_buffers),
+                        draw.element_count,
+                        draw.instance_count,
+                        draw.first_vertex,
+                        draw.first_index,
+                        draw.first_instance,
+                        draw.vertex_offset,
+                        index_min,
+                        index_max,
+                        index is not None,
+                    )
+                )
 
         with hardware_failure_phase("provider_execution_failure"):
             self.pipelines[0]._runtime_prog._vulkan_graphics_pass(
@@ -659,8 +774,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 self.clear_color,
                 self.viewport,
                 self._experimental_retained_replay
-                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF")
-                == "1",
+                and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
             )
         return color
 
@@ -703,9 +817,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             runtime_bindings=lambda item: tuple(
                 (
                     name,
-                    "texture"
-                    if name in {item.color, item.depth}
-                    else "ndarray",
+                    "texture" if name in {item.color, item.depth} else "ndarray",
                 )
                 for name in item.binding_names
             ),
@@ -716,6 +828,12 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "pipeline_count": len(item.pipelines),
                 "indexed_draw_count": sum(
                     draw.index_buffer is not None for draw in item.draws
+                ),
+                "indirect_draw_count": sum(
+                    isinstance(draw.draw, IndirectDraw) for draw in item.draws
+                ),
+                "indirect_count_draw_count": sum(
+                    draw.count_buffer is not None for draw in item.draws
                 ),
                 "color_load_op": item.color_load_op,
                 "depth_load_op": item.depth_load_op,
@@ -838,6 +956,8 @@ class VulkanGraphicsPipeline:
         vertex_buffers,
         index_buffer=None,
         shader_buffers=None,
+        indirect_buffer=None,
+        count_buffer=None,
     ):
         self._validate_lifetime()
         return GraphicsPassDraw(
@@ -846,6 +966,8 @@ class VulkanGraphicsPipeline:
             vertex_buffers,
             index_buffer=index_buffer,
             shader_buffers=shader_buffers,
+            indirect_buffer=indirect_buffer,
+            count_buffer=count_buffer,
         )
 
     def record_pass(self, draws, **kwargs):
@@ -957,14 +1079,45 @@ def is_available():
     )
 
 
+def indirect_capabilities():
+    """Return active-device Vulkan indirect-draw capability facts."""
+
+    unavailable = {
+        "fixed_count": 0,
+        "multi_draw": 0,
+        "first_instance": 0,
+        "count_buffer": 0,
+        "max_draw_count": 0,
+    }
+    program = impl.get_runtime().prog
+    if program is None or active_backend() != "vulkan":
+        return MappingProxyType(unavailable)
+    return MappingProxyType(dict(program.vulkan_graphics_indirect_capabilities()))
+
+
+def is_indirect_available(*, count_buffer=False):
+    """Return whether fixed-count or count-buffer indirect draws are usable."""
+
+    if not isinstance(count_buffer, bool):
+        raise TypeError("count_buffer must be a bool")
+    capabilities = indirect_capabilities()
+    return bool(
+        capabilities["fixed_count"]
+        and (not count_buffer or capabilities["count_buffer"])
+    )
+
+
 __all__ = [
     "Draw",
     "GraphicsPassDraw",
+    "IndirectDraw",
     "ShaderBufferBinding",
     "VertexAttribute",
     "VertexBinding",
     "VulkanGraphicsDrawRecording",
     "VulkanGraphicsPassRecording",
     "VulkanGraphicsPipeline",
+    "indirect_capabilities",
     "is_available",
+    "is_indirect_available",
 ]

@@ -537,6 +537,21 @@ class VulkanCommandList : public CommandList {
                              int32_t vertex_offset = 0,
                              uint32_t start_index = 0,
                              uint32_t start_instance = 0) override;
+  RhiResult draw_indirect(DevicePtr indirect,
+                          uint32_t draw_count,
+                          uint32_t stride) noexcept override;
+  RhiResult draw_indexed_indirect(DevicePtr indirect,
+                                  uint32_t draw_count,
+                                  uint32_t stride) noexcept override;
+  RhiResult draw_indirect_count(DevicePtr indirect,
+                                DevicePtr count,
+                                uint32_t max_draw_count,
+                                uint32_t stride) noexcept override;
+  RhiResult draw_indexed_indirect_count(
+      DevicePtr indirect,
+      DevicePtr count,
+      uint32_t max_draw_count,
+      uint32_t stride) noexcept override;
   void set_line_width(float width) override;
   void image_transition(DeviceAllocation img,
                         ImageLayout old_layout,
@@ -842,6 +857,10 @@ struct VulkanCapabilities {
   bool acceleration_structure{false};
   bool ray_query{false};
   bool cooperative_matrix{false};
+  bool multi_draw_indirect{false};
+  bool draw_indirect_first_instance{false};
+  bool draw_indirect_count{false};
+  std::uint32_t max_draw_indirect_count{0};
   std::uint32_t subgroup_size{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;

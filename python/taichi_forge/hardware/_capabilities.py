@@ -1001,6 +1001,17 @@ def _passive_core_statuses(runtime_initialized, backend):
     graphics_available = bool(
         program is not None and program.vulkan_graphics_pipeline_available()
     )
+    graphics_indirect = (
+        dict(program.vulkan_graphics_indirect_capabilities())
+        if graphics_available
+        else {
+            "fixed_count": 0,
+            "multi_draw": 0,
+            "first_instance": 0,
+            "count_buffer": 0,
+            "max_draw_count": 0,
+        }
+    )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
     cooperative_matrix_available = bool(
         program is not None and program.vulkan_cooperative_matrix_available()
@@ -1058,6 +1069,11 @@ def _passive_core_statuses(runtime_initialized, backend):
                 "capability_query": "active_vulkan_graphics_pipeline",
                 "admission_scope": "provider_route",
                 "resource_requirements_evaluated": False,
+                "indirect_fixed_count": bool(graphics_indirect["fixed_count"]),
+                "indirect_multi_draw": bool(graphics_indirect["multi_draw"]),
+                "indirect_first_instance": bool(graphics_indirect["first_instance"]),
+                "indirect_count_buffer": bool(graphics_indirect["count_buffer"]),
+                "max_draw_indirect_count": int(graphics_indirect["max_draw_count"]),
             },
         },
         "ray.as_build.vulkan": {

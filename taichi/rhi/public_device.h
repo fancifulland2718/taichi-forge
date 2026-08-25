@@ -677,6 +677,29 @@ class RHI_DLL_EXPORT CommandList {
                                      uint32_t start_instance = 0) {
     RHI_NOT_IMPLEMENTED
   }
+  virtual RhiResult draw_indirect(DevicePtr indirect,
+                                  uint32_t draw_count,
+                                  uint32_t stride) noexcept {
+    return RhiResult::not_supported;
+  }
+  virtual RhiResult draw_indexed_indirect(DevicePtr indirect,
+                                          uint32_t draw_count,
+                                          uint32_t stride) noexcept {
+    return RhiResult::not_supported;
+  }
+  virtual RhiResult draw_indirect_count(DevicePtr indirect,
+                                        DevicePtr count,
+                                        uint32_t max_draw_count,
+                                        uint32_t stride) noexcept {
+    return RhiResult::not_supported;
+  }
+  virtual RhiResult draw_indexed_indirect_count(
+      DevicePtr indirect,
+      DevicePtr count,
+      uint32_t max_draw_count,
+      uint32_t stride) noexcept {
+    return RhiResult::not_supported;
+  }
   virtual void image_transition(DeviceAllocation img,
                                 ImageLayout old_layout,
                                 ImageLayout new_layout) {
