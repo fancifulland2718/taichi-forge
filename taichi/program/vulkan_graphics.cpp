@@ -310,6 +310,58 @@ Program::vulkan_graphics_indirect_capabilities() const {
   return result;
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_bindless_buffer_capabilities() const {
+  std::unordered_map<std::string, std::uint64_t> result{
+      {"descriptor_indexing", 0},
+      {"storage_buffer_non_uniform_indexing", 0},
+      {"fixed_count", 0},
+      {"partially_bound", 0},
+      {"update_after_bind", 0},
+      {"variable_count", 0},
+      {"runtime_array", 0},
+      {"update_unused_while_pending", 0},
+      {"max_fixed_count", 0},
+      {"max_update_after_bind_descriptors_in_all_pools", 0},
+      {"max_per_stage_update_after_bind_storage_buffers", 0},
+      {"max_descriptor_set_update_after_bind_storage_buffers", 0},
+  };
+  if (!vulkan_graphics_pipeline_available()) {
+    return result;
+  }
+  auto *device = static_cast<vulkan::VulkanDevice *>(
+      const_cast<Program *>(this)->get_graphics_device());
+  if (device == nullptr) {
+    return result;
+  }
+  const auto &caps = device->vk_caps();
+  const auto max_fixed_count =
+      std::min(caps.max_per_stage_descriptor_storage_buffers,
+               caps.max_descriptor_set_storage_buffers);
+  result["descriptor_indexing"] = caps.descriptor_indexing;
+  result["storage_buffer_non_uniform_indexing"] =
+      caps.descriptor_storage_buffer_array_non_uniform_indexing;
+  result["fixed_count"] =
+      caps.descriptor_storage_buffer_array_non_uniform_indexing &&
+      max_fixed_count > 0;
+  result["partially_bound"] = caps.descriptor_binding_partially_bound;
+  result["update_after_bind"] =
+      caps.descriptor_storage_buffer_update_after_bind;
+  result["variable_count"] = caps.descriptor_binding_variable_count &&
+                             caps.runtime_descriptor_array;
+  result["runtime_array"] = caps.runtime_descriptor_array;
+  result["update_unused_while_pending"] =
+      caps.descriptor_update_unused_while_pending;
+  result["max_fixed_count"] = max_fixed_count;
+  result["max_update_after_bind_descriptors_in_all_pools"] =
+      caps.max_update_after_bind_descriptors_in_all_pools;
+  result["max_per_stage_update_after_bind_storage_buffers"] =
+      caps.max_per_stage_descriptor_update_after_bind_storage_buffers;
+  result["max_descriptor_set_update_after_bind_storage_buffers"] =
+      caps.max_descriptor_set_update_after_bind_storage_buffers;
+  return result;
+}
+
 std::size_t Program::debug_vulkan_graphics_pipeline_count() {
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   return vulkan_graphics_pipelines_.size();
@@ -1008,6 +1060,22 @@ Program::vulkan_graphics_indirect_capabilities() const {
           {"first_instance", 0},
           {"count_buffer", 0},
           {"max_draw_count", 0}};
+}
+
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_bindless_buffer_capabilities() const {
+  return {{"descriptor_indexing", 0},
+          {"storage_buffer_non_uniform_indexing", 0},
+          {"fixed_count", 0},
+          {"partially_bound", 0},
+          {"update_after_bind", 0},
+          {"variable_count", 0},
+          {"runtime_array", 0},
+          {"update_unused_while_pending", 0},
+          {"max_fixed_count", 0},
+          {"max_update_after_bind_descriptors_in_all_pools", 0},
+          {"max_per_stage_update_after_bind_storage_buffers", 0},
+          {"max_descriptor_set_update_after_bind_storage_buffers", 0}};
 }
 
 std::size_t Program::debug_vulkan_graphics_pipeline_count() {

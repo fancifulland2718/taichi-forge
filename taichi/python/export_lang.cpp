@@ -2095,6 +2095,8 @@ void export_lang(py::module &m) {
            &Program::vulkan_graphics_pipeline_available)
       .def("vulkan_graphics_indirect_capabilities",
            &Program::vulkan_graphics_indirect_capabilities)
+      .def("vulkan_bindless_buffer_capabilities",
+           &Program::vulkan_bindless_buffer_capabilities)
       .def(
           "_create_vulkan_graphics_pipeline",
           [](Program *program, py::bytes vertex_bytes,

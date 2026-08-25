@@ -843,6 +843,8 @@ struct VulkanCapabilities {
   // C-2.4.c: VkPhysicalDeviceLimits::maxPerStageDescriptorStorageBuffers,
   // 0 = not yet probed.
   uint32_t max_per_stage_descriptor_storage_buffers{0};
+  uint32_t max_descriptor_set_storage_buffers{0};
+  uint32_t max_per_stage_resources{0};
   bool physical_device_features2{false};
   bool external_memory{false};
   bool external_semaphore{false};
@@ -852,6 +854,17 @@ struct VulkanCapabilities {
   bool dynamic_rendering{false};
   bool present_mode_fifo_latest_ready{false};
   bool descriptor_update_after_bind{false};
+  bool descriptor_indexing{false};
+  bool descriptor_storage_buffer_array_non_uniform_indexing{false};
+  bool descriptor_storage_buffer_update_after_bind{false};
+  bool descriptor_binding_partially_bound{false};
+  bool descriptor_binding_variable_count{false};
+  bool runtime_descriptor_array{false};
+  bool descriptor_update_unused_while_pending{false};
+  std::uint32_t max_update_after_bind_descriptors_in_all_pools{0};
+  std::uint32_t
+      max_per_stage_descriptor_update_after_bind_storage_buffers{0};
+  std::uint32_t max_descriptor_set_update_after_bind_storage_buffers{0};
   bool conditional_rendering{false};
   bool buffer_device_address{false};
   bool acceleration_structure{false};

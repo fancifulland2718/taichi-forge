@@ -607,6 +607,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   // C-2.4.c: cache descriptor-array hard limit for chunked allocator probe.
   ti_device_->vk_caps().max_per_stage_descriptor_storage_buffers =
       physical_device_properties.limits.maxPerStageDescriptorStorageBuffers;
+  ti_device_->vk_caps().max_descriptor_set_storage_buffers =
+      physical_device_properties.limits.maxDescriptorSetStorageBuffers;
+  ti_device_->vk_caps().max_per_stage_resources =
+      physical_device_properties.limits.maxPerStageResources;
   if (vk_api_version >= VK_API_VERSION_1_3) {
     caps.set(DeviceCapability::spirv_version, 0x10500);
   } else if (vk_api_version >= VK_API_VERSION_1_2) {
@@ -1187,32 +1191,88 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       }
     }
 
-    // Graph replay can patch the buffer descriptors referenced by an
-    // executable command buffer only when both descriptor classes used by
-    // compute launches support update-after-bind. Enable exactly those two
-    // optional features; unsupported devices retain the record-on-change path.
-    if (get_environ_config("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", 1) != 0 &&
-        (CHECK_VERSION(1, 2) ||
-         CHECK_EXTENSION(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME))) {
+    // Descriptor indexing contains independent admission axes. Graph replay
+    // needs both buffer update-after-bind bits, while a fixed-size bindless
+    // storage-buffer table needs non-uniform array indexing and may use
+    // partially-bound, variable-count, and update-after-bind only when each
+    // corresponding bit is supported. Query and retain the complete storage
+    // buffer slice instead of collapsing it to one boolean.
+    if (CHECK_VERSION(1, 2) ||
+        CHECK_EXTENSION(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
       features2.pNext = &descriptor_indexing_feature;
       query_physical_device_features2(&features2);
+      const auto supported_descriptor_indexing = descriptor_indexing_feature;
+      auto &descriptor_caps = ti_device_->vk_caps();
+      descriptor_caps.descriptor_indexing = true;
+      descriptor_caps
+          .descriptor_storage_buffer_array_non_uniform_indexing =
+          supported_descriptor_indexing
+              .shaderStorageBufferArrayNonUniformIndexing;
+      descriptor_caps.descriptor_storage_buffer_update_after_bind =
+          supported_descriptor_indexing
+              .descriptorBindingStorageBufferUpdateAfterBind;
+      descriptor_caps.descriptor_binding_partially_bound =
+          supported_descriptor_indexing.descriptorBindingPartiallyBound;
+      descriptor_caps.descriptor_binding_variable_count =
+          supported_descriptor_indexing.descriptorBindingVariableDescriptorCount;
+      descriptor_caps.runtime_descriptor_array =
+          supported_descriptor_indexing.runtimeDescriptorArray;
+      descriptor_caps.descriptor_update_unused_while_pending =
+          supported_descriptor_indexing
+              .descriptorBindingUpdateUnusedWhilePending;
+
+      VkPhysicalDeviceDescriptorIndexingProperties descriptor_properties{};
+      descriptor_properties.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
+      VkPhysicalDeviceProperties2 descriptor_properties2{};
+      descriptor_properties2.sType =
+          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+      descriptor_properties2.pNext = &descriptor_properties;
+      query_physical_device_properties2(&descriptor_properties2);
+      descriptor_caps.max_update_after_bind_descriptors_in_all_pools =
+          descriptor_properties.maxUpdateAfterBindDescriptorsInAllPools;
+      descriptor_caps
+          .max_per_stage_descriptor_update_after_bind_storage_buffers =
+          descriptor_properties
+              .maxPerStageDescriptorUpdateAfterBindStorageBuffers;
+      descriptor_caps
+          .max_descriptor_set_update_after_bind_storage_buffers =
+          descriptor_properties.maxDescriptorSetUpdateAfterBindStorageBuffers;
+
       const bool supports_graph_descriptor_patch =
-          descriptor_indexing_feature
+          supported_descriptor_indexing
               .descriptorBindingUniformBufferUpdateAfterBind &&
-          descriptor_indexing_feature
+          supported_descriptor_indexing
               .descriptorBindingStorageBufferUpdateAfterBind;
       descriptor_indexing_feature = {};
       descriptor_indexing_feature.sType =
           VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES;
-      if (supports_graph_descriptor_patch) {
+      descriptor_indexing_feature
+          .shaderStorageBufferArrayNonUniformIndexing =
+          supported_descriptor_indexing
+              .shaderStorageBufferArrayNonUniformIndexing;
+      descriptor_indexing_feature
+          .descriptorBindingStorageBufferUpdateAfterBind =
+          supported_descriptor_indexing
+              .descriptorBindingStorageBufferUpdateAfterBind;
+      descriptor_indexing_feature.descriptorBindingPartiallyBound =
+          supported_descriptor_indexing.descriptorBindingPartiallyBound;
+      descriptor_indexing_feature.descriptorBindingVariableDescriptorCount =
+          supported_descriptor_indexing
+              .descriptorBindingVariableDescriptorCount;
+      descriptor_indexing_feature.runtimeDescriptorArray =
+          supported_descriptor_indexing.runtimeDescriptorArray;
+      descriptor_indexing_feature.descriptorBindingUpdateUnusedWhilePending =
+          supported_descriptor_indexing
+              .descriptorBindingUpdateUnusedWhilePending;
+      if (get_environ_config("TI_VULKAN_GRAPH_STRUCTURAL_PATCH", 1) != 0 &&
+          supports_graph_descriptor_patch) {
         descriptor_indexing_feature
             .descriptorBindingUniformBufferUpdateAfterBind = true;
-        descriptor_indexing_feature
-            .descriptorBindingStorageBufferUpdateAfterBind = true;
         ti_device_->vk_caps().descriptor_update_after_bind = true;
-        *pNextEnd = &descriptor_indexing_feature;
-        pNextEnd = &descriptor_indexing_feature.pNext;
       }
+      *pNextEnd = &descriptor_indexing_feature;
+      pNextEnd = &descriptor_indexing_feature.pNext;
     }
 
     // FIFO_LATEST_READY present mode

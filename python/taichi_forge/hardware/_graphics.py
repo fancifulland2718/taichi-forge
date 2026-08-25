@@ -1107,6 +1107,35 @@ def is_indirect_available(*, count_buffer=False):
     )
 
 
+def bindless_buffer_capabilities():
+    """Return independent Vulkan storage-buffer descriptor-indexing facts."""
+
+    unavailable = {
+        "descriptor_indexing": 0,
+        "storage_buffer_non_uniform_indexing": 0,
+        "fixed_count": 0,
+        "partially_bound": 0,
+        "update_after_bind": 0,
+        "variable_count": 0,
+        "runtime_array": 0,
+        "update_unused_while_pending": 0,
+        "max_fixed_count": 0,
+        "max_update_after_bind_descriptors_in_all_pools": 0,
+        "max_per_stage_update_after_bind_storage_buffers": 0,
+        "max_descriptor_set_update_after_bind_storage_buffers": 0,
+    }
+    program = impl.get_runtime().prog
+    if program is None or active_backend() != "vulkan":
+        return MappingProxyType(unavailable)
+    return MappingProxyType(dict(program.vulkan_bindless_buffer_capabilities()))
+
+
+def is_bindless_buffer_available():
+    """Return whether fixed-count non-uniform storage-buffer tables are usable."""
+
+    return bool(bindless_buffer_capabilities()["fixed_count"])
+
+
 __all__ = [
     "Draw",
     "GraphicsPassDraw",
@@ -1117,7 +1146,9 @@ __all__ = [
     "VulkanGraphicsDrawRecording",
     "VulkanGraphicsPassRecording",
     "VulkanGraphicsPipeline",
+    "bindless_buffer_capabilities",
     "indirect_capabilities",
     "is_available",
+    "is_bindless_buffer_available",
     "is_indirect_available",
 ]

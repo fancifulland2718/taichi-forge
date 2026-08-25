@@ -1086,6 +1086,9 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::string, std::uint64_t>
   vulkan_graphics_indirect_capabilities() const;
 
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_bindless_buffer_capabilities() const;
+
   std::size_t debug_vulkan_graphics_pipeline_count();
 
   std::unordered_map<std::string, std::uint64_t>
