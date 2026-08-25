@@ -507,6 +507,11 @@ void VulkanPipeline::create_graphics_pipeline(
     const RasterParams &raster_params,
     const std::vector<VertexInputBinding> &vertex_inputs,
     const std::vector<VertexInputAttribute> &vertex_attrs) {
+  const bool mesh_pipeline = std::any_of(
+      shader_stages_.begin(), shader_stages_.end(),
+      [](const VkPipelineShaderStageCreateInfo &stage) {
+        return stage.stage == VK_SHADER_STAGE_MESH_BIT_EXT;
+      });
   // Use dynamic viewport state. These two are just dummies
   VkViewport viewport{};
   viewport.width = 1;
@@ -699,8 +704,9 @@ void VulkanPipeline::create_graphics_pipeline(
   pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
   pipeline_info.stageCount = shader_stages_.size();
   pipeline_info.pStages = shader_stages_.data();
-  pipeline_info.pVertexInputState = &vertex_input;
-  pipeline_info.pInputAssemblyState = &input_assembly;
+  pipeline_info.pVertexInputState = mesh_pipeline ? nullptr : &vertex_input;
+  pipeline_info.pInputAssemblyState =
+      mesh_pipeline ? nullptr : &input_assembly;
   pipeline_info.pViewportState = &viewport_state;
   pipeline_info.pRasterizationState = &rasterizer;
   pipeline_info.pMultisampleState = &multisampling;
@@ -1890,6 +1896,34 @@ RhiResult VulkanCommandList::draw_indexed_indirect_count(
   }
   buffer_->refs.push_back(indirect_buffer);
   buffer_->refs.push_back(count_buffer);
+  return RhiResult::success;
+}
+
+RhiResult VulkanCommandList::draw_mesh_tasks(uint32_t group_count_x,
+                                              uint32_t group_count_y,
+                                              uint32_t group_count_z,
+                                              bool task_shader) noexcept {
+  const auto &caps = ti_device_->vk_caps();
+  if (!caps.mesh_shader || (task_shader && !caps.task_shader) ||
+      vkCmdDrawMeshTasksEXT == nullptr || current_pipeline_ == nullptr ||
+      !current_pipeline_->is_graphics() ||
+      current_renderpass_ == VK_NULL_HANDLE || group_count_x == 0 ||
+      group_count_y == 0 || group_count_z == 0) {
+    return RhiResult::not_supported;
+  }
+  const auto &limits = task_shader ? caps.max_task_work_group_count
+                                   : caps.max_mesh_work_group_count;
+  const std::uint64_t total = static_cast<std::uint64_t>(group_count_x) *
+                              group_count_y * group_count_z;
+  const std::uint64_t total_limit =
+      task_shader ? caps.max_task_work_group_total_count
+                  : caps.max_mesh_work_group_total_count;
+  if (group_count_x > limits[0] || group_count_y > limits[1] ||
+      group_count_z > limits[2] || total > total_limit) {
+    return RhiResult::invalid_usage;
+  }
+  vkCmdDrawMeshTasksEXT(buffer_->buffer, group_count_x, group_count_y,
+                        group_count_z);
   return RhiResult::success;
 }
 
@@ -3518,6 +3552,10 @@ std::unique_ptr<Pipeline> VulkanDevice::create_raster_pipeline(
       code.stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
     } else if (src_desc.stage == PipelineStageType::tesselation_eval) {
       code.stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+    } else if (src_desc.stage == PipelineStageType::task) {
+      code.stage = VK_SHADER_STAGE_TASK_BIT_EXT;
+    } else if (src_desc.stage == PipelineStageType::mesh) {
+      code.stage = VK_SHADER_STAGE_MESH_BIT_EXT;
     }
   }
 

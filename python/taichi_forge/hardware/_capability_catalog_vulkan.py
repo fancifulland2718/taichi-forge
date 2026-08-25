@@ -167,6 +167,45 @@ def vulkan_command_operations(_operation):
                 "Its GGUI scene semantics and hidden attachments are not the Forge low-level graphics abstraction.",
             ),
         ),
+        _operation(
+            "raster.mesh_tasks.vulkan",
+            "raster.geometry_frontend",
+            "vulkan_graphics",
+            ("vulkan",),
+            "core",
+            "fixed_function",
+            "native_shader_operation",
+            "implementation_defined",
+            ("python", "graph"),
+            "native_command",
+            "root_ordered",
+            "runtime_ordered",
+            "provider_owned",
+            "qualification_required",
+            activation_mode="explicit_hardware_api",
+            resource_effects=(
+                "read:shader_descriptor_buffers",
+                "write_or_read_write:color_depth_attachments",
+            ),
+            lifetime_policy="resource_generation",
+            update_policy="immutable",
+            layouts=(
+                "caller-provided SPV_EXT_mesh_shader mesh SPIR-V",
+                "optional caller-provided task SPIR-V",
+                "direct 3D mesh workgroup counts",
+            ),
+            requirements=(
+                "Vulkan 1.2 and VK_EXT_mesh_shader",
+                "meshShader feature; taskShader independently admitted",
+                "caller-provided mesh and fragment SPIR-V",
+            ),
+            public_api="ti.hardware.graphics.VulkanMeshPipeline",
+            notes=(
+                "Explicit root graphics command; ordinary kernel calls are impossible.",
+                "The provider owns no meshlet generation, culling policy, material, or renderer semantics.",
+                "Extension presence is insufficient: executable support and dispatch/output limits come from the active device feature/property chain.",
+            ),
+        ),
     )
 
 
@@ -202,37 +241,7 @@ def vulkan_interop_operations(_operation):
 
 
 def vulkan_future_operations(_operation):
-    return (
-        _operation(
-            "internal.raster.mesh_shader.vulkan",
-            "raster.geometry_frontend",
-            "vulkan_mesh_shader",
-            ("vulkan",),
-            "core",
-            "compute_native",
-            "native_shader_operation",
-            "none",
-            ("internal",),
-            "native_command",
-            "backend_recorded",
-            "runtime_ordered",
-            "graph_owned",
-            "planned",
-            activation_mode="compiler_automatic",
-            resource_effects=("read:geometry", "write:raster_primitives"),
-            lifetime_policy="graph_generation",
-            update_policy="rebind",
-            requirements=(
-                "VK_EXT_mesh_shader feature query and device enablement",
-                "SPV_EXT_mesh_shader code generation",
-                "mesh pipeline and vkCmdDrawMeshTasksEXT recording",
-            ),
-            notes=(
-                "Raster provider specialization; not a public shader model",
-                "Vulkan headers alone do not constitute an implemented provider",
-            ),
-        ),
-    )
+    return ()
 
 
 __all__ = (

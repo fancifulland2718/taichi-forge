@@ -52,6 +52,7 @@ struct RecordedGraphicsDraw {
   std::vector<RecordedGraphicsShaderBuffer> shader_buffers;
   VulkanGraphicsDrawInfo draw;
   std::optional<RecordedGraphicsIndirect> indirect;
+  std::optional<VulkanGraphicsMeshDrawInfo> mesh;
 };
 
 std::size_t vertex_format_bytes(BufferFormat format) {
@@ -266,6 +267,79 @@ class VulkanGraphicsPipelineResource {
     TI_ERROR_IF(!pipeline_, "Vulkan graphics pipeline creation failed.");
   }
 
+  VulkanGraphicsPipelineResource(
+      Program *program,
+      const std::vector<std::uint32_t> &task_spirv,
+      const std::vector<std::uint32_t> &mesh_spirv,
+      const std::vector<std::uint32_t> &fragment_spirv,
+      int topology,
+      int polygon_mode,
+      bool front_face_cull,
+      bool back_face_cull,
+      bool depth_test,
+      bool depth_write,
+      bool blending,
+      const std::string &name)
+      : program_(program), mesh_pipeline_(true), task_shader_(!task_spirv.empty()) {
+    TI_ERROR_IF(program_ == nullptr,
+                "Vulkan mesh pipeline requires a live Program.");
+    const auto caps = program_->vulkan_mesh_shader_capabilities();
+    TI_ERROR_IF(caps.at("mesh_shader") == 0 ||
+                    (task_shader_ && caps.at("task_shader") == 0),
+                "Vulkan mesh/task shader features are unavailable on the "
+                "active device.");
+    TI_ERROR_IF(mesh_spirv.empty() || fragment_spirv.empty(),
+                "Vulkan mesh pipelines require mesh and fragment SPIR-V.");
+    TI_ERROR_IF(mesh_spirv.size() * sizeof(std::uint32_t) >
+                        kMaximumShaderBytes ||
+                    fragment_spirv.size() * sizeof(std::uint32_t) >
+                        kMaximumShaderBytes ||
+                    task_spirv.size() * sizeof(std::uint32_t) >
+                        kMaximumShaderBytes,
+                "Vulkan mesh pipeline shader exceeds the 16 MiB safety "
+                "limit.");
+    TI_ERROR_IF(mesh_spirv.front() != 0x07230203u ||
+                    fragment_spirv.front() != 0x07230203u ||
+                    (task_shader_ && task_spirv.front() != 0x07230203u),
+                "Vulkan mesh pipeline shaders must contain SPIR-V binary "
+                "magic.");
+
+    auto *device = dynamic_cast<GraphicsDevice *>(program_->get_graphics_device());
+    TI_ERROR_IF(device == nullptr,
+                "Vulkan mesh pipeline has no graphics device.");
+    std::vector<PipelineSourceDesc> sources;
+    sources.reserve(task_shader_ ? 3 : 2);
+    sources.push_back({PipelineSourceType::spirv_binary,
+                       const_cast<std::uint32_t *>(fragment_spirv.data()),
+                       fragment_spirv.size() * sizeof(std::uint32_t),
+                       PipelineStageType::fragment});
+    sources.push_back({PipelineSourceType::spirv_binary,
+                       const_cast<std::uint32_t *>(mesh_spirv.data()),
+                       mesh_spirv.size() * sizeof(std::uint32_t),
+                       PipelineStageType::mesh});
+    if (task_shader_) {
+      sources.push_back({PipelineSourceType::spirv_binary,
+                         const_cast<std::uint32_t *>(task_spirv.data()),
+                         task_spirv.size() * sizeof(std::uint32_t),
+                         PipelineStageType::task});
+    }
+
+    RasterParams params;
+    params.prim_topology = decode_topology(topology);
+    params.polygon_mode = decode_polygon_mode(polygon_mode);
+    params.front_face_cull = front_face_cull;
+    params.back_face_cull = back_face_cull;
+    params.depth_test = depth_test;
+    params.depth_write = depth_write;
+    if (blending) {
+      params.blending.emplace_back();
+    }
+    pipeline_ = device->create_raster_pipeline(
+        sources, params, {}, {},
+        name.empty() ? "Forge VulkanMeshPipeline" : name);
+    TI_ERROR_IF(!pipeline_, "Vulkan mesh pipeline creation failed.");
+  }
+
   Pipeline *pipeline() const noexcept {
     return pipeline_.get();
   }
@@ -274,9 +348,19 @@ class VulkanGraphicsPipelineResource {
     return bindings_;
   }
 
+  bool mesh_pipeline() const noexcept {
+    return mesh_pipeline_;
+  }
+
+  bool task_shader() const noexcept {
+    return task_shader_;
+  }
+
  private:
   Program *program_{nullptr};
   std::vector<VulkanGraphicsVertexBinding> bindings_;
+  bool mesh_pipeline_{false};
+  bool task_shader_{false};
   std::unique_ptr<Pipeline> pipeline_;
 };
 
@@ -363,6 +447,54 @@ Program::vulkan_bindless_buffer_capabilities() const {
   return result;
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_mesh_shader_capabilities() const {
+  std::unordered_map<std::string, std::uint64_t> result{
+      {"mesh_shader", 0},
+      {"task_shader", 0},
+      {"max_task_group_count_x", 0},
+      {"max_task_group_count_y", 0},
+      {"max_task_group_count_z", 0},
+      {"max_task_group_total_count", 0},
+      {"max_task_group_invocations", 0},
+      {"max_mesh_group_count_x", 0},
+      {"max_mesh_group_count_y", 0},
+      {"max_mesh_group_count_z", 0},
+      {"max_mesh_group_total_count", 0},
+      {"max_mesh_group_invocations", 0},
+      {"max_mesh_output_vertices", 0},
+      {"max_mesh_output_primitives", 0},
+  };
+  if (!vulkan_graphics_pipeline_available()) {
+    return result;
+  }
+  auto *device = static_cast<vulkan::VulkanDevice *>(
+      const_cast<Program *>(this)->get_graphics_device());
+  if (device == nullptr) {
+    return result;
+  }
+  const auto &caps = device->vk_caps();
+  result["mesh_shader"] = caps.mesh_shader;
+  result["task_shader"] = caps.task_shader;
+  result["max_task_group_count_x"] = caps.max_task_work_group_count[0];
+  result["max_task_group_count_y"] = caps.max_task_work_group_count[1];
+  result["max_task_group_count_z"] = caps.max_task_work_group_count[2];
+  result["max_task_group_total_count"] =
+      caps.max_task_work_group_total_count;
+  result["max_task_group_invocations"] =
+      caps.max_task_work_group_invocations;
+  result["max_mesh_group_count_x"] = caps.max_mesh_work_group_count[0];
+  result["max_mesh_group_count_y"] = caps.max_mesh_work_group_count[1];
+  result["max_mesh_group_count_z"] = caps.max_mesh_work_group_count[2];
+  result["max_mesh_group_total_count"] =
+      caps.max_mesh_work_group_total_count;
+  result["max_mesh_group_invocations"] =
+      caps.max_mesh_work_group_invocations;
+  result["max_mesh_output_vertices"] = caps.max_mesh_output_vertices;
+  result["max_mesh_output_primitives"] = caps.max_mesh_output_primitives;
+  return result;
+}
+
 std::size_t Program::debug_vulkan_graphics_pipeline_count() {
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   return vulkan_graphics_pipelines_.size();
@@ -412,6 +544,33 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
       this, vertex_spirv, fragment_spirv, vertex_bindings, vertex_attributes,
       topology, polygon_mode, front_face_cull, back_face_cull, depth_test,
       depth_write, blending, name);
+  std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+  TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
+              "Vulkan graphics pipeline handle space exhausted.");
+  const std::uint64_t handle = next_vulkan_graphics_pipeline_handle_++;
+  vulkan_graphics_pipelines_.emplace(handle, std::move(resource));
+  return handle;
+}
+
+std::uint64_t Program::create_vulkan_mesh_pipeline(
+    const std::vector<std::uint32_t> &task_spirv,
+    const std::vector<std::uint32_t> &mesh_spirv,
+    const std::vector<std::uint32_t> &fragment_spirv,
+    int topology,
+    int polygon_mode,
+    bool front_face_cull,
+    bool back_face_cull,
+    bool depth_test,
+    bool depth_write,
+    bool blending,
+    const std::string &name) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_graphics_pipeline_available(),
+              "Vulkan mesh pipelines require the Vulkan backend.");
+  auto resource = std::make_shared<VulkanGraphicsPipelineResource>(
+      this, task_spirv, mesh_spirv, fragment_spirv, topology, polygon_mode,
+      front_face_cull, back_face_cull, depth_test, depth_write, blending,
+      name);
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
               "Vulkan graphics pipeline handle space exhausted.");
@@ -509,7 +668,15 @@ std::size_t Program::vulkan_graphics_pass(
     const auto &command = commands[draw_index];
     const auto &draw = command.draw;
     const auto &resource = pipelines[draw_index];
-    TI_ERROR_IF(!command.indirect.has_value() &&
+    const bool mesh_draw = command.mesh.has_value();
+    TI_ERROR_IF(mesh_draw != resource->mesh_pipeline(),
+                "Vulkan graphics pipeline and draw command kinds must agree.");
+    TI_ERROR_IF(mesh_draw &&
+                    (command.indirect.has_value() || command.index_buffer ||
+                     !command.vertex_buffers.empty()),
+                "Vulkan mesh draws cannot bind vertex, index, or classic "
+                "indirect draw inputs.");
+    TI_ERROR_IF(!mesh_draw && !command.indirect.has_value() &&
                     (draw.element_count == 0 || draw.instance_count == 0),
                 "Vulkan graphics direct draw counts must be positive.");
     TI_ERROR_IF(draw.indexed != (command.index_buffer != nullptr),
@@ -519,6 +686,24 @@ std::size_t Program::vulkan_graphics_pass(
     RecordedGraphicsDraw recorded;
     recorded.pipeline = resource;
     recorded.draw = draw;
+    if (mesh_draw) {
+      const auto &mesh = *command.mesh;
+      const auto caps = vulkan_mesh_shader_capabilities();
+      const std::string prefix =
+          resource->task_shader() ? "max_task_" : "max_mesh_";
+      const std::uint64_t total =
+          static_cast<std::uint64_t>(mesh.group_count_x) *
+          mesh.group_count_y * mesh.group_count_z;
+      TI_ERROR_IF(mesh.group_count_x == 0 || mesh.group_count_y == 0 ||
+                      mesh.group_count_z == 0 ||
+                      mesh.group_count_x > caps.at(prefix + "group_count_x") ||
+                      mesh.group_count_y > caps.at(prefix + "group_count_y") ||
+                      mesh.group_count_z > caps.at(prefix + "group_count_z") ||
+                      total > caps.at(prefix + "group_total_count"),
+                  "Vulkan mesh draw group counts exceed the active device "
+                  "limits.");
+      recorded.mesh = mesh;
+    }
     if (command.indirect.has_value()) {
       const auto &indirect = *command.indirect;
       const auto caps = vulkan_graphics_indirect_capabilities();
@@ -818,6 +1003,12 @@ std::size_t Program::vulkan_graphics_pass(
       const auto &command = commands[draw_index];
       const auto &recorded = recorded_draws[draw_index];
       replay_key.push_back(command.pipeline_handle);
+      replay_key.push_back(recorded.mesh.has_value() ? 1 : 0);
+      if (recorded.mesh.has_value()) {
+        replay_key.push_back(recorded.mesh->group_count_x);
+        replay_key.push_back(recorded.mesh->group_count_y);
+        replay_key.push_back(recorded.mesh->group_count_z);
+      }
       replay_key.push_back(recorded.vertex_buffers.size());
       for (const auto &[binding, allocation] : recorded.vertex_buffers) {
         replay_key.push_back(binding);
@@ -863,7 +1054,7 @@ std::size_t Program::vulkan_graphics_pass(
         replay_key.push_back(indirect.instance_record_limit);
         replay_key.push_back(indirect.index_element_limit);
         replay_key.push_back(indirect.first_instance_may_be_nonzero ? 1 : 0);
-      } else {
+      } else if (!recorded.mesh.has_value()) {
         const auto &draw = recorded.draw;
         replay_key.push_back(draw.element_count);
         replay_key.push_back(draw.instance_count);
@@ -928,15 +1119,6 @@ std::size_t Program::vulkan_graphics_pass(
             static_cast<int>(viewport_x_end),
             static_cast<int>(viewport_y_end));
         for (const auto &recorded : recorded_draws) {
-          auto raster = graphics->create_raster_resources_unique();
-          for (const auto &[binding, allocation] :
-               recorded.vertex_buffers) {
-            raster->vertex_buffer(allocation.get_ptr(), binding);
-          }
-          if (recorded.draw.indexed) {
-            raster->index_buffer(recorded.index_buffer.get_ptr(), 32);
-          }
-
           std::unordered_map<std::uint32_t,
                              std::unique_ptr<ShaderResourceSet>> resource_sets;
           for (const auto &shader : recorded.shader_buffers) {
@@ -955,13 +1137,23 @@ std::size_t Program::vulkan_graphics_pass(
           }
 
           commands->bind_pipeline(recorded.pipeline->pipeline());
-          const RhiResult raster_result =
-              commands->bind_raster_resources(raster.get());
-          TI_ERROR_IF(
-              raster_result != RhiResult::success,
-              "Vulkan graphics raster resource binding failed: "
-              "RhiResult({}).",
-              raster_result);
+          if (!recorded.mesh.has_value()) {
+            auto raster = graphics->create_raster_resources_unique();
+            for (const auto &[binding, allocation] :
+                 recorded.vertex_buffers) {
+              raster->vertex_buffer(allocation.get_ptr(), binding);
+            }
+            if (recorded.draw.indexed) {
+              raster->index_buffer(recorded.index_buffer.get_ptr(), 32);
+            }
+            const RhiResult raster_result =
+                commands->bind_raster_resources(raster.get());
+            TI_ERROR_IF(
+                raster_result != RhiResult::success,
+                "Vulkan graphics raster resource binding failed: "
+                "RhiResult({}).",
+                raster_result);
+          }
           for (const auto &[set_index, resource_set] : resource_sets) {
             const RhiResult shader_result =
                 commands->bind_shader_resources(resource_set.get(),
@@ -974,7 +1166,15 @@ std::size_t Program::vulkan_graphics_pass(
           }
 
           const auto &draw = recorded.draw;
-          if (recorded.indirect.has_value()) {
+          if (recorded.mesh.has_value()) {
+            const auto &mesh = *recorded.mesh;
+            const RhiResult mesh_result = commands->draw_mesh_tasks(
+                mesh.group_count_x, mesh.group_count_y, mesh.group_count_z,
+                recorded.pipeline->task_shader());
+            TI_ERROR_IF(mesh_result != RhiResult::success,
+                        "Vulkan mesh draw failed: RhiResult({}).",
+                        mesh_result);
+          } else if (recorded.indirect.has_value()) {
             const auto &indirect = *recorded.indirect;
             const auto command_ptr =
                 indirect.command_buffer.get_ptr(indirect.command_offset);
@@ -1127,6 +1327,24 @@ Program::vulkan_bindless_buffer_capabilities() const {
           {"max_descriptor_set_update_after_bind_storage_buffers", 0}};
 }
 
+std::unordered_map<std::string, std::uint64_t>
+Program::vulkan_mesh_shader_capabilities() const {
+  return {{"mesh_shader", 0},
+          {"task_shader", 0},
+          {"max_task_group_count_x", 0},
+          {"max_task_group_count_y", 0},
+          {"max_task_group_count_z", 0},
+          {"max_task_group_total_count", 0},
+          {"max_task_group_invocations", 0},
+          {"max_mesh_group_count_x", 0},
+          {"max_mesh_group_count_y", 0},
+          {"max_mesh_group_count_z", 0},
+          {"max_mesh_group_total_count", 0},
+          {"max_mesh_group_invocations", 0},
+          {"max_mesh_output_vertices", 0},
+          {"max_mesh_output_primitives", 0}};
+}
+
 std::size_t Program::debug_vulkan_graphics_pipeline_count() {
   return 0;
 }
@@ -1171,6 +1389,21 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
     bool,
     const std::string &) {
   TI_ERROR("Vulkan graphics pipelines are unavailable in this build.");
+}
+
+std::uint64_t Program::create_vulkan_mesh_pipeline(
+    const std::vector<std::uint32_t> &,
+    const std::vector<std::uint32_t> &,
+    const std::vector<std::uint32_t> &,
+    int,
+    int,
+    bool,
+    bool,
+    bool,
+    bool,
+    bool,
+    const std::string &) {
+  TI_ERROR("Vulkan mesh pipelines are unavailable in this build.");
 }
 
 std::size_t Program::vulkan_graphics_draw(

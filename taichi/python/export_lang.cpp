@@ -2097,6 +2097,8 @@ void export_lang(py::module &m) {
            &Program::vulkan_graphics_indirect_capabilities)
       .def("vulkan_bindless_buffer_capabilities",
            &Program::vulkan_bindless_buffer_capabilities)
+      .def("vulkan_mesh_shader_capabilities",
+           &Program::vulkan_mesh_shader_capabilities)
       .def(
           "_create_vulkan_graphics_pipeline",
           [](Program *program, py::bytes vertex_bytes,
@@ -2155,6 +2157,42 @@ void export_lang(py::module &m) {
           py::arg("front_face_cull"), py::arg("back_face_cull"),
           py::arg("depth_test"), py::arg("depth_write"),
           py::arg("blending"), py::arg("name"))
+      .def(
+          "_create_vulkan_mesh_pipeline",
+          [](Program *program, py::bytes task_bytes, py::bytes mesh_bytes,
+             py::bytes fragment_bytes, int topology, int polygon_mode,
+             bool front_face_cull, bool back_face_cull, bool depth_test,
+             bool depth_write, bool blending, const std::string &name) {
+            auto decode_spirv = [](py::bytes value, const char *stage,
+                                   bool optional) {
+              const std::string bytes = py::cast<std::string>(value);
+              TI_ERROR_IF((!optional && bytes.empty()) ||
+                              bytes.size() % sizeof(std::uint32_t) != 0,
+                          "Vulkan mesh pipeline {} SPIR-V must be {}and "
+                          "four-byte aligned.",
+                          stage, optional ? "optional " : "nonempty ");
+              std::vector<std::uint32_t> words(
+                  bytes.size() / sizeof(std::uint32_t));
+              if (!bytes.empty()) {
+                std::memcpy(words.data(), bytes.data(), bytes.size());
+              }
+              return words;
+            };
+            auto task_spirv = decode_spirv(task_bytes, "task", true);
+            auto mesh_spirv = decode_spirv(mesh_bytes, "mesh", false);
+            auto fragment_spirv =
+                decode_spirv(fragment_bytes, "fragment", false);
+            py::gil_scoped_release release;
+            return program->create_vulkan_mesh_pipeline(
+                task_spirv, mesh_spirv, fragment_spirv, topology,
+                polygon_mode, front_face_cull, back_face_cull, depth_test,
+                depth_write, blending, name);
+          },
+          py::arg("task_spirv"), py::arg("mesh_spirv"),
+          py::arg("fragment_spirv"), py::arg("topology"),
+          py::arg("polygon_mode"), py::arg("front_face_cull"),
+          py::arg("back_face_cull"), py::arg("depth_test"),
+          py::arg("depth_write"), py::arg("blending"), py::arg("name"))
       .def(
           "_vulkan_graphics_draw",
           [](Program *program, std::uint64_t handle, Texture *color,
@@ -2219,10 +2257,12 @@ void export_lang(py::module &m) {
             commands.reserve(raw_draws.size());
             for (const py::handle raw : raw_draws) {
               const py::tuple item = py::cast<py::tuple>(raw);
+              const bool mesh = item.size() == 8;
               const bool indirect = item.size() == 15;
-              TI_ERROR_IF(item.size() != 13 && !indirect,
+              TI_ERROR_IF(item.size() != 13 && !indirect && !mesh,
                           "Vulkan graphics pass draws require either the "
-                          "13-field direct ABI or 15-field indirect ABI.");
+                          "13-field direct, 15-field indirect, or 8-field "
+                          "mesh ABI.");
               VulkanGraphicsDrawCommand command;
               command.pipeline_handle = py::cast<std::uint64_t>(item[0]);
               const py::sequence raw_vertex_buffers =
@@ -2271,7 +2311,15 @@ void export_lang(py::module &m) {
                 command.shader_buffers.push_back(
                     std::move(shader_binding));
               }
-              if (indirect) {
+              if (mesh) {
+                TI_ERROR_IF(!py::cast<bool>(item[7]),
+                            "Vulkan graphics mesh ABI requires its mesh "
+                            "marker.");
+                command.mesh = VulkanGraphicsMeshDrawInfo{
+                    py::cast<std::uint32_t>(item[4]),
+                    py::cast<std::uint32_t>(item[5]),
+                    py::cast<std::uint32_t>(item[6])};
+              } else if (indirect) {
                 VulkanGraphicsIndirectInfo indirect_info;
                 indirect_info.command_buffer = py::cast<Ndarray *>(item[4]);
                 indirect_info.count_buffer = py::cast<Ndarray *>(item[5]);

@@ -144,6 +144,32 @@ class Draw:
 
 
 @dataclass(frozen=True)
+class MeshDraw:
+    """One direct VK_EXT_mesh_shader workgroup dispatch inside a render pass."""
+
+    group_count_x: int = 1
+    group_count_y: int = 1
+    group_count_z: int = 1
+
+    def __post_init__(self):
+        _u32(self.group_count_x, "group_count_x", positive=True)
+        _u32(self.group_count_y, "group_count_y", positive=True)
+        _u32(self.group_count_z, "group_count_z", positive=True)
+
+    @property
+    def index_bounds(self):
+        return None
+
+    @property
+    def vertex_offset(self):
+        return 0
+
+    @property
+    def first_index(self):
+        return 0
+
+
+@dataclass(frozen=True)
 class IndirectDraw:
     """Vulkan indirect-command ABI and conservative resource bounds.
 
@@ -239,10 +265,12 @@ class GraphicsPassDraw:
     def __post_init__(self):
         if not isinstance(self.pipeline, VulkanGraphicsPipeline):
             raise TypeError("pipeline must be a VulkanGraphicsPipeline")
-        if not isinstance(self.draw, (Draw, IndirectDraw)):
-            raise TypeError(
-                "draw must be a ti.hardware.graphics.Draw or IndirectDraw value"
-            )
+        if not isinstance(self.draw, (Draw, IndirectDraw, MeshDraw)):
+            raise TypeError("draw must be a Draw, IndirectDraw, or MeshDraw value")
+        if isinstance(self.draw, MeshDraw) != isinstance(
+            self.pipeline, VulkanMeshPipeline
+        ):
+            raise TypeError("MeshDraw values require a VulkanMeshPipeline")
         if not isinstance(self.vertex_buffers, dict):
             raise TypeError("vertex_buffers must map binding integers to names")
         vertices = {}
@@ -766,7 +794,20 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                         )
                     )
             draw = item.draw
-            if isinstance(draw, IndirectDraw):
+            if isinstance(draw, MeshDraw):
+                raw_draws.append(
+                    (
+                        item.pipeline._handle,
+                        (),
+                        None,
+                        tuple(shader_buffers),
+                        draw.group_count_x,
+                        draw.group_count_y,
+                        draw.group_count_z,
+                        True,
+                    )
+                )
+            elif isinstance(draw, IndirectDraw):
                 command = bindings[item.indirect_buffer].arr
                 count = (
                     None
@@ -885,6 +926,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "indirect_count_draw_count": sum(
                     draw.count_buffer is not None for draw in item.draws
                 ),
+                "mesh_draw_count": sum(
+                    isinstance(draw.draw, MeshDraw) for draw in item.draws
+                ),
                 "bindless_buffer_table_count": sum(
                     isinstance(declaration, ShaderBufferArrayBinding)
                     for pipeline in item.pipelines
@@ -894,6 +938,17 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "depth_load_op": item.depth_load_op,
             },
         )
+
+
+@instrument_hardware_recording("raster.mesh_tasks.vulkan")
+class VulkanMeshPassRecording(VulkanGraphicsPassRecording):
+    """Mesh/task specialization of the low-level Vulkan graphics pass."""
+
+    def __init__(self, *args, **kwargs):
+        VulkanGraphicsPassRecording.__init__.__wrapped__(self, *args, **kwargs)
+
+    def execute(self, bindings):
+        return VulkanGraphicsPassRecording.execute.__wrapped__(self, bindings)
 
 
 class VulkanGraphicsPipeline:
@@ -1142,6 +1197,140 @@ class VulkanGraphicsPipeline:
         return False
 
 
+class VulkanMeshPipeline(VulkanGraphicsPipeline):
+    """Caller-SPIR-V VK_EXT_mesh_shader pipeline without renderer semantics."""
+
+    def __init__(
+        self,
+        mesh_spirv,
+        fragment_spirv,
+        *,
+        task_spirv=None,
+        shader_buffer_bindings=(),
+        topology="triangles",
+        polygon_mode="fill",
+        cull_mode="none",
+        depth_test=False,
+        depth_write=False,
+        blending=False,
+        name="",
+    ):
+        program = impl.get_runtime().prog
+        if program is None:
+            raise TaichiRuntimeError(
+                "VulkanMeshPipeline requires an initialized Taichi runtime"
+            )
+        if active_backend() != "vulkan":
+            raise TaichiRuntimeError(
+                "VulkanMeshPipeline requires the Vulkan backend; the active "
+                f"backend is {active_backend()}"
+            )
+        task_enabled = task_spirv is not None
+        if not is_mesh_shader_available(task_shader=task_enabled):
+            requirement = "task and mesh" if task_enabled else "mesh"
+            raise TaichiRuntimeError(
+                f"Vulkan {requirement} shader features are unavailable on "
+                "the active device"
+            )
+
+        shader_buffer_bindings = tuple(shader_buffer_bindings)
+        if not all(
+            isinstance(item, (ShaderBufferBinding, ShaderBufferArrayBinding))
+            for item in shader_buffer_bindings
+        ):
+            raise TypeError(
+                "shader_buffer_bindings must contain ShaderBufferBinding or "
+                "ShaderBufferArrayBinding values"
+            )
+        shader_buffer_by_key = {
+            (item.set_index, item.binding): item for item in shader_buffer_bindings
+        }
+        if len(shader_buffer_by_key) != len(shader_buffer_bindings):
+            raise ValueError("shader buffer set/binding pairs must be unique")
+        array_bindings = tuple(
+            item
+            for item in shader_buffer_bindings
+            if isinstance(item, ShaderBufferArrayBinding)
+        )
+        if array_bindings:
+            capabilities = bindless_buffer_capabilities()
+            if not capabilities["fixed_count"]:
+                raise TaichiRuntimeError(
+                    "fixed-count Vulkan storage-buffer descriptor arrays are "
+                    "unavailable on the active device"
+                )
+            provider_limit = min(int(capabilities["max_fixed_count"]), 64)
+            if any(item.descriptor_count > provider_limit for item in array_bindings):
+                raise ValueError(
+                    "descriptor_count exceeds the Vulkan graphics provider limit"
+                )
+        try:
+            topology_value = _TOPOLOGIES[topology]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("unsupported graphics topology") from exc
+        try:
+            polygon_value = _POLYGON_MODES[polygon_mode]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("unsupported graphics polygon_mode") from exc
+        try:
+            front_cull, back_cull = _CULL_MODES[cull_mode]
+        except (KeyError, TypeError) as exc:
+            raise ValueError("unsupported graphics cull_mode") from exc
+        if not isinstance(name, str):
+            raise TypeError("name must be a string")
+
+        self._runtime_prog = program
+        self._runtime_generation = int(impl.runtime_generation())
+        self.vertex_bindings = ()
+        self.vertex_attributes = ()
+        self.shader_buffer_bindings = shader_buffer_bindings
+        self._shader_buffer_by_key = MappingProxyType(shader_buffer_by_key)
+        with hardware_failure_phase("provider_plan_failure"):
+            self._handle = int(
+                program._create_vulkan_mesh_pipeline(
+                    b"" if task_spirv is None else _bytes(task_spirv, "task_spirv"),
+                    _bytes(mesh_spirv, "mesh_spirv"),
+                    _bytes(fragment_spirv, "fragment_spirv"),
+                    topology_value,
+                    polygon_value,
+                    front_cull,
+                    back_cull,
+                    bool(depth_test),
+                    bool(depth_write),
+                    bool(blending),
+                    name,
+                )
+            )
+
+    def record(self, draw, **kwargs):
+        raise TypeError("mesh pipelines require pass_draw()/record_pass()")
+
+    def pass_draw(self, draw, *, shader_buffers=None):
+        self._validate_lifetime()
+        if not isinstance(draw, MeshDraw):
+            raise TypeError("VulkanMeshPipeline draws require a MeshDraw value")
+        return GraphicsPassDraw(
+            self,
+            draw,
+            {},
+            shader_buffers=shader_buffers,
+        )
+
+    def record_pass(self, draws, **kwargs):
+        self._validate_lifetime()
+        recording = VulkanMeshPassRecording(draws, **kwargs)
+        if self not in recording.pipelines:
+            raise ValueError("record_pass draws must include the owning pipeline")
+        if not all(
+            isinstance(pipeline, VulkanMeshPipeline) for pipeline in recording.pipelines
+        ):
+            raise ValueError("mesh passes cannot mix classic and mesh pipelines")
+        return recording
+
+    def draw(self, *args, **kwargs):
+        raise TypeError("mesh pipelines require pass_draw()/record_pass()")
+
+
 def is_available():
     """Return whether the initialized runtime accepts Vulkan graphics draws."""
 
@@ -1210,10 +1399,47 @@ def is_bindless_buffer_available():
     return bool(bindless_buffer_capabilities()["fixed_count"])
 
 
+def mesh_shader_capabilities():
+    """Return independent VK_EXT_mesh_shader feature and limit facts."""
+
+    unavailable = {
+        "mesh_shader": 0,
+        "task_shader": 0,
+        "max_task_group_count_x": 0,
+        "max_task_group_count_y": 0,
+        "max_task_group_count_z": 0,
+        "max_task_group_total_count": 0,
+        "max_task_group_invocations": 0,
+        "max_mesh_group_count_x": 0,
+        "max_mesh_group_count_y": 0,
+        "max_mesh_group_count_z": 0,
+        "max_mesh_group_total_count": 0,
+        "max_mesh_group_invocations": 0,
+        "max_mesh_output_vertices": 0,
+        "max_mesh_output_primitives": 0,
+    }
+    program = impl.get_runtime().prog
+    if program is None or active_backend() != "vulkan":
+        return MappingProxyType(unavailable)
+    return MappingProxyType(dict(program.vulkan_mesh_shader_capabilities()))
+
+
+def is_mesh_shader_available(*, task_shader=False):
+    """Return whether mesh-only or task-plus-mesh pipelines are available."""
+
+    if not isinstance(task_shader, bool):
+        raise TypeError("task_shader must be a bool")
+    capabilities = mesh_shader_capabilities()
+    return bool(
+        capabilities["mesh_shader"] and (not task_shader or capabilities["task_shader"])
+    )
+
+
 __all__ = [
     "Draw",
     "GraphicsPassDraw",
     "IndirectDraw",
+    "MeshDraw",
     "ShaderBufferArrayBinding",
     "ShaderBufferBinding",
     "VertexAttribute",
@@ -1221,9 +1447,13 @@ __all__ = [
     "VulkanGraphicsDrawRecording",
     "VulkanGraphicsPassRecording",
     "VulkanGraphicsPipeline",
+    "VulkanMeshPassRecording",
+    "VulkanMeshPipeline",
     "bindless_buffer_capabilities",
     "indirect_capabilities",
     "is_available",
     "is_bindless_buffer_available",
     "is_indirect_available",
+    "is_mesh_shader_available",
+    "mesh_shader_capabilities",
 ]

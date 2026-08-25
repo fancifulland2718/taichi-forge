@@ -184,6 +184,12 @@ struct VulkanGraphicsIndirectInfo {
   bool first_instance_may_be_nonzero{false};
 };
 
+struct VulkanGraphicsMeshDrawInfo {
+  std::uint32_t group_count_x{1};
+  std::uint32_t group_count_y{1};
+  std::uint32_t group_count_z{1};
+};
+
 struct VulkanGraphicsDrawCommand {
   std::uint64_t pipeline_handle{0};
   std::vector<std::pair<std::uint32_t, Ndarray *>> vertex_buffers;
@@ -191,6 +197,7 @@ struct VulkanGraphicsDrawCommand {
   std::vector<VulkanGraphicsShaderBufferBinding> shader_buffers;
   VulkanGraphicsDrawInfo draw;
   std::optional<VulkanGraphicsIndirectInfo> indirect;
+  std::optional<VulkanGraphicsMeshDrawInfo> mesh;
 };
 
 struct VulkanGraphicsPassInfo {
@@ -1090,6 +1097,9 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::string, std::uint64_t>
   vulkan_bindless_buffer_capabilities() const;
 
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_mesh_shader_capabilities() const;
+
   std::size_t debug_vulkan_graphics_pipeline_count();
 
   std::unordered_map<std::string, std::uint64_t>
@@ -1100,6 +1110,19 @@ class TI_DLL_EXPORT Program {
       const std::vector<std::uint32_t> &fragment_spirv,
       const std::vector<VulkanGraphicsVertexBinding> &vertex_bindings,
       const std::vector<VulkanGraphicsVertexAttribute> &vertex_attributes,
+      int topology,
+      int polygon_mode,
+      bool front_face_cull,
+      bool back_face_cull,
+      bool depth_test,
+      bool depth_write,
+      bool blending,
+      const std::string &name);
+
+  std::uint64_t create_vulkan_mesh_pipeline(
+      const std::vector<std::uint32_t> &task_spirv,
+      const std::vector<std::uint32_t> &mesh_spirv,
+      const std::vector<std::uint32_t> &fragment_spirv,
       int topology,
       int polygon_mode,
       bool front_face_cull,

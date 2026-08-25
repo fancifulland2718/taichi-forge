@@ -673,6 +673,13 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       vk_api_version < VK_API_VERSION_1_2 &&
       draw_indirect_count_extension_requested &&
       has_device_extension(VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME);
+  const bool mesh_shader_extension_requested =
+      !manual_create ||
+      extension_was_requested(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+  const bool mesh_shader_extension_available =
+      vk_api_version >= VK_API_VERSION_1_2 &&
+      mesh_shader_extension_requested &&
+      has_device_extension(VK_EXT_MESH_SHADER_EXTENSION_NAME);
 
   bool has_swapchain = false;
   // VK_KHR_external_memory became core in Vulkan 1.1.  Exporting the memory
@@ -786,6 +793,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (draw_indirect_count_extension_available &&
                name == VK_KHR_DRAW_INDIRECT_COUNT_EXTENSION_NAME) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if (mesh_shader_extension_available &&
+               name == VK_EXT_MESH_SHADER_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (std::find(params_.additional_device_extensions.begin(),
                          params_.additional_device_extensions.end(),
@@ -934,6 +944,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       present_mode_fifo_latest_ready_feature{};
   present_mode_fifo_latest_ready_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_MODE_FIFO_LATEST_READY_FEATURES_KHR;
+  VkPhysicalDeviceMeshShaderFeaturesEXT mesh_shader_feature{};
+  mesh_shader_feature.sType =
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 
   if (ti_device_->vk_caps().physical_device_features2) {
     VkPhysicalDeviceFeatures2KHR features2{};
@@ -1273,6 +1286,53 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       }
       *pNextEnd = &descriptor_indexing_feature;
       pNextEnd = &descriptor_indexing_feature.pNext;
+    }
+
+    // Mesh and task shaders are a graphics-provider specialization. Keep the
+    // independent task bit and exact dispatch/output limits instead of
+    // treating extension presence as executable support.
+    if (mesh_shader_extension_available) {
+      features2.pNext = &mesh_shader_feature;
+      query_physical_device_features2(&features2);
+      const bool supported_mesh = mesh_shader_feature.meshShader;
+      const bool supported_task = mesh_shader_feature.taskShader;
+      if (supported_mesh) {
+        VkPhysicalDeviceMeshShaderPropertiesEXT mesh_properties{};
+        mesh_properties.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT;
+        VkPhysicalDeviceProperties2 properties2{};
+        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties2.pNext = &mesh_properties;
+        query_physical_device_properties2(&properties2);
+
+        mesh_shader_feature = {};
+        mesh_shader_feature.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+        mesh_shader_feature.meshShader = VK_TRUE;
+        mesh_shader_feature.taskShader = supported_task ? VK_TRUE : VK_FALSE;
+        *pNextEnd = &mesh_shader_feature;
+        pNextEnd = &mesh_shader_feature.pNext;
+
+        auto &mesh_caps = ti_device_->vk_caps();
+        mesh_caps.mesh_shader = true;
+        mesh_caps.task_shader = supported_task;
+        std::copy_n(mesh_properties.maxTaskWorkGroupCount, 3,
+                    mesh_caps.max_task_work_group_count.begin());
+        mesh_caps.max_task_work_group_total_count =
+            mesh_properties.maxTaskWorkGroupTotalCount;
+        mesh_caps.max_task_work_group_invocations =
+            mesh_properties.maxTaskWorkGroupInvocations;
+        std::copy_n(mesh_properties.maxMeshWorkGroupCount, 3,
+                    mesh_caps.max_mesh_work_group_count.begin());
+        mesh_caps.max_mesh_work_group_total_count =
+            mesh_properties.maxMeshWorkGroupTotalCount;
+        mesh_caps.max_mesh_work_group_invocations =
+            mesh_properties.maxMeshWorkGroupInvocations;
+        mesh_caps.max_mesh_output_vertices =
+            mesh_properties.maxMeshOutputVertices;
+        mesh_caps.max_mesh_output_primitives =
+            mesh_properties.maxMeshOutputPrimitives;
+      }
     }
 
     // FIFO_LATEST_READY present mode

@@ -1030,6 +1030,26 @@ def _passive_core_statuses(runtime_initialized, backend):
             "max_descriptor_set_update_after_bind_storage_buffers": 0,
         }
     )
+    graphics_mesh_shader = (
+        dict(program.vulkan_mesh_shader_capabilities())
+        if graphics_available
+        else {
+            "mesh_shader": 0,
+            "task_shader": 0,
+            "max_task_group_count_x": 0,
+            "max_task_group_count_y": 0,
+            "max_task_group_count_z": 0,
+            "max_task_group_total_count": 0,
+            "max_task_group_invocations": 0,
+            "max_mesh_group_count_x": 0,
+            "max_mesh_group_count_y": 0,
+            "max_mesh_group_count_z": 0,
+            "max_mesh_group_total_count": 0,
+            "max_mesh_group_invocations": 0,
+            "max_mesh_output_vertices": 0,
+            "max_mesh_output_primitives": 0,
+        }
+    )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
     cooperative_matrix_available = bool(
         program is not None and program.vulkan_cooperative_matrix_available()
@@ -1113,6 +1133,21 @@ def _passive_core_statuses(runtime_initialized, backend):
                 "max_bindless_storage_buffer_fixed_count": min(
                     int(graphics_bindless_buffers["max_fixed_count"]), 64
                 ),
+            },
+        },
+        "raster.mesh_tasks.vulkan": {
+            "available": bool(graphics_mesh_shader["mesh_shader"]),
+            "native_facts": {
+                "provider_available": bool(graphics_mesh_shader["mesh_shader"]),
+                "capability_query": "active_vulkan_mesh_shader_feature_chain",
+                "admission_scope": "provider_route",
+                "mesh_shader": bool(graphics_mesh_shader["mesh_shader"]),
+                "task_shader": bool(graphics_mesh_shader["task_shader"]),
+                **{
+                    name: int(graphics_mesh_shader[name])
+                    for name in graphics_mesh_shader
+                    if name not in {"mesh_shader", "task_shader"}
+                },
             },
         },
         "ray.as_build.vulkan": {

@@ -14,6 +14,7 @@ _OPERATION_IDS = (
     "image.copy.vulkan",
     "raster.draw.vulkan",
     "raster.adapter.ggui.vulkan",
+    "raster.mesh_tasks.vulkan",
     "ray.as_build.vulkan",
     "ray.as_refit.vulkan",
     "ray.query.batch.vulkan",
@@ -41,7 +42,6 @@ _OPERATION_IDS = (
     "ray.query.batch.optix",
     "algorithms.primitives.cub",
     "internal.tile.async.cuda",
-    "internal.raster.mesh_shader.vulkan",
 )
 
 
@@ -126,7 +126,6 @@ def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
             "internal.reduction.grouped.cuda_vulkan",
             "internal.listgen.subgroup_ballot.vulkan",
             "internal.tile.async.cuda",
-            "internal.raster.mesh_shader.vulkan",
         },
         "explicit_kernel_intrinsic": {
             "ray.query.inline.vulkan",
@@ -517,11 +516,12 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     )
     assert "no public cp.async or TMA API" in async_tile.notes[0]
 
-    mesh_shader = ti.hardware.capability("internal.raster.mesh_shader.vulkan")
-    assert mesh_shader.implementation_status == "planned"
-    assert mesh_shader.hardware_acceleration == "none"
-    assert "feature query and device enablement" in mesh_shader.requirements[0]
-    assert "headers alone" in mesh_shader.notes[1]
+    mesh_shader = ti.hardware.capability("raster.mesh_tasks.vulkan")
+    assert mesh_shader.implementation_status == "qualification_required"
+    assert mesh_shader.hardware_acceleration == "implementation_defined"
+    assert mesh_shader.activation_mode == "explicit_hardware_api"
+    assert "meshShader feature" in mesh_shader.requirements[1]
+    assert "ordinary kernel calls are impossible" in mesh_shader.notes[0]
 
     with pytest.raises(KeyError, match="unknown hardware operation"):
         ti.hardware.capability("missing.operation")

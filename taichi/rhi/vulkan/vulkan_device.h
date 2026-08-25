@@ -562,6 +562,10 @@ class VulkanCommandList : public CommandList {
       DevicePtr count,
       uint32_t max_draw_count,
       uint32_t stride) noexcept override;
+  RhiResult draw_mesh_tasks(uint32_t group_count_x,
+                            uint32_t group_count_y,
+                            uint32_t group_count_z,
+                            bool task_shader) noexcept override;
   void set_line_width(float width) override;
   void image_transition(DeviceAllocation img,
                         ImageLayout old_layout,
@@ -884,6 +888,16 @@ struct VulkanCapabilities {
   bool draw_indirect_first_instance{false};
   bool draw_indirect_count{false};
   std::uint32_t max_draw_indirect_count{0};
+  bool mesh_shader{false};
+  bool task_shader{false};
+  std::array<std::uint32_t, 3> max_task_work_group_count{0, 0, 0};
+  std::uint32_t max_task_work_group_total_count{0};
+  std::uint32_t max_task_work_group_invocations{0};
+  std::array<std::uint32_t, 3> max_mesh_work_group_count{0, 0, 0};
+  std::uint32_t max_mesh_work_group_total_count{0};
+  std::uint32_t max_mesh_work_group_invocations{0};
+  std::uint32_t max_mesh_output_vertices{0};
+  std::uint32_t max_mesh_output_primitives{0};
   std::uint32_t subgroup_size{0};
   VkShaderStageFlags cooperative_matrix_supported_stages{0};
   std::vector<VulkanCooperativeMatrixProperty> cooperative_matrix_properties;

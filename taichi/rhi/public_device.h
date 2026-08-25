@@ -302,6 +302,8 @@ enum class PipelineStageType {
   tesselation_control,
   tesselation_eval,
   geometry,
+  task,
+  mesh,
   raytracing
 };
 
@@ -698,6 +700,12 @@ class RHI_DLL_EXPORT CommandList {
       DevicePtr count,
       uint32_t max_draw_count,
       uint32_t stride) noexcept {
+    return RhiResult::not_supported;
+  }
+  virtual RhiResult draw_mesh_tasks(uint32_t group_count_x,
+                                    uint32_t group_count_y,
+                                    uint32_t group_count_z,
+                                    bool task_shader) noexcept {
     return RhiResult::not_supported;
   }
   virtual void image_transition(DeviceAllocation img,
