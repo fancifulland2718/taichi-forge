@@ -82,7 +82,7 @@ from taichi_forge.hardware._admission import (  # pylint: disable=C0413
 )
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v4"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v5"
 ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
 AUTO_ADMISSION_MINIMUM_PROCESSES = 8
 AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER = 4
@@ -252,18 +252,12 @@ def _implicit_grid_csr(side, stiffness, *, stencil_radius=1):
                         continue
                     neighbor_row = row + row_delta
                     neighbor_column = column + column_delta
-                    if not (
-                        0 <= neighbor_row < side
-                        and 0 <= neighbor_column < side
-                    ):
+                    if not (0 <= neighbor_row < side and 0 <= neighbor_column < side):
                         continue
                     # Keep radius one bit-for-bit compatible with the original
                     # five-point graph rather than turning it into a nine-point
                     # stencil.
-                    if (
-                        stencil_radius == 1
-                        and abs(row_delta) + abs(column_delta) != 1
-                    ):
+                    if stencil_radius == 1 and abs(row_delta) + abs(column_delta) != 1:
                         continue
                     neighbors.append(neighbor_row * side + neighbor_column)
             entries = [(index, 1.0 + stiffness * len(neighbors))]
@@ -1381,8 +1375,7 @@ def _cuda_spmv_krylov_case(order, args):
     if args.krylov_baseline == "rerecord":
         if recording.replay_mode != "stream_capture":
             raise RuntimeError(
-                "the rerecord baseline requires "
-                "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1"
+                "the rerecord baseline requires " "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1"
             )
         proof_flag = os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
         try:
@@ -2862,6 +2855,14 @@ def _vulkan_offscreen_simulation_case(order, args):
     baseline_phase = ti.ndarray(ti.f32, shape=1)
     baseline_image = ti.ndarray(ti.f32, shape=size * size * 3)
     target = ti.Texture(ti.Format.rgba8, (size, size))
+    retained_binding_sets = args.vulkan_retained_binding_sets
+    hardware_vertices_sets = [hardware_vertices]
+    hardware_phase_sets = [hardware_phase]
+    target_sets = [target]
+    for _ in range(1, retained_binding_sets):
+        hardware_vertices_sets.append(ti.ndarray(ti.f32, shape=triangle_count * 15))
+        hardware_phase_sets.append(ti.ndarray(ti.f32, shape=1))
+        target_sets.append(ti.Texture(ti.Format.rgba8, (size, size)))
     rerecord_vertices = None
     rerecord_phase = None
     rerecord_target = None
@@ -2981,11 +2982,12 @@ def _vulkan_offscreen_simulation_case(order, args):
     software_builder.dispatch(clear_software_image, image_arg)
     software_builder.dispatch(software_rasterize, vertices_arg, image_arg)
     software_graph = software_builder.compile()
-    hardware_bindings = {
-        "phase": hardware_phase,
-        "vertices": hardware_vertices,
-        "target": target,
-    }
+    hardware_binding_sets = [
+        {"phase": phase, "vertices": vertices, "target": color}
+        for phase, vertices, color in zip(
+            hardware_phase_sets, hardware_vertices_sets, target_sets
+        )
+    ]
     software_bindings = {
         "phase": baseline_phase,
         "vertices": baseline_vertices,
@@ -3006,28 +3008,48 @@ def _vulkan_offscreen_simulation_case(order, args):
         rerecord_vertices = ti.ndarray(ti.f32, shape=triangle_count * 15)
         rerecord_phase = ti.ndarray(ti.f32, shape=1)
         rerecord_target = ti.Texture(ti.Format.rgba8, (size, size))
+        rerecord_vertices_sets = [rerecord_vertices]
+        rerecord_phase_sets = [rerecord_phase]
+        rerecord_target_sets = [rerecord_target]
+        for _ in range(1, retained_binding_sets):
+            rerecord_vertices_sets.append(ti.ndarray(ti.f32, shape=triangle_count * 15))
+            rerecord_phase_sets.append(ti.ndarray(ti.f32, shape=1))
+            rerecord_target_sets.append(ti.Texture(ti.Format.rgba8, (size, size)))
         rerecord_builder = ti.graph.GraphBuilder()
         rerecord_builder.dispatch(advance_simulation, phase_arg, vertices_arg)
         rerecord_builder.append_native(rerecord_recording, admission="explicit")
         rerecord_graph = rerecord_builder.compile()
-        baseline_bindings = {
-            "phase": rerecord_phase,
-            "vertices": rerecord_vertices,
-            "target": rerecord_target,
-        }
+        baseline_binding_sets = [
+            {"phase": phase, "vertices": vertices, "target": color}
+            for phase, vertices, color in zip(
+                rerecord_phase_sets, rerecord_vertices_sets, rerecord_target_sets
+            )
+        ]
     else:
         rerecord_graph = None
-        baseline_bindings = software_bindings
+        rerecord_phase_sets = []
+        rerecord_target_sets = []
+        baseline_binding_sets = [software_bindings]
+
+    binding_cursor = {"hardware": 0, "baseline": 0}
+
+    def next_bindings(variant):
+        bindings = (
+            hardware_binding_sets if variant == "hardware" else baseline_binding_sets
+        )
+        index = binding_cursor[variant] % len(bindings)
+        binding_cursor[variant] += 1
+        return bindings[index]
 
     def hardware():
-        hardware_graph.run(hardware_bindings)
+        hardware_graph.run(next_bindings("hardware"))
         ti.sync()
 
     def baseline():
         if rerecord_graph is None:
-            software_graph.run(baseline_bindings)
+            software_graph.run(software_bindings)
         else:
-            rerecord_graph.run(baseline_bindings)
+            rerecord_graph.run(next_bindings("baseline"))
         ti.sync()
 
     def software_oracle():
@@ -3035,6 +3057,7 @@ def _vulkan_offscreen_simulation_case(order, args):
         ti.sync()
 
     submit_timing = None
+    gpu_stage_timing = None
     timing = _measure_pair(
         hardware,
         baseline,
@@ -3052,9 +3075,9 @@ def _vulkan_offscreen_simulation_case(order, args):
             ti.sync()
             started = time.perf_counter_ns()
             if variant == "hardware":
-                hardware_graph.run(hardware_bindings)
+                hardware_graph.run(next_bindings("hardware"))
             else:
-                rerecord_graph.run(baseline_bindings)
+                rerecord_graph.run(next_bindings("baseline"))
             submit_samples[variant].append((time.perf_counter_ns() - started) / 1.0e6)
 
         submit_order = ("hardware", "baseline")
@@ -3074,26 +3097,86 @@ def _vulkan_offscreen_simulation_case(order, args):
                 )
             ),
         }
-    hardware_phase.from_numpy(np.zeros(1, dtype=np.float32))
+        hardware_graph.prepare_telemetry("timestamps")
+        rerecord_graph.prepare_telemetry("timestamps")
+        gpu_samples = {"hardware": [], "baseline": []}
+        gpu_observations = {"hardware": [], "baseline": []}
+        paired_gpu_speedups = []
+
+        def timestamp_once(variant):
+            if variant == "hardware":
+                graph = hardware_graph
+                bindings = next_bindings("hardware")
+            else:
+                graph = rerecord_graph
+                bindings = next_bindings("baseline")
+            report = graph.submit(bindings, telemetry="timestamps").telemetry()
+            observation = {
+                "duration_ns": report.gpu_duration_ns,
+                "scope": report.gpu_timestamp_scope,
+                "exact": report.gpu_timestamp_exact,
+                "measurement_path_changed": report.gpu_measurement_path_changed,
+                "queue_or_stream_id": report.gpu_queue_or_stream_id,
+                "status": report.gpu_timestamp_status,
+            }
+            gpu_observations[variant].append(observation)
+            if (
+                observation["exact"]
+                and observation["duration_ns"] is not None
+                and observation["duration_ns"] > 0
+            ):
+                gpu_samples[variant].append(observation["duration_ns"] / 1.0e6)
+            return observation
+
+        for _ in range(40):
+            observations = {}
+            for variant in submit_order:
+                observations[variant] = timestamp_once(variant)
+            hardware_observation = observations["hardware"]
+            baseline_observation = observations["baseline"]
+            if (
+                hardware_observation["exact"]
+                and baseline_observation["exact"]
+                and hardware_observation["duration_ns"] is not None
+                and baseline_observation["duration_ns"] is not None
+                and hardware_observation["duration_ns"] > 0
+            ):
+                paired_gpu_speedups.append(
+                    baseline_observation["duration_ns"]
+                    / hardware_observation["duration_ns"]
+                )
+        gpu_stage_timing = {
+            "scope": (
+                "Graph.submit whole-ticket GPU timestamps; simulation, "
+                "graphics queue, and completion bridge included"
+            ),
+            "samples_ms": gpu_samples,
+            "observations": gpu_observations,
+            "paired_speedups": paired_gpu_speedups,
+        }
+    for phase in hardware_phase_sets:
+        phase.from_numpy(np.zeros(1, dtype=np.float32))
     baseline_phase.from_numpy(np.zeros(1, dtype=np.float32))
-    if rerecord_phase is not None:
-        rerecord_phase.from_numpy(np.zeros(1, dtype=np.float32))
-    hardware()
-    baseline()
+    for phase in rerecord_phase_sets:
+        phase.from_numpy(np.zeros(1, dtype=np.float32))
+    for _ in range(retained_binding_sets):
+        hardware()
+        baseline()
     if rerecord_graph is not None:
         software_oracle()
     from taichi_forge._kernels import (  # pylint: disable=C0415
         save_texture_to_numpy,
     )
 
-    hardware_image = np.zeros((size, size, 3), dtype=np.uint8)
-    save_texture_to_numpy(target, hardware_image)
-    hardware_image = np.rot90(hardware_image, 3)
-    rerecord_image = None
-    if rerecord_target is not None:
-        rerecord_image = np.zeros((size, size, 3), dtype=np.uint8)
-        save_texture_to_numpy(rerecord_target, rerecord_image)
-        rerecord_image = np.rot90(rerecord_image, 3)
+    def read_target(color):
+        image = np.zeros((size, size, 3), dtype=np.uint8)
+        save_texture_to_numpy(color, image)
+        return np.rot90(image, 3)
+
+    hardware_images = [read_target(color) for color in target_sets]
+    hardware_image = hardware_images[0]
+    rerecord_images = [read_target(color) for color in rerecord_target_sets]
+    rerecord_image = rerecord_images[0] if rerecord_images else None
     baseline_image_host = np.clip(
         baseline_image.to_numpy().reshape(size, size, 3), 0.0, 1.0
     )
@@ -3126,6 +3209,22 @@ def _vulkan_offscreen_simulation_case(order, args):
                 )
             )
         )
+    binding_set_correctness = []
+    for binding_index, binding_image in enumerate(hardware_images):
+        binding_mask = np.max(binding_image, axis=2) > 8
+        matching_rerecord = rerecord_images[binding_index] if rerecord_images else None
+        binding_set_correctness.append(
+            {
+                "binding_index": binding_index,
+                "hardware_covered_pixels": int(binding_mask.sum()),
+                "hardware_nonempty": bool(binding_mask.any()),
+                "rerecord_exact_image_match": (
+                    bool(np.array_equal(binding_image, matching_rerecord))
+                    if matching_rerecord is not None
+                    else None
+                ),
+            }
+        )
     resolved = _resolved_operation("raster.draw.vulkan")
     replay_stats = dict(
         ti.lang.impl.get_runtime().prog._debug_vulkan_graphics_resource_stats()
@@ -3135,7 +3234,7 @@ def _vulkan_offscreen_simulation_case(order, args):
     ti.sync()
     memory_closed = pipeline.memory_report().to_dict()
     passed = (
-        hardware_mask.any()
+        all(item["hardware_nonempty"] for item in binding_set_correctness)
         and baseline_mask.any()
         and coverage_error <= 0.15
         and mean_color_error <= 0.08
@@ -3148,9 +3247,11 @@ def _vulkan_offscreen_simulation_case(order, args):
             not args.vulkan_retained_replay_proof
             or (
                 recording._experimental_retained_replay
-                and replay_stats["retained_replay_records"] == 1
-                and replay_stats["retained_replay_replays"] > 0
+                and replay_stats["retained_replay_attempts"] > 0
                 and replay_stats["retained_replay_submit_failures"] == 0
+                and replay_stats["retained_replay_bridge_failures"] == 0
+                and replay_stats["retained_replay_graphics_submissions"]
+                == replay_stats["retained_replay_bridge_submissions"]
             )
         )
     )
@@ -3164,6 +3265,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "draws_per_frame": draw_count,
                 "triangle_tiles": (tiles, tiles),
                 "triangles_per_frame": triangle_count,
+                "retained_binding_sets": retained_binding_sets,
                 "timed_scope": "simulation_kernel+offscreen_raster+single_final_synchronization",
                 "readback_included": False,
                 "hardware": "Forge low-level Vulkan graphics pass recording",
@@ -3185,6 +3287,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "mean_color_tolerance": 0.08,
                 "rerecord_relative_coverage_error": rerecord_coverage_error,
                 "rerecord_whole_image_mean_color_max_abs": (rerecord_mean_color_error),
+                "binding_sets": binding_set_correctness,
             },
             "route": {
                 "provider": resolved,
@@ -3210,6 +3313,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "public_contract_promoted": False,
             },
             "submit_timing": submit_timing,
+            "gpu_stage_timing": gpu_stage_timing,
             "memory": {
                 "pipeline_open": memory_open,
                 "pipeline_closed": memory_closed,
@@ -3745,6 +3849,118 @@ def _aggregate(
             "minimum_conservative_speedup": 1.0 / 0.95,
             "gate_passed": (submit_stable and submit_speedup["p05"] >= 1.0 / 0.95),
         }
+    if all(worker.get("gpu_stage_timing") is not None for worker in workers):
+        gpu_variants = {}
+        gpu_stable = True
+        gpu_exact = True
+        for variant in ("hardware", "baseline"):
+            observations = [
+                observation
+                for worker in workers
+                for observation in worker["gpu_stage_timing"]["observations"][variant]
+            ]
+            samples = [
+                sample
+                for worker in workers
+                for sample in worker["gpu_stage_timing"]["samples_ms"][variant]
+            ]
+            exact = bool(observations) and all(
+                observation["scope"] == "whole_ticket"
+                and observation["exact"]
+                and observation["duration_ns"] is not None
+                and observation["duration_ns"] > 0
+                and observation["status"] == "instrumented_exact"
+                for observation in observations
+            )
+            summary = _summary(samples)
+            by_order = {}
+            for order in ("ab", "ba"):
+                order_samples = [
+                    sample
+                    for worker in workers
+                    if worker["order"] == order
+                    for sample in worker["gpu_stage_timing"]["samples_ms"][variant]
+                ]
+                by_order[order] = (
+                    statistics.median(order_samples) if order_samples else None
+                )
+            drift = None
+            if (
+                summary is not None
+                and by_order["ab"] is not None
+                and by_order["ba"] is not None
+            ):
+                drift = abs(by_order["ab"] - by_order["ba"]) / max(
+                    summary["median_ms"], np.finfo(np.float64).tiny
+                )
+            variant_stable = bool(
+                exact
+                and summary is not None
+                and summary["cv"] <= cv_limit
+                and drift is not None
+                and drift <= drift_limit
+            )
+            gpu_exact = gpu_exact and exact
+            gpu_stable = gpu_stable and variant_stable
+            gpu_variants[variant] = {
+                **(summary or {"count": 0}),
+                "order_medians_ms": by_order,
+                "order_drift": drift,
+                "exact": exact,
+                "instrumented_path": all(
+                    observation["measurement_path_changed"]
+                    for observation in observations
+                ),
+                "stable": variant_stable,
+                "statuses": sorted(
+                    {observation["status"] for observation in observations}
+                ),
+                "queue_or_stream_ids": sorted(
+                    {observation["queue_or_stream_id"] for observation in observations}
+                ),
+            }
+        gpu_paired_ratios = [
+            ratio
+            for worker in workers
+            for ratio in worker["gpu_stage_timing"]["paired_speedups"]
+        ]
+        gpu_paired_speedup = (
+            _ratio_summary(gpu_paired_ratios) if gpu_paired_ratios else None
+        )
+        gpu_worker_ratios = []
+        for worker in workers:
+            hardware_samples = worker["gpu_stage_timing"]["samples_ms"]["hardware"]
+            baseline_samples = worker["gpu_stage_timing"]["samples_ms"]["baseline"]
+            if hardware_samples and baseline_samples:
+                gpu_worker_ratios.append(
+                    statistics.median(baseline_samples)
+                    / statistics.median(hardware_samples)
+                )
+        gpu_speedup = _ratio_summary(gpu_worker_ratios) if gpu_worker_ratios else None
+        gpu_stable = bool(
+            gpu_exact
+            and gpu_speedup is not None
+            and gpu_speedup["cv"] <= cv_limit
+            and all(
+                variant["order_drift"] is not None
+                and variant["order_drift"] <= drift_limit
+                for variant in gpu_variants.values()
+            )
+        )
+        gpu_non_regression = bool(
+            gpu_exact and gpu_speedup is not None and gpu_speedup["p05"] >= 0.95
+        )
+        result["gpu_stage_timing"] = {
+            "scope": workers[0]["gpu_stage_timing"]["scope"],
+            "variants": gpu_variants,
+            "paired_speedup": gpu_paired_speedup,
+            "fresh_process_median_speedup": gpu_speedup,
+            "exact": gpu_exact,
+            "stable": gpu_stable,
+            "minimum_conservative_non_regression": 0.95,
+            "non_regression_gate_passed": gpu_non_regression,
+            "gate_passed": gpu_stable and gpu_non_regression,
+        }
     replay_workers = [
         worker["replay_proof"]
         for worker in workers
@@ -3752,12 +3968,33 @@ def _aggregate(
     ]
     if replay_workers:
         baseline_mode = replay_workers[0]["baseline_mode"]
+        retained_binding_sets = int(workers[0]["workload"]["retained_binding_sets"])
         counters_qualified = all(
-            proof["runtime_statistics"]["retained_replay_records"] == 1
+            proof["runtime_statistics"]["retained_replay_prewarms"]
+            == retained_binding_sets
+            and proof["runtime_statistics"]["retained_replay_records"]
+            == retained_binding_sets
             and proof["runtime_statistics"]["retained_replay_replays"] > 0
             and proof["runtime_statistics"]["retained_replay_busy_fallbacks"] == 0
             and proof["runtime_statistics"]["retained_replay_submit_failures"] == 0
+            and proof["runtime_statistics"]["retained_replay_bridge_failures"] == 0
+            and proof["runtime_statistics"]["retained_replay_slots"]
+            == retained_binding_sets
+            and proof["runtime_statistics"]["retained_replay_slot_capacity"]
+            >= retained_binding_sets
             for proof in replay_workers
+        )
+        lifecycle_qualified = bool(
+            counters_qualified
+            and all(
+                worker["memory"]["pipeline_closed"]["lifecycle_state"] == "closed"
+                and all(
+                    binding["hardware_nonempty"]
+                    and binding["rerecord_exact_image_match"] is True
+                    for binding in worker["correctness"]["binding_sets"]
+                )
+                for worker in workers
+            )
         )
         if baseline_mode == "rerecord":
             wall_gate = bool(
@@ -3766,14 +4003,27 @@ def _aggregate(
             cpu_submit_gate = bool(
                 result.get("submit_timing", {}).get("gate_passed", False)
             )
+            gpu_stage_gate = bool(
+                result.get("gpu_stage_timing", {}).get("gate_passed", False)
+            )
+            performance_gate = bool(
+                counters_qualified and gpu_stage_gate and (wall_gate or cpu_submit_gate)
+            )
             result["replay_proof_gate"] = {
                 "scope": "mechanism_retained_vs_rerecord",
+                "retained_binding_sets": retained_binding_sets,
                 "counters_qualified": counters_qualified,
+                "lifecycle_gate_passed": lifecycle_qualified,
                 "wall_gate_passed": wall_gate,
                 "cpu_submit_gate_passed": cpu_submit_gate,
-                "gpu_stage_gate_passed": False,
-                "gpu_stage_gate_reason": "exact_gpu_stage_timing_not_collected",
-                "performance_gate_passed": False,
+                "gpu_stage_gate_passed": gpu_stage_gate,
+                "gpu_stage_gate_reason": (
+                    "qualified_exact_non_regression"
+                    if gpu_stage_gate
+                    else "exact_gpu_stage_unavailable_unstable_or_regressed"
+                ),
+                "performance_gate_passed": performance_gate,
+                "retention_gate_passed": lifecycle_qualified and performance_gate,
             }
             result["performance_claim_eligible"] = False
         else:
@@ -3887,6 +4137,8 @@ def _parent(args):
                     str(args.offscreen_draws),
                     "--offscreen-baseline",
                     args.offscreen_baseline,
+                    "--vulkan-retained-binding-sets",
+                    str(args.vulkan_retained_binding_sets),
                 ]
                 if args.vulkan_retained_replay_proof:
                     command.append("--vulkan-retained-replay-proof")
@@ -4027,6 +4279,7 @@ def _parent(args):
                 "offscreen_draws": args.offscreen_draws,
                 "offscreen_baseline": args.offscreen_baseline,
                 "vulkan_retained_replay_proof": (args.vulkan_retained_replay_proof),
+                "vulkan_retained_binding_sets": (args.vulkan_retained_binding_sets),
             },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
@@ -4102,6 +4355,7 @@ def _parse_args():
         default="software",
     )
     parser.add_argument("--vulkan-retained-replay-proof", action="store_true")
+    parser.add_argument("--vulkan-retained-binding-sets", type=int, default=1)
     args = parser.parse_args()
     if args.worker:
         if not args.case or not args.order or not args.worker_output:
@@ -4145,6 +4399,14 @@ def _parse_args():
         or args.offscreen_draws <= 0
         or args.offscreen_draws > args.offscreen_tiles * args.offscreen_tiles
         or (args.offscreen_tiles * args.offscreen_tiles) % args.offscreen_draws != 0
+        or not 1 <= args.vulkan_retained_binding_sets <= 2
+        or (
+            args.vulkan_retained_binding_sets > 1
+            and (
+                not args.vulkan_retained_replay_proof
+                or args.offscreen_baseline != "rerecord"
+            )
+        )
     ):
         parser.error("invalid qualification bounds")
     return args
