@@ -56,7 +56,13 @@ class VulkanProgramImpl : public GfxProgramImpl {
 
   void enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-      const std::vector<ComputeOpImageRef> &image_refs) override;
+      const std::vector<ComputeOpImageRef> &image_refs,
+      const std::vector<std::uint64_t> &replay_key = {}) override;
+
+  void invalidate_graphics_command_replay() override;
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_graphics_command_replay_stats() const override;
 
  private:
   std::unique_ptr<vulkan::VulkanDeviceCreator> embedded_device_{nullptr};

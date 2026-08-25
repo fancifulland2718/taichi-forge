@@ -558,7 +558,13 @@ class TI_DLL_EXPORT GfxRuntime {
   // retirement in the existing runtime ordering domain without a host wait.
   void enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-      const std::vector<ComputeOpImageRef> &image_refs);
+      const std::vector<ComputeOpImageRef> &image_refs,
+      const std::vector<std::uint64_t> &replay_key = {});
+
+  void invalidate_graphics_command_replay();
+
+  std::unordered_map<std::string, std::uint64_t>
+  debug_graphics_command_replay_stats() const;
 
   bool used_in_kernel(DeviceAllocationId id) {
     std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
@@ -590,6 +596,35 @@ class TI_DLL_EXPORT GfxRuntime {
   // is deliberately a binary-semaphore chain rather than a host-side wait.
   StreamSemaphore latest_compute_completion_;
   bool graphics_submission_used_{false};
+
+  // Feasibility proof for one exact-binding graphics command list. The slot
+  // is intentionally fixed at one so binding churn cannot grow driver-owned
+  // command buffers without bound. Compute/graphics semaphore bridges remain
+  // per submission and are never retained here.
+  struct RetainedGraphicsCommandReplay {
+    std::vector<std::uint64_t> key;
+    std::vector<DeviceAllocation> images;
+    std::unique_ptr<CommandList> command_list;
+    StreamSemaphore completion;
+    bool prewarmed{false};
+    std::uint64_t attempts{0};
+    std::uint64_t prewarms{0};
+    std::uint64_t records{0};
+    std::uint64_t replays{0};
+    std::uint64_t fallbacks{0};
+    std::uint64_t busy_fallbacks{0};
+    std::uint64_t binding_misses{0};
+    std::uint64_t layout_misses{0};
+    std::uint64_t graphics_submissions{0};
+    std::uint64_t bridge_submissions{0};
+    std::uint64_t bridge_failures{0};
+    std::uint64_t submit_failures{0};
+    std::uint64_t invalidations{0};
+    std::uint64_t last_path{0};
+  } retained_graphics_replay_;
+
+  void invalidate_graphics_command_replay_locked(
+      DeviceAllocation image = kDeviceNullAllocation);
 
   void ensure_current_cmdlist();
   void submit_current_cmdlist_if_timeout();

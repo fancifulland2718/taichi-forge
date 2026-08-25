@@ -2184,7 +2184,8 @@ void export_lang(py::module &m) {
           [](Program *program, Texture *color, Texture *depth,
              const py::sequence &raw_draws, bool color_clear,
              bool depth_clear, const std::array<float, 4> &clear_color,
-             const std::array<std::uint32_t, 4> &viewport) {
+             const std::array<std::uint32_t, 4> &viewport,
+             bool retained_replay) {
             std::vector<VulkanGraphicsDrawCommand> commands;
             commands.reserve(raw_draws.size());
             for (const py::handle raw : raw_draws) {
@@ -2246,6 +2247,7 @@ void export_lang(py::module &m) {
             VulkanGraphicsPassInfo pass;
             pass.color_clear = color_clear;
             pass.depth_clear = depth_clear;
+            pass.retained_replay = retained_replay;
             pass.clear_color = clear_color;
             pass.viewport = viewport;
             try {
@@ -2262,7 +2264,8 @@ void export_lang(py::module &m) {
           },
           py::arg("color"), py::arg("depth"), py::arg("draws"),
           py::arg("color_clear"), py::arg("depth_clear"),
-          py::arg("clear_color"), py::arg("viewport"))
+          py::arg("clear_color"), py::arg("viewport"),
+          py::arg("retained_replay"))
       .def("_destroy_vulkan_graphics_pipeline",
            &Program::destroy_vulkan_graphics_pipeline, py::arg("handle"),
            py::call_guard<py::gil_scoped_release>())

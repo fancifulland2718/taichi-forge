@@ -137,3 +137,262 @@ def test_cuda_cusparse_mixed_command_replay_proof(monkeypatch):
     ti.reset()
     with pytest.raises(RuntimeError, match="compiled before ti.reset"):
         graph.run(bindings)
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_fixed_binding_retained_graphics_replay_proof(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    from tests.python.test_hardware_graphics import (
+        _texture_rgb,
+        _triangle_pipeline,
+        _triangle_vertices,
+    )
+
+    pipeline = _triangle_pipeline()
+    source = _triangle_vertices()
+    source_host = source.to_numpy()
+    vertices = ti.ndarray(ti.f32, shape=15)
+    marker = ti.ndarray(ti.i32, shape=1)
+    target = ti.Texture(ti.Format.rgba8, (256, 256))
+
+    @ti.kernel
+    def prepare(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        vertices: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in vertices:
+            vertices[index] = source[index]
+
+    @ti.kernel
+    def finish(marker: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        marker[0] += 1
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
+    vertices_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vertices", ti.f32, ndim=1)
+    marker_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "marker", ti.i32, ndim=1)
+    draw = pipeline.pass_draw(
+        ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"}
+    )
+    recording = pipeline.record_pass((draw,), color="target")
+    # This is an internal proof only: the public recording/manifest contract
+    # remains rerecord until both formal performance and lifecycle gates pass.
+    assert recording.replay_mode == "rerecord"
+    assert recording._experimental_retained_replay
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(prepare, source_arg, vertices_arg)
+    builder.append_native(recording, admission="explicit")
+    builder.dispatch(finish, marker_arg)
+    graph = builder.compile()
+    bindings = {
+        "source": source,
+        "vertices": vertices,
+        "marker": marker,
+        "target": target,
+    }
+    program = ti.lang.impl.get_runtime().prog
+    before = dict(program._debug_vulkan_graphics_resource_stats())
+
+    process_memory = ProcessMemoryPlateau(
+        "vulkan-fixed-binding-retained-replay", ("vulkan-graphics",)
+    )
+    process_memory.capture("before")
+    for replay_index in range(1_000):
+        graph.run(bindings)
+        ti.sync()
+        if replay_index == 499:
+            process_memory.capture("midpoint")
+    process_memory.capture("after")
+    process_memory.finish(1_000)
+
+    fixed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        fixed["retained_replay_attempts"] - before["retained_replay_attempts"] == 1_000
+    )
+    assert fixed["retained_replay_prewarms"] - before["retained_replay_prewarms"] == 1
+    assert fixed["retained_replay_records"] - before["retained_replay_records"] == 1
+    assert fixed["retained_replay_replays"] - before["retained_replay_replays"] == 998
+    assert (
+        fixed["retained_replay_busy_fallbacks"]
+        == before["retained_replay_busy_fallbacks"]
+    )
+    assert (
+        fixed["retained_replay_submit_failures"]
+        == before["retained_replay_submit_failures"]
+    )
+    assert fixed["retained_replay_slots"] == 1
+    assert fixed["retained_replay_slot_capacity"] == 1
+    assert fixed["retained_replay_inflight_slots"] == 0
+    assert fixed["retained_replay_last_path"] == 3
+    assert marker.to_numpy()[0] == 1_000
+    image = _texture_rgb(target)
+    assert image[..., 0].max() > 32
+    assert image[..., 1].max() > 32
+    assert image[..., 2].max() > 32
+
+    # Every allocation generation gets prewarm, record, and one exact replay;
+    # the single retained slot is recycled instead of growing with churn.
+    rebound_generations = []
+    churn_before = dict(program._debug_vulkan_graphics_resource_stats())
+    for _ in range(100):
+        rebound_source = ti.ndarray(ti.f32, shape=15)
+        rebound_source.from_numpy(source_host)
+        rebound = {
+            "source": rebound_source,
+            "vertices": ti.ndarray(ti.f32, shape=15),
+            "marker": ti.ndarray(ti.i32, shape=1),
+            "target": ti.Texture(ti.Format.rgba8, (64, 64)),
+        }
+        rebound_generations.append(rebound)
+        for _ in range(3):
+            graph.run(rebound)
+            ti.sync()
+    churn = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        churn["retained_replay_attempts"] - churn_before["retained_replay_attempts"]
+        == 300
+    )
+    assert (
+        churn["retained_replay_prewarms"] - churn_before["retained_replay_prewarms"]
+        == 100
+    )
+    assert (
+        churn["retained_replay_records"] - churn_before["retained_replay_records"]
+        == 100
+    )
+    assert (
+        churn["retained_replay_replays"] - churn_before["retained_replay_replays"]
+        == 100
+    )
+    assert (
+        churn["retained_replay_binding_misses"]
+        - churn_before["retained_replay_binding_misses"]
+        == 100
+    )
+    assert churn["retained_replay_slots"] == 1
+    assert churn["retained_replay_last_path"] == 3
+    np.testing.assert_array_equal(rebound["vertices"].to_numpy(), source_host)
+    assert rebound["marker"].to_numpy()[0] == 3
+
+    # Hot flag removal fails back to the existing rerecord path and retires a
+    # retained slot only when the ordinary pass touches its attachment.
+    monkeypatch.delenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF")
+    graph.run(rebound)
+    ti.sync()
+    fallback = dict(program._debug_vulkan_graphics_resource_stats())
+    assert fallback["retained_replay_attempts"] == churn["retained_replay_attempts"]
+    assert fallback["retained_replay_slots"] == 0
+    assert (
+        fallback["retained_replay_invalidations"]
+        == churn["retained_replay_invalidations"] + 1
+    )
+    assert fallback["retained_replay_last_path"] == 0
+
+    # Close while a replay submission may still be in flight. Vulkan stream
+    # ownership carries native references to completion; the retained slot is
+    # synchronously detached and the pipeline retires on the compute bridge.
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    for _ in range(3):
+        graph.run(bindings)
+        ti.sync()
+    graph.run(bindings)
+    pipeline.close()
+    closing = dict(program._debug_vulkan_graphics_resource_stats())
+    assert closing["retained_replay_slots"] == 0
+    assert closing["live"] == 0
+    ti.sync()
+    closed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert closed["live"] == 0
+    assert closed["retiring"] == 0
+    with pytest.raises(RuntimeError, match="closed"):
+        graph.run(bindings)
+
+    # Pipeline/recording/slot create-destroy churn is a separate lifecycle
+    # axis from binding churn above.
+    for _ in range(100):
+        churn_pipeline = _triangle_pipeline()
+        churn_vertices = _triangle_vertices()
+        churn_target = ti.Texture(ti.Format.rgba8, (32, 32))
+        churn_draw = churn_pipeline.pass_draw(
+            ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"}
+        )
+        churn_recording = churn_pipeline.record_pass((churn_draw,), color="target")
+        churn_bindings = {"vertices": churn_vertices, "target": churn_target}
+        for _ in range(3):
+            churn_recording.execute(churn_bindings)
+            ti.sync()
+        churn_pipeline.close()
+    ti.sync()
+    after_pipeline_churn = dict(program._debug_vulkan_graphics_resource_stats())
+    assert after_pipeline_churn["retained_replay_slots"] == 0
+    assert after_pipeline_churn["live"] == 0
+    assert after_pipeline_churn["retiring"] == 0
+    assert after_pipeline_churn["retained_replay_submit_failures"] == 0
+
+    reset_pipeline = _triangle_pipeline()
+    reset_vertices = _triangle_vertices()
+    reset_target = ti.Texture(ti.Format.rgba8, (32, 32))
+    reset_recording = reset_pipeline.record_pass(
+        (
+            reset_pipeline.pass_draw(
+                ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"}
+            ),
+        ),
+        color="target",
+    )
+    reset_builder = ti.graph.GraphBuilder()
+    reset_builder.append_native(reset_recording, admission="explicit")
+    reset_graph = reset_builder.compile()
+    reset_bindings = {"vertices": reset_vertices, "target": reset_target}
+    for _ in range(3):
+        reset_graph.run(reset_bindings)
+        ti.sync()
+    program._debug_inject_runtime_fault(
+        -4, "injected_retained_replay_failure", "injected Vulkan device loss"
+    )
+    with pytest.raises(RuntimeError, match="injected_retained_replay_failure"):
+        reset_graph.run(reset_bindings)
+    reset_pipeline.close()
+    ti.reset()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset|previous ti.init"):
+        reset_graph.run(reset_bindings)
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.vulkan, offline_cache=False, kernel_profiler=True)
+def test_vulkan_retained_graphics_replay_profiler_falls_back(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    if not ti.hardware.graphics.is_available():
+        pytest.skip("Vulkan graphics commands are unavailable")
+
+    from tests.python.test_hardware_graphics import (
+        _triangle_pipeline,
+        _triangle_vertices,
+    )
+
+    pipeline = _triangle_pipeline()
+    vertices = _triangle_vertices()
+    target = ti.Texture(ti.Format.rgba8, (32, 32))
+    recording = pipeline.record_pass(
+        (
+            pipeline.pass_draw(
+                ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"}
+            ),
+        ),
+        color="target",
+    )
+    assert recording._experimental_retained_replay
+    for _ in range(3):
+        recording.execute({"vertices": vertices, "target": target})
+        ti.sync()
+    stats = dict(
+        ti.lang.impl.get_runtime().prog._debug_vulkan_graphics_resource_stats()
+    )
+    assert stats["retained_replay_attempts"] == 0
+    assert stats["retained_replay_slots"] == 0
+    assert stats["retained_replay_last_path"] == 0
+    pipeline.close()

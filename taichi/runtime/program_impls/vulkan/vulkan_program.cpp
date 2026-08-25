@@ -199,8 +199,18 @@ void VulkanProgramImpl::enqueue_compute_op_lambda(
 
 void VulkanProgramImpl::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-    const std::vector<ComputeOpImageRef> &image_refs) {
-  runtime_->enqueue_graphics_op_lambda(std::move(op), image_refs);
+    const std::vector<ComputeOpImageRef> &image_refs,
+    const std::vector<std::uint64_t> &replay_key) {
+  runtime_->enqueue_graphics_op_lambda(std::move(op), image_refs, replay_key);
+}
+
+void VulkanProgramImpl::invalidate_graphics_command_replay() {
+  runtime_->invalidate_graphics_command_replay();
+}
+
+std::unordered_map<std::string, std::uint64_t>
+VulkanProgramImpl::debug_graphics_command_replay_stats() const {
+  return runtime_->debug_graphics_command_replay_stats();
 }
 
 void VulkanProgramImpl::finalize() {

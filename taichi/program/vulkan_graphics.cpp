@@ -1,12 +1,14 @@
 #include "taichi/program/program.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include "taichi/program/ndarray.h"
+#include "taichi/program/program_impl.h"
 #include "taichi/program/texture.h"
 
 #if defined(TI_WITH_VULKAN)
@@ -125,6 +127,21 @@ std::size_t ndarray_bytes(const Ndarray *array, const char *role) {
                       (std::numeric_limits<std::size_t>::max)() / element_bytes,
               "Vulkan graphics {} byte size overflows size_t.", role);
   return elements * element_bytes;
+}
+
+void append_graphics_allocation_key(
+    std::vector<std::uint64_t> &key,
+    const vulkan::VulkanDevice *device,
+    DeviceAllocation allocation) {
+  key.push_back(allocation.alloc_id);
+  key.push_back(device->allocation_generation(allocation));
+}
+
+std::uint32_t graphics_float_bits(float value) {
+  std::uint32_t bits = 0;
+  static_assert(sizeof(bits) == sizeof(value));
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
 }
 
 }  // namespace
@@ -269,10 +286,17 @@ Program::debug_vulkan_graphics_resource_stats() {
   }
   const auto completion_retained = runtime_completion_resource_count(
       kVulkanGraphicsPipelineResourceKind);
-  return {{"live", live},
-          {"retiring", queued_for_completion + completion_retained},
-          {"queued_for_completion", queued_for_completion},
-          {"completion_retained", completion_retained}};
+  std::unordered_map<std::string, std::uint64_t> result{
+      {"live", live},
+      {"retiring", queued_for_completion + completion_retained},
+      {"queued_for_completion", queued_for_completion},
+      {"completion_retained", completion_retained}};
+  if (program_impl_) {
+    const auto replay =
+        program_impl_->debug_graphics_command_replay_stats();
+    result.insert(replay.begin(), replay.end());
+  }
+  return result;
 }
 
 std::uint64_t Program::create_vulkan_graphics_pipeline(
@@ -530,6 +554,68 @@ std::size_t Program::vulkan_graphics_pass(
   const int width = color_size[0];
   const int height = color_size[1];
 
+  std::vector<std::uint64_t> replay_key;
+  const bool replay_eligible =
+      pass.retained_replay && pass.color_clear &&
+      (depth == nullptr || pass.depth_clear) && !compile_config().debug &&
+      !compile_config().kernel_profiler;
+  if (replay_eligible) {
+    // Exact vector equality, including allocation generations, is the replay
+    // contract. Hash-only identity would permit a stale descriptor or
+    // attachment collision and is deliberately not used.
+    replay_key.reserve(32 + commands.size() * 32);
+    replay_key.push_back(0x4652475250415353ull);  // "FRGRPASS"
+    replay_key.push_back(1);
+    replay_key.push_back(reinterpret_cast<std::uintptr_t>(this));
+    append_graphics_allocation_key(replay_key, device, color_allocation);
+    replay_key.push_back(depth == nullptr ? 0 : 1);
+    if (depth != nullptr) {
+      append_graphics_allocation_key(replay_key, device, depth_allocation);
+    }
+    replay_key.push_back(static_cast<std::uint64_t>(width));
+    replay_key.push_back(static_cast<std::uint64_t>(height));
+    for (const auto component : pass.clear_color) {
+      replay_key.push_back(graphics_float_bits(component));
+    }
+    for (const auto component : viewport) {
+      replay_key.push_back(component);
+    }
+    replay_key.push_back(commands.size());
+    for (std::size_t draw_index = 0; draw_index < commands.size();
+         ++draw_index) {
+      const auto &command = commands[draw_index];
+      const auto &recorded = recorded_draws[draw_index];
+      replay_key.push_back(command.pipeline_handle);
+      replay_key.push_back(recorded.vertex_buffers.size());
+      for (const auto &[binding, allocation] : recorded.vertex_buffers) {
+        replay_key.push_back(binding);
+        append_graphics_allocation_key(replay_key, device, allocation);
+      }
+      replay_key.push_back(recorded.draw.indexed ? 1 : 0);
+      if (recorded.draw.indexed) {
+        append_graphics_allocation_key(replay_key, device,
+                                       recorded.index_buffer);
+      }
+      replay_key.push_back(recorded.shader_buffers.size());
+      for (const auto &shader : recorded.shader_buffers) {
+        replay_key.push_back(shader.set_index);
+        replay_key.push_back(shader.binding);
+        replay_key.push_back(shader.storage ? 1 : 0);
+        append_graphics_allocation_key(replay_key, device,
+                                       shader.allocation);
+      }
+      const auto &draw = recorded.draw;
+      replay_key.push_back(draw.element_count);
+      replay_key.push_back(draw.instance_count);
+      replay_key.push_back(draw.first_vertex);
+      replay_key.push_back(draw.first_index);
+      replay_key.push_back(draw.first_instance);
+      replay_key.push_back(static_cast<std::uint32_t>(draw.vertex_offset));
+      replay_key.push_back(draw.index_min);
+      replay_key.push_back(draw.index_max);
+    }
+  }
+
   enqueue_graphics_op_lambda(
       [recorded_draws = std::move(recorded_draws), pass, viewport,
        viewport_x_end, viewport_y_end, color_allocation, depth_allocation,
@@ -621,7 +707,8 @@ std::size_t Program::vulkan_graphics_pass(
                    ImageLayout::shader_read}}
             : std::vector<ComputeOpImageRef>{
                   {color_allocation, ImageLayout::color_attachment,
-                   ImageLayout::shader_read}});
+                   ImageLayout::shader_read}},
+      replay_key);
   mark_runtime_submission_pending();
   pin_ndarray_launch_leases(ndarray_leases);
   pin_texture_launch_leases(texture_leases);
@@ -631,6 +718,25 @@ std::size_t Program::vulkan_graphics_pass(
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
   std::shared_ptr<VulkanGraphicsPipelineResource> resource;
   bool record_retirement = false;
+  if (runtime_has_fatal_fault()) {
+    {
+      std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+      const auto found = vulkan_graphics_pipelines_.find(handle);
+      if (found == vulkan_graphics_pipelines_.end()) {
+        return;
+      }
+      resource = std::move(found->second);
+      vulkan_graphics_pipelines_.erase(found);
+    }
+    // A faulted backend rejects new completion submissions. Native command
+    // buffers already carry their Vulkan object references through the stream,
+    // so detach the host-side replay owner without attempting another wait or
+    // retirement marker.
+    if (program_impl_) {
+      program_impl_->invalidate_graphics_command_replay();
+    }
+    return;
+  }
   {
     auto submission_guard = acquire_runtime_resource_submission_guard();
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
@@ -646,12 +752,18 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
       record_retirement = true;
     }
   }
+  if (program_impl_) {
+    program_impl_->invalidate_graphics_command_replay();
+  }
   if (record_retirement) {
     record_runtime_completion();
   }
 }
 
 void Program::vulkan_clear_graphics_pipelines() {
+  if (program_impl_) {
+    program_impl_->invalidate_graphics_command_replay();
+  }
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   vulkan_graphics_pipelines_.clear();
   vulkan_graphics_pipeline_retirements_.clear();
@@ -676,7 +788,24 @@ Program::debug_vulkan_graphics_resource_stats() {
   return {{"live", 0},
           {"retiring", 0},
           {"queued_for_completion", 0},
-          {"completion_retained", 0}};
+          {"completion_retained", 0},
+          {"retained_replay_attempts", 0},
+          {"retained_replay_prewarms", 0},
+          {"retained_replay_records", 0},
+          {"retained_replay_replays", 0},
+          {"retained_replay_fallbacks", 0},
+          {"retained_replay_busy_fallbacks", 0},
+          {"retained_replay_binding_misses", 0},
+          {"retained_replay_layout_misses", 0},
+          {"retained_replay_graphics_submissions", 0},
+          {"retained_replay_bridge_submissions", 0},
+          {"retained_replay_bridge_failures", 0},
+          {"retained_replay_submit_failures", 0},
+          {"retained_replay_invalidations", 0},
+          {"retained_replay_slots", 0},
+          {"retained_replay_slot_capacity", 0},
+          {"retained_replay_inflight_slots", 0},
+          {"retained_replay_last_path", 0}};
 }
 
 std::uint64_t Program::create_vulkan_graphics_pipeline(

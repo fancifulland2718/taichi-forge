@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 #include "taichi/aot/module_builder.h"
 #include "taichi/ir/statements.h"
@@ -176,8 +179,17 @@ class ProgramImpl {
 
   virtual void enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-      const std::vector<ComputeOpImageRef> &image_refs) {
+      const std::vector<ComputeOpImageRef> &image_refs,
+      const std::vector<std::uint64_t> &replay_key = {}) {
     TI_NOT_IMPLEMENTED;
+  }
+
+  virtual void invalidate_graphics_command_replay() {
+  }
+
+  virtual std::unordered_map<std::string, std::uint64_t>
+  debug_graphics_command_replay_stats() const {
+    return {};
   }
 
   virtual void print_memory_profiler_info(

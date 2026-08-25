@@ -5037,6 +5037,7 @@ void GfxRuntime::track_image(DeviceAllocation image, ImageLayout layout) {
 }
 void GfxRuntime::untrack_image(DeviceAllocation image) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  invalidate_graphics_command_replay_locked(image);
   last_image_layouts_.erase(image.alloc_id);
   image_sampler_configs_.erase(image.alloc_id);
 }
@@ -5646,7 +5647,8 @@ void GfxRuntime::enqueue_compute_op_lambda(
 
 void GfxRuntime::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-    const std::vector<ComputeOpImageRef> &image_refs) {
+    const std::vector<ComputeOpImageRef> &image_refs,
+    const std::vector<std::uint64_t> &replay_key) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   TI_ERROR_IF(!op, "Runtime graphics operation must not be empty");
   auto *graphics_device = dynamic_cast<GraphicsDevice *>(device_);
@@ -5667,55 +5669,233 @@ void GfxRuntime::enqueue_graphics_op_lambda(
   }
 
   Stream *graphics_stream = graphics_device->get_graphics_stream();
-  auto [graphics_commands, graphics_result] =
-      graphics_stream->new_command_list_unique();
-  TI_ERROR_IF(graphics_result != RhiResult::success,
-              "Runtime graphics command-list allocation failed: RhiResult({})",
-              graphics_result);
-
-  for (const auto &ref : image_refs) {
-    const ImageLayout previous = last_image_layouts_.at(ref.image.alloc_id);
-    if (previous != ref.initial_layout) {
-      graphics_commands->image_transition(ref.image, previous,
-                                          ref.initial_layout);
+  const bool replay_requested = !replay_key.empty();
+  if (!replay_requested && !retained_graphics_replay_.key.empty()) {
+    const bool touches_retained_image = std::any_of(
+        image_refs.begin(), image_refs.end(), [&](const auto &ref) {
+          return std::find(retained_graphics_replay_.images.begin(),
+                           retained_graphics_replay_.images.end(), ref.image) !=
+                 retained_graphics_replay_.images.end();
+        });
+    if (touches_retained_image) {
+      invalidate_graphics_command_replay_locked();
     }
   }
 
-  op(graphics_device, graphics_commands.get());
-
-  for (const auto &ref : image_refs) {
-    if (ref.initial_layout != ref.final_layout) {
-      graphics_commands->image_transition(ref.image, ref.initial_layout,
-                                          ref.final_layout);
+  bool replay = false;
+  bool record_retained = false;
+  if (replay_requested) {
+    ++retained_graphics_replay_.attempts;
+    const bool exact_key = retained_graphics_replay_.key == replay_key;
+    const bool layouts_stable = std::all_of(
+        image_refs.begin(), image_refs.end(), [&](const auto &ref) {
+          return last_image_layouts_.at(ref.image.alloc_id) == ref.final_layout;
+        });
+    if (!exact_key || !layouts_stable) {
+      if (!retained_graphics_replay_.key.empty()) {
+        if (!exact_key) {
+          ++retained_graphics_replay_.binding_misses;
+        }
+        if (exact_key && !layouts_stable) {
+          ++retained_graphics_replay_.layout_misses;
+        }
+        invalidate_graphics_command_replay_locked();
+      }
+      retained_graphics_replay_.key = replay_key;
+      retained_graphics_replay_.images.clear();
+      retained_graphics_replay_.images.reserve(image_refs.size());
+      for (const auto &ref : image_refs) {
+        retained_graphics_replay_.images.push_back(ref.image);
+      }
+      retained_graphics_replay_.prewarmed = true;
+      ++retained_graphics_replay_.prewarms;
+      if (exact_key && !layouts_stable) {
+        ++retained_graphics_replay_.fallbacks;
+      }
+      retained_graphics_replay_.last_path = 1;
+    } else if (retained_graphics_replay_.command_list) {
+      const bool slot_ready = !retained_graphics_replay_.completion ||
+                              retained_graphics_replay_.completion->is_ready();
+      if (slot_ready) {
+        replay = true;
+        retained_graphics_replay_.last_path = 3;
+      } else {
+        ++retained_graphics_replay_.fallbacks;
+        ++retained_graphics_replay_.busy_fallbacks;
+        retained_graphics_replay_.last_path = 4;
+      }
+    } else if (retained_graphics_replay_.prewarmed) {
+      record_retained = true;
+      retained_graphics_replay_.last_path = 2;
     }
-    last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
+  } else {
+    retained_graphics_replay_.last_path = 0;
+  }
+
+  std::unique_ptr<CommandList> graphics_commands;
+  CommandList *submitted_commands = nullptr;
+  if (replay) {
+    submitted_commands = retained_graphics_replay_.command_list.get();
+    for (const auto &ref : image_refs) {
+      last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
+    }
+  } else {
+    auto [new_commands, graphics_result] =
+        graphics_stream->new_command_list_unique();
+    TI_ERROR_IF(
+        graphics_result != RhiResult::success,
+        "Runtime graphics command-list allocation failed: RhiResult({})",
+        graphics_result);
+    graphics_commands = std::move(new_commands);
+
+    for (const auto &ref : image_refs) {
+      const ImageLayout previous = last_image_layouts_.at(ref.image.alloc_id);
+      if (previous != ref.initial_layout) {
+        graphics_commands->image_transition(ref.image, previous,
+                                            ref.initial_layout);
+      }
+    }
+
+    op(graphics_device, graphics_commands.get());
+
+    for (const auto &ref : image_refs) {
+      if (ref.initial_layout != ref.final_layout) {
+        graphics_commands->image_transition(ref.image, ref.initial_layout,
+                                            ref.final_layout);
+      }
+      last_image_layouts_[ref.image.alloc_id] = ref.final_layout;
+    }
+
+    if (record_retained) {
+      retained_graphics_replay_.command_list = std::move(graphics_commands);
+      submitted_commands = retained_graphics_replay_.command_list.get();
+    } else {
+      submitted_commands = graphics_commands.get();
+    }
   }
 
   std::vector<StreamSemaphore> graphics_waits;
   if (latest_compute_completion_) {
     graphics_waits.push_back(latest_compute_completion_);
   }
-  StreamSemaphore graphics_completion =
-      graphics_stream->submit(graphics_commands.get(), graphics_waits);
-  TI_ERROR_IF(!graphics_completion,
-              "Runtime graphics submission returned no completion token");
+  StreamSemaphore graphics_completion;
+  try {
+    graphics_completion =
+        graphics_stream->submit(submitted_commands, graphics_waits);
+    TI_ERROR_IF(!graphics_completion,
+                "Runtime graphics submission returned no completion token");
+  } catch (...) {
+    ++retained_graphics_replay_.submit_failures;
+    if (record_retained || replay) {
+      invalidate_graphics_command_replay_locked();
+    }
+    throw;
+  }
+  ++retained_graphics_replay_.graphics_submissions;
+  if (record_retained) {
+    ++retained_graphics_replay_.records;
+  } else if (replay) {
+    ++retained_graphics_replay_.replays;
+  }
+  if (record_retained || replay) {
+    retained_graphics_replay_.completion = graphics_completion;
+  }
 
   // Bring the dependency back to the compute stream immediately. All later
   // kernel submissions and RuntimeCompletion tickets already use this stream,
   // so no second lifetime/completion domain is introduced.
-  Stream *compute_stream = device_->get_compute_stream();
-  auto [bridge_commands, bridge_result] =
-      compute_stream->new_command_list_unique();
-  TI_ERROR_IF(bridge_result != RhiResult::success,
-              "Runtime graphics completion bridge allocation failed: "
-              "RhiResult({})",
-              bridge_result);
-  bridge_commands->memory_barrier();
-  latest_compute_completion_ =
-      compute_stream->submit(bridge_commands.get(), {graphics_completion});
-  TI_ERROR_IF(!latest_compute_completion_,
-              "Runtime graphics completion bridge returned no token");
+  try {
+    Stream *compute_stream = device_->get_compute_stream();
+    auto [bridge_commands, bridge_result] =
+        compute_stream->new_command_list_unique();
+    TI_ERROR_IF(bridge_result != RhiResult::success,
+                "Runtime graphics completion bridge allocation failed: "
+                "RhiResult({})",
+                bridge_result);
+    bridge_commands->memory_barrier();
+    latest_compute_completion_ =
+        compute_stream->submit(bridge_commands.get(), {graphics_completion});
+    TI_ERROR_IF(!latest_compute_completion_,
+                "Runtime graphics completion bridge returned no token");
+  } catch (...) {
+    ++retained_graphics_replay_.bridge_failures;
+    ++retained_graphics_replay_.submit_failures;
+    // Preserve the graphics completion as the next ordering dependency even
+    // when bridge recording fails. A non-fatal caller may then fall back
+    // without submitting compute work ahead of the graphics operation.
+    latest_compute_completion_ = graphics_completion;
+    if (record_retained || replay) {
+      invalidate_graphics_command_replay_locked();
+    }
+    throw;
+  }
+  ++retained_graphics_replay_.bridge_submissions;
   graphics_submission_used_ = true;
+}
+
+void GfxRuntime::invalidate_graphics_command_replay_locked(
+    DeviceAllocation image) {
+  if (image != kDeviceNullAllocation) {
+    const bool references_image = std::find(
+        retained_graphics_replay_.images.begin(),
+        retained_graphics_replay_.images.end(), image) !=
+                                  retained_graphics_replay_.images.end();
+    if (!references_image) {
+      return;
+    }
+  }
+  if (retained_graphics_replay_.key.empty() &&
+      !retained_graphics_replay_.command_list &&
+      !retained_graphics_replay_.prewarmed) {
+    return;
+  }
+  retained_graphics_replay_.command_list.reset();
+  retained_graphics_replay_.completion.reset();
+  retained_graphics_replay_.key.clear();
+  retained_graphics_replay_.images.clear();
+  retained_graphics_replay_.prewarmed = false;
+  ++retained_graphics_replay_.invalidations;
+}
+
+void GfxRuntime::invalidate_graphics_command_replay() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  invalidate_graphics_command_replay_locked();
+}
+
+std::unordered_map<std::string, std::uint64_t>
+GfxRuntime::debug_graphics_command_replay_stats() const {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  const bool inflight = retained_graphics_replay_.command_list &&
+                        retained_graphics_replay_.completion &&
+                        !retained_graphics_replay_.completion->is_ready();
+  return {
+      {"retained_replay_attempts", retained_graphics_replay_.attempts},
+      {"retained_replay_prewarms", retained_graphics_replay_.prewarms},
+      {"retained_replay_records", retained_graphics_replay_.records},
+      {"retained_replay_replays", retained_graphics_replay_.replays},
+      {"retained_replay_fallbacks", retained_graphics_replay_.fallbacks},
+      {"retained_replay_busy_fallbacks",
+       retained_graphics_replay_.busy_fallbacks},
+      {"retained_replay_binding_misses",
+       retained_graphics_replay_.binding_misses},
+      {"retained_replay_layout_misses",
+       retained_graphics_replay_.layout_misses},
+      {"retained_replay_graphics_submissions",
+       retained_graphics_replay_.graphics_submissions},
+      {"retained_replay_bridge_submissions",
+       retained_graphics_replay_.bridge_submissions},
+      {"retained_replay_bridge_failures",
+       retained_graphics_replay_.bridge_failures},
+      {"retained_replay_submit_failures",
+       retained_graphics_replay_.submit_failures},
+      {"retained_replay_invalidations",
+       retained_graphics_replay_.invalidations},
+      {"retained_replay_slots",
+       retained_graphics_replay_.command_list ? 1u : 0u},
+      {"retained_replay_slot_capacity", 1u},
+      {"retained_replay_inflight_slots", inflight ? 1u : 0u},
+      {"retained_replay_last_path", retained_graphics_replay_.last_path},
+  };
 }
 
 GfxRuntime::RegisterParams run_codegen(

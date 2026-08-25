@@ -181,6 +181,7 @@ struct VulkanGraphicsDrawCommand {
 struct VulkanGraphicsPassInfo {
   bool color_clear{true};
   bool depth_clear{true};
+  bool retained_replay{false};
   std::array<float, 4> clear_color{0.0f, 0.0f, 0.0f, 1.0f};
   std::array<std::uint32_t, 4> viewport{0, 0, 0, 0};
 };
@@ -3566,7 +3567,8 @@ class TI_DLL_EXPORT Program {
    */
   void enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-      const std::vector<ComputeOpImageRef> &image_refs);
+      const std::vector<ComputeOpImageRef> &image_refs,
+      const std::vector<std::uint64_t> &replay_key = {});
 
   /**
    * TODO(zhanlue): Remove this interface

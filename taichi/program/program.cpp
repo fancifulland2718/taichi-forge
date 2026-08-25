@@ -22084,7 +22084,8 @@ void Program::enqueue_compute_op_lambda(
 
 void Program::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
-    const std::vector<ComputeOpImageRef> &image_refs) {
+    const std::vector<ComputeOpImageRef> &image_refs,
+    const std::vector<std::uint64_t> &replay_key) {
   TI_ERROR_IF(compile_config().arch != Arch::vulkan,
               "Runtime-ordered graphics commands currently require Vulkan.");
 #ifdef TI_WITH_VULKAN
@@ -22092,7 +22093,8 @@ void Program::enqueue_graphics_op_lambda(
               "Graphics commands cannot be nested into a compute native "
               "command recording.");
 #endif
-  program_impl_->enqueue_graphics_op_lambda(std::move(op), image_refs);
+  program_impl_->enqueue_graphics_op_lambda(std::move(op), image_refs,
+                                            replay_key);
 }
 
 }  // namespace taichi::lang

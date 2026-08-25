@@ -6,6 +6,7 @@ pipeline object and runtime ordering needed to record the draw.
 """
 
 from dataclasses import dataclass
+import os
 from types import MappingProxyType
 
 from taichi_forge._lib import core as _ti_core
@@ -315,6 +316,9 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             if len(viewport) != 4:
                 raise ValueError("viewport must contain x, y, width, and height")
 
+        experimental_retained_replay = (
+            os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1"
+        )
         super().__init__(
             backend="vulkan",
             binding_names=tuple(binding_names),
@@ -325,6 +329,9 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             workspace_ownership="provider_generation",
             replay_mode="rerecord",
             no_host_readback=True,
+        )
+        object.__setattr__(
+            self, "_experimental_retained_replay", experimental_retained_replay
         )
         object.__setattr__(self, "pipeline", pipeline)
         object.__setattr__(self, "draw", draw)
@@ -398,6 +405,8 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             depth is not None,
             self.clear_color,
             self.viewport,
+            self._experimental_retained_replay
+            and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
         )
         return color
 
@@ -539,6 +548,11 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
 
         ndarray_names = frozenset(effects).difference(attachment_names)
 
+        experimental_retained_replay = (
+            os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1"
+            and color_load_op == "clear"
+            and (depth is None or depth_load_op == "clear")
+        )
         super().__init__(
             backend="vulkan",
             binding_names=tuple(effects),
@@ -549,6 +563,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             workspace_ownership="provider_generation",
             replay_mode="rerecord",
             no_host_readback=True,
+        )
+        object.__setattr__(
+            self, "_experimental_retained_replay", experimental_retained_replay
         )
         object.__setattr__(self, "draws", draws)
         object.__setattr__(self, "pipelines", tuple(pipelines))
@@ -635,6 +652,8 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             depth is not None and self.depth_load_op == "clear",
             self.clear_color,
             self.viewport,
+            self._experimental_retained_replay
+            and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
         )
         return color
 
