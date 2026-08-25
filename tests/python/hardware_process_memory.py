@@ -251,14 +251,70 @@ def _nvidia_smi_process_gpu_bytes():
     return sum(values) * 1024 * 1024, "nvidia-smi_compute_process", None
 
 
-def _nvidia_process_gpu_bytes():
+def _windows_process_gpu_bytes():
+    if sys.platform != "win32":
+        return None, None, f"windows_gpu_process_unsupported:{sys.platform}"
+    executable = shutil.which("powershell.exe") or shutil.which("powershell")
+    if executable is None:
+        return None, None, "windows_powershell_not_found"
+    command = (
+        "$ErrorActionPreference='Stop';"
+        f"$targetPid={os.getpid()};"
+        "$rows=@(Get-CimInstance "
+        "Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory "
+        "| Where-Object { $_.Name -match ('^pid_'+$targetPid+'_') });"
+        "$total=($rows | Measure-Object -Property TotalCommitted -Sum).Sum;"
+        "if($null -eq $total){$total=0};"
+        "[pscustomobject]@{total=[uint64]$total;instances=$rows.Count}"
+        "| ConvertTo-Json -Compress"
+    )
+    try:
+        completed = subprocess.run(
+            [
+                executable,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                command,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, None, f"windows_gpu_process_failed:{type(exc).__name__}"
+    if completed.returncode != 0:
+        return None, None, "windows_gpu_process_query_failed"
+    try:
+        payload = json.loads(completed.stdout)
+        total = int(payload["total"])
+        instances = int(payload["instances"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None, None, "windows_gpu_process_output_invalid"
+    if total < 0 or instances < 0:
+        return None, None, "windows_gpu_process_output_invalid"
+    return total, "windows_gpu_process_total_committed", None
+
+
+def _process_gpu_bytes():
     value, source, nvml_reason = _nvml_process_gpu_bytes()
     if value is not None:
         return value, source, None
+    windows_reason = None
+    if sys.platform == "win32":
+        value, source, windows_reason = _windows_process_gpu_bytes()
+        if value is not None:
+            return value, source, None
     value, source, smi_reason = _nvidia_smi_process_gpu_bytes()
     if value is not None:
         return value, source, None
-    return None, None, f"nvml:{nvml_reason};nvidia-smi:{smi_reason}"
+    reasons = [f"nvml:{nvml_reason}"]
+    if windows_reason is not None:
+        reasons.append(f"windows:{windows_reason}")
+    reasons.append(f"nvidia-smi:{smi_reason}")
+    return None, None, ";".join(reasons)
 
 
 def _append_record(path, record):
@@ -299,7 +355,7 @@ class ProcessMemoryPlateau:
         if phase not in _PHASES or phase in self.samples:
             raise ValueError(f"invalid or duplicate process-memory phase {phase!r}")
         rss, rss_source, rss_reason = _rss_bytes()
-        gpu, gpu_source, gpu_reason = _nvidia_process_gpu_bytes()
+        gpu, gpu_source, gpu_reason = _process_gpu_bytes()
         self.samples[phase] = {
             "rss_bytes": rss,
             "rss_source": rss_source,

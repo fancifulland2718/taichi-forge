@@ -15,7 +15,7 @@ def test_process_gpu_memory_prefers_package_free_nvml(monkeypatch):
 
     monkeypatch.setattr(memory, "_nvidia_smi_process_gpu_bytes", unexpected_smi)
 
-    assert memory._nvidia_process_gpu_bytes() == (
+    assert memory._process_gpu_bytes() == (
         1234,
         "nvml_compute_graphics_process_v3",
         None,
@@ -30,11 +30,16 @@ def test_process_gpu_memory_falls_back_to_nvidia_smi(monkeypatch):
     )
     monkeypatch.setattr(
         memory,
+        "_windows_process_gpu_bytes",
+        lambda: (None, None, "windows_gpu_process_query_failed"),
+    )
+    monkeypatch.setattr(
+        memory,
         "_nvidia_smi_process_gpu_bytes",
         lambda: (64 * 1024 * 1024, "nvidia-smi_compute_process", None),
     )
 
-    assert memory._nvidia_process_gpu_bytes() == (
+    assert memory._process_gpu_bytes() == (
         64 * 1024 * 1024,
         "nvidia-smi_compute_process",
         None,
@@ -42,6 +47,7 @@ def test_process_gpu_memory_falls_back_to_nvidia_smi(monkeypatch):
 
 
 def test_process_gpu_memory_reports_both_observer_failures(monkeypatch):
+    monkeypatch.setattr(memory.sys, "platform", "linux")
     monkeypatch.setattr(
         memory,
         "_nvml_process_gpu_bytes",
@@ -53,13 +59,54 @@ def test_process_gpu_memory_reports_both_observer_failures(monkeypatch):
         lambda: (None, None, "nvidia-smi_process_memory_unavailable"),
     )
 
-    value, source, reason = memory._nvidia_process_gpu_bytes()
+    value, source, reason = memory._process_gpu_bytes()
 
     assert value is None
     assert source is None
     assert reason == (
         "nvml:nvml_process_memory_unavailable;"
         "nvidia-smi:nvidia-smi_process_memory_unavailable"
+    )
+
+
+def test_windows_gpu_process_memory_uses_total_committed(monkeypatch):
+    class Completed:
+        returncode = 0
+        stdout = '{"total":14710833152,"instances":1}'
+
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    monkeypatch.setattr(memory.shutil, "which", lambda _name: "powershell.exe")
+    monkeypatch.setattr(memory.subprocess, "run", lambda *_args, **_kwargs: Completed())
+
+    assert memory._windows_process_gpu_bytes() == (
+        14710833152,
+        "windows_gpu_process_total_committed",
+        None,
+    )
+
+
+def test_process_gpu_memory_falls_back_to_windows_counter(monkeypatch):
+    monkeypatch.setattr(memory.sys, "platform", "win32")
+    monkeypatch.setattr(
+        memory,
+        "_nvml_process_gpu_bytes",
+        lambda: (None, None, "nvml_process_memory_unavailable"),
+    )
+    monkeypatch.setattr(
+        memory,
+        "_windows_process_gpu_bytes",
+        lambda: (256, "windows_gpu_process_total_committed", None),
+    )
+
+    def unexpected_smi():
+        raise AssertionError("nvidia-smi should not run after the Windows counter")
+
+    monkeypatch.setattr(memory, "_nvidia_smi_process_gpu_bytes", unexpected_smi)
+
+    assert memory._process_gpu_bytes() == (
+        256,
+        "windows_gpu_process_total_committed",
+        None,
     )
 
 
@@ -73,7 +120,7 @@ def test_process_memory_plateau_requires_long_run_and_exact_gpu_process_scope(
     monkeypatch.setattr(memory, "_rss_bytes", lambda: (next(rss), "test_rss", None))
     monkeypatch.setattr(
         memory,
-        "_nvidia_process_gpu_bytes",
+        "_process_gpu_bytes",
         lambda: (next(gpu), "test_gpu_process", None),
     )
 
@@ -104,7 +151,7 @@ def test_process_memory_plateau_fails_closed_without_gpu_process_measurement(
     monkeypatch.setattr(memory, "_rss_bytes", lambda: (100, "test_rss", None))
     monkeypatch.setattr(
         memory,
-        "_nvidia_process_gpu_bytes",
+        "_process_gpu_bytes",
         lambda: (None, None, "nvidia-smi_process_memory_unavailable"),
     )
     observer = memory.ProcessMemoryPlateau("wddm", ("cuda-cufft",))
