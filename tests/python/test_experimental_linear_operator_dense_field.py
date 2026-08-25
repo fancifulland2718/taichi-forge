@@ -290,6 +290,7 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         device_operations = device_stats["operations"]
         assert device_operations["host_scalar_readbacks"] == 1
         assert device_operations["host_synchronizations"] == 1
+        assert device_operations["terminal_submission_observations"] == 1
         assert device_operations["solver_chunk_submissions"] == 1
         assert device_operations["structured_control_observation_batches"] == 0
         if impl.current_cfg().arch == ti.vulkan:
@@ -588,6 +589,9 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
     assert stats["identity"]["preconditioner_method"] == "linear_operator"
     assert stats["operations"]["preconditioner_apply_calls"] == 2
     assert stats["operations"]["host_scalar_readbacks"] == 1
+    assert stats["operations"]["terminal_submission_observations"] == (
+        0 if impl.current_cfg().arch == ti.cpu else 1
+    )
     assert stats["operations"]["structured_control_observation_batches"] == 0
     vector_stats = stats["vector_io"]
     assert vector_stats["pack_calls"] == 0

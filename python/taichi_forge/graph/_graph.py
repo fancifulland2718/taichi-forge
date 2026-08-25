@@ -9312,6 +9312,56 @@ class _GraphSpec:
         structured_roots = tuple(node for node in self.structured_control_nodes if node.control_depth == 1)
         return bool(structured_roots) and all(node.supports_native_submission for node in structured_roots)
 
+    def terminal_control_report(self, logical_iterations):
+        """Synthesize the control report for one terminal-only submission."""
+
+        roots = tuple(
+            node
+            for node in self.structured_control_nodes
+            if node.control_depth == 1 and isinstance(node, _CompiledWhileGraphNode)
+        )
+        if len(roots) != 1 or not self.supports_native_structured_submission:
+            raise TaichiRuntimeError(
+                "Terminal-only Graph observation requires exactly one "
+                "submission-capable root while region"
+            )
+        node = roots[0]
+        logical_iterations = int(logical_iterations)
+        if logical_iterations < 0 or logical_iterations > node.max_iterations:
+            raise TaichiRuntimeError(
+                "Terminal-only Graph observation returned an invalid "
+                "logical iteration count"
+            )
+        arch = impl.current_cfg().arch
+        if arch == _ti_core.Arch.vulkan:
+            encoded_iterations = node.max_iterations
+            executed_iterations = encoded_iterations
+            lowering = "vulkan_compact_indirect"
+            boundaries = (encoded_iterations,) if encoded_iterations else ()
+        elif arch == _ti_core.Arch.cuda:
+            lowering = node._cuda_control_lowering or "cuda_conditional_graph"
+            encoded_iterations = (
+                node.max_iterations
+                if lowering == "cuda_masked_bounded_graph"
+                else logical_iterations
+            )
+            executed_iterations = logical_iterations
+            boundaries = (0, executed_iterations)
+        else:
+            raise TaichiRuntimeError(
+                "Terminal-only Graph observation requires CUDA or Vulkan"
+            )
+        return _GraphTerminalControlReport(
+            logical_iterations=logical_iterations,
+            executed_iterations=executed_iterations,
+            observation_batches=0,
+            observation_boundaries=boundaries,
+            lowering=lowering,
+            encoded_iterations=encoded_iterations,
+            masked_iterations=encoded_iterations - logical_iterations,
+            chunk_sizes=((encoded_iterations,) if encoded_iterations else ()),
+        )
+
     @property
     def pipeline_definition(self):
         if self._pipeline_definition_cache is None:
@@ -12588,6 +12638,7 @@ class SubmissionTicket:
         "_admission",
         "_completion",
         "_completion_observations",
+        "_graph_token",
         "_observation",
         "_runtime_owner_retained",
         "_runtime",
@@ -12607,10 +12658,12 @@ class SubmissionTicket:
         submission_owners=(),
         completion_observations=(),
         runtime_owner_retained=False,
+        graph_token=None,
     ):
         self._admission = admission
         self._completion = completion
         self._completion_observations = tuple(completion_observations)
+        self._graph_token = graph_token
         self._observation = observation
         self._runtime_owner_retained = bool(runtime_owner_retained)
         self._runtime = runtime
@@ -12693,6 +12746,7 @@ class SubmissionTicket:
                     self._observe_completion()
             except Exception:
                 pass
+
         observation = getattr(self, "_observation", None)
         if observation is not None:
             try:
@@ -12705,6 +12759,27 @@ class SubmissionTicket:
                 telemetry.discard()
             except Exception:
                 pass
+
+
+@dataclass(frozen=True)
+class _GraphTerminalControlReport:
+    logical_iterations: int
+    executed_iterations: int
+    observation_batches: int
+    observation_boundaries: tuple
+    lowering: str
+    encoded_iterations: int
+    masked_iterations: int
+    chunk_sizes: tuple
+
+
+@dataclass(frozen=True)
+class _GraphTerminalObservation:
+    value: object
+    control_report: _GraphTerminalControlReport
+    backend: str
+    sequence: object
+    workspace_lane: int
 
 
 def _workspace_lane_configuration(workspace_lanes, workspace_saturation):
@@ -12729,6 +12804,7 @@ class Graph:
         workspace_saturation="wait",
     ) -> None:
         self._lifecycle_lock = threading.Lock()
+        self._terminal_observation_token = object()
         self._stale_snode_tree_dependencies = set()
         (
             self._workspace_lane_capacity,
@@ -12770,6 +12846,64 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+
+    def _supports_terminal_observation(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            roots = tuple(
+                node
+                for node in self._spec.structured_control_nodes
+                if node.control_depth == 1
+                and isinstance(node, _CompiledWhileGraphNode)
+            )
+            return bool(
+                len(roots) == 1
+                and self._spec.supports_native_structured_submission
+                and impl.current_cfg().arch
+                in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
+            )
+
+    def _observe_terminal_submission(
+        self,
+        ticket,
+        materialize,
+        *,
+        logical_iterations,
+    ):
+        """Wait, materialize one terminal value, and derive control metadata."""
+
+        if (
+            not isinstance(ticket, SubmissionTicket)
+            or ticket._graph_token is not self._terminal_observation_token
+        ):
+            raise TaichiRuntimeError(
+                "Terminal-only Graph observation requires this Graph's "
+                "SubmissionTicket"
+            )
+        if not callable(materialize) or not callable(logical_iterations):
+            raise TaichiRuntimeError(
+                "Terminal-only Graph observation requires materialization "
+                "and logical-iteration callbacks"
+            )
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if not self._spec.supports_native_structured_submission:
+                raise TaichiRuntimeError(
+                    "Terminal-only Graph observation is unavailable for this Graph"
+                )
+        ticket.wait()
+        value = materialize()
+        logical = logical_iterations(value)
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            report = self._spec.terminal_control_report(logical)
+        return _GraphTerminalObservation(
+            value=value,
+            control_report=report,
+            backend=ticket.backend,
+            sequence=ticket.sequence,
+            workspace_lane=ticket.workspace_lane,
+        )
 
     def _parallel_candidate_report(self, branches, args=None):
         """Analyze a possible root-level fork/join without executing it.
@@ -13335,6 +13469,7 @@ class Graph:
             submission_owners=submission_owners,
             completion_observations=completion_observations,
             runtime_owner_retained=runtime_owner_retained,
+            graph_token=self._terminal_observation_token,
         )
 
     def prepare_telemetry(self, mode, *, slots=1):

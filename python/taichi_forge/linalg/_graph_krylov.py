@@ -1,6 +1,6 @@
 """Internal device-convergent Krylov programs built from Graph actions."""
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 import math
 import time
 
@@ -39,18 +39,6 @@ def _array_arg(name, dtype=ti.f32):
 
 def _scalar_array_arg(name, dtype):
     return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, dtype, ndim=0)
-
-
-@dataclass(frozen=True)
-class _GraphKrylovControlReport:
-    logical_iterations: int
-    executed_iterations: int
-    observation_batches: int
-    observation_boundaries: tuple
-    lowering: str
-    encoded_iterations: int
-    masked_iterations: int
-    chunk_sizes: tuple
 
 
 class GraphKrylovSolver:
@@ -115,6 +103,7 @@ class GraphKrylovSolver:
         self._executed_iterations = 0
         self._solver_chunk_submissions = 0
         self._structured_control_observation_batches = 0
+        self._terminal_submission_observations = 0
         self._last_control_report = None
         self._operator_apply_calls = 0
         self._preconditioner_apply_calls = 0
@@ -929,31 +918,8 @@ class GraphKrylovSolver:
 
     def _supports_terminal_only_submission(self):
         return bool(
-            self._backend_family in ("cuda", "vulkan") and self._graph._spec.supports_native_structured_submission
-        )
-
-    def _terminal_only_control_report(self, logical_iterations):
-        logical_iterations = int(logical_iterations)
-        if self._backend_family == "vulkan":
-            encoded_iterations = self._max_iterations
-            executed_iterations = encoded_iterations
-            lowering = "vulkan_compact_indirect"
-            boundaries = (encoded_iterations,) if encoded_iterations else ()
-        else:
-            control_nodes = self._graph._spec.structured_control_nodes
-            lowering = control_nodes[0]._cuda_control_lowering if control_nodes else "cuda_conditional_graph"
-            encoded_iterations = self._max_iterations if lowering == "cuda_masked_bounded_graph" else logical_iterations
-            executed_iterations = logical_iterations
-            boundaries = (0, executed_iterations)
-        return _GraphKrylovControlReport(
-            logical_iterations=logical_iterations,
-            executed_iterations=executed_iterations,
-            observation_batches=0,
-            observation_boundaries=boundaries,
-            lowering=lowering,
-            encoded_iterations=encoded_iterations,
-            masked_iterations=encoded_iterations - logical_iterations,
-            chunk_sizes=((encoded_iterations,) if encoded_iterations else ()),
+            self._backend_family in ("cuda", "vulkan")
+            and self._graph._supports_terminal_observation()
         )
 
     def solve_arrays(self, x, b, initial_x=None, *, direct_output=False):
@@ -986,21 +952,25 @@ class GraphKrylovSolver:
         started = time.perf_counter()
         terminal_only_submission = self._supports_terminal_only_submission()
         if terminal_only_submission:
-            self._graph.submit(arguments).wait()
-            self._last_control_report = None
+            observation = self._graph._observe_terminal_submission(
+                self._graph.submit(arguments),
+                lambda: np.asarray(self._terminal.to_numpy(), dtype=np.float32),
+                logical_iterations=lambda value: int(round(float(value[1]))),
+            )
+            terminal = observation.value
+            self._last_control_report = observation.control_report
+            self._terminal_submission_observations += 1
         else:
             self._graph.run(arguments)
             reports = self._graph.control_flow_stats()
             self._last_control_report = reports[0] if reports else None
-        terminal = np.asarray(self._terminal.to_numpy(), dtype=np.float32)
+            terminal = np.asarray(self._terminal.to_numpy(), dtype=np.float32)
         self._last_elapsed_seconds = time.perf_counter() - started
         self._host_synchronizations += 1
         self._host_scalar_readbacks += 1
 
         status = int(round(float(terminal[0])))
         iterations = int(round(float(terminal[1])))
-        if terminal_only_submission:
-            self._last_control_report = self._terminal_only_control_report(iterations)
         initial_residual_norm = math.sqrt(max(float(terminal[2]), 0.0))
         residual_norm = math.sqrt(max(float(terminal[3]), 0.0))
         reference_norm = math.sqrt(max(float(terminal[4]), 0.0))
@@ -1115,6 +1085,7 @@ class GraphKrylovSolver:
             "host_synchronizations": self._host_synchronizations,
             "host_scalar_readbacks": self._host_scalar_readbacks,
             "structured_control_observation_batches": (self._structured_control_observation_batches),
+            "terminal_submission_observations": self._terminal_submission_observations,
             "last_convergence_observation_boundaries": (
                 [] if self._last_control_report is None else list(self._last_control_report.observation_boundaries)
             ),

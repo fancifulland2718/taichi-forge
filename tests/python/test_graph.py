@@ -6611,6 +6611,59 @@ def test_structured_graph_native_while_submit_defers_terminal_observation():
     }
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_structured_graph_internal_terminal_observation_materializes_once():
+    if impl.current_cfg().arch == ti.cuda:
+        capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+        if not (
+            capabilities["driver_version_eligible"]
+            and capabilities["conditional_graph_symbols_loaded"]
+            and capabilities["general_device_setter_lowering_compiled"]
+        ):
+            pytest.skip("general CUDA conditional Graph is unavailable")
+
+    graph = _build_structured_while_graph(
+        observe=False,
+        max_iterations=20,
+        lowering_mode="native_required",
+    )
+    other = _build_structured_while_graph(
+        observe=False,
+        max_iterations=20,
+        lowering_mode="native_required",
+    )
+    args = _structured_while_args(target=7)
+    ticket = graph.submit(args)
+    materializations = []
+
+    def materialize():
+        materializations.append(True)
+        return int(args["counter"].to_numpy()[()])
+
+    with pytest.raises(TaichiRuntimeError, match="this Graph's SubmissionTicket"):
+        other._observe_terminal_submission(
+            ticket,
+            materialize,
+            logical_iterations=int,
+        )
+    assert materializations == []
+
+    observation = graph._observe_terminal_submission(
+        ticket,
+        materialize,
+        logical_iterations=int,
+    )
+    assert observation.value == 7
+    assert materializations == [True]
+    assert observation.control_report.logical_iterations == 7
+    assert observation.control_report.observation_batches == 0
+    assert observation.control_report.lowering == (
+        "vulkan_compact_indirect"
+        if impl.current_cfg().arch == ti.vulkan
+        else "cuda_conditional_graph"
+    )
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_structured_if_uses_multiple_control_inputs():
     @ti.kernel
