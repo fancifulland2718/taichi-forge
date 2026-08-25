@@ -106,6 +106,7 @@ def vulkan_command_operations(_operation):
                 "declared vertex bindings and attributes",
                 "optional uint32 index buffer",
                 "explicit uniform/storage descriptor buffers",
+                "fixed-count non-uniform storage-buffer descriptor arrays",
                 "one color and optional depth attachment with clear/load and store",
                 "one or more draws recorded into one render pass",
                 "fixed-count or feature-gated count-buffer indirect draws",
@@ -119,6 +120,7 @@ def vulkan_command_operations(_operation):
                 "Vulkan RHI graphics pipeline and graphics queue",
                 "caller-provided SPIR-V vertex and fragment shaders",
                 "indirect buffers follow VkDrawIndirectCommand or VkDrawIndexedIndirectCommand ABI",
+                "descriptor indexing with non-uniform storage-buffer indexing for bindless tables",
             ),
             public_api="ti.hardware.graphics.VulkanGraphicsPipeline",
             notes=(
@@ -128,6 +130,8 @@ def vulkan_command_operations(_operation):
                 "Compute-to-graphics-to-compute ordering uses backend semaphores and does not add a host wait.",
                 "Indirect draws consume kernel-produced command/count ndarrays without host readback; declared geometry bounds are validated conservatively.",
                 "Fixed-count indirect is baseline Vulkan; multi-draw, nonzero firstInstance, and count-buffer variants are admitted from active-device feature facts.",
+                "Bindless buffers are bounded immutable table snapshots (maximum 64 slots); variable-count/runtime arrays are reported but not exposed.",
+                "Retained Graph replay keys include every descriptor allocation generation, preventing in-flight table overwrite or stale descriptor reuse.",
             ),
         ),
         _operation(

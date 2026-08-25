@@ -28,6 +28,7 @@ struct RecordedGraphicsShaderBuffer {
   std::uint32_t set_index{0};
   std::uint32_t binding{0};
   DeviceAllocation allocation{kDeviceNullAllocation};
+  std::vector<DeviceAllocation> array_elements;
   bool storage{false};
 };
 
@@ -711,7 +712,45 @@ std::size_t Program::vulkan_graphics_pass(
                   "Vulkan graphics shader buffer set {} binding {} is "
                   "duplicated.",
                   shader.set_index, shader.binding);
-      TI_ERROR_IF(!shader.array,
+      if (!shader.array_elements.empty()) {
+        const auto bindless_caps = vulkan_bindless_buffer_capabilities();
+        constexpr std::size_t kMaximumProviderBindlessBuffers = 64;
+        const std::size_t limit = std::min<std::size_t>(
+            bindless_caps.at("max_fixed_count"),
+            kMaximumProviderBindlessBuffers);
+        TI_ERROR_IF(bindless_caps.at("fixed_count") == 0 || !shader.storage,
+                    "Vulkan bindless graphics requires fixed-count storage "
+                    "buffer descriptor indexing.");
+        TI_ERROR_IF(shader.array_elements.size() < 2 ||
+                        shader.array_elements.size() > limit,
+                    "Vulkan bindless graphics table size must be between 2 "
+                    "and the provider/device limit {}.",
+                    limit);
+        RecordedGraphicsShaderBuffer recorded_shader;
+        recorded_shader.set_index = shader.set_index;
+        recorded_shader.binding = shader.binding;
+        recorded_shader.storage = true;
+        recorded_shader.array_elements.reserve(shader.array_elements.size());
+        for (Ndarray *element : shader.array_elements) {
+          TI_ERROR_IF(element == nullptr || element->owning_program() != this ||
+                          element->get_device_allocation().device != device,
+                      "Vulkan bindless graphics buffer set {} binding {} "
+                      "contains an element from another runtime or device.",
+                      shader.set_index, shader.binding);
+          const DeviceAllocation allocation =
+              element->get_device_allocation();
+          TI_ERROR_IF(!int(device->allocation_usage(allocation) &
+                           AllocUsage::Storage),
+                      "Vulkan bindless graphics buffer set {} binding {} "
+                      "contains an element without storage usage.",
+                      shader.set_index, shader.binding);
+          arrays.push_back(element);
+          recorded_shader.array_elements.push_back(allocation);
+        }
+        recorded.shader_buffers.push_back(std::move(recorded_shader));
+        continue;
+      }
+      TI_ERROR_IF(shader.array == nullptr,
                   "Vulkan graphics shader buffer set {} binding {} is null.",
                   shader.set_index, shader.binding);
       const DeviceAllocation allocation =
@@ -730,7 +769,7 @@ std::size_t Program::vulkan_graphics_pass(
                   shader.storage ? "storage" : "uniform");
       arrays.push_back(shader.array);
       recorded.shader_buffers.push_back(
-          {shader.set_index, shader.binding, allocation, shader.storage});
+          {shader.set_index, shader.binding, allocation, {}, shader.storage});
     }
     recorded_draws.push_back(std::move(recorded));
   }
@@ -794,8 +833,15 @@ std::size_t Program::vulkan_graphics_pass(
         replay_key.push_back(shader.set_index);
         replay_key.push_back(shader.binding);
         replay_key.push_back(shader.storage ? 1 : 0);
-        append_graphics_allocation_key(replay_key, device,
-                                       shader.allocation);
+        replay_key.push_back(shader.array_elements.size());
+        if (shader.array_elements.empty()) {
+          append_graphics_allocation_key(replay_key, device,
+                                         shader.allocation);
+        } else {
+          for (const auto allocation : shader.array_elements) {
+            append_graphics_allocation_key(replay_key, device, allocation);
+          }
+        }
       }
       replay_key.push_back(recorded.indirect.has_value() ? 1 : 0);
       if (recorded.indirect.has_value()) {
@@ -898,7 +944,10 @@ std::size_t Program::vulkan_graphics_pass(
             if (!resource_set) {
               resource_set = graphics->create_resource_set_unique();
             }
-            if (shader.storage) {
+            if (!shader.array_elements.empty()) {
+              resource_set->rw_buffer_array(shader.binding,
+                                            shader.array_elements);
+            } else if (shader.storage) {
               resource_set->rw_buffer(shader.binding, shader.allocation);
             } else {
               resource_set->buffer(shader.binding, shader.allocation);

@@ -167,6 +167,7 @@ struct VulkanGraphicsShaderBufferBinding {
   std::uint32_t set_index{0};
   std::uint32_t binding{0};
   Ndarray *array{nullptr};
+  std::vector<Ndarray *> array_elements;
   bool storage{false};
 };
 

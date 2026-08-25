@@ -2245,14 +2245,31 @@ void export_lang(py::module &m) {
               for (const py::handle raw_shader : raw_shader_buffers) {
                 const py::tuple shader = py::cast<py::tuple>(raw_shader);
                 TI_ERROR_IF(
-                    shader.size() != 4,
-                    "Vulkan graphics shader-buffer bindings require set, "
-                    "binding, ndarray, and storage fields.");
+                    shader.size() != 4 && shader.size() != 5,
+                    "Vulkan graphics shader-buffer bindings require either "
+                    "the scalar or fixed-array descriptor ABI.");
+                VulkanGraphicsShaderBufferBinding shader_binding;
+                shader_binding.set_index =
+                    py::cast<std::uint32_t>(shader[0]);
+                shader_binding.binding =
+                    py::cast<std::uint32_t>(shader[1]);
+                shader_binding.storage = py::cast<bool>(shader[3]);
+                if (shader.size() == 5) {
+                  TI_ERROR_IF(!py::cast<bool>(shader[4]),
+                              "Vulkan graphics fixed-array descriptor ABI "
+                              "requires its array marker.");
+                  const py::sequence elements =
+                      py::cast<py::sequence>(shader[2]);
+                  shader_binding.array_elements.reserve(elements.size());
+                  for (const py::handle element : elements) {
+                    shader_binding.array_elements.push_back(
+                        py::cast<Ndarray *>(element));
+                  }
+                } else {
+                  shader_binding.array = py::cast<Ndarray *>(shader[2]);
+                }
                 command.shader_buffers.push_back(
-                    {py::cast<std::uint32_t>(shader[0]),
-                     py::cast<std::uint32_t>(shader[1]),
-                     py::cast<Ndarray *>(shader[2]),
-                     py::cast<bool>(shader[3])});
+                    std::move(shader_binding));
               }
               if (indirect) {
                 VulkanGraphicsIndirectInfo indirect_info;

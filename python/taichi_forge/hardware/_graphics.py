@@ -204,6 +204,27 @@ class ShaderBufferBinding:
 
 
 @dataclass(frozen=True)
+class ShaderBufferArrayBinding:
+    """One fixed-count storage-buffer descriptor array in caller SPIR-V."""
+
+    set_index: int
+    binding: int
+    descriptor_count: int
+    access: str = "read"
+
+    def __post_init__(self):
+        _u32(self.set_index, "set_index")
+        _u32(self.binding, "binding")
+        _u32(self.descriptor_count, "descriptor_count", positive=True)
+        if self.descriptor_count < 2:
+            raise ValueError("descriptor_count must be at least two")
+        if self.access not in _SHADER_BUFFER_ACCESSES:
+            raise ValueError(
+                "shader buffer access must be 'read', 'write', or 'read_write'"
+            )
+
+
+@dataclass(frozen=True)
 class GraphicsPassDraw:
     """One pipeline and its symbolic resources inside a graphics pass."""
 
@@ -302,7 +323,21 @@ class GraphicsPassDraw:
                 _u32(key[0], "shader-buffer set_index"),
                 _u32(key[1], "shader-buffer binding"),
             )
-            normalized_shader[normalized_key] = _name(name, "shader-buffer name")
+            declaration = self.pipeline._shader_buffer_by_key.get(normalized_key)
+            if isinstance(declaration, ShaderBufferArrayBinding):
+                if not isinstance(name, (tuple, list)):
+                    raise TypeError(
+                        "shader buffer array bindings require a sequence of names"
+                    )
+                if len(name) != declaration.descriptor_count:
+                    raise ValueError(
+                        "shader buffer array binding count must match descriptor_count"
+                    )
+                normalized_shader[normalized_key] = tuple(
+                    _name(item, "shader-buffer array name") for item in name
+                )
+            else:
+                normalized_shader[normalized_key] = _name(name, "shader-buffer name")
         required_shader = frozenset(
             (item.set_index, item.binding)
             for item in self.pipeline.shader_buffer_bindings
@@ -626,17 +661,21 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                     effects.get(name), GraphAccess.READ
                 )
             for key, name in item.shader_buffers.items():
-                if name in attachment_names:
-                    raise ValueError(
-                        "graphics attachment bindings cannot also name ndarray resources"
-                    )
                 declaration = item.pipeline._shader_buffer_by_key[key]
                 access = {
                     "read": GraphAccess.READ,
                     "write": GraphAccess.WRITE,
                     "read_write": GraphAccess.READ_WRITE,
                 }[declaration.access]
-                effects[name] = _merge_graphics_access(effects.get(name), access)
+                names = name if isinstance(name, tuple) else (name,)
+                for resource_name in names:
+                    if resource_name in attachment_names:
+                        raise ValueError(
+                            "graphics attachment bindings cannot also name ndarray resources"
+                        )
+                    effects[resource_name] = _merge_graphics_access(
+                        effects.get(resource_name), access
+                    )
 
         ndarray_names = frozenset(effects).difference(attachment_names)
 
@@ -707,14 +746,25 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             shader_buffers = []
             for key, name in sorted(item.shader_buffers.items()):
                 declaration = item.pipeline._shader_buffer_by_key[key]
-                shader_buffers.append(
-                    (
-                        key[0],
-                        key[1],
-                        bindings[name].arr,
-                        declaration.kind == "storage",
+                if isinstance(declaration, ShaderBufferArrayBinding):
+                    shader_buffers.append(
+                        (
+                            key[0],
+                            key[1],
+                            tuple(bindings[item].arr for item in name),
+                            True,
+                            True,
+                        )
                     )
-                )
+                else:
+                    shader_buffers.append(
+                        (
+                            key[0],
+                            key[1],
+                            bindings[name].arr,
+                            declaration.kind == "storage",
+                        )
+                    )
             draw = item.draw
             if isinstance(draw, IndirectDraw):
                 command = bindings[item.indirect_buffer].arr
@@ -835,6 +885,11 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "indirect_count_draw_count": sum(
                     draw.count_buffer is not None for draw in item.draws
                 ),
+                "bindless_buffer_table_count": sum(
+                    isinstance(declaration, ShaderBufferArrayBinding)
+                    for pipeline in item.pipelines
+                    for declaration in pipeline.shader_buffer_bindings
+                ),
                 "color_load_op": item.color_load_op,
                 "depth_load_op": item.depth_load_op,
             },
@@ -886,16 +941,35 @@ class VulkanGraphicsPipeline:
         ):
             raise TypeError("vertex_attributes must contain VertexAttribute values")
         if not all(
-            isinstance(item, ShaderBufferBinding) for item in shader_buffer_bindings
+            isinstance(item, (ShaderBufferBinding, ShaderBufferArrayBinding))
+            for item in shader_buffer_bindings
         ):
             raise TypeError(
-                "shader_buffer_bindings must contain ShaderBufferBinding values"
+                "shader_buffer_bindings must contain ShaderBufferBinding or "
+                "ShaderBufferArrayBinding values"
             )
         shader_buffer_by_key = {
             (item.set_index, item.binding): item for item in shader_buffer_bindings
         }
         if len(shader_buffer_by_key) != len(shader_buffer_bindings):
             raise ValueError("shader buffer set/binding pairs must be unique")
+        array_bindings = tuple(
+            item
+            for item in shader_buffer_bindings
+            if isinstance(item, ShaderBufferArrayBinding)
+        )
+        if array_bindings:
+            capabilities = bindless_buffer_capabilities()
+            if not capabilities["fixed_count"]:
+                raise TaichiRuntimeError(
+                    "fixed-count Vulkan storage-buffer descriptor arrays are "
+                    "unavailable on the active device"
+                )
+            provider_limit = min(int(capabilities["max_fixed_count"]), 64)
+            if any(item.descriptor_count > provider_limit for item in array_bindings):
+                raise ValueError(
+                    "descriptor_count exceeds the Vulkan graphics provider limit"
+                )
         try:
             topology_value = _TOPOLOGIES[topology]
         except (KeyError, TypeError) as exc:
@@ -1140,6 +1214,7 @@ __all__ = [
     "Draw",
     "GraphicsPassDraw",
     "IndirectDraw",
+    "ShaderBufferArrayBinding",
     "ShaderBufferBinding",
     "VertexAttribute",
     "VertexBinding",

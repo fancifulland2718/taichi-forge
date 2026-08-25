@@ -359,7 +359,19 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
 
         if (desc_binding->descriptor_type ==
             SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-          set.rw_buffer(desc_binding->binding, kDeviceNullPtr, 0);
+          RHI_THROW_UNLESS(
+              desc_binding->count > 0,
+              std::invalid_argument(
+                  "Runtime-sized storage-buffer descriptor arrays require "
+                  "an explicit variable-count provider"));
+          if (desc_binding->count > 1) {
+            set.rw_buffer_array(
+                desc_binding->binding,
+                std::vector<DeviceAllocation>(desc_binding->count,
+                                              kDeviceNullAllocation));
+          } else {
+            set.rw_buffer(desc_binding->binding, kDeviceNullPtr, 0);
+          }
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
           set.buffer(desc_binding->binding, kDeviceNullPtr, 0);
@@ -3897,16 +3909,31 @@ vkapi::IVkDescriptorSetLayout VulkanDevice::get_desc_set_layout(
   std::vector<VkDescriptorBindingFlags> binding_flags;
   bool has_update_after_bind_binding = false;
   for (const auto &pair : set.get_bindings()) {
+    const auto descriptor_count =
+        VulkanResourceSet::descriptor_count(pair.second);
+    if (descriptor_count == 0) {
+      RHI_LOG_ERROR("Descriptor array bindings must not be empty");
+      return nullptr;
+    }
     bindings.push_back(VkDescriptorSetLayoutBinding{
-        /*binding=*/pair.first, pair.second.type, /*descriptorCount=*/1,
+        /*binding=*/pair.first, pair.second.type, descriptor_count,
         VK_SHADER_STAGE_ALL,
         /*pImmutableSamplers=*/nullptr});
+    const bool is_buffer_array =
+        std::holds_alternative<VulkanResourceSet::BufferArray>(
+            pair.second.res);
     const bool is_patchable_buffer =
         pair.second.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
         pair.second.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     const auto flags =
-        vk_caps().descriptor_update_after_bind && is_patchable_buffer
-            ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT
+        ((is_buffer_array &&
+          vk_caps().descriptor_storage_buffer_update_after_bind) ||
+         (!is_buffer_array && vk_caps().descriptor_update_after_bind &&
+          is_patchable_buffer))
+            ? VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
+                  (vk_caps().descriptor_binding_partially_bound
+                       ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT
+                       : VkDescriptorBindingFlags{0})
             : VkDescriptorBindingFlags{0};
     binding_flags.push_back(flags);
     has_update_after_bind_binding |= flags != 0;
@@ -4156,7 +4183,8 @@ RhiResult VulkanDevice::new_descriptor_pool_locked() {
   VkDescriptorPoolCreateInfo pool_info = {};
   pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
   pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-  if (vk_caps().descriptor_update_after_bind) {
+  if (vk_caps().descriptor_update_after_bind ||
+      vk_caps().descriptor_storage_buffer_update_after_bind) {
     pool_info.flags |= VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
   }
   pool_info.maxSets = 64;

@@ -1012,6 +1012,24 @@ def _passive_core_statuses(runtime_initialized, backend):
             "max_draw_count": 0,
         }
     )
+    graphics_bindless_buffers = (
+        dict(program.vulkan_bindless_buffer_capabilities())
+        if graphics_available
+        else {
+            "descriptor_indexing": 0,
+            "storage_buffer_non_uniform_indexing": 0,
+            "fixed_count": 0,
+            "partially_bound": 0,
+            "update_after_bind": 0,
+            "variable_count": 0,
+            "runtime_array": 0,
+            "update_unused_while_pending": 0,
+            "max_fixed_count": 0,
+            "max_update_after_bind_descriptors_in_all_pools": 0,
+            "max_per_stage_update_after_bind_storage_buffers": 0,
+            "max_descriptor_set_update_after_bind_storage_buffers": 0,
+        }
+    )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
     cooperative_matrix_available = bool(
         program is not None and program.vulkan_cooperative_matrix_available()
@@ -1074,6 +1092,27 @@ def _passive_core_statuses(runtime_initialized, backend):
                 "indirect_first_instance": bool(graphics_indirect["first_instance"]),
                 "indirect_count_buffer": bool(graphics_indirect["count_buffer"]),
                 "max_draw_indirect_count": int(graphics_indirect["max_draw_count"]),
+                "bindless_storage_buffer_fixed_count": bool(
+                    graphics_bindless_buffers["fixed_count"]
+                ),
+                "bindless_storage_buffer_non_uniform_indexing": bool(
+                    graphics_bindless_buffers["storage_buffer_non_uniform_indexing"]
+                ),
+                "bindless_storage_buffer_partially_bound": bool(
+                    graphics_bindless_buffers["partially_bound"]
+                ),
+                "bindless_storage_buffer_update_after_bind": bool(
+                    graphics_bindless_buffers["update_after_bind"]
+                ),
+                "bindless_storage_buffer_variable_count": bool(
+                    graphics_bindless_buffers["variable_count"]
+                ),
+                "bindless_storage_buffer_runtime_array": bool(
+                    graphics_bindless_buffers["runtime_array"]
+                ),
+                "max_bindless_storage_buffer_fixed_count": min(
+                    int(graphics_bindless_buffers["max_fixed_count"]), 64
+                ),
             },
         },
         "ray.as_build.vulkan": {

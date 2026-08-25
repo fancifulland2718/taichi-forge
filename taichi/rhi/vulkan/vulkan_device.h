@@ -215,6 +215,13 @@ class VulkanResourceSet : public ShaderResourceSet {
     }
   };
 
+  static uint32_t descriptor_count(const Binding &binding) {
+    if (const auto *array = std::get_if<BufferArray>(&binding.res)) {
+      return static_cast<uint32_t>(array->buffers.size());
+    }
+    return 1;
+  }
+
   // This hashes the Set Layout
   struct SetLayoutHasher {
     std::size_t operator()(const VulkanResourceSet &set) const {
@@ -225,6 +232,7 @@ class VulkanResourceSet : public ShaderResourceSet {
         rhi_impl::hash_combine(hash, pair.first);
         // We only care about type in this case
         rhi_impl::hash_combine(hash, pair.second.type);
+        rhi_impl::hash_combine(hash, descriptor_count(pair.second));
       }
       return hash;
     }
@@ -243,7 +251,9 @@ class VulkanResourceSet : public ShaderResourceSet {
           return false;
         }
         const Binding &rhs_binding = rhs_binding_iter->second;
-        if (rhs_binding.type != lhs_pair.second.type) {
+        if (rhs_binding.type != lhs_pair.second.type ||
+            descriptor_count(rhs_binding) !=
+                descriptor_count(lhs_pair.second)) {
           return false;
         }
       }
