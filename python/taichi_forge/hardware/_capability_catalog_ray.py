@@ -1,5 +1,6 @@
 """Ray acceleration capability catalog fragments."""
 
+
 def ray_command_operations(_operation):
     return (
         _operation(
@@ -27,8 +28,7 @@ def ray_command_operations(_operation):
             update_policy="rebuild",
             requirements=("VK_KHR_acceleration_structure",),
             public_api=(
-                "ti.hardware.ray.TriangleBLAS / "
-                "ti.hardware.ray.InstanceTLAS"
+                "ti.hardware.ray.TriangleBLAS / " "ti.hardware.ray.InstanceTLAS"
             ),
             dtypes=("vertex:f32", "index:i32"),
             layouts=("scalar (N,3)", "AOS vector-3 (N,)"),
@@ -167,6 +167,69 @@ def ray_command_operations(_operation):
 def ray_optional_operations(_operation):
     return (
         _operation(
+            "ray.as_build.optix",
+            "ray.acceleration_structure",
+            "optix",
+            ("cuda",),
+            "lazy_external",
+            "vendor_hardware_runtime",
+            "vendor_hardware_runtime",
+            "implementation_defined",
+            ("python",),
+            "external_library",
+            "unsupported",
+            "runtime_ordered",
+            "provider_owned",
+            "internal_foundation",
+            activation_mode="explicit_hardware_api",
+            dependency_name="OptiX",
+            resource_effects=("read:geometry", "write:gas_ias"),
+            lifetime_policy="provider_plan",
+            update_policy="rebuild",
+            requirements=(
+                "user-built Forge OptiX provider ABI 1",
+                "OptiX SDK ABI 93 or 105 and a compatible display driver",
+                "active Taichi CUDA context and CUDA device storage",
+            ),
+            public_api="ti.hardware.ray.OptixProvider.triangle_scene",
+            notes=(
+                "Builds an update-capable triangle GAS plus an identity IAS; it is an explicit resource operation, not a kernel call.",
+                "The provider target has no wheel install rule and is never built unless TI_BUILD_OPTIX_PROVIDER is explicitly enabled.",
+                "Source ABI is implemented, but no real OptiX SDK/device qualification is available in the Forge default build.",
+            ),
+        ),
+        _operation(
+            "ray.as_refit.optix",
+            "ray.acceleration_structure",
+            "optix",
+            ("cuda",),
+            "lazy_external",
+            "vendor_hardware_runtime",
+            "vendor_hardware_runtime",
+            "implementation_defined",
+            ("python", "graph"),
+            "external_library",
+            "opaque",
+            "runtime_ordered",
+            "provider_owned",
+            "internal_foundation",
+            activation_mode="explicit_hardware_api",
+            dependency_name="OptiX",
+            resource_effects=("read:vertices", "read_write:gas"),
+            lifetime_policy="provider_plan",
+            update_policy="refit",
+            requirements=(
+                "scene created with update support",
+                "fixed vertex and triangle counts",
+                "runtime-ordered CUDA device storage",
+            ),
+            public_api="ti.hardware.ray.OptixTriangleScene.record_refit",
+            notes=(
+                "Graph replay reissues one provider update on the runtime default stream.",
+                "The explicit provider and its scene must outlive every retained Graph recording.",
+            ),
+        ),
+        _operation(
             "ray.query.batch.optix",
             "ray.query",
             "optix",
@@ -178,24 +241,24 @@ def ray_optional_operations(_operation):
             ("python", "graph"),
             "external_library",
             "opaque",
-            "explicit",
+            "runtime_ordered",
             "provider_owned",
-            "planned",
+            "internal_foundation",
             activation_mode="explicit_hardware_api",
             dependency_name="OptiX",
             resource_effects=("read:scene", "read:rays", "write:hits"),
             lifetime_policy="provider_plan",
-            update_policy="rebuild",
+            update_policy="rebind",
             requirements=(
-                "user-provided licensed OptiX SDK headers for a qualified OPTIX_ABI_VERSION",
-                "lazy optixQueryFunctionTable loader with ABI isolation",
-                "OptiX module/program-group/pipeline/SBT and GAS/IAS resource contracts",
-                "qualified device-program build or artifact strategy",
+                "user-built Forge OptiX provider ABI 1",
+                "provider compiled from SDK headers with OPTIX_ABI_VERSION 93 or 105",
+                "fixed Forge f32x8 ray and f32x4 closest-hit storage ABI",
             ),
-            public_api="ti.hardware.ray",
+            public_api="ti.hardware.ray.OptixTriangleScene.record",
             notes=(
-                "OptiX function-table layout and initialization are SDK-header/ABI defined; a shared library name alone is not a safe provider contract.",
-                "Keep this as a user-built plugin/source-build candidate until header licensing, ABI coverage, device programs, and pipeline lifetime are closed.",
+                "The optional provider compiles the official SDK function table, module, program groups, pipeline, SBT, GAS/IAS, and device PTX outside Forge wheels.",
+                "Provider loading is explicit and failure-isolated; normal CUDA initialization and every other provider remain independent.",
+                "No kernel-inline route, automatic selection, cross-device qualification, or performance claim is made.",
             ),
         ),
     )

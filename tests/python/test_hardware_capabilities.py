@@ -39,6 +39,8 @@ _OPERATION_IDS = (
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",
     "linalg.refactor_solve.cudss",
+    "ray.as_build.optix",
+    "ray.as_refit.optix",
     "ray.query.batch.optix",
     "algorithms.primitives.cub",
     "internal.tile.async.cuda",
@@ -101,8 +103,9 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         operations[0].backends[0] = "cpu"
     with pytest.raises(ValueError, match="unqualified implementations"):
         replace(
-            ti.hardware.capability("ray.query.batch.optix"),
+            ti.hardware.capability("raster.mesh_tasks.vulkan"),
             hardware_acceleration="qualified",
+            hardware_route="qualified",
         )
     with pytest.raises(ValueError, match="load_mode must match"):
         replace(ti.hardware.capability("linalg.gemm.cublas"), load_mode="built_in")
@@ -439,9 +442,20 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "NVIDIA Vulkan" in vulkan_matrix.notes[2]
 
     optix = ti.hardware.capability("ray.query.batch.optix")
-    assert optix.implementation_status == "planned"
-    assert "optixQueryFunctionTable" in optix.requirements[1]
-    assert "user-built plugin" in optix.notes[1]
+    assert optix.implementation_status == "internal_foundation"
+    assert "OPTIX_ABI_VERSION 93 or 105" in optix.requirements[1]
+    assert "loading is explicit" in optix.notes[1]
+    assert "No kernel-inline route" in optix.notes[2]
+
+    optix_build = ti.hardware.capability("ray.as_build.optix")
+    assert optix_build.graph_integration == "unsupported"
+    assert optix_build.update_policy == "rebuild"
+    assert "no wheel install rule" in optix_build.notes[1]
+
+    optix_refit = ti.hardware.capability("ray.as_refit.optix")
+    assert optix_refit.graph_integration == "opaque"
+    assert optix_refit.update_policy == "refit"
+    assert optix_refit.scopes == ("python", "graph")
 
     cusparse = ti.hardware.capability("linalg.spmv.cusparse")
     assert cusparse.implementation_status == "existing_public"
@@ -1289,7 +1303,7 @@ def test_explicit_external_probe_failures_remain_provider_scoped(monkeypatch):
     assert operation.selection == "not_considered"
 
 
-def test_planned_external_probe_and_invalid_tiers_fail_closed(monkeypatch):
+def test_optional_optix_probe_and_invalid_tiers_fail_closed(monkeypatch):
     monkeypatch.setattr(
         _capabilities,
         "_runtime_facts",
@@ -1297,15 +1311,21 @@ def test_planned_external_probe_and_invalid_tiers_fail_closed(monkeypatch):
     )
 
     report = ti.hardware.probe("optix")
-    optix = next(
+    optix_operations = tuple(
         operation
         for operation in report.operations
         if operation.descriptor.provider_id == "optix"
     )
-    assert optix.discovery is None
-    assert optix.unavailable_reason == "native_probe_not_implemented"
-    assert optix.enablement == "disabled"
-    assert optix.selection == "not_considered"
+    assert len(optix_operations) == 3
+    assert all(operation.discovery == "missing" for operation in optix_operations)
+    assert all(
+        operation.unavailable_reason == "provider_library_path_required"
+        for operation in optix_operations
+    )
+    assert all(operation.enablement == "disabled" for operation in optix_operations)
+    assert all(
+        operation.selection == "not_considered" for operation in optix_operations
+    )
     assert report.external_components_probed is False
 
     with pytest.raises(ValueError, match="only lazy_external"):
