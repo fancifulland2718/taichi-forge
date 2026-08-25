@@ -330,9 +330,13 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert len(cuda_texture.requirements) == 4
 
     inline_ray = ti.hardware.capability("ray.query.inline.vulkan")
-    assert inline_ray.implementation_status == "planned"
-    assert "RayQuery IR" in inline_ray.requirements[1]
-    assert "separate embedded SPIR-V shader" in inline_ray.notes[0]
+    assert inline_ray.implementation_status == "existing_public"
+    assert inline_ray.hardware_acceleration == "qualified"
+    assert "VK_KHR_ray_query" in inline_ray.requirements
+    assert "trace_closest" in inline_ray.public_api
+    assert "JIT Vulkan kernels only" in inline_ray.notes[2]
+    assert "dense-field particle contact" in inline_ray.notes[4]
+    assert "prepacked ray-buffer" in inline_ray.notes[5]
 
     cuda_atomic = ti.hardware.capability("kernel.atomic.cuda")
     vulkan_atomic = ti.hardware.capability("kernel.atomic.vulkan")

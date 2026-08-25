@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.lang import impl
 from tests import test_utils
@@ -40,6 +41,36 @@ def test_vulkan_triangle_ray_contract_rejects_non_vulkan_runtime():
     build = ti.hardware.capability("ray.as_build.vulkan")
     assert build.scopes == ("python", "graph")
     assert "TriangleBLAS" in build.public_api
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_vulkan_inline_ray_query_fails_closed_outside_jit_vulkan():
+    @ti.kernel
+    def trace(acceleration: ti.types.acceleration_structure()) -> ti.i32:
+        hit = acceleration.trace_closest(
+            ti.Vector([0.0, 0.0, 1.0]), ti.Vector([0.0, 0.0, -1.0])
+        )
+        return hit.hit
+
+    with pytest.raises(
+        ti.TaichiTypeError,
+        match="Acceleration-structure kernel arguments require the Vulkan backend",
+    ):
+        trace._primal.ensure_compiled(None)
+
+    module = ti.aot.Module(ti.cpu)
+    with pytest.raises(
+        ti.TaichiCompilationError,
+        match="acceleration-structure kernel arguments are JIT-only",
+    ):
+        module.add_kernel(trace)
+
+    builder = ti.graph.GraphBuilder()
+    with pytest.raises(
+        ti.TaichiCompilationError,
+        match="acceleration-structure kernel arguments are JIT-only",
+    ):
+        builder.dispatch(trace, None)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
@@ -81,6 +112,165 @@ def test_vulkan_inline_ray_resource_contract_is_generation_qualified():
     tlas.close()
     with pytest.raises(RuntimeError, match="closed"):
         descriptor.validate_lifetime()
+    blas.close()
+
+
+@test_utils.test(
+    arch=ti.vulkan,
+    offline_cache=False,
+    vulkan_spv_stats=True,
+    vulkan_spv_stats_filter="all",
+)
+def test_vulkan_inline_ray_query_kernel_matches_triangle_oracle_and_retains_lifetime():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    rays = ti.ndarray(ti.f32, shape=(3, 8))
+    hits = ti.ndarray(ti.f32, shape=(3, 9))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    rays.from_numpy(
+        np.array(
+            [
+                [0, 0, 1, 0.001, 0, 0, -1, 100],
+                [2, 0, 1, 0.001, 0, 0, -1, 100],
+                [0, 0, -1, 0.001, 0, 0, 1, 100],
+            ],
+            dtype=np.float32,
+        )
+    )
+    blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+    tlas = ti.hardware.ray.InstanceTLAS(
+        [ti.hardware.ray.RayInstance(blas, custom_index=37)]
+    )
+
+    @ti.kernel
+    def trace(
+        acceleration: ti.types.acceleration_structure(),
+        ray_data: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i in range(ray_data.shape[0]):
+            hit = acceleration.trace_closest(
+                ti.Vector([ray_data[i, 0], ray_data[i, 1], ray_data[i, 2]]),
+                ti.Vector([ray_data[i, 4], ray_data[i, 5], ray_data[i, 6]]),
+                ray_data[i, 3],
+                ray_data[i, 7],
+            )
+            output[i, 0] = hit.hit
+            output[i, 1] = hit.t
+            output[i, 2] = hit.primitive_index
+            output[i, 3] = hit.instance_id
+            output[i, 4] = hit.instance_custom_index
+            output[i, 5] = hit.geometry_index
+            output[i, 6] = hit.barycentric_u
+            output[i, 7] = hit.barycentric_v
+            output[i, 8] = hit.front_face
+
+    trace(tlas, rays, hits)
+    full_stats = _ti_core.get_last_vulkan_spv_stats()
+    assert sum(item["ray_query_initialize_after"] for item in full_stats) == 1
+    assert sum(item["ray_query_getter_after"] for item in full_stats) == 8
+
+    minimal_hits = ti.ndarray(ti.f32, shape=(3, 2))
+
+    @ti.kernel
+    def trace_minimal(
+        acceleration: ti.types.acceleration_structure(),
+        ray_data: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i in range(ray_data.shape[0]):
+            hit = acceleration.trace_closest(
+                ti.Vector([ray_data[i, 0], ray_data[i, 1], ray_data[i, 2]]),
+                ti.Vector([ray_data[i, 4], ray_data[i, 5], ray_data[i, 6]]),
+                ray_data[i, 3],
+                ray_data[i, 7],
+            )
+            output[i, 0] = hit.hit
+            output[i, 1] = hit.t
+
+    trace_minimal(tlas, rays, minimal_hits)
+    minimal_stats = _ti_core.get_last_vulkan_spv_stats()
+    assert sum(item["ray_query_initialize_after"] for item in minimal_stats) == 1
+    assert sum(item["ray_query_getter_after"] for item in minimal_stats) == 2
+    assert sum(item["phi_after"] for item in minimal_stats) == 2
+    # Closing immediately after launch must not invalidate an in-flight
+    # descriptor or the TLAS/BLAS allocations retained by the command buffer.
+    tlas.close()
+    ti.sync()
+    actual = hits.to_numpy()
+    np.testing.assert_allclose(
+        minimal_hits.to_numpy(), [[1, 1], [0, -1], [1, 1]]
+    )
+    np.testing.assert_allclose(actual[:, :2], [[1, 1], [0, -1], [1, 1]])
+    np.testing.assert_allclose(actual[[0, 2], 2:6], [[0, 0, 37, 0]] * 2)
+    np.testing.assert_allclose(actual[[0, 2], 6:8], [[0.25, 0.5]] * 2)
+    np.testing.assert_allclose(actual[[0, 2], 8], [1, 0])
+    with pytest.raises(RuntimeError, match="closed"):
+        trace(tlas, rays, hits)
+    blas.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_inline_ray_query_honors_instance_masks_and_multiple_instances():
+    if not ti.hardware.ray.is_available():
+        pytest.skip("Vulkan ray query features are unavailable")
+
+    vertices = ti.ndarray(ti.f32, shape=(3, 3))
+    indices = ti.ndarray(ti.i32, shape=(1, 3))
+    output = ti.ndarray(ti.f32, shape=(3, 4))
+    vertices.from_numpy(
+        np.array([[-1, -1, 0], [1, -1, 0], [0, 1, 0]], dtype=np.float32)
+    )
+    indices.from_numpy(np.array([[0, 1, 2]], dtype=np.int32))
+    blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+    tlas = ti.hardware.ray.InstanceTLAS(
+        [
+            ti.hardware.ray.RayInstance(blas, mask=0x1, custom_index=11),
+            ti.hardware.ray.RayInstance(
+                blas,
+                transform=(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1),
+                mask=0x2,
+                custom_index=22,
+            ),
+        ]
+    )
+
+    @ti.kernel
+    def trace_masks(
+        acceleration: ti.types.acceleration_structure(),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i in range(3):
+            hit = acceleration.trace_closest(
+                ti.Vector([0.0, 0.0, 1.0]),
+                ti.Vector([0.0, 0.0, -1.0]),
+                0.001,
+                4.0,
+                cull_mask=1 << i,
+            )
+            result[i, 0] = hit.hit
+            result[i, 1] = hit.t
+            result[i, 2] = hit.instance_custom_index
+            result[i, 3] = hit.instance_id
+
+    trace_masks(tlas, output)
+    ti.sync()
+    actual = output.to_numpy()
+    np.testing.assert_allclose(actual[:2], [[1, 1, 11, 0], [1, 2, 22, 1]])
+    assert actual[2, 0] == 0
+    assert actual[2, 1] == -1
+    assert actual[2, 2] == np.float32(0xFFFFFFFF)
+    assert actual[2, 3] == np.float32(0xFFFFFFFF)
+    with pytest.raises(TypeError, match="InstanceTLAS"):
+        trace_masks(blas, output)
+
+    tlas.close()
     blas.close()
 
 

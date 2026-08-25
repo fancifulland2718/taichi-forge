@@ -103,6 +103,7 @@ CASES = (
     "cuda-cudss-solve",
     "cuda-cudss-refactor-solve",
     "cuda-cudss-tet-fem",
+    "vulkan-ray-inline-contact",
     "vulkan-ray-update",
     "vulkan-image-copy",
     "vulkan-offscreen-simulation",
@@ -2704,6 +2705,214 @@ def _vulkan_ray_update_case(order, args):
     return result
 
 
+def _vulkan_ray_inline_contact_case(order, args):
+    """Compare fused inline contact response with batch query plus response."""
+
+    _init_vulkan()
+    if not ti.hardware.ray.is_available():
+        result = _provenance("vulkan-ray-inline-contact", order)
+        result.update(
+            {"status": "skipped", "reason": "vulkan_ray_query_unavailable"}
+        )
+        ti.reset()
+        return result
+
+    grid = args.ray_grid
+    query_side = args.ray_query_side
+    x, y = np.meshgrid(
+        np.linspace(-1.0, 1.0, grid, dtype=np.float32),
+        np.linspace(-1.0, 1.0, grid, dtype=np.float32),
+        indexing="ij",
+    )
+    vertices_host = np.stack(
+        (x.reshape(-1), y.reshape(-1), np.zeros(grid * grid, np.float32)),
+        axis=1,
+    )
+    triangles = []
+    for row in range(grid - 1):
+        for column in range(grid - 1):
+            lower = row * grid + column
+            triangles.append((lower, lower + grid, lower + 1))
+            triangles.append((lower + 1, lower + grid, lower + grid + 1))
+    indices_host = np.asarray(triangles, dtype=np.int32)
+
+    ray_x, ray_y = np.meshgrid(
+        np.linspace(-0.95, 0.95, query_side, dtype=np.float32),
+        np.linspace(-0.95, 0.95, query_side, dtype=np.float32),
+        indexing="ij",
+    )
+    ray_count = query_side * query_side
+    rays_host = np.zeros((ray_count, 8), dtype=np.float32)
+    rays_host[:, 0] = ray_x.reshape(-1)
+    rays_host[:, 1] = ray_y.reshape(-1)
+    rays_host[:, 2] = (
+        np.arange(ray_count, dtype=np.float32) % np.float32(257.0)
+    ) / np.float32(256.0) + np.float32(0.5)
+    rays_host[:, 3] = 0.001
+    rays_host[:, 6] = -1.0
+    rays_host[:, 7] = 4.0
+    velocities_host = np.zeros((ray_count, 3), dtype=np.float32)
+    velocities_host[:, 0] = np.float32(0.25)
+    velocities_host[:, 1] = np.float32(-0.125)
+    velocities_host[:, 2] = -(
+        np.arange(ray_count, dtype=np.float32) % np.float32(31.0)
+    ) / np.float32(31.0) - np.float32(0.1)
+
+    vertices = ti.ndarray(ti.f32, shape=vertices_host.shape)
+    indices = ti.ndarray(ti.i32, shape=indices_host.shape)
+    positions = ti.Vector.field(3, dtype=ti.f32, shape=ray_count)
+    velocities = ti.Vector.field(3, dtype=ti.f32, shape=ray_count)
+    staged_rays = ti.ndarray(ti.f32, shape=rays_host.shape)
+    batch_hits = ti.ndarray(ti.f32, shape=(ray_count, 4))
+    inline_output = ti.ndarray(ti.f32, shape=(ray_count, 4))
+    batch_output = ti.ndarray(ti.f32, shape=(ray_count, 4))
+    vertices.from_numpy(vertices_host)
+    indices.from_numpy(indices_host)
+    positions.from_numpy(rays_host[:, :3])
+    velocities.from_numpy(velocities_host)
+
+    setup_started = time.perf_counter_ns()
+    blas = ti.hardware.ray.TriangleBLAS(vertices, indices)
+    tlas = ti.hardware.ray.InstanceTLAS(
+        [ti.hardware.ray.RayInstance(blas, custom_index=11)]
+    )
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+
+    radius = 0.02
+    restitution = 0.35
+
+    @ti.kernel
+    def fused_contact(
+        acceleration: ti.types.acceleration_structure(),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        ti.loop_config(block_dim=128)
+        for i in range(ray_count):
+            hit = acceleration.trace_closest(
+                positions[i],
+                ti.Vector([0.0, 0.0, -1.0]),
+                0.001,
+                4.0,
+            )
+            output[i, 0] = positions[i].z
+            output[i, 1] = velocities[i].z
+            output[i, 2] = 0.0
+            output[i, 3] = 0.0
+            if hit.hit != 0:
+                output[i, 0] = positions[i].z - hit.t + radius
+                output[i, 1] = ti.max(-restitution * velocities[i].z, 0.0)
+                output[i, 2] = hit.t
+                output[i, 3] = 1.0
+
+    @ti.kernel
+    def stage_rays(ray_data: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        ti.loop_config(block_dim=128)
+        for i in range(ray_count):
+            ray_data[i, 0] = positions[i].x
+            ray_data[i, 1] = positions[i].y
+            ray_data[i, 2] = positions[i].z
+            ray_data[i, 3] = 0.001
+            ray_data[i, 4] = 0.0
+            ray_data[i, 5] = 0.0
+            ray_data[i, 6] = -1.0
+            ray_data[i, 7] = 4.0
+
+    @ti.kernel
+    def batch_contact_response(
+        hits: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        ti.loop_config(block_dim=128)
+        for i in range(ray_count):
+            output[i, 0] = positions[i].z
+            output[i, 1] = velocities[i].z
+            output[i, 2] = 0.0
+            output[i, 3] = 0.0
+            if hits[i, 3] != 0.0:
+                output[i, 0] = positions[i].z - hits[i, 0] + radius
+                output[i, 1] = ti.max(-restitution * velocities[i].z, 0.0)
+                output[i, 2] = hits[i, 0]
+                output[i, 3] = 1.0
+
+    def hardware():
+        fused_contact(tlas, inline_output)
+
+    def baseline():
+        stage_rays(staged_rays)
+        tlas.trace(staged_rays, batch_hits)
+        batch_contact_response(batch_hits, batch_output)
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    inline_values = inline_output.to_numpy()
+    batch_values = batch_output.to_numpy()
+    cross_error = _error(inline_values, batch_values)
+    expected = np.empty_like(inline_values)
+    expected[:, 0] = radius
+    expected[:, 1] = np.maximum(-restitution * velocities_host[:, 2], 0.0)
+    expected[:, 2] = rays_host[:, 2]
+    expected[:, 3] = 1.0
+    inline_error = _error(inline_values, expected)
+    batch_error = _error(batch_values, expected)
+    inline_route = _resolved_operation("ray.query.inline.vulkan")
+    batch_route = _resolved_operation("ray.query.batch.vulkan")
+    passed = bool(
+        inline_error[0] <= 2.0e-5
+        and batch_error[0] <= 2.0e-5
+        and cross_error[0] <= 2.0e-5
+        and inline_route["discovery"] == "available"
+        and inline_route["selection"] in ("eligible", "selected")
+        and batch_route["discovery"] == "available"
+    )
+    result = _provenance("vulkan-ray-inline-contact", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "kind": "particle_heightfield_contact_projection",
+                "grid": grid,
+                "triangles": len(triangles),
+                "particles": ray_count,
+                "radius": radius,
+                "restitution": restitution,
+                "initial_scene_build_ms": setup_ms,
+                "hardware": "kernel-inline Vulkan Ray Query fused with contact response",
+                "baseline": "field-to-ray staging, batch Vulkan Ray Query, and Taichi contact response",
+                "timed_scope": "ray traversal plus contact response plus synchronization",
+                "scene_build_included": False,
+                "state_layout": "dense vector fields typical of particle solvers",
+            },
+            "timing": timing,
+            "correctness": {
+                "tolerance": 2.0e-5,
+                "inline_vs_host_max_abs": inline_error[0],
+                "batch_vs_host_max_abs": batch_error[0],
+                "inline_vs_batch_max_abs": cross_error[0],
+                "all_particles_hit": bool(np.all(inline_values[:, 3] == 1.0)),
+            },
+            "route": {"inline": inline_route, "batch": batch_route},
+            "architecture_benefit": {
+                "query_and_response_fused": True,
+                "intermediate_hit_buffer_eliminated": True,
+                "extra_response_dispatch_eliminated": True,
+            },
+        }
+    )
+    tlas.close()
+    blas.close()
+    ti.sync()
+    ti.reset()
+    return result
+
+
 def _vulkan_texture_fetch_case(order, args):
     _init_vulkan()
     size = args.texture_size
@@ -3681,6 +3890,7 @@ _CASE_RUNNERS = {
     "cuda-cudss-solve": _cuda_cudss_solve_case,
     "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
     "cuda-cudss-tet-fem": _cuda_cudss_tet_fem_case,
+    "vulkan-ray-inline-contact": _vulkan_ray_inline_contact_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-image-copy": _vulkan_image_copy_case,
     "vulkan-offscreen-simulation": _vulkan_offscreen_simulation_case,
