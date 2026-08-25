@@ -316,11 +316,32 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         assert device_vector_stats["transfer_native_submissions"] == 0
         assert device_vector_stats["direct_graph_solve_submissions"] == 1
         assert device_vector_stats["direct_dense_field_submissions"] == 1
+        device_operations = device_stats["operations"]
+        assert device_operations["host_scalar_readbacks"] == 1
+        assert device_operations["host_synchronizations"] == 1
+        assert device_operations["solver_chunk_submissions"] == 1
+        assert device_operations["structured_control_observation_batches"] == 0
         if impl.current_cfg().arch == ti.vulkan:
-            control = device_plan._solver._graph.control_flow_stats()[0]
-            assert control.lowering == "vulkan_compact_indirect"
-            assert control.logical_iterations == 1
-            assert control.executed_iterations == 8
+            assert device_operations["last_structured_control_lowering"] == (
+                "vulkan_compact_indirect"
+            )
+            assert device_operations["last_logical_iterations"] == 1
+            assert device_operations["last_executed_iterations"] == 8
+        else:
+            assert device_operations["last_structured_control_lowering"] == (
+                "cuda_conditional_graph"
+            )
+            assert device_operations["last_logical_iterations"] == 1
+            assert device_operations["last_executed_iterations"] == 1
+        with pytest.raises(
+            ti.TaichiRuntimeError,
+            match="unavailable after asynchronous submission",
+        ):
+            device_plan._solver._graph.control_flow_stats()
+        graph_memory = device_plan._solver._graph.execution_stats().memory
+        assert graph_memory.workspace_lanes_busy == 0
+        assert graph_memory.workspace_lane_acquisitions == 1
+        assert graph_memory.workspace_lane_waits == 0
 
     volume_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
     volume_source = ti.field(ti.f32, shape=(2, 2, 2))
@@ -639,6 +660,7 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
     assert stats["identity"]["preconditioner_method"] == "linear_operator"
     assert stats["operations"]["preconditioner_apply_calls"] == 2
     assert stats["operations"]["host_scalar_readbacks"] == 1
+    assert stats["operations"]["structured_control_observation_batches"] == 0
     vector_stats = stats["vector_io"]
     assert vector_stats["pack_calls"] == 0
     assert vector_stats["unpack_calls"] == 0
