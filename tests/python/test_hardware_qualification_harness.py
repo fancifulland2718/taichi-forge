@@ -523,6 +523,91 @@ def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():
     assert not report["performance_claim_eligible"]
 
 
+def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [1.1] * 5,
+            [1.1] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker["backend"] = "vulkan"
+        worker["workload"].update({"retained_binding_sets": 1, "retained_packets_per_burst": 4})
+        worker["correctness"] = {
+            "binding_sets": [
+                {
+                    "hardware_nonempty": True,
+                    "rerecord_exact_image_match": True,
+                }
+            ]
+        }
+        worker["memory"] = {"pipeline_closed": {"lifecycle_state": "closed"}}
+        worker["replay_proof"] = {
+            "enabled": True,
+            "baseline_mode": "rerecord",
+            "runtime_statistics": {
+                "retained_replay_prewarms": 1,
+                "retained_replay_records": 1,
+                "retained_replay_replays": 100,
+                "retained_replay_busy_fallbacks": 0,
+                "retained_replay_submit_failures": 0,
+                "retained_replay_bridge_failures": 0,
+                "retained_replay_slots": 1,
+                "retained_replay_slot_capacity": 1,
+            },
+        }
+        worker["packet_timing"] = {
+            "scope": "four fixed-binding packets with one terminal wait",
+            "samples_ms": {"hardware": [1.0] * 5, "baseline": [1.1] * 5},
+            "paired_speedups": [1.1] * 5,
+            "calibration": {
+                "hardware": {"satisfied": True, "observed_block_ms": 100.0},
+                "baseline": {"satisfied": True, "observed_block_ms": 100.0},
+            },
+        }
+        worker["packet_lifecycle"] = {
+            "packets_per_burst": 4,
+            "binding_sets": 1,
+            "calls": {
+                "hardware": {"bursts": 5, "submissions": 20, "completion_waits": 5},
+                "baseline": {"bursts": 5, "submissions": 20, "completion_waits": 5},
+            },
+            "hardware_workspace_lane_waits_delta": 0,
+            "baseline_workspace_lane_waits_delta": 0,
+            "hardware_workspace_lanes_busy_after": 0,
+            "baseline_workspace_lanes_busy_after": 0,
+            "retained_replay_busy_fallbacks_delta": 0,
+            "retained_replay_submit_failures_delta": 0,
+            "retained_replay_bridge_failures_delta": 0,
+        }
+
+    report = qualification._aggregate("vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10)
+    gate = report["replay_proof_gate"]
+    assert gate["scope"] == "vulkan_fixed_binding_multi_packet"
+    assert gate["lifecycle_gate_passed"]
+    assert gate["low_sync_gate_passed"]
+    assert gate["packet_performance_gate_passed"]
+    assert gate["retention_gate_passed"]
+    assert not report["performance_claim_eligible"]
+
+    workers[0]["packet_lifecycle"]["hardware_workspace_lane_waits_delta"] = 1
+    report = qualification._aggregate("vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10)
+    gate = report["replay_proof_gate"]
+    assert gate["lifecycle_gate_passed"]
+    assert not gate["low_sync_gate_passed"]
+    assert not gate["retention_gate_passed"]
+
+    qualification._apply_build_provenance_gate([report], "different-revision")
+    assert not report["packet_timing"]["performance_evidence_qualified"]
+    assert not report["packet_timing"]["gate_passed"]
+    assert report["packet_timing"]["gate_reason"] == "build_provenance_unqualified"
+
+
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():
     workers = (
         _worker("ab", [1.0] * 5, [2.0] * 5, [2.0] * 5),

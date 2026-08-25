@@ -3170,6 +3170,7 @@ def _vulkan_offscreen_simulation_case(order, args):
     baseline_image = ti.ndarray(ti.f32, shape=size * size * 3)
     target = ti.Texture(ti.Format.rgba8, (size, size))
     retained_binding_sets = args.vulkan_retained_binding_sets
+    retained_packets = args.vulkan_retained_packets
     hardware_vertices_sets = [hardware_vertices]
     hardware_phase_sets = [hardware_phase]
     target_sets = [target]
@@ -3372,6 +3373,8 @@ def _vulkan_offscreen_simulation_case(order, args):
 
     submit_timing = None
     gpu_stage_timing = None
+    packet_timing = None
+    packet_lifecycle = None
     timing = _measure_pair(
         hardware,
         baseline,
@@ -3467,6 +3470,85 @@ def _vulkan_offscreen_simulation_case(order, args):
             "samples_ms": gpu_samples,
             "observations": gpu_observations,
             "paired_speedups": paired_gpu_speedups,
+        }
+    if (
+        args.vulkan_retained_replay_proof
+        and rerecord_graph is not None
+        and retained_packets > 1
+    ):
+        packet_calls = {
+            variant: {"bursts": 0, "submissions": 0, "completion_waits": 0}
+            for variant in ("hardware", "baseline")
+        }
+        program = ti.lang.impl.get_runtime().prog
+        replay_before_packets = dict(
+            program._debug_vulkan_graphics_resource_stats()
+        )
+        hardware_memory_before = hardware_graph.execution_stats().memory
+        baseline_memory_before = rerecord_graph.execution_stats().memory
+
+        def packet_burst(variant):
+            graph = hardware_graph if variant == "hardware" else rerecord_graph
+            bindings = (
+                hardware_binding_sets[0]
+                if variant == "hardware"
+                else baseline_binding_sets[0]
+            )
+            tickets = [graph.submit(bindings) for _ in range(retained_packets)]
+            packet_calls[variant]["bursts"] += 1
+            packet_calls[variant]["submissions"] += len(tickets)
+            tickets[-1].wait()
+            packet_calls[variant]["completion_waits"] += 1
+
+        packet_timing = _measure_pair(
+            lambda: packet_burst("hardware"),
+            lambda: packet_burst("baseline"),
+            order,
+            args.warmup,
+            args.rounds,
+            args.repetitions,
+            args.minimum_block_ms,
+            args.maximum_repetitions,
+        )
+        packet_timing["scope"] = (
+            f"{retained_packets} fixed-binding Graph.submit packets with one terminal wait"
+        )
+        replay_after_packets = dict(
+            program._debug_vulkan_graphics_resource_stats()
+        )
+        hardware_memory_after = hardware_graph.execution_stats().memory
+        baseline_memory_after = rerecord_graph.execution_stats().memory
+        packet_lifecycle = {
+            "scope": "fixed-binding Graph.submit burst with one terminal wait",
+            "packets_per_burst": retained_packets,
+            "binding_sets": retained_binding_sets,
+            "calls": packet_calls,
+            "hardware_workspace_lane_waits_delta": (
+                hardware_memory_after.workspace_lane_waits
+                - hardware_memory_before.workspace_lane_waits
+            ),
+            "baseline_workspace_lane_waits_delta": (
+                baseline_memory_after.workspace_lane_waits
+                - baseline_memory_before.workspace_lane_waits
+            ),
+            "hardware_workspace_lanes_busy_after": (
+                hardware_memory_after.workspace_lanes_busy
+            ),
+            "baseline_workspace_lanes_busy_after": (
+                baseline_memory_after.workspace_lanes_busy
+            ),
+            "retained_replay_busy_fallbacks_delta": (
+                replay_after_packets["retained_replay_busy_fallbacks"]
+                - replay_before_packets["retained_replay_busy_fallbacks"]
+            ),
+            "retained_replay_submit_failures_delta": (
+                replay_after_packets["retained_replay_submit_failures"]
+                - replay_before_packets["retained_replay_submit_failures"]
+            ),
+            "retained_replay_bridge_failures_delta": (
+                replay_after_packets["retained_replay_bridge_failures"]
+                - replay_before_packets["retained_replay_bridge_failures"]
+            ),
         }
     for phase in hardware_phase_sets:
         phase.from_numpy(np.zeros(1, dtype=np.float32))
@@ -3580,6 +3662,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "triangle_tiles": (tiles, tiles),
                 "triangles_per_frame": triangle_count,
                 "retained_binding_sets": retained_binding_sets,
+                "retained_packets_per_burst": retained_packets,
                 "timed_scope": "simulation_kernel+offscreen_raster+single_final_synchronization",
                 "readback_included": False,
                 "hardware": "Forge low-level Vulkan graphics pass recording",
@@ -3628,6 +3711,8 @@ def _vulkan_offscreen_simulation_case(order, args):
             },
             "submit_timing": submit_timing,
             "gpu_stage_timing": gpu_stage_timing,
+            "packet_timing": packet_timing,
+            "packet_lifecycle": packet_lifecycle,
             "memory": {
                 "pipeline_open": memory_open,
                 "pipeline_closed": memory_closed,
@@ -4194,6 +4279,76 @@ def _aggregate(
             "minimum_conservative_speedup": 1.0 / 0.95,
             "gate_passed": (submit_stable and submit_speedup["p05"] >= 1.0 / 0.95),
         }
+    if all(worker.get("packet_timing") is not None for worker in workers):
+        packet_variants = {}
+        packet_stable = True
+        for variant in ("hardware", "baseline"):
+            samples = [
+                sample
+                for worker in workers
+                for sample in worker["packet_timing"]["samples_ms"][variant]
+            ]
+            summary = _summary(samples)
+            by_order = {
+                order: statistics.median(
+                    sample
+                    for worker in workers
+                    if worker["order"] == order
+                    for sample in worker["packet_timing"]["samples_ms"][variant]
+                )
+                for order in ("ab", "ba")
+            }
+            drift = abs(by_order["ab"] - by_order["ba"]) / max(
+                summary["median_ms"], np.finfo(np.float64).tiny
+            )
+            variant_stable = summary["cv"] <= cv_limit and drift <= drift_limit
+            packet_stable = packet_stable and variant_stable
+            packet_variants[variant] = {
+                **summary,
+                "order_medians_ms": by_order,
+                "order_drift": drift,
+                "stable": variant_stable,
+            }
+        packet_speedup = _ratio_summary(
+            ratio
+            for worker in workers
+            for ratio in worker["packet_timing"]["paired_speedups"]
+        )
+        packet_minimum_block_qualified = all(
+            worker["packet_timing"].get("calibration", {})
+            .get(variant, {})
+            .get("satisfied", False)
+            and worker["packet_timing"]["calibration"][variant].get(
+                "observed_block_ms", 0.0
+            )
+            >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
+            for worker in workers
+            for variant in ("hardware", "baseline")
+        )
+        packet_samples_qualified = all(
+            packet_variants[variant]["count"] >= AUTO_ADMISSION_MINIMUM_SAMPLES
+            for variant in ("hardware", "baseline")
+        )
+        packet_evidence_qualified = bool(
+            performance_evidence["qualified"]
+            and packet_stable
+            and packet_minimum_block_qualified
+            and packet_samples_qualified
+        )
+        result["packet_timing"] = {
+            "scope": workers[0]["packet_timing"]["scope"],
+            "variants": packet_variants,
+            "paired_speedup": packet_speedup,
+            "stable": packet_stable,
+            "minimum_block_qualified": packet_minimum_block_qualified,
+            "minimum_samples_qualified": packet_samples_qualified,
+            "performance_evidence_qualified": packet_evidence_qualified,
+            "minimum_conservative_non_regression": 0.95,
+            "non_regression_gate_passed": packet_speedup["p05"] >= 0.95,
+            "gate_passed": (
+                packet_evidence_qualified and packet_speedup["p05"] >= 0.95
+            ),
+        }
     if all(worker.get("gpu_stage_timing") is not None for worker in workers):
         gpu_variants = {}
         gpu_stable = True
@@ -4425,6 +4580,9 @@ def _aggregate(
             retained_binding_sets = int(
                 workers[0]["workload"]["retained_binding_sets"]
             )
+            retained_packets = int(
+                workers[0]["workload"].get("retained_packets_per_burst", 1)
+            )
             binding_rotation_scope = retained_binding_sets > 1
             counters_qualified = all(
                 proof.get("runtime_statistics") is not None
@@ -4515,6 +4673,43 @@ def _aggregate(
                     for worker in workers
                 )
             )
+            packet_lifecycle_records = [
+                worker.get("packet_lifecycle") for worker in workers
+            ]
+            packet_lifecycle_qualified = bool(
+                retained_packets == 1
+                or (
+                    all(record is not None for record in packet_lifecycle_records)
+                    and all(
+                        record["packets_per_burst"] == retained_packets
+                        and record["binding_sets"] == 1
+                        and record["hardware_workspace_lanes_busy_after"] == 0
+                        and record["baseline_workspace_lanes_busy_after"] == 0
+                        and record["retained_replay_busy_fallbacks_delta"] == 0
+                        and record["retained_replay_submit_failures_delta"] == 0
+                        and record["retained_replay_bridge_failures_delta"] == 0
+                        and all(
+                            calls["bursts"] > 0
+                            and calls["submissions"]
+                            == calls["bursts"] * retained_packets
+                            and calls["completion_waits"] == calls["bursts"]
+                            for calls in record["calls"].values()
+                        )
+                        for record in packet_lifecycle_records
+                    )
+                )
+            )
+            packet_low_sync_qualified = bool(
+                retained_packets == 1
+                or (
+                    packet_lifecycle_qualified
+                    and all(
+                        record["hardware_workspace_lane_waits_delta"] == 0
+                        and record["baseline_workspace_lane_waits_delta"] == 0
+                        for record in packet_lifecycle_records
+                    )
+                )
+            )
             if binding_rotation_scope:
                 result["replay_proof_gate"] = {
                     "scope": "vulkan_binding_rotation_lifecycle",
@@ -4542,6 +4737,47 @@ def _aggregate(
                     and gpu_stage_gate
                     and (wall_gate or cpu_submit_gate)
                 )
+                if retained_packets > 1:
+                    packet_performance_gate = bool(
+                        result.get("packet_timing", {}).get("gate_passed", False)
+                    )
+                    packet_gate = bool(
+                        counters_qualified
+                        and lifecycle_qualified
+                        and packet_lifecycle_qualified
+                        and packet_low_sync_qualified
+                        and packet_performance_gate
+                    )
+                    result["replay_proof_gate"] = {
+                        "scope": "vulkan_fixed_binding_multi_packet",
+                        "retained_binding_sets": retained_binding_sets,
+                        "retained_packets_per_burst": retained_packets,
+                        "counters_qualified": counters_qualified,
+                        "lifecycle_gate_passed": (
+                            lifecycle_qualified and packet_lifecycle_qualified
+                        ),
+                        "low_sync_gate_passed": packet_low_sync_qualified,
+                        "packet_performance_gate_passed": (
+                            packet_performance_gate
+                        ),
+                        "performance_gate_passed": packet_gate,
+                        "retention_gate_passed": packet_gate,
+                    }
+                    result["performance_claim_eligible"] = False
+                    for diagnostic in (
+                        "memory",
+                        "provider_statistics",
+                        "replay_proof",
+                        "packet_lifecycle",
+                    ):
+                        values = [
+                            worker[diagnostic]
+                            for worker in workers
+                            if diagnostic in worker
+                        ]
+                        if values:
+                            result[diagnostic] = values
+                    return result
                 result["replay_proof_gate"] = {
                     "scope": "mechanism_retained_vs_rerecord",
                     "retained_binding_sets": retained_binding_sets,
@@ -4663,6 +4899,11 @@ def _apply_build_provenance_gate(case_reports, source_revision):
             performance_evidence["reasons"] = tuple(
                 dict.fromkeys((*performance_evidence.get("reasons", ()), "build_provenance_unqualified"))
             )
+        packet_timing = case.get("packet_timing")
+        if packet_timing is not None:
+            packet_timing["performance_evidence_qualified"] = False
+            packet_timing["gate_passed"] = False
+            packet_timing["gate_reason"] = "build_provenance_unqualified"
         case["performance_claim_eligible"] = False
         auto_admission = case.get("auto_admission")
         if auto_admission is not None and auto_admission.get("eligible"):
@@ -4670,7 +4911,12 @@ def _apply_build_provenance_gate(case_reports, source_revision):
             auto_admission.update({"eligible": False, "reason": "build_provenance_unqualified"})
         if replay_gate is not None:
             replay_gate["gate_reason"] = "build_provenance_unqualified"
-            for key in ("physics_roi_gate_passed", "performance_gate_passed", "retention_gate_passed"):
+            for key in (
+                "physics_roi_gate_passed",
+                "packet_performance_gate_passed",
+                "performance_gate_passed",
+                "retention_gate_passed",
+            ):
                 if key in replay_gate:
                     replay_gate[key] = False
     return _build_provenance_qualification(source_revision, measured_worker_provenance)
@@ -4758,6 +5004,8 @@ def _parent(args):
                     args.offscreen_baseline,
                     "--vulkan-retained-binding-sets",
                     str(args.vulkan_retained_binding_sets),
+                    "--vulkan-retained-packets",
+                    str(args.vulkan_retained_packets),
                 ]
                 if args.vulkan_retained_replay_proof:
                     command.append("--vulkan-retained-replay-proof")
@@ -4867,6 +5115,7 @@ def _parent(args):
                 "offscreen_baseline": args.offscreen_baseline,
                 "vulkan_retained_replay_proof": (args.vulkan_retained_replay_proof),
                 "vulkan_retained_binding_sets": (args.vulkan_retained_binding_sets),
+                "vulkan_retained_packets": (args.vulkan_retained_packets),
             },
             "timing": "synchronized wall completion latency",
             "cold_timings_excluded_from_speedup": True,
@@ -4940,6 +5189,7 @@ def _parse_args():
     )
     parser.add_argument("--vulkan-retained-replay-proof", action="store_true")
     parser.add_argument("--vulkan-retained-binding-sets", type=int, default=1)
+    parser.add_argument("--vulkan-retained-packets", type=int, default=1)
     args = parser.parse_args()
     if args.worker:
         if not args.case or not args.order or not args.worker_output:
@@ -4984,6 +5234,11 @@ def _parse_args():
         or args.offscreen_draws > args.offscreen_tiles * args.offscreen_tiles
         or (args.offscreen_tiles * args.offscreen_tiles) % args.offscreen_draws != 0
         or not 1 <= args.vulkan_retained_binding_sets <= 2
+        or not 1 <= args.vulkan_retained_packets <= 64
+        or (
+            args.vulkan_retained_binding_sets > 1
+            and args.vulkan_retained_packets > 1
+        )
         or (
             args.vulkan_retained_binding_sets > 1
             and (
