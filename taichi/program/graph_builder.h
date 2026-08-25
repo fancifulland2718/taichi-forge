@@ -190,6 +190,14 @@ class GraphBuilder {
                                            const aot::Arg &input,
                                            const aot::Arg &output);
 
+  void dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
+                                   Program *program,
+                                   const aot::Arg &input,
+                                   const aot::Arg &output,
+                                   int direction,
+                                   std::size_t input_scalars,
+                                   std::size_t output_scalars);
+
   Sequential *seq() const;
 
   void enable_two_map_composer() {

@@ -92,6 +92,7 @@ AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
 CASES = (
     "cuda-fft",
+    "cuda-cufft-mixed-replay",
     "cuda-fft-poisson",
     "cuda-gemm",
     "cuda-mma",
@@ -840,6 +841,172 @@ def _cuda_fft_case(order, args):
     )
     plan.close()
     ti.reset()
+    return result
+
+
+def _cuda_cufft_mixed_replay_case(order, args):
+    _init_cuda()
+    if not ti.hardware.fft.is_available():
+        result = _provenance("cuda-cufft-mixed-replay", order)
+        result.update({"status": "skipped", "reason": "cufft_unavailable"})
+        ti.reset()
+        return result
+    length = args.fft_length
+    batch = args.fft_batch
+    if length & (length - 1):
+        raise ValueError("fft-length must be a power of two")
+    shape = (batch, length, 2)
+    rng = np.random.default_rng(20260825)
+    complex_values = (
+        rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))
+    ).astype(np.complex64)
+    packed_values = np.stack(
+        (complex_values.real, complex_values.imag), axis=-1
+    ).astype(np.float32)
+    source = ti.ndarray(ti.f32, shape=shape)
+    source.from_numpy(packed_values)
+    plan = ti.hardware.fft.CufftPlan1D(length, batch_count=batch, transform="c2c")
+
+    @ti.kernel
+    def prepare(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        work: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, component in values:
+            work[i, j, component] = values[i, j, component]
+
+    @ti.kernel
+    def finish(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, component in values:
+            output[i, j, component] = values[i, j, component]
+
+    original_proof_flag = os.environ.get("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF")
+    os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = "1"
+    recording = plan.record(input="work", output="fft_output")
+    os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
+    rerecord_recording = plan.record(input="work", output="fft_output")
+    os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = "1"
+    if recording.replay_mode != "stream_capture":
+        raise RuntimeError("failed to construct the cuFFT capture proof recording")
+    if rerecord_recording.replay_mode != "rerecord":
+        raise RuntimeError("failed to construct the cuFFT rerecord baseline")
+
+    graph_args = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=3)
+        for name in ("source", "work", "fft_output", "result")
+    }
+
+    def build_graph(selected_recording):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(prepare, graph_args["source"], graph_args["work"])
+        builder.append_native(selected_recording, admission="explicit")
+        builder.dispatch(finish, graph_args["fft_output"], graph_args["result"])
+        return builder.compile()
+
+    hardware_graph = build_graph(recording)
+    baseline_graph = build_graph(rerecord_recording)
+    if not hardware_graph._graph_stats[0]["diagnostics_counters_complete"]:
+        raise RuntimeError("cuFFT replay diagnostics were enabled too late")
+
+    def make_bindings():
+        return {
+            "source": source,
+            "work": ti.ndarray(ti.f32, shape=shape),
+            "fft_output": ti.ndarray(ti.f32, shape=shape),
+            "result": ti.ndarray(ti.f32, shape=shape),
+        }
+
+    hardware_bindings = make_bindings()
+    baseline_bindings = make_bindings()
+
+    def hardware():
+        hardware_graph.run(hardware_bindings)
+        ti.sync()
+
+    def baseline():
+        baseline_graph.run(baseline_bindings)
+        ti.sync()
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware()
+    baseline()
+    expected = np.fft.fft(complex_values, axis=-1)
+    hardware_values = hardware_bindings["result"].to_numpy()
+    baseline_values = baseline_bindings["result"].to_numpy()
+    hardware_complex = hardware_values[..., 0] + 1j * hardware_values[..., 1]
+    baseline_complex = baseline_values[..., 0] + 1j * baseline_values[..., 1]
+    hardware_error = _error(hardware_complex, expected)
+    baseline_error = _error(baseline_complex, expected)
+    cross_error = _error(hardware_complex, baseline_complex)
+    route = _resolved_operation("fft.transform.cufft")
+    graph_statistics = dict(hardware_graph._graph_stats[0])
+    memory_open = plan.memory_report().to_dict()
+    passed = bool(
+        hardware_error[1] <= 2e-5
+        and baseline_error[1] <= 2e-5
+        and cross_error[1] <= 2e-5
+        and route["discovery"] == "available"
+        and route["selection"] in ("eligible", "selected")
+        and graph_statistics["captures"] == 1
+        and graph_statistics["exact_replays"] > 0
+        and graph_statistics["patched_replays"] == 0
+    )
+    result = _provenance("cuda-cufft-mixed-replay", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "length": length,
+                "batch": batch,
+                "transforms": batch,
+                "timed_scope": (
+                    "prepare+fixed-plan C2C cuFFT+finish+terminal synchronization"
+                ),
+                "hardware": "fixed-binding CUDA Graph mixed cuFFT capture replay",
+                "baseline": "segmented root Graph with cuFFT rerecord",
+                "host_readback_included": False,
+            },
+            "timing": timing,
+            "correctness": {
+                "hardware_max_abs": hardware_error[0],
+                "hardware_max_rel": hardware_error[1],
+                "baseline_max_abs": baseline_error[0],
+                "baseline_max_rel": baseline_error[1],
+                "cross_max_abs": cross_error[0],
+                "cross_max_rel": cross_error[1],
+            },
+            "route": route,
+            "memory": {"plan_open": memory_open},
+            "replay_proof": {
+                "enabled": True,
+                "baseline_mode": "rerecord",
+                "graph_statistics": graph_statistics,
+            },
+        }
+    )
+    plan.close()
+    result["memory"]["plan_closed"] = plan.memory_report().to_dict()
+    ti.reset()
+    result["replay_proof"]["lifecycle"] = {
+        "scope": "fresh_process_capture_replay_runtime_reset",
+        "runtime_reset_completed": True,
+    }
+    if original_proof_flag is None:
+        os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
+    else:
+        os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = original_proof_flag
     return result
 
 
@@ -3452,6 +3619,7 @@ def _vulkan_texture_stencil_case(order, args):
 
 _CASE_RUNNERS = {
     "cuda-fft": _cuda_fft_case,
+    "cuda-cufft-mixed-replay": _cuda_cufft_mixed_replay_case,
     "cuda-fft-poisson": _cuda_fft_poisson_case,
     "cuda-gemm": _cuda_gemm_case,
     "cuda-mma": _cuda_mma_case,

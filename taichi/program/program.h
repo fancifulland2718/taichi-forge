@@ -1176,6 +1176,14 @@ class TI_DLL_EXPORT Program {
                                      Ndarray *output,
                                      int direction);
 
+  bool cuda_cufft_capture_plan_available(std::uint64_t handle);
+
+  std::size_t cuda_cufft_capture_record(std::uint64_t handle,
+                                        Ndarray *input,
+                                        Ndarray *output,
+                                        int direction,
+                                        void *stream);
+
   std::unordered_map<std::string, std::uint64_t>
   cuda_cufft_plan_memory_statistics(std::uint64_t handle);
 

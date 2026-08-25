@@ -26,6 +26,25 @@ const Ndarray *cuda_sparse_spmv_ndarray(
   return array;
 }
 
+Ndarray *cuda_cufft_ndarray(
+    const aot::Arg &symbol,
+    const std::unordered_map<std::string, aot::IValue> &args,
+    Program &program,
+    std::size_t expected_scalars) {
+  const auto value_it = args.find(symbol.name);
+  if (value_it == args.end() || value_it->second.tag != aot::ArgKind::kNdarray) {
+    return nullptr;
+  }
+  auto *array = reinterpret_cast<Ndarray *>(value_it->second.val);
+  if (array == nullptr || array->owning_program() != &program ||
+      array->get_element_data_type() != PrimitiveType::f32 ||
+      !array->get_element_shape().empty() ||
+      array->get_nelement() != expected_scalars) {
+    return nullptr;
+  }
+  return array;
+}
+
 class CudaSparseSpmvCaptureCommand final
     : public aot::CudaGraphCaptureCommand {
  public:
@@ -116,6 +135,81 @@ class CudaSparseSpmvCaptureCommand final
   aot::Arg output_;
 };
 
+class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
+ public:
+  CudaCufftCaptureCommand(std::uint64_t plan_handle,
+                          Program *program,
+                          aot::Arg input,
+                          aot::Arg output,
+                          int direction,
+                          std::size_t input_scalars,
+                          std::size_t output_scalars)
+      : plan_handle_(plan_handle),
+        program_(program),
+        input_(std::move(input)),
+        output_(std::move(output)),
+        direction_(direction),
+        input_scalars_(input_scalars),
+        output_scalars_(output_scalars) {
+  }
+
+  const char *kind() const override {
+    return "cufft_fixed_plan";
+  }
+
+  Program *program() const override {
+    return program_;
+  }
+
+  bool supports(const std::unordered_map<std::string, aot::IValue> &args,
+                Program &program) const override {
+    if (program_ != &program || plan_handle_ == 0 ||
+        !program.cuda_cufft_capture_plan_available(plan_handle_)) {
+      return false;
+    }
+    auto *input = cuda_cufft_ndarray(input_, args, program, input_scalars_);
+    auto *output = cuda_cufft_ndarray(output_, args, program, output_scalars_);
+    return input != nullptr && output != nullptr &&
+           input->get_device_allocation() != output->get_device_allocation();
+  }
+
+  void prepare(const std::unordered_map<std::string, aot::IValue> &args,
+               Program &program) override {
+    record(args, program, nullptr);
+  }
+
+  void record(const std::unordered_map<std::string, aot::IValue> &args,
+              Program &program,
+              void *stream) override {
+    TI_ERROR_IF(program_ != &program || plan_handle_ == 0,
+                "CUDA cuFFT capture recipe provider generation is stale");
+    auto *input = cuda_cufft_ndarray(input_, args, program, input_scalars_);
+    auto *output = cuda_cufft_ndarray(output_, args, program, output_scalars_);
+    TI_ERROR_IF(input == nullptr,
+                "CUDA cuFFT capture input {} must be an owning compact f32 "
+                "ndarray with {} scalar elements in the active Program",
+                input_.name, input_scalars_);
+    TI_ERROR_IF(output == nullptr,
+                "CUDA cuFFT capture output {} must be an owning compact f32 "
+                "ndarray with {} scalar elements in the active Program",
+                output_.name, output_scalars_);
+    TI_ERROR_IF(input->get_device_allocation() ==
+                    output->get_device_allocation(),
+                "CUDA cuFFT capture input/output alias");
+    program.cuda_cufft_capture_record(plan_handle_, input, output, direction_,
+                                      stream);
+  }
+
+ private:
+  std::uint64_t plan_handle_{0};
+  Program *program_{nullptr};
+  aot::Arg input_;
+  aot::Arg output_;
+  int direction_{0};
+  std::size_t input_scalars_{0};
+  std::size_t output_scalars_{0};
+};
+
 class CudaCaptureCommandDispatch final : public Node {
  public:
   CudaCaptureCommandDispatch(
@@ -166,6 +260,32 @@ void validate_cuda_sparse_spmv_args(SparseMatrix *matrix,
               "CUDA sparse SpMV Graph proof supports cuSPARSE CSR/BSR only");
   TI_ERROR_IF(matrix->get_data_type() != PrimitiveType::f32,
               "CUDA sparse SpMV Graph proof supports f32 matrices only");
+}
+
+void validate_cuda_cufft_args(std::uint64_t plan_handle,
+                              Program *program,
+                              const aot::Arg &input,
+                              const aot::Arg &output,
+                              int direction,
+                              std::size_t input_scalars,
+                              std::size_t output_scalars) {
+  TI_ERROR_IF(plan_handle == 0 || program == nullptr,
+              "CUDA cuFFT Graph proof requires a live plan and Program");
+  TI_ERROR_IF(input.tag != aot::ArgKind::kNdarray ||
+                  output.tag != aot::ArgKind::kNdarray ||
+                  input.dtype_id != PrimitiveTypeID::f32 ||
+                  output.dtype_id != PrimitiveTypeID::f32 ||
+                  input.field_dim == 0 || output.field_dim == 0 ||
+                  !input.element_shape.empty() || !output.element_shape.empty(),
+              "CUDA cuFFT Graph proof requires scalar f32 ndarray bindings");
+  TI_ERROR_IF(input.name == output.name,
+              "CUDA cuFFT Graph proof input and output must differ");
+  TI_ERROR_IF(direction != -1 && direction != 1,
+              "CUDA cuFFT Graph proof direction must be -1 or 1");
+  TI_ERROR_IF(input_scalars == 0 || output_scalars == 0,
+              "CUDA cuFFT Graph proof scalar counts must be positive");
+  TI_ERROR_IF(!program->cuda_cufft_capture_plan_available(plan_handle),
+              "CUDA cuFFT Graph proof plan is stale or closed");
 }
 
 }  // namespace
@@ -487,6 +607,25 @@ void GraphBuilder::dispatch_cuda_capture_cusparse_spmv(
   register_arg(output);
   auto command = std::make_shared<CudaSparseSpmvCaptureCommand>(
       matrix, program, input, output);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), std::vector<aot::Arg>{input, output}));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
+                                               Program *program,
+                                               const aot::Arg &input,
+                                               const aot::Arg &output,
+                                               int direction,
+                                               std::size_t input_scalars,
+                                               std::size_t output_scalars) {
+  validate_cuda_cufft_args(plan_handle, program, input, output, direction,
+                           input_scalars, output_scalars);
+  register_arg(input);
+  register_arg(output);
+  auto command = std::make_shared<CudaCufftCaptureCommand>(
+      plan_handle, program, input, output, direction, input_scalars,
+      output_scalars);
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), std::vector<aot::Arg>{input, output}));
   seq()->append(all_nodes_.back().get());

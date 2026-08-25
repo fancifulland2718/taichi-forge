@@ -8,6 +8,123 @@ from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_cufft_fixed_plan_mixed_command_replay_proof(monkeypatch):
+    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+    if not ti.hardware.fft.is_available():
+        pytest.skip("compatible cuFFT library is required")
+
+    length = 64
+    batch_count = 2
+    shape = (batch_count, length, 2)
+    plan = ti.hardware.fft.CufftPlan1D(length, batch_count=batch_count, transform="c2c")
+
+    @ti.kernel
+    def prepare(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        work: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, component in source:
+            work[i, j, component] = source[i, j, component]
+
+    @ti.kernel
+    def finish(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, component in source:
+            result[i, j, component] = source[i, j, component]
+
+    args = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=3)
+        for name in ("source", "work", "fft_output", "result")
+    }
+    recording = plan.record(input="work", output="fft_output")
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(prepare, args["source"], args["work"])
+    builder.append_native(recording, admission="explicit")
+    builder.dispatch(finish, args["fft_output"], args["result"])
+    graph = builder.compile()
+    assert recording.replay_mode == "stream_capture"
+    assert graph._instance_debug_info["kind"] == "mixed_backend_region"
+    assert len(graph._graph_stats) == 1
+    assert graph._graph_stats[0]["diagnostics_counters_complete"]
+
+    source_host = np.zeros(shape, dtype=np.float32)
+    source_host[..., 0] = np.linspace(
+        0.25, 2.0, batch_count * length, dtype=np.float32
+    ).reshape(batch_count, length)
+    source_host[..., 1] = np.linspace(
+        -0.75, 0.5, batch_count * length, dtype=np.float32
+    ).reshape(batch_count, length)
+    expected_complex = np.fft.fft(
+        source_host[..., 0] + 1j * source_host[..., 1], axis=-1
+    )
+    expected = np.stack((expected_complex.real, expected_complex.imag), axis=-1).astype(
+        np.float32
+    )
+
+    def make_bindings():
+        values = {name: ti.ndarray(ti.f32, shape=shape) for name in args}
+        values["source"].from_numpy(source_host)
+        return values
+
+    bindings = make_bindings()
+    process_memory = ProcessMemoryPlateau(
+        "cuda-cufft-fixed-plan-mixed-command-replay", ("cuda-cufft",)
+    )
+    process_memory.capture("before")
+    graph.run(bindings)
+    for replay_index in range(999):
+        graph.run(bindings)
+        if replay_index == 498:
+            ti.sync()
+            process_memory.capture("midpoint")
+    ti.sync()
+    process_memory.capture("after")
+    process_memory.finish(1_000)
+
+    stats = graph._graph_stats[0]
+    assert stats["captures"] == 1
+    assert stats["exact_replays"] >= 999
+    assert stats["patched_replays"] == 0
+    assert stats["last_path"] == "cuda_exact_replay"
+    np.testing.assert_allclose(
+        bindings["result"].to_numpy(), expected, rtol=1e-5, atol=1e-6
+    )
+
+    monkeypatch.delenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF")
+    graph.run(bindings)
+    ti.sync()
+    assert graph._graph_stats[0]["last_path"] == "ordinary_fallback"
+    assert graph._graph_stats[0]["last_fallback_reason"] == "runtime_mode"
+    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+
+    rebound_generations = []
+    for _ in range(100):
+        rebound = make_bindings()
+        rebound_generations.append(rebound)
+        graph.run(rebound)
+        graph.run(rebound)
+    ti.sync()
+    rebound_stats = graph._graph_stats[0]
+    assert rebound_stats["patched_replays"] == 0
+    assert rebound_stats["last_path"] == "cuda_exact_replay"
+    assert rebound_stats["backend_replay_signature_slots"] == 2
+    assert rebound_stats["backend_replay_signature_slot_capacity"] == 2
+    np.testing.assert_allclose(
+        rebound["result"].to_numpy(), expected, rtol=1e-5, atol=1e-6
+    )
+
+    plan.close()
+    with pytest.raises(RuntimeError, match="plan has been closed"):
+        graph.run(bindings)
+    ti.reset()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        graph.run(bindings)
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_cusparse_mixed_command_replay_proof(monkeypatch):
     monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
     if not ti.hardware.linalg.cusparse_is_available():

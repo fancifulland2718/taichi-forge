@@ -312,10 +312,17 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
     return workspace_bytes_;
   }
 
-  void execute(void *input, void *output, int direction) {
+  void execute(void *input,
+               void *output,
+               int direction,
+               CUstream stream) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(handle_ == 0, "CUDA cuFFT plan is closed.");
     auto &driver = CUFFTDriver::get_instance();
+    const auto stream_status = driver.set_stream.call(handle_, stream);
+    TI_ERROR_IF(stream_status != 0,
+                "CUDA cuFFT failed to bind the execution stream (status {}).",
+                stream_status);
     int status = 0;
     if (descriptor_.transform_kind == CufftTransformKind::c2c) {
       TI_ERROR_IF(direction != kCufftForward && direction != kCufftInverse,
@@ -478,7 +485,7 @@ std::size_t Program::cuda_cufft_execute(std::uint64_t handle,
       reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
   TI_ERROR_IF(!input_ptr || !output_ptr,
               "CUDA cuFFT received a null device pointer.");
-  plan->execute(input_ptr, output_ptr, direction);
+  plan->execute(input_ptr, output_ptr, direction, nullptr);
   pin_cuda_provider_plan(plan);
   mark_runtime_submission_pending();
   return 0;
@@ -497,6 +504,64 @@ std::size_t Program::cuda_cufft_execute_c2c(std::uint64_t handle,
                 "CUDA cuFFT legacy C2C execution requires a C2C plan.");
   }
   return cuda_cufft_execute(handle, input, output, direction);
+}
+
+bool Program::cuda_cufft_capture_plan_available(std::uint64_t handle) {
+  std::lock_guard<std::mutex> lock(cuda_cufft_plan_mutex_);
+  return cuda_cufft_plans_.find(handle) != cuda_cufft_plans_.end();
+}
+
+std::size_t Program::cuda_cufft_capture_record(std::uint64_t handle,
+                                               Ndarray *input,
+                                               Ndarray *output,
+                                               int direction,
+                                               void *stream) {
+  TI_ERROR_IF(compile_config().arch != Arch::cuda,
+              "CUDA cuFFT capture requires the CUDA backend.");
+  TI_ERROR_IF(!input || !output,
+              "CUDA cuFFT capture received a null ndarray.");
+
+  std::shared_ptr<CudaFftPlan> plan;
+  {
+    std::lock_guard<std::mutex> lock(cuda_cufft_plan_mutex_);
+    const auto found = cuda_cufft_plans_.find(handle);
+    TI_ERROR_IF(found == cuda_cufft_plans_.end(),
+                "CUDA cuFFT capture plan handle is stale or closed.");
+    plan = found->second;
+  }
+  const auto expected = plan->scalar_counts();
+  const auto validate = [](const char *name,
+                           Ndarray *array,
+                           std::size_t expected_scalars) {
+    TI_ERROR_IF(!array->get_element_shape().empty() ||
+                    array->get_element_data_type() != PrimitiveType::f32 ||
+                    array->get_nelement() != expected_scalars ||
+                    array->get_element_size() != sizeof(float32),
+                "CUDA cuFFT capture {} must be a compact scalar f32 ndarray "
+                "with exactly the plan-declared scalar count.",
+                name);
+  };
+  validate("input", input, expected.input);
+  validate("output", output, expected.output);
+  TI_ERROR_IF(input->owning_program() != this ||
+                  output->owning_program() != this,
+              "CUDA cuFFT capture arrays must belong to the active runtime.");
+  TI_ERROR_IF(input->get_device_allocation() ==
+                  output->get_device_allocation(),
+              "CUDA cuFFT capture input/output alias.");
+
+  auto context_guard = CUDAContext::get_instance().get_guard();
+  auto *input_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(input));
+  auto *output_ptr =
+      reinterpret_cast<void *>(get_ndarray_data_ptr_as_int(output));
+  TI_ERROR_IF(!input_ptr || !output_ptr,
+              "CUDA cuFFT capture received a null device pointer.");
+  plan->execute(input_ptr, output_ptr, direction,
+                reinterpret_cast<CUstream>(stream));
+  pin_cuda_provider_plan(plan);
+  mark_runtime_submission_pending();
+  return 0;
 }
 
 std::unordered_map<std::string, std::uint64_t>
@@ -617,6 +682,18 @@ std::size_t Program::cuda_cufft_execute_c2c(std::uint64_t,
                                             Ndarray *,
                                             Ndarray *,
                                             int) {
+  TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
+}
+
+bool Program::cuda_cufft_capture_plan_available(std::uint64_t) {
+  return false;
+}
+
+std::size_t Program::cuda_cufft_capture_record(std::uint64_t,
+                                               Ndarray *,
+                                               Ndarray *,
+                                               int,
+                                               void *) {
   TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
 }
 

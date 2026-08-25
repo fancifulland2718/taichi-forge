@@ -4535,6 +4535,11 @@ void export_lang(py::module &m) {
           },
           py::arg("matrix"), py::arg("program"), py::arg("input"),
           py::arg("output"))
+      .def("_dispatch_cuda_cufft_capture_recipe",
+           &GraphBuilder::dispatch_cuda_capture_cufft,
+           py::arg("plan_handle"), py::arg("program"), py::arg("input"),
+           py::arg("output"), py::arg("direction"),
+           py::arg("input_scalars"), py::arg("output_scalars"))
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

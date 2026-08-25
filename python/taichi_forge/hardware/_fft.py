@@ -1,9 +1,10 @@
 """Optional single-GPU cuFFT plan and execution provider."""
 
+import os
 from dataclasses import dataclass
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
-from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.graph._native import BackendCommandRecording, _CudaGraphCaptureRecipe
 from taichi_forge._hardware_telemetry import instrument_hardware_recording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
@@ -130,6 +131,41 @@ def _resolve_direction(transform, direction):
     return direction, direction_value
 
 
+class _CufftCaptureRecipe(_CudaGraphCaptureRecipe):
+    kind = "cufft_fixed_plan"
+
+    def __init__(self, plan, direction, input_name, output_name):
+        self._plan = plan
+        self._direction = direction
+        self._input_name = input_name
+        self._output_name = output_name
+
+    def append_to_graph(self, builder, program):
+        from taichi_forge.graph._graph import Arg, ArgKind  # pylint: disable=C0415
+
+        input_arg = Arg(
+            ArgKind.NDARRAY,
+            self._input_name,
+            f32,
+            ndim=len(self._plan.input_shape),
+        )
+        output_arg = Arg(
+            ArgKind.NDARRAY,
+            self._output_name,
+            f32,
+            ndim=len(self._plan.output_shape),
+        )
+        builder._dispatch_cuda_cufft_capture_recipe(
+            self._plan._handle,  # pylint: disable=W0212
+            program,
+            input_arg,
+            output_arg,
+            self._direction,
+            self._plan.input_storage_scalars,
+            self._plan.output_storage_scalars,
+        )
+
+
 @instrument_hardware_recording("fft.transform.cufft")
 class CufftRecording(BackendCommandRecording):
     """One out-of-place C2C, R2C, or C2R execution against a fixed plan."""
@@ -157,7 +193,11 @@ class CufftRecording(BackendCommandRecording):
             stream_binding="runtime_ordered",
             barrier_policy="declared_effects",
             workspace_ownership="provider_generation",
-            replay_mode="rerecord",
+            replay_mode=(
+                "stream_capture"
+                if os.environ.get("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF") == "1"
+                else "rerecord"
+            ),
             no_host_readback=True,
         )
         object.__setattr__(self, "plan", plan)
@@ -170,6 +210,11 @@ class CufftRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "output", output)
+        object.__setattr__(
+            self,
+            "_cuda_capture_recipe",
+            _CufftCaptureRecipe(plan, direction_value, input, output),
+        )
 
     @property
     def resource_effects(self):
