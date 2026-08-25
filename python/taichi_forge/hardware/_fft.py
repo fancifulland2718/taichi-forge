@@ -1,6 +1,5 @@
 """Optional single-GPU cuFFT plan and execution provider."""
 
-import os
 from dataclasses import dataclass
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
@@ -196,11 +195,7 @@ class CufftRecording(BackendCommandRecording):
             stream_binding="runtime_ordered",
             barrier_policy="declared_effects",
             workspace_ownership="provider_generation",
-            replay_mode=(
-                "stream_capture"
-                if os.environ.get("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF") == "1"
-                else "rerecord"
-            ),
+            replay_mode="stream_capture",
             no_host_readback=True,
         )
         object.__setattr__(self, "plan", plan)

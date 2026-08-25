@@ -8,8 +8,7 @@ from tests.python.hardware_process_memory import ProcessMemoryPlateau
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_cufft_fixed_plan_mixed_command_replay_proof(monkeypatch):
-    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+def test_cuda_cufft_fixed_plan_mixed_command_replay_proof():
     if not ti.hardware.fft.is_available():
         pytest.skip("compatible cuFFT library is required")
 
@@ -92,12 +91,13 @@ def test_cuda_cufft_fixed_plan_mixed_command_replay_proof(monkeypatch):
         bindings["result"].to_numpy(), expected, rtol=1e-5, atol=1e-6
     )
 
-    monkeypatch.delenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF")
+    cache = graph._instance._backend_executable._jit_cache
+    cache._set_stable_replay_optimization(False)
     graph.run(bindings)
     ti.sync()
     assert graph._graph_stats[0]["last_path"] == "ordinary_fallback"
     assert graph._graph_stats[0]["last_fallback_reason"] == "runtime_mode"
-    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+    cache._set_stable_replay_optimization(True)
 
     rebound_generations = []
     for _ in range(100):
@@ -125,8 +125,7 @@ def test_cuda_cufft_fixed_plan_mixed_command_replay_proof(monkeypatch):
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_cusparse_mixed_command_replay_proof(monkeypatch):
-    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+def test_cuda_cusparse_mixed_command_replay_proof():
     if not ti.hardware.linalg.cusparse_is_available():
         pytest.skip("compatible cuSPARSE library is required")
 
@@ -217,14 +216,15 @@ def test_cuda_cusparse_mixed_command_replay_proof(monkeypatch):
     # Python replay loop or once per exact replay.
     assert provider_stats["spmv_calls"] == 2
 
-    monkeypatch.delenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF")
+    cache = graph._instance._backend_executable._jit_cache
+    cache._set_stable_replay_optimization(False)
     graph.run(bindings)
     ti.sync()
     fallback_stats = graph._graph_stats[0]
     assert fallback_stats["last_path"] == "ordinary_fallback"
     assert fallback_stats["last_fallback_reason"] == "runtime_mode"
     assert matrix._debug_runtime_stats()["operations"]["spmv_calls"] == 3
-    monkeypatch.setenv("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", "1")
+    cache._set_stable_replay_optimization(True)
 
     # A changed allocation identity must never patch cuSPARSE descriptors.
     rebound_generations = []

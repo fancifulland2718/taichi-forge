@@ -95,18 +95,36 @@ def test_cufft_c2c_executes_directly_and_through_graph():
     assert resolved.provider_abi == "cufft-plan-many-dynamic-symbols-v3"
 
     recording = plan.record(direction="inverse", input="spectrum", output="signal")
+    assert recording.replay_mode == "stream_capture"
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
     ) == (("spectrum", GraphAccess.READ), ("signal", GraphAccess.WRITE))
     builder = ti.graph.GraphBuilder()
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
+    assert len(graph._graph_stats) == 1
     graph.run({"spectrum": spectrum, "signal": recovered})
     ti.sync()
     np.testing.assert_allclose(
         recovered.to_numpy(), packed_values * length, rtol=2e-5, atol=2e-5
     )
-    assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
+    optimization = graph._debug_info["optimization"]
+    assert optimization["mixed_backend_regions"] == 0
+    assert graph._debug_info["native_count"] == 1
+    assert "backend_command_nodes" not in optimization
+    graph_stats = graph._graph_stats[0]
+    assert graph_stats["captures"] == 0, {
+        key: graph_stats.get(key)
+        for key in (
+            "attempts",
+            "captures",
+            "last_path",
+            "last_fallback_reason",
+            "fallbacks",
+        )
+    }
+    assert graph_stats["last_path"] == "ordinary_fallback"
+    assert graph_stats["last_fallback_reason"] == "structural_unsupported"
 
     plan.close()
     with pytest.raises(RuntimeError, match="closed"):

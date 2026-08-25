@@ -986,12 +986,9 @@ def _cuda_cufft_mixed_replay_case(order, args):
         for i, j, component in values:
             output[i, j, component] = values[i, j, component]
 
-    original_proof_flag = os.environ.get("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF")
-    os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = "1"
     recording = plan.record(input="work", output="fft_output")
-    os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
     rerecord_recording = plan.record(input="work", output="fft_output")
-    os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = "1"
+    object.__setattr__(rerecord_recording, "replay_mode", "rerecord")
     if recording.replay_mode != "stream_capture":
         raise RuntimeError("failed to construct the cuFFT capture proof recording")
     if rerecord_recording.replay_mode != "rerecord":
@@ -1104,10 +1101,6 @@ def _cuda_cufft_mixed_replay_case(order, args):
         "scope": "fresh_process_capture_replay_runtime_reset",
         "runtime_reset_completed": True,
     }
-    if original_proof_flag is None:
-        os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
-    else:
-        os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = original_proof_flag
     return result
 
 
@@ -1625,13 +1618,11 @@ def _cuda_spmv_krylov_case(order, args):
     rerecord_recording = None
     if args.krylov_baseline == "rerecord":
         if recording.replay_mode != "stream_capture":
-            raise RuntimeError("the rerecord baseline requires " "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1")
-        proof_flag = os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
-        try:
-            rerecord_recording = ti.hardware.linalg.CusparseSpmvRecording(matrix, input="p", output="ap")
-        finally:
-            if proof_flag is not None:
-                os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = proof_flag
+            raise RuntimeError("the cuSPARSE recording is not capture-capable")
+        rerecord_recording = ti.hardware.linalg.CusparseSpmvRecording(
+            matrix, input="p", output="ap"
+        )
+        object.__setattr__(rerecord_recording, "replay_mode", "rerecord")
         if rerecord_recording.replay_mode != "rerecord":
             raise RuntimeError("failed to construct the segmented rerecord baseline")
 

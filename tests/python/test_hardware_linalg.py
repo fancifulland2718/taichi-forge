@@ -138,6 +138,7 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
 
     output.fill(0)
     recording = ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    assert recording.replay_mode == "stream_capture"
     assert recording.workspace_ownership == "provider_generation"
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
@@ -148,10 +149,27 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     graph_builder = ti.graph.GraphBuilder()
     graph_builder.append_native(recording, admission="auto")
     graph = graph_builder.compile()
+    assert len(graph._graph_stats) == 1
     graph.run({"input": input_array, "output": output})
     ti.sync()
     np.testing.assert_allclose(output.to_numpy(), expected)
-    assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
+    optimization = graph._debug_info["optimization"]
+    assert optimization["mixed_backend_regions"] == 0
+    assert graph._debug_info["native_count"] == 1
+    assert "backend_command_nodes" not in optimization
+    graph_stats = graph._graph_stats[0]
+    assert graph_stats["captures"] == 0, {
+        key: graph_stats.get(key)
+        for key in (
+            "attempts",
+            "captures",
+            "last_path",
+            "last_fallback_reason",
+            "fallbacks",
+        )
+    }
+    assert graph_stats["last_path"] == "ordinary_fallback"
+    assert graph_stats["last_fallback_reason"] == "structural_unsupported"
     assert graph._spec.lifetime_leases
     stats = matrix._debug_runtime_stats()
     assert stats["operations"]["spmv_calls"] == 2
@@ -247,6 +265,7 @@ def test_cuda_vendor_commands_preserve_cross_provider_graph_order():
     )
     builder.dispatch(finish, sparse_arg, result_arg)
     graph = builder.compile()
+    assert len(graph._graph_stats) == 1
     graph.run(
         {
             "a": a,
@@ -263,7 +282,15 @@ def test_cuda_vendor_commands_preserve_cross_provider_graph_order():
     expected_rows = expected_dense.sum(axis=1)
     expected = expected_rows * np.arange(1, n + 1, dtype=np.float32) + 1
     np.testing.assert_allclose(result.to_numpy(), expected, rtol=1e-6)
-    assert graph._debug_info["optimization"]["backend_command_nodes"] == 2
+    optimization = graph._debug_info["optimization"]
+    # cuBLAS remains an ordinary backend command while the two Taichi kernels
+    # and fixed-plan cuSPARSE dispatch were inserted into one CUDA Graph during
+    # builder assembly, before the later mixed-region lowering pass.
+    assert optimization["backend_command_nodes"] == 1
+    assert optimization["mixed_backend_regions"] == 0
+    assert graph._debug_info["native_count"] == 2
+    assert graph._graph_stats[0]["captures"] == 1
+    assert graph._graph_stats[0]["last_path"] == "cuda_capture"
 
 
 @pytest.mark.run_in_serial

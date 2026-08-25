@@ -2272,13 +2272,12 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         *state, CompiledGraphFallbackReason::insufficient_dispatches, true);
     return false;
   }
-  const bool has_capture_commands = graph.has_cuda_capture_commands();
-  if (has_capture_commands &&
-      get_environ_config("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", 0) == 0) {
+  if (!stable_replay) {
     mark_cuda_graph_fallback(*state,
                              CompiledGraphFallbackReason::runtime_mode);
     return false;
   }
+  const bool has_capture_commands = graph.has_cuda_capture_commands();
   if (has_capture_commands) {
     const bool has_taichi_dispatch = std::any_of(
         graph.dispatches.begin(), graph.dispatches.end(),
@@ -2289,6 +2288,10 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
           return dispatch.cuda_capture_command == nullptr ||
                  dispatch.cuda_capture_command->supports(args, program);
         });
+    // Capture recipes are prewarmed against their real bindings before stream
+    // capture. A surrounding Taichi dispatch is therefore part of the current
+    // mixed-command contract; provider-only graphs remain on the ordinary path
+    // until destructive-input recipes can prewarm through private scratch.
     if (!has_taichi_dispatch || !providers_supported) {
       mark_cuda_graph_fallback(
           *state, CompiledGraphFallbackReason::structural_unsupported, true);
