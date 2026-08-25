@@ -18,9 +18,7 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
     rhs = np.stack((np.sin(coordinates), np.cos(3.0 * coordinates))).astype(np.float32)
     solution = qualification._periodic_poisson_reference(rhs)
     residual = qualification._periodic_poisson_residual(solution, rhs)
-    residual_tolerance = qualification._periodic_poisson_residual_tolerance(
-        solution, rhs
-    )
+    residual_tolerance = qualification._periodic_poisson_residual_tolerance(solution, rhs)
     inverse = qualification._periodic_poisson_inverse_eigenvalues(length)
     assert inverse[0] == 0.0
     assert inverse[1] == inverse[-1]
@@ -29,30 +27,22 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
     rows, columns, values = qualification._implicit_grid_csr(3, 0.2)
     dense = np.zeros((9, 9), dtype=np.float64)
     for row in range(9):
-        dense[row, columns[rows[row] : rows[row + 1]]] = values[
-            rows[row] : rows[row + 1]
-        ]
+        dense[row, columns[rows[row] : rows[row + 1]]] = values[rows[row] : rows[row + 1]]
     np.testing.assert_allclose(dense, dense.T)
     assert np.min(np.linalg.eigvalsh(dense)) > 0.0
 
-    wide_rows, wide_columns, wide_values = qualification._implicit_grid_csr(
-        5, 0.2, stencil_radius=2
-    )
+    wide_rows, wide_columns, wide_values = qualification._implicit_grid_csr(5, 0.2, stencil_radius=2)
     wide_dense = np.zeros((25, 25), dtype=np.float64)
     for row in range(25):
-        wide_dense[row, wide_columns[wide_rows[row] : wide_rows[row + 1]]] = (
-            wide_values[wide_rows[row] : wide_rows[row + 1]]
-        )
+        wide_dense[row, wide_columns[wide_rows[row] : wide_rows[row + 1]]] = wide_values[
+            wide_rows[row] : wide_rows[row + 1]
+        ]
     np.testing.assert_allclose(wide_dense, wide_dense.T)
     assert np.count_nonzero(wide_dense[12]) == 25
     assert np.min(np.linalg.eigvalsh(wide_dense)) > 0.0
 
-    coordinates, tetrahedra, rows, columns, low_values = (
-        qualification._irregular_tet_fem_csr(3, 2.0)
-    )
-    _, high_tetrahedra, high_rows, high_columns, high_values = (
-        qualification._irregular_tet_fem_csr(3, 5.0)
-    )
+    coordinates, tetrahedra, rows, columns, low_values = qualification._irregular_tet_fem_csr(3, 2.0)
+    _, high_tetrahedra, high_rows, high_columns, high_values = qualification._irregular_tet_fem_csr(3, 5.0)
     assert coordinates.shape == (27, 3)
     assert tetrahedra.shape == (48, 4)
     assert np.array_equal(tetrahedra, high_tetrahedra)
@@ -63,9 +53,7 @@ def test_physics_workload_registry_and_cpu_oracles_are_stable():
     assert not np.allclose(coordinates[13], regular_center)
     dense = np.zeros((81, 81), dtype=np.float64)
     for row in range(81):
-        dense[row, columns[rows[row] : rows[row + 1]]] = low_values[
-            rows[row] : rows[row + 1]
-        ]
+        dense[row, columns[rows[row] : rows[row + 1]]] = low_values[rows[row] : rows[row + 1]]
     np.testing.assert_allclose(dense, dense.T, atol=2e-6)
     assert np.min(np.linalg.eigvalsh(dense)) > 0.0
 
@@ -171,6 +159,128 @@ def test_aggregate_allows_claim_after_formal_fresh_process_coverage():
     assert report["performance_claim_eligible"]
 
 
+def test_build_provenance_qualification_requires_one_matching_worker_revision():
+    workers = ({"forge_commit": "source-revision"}, {"forge_commit": "source-revision"})
+
+    exact = qualification._build_provenance_qualification("source-revision", workers)
+    abbreviated = qualification._build_provenance_qualification(
+        "0955034a10c53d8848af897487abc332f90f0eb3", [{"forge_commit": "0955034a"}]
+    )
+    mismatch = qualification._build_provenance_qualification("other-revision", workers)
+    mixed = qualification._build_provenance_qualification(
+        "source-revision", (*workers, {"forge_commit": "other-revision"})
+    )
+    missing = qualification._build_provenance_qualification("source-revision", (*workers, {}))
+
+    assert exact["qualified"]
+    assert exact["reasons"] == ()
+    assert abbreviated["qualified"]
+    assert not mismatch["qualified"]
+    assert mismatch["reasons"] == ("source_worker_revision_mismatch",)
+    assert not mixed["qualified"]
+    assert "mixed_worker_revisions" in mixed["reasons"]
+    assert "source_worker_revision_mismatch" in mixed["reasons"]
+    assert not missing["qualified"]
+    assert "worker_revision_unavailable" in missing["reasons"]
+
+
+def test_build_provenance_gate_fails_closed_for_claims_and_admission():
+    case = {
+        "status": "passed",
+        "worker_provenance": [{"forge_commit": "built-revision"}],
+        "performance_evidence": {"qualified": True, "reasons": ()},
+        "performance_claim_eligible": True,
+        "auto_admission": {"eligible": True, "evidence": {"unsafe": True}},
+        "replay_proof_gate": {
+            "physics_roi_gate_passed": True,
+            "performance_gate_passed": True,
+            "retention_gate_passed": True,
+        },
+    }
+
+    overall = qualification._apply_build_provenance_gate([case], "source-revision")
+
+    assert not overall["qualified"]
+    assert not case["build_provenance"]["qualified"]
+    assert not case["performance_evidence"]["qualified"]
+    assert case["performance_evidence"]["reasons"] == ("build_provenance_unqualified",)
+    assert not case["performance_claim_eligible"]
+    assert case["auto_admission"] == {"eligible": False, "reason": "build_provenance_unqualified"}
+    assert case["replay_proof_gate"]["gate_reason"] == "build_provenance_unqualified"
+    assert not case["replay_proof_gate"]["performance_gate_passed"]
+    assert not case["replay_proof_gate"]["retention_gate_passed"]
+
+
+def test_build_provenance_gate_preserves_exact_claims():
+    case = {
+        "status": "passed",
+        "worker_provenance": [{"forge_commit": "source-revision"}],
+        "performance_evidence": {"qualified": True, "reasons": ()},
+        "performance_claim_eligible": True,
+        "auto_admission": {"eligible": True, "evidence": {"safe": True}},
+    }
+
+    overall = qualification._apply_build_provenance_gate([case], "source-revision")
+
+    assert overall["qualified"]
+    assert case["build_provenance"]["qualified"]
+    assert case["performance_evidence"]["qualified"]
+    assert case["performance_claim_eligible"]
+    assert case["auto_admission"]["eligible"]
+
+
+def test_windows_performance_counter_payload_rejects_impossible_values():
+    valid = qualification._validate_windows_performance_counter_payload(
+        {
+            "cpu": {"PercentProcessorPerformance": 118, "ProcessorFrequency": 5440},
+            "gpu": [
+                {"Name": "3D", "UtilizationPercentage": 75},
+                {"Name": "Copy", "UtilizationPercentage": 12},
+            ],
+        }
+    )
+    invalid = qualification._validate_windows_performance_counter_payload(
+        {
+            "cpu": {"PercentProcessorPerformance": 118, "ProcessorFrequency": 5440},
+            "gpu": [{"Name": "3D", "UtilizationPercentage": 1.8e14}],
+        }
+    )
+
+    assert valid["qualified"]
+    assert valid["gpu_engine_max_utilization_percent"] == 75
+    assert not invalid["qualified"]
+    assert invalid["reasons"] == ("invalid_gpu_engine_counter",)
+
+
+def test_unqualified_performance_environment_blocks_formal_claim():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker["performance_environment"] = {"qualified": True, "reasons": ()}
+    workers[-1]["performance_environment"] = {
+        "qualified": False,
+        "reasons": ("invalid_gpu_engine_counter",),
+    }
+
+    report = qualification._aggregate("synthetic", tuple(workers), 0.10, 0.10)
+
+    assert report["performance_state"] == "stable_positive"
+    assert not report["performance_environment"]["qualified"]
+    assert report["performance_environment"]["reasons"] == ("invalid_gpu_engine_counter",)
+    assert not report["performance_evidence"]["qualified"]
+    assert "performance_environment_unqualified" in report["performance_evidence"]["reasons"]
+    assert not report["performance_claim_eligible"]
+
+
 def _cuda_replay_graph_statistics():
     return {
         "diagnostics_counters_complete": True,
@@ -212,9 +322,7 @@ def test_cuda_replay_proof_uses_cuda_counters_and_separate_gates():
             },
         }
 
-    report = qualification._aggregate(
-        "cuda-spmv-krylov", tuple(workers), 0.10, 0.10
-    )
+    report = qualification._aggregate("cuda-spmv-krylov", tuple(workers), 0.10, 0.10)
 
     gate = report["replay_proof_gate"]
     assert gate["scope"] == "cuda_mixed_capture_vs_rerecord"
@@ -245,9 +353,7 @@ def test_replay_proof_fails_closed_when_fresh_process_scope_is_incomplete():
             "lifecycle": {"runtime_reset_completed": True},
         }
 
-    report = qualification._aggregate(
-        "cuda-spmv-krylov", tuple(workers), 0.10, 0.10
-    )
+    report = qualification._aggregate("cuda-spmv-krylov", tuple(workers), 0.10, 0.10)
 
     assert report["replay_proof_gate"] == {
         "scope": "unqualified_replay_proof",
@@ -283,9 +389,7 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
                 }
             ]
         }
-        worker["memory"] = {
-            "pipeline_closed": {"lifecycle_state": "closed"}
-        }
+        worker["memory"] = {"pipeline_closed": {"lifecycle_state": "closed"}}
         worker["replay_proof"] = {
             "enabled": True,
             "baseline_mode": "rerecord",
@@ -301,9 +405,7 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
             },
         }
 
-    report = qualification._aggregate(
-        "vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10
-    )
+    report = qualification._aggregate("vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10)
 
     gate = report["replay_proof_gate"]
     assert gate["scope"] == "mechanism_retained_vs_rerecord"
@@ -342,9 +444,7 @@ def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():
                 },
             ]
         }
-        worker["memory"] = {
-            "pipeline_closed": {"lifecycle_state": "closed"}
-        }
+        worker["memory"] = {"pipeline_closed": {"lifecycle_state": "closed"}}
         worker["replay_proof"] = {
             "enabled": True,
             "baseline_mode": "rerecord",
@@ -363,9 +463,7 @@ def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():
             },
         }
 
-    report = qualification._aggregate(
-        "vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10
-    )
+    report = qualification._aggregate("vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10)
 
     gate = report["replay_proof_gate"]
     assert gate["scope"] == "vulkan_binding_rotation_lifecycle"
@@ -462,10 +560,7 @@ def test_artifact_provenance_records_identity_and_digest(tmp_path):
 
     assert provenance["path"] == str(artifact.resolve())
     assert provenance["bytes"] == 20
-    assert (
-        provenance["sha256"]
-        == "3bdb141509c6111dee71c967b1c7e38875c39a5f646009caeb61aa7fc2c5a418"
-    )
+    assert provenance["sha256"] == "3bdb141509c6111dee71c967b1c7e38875c39a5f646009caeb61aa7fc2c5a418"
 
 
 def test_runtime_bitcode_provenance_records_only_loaded_artifact_kinds(tmp_path):
@@ -476,10 +571,7 @@ def test_runtime_bitcode_provenance_records_only_loaded_artifact_kinds(tmp_path)
 
     provenance = qualification._runtime_bitcode_provenance(tmp_path)
 
-    assert [
-        artifact["path"].replace("\\", "/").rsplit("/", 1)[-1]
-        for artifact in provenance
-    ] == [
+    assert [artifact["path"].replace("\\", "/").rsplit("/", 1)[-1] for artifact in provenance] == [
         "runtime_cuda.bc",
         "runtime_x64.bc",
         "slim_libdevice.10.bc",
@@ -546,12 +638,7 @@ def test_aggregate_emits_loadable_strict_auto_admission_evidence(tmp_path):
 
     assert case["auto_admission"]["eligible"]
     assert case["auto_admission"]["evidence"]["performance"]["fresh_processes"] == 8
-    assert (
-        case["auto_admission"]["evidence"]["performance"][
-            "baseline_first_use_overhead_ns"
-        ]
-        == 100_000.0
-    )
+    assert case["auto_admission"]["evidence"]["performance"]["baseline_first_use_overhead_ns"] == 100_000.0
     artifact = tmp_path / "qualification.json"
     artifact.write_text(
         json.dumps(

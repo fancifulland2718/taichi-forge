@@ -116,9 +116,7 @@ def _packed_solveplan_case(case, order, args):
         ):
             for index in range(nodes):
                 for row, column in ti.static(ti.ndrange(3, 3)):
-                    destination[index * 9 + row * 3 + column] = source[index][
-                        row, column
-                    ]
+                    destination[index * 9 + row * 3 + column] = source[index][row, column]
 
         @ti.kernel
         def unpack(
@@ -127,9 +125,7 @@ def _packed_solveplan_case(case, order, args):
         ):
             for index in range(nodes):
                 for row, column in ti.static(ti.ndrange(3, 3)):
-                    destination[index][row, column] = source[
-                        index * 9 + row * 3 + column
-                    ]
+                    destination[index][row, column] = source[index * 9 + row * 3 + column]
 
     def hardware():
         direct_plan.solve(rhs, out=direct_output)
@@ -177,10 +173,7 @@ def _packed_solveplan_case(case, order, args):
                 "lanes_per_node": lanes,
                 "scalar_extent": size,
                 "iterations": 8,
-                "timed_scope": (
-                    "pack/fused-boundary+device-convergent CG+unpack+"
-                    "terminal synchronization"
-                ),
+                "timed_scope": ("pack/fused-boundary+device-convergent CG+unpack+" "terminal synchronization"),
                 "hardware": ("packed Field direct graph-fused SolvePlan boundary"),
                 "baseline": ("explicit pack+scalar ndarray SolvePlan+explicit unpack"),
                 "host_readback_included": False,
@@ -230,9 +223,7 @@ def _parent(args):
         raise ValueError(f"unknown or empty cases: {unknown}")
     script = pathlib.Path(__file__).resolve()
     reports = []
-    with tempfile.TemporaryDirectory(
-        prefix="forge-packed-solveplan-qualification-"
-    ) as temp:
+    with tempfile.TemporaryDirectory(prefix="forge-packed-solveplan-qualification-") as temp:
         temp_path = pathlib.Path(temp)
         for case in cases:
             workers = []
@@ -262,12 +253,23 @@ def _parent(args):
                     "--maximum-repetitions",
                     str(args.maximum_repetitions),
                 ]
+                counter_before = (
+                    qualification._windows_performance_counter_snapshot() if args.windows_performance_counters else None
+                )
                 completed = subprocess.run(
                     command,
                     check=False,
                     capture_output=True,
                     text=True,
                     env=os.environ.copy(),
+                )
+                counter_after = (
+                    qualification._windows_performance_counter_snapshot() if args.windows_performance_counters else None
+                )
+                performance_environment = (
+                    qualification._performance_environment_record(counter_before, counter_after)
+                    if counter_before is not None and counter_after is not None
+                    else None
                 )
                 if worker_output.exists():
                     with open(worker_output, "r", encoding="utf-8") as source:
@@ -288,6 +290,8 @@ def _parent(args):
                 worker["worker_exit_code"] = completed.returncode
                 worker["launch_index"] = launch_index
                 worker["worker_index"] = worker_index
+                if performance_environment is not None:
+                    worker["performance_environment"] = performance_environment
                 workers.append(worker)
             reports.append(
                 qualification._aggregate(
@@ -297,33 +301,16 @@ def _parent(args):
                     args.drift_limit,
                 )
             )
-    source_root = script.parents[2]
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    source_status = subprocess.run(
-        ["git", "status", "--short"],
-        cwd=source_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    source_provenance = qualification._source_checkout_provenance(script.parents[2])
+    build_artifacts = qualification._local_build_artifact_provenance()
+    build_provenance = qualification._apply_build_provenance_gate(reports, source_provenance["source_revision"])
     report = {
         "schema": qualification.SCHEMA,
         "qualification": "packed_solveplan_crossover",
         "generated_at_ns": time.time_ns(),
-        "source_revision": (
-            revision.stdout.strip() if revision.returncode == 0 else None
-        ),
-        "source_status": (
-            tuple(source_status.stdout.splitlines())
-            if source_status.returncode == 0
-            else None
-        ),
+        **source_provenance,
+        **build_artifacts,
+        "build_provenance": build_provenance,
         "policy": {
             "workers_per_order": args.workers_per_order,
             "warmup": args.warmup,
@@ -334,6 +321,7 @@ def _parent(args):
             "cv_limit": args.cv_limit,
             "order_drift_limit": args.drift_limit,
             "nodes": args.nodes,
+            "windows_performance_counters": args.windows_performance_counters,
         },
         "cases": reports,
     }
@@ -347,6 +335,7 @@ def _parent(args):
 def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--windows-performance-counters", action="store_true")
     parser.add_argument("--case", choices=CASES)
     parser.add_argument("--order", choices=("ab", "ba"))
     parser.add_argument("--worker-output")

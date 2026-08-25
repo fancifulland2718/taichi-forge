@@ -472,6 +472,148 @@ def _runtime_bitcode_provenance(directory):
     ]
 
 
+def _source_checkout_provenance(source_root):
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    source_status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=source_root,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "source_revision": revision.stdout.strip() if revision.returncode == 0 else None,
+        "source_status": tuple(source_status.stdout.splitlines()) if source_status.returncode == 0 else None,
+    }
+
+
+def _local_build_artifact_provenance():
+    local_python_extension = _artifact_provenance(_LOCAL_PYD) if _LOCAL_PYD else None
+    local_runtime_artifacts = []
+    if _RUNTIME_DIR:
+        runtime_root = pathlib.Path(_RUNTIME_DIR)
+        for name in ("taichi_runtime.dll", "libtaichi_runtime.so", "libtaichi_runtime.dylib"):
+            candidate = runtime_root / name
+            if candidate.is_file():
+                local_runtime_artifacts.append(_artifact_provenance(candidate))
+    return {
+        "local_python_extension": local_python_extension,
+        "local_runtime_artifacts": local_runtime_artifacts,
+        "local_runtime_bitcode_artifacts": _runtime_bitcode_provenance(_runtime_bitcode_dir()),
+    }
+
+
+def _validate_windows_performance_counter_payload(payload):
+    reasons = []
+    cpu = payload.get("cpu") if isinstance(payload, dict) else None
+    gpu = payload.get("gpu") if isinstance(payload, dict) else None
+    if not isinstance(cpu, dict):
+        reasons.append("missing_cpu_counter_sample")
+        cpu = {}
+    try:
+        processor_performance = float(cpu.get("PercentProcessorPerformance"))
+    except (TypeError, ValueError):
+        processor_performance = None
+    try:
+        processor_frequency_mhz = float(cpu.get("ProcessorFrequency"))
+    except (TypeError, ValueError):
+        processor_frequency_mhz = None
+    if (
+        processor_performance is None
+        or not math.isfinite(processor_performance)
+        or not 0.0 <= processor_performance <= 1000.0
+    ):
+        reasons.append("invalid_processor_performance_counter")
+    if (
+        processor_frequency_mhz is None
+        or not math.isfinite(processor_frequency_mhz)
+        or not 0.0 < processor_frequency_mhz <= 10000.0
+    ):
+        reasons.append("invalid_processor_frequency_counter")
+    if isinstance(gpu, dict):
+        gpu = [gpu]
+    if not isinstance(gpu, list) or not gpu:
+        reasons.append("missing_gpu_engine_counter_samples")
+        gpu = []
+    gpu_utilizations = []
+    for sample in gpu:
+        try:
+            utilization = float(sample.get("UtilizationPercentage"))
+        except (AttributeError, TypeError, ValueError):
+            utilization = None
+        if utilization is None or not math.isfinite(utilization) or not 0.0 <= utilization <= 100.0:
+            reasons.append("invalid_gpu_engine_counter")
+            continue
+        gpu_utilizations.append(utilization)
+    return {
+        "qualified": not reasons,
+        "reasons": tuple(dict.fromkeys(reasons)),
+        "processor_performance_percent": processor_performance,
+        "processor_frequency_mhz": processor_frequency_mhz,
+        "gpu_engine_samples": len(gpu_utilizations),
+        "gpu_engine_max_utilization_percent": max(gpu_utilizations) if gpu_utilizations else None,
+        "gpu_engine_sum_utilization_percent": sum(gpu_utilizations) if gpu_utilizations else None,
+    }
+
+
+def _windows_performance_counter_snapshot():
+    if sys.platform != "win32":
+        return {"qualified": False, "reasons": ("windows_performance_counters_unsupported",)}
+    command = (
+        "$ErrorActionPreference='Stop';"
+        "$cpu=Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation | "
+        "Where-Object {$_.Name -eq '_Total'} | Select-Object -First 1 "
+        "PercentProcessorPerformance,ProcessorFrequency;"
+        "$gpu=@(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUEngine | "
+        "Select-Object Name,UtilizationPercentage);"
+        "@{cpu=$cpu;gpu=$gpu} | ConvertTo-Json -Compress -Depth 4"
+    )
+    started_ns = time.time_ns()
+    completed = subprocess.run(
+        ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return {
+            "qualified": False,
+            "reasons": ("windows_performance_counter_query_failed",),
+            "query_exit_code": completed.returncode,
+            "query_error": completed.stderr[-1000:],
+            "timestamp_ns": started_ns,
+        }
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {
+            "qualified": False,
+            "reasons": ("windows_performance_counter_output_invalid",),
+            "timestamp_ns": started_ns,
+        }
+    result = _validate_windows_performance_counter_payload(payload)
+    result["timestamp_ns"] = started_ns
+    result["source"] = "Windows formatted performance counter CIM providers"
+    return result
+
+
+def _performance_environment_record(before, after):
+    reasons = tuple(dict.fromkeys((*before.get("reasons", ()), *after.get("reasons", ()))))
+    return {
+        "qualified": bool(before.get("qualified") and after.get("qualified") and not reasons),
+        "reasons": reasons,
+        "sampling_scope": "worker_process_endpoints",
+        "before": before,
+        "after": after,
+    }
+
+
 def _time_block(action, repetitions):
     _debug(f"start block {getattr(action, '__name__', 'action')} x{repetitions}")
     started = time.perf_counter_ns()
@@ -3822,6 +3964,25 @@ def _performance_evidence_qualification(workers, variants):
     }
 
 
+def _performance_environment_qualification(workers):
+    records = [worker.get("performance_environment") for worker in workers]
+    if not any(record is not None for record in records):
+        return None
+    reasons = []
+    if any(record is None for record in records):
+        reasons.append("incomplete_performance_environment_coverage")
+    for record in records:
+        if record is not None and not record.get("qualified"):
+            reasons.extend(record.get("reasons", ()))
+    return {
+        "qualified": not reasons,
+        "reasons": tuple(dict.fromkeys(reasons)),
+        "observed_workers": sum(record is not None for record in records),
+        "required_workers": len(workers),
+        "records": tuple(record for record in records if record is not None),
+    }
+
+
 def _aggregate(
     case,
     workers,
@@ -3907,9 +4068,13 @@ def _aggregate(
     else:
         performance_state = "unstable"
     performance_evidence = _performance_evidence_qualification(workers, variants)
-    claim_eligible = (
-        performance_state == "stable_positive" and performance_evidence["qualified"]
-    )
+    performance_environment = _performance_environment_qualification(workers)
+    if performance_environment is not None and not performance_environment["qualified"]:
+        performance_evidence["qualified"] = False
+        performance_evidence["reasons"] = tuple(
+            dict.fromkeys((*performance_evidence["reasons"], "performance_environment_unqualified"))
+        )
+    claim_eligible = performance_state == "stable_positive" and performance_evidence["qualified"]
     performance_scope = {
         "harness_schema": SCHEMA,
         "case": case,
@@ -3932,6 +4097,12 @@ def _aggregate(
         expected_reuse=auto_admission_expected_reuse,
         minimum_margin=auto_admission_minimum_margin,
     )
+    if (
+        performance_environment is not None
+        and not performance_environment["qualified"]
+        and auto_admission.get("eligible")
+    ):
+        auto_admission = {"eligible": False, "reason": "performance_environment_unqualified"}
     result = {
         "case": case,
         "status": "passed",
@@ -3939,6 +4110,7 @@ def _aggregate(
         "noise_status": "stable" if stable else "unstable",
         "minimum_block_qualified": minimum_block_qualified,
         "performance_evidence": performance_evidence,
+        "performance_environment": performance_environment,
         "performance_claim_eligible": claim_eligible,
         "performance_state": performance_state,
         "performance_scope": performance_scope,
@@ -4430,6 +4602,80 @@ def _balanced_worker_schedule(workers_per_order):
     return tuple(schedule)
 
 
+def _git_revisions_match(source_revision, worker_revision):
+    if not source_revision or not worker_revision:
+        return False
+    source_revision = str(source_revision).lower()
+    worker_revision = str(worker_revision).lower()
+    if source_revision == worker_revision:
+        return True
+    hexadecimal = re.compile(r"[0-9a-f]{8,40}")
+    return bool(
+        hexadecimal.fullmatch(source_revision)
+        and hexadecimal.fullmatch(worker_revision)
+        and (source_revision.startswith(worker_revision) or worker_revision.startswith(source_revision))
+    )
+
+
+def _build_provenance_qualification(source_revision, worker_provenance):
+    workers = tuple(worker_provenance)
+    worker_revisions = sorted({str(worker["forge_commit"]) for worker in workers if worker.get("forge_commit")})
+    missing_worker_revisions = sum(not bool(worker.get("forge_commit")) for worker in workers)
+    checks = (
+        (bool(source_revision), "source_revision_unavailable"),
+        (bool(workers), "no_measured_workers"),
+        (missing_worker_revisions == 0, "worker_revision_unavailable"),
+        (len(worker_revisions) == 1, "mixed_worker_revisions"),
+        (
+            len(worker_revisions) == 1 and _git_revisions_match(source_revision, worker_revisions[0]),
+            "source_worker_revision_mismatch",
+        ),
+    )
+    reasons = tuple(reason for qualified, reason in checks if not qualified)
+    return {
+        "qualified": not reasons,
+        "reasons": reasons,
+        "source_revision": source_revision,
+        "worker_revisions": worker_revisions,
+        "observed_workers": len(workers),
+        "workers_without_revision": missing_worker_revisions,
+        "source_status_is_evidence_only": True,
+    }
+
+
+def _apply_build_provenance_gate(case_reports, source_revision):
+    measured_worker_provenance = []
+    for case in case_reports:
+        worker_provenance = tuple(case.get("worker_provenance", ()))
+        if case.get("status") != "passed":
+            continue
+        measured_worker_provenance.extend(worker_provenance)
+        qualification = _build_provenance_qualification(source_revision, worker_provenance)
+        case["build_provenance"] = qualification
+        replay_gate = case.get("replay_proof_gate")
+        if replay_gate is not None:
+            replay_gate["build_provenance_qualified"] = qualification["qualified"]
+        if qualification["qualified"]:
+            continue
+        performance_evidence = case.get("performance_evidence")
+        if performance_evidence is not None:
+            performance_evidence["qualified"] = False
+            performance_evidence["reasons"] = tuple(
+                dict.fromkeys((*performance_evidence.get("reasons", ()), "build_provenance_unqualified"))
+            )
+        case["performance_claim_eligible"] = False
+        auto_admission = case.get("auto_admission")
+        if auto_admission is not None and auto_admission.get("eligible"):
+            auto_admission.clear()
+            auto_admission.update({"eligible": False, "reason": "build_provenance_unqualified"})
+        if replay_gate is not None:
+            replay_gate["gate_reason"] = "build_provenance_unqualified"
+            for key in ("physics_roi_gate_passed", "performance_gate_passed", "retention_gate_passed"):
+                if key in replay_gate:
+                    replay_gate[key] = False
+    return _build_provenance_qualification(source_revision, measured_worker_provenance)
+
+
 def _parent(args):
     cases = tuple(item.strip() for item in args.cases.split(",") if item.strip())
     unknown = sorted(set(cases).difference(CASES))
@@ -4517,6 +4763,7 @@ def _parent(args):
                     command.append("--vulkan-retained-replay-proof")
                 if args.cudss_library:
                     command.extend(("--cudss-library", args.cudss_library))
+                counter_before = _windows_performance_counter_snapshot() if args.windows_performance_counters else None
                 completed = subprocess.run(
                     command,
                     check=False,
@@ -4524,29 +4771,38 @@ def _parent(args):
                     text=True,
                     env=os.environ.copy(),
                 )
+                counter_after = _windows_performance_counter_snapshot() if args.windows_performance_counters else None
+                performance_environment = (
+                    _performance_environment_record(counter_before, counter_after)
+                    if counter_before is not None and counter_after is not None
+                    else None
+                )
                 if not worker_output.exists():
-                    workers.append(
-                        {
-                            "schema": SCHEMA,
-                            "case": case,
-                            "order": order,
-                            "status": "error",
-                            "error_type": "WorkerProcessError",
-                            "error": (
-                                f"exit={completed.returncode}; "
-                                f"stdout={completed.stdout[-1000:]!r}; "
-                                f"stderr={completed.stderr[-1000:]!r}"
-                            ),
-                            "launch_index": launch_index,
-                            "worker_index": worker_index,
-                        }
-                    )
+                    worker = {
+                        "schema": SCHEMA,
+                        "case": case,
+                        "order": order,
+                        "status": "error",
+                        "error_type": "WorkerProcessError",
+                        "error": (
+                            f"exit={completed.returncode}; "
+                            f"stdout={completed.stdout[-1000:]!r}; "
+                            f"stderr={completed.stderr[-1000:]!r}"
+                        ),
+                        "launch_index": launch_index,
+                        "worker_index": worker_index,
+                    }
+                    if performance_environment is not None:
+                        worker["performance_environment"] = performance_environment
+                    workers.append(worker)
                     continue
                 with open(worker_output, "r", encoding="utf-8") as source:
                     worker = json.load(source)
                 worker["worker_exit_code"] = completed.returncode
                 worker["launch_index"] = launch_index
                 worker["worker_index"] = worker_index
+                if performance_environment is not None:
+                    worker["performance_environment"] = performance_environment
                 workers.append(worker)
             case_reports.append(
                 _aggregate(
@@ -4555,67 +4811,26 @@ def _parent(args):
                     args.cv_limit,
                     args.drift_limit,
                     auto_admission_expected_reuse=(
-                        args.cudss_expected_reuse
-                        if case == "cuda-cudss-solve"
-                        else args.spmv_expected_reuse
+                        args.cudss_expected_reuse if case == "cuda-cudss-solve" else args.spmv_expected_reuse
                     ),
                     auto_admission_minimum_margin=args.auto_admission_margin,
                 )
             )
     source_root = pathlib.Path(__file__).resolve().parents[2]
-    revision = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=source_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    source_status = subprocess.run(
-        ["git", "status", "--short"],
-        cwd=source_root,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    local_python_extension = None
-    if _LOCAL_PYD:
-        local_python_extension = _artifact_provenance(_LOCAL_PYD)
-    local_runtime_artifacts = []
-    if _RUNTIME_DIR:
-        runtime_root = pathlib.Path(_RUNTIME_DIR)
-        for name in (
-            "taichi_runtime.dll",
-            "libtaichi_runtime.so",
-            "libtaichi_runtime.dylib",
-        ):
-            candidate = runtime_root / name
-            if candidate.is_file():
-                local_runtime_artifacts.append(_artifact_provenance(candidate))
-    local_runtime_bitcode_artifacts = _runtime_bitcode_provenance(
-        _runtime_bitcode_dir()
-    )
+    source_provenance = _source_checkout_provenance(source_root)
+    build_artifacts = _local_build_artifact_provenance()
+    build_provenance = _apply_build_provenance_gate(case_reports, source_provenance["source_revision"])
     report = {
         "schema": SCHEMA,
         "generated_at_ns": time.time_ns(),
-        "source_revision": (
-            revision.stdout.strip() if revision.returncode == 0 else None
-        ),
-        "source_status": (
-            tuple(source_status.stdout.splitlines())
-            if source_status.returncode == 0
-            else None
-        ),
-        "local_python_extension": local_python_extension,
-        "local_runtime_artifacts": local_runtime_artifacts,
-        "local_runtime_bitcode_artifacts": local_runtime_bitcode_artifacts,
+        **source_provenance,
+        **build_artifacts,
+        "build_provenance": build_provenance,
         "policy": {
             "fresh_process_orders": ("ab", "ba"),
             "workers_per_order": args.workers_per_order,
             "worker_schedule": tuple(
-                order
-                for order, _worker_index in _balanced_worker_schedule(
-                    args.workers_per_order
-                )
+                order for order, _worker_index in _balanced_worker_schedule(args.workers_per_order)
             ),
             "worker_schedule_policy": "alternating_pair_order",
             "warmup": args.warmup,
@@ -4625,11 +4840,10 @@ def _parent(args):
             "maximum_repetitions": args.maximum_repetitions,
             "cv_limit": args.cv_limit,
             "order_drift_limit": args.drift_limit,
+            "windows_performance_counters": args.windows_performance_counters,
             "auto_admission": {
                 "minimum_fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
-                "minimum_processes_per_order": (
-                    AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
-                ),
+                "minimum_processes_per_order": (AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER),
                 "minimum_samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
                 "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
                 "maximum_cv": AUTO_ADMISSION_MAXIMUM_CV,
@@ -4659,14 +4873,10 @@ def _parent(args):
         },
         "cases": case_reports,
         "all_correctness_and_routes_qualified": all(
-            case.get("correctness_and_route_qualified", False)
-            for case in case_reports
-            if case["status"] != "skipped"
+            case.get("correctness_and_route_qualified", False) for case in case_reports if case["status"] != "skipped"
         ),
         "all_performance_claims_eligible": all(
-            case["performance_claim_eligible"]
-            for case in case_reports
-            if case["status"] != "skipped"
+            case["performance_claim_eligible"] for case in case_reports if case["status"] != "skipped"
         ),
     }
     with open(args.output, "w", encoding="utf-8") as output:
@@ -4680,6 +4890,7 @@ def _parent(args):
 def _parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", action="store_true")
+    parser.add_argument("--windows-performance-counters", action="store_true")
     parser.add_argument("--case", choices=CASES)
     parser.add_argument("--order", choices=("ab", "ba"))
     parser.add_argument("--worker-output")
