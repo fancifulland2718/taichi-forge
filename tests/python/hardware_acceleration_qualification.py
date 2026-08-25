@@ -4085,14 +4085,9 @@ def _aggregate(
             retained_binding_sets = int(
                 workers[0]["workload"]["retained_binding_sets"]
             )
+            binding_rotation_scope = retained_binding_sets > 1
             counters_qualified = all(
                 proof.get("runtime_statistics") is not None
-                and proof["runtime_statistics"].get("retained_replay_prewarms")
-                == retained_binding_sets
-                and proof["runtime_statistics"].get("retained_replay_records")
-                == retained_binding_sets
-                and proof["runtime_statistics"].get("retained_replay_replays", 0)
-                > 0
                 and proof["runtime_statistics"].get(
                     "retained_replay_busy_fallbacks"
                 )
@@ -4105,12 +4100,66 @@ def _aggregate(
                     "retained_replay_bridge_failures"
                 )
                 == 0
-                and proof["runtime_statistics"].get("retained_replay_slots")
-                == retained_binding_sets
-                and proof["runtime_statistics"].get(
-                    "retained_replay_slot_capacity", 0
+                and (
+                    (
+                        binding_rotation_scope
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_attempts", 0
+                        )
+                        > 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_binding_misses", 0
+                        )
+                        > 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_invalidations", 0
+                        )
+                        > 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_prewarms", 0
+                        )
+                        > 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_records"
+                        )
+                        == 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_replays"
+                        )
+                        == 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_slots"
+                        )
+                        == 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_slot_capacity"
+                        )
+                        == 1
+                    )
+                    or (
+                        not binding_rotation_scope
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_prewarms"
+                        )
+                        == 1
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_records"
+                        )
+                        == 1
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_replays", 0
+                        )
+                        > 0
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_slots"
+                        )
+                        == 1
+                        and proof["runtime_statistics"].get(
+                            "retained_replay_slot_capacity", 0
+                        )
+                        >= 1
+                    )
                 )
-                >= retained_binding_sets
                 for proof in enabled_replay_proofs
             )
             lifecycle_qualified = bool(
@@ -4126,7 +4175,18 @@ def _aggregate(
                     for worker in workers
                 )
             )
-            if baseline_mode == "rerecord":
+            if binding_rotation_scope:
+                result["replay_proof_gate"] = {
+                    "scope": "vulkan_binding_rotation_lifecycle",
+                    "retained_binding_sets": retained_binding_sets,
+                    "gate_reason": "binding_rotation_is_not_fixed_binding_replay",
+                    "counters_qualified": counters_qualified,
+                    "lifecycle_gate_passed": lifecycle_qualified,
+                    "performance_gate_passed": False,
+                    "retention_gate_passed": False,
+                }
+                result["performance_claim_eligible"] = False
+            elif baseline_mode == "rerecord":
                 wall_gate = bool(
                     performance_evidence["qualified"]
                     and speedup["p05"] >= 1.0 / 0.95

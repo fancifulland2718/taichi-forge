@@ -315,6 +315,67 @@ def test_vulkan_replay_proof_keeps_retained_graphics_gate_shape():
     assert not gate["retention_gate_passed"]
 
 
+def test_vulkan_binding_rotation_is_lifecycle_only_not_replay_performance():
+    workers = [
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [2.0] * 5,
+            [2.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    ]
+    for worker in workers:
+        worker["backend"] = "vulkan"
+        worker["workload"]["retained_binding_sets"] = 2
+        worker["correctness"] = {
+            "binding_sets": [
+                {
+                    "hardware_nonempty": True,
+                    "rerecord_exact_image_match": True,
+                },
+                {
+                    "hardware_nonempty": True,
+                    "rerecord_exact_image_match": True,
+                },
+            ]
+        }
+        worker["memory"] = {
+            "pipeline_closed": {"lifecycle_state": "closed"}
+        }
+        worker["replay_proof"] = {
+            "enabled": True,
+            "baseline_mode": "rerecord",
+            "runtime_statistics": {
+                "retained_replay_attempts": 100,
+                "retained_replay_binding_misses": 99,
+                "retained_replay_invalidations": 99,
+                "retained_replay_prewarms": 100,
+                "retained_replay_records": 0,
+                "retained_replay_replays": 0,
+                "retained_replay_busy_fallbacks": 0,
+                "retained_replay_submit_failures": 0,
+                "retained_replay_bridge_failures": 0,
+                "retained_replay_slots": 0,
+                "retained_replay_slot_capacity": 1,
+            },
+        }
+
+    report = qualification._aggregate(
+        "vulkan-offscreen-simulation", tuple(workers), 0.10, 0.10
+    )
+
+    gate = report["replay_proof_gate"]
+    assert gate["scope"] == "vulkan_binding_rotation_lifecycle"
+    assert gate["counters_qualified"]
+    assert gate["lifecycle_gate_passed"]
+    assert not gate["performance_gate_passed"]
+    assert not gate["retention_gate_passed"]
+    assert not report["performance_claim_eligible"]
+
+
 def test_aggregate_rejects_cross_order_drift_despite_positive_speedup():
     workers = (
         _worker("ab", [1.0] * 5, [2.0] * 5, [2.0] * 5),
