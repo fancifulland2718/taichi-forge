@@ -34,31 +34,211 @@ integer_storage_image_cases = [
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cuda_texture_resource_fails_closed_before_allocation():
+def test_cuda_texture_hardware_sampling_and_lifecycle():
     runtime = impl.get_runtime()
-    registry_before = dict(runtime.prog._debug_texture_resource_stats())
-    runtime_objects_before = len(runtime._runtime_object_refs)
+    source = ti.ndarray(dtype=ti.f32, shape=(2, 2))
+    source.from_numpy(np.asarray([[0.0, 1.0], [2.0, 3.0]], dtype=np.float32))
+    texture = ti.Texture(ti.Format.r32f, (2, 2))
+    texture.from_ndarray(source)
+    result = ti.ndarray(dtype=ti.f32, shape=5)
+
+    @ti.kernel
+    def sample(
+        image: ti.types.texture(num_dimensions=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        output[0] = image.fetch(ti.Vector([0, 0]), 0).x
+        output[1] = image.fetch(ti.Vector([1, 0]), 0).x
+        output[2] = image.fetch(ti.Vector([0, 1]), 0).x
+        output[3] = image.fetch(ti.Vector([1, 1]), 0).x
+        output[4] = image.sample_lod(ti.Vector([0.5, 0.5]), 0.0).x
+
+    sample(texture, result)
+    identity = dict(runtime.prog._debug_texture_resource_identity(texture.tex))
+    texture._delete_runtime_texture()
+    ti.sync()
+    np.testing.assert_allclose(
+        result.to_numpy(),
+        np.asarray([0.0, 2.0, 1.0, 3.0, 1.5], dtype=np.float32),
+    )
+    stats = dict(runtime.prog._debug_texture_resource_stats())
+    assert identity["generation"] > 0
+    assert stats["live"] == 0
+    assert stats["inflight"] == 0
+    assert stats["release_errors"] == 0
+
     resolved = next(
         operation
         for operation in ti.hardware.report().operations
         if operation.descriptor.operation_id == "sampling.texture.cuda"
     )
-    assert resolved.selection == "rejected"
-    assert resolved.unavailable_reason == "implementation_planned"
+    assert resolved.selection == "not_considered"
+    assert resolved.unavailable_reason == "operation_requirements_not_evaluated"
+    assert resolved.descriptor.hardware_acceleration == "qualified"
+    assert resolved.descriptor.graph_integration == "inline"
 
-    with pytest.raises(
-        RuntimeError,
-        match=(
-            "Texture resources are unavailable on the cuda backend; "
-            "this backend does not implement graphics texture allocation "
-            "and TextureOp lowering"
-        ),
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_rejects_incompatible_resource_contracts():
+    with pytest.raises(RuntimeError, match="vec4-f32 sampling contract"):
+        ti.Texture(ti.Format.r32u, (4, 4))
+
+    sampler = ti.hardware.sampling.SamplerConfig(
+        min_filter="nearest", mag_filter="linear"
+    )
+    with pytest.raises(RuntimeError, match="matching min and mag filters"):
+        ti.Texture(ti.Format.r32f, (4, 4), sampler=sampler)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_samples_1d_normalized_and_3d_float_resources():
+    source_1d = ti.ndarray(dtype=ti.u8, shape=4)
+    source_1d.from_numpy(np.asarray([0, 64, 128, 255], dtype=np.uint8))
+    texture_1d = ti.Texture(ti.Format.r8, (4,))
+    texture_1d.from_ndarray(source_1d)
+
+    source_3d = ti.ndarray(dtype=ti.f32, shape=(2, 2, 2))
+    source_3d.from_numpy(np.arange(8, dtype=np.float32).reshape((2, 2, 2)))
+    texture_3d = ti.Texture(ti.Format.r32f, (2, 2, 2))
+    texture_3d.from_ndarray(source_3d)
+    result = ti.ndarray(dtype=ti.f32, shape=4)
+
+    @ti.kernel
+    def sample_dimensions(
+        image_1d: ti.types.texture(num_dimensions=1),
+        image_3d: ti.types.texture(num_dimensions=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
     ):
-        ti.Texture(ti.Format.r32f, (4, 4))
+        output[0] = image_1d.fetch(ti.Vector([2]), 0).x
+        output[1] = image_1d.sample_lod(ti.Vector([0.875]), 0.0).x
+        output[2] = image_3d.fetch(ti.Vector([1, 1, 1]), 0).x
+        output[3] = image_3d.sample_lod(
+            ti.Vector([0.5, 0.5, 0.5]), 0.0
+        ).x
 
+    sample_dimensions(texture_1d, texture_3d, result)
     ti.sync()
-    assert dict(runtime.prog._debug_texture_resource_stats()) == registry_before
-    assert len(runtime._runtime_object_refs) == runtime_objects_before
+    np.testing.assert_allclose(
+        result.to_numpy(),
+        np.asarray([128.0 / 255.0, 1.0, 7.0, 3.5], dtype=np.float32),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_preserves_asymmetric_logical_axes():
+    source_2d_host = np.arange(15, dtype=np.float32).reshape((3, 5))
+    source_2d = ti.ndarray(dtype=ti.f32, shape=(3, 5))
+    source_2d.from_numpy(source_2d_host)
+    texture_2d = ti.Texture(ti.Format.r32f, (3, 5))
+    texture_2d.from_ndarray(source_2d)
+
+    source_3d_host = np.arange(24, dtype=np.float32).reshape((2, 3, 4))
+    source_3d = ti.ndarray(dtype=ti.f32, shape=(2, 3, 4))
+    source_3d.from_numpy(source_3d_host)
+    texture_3d = ti.Texture(ti.Format.r32f, (2, 3, 4))
+    texture_3d.from_ndarray(source_3d)
+    result = ti.ndarray(dtype=ti.f32, shape=4)
+
+    @ti.kernel
+    def fetch_asymmetric(
+        image_2d: ti.types.texture(num_dimensions=2),
+        image_3d: ti.types.texture(num_dimensions=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        output[0] = image_2d.fetch(ti.Vector([0, 4]), 0).x
+        output[1] = image_2d.fetch(ti.Vector([2, 1]), 0).x
+        output[2] = image_3d.fetch(ti.Vector([0, 2, 3]), 0).x
+        output[3] = image_3d.fetch(ti.Vector([1, 0, 2]), 0).x
+
+    fetch_asymmetric(texture_2d, texture_3d, result)
+    ti.sync()
+    np.testing.assert_array_equal(
+        result.to_numpy(),
+        np.asarray(
+            [
+                source_2d_host[0, 4],
+                source_2d_host[2, 1],
+                source_3d_host[0, 2, 3],
+                source_3d_host[1, 0, 2],
+            ],
+            dtype=np.float32,
+        ),
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_uploads_tightly_packed_dense_field():
+    source = ti.field(dtype=ti.f32, shape=(3, 5))
+    texture = ti.Texture(ti.Format.r32f, (3, 5))
+    vector_source = ti.Vector.field(2, dtype=ti.f32, shape=(3, 5))
+    vector_texture = ti.Texture(ti.Format.rg32f, (3, 5))
+    result = ti.ndarray(dtype=ti.f32, shape=5)
+
+    @ti.kernel
+    def initialize():
+        for i, j in source:
+            source[i, j] = ti.cast(i * 10 + j, ti.f32)
+            vector_source[i, j] = ti.Vector(
+                [ti.cast(i * 10 + j, ti.f32), ti.cast(100 + i + j, ti.f32)]
+            )
+
+    @ti.kernel
+    def fetch_field(
+        image: ti.types.texture(num_dimensions=2),
+        vector_image: ti.types.texture(num_dimensions=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        output[0] = image.fetch(ti.Vector([0, 4]), 0).x
+        output[1] = image.fetch(ti.Vector([1, 3]), 0).x
+        output[2] = image.fetch(ti.Vector([2, 0]), 0).x
+        vector_value = vector_image.fetch(ti.Vector([2, 4]), 0)
+        output[3] = vector_value.x
+        output[4] = vector_value.y
+
+    initialize()
+    texture.from_field(source)
+    vector_texture.from_field(vector_source)
+    fetch_field(texture, vector_texture, result)
+    ti.sync()
+    np.testing.assert_array_equal(
+        result.to_numpy(),
+        np.asarray([4.0, 13.0, 20.0, 24.0, 106.0], dtype=np.float32),
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_texture_graph_capture_fails_closed_to_ordinary_dispatch():
+    source = ti.ndarray(dtype=ti.f32, shape=(2, 2))
+    source.from_numpy(np.asarray([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32))
+    texture = ti.Texture(ti.Format.r32f, (2, 2))
+    texture.from_ndarray(source)
+    output = ti.ndarray(dtype=ti.f32, shape=1)
+
+    @ti.kernel
+    def fetch(
+        image: ti.types.texture(num_dimensions=2),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        result[0] = image.fetch(ti.Vector([1, 1]), 0).x
+
+    image_arg = ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "image", ndim=2)
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(fetch, image_arg, output_arg)
+    graph = builder.compile()
+    assert graph._graph_stats[0]["backend"] == "none"
+    graph.run({"image": texture, "output": output})
+    ti.sync()
+
+    assert output.to_numpy()[0] == pytest.approx(4.0)
+    stats = graph._graph_stats[0]
+    assert stats["last_path"] == "ordinary_fallback"
+    assert stats["ordinary_fallbacks"] >= 1
+    assert stats["structural_fallbacks"] >= 1
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
@@ -445,7 +625,7 @@ def test_texture_launch_context_rejects_stale_resource_generation():
 
 
 @pytest.mark.run_in_serial
-@test_utils.test(arch=supported_archs_texture)
+@test_utils.test(arch=[ti.vulkan, ti.cuda])
 def test_texture_registry_resize_churn_conserves_resources():
     prog = impl.get_runtime().prog
     runtime = impl.get_runtime()
@@ -453,10 +633,11 @@ def test_texture_registry_resize_churn_conserves_resources():
     baseline_runtime_objects = len(runtime._runtime_object_refs)
 
     iterations = stress_iterations(256)
+    backend = "cuda" if impl.current_cfg().arch == ti.cuda else "vulkan"
     process_memory = ProcessMemoryPlateau(
-        "vulkan-image-texture-churn",
-        ("vulkan-image",),
-        enabled=impl.current_cfg().arch == ti.vulkan,
+        f"{backend}-texture-resource-churn",
+        (f"{backend}-texture",),
+        enabled=True,
     )
     process_memory.capture("before")
     for i in range(iterations):

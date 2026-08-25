@@ -322,11 +322,17 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert texture.deterministic is False
 
     cuda_texture = ti.hardware.capability("sampling.texture.cuda")
-    assert cuda_texture.implementation_status == "planned"
-    assert cuda_texture.hardware_acceleration == "implementation_defined"
-    assert "GFX Program" in cuda_texture.notes[0]
-    assert "rejects LLVM/CUDA" in cuda_texture.notes[0]
-    assert "TextureOp" in cuda_texture.notes[1]
+    assert cuda_texture.implementation_status == "existing_public"
+    assert cuda_texture.hardware_acceleration == "qualified"
+    assert cuda_texture.scopes == ("kernel",)
+    assert cuda_texture.execution_kind == "kernel_intrinsic"
+    assert cuda_texture.graph_integration == "inline"
+    assert cuda_texture.shapes_or_tiles == ("1D", "2D", "3D")
+    assert cuda_texture.layouts == ("cuda_array",)
+    assert "Driver API symbols" in cuda_texture.notes[0]
+    assert "CUDA RW textures remain unsupported" in cuda_texture.notes[1]
+    assert "CUDA Graph capture remains unsupported" in cuda_texture.notes[4]
+    assert "does not silently replace ndarray loads" in cuda_texture.notes[5]
     assert len(cuda_texture.requirements) == 4
 
     inline_ray = ti.hardware.capability("ray.query.inline.vulkan")

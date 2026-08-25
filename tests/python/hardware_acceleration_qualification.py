@@ -103,6 +103,10 @@ CASES = (
     "cuda-cudss-solve",
     "cuda-cudss-refactor-solve",
     "cuda-cudss-tet-fem",
+    "cuda-texture-fetch",
+    "cuda-texture-sample",
+    "cuda-texture-sdf-3d",
+    "cuda-texture-stencil",
     "vulkan-ray-inline-contact",
     "vulkan-ray-update",
     "vulkan-image-copy",
@@ -720,8 +724,8 @@ def _provenance(case, order):
     }
 
 
-def _init_cuda():
-    ti.init(arch=ti.cuda, enable_fallback=False, offline_cache=False)
+def _init_cuda(**kwargs):
+    ti.init(arch=ti.cuda, enable_fallback=False, offline_cache=False, **kwargs)
 
 
 def _init_vulkan():
@@ -2913,8 +2917,8 @@ def _vulkan_ray_inline_contact_case(order, args):
     return result
 
 
-def _vulkan_texture_fetch_case(order, args):
-    _init_vulkan()
+def _texture_fetch_case(order, args, backend):
+    (_init_cuda if backend == "cuda" else _init_vulkan)()
     size = args.texture_size
     source_host = (np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021) / np.float32(1021.0)
     source = ti.ndarray(ti.f32, shape=(size, size))
@@ -2955,7 +2959,10 @@ def _vulkan_texture_fetch_case(order, args):
             output[i, j] = values[x_index, y_index]
 
     setup_started = time.perf_counter_ns()
-    upload(source, texture)
+    if backend == "cuda":
+        texture.from_ndarray(source)
+    else:
+        upload(source, texture)
     ti.sync()
     setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
 
@@ -2978,13 +2985,13 @@ def _vulkan_texture_fetch_case(order, args):
     hardware_values = hardware_output.to_numpy()
     baseline_values = baseline_output.to_numpy()
     hardware_error = _error(hardware_values, baseline_values)
-    route = _resolved_operation("sampling.texture.vulkan")
+    route = _resolved_operation(f"sampling.texture.{backend}")
     passed = (
         hardware_error[0] == 0.0
         and _executed_core_route_is_consistent(route)
         and route["hardware_route"] == "qualified"
     )
-    result = _provenance("vulkan-texture-fetch", order)
+    result = _provenance(f"{backend}-texture-fetch", order)
     result.update(
         {
             "status": "passed" if passed else "failed",
@@ -2993,7 +3000,7 @@ def _vulkan_texture_fetch_case(order, args):
                 "height": size,
                 "fetches": size * size,
                 "upload_ms": setup_ms,
-                "hardware": "Vulkan sampled-image texelFetch",
+                "hardware": f"{backend.upper()} hardware texture exact fetch",
                 "baseline": "Taichi storage-buffer ndarray load",
             },
             "timing": timing,
@@ -3008,8 +3015,16 @@ def _vulkan_texture_fetch_case(order, args):
     return result
 
 
-def _vulkan_texture_sample_case(order, args):
-    _init_vulkan()
+def _cuda_texture_fetch_case(order, args):
+    return _texture_fetch_case(order, args, "cuda")
+
+
+def _vulkan_texture_fetch_case(order, args):
+    return _texture_fetch_case(order, args, "vulkan")
+
+
+def _texture_sample_case(order, args, backend):
+    (_init_cuda if backend == "cuda" else _init_vulkan)()
     size = args.texture_size
     source_host = np.fromfunction(
         lambda i, j: (i + 2.0 * j) / (3.0 * max(size - 1, 1)),
@@ -3068,7 +3083,10 @@ def _vulkan_texture_sample_case(order, args):
             output[i, j] = lower * (1.0 - ty) + upper * ty
 
     setup_started = time.perf_counter_ns()
-    upload(source, texture)
+    if backend == "cuda":
+        texture.from_ndarray(source)
+    else:
+        upload(source, texture)
     ti.sync()
     setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
 
@@ -3091,17 +3109,17 @@ def _vulkan_texture_sample_case(order, args):
     hardware_values = hardware_output.to_numpy()
     baseline_values = baseline_output.to_numpy()
     sample_error = _error(hardware_values, baseline_values)
-    # Vulkan filtering weights have device-defined sub-texel precision. A
+    # Hardware filtering weights have device-defined sub-texel precision. A
     # smooth grid keeps the semantic check sensitive to coordinate/address
     # mistakes without requiring bitwise equality to manual f32 interpolation.
     tolerance = max(2.0e-5, 2.0 / max(size - 1, 1) / 256.0)
-    route = _resolved_operation("sampling.texture.vulkan")
+    route = _resolved_operation(f"sampling.texture.{backend}")
     passed = (
         sample_error[0] <= tolerance
         and _executed_core_route_is_consistent(route)
         and route["hardware_route"] == "qualified"
     )
-    result = _provenance("vulkan-texture-sample", order)
+    result = _provenance(f"{backend}-texture-sample", order)
     result.update(
         {
             "status": "passed" if passed else "failed",
@@ -3110,7 +3128,7 @@ def _vulkan_texture_sample_case(order, args):
                 "height": size,
                 "samples": size * size,
                 "upload_ms": setup_ms,
-                "hardware": "Vulkan linear clamp-to-edge sample_lod",
+                "hardware": f"{backend.upper()} linear clamp-to-edge sample_lod",
                 "baseline": "Taichi ndarray manual bilinear clamp",
             },
             "timing": timing,
@@ -3120,6 +3138,164 @@ def _vulkan_texture_sample_case(order, args):
                 "hardware_vs_manual_max_rel": sample_error[1],
             },
             "route": route,
+        }
+    )
+    ti.reset()
+    return result
+
+
+def _cuda_texture_sample_case(order, args):
+    return _texture_sample_case(order, args, "cuda")
+
+
+def _vulkan_texture_sample_case(order, args):
+    return _texture_sample_case(order, args, "vulkan")
+
+
+def _cuda_texture_sdf_3d_case(order, args):
+    """Qualify the physics-facing trilinear SDF sampling crossover."""
+    _init_cuda(kernel_profiler=args.texture_kernel_profiler)
+    size = args.texture_volume_size
+    source_host = np.fromfunction(
+        lambda i, j, k: (0.25 * i + 0.5 * j + 0.75 * k) / (1.5 * max(size - 1, 1)),
+        (size, size, size),
+        dtype=np.float32,
+    ).astype(np.float32)
+    source = ti.ndarray(ti.f32, shape=(size, size, size))
+    hardware_output = ti.ndarray(ti.f32, shape=(size, size, size))
+    baseline_output = ti.ndarray(ti.f32, shape=(size, size, size))
+    sampler = ti.hardware.sampling.SamplerConfig(
+        address_mode_u="clamp_to_edge",
+        address_mode_v="clamp_to_edge",
+        address_mode_w="clamp_to_edge",
+    )
+    texture = ti.Texture(ti.Format.r32f, (size, size, size), sampler=sampler)
+    source.from_numpy(source_host)
+
+    @ti.kernel
+    def hardware_sample(
+        image: ti.types.texture(num_dimensions=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, k in output:
+            x = ti.cast((i * 17 + j * 3 + k * 5) % size, ti.f32) + 0.37
+            y = ti.cast((i * 5 + j * 11 + k * 7) % size, ti.f32) + 0.61
+            z = ti.cast((i * 13 + j * 2 + k * 19) % size, ti.f32) + 0.43
+            output[i, j, k] = image.sample_lod(
+                ti.Vector([x / size, y / size, z / size]), 0.0
+            ).x
+
+    @ti.kernel
+    def baseline_sample(
+        values: ti.types.ndarray(dtype=ti.f32, ndim=3),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=3),
+    ):
+        for i, j, k in output:
+            x = ti.cast((i * 17 + j * 3 + k * 5) % size, ti.f32) + 0.37 - 0.5
+            y = ti.cast((i * 5 + j * 11 + k * 7) % size, ti.f32) + 0.61 - 0.5
+            z = ti.cast((i * 13 + j * 2 + k * 19) % size, ti.f32) + 0.43 - 0.5
+            x0 = ti.cast(ti.floor(x), ti.i32)
+            y0 = ti.cast(ti.floor(y), ti.i32)
+            z0 = ti.cast(ti.floor(z), ti.i32)
+            tx = x - ti.cast(x0, ti.f32)
+            ty = y - ti.cast(y0, ti.f32)
+            tz = z - ti.cast(z0, ti.f32)
+            x1 = ti.min(ti.max(x0 + 1, 0), size - 1)
+            y1 = ti.min(ti.max(y0 + 1, 0), size - 1)
+            z1 = ti.min(ti.max(z0 + 1, 0), size - 1)
+            x0 = ti.min(ti.max(x0, 0), size - 1)
+            y0 = ti.min(ti.max(y0, 0), size - 1)
+            z0 = ti.min(ti.max(z0, 0), size - 1)
+            lower_y0 = values[x0, y0, z0] * (1.0 - tx) + values[x1, y0, z0] * tx
+            lower_y1 = values[x0, y1, z0] * (1.0 - tx) + values[x1, y1, z0] * tx
+            upper_y0 = values[x0, y0, z1] * (1.0 - tx) + values[x1, y0, z1] * tx
+            upper_y1 = values[x0, y1, z1] * (1.0 - tx) + values[x1, y1, z1] * tx
+            lower = lower_y0 * (1.0 - ty) + lower_y1 * ty
+            upper = upper_y0 * (1.0 - ty) + upper_y1 * ty
+            output[i, j, k] = lower * (1.0 - tz) + upper * tz
+
+    setup_started = time.perf_counter_ns()
+    texture.from_ndarray(source)
+    ti.sync()
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+
+    def hardware():
+        hardware_sample(texture, hardware_output)
+
+    def baseline():
+        baseline_sample(source, baseline_output)
+
+    if args.texture_kernel_profiler:
+        ti.profiler.clear_kernel_profiler_info()
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    device_profile = None
+    if args.texture_kernel_profiler:
+        hardware_profile = ti.profiler.query_kernel_profiler_info(hardware_sample.__name__)
+        baseline_profile = ti.profiler.query_kernel_profiler_info(baseline_sample.__name__)
+        device_profile = {
+            "measurement_path_changed": True,
+            "tool": "Taichi CUDA event kernel profiler",
+            "hardware": {
+                "count": hardware_profile.counter,
+                "min_ms": hardware_profile.min,
+                "avg_ms": hardware_profile.avg,
+                "max_ms": hardware_profile.max,
+            },
+            "baseline": {
+                "count": baseline_profile.counter,
+                "min_ms": baseline_profile.min,
+                "avg_ms": baseline_profile.avg,
+                "max_ms": baseline_profile.max,
+            },
+        }
+    hardware_values = hardware_output.to_numpy()
+    baseline_values = baseline_output.to_numpy()
+    sample_error = _error(hardware_values, baseline_values)
+    tolerance = max(3.0e-5, 3.0 / max(size - 1, 1) / 256.0)
+    route = _resolved_operation("sampling.texture.cuda")
+    passed = (
+        sample_error[0] <= tolerance
+        and _executed_core_route_is_consistent(route)
+        and route["hardware_route"] == "qualified"
+    )
+    result = _provenance("cuda-texture-sdf-3d", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "kind": "grid_sdf_trilinear_contact_query",
+                "width": size,
+                "height": size,
+                "depth": size,
+                "samples": size**3,
+                "upload_ms": setup_ms,
+                "hardware": "CUDA hardware texture trilinear sample_lod",
+                "baseline": "Taichi ndarray manual eight-load trilinear interpolation",
+                "timed_scope": "query kernel plus synchronization",
+                "upload_included": False,
+            },
+            "timing": timing,
+            "correctness": {
+                "tolerance": float(tolerance),
+                "hardware_vs_manual_max_abs": sample_error[0],
+                "hardware_vs_manual_max_rel": sample_error[1],
+            },
+            "route": route,
+            "architecture_benefit": {
+                "physics_use": "grid SDF collision and contact query",
+                "eight_loads_and_interpolation_fused": True,
+                "resource_is_immutable_for_dispatch": True,
+            },
+            "device_profile": device_profile,
         }
     )
     ti.reset()
@@ -3764,8 +3940,8 @@ def _vulkan_offscreen_simulation_case(order, args):
     return result
 
 
-def _vulkan_texture_stencil_case(order, args):
-    _init_vulkan()
+def _texture_stencil_case(order, args, backend):
+    (_init_cuda if backend == "cuda" else _init_vulkan)()
     size = args.texture_size
     radius = args.texture_stencil_radius
     output_size = size - 2 * radius
@@ -3811,7 +3987,10 @@ def _vulkan_texture_stencil_case(order, args):
             output[i, j] = total
 
     setup_started = time.perf_counter_ns()
-    upload(source, texture)
+    if backend == "cuda":
+        texture.from_ndarray(source)
+    else:
+        upload(source, texture)
     ti.sync()
     setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
 
@@ -3843,14 +4022,14 @@ def _vulkan_texture_stencil_case(order, args):
     hardware_error = _error(hardware_values, expected)
     baseline_error = _error(baseline_values, expected)
     tolerance = float(taps * np.finfo(np.float32).eps * 4.0)
-    route = _resolved_operation("sampling.texture.vulkan")
+    route = _resolved_operation(f"sampling.texture.{backend}")
     passed = (
         hardware_error[0] <= tolerance
         and baseline_error[0] <= tolerance
         and _executed_core_route_is_consistent(route)
         and route["hardware_route"] == "qualified"
     )
-    result = _provenance("vulkan-texture-stencil", order)
+    result = _provenance(f"{backend}-texture-stencil", order)
     result.update(
         {
             "status": "passed" if passed else "failed",
@@ -3861,7 +4040,7 @@ def _vulkan_texture_stencil_case(order, args):
                 "taps_per_output": taps,
                 "outputs": output_size * output_size,
                 "upload_ms": setup_ms,
-                "hardware": "Vulkan sampled-image local texelFetch stencil",
+                "hardware": f"{backend.upper()} hardware texture local-fetch stencil",
                 "baseline": "Taichi storage-buffer local-load stencil",
             },
             "timing": timing,
@@ -3879,6 +4058,14 @@ def _vulkan_texture_stencil_case(order, args):
     return result
 
 
+def _cuda_texture_stencil_case(order, args):
+    return _texture_stencil_case(order, args, "cuda")
+
+
+def _vulkan_texture_stencil_case(order, args):
+    return _texture_stencil_case(order, args, "vulkan")
+
+
 _CASE_RUNNERS = {
     "cuda-fft": _cuda_fft_case,
     "cuda-cufft-mixed-replay": _cuda_cufft_mixed_replay_case,
@@ -3890,6 +4077,10 @@ _CASE_RUNNERS = {
     "cuda-cudss-solve": _cuda_cudss_solve_case,
     "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
     "cuda-cudss-tet-fem": _cuda_cudss_tet_fem_case,
+    "cuda-texture-fetch": _cuda_texture_fetch_case,
+    "cuda-texture-sample": _cuda_texture_sample_case,
+    "cuda-texture-sdf-3d": _cuda_texture_sdf_3d_case,
+    "cuda-texture-stencil": _cuda_texture_stencil_case,
     "vulkan-ray-inline-contact": _vulkan_ray_inline_contact_case,
     "vulkan-ray-update": _vulkan_ray_update_case,
     "vulkan-image-copy": _vulkan_image_copy_case,
@@ -5206,6 +5397,8 @@ def _parent(args):
                     str(args.ray_query_side),
                     "--texture-size",
                     str(args.texture_size),
+                    "--texture-volume-size",
+                    str(args.texture_volume_size),
                     "--texture-stencil-radius",
                     str(args.texture_stencil_radius),
                     "--offscreen-size",
@@ -5223,6 +5416,8 @@ def _parent(args):
                 ]
                 if args.vulkan_retained_replay_proof:
                     command.append("--vulkan-retained-replay-proof")
+                if args.texture_kernel_profiler:
+                    command.append("--texture-kernel-profiler")
                 if args.cudss_library:
                     command.extend(("--cudss-library", args.cudss_library))
                 counter_before = _windows_performance_counter_snapshot() if args.windows_performance_counters else None
@@ -5333,6 +5528,7 @@ def _parent(args):
                 "krylov_iterations": args.krylov_iterations,
                 "krylov_stencil_radius": args.krylov_stencil_radius,
                 "krylov_baseline": args.krylov_baseline,
+                "texture_volume_size": args.texture_volume_size,
                 "offscreen_size": args.offscreen_size,
                 "offscreen_tiles": args.offscreen_tiles,
                 "offscreen_draws": args.offscreen_draws,
@@ -5405,6 +5601,8 @@ def _parse_args():
     parser.add_argument("--ray-grid", type=int, default=128)
     parser.add_argument("--ray-query-side", type=int, default=128)
     parser.add_argument("--texture-size", type=int, default=1024)
+    parser.add_argument("--texture-volume-size", type=int, default=160)
+    parser.add_argument("--texture-kernel-profiler", action="store_true")
     parser.add_argument("--texture-stencil-radius", type=int, default=2)
     parser.add_argument("--offscreen-size", type=int, default=256)
     parser.add_argument("--offscreen-tiles", type=int, default=32)
@@ -5452,6 +5650,7 @@ def _parse_args():
         or args.ray_grid < 2
         or args.ray_query_side <= 0
         or args.texture_size <= 0
+        or args.texture_volume_size <= 1
         or args.texture_stencil_radius <= 0
         or 2 * args.texture_stencil_radius >= args.texture_size
         or args.offscreen_size < 32
