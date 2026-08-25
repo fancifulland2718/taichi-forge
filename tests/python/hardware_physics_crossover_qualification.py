@@ -306,6 +306,12 @@ def _parent(args):
             "cv_limit": args.cv_limit,
             "order_drift_limit": args.drift_limit,
             "windows_performance_counters": args.windows_performance_counters,
+            "retention": {
+                "scope": "declared_timed_scope",
+                "minimum_paired_p05_exclusive": qualification.RETENTION_MINIMUM_PAIRED_SPEEDUP,
+                "cv_and_order_drift_are_diagnostic": True,
+                "raw_minimum_is_diagnostic": True,
+            },
             "points": {
                 family: [
                     {key: point[key] for key in ("label", "work_units", "parameters")}

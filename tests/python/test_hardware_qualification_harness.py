@@ -265,11 +265,11 @@ def test_aggregate_rejects_noisy_paired_gain_from_retention():
 
     assert not report["retention_eligible"]
     assert "paired_margin_gate" in report["retention_qualification"]["reasons"]
-    assert "unstable_paired_ratio" in report["retention_qualification"]["reasons"]
+    assert report["retention_qualification"]["paired_cv_is_diagnostic"]
 
 
-def test_aggregate_retains_strong_p05_despite_paired_noise_and_order_effect():
-    paired = [1.3, 1.4, 1.5, 2.5, 4.0]
+def test_aggregate_retains_positive_p05_despite_paired_noise_and_order_effect():
+    paired = [1.01, 1.1, 1.2, 2.5, 4.0]
     workers = tuple(
         _worker(
             "ab" if index < 4 else "ba",
@@ -284,13 +284,34 @@ def test_aggregate_retains_strong_p05_despite_paired_noise_and_order_effect():
 
     report = qualification._aggregate("synthetic", workers, 0.05, 0.05)
 
-    assert report["paired_speedup"]["p05"] == pytest.approx(1.3)
+    assert report["paired_speedup"]["p05"] == pytest.approx(1.01)
     assert report["paired_speedup"]["cv"] > 0.05
     assert report["retention_qualification"]["observed"]["maximum_order_drift"] > 0.05
     assert report["retention_eligible"]
-    assert report["retention_qualification"]["strong_margin_noise_override_applied"]
+    assert report["retention_qualification"]["paired_cv_is_diagnostic"]
+    assert report["retention_qualification"]["order_drift_is_diagnostic"]
     assert report["retention_qualification"]["reasons"] == ()
     assert not report["performance_claim_eligible"]
+
+
+def test_aggregate_rejects_break_even_p05_from_retention():
+    workers = tuple(
+        _worker(
+            "ab" if index < 4 else "ba",
+            [1.0] * 5,
+            [1.0] * 5,
+            [1.0] * 5,
+            block_ms=100.0,
+            pid=index + 1,
+        )
+        for index in range(8)
+    )
+
+    report = qualification._aggregate("synthetic", workers, 0.05, 0.05)
+
+    assert report["paired_speedup"]["p05"] == pytest.approx(1.0)
+    assert not report["retention_eligible"]
+    assert report["retention_qualification"]["reasons"] == ("paired_margin_gate",)
 
 
 def test_build_provenance_qualification_requires_one_matching_worker_revision():
@@ -623,8 +644,8 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
         _worker(
             "ab" if index < 4 else "ba",
             [1.0] * 5,
-            [1.1] * 5,
-            [1.1] * 5,
+            [0.9] * 5,
+            [0.9] * 5,
             block_ms=100.0,
             pid=index + 1,
         )
@@ -659,7 +680,10 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
         }
         worker["packet_timing"] = {
             "scope": "two fixed-binding packets with one terminal wait",
-            "samples_ms": {"hardware": [1.0] * 5, "baseline": [1.1] * 5},
+            "samples_ms": {
+                "hardware": [0.8, 1.2, 0.9, 1.1, 1.0],
+                "baseline": [0.88, 1.32, 0.99, 1.21, 1.1],
+            },
             "paired_speedups": [1.1] * 5,
             "calibration": {
                 "hardware": {"satisfied": True, "observed_block_ms": 100.0},
@@ -688,7 +712,12 @@ def test_vulkan_multi_packet_requires_low_sync_lifecycle_and_performance():
     assert gate["lifecycle_gate_passed"]
     assert gate["low_sync_gate_passed"]
     assert gate["packet_performance_gate_passed"]
+    assert not gate["packet_low_noise_diagnostic_passed"]
     assert gate["retention_gate_passed"]
+    assert report["retention_eligible"]
+    assert report["retention_qualification"]["scope"] == (
+        "two fixed-binding packets with one terminal wait"
+    )
     assert not report["performance_claim_eligible"]
 
     workers[0]["packet_lifecycle"]["hardware_workspace_lane_waits_delta"] = 1

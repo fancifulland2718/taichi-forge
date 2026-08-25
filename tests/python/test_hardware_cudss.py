@@ -234,7 +234,7 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
                 "minimum_block_qualified": True,
             },
         },
-        source_schema="taichi_forge.hardware_acceleration_qualification.v6",
+        source_schema="taichi_forge.hardware_acceleration_qualification.v7",
         source_digest="test-artifact",
     )
     mismatched = ti.linalg.SparseSolver(

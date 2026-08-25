@@ -345,7 +345,7 @@ def test_cuda_sparse_domain_auto_spmv_requires_scoped_provider_evidence():
                     "minimum_block_qualified": True,
                 },
             },
-            source_schema=("taichi_forge.hardware_acceleration_qualification.v6"),
+            source_schema=("taichi_forge.hardware_acceleration_qualification.v7"),
             source_digest="test-artifact",
         )
 

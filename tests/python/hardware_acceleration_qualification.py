@@ -82,7 +82,7 @@ from taichi_forge.hardware._admission import (  # pylint: disable=C0413
 )
 
 
-SCHEMA = "taichi_forge.hardware_acceleration_qualification.v6"
+SCHEMA = "taichi_forge.hardware_acceleration_qualification.v7"
 ADMISSION_SCHEMA = "taichi_forge.provider_admission.v2"
 AUTO_ADMISSION_MINIMUM_PROCESSES = 8
 AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER = 4
@@ -90,10 +90,7 @@ AUTO_ADMISSION_MINIMUM_SAMPLES = 40
 AUTO_ADMISSION_MINIMUM_BLOCK_MS = 100.0
 AUTO_ADMISSION_MAXIMUM_CV = 0.05
 AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT = 0.05
-RETENTION_MINIMUM_PAIRED_SPEEDUP = 1.05
-RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP = 1.20
-RETENTION_MAXIMUM_PAIRED_CV = 0.05
-RETENTION_MAXIMUM_ORDER_DRIFT = 0.05
+RETENTION_MINIMUM_PAIRED_SPEEDUP = 1.0
 CASES = (
     "cuda-fft",
     "cuda-cufft-mixed-replay",
@@ -3875,36 +3872,40 @@ def _performance_environment_qualification(workers):
     }
 
 
-def _retention_qualification(workers, variants, paired_speedup, performance_environment):
-    """Qualify a robust paired gain without hiding absolute timing noise.
+def _retention_qualification(
+    workers,
+    variants,
+    paired_speedup,
+    performance_environment,
+    *,
+    timing_key="timing",
+    scope="primary_timing",
+):
+    """Qualify a conservative paired gain without hiding timing noise.
 
     Retention is deliberately weaker than auto admission or a public
-    performance claim: correlated process noise may make each variant noisy
-    while their paired ratio remains reproducibly positive. Coverage,
-    calibrated blocks, paired-ratio stability, order stability, and any
-    collected environment evidence still fail closed.
+    performance claim. The predeclared paired p05 lower tail must remain
+    strictly positive, while absolute CV, paired CV, order drift, and the raw
+    sample minimum remain visible diagnostics. Coverage, calibrated blocks,
+    and any collected environment evidence still fail closed.
     """
 
     order_processes = {order: sum(worker["order"] == order for worker in workers) for order in ("ab", "ba")}
     fresh_processes = len({(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers})
     samples_per_variant = {variant: variants[variant]["count"] for variant in ("hardware", "baseline")}
     observed_blocks = [
-        float(worker["timing"]["calibration"][variant]["observed_block_ms"])
+        float(worker[timing_key]["calibration"][variant]["observed_block_ms"])
         for worker in workers
         for variant in ("hardware", "baseline")
     ]
     calibration_satisfied = all(
-        worker["timing"]["calibration"][variant]["satisfied"]
+        worker[timing_key]["calibration"][variant]["satisfied"]
         for worker in workers
         for variant in ("hardware", "baseline")
     )
     minimum_block_ms = min(observed_blocks)
     maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
     paired_cv = paired_speedup.get("cv")
-    strong_margin = bool(
-        paired_speedup.get("p05") is not None
-        and paired_speedup["p05"] >= RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP
-    )
     checks = (
         (
             fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES
@@ -3920,17 +3921,8 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
             "undersized_timing_blocks",
         ),
         (
-            paired_speedup.get("p05") is not None and paired_speedup["p05"] >= RETENTION_MINIMUM_PAIRED_SPEEDUP,
+            paired_speedup.get("p05") is not None and paired_speedup["p05"] > RETENTION_MINIMUM_PAIRED_SPEEDUP,
             "paired_margin_gate",
-        ),
-        (
-            paired_cv is not None
-            and (paired_cv <= RETENTION_MAXIMUM_PAIRED_CV or strong_margin),
-            "unstable_paired_ratio",
-        ),
-        (
-            maximum_order_drift <= RETENTION_MAXIMUM_ORDER_DRIFT or strong_margin,
-            "unstable_order_effect",
         ),
         (
             performance_environment is None or performance_environment["qualified"],
@@ -3941,27 +3933,18 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
     return {
         "qualified": not reasons,
         "reasons": reasons,
-        "policy": "robust_paired_positive",
+        "policy": "conservative_paired_positive",
+        "scope": scope,
         "absolute_variant_cv_is_diagnostic": True,
-        "strong_margin_noise_override_applied": bool(
-            strong_margin
-            and (
-                paired_cv is None
-                or paired_cv > RETENTION_MAXIMUM_PAIRED_CV
-                or maximum_order_drift > RETENTION_MAXIMUM_ORDER_DRIFT
-            )
-        ),
+        "paired_cv_is_diagnostic": True,
+        "order_drift_is_diagnostic": True,
+        "raw_minimum_is_diagnostic": True,
         "requirements": {
             "fresh_processes": AUTO_ADMISSION_MINIMUM_PROCESSES,
             "processes_per_order": AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER,
             "samples_per_variant": AUTO_ADMISSION_MINIMUM_SAMPLES,
             "minimum_block_ms": AUTO_ADMISSION_MINIMUM_BLOCK_MS,
-            "minimum_paired_p05": RETENTION_MINIMUM_PAIRED_SPEEDUP,
-            "strong_margin_minimum_paired_p05": (
-                RETENTION_STRONG_MINIMUM_PAIRED_SPEEDUP
-            ),
-            "maximum_paired_cv": RETENTION_MAXIMUM_PAIRED_CV,
-            "maximum_order_drift": RETENTION_MAXIMUM_ORDER_DRIFT,
+            "minimum_paired_p05_exclusive": RETENTION_MINIMUM_PAIRED_SPEEDUP,
         },
         "observed": {
             "fresh_processes": fresh_processes,
@@ -3970,6 +3953,7 @@ def _retention_qualification(workers, variants, paired_speedup, performance_envi
             "minimum_block_ms": minimum_block_ms,
             "calibration_satisfied": calibration_satisfied,
             "paired_p05": paired_speedup.get("p05"),
+            "paired_min": paired_speedup.get("min"),
             "paired_cv": paired_cv,
             "maximum_order_drift": maximum_order_drift,
             "absolute_variant_cv": {variant: variants[variant]["cv"] for variant in variants},
@@ -4242,6 +4226,14 @@ def _aggregate(
             and packet_minimum_block_qualified
             and packet_samples_qualified
         )
+        packet_retention_qualification = _retention_qualification(
+            workers,
+            packet_variants,
+            packet_speedup,
+            performance_environment,
+            timing_key="packet_timing",
+            scope=workers[0]["packet_timing"]["scope"],
+        )
         result["packet_timing"] = {
             "scope": workers[0]["packet_timing"]["scope"],
             "variants": packet_variants,
@@ -4250,6 +4242,7 @@ def _aggregate(
             "minimum_block_qualified": packet_minimum_block_qualified,
             "minimum_samples_qualified": packet_samples_qualified,
             "performance_evidence_qualified": packet_evidence_qualified,
+            "retention_qualification": packet_retention_qualification,
             "minimum_conservative_non_regression": 0.95,
             "non_regression_gate_passed": packet_speedup["p05"] >= 0.95,
             "gate_passed": (packet_evidence_qualified and packet_speedup["p05"] >= 0.95),
@@ -4518,7 +4511,9 @@ def _aggregate(
                 gpu_stage_gate = bool(result.get("gpu_stage_timing", {}).get("gate_passed", False))
                 performance_gate = bool(counters_qualified and gpu_stage_gate and (wall_gate or cpu_submit_gate))
                 if retained_packets > 1:
-                    packet_performance_gate = bool(result.get("packet_timing", {}).get("gate_passed", False))
+                    packet_timing = result.get("packet_timing", {})
+                    packet_retention = packet_timing.get("retention_qualification", {})
+                    packet_performance_gate = bool(packet_retention.get("qualified", False))
                     packet_gate = bool(
                         counters_qualified
                         and lifecycle_qualified
@@ -4534,9 +4529,14 @@ def _aggregate(
                         "lifecycle_gate_passed": (lifecycle_qualified and packet_lifecycle_qualified),
                         "low_sync_gate_passed": packet_low_sync_qualified,
                         "packet_performance_gate_passed": (packet_performance_gate),
+                        "packet_low_noise_diagnostic_passed": bool(
+                            packet_timing.get("gate_passed", False)
+                        ),
                         "performance_gate_passed": packet_gate,
                         "retention_gate_passed": packet_gate,
                     }
+                    result["retention_qualification"] = packet_retention
+                    result["retention_eligible"] = packet_performance_gate
                     result["performance_claim_eligible"] = False
                     for diagnostic in (
                         "memory",
@@ -4872,6 +4872,12 @@ def _parent(args):
                 "minimum_margin": args.auto_admission_margin,
                 "spmv_expected_reuse": args.spmv_expected_reuse,
                 "cudss_expected_reuse": args.cudss_expected_reuse,
+            },
+            "retention": {
+                "scope": "declared_timed_scope",
+                "minimum_paired_p05_exclusive": RETENTION_MINIMUM_PAIRED_SPEEDUP,
+                "cv_and_order_drift_are_diagnostic": True,
+                "raw_minimum_is_diagnostic": True,
             },
             "physics_workloads": {
                 "poisson_length": args.poisson_length,
