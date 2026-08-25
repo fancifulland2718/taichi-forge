@@ -84,58 +84,31 @@ class GraphKrylovSolver:
             raise RuntimeError("GraphKrylovSolver requires CPU, CUDA, or Vulkan")
         self._recordable_only = bool(recordable_only)
         self._vectors = (
-            {}
-            if self._recordable_only
-            else {
-                name: ti.ndarray(ti.f32, shape=self._size)
-                for name in _VECTOR_NAMES
-            }
+            {} if self._recordable_only else {name: ti.ndarray(ti.f32, shape=self._size) for name in _VECTOR_NAMES}
         )
         self._direct_solution = None
         self._reduction_block_dim = 256
         self._reduction_items_per_thread = 4
-        reduction_threads = (
-            self._size + self._reduction_items_per_thread - 1
-        ) // self._reduction_items_per_thread
+        reduction_threads = (self._size + self._reduction_items_per_thread - 1) // self._reduction_items_per_thread
         self._reduction_partial_count = (
             1
             if self._backend_family == "cpu"
-            else (reduction_threads + self._reduction_block_dim - 1)
-            // self._reduction_block_dim
+            else (reduction_threads + self._reduction_block_dim - 1) // self._reduction_block_dim
         )
-        self._reduction_worker_count = (
-            self._reduction_partial_count * self._reduction_block_dim
-        )
+        self._reduction_worker_count = self._reduction_partial_count * self._reduction_block_dim
         self._reduction_partials = (
             {}
             if self._recordable_only
-            else {
-                name: ti.ndarray(ti.f32, shape=self._reduction_partial_count)
-                for name in _PARTIAL_NAMES
-            }
+            else {name: ti.ndarray(ti.f32, shape=self._reduction_partial_count) for name in _PARTIAL_NAMES}
         )
-        self._scalars = (
-            {}
-            if self._recordable_only
-            else {
-                name: ti.ndarray(ti.f32, shape=()) for name in _SCALAR_NAMES
-            }
-        )
-        self._predicate = (
-            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
-        )
-        self._status = (
-            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
-        )
-        self._counter = (
-            None if self._recordable_only else ti.ndarray(ti.i32, shape=())
-        )
+        self._scalars = {} if self._recordable_only else {name: ti.ndarray(ti.f32, shape=()) for name in _SCALAR_NAMES}
+        self._predicate = None if self._recordable_only else ti.ndarray(ti.i32, shape=())
+        self._status = None if self._recordable_only else ti.ndarray(ti.i32, shape=())
+        self._counter = None if self._recordable_only else ti.ndarray(ti.i32, shape=())
         # One terminal packet causes one public readback/synchronization. Status
         # and iteration counts are exactly representable for the supported
         # bounded iteration range.
-        self._terminal = (
-            None if self._recordable_only else ti.ndarray(ti.f32, shape=5)
-        )
+        self._terminal = None if self._recordable_only else ti.ndarray(ti.f32, shape=5)
         self._last_result = self._not_run_result()
         self._solve_calls = 0
         self._logical_iterations = 0
@@ -185,12 +158,8 @@ class GraphKrylovSolver:
                 ti.loop_config(block_dim=reduction_block_dim)
                 for worker in range(reduction_worker_count):
                     lane = worker % reduction_block_dim
-                    residual_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
-                    rhs_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
+                    residual_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
+                    rhs_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
                     residual_sum = 0.0
                     rhs_sum = 0.0
                     for item in ti.static(range(reduction_items_per_thread)):
@@ -296,9 +265,7 @@ class GraphKrylovSolver:
                 ti.loop_config(block_dim=reduction_block_dim)
                 for worker in range(reduction_worker_count):
                     lane = worker % reduction_block_dim
-                    pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
+                    pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
                     value = 0.0
                     for item in ti.static(range(reduction_items_per_thread)):
                         index = worker * reduction_items_per_thread + item
@@ -373,12 +340,8 @@ class GraphKrylovSolver:
                 ti.loop_config(block_dim=reduction_block_dim)
                 for worker in range(reduction_worker_count):
                     lane = worker % reduction_block_dim
-                    residual_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
-                    rz_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
+                    residual_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
+                    rz_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
                     residual_sum = 0.0
                     rz_sum = 0.0
                     for item in ti.static(range(reduction_items_per_thread)):
@@ -420,12 +383,8 @@ class GraphKrylovSolver:
                 ti.loop_config(block_dim=reduction_block_dim)
                 for worker in range(reduction_worker_count):
                     lane = worker % reduction_block_dim
-                    residual_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
-                    rz_pad = ti.simt.block.SharedArray(
-                        (reduction_block_dim,), ti.f32
-                    )
+                    residual_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
+                    rz_pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
                     residual_sum = 0.0
                     rz_sum = 0.0
                     for item in ti.static(range(reduction_items_per_thread)):
@@ -554,16 +513,9 @@ class GraphKrylovSolver:
             threshold = ti.max(atol, rtol * reference)
             terminal_metrics[3] = threshold * threshold
 
-        vectors = {
-            name: _array_arg(name)
-            for name in ("b", "initial_x", "x", "output", *_VECTOR_NAMES)
-        }
-        partials = {
-            name: _array_arg(name) for name in _PARTIAL_NAMES
-        }
-        scalars = {
-            name: _scalar_array_arg(name, ti.f32) for name in _SCALAR_NAMES
-        }
+        vectors = {name: _array_arg(name) for name in ("b", "initial_x", "x", "output", *_VECTOR_NAMES)}
+        partials = {name: _array_arg(name) for name in _PARTIAL_NAMES}
+        scalars = {name: _scalar_array_arg(name, ti.f32) for name in _SCALAR_NAMES}
         predicate = _scalar_array_arg("predicate", ti.i32)
         status = _scalar_array_arg("status", ti.i32)
         counter = _scalar_array_arg("counter", ti.i32)
@@ -578,9 +530,7 @@ class GraphKrylovSolver:
             vectors["x"],
             use_initial_guess,
         )
-        builder.append_native(
-            self._operator.graph_action(vectors["x"], vectors["ax"])
-        )
+        builder.append_native(self._operator.graph_action(vectors["x"], vectors["ax"]))
         builder.dispatch(
             initialize_blocks,
             vectors["b"],
@@ -610,9 +560,7 @@ class GraphKrylovSolver:
                 scalars["rz_old"],
             )
         else:
-            builder.append_native(
-                self._preconditioner.graph_action(vectors["r"], vectors["z"])
-            )
+            builder.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
             builder.dispatch(
                 seed_pcg,
                 vectors["r"],
@@ -630,9 +578,7 @@ class GraphKrylovSolver:
             status,
         )
         body = builder.create_sequential()
-        body.append_native(
-            self._operator.graph_action(vectors["p"], vectors["ap"])
-        )
+        body.append_native(self._operator.graph_action(vectors["p"], vectors["ap"]))
         body.dispatch(
             reduce_pap_blocks,
             vectors["p"],
@@ -676,9 +622,7 @@ class GraphKrylovSolver:
                 scalars["rz_new"],
             )
         else:
-            body.append_native(
-                self._preconditioner.graph_action(vectors["r"], vectors["z"])
-            )
+            body.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
             body.dispatch(
                 reduce_next_pcg_blocks,
                 vectors["r"],
@@ -729,9 +673,7 @@ class GraphKrylovSolver:
             ),
             counter=counter,
             max_iterations=max_iterations,
-            lowering_mode=(
-                "auto" if self._backend_family == "cpu" else "native_required"
-            ),
+            lowering_mode=("auto" if self._backend_family == "cpu" else "native_required"),
             name=f"linear_operator_{self._method}",
         )
         builder.dispatch(
@@ -796,19 +738,9 @@ class GraphKrylovSolver:
                 exclusive_submission=True,
             )
 
-        vectors = {
-            key: internal_ndarray(key, ti.f32, (self._size,))
-            for key in _VECTOR_NAMES
-        }
-        partials = {
-            key: internal_ndarray(
-                key, ti.f32, (self._reduction_partial_count,)
-            )
-            for key in _PARTIAL_NAMES
-        }
-        scalars = {
-            key: internal_ndarray(key, ti.f32, ()) for key in _SCALAR_NAMES
-        }
+        vectors = {key: internal_ndarray(key, ti.f32, (self._size,)) for key in _VECTOR_NAMES}
+        partials = {key: internal_ndarray(key, ti.f32, (self._reduction_partial_count,)) for key in _PARTIAL_NAMES}
+        scalars = {key: internal_ndarray(key, ti.f32, ()) for key in _SCALAR_NAMES}
         predicate = internal_ndarray("predicate", ti.i32, ())
         status = internal_ndarray("status", ti.i32, ())
         counter = internal_ndarray("counter", ti.i32, ())
@@ -827,9 +759,7 @@ class GraphKrylovSolver:
             output,
             use_initial_guess,
         )
-        sequence.append_native(
-            self._operator.graph_action(output, vectors["ax"])
-        )
+        sequence.append_native(self._operator.graph_action(output, vectors["ax"]))
         sequence.dispatch(
             kernels["initialize_blocks"],
             rhs,
@@ -859,11 +789,7 @@ class GraphKrylovSolver:
                 scalars["rz_old"],
             )
         else:
-            sequence.append_native(
-                self._preconditioner.graph_action(
-                    vectors["r"], vectors["z"]
-                )
-            )
+            sequence.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
             sequence.dispatch(
                 kernels["seed_pcg"],
                 vectors["r"],
@@ -881,9 +807,7 @@ class GraphKrylovSolver:
             status,
         )
         body = ti.graph.GraphBuilder().create_sequential()
-        body.append_native(
-            self._operator.graph_action(vectors["p"], vectors["ap"])
-        )
+        body.append_native(self._operator.graph_action(vectors["p"], vectors["ap"]))
         body.dispatch(
             kernels["reduce_pap_blocks"],
             vectors["p"],
@@ -920,11 +844,7 @@ class GraphKrylovSolver:
                 partials["partial1"],
             )
         else:
-            body.append_native(
-                self._preconditioner.graph_action(
-                    vectors["r"], vectors["z"]
-                )
-            )
+            body.append_native(self._preconditioner.graph_action(vectors["r"], vectors["z"]))
             body.dispatch(
                 kernels["reduce_next_pcg_blocks"],
                 vectors["r"],
@@ -975,9 +895,7 @@ class GraphKrylovSolver:
             ),
             counter=counter,
             max_iterations=self._max_iterations,
-            lowering_mode=(
-                "auto" if self._backend_family == "cpu" else "native_required"
-            ),
+            lowering_mode=("auto" if self._backend_family == "cpu" else "native_required"),
             name=name,
         )
         sequence.dispatch(
@@ -1011,8 +929,7 @@ class GraphKrylovSolver:
 
     def _supports_terminal_only_submission(self):
         return bool(
-            self._backend_family in ("cuda", "vulkan")
-            and self._graph._spec.supports_native_structured_submission
+            self._backend_family in ("cuda", "vulkan") and self._graph._spec.supports_native_structured_submission
         )
 
     def _terminal_only_control_report(self, logical_iterations):
@@ -1024,16 +941,8 @@ class GraphKrylovSolver:
             boundaries = (encoded_iterations,) if encoded_iterations else ()
         else:
             control_nodes = self._graph._spec.structured_control_nodes
-            lowering = (
-                control_nodes[0]._cuda_control_lowering
-                if control_nodes
-                else "cuda_conditional_graph"
-            )
-            encoded_iterations = (
-                self._max_iterations
-                if lowering == "cuda_masked_bounded_graph"
-                else logical_iterations
-            )
+            lowering = control_nodes[0]._cuda_control_lowering if control_nodes else "cuda_conditional_graph"
+            encoded_iterations = self._max_iterations if lowering == "cuda_masked_bounded_graph" else logical_iterations
             executed_iterations = logical_iterations
             boundaries = (0, executed_iterations)
         return _GraphKrylovControlReport(
@@ -1073,11 +982,7 @@ class GraphKrylovSolver:
                 "terminal": self._terminal,
             }
         )
-        arguments = {
-            name: value
-            for name, value in arguments.items()
-            if name in self._runtime_arg_names
-        }
+        arguments = {name: value for name, value in arguments.items() if name in self._runtime_arg_names}
         started = time.perf_counter()
         terminal_only_submission = self._supports_terminal_only_submission()
         if terminal_only_submission:
@@ -1095,9 +1000,7 @@ class GraphKrylovSolver:
         status = int(round(float(terminal[0])))
         iterations = int(round(float(terminal[1])))
         if terminal_only_submission:
-            self._last_control_report = self._terminal_only_control_report(
-                iterations
-            )
+            self._last_control_report = self._terminal_only_control_report(iterations)
         initial_residual_norm = math.sqrt(max(float(terminal[2]), 0.0))
         residual_norm = math.sqrt(max(float(terminal[3]), 0.0))
         reference_norm = math.sqrt(max(float(terminal[4]), 0.0))
@@ -1130,31 +1033,16 @@ class GraphKrylovSolver:
         self._solve_calls += 1
         self._logical_iterations += iterations
         executed_iterations = (
-            int(self._last_control_report.executed_iterations)
-            if self._last_control_report is not None
-            else iterations
+            int(self._last_control_report.executed_iterations) if self._last_control_report is not None else iterations
         )
-        if (
-            self._last_control_report is not None
-            and int(self._last_control_report.logical_iterations) != iterations
-        ):
-            raise RuntimeError(
-                "structured Graph iteration report disagrees with solver terminal"
-            )
+        if self._last_control_report is not None and int(self._last_control_report.logical_iterations) != iterations:
+            raise RuntimeError("structured Graph iteration report disagrees with solver terminal")
         self._executed_iterations += executed_iterations
         if self._last_control_report is not None:
-            observation_batches = int(
-                self._last_control_report.observation_batches
-            )
+            observation_batches = int(self._last_control_report.observation_batches)
             self._structured_control_observation_batches += observation_batches
             self._solver_chunk_submissions += (
-                1
-                if terminal_only_submission
-                else (
-                    observation_batches
-                    if self._backend_family == "vulkan"
-                    else 1
-                )
+                1 if terminal_only_submission else (observation_batches if self._backend_family == "vulkan" else 1)
             )
         else:
             self._solver_chunk_submissions += 1
@@ -1169,11 +1057,7 @@ class GraphKrylovSolver:
         iterations = int(self._last_result["iterations"])
         reduction_workspace_bytes = self._reduction_partial_count * 2 * 4
         persistent_vector_count = 5 + int(self._direct_solution is not None)
-        workspace_bytes = (
-            (persistent_vector_count * self._size + 5 + 8) * 4
-            + 3 * 4
-            + reduction_workspace_bytes
-        )
+        workspace_bytes = (persistent_vector_count * self._size + 5 + 8) * 4 + 3 * 4 + reduction_workspace_bytes
         identity = {
             "schema_version": 1,
             "backend_family": self._backend_family,
@@ -1184,12 +1068,8 @@ class GraphKrylovSolver:
             "max_iterations": self._max_iterations,
             "absolute_tolerance": self._atol,
             "relative_tolerance": self._rtol,
-            "last_relative_reference_norm": self._last_result[
-                "relative_reference_norm"
-            ],
-            "last_effective_tolerance": self._last_result[
-                "effective_tolerance"
-            ],
+            "last_relative_reference_norm": self._last_result["relative_reference_norm"],
+            "last_effective_tolerance": self._last_result["effective_tolerance"],
             "last_breakdown_reason": self._last_result["breakdown_reason"],
             "solver_execution_policy": "device_convergent",
             "solver_control_path": "generic_structured_graph",
@@ -1215,17 +1095,13 @@ class GraphKrylovSolver:
             "reduction_block_dim": self._reduction_block_dim,
             "reduction_items_per_thread": self._reduction_items_per_thread,
             "reduction_workspace_bytes": reduction_workspace_bytes,
-            "direct_solution_workspace_bytes": (
-                self._size * 4 if self._direct_solution is not None else 0
-            ),
+            "direct_solution_workspace_bytes": (self._size * 4 if self._direct_solution is not None else 0),
         }
         operations = {
             "solve_calls": self._solve_calls,
             "logical_iterations": self._logical_iterations,
             "executed_iterations": self._executed_iterations,
-            "wasted_iterations": (
-                self._executed_iterations - self._logical_iterations
-            ),
+            "wasted_iterations": (self._executed_iterations - self._logical_iterations),
             "last_logical_iterations": iterations,
             "last_executed_iterations": (
                 int(self._last_control_report.executed_iterations)
@@ -1234,39 +1110,25 @@ class GraphKrylovSolver:
             ),
             "operator_apply_calls": self._operator_apply_calls,
             "preconditioner_apply_calls": self._preconditioner_apply_calls,
-            "preconditioner_update_noops": (
-                self._solve_calls if self._preconditioner is not None else 0
-            ),
+            "preconditioner_update_noops": (self._solve_calls if self._preconditioner is not None else 0),
             "solver_chunk_submissions": self._solver_chunk_submissions,
             "host_synchronizations": self._host_synchronizations,
             "host_scalar_readbacks": self._host_scalar_readbacks,
-            "structured_control_observation_batches": (
-                self._structured_control_observation_batches
-            ),
+            "structured_control_observation_batches": (self._structured_control_observation_batches),
             "last_convergence_observation_boundaries": (
-                []
-                if self._last_control_report is None
-                else list(self._last_control_report.observation_boundaries)
+                [] if self._last_control_report is None else list(self._last_control_report.observation_boundaries)
             ),
             "last_structured_control_lowering": (
-                "none"
-                if self._last_control_report is None
-                else self._last_control_report.lowering
+                "none" if self._last_control_report is None else self._last_control_report.lowering
             ),
             "last_encoded_iterations": (
-                iterations
-                if self._last_control_report is None
-                else int(self._last_control_report.encoded_iterations)
+                iterations if self._last_control_report is None else int(self._last_control_report.encoded_iterations)
             ),
             "last_masked_iterations": (
-                0
-                if self._last_control_report is None
-                else int(self._last_control_report.masked_iterations)
+                0 if self._last_control_report is None else int(self._last_control_report.masked_iterations)
             ),
             "last_window_sizes": (
-                []
-                if self._last_control_report is None
-                else list(self._last_control_report.chunk_sizes)
+                [] if self._last_control_report is None else list(self._last_control_report.chunk_sizes)
             ),
             "last_elapsed_seconds": self._last_elapsed_seconds,
         }

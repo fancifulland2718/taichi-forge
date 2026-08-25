@@ -66,9 +66,7 @@ def _compiled_graph_identity(size, *, multi_dispatch=False):
 def _compiled_graph_stencil_and_jacobi(size):
     topology = ti.ndarray(ti.i32, shape=size)
     topology.from_numpy(np.arange(size, dtype=np.int32))
-    diagonal_values = 2.5 + 0.25 * np.sin(
-        np.linspace(0.0, 5.0, size, dtype=np.float32)
-    )
+    diagonal_values = 2.5 + 0.25 * np.sin(np.linspace(0.0, 5.0, size, dtype=np.float32))
     diagonal = ti.ndarray(ti.f32, shape=size)
     diagonal.from_numpy(diagonal_values.astype(np.float32))
 
@@ -128,21 +126,11 @@ def _compiled_graph_stencil_and_jacobi(size):
             index = topology_data[slot]
             y[index] = temporary[index]
 
-    topology_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
-    )
-    diagonal_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "diagonal", ti.f32, ndim=1
-    )
-    input_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
-    )
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
-    )
-    temporary_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "temporary", ti.f32, ndim=1
-    )
+    topology_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1)
+    diagonal_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "diagonal", ti.f32, ndim=1)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    temporary_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "temporary", ti.f32, ndim=1)
 
     operator_temporary = ti.ndarray(ti.f32, shape=size)
     operator_builder = ti.graph.GraphBuilder()
@@ -153,9 +141,7 @@ def _compiled_graph_stencil_and_jacobi(size):
         input_arg,
         temporary_arg,
     )
-    operator_builder.dispatch(
-        stencil_left, topology_arg, input_arg, temporary_arg
-    )
+    operator_builder.dispatch(stencil_left, topology_arg, input_arg, temporary_arg)
     operator_builder.dispatch(
         stencil_right,
         topology_arg,
@@ -181,9 +167,7 @@ def _compiled_graph_stencil_and_jacobi(size):
         input_arg,
         temporary_arg,
     )
-    preconditioner_builder.dispatch(
-        copy_vector, topology_arg, temporary_arg, output_arg
-    )
+    preconditioner_builder.dispatch(copy_vector, topology_arg, temporary_arg, output_arg)
     preconditioner = ti.linalg.LinearOperator.from_graph(
         preconditioner_builder.compile(),
         size,
@@ -258,36 +242,25 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         assert vector_stats["staging_buffer_reuses"] == 2
         assert vector_stats["transfer_plan_builds"] == 2
         assert vector_stats["transfer_plan_reuses"] == 2
-        assert vector_stats["transfer_native_submissions"] == (
-            0 if impl.current_cfg().arch == ti.cuda else 4
-        )
-        assert vector_stats["transfer_graph_submissions"] == (
-            4 if impl.current_cfg().arch == ti.cuda else 0
-        )
+        assert vector_stats["transfer_native_submissions"] == (0 if impl.current_cfg().arch == ti.cuda else 4)
+        assert vector_stats["transfer_graph_submissions"] == (4 if impl.current_cfg().arch == ti.cuda else 0)
         assert vector_stats["pack_calls"] == 2
         assert vector_stats["unpack_calls"] == 2
         assert vector_stats["completion_syncs"] == 2
     assert vector_stats["implicit_view_builds"] == 2
-    assert stats["execution_capabilities"]["vector_io"]["dense_field"][
-        "execution_mode"
-    ] == "provider_qualified"
+    assert stats["execution_capabilities"]["vector_io"]["dense_field"]["execution_mode"] == "provider_qualified"
     capabilities = ti.linalg.vector_io_capabilities()
     assert capabilities["ndarray"]["zero_copy"] is True
     assert capabilities["dense_field"]["zero_copy"] is False
     assert capabilities["dense_field"]["zero_copy_condition"] == (
-        "canonical full field or contiguous scalar-flat range and provider "
-        "dense_storage_operands"
+        "canonical full field or contiguous scalar-flat range and provider " "dense_storage_operands"
     )
     assert capabilities["dense_field"]["solve_direct_binding_semantics"] == (
         "Graph-fused boundary copy into plan-owned iterative storage"
     )
     assert capabilities["dense_field"]["value_host_transfer"] is False
-    assert capabilities["dense_field"]["conversion_scope"] == (
-        "apply_or_solve_boundary_only"
-    )
-    assert capabilities["dense_field"]["conversion_submission"] == (
-        "native_bulk_copy_or_compiled_graph_replay"
-    )
+    assert capabilities["dense_field"]["conversion_scope"] == ("apply_or_solve_boundary_only")
+    assert capabilities["dense_field"]["conversion_submission"] == ("native_bulk_copy_or_compiled_graph_replay")
 
     device_capability = plan.execution_capabilities()["device_convergent"]
     if device_capability["supported"]:
@@ -302,9 +275,7 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         assert device_result.converged
         np.testing.assert_allclose(solution.to_numpy(), values, rtol=1e-6)
         device_stats = device_plan.statistics()
-        assert device_stats["identity"]["solver_control_path"] == (
-            "generic_structured_graph"
-        )
+        assert device_stats["identity"]["solver_control_path"] == ("generic_structured_graph")
         assert device_stats["identity"]["backend_family"] == (
             "vulkan" if impl.current_cfg().arch == ti.vulkan else "cuda"
         )
@@ -322,15 +293,11 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
         assert device_operations["solver_chunk_submissions"] == 1
         assert device_operations["structured_control_observation_batches"] == 0
         if impl.current_cfg().arch == ti.vulkan:
-            assert device_operations["last_structured_control_lowering"] == (
-                "vulkan_compact_indirect"
-            )
+            assert device_operations["last_structured_control_lowering"] == ("vulkan_compact_indirect")
             assert device_operations["last_logical_iterations"] == 1
             assert device_operations["last_executed_iterations"] == 8
         else:
-            assert device_operations["last_structured_control_lowering"] == (
-                "cuda_conditional_graph"
-            )
+            assert device_operations["last_structured_control_lowering"] == ("cuda_conditional_graph")
             assert device_operations["last_logical_iterations"] == 1
             assert device_operations["last_executed_iterations"] == 1
         with pytest.raises(
@@ -347,9 +314,7 @@ def test_dense_scalar_field_apply_solve_and_staging_reuse():
     volume_source = ti.field(ti.f32, shape=(2, 2, 2))
     volume_output = ti.field(ti.f32, shape=(2, 2, 2))
     volume_source.from_numpy(volume_values)
-    _compiled_identity(volume_values.size).apply(
-        volume_source, out=volume_output
-    )
+    _compiled_identity(volume_values.size).apply(volume_source, out=volume_output)
     np.testing.assert_array_equal(volume_output.to_numpy(), volume_values)
 
 
@@ -366,15 +331,9 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
         atol=1e-6,
         **options,
     )
-    rhs_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "solve_rhs", ti.f32, ndim=1
-    )
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "solve_output", ti.f32, ndim=1
-    )
-    action = plan.graph_action(
-        rhs_arg, output_arg, name=f"recorded_{method}"
-    )
+    rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "solve_rhs", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "solve_output", ti.f32, ndim=1)
+    action = plan.graph_action(rhs_arg, output_arg, name=f"recorded_{method}")
     builder = ti.graph.GraphBuilder()
     builder.append_native(action)
     graph = builder.compile()
@@ -415,9 +374,7 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
     assert report.memory.persistent_internal_storage_bytes > size * 4
     assert report.memory.internal_storage_exclusive
     telemetry = ticket.telemetry()
-    assert tuple(region.path_id for region in telemetry.regions) == (
-        f"recorded_{method}",
-    )
+    assert tuple(region.path_id for region in telemetry.regions) == (f"recorded_{method}",)
     assert telemetry.regions[0].logical_invocations == 1
     assert telemetry.regions[0].logical_iterations == 1
     action_stats = action.statistics()
@@ -434,13 +391,9 @@ def test_solve_plan_complete_graph_action_terminal_and_workspace(method):
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_solve_plan_graph_action_attributes_synchronous_graph_run():
     size = 8
-    plan = ti.linalg.experimental.SolvePlan(
-        _compiled_identity(size), method="cg", max_iterations=4, atol=1e-6
-    )
+    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=4, atol=1e-6)
     rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sync_rhs", ti.f32, ndim=1)
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "sync_output", ti.f32, ndim=1
-    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "sync_output", ti.f32, ndim=1)
     action = plan.graph_action(rhs_arg, output_arg, name="sync_recorded_cg")
     builder = ti.graph.GraphBuilder()
     builder.append_native(action)
@@ -471,13 +424,9 @@ def test_solve_plan_graph_action_attributes_synchronous_graph_run():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_solve_plan_graph_action_statistics_reject_stale_runtime():
     size = 4
-    plan = ti.linalg.experimental.SolvePlan(
-        _compiled_identity(size), method="cg", max_iterations=2, atol=1e-6
-    )
+    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=2, atol=1e-6)
     rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "stale_rhs", ti.f32, ndim=1)
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "stale_output", ti.f32, ndim=1
-    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "stale_output", ti.f32, ndim=1)
     plan.graph_action(rhs_arg, output_arg)
 
     ti.reset()
@@ -515,9 +464,7 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
         telemetry=True,
         workspace_lane=requested_lane,
     )
-    assert isinstance(
-        submission, ti.linalg.experimental.SolvePlanSubmission
-    )
+    assert isinstance(submission, ti.linalg.experimental.SolvePlanSubmission)
     assert submission.workspace_lane == requested_lane
     before_result = plan.submission_statistics()
     assert before_result["submit_calls"] == 1
@@ -545,18 +492,14 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
     if impl.current_cfg().arch == ti.cpu:
         assert telemetry is None
     else:
-        assert tuple(region.path_id for region in telemetry.regions) == (
-            "cg_submit_zero",
-        )
+        assert tuple(region.path_id for region in telemetry.regions) == ("cg_submit_zero",)
 
     initial = ti.ndarray(ti.f32, shape=size)
     initial.fill(0.25)
     second = plan.submit(rhs, initial_guess=initial, workspace_lane=0)
     second_result = second.result()
     assert second_result.converged
-    np.testing.assert_allclose(
-        second_result.solution.to_numpy(), expected, rtol=1e-6
-    )
+    np.testing.assert_allclose(second_result.solution.to_numpy(), expected, rtol=1e-6)
     final_stats = plan.statistics()["submission"]
     assert final_stats["submit_calls"] == 2
     assert final_stats["submit_successes"] == 2
@@ -584,18 +527,10 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
 @test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_solve_plan_submit_workspace_configuration_fails_closed():
     operator = _compiled_identity(4)
-    with pytest.raises(
-        RuntimeError, match="submission_workspace_lanes must be between"
-    ):
-        ti.linalg.experimental.SolvePlan(
-            operator, submission_workspace_lanes=0
-        )
-    with pytest.raises(
-        RuntimeError, match="submission_workspace_saturation"
-    ):
-        ti.linalg.experimental.SolvePlan(
-            operator, submission_workspace_saturation="drop"
-        )
+    with pytest.raises(RuntimeError, match="submission_workspace_lanes must be between"):
+        ti.linalg.experimental.SolvePlan(operator, submission_workspace_lanes=0)
+    with pytest.raises(RuntimeError, match="submission_workspace_saturation"):
+        ti.linalg.experimental.SolvePlan(operator, submission_workspace_saturation="drop")
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -611,15 +546,10 @@ def test_solve_plan_submit_requires_device_convergent_policy_on_gpu():
     submission = plan.submission_statistics()
     assert not submission["qualified"]
     assert not submission["asynchronous"]
-    assert (
-        submission["unsupported_reason"]
-        == "device_convergent_policy_required"
-    )
+    assert submission["unsupported_reason"] == "device_convergent_policy_required"
     rhs = ti.ndarray(ti.f32, shape=8)
     rhs.fill(1.0)
-    with pytest.raises(
-        RuntimeError, match="device_convergent_policy_required"
-    ):
+    with pytest.raises(RuntimeError, match="device_convergent_policy_required"):
         plan.submit(rhs)
 
 
@@ -640,9 +570,7 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
     assert capabilities["default_execution_policy"] == "device_convergent"
     assert capabilities["device_convergent"]["supported"]
     assert capabilities["device_convergent"]["provider_qualified"]
-    assert capabilities["device_convergent"][
-        "automatic_selection_qualified"
-    ]
+    assert capabilities["device_convergent"]["automatic_selection_qualified"]
 
     expected = np.linspace(-2.0, 3.0, size, dtype=np.float32)
     rhs = ti.field(ti.f32, shape=size)
@@ -681,9 +609,7 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
     size = 128
-    operator, preconditioner, diagonal = (
-        _compiled_graph_stencil_and_jacobi(size)
-    )
+    operator, preconditioner, diagonal = _compiled_graph_stencil_and_jacobi(size)
     plan = ti.linalg.experimental.SolvePlan(
         operator,
         method="pcg",
@@ -721,9 +647,7 @@ def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
         assert region.path_id == "pcg_submit_zero"
         assert region.logical_iterations == result.iterations
         assert region.encoded_iterations >= region.logical_iterations
-        assert region.masked_iterations == (
-            region.encoded_iterations - region.logical_iterations
-        )
+        assert region.masked_iterations == (region.encoded_iterations - region.logical_iterations)
     submission_stats = plan.submission_statistics()
     if impl.current_cfg().arch == ti.cpu:
         assert submission_stats["execution_path"] == "native_cpu_completed"
@@ -740,9 +664,7 @@ def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
 def test_solve_plan_graph_action_uses_independent_workspace_lanes():
     size = 4096
-    plan = ti.linalg.experimental.SolvePlan(
-        _compiled_identity(size), method="cg", max_iterations=8, atol=1e-6
-    )
+    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=8, atol=1e-6)
     rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     action = plan.graph_action(rhs_arg, output_arg, name="multi_lane_cg")
@@ -789,9 +711,7 @@ def test_solve_plan_graph_action_uses_independent_workspace_lanes():
     assert one_lane_memory.workspace_lane_capacity == 2
     assert one_lane_memory.workspace_lanes_materialized == 1
     assert two_lane_memory.workspace_lanes_materialized == 2
-    assert two_lane_memory.persistent_internal_storage_bytes == (
-        2 * one_lane_memory.persistent_internal_storage_bytes
-    )
+    assert two_lane_memory.persistent_internal_storage_bytes == (2 * one_lane_memory.persistent_internal_storage_bytes)
     assert two_lane_memory.workspace_lane_acquisitions == 2
     assert two_lane_memory.workspace_lane_waits == 0
     assert two_lane_memory.internal_storage_waits == 0
@@ -835,9 +755,7 @@ def test_solve_plan_graph_action_uses_independent_workspace_lanes():
     final_memory = graph.execution_stats().memory
     assert final_memory.workspace_lanes_materialized == 2
     assert final_memory.workspace_lane_saturation_errors == 1
-    assert final_memory.persistent_internal_storage_bytes == (
-        two_lane_memory.persistent_internal_storage_bytes
-    )
+    assert final_memory.persistent_internal_storage_bytes == (two_lane_memory.persistent_internal_storage_bytes)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -973,27 +891,19 @@ def test_solve_plan_graph_action_binds_disjoint_field_ranges_directly():
     rhs = ti.linalg.vector_view(storage, offset=3, length=size)
     output = ti.linalg.vector_view(storage, offset=27, length=size)
 
-    plan = ti.linalg.experimental.SolvePlan(
-        _compiled_identity(size), method="cg", max_iterations=8, atol=1e-6
-    )
+    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=8, atol=1e-6)
     rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "rhs", ti.f32, ndim=1)
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
-    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     action = plan.graph_action(rhs_arg, output_arg)
     builder = ti.graph.GraphBuilder()
     builder.append_native(action)
     graph = builder.compile()
     packet = action.allocate_terminal()
-    ticket = graph.submit(
-        {"rhs": rhs, "output": output, **packet.arguments}
-    )
+    ticket = graph.submit({"rhs": rhs, "output": output, **packet.arguments})
     ticket.wait()
 
     assert packet.snapshot().converged
-    np.testing.assert_allclose(
-        storage.to_numpy()[27 : 27 + size], expected, rtol=1e-6
-    )
+    np.testing.assert_allclose(storage.to_numpy()[27 : 27 + size], expected, rtol=1e-6)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -1189,15 +1099,11 @@ def test_graph_cached_direct_field_binding_rejects_destroyed_tree():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_dense_scalar_field_bicgstab_keeps_vector_values_device_resident():
-    values = np.asarray(
-        [[1.0, -2.0, 3.0], [0.5, 4.0, -1.0]], dtype=np.float32
-    )
+    values = np.asarray([[1.0, -2.0, 3.0], [0.5, 4.0, -1.0]], dtype=np.float32)
     rhs = ti.field(ti.f32, shape=values.shape)
     solution = ti.field(ti.f32, shape=values.shape)
     rhs.from_numpy(values)
-    operator = ti.linalg.aslinearoperator(
-        _fixed_csr(np.eye(values.size, dtype=np.float32))
-    )
+    operator = ti.linalg.aslinearoperator(_fixed_csr(np.eye(values.size, dtype=np.float32)))
     plan = ti.linalg.experimental.SolvePlan(
         operator,
         method="bicgstab",
@@ -1214,9 +1120,7 @@ def test_dense_scalar_field_bicgstab_keeps_vector_values_device_resident():
     assert vector_stats["unpacked_logical_bytes"] == values.nbytes
     assert vector_stats["pack_calls"] == 1
     assert vector_stats["unpack_calls"] == 1
-    assert ti.linalg.vector_io_capabilities()["dense_field"][
-        "value_host_transfer"
-    ] is False
+    assert ti.linalg.vector_io_capabilities()["dense_field"]["value_host_transfer"] is False
 
 
 def _fixed_csr(dense):
@@ -1237,9 +1141,7 @@ def _fixed_csr(dense):
     offsets.from_numpy(np.asarray(row_offsets, dtype=np.int32))
     indices.from_numpy(np.asarray(column_indices, dtype=np.int32))
     numeric.from_numpy(np.asarray(values, dtype=np.float32))
-    return ti.linalg.SparsePattern.csr(
-        rows, columns, offsets, indices
-    ).matrix(numeric)
+    return ti.linalg.SparsePattern.csr(rows, columns, offsets, indices).matrix(numeric)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -1252,9 +1154,7 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     vector_view = ti.linalg.vector_view(vector_source)
     assert vector_view.element_shape == (3,)
     assert vector_view.scalar_extent == vector_values.size
-    _compiled_identity(vector_values.size).apply(
-        vector_source, out=vector_output
-    )
+    _compiled_identity(vector_values.size).apply(vector_source, out=vector_output)
     np.testing.assert_array_equal(vector_output.to_numpy(), vector_values)
 
     matrix_values = np.arange(16, dtype=np.float32).reshape(2, 2, 2, 2)
@@ -1265,9 +1165,7 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     matrix_view = ti.linalg.vector_view(matrix_source)
     assert matrix_view.element_shape == (2, 2)
     assert matrix_view.scalar_extent == matrix_values.size
-    _compiled_identity(matrix_values.size).apply(
-        matrix_source, out=matrix_output
-    )
+    _compiled_identity(matrix_values.size).apply(matrix_source, out=matrix_output)
     np.testing.assert_array_equal(matrix_output.to_numpy(), matrix_values)
 
     # Multiple selected lanes from one packed element must not race through
@@ -1276,24 +1174,16 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
     indexed_output.fill(-1)
     indices = ti.ndarray(ti.i32, shape=4)
     indices.from_numpy(np.asarray([0, 1, 2, 11], dtype=np.int32))
-    source_view = ti.linalg.vector_view(
-        vector_source, indices=indices
-    )
-    output_view = ti.linalg.vector_view(
-        indexed_output, indices=indices
-    )
+    source_view = ti.linalg.vector_view(vector_source, indices=indices)
+    output_view = ti.linalg.vector_view(indexed_output, indices=indices)
     _compiled_identity(4).apply(source_view, out=output_view)
     expected = np.full(vector_values.shape, -1, dtype=np.float32)
-    expected.reshape(-1)[[0, 1, 2, 11]] = vector_values.reshape(-1)[
-        [0, 1, 2, 11]
-    ]
+    expected.reshape(-1)[[0, 1, 2, 11]] = vector_values.reshape(-1)[[0, 1, 2, 11]]
     np.testing.assert_array_equal(indexed_output.to_numpy(), expected)
 
     for index_shape in ((4,), (2, 1, 2)):
         scalar_extent = int(np.prod(index_shape)) * 2
-        values = np.arange(scalar_extent, dtype=np.float32).reshape(
-            *index_shape, 2
-        )
+        values = np.arange(scalar_extent, dtype=np.float32).reshape(*index_shape, 2)
         shaped_source = ti.Vector.field(2, ti.f32, shape=index_shape)
         shaped_output = ti.Vector.field(2, ti.f32, shape=index_shape)
         shaped_source.from_numpy(values)
@@ -1302,12 +1192,8 @@ def test_packed_vector_and_matrix_fields_use_scalar_flat_lane_order():
         selected = np.asarray([0, 1, scalar_extent - 1], dtype=np.int32)
         shaped_indices.from_numpy(selected)
         _compiled_identity(3).apply(
-            ti.linalg.vector_view(
-                shaped_source, indices=shaped_indices
-            ),
-            out=ti.linalg.vector_view(
-                shaped_output, indices=shaped_indices
-            ),
+            ti.linalg.vector_view(shaped_source, indices=shaped_indices),
+            out=ti.linalg.vector_view(shaped_output, indices=shaped_indices),
         )
         expected = np.full(values.shape, -1, dtype=np.float32)
         expected.reshape(-1)[selected] = values.reshape(-1)[selected]
@@ -1347,9 +1233,7 @@ def test_packed_field_solveplan_uses_direct_graph_boundary(field_kind, method):
     stats = plan.statistics()
     capability = stats["execution_capabilities"]["direct_dense_field_solve"]
     assert capability["selected"]
-    assert "root_dense_packed_vector_matrix_contiguous" in capability[
-        "qualified_layouts"
-    ]
+    assert "root_dense_packed_vector_matrix_contiguous" in capability["qualified_layouts"]
     vector_stats = stats["vector_io"]
     assert vector_stats["staging_buffer_builds"] == 0
     assert vector_stats["staging_buffer_reuses"] == 0
@@ -1369,17 +1253,11 @@ def test_scalar_flat_range_views_apply_and_preserve_disjoint_storage():
     storage = ti.field(ti.f32, shape=12)
     storage.from_numpy(source_values)
 
-    source_view = ti.linalg.vector_view(
-        storage, offset=1, length=4
-    )
-    output_view = ti.linalg.vector_view(
-        storage, offset=7, length=4
-    )
+    source_view = ti.linalg.vector_view(storage, offset=1, length=4)
+    output_view = ti.linalg.vector_view(storage, offset=7, length=4)
     assert source_view.metadata["layout_kind"] == "range_scalar_flat"
     assert source_view.metadata["range"] == (1, 4, 1)
-    assert source_view.metadata["index_validation"] == (
-        "host_once_immutable_bounds"
-    )
+    assert source_view.metadata["index_validation"] == ("host_once_immutable_bounds")
     assert source_view.scalar_extent == 4
     assert source_view.source_scalar_extent == 12
 
@@ -1404,12 +1282,8 @@ def test_scalar_flat_range_views_cross_packed_lanes_and_direct_affine_stride():
     source.from_numpy(values)
     output.fill(-1)
 
-    contiguous_source = ti.linalg.vector_view(
-        source, offset=2, length=7
-    )
-    contiguous_output = ti.linalg.vector_view(
-        output, offset=5, length=7
-    )
+    contiguous_source = ti.linalg.vector_view(source, offset=2, length=7)
+    contiguous_output = ti.linalg.vector_view(output, offset=5, length=7)
     _compiled_identity(7).apply(contiguous_source, out=contiguous_output)
     expected = np.full(values.size, -1, dtype=np.float32)
     expected[5:12] = values.reshape(-1)[2:9]
@@ -1417,19 +1291,13 @@ def test_scalar_flat_range_views_cross_packed_lanes_and_direct_affine_stride():
 
     strided_output = ti.Vector.field(3, ti.f32, shape=6)
     strided_output.fill(-1)
-    strided_source_view = ti.linalg.vector_view(
-        source, offset=1, length=5, stride=3
-    )
-    strided_output_view = ti.linalg.vector_view(
-        strided_output, offset=2, length=5, stride=3
-    )
+    strided_source_view = ti.linalg.vector_view(source, offset=1, length=5, stride=3)
+    strided_output_view = ti.linalg.vector_view(strided_output, offset=2, length=5, stride=3)
     operator = _compiled_identity(5)
     operator.apply(strided_source_view, out=strided_output_view)
     expected = np.full(values.size, -1, dtype=np.float32)
     expected[[2, 5, 8, 11, 14]] = values.reshape(-1)[[1, 4, 7, 10, 13]]
-    np.testing.assert_array_equal(
-        strided_output.to_numpy().reshape(-1), expected
-    )
+    np.testing.assert_array_equal(strided_output.to_numpy().reshape(-1), expected)
     vector_stats = operator.statistics()["vector_io"]
     assert vector_stats["last_input_execution_mode"] == "direct_affine"
     assert vector_stats["last_output_execution_mode"] == "direct_affine"
@@ -1444,9 +1312,7 @@ def test_solveplan_contiguous_range_direct_and_strided_range_staged():
     output = ti.field(ti.f32, shape=12)
     source.fill(0)
     output.fill(-1)
-    source.from_numpy(
-        np.asarray([0, 0, *values, 0, 0, 0, 0, 0, 0], dtype=np.float32)
-    )
+    source.from_numpy(np.asarray([0, 0, *values, 0, 0, 0, 0, 0, 0], dtype=np.float32))
     rhs = ti.linalg.vector_view(source, offset=2, length=4)
     solution = ti.linalg.vector_view(output, offset=5, length=4)
     plan = ti.linalg.experimental.SolvePlan(
@@ -1454,18 +1320,12 @@ def test_solveplan_contiguous_range_direct_and_strided_range_staged():
         method="cg",
         max_iterations=8,
         atol=1e-6,
-        execution_policy=(
-            "device_convergent"
-            if impl.current_cfg().arch in (ti.cuda, ti.vulkan)
-            else None
-        ),
+        execution_policy=("device_convergent" if impl.current_cfg().arch in (ti.cuda, ti.vulkan) else None),
     )
 
     result = plan.solve(rhs, out=solution)
     assert result.converged
-    np.testing.assert_allclose(
-        output.to_numpy()[5:9], values, rtol=1e-6, atol=1e-6
-    )
+    np.testing.assert_allclose(output.to_numpy()[5:9], values, rtol=1e-6, atol=1e-6)
     stats = plan.statistics()["vector_io"]
     if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
         assert stats["direct_graph_solve_submissions"] == 1
@@ -1478,20 +1338,12 @@ def test_solveplan_contiguous_range_direct_and_strided_range_staged():
 
     strided_source = ti.field(ti.f32, shape=12)
     strided_output = ti.field(ti.f32, shape=12)
-    strided_source.from_numpy(
-        np.asarray([1, 0, -2, 0, 3, 0, 4, 0, 0, 0, 0, 0], dtype=np.float32)
-    )
+    strided_source.from_numpy(np.asarray([1, 0, -2, 0, 3, 0, 4, 0, 0, 0, 0, 0], dtype=np.float32))
     strided_output.fill(-1)
-    strided_plan = ti.linalg.experimental.SolvePlan(
-        _compiled_identity(4), method="cg", max_iterations=8, atol=1e-6
-    )
+    strided_plan = ti.linalg.experimental.SolvePlan(_compiled_identity(4), method="cg", max_iterations=8, atol=1e-6)
     strided_result = strided_plan.solve(
-        ti.linalg.vector_view(
-            strided_source, offset=0, length=4, stride=2
-        ),
-        out=ti.linalg.vector_view(
-            strided_output, offset=1, length=4, stride=2
-        ),
+        ti.linalg.vector_view(strided_source, offset=0, length=4, stride=2),
+        out=ti.linalg.vector_view(strided_output, offset=1, length=4, stride=2),
     )
     assert strided_result.converged
     np.testing.assert_allclose(
@@ -1526,13 +1378,9 @@ def test_scalar_flat_range_view_validation():
             ti.linalg.vector_view(field, **kwargs)
 
     with pytest.raises(RuntimeError, match="mutually exclusive"):
-        ti.linalg.vector_view(
-            field, indices=indices, offset=0, length=2
-        )
+        ti.linalg.vector_view(field, indices=indices, offset=0, length=2)
     with pytest.raises(RuntimeError, match="already a VectorView"):
-        ti.linalg.vector_view(
-            ti.linalg.vector_view(field), offset=0, length=2
-        )
+        ti.linalg.vector_view(ti.linalg.vector_view(field), offset=0, length=2)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -1573,12 +1421,8 @@ def test_indexed_dense_views_snapshot_topology_and_scatter_selected_values():
 
     indices = ti.field(ti.i32, shape=3)
     indices.from_numpy(np.asarray([5, 1, 3], dtype=np.int32))
-    source_view = ti.linalg.vector_view(
-        source, indices=indices
-    )
-    output_view = ti.linalg.vector_view(
-        output, indices=indices
-    )
+    source_view = ti.linalg.vector_view(source, indices=indices)
+    output_view = ti.linalg.vector_view(output, indices=indices)
 
     # VectorView owns an immutable validated topology snapshot.
     indices.from_numpy(np.asarray([0, 2, 4], dtype=np.int32))
@@ -1594,9 +1438,7 @@ def test_indexed_dense_views_snapshot_topology_and_scatter_selected_values():
     assert stats["transfer_graph_submissions"] == 2
     assert stats["indexed_scatter_calls"] == 1
     assert source_view.metadata["layout_kind"] == "indexed_scalar_flat"
-    assert source_view.metadata["index_validation"] == (
-        "host_once_immutable_snapshot"
-    )
+    assert source_view.metadata["index_validation"] == ("host_once_immutable_snapshot")
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
@@ -1615,37 +1457,25 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     output.fill(7)
     result = plan.solve(source, initial_guess=output, out=output)
     assert result.converged
-    np.testing.assert_array_equal(
-        output.to_numpy(), np.arange(4, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(4, dtype=np.float32))
 
     rhs_array = ti.ndarray(ti.f32, shape=4)
     rhs_array.from_numpy(np.arange(4, dtype=np.float32))
     assert plan.solve(rhs_array, out=output).solution is output
-    np.testing.assert_array_equal(
-        output.to_numpy(), np.arange(4, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(4, dtype=np.float32))
     ndarray_output = ti.ndarray(ti.f32, shape=4)
     assert plan.solve(source, out=ndarray_output).solution is ndarray_output
-    np.testing.assert_array_equal(
-        ndarray_output.to_numpy(), np.arange(4, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(ndarray_output.to_numpy(), np.arange(4, dtype=np.float32))
 
     permutation = ti.ndarray(ti.i32, shape=4)
     permutation.from_numpy(np.asarray([1, 0, 2, 3], dtype=np.int32))
-    permuted_output = ti.linalg.vector_view(
-        output, indices=permutation
-    )
+    permuted_output = ti.linalg.vector_view(output, indices=permutation)
     with pytest.raises(RuntimeError, match="addend and output overlap"):
-        operator.apply(
-            source, out=output, beta=1, addend=permuted_output
-        )
+        operator.apply(source, out=output, beta=1, addend=permuted_output)
 
     output.fill(3)
     operator.apply(source, out=output, beta=2, addend=output)
-    np.testing.assert_array_equal(
-        output.to_numpy(), np.arange(4, dtype=np.float32) + 6
-    )
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(4, dtype=np.float32) + 6)
 
     duplicate = ti.ndarray(ti.i32, shape=2)
     duplicate.from_numpy(np.asarray([1, 1], dtype=np.int32))
@@ -1671,9 +1501,7 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     ranged_builder = ti.FieldsBuilder()
     ranged_builder.dense(ti.i, 6).place(ranged_field)
     ranged_tree = ranged_builder.finalize()
-    stale_range = ti.linalg.vector_view(
-        ranged_field, offset=1, length=4
-    )
+    stale_range = ti.linalg.vector_view(ranged_field, offset=1, length=4)
     ranged_tree.destroy()
     with pytest.raises(RuntimeError, match="destroyed SNodeTree"):
         operator.apply(stale_range)
@@ -1683,9 +1511,7 @@ def test_dense_vector_view_validation_alias_and_tree_lifetime():
     replacement_builder.dense(ti.i, 4).place(replacement_field)
     replacement_tree = replacement_builder.finalize()
     assert int(replacement_tree.ptr.id()) == retired_tree_id
-    replacement_view = ti.linalg.vector_view(
-        replacement_field
-    )
+    replacement_view = ti.linalg.vector_view(replacement_field)
 
     dependency = (
         int(replacement_tree.ptr.id()),
@@ -1711,9 +1537,9 @@ def test_dense_field_f64_and_unsupported_sparse_layout():
     source.from_numpy(values)
 
     operator = ti.linalg.identity(4, dtype=ti.f64)
-    result = ti.linalg.experimental.SolvePlan(
-        operator, method="cg", max_iterations=4, atol=1e-12
-    ).solve(source, out=output)
+    result = ti.linalg.experimental.SolvePlan(operator, method="cg", max_iterations=4, atol=1e-12).solve(
+        source, out=output
+    )
     assert result.converged
     np.testing.assert_allclose(output.to_numpy(), values, rtol=1e-12)
 
@@ -1795,12 +1621,8 @@ def test_runtime_dense_views_bind_directly_without_staging():
     affine_values = np.arange(8, dtype=np.float32)
     affine_source.from_numpy(affine_values)
     affine_output.fill(-1.0)
-    affine_input = ti.experimental.ndarray_view(
-        affine_source, slices=slice(0, 8, 2)
-    )
-    affine_result = ti.experimental.ndarray_view(
-        affine_output, slices=slice(1, 8, 2)
-    )
+    affine_input = ti.experimental.ndarray_view(affine_source, slices=slice(0, 8, 2))
+    affine_result = ti.experimental.ndarray_view(affine_output, slices=slice(1, 8, 2))
 
     affine_operator = _compiled_identity(4)
     assert affine_operator.capabilities.dense_storage_affine_operands
@@ -1834,15 +1656,9 @@ def test_compiled_graph_accepts_affine_runtime_storage_views():
         for i in range(size):
             y[i] = x[topology_data[i]]
 
-    topology_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1
-    )
-    input_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1
-    )
-    output_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
-    )
+    topology_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "topology", ti.i32, ndim=1)
+    input_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "input", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     builder = ti.graph.GraphBuilder()
     builder.dispatch(copy_by_topology, topology_arg, input_arg, output_arg)
     operator = ti.linalg.LinearOperator.from_graph(

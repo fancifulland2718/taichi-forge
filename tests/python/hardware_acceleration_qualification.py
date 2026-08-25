@@ -167,11 +167,7 @@ def _ratio_summary(samples):
 
 
 def _error(actual, expected):
-    dtype = (
-        np.complex128
-        if np.iscomplexobj(actual) or np.iscomplexobj(expected)
-        else np.float64
-    )
+    dtype = np.complex128 if np.iscomplexobj(actual) or np.iscomplexobj(expected) else np.float64
     actual = np.asarray(actual, dtype=dtype)
     expected = np.asarray(expected, dtype=dtype)
     absolute = float(np.max(np.abs(actual - expected)))
@@ -205,9 +201,7 @@ def _periodic_poisson_residual(solution, rhs):
     solution = np.asarray(solution, dtype=np.float64)
     rhs = np.asarray(rhs, dtype=np.float64)
     length = solution.shape[-1]
-    applied = (
-        2.0 * solution - np.roll(solution, 1, axis=-1) - np.roll(solution, -1, axis=-1)
-    ) * (length * length)
+    applied = (2.0 * solution - np.roll(solution, 1, axis=-1) - np.roll(solution, -1, axis=-1)) * (length * length)
     return _error(applied, rhs)
 
 
@@ -216,14 +210,7 @@ def _periodic_poisson_residual_tolerance(solution, rhs):
     rhs = np.asarray(rhs, dtype=np.float64)
     length = solution.shape[-1]
     scale = max(float(np.max(np.abs(rhs))), np.finfo(np.float64).tiny)
-    quantization_bound = (
-        8.0
-        * np.finfo(np.float32).eps
-        * length
-        * length
-        * float(np.max(np.abs(solution)))
-        / scale
-    )
+    quantization_bound = 8.0 * np.finfo(np.float32).eps * length * length * float(np.max(np.abs(solution))) / scale
     return float(max(2e-3, quantization_bound))
 
 
@@ -341,16 +328,10 @@ def _irregular_tet_fem_csr(
                     node_index(i, j + 1, k + 1),
                     node_index(i + 1, j + 1, k + 1),
                 )
-                tetrahedra.extend(
-                    tuple(cube[index] for index in tet) for tet in local_tets
-                )
+                tetrahedra.extend(tuple(cube[index] for index in tet) for tet in local_tets)
     tetrahedra = np.asarray(tetrahedra, dtype=np.int32)
 
-    lame_lambda = (
-        young_modulus
-        * poisson_ratio
-        / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
-    )
+    lame_lambda = young_modulus * poisson_ratio / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
     lame_mu = young_modulus / (2.0 * (1.0 + poisson_ratio))
     elasticity = np.zeros((6, 6), dtype=np.float64)
     elasticity[:3, :3] = lame_lambda
@@ -403,9 +384,7 @@ def _irregular_tet_fem_csr(
             row_entries = assembled[int(row)]
             for local_column, column in enumerate(element_dofs):
                 column = int(column)
-                row_entries[column] = (
-                    row_entries.get(column, 0.0) + element[local_row, local_column]
-                )
+                row_entries[column] = row_entries.get(column, 0.0) + element[local_row, local_column]
     for row in range(dofs):
         assembled[row][row] = assembled[row].get(row, 0.0) + mass_shift
 
@@ -465,11 +444,7 @@ def _runtime_bitcode_provenance(directory):
     root = pathlib.Path(directory).resolve()
     candidates = [root / "runtime_cuda.bc", root / "runtime_x64.bc"]
     candidates.extend(sorted(root.glob("slim_libdevice.*.bc")))
-    return [
-        _artifact_provenance(candidate)
-        for candidate in candidates
-        if candidate.is_file()
-    ]
+    return [_artifact_provenance(candidate) for candidate in candidates if candidate.is_file()]
 
 
 def _source_checkout_provenance(source_root):
@@ -688,9 +663,7 @@ def _measure_pair(
     for _ in range(rounds):
         block = {}
         for name in sequence:
-            elapsed = _time_block(
-                actions[name], calibration[name]["effective_repetitions"]
-            )
+            elapsed = _time_block(actions[name], calibration[name]["effective_repetitions"])
             samples[name].append(elapsed)
             block[name] = elapsed
         paired_ratios.append(block["baseline"] / block["hardware"])
@@ -703,11 +676,7 @@ def _measure_pair(
 
 
 def _resolved_operation(operation_id):
-    operation = next(
-        item
-        for item in ti.hardware.report().operations
-        if item.descriptor.operation_id == operation_id
-    )
+    operation = next(item for item in ti.hardware.report().operations if item.descriptor.operation_id == operation_id)
     return operation.to_dict()
 
 
@@ -725,15 +694,11 @@ def _executed_core_route_is_consistent(route):
 def _provenance(case, order):
     backend = _ti_core.arch_name(ti.lang.impl.current_cfg().arch)
     try:
-        cuda_compute_capability = (
-            ti.lang.impl.get_cuda_compute_capability() if backend == "cuda" else None
-        )
+        cuda_compute_capability = ti.lang.impl.get_cuda_compute_capability() if backend == "cuda" else None
     except Exception:  # pragma: no cover - provider-specific diagnostic only
         cuda_compute_capability = None
     try:
-        cuda_device_uuid = (
-            ti.interop.current_cuda_device_uuid().hex() if backend == "cuda" else None
-        )
+        cuda_device_uuid = ti.interop.current_cuda_device_uuid().hex() if backend == "cuda" else None
     except Exception:  # pragma: no cover - provider-specific diagnostic only
         cuda_device_uuid = None
     return {
@@ -859,12 +824,10 @@ def _cuda_fft_case(order, args):
     if length & (length - 1):
         raise ValueError("fft-length must be a power of two")
     rng = np.random.default_rng(20260823)
-    complex_values = (
-        rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))
-    ).astype(np.complex64)
-    packed_values = np.stack(
-        (complex_values.real, complex_values.imag), axis=-1
-    ).astype(np.float32)
+    complex_values = (rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))).astype(
+        np.complex64
+    )
+    packed_values = np.stack((complex_values.real, complex_values.imag), axis=-1).astype(np.float32)
     source = ti.ndarray(ti.f32, shape=(batch, length, 2))
     hardware_output = ti.ndarray(ti.f32, shape=(batch, length, 2))
     baseline_output = ti.ndarray(ti.f32, shape=(batch, length, 2))
@@ -882,9 +845,7 @@ def _cuda_fft_case(order, args):
             value >>= 1
         reversal_host[index] = reversed_value
     angles = -2.0 * np.pi * np.arange(length // 2) / length
-    twiddle_host = np.stack((np.cos(angles), np.sin(angles)), axis=-1).astype(
-        np.float32
-    )
+    twiddle_host = np.stack((np.cos(angles), np.sin(angles)), axis=-1).astype(np.float32)
     bit_reversal.from_numpy(reversal_host)
     twiddle.from_numpy(twiddle_host)
 
@@ -999,12 +960,10 @@ def _cuda_cufft_mixed_replay_case(order, args):
         raise ValueError("fft-length must be a power of two")
     shape = (batch, length, 2)
     rng = np.random.default_rng(20260825)
-    complex_values = (
-        rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))
-    ).astype(np.complex64)
-    packed_values = np.stack(
-        (complex_values.real, complex_values.imag), axis=-1
-    ).astype(np.float32)
+    complex_values = (rng.standard_normal((batch, length)) + 1j * rng.standard_normal((batch, length))).astype(
+        np.complex64
+    )
+    packed_values = np.stack((complex_values.real, complex_values.imag), axis=-1).astype(np.float32)
     source = ti.ndarray(ti.f32, shape=shape)
     source.from_numpy(packed_values)
     plan = ti.hardware.fft.CufftPlan1D(length, batch_count=batch, transform="c2c")
@@ -1113,9 +1072,7 @@ def _cuda_cufft_mixed_replay_case(order, args):
                 "length": length,
                 "batch": batch,
                 "transforms": batch,
-                "timed_scope": (
-                    "prepare+fixed-plan C2C cuFFT+finish+terminal synchronization"
-                ),
+                "timed_scope": ("prepare+fixed-plan C2C cuFFT+finish+terminal synchronization"),
                 "hardware": "fixed-binding CUDA Graph mixed cuFFT capture replay",
                 "baseline": "segmented root Graph with cuFFT rerecord",
                 "host_readback_included": False,
@@ -1208,9 +1165,7 @@ def _cuda_fft_poisson_case(order, args):
             value >>= 1
         reversal_host[index] = reversed_value
     angles = -2.0 * np.pi * np.arange(length // 2) / length
-    forward_host = np.stack((np.cos(angles), np.sin(angles)), axis=-1).astype(
-        np.float32
-    )
+    forward_host = np.stack((np.cos(angles), np.sin(angles)), axis=-1).astype(np.float32)
     inverse_host_twiddle = forward_host.copy()
     inverse_host_twiddle[:, 1] *= -1.0
     bit_reversal.from_numpy(reversal_host)
@@ -1459,9 +1414,7 @@ def _cuda_mma_case(order, args):
         for tile, row, column in output:
             total = 0.0
             for inner in ti.static(range(16)):
-                total += ti.cast(left[tile, row, inner], ti.f32) * ti.cast(
-                    right[tile, inner, column], ti.f32
-                )
+                total += ti.cast(left[tile, row, inner], ti.f32) * ti.cast(right[tile, inner, column], ti.f32)
             output[tile, row, column] = total
 
     recording = ti.hardware.matrix.CudaMatrixMmaRecording(batch)
@@ -1486,11 +1439,7 @@ def _cuda_mma_case(order, args):
     hardware_error = _error(hardware_output.to_numpy(), expected)
     baseline_error = _error(baseline_output.to_numpy(), expected)
     resolved = _resolved_operation("matrix.mma.cuda")
-    passed = (
-        hardware_error[0] <= 3e-3
-        and baseline_error[0] <= 3e-3
-        and resolved["discovery"] == "available"
-    )
+    passed = hardware_error[0] <= 3e-3 and baseline_error[0] <= 3e-3 and resolved["discovery"] == "available"
     result = _provenance("cuda-mma", order)
     result.update(
         {
@@ -1533,15 +1482,9 @@ def _cuda_spmv_case(order, args):
         n - width,
     ).astype(np.int32)
     row_offsets_host = np.arange(0, (n + 1) * width, width, dtype=np.int32)
-    column_indices_host = (
-        starts[:, None] + np.arange(width, dtype=np.int32)[None, :]
-    ).reshape(-1)
-    values_host = (
-        0.25 + (np.arange(n * width, dtype=np.float32) % 17) * np.float32(0.01)
-    ).astype(np.float32)
-    input_host = (
-        np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003)) + 0.5
-    ).astype(np.float32)
+    column_indices_host = (starts[:, None] + np.arange(width, dtype=np.int32)[None, :]).reshape(-1)
+    values_host = (0.25 + (np.arange(n * width, dtype=np.float32) % 17) * np.float32(0.01)).astype(np.float32)
+    input_host = (np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003)) + 0.5).astype(np.float32)
     row_offsets = ti.ndarray(ti.i32, shape=n + 1)
     column_indices = ti.ndarray(ti.i32, shape=n * width)
     values = ti.ndarray(ti.f32, shape=n * width)
@@ -1581,8 +1524,7 @@ def _cuda_spmv_case(order, args):
         args.maximum_repetitions,
     )
     expected = np.sum(
-        values_host.reshape(n, width)
-        * input_host[column_indices_host].reshape(n, width),
+        values_host.reshape(n, width) * input_host[column_indices_host].reshape(n, width),
         axis=1,
     )
     hardware_error = _error(hardware_output.to_numpy(), expected)
@@ -1662,9 +1604,7 @@ def _cuda_spmv_krylov_case(order, args):
     iterations = args.krylov_iterations
     n = side * side
     stencil_radius = args.krylov_stencil_radius
-    row_offsets_host, column_indices_host, values_host = _implicit_grid_csr(
-        side, 0.20, stencil_radius=stencil_radius
-    )
+    row_offsets_host, column_indices_host, values_host = _implicit_grid_csr(side, 0.20, stencil_radius=stencil_radius)
     rhs_host = (
         np.sin(np.arange(n, dtype=np.float32) * np.float32(0.017))
         + np.cos(np.arange(n, dtype=np.float32) * np.float32(0.011))
@@ -1683,14 +1623,10 @@ def _cuda_spmv_krylov_case(order, args):
     rerecord_recording = None
     if args.krylov_baseline == "rerecord":
         if recording.replay_mode != "stream_capture":
-            raise RuntimeError(
-                "the rerecord baseline requires " "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1"
-            )
+            raise RuntimeError("the rerecord baseline requires " "TI_CUDA_MIXED_COMMAND_REPLAY_PROOF=1")
         proof_flag = os.environ.pop("TI_CUDA_MIXED_COMMAND_REPLAY_PROOF", None)
         try:
-            rerecord_recording = ti.hardware.linalg.CusparseSpmvRecording(
-                matrix, input="p", output="ap"
-            )
+            rerecord_recording = ti.hardware.linalg.CusparseSpmvRecording(matrix, input="p", output="ap")
         finally:
             if proof_flag is not None:
                 os.environ["TI_CUDA_MIXED_COMMAND_REPLAY_PROOF"] = proof_flag
@@ -1775,17 +1711,13 @@ def _cuda_spmv_krylov_case(order, args):
         rr[0] = rr_new[0]
 
     scalar_args = {
-        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
-        for name in ("rr", "pap", "rr_new")
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1) for name in ("rr", "pap", "rr_new")
     }
     vector_args = {
-        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
-        for name in ("rhs", "x", "r", "p", "ap")
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1) for name in ("rhs", "x", "r", "p", "ap")
     }
     row_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "row_offsets", ti.i32, ndim=1)
-    column_arg = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "column_indices", ti.i32, ndim=1
-    )
+    column_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "column_indices", ti.i32, ndim=1)
     values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1)
 
     def build_solver_graph(use_hardware, *, selected_recording=None):
@@ -1967,9 +1899,7 @@ def _cuda_spmv_krylov_case(order, args):
                 "hardware_action": "linalg.spmv.cusparse_explicit",
                 "graph_integration": resolved["graph_integration"],
                 "baseline_action": (
-                    "segmented_cusparse_rerecord"
-                    if rerecord_recording is not None
-                    else "taichi_kernel_csr_spmv"
+                    "segmented_cusparse_rerecord" if rerecord_recording is not None else "taichi_kernel_csr_spmv"
                 ),
             },
             "provider_statistics": provider_stats,
@@ -1977,9 +1907,7 @@ def _cuda_spmv_krylov_case(order, args):
                 "enabled": recording.replay_mode == "stream_capture",
                 "baseline_mode": args.krylov_baseline,
                 "graph_statistics": (
-                    hardware_graph._graph_stats[0]
-                    if recording.replay_mode == "stream_capture"
-                    else None
+                    hardware_graph._graph_stats[0] if recording.replay_mode == "stream_capture" else None
                 ),
             },
         }
@@ -2047,9 +1975,7 @@ def _cuda_cudss_solve_case(order, args):
     row_offsets_host = np.asarray(row_offsets_host, dtype=np.int32)
     column_indices_host = np.asarray(column_indices_host, dtype=np.int32)
     values_host = np.asarray(values_host, dtype=np.float32)
-    rhs_host = (
-        0.5 + np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003))
-    ).astype(np.float32)
+    rhs_host = (0.5 + np.sin(np.arange(n, dtype=np.float32) * np.float32(0.003))).astype(np.float32)
 
     row_offsets = ti.ndarray(ti.i32, shape=n + 1)
     column_indices = ti.ndarray(ti.i32, shape=column_indices_host.size)
@@ -2116,13 +2042,9 @@ def _cuda_cudss_solve_case(order, args):
     baseline_error = residual(baseline_values)
     provider_report = ti.hardware.probe("cudss", library_path=library_path)
     resolved = next(
-        item
-        for item in provider_report.operations
-        if item.descriptor.operation_id == "linalg.solve.cudss"
+        item for item in provider_report.operations if item.descriptor.operation_id == "linalg.solve.cudss"
     ).to_dict()
-    provider_version = tuple(
-        int(part) for part in resolved["provider_version"].split(".")
-    )
+    provider_version = tuple(int(part) for part in resolved["provider_version"].split("."))
     matrix_stats = matrix._debug_runtime_stats()
     result = _provenance("cuda-cudss-solve", order)
     admission_scope = {
@@ -2224,18 +2146,11 @@ def _cuda_cudss_refactor_solve_case(order, args):
     low_stiffness = np.float32(0.08)
     high_stiffness = np.float32(0.20)
     phase = np.float32(0.35)
-    row_offsets_host, column_indices_host, low_values_host = _implicit_grid_csr(
-        side, low_stiffness
-    )
+    row_offsets_host, column_indices_host, low_values_host = _implicit_grid_csr(side, low_stiffness)
     high_rows, high_columns, high_values_host = _implicit_grid_csr(side, high_stiffness)
-    if not (
-        np.array_equal(row_offsets_host, high_rows)
-        and np.array_equal(column_indices_host, high_columns)
-    ):
+    if not (np.array_equal(row_offsets_host, high_rows) and np.array_equal(column_indices_host, high_columns)):
         raise RuntimeError("implicit-grid coefficient update changed CSR topology")
-    current_values_host = (
-        (np.float32(1.0) - phase) * low_values_host + phase * high_values_host
-    ).astype(np.float32)
+    current_values_host = ((np.float32(1.0) - phase) * low_values_host + phase * high_values_host).astype(np.float32)
     rhs_host = (
         np.sin(np.arange(n, dtype=np.float32) * np.float32(0.013))
         + np.cos(np.arange(n, dtype=np.float32) * np.float32(0.007))
@@ -2363,11 +2278,9 @@ def _cuda_cudss_refactor_solve_case(order, args):
         and resolved["discovery"] == "available"
         and resolved["selection"] in ("eligible", "selected")
         and statistics["refactor_solve_attempts"] > 0
-        and statistics["refactor_solve_successes"]
-        == statistics["refactor_solve_attempts"]
+        and statistics["refactor_solve_successes"] == statistics["refactor_solve_attempts"]
         and statistics["refactor_solve_failures"] == 0
-        and statistics["refactor_solve_retirements"]
-        == statistics["refactor_solve_successes"]
+        and statistics["refactor_solve_retirements"] == statistics["refactor_solve_successes"]
         and statistics["refactor_solve_inflight"] == 0
         and memory_after_close["inflight_resources"] == 0
         and closed_report["lifecycle_state"] == "closed"
@@ -2447,8 +2360,8 @@ def _cuda_cudss_tet_fem_case(order, args):
     low_young = np.float32(2.0)
     high_young = np.float32(5.0)
     phase = np.float32(0.35)
-    coordinates, tetrahedra, row_offsets_host, column_indices_host, low_values_host = (
-        _irregular_tet_fem_csr(grid, float(low_young))
+    coordinates, tetrahedra, row_offsets_host, column_indices_host, low_values_host = _irregular_tet_fem_csr(
+        grid, float(low_young)
     )
     (
         high_coordinates,
@@ -2464,9 +2377,7 @@ def _cuda_cudss_tet_fem_case(order, args):
         and np.array_equal(column_indices_host, high_columns)
     ):
         raise RuntimeError("tet FEM material update changed geometry or CSR topology")
-    current_values_host = (
-        (np.float32(1.0) - phase) * low_values_host + phase * high_values_host
-    ).astype(np.float32)
+    current_values_host = ((np.float32(1.0) - phase) * low_values_host + phase * high_values_host).astype(np.float32)
     n = coordinates.shape[0] * 3
     rhs_host = (
         np.sin(np.arange(n, dtype=np.float32) * np.float32(0.019))
@@ -2763,9 +2674,7 @@ def _vulkan_ray_update_case(order, args):
     expected_baseline_t = 2.0 - baseline_state["z"]
     hardware_error = float(np.max(np.abs(hardware_values[:, 0] - expected_hardware_t)))
     baseline_error = float(np.max(np.abs(baseline_values[:, 0] - expected_baseline_t)))
-    all_hits = bool(
-        np.all(hardware_values[:, 3] == 1.0) and np.all(baseline_values[:, 3] == 1.0)
-    )
+    all_hits = bool(np.all(hardware_values[:, 3] == 1.0) and np.all(baseline_values[:, 3] == 1.0))
     refit_route = _resolved_operation("ray.as_refit.vulkan")
     query_route = _resolved_operation("ray.query.batch.vulkan")
     passed = (
@@ -2805,9 +2714,7 @@ def _vulkan_ray_update_case(order, args):
 def _vulkan_texture_fetch_case(order, args):
     _init_vulkan()
     size = args.texture_size
-    source_host = (
-        np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
-    ) / np.float32(1021.0)
+    source_host = (np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021) / np.float32(1021.0)
     source = ti.ndarray(ti.f32, shape=(size, size))
     hardware_output = ti.ndarray(ti.f32, shape=(size, size))
     baseline_output = ti.ndarray(ti.f32, shape=(size, size))
@@ -3020,9 +2927,7 @@ def _vulkan_texture_sample_case(order, args):
 def _vulkan_image_copy_case(order, args):
     _init_vulkan()
     size = args.texture_size
-    source_host = (
-        np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
-    ) / np.float32(1021.0)
+    source_host = (np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021) / np.float32(1021.0)
     source_values = ti.ndarray(ti.f32, shape=(size, size))
     hardware_values = ti.ndarray(ti.f32, shape=(size, size))
     baseline_values = ti.ndarray(ti.f32, shape=(size, size))
@@ -3045,9 +2950,7 @@ def _vulkan_image_copy_case(order, args):
     @ti.kernel
     def kernel_copy(
         source_image: ti.types.texture(num_dimensions=2),
-        destination_image: ti.types.rw_texture(
-            num_dimensions=2, fmt=ti.Format.r32f, lod=0
-        ),
+        destination_image: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=0),
     ):
         for i, j in ti.ndrange(size, size):
             destination_image.store(
@@ -3137,21 +3040,11 @@ def _vulkan_offscreen_simulation_case(order, args):
     triangle_count = tiles * tiles
     draw_count = args.offscreen_draws
     if draw_count > triangle_count or triangle_count % draw_count != 0:
-        raise ValueError(
-            "offscreen draws must divide the total triangle count and cannot exceed it"
-        )
-    shader_root = (
-        pathlib.Path(__file__).resolve().parents[2]
-        / "cpp_examples"
-        / "rhi_examples"
-        / "shaders"
-    )
+        raise ValueError("offscreen draws must divide the total triangle count and cannot exceed it")
+    shader_root = pathlib.Path(__file__).resolve().parents[2] / "cpp_examples" / "rhi_examples" / "shaders"
 
     def spirv_header(name):
-        words = [
-            int(value, 16)
-            for value in re.findall(r"0x[0-9a-fA-F]+", (shader_root / name).read_text())
-        ]
+        words = [int(value, 16) for value in re.findall(r"0x[0-9a-fA-F]+", (shader_root / name).read_text())]
         return struct.pack(f"<{len(words)}I", *words)
 
     pipeline = ti.hardware.graphics.VulkanGraphicsPipeline(
@@ -3255,9 +3148,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                     ti.i32,
                 ),
             )
-            for px, py in ti.ndrange(
-                (minimum_x, maximum_x + 1), (minimum_y, maximum_y + 1)
-            ):
+            for px, py in ti.ndrange((minimum_x, maximum_x + 1), (minimum_y, maximum_y + 1)):
                 x = 2.0 * (ti.cast(px, ti.f32) + 0.5) / size - 1.0
                 y = 2.0 * (ti.cast(py, ti.f32) + 0.5) / size - 1.0
                 w0 = ((y1 - y2) * (x - x2) + (x2 - x1) * (y - y2)) / denominator
@@ -3299,9 +3190,7 @@ def _vulkan_offscreen_simulation_case(order, args):
     software_graph = software_builder.compile()
     hardware_binding_sets = [
         {"phase": phase, "vertices": vertices, "target": color}
-        for phase, vertices, color in zip(
-            hardware_phase_sets, hardware_vertices_sets, target_sets
-        )
+        for phase, vertices, color in zip(hardware_phase_sets, hardware_vertices_sets, target_sets)
     ]
     software_bindings = {
         "phase": baseline_phase,
@@ -3336,9 +3225,7 @@ def _vulkan_offscreen_simulation_case(order, args):
         rerecord_graph = rerecord_builder.compile()
         baseline_binding_sets = [
             {"phase": phase, "vertices": vertices, "target": color}
-            for phase, vertices, color in zip(
-                rerecord_phase_sets, rerecord_vertices_sets, rerecord_target_sets
-            )
+            for phase, vertices, color in zip(rerecord_phase_sets, rerecord_vertices_sets, rerecord_target_sets)
         ]
     else:
         rerecord_graph = None
@@ -3349,9 +3236,7 @@ def _vulkan_offscreen_simulation_case(order, args):
     binding_cursor = {"hardware": 0, "baseline": 0}
 
     def next_bindings(variant):
-        bindings = (
-            hardware_binding_sets if variant == "hardware" else baseline_binding_sets
-        )
+        bindings = hardware_binding_sets if variant == "hardware" else baseline_binding_sets
         index = binding_cursor[variant] % len(bindings)
         binding_cursor[variant] += 1
         return bindings[index]
@@ -3409,9 +3294,7 @@ def _vulkan_offscreen_simulation_case(order, args):
             "samples_ms": submit_samples,
             "paired_speedups": tuple(
                 baseline_value / hardware_value
-                for hardware_value, baseline_value in zip(
-                    submit_samples["hardware"], submit_samples["baseline"]
-                )
+                for hardware_value, baseline_value in zip(submit_samples["hardware"], submit_samples["baseline"])
             ),
         }
         hardware_graph.prepare_telemetry("timestamps")
@@ -3437,11 +3320,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "status": report.gpu_timestamp_status,
             }
             gpu_observations[variant].append(observation)
-            if (
-                observation["exact"]
-                and observation["duration_ns"] is not None
-                and observation["duration_ns"] > 0
-            ):
+            if observation["exact"] and observation["duration_ns"] is not None and observation["duration_ns"] > 0:
                 gpu_samples[variant].append(observation["duration_ns"] / 1.0e6)
             return observation
 
@@ -3458,10 +3337,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 and baseline_observation["duration_ns"] is not None
                 and hardware_observation["duration_ns"] > 0
             ):
-                paired_gpu_speedups.append(
-                    baseline_observation["duration_ns"]
-                    / hardware_observation["duration_ns"]
-                )
+                paired_gpu_speedups.append(baseline_observation["duration_ns"] / hardware_observation["duration_ns"])
         gpu_stage_timing = {
             "scope": (
                 "Graph.submit whole-ticket GPU timestamps; simulation, "
@@ -3471,29 +3347,18 @@ def _vulkan_offscreen_simulation_case(order, args):
             "observations": gpu_observations,
             "paired_speedups": paired_gpu_speedups,
         }
-    if (
-        args.vulkan_retained_replay_proof
-        and rerecord_graph is not None
-        and retained_packets > 1
-    ):
+    if args.vulkan_retained_replay_proof and rerecord_graph is not None and retained_packets > 1:
         packet_calls = {
-            variant: {"bursts": 0, "submissions": 0, "completion_waits": 0}
-            for variant in ("hardware", "baseline")
+            variant: {"bursts": 0, "submissions": 0, "completion_waits": 0} for variant in ("hardware", "baseline")
         }
         program = ti.lang.impl.get_runtime().prog
-        replay_before_packets = dict(
-            program._debug_vulkan_graphics_resource_stats()
-        )
+        replay_before_packets = dict(program._debug_vulkan_graphics_resource_stats())
         hardware_memory_before = hardware_graph.execution_stats().memory
         baseline_memory_before = rerecord_graph.execution_stats().memory
 
         def packet_burst(variant):
             graph = hardware_graph if variant == "hardware" else rerecord_graph
-            bindings = (
-                hardware_binding_sets[0]
-                if variant == "hardware"
-                else baseline_binding_sets[0]
-            )
+            bindings = hardware_binding_sets[0] if variant == "hardware" else baseline_binding_sets[0]
             tickets = [graph.submit(bindings) for _ in range(retained_packets)]
             packet_calls[variant]["bursts"] += 1
             packet_calls[variant]["submissions"] += len(tickets)
@@ -3510,12 +3375,8 @@ def _vulkan_offscreen_simulation_case(order, args):
             args.minimum_block_ms,
             args.maximum_repetitions,
         )
-        packet_timing["scope"] = (
-            f"{retained_packets} fixed-binding Graph.submit packets with one terminal wait"
-        )
-        replay_after_packets = dict(
-            program._debug_vulkan_graphics_resource_stats()
-        )
+        packet_timing["scope"] = f"{retained_packets} fixed-binding Graph.submit packets with one terminal wait"
+        replay_after_packets = dict(program._debug_vulkan_graphics_resource_stats())
         hardware_memory_after = hardware_graph.execution_stats().memory
         baseline_memory_after = rerecord_graph.execution_stats().memory
         packet_lifecycle = {
@@ -3524,19 +3385,13 @@ def _vulkan_offscreen_simulation_case(order, args):
             "binding_sets": retained_binding_sets,
             "calls": packet_calls,
             "hardware_workspace_lane_waits_delta": (
-                hardware_memory_after.workspace_lane_waits
-                - hardware_memory_before.workspace_lane_waits
+                hardware_memory_after.workspace_lane_waits - hardware_memory_before.workspace_lane_waits
             ),
             "baseline_workspace_lane_waits_delta": (
-                baseline_memory_after.workspace_lane_waits
-                - baseline_memory_before.workspace_lane_waits
+                baseline_memory_after.workspace_lane_waits - baseline_memory_before.workspace_lane_waits
             ),
-            "hardware_workspace_lanes_busy_after": (
-                hardware_memory_after.workspace_lanes_busy
-            ),
-            "baseline_workspace_lanes_busy_after": (
-                baseline_memory_after.workspace_lanes_busy
-            ),
+            "hardware_workspace_lanes_busy_after": (hardware_memory_after.workspace_lanes_busy),
+            "baseline_workspace_lanes_busy_after": (baseline_memory_after.workspace_lanes_busy),
             "retained_replay_busy_fallbacks_delta": (
                 replay_after_packets["retained_replay_busy_fallbacks"]
                 - replay_before_packets["retained_replay_busy_fallbacks"]
@@ -3573,35 +3428,25 @@ def _vulkan_offscreen_simulation_case(order, args):
     hardware_image = hardware_images[0]
     rerecord_images = [read_target(color) for color in rerecord_target_sets]
     rerecord_image = rerecord_images[0] if rerecord_images else None
-    baseline_image_host = np.clip(
-        baseline_image.to_numpy().reshape(size, size, 3), 0.0, 1.0
-    )
+    baseline_image_host = np.clip(baseline_image.to_numpy().reshape(size, size, 3), 0.0, 1.0)
     hardware_normalized = hardware_image.astype(np.float32) / 255.0
     hardware_mask = np.max(hardware_image, axis=2) > 8
     baseline_mask = np.max(baseline_image_host, axis=2) > (8.0 / 255.0)
-    coverage_error = abs(int(hardware_mask.sum()) - int(baseline_mask.sum())) / max(
-        1, int(baseline_mask.sum())
-    )
+    coverage_error = abs(int(hardware_mask.sum()) - int(baseline_mask.sum())) / max(1, int(baseline_mask.sum()))
     mean_color_error = float(
-        np.max(
-            np.abs(
-                hardware_normalized.mean(axis=(0, 1))
-                - baseline_image_host.mean(axis=(0, 1))
-            )
-        )
+        np.max(np.abs(hardware_normalized.mean(axis=(0, 1)) - baseline_image_host.mean(axis=(0, 1))))
     )
     rerecord_coverage_error = None
     rerecord_mean_color_error = None
     if rerecord_image is not None:
         rerecord_mask = np.max(rerecord_image, axis=2) > 8
-        rerecord_coverage_error = abs(
-            int(rerecord_mask.sum()) - int(baseline_mask.sum())
-        ) / max(1, int(baseline_mask.sum()))
+        rerecord_coverage_error = abs(int(rerecord_mask.sum()) - int(baseline_mask.sum())) / max(
+            1, int(baseline_mask.sum())
+        )
         rerecord_mean_color_error = float(
             np.max(
                 np.abs(
-                    rerecord_image.astype(np.float32).mean(axis=(0, 1)) / 255.0
-                    - baseline_image_host.mean(axis=(0, 1))
+                    rerecord_image.astype(np.float32).mean(axis=(0, 1)) / 255.0 - baseline_image_host.mean(axis=(0, 1))
                 )
             )
         )
@@ -3615,16 +3460,12 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "hardware_covered_pixels": int(binding_mask.sum()),
                 "hardware_nonempty": bool(binding_mask.any()),
                 "rerecord_exact_image_match": (
-                    bool(np.array_equal(binding_image, matching_rerecord))
-                    if matching_rerecord is not None
-                    else None
+                    bool(np.array_equal(binding_image, matching_rerecord)) if matching_rerecord is not None else None
                 ),
             }
         )
     resolved = _resolved_operation("raster.draw.vulkan")
-    replay_stats = dict(
-        ti.lang.impl.get_runtime().prog._debug_vulkan_graphics_resource_stats()
-    )
+    replay_stats = dict(ti.lang.impl.get_runtime().prog._debug_vulkan_graphics_resource_stats())
     memory_open = pipeline.memory_report().to_dict()
     pipeline.close()
     ti.sync()
@@ -3692,9 +3533,7 @@ def _vulkan_offscreen_simulation_case(order, args):
                 "graph_integration": resolved["graph_integration"],
                 "replay_mode": recording.replay_mode,
                 "experimental_replay": (
-                    "experimental_fixed_binding_retained"
-                    if recording._experimental_retained_replay
-                    else "disabled"
+                    "experimental_fixed_binding_retained" if recording._experimental_retained_replay else "disabled"
                 ),
                 "stream_binding": recording.stream_binding,
                 "baseline_action": (
@@ -3729,9 +3568,7 @@ def _vulkan_texture_stencil_case(order, args):
     radius = args.texture_stencil_radius
     output_size = size - 2 * radius
     taps = (2 * radius + 1) ** 2
-    source_host = (
-        np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021
-    ) / np.float32(1021.0)
+    source_host = (np.arange(size * size, dtype=np.float32).reshape(size, size) % 1021) / np.float32(1021.0)
     source = ti.ndarray(ti.f32, shape=(size, size))
     hardware_output = ti.ndarray(ti.f32, shape=(output_size, output_size))
     baseline_output = ti.ndarray(ti.f32, shape=(output_size, output_size))
@@ -3756,9 +3593,7 @@ def _vulkan_texture_stencil_case(order, args):
     ):
         for i, j in output:
             total = 0.0
-            for di, dj in ti.static(
-                ti.ndrange((-radius, radius + 1), (-radius, radius + 1))
-            ):
+            for di, dj in ti.static(ti.ndrange((-radius, radius + 1), (-radius, radius + 1))):
                 total += image.fetch(ti.Vector([i + radius + di, j + radius + dj]), 0).x
             output[i, j] = total
 
@@ -3769,9 +3604,7 @@ def _vulkan_texture_stencil_case(order, args):
     ):
         for i, j in output:
             total = 0.0
-            for di, dj in ti.static(
-                ti.ndrange((-radius, radius + 1), (-radius, radius + 1))
-            ):
+            for di, dj in ti.static(ti.ndrange((-radius, radius + 1), (-radius, radius + 1))):
                 total += values[i + radius + di, j + radius + dj]
             output[i, j] = total
 
@@ -3894,9 +3727,7 @@ def _auto_admission(
     scopes = [worker.get("admission_scope") for worker in workers]
     if not scopes or any(not isinstance(scope, dict) for scope in scopes):
         return {"eligible": False, "reason": "not_applicable"}
-    canonical_scopes = {
-        json.dumps(scope, sort_keys=True, separators=(",", ":")) for scope in scopes
-    }
+    canonical_scopes = {json.dumps(scope, sort_keys=True, separators=(",", ":")) for scope in scopes}
     if len(canonical_scopes) != 1:
         return {"eligible": False, "reason": "qualification_scope_mismatch"}
     scope = copy.deepcopy(scopes[0])
@@ -3910,15 +3741,9 @@ def _auto_admission(
     margin_qualified = paired_speedup["p05"] >= 1.0 / (1.0 - minimum_margin)
     provider_median_ns = variants["hardware"]["median_ms"] * 1.0e6
     baseline_median_ns = variants["baseline"]["median_ms"] * 1.0e6
-    cold_provider_ns = (
-        statistics.median(worker["timing"]["cold_ms"]["hardware"] for worker in workers)
-        * 1.0e6
-    )
+    cold_provider_ns = statistics.median(worker["timing"]["cold_ms"]["hardware"] for worker in workers) * 1.0e6
     first_use_overhead_ns = max(cold_provider_ns - provider_median_ns, 0.0)
-    cold_baseline_ns = (
-        statistics.median(worker["timing"]["cold_ms"]["baseline"] for worker in workers)
-        * 1.0e6
-    )
+    cold_baseline_ns = statistics.median(worker["timing"]["cold_ms"]["baseline"] for worker in workers) * 1.0e6
     baseline_first_use_overhead_ns = max(cold_baseline_ns - baseline_median_ns, 0.0)
     provider_cost_ns = (
         provider_median_ns
@@ -3926,18 +3751,12 @@ def _auto_admission(
         + float(scope.pop("transfer_ns"))
         + float(scope.pop("conversion_ns"))
     )
-    baseline_cost_ns = (
-        baseline_median_ns + baseline_first_use_overhead_ns / expected_reuse
-    )
+    baseline_cost_ns = baseline_median_ns + baseline_first_use_overhead_ns / expected_reuse
     cost_qualified = provider_cost_ns < baseline_cost_ns * (1.0 - minimum_margin)
     checks = (
         (
             performance_evidence["qualified"],
-            (
-                performance_evidence["reasons"][0]
-                if performance_evidence["reasons"]
-                else "qualified"
-            ),
+            (performance_evidence["reasons"][0] if performance_evidence["reasons"] else "qualified"),
         ),
         (margin_qualified, "paired_margin_gate"),
         (cost_qualified, "amortized_cost_gate"),
@@ -3981,16 +3800,9 @@ def _auto_admission(
 
 
 def _performance_evidence_qualification(workers, variants):
-    order_processes = {
-        order: sum(worker["order"] == order for worker in workers)
-        for order in ("ab", "ba")
-    }
-    fresh_processes = len(
-        {(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers}
-    )
-    samples_per_variant = {
-        variant: variants[variant]["count"] for variant in ("hardware", "baseline")
-    }
+    order_processes = {order: sum(worker["order"] == order for worker in workers) for order in ("ab", "ba")}
+    fresh_processes = len({(worker.get("pid"), worker.get("timestamp_ns")) for worker in workers})
+    samples_per_variant = {variant: variants[variant]["count"] for variant in ("hardware", "baseline")}
     observed_blocks = [
         float(worker["timing"]["calibration"][variant]["observed_block_ms"])
         for worker in workers
@@ -4004,21 +3816,12 @@ def _performance_evidence_qualification(workers, variants):
     maximum_cv = max(variants[variant]["cv"] for variant in variants)
     maximum_order_drift = max(variants[variant]["order_drift"] for variant in variants)
     coverage_qualified = fresh_processes >= AUTO_ADMISSION_MINIMUM_PROCESSES and all(
-        count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER
-        for count in order_processes.values()
+        count >= AUTO_ADMISSION_MINIMUM_PROCESSES_PER_ORDER for count in order_processes.values()
     )
-    samples_qualified = all(
-        count >= AUTO_ADMISSION_MINIMUM_SAMPLES
-        for count in samples_per_variant.values()
-    )
-    stable = (
-        maximum_cv <= AUTO_ADMISSION_MAXIMUM_CV
-        and maximum_order_drift <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
-    )
+    samples_qualified = all(count >= AUTO_ADMISSION_MINIMUM_SAMPLES for count in samples_per_variant.values())
+    stable = maximum_cv <= AUTO_ADMISSION_MAXIMUM_CV and maximum_order_drift <= AUTO_ADMISSION_MAXIMUM_ORDER_DRIFT
     minimum_block_ms = min(observed_blocks)
-    minimum_block_qualified = (
-        calibration_satisfied and minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
-    )
+    minimum_block_qualified = calibration_satisfied and minimum_block_ms >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
     checks = (
         (coverage_qualified, "insufficient_fresh_process_coverage"),
         (samples_qualified, "insufficient_timing_samples"),
@@ -4108,11 +3911,7 @@ def _aggregate(
     variants = {}
     stable = True
     for variant in ("hardware", "baseline"):
-        samples = [
-            sample
-            for worker in workers
-            for sample in worker["timing"]["samples_ms"][variant]
-        ]
+        samples = [sample for worker in workers for sample in worker["timing"]["samples_ms"][variant]]
         summary = _summary(samples)
         by_order = {
             order: statistics.median(
@@ -4123,9 +3922,7 @@ def _aggregate(
             )
             for order in ("ab", "ba")
         }
-        drift = abs(by_order["ab"] - by_order["ba"]) / max(
-            summary["median_ms"], np.finfo(np.float64).tiny
-        )
+        drift = abs(by_order["ab"] - by_order["ba"]) / max(summary["median_ms"], np.finfo(np.float64).tiny)
         variant_stable = summary["cv"] <= cv_limit and drift <= drift_limit
         stable = stable and variant_stable
         variants[variant] = {
@@ -4134,9 +3931,7 @@ def _aggregate(
             "order_drift": drift,
             "stable": variant_stable,
         }
-    speedups = [
-        ratio for worker in workers for ratio in worker["timing"]["paired_speedups"]
-    ]
+    speedups = [ratio for worker in workers for ratio in worker["timing"]["paired_speedups"]]
     speedup = _ratio_summary(speedups)
     ratio = variants["baseline"]["median_ms"] / variants["hardware"]["median_ms"]
     minimum_block_qualified = all(
@@ -4240,11 +4035,7 @@ def _aggregate(
         submit_variants = {}
         submit_stable = True
         for variant in ("hardware", "baseline"):
-            samples = [
-                sample
-                for worker in workers
-                for sample in worker["submit_timing"]["samples_ms"][variant]
-            ]
+            samples = [sample for worker in workers for sample in worker["submit_timing"]["samples_ms"][variant]]
             summary = _summary(samples)
             by_order = {
                 order: statistics.median(
@@ -4255,9 +4046,7 @@ def _aggregate(
                 )
                 for order in ("ab", "ba")
             }
-            drift = abs(by_order["ab"] - by_order["ba"]) / max(
-                summary["median_ms"], np.finfo(np.float64).tiny
-            )
+            drift = abs(by_order["ab"] - by_order["ba"]) / max(summary["median_ms"], np.finfo(np.float64).tiny)
             variant_stable = summary["cv"] <= cv_limit and drift <= drift_limit
             submit_stable = submit_stable and variant_stable
             submit_variants[variant] = {
@@ -4267,9 +4056,7 @@ def _aggregate(
                 "stable": variant_stable,
             }
         submit_speedup = _ratio_summary(
-            ratio
-            for worker in workers
-            for ratio in worker["submit_timing"]["paired_speedups"]
+            ratio for worker in workers for ratio in worker["submit_timing"]["paired_speedups"]
         )
         result["submit_timing"] = {
             "scope": workers[0]["submit_timing"]["scope"],
@@ -4283,11 +4070,7 @@ def _aggregate(
         packet_variants = {}
         packet_stable = True
         for variant in ("hardware", "baseline"):
-            samples = [
-                sample
-                for worker in workers
-                for sample in worker["packet_timing"]["samples_ms"][variant]
-            ]
+            samples = [sample for worker in workers for sample in worker["packet_timing"]["samples_ms"][variant]]
             summary = _summary(samples)
             by_order = {
                 order: statistics.median(
@@ -4298,9 +4081,7 @@ def _aggregate(
                 )
                 for order in ("ab", "ba")
             }
-            drift = abs(by_order["ab"] - by_order["ba"]) / max(
-                summary["median_ms"], np.finfo(np.float64).tiny
-            )
+            drift = abs(by_order["ab"] - by_order["ba"]) / max(summary["median_ms"], np.finfo(np.float64).tiny)
             variant_stable = summary["cv"] <= cv_limit and drift <= drift_limit
             packet_stable = packet_stable and variant_stable
             packet_variants[variant] = {
@@ -4310,24 +4091,17 @@ def _aggregate(
                 "stable": variant_stable,
             }
         packet_speedup = _ratio_summary(
-            ratio
-            for worker in workers
-            for ratio in worker["packet_timing"]["paired_speedups"]
+            ratio for worker in workers for ratio in worker["packet_timing"]["paired_speedups"]
         )
         packet_minimum_block_qualified = all(
-            worker["packet_timing"].get("calibration", {})
-            .get(variant, {})
-            .get("satisfied", False)
-            and worker["packet_timing"]["calibration"][variant].get(
-                "observed_block_ms", 0.0
-            )
+            worker["packet_timing"].get("calibration", {}).get(variant, {}).get("satisfied", False)
+            and worker["packet_timing"]["calibration"][variant].get("observed_block_ms", 0.0)
             >= AUTO_ADMISSION_MINIMUM_BLOCK_MS
             for worker in workers
             for variant in ("hardware", "baseline")
         )
         packet_samples_qualified = all(
-            packet_variants[variant]["count"] >= AUTO_ADMISSION_MINIMUM_SAMPLES
-            for variant in ("hardware", "baseline")
+            packet_variants[variant]["count"] >= AUTO_ADMISSION_MINIMUM_SAMPLES for variant in ("hardware", "baseline")
         )
         packet_evidence_qualified = bool(
             performance_evidence["qualified"]
@@ -4345,9 +4119,7 @@ def _aggregate(
             "performance_evidence_qualified": packet_evidence_qualified,
             "minimum_conservative_non_regression": 0.95,
             "non_regression_gate_passed": packet_speedup["p05"] >= 0.95,
-            "gate_passed": (
-                packet_evidence_qualified and packet_speedup["p05"] >= 0.95
-            ),
+            "gate_passed": (packet_evidence_qualified and packet_speedup["p05"] >= 0.95),
         }
     if all(worker.get("gpu_stage_timing") is not None for worker in workers):
         gpu_variants = {}
@@ -4355,15 +4127,9 @@ def _aggregate(
         gpu_exact = True
         for variant in ("hardware", "baseline"):
             observations = [
-                observation
-                for worker in workers
-                for observation in worker["gpu_stage_timing"]["observations"][variant]
+                observation for worker in workers for observation in worker["gpu_stage_timing"]["observations"][variant]
             ]
-            samples = [
-                sample
-                for worker in workers
-                for sample in worker["gpu_stage_timing"]["samples_ms"][variant]
-            ]
+            samples = [sample for worker in workers for sample in worker["gpu_stage_timing"]["samples_ms"][variant]]
             exact = bool(observations) and all(
                 observation["scope"] == "whole_ticket"
                 and observation["exact"]
@@ -4381,18 +4147,10 @@ def _aggregate(
                     if worker["order"] == order
                     for sample in worker["gpu_stage_timing"]["samples_ms"][variant]
                 ]
-                by_order[order] = (
-                    statistics.median(order_samples) if order_samples else None
-                )
+                by_order[order] = statistics.median(order_samples) if order_samples else None
             drift = None
-            if (
-                summary is not None
-                and by_order["ab"] is not None
-                and by_order["ba"] is not None
-            ):
-                drift = abs(by_order["ab"] - by_order["ba"]) / max(
-                    summary["median_ms"], np.finfo(np.float64).tiny
-                )
+            if summary is not None and by_order["ab"] is not None and by_order["ba"] is not None:
+                drift = abs(by_order["ab"] - by_order["ba"]) / max(summary["median_ms"], np.finfo(np.float64).tiny)
             variant_stable = bool(
                 exact
                 and summary is not None
@@ -4407,49 +4165,30 @@ def _aggregate(
                 "order_medians_ms": by_order,
                 "order_drift": drift,
                 "exact": exact,
-                "instrumented_path": all(
-                    observation["measurement_path_changed"]
-                    for observation in observations
-                ),
+                "instrumented_path": all(observation["measurement_path_changed"] for observation in observations),
                 "stable": variant_stable,
-                "statuses": sorted(
-                    {observation["status"] for observation in observations}
-                ),
-                "queue_or_stream_ids": sorted(
-                    {observation["queue_or_stream_id"] for observation in observations}
-                ),
+                "statuses": sorted({observation["status"] for observation in observations}),
+                "queue_or_stream_ids": sorted({observation["queue_or_stream_id"] for observation in observations}),
             }
-        gpu_paired_ratios = [
-            ratio
-            for worker in workers
-            for ratio in worker["gpu_stage_timing"]["paired_speedups"]
-        ]
-        gpu_paired_speedup = (
-            _ratio_summary(gpu_paired_ratios) if gpu_paired_ratios else None
-        )
+        gpu_paired_ratios = [ratio for worker in workers for ratio in worker["gpu_stage_timing"]["paired_speedups"]]
+        gpu_paired_speedup = _ratio_summary(gpu_paired_ratios) if gpu_paired_ratios else None
         gpu_worker_ratios = []
         for worker in workers:
             hardware_samples = worker["gpu_stage_timing"]["samples_ms"]["hardware"]
             baseline_samples = worker["gpu_stage_timing"]["samples_ms"]["baseline"]
             if hardware_samples and baseline_samples:
-                gpu_worker_ratios.append(
-                    statistics.median(baseline_samples)
-                    / statistics.median(hardware_samples)
-                )
+                gpu_worker_ratios.append(statistics.median(baseline_samples) / statistics.median(hardware_samples))
         gpu_speedup = _ratio_summary(gpu_worker_ratios) if gpu_worker_ratios else None
         gpu_stable = bool(
             gpu_exact
             and gpu_speedup is not None
             and gpu_speedup["cv"] <= cv_limit
             and all(
-                variant["order_drift"] is not None
-                and variant["order_drift"] <= drift_limit
+                variant["order_drift"] is not None and variant["order_drift"] <= drift_limit
                 for variant in gpu_variants.values()
             )
         )
-        gpu_non_regression = bool(
-            gpu_exact and gpu_speedup is not None and gpu_speedup["p05"] >= 0.95
-        )
+        gpu_non_regression = bool(gpu_exact and gpu_speedup is not None and gpu_speedup["p05"] >= 0.95)
         result["gpu_stage_timing"] = {
             "scope": workers[0]["gpu_stage_timing"]["scope"],
             "variants": gpu_variants,
@@ -4462,19 +4201,11 @@ def _aggregate(
             "gate_passed": gpu_stable and gpu_non_regression,
         }
     replay_proofs = [worker.get("replay_proof") for worker in workers]
-    enabled_replay_proofs = [
-        proof for proof in replay_proofs if proof is not None and proof.get("enabled")
-    ]
+    enabled_replay_proofs = [proof for proof in replay_proofs if proof is not None and proof.get("enabled")]
     if enabled_replay_proofs:
         replay_backends = {worker.get("backend") for worker in workers}
-        baseline_modes = {
-            proof.get("baseline_mode") for proof in enabled_replay_proofs
-        }
-        if (
-            len(enabled_replay_proofs) != len(workers)
-            or len(replay_backends) != 1
-            or len(baseline_modes) != 1
-        ):
+        baseline_modes = {proof.get("baseline_mode") for proof in enabled_replay_proofs}
+        if len(enabled_replay_proofs) != len(workers) or len(replay_backends) != 1 or len(baseline_modes) != 1:
             result["replay_proof_gate"] = {
                 "scope": "unqualified_replay_proof",
                 "gate_reason": "incomplete_or_mixed_worker_scope",
@@ -4488,9 +4219,7 @@ def _aggregate(
             baseline_mode = next(iter(baseline_modes))
             counters_qualified = all(
                 proof.get("graph_statistics") is not None
-                and proof["graph_statistics"].get(
-                    "diagnostics_counters_complete", False
-                )
+                and proof["graph_statistics"].get("diagnostics_counters_complete", False)
                 and proof["graph_statistics"].get("backend") == "cuda"
                 and proof["graph_statistics"].get("capture_attempts") == 1
                 and proof["graph_statistics"].get("captures") == 1
@@ -4500,44 +4229,28 @@ def _aggregate(
                 and proof["graph_statistics"].get("ordinary_fallbacks") == 0
                 and proof["graph_statistics"].get("transient_failures") == 0
                 and proof["graph_statistics"].get("capture_exceptions") == 0
-                and proof["graph_statistics"].get("last_path")
-                == "cuda_exact_replay"
-                and proof["graph_statistics"].get(
-                    "backend_replay_signature_slots"
-                )
-                == 1
-                and proof["graph_statistics"].get(
-                    "backend_replay_signature_slot_capacity", 0
-                )
-                >= 1
+                and proof["graph_statistics"].get("last_path") == "cuda_exact_replay"
+                and proof["graph_statistics"].get("backend_replay_signature_slots") == 1
+                and proof["graph_statistics"].get("backend_replay_signature_slot_capacity", 0) >= 1
                 for proof in enabled_replay_proofs
             )
             lifecycle_qualified = bool(
                 counters_qualified
                 and all(
-                    proof.get("lifecycle", {}).get("runtime_reset_completed")
-                    is True
-                    for proof in enabled_replay_proofs
+                    proof.get("lifecycle", {}).get("runtime_reset_completed") is True for proof in enabled_replay_proofs
                 )
             )
             if baseline_mode == "rerecord":
-                wall_gate = bool(
-                    performance_evidence["qualified"]
-                    and speedup["p05"] >= 1.0 / 0.95
-                )
+                wall_gate = bool(performance_evidence["qualified"] and speedup["p05"] >= 1.0 / 0.95)
                 performance_gate = bool(counters_qualified and wall_gate)
                 result["replay_proof_gate"] = {
                     "scope": "cuda_mixed_capture_vs_rerecord",
                     "counters_qualified": counters_qualified,
-                    "lifecycle_scope": (
-                        "fresh_process_capture_replay_runtime_reset"
-                    ),
+                    "lifecycle_scope": ("fresh_process_capture_replay_runtime_reset"),
                     "lifecycle_gate_passed": lifecycle_qualified,
                     "wall_gate_passed": wall_gate,
                     "performance_gate_passed": performance_gate,
-                    "retention_gate_passed": (
-                        lifecycle_qualified and performance_gate
-                    ),
+                    "retention_gate_passed": (lifecycle_qualified and performance_gate),
                 }
                 result["performance_claim_eligible"] = False
             elif baseline_mode == "taichi":
@@ -4549,15 +4262,11 @@ def _aggregate(
                 result["replay_proof_gate"] = {
                     "scope": "cuda_mixed_capture_vs_software",
                     "counters_qualified": counters_qualified,
-                    "lifecycle_scope": (
-                        "fresh_process_capture_replay_runtime_reset"
-                    ),
+                    "lifecycle_scope": ("fresh_process_capture_replay_runtime_reset"),
                     "lifecycle_gate_passed": lifecycle_qualified,
                     "physics_roi_gate_passed": physics_roi_gate,
                     "performance_gate_passed": physics_roi_gate,
-                    "retention_gate_passed": (
-                        lifecycle_qualified and physics_roi_gate
-                    ),
+                    "retention_gate_passed": (lifecycle_qualified and physics_roi_gate),
                 }
                 result["performance_claim_eligible"] = bool(
                     result["performance_claim_eligible"]
@@ -4577,85 +4286,33 @@ def _aggregate(
                 result["performance_claim_eligible"] = False
         elif replay_backends == {"vulkan"}:
             baseline_mode = next(iter(baseline_modes))
-            retained_binding_sets = int(
-                workers[0]["workload"]["retained_binding_sets"]
-            )
-            retained_packets = int(
-                workers[0]["workload"].get("retained_packets_per_burst", 1)
-            )
+            retained_binding_sets = int(workers[0]["workload"]["retained_binding_sets"])
+            retained_packets = int(workers[0]["workload"].get("retained_packets_per_burst", 1))
             binding_rotation_scope = retained_binding_sets > 1
             counters_qualified = all(
                 proof.get("runtime_statistics") is not None
-                and proof["runtime_statistics"].get(
-                    "retained_replay_busy_fallbacks"
-                )
-                == 0
-                and proof["runtime_statistics"].get(
-                    "retained_replay_submit_failures"
-                )
-                == 0
-                and proof["runtime_statistics"].get(
-                    "retained_replay_bridge_failures"
-                )
-                == 0
+                and proof["runtime_statistics"].get("retained_replay_busy_fallbacks") == 0
+                and proof["runtime_statistics"].get("retained_replay_submit_failures") == 0
+                and proof["runtime_statistics"].get("retained_replay_bridge_failures") == 0
                 and (
                     (
                         binding_rotation_scope
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_attempts", 0
-                        )
-                        > 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_binding_misses", 0
-                        )
-                        > 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_invalidations", 0
-                        )
-                        > 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_prewarms", 0
-                        )
-                        > 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_records"
-                        )
-                        == 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_replays"
-                        )
-                        == 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_slots"
-                        )
-                        == 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_slot_capacity"
-                        )
-                        == 1
+                        and proof["runtime_statistics"].get("retained_replay_attempts", 0) > 0
+                        and proof["runtime_statistics"].get("retained_replay_binding_misses", 0) > 0
+                        and proof["runtime_statistics"].get("retained_replay_invalidations", 0) > 0
+                        and proof["runtime_statistics"].get("retained_replay_prewarms", 0) > 0
+                        and proof["runtime_statistics"].get("retained_replay_records") == 0
+                        and proof["runtime_statistics"].get("retained_replay_replays") == 0
+                        and proof["runtime_statistics"].get("retained_replay_slots") == 0
+                        and proof["runtime_statistics"].get("retained_replay_slot_capacity") == 1
                     )
                     or (
                         not binding_rotation_scope
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_prewarms"
-                        )
-                        == 1
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_records"
-                        )
-                        == 1
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_replays", 0
-                        )
-                        > 0
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_slots"
-                        )
-                        == 1
-                        and proof["runtime_statistics"].get(
-                            "retained_replay_slot_capacity", 0
-                        )
-                        >= 1
+                        and proof["runtime_statistics"].get("retained_replay_prewarms") == 1
+                        and proof["runtime_statistics"].get("retained_replay_records") == 1
+                        and proof["runtime_statistics"].get("retained_replay_replays", 0) > 0
+                        and proof["runtime_statistics"].get("retained_replay_slots") == 1
+                        and proof["runtime_statistics"].get("retained_replay_slot_capacity", 0) >= 1
                     )
                 )
                 for proof in enabled_replay_proofs
@@ -4663,19 +4320,15 @@ def _aggregate(
             lifecycle_qualified = bool(
                 counters_qualified
                 and all(
-                    worker["memory"]["pipeline_closed"]["lifecycle_state"]
-                    == "closed"
+                    worker["memory"]["pipeline_closed"]["lifecycle_state"] == "closed"
                     and all(
-                        binding["hardware_nonempty"]
-                        and binding["rerecord_exact_image_match"] is True
+                        binding["hardware_nonempty"] and binding["rerecord_exact_image_match"] is True
                         for binding in worker["correctness"]["binding_sets"]
                     )
                     for worker in workers
                 )
             )
-            packet_lifecycle_records = [
-                worker.get("packet_lifecycle") for worker in workers
-            ]
+            packet_lifecycle_records = [worker.get("packet_lifecycle") for worker in workers]
             packet_lifecycle_qualified = bool(
                 retained_packets == 1
                 or (
@@ -4690,8 +4343,7 @@ def _aggregate(
                         and record["retained_replay_bridge_failures_delta"] == 0
                         and all(
                             calls["bursts"] > 0
-                            and calls["submissions"]
-                            == calls["bursts"] * retained_packets
+                            and calls["submissions"] == calls["bursts"] * retained_packets
                             and calls["completion_waits"] == calls["bursts"]
                             for calls in record["calls"].values()
                         )
@@ -4722,25 +4374,12 @@ def _aggregate(
                 }
                 result["performance_claim_eligible"] = False
             elif baseline_mode == "rerecord":
-                wall_gate = bool(
-                    performance_evidence["qualified"]
-                    and speedup["p05"] >= 1.0 / 0.95
-                )
-                cpu_submit_gate = bool(
-                    result.get("submit_timing", {}).get("gate_passed", False)
-                )
-                gpu_stage_gate = bool(
-                    result.get("gpu_stage_timing", {}).get("gate_passed", False)
-                )
-                performance_gate = bool(
-                    counters_qualified
-                    and gpu_stage_gate
-                    and (wall_gate or cpu_submit_gate)
-                )
+                wall_gate = bool(performance_evidence["qualified"] and speedup["p05"] >= 1.0 / 0.95)
+                cpu_submit_gate = bool(result.get("submit_timing", {}).get("gate_passed", False))
+                gpu_stage_gate = bool(result.get("gpu_stage_timing", {}).get("gate_passed", False))
+                performance_gate = bool(counters_qualified and gpu_stage_gate and (wall_gate or cpu_submit_gate))
                 if retained_packets > 1:
-                    packet_performance_gate = bool(
-                        result.get("packet_timing", {}).get("gate_passed", False)
-                    )
+                    packet_performance_gate = bool(result.get("packet_timing", {}).get("gate_passed", False))
                     packet_gate = bool(
                         counters_qualified
                         and lifecycle_qualified
@@ -4753,13 +4392,9 @@ def _aggregate(
                         "retained_binding_sets": retained_binding_sets,
                         "retained_packets_per_burst": retained_packets,
                         "counters_qualified": counters_qualified,
-                        "lifecycle_gate_passed": (
-                            lifecycle_qualified and packet_lifecycle_qualified
-                        ),
+                        "lifecycle_gate_passed": (lifecycle_qualified and packet_lifecycle_qualified),
                         "low_sync_gate_passed": packet_low_sync_qualified,
-                        "packet_performance_gate_passed": (
-                            packet_performance_gate
-                        ),
+                        "packet_performance_gate_passed": (packet_performance_gate),
                         "performance_gate_passed": packet_gate,
                         "retention_gate_passed": packet_gate,
                     }
@@ -4770,11 +4405,7 @@ def _aggregate(
                         "replay_proof",
                         "packet_lifecycle",
                     ):
-                        values = [
-                            worker[diagnostic]
-                            for worker in workers
-                            if diagnostic in worker
-                        ]
+                        values = [worker[diagnostic] for worker in workers if diagnostic in worker]
                         if values:
                             result[diagnostic] = values
                     return result
@@ -4792,9 +4423,7 @@ def _aggregate(
                         else "exact_gpu_stage_unavailable_unstable_or_regressed"
                     ),
                     "performance_gate_passed": performance_gate,
-                    "retention_gate_passed": (
-                        lifecycle_qualified and performance_gate
-                    ),
+                    "retention_gate_passed": (lifecycle_qualified and performance_gate),
                 }
                 result["performance_claim_eligible"] = False
             else:
@@ -4809,9 +4438,7 @@ def _aggregate(
                     "physics_roi_gate_passed": physics_roi_gate,
                 }
                 result["performance_claim_eligible"] = bool(
-                    result["performance_claim_eligible"]
-                    and counters_qualified
-                    and physics_roi_gate
+                    result["performance_claim_eligible"] and counters_qualified and physics_roi_gate
                 )
         else:
             result["replay_proof_gate"] = {
@@ -5235,16 +4862,10 @@ def _parse_args():
         or (args.offscreen_tiles * args.offscreen_tiles) % args.offscreen_draws != 0
         or not 1 <= args.vulkan_retained_binding_sets <= 2
         or not 1 <= args.vulkan_retained_packets <= 64
+        or (args.vulkan_retained_binding_sets > 1 and args.vulkan_retained_packets > 1)
         or (
             args.vulkan_retained_binding_sets > 1
-            and args.vulkan_retained_packets > 1
-        )
-        or (
-            args.vulkan_retained_binding_sets > 1
-            and (
-                not args.vulkan_retained_replay_proof
-                or args.offscreen_baseline != "rerecord"
-            )
+            and (not args.vulkan_retained_replay_proof or args.offscreen_baseline != "rerecord")
         )
     ):
         parser.error("invalid qualification bounds")
