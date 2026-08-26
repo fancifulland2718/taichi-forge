@@ -30,6 +30,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
 from taichi_forge.hardware._retained import (
     HardwareExecutionCostModel,
     RetainedExecutionContract,
@@ -800,13 +801,10 @@ class CublasLtMatmulPlan(BackendCommandRecording):
 
         runtime = impl.get_runtime()
         program = runtime.prog
-        submission = program._begin_external_cuda_submission()
         values = [a, b, output]
         if self.workspace is not None:
             values.append(self.workspace)
-        invoked = False
-        committed = False
-        try:
+        with external_cuda_submission(program, values) as submission:
             a_pointer = _device_pointer(program, a)
             b_pointer = _device_pointer(program, b)
             output_pointer = _device_pointer(program, output)
@@ -818,38 +816,27 @@ class CublasLtMatmulPlan(BackendCommandRecording):
             alpha = ctypes.c_float(self.alpha)
             beta = ctypes.c_float(self.beta)
             with self.provider._lock, self._lock, hardware_provider_call("cublaslt"):
-                invoked = True
-                self.provider._library.require(
-                    self.provider._library.matmul(
-                        self.provider._handle,
-                        self._matmul_desc,
-                        ctypes.byref(alpha),
-                        a_pointer,
-                        self._a_layout,
-                        b_pointer,
-                        self._b_layout,
-                        ctypes.byref(beta),
-                        output_pointer,
-                        self._c_layout,
-                        output_pointer,
-                        self._d_layout,
-                        ctypes.byref(self._heuristic.algo),
-                        workspace_pointer,
-                        self.workspace_bytes,
-                        None,
-                    ),
-                    "matmul execution",
+                status = submission.invoke(
+                    self.provider._library.matmul,
+                    self.provider._handle,
+                    self._matmul_desc,
+                    ctypes.byref(alpha),
+                    a_pointer,
+                    self._a_layout,
+                    b_pointer,
+                    self._b_layout,
+                    ctypes.byref(beta),
+                    output_pointer,
+                    self._c_layout,
+                    output_pointer,
+                    self._d_layout,
+                    ctypes.byref(self._heuristic.algo),
+                    workspace_pointer,
+                    self.workspace_bytes,
+                    None,
                 )
-            submission._commit([value.arr for value in values])
-            committed = True
+                self.provider._library.require(status, "matmul execution")
             return output
-        except BaseException:
-            if invoked and not committed:
-                try:
-                    submission._commit([value.arr for value in values], True)
-                except Exception:
-                    pass
-            raise
 
     def run(self, **bindings):
         return self.execute(bindings)

@@ -10,6 +10,7 @@ import numpy as np
 import taichi_forge as ti
 from taichi_forge.hardware import _amgx, _cusparselt, _cutensor
 from taichi_forge.hardware import _bundled_runtime_provider as _runtime_provider
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
 
 
 _MODULES = (_cusparselt, _cutensor, _amgx)
@@ -18,9 +19,19 @@ _MODULES = (_cusparselt, _cutensor, _amgx)
 class _FakeProgram:
     def __init__(self):
         self.synchronizations = 0
+        self.submissions = []
 
     def synchronize(self):
         self.synchronizations += 1
+
+    def _begin_external_cuda_submission(self):
+        owner = self
+
+        class Scope:
+            def _commit(self, arrays, failed=False):
+                owner.submissions.append((tuple(arrays), bool(failed)))
+
+        return Scope()
 
 
 class _FakeRuntime:
@@ -47,8 +58,31 @@ class _FakeRuntime:
         self.closed = True
 
 
+def test_external_cuda_submission_commits_success_failure_and_no_call():
+    program = _FakeProgram()
+    first = SimpleNamespace(arr="first")
+    second = SimpleNamespace(arr="second")
+
+    with external_cuda_submission(program, (first, second)) as submission:
+        assert submission.invoke(lambda value: value + 1, 3) == 4
+    with pytest.raises(RuntimeError, match="provider failure"):
+        with external_cuda_submission(program, (first,)) as submission:
+            submission.invoke(
+                lambda: (_ for _ in ()).throw(RuntimeError("provider failure"))
+            )
+    with external_cuda_submission(program, (second,)):
+        pass
+
+    assert program.submissions == [
+        (("first", "second"), False),
+        (("first",), True),
+    ]
+
+
 @pytest.mark.parametrize("module", _MODULES)
-def test_optional_runtime_library_path_is_explicit_and_environment_owned(module, tmp_path, monkeypatch):
+def test_optional_runtime_library_path_is_explicit_and_environment_owned(
+    module, tmp_path, monkeypatch
+):
     name = module.DEFINITION.library_names[0]
     runtime = tmp_path / name
     runtime.write_bytes(b"test-vendor-runtime")
@@ -65,25 +99,33 @@ def test_optional_runtime_library_path_is_explicit_and_environment_owned(module,
 
 
 @pytest.mark.parametrize("module", (_cusparselt, _cutensor))
-def test_optional_runtime_discovers_installed_vendor_package_files(module, tmp_path, monkeypatch):
+def test_optional_runtime_discovers_installed_vendor_package_files(
+    module, tmp_path, monkeypatch
+):
     relative = Path("vendor") / "lib" / module.DEFINITION.library_names[0]
     runtime = tmp_path / relative
     runtime.parent.mkdir(parents=True)
     runtime.write_bytes(b"test-package-runtime")
-    distribution = SimpleNamespace(files=(relative,), locate_file=lambda item: tmp_path / item)
+    distribution = SimpleNamespace(
+        files=(relative,), locate_file=lambda item: tmp_path / item
+    )
 
     def find_distribution(name):
         if name == module.DEFINITION.package_distributions[0]:
             return distribution
         raise _runtime_provider.importlib.metadata.PackageNotFoundError(name)
 
-    monkeypatch.setattr(_runtime_provider.importlib.metadata, "distribution", find_distribution)
+    monkeypatch.setattr(
+        _runtime_provider.importlib.metadata, "distribution", find_distribution
+    )
 
     assert module.resolve_library_path() == str(runtime.resolve())
 
 
 @pytest.mark.parametrize("module", _MODULES)
-def test_optional_runtime_probe_audits_without_qualifying_execution(module, monkeypatch):
+def test_optional_runtime_probe_audits_without_qualifying_execution(
+    module, monkeypatch
+):
     definition = module.DEFINITION
     info = _runtime_provider._ProviderInfo()  # pylint: disable=W0212
     info.provider_id = definition.provider_id.encode()
@@ -101,7 +143,9 @@ def test_optional_runtime_probe_audits_without_qualifying_execution(module, monk
         "_bundled_provider_candidates",
         lambda _definition: ("test-forge-adapter",),
     )
-    monkeypatch.setattr(_runtime_provider, "_query_provider", lambda _definition, _path: loaded)
+    monkeypatch.setattr(
+        _runtime_provider, "_query_provider", lambda _definition, _path: loaded
+    )
     monkeypatch.setattr(
         _runtime_provider,
         "_probe_runtime",
@@ -134,7 +178,9 @@ def test_optional_runtime_probe_audits_without_qualifying_execution(module, monk
 
 
 @pytest.mark.parametrize("module", _MODULES)
-def test_optional_runtime_probe_fails_closed_when_vendor_runtime_is_missing(module, monkeypatch):
+def test_optional_runtime_probe_fails_closed_when_vendor_runtime_is_missing(
+    module, monkeypatch
+):
     monkeypatch.setattr(
         _runtime_provider,
         "_bundled_provider_candidates",
@@ -181,7 +227,9 @@ def test_optional_runtime_passive_status_never_loads_a_library(module, monkeypat
     assert status["native_facts"]["execution_api_available"] is False
 
 
-def test_optional_runtime_passive_status_observes_retained_runtime_without_loading(monkeypatch):
+def test_optional_runtime_passive_status_observes_retained_runtime_without_loading(
+    monkeypatch,
+):
     definition = _cutensor.DEFINITION
     loaded = SimpleNamespace(api=SimpleNamespace(destroy_runtime=lambda _handle: 0))
     runtime_info = {
@@ -195,7 +243,9 @@ def test_optional_runtime_passive_status_observes_retained_runtime_without_loadi
     monkeypatch.setattr(
         _runtime_provider,
         "_load_library",
-        lambda _path: (_ for _ in ()).throw(AssertionError("passive status must not load a library")),
+        lambda _path: (_ for _ in ()).throw(
+            AssertionError("passive status must not load a library")
+        ),
     )
 
     runtime = _runtime_provider.BundledRuntime(
@@ -279,7 +329,9 @@ def test_public_hardware_probe_keeps_probe_only_provider_disabled(module, monkey
 
     report = ti.hardware.probe(definition.provider_id)
     operation = next(
-        item for item in report.operations if item.descriptor.operation_id == f"runtime.probe.{definition.provider_id}"
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == f"runtime.probe.{definition.provider_id}"
     )
 
     assert report.external_components_probed is True
@@ -291,7 +343,9 @@ def test_public_hardware_probe_keeps_probe_only_provider_disabled(module, monkey
 
 def test_optional_runtime_provider_filenames_are_platform_specific():
     for module in _MODULES:
-        filename = _runtime_provider._adapter_filename(module.DEFINITION)  # pylint: disable=W0212
+        filename = _runtime_provider._adapter_filename(
+            module.DEFINITION
+        )  # pylint: disable=W0212
         assert Path(filename).suffix == (".dll" if os.name == "nt" else ".so")
 
 
@@ -307,8 +361,9 @@ def test_cutensor_provider_owns_plan_lifetime_and_native_destroy(monkeypatch):
     execution = SimpleNamespace(
         execution_abi_version=1,
         create_contraction_plan=create,
-        execute_contraction=lambda _plan, _desc: 0,
-        destroy_contraction_plan=lambda plan: calls.append(("destroy", plan.value)) or 0,
+        execute_contraction=lambda _plan, _desc: calls.append("execute") or 0,
+        destroy_contraction_plan=lambda plan: calls.append(("destroy", plan.value))
+        or 0,
     )
     runtime = _FakeRuntime(execution)
     program = _FakeProgram()
@@ -317,17 +372,25 @@ def test_cutensor_provider_owns_plan_lifetime_and_native_destroy(monkeypatch):
     monkeypatch.setattr(_cutensor.impl, "runtime_generation", lambda: 7)
     monkeypatch.setattr(_cutensor, "validate_runtime_generation", lambda *_args: None)
     monkeypatch.setattr(_cutensor, "runtime_generation_matches", lambda _owner: True)
+    monkeypatch.setattr(_cutensor, "_validate_array", lambda *_args: None)
+    monkeypatch.setattr(_cutensor, "_device_pointer", lambda value: id(value))
 
     provider = _cutensor.CutensorProvider()
-    plan = provider.contraction_plan((2, 3), "ik", (3, 4), "kj", (2, 4), "ij", (2, 4), "ij")
+    plan = provider.contraction_plan(
+        (2, 3), "ik", (3, 4), "kj", (2, 4), "ij", (2, 4), "ij"
+    )
+    arrays = tuple(SimpleNamespace(arr=object()) for _ in range(4))
+    plan.execute(*arrays)
     with pytest.raises(ti.TaichiRuntimeError, match="plans are live"):
         provider.close()
     plan.close()
     provider.close()
 
-    assert calls == [("destroy", 202)]
+    assert calls == ["execute", ("destroy", 202)]
     assert runtime.closed is True
     assert program.synchronizations == 2
+    assert len(program.submissions) == 1
+    assert program.submissions[0][1] is False
 
 
 def test_cusparselt_provider_retains_owned_buffers_until_plan_close(monkeypatch):
@@ -350,17 +413,24 @@ def test_cusparselt_provider_retains_owned_buffers_until_plan_close(monkeypatch)
     runtime = _FakeRuntime(execution)
     program = _FakeProgram()
     monkeypatch.setattr(_cusparselt, "_require_cuda_program", lambda _name: program)
-    monkeypatch.setattr(_cusparselt, "_open_runtime", lambda _definition, _path: runtime)
+    monkeypatch.setattr(
+        _cusparselt, "_open_runtime", lambda _definition, _path: runtime
+    )
     monkeypatch.setattr(_cusparselt.impl, "runtime_generation", lambda: 7)
     monkeypatch.setattr(_cusparselt, "validate_runtime_generation", lambda *_args: None)
     monkeypatch.setattr(_cusparselt, "runtime_generation_matches", lambda _owner: True)
-    monkeypatch.setattr(_cusparselt, "ScalarNdarray", lambda _dtype, shape: SimpleNamespace(shape=shape))
+    monkeypatch.setattr(
+        _cusparselt,
+        "ScalarNdarray",
+        lambda _dtype, shape: SimpleNamespace(shape=shape, arr=object()),
+    )
     monkeypatch.setattr(_cusparselt, "_validate_array", lambda *_args: None)
     monkeypatch.setattr(_cusparselt, "_device_pointer", lambda value: id(value))
 
     provider = _cusparselt.CusparseLtProvider()
     plan = provider.matmul_plan(16, 16, 16)
-    plan.compress(object()).execute(object(), object(), object())
+    arrays = tuple(SimpleNamespace(arr=object()) for _ in range(4))
+    plan.compress(arrays[0]).execute(*arrays[1:])
     with pytest.raises(ti.TaichiRuntimeError, match="plans are live"):
         provider.close()
     plan.close()
@@ -368,6 +438,8 @@ def test_cusparselt_provider_retains_owned_buffers_until_plan_close(monkeypatch)
 
     assert calls == ["compress", "execute", ("destroy", 303)]
     assert runtime.closed is True
+    assert len(program.submissions) == 2
+    assert all(not item[1] for item in program.submissions)
 
 
 def test_amgx_provider_executes_host_buffers_and_blocks_early_close(monkeypatch):
@@ -379,7 +451,9 @@ def test_amgx_provider_executes_host_buffers_and_blocks_early_close(monkeypatch)
 
     def solve(_solver, desc, info):
         solve_desc = desc._obj
-        ctypes.memmove(solve_desc.solution, solve_desc.rhs, 3 * ctypes.sizeof(ctypes.c_double))
+        ctypes.memmove(
+            solve_desc.solution, solve_desc.rhs, 3 * ctypes.sizeof(ctypes.c_double)
+        )
         info._obj.solve_status = 0
         info._obj.iterations = 4
         info._obj.residual_norm = 1e-12
@@ -388,7 +462,8 @@ def test_amgx_provider_executes_host_buffers_and_blocks_early_close(monkeypatch)
     execution = SimpleNamespace(
         execution_abi_version=1,
         create_solver=create,
-        replace_coefficients=lambda _solver, _values, _nonzeros: calls.append("replace") or 0,
+        replace_coefficients=lambda _solver, _values, _nonzeros: calls.append("replace")
+        or 0,
         solve=solve,
         destroy_solver=lambda solver: calls.append(("destroy", solver.value)) or 0,
     )

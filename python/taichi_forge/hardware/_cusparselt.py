@@ -13,7 +13,11 @@ from taichi_forge.hardware._bundled_runtime_provider import (
     probe_provider as _probe_provider,
     resolve_library_path as _resolve_library_path,
 )
-from taichi_forge.hardware._native_adapter import runtime_generation_matches, validate_runtime_generation
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
+from taichi_forge.hardware._native_adapter import (
+    runtime_generation_matches,
+    validate_runtime_generation,
+)
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
@@ -29,7 +33,9 @@ DEFINITION = BundledRuntimeProviderDefinition(
     provider_abi_name="taichi-forge-cusparselt-provider-c-abi2",
     environment_variable="TI_CUSPARSELT_LIBRARY_PATH",
     library_names=(
-        ("cusparseLt64_0.dll", "cusparseLt.dll") if os.name == "nt" else ("libcusparseLt.so.0", "libcusparseLt.so")
+        ("cusparseLt64_0.dll", "cusparseLt.dll")
+        if os.name == "nt"
+        else ("libcusparseLt.so.0", "libcusparseLt.so")
     ),
     package_distributions=("nvidia-cusparselt-cu13", "nvidia-cusparselt-cu12"),
     supported_version_family="0.8.x-0.9.x",
@@ -91,7 +97,9 @@ _CreatePlan = ctypes.CFUNCTYPE(
     ctypes.POINTER(ctypes.c_void_p),
     ctypes.POINTER(_PlanInfo),
 )
-_Compress = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_CompressDesc))
+_Compress = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_CompressDesc)
+)
 _Execute = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_ExecDesc))
 _DestroyPlan = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 
@@ -131,10 +139,18 @@ def _device_pointer(value):
 
 
 def _validate_array(value, shape, name):
-    if not isinstance(value, Ndarray) or value.dtype != f16 or value.element_shape != ():
-        raise TaichiRuntimeError(f"cuSPARSELt {name} must be a scalar f16 Taichi ndarray")
+    if (
+        not isinstance(value, Ndarray)
+        or value.dtype != f16
+        or value.element_shape != ()
+    ):
+        raise TaichiRuntimeError(
+            f"cuSPARSELt {name} must be a scalar f16 Taichi ndarray"
+        )
     if tuple(value.shape) != shape:
-        raise TaichiRuntimeError(f"cuSPARSELt {name} shape must be {shape}, got {tuple(value.shape)}")
+        raise TaichiRuntimeError(
+            f"cuSPARSELt {name} shape must be {shape}, got {tuple(value.shape)}"
+        )
 
 
 class CusparseLtProvider:
@@ -175,7 +191,9 @@ class CusparseLtProvider:
     def _validate_lifetime(self):
         if self._runtime is None:
             raise TaichiRuntimeError("CusparseLtProvider has been closed")
-        validate_runtime_generation(self, "CusparseLtProvider belongs to a previous Taichi runtime generation")
+        validate_runtime_generation(
+            self, "CusparseLtProvider belongs to a previous Taichi runtime generation"
+        )
 
     def matmul_plan(self, m, n, k, *, alignment_bytes=16):
         with self._lock:
@@ -187,7 +205,9 @@ class CusparseLtProvider:
             if self._runtime is None:
                 return None
             if any(not plan.closed for plan in self._plans):
-                raise TaichiRuntimeError("CusparseLtProvider cannot close while matmul plans are live")
+                raise TaichiRuntimeError(
+                    "CusparseLtProvider cannot close while matmul plans are live"
+                )
             runtime = self._runtime
             self._runtime = None
             if runtime_generation_matches(self):
@@ -223,11 +243,18 @@ class CusparseLtMatmulPlan:
         if not isinstance(provider, CusparseLtProvider):
             raise TypeError("provider must be a CusparseLtProvider")
         dimensions = (m, n, k)
-        if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in dimensions):
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in dimensions
+        ):
             raise ValueError("cuSPARSELt m, n, and k must be positive integers")
         if any(value % 16 for value in dimensions):
             raise ValueError("cuSPARSELt FP16 m, n, and k must be multiples of 16")
-        if isinstance(alignment_bytes, bool) or not isinstance(alignment_bytes, int) or alignment_bytes <= 0:
+        if (
+            isinstance(alignment_bytes, bool)
+            or not isinstance(alignment_bytes, int)
+            or alignment_bytes <= 0
+        ):
             raise ValueError("cuSPARSELt alignment_bytes must be a positive integer")
         desc = _PlanDesc(ctypes.sizeof(_PlanDesc), alignment_bytes, m, n, k)
         handle = ctypes.c_void_p()
@@ -258,9 +285,15 @@ class CusparseLtMatmulPlan:
         try:
             self._compressed_a = ScalarNdarray(u8, (self.compressed_bytes,))
             self._compression_buffer = (
-                ScalarNdarray(u8, (self.compression_buffer_bytes,)) if self.compression_buffer_bytes else None
+                ScalarNdarray(u8, (self.compression_buffer_bytes,))
+                if self.compression_buffer_bytes
+                else None
             )
-            self._workspace = ScalarNdarray(u8, (self.workspace_bytes,)) if self.workspace_bytes else None
+            self._workspace = (
+                ScalarNdarray(u8, (self.workspace_bytes,))
+                if self.workspace_bytes
+                else None
+            )
             self._compressed_ready = False
             provider._plans.add(self)
         except Exception:
@@ -276,7 +309,9 @@ class CusparseLtMatmulPlan:
         if self._handle is None:
             raise TaichiRuntimeError("CusparseLtMatmulPlan has been closed")
         self.provider._validate_lifetime()
-        validate_runtime_generation(self, "cuSPARSELt plan belongs to a previous Taichi runtime generation")
+        validate_runtime_generation(
+            self, "cuSPARSELt plan belongs to a previous Taichi runtime generation"
+        )
 
     def compress(self, a):
         """Compress an already-valid 2:4 sparse A matrix with shape (m, k)."""
@@ -284,23 +319,34 @@ class CusparseLtMatmulPlan:
         with self.provider._lock, self._lock:
             self._validate_lifetime()
             _validate_array(a, (self.m, self.k), "A")
-            compression_pointer = 0 if self._compression_buffer is None else _device_pointer(self._compression_buffer)
-            desc = _CompressDesc(
-                ctypes.sizeof(_CompressDesc),
-                0,
-                _device_pointer(a),
-                _device_pointer(self._compressed_a),
-                compression_pointer,
-                self.compression_buffer_bytes,
-                0,
-            )
-            self._compressed_ready = False
-            try:
-                self.provider._runtime.check_result(
-                    self.provider._execution_api.compress_sparse_a(self._handle, ctypes.byref(desc))
+            resources = [a, self._compressed_a]
+            if self._compression_buffer is not None:
+                resources.append(self._compression_buffer)
+            with external_cuda_submission(self._runtime_prog, resources) as submission:
+                compression_pointer = (
+                    0
+                    if self._compression_buffer is None
+                    else _device_pointer(self._compression_buffer)
                 )
-            except RuntimeError as exc:
-                raise TaichiRuntimeError(str(exc)) from exc
+                desc = _CompressDesc(
+                    ctypes.sizeof(_CompressDesc),
+                    0,
+                    _device_pointer(a),
+                    _device_pointer(self._compressed_a),
+                    compression_pointer,
+                    self.compression_buffer_bytes,
+                    0,
+                )
+                self._compressed_ready = False
+                try:
+                    result = submission.invoke(
+                        self.provider._execution_api.compress_sparse_a,
+                        self._handle,
+                        ctypes.byref(desc),
+                    )
+                    self.provider._runtime.check_result(result)
+                except RuntimeError as exc:
+                    raise TaichiRuntimeError(str(exc)) from exc
             self._compressed_ready = True
         return self
 
@@ -310,31 +356,44 @@ class CusparseLtMatmulPlan:
         with self.provider._lock, self._lock:
             self._validate_lifetime()
             if not self._compressed_ready:
-                raise TaichiRuntimeError("cuSPARSELt A must be compressed before matmul execution")
+                raise TaichiRuntimeError(
+                    "cuSPARSELt A must be compressed before matmul execution"
+                )
             _validate_array(b, (self.n, self.k), "B transposed storage")
             _validate_array(c, (self.m, self.n), "C")
             _validate_array(d, (self.m, self.n), "D")
-            workspace_pointer = 0 if self._workspace is None else _device_pointer(self._workspace)
-            pointers = tuple(_device_pointer(value) for value in (b, c, d))
-            if pointers[2] == pointers[0]:
-                raise TaichiRuntimeError("cuSPARSELt D must not alias B transposed storage")
-            desc = _ExecDesc(
-                ctypes.sizeof(_ExecDesc),
-                0,
-                float(alpha),
-                float(beta),
-                _device_pointer(self._compressed_a),
-                *pointers,
-                workspace_pointer,
-                self.workspace_bytes,
-                0,
-            )
-            try:
-                self.provider._runtime.check_result(
-                    self.provider._execution_api.execute_matmul(self._handle, ctypes.byref(desc))
+            resources = [self._compressed_a, b, c, d]
+            if self._workspace is not None:
+                resources.append(self._workspace)
+            with external_cuda_submission(self._runtime_prog, resources) as submission:
+                workspace_pointer = (
+                    0 if self._workspace is None else _device_pointer(self._workspace)
                 )
-            except RuntimeError as exc:
-                raise TaichiRuntimeError(str(exc)) from exc
+                pointers = tuple(_device_pointer(value) for value in (b, c, d))
+                if pointers[2] == pointers[0]:
+                    raise TaichiRuntimeError(
+                        "cuSPARSELt D must not alias B transposed storage"
+                    )
+                desc = _ExecDesc(
+                    ctypes.sizeof(_ExecDesc),
+                    0,
+                    float(alpha),
+                    float(beta),
+                    _device_pointer(self._compressed_a),
+                    *pointers,
+                    workspace_pointer,
+                    self.workspace_bytes,
+                    0,
+                )
+                try:
+                    result = submission.invoke(
+                        self.provider._execution_api.execute_matmul,
+                        self._handle,
+                        ctypes.byref(desc),
+                    )
+                    self.provider._runtime.check_result(result)
+                except RuntimeError as exc:
+                    raise TaichiRuntimeError(str(exc)) from exc
         return d
 
     def close(self):
@@ -346,7 +405,9 @@ class CusparseLtMatmulPlan:
             if runtime_generation_matches(self):
                 self._runtime_prog.synchronize()
                 try:
-                    self.provider._runtime.check_result(self.provider._execution_api.destroy_matmul_plan(handle))
+                    self.provider._runtime.check_result(
+                        self.provider._execution_api.destroy_matmul_plan(handle)
+                    )
                 except RuntimeError as exc:
                     self._handle = handle
                     raise TaichiRuntimeError(str(exc)) from exc

@@ -21,6 +21,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
 from taichi_forge.hardware._retained import (
     HardwareExecutionCostModel,
     RetainedExecutionContract,
@@ -50,13 +51,23 @@ _OPERATION_SPECS = {
         "code": _RADIX_SORT_PAIRS_U32,
         "bindings": ("keys_in", "values_in", "keys_out", "values_out"),
         "dtypes": (u32, u32, u32, u32),
-        "access": (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE, GraphAccess.WRITE),
+        "access": (
+            GraphAccess.READ,
+            GraphAccess.READ,
+            GraphAccess.WRITE,
+            GraphAccess.WRITE,
+        ),
     },
     "radix_sort_pairs_u64": {
         "code": _RADIX_SORT_PAIRS_U64,
         "bindings": ("keys_in", "values_in", "keys_out", "values_out"),
         "dtypes": (u64, u32, u64, u32),
-        "access": (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE, GraphAccess.WRITE),
+        "access": (
+            GraphAccess.READ,
+            GraphAccess.READ,
+            GraphAccess.WRITE,
+            GraphAccess.WRITE,
+        ),
     },
     "exclusive_scan_u32": {
         "code": _EXCLUSIVE_SCAN_U32,
@@ -68,7 +79,12 @@ _OPERATION_SPECS = {
         "code": _SELECT_FLAGGED_U32,
         "bindings": ("input", "flags", "output", "count"),
         "dtypes": (u32, u32, u32, u32),
-        "access": (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE, GraphAccess.WRITE),
+        "access": (
+            GraphAccess.READ,
+            GraphAccess.READ,
+            GraphAccess.WRITE,
+            GraphAccess.WRITE,
+        ),
     },
 }
 _REQUIRED_FEATURES = (1 << len(_OPERATION_SPECS)) - 1
@@ -183,7 +199,10 @@ class _CubSourceLibrary:
         expected_cub = _encoded_cub_version(
             _source_dependency(manifest, "cccl/cub").version
         )
-        if info.cuda_runtime_version != expected_cuda or info.cub_version != expected_cub:
+        if (
+            info.cuda_runtime_version != expected_cuda
+            or info.cub_version != expected_cub
+        ):
             raise TaichiRuntimeError(
                 "CUB source-provider reported toolchain identity does not match its manifest"
             )
@@ -228,7 +247,12 @@ def _load_process_library(manifest):
 
 
 def _dimension(value):
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > 0x7FFFFFFF:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 0
+        or value > 0x7FFFFFFF
+    ):
         raise ValueError("CUB source-provider item count must be in [0, INT_MAX]")
     return value
 
@@ -240,7 +264,11 @@ def _device_pointer(program, value):
 def _validate_array(value, name, dtype, shape):
     if not isinstance(value, Ndarray):
         raise TaichiRuntimeError(f"CUB binding {name!r} must be a Taichi ndarray")
-    if value.dtype != dtype or tuple(value.element_shape) != () or tuple(value.shape) != shape:
+    if (
+        value.dtype != dtype
+        or tuple(value.element_shape) != ()
+        or tuple(value.shape) != shape
+    ):
         raise TaichiRuntimeError(
             f"CUB binding {name!r} must be a compact scalar {dtype} ndarray with shape {shape}"
         )
@@ -299,7 +327,9 @@ class CubSourcePlan(BackendCommandRecording):
                     (
                         fixed_cost("manifest_and_binary_validation", "process"),
                         fixed_cost("provider_library_load", "process"),
-                        fixed_cost("workspace_query_and_allocation", "provider_generation"),
+                        fixed_cost(
+                            "workspace_query_and_allocation", "provider_generation"
+                        ),
                         fixed_cost("ctypes_dispatch", "invocation"),
                         fixed_cost("submission_registration", "invocation"),
                         scale_cost("primitive_execution", "num_items"),
@@ -316,7 +346,9 @@ class CubSourcePlan(BackendCommandRecording):
         return tuple(
             ResourceEffect(name, access)
             for name, access in zip(spec["bindings"], spec["access"])
-        ) + (static_resource_effect(self.workspace, GraphAccess.READ_WRITE),)
+        ) + (
+            static_resource_effect(self.workspace, GraphAccess.READ_WRITE),
+        )
 
     def _invocation(self, bindings):
         validate_exact_bindings(self, bindings, "CUDA CUB source provider")
@@ -325,7 +357,9 @@ class CubSourcePlan(BackendCommandRecording):
             "CUB source-provider plan belongs to another runtime generation",
         )
         if active_backend() != "cuda":
-            raise TaichiRuntimeError("CUB source-provider execution requires the CUDA backend")
+            raise TaichiRuntimeError(
+                "CUB source-provider execution requires the CUDA backend"
+            )
         spec = _OPERATION_SPECS[self.operation]
         values = []
         for name, dtype in zip(spec["bindings"], spec["dtypes"]):
@@ -338,10 +372,16 @@ class CubSourcePlan(BackendCommandRecording):
             if access != GraphAccess.READ
         )
         inputs = tuple(
-            value for value, access in zip(values, spec["access"]) if access == GraphAccess.READ
+            value
+            for value, access in zip(values, spec["access"])
+            if access == GraphAccess.READ
         )
-        if any(output is item for output in outputs for item in inputs) or len(set(map(id, outputs))) != len(outputs):
-            raise TaichiRuntimeError("CUB source-provider outputs must not alias inputs or each other")
+        if any(output is item for output in outputs for item in inputs) or len(
+            set(map(id, outputs))
+        ) != len(outputs):
+            raise TaichiRuntimeError(
+                "CUB source-provider outputs must not alias inputs or each other"
+            )
         program = impl.get_runtime().prog
         pointers = [_device_pointer(program, value) for value in values]
         workspace = _device_pointer(program, self.workspace)
@@ -368,29 +408,14 @@ class CubSourcePlan(BackendCommandRecording):
     def execute(self, bindings):
         runtime = impl.get_runtime()
         program = runtime.prog
-        submission = program._begin_external_cuda_submission()
-        invoked = False
-        committed = False
-        try:
+        values = [
+            bindings[name] for name in _OPERATION_SPECS[self.operation]["bindings"]
+        ]
+        values.append(self.workspace)
+        with external_cuda_submission(program, values) as submission:
             invocation = self._invocation(bindings)
-            values = [
-                bindings[name] for name in _OPERATION_SPECS[self.operation]["bindings"]
-            ]
-            values.append(self.workspace)
             with hardware_provider_call("cub_reference"):
-                invoked = True
-                self.provider._library.execute(invocation)
-            submission._commit([value.arr for value in values])
-            committed = True
-        except BaseException:
-            # A provider may report an error after enqueueing some CUDA work.
-            # Conservatively publish that possibility before unwinding.
-            if invoked and not committed:
-                try:
-                    submission._commit([value.arr for value in values], True)
-                except Exception:
-                    pass
-            raise
+                submission.invoke(self.provider._library.execute, invocation)
 
     def run(self, **bindings):
         self.execute(bindings)

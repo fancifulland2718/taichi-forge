@@ -14,6 +14,7 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -444,7 +445,13 @@ class OptixProvider:
             for candidate in candidates:
                 try:
                     queried_candidates.append(_query_provider(candidate))
-                except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                except (
+                    AttributeError,
+                    OSError,
+                    RuntimeError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
                     load_failures.append(
                         f"{candidate}: {str(exc) or type(exc).__name__}"
                     )
@@ -686,23 +693,29 @@ class OptixTriangleScene:
         vertex_count = _item_count(vertices, 3, f32, "vertices")
         triangle_count = _item_count(indices, 3, i32, "indices")
         scene = ctypes.c_void_p()
-        desc = _TriangleSceneDesc(
-            ctypes.sizeof(_TriangleSceneDesc),
-            vertex_count,
-            triangle_count,
-            int(allow_update),
-            _device_pointer(vertices),
-            _device_pointer(indices),
-            0,
-        )
-        with hardware_failure_phase("provider_plan_failure"):
-            result = int(
-                provider._loaded.api.create_triangle_scene(
-                    provider._context, ctypes.byref(desc), ctypes.byref(scene)
-                )
+        with external_cuda_submission(
+            provider._runtime_prog, (vertices, indices)
+        ) as submission:
+            desc = _TriangleSceneDesc(
+                ctypes.sizeof(_TriangleSceneDesc),
+                vertex_count,
+                triangle_count,
+                int(allow_update),
+                _device_pointer(vertices),
+                _device_pointer(indices),
+                0,
             )
-            if result != _SUCCESS or not scene.value:
-                raise TaichiRuntimeError(_provider_error(provider._loaded.api))
+            with hardware_failure_phase("provider_plan_failure"):
+                result = int(
+                    submission.invoke(
+                        provider._loaded.api.create_triangle_scene,
+                        provider._context,
+                        ctypes.byref(desc),
+                        ctypes.byref(scene),
+                    )
+                )
+                if result != _SUCCESS or not scene.value:
+                    raise TaichiRuntimeError(_provider_error(provider._loaded.api))
         self.provider = provider
         self._scene = scene
         self._runtime_prog = provider._runtime_prog
@@ -749,40 +762,50 @@ class OptixTriangleScene:
             raise TaichiRuntimeError("OptiX scene was not created for updates")
         if _item_count(vertices, 3, f32, "vertices") != self.vertex_count:
             raise TaichiRuntimeError("OptiX refit must preserve the vertex count")
-        desc = _TriangleSceneDesc(
-            ctypes.sizeof(_TriangleSceneDesc),
-            self.vertex_count,
-            self.triangle_count,
-            1,
-            _device_pointer(vertices),
-            _device_pointer(self._indices),
-            0,
-        )
-        with hardware_failure_phase("provider_execution_failure"):
-            result = int(
-                self.provider._loaded.api.update_triangle_scene(
-                    self._scene, ctypes.byref(desc)
-                )
+        with external_cuda_submission(
+            self._runtime_prog, (vertices, self._indices)
+        ) as submission:
+            desc = _TriangleSceneDesc(
+                ctypes.sizeof(_TriangleSceneDesc),
+                self.vertex_count,
+                self.triangle_count,
+                1,
+                _device_pointer(vertices),
+                _device_pointer(self._indices),
+                0,
             )
-            if result != _SUCCESS:
-                raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
+            with hardware_failure_phase("provider_execution_failure"):
+                result = int(
+                    submission.invoke(
+                        self.provider._loaded.api.update_triangle_scene,
+                        self._scene,
+                        ctypes.byref(desc),
+                    )
+                )
+                if result != _SUCCESS:
+                    raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
         return self
 
     def _execute_query(self, rays, hits, ray_count):
         self._validate_lifetime()
-        desc = _TraceDesc(
-            ctypes.sizeof(_TraceDesc),
-            ray_count,
-            _device_pointer(rays),
-            _device_pointer(hits),
-            0,
-        )
-        with hardware_failure_phase("provider_execution_failure"):
-            result = int(
-                self.provider._loaded.api.trace(self._scene, ctypes.byref(desc))
+        with external_cuda_submission(self._runtime_prog, (rays, hits)) as submission:
+            desc = _TraceDesc(
+                ctypes.sizeof(_TraceDesc),
+                ray_count,
+                _device_pointer(rays),
+                _device_pointer(hits),
+                0,
             )
-            if result != _SUCCESS:
-                raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
+            with hardware_failure_phase("provider_execution_failure"):
+                result = int(
+                    submission.invoke(
+                        self.provider._loaded.api.trace,
+                        self._scene,
+                        ctypes.byref(desc),
+                    )
+                )
+                if result != _SUCCESS:
+                    raise TaichiRuntimeError(_provider_error(self.provider._loaded.api))
 
     def _validate_lifetime(self):
         if self._scene is None:

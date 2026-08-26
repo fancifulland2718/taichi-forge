@@ -13,7 +13,11 @@ from taichi_forge.hardware._bundled_runtime_provider import (
     probe_provider as _probe_provider,
     resolve_library_path as _resolve_library_path,
 )
-from taichi_forge.hardware._native_adapter import runtime_generation_matches, validate_runtime_generation
+from taichi_forge.hardware._external_cuda_submission import external_cuda_submission
+from taichi_forge.hardware._native_adapter import (
+    runtime_generation_matches,
+    validate_runtime_generation,
+)
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
@@ -28,7 +32,11 @@ DEFINITION = BundledRuntimeProviderDefinition(
     query_symbol="taichi_forge_cutensor_provider_query",
     provider_abi_name="taichi-forge-cutensor-provider-c-abi2",
     environment_variable="TI_CUTENSOR_LIBRARY_PATH",
-    library_names=(("cutensor64_2.dll", "cutensor.dll") if os.name == "nt" else ("libcutensor.so.2", "libcutensor.so")),
+    library_names=(
+        ("cutensor64_2.dll", "cutensor.dll")
+        if os.name == "nt"
+        else ("libcutensor.so.2", "libcutensor.so")
+    ),
     package_distributions=("cutensor-cu13", "cutensor-cu12"),
     supported_version_family="2.0.x-2.7.x",
 )
@@ -141,9 +149,13 @@ def _normalize_tensor(shape, modes, name):
     if not shape or len(shape) > 32 or any(value <= 0 for value in shape):
         raise ValueError(f"cuTENSOR {name} shape must have 1-32 positive dimensions")
     normalized_modes = (
-        tuple(ord(value) for value in modes) if isinstance(modes, str) else tuple(int(value) for value in modes)
+        tuple(ord(value) for value in modes)
+        if isinstance(modes, str)
+        else tuple(int(value) for value in modes)
     )
-    if len(normalized_modes) != len(shape) or len(set(normalized_modes)) != len(normalized_modes):
+    if len(normalized_modes) != len(shape) or len(set(normalized_modes)) != len(
+        normalized_modes
+    ):
         raise ValueError(f"cuTENSOR {name} modes must be unique and match its rank")
     return shape, normalized_modes, _packed_strides(shape)
 
@@ -152,15 +164,27 @@ def _native_tensor(shape, modes, strides):
     extents_array = (ctypes.c_int64 * len(shape))(*shape)
     strides_array = (ctypes.c_int64 * len(strides))(*strides)
     modes_array = (ctypes.c_int32 * len(modes))(*modes)
-    desc = _TensorDesc(ctypes.sizeof(_TensorDesc), len(shape), extents_array, strides_array, modes_array)
+    desc = _TensorDesc(
+        ctypes.sizeof(_TensorDesc),
+        len(shape),
+        extents_array,
+        strides_array,
+        modes_array,
+    )
     return desc, (extents_array, strides_array, modes_array)
 
 
 def _validate_array(value, shape, name):
-    if not isinstance(value, Ndarray) or value.dtype != f32 or value.element_shape != ():
+    if (
+        not isinstance(value, Ndarray)
+        or value.dtype != f32
+        or value.element_shape != ()
+    ):
         raise TaichiRuntimeError(f"cuTENSOR {name} must be a scalar f32 Taichi ndarray")
     if tuple(value.shape) != shape:
-        raise TaichiRuntimeError(f"cuTENSOR {name} shape must be {shape}, got {tuple(value.shape)}")
+        raise TaichiRuntimeError(
+            f"cuTENSOR {name} shape must be {shape}, got {tuple(value.shape)}"
+        )
 
 
 class CutensorProvider:
@@ -201,7 +225,9 @@ class CutensorProvider:
     def _validate_lifetime(self):
         if self._runtime is None:
             raise TaichiRuntimeError("CutensorProvider has been closed")
-        validate_runtime_generation(self, "CutensorProvider belongs to a previous Taichi runtime generation")
+        validate_runtime_generation(
+            self, "CutensorProvider belongs to a previous Taichi runtime generation"
+        )
 
     def contraction_plan(
         self,
@@ -242,7 +268,9 @@ class CutensorProvider:
             if self._runtime is None:
                 return None
             if any(not plan.closed for plan in self._plans):
-                raise TaichiRuntimeError("CutensorProvider cannot close while contraction plans are live")
+                raise TaichiRuntimeError(
+                    "CutensorProvider cannot close while contraction plans are live"
+                )
             runtime = self._runtime
             self._runtime = None
             if runtime_generation_matches(self):
@@ -298,15 +326,23 @@ class CutensorContractionPlan:
         if compute not in compute_modes:
             raise ValueError("cuTENSOR compute must be 'f32' or 'tf32'")
         if workspace_preference not in workspace_modes:
-            raise ValueError("cuTENSOR workspace_preference must be 'min', 'default', or 'max'")
-        if isinstance(alignment_bytes, bool) or not isinstance(alignment_bytes, int) or alignment_bytes <= 0:
+            raise ValueError(
+                "cuTENSOR workspace_preference must be 'min', 'default', or 'max'"
+            )
+        if (
+            isinstance(alignment_bytes, bool)
+            or not isinstance(alignment_bytes, int)
+            or alignment_bytes <= 0
+        ):
             raise ValueError("cuTENSOR alignment_bytes must be a positive integer")
         if (
             isinstance(workspace_limit_bytes, bool)
             or not isinstance(workspace_limit_bytes, int)
             or workspace_limit_bytes < 0
         ):
-            raise ValueError("cuTENSOR workspace_limit_bytes must be a nonnegative integer")
+            raise ValueError(
+                "cuTENSOR workspace_limit_bytes must be a nonnegative integer"
+            )
         tensors = tuple(
             _normalize_tensor(shape, modes, name)
             for shape, modes, name in (
@@ -331,7 +367,10 @@ class CutensorContractionPlan:
         try:
             provider._runtime.check_result(
                 provider._execution_api.create_contraction_plan(
-                    provider._runtime.handle, ctypes.byref(desc), ctypes.byref(handle), ctypes.byref(info)
+                    provider._runtime.handle,
+                    ctypes.byref(desc),
+                    ctypes.byref(handle),
+                    ctypes.byref(info),
                 )
             )
         except RuntimeError as exc:
@@ -348,7 +387,9 @@ class CutensorContractionPlan:
         self.workspace_required_bytes = int(info.workspace_required_bytes)
         try:
             self._workspace = (
-                ScalarNdarray(u8, (self.workspace_required_bytes,)) if self.workspace_required_bytes else None
+                ScalarNdarray(u8, (self.workspace_required_bytes,))
+                if self.workspace_required_bytes
+                else None
             )
             provider._plans.add(self)
         except Exception:
@@ -364,33 +405,44 @@ class CutensorContractionPlan:
         if self._handle is None:
             raise TaichiRuntimeError("CutensorContractionPlan has been closed")
         self.provider._validate_lifetime()
-        validate_runtime_generation(self, "cuTENSOR plan belongs to a previous Taichi runtime generation")
+        validate_runtime_generation(
+            self, "cuTENSOR plan belongs to a previous Taichi runtime generation"
+        )
 
     def execute(self, a, b, c, d, *, alpha=1.0, beta=0.0):
         with self.provider._lock, self._lock:
             self._validate_lifetime()
             for value, shape, name in zip((a, b, c, d), self._shapes, "ABCD"):
                 _validate_array(value, shape, name)
-            workspace_pointer = 0 if self._workspace is None else _device_pointer(self._workspace)
-            pointers = tuple(_device_pointer(value) for value in (a, b, c, d))
-            if pointers[3] in pointers[:2]:
-                raise TaichiRuntimeError("cuTENSOR D must not alias A or B")
-            desc = _ExecDesc(
-                ctypes.sizeof(_ExecDesc),
-                0,
-                float(alpha),
-                float(beta),
-                *pointers,
-                workspace_pointer,
-                self.workspace_required_bytes,
-                0,
-            )
-            try:
-                self.provider._runtime.check_result(
-                    self.provider._execution_api.execute_contraction(self._handle, ctypes.byref(desc))
+            resources = [a, b, c, d]
+            if self._workspace is not None:
+                resources.append(self._workspace)
+            with external_cuda_submission(self._runtime_prog, resources) as submission:
+                workspace_pointer = (
+                    0 if self._workspace is None else _device_pointer(self._workspace)
                 )
-            except RuntimeError as exc:
-                raise TaichiRuntimeError(str(exc)) from exc
+                pointers = tuple(_device_pointer(value) for value in (a, b, c, d))
+                if pointers[3] in pointers[:2]:
+                    raise TaichiRuntimeError("cuTENSOR D must not alias A or B")
+                desc = _ExecDesc(
+                    ctypes.sizeof(_ExecDesc),
+                    0,
+                    float(alpha),
+                    float(beta),
+                    *pointers,
+                    workspace_pointer,
+                    self.workspace_required_bytes,
+                    0,
+                )
+                try:
+                    result = submission.invoke(
+                        self.provider._execution_api.execute_contraction,
+                        self._handle,
+                        ctypes.byref(desc),
+                    )
+                    self.provider._runtime.check_result(result)
+                except RuntimeError as exc:
+                    raise TaichiRuntimeError(str(exc)) from exc
         return d
 
     def close(self):
@@ -402,7 +454,9 @@ class CutensorContractionPlan:
             if runtime_generation_matches(self):
                 self._runtime_prog.synchronize()
                 try:
-                    self.provider._runtime.check_result(self.provider._execution_api.destroy_contraction_plan(handle))
+                    self.provider._runtime.check_result(
+                        self.provider._execution_api.destroy_contraction_plan(handle)
+                    )
                 except RuntimeError as exc:
                     self._handle = handle
                     raise TaichiRuntimeError(str(exc)) from exc
