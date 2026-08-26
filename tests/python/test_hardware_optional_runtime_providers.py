@@ -1,9 +1,11 @@
 from contextlib import nullcontext
+import ctypes
 import os
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 
 import taichi_forge as ti
 from taichi_forge.hardware import _amgx, _cusparselt, _cutensor
@@ -11,6 +13,38 @@ from taichi_forge.hardware import _bundled_runtime_provider as _runtime_provider
 
 
 _MODULES = (_cusparselt, _cutensor, _amgx)
+
+
+class _FakeProgram:
+    def __init__(self):
+        self.synchronizations = 0
+
+    def synchronize(self):
+        self.synchronizations += 1
+
+
+class _FakeRuntime:
+    def __init__(self, execution_api):
+        self.handle = ctypes.c_void_p(101)
+        self.runtime_info = {
+            "version_major": 2,
+            "version_minor": 7,
+            "version_patch": 0,
+            "library_path": "fake-vendor-runtime",
+            "build_version": "test-build",
+        }
+        self.execution_api = execution_api
+        self.closed = False
+
+    def query_execution_api(self, _api_type):
+        return self.execution_api
+
+    @staticmethod
+    def check_result(result):
+        assert result == 0
+
+    def close(self):
+        self.closed = True
 
 
 @pytest.mark.parametrize("module", _MODULES)
@@ -56,7 +90,9 @@ def test_optional_runtime_probe_audits_without_qualifying_execution(module, monk
     info.provider_name = definition.provider_name.encode()
     info.supported_version_family = definition.supported_version_family.encode()
     info.build_identity = b"test-forge-adapter"
-    info.features = _runtime_provider._REQUIRED_FEATURES  # pylint: disable=W0212
+    info.features = (  # pylint: disable=W0212
+        _runtime_provider._REQUIRED_FEATURES | _runtime_provider._FEATURE_EXECUTION_API
+    )
     info.required_symbol_count = 17
     loaded = SimpleNamespace(path="test-forge-adapter", api=SimpleNamespace(info=info))
 
@@ -92,7 +128,7 @@ def test_optional_runtime_probe_audits_without_qualifying_execution(module, monk
     assert result["provider_version"] == "2.5.0"
     assert result["native_facts"]["required_symbol_count"] == 17
     assert result["native_facts"]["library_loaded_transiently"] is True
-    assert result["native_facts"]["execution_api_available"] is False
+    assert result["native_facts"]["execution_api_available"] is True
     assert result["native_facts"]["execution_qualified"] is False
     assert result["native_facts"]["execution_resource_created"] is False
 
@@ -145,7 +181,51 @@ def test_optional_runtime_passive_status_never_loads_a_library(module, monkeypat
     assert status["native_facts"]["execution_api_available"] is False
 
 
-def test_probe_only_provider_capabilities_are_host_only_and_non_executable():
+def test_optional_runtime_passive_status_observes_retained_runtime_without_loading(monkeypatch):
+    definition = _cutensor.DEFINITION
+    loaded = SimpleNamespace(api=SimpleNamespace(destroy_runtime=lambda _handle: 0))
+    runtime_info = {
+        "version_major": 2,
+        "version_minor": 7,
+        "version_patch": 0,
+        "cuda_runtime_version": 12080,
+        "library_path": "retained-cutensor-runtime",
+        "build_version": "test-build",
+    }
+    monkeypatch.setattr(
+        _runtime_provider,
+        "_load_library",
+        lambda _path: (_ for _ in ()).throw(AssertionError("passive status must not load a library")),
+    )
+
+    runtime = _runtime_provider.BundledRuntime(
+        definition,
+        loaded,
+        ctypes.c_void_p(505),
+        runtime_info,
+    )
+    status = _cutensor.passive_status()
+
+    assert status["library_loaded"] is True
+    assert status["provider_version"] == "2.7.0"
+    assert status["native_facts"]["execution_api_available"] is True
+    assert status["native_facts"]["active_runtime_count"] == 1
+    assert status["native_facts"]["loaded_runtime_identities"] == (
+        {
+            "library_path": "retained-cutensor-runtime",
+            "version": "2.7.0",
+            "build_version": "test-build",
+            "lease_count": 1,
+        },
+    )
+
+    runtime.close()
+    status = _cutensor.passive_status()
+    assert status["library_loaded"] is False
+    assert status["native_facts"]["active_runtime_count"] == 0
+
+
+def test_optional_runtime_probe_capabilities_remain_non_executing_observation_calls():
     for provider_id in ("cusparselt", "cutensor", "amgx"):
         descriptor = ti.hardware.capability(f"runtime.probe.{provider_id}")
         assert descriptor.provider_id == provider_id
@@ -155,7 +235,24 @@ def test_probe_only_provider_capabilities_are_host_only_and_non_executable():
         assert descriptor.hardware_acceleration == "none"
         assert descriptor.hardware_route == "none"
         assert descriptor.implementation_status == "internal_foundation"
-        assert "kernel intrinsic is exposed yet" in descriptor.notes[1]
+        assert "kernel intrinsic" in descriptor.notes[1]
+
+
+def test_optional_runtime_execution_capabilities_are_explicit_host_plan_apis():
+    operation_ids = (
+        "tensor.matmul.cusparselt",
+        "tensor.contract.cutensor",
+        "linalg.solve.amgx",
+    )
+    for operation_id in operation_ids:
+        descriptor = ti.hardware.capability(operation_id)
+        assert descriptor.scopes == ("python",)
+        assert descriptor.execution_kind == "external_library"
+        assert descriptor.graph_integration == "unsupported"
+        assert descriptor.hardware_acceleration == "implementation_defined"
+        assert descriptor.activation_mode == "explicit_hardware_api"
+        assert descriptor.lifetime_policy == "provider_plan"
+        assert "automatic" in " ".join(descriptor.notes).lower()
 
 
 @pytest.mark.parametrize("module", _MODULES)
@@ -175,7 +272,7 @@ def test_public_hardware_probe_keeps_probe_only_provider_disabled(module, monkey
             "failure_scope": None,
             "native_facts": {
                 "execution_qualified": False,
-                "execution_api_available": False,
+                "execution_api_available": True,
             },
         },
     )
@@ -196,3 +293,129 @@ def test_optional_runtime_provider_filenames_are_platform_specific():
     for module in _MODULES:
         filename = _runtime_provider._adapter_filename(module.DEFINITION)  # pylint: disable=W0212
         assert Path(filename).suffix == (".dll" if os.name == "nt" else ".so")
+
+
+def test_cutensor_provider_owns_plan_lifetime_and_native_destroy(monkeypatch):
+    calls = []
+
+    def create(_runtime, _desc, handle, info):
+        handle._obj.value = 202
+        info._obj.workspace_estimate_bytes = 0
+        info._obj.workspace_required_bytes = 0
+        return 0
+
+    execution = SimpleNamespace(
+        execution_abi_version=1,
+        create_contraction_plan=create,
+        execute_contraction=lambda _plan, _desc: 0,
+        destroy_contraction_plan=lambda plan: calls.append(("destroy", plan.value)) or 0,
+    )
+    runtime = _FakeRuntime(execution)
+    program = _FakeProgram()
+    monkeypatch.setattr(_cutensor, "_require_cuda_program", lambda _name: program)
+    monkeypatch.setattr(_cutensor, "_open_runtime", lambda _definition, _path: runtime)
+    monkeypatch.setattr(_cutensor.impl, "runtime_generation", lambda: 7)
+    monkeypatch.setattr(_cutensor, "validate_runtime_generation", lambda *_args: None)
+    monkeypatch.setattr(_cutensor, "runtime_generation_matches", lambda _owner: True)
+
+    provider = _cutensor.CutensorProvider()
+    plan = provider.contraction_plan((2, 3), "ik", (3, 4), "kj", (2, 4), "ij", (2, 4), "ij")
+    with pytest.raises(ti.TaichiRuntimeError, match="plans are live"):
+        provider.close()
+    plan.close()
+    provider.close()
+
+    assert calls == [("destroy", 202)]
+    assert runtime.closed is True
+    assert program.synchronizations == 2
+
+
+def test_cusparselt_provider_retains_owned_buffers_until_plan_close(monkeypatch):
+    calls = []
+
+    def create(_runtime, _desc, handle, info):
+        handle._obj.value = 303
+        info._obj.compressed_bytes = 64
+        info._obj.compression_buffer_bytes = 32
+        info._obj.workspace_bytes = 16
+        return 0
+
+    execution = SimpleNamespace(
+        execution_abi_version=1,
+        create_matmul_plan=create,
+        compress_sparse_a=lambda _plan, _desc: calls.append("compress") or 0,
+        execute_matmul=lambda _plan, _desc: calls.append("execute") or 0,
+        destroy_matmul_plan=lambda plan: calls.append(("destroy", plan.value)) or 0,
+    )
+    runtime = _FakeRuntime(execution)
+    program = _FakeProgram()
+    monkeypatch.setattr(_cusparselt, "_require_cuda_program", lambda _name: program)
+    monkeypatch.setattr(_cusparselt, "_open_runtime", lambda _definition, _path: runtime)
+    monkeypatch.setattr(_cusparselt.impl, "runtime_generation", lambda: 7)
+    monkeypatch.setattr(_cusparselt, "validate_runtime_generation", lambda *_args: None)
+    monkeypatch.setattr(_cusparselt, "runtime_generation_matches", lambda _owner: True)
+    monkeypatch.setattr(_cusparselt, "ScalarNdarray", lambda _dtype, shape: SimpleNamespace(shape=shape))
+    monkeypatch.setattr(_cusparselt, "_validate_array", lambda *_args: None)
+    monkeypatch.setattr(_cusparselt, "_device_pointer", lambda value: id(value))
+
+    provider = _cusparselt.CusparseLtProvider()
+    plan = provider.matmul_plan(16, 16, 16)
+    plan.compress(object()).execute(object(), object(), object())
+    with pytest.raises(ti.TaichiRuntimeError, match="plans are live"):
+        provider.close()
+    plan.close()
+    provider.close()
+
+    assert calls == ["compress", "execute", ("destroy", 303)]
+    assert runtime.closed is True
+
+
+def test_amgx_provider_executes_host_buffers_and_blocks_early_close(monkeypatch):
+    calls = []
+
+    def create(_runtime, _desc, handle):
+        handle._obj.value = 404
+        return 0
+
+    def solve(_solver, desc, info):
+        solve_desc = desc._obj
+        ctypes.memmove(solve_desc.solution, solve_desc.rhs, 3 * ctypes.sizeof(ctypes.c_double))
+        info._obj.solve_status = 0
+        info._obj.iterations = 4
+        info._obj.residual_norm = 1e-12
+        return 0
+
+    execution = SimpleNamespace(
+        execution_abi_version=1,
+        create_solver=create,
+        replace_coefficients=lambda _solver, _values, _nonzeros: calls.append("replace") or 0,
+        solve=solve,
+        destroy_solver=lambda solver: calls.append(("destroy", solver.value)) or 0,
+    )
+    runtime = _FakeRuntime(execution)
+    program = _FakeProgram()
+    monkeypatch.setattr(_amgx, "_require_cuda_program", lambda _name: program)
+    monkeypatch.setattr(_amgx, "_open_runtime", lambda _definition, _path: runtime)
+    monkeypatch.setattr(_amgx.impl, "runtime_generation", lambda: 7)
+    monkeypatch.setattr(_amgx, "validate_runtime_generation", lambda *_args: None)
+    monkeypatch.setattr(_amgx, "runtime_generation_matches", lambda _owner: True)
+
+    provider = _amgx.AmgxProvider()
+    solver = provider.solver(
+        np.array([0, 1, 2, 3], dtype=np.int32),
+        np.array([0, 1, 2], dtype=np.int32),
+        np.ones(3, dtype=np.float64),
+        "config_version=2, solver=PCG",
+    )
+    with pytest.raises(ti.TaichiRuntimeError, match="solver resources are live"):
+        provider.close()
+    solution, info = solver.solve(np.array([1.0, 2.0, 3.0], dtype=np.float64))
+    solver.replace_coefficients(np.full(3, 2.0, dtype=np.float64))
+    solver.close()
+    provider.close()
+
+    np.testing.assert_array_equal(solution, np.array([1.0, 2.0, 3.0]))
+    assert info["converged"] is True
+    assert info["iterations"] == 4
+    assert calls == ["replace", ("destroy", 404)]
+    assert runtime.closed is True

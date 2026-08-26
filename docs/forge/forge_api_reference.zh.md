@@ -38,15 +38,16 @@ replay 时再次调用 provider；它不表示 CUDA Graph capture 或持久 Vulk
 
 `probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；cuBLAS、cuSPARSE 与
 cuFFT 使用瞬时 native handle 检查精确 symbol；cuDSS 通过 wheel 内 Forge adapter 瞬时
-加载并核对用户 vendor runtime。probe-only bundled adapter 同样检查 cuSPARSELt
-0.4.x-0.9.x、cuTENSOR 2.0.x-2.7.x 与 AmgX stable C API，但不提供执行或 automatic route。
+加载并核对用户 vendor runtime。bundled adapter 同样检查 cuSPARSELt 0.8.x-0.9.x、
+cuTENSOR 2.0.x-2.7.x 与 AmgX stable C API。它们另有显式执行 provider object，但不提供
+automatic、Graph 或 kernel route。
 所有 probe handle 都在返回前关闭，不改变后续 selection。若实际算法此前已经 lazy-load
 某库，被动 report 会观察其 plan 状态，但绝不自行调用 loader。未知 operation/provider 和
 未实现的 probe 均 fail closed。
 
 用户管理 library 的安装责任、版本绑定、loader 配置与推荐 selection gate 统一见
 [可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分执行
-provider、probe-only provider 与 native-adapter 候选；安装 runtime 不会增加执行 API。
+provider、非执行 probe 与 native-adapter 候选；安装 runtime 不会自动选择算法。
 
 ### 核心 kernel 硬件路线（0.6.3 资格化）
 
@@ -151,6 +152,27 @@ Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆�
 `library_path` 始终指 vendor runtime，不能覆盖内部 adapter。这属于领域级或显式 plan
 选择，不是编译器改写任意 kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生
 的 analysis、factorization 或数值失败保持可见，不会静默 fallback。
+
+### `ti.hardware.tensor` 与 `ti.hardware.linalg.AmgxProvider`（0.6.3 开发中）
+
+三个用户 runtime adapter 公开显式 retained execution resource：
+
+- `CusparseLtProvider(library_path=None).matmul_plan(m, n, k)` 创建 FP16 row-major
+  2:4 plan。先对已满足 sparsity 的 `(m, k)` operand 调用 `compress(a)`，再调用
+  `execute(b_transposed, c, d, alpha=..., beta=...)`；`b_transposed` shape 为 `(n, k)`，
+  dimensions 必须是 16 的倍数。
+- `CutensorProvider(library_path=None).contraction_plan(...)` 根据 A/B/C/D 的显式
+  shape/mode pair 创建 compact scalar-f32 contraction；支持 `compute="f32"` 与
+  `compute="tf32"`，plan 会报告并持有精确 workspace。
+- `AmgxProvider(library_path=None).solver(row_offsets, column_indices, values, config,
+  config_file=False)` 创建 scalar f32/f64 host-CSR solver；
+  `solve(rhs, solution=None, zero_initial_guess=True)` 返回 host solution 与不可变 convergence
+  fact，`replace_coefficients(values)` 在 fixed topology 上复用并 reset solver setup。
+
+三者都要求已初始化 CUDA runtime，只有构造 provider 时才加载用户 library。child
+plan/solver 必须先于 provider 关闭；`ti.reset()` 后所有对象失效。这些 API 只允许 direct
+Python 调用，不是 Graph action、kernel call、compiler rewrite 或 automatic provider choice。
+安装、路径、数值和内存门禁见 external-provider 指南。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 

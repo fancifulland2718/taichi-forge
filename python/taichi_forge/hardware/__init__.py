@@ -9,6 +9,7 @@ from taichi_forge.hardware import (
     raster,
     ray,
     sampling,
+    tensor,
 )
 
 from taichi_forge.hardware._admission import (
@@ -123,4 +124,5 @@ __all__ = [
     "raster",
     "ray",
     "sampling",
+    "tensor",
 ]

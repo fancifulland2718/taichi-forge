@@ -9,9 +9,9 @@ variant. This guide explains that user-managed boundary and gives recommended
 configuration for the optional libraries most relevant to simulation and
 rendering.
 
-This page is an installation and deployment guide. Installing a library does
-not create an execution route. Some libraries have a registered probe-only
-Forge adapter, which reports compatibility but exposes no algorithm API.
+This page is an installation and deployment guide. Installing a library alone
+does not select an execution route. Forge exposes explicit retained-provider
+APIs for the three libraries below; discovery probes remain non-executing.
 
 ## Support status and call boundary
 
@@ -23,18 +23,15 @@ Forge adapter, which reports compatibility but exposes no algorithm API.
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
-| cuSPARSELt 0.4.x-0.9.x | Registered probe-only bundled adapter | Forge adapter; user optional package | `ti.hardware.probe("cusparselt", library_path=...)` | Host diagnostic probe only; no execution/Graph/kernel API |
-| cuTENSOR 2.0.x-2.7.x | Registered probe-only bundled adapter | Forge adapter; user optional package | `ti.hardware.probe("cutensor", library_path=...)` | Host diagnostic probe only; no execution/Graph/kernel API |
-| AmgX stable C API | Registered probe-only bundled adapter | Forge adapter; user source build | `ti.hardware.probe("amgx", library_path=...)` | Host diagnostic probe only; no solve/Graph/kernel API |
+| cuSPARSELt 0.8.x-0.9.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.probe(...)` or `ti.hardware.tensor.CusparseLtProvider` | Explicit FP16 2:4 matmul plan; no Graph/kernel/auto route |
+| cuTENSOR 2.0.x-2.7.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.probe(...)` or `ti.hardware.tensor.CutensorProvider` | Explicit FP32 contraction plan; no Graph/kernel/auto route |
+| AmgX stable C API | Registered bundled-adapter ABI | Forge adapter; user source build | `ti.hardware.probe(...)` or `ti.hardware.linalg.AmgxProvider` | Explicit host-CSR solver; no Graph/kernel/auto route |
 | NCCL | Native-adapter candidate only | User system package | No public Forge probe or execution API | External multi-GPU communication only |
 
-The three probe-only rows appear in `ti.hardware.providers()` and audit a
-bounded version family plus the core execution-symbol surface. Probe success
-means only that the runtime can be loaded through that ABI; it does not mean
-that Forge can execute or select the library. NCCL remains an unregistered
-candidate. Any future execution integration must separately define resource
-effects, stream ordering, lifetime, error, memory, and performance-admission
-contracts.
+These three providers appear in `ti.hardware.providers()`. Their probe audits a
+bounded version family and execution-symbol surface, but still creates no plan
+and qualifies no workload. Execution starts only when the application creates
+the corresponding provider and plan/solver object. NCCL remains unregistered.
 
 None of these host libraries can be called from inside `@ti.kernel`. Automatic
 use is currently limited to documented domain APIs such as qualified
@@ -274,13 +271,13 @@ Graph work retains both. Close scenes before the provider and do not reuse any
 object after `ti.reset()`. `validation=True` is recommended for development,
 not as a default performance setting.
 
-## Probe-only bundled adapters without execution APIs
+## Explicit optional runtime execution providers
 
-The following three libraries have a Forge-owned probe adapter in the standard
-runtime wheel. The adapter contains no vendor code or dependency: it loads the
-user runtime transiently, queries its version, audits required symbols, and
-unloads it. This does not enable a Graph action, algorithm call, or automatic
-route.
+The standard runtime wheel contains Forge-owned thin adapters for the following
+three libraries. An adapter contains and links no vendor code. `probe()` loads
+the user runtime transiently; creating a provider instead retains the selected
+runtime and exposes a bounded execution ABI. All routes are explicit host-side
+resources: none is a Graph action, kernel intrinsic, or automatic rewrite.
 
 ### cuSPARSELt recommended configuration
 
@@ -310,6 +307,17 @@ probe = next(
     if item.descriptor.operation_id == "runtime.probe.cusparselt"
 )
 assert probe.discovery == "available"
+```
+
+Execute with an explicit retained plan. `A` must already satisfy exact 2:4
+sparsity; Forge does not prune or silently modify the numerical operator. `B`
+uses row-major `(n, k)` transposed storage:
+
+```python
+with ti.hardware.tensor.CusparseLtProvider(runtime_path) as provider:
+    with provider.matmul_plan(m, n, k) as plan:
+        plan.compress(a).execute(b_transposed, c, d, alpha=1.0, beta=0.0)
+        ti.sync()
 ```
 
 Follow the selected release's support table. Current cuSPARSELt documentation
@@ -387,6 +395,18 @@ system loader:
 report = ti.hardware.probe("cutensor", library_path="/opt/cutensor/lib/libcutensor.so.2")
 ```
 
+The current execution surface is compact row-major scalar `f32` contraction
+with `f32` or `tf32` compute. Modes explicitly define the contraction:
+
+```python
+with ti.hardware.tensor.CutensorProvider(runtime_path) as provider:
+    with provider.contraction_plan(
+        (m, k), "ik", (k, n), "kj", (m, n), "ij", (m, n), "ij"
+    ) as plan:
+        plan.execute(a, b, c, d, alpha=1.0, beta=0.0)
+        ti.sync()
+```
+
 cuTENSOR is a candidate for large contractions, reductions, permutations, and
 elementwise tensor operations with layouts that would otherwise require
 substantial handwritten indexing. It depends on CUDART and remains entirely
@@ -436,6 +456,22 @@ must remain visible to the loader:
 ```python
 report = ti.hardware.probe("amgx", library_path="/opt/amgx/lib/libamgxsh.so")
 ```
+
+Execution accepts contiguous host scalar CSR arrays and host vectors. AmgX
+owns device upload, hierarchy, and solver resources; keep the solver when the
+topology is reused and provide the exact application-owned configuration:
+
+```python
+with ti.hardware.linalg.AmgxProvider(runtime_path) as provider:
+    with provider.solver(offsets, columns, values, "PCG_V.json", config_file=True) as solver:
+        solution, info = solver.solve(rhs)
+        assert info["converged"]
+```
+
+Close every plan/solver before its provider and do not reuse either after
+`ti.reset()`. Provider close fails while a child resource is live. Explicit
+selection surfaces load, numerical, and lifecycle errors rather than silently
+falling back.
 
 Recommended physics starting points:
 

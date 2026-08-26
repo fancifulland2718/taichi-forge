@@ -41,15 +41,15 @@ OPTIX_PROVIDER_ABIS = (93, 105, 118)
 CUDSS_PROVIDER_HEADER_VERSIONS = (80,)
 OPTIONAL_RUNTIME_PROVIDERS = {
     "cusparselt": (
-        "taichi_forge_cusparselt_provider_abi1_api040_090",
+        "taichi_forge_cusparselt_provider_abi2_api080_090",
         "taichi_forge_cusparselt_provider_query",
     ),
     "cutensor": (
-        "taichi_forge_cutensor_provider_abi1_api200_207",
+        "taichi_forge_cutensor_provider_abi2_api200_207",
         "taichi_forge_cutensor_provider_query",
     ),
     "amgx": (
-        "taichi_forge_amgx_provider_abi1_stable_c",
+        "taichi_forge_amgx_provider_abi2_stable_c",
         "taichi_forge_amgx_provider_query",
     ),
 }

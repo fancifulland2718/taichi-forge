@@ -57,12 +57,13 @@ grouped under the behavior they shipped.
   use transient vendor handles. The cuDSS probe transiently validates the user
   vendor runtime through the wheel-internal thin C-ABI adapter. None enables a
   provider implicitly.
-- Added Forge-owned query-only adapters for user-managed cuSPARSELt 0.4.x-0.9.x,
-  cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API. They ship in the unchanged
-  runtime wheel, use no vendor headers or link dependencies, audit version and
-  core execution symbols through transient loads, and expose only
-  `ti.hardware.probe()`. They do not yet expose execution, Graph, automatic, or
-  kernel-inline routes. NCCL remains outside the registered provider catalog.
+- Added Forge-owned runtime-loaded execution adapters for user-managed
+  cuSPARSELt 0.8.x-0.9.x, cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API.
+  Their explicit provider plans retain the user runtime and execute bounded
+  FP16 2:4 matmul, FP32 contraction, or host-CSR solve operations, while probes
+  remain non-executing. The thin adapters ship in the unchanged runtime wheel,
+  use no vendor link dependency, and add no Graph, automatic, or kernel-inline
+  route. NCCL remains outside the registered provider catalog.
 - Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
   `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
   execution lazy-loads the user's compatible cuBLAS and reuses one handle per

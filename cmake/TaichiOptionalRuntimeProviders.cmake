@@ -1,5 +1,5 @@
 option(TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS
-       "Build probe-only optional vendor-runtime adapters" OFF)
+       "Build optional vendor-runtime execution adapters" OFF)
 
 add_custom_target(taichi_forge_optional_runtime_providers)
 
@@ -33,8 +33,8 @@ function(ti_add_optional_runtime_provider provider kind output_name)
 endfunction()
 
 ti_add_optional_runtime_provider(
-    cusparselt 1 "taichi_forge_cusparselt_provider_abi1_api040_090")
+    cusparselt 1 "taichi_forge_cusparselt_provider_abi2_api080_090")
 ti_add_optional_runtime_provider(
-    cutensor 2 "taichi_forge_cutensor_provider_abi1_api200_207")
+    cutensor 2 "taichi_forge_cutensor_provider_abi2_api200_207")
 ti_add_optional_runtime_provider(
-    amgx 3 "taichi_forge_amgx_provider_abi1_stable_c")
+    amgx 3 "taichi_forge_amgx_provider_abi2_stable_c")

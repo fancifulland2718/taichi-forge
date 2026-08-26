@@ -46,9 +46,10 @@ not claim CUDA Graph capture or a persistent Vulkan command buffer.
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
 cuBLAS, cuSPARSE, and cuFFT probes check exact symbols through a transient
 native handle. cuDSS uses the wheel-internal Forge adapter to transiently load
-and validate the user vendor runtime. Probe-only bundled adapters similarly
-audit cuSPARSELt 0.4.x-0.9.x, cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API,
-but expose no execution or automatic route. Probe handles close before return
+and validate the user vendor runtime. Bundled adapters similarly audit
+cuSPARSELt 0.8.x-0.9.x, cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API. Their
+separate provider objects expose explicit execution plans, but no automatic,
+Graph, or kernel route. Probe handles close before return
 and no probe changes later selection. If an actual algorithm already owns a
 plan, passive reports observe that state without invoking the loader. Unknown
 operations/providers and unimplemented probes fail closed.
@@ -56,8 +57,8 @@ operations/providers and unimplemented probes fail closed.
 Installation ownership, version binding, loader configuration, and recommended
 selection gates for user-managed libraries are documented in
 [Optional external hardware providers](external_hardware_providers.en.md).
-That guide distinguishes execution providers, probe-only providers, and
-native-adapter candidates; installing a runtime never adds an execution API.
+That guide distinguishes execution providers, non-executing probes, and
+native-adapter candidates; installing a runtime never selects an algorithm.
 
 ### Core kernel hardware routes (0.6.3 qualification)
 
@@ -192,6 +193,31 @@ internal adapter. This is domain-level or explicit-plan selection, not a
 compiler rewrite of arbitrary kernels. None is kernel-callable. Provider
 analysis, factorization, and numerical failures after explicit selection stay
 visible rather than silently falling back.
+
+### `ti.hardware.tensor` and `ti.hardware.linalg.AmgxProvider` (0.6.3 in development)
+
+Three user-runtime adapters expose explicit retained execution resources:
+
+- `CusparseLtProvider(library_path=None).matmul_plan(m, n, k)` creates an FP16
+  row-major 2:4 plan. Call `compress(a)` for an already-valid sparse `(m, k)`
+  operand, then `execute(b_transposed, c, d, alpha=..., beta=...)`.
+  `b_transposed` has shape `(n, k)`; dimensions are multiples of 16.
+- `CutensorProvider(library_path=None).contraction_plan(...)` creates a compact
+  scalar-f32 contraction from explicit shape/mode pairs for A, B, C, and D.
+  `compute="f32"` and `compute="tf32"` are supported; the plan reports and owns
+  its exact workspace.
+- `AmgxProvider(library_path=None).solver(row_offsets, column_indices, values,
+  config, config_file=False)` creates a scalar f32/f64 host-CSR solver.
+  `solve(rhs, solution=None, zero_initial_guess=True)` returns the host solution
+  and immutable convergence facts; `replace_coefficients(values)` reuses the
+  fixed topology and resets solver setup.
+
+All require an initialized CUDA runtime and load the user library only when the
+provider is constructed. Child plans/solvers must close before their provider;
+all objects become invalid after `ti.reset()`. These APIs are direct Python
+calls, never Graph actions, kernel calls, compiler rewrites, or automatic
+provider choices. See the external-provider guide for installation, path,
+numeric, and memory gates.
 
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 

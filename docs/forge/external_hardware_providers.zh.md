@@ -7,8 +7,8 @@ Taichi Forge 的官方 runtime wheel 始终保持 driver-only。可选 CUDA/vend
 `cu12`/`cu13` Forge wheel 变体。本文说明这一用户管理边界，并为 simulation 与 rendering
 中最相关的可选 library 给出推荐配置。
 
-本文是安装与部署指南。安装 library 不会自动产生执行路线；部分 library 有已注册的
-probe-only Forge adapter，它只报告兼容性，不提供算法执行 API。
+本文是安装与部署指南。安装 library 本身不会选择执行路线；下列三个 library 已有显式
+retained-provider API，而 discovery probe 始终不执行算法。
 
 ## 支持状态与调用边界
 
@@ -20,15 +20,14 @@ probe-only Forge adapter，它只报告兼容性，不提供算法执行 API。
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
-| cuSPARSELt 0.4.x-0.9.x | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe("cusparselt", library_path=...)` | 仅 host diagnostic probe；无 execution/Graph/kernel API |
-| cuTENSOR 2.0.x-2.7.x | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe("cutensor", library_path=...)` | 仅 host diagnostic probe；无 execution/Graph/kernel API |
-| AmgX stable C API | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe("amgx", library_path=...)` | 仅 host diagnostic probe；无 solve/Graph/kernel API |
+| cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe(...)` 或 `ti.hardware.tensor.CusparseLtProvider` | 显式 FP16 2:4 matmul plan；无 Graph/kernel/auto 路线 |
+| cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe(...)` 或 `ti.hardware.tensor.CutensorProvider` | 显式 FP32 contraction plan；无 Graph/kernel/auto 路线 |
+| AmgX stable C API | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe(...)` 或 `ti.hardware.linalg.AmgxProvider` | 显式 host-CSR solver；无 Graph/kernel/auto 路线 |
 | NCCL | 仅 native-adapter 候选 | 用户安装系统包 | 没有公开 Forge probe 或执行 API | 仅外部 multi-GPU communication |
 
-三个 probe-only 项会出现在 `ti.hardware.providers()` 中，并检查有界版本族和核心执行
-symbol surface。probe 成功只表示该 runtime 能通过该 ABI 被加载，不表示 Forge 已能执行或
-选择它。NCCL 仍是未注册候选。未来增加执行集成时，仍须另行定义 resource effect、stream
-ordering、lifetime、error、memory 与 performance admission 合同。
+这三个 provider 会出现在 `ti.hardware.providers()` 中。它们的 probe 检查有界版本族和
+execution-symbol surface，但不创建 plan，也不资格化 workload。只有应用创建对应 provider
+与 plan/solver object 时才开始执行。NCCL 仍是未注册候选。
 
 这些 host library 都不能从 `@ti.kernel` 内调用。当前只有文档明确说明的领域 API 可以自动
 选择，例如已资格化的 cuSPARSE SpMV 与 cuDSS solver selection。安装 cuSPARSELt、
@@ -231,11 +230,12 @@ provider 持有 OptiX context，scene 持有 provider，已提交 Graph work 同
 关闭 scene，再关闭 provider；`ti.reset()` 后不得复用任何旧对象。`validation=True` 推荐用于
 开发阶段，而不是默认性能配置。
 
-## 没有执行 API 的 probe-only bundled adapter
+## 显式 optional runtime 执行 provider
 
-下面三个 library 的 Forge 自有 probe adapter 已随标准 runtime wheel 提供。adapter 不包含
-vendor code 或依赖，只瞬时加载用户 runtime、查询版本、检查 required symbol 后卸载；它
-不会启用 Graph action、算法调用或 automatic route。
+标准 runtime wheel 随附以下三个 Forge 自有薄 adapter。adapter 不包含也不链接 vendor
+code；`probe()` 只瞬时加载用户 runtime，而创建 provider 会保留选中的 runtime 并公开有界
+execution ABI。所有路线都是显式 host-side resource，不是 Graph action、kernel intrinsic
+或 automatic rewrite。
 
 ### cuSPARSELt 推荐配置
 
@@ -263,6 +263,16 @@ probe = next(
     if item.descriptor.operation_id == "runtime.probe.cusparselt"
 )
 assert probe.discovery == "available"
+```
+
+使用显式 retained plan 执行。`A` 必须已经严格满足 2:4 sparsity；Forge 不做 pruning，也不
+静默修改数值 operator。`B` 使用 row-major `(n, k)` 转置存储：
+
+```python
+with ti.hardware.tensor.CusparseLtProvider(runtime_path) as provider:
+    with provider.matmul_plan(m, n, k) as plan:
+        plan.compress(a).execute(b_transposed, c, d, alpha=1.0, beta=0.0)
+        ti.sync()
 ```
 
 必须遵守所选 release 的 support table。当前 cuSPARSELt 文档要求 compute capability 8.0
@@ -332,6 +342,18 @@ python -m pip install cutensor-cu13
 report = ti.hardware.probe("cutensor", library_path="/opt/cutensor/lib/libcutensor.so.2")
 ```
 
+当前执行面是 compact row-major scalar `f32` contraction，compute 支持 `f32` 或 `tf32`；
+mode 显式定义 contraction：
+
+```python
+with ti.hardware.tensor.CutensorProvider(runtime_path) as provider:
+    with provider.contraction_plan(
+        (m, k), "ik", (k, n), "kj", (m, n), "ij", (m, n), "ij"
+    ) as plan:
+        plan.execute(a, b, c, d, alpha=1.0, beta=0.0)
+        ti.sync()
+```
+
 cuTENSOR 适合 large contraction、reduction、permutation 和 elementwise tensor operation，
 特别是那些否则需要大量手写 indexing 的 layout。它依赖 CUDART，必须完全留在 driver-only
 Forge wheel 之外。
@@ -375,6 +397,20 @@ AmgX 不做默认 Python package 搜索。显式传入构建出的 library，或
 ```python
 report = ti.hardware.probe("amgx", library_path="/opt/amgx/lib/libamgxsh.so")
 ```
+
+执行接口接受连续的 host scalar CSR array 与 host vector。AmgX 持有 device upload、
+hierarchy 和 solver resource；topology 复用时应保留 solver，并传入应用自有的精确配置：
+
+```python
+with ti.hardware.linalg.AmgxProvider(runtime_path) as provider:
+    with provider.solver(offsets, columns, values, "PCG_V.json", config_file=True) as solver:
+        solution, info = solver.solve(rhs)
+        assert info["converged"]
+```
+
+必须先关闭每个 plan/solver，再关闭 provider；`ti.reset()` 后两者都不得复用。存在 live child
+resource 时 provider close 会失败。显式选择后的 load、数值和 lifetime 错误会直接暴露，
+不会静默 fallback。
 
 推荐的 physics 起点：
 

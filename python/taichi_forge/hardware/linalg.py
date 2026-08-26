@@ -1,5 +1,6 @@
 """Public optional hardware linear-algebra provider API."""
 
+from taichi_forge.hardware._amgx import AmgxProvider, AmgxSolver
 from taichi_forge.hardware._linalg import (
     CudssPlan,
     CudssRefactorSolveRecording,
@@ -15,6 +16,8 @@ from taichi_forge.hardware._linalg import (
 )
 
 __all__ = [
+    "AmgxProvider",
+    "AmgxSolver",
     "CudssPlan",
     "CudssRefactorSolveRecording",
     "CudssSolveRecording",

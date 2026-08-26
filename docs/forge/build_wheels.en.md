@@ -153,9 +153,10 @@ similar vendor runtimes remain outside this release matrix. The runtime wheel
 may carry thin Forge adapters that do not link those vendor runtimes. Their
 installation, loader, version, lifecycle, and support-status boundaries are documented in
 [Optional external hardware providers](external_hardware_providers.en.md).
-The standard wheel also carries query-only adapters for cuSPARSELt, cuTENSOR,
-and AmgX. They build without vendor headers or libraries, and the release gate
-rejects any implicit vendor-runtime dependency.
+The standard wheel also carries runtime-loaded execution adapters for
+cuSPARSELt, cuTENSOR, and AmgX. They build without vendor headers or libraries,
+load a user-installed runtime only when explicitly requested, and the release
+gate rejects any implicit vendor-runtime dependency.
 
 `scripts/validate_runtime_wheel.py --dependency-class driver-only` is the
 standard release gate. It verifies project/version identity, one native runtime,

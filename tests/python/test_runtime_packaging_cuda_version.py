@@ -92,9 +92,9 @@ def _write_runtime_wheel(
         if include_optional_runtime_providers and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
             stems = (
-                "taichi_forge_cusparselt_provider_abi1_api040_090",
-                "taichi_forge_cutensor_provider_abi1_api200_207",
-                "taichi_forge_amgx_provider_abi1_stable_c",
+                "taichi_forge_cusparselt_provider_abi2_api080_090",
+                "taichi_forge_cutensor_provider_abi2_api200_207",
+                "taichi_forge_amgx_provider_abi2_stable_c",
             )
             for stem in stems:
                 provider_name = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
@@ -769,7 +769,7 @@ def test_runtime_wheel_requires_bundled_cudss_adapter(tmp_path, platform, tag):
         ("manylinux", "manylinux_2_35_x86_64"),
     ),
 )
-def test_runtime_wheel_requires_probe_only_optional_runtime_adapters(tmp_path, platform, tag):
+def test_runtime_wheel_requires_optional_runtime_execution_adapters(tmp_path, platform, tag):
     wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
     _write_runtime_wheel(
         wheel,

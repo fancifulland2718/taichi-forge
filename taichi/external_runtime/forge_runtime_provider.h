@@ -17,7 +17,8 @@
 extern "C" {
 #endif
 
-#define TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION 1u
+#define TI_FORGE_RUNTIME_PROVIDER_ABI_VERSION 2u
+#define TI_FORGE_RUNTIME_PROVIDER_EXECUTION_ABI_VERSION 1u
 
 #define TI_FORGE_CUSPARSELT_PROVIDER_QUERY_SYMBOL \
   "taichi_forge_cusparselt_provider_query"
@@ -33,6 +34,9 @@ typedef enum TiForgeRuntimeProviderResult {
   TI_FORGE_RUNTIME_PROVIDER_ERROR_RUNTIME_INCOMPATIBLE = 4,
   TI_FORGE_RUNTIME_PROVIDER_ERROR_OUT_OF_MEMORY = 5,
   TI_FORGE_RUNTIME_PROVIDER_ERROR_INTERNAL = 6,
+  TI_FORGE_RUNTIME_PROVIDER_ERROR_VENDOR_CALL = 7,
+  TI_FORGE_RUNTIME_PROVIDER_ERROR_LIFETIME = 8,
+  TI_FORGE_RUNTIME_PROVIDER_ERROR_EXECUTION_UNSUPPORTED = 9,
 } TiForgeRuntimeProviderResult;
 
 typedef enum TiForgeRuntimeProviderFeature {
@@ -76,6 +80,12 @@ typedef TiForgeRuntimeProviderResult (*TiForgeRuntimeProviderCreateRuntimeFn)(
     TiForgeRuntimeInfo *out_info);
 typedef TiForgeRuntimeProviderResult (*TiForgeRuntimeProviderDestroyRuntimeFn)(
     TiForgeRuntimeProviderRuntime runtime);
+typedef TiForgeRuntimeProviderResult (
+    *TiForgeRuntimeProviderQueryExecutionApiFn)(
+    TiForgeRuntimeProviderRuntime runtime,
+    uint32_t requested_execution_abi_version,
+    size_t api_size,
+    void *out_api);
 typedef size_t (*TiForgeRuntimeProviderGetLastErrorFn)(char *destination,
                                                        size_t destination_size);
 
@@ -86,8 +96,211 @@ typedef struct TiForgeRuntimeProviderApi {
   TiForgeRuntimeProviderProbeRuntimeFn probe_runtime;
   TiForgeRuntimeProviderCreateRuntimeFn create_runtime;
   TiForgeRuntimeProviderDestroyRuntimeFn destroy_runtime;
+  TiForgeRuntimeProviderQueryExecutionApiFn query_execution_api;
   TiForgeRuntimeProviderGetLastErrorFn get_last_error;
 } TiForgeRuntimeProviderApi;
+
+typedef void *TiForgeCutensorContractionPlan;
+
+typedef enum TiForgeCutensorComputeMode {
+  TI_FORGE_CUTENSOR_COMPUTE_F32 = 0,
+  TI_FORGE_CUTENSOR_COMPUTE_TF32 = 1,
+} TiForgeCutensorComputeMode;
+
+typedef enum TiForgeCutensorWorkspacePreference {
+  TI_FORGE_CUTENSOR_WORKSPACE_MIN = 1,
+  TI_FORGE_CUTENSOR_WORKSPACE_DEFAULT = 2,
+  TI_FORGE_CUTENSOR_WORKSPACE_MAX = 3,
+} TiForgeCutensorWorkspacePreference;
+
+typedef struct TiForgeCutensorTensorDesc {
+  uint32_t struct_size;
+  uint32_t rank;
+  const int64_t *extents;
+  const int64_t *strides;
+  const int32_t *modes;
+} TiForgeCutensorTensorDesc;
+
+typedef struct TiForgeCutensorContractionPlanDesc {
+  uint32_t struct_size;
+  uint32_t compute_mode;
+  uint32_t alignment_bytes;
+  uint32_t workspace_preference;
+  uint64_t workspace_limit_bytes;
+  TiForgeCutensorTensorDesc a;
+  TiForgeCutensorTensorDesc b;
+  TiForgeCutensorTensorDesc c;
+  TiForgeCutensorTensorDesc d;
+} TiForgeCutensorContractionPlanDesc;
+
+typedef struct TiForgeCutensorContractionPlanInfo {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t workspace_estimate_bytes;
+  uint64_t workspace_required_bytes;
+} TiForgeCutensorContractionPlanInfo;
+
+typedef struct TiForgeCutensorContractionExecDesc {
+  uint32_t struct_size;
+  uint32_t reserved;
+  float alpha;
+  float beta;
+  uint64_t a;
+  uint64_t b;
+  uint64_t c;
+  uint64_t d;
+  uint64_t workspace;
+  uint64_t workspace_bytes;
+  uint64_t cuda_stream;
+} TiForgeCutensorContractionExecDesc;
+
+typedef TiForgeRuntimeProviderResult (*TiForgeCutensorCreatePlanFn)(
+    TiForgeRuntimeProviderRuntime runtime,
+    const TiForgeCutensorContractionPlanDesc *desc,
+    TiForgeCutensorContractionPlan *out_plan,
+    TiForgeCutensorContractionPlanInfo *out_info);
+typedef TiForgeRuntimeProviderResult (*TiForgeCutensorExecuteFn)(
+    TiForgeCutensorContractionPlan plan,
+    const TiForgeCutensorContractionExecDesc *desc);
+typedef TiForgeRuntimeProviderResult (*TiForgeCutensorDestroyPlanFn)(
+    TiForgeCutensorContractionPlan plan);
+
+typedef struct TiForgeCutensorExecutionApi {
+  uint32_t struct_size;
+  uint32_t execution_abi_version;
+  TiForgeCutensorCreatePlanFn create_contraction_plan;
+  TiForgeCutensorExecuteFn execute_contraction;
+  TiForgeCutensorDestroyPlanFn destroy_contraction_plan;
+} TiForgeCutensorExecutionApi;
+
+typedef void *TiForgeCusparseLtMatmulPlan;
+
+typedef struct TiForgeCusparseLtMatmulPlanDesc {
+  uint32_t struct_size;
+  uint32_t alignment_bytes;
+  int64_t m;
+  int64_t n;
+  int64_t k;
+} TiForgeCusparseLtMatmulPlanDesc;
+
+typedef struct TiForgeCusparseLtMatmulPlanInfo {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t compressed_bytes;
+  uint64_t compression_buffer_bytes;
+  uint64_t workspace_bytes;
+} TiForgeCusparseLtMatmulPlanInfo;
+
+typedef struct TiForgeCusparseLtCompressDesc {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t dense_a;
+  uint64_t compressed_a;
+  uint64_t compression_buffer;
+  uint64_t compression_buffer_bytes;
+  uint64_t cuda_stream;
+} TiForgeCusparseLtCompressDesc;
+
+typedef struct TiForgeCusparseLtMatmulExecDesc {
+  uint32_t struct_size;
+  uint32_t reserved;
+  float alpha;
+  float beta;
+  uint64_t compressed_a;
+  uint64_t b;
+  uint64_t c;
+  uint64_t d;
+  uint64_t workspace;
+  uint64_t workspace_bytes;
+  uint64_t cuda_stream;
+} TiForgeCusparseLtMatmulExecDesc;
+
+typedef TiForgeRuntimeProviderResult (*TiForgeCusparseLtCreatePlanFn)(
+    TiForgeRuntimeProviderRuntime runtime,
+    const TiForgeCusparseLtMatmulPlanDesc *desc,
+    TiForgeCusparseLtMatmulPlan *out_plan,
+    TiForgeCusparseLtMatmulPlanInfo *out_info);
+typedef TiForgeRuntimeProviderResult (*TiForgeCusparseLtCompressFn)(
+    TiForgeCusparseLtMatmulPlan plan,
+    const TiForgeCusparseLtCompressDesc *desc);
+typedef TiForgeRuntimeProviderResult (*TiForgeCusparseLtExecuteFn)(
+    TiForgeCusparseLtMatmulPlan plan,
+    const TiForgeCusparseLtMatmulExecDesc *desc);
+typedef TiForgeRuntimeProviderResult (*TiForgeCusparseLtDestroyPlanFn)(
+    TiForgeCusparseLtMatmulPlan plan);
+
+typedef struct TiForgeCusparseLtExecutionApi {
+  uint32_t struct_size;
+  uint32_t execution_abi_version;
+  TiForgeCusparseLtCreatePlanFn create_matmul_plan;
+  TiForgeCusparseLtCompressFn compress_sparse_a;
+  TiForgeCusparseLtExecuteFn execute_matmul;
+  TiForgeCusparseLtDestroyPlanFn destroy_matmul_plan;
+} TiForgeCusparseLtExecutionApi;
+
+typedef void *TiForgeAmgxSolver;
+
+typedef enum TiForgeAmgxValueType {
+  TI_FORGE_AMGX_VALUE_F32 = 1,
+  TI_FORGE_AMGX_VALUE_F64 = 2,
+} TiForgeAmgxValueType;
+
+typedef enum TiForgeAmgxConfigSource {
+  TI_FORGE_AMGX_CONFIG_STRING = 0,
+  TI_FORGE_AMGX_CONFIG_FILE = 1,
+} TiForgeAmgxConfigSource;
+
+typedef struct TiForgeAmgxSolverDesc {
+  uint32_t struct_size;
+  uint32_t value_type;
+  uint32_t config_source;
+  uint32_t reserved;
+  int32_t rows;
+  int32_t nonzeros;
+  const int32_t *row_offsets;
+  const int32_t *column_indices;
+  const void *values;
+  const char *config;
+} TiForgeAmgxSolverDesc;
+
+typedef struct TiForgeAmgxSolveDesc {
+  uint32_t struct_size;
+  uint32_t zero_initial_guess;
+  const void *rhs;
+  void *solution;
+} TiForgeAmgxSolveDesc;
+
+typedef struct TiForgeAmgxSolveInfo {
+  uint32_t struct_size;
+  uint32_t solve_status;
+  int32_t iterations;
+  uint32_t reserved;
+  double residual_norm;
+} TiForgeAmgxSolveInfo;
+
+typedef TiForgeRuntimeProviderResult (*TiForgeAmgxCreateSolverFn)(
+    TiForgeRuntimeProviderRuntime runtime,
+    const TiForgeAmgxSolverDesc *desc,
+    TiForgeAmgxSolver *out_solver);
+typedef TiForgeRuntimeProviderResult (*TiForgeAmgxReplaceCoefficientsFn)(
+    TiForgeAmgxSolver solver,
+    const void *values,
+    int32_t nonzeros);
+typedef TiForgeRuntimeProviderResult (*TiForgeAmgxSolveFn)(
+    TiForgeAmgxSolver solver,
+    const TiForgeAmgxSolveDesc *desc,
+    TiForgeAmgxSolveInfo *out_info);
+typedef TiForgeRuntimeProviderResult (*TiForgeAmgxDestroySolverFn)(
+    TiForgeAmgxSolver solver);
+
+typedef struct TiForgeAmgxExecutionApi {
+  uint32_t struct_size;
+  uint32_t execution_abi_version;
+  TiForgeAmgxCreateSolverFn create_solver;
+  TiForgeAmgxReplaceCoefficientsFn replace_coefficients;
+  TiForgeAmgxSolveFn solve;
+  TiForgeAmgxDestroySolverFn destroy_solver;
+} TiForgeAmgxExecutionApi;
 
 typedef TiForgeRuntimeProviderResult (*TiForgeRuntimeProviderQueryFn)(
     uint32_t requested_abi_version,

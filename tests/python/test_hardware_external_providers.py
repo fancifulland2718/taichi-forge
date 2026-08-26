@@ -49,7 +49,7 @@ def test_external_provider_registry_owns_path_and_lifetime_policy():
     assert optix.runtime_resource_policy == "provider_context"
     assert optix.python_adapter_module == "taichi_forge.hardware._optix"
 
-    expected_probe_only = {
+    expected_runtime_providers = {
         "cusparselt": (
             "taichi_forge.hardware._cusparselt",
             ("cuda_runtime",),
@@ -63,13 +63,13 @@ def test_external_provider_registry_owns_path_and_lifetime_policy():
             ("cuda_runtime", "cublas", "cusparse"),
         ),
     }
-    for provider_id, (module, dependencies) in expected_probe_only.items():
+    for provider_id, (module, dependencies) in expected_runtime_providers.items():
         provider = external_provider_spec(provider_id)
         assert provider.supports_library_path
-        assert provider.adapter_kind == "bundled_probe_only_provider_c_abi"
+        assert provider.adapter_kind == "bundled_provider_c_abi"
         assert provider.install_owner == "forge_runtime_wheel"
-        assert provider.process_handle_policy == "transient_probe"
-        assert provider.runtime_resource_policy == "call"
+        assert provider.process_handle_policy == "provider_object"
+        assert provider.runtime_resource_policy == "provider_plan"
         assert provider.transitive_dependencies == dependencies
         assert provider.python_adapter_module == module
 

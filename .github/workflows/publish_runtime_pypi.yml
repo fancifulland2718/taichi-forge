@@ -229,7 +229,7 @@ jobs:
           fi
           mapfile -t hardware_providers < <(
             find build _skbuild -type f \
-              -name 'libtaichi_forge_*_provider_abi1_*.so' | sort -u
+              -name 'libtaichi_forge_*_provider_abi*_*.so' | sort -u
           )
           if [[ "${#hardware_providers[@]}" -ne 7 ]]; then
             echo "::error::Expected seven bundled hardware adapters, found: ${hardware_providers[*]}"
@@ -454,7 +454,7 @@ jobs:
             exit 1
           }
           $hardwareProviders = @(Get-ChildItem -Path build,_skbuild -Recurse `
-            -Filter "taichi_forge_*_provider_abi1_*.dll" |
+            -Filter "taichi_forge_*_provider_abi*_*.dll" |
             Sort-Object FullName -Unique)
           if ($hardwareProviders.Count -ne 7) {
             Write-Error "Expected seven bundled hardware adapters, found: $($hardwareProviders.FullName -join ', ')"

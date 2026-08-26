@@ -1,4 +1,4 @@
-"""Shared loader for Forge-owned, probe-only vendor runtime adapters."""
+"""Shared loader for Forge-owned optional vendor runtime adapters."""
 
 from contextlib import contextmanager
 import ctypes
@@ -10,9 +10,11 @@ import importlib.util
 import os
 from pathlib import Path
 import sys
+import threading
 
 
-PROVIDER_ABI_VERSION = 1
+PROVIDER_ABI_VERSION = 2
+EXECUTION_ABI_VERSION = 1
 
 _SUCCESS = 0
 _RUNTIME_UNAVAILABLE = 3
@@ -21,6 +23,8 @@ _FEATURE_REQUIRED_SYMBOL_AUDIT = 1 << 1
 _FEATURE_TRANSIENT_PROBE = 1 << 2
 _FEATURE_EXECUTION_API = 1 << 3
 _REQUIRED_FEATURES = _FEATURE_VERSION_QUERY | _FEATURE_REQUIRED_SYMBOL_AUDIT | _FEATURE_TRANSIENT_PROBE
+_ACTIVE_RUNTIME_LOCK = threading.RLock()
+_ACTIVE_RUNTIMES = {}
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,13 @@ _CreateRuntime = ctypes.CFUNCTYPE(
     ctypes.POINTER(_RuntimeInfo),
 )
 _DestroyRuntime = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+_QueryExecutionApi = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_uint32,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+)
 _GetLastError = ctypes.CFUNCTYPE(ctypes.c_size_t, ctypes.POINTER(ctypes.c_char), ctypes.c_size_t)
 
 
@@ -82,6 +93,7 @@ class _ProviderApi(ctypes.Structure):
         ("probe_runtime", _ProbeRuntime),
         ("create_runtime", _CreateRuntime),
         ("destroy_runtime", _DestroyRuntime),
+        ("query_execution_api", _QueryExecutionApi),
         ("get_last_error", _GetLastError),
     ]
 
@@ -97,6 +109,124 @@ class _ProviderRuntimeError(RuntimeError):
     def __init__(self, result, message):
         super().__init__(message)
         self.result = int(result)
+
+
+def _runtime_registry_identity(runtime_info):
+    return (
+        runtime_info["library_path"],
+        int(runtime_info["version_major"]),
+        int(runtime_info["version_minor"]),
+        int(runtime_info["version_patch"]),
+        runtime_info["build_version"],
+    )
+
+
+def _retain_runtime(definition, runtime_info):
+    identity = _runtime_registry_identity(runtime_info)
+    with _ACTIVE_RUNTIME_LOCK:
+        runtimes = _ACTIVE_RUNTIMES.setdefault(definition.provider_id, {})
+        runtimes[identity] = runtimes.get(identity, 0) + 1
+
+
+def _release_runtime(definition, runtime_info):
+    identity = _runtime_registry_identity(runtime_info)
+    with _ACTIVE_RUNTIME_LOCK:
+        runtimes = _ACTIVE_RUNTIMES.get(definition.provider_id)
+        if not runtimes or runtimes.get(identity, 0) <= 0:
+            raise RuntimeError(f"{definition.provider_name} retained-runtime registry underflow")
+        if runtimes[identity] == 1:
+            del runtimes[identity]
+        else:
+            runtimes[identity] -= 1
+        if not runtimes:
+            del _ACTIVE_RUNTIMES[definition.provider_id]
+
+
+def _active_runtime_snapshot(provider_id):
+    with _ACTIVE_RUNTIME_LOCK:
+        runtimes = dict(_ACTIVE_RUNTIMES.get(provider_id, {}))
+    identities = tuple(
+        {
+            "library_path": identity[0],
+            "version": f"{identity[1]}.{identity[2]}.{identity[3]}",
+            "build_version": identity[4],
+            "lease_count": count,
+        }
+        for identity, count in sorted(runtimes.items())
+    )
+    return sum(runtimes.values()), identities
+
+
+class BundledRuntime:
+    """Retained adapter/vendor runtime pair with deterministic destruction."""
+
+    def __init__(self, definition, loaded, handle, runtime_info):
+        self.definition = definition
+        self.loaded = loaded
+        self._handle = handle
+        self.runtime_info = dict(runtime_info)
+        _retain_runtime(definition, self.runtime_info)
+
+    @property
+    def closed(self):
+        return self._handle is None
+
+    @property
+    def handle(self):
+        if self._handle is None:
+            raise RuntimeError(f"{self.definition.provider_name} runtime has been closed")
+        return self._handle
+
+    def query_execution_api(self, api_type):
+        output = api_type()
+        result = int(
+            self.loaded.api.query_execution_api(
+                self.handle,
+                EXECUTION_ABI_VERSION,
+                ctypes.sizeof(api_type),
+                ctypes.byref(output),
+            )
+        )
+        if result != _SUCCESS:
+            raise _ProviderRuntimeError(result, _provider_error(self.loaded.api, self.definition))
+        if output.struct_size < ctypes.sizeof(api_type):
+            raise RuntimeError(f"{self.definition.provider_name} returned a truncated execution API")
+        if output.execution_abi_version != EXECUTION_ABI_VERSION:
+            raise RuntimeError(f"{self.definition.provider_name} returned a mismatched execution ABI")
+        return output
+
+    def check_result(self, result):
+        result = int(result)
+        if result != _SUCCESS:
+            raise _ProviderRuntimeError(result, _provider_error(self.loaded.api, self.definition))
+        return None
+
+    def close(self):
+        if self._handle is None:
+            return None
+        handle = self._handle
+        result = int(self.loaded.api.destroy_runtime(handle))
+        if result != _SUCCESS:
+            raise _ProviderRuntimeError(result, _provider_error(self.loaded.api, self.definition))
+        self._handle = None
+        _release_runtime(self.definition, self.runtime_info)
+        return None
+
+    destroy = close
+
+    def __enter__(self):
+        self.handle
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _decode(value):
@@ -257,14 +387,15 @@ def _check_api(api, definition):
     features = int(api.info.features)
     if features & _REQUIRED_FEATURES != _REQUIRED_FEATURES:
         raise RuntimeError(f"{definition.provider_name} adapter is missing probe features")
-    if features & _FEATURE_EXECUTION_API:
-        raise RuntimeError(f"{definition.provider_name} probe-only adapter claims execution")
+    if not features & _FEATURE_EXECUTION_API:
+        raise RuntimeError(f"{definition.provider_name} adapter is missing execution support")
     if api.info.required_symbol_count <= 0:
         raise RuntimeError(f"{definition.provider_name} adapter does not audit execution symbols")
     for name in (
         "probe_runtime",
         "create_runtime",
         "destroy_runtime",
+        "query_execution_api",
         "get_last_error",
     ):
         if not bool(getattr(api, name)):
@@ -312,6 +443,25 @@ def _probe_runtime(definition, loaded, runtime_path):
         "library_path": _decode(info.library_path) or runtime_path or "system_default",
         "build_version": _decode(info.build_version),
     }
+
+
+def _create_runtime(definition, loaded, runtime_path):
+    info = _RuntimeInfo()
+    info.struct_size = ctypes.sizeof(_RuntimeInfo)
+    handle = ctypes.c_void_p()
+    argument = None if not runtime_path else os.fsencode(runtime_path)
+    result = int(loaded.api.create_runtime(argument, ctypes.byref(handle), ctypes.byref(info)))
+    if result != _SUCCESS or not handle.value:
+        raise _ProviderRuntimeError(result, _provider_error(loaded.api, definition))
+    runtime = {
+        "version_major": int(info.version_major),
+        "version_minor": int(info.version_minor),
+        "version_patch": int(info.version_patch),
+        "cuda_runtime_version": int(info.cuda_runtime_version),
+        "library_path": _decode(info.library_path) or runtime_path or "system_default",
+        "build_version": _decode(info.build_version),
+    }
+    return BundledRuntime(definition, loaded, handle, runtime)
 
 
 def _format_version(runtime):
@@ -390,8 +540,9 @@ def probe_provider(definition, library_path=None):
                 library_candidate=loaded.path,
                 provider_adapter_binary_sha256=adapter_hash,
                 library_loaded_transiently=True,
-                runtime_probe_only=True,
+                probe_created_execution_resource=False,
                 execution_resource_created=False,
+                execution_api_available=True,
                 vendor_runtime_abi_compatible=True,
                 vendor_library_resolved=runtime["library_path"],
                 provider_name=_decode(info.provider_name),
@@ -418,27 +569,52 @@ def probe_provider(definition, library_path=None):
     return result
 
 
-def passive_status(definition):
-    """Report the probe-only contract without loading either shared library."""
+def open_runtime(definition, library_path=None):
+    """Load and retain one compatible adapter plus user-managed vendor runtime."""
 
+    runtime_path = resolve_library_path(definition, library_path)
+    candidates = _bundled_provider_candidates(definition)
+    if not candidates:
+        raise RuntimeError(f"Forge runtime wheel does not contain a {definition.provider_name} adapter")
+    failures = []
+    with _vendor_dll_directories(definition, runtime_path):
+        for candidate in candidates:
+            try:
+                loaded = _query_provider(definition, candidate)
+                return _create_runtime(definition, loaded, runtime_path)
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+                failures.append(f"{candidate}: {str(exc) or type(exc).__name__}")
+    raise RuntimeError(f"no compatible {definition.provider_name} runtime: " + "; ".join(failures))
+
+
+def passive_status(definition):
+    """Report the optional-provider contract without loading either shared library."""
+
+    active_runtime_count, identities = _active_runtime_snapshot(definition.provider_id)
+    versions = tuple(dict.fromkeys(identity["version"] for identity in identities))
     return {
         "provider_id": definition.provider_id,
-        "library_loaded": False,
+        "library_loaded": bool(active_runtime_count),
         "provider_abi": definition.provider_abi_name,
-        "provider_version": None,
+        "provider_version": versions[0] if len(versions) == 1 else None,
         "native_facts": {
-            "status_policy": "passive_probe_only_provider",
+            "status_policy": "passive_retained_runtime_registry",
             "external_component_probed": False,
             "provider_enablement_changed": False,
             "provider_selection_changed": False,
-            "execution_api_available": False,
+            "execution_api_available": bool(active_runtime_count),
+            "active_runtime_count": active_runtime_count,
+            "loaded_runtime_identities": identities,
         },
     }
 
 
 __all__ = (
     "BundledRuntimeProviderDefinition",
+    "BundledRuntime",
+    "EXECUTION_ABI_VERSION",
     "PROVIDER_ABI_VERSION",
+    "open_runtime",
     "passive_status",
     "probe_provider",
     "resolve_library_path",
