@@ -102,6 +102,7 @@ CASES = (
     "cuda-gemm",
     "cuda-mma",
     "cuda-spmv",
+    "cuda-spmm",
     "cuda-spmv-krylov",
     "cuda-cudss-solve",
     "cuda-cudss-refactor-solve",
@@ -1607,6 +1608,138 @@ def _cuda_spmv_case(order, args):
             "route": resolved,
             "provider_statistics": provider_stats,
             "admission_scope": admission_scope,
+        }
+    )
+    ti.reset()
+    return result
+
+
+def _cuda_spmm_case(order, args):
+    _init_cuda()
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        result = _provenance("cuda-spmm", order)
+        result.update({"status": "skipped", "reason": "cusparse_spmm_unavailable"})
+        ti.reset()
+        return result
+
+    rows = args.spmv_rows
+    columns = rows
+    width = args.spmv_width
+    rhs_count = args.spmm_rhs
+    if width <= 0 or width > columns:
+        raise ValueError("spmv-width must be in [1, spmv-rows]")
+    starts = np.clip(
+        np.arange(rows, dtype=np.int64) - width // 2,
+        0,
+        columns - width,
+    ).astype(np.int32)
+    row_offsets_host = np.arange(0, (rows + 1) * width, width, dtype=np.int32)
+    column_indices_host = (starts[:, None] + np.arange(width, dtype=np.int32)[None, :]).reshape(-1)
+    values_host = (0.25 + (np.arange(rows * width, dtype=np.float32) % 17) * np.float32(0.01)).astype(np.float32)
+    input_host = (
+        np.sin(np.arange(columns * rhs_count, dtype=np.float32).reshape(columns, rhs_count) * np.float32(0.003)) + 0.5
+    ).astype(np.float32)
+
+    row_offsets = ti.ndarray(ti.i32, shape=rows + 1)
+    column_indices = ti.ndarray(ti.i32, shape=rows * width)
+    values = ti.ndarray(ti.f32, shape=rows * width)
+    dense_input = ti.ndarray(ti.f32, shape=(columns, rhs_count))
+    hardware_output = ti.ndarray(ti.f32, shape=(rows, rhs_count))
+    baseline_output = ti.ndarray(ti.f32, shape=(rows, rhs_count))
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    values.from_numpy(values_host)
+    dense_input.from_numpy(input_host)
+
+    setup_started = time.perf_counter_ns()
+    pattern = ti.linalg.SparsePattern.csr(rows, columns, row_offsets, column_indices)
+    matrix = ti.linalg.SparseMatrix.from_pattern(pattern, values)
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+    recording_started = time.perf_counter_ns()
+    recording = ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count)
+    recording_creation_ms = (time.perf_counter_ns() - recording_started) / 1.0e6
+
+    @ti.kernel
+    def baseline_kernel(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        coefficients: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        dense: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for row, rhs in output:
+            total = 0.0
+            for offset in range(offsets[row], offsets[row + 1]):
+                total += coefficients[offset] * dense[indices[offset], rhs]
+            output[row, rhs] = total
+
+    def hardware():
+        recording.execute({"input": dense_input, "output": hardware_output})
+
+    def baseline():
+        baseline_kernel(
+            row_offsets,
+            column_indices,
+            values,
+            dense_input,
+            baseline_output,
+        )
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    expected = np.sum(
+        values_host.reshape(rows, width, 1) * input_host[column_indices_host].reshape(rows, width, rhs_count),
+        axis=1,
+    )
+    hardware_error = _error(hardware_output.to_numpy(), expected)
+    baseline_error = _error(baseline_output.to_numpy(), expected)
+    resolved = _resolved_operation("linalg.spmm.cusparse_explicit")
+    provider_stats = matrix._debug_runtime_stats()
+    passed = (
+        hardware_error[0] <= 3e-5
+        and baseline_error[0] <= 3e-5
+        and resolved["discovery"] == "available"
+        and provider_stats["operations"]["spmm_plan_builds"] == 1
+        and provider_stats["resources"]["spmm_plan_count"] == 1
+    )
+    result = _provenance("cuda-spmm", order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "rows": rows,
+                "columns": columns,
+                "nnz_per_row": width,
+                "nnz": rows * width,
+                "rhs_count": rhs_count,
+                "scale_work": rows * width * rhs_count,
+                "resource_setup_ms": setup_ms,
+                "hardware": "cuSPARSE CSR SpMM row-major CSR_ALG2",
+                "baseline": "Taichi scalar CSR x dense kernel",
+            },
+            "fixed_cost_observation": {
+                "resource_setup_ms": setup_ms,
+                "recording_creation_ms": recording_creation_ms,
+                "first_hardware_execution_ms": timing["cold_ms"]["hardware"],
+            },
+            "cost_contract": retained_execution_contract(recording).to_dict(),
+            "timing": timing,
+            "correctness": {
+                "hardware_max_abs": hardware_error[0],
+                "hardware_max_rel": hardware_error[1],
+                "baseline_max_abs": baseline_error[0],
+                "baseline_max_rel": baseline_error[1],
+            },
+            "route": resolved,
+            "provider_statistics": provider_stats,
         }
     )
     ti.reset()
@@ -4103,6 +4236,7 @@ _CASE_RUNNERS = {
     "cuda-gemm": _cuda_gemm_case,
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
+    "cuda-spmm": _cuda_spmm_case,
     "cuda-spmv-krylov": _cuda_spmv_krylov_case,
     "cuda-cudss-solve": _cuda_cudss_solve_case,
     "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
@@ -5461,6 +5595,8 @@ def _parent(args):
                     str(args.spmv_rows),
                     "--spmv-width",
                     str(args.spmv_width),
+                    "--spmm-rhs",
+                    str(args.spmm_rhs),
                     "--cudss-grid",
                     str(args.cudss_grid),
                     "--cudss-expected-reuse",
@@ -5612,6 +5748,7 @@ def _parent(args):
                 "krylov_iterations": args.krylov_iterations,
                 "krylov_stencil_radius": args.krylov_stencil_radius,
                 "krylov_baseline": args.krylov_baseline,
+                "spmm_rhs": args.spmm_rhs,
                 "texture_volume_size": args.texture_volume_size,
                 "offscreen_size": args.offscreen_size,
                 "offscreen_tiles": args.offscreen_tiles,
@@ -5668,6 +5805,7 @@ def _parse_args():
     parser.add_argument("--mma-batch", type=int, default=1024)
     parser.add_argument("--spmv-rows", type=int, default=131072)
     parser.add_argument("--spmv-width", type=int, default=7)
+    parser.add_argument("--spmm-rhs", type=int, default=8)
     parser.add_argument("--spmv-expected-reuse", type=int, default=100)
     parser.add_argument("--cudss-grid", type=int, default=64)
     parser.add_argument("--cudss-expected-reuse", type=int, default=100)
@@ -5722,6 +5860,7 @@ def _parse_args():
         or args.mma_batch <= 0
         or args.spmv_rows <= 0
         or args.spmv_width <= 0
+        or args.spmm_rhs < 2
         or args.spmv_expected_reuse <= 0
         or args.cudss_grid < 2
         or args.cudss_expected_reuse <= 0

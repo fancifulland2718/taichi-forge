@@ -532,9 +532,12 @@ typedef struct cusparseMatDescr *cusparseMatDescr_t;
 
 struct cusparseSpVecDescr;
 struct cusparseDnVecDescr;
+struct cusparseDnMatDescr;
 struct cusparseSpMatDescr;
 typedef struct cusparseSpVecDescr *cusparseSpVecDescr_t;
 typedef struct cusparseDnVecDescr *cusparseDnVecDescr_t;
+typedef struct cusparseDnMatDescr *cusparseDnMatDescr_t;
+typedef struct cusparseDnMatDescr const *cusparseConstDnMatDescr_t;
 typedef struct cusparseSpMatDescr *cusparseSpMatDescr_t;
 
 struct cusparseSpGEMMDescr;
@@ -599,6 +602,19 @@ typedef enum {
   CUSPARSE_SPMV_COO_ALG2 = 4,
   CUSPARSE_SPMV_BSR_ALG1 = 6
 } cusparseSpMVAlg_t;
+
+typedef enum {
+  CUSPARSE_SPMM_ALG_DEFAULT = 0,
+  CUSPARSE_SPMM_COO_ALG1 = 1,
+  CUSPARSE_SPMM_COO_ALG2 = 2,
+  CUSPARSE_SPMM_COO_ALG3 = 3,
+  CUSPARSE_SPMM_COO_ALG4 = 5,
+  CUSPARSE_SPMM_CSR_ALG1 = 4,
+  CUSPARSE_SPMM_CSR_ALG2 = 6,
+  CUSPARSE_SPMM_CSR_ALG3 = 12,
+  CUSPARSE_SPMM_BLOCKED_ELL_ALG1 = 13,
+  CUSPARSE_SPMM_BSR_ALG1 = 14
+} cusparseSpMMAlg_t;
 
 typedef enum {
   CUSPARSE_SPGEMM_DEFAULT = 0,

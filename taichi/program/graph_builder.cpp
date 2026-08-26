@@ -26,6 +26,26 @@ const Ndarray *cuda_sparse_spmv_ndarray(
   return array;
 }
 
+const Ndarray *cuda_sparse_spmm_ndarray(
+    const aot::Arg &symbol,
+    const std::unordered_map<std::string, aot::IValue> &args,
+    Program &program,
+    int expected_rows,
+    int expected_columns) {
+  const auto value_it = args.find(symbol.name);
+  if (value_it == args.end() || value_it->second.tag != aot::ArgKind::kNdarray) {
+    return nullptr;
+  }
+  auto *array = reinterpret_cast<Ndarray *>(value_it->second.val);
+  if (array == nullptr || array->owning_program() != &program ||
+      array->get_element_data_type() != PrimitiveType::f32 ||
+      !array->get_element_shape().empty() ||
+      array->shape != std::vector<int>({expected_rows, expected_columns})) {
+    return nullptr;
+  }
+  return array;
+}
+
 Ndarray *cuda_cufft_ndarray(
     const aot::Arg &symbol,
     const std::unordered_map<std::string, aot::IValue> &args,
@@ -133,6 +153,82 @@ class CudaSparseSpmvCaptureCommand final
   Program *program_{nullptr};
   aot::Arg input_;
   aot::Arg output_;
+};
+
+class CudaSparseSpmmCaptureCommand final
+    : public aot::CudaGraphCaptureCommand {
+ public:
+  CudaSparseSpmmCaptureCommand(CuSparseMatrix *matrix,
+                               Program *program,
+                               aot::Arg input,
+                               aot::Arg output,
+                               int rhs_count,
+                               int algorithm)
+      : matrix_(matrix),
+        program_(program),
+        input_(std::move(input)),
+        output_(std::move(output)),
+        rhs_count_(rhs_count),
+        algorithm_(algorithm) {
+  }
+
+  const char *kind() const override {
+    return "cusparse_spmm_f32";
+  }
+
+  Program *program() const override {
+    return program_;
+  }
+
+  bool supports(const std::unordered_map<std::string, aot::IValue> &args,
+                Program &program) const override {
+    if (matrix_ == nullptr || program_ != &program || rhs_count_ < 2 ||
+        (algorithm_ != 0 && algorithm_ != 1)) {
+      return false;
+    }
+    const auto *input = cuda_sparse_spmm_ndarray(
+        input_, args, program, matrix_->num_cols(), rhs_count_);
+    const auto *output = cuda_sparse_spmm_ndarray(
+        output_, args, program, matrix_->num_rows(), rhs_count_);
+    return input != nullptr && output != nullptr &&
+           input->get_device_allocation() != output->get_device_allocation();
+  }
+
+  void prepare(const std::unordered_map<std::string, aot::IValue> &args,
+               Program &program) override {
+    record(args, program, nullptr);
+  }
+
+  void record(const std::unordered_map<std::string, aot::IValue> &args,
+              Program &program,
+              void *stream) override {
+    TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
+                "CUDA cuSPARSE SpMM capture recipe generation is stale");
+    const auto *input = cuda_sparse_spmm_ndarray(
+        input_, args, program, matrix_->num_cols(), rhs_count_);
+    const auto *output = cuda_sparse_spmm_ndarray(
+        output_, args, program, matrix_->num_rows(), rhs_count_);
+    TI_ERROR_IF(input == nullptr || output == nullptr,
+                "CUDA cuSPARSE SpMM capture requires owning compact f32 "
+                "arrays with shapes ({}, {}) and ({}, {})",
+                matrix_->num_cols(), rhs_count_, matrix_->num_rows(),
+                rhs_count_);
+    TI_ERROR_IF(input->get_device_allocation() ==
+                    output->get_device_allocation(),
+                "CUDA cuSPARSE SpMM capture input/output alias");
+    matrix_->spmm(
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(input)),
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(output)),
+        rhs_count_, algorithm_, reinterpret_cast<CUstream>(stream));
+  }
+
+ private:
+  CuSparseMatrix *matrix_{nullptr};
+  Program *program_{nullptr};
+  aot::Arg input_;
+  aot::Arg output_;
+  int rhs_count_{0};
+  int algorithm_{0};
 };
 
 class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
@@ -260,6 +356,32 @@ void validate_cuda_sparse_spmv_args(SparseMatrix *matrix,
               "CUDA sparse SpMV Graph proof supports cuSPARSE CSR/BSR only");
   TI_ERROR_IF(matrix->get_data_type() != PrimitiveType::f32,
               "CUDA sparse SpMV Graph proof supports f32 matrices only");
+}
+
+void validate_cuda_sparse_spmm_args(CuSparseMatrix *matrix,
+                                    Program *program,
+                                    const aot::Arg &input,
+                                    const aot::Arg &output,
+                                    int rhs_count,
+                                    int algorithm) {
+  TI_ERROR_IF(matrix == nullptr || program == nullptr,
+              "CUDA sparse SpMM Graph proof requires a live CSR matrix and "
+              "Program");
+  TI_ERROR_IF(input.tag != aot::ArgKind::kNdarray ||
+                  output.tag != aot::ArgKind::kNdarray ||
+                  input.dtype_id != PrimitiveTypeID::f32 ||
+                  output.dtype_id != PrimitiveTypeID::f32 ||
+                  input.field_dim != 2 || output.field_dim != 2 ||
+                  !input.element_shape.empty() || !output.element_shape.empty(),
+              "CUDA sparse SpMM Graph proof requires scalar f32 rank-2 "
+              "ndarray bindings");
+  TI_ERROR_IF(input.name == output.name,
+              "CUDA sparse SpMM Graph proof input and output must differ");
+  TI_ERROR_IF(rhs_count < 2,
+              "CUDA sparse SpMM Graph proof requires at least two "
+              "right-hand sides");
+  TI_ERROR_IF(algorithm != 0 && algorithm != 1,
+              "CUDA sparse SpMM Graph proof algorithm is invalid");
 }
 
 void validate_cuda_cufft_args(std::uint64_t plan_handle,
@@ -607,6 +729,24 @@ void GraphBuilder::dispatch_cuda_capture_cusparse_spmv(
   register_arg(output);
   auto command = std::make_shared<CudaSparseSpmvCaptureCommand>(
       matrix, program, input, output);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), std::vector<aot::Arg>{input, output}));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_cusparse_spmm(
+    CuSparseMatrix *matrix,
+    Program *program,
+    const aot::Arg &input,
+    const aot::Arg &output,
+    int rhs_count,
+    int algorithm) {
+  validate_cuda_sparse_spmm_args(matrix, program, input, output, rhs_count,
+                                 algorithm);
+  register_arg(input);
+  register_arg(output);
+  auto command = std::make_shared<CudaSparseSpmmCaptureCommand>(
+      matrix, program, input, output, rhs_count, algorithm);
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), std::vector<aot::Arg>{input, output}));
   seq()->append(all_nodes_.back().get());

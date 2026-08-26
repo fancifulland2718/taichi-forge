@@ -336,6 +336,8 @@ struct CUSPARSEProviderCapabilities {
   bool generic_bsr_spmv_available{false};
   bool spmv_preprocess_available{false};
   bool scalar_spmv_available{false};
+  bool spmm_f32_available{false};
+  bool spmm_preprocess_available{false};
 };
 
 class CUSPARSEDriver : protected CUDADriverBase {
@@ -375,6 +377,52 @@ class CUSPARSEDriver : protected CUDADriverBase {
                      cusparseSpMVAlg_t,
                      void *>
       cpSpMVPreprocess;
+  CUDADriverFunction<cusparseDnMatDescr_t *,
+                     int64_t,
+                     int64_t,
+                     int64_t,
+                     void *,
+                     cudaDataType,
+                     cusparseOrder_t>
+      cpCreateDnMat;
+  CUDADriverFunction<cusparseConstDnMatDescr_t> cpDestroyDnMat;
+  CUDADriverFunction<cusparseDnMatDescr_t, void *> cpDnMatSetValues;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseConstDnMatDescr_t,
+                     const void *,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpMMAlg_t,
+                     size_t *>
+      cpSpMMBufferSize;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseConstDnMatDescr_t,
+                     const void *,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpMMAlg_t,
+                     void *>
+      cpSpMMPreprocess;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseConstDnMatDescr_t,
+                     const void *,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpMMAlg_t,
+                     void *>
+      cpSpMM;
 
   bool load_cusparse();
 

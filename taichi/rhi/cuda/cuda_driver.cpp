@@ -465,6 +465,28 @@ bool CUSPARSEDriver::load_cusparse() {
       loader_->load_function_optional("cusparseSpMV_preprocess"));
   cpSpMVPreprocess.set_lock(&lock_);
   cpSpMVPreprocess.set_names("cpSpMVPreprocess", "cusparseSpMV_preprocess");
+  cpCreateDnMat.set(loader_->load_function_optional("cusparseCreateDnMat"));
+  cpCreateDnMat.set_lock(&lock_);
+  cpCreateDnMat.set_names("cpCreateDnMat", "cusparseCreateDnMat");
+  cpDestroyDnMat.set(
+      loader_->load_function_optional("cusparseDestroyDnMat"));
+  cpDestroyDnMat.set_lock(&lock_);
+  cpDestroyDnMat.set_names("cpDestroyDnMat", "cusparseDestroyDnMat");
+  cpDnMatSetValues.set(
+      loader_->load_function_optional("cusparseDnMatSetValues"));
+  cpDnMatSetValues.set_lock(&lock_);
+  cpDnMatSetValues.set_names("cpDnMatSetValues", "cusparseDnMatSetValues");
+  cpSpMMBufferSize.set(
+      loader_->load_function_optional("cusparseSpMM_bufferSize"));
+  cpSpMMBufferSize.set_lock(&lock_);
+  cpSpMMBufferSize.set_names("cpSpMMBufferSize", "cusparseSpMM_bufferSize");
+  cpSpMMPreprocess.set(
+      loader_->load_function_optional("cusparseSpMM_preprocess"));
+  cpSpMMPreprocess.set_lock(&lock_);
+  cpSpMMPreprocess.set_names("cpSpMMPreprocess", "cusparseSpMM_preprocess");
+  cpSpMM.set(loader_->load_function_optional("cusparseSpMM"));
+  cpSpMM.set_lock(&lock_);
+  cpSpMM.set_names("cpSpMM", "cusparseSpMM");
 
   capabilities_ = {};
   if (cp_get_property_.available()) {
@@ -494,6 +516,12 @@ bool CUSPARSEDriver::load_cusparse() {
       cpCreateCsr.available() && cpDestroySpMat.available() &&
       cpCreateDnVec.available() && cpDestroyDnVec.available() &&
       cpSpMV_bufferSize.available() && cpSpMV.available();
+  capabilities_.spmm_f32_available =
+      capabilities_.scalar_spmv_available && cpCreateDnMat.available() &&
+      cpDestroyDnMat.available() && cpDnMatSetValues.available() &&
+      cpSpMMBufferSize.available() && cpSpMM.available();
+  capabilities_.spmm_preprocess_available =
+      capabilities_.spmm_f32_available && cpSpMMPreprocess.available();
   const auto version_at_least = [&](int major, int minor, int patch) {
     const auto actual = std::make_tuple(capabilities_.library_version_major,
                                         capabilities_.library_version_minor,

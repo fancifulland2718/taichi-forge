@@ -6,13 +6,16 @@ from taichi_forge.hardware._linalg import (
     CudssRefactorSolveRecording,
     CudssSolveRecording,
     CublasGemmRecording,
+    CusparseSpmmRecording,
     CusparseSpmvRecording,
     cublas_is_available,
     cusparse_is_available,
+    cusparse_spmm_is_available,
     cudss_is_available,
     gemm_f32,
     is_available,
     spmv_f32,
+    spmm_f32,
 )
 
 __all__ = [
@@ -22,11 +25,14 @@ __all__ = [
     "CudssRefactorSolveRecording",
     "CudssSolveRecording",
     "CublasGemmRecording",
+    "CusparseSpmmRecording",
     "CusparseSpmvRecording",
     "cublas_is_available",
     "cusparse_is_available",
+    "cusparse_spmm_is_available",
     "cudss_is_available",
     "gemm_f32",
     "is_available",
     "spmv_f32",
+    "spmm_f32",
 ]

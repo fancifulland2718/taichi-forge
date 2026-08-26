@@ -35,6 +35,7 @@ _OPERATION_IDS = (
     "linalg.gemm.cublas",
     "linalg.spmv.cusparse",
     "linalg.spmv.cusparse_explicit",
+    "linalg.spmm.cusparse_explicit",
     "fft.transform.cufft",
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",
@@ -469,6 +470,16 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert explicit_cusparse.public_api == "ti.hardware.linalg.spmv_f32"
     assert "manual hardware interface" in explicit_cusparse.notes[2]
 
+    spmm = ti.hardware.capability("linalg.spmm.cusparse_explicit")
+    assert spmm.implementation_status == "existing_public"
+    assert spmm.scopes == ("python", "graph")
+    assert spmm.graph_integration == "root_ordered"
+    assert spmm.stream_binding == "runtime_ordered"
+    assert spmm.workspace_ownership == "provider_owned"
+    assert spmm.public_api == "ti.hardware.linalg.spmm_f32"
+    assert "fixed costs" in spmm.notes[2]
+    assert "single-inflight" in spmm.notes[4]
+
     cudss = ti.hardware.capability("linalg.solve.cudss")
     assert cudss.implementation_status == "existing_public"
     assert cudss.scopes == ("python", "graph")
@@ -705,6 +716,7 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
                 "provider_enablement_changed": False,
                 "provider_selection_changed": False,
                 "generic_bsr_spmv_available": provider_id == "cusparse",
+                "spmm_f32_available": provider_id == "cusparse",
             },
         }
 
@@ -712,6 +724,11 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
     report = ti.hardware.report()
     cusparse = next(operation for operation in report.operations if operation.descriptor.provider_id == "cusparse")
     cublas = next(operation for operation in report.operations if operation.descriptor.provider_id == "cublas")
+    spmm = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id == "linalg.spmm.cusparse_explicit"
+    )
 
     assert cusparse.discovery == "available"
     assert cusparse.enablement == "enabled"
@@ -721,6 +738,9 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
     assert cusparse.provider_version == "12.6.3"
     assert cusparse.native_facts["generic_bsr_spmv_available"]
     assert not cusparse.native_facts["external_component_probed"]
+    assert spmm.discovery == "available"
+    assert spmm.selection == "eligible"
+    assert spmm.native_facts["spmm_f32_available"]
     assert cublas.enablement == "disabled"
     assert cublas.selection == "not_considered"
 

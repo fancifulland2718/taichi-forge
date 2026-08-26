@@ -234,6 +234,31 @@ class _CusparseSpmvCaptureRecipe(_CudaGraphCaptureRecipe):
         )
 
 
+class _CusparseSpmmCaptureRecipe(_CudaGraphCaptureRecipe):
+    kind = "cusparse_spmm_f32"
+
+    def __init__(self, matrix, rhs_count, algorithm, input_name, output_name):
+        self._matrix = matrix
+        self._rhs_count = rhs_count
+        self._algorithm = algorithm
+        self._input_name = input_name
+        self._output_name = output_name
+
+    def append_to_graph(self, builder, program):
+        from taichi_forge.graph._graph import Arg, ArgKind  # pylint: disable=C0415
+
+        input_arg = Arg(ArgKind.NDARRAY, self._input_name, f32, ndim=2)
+        output_arg = Arg(ArgKind.NDARRAY, self._output_name, f32, ndim=2)
+        builder._dispatch_cuda_cusparse_spmm_capture_recipe(
+            self._matrix.matrix,
+            program,
+            input_arg,
+            output_arg,
+            self._rhs_count,
+            self._algorithm,
+        )
+
+
 def _cusparse_spmv_execution_contract(matrix, identity):
     cache_key = int(impl.runtime_generation())
     cached = getattr(matrix, "_cusparse_spmv_retained_contract", None)
@@ -280,9 +305,7 @@ def _cusparse_spmv_execution_contract(matrix, identity):
         fixed_cost("graph_capture", "graph_instance"),
     ]
     if provider["spmv_preprocess_available"]:
-        fixed_components.append(
-            fixed_cost("spmv_preprocess", "provider_generation")
-        )
+        fixed_components.append(fixed_cost("spmv_preprocess", "provider_generation"))
     contract = RetainedExecutionContract(
         identity=retained_identity,
         cost_model=HardwareExecutionCostModel(
@@ -533,6 +556,19 @@ def spmv_f32(matrix, input, output):
     return output
 
 
+def spmm_f32(matrix, input, output, *, algorithm="row_major"):
+    """Compute ``output = matrix @ input`` for a compact row-major RHS batch."""
+
+    input_shape = tuple(getattr(input, "shape", ()))
+    if len(input_shape) != 2:
+        raise TaichiRuntimeError(
+            "CUDA cuSPARSE SpMM input must be a two-dimensional ndarray"
+        )
+    recording = CusparseSpmmRecording(matrix, input_shape[1], algorithm=algorithm)
+    recording.execute({"input": input, "output": output})
+    return output
+
+
 def cublas_is_available():
     """Explicitly probe whether a compatible cuBLAS provider is present."""
 
@@ -569,6 +605,275 @@ def cusparse_is_available():
         if item.descriptor.operation_id == "linalg.spmv.cusparse_explicit"
     )
     return operation.discovery == "available"
+
+
+def cusparse_spmm_is_available():
+    """Probe the optional cuSPARSE dense-matrix SpMM symbol slice."""
+
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
+        return False
+    from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
+
+    report = probe("cusparse")
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.spmm.cusparse_explicit"
+    )
+    return operation.discovery == "available"
+
+
+def _cusparse_spmm_execution_contract(matrix, identity, rhs_count, algorithm):
+    cache_key = (int(impl.runtime_generation()), rhs_count, algorithm)
+    cached_contracts = getattr(matrix, "_cusparse_spmm_retained_contracts", None)
+    if cached_contracts is None:
+        cached_contracts = {}
+        matrix._cusparse_spmm_retained_contracts = cached_contracts
+    cached = cached_contracts.get(cache_key)
+    if cached is not None:
+        return cached
+
+    runtime_stats = matrix._debug_runtime_stats()  # pylint: disable=W0212
+    pattern_version = runtime_stats["identity"]["pattern_version"]
+    provider = runtime_stats["provider"]
+    provider_scope = passive_dynamic_provider_scope(
+        "cusparse",
+        "cusparse-dynamic-symbols-v1",
+        version=provider["library_version"],
+    )
+    retained_identity = make_retained_plan_identity(
+        "linalg.spmm.cusparse_explicit",
+        "cusparse",
+        "cuda",
+        provider_scope=provider_scope,
+        problem_scope={
+            "rows": matrix.n,
+            "columns": matrix.m,
+            "nonzeros": runtime_stats["identity"]["nnz"],
+            "rhs_count": rhs_count,
+            "storage_format": identity["storage_format"],
+            "dtype": "f32",
+            "topology_fingerprint": matrix._topology_fingerprint,
+            "pattern_id": runtime_stats["identity"]["pattern_id"],
+            "pattern_version": pattern_version,
+            "resource_object_token": id(matrix.matrix),
+            "resource_generation": pattern_version,
+        },
+        execution_scope={
+            "algorithm": algorithm,
+            "workspace_limit_bytes": None,
+            "stream_binding": "runtime_ordered",
+            "capture_compatible": True,
+        },
+    )
+    fixed_components = [
+        fixed_cost("provider_library_load", "process"),
+        fixed_cost("handle_and_descriptors", "provider_generation"),
+        fixed_cost("workspace_allocation", "provider_generation"),
+        fixed_cost("graph_capture", "graph_instance"),
+    ]
+    if algorithm == "deterministic" and provider["spmm_preprocess_available"]:
+        fixed_components.append(fixed_cost("spmm_preprocess", "provider_generation"))
+    contract = RetainedExecutionContract(
+        identity=retained_identity,
+        cost_model=HardwareExecutionCostModel(
+            (
+                *fixed_components,
+                scale_cost("spmm_execution", "rows", "nonzeros", "rhs_count"),
+            )
+        ),
+        workspace_ownership="provider_generation",
+        concurrency_policy="single_inflight",
+    )
+    result = (contract, dict(runtime_stats["resources"]))
+    cached_contracts[cache_key] = result
+    return result
+
+
+@instrument_hardware_recording("linalg.spmm.cusparse_explicit")
+class CusparseSpmmRecording(BackendCommandRecording):
+    """Retained row-major f32 CSR SpMM over two or more right-hand sides."""
+
+    _ALGORITHMS = {"row_major": 0, "deterministic": 1}
+
+    def __init__(
+        self,
+        matrix,
+        rhs_count,
+        *,
+        algorithm="row_major",
+        input="input",
+        output="output",
+    ):
+        from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
+            SparseMatrix,
+        )
+
+        if not isinstance(matrix, SparseMatrix):
+            raise TypeError("CUDA cuSPARSE SpMM matrix must be a SparseMatrix")
+        if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):
+            raise TypeError("CUDA cuSPARSE SpMM rhs_count must be an integer")
+        if rhs_count < 2 or rhs_count > 0x7FFFFFFF:
+            raise ValueError("CUDA cuSPARSE SpMM rhs_count must be in [2, INT_MAX]")
+        if algorithm not in self._ALGORITHMS:
+            raise ValueError(
+                "CUDA cuSPARSE SpMM algorithm must be row_major or deterministic"
+            )
+        matrix._ensure_valid()  # pylint: disable=W0212
+        contract = matrix._get_format_contract()  # pylint: disable=W0212
+        identity = contract["identity"]
+        if identity["backend_family"] != "cuda" or identity["storage_format"] != "csr":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMM requires a scalar CUDA CSR SparseMatrix"
+            )
+        if identity["dtype"] != "f32":
+            raise TaichiRuntimeError("CUDA cuSPARSE SpMM requires an f32 SparseMatrix")
+        runtime_stats = matrix._debug_runtime_stats()  # pylint: disable=W0212
+        if not runtime_stats["provider"]["spmm_f32_available"]:
+            raise TaichiRuntimeError(
+                "The loaded cuSPARSE provider does not expose the optional "
+                "f32 SpMM dynamic-symbol contract"
+            )
+        names = (input, output)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
+        if input == output:
+            raise ValueError("CUDA cuSPARSE binding names must be unique")
+        super().__init__(
+            backend="cuda",
+            binding_names=names,
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="declared_effects",
+            workspace_ownership="provider_generation",
+            replay_mode="stream_capture",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "rhs_count", rhs_count)
+        object.__setattr__(self, "algorithm", algorithm)
+        object.__setattr__(self, "_algorithm_code", self._ALGORITHMS[algorithm])
+        object.__setattr__(self, "input", input)
+        object.__setattr__(self, "output", output)
+        object.__setattr__(
+            self,
+            "_cuda_capture_recipe",
+            _CusparseSpmmCaptureRecipe(
+                matrix, rhs_count, self._algorithm_code, input, output
+            ),
+        )
+        retained_contract, memory_resources = _cusparse_spmm_execution_contract(
+            matrix, identity, rhs_count, algorithm
+        )
+        attach_retained_execution_contract(self, retained_contract)
+        object.__setattr__(self, "_memory_resources", memory_resources)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.input, GraphAccess.READ),
+            ResourceEffect(self.output, GraphAccess.WRITE),
+        )
+
+    def execute(self, bindings):
+        validate_exact_bindings(self, bindings, "CUDA cuSPARSE SpMM")
+        if active_backend() != "cuda":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMM requires the CUDA backend; the active "
+                f"backend is {active_backend()}"
+            )
+        program = impl.get_runtime().prog
+        if program is None:
+            raise TaichiRuntimeError("CUDA cuSPARSE SpMM requires an active runtime")
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+        input_value = bindings[self.input]
+        output_value = bindings[self.output]
+        input_array = CusparseSpmvRecording._validate_array(
+            input_value, self.input, (self.matrix.m, self.rhs_count)
+        )
+        output_array = CusparseSpmvRecording._validate_array(
+            output_value, self.output, (self.matrix.n, self.rhs_count)
+        )
+        if (
+            input_value._runtime_allocation_identity
+            == output_value._runtime_allocation_identity
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE SpMM output must not alias the input"
+            )
+        with hardware_provider_call("cusparse"):
+            self.matrix.matrix._cuda_cusparse_spmm_f32(
+                program,
+                input_array,
+                output_array,
+                self.rhs_count,
+                self._algorithm_code,
+            )
+
+    def validate_graph_lifetime(self):
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+
+    def memory_report(self):
+        lifecycle_state = "ready"
+        resident = True
+        resources = self._memory_resources
+        try:
+            resources = dict(
+                self.matrix._debug_runtime_stats()["resources"]  # pylint: disable=W0212
+            )
+            object.__setattr__(self, "_memory_resources", resources)
+        except TaichiRuntimeError:
+            lifecycle_state = "runtime_invalid"
+            resident = False
+        workspace_bytes = int(resources.get("spmm_workspace_reserved_bytes", 0))
+        return make_memory_report(
+            "cusparse_spmm_f32",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    "retained_spmm_workspace",
+                    workspace_bytes,
+                    True,
+                    "provider_generation",
+                    "shared_user_object",
+                    resident=resident,
+                ),
+                HardwareMemoryComponent(
+                    "cusparse_handle_and_descriptors",
+                    None,
+                    False,
+                    "provider_generation",
+                    "driver",
+                    resident=resident,
+                ),
+            ),
+            lifecycle_state=lifecycle_state,
+            ownership_scope="sparse_matrix_rhs_algorithm_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return (
+            "cusparse_spmm_f32",
+            id(self.matrix),
+            self.rhs_count,
+            self.algorithm,
+        )
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item,),
+            debug_info=lambda item: {
+                "kind": "cuda_cusparse_spmm_f32",
+                "shape": item.matrix.shape,
+                "rhs_count": item.rhs_count,
+                "algorithm": item.algorithm,
+            },
+        )
 
 
 class CudssPlan:
@@ -659,9 +964,7 @@ class CudssPlan:
                 "provider_source": "forge_runtime_wheel",
                 "provider_abi": "taichi-forge-cudss-provider-c-abi1",
                 "provider_version": resolved.provider_version,
-                "provider_adapter_binary_sha256": (
-                    resolved.adapter_binary_sha256
-                ),
+                "provider_adapter_binary_sha256": (resolved.adapter_binary_sha256),
                 "cudss_header_version": resolved.provider_header_version,
                 "provider_name": resolved.provider_name,
                 "build_identity": resolved.build_identity,
@@ -699,6 +1002,7 @@ class CudssPlan:
                 "capture_compatible": False,
             },
         )
+
         self._solve_execution_contract = RetainedExecutionContract(
             identity=self._retained_identity,
             cost_model=HardwareExecutionCostModel(

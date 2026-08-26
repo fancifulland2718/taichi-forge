@@ -203,9 +203,16 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
         "cusparseCreateCsr",       "cusparseDestroySpMat",
         "cusparseCreateDnVec",     "cusparseDestroyDnVec",
         "cusparseSpMV_bufferSize", "cusparseSpMV"};
-    optional_symbols = {"cusparseGetProperty", "cusparseCreateBsr",
-                        "cusparseSpMV_preprocess"};
-    native_facts["operation_contract"] = "spmv_f32";
+    optional_symbols = {"cusparseGetProperty",
+                        "cusparseCreateBsr",
+                        "cusparseSpMV_preprocess",
+                        "cusparseCreateDnMat",
+                        "cusparseDestroyDnMat",
+                        "cusparseDnMatSetValues",
+                        "cusparseSpMM_bufferSize",
+                        "cusparseSpMM_preprocess",
+                        "cusparseSpMM"};
+    native_facts["operation_contract"] = "spmv_f32+optional_spmm_f32";
   } else if (provider_id == "cufft") {
     library_name = "cufft";
     versions = {cuda_major, cuda_major - 1, 12, 11, 10};
@@ -315,6 +322,18 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
       }
     }
   }
+  if (provider_id == "cusparse") {
+    const auto has_symbol = [&](const char *symbol) {
+      return loader->load_function_optional(symbol) != nullptr;
+    };
+    native_facts["spmm_f32_available"] =
+        has_symbol("cusparseCreateDnMat") &&
+        has_symbol("cusparseDestroyDnMat") &&
+        has_symbol("cusparseDnMatSetValues") &&
+        has_symbol("cusparseSpMM_bufferSize") && has_symbol("cusparseSpMM");
+    native_facts["spmm_preprocess_available"] =
+        has_symbol("cusparseSpMM_preprocess");
+  }
   native_facts["version_query_succeeded"] = version_query_succeeded;
   if (version_query_succeeded) {
     result["provider_version"] =
@@ -387,6 +406,10 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
         loaded && capabilities.spmv_preprocess_available;
     native_facts["scalar_spmv_available"] =
         loaded && capabilities.scalar_spmv_available;
+    native_facts["spmm_f32_available"] =
+        loaded && capabilities.spmm_f32_available;
+    native_facts["spmm_preprocess_available"] =
+        loaded && capabilities.spmm_preprocess_available;
     if (loaded && capabilities.library_version_major >= 0 &&
         capabilities.library_version_minor >= 0 &&
         capabilities.library_version_patch >= 0) {

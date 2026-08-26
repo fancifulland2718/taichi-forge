@@ -3050,6 +3050,37 @@ void CuSparseMatrix::build_csr_from_coo(void *coo_row_ptr,
 #endif
 }
 
+struct CuSparseMatrix::SpmmPlan {
+#if defined(TI_WITH_CUDA)
+  ~SpmmPlan() {
+    auto &cusparse = CUSPARSEDriver::get_instance();
+    if (input_descriptor)
+      cusparse.cpDestroyDnMat(input_descriptor);
+    if (output_descriptor)
+      cusparse.cpDestroyDnMat(output_descriptor);
+    if (matrix_descriptor)
+      cusparse.cpDestroySpMat(matrix_descriptor);
+    if (handle)
+      cusparse.cpDestroy(handle);
+    if (workspace)
+      CUDADriver::get_instance().mem_free(workspace);
+  }
+
+  cusparseHandle_t handle{nullptr};
+  CUstream stream{nullptr};
+  cusparseSpMatDescr_t matrix_descriptor{nullptr};
+  cusparseDnMatDescr_t input_descriptor{nullptr};
+  cusparseDnMatDescr_t output_descriptor{nullptr};
+  std::size_t input_ptr{0};
+  std::size_t output_ptr{0};
+  void *workspace{nullptr};
+  std::size_t workspace_size{0};
+  int rhs_count{0};
+  cusparseSpMMAlg_t algorithm{CUSPARSE_SPMM_CSR_ALG2};
+  bool preprocessed{false};
+#endif
+};
+
 void CuSparseMatrix::reset_spmv_resources() {
 #if defined(TI_WITH_CUDA)
   if (spmv_vec_x_)
@@ -3107,6 +3138,7 @@ void CuSparseMatrix::update_values(Program *prog, const Ndarray &values) {
 
 CuSparseMatrix::~CuSparseMatrix() {
 #if defined(TI_WITH_CUDA)
+  reset_spmm_resources();
   reset_spmv_resources();
   if (matrix_)
     CUSPARSEDriver::get_instance().cpDestroySpMat(matrix_);
@@ -3502,6 +3534,136 @@ void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
 #endif
 }
 
+void CuSparseMatrix::spmm(size_t dB,
+                          size_t dC,
+                          int rhs_count,
+                          int algorithm,
+                          CUstream stream) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(dtype_ != PrimitiveType::f32,
+              "CUDA cuSPARSE SpMM supports f32 CSR matrices only.");
+  TI_ERROR_IF(rhs_count < 2,
+              "CUDA cuSPARSE SpMM requires at least two right-hand sides; "
+              "use SpMV for one right-hand side.");
+  TI_ERROR_IF(algorithm != 0 && algorithm != 1,
+              "CUDA cuSPARSE SpMM algorithm must be 0 (row-major) or 1 "
+              "(deterministic).");
+  TI_ERROR_IF(dB == 0 || dC == 0 || dB == dC,
+              "CUDA cuSPARSE SpMM requires distinct live input/output "
+              "allocations.");
+
+  auto numeric_guard = acquire_numeric_access_guard();
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  auto &cusparse = CUSPARSEDriver::get_instance();
+  TI_ERROR_IF(!cusparse.capabilities().spmm_f32_available,
+              "The loaded cuSPARSE provider does not expose the optional "
+              "f32 SpMM dynamic-symbol contract.");
+
+  ++spmm_calls_;
+  const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
+                   static_cast<std::uint32_t>(algorithm);
+  auto found = spmm_plans_.find(key);
+  if (found == spmm_plans_.end()) {
+    auto created = std::make_shared<SpmmPlan>();
+    created->rhs_count = rhs_count;
+    created->algorithm = algorithm == 0 ? CUSPARSE_SPMM_CSR_ALG2
+                                        : CUSPARSE_SPMM_CSR_ALG3;
+    cusparse.cpCreate(&created->handle);
+    cusparse.cpSetPointerMode(created->handle, CUSPARSE_POINTER_MODE_HOST);
+    cusparse.cpCreateCsr(
+        &created->matrix_descriptor, rows_, cols_, nnz_, csr_row_ptr_,
+        csr_col_ind_, csr_val_, CUSPARSE_INDEX_32I, CUSPARSE_INDEX_32I,
+        CUSPARSE_INDEX_BASE_ZERO, CUDA_R_32F);
+    cusparse.cpCreateDnMat(&created->input_descriptor, cols_, rhs_count,
+                          rhs_count, reinterpret_cast<void *>(dB),
+                          CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    cusparse.cpCreateDnMat(&created->output_descriptor, rows_, rhs_count,
+                          rhs_count, reinterpret_cast<void *>(dC),
+                          CUDA_R_32F, CUSPARSE_ORDER_ROW);
+    created->input_ptr = dB;
+    created->output_ptr = dC;
+
+    cusparse.cpSetStream(created->handle, stream);
+    CUstream bound_stream = reinterpret_cast<CUstream>(1);
+    cusparse.cpGetStream(created->handle, &bound_stream);
+    TI_ERROR_IF(bound_stream != stream,
+                "CUDA cuSPARSE SpMM stream binding could not be verified.");
+    created->stream = stream;
+
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    cusparse.cpSpMMBufferSize(
+        created->handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+        CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+        created->matrix_descriptor, created->input_descriptor, &beta,
+        created->output_descriptor, CUDA_R_32F, created->algorithm,
+        &created->workspace_size);
+    if (created->workspace_size > 0) {
+      CUDADriver::get_instance().malloc(&created->workspace,
+                                        created->workspace_size);
+      ++spmm_workspace_allocations_;
+    }
+
+    if (algorithm == 1 &&
+        cusparse.capabilities().spmm_preprocess_available) {
+      const auto preprocess_error = cusparse.cpSpMMPreprocess.call(
+          created->handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+          CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+          created->matrix_descriptor, created->input_descriptor, &beta,
+          created->output_descriptor, CUDA_R_32F, created->algorithm,
+          created->workspace);
+      if (preprocess_error == 0) {
+        created->preprocessed = true;
+        ++spmm_preprocess_builds_;
+      } else {
+        ++spmm_preprocess_fallbacks_;
+      }
+    } else if (algorithm == 1) {
+      ++spmm_preprocess_fallbacks_;
+    }
+    found = spmm_plans_.emplace(key, std::move(created)).first;
+    ++spmm_plan_builds_;
+  } else {
+    ++spmm_plan_reuses_;
+    if (found->second->preprocessed) {
+      ++spmm_preprocess_reuses_;
+    }
+  }
+
+  auto &plan = *found->second;
+  if (plan.stream != stream) {
+    cusparse.cpSetStream(plan.handle, stream);
+    CUstream bound_stream = reinterpret_cast<CUstream>(1);
+    cusparse.cpGetStream(plan.handle, &bound_stream);
+    TI_ERROR_IF(bound_stream != stream,
+                "CUDA cuSPARSE SpMM stream binding could not be verified.");
+    plan.stream = stream;
+  }
+  if (plan.input_ptr != dB) {
+    cusparse.cpDnMatSetValues(plan.input_descriptor,
+                              reinterpret_cast<void *>(dB));
+    plan.input_ptr = dB;
+    ++spmm_dense_descriptor_rebinds_;
+  }
+  if (plan.output_ptr != dC) {
+    cusparse.cpDnMatSetValues(plan.output_descriptor,
+                              reinterpret_cast<void *>(dC));
+    plan.output_ptr = dC;
+    ++spmm_dense_descriptor_rebinds_;
+  }
+
+  float alpha = 1.0f;
+  float beta = 0.0f;
+  cusparse.cpSpMM(plan.handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
+                  CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
+                  plan.matrix_descriptor, plan.input_descriptor, &beta,
+                  plan.output_descriptor, CUDA_R_32F, plan.algorithm,
+                  plan.workspace);
+#else
+  TI_NOT_IMPLEMENTED;
+#endif
+}
+
 void CuSparseMatrix::spmv_kernel(size_t dX,
                                  size_t dY,
                                  CUstream stream) {
@@ -3514,6 +3676,12 @@ void CuSparseMatrix::spmv_kernel(size_t dX,
       reinterpret_cast<void *>(dY), rows_, stream);
 #else
   TI_NOT_IMPLEMENTED;
+#endif
+}
+
+void CuSparseMatrix::reset_spmm_resources() {
+#if defined(TI_WITH_CUDA)
+  spmm_plans_.clear();
 #endif
 }
 
@@ -3532,11 +3700,23 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
       provider.generic_bsr_spmv_available;
   result.provider_spmv_preprocess_available =
       provider.spmv_preprocess_available;
+  result.provider_spmm_f32_available = provider.spmm_f32_available;
+  result.provider_spmm_preprocess_available =
+      provider.spmm_preprocess_available;
   result.spmv_preprocess_active = spmv_preprocessed_;
   result.spmv_preprocess_last_error = spmv_preprocess_last_error_;
   result.spmv_preprocess_builds = spmv_preprocess_builds_;
   result.spmv_preprocess_reuses = spmv_preprocess_reuses_;
   result.spmv_preprocess_fallbacks = spmv_preprocess_fallbacks_;
+  result.spmm_calls = spmm_calls_;
+  result.spmm_plan_builds = spmm_plan_builds_;
+  result.spmm_plan_reuses = spmm_plan_reuses_;
+  result.spmm_dense_descriptor_rebinds =
+      spmm_dense_descriptor_rebinds_;
+  result.spmm_workspace_allocations = spmm_workspace_allocations_;
+  result.spmm_preprocess_builds = spmm_preprocess_builds_;
+  result.spmm_preprocess_reuses = spmm_preprocess_reuses_;
+  result.spmm_preprocess_fallbacks = spmm_preprocess_fallbacks_;
   result.nnz = nnz_;
   result.pattern_reserved_bytes =
       (static_cast<std::uint64_t>(rows_) + 1 +
@@ -3546,12 +3726,18 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
       static_cast<std::uint64_t>(nnz_) * sizeof(float32);
   result.spmv_workspace_reserved_bytes =
       spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
+  for (const auto &[key, plan] : spmm_plans_) {
+    (void)key;
+    result.spmm_workspace_reserved_bytes += plan->workspace_size;
+  }
   result.operator_owned_reserved_bytes = result.pattern_reserved_bytes +
                                          result.values_reserved_bytes +
-                                         result.spmv_workspace_reserved_bytes;
+                                         result.spmv_workspace_reserved_bytes +
+                                         result.spmm_workspace_reserved_bytes;
   if (pattern_) {
     result.operator_exclusive_reserved_bytes =
-        result.values_reserved_bytes + result.spmv_workspace_reserved_bytes;
+        result.values_reserved_bytes + result.spmv_workspace_reserved_bytes +
+        result.spmm_workspace_reserved_bytes;
     result.shared_pattern_id = pattern_->pattern_id();
     result.shared_pattern_operator_references =
         pattern_->operator_references();
@@ -3561,6 +3747,8 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
   result.dense_vector_descriptor_count =
       (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0);
   result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
+  result.spmm_plan_count = spmm_plans_.size();
+  result.spmm_dense_matrix_descriptor_count = spmm_plans_.size() * 2;
   return result;
 #else
   return make_runtime_statistics("cuda", "csr");
@@ -4971,6 +5159,34 @@ void CuSparseMatrix::nd_spmv(Program *prog,
   size_t dX = prog->get_ndarray_data_ptr_as_int(&x);
   size_t dY = prog->get_ndarray_data_ptr_as_int(&y);
   spmv(dX, dY);
+#endif
+}
+
+void CuSparseMatrix::nd_spmm(Program *prog,
+                             const Ndarray &input,
+                             const Ndarray &output,
+                             int rhs_count,
+                             int algorithm) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(!prog || !arch_is_cuda(prog->compile_config().arch),
+              "CUDA cuSPARSE SpMM requires its owning CUDA Program.");
+  const std::vector<int> expected_input_shape{cols_, rhs_count};
+  const std::vector<int> expected_output_shape{rows_, rhs_count};
+  TI_ERROR_IF(input.owning_program() != prog || output.owning_program() != prog,
+              "CUDA cuSPARSE SpMM ndarrays must belong to the active Program.");
+  TI_ERROR_IF(input.get_element_data_type() != PrimitiveType::f32 ||
+                  !input.get_element_shape().empty() ||
+                  input.shape != expected_input_shape ||
+                  output.get_element_data_type() != PrimitiveType::f32 ||
+                  !output.get_element_shape().empty() ||
+                  output.shape != expected_output_shape,
+              "CUDA cuSPARSE SpMM expects compact scalar f32 arrays with "
+              "shapes ({}, {}) and ({}, {}).",
+              cols_, rhs_count, rows_, rhs_count);
+  spmm(prog->get_ndarray_data_ptr_as_int(&input),
+       prog->get_ndarray_data_ptr_as_int(&output), rhs_count, algorithm);
+#else
+  TI_NOT_IMPLEMENTED;
 #endif
 }
 

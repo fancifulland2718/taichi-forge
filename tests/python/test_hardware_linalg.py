@@ -67,12 +67,21 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
         ti.hardware.linalg.CusparseSpmvRecording(matrix)
     with pytest.raises(TypeError, match="must be a SparseMatrix"):
         ti.hardware.linalg.CusparseSpmvRecording(object())
+    with pytest.raises(TypeError, match="must be a SparseMatrix"):
+        ti.hardware.linalg.CusparseSpmmRecording(object(), 4)
+    with pytest.raises(ValueError, match="rhs_count"):
+        ti.hardware.linalg.CusparseSpmmRecording(matrix, 1)
+    with pytest.raises(ValueError, match="algorithm"):
+        ti.hardware.linalg.CusparseSpmmRecording(matrix, 4, algorithm="fastest_magic")
 
     spmv_descriptor = ti.hardware.capability(
         "linalg.spmv.cusparse_explicit"
     )
     assert spmv_descriptor.graph_integration == "root_ordered"
     assert spmv_descriptor.public_api == "ti.hardware.linalg.spmv_f32"
+    spmm_descriptor = ti.hardware.capability("linalg.spmm.cusparse_explicit")
+    assert spmm_descriptor.graph_integration == "root_ordered"
+    assert spmm_descriptor.public_api == "ti.hardware.linalg.spmm_f32"
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -222,6 +231,103 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cusparse_spmm_retains_plans_and_executes_directly_and_through_graph():
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("the loaded cuSPARSE library lacks generic SpMM symbols")
+
+    rows, columns, rhs_count = 7, 5, 4
+    builder = ti.linalg.SparseMatrixBuilder(rows, columns, max_num_triplets=rows * 2)
+
+    @ti.kernel
+    def fill(a: ti.types.sparse_matrix_builder()):
+        for i in range(rows):
+            a[i, i % columns] += ti.cast(i + 1, ti.f32)
+            a[i, (i + 2) % columns] += 0.25
+
+    fill(builder)
+    matrix = builder.build()
+    dense_matrix = np.zeros((rows, columns), dtype=np.float32)
+    for i in range(rows):
+        dense_matrix[i, i % columns] += i + 1
+        dense_matrix[i, (i + 2) % columns] += 0.25
+    input_values = np.arange(columns * rhs_count, dtype=np.float32).reshape(columns, rhs_count) / 7.0 - 0.5
+    expected = dense_matrix @ input_values
+    input_array = ti.ndarray(ti.f32, shape=input_values.shape)
+    output = ti.ndarray(ti.f32, shape=expected.shape)
+    input_array.from_numpy(input_values)
+
+    ti.hardware.linalg.spmm_f32(matrix, input_array, output)
+    ti.sync()
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
+
+    recording = ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count)
+    retained = retained_execution_contract(recording)
+    assert retained.identity.operation_id == "linalg.spmm.cusparse_explicit"
+    assert retained.identity.to_dict()["problem_scope"]["rhs_count"] == rhs_count
+    assert retained.concurrency_policy == "single_inflight"
+    assert retained.cost_model.scale_costs[0].dimensions == (
+        "rows",
+        "nonzeros",
+        "rhs_count",
+    )
+    assert tuple(item.name for item in retained.cost_model.fixed_costs) == (
+        "provider_library_load",
+        "handle_and_descriptors",
+        "workspace_allocation",
+        "graph_capture",
+    )
+    assert retained is retained_execution_contract(ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count))
+
+    output.fill(0)
+    result = ti.ndarray(ti.f32, shape=expected.shape)
+
+    @ti.kernel
+    def finish(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        destination: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for i, j in source:
+            destination[i, j] = source[i, j] + 1.0
+
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
+    result_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=2)
+    graph_builder = ti.graph.GraphBuilder()
+    graph_builder.append_native(recording, admission="auto")
+    graph_builder.dispatch(finish, output_arg, result_arg)
+    graph = graph_builder.compile()
+    graph.run({"input": input_array, "output": output, "result": result})
+    ti.sync()
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
+    np.testing.assert_allclose(result.to_numpy(), expected + 1.0, rtol=2e-5, atol=2e-5)
+    assert graph._graph_stats[0]["last_path"] == "cuda_capture"
+    assert graph._graph_stats[0]["structural_fallbacks"] == 0
+
+    deterministic_output = ti.ndarray(ti.f32, shape=expected.shape)
+    ti.hardware.linalg.spmm_f32(
+        matrix,
+        input_array,
+        deterministic_output,
+        algorithm="deterministic",
+    )
+    ti.sync()
+    np.testing.assert_allclose(deterministic_output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
+
+    stats = matrix._debug_runtime_stats()
+    assert stats["provider"]["spmm_f32_available"]
+    assert stats["operations"]["spmm_plan_builds"] == 2
+    assert stats["operations"]["spmm_plan_reuses"] >= 1
+    assert stats["resources"]["spmm_plan_count"] == 2
+    assert stats["resources"]["spmm_dense_matrix_descriptor_count"] == 4
+    assert stats["resources"]["spmm_workspace_reserved_bytes"] >= 0
+    report = recording.memory_report()
+    assert report.ownership_scope == "sparse_matrix_rhs_algorithm_generation"
+
+    wrong = ti.ndarray(ti.f32, shape=(columns, rhs_count + 1))
+    with pytest.raises(RuntimeError, match="shape"):
+        ti.hardware.linalg.spmm_f32(matrix, wrong, output)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_vendor_commands_preserve_cross_provider_graph_order():
     if not (
         ti.hardware.linalg.cublas_is_available()
@@ -363,11 +469,23 @@ def test_cuda_runtime_owned_provider_replay_plateaus():
     vector.from_numpy(vector_values)
     gemm = ti.hardware.linalg.CublasGemmRecording(n, n, n)
     spmv = ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    spmm = None
+    spmm_input = None
+    spmm_output = None
+    bindings_spmm = None
+    if ti.hardware.linalg.cusparse_spmm_is_available():
+        spmm_input = ti.ndarray(ti.f32, shape=(n, 2))
+        spmm_output = ti.ndarray(ti.f32, shape=(n, 2))
+        spmm_input.from_numpy(np.column_stack((vector_values, -vector_values)))
+        spmm = ti.hardware.linalg.CusparseSpmmRecording(matrix, 2)
+        bindings_spmm = {"input": spmm_input, "output": spmm_output}
     bindings_gemm = {"a": a, "b": b, "output": product}
     bindings_spmv = {"input": vector, "output": spmv_output}
 
     gemm.execute(bindings_gemm)
     spmv.execute(bindings_spmv)
+    if spmm is not None:
+        spmm.execute(bindings_spmm)
     ti.sync()
     program = ti.lang.impl.get_runtime().prog
     baseline_memory = program._runtime_statistics_snapshot()["memory"]
@@ -378,11 +496,16 @@ def test_cuda_runtime_owned_provider_replay_plateaus():
     process_memory.capture("before")
     assert baseline_sparse["spmv_handle_creations"] == 1
     assert baseline_sparse["spmv_plan_builds"] == 1
+    if spmm is not None:
+        assert baseline_sparse["spmm_plan_builds"] == 1
+        assert baseline_sparse["spmm_plan_reuses"] == 0
 
     midpoint = None
     for iteration in range(iterations):
         gemm.execute(bindings_gemm)
         spmv.execute(bindings_spmv)
+        if spmm is not None:
+            spmm.execute(bindings_spmm)
         if (iteration + 1) % 64 == 0:
             ti.sync()
         if iteration + 1 == max(1, iterations // 2):
@@ -401,12 +524,23 @@ def test_cuda_runtime_owned_provider_replay_plateaus():
     assert final_sparse["spmv_handle_creations"] == 1
     assert final_sparse["spmv_plan_builds"] == 1
     assert final_sparse["spmv_plan_reuses"] >= iterations
+    if spmm is not None:
+        assert final_sparse["spmm_plan_builds"] == 1
+        assert final_sparse["spmm_plan_reuses"] >= iterations
     np.testing.assert_allclose(product.to_numpy(), a_values @ b_values, rtol=1e-6)
     np.testing.assert_allclose(
         spmv_output.to_numpy(),
         vector_values * np.arange(1, n + 1, dtype=np.float32),
         rtol=1e-6,
     )
+    if spmm is not None:
+        expected_spmm = np.column_stack(
+            (
+                vector_values * np.arange(1, n + 1, dtype=np.float32),
+                -vector_values * np.arange(1, n + 1, dtype=np.float32),
+            )
+        )
+        np.testing.assert_allclose(spmm_output.to_numpy(), expected_spmm, rtol=1e-6)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -437,7 +571,16 @@ def test_cuda_vendor_graphs_fail_closed_after_runtime_reset():
         ti.hardware.linalg.CusparseSpmvRecording(matrix), admission="auto"
     )
     spmv_graph = spmv_builder.compile()
+    spmm_graph = None
+    if ti.hardware.linalg.cusparse_spmm_is_available():
+        spmm_builder = ti.graph.GraphBuilder()
+        spmm_builder.append_native(
+            ti.hardware.linalg.CusparseSpmmRecording(matrix, 2),
+            admission="auto",
+        )
+        spmm_graph = spmm_builder.compile()
     matrix_array = ti.ndarray(ti.f32, shape=(n, n))
+    spmm_output = ti.ndarray(ti.f32, shape=(n, n))
     vector = ti.ndarray(ti.f32, shape=n)
 
     ti.reset()
@@ -448,3 +591,6 @@ def test_cuda_vendor_graphs_fail_closed_after_runtime_reset():
         )
     with pytest.raises(RuntimeError, match="compiled before ti.reset"):
         spmv_graph.run({"input": vector, "output": vector})
+    if spmm_graph is not None:
+        with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+            spmm_graph.run({"input": matrix_array, "output": spmm_output})

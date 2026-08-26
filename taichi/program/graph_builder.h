@@ -11,6 +11,7 @@ namespace taichi::lang {
 class Kernel;
 class GraphBuilder;
 class SparseMatrix;
+class CuSparseMatrix;
 
 class Node {
  public:
@@ -189,6 +190,13 @@ class GraphBuilder {
                                            Program *program,
                                            const aot::Arg &input,
                                            const aot::Arg &output);
+
+  void dispatch_cuda_capture_cusparse_spmm(CuSparseMatrix *matrix,
+                                           Program *program,
+                                           const aot::Arg &input,
+                                           const aot::Arg &output,
+                                           int rhs_count,
+                                           int algorithm);
 
   void dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
                                    Program *program,

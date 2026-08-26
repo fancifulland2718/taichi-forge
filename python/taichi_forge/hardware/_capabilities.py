@@ -1214,6 +1214,18 @@ def _passive_core_statuses(runtime_initialized, backend):
     }
 
 
+_EXTERNAL_OPERATION_REQUIRED_FACTS = {
+    "linalg.spmm.cusparse_explicit": "spmm_f32_available",
+}
+
+
+def _external_operation_supported(descriptor, native_facts):
+    required_fact = _EXTERNAL_OPERATION_REQUIRED_FACTS.get(descriptor.operation_id)
+    if required_fact is None:
+        return True, None
+    return bool(native_facts.get(required_fact, False)), required_fact
+
+
 def _passive_resolution(
     descriptor,
     *,
@@ -1254,6 +1266,23 @@ def _passive_resolution(
         facts.update(dict(external_status.get("native_facts", {})))
         provider_abi = external_status.get("provider_abi")
         provider_version = external_status.get("provider_version")
+        operation_supported, required_fact = _external_operation_supported(
+            descriptor, facts
+        )
+        if not operation_supported:
+            facts["required_operation_fact"] = required_fact
+            return ResolvedHardwareOperation(
+                descriptor=descriptor,
+                backend=backend,
+                runtime_initialized=runtime_initialized,
+                discovery="incompatible",
+                enablement="disabled",
+                selection="rejected",
+                unavailable_reason="hardware_requirement_not_met",
+                native_facts=facts,
+                provider_abi=provider_abi,
+                provider_version=provider_version,
+            )
         if not runtime_initialized:
             return ResolvedHardwareOperation(
                 descriptor=descriptor,
@@ -1482,14 +1511,23 @@ def _explicit_external_probe_resolution(
         native_facts = dict(native_result["native_facts"])
         external_component_probed = bool(native_result["external_component_probed"])
         native_facts["external_component_probed"] = external_component_probed
+        operation_supported, required_fact = _external_operation_supported(
+            descriptor, native_facts
+        )
+        discovery = native_result["discovery"]
+        unavailable_reason = native_result["unavailable_reason"]
+        if discovery == "available" and not operation_supported:
+            discovery = "incompatible"
+            unavailable_reason = "hardware_requirement_not_met"
+            native_facts["required_operation_fact"] = required_fact
         return ResolvedHardwareOperation(
             descriptor=descriptor,
             backend=backend,
             runtime_initialized=runtime_initialized,
-            discovery=native_result["discovery"],
+            discovery=discovery,
             enablement="disabled",
             selection="not_considered",
-            unavailable_reason=native_result["unavailable_reason"],
+            unavailable_reason=unavailable_reason,
             native_facts=native_facts,
             provider_abi=native_result.get("provider_abi"),
             provider_version=native_result.get("provider_version"),
@@ -1559,9 +1597,10 @@ def probe(provider_id, *, library_path=None):
     provider = _provider(provider_id)
     if provider.dependency_tier != "lazy_external":
         raise ValueError("only lazy_external providers support runtime probing")
-    if library_path is not None and not external_provider_spec(
-        provider_id
-    ).supports_library_path:
+    if (
+        library_path is not None
+        and not external_provider_spec(provider_id).supports_library_path
+    ):
         raise ValueError(
             "library_path is supported only for providers with an explicit "
             "user-managed vendor-runtime path"

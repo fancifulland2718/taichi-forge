@@ -55,6 +55,8 @@ struct SparseMatrixRuntimeStatistics {
   bool provider_bsr_descriptor_available{false};
   bool provider_generic_bsr_spmv_available{false};
   bool provider_spmv_preprocess_available{false};
+  bool provider_spmm_f32_available{false};
+  bool provider_spmm_preprocess_available{false};
   bool spmv_preprocess_active{false};
   std::uint32_t spmv_preprocess_last_error{0};
   int rows{0};
@@ -80,6 +82,14 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t spmv_preprocess_builds{0};
   std::uint64_t spmv_preprocess_reuses{0};
   std::uint64_t spmv_preprocess_fallbacks{0};
+  std::uint64_t spmm_calls{0};
+  std::uint64_t spmm_plan_builds{0};
+  std::uint64_t spmm_plan_reuses{0};
+  std::uint64_t spmm_dense_descriptor_rebinds{0};
+  std::uint64_t spmm_workspace_allocations{0};
+  std::uint64_t spmm_preprocess_builds{0};
+  std::uint64_t spmm_preprocess_reuses{0};
+  std::uint64_t spmm_preprocess_fallbacks{0};
   std::uint64_t resource_generations_published{0};
   std::uint64_t resource_generations_retired{0};
   std::uint64_t resource_generations_released{0};
@@ -89,6 +99,7 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t pattern_reserved_bytes{0};
   std::uint64_t values_reserved_bytes{0};
   std::uint64_t spmv_workspace_reserved_bytes{0};
+  std::uint64_t spmm_workspace_reserved_bytes{0};
   std::uint64_t operator_owned_reserved_bytes{0};
   std::uint64_t operator_exclusive_reserved_bytes{0};
   std::uint64_t numeric_update_peak_temporary_bytes{0};
@@ -98,6 +109,8 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t matrix_descriptor_count{0};
   std::uint64_t dense_vector_descriptor_count{0};
   std::uint64_t spmv_handle_count{0};
+  std::uint64_t spmm_plan_count{0};
+  std::uint64_t spmm_dense_matrix_descriptor_count{0};
 
   std::uint64_t host_to_device_bytes{0};
   std::uint64_t device_to_host_bytes{0};
@@ -1052,6 +1065,18 @@ class CuSparseMatrix : public SparseMatrix {
 
   void spmv(size_t x, size_t y, CUstream stream = nullptr);
 
+  void nd_spmm(Program *prog,
+               const Ndarray &input,
+               const Ndarray &output,
+               int rhs_count,
+               int algorithm);
+
+  void spmm(size_t input,
+            size_t output,
+            int rhs_count,
+            int algorithm,
+            CUstream stream = nullptr);
+
   void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
 
   bool supports_spmv_stream_binding() const;
@@ -1088,7 +1113,9 @@ class CuSparseMatrix : public SparseMatrix {
   void mmwrite(const std::string &filename) override;
 
  private:
+  struct SpmmPlan;
   void reset_spmv_resources();
+  void reset_spmm_resources();
 
   cusparseSpMatDescr_t matrix_{nullptr};
   void *csr_row_ptr_{nullptr};
@@ -1112,6 +1139,15 @@ class CuSparseMatrix : public SparseMatrix {
   std::uint64_t spmv_preprocess_builds_{0};
   std::uint64_t spmv_preprocess_reuses_{0};
   std::uint64_t spmv_preprocess_fallbacks_{0};
+  std::unordered_map<std::uint64_t, std::shared_ptr<SpmmPlan>> spmm_plans_;
+  std::uint64_t spmm_calls_{0};
+  std::uint64_t spmm_plan_builds_{0};
+  std::uint64_t spmm_plan_reuses_{0};
+  std::uint64_t spmm_dense_descriptor_rebinds_{0};
+  std::uint64_t spmm_workspace_allocations_{0};
+  std::uint64_t spmm_preprocess_builds_{0};
+  std::uint64_t spmm_preprocess_reuses_{0};
+  std::uint64_t spmm_preprocess_fallbacks_{0};
 };
 
 // Internal CUDA-only prototype for already-compressed, square dense blocks.

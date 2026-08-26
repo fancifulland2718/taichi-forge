@@ -4662,6 +4662,21 @@ void export_lang(py::module &m) {
           },
           py::arg("matrix"), py::arg("program"), py::arg("input"),
           py::arg("output"))
+      .def(
+          "_dispatch_cuda_cusparse_spmm_capture_recipe",
+          [](GraphBuilder &builder, const py::object &matrix,
+             Program *program, const aot::Arg &input,
+             const aot::Arg &output, int rhs_count, int algorithm) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(
+                matrix.cast<SparseMatrix *>());
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE SpMM capture supports scalar CSR "
+                        "matrices only.");
+            builder.dispatch_cuda_capture_cusparse_spmm(
+                csr, program, input, output, rhs_count, algorithm);
+          },
+          py::arg("matrix"), py::arg("program"), py::arg("input"),
+          py::arg("output"), py::arg("rhs_count"), py::arg("algorithm"))
       .def("_dispatch_cuda_cufft_capture_recipe",
            &GraphBuilder::dispatch_cuda_capture_cufft,
            py::arg("plan_handle"), py::arg("program"), py::arg("input"),
@@ -6647,6 +6662,18 @@ void export_lang(py::module &m) {
       .def("num_cols", &SparseMatrix::num_cols)
       .def("num_nonzero", &SparseMatrix::num_nonzero)
       .def("update_values", &SparseMatrix::update_values)
+      .def(
+          "_cuda_cusparse_spmm_f32",
+          [](SparseMatrix &matrix, Program *program, const Ndarray &input,
+             const Ndarray &output, int rhs_count, int algorithm) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE SpMM supports scalar CSR matrices "
+                        "only.");
+            csr->nd_spmm(program, input, output, rhs_count, algorithm);
+          },
+          py::arg("program"), py::arg("input"), py::arg("output"),
+          py::arg("rhs_count"), py::arg("algorithm"))
       .def("_debug_runtime_stats", [](const SparseMatrix &matrix) {
         const auto stats = matrix.debug_runtime_statistics();
         py::dict identity;
@@ -6696,6 +6723,19 @@ void export_lang(py::module &m) {
             stats.spmv_preprocess_reuses;
         operations["spmv_preprocess_fallbacks"] =
             stats.spmv_preprocess_fallbacks;
+        operations["spmm_calls"] = stats.spmm_calls;
+        operations["spmm_plan_builds"] = stats.spmm_plan_builds;
+        operations["spmm_plan_reuses"] = stats.spmm_plan_reuses;
+        operations["spmm_dense_descriptor_rebinds"] =
+            stats.spmm_dense_descriptor_rebinds;
+        operations["spmm_workspace_allocations"] =
+            stats.spmm_workspace_allocations;
+        operations["spmm_preprocess_builds"] =
+            stats.spmm_preprocess_builds;
+        operations["spmm_preprocess_reuses"] =
+            stats.spmm_preprocess_reuses;
+        operations["spmm_preprocess_fallbacks"] =
+            stats.spmm_preprocess_fallbacks;
         operations["resource_generations_published"] =
             stats.resource_generations_published;
         operations["resource_generations_retired"] =
@@ -6709,6 +6749,8 @@ void export_lang(py::module &m) {
         resources["values_reserved_bytes"] = stats.values_reserved_bytes;
         resources["spmv_workspace_reserved_bytes"] =
             stats.spmv_workspace_reserved_bytes;
+        resources["spmm_workspace_reserved_bytes"] =
+            stats.spmm_workspace_reserved_bytes;
         resources["operator_owned_reserved_bytes"] =
             stats.operator_owned_reserved_bytes;
         resources["numeric_update_peak_temporary_bytes"] =
@@ -6736,6 +6778,9 @@ void export_lang(py::module &m) {
         resources["dense_vector_descriptor_count"] =
             stats.dense_vector_descriptor_count;
         resources["spmv_handle_count"] = stats.spmv_handle_count;
+        resources["spmm_plan_count"] = stats.spmm_plan_count;
+        resources["spmm_dense_matrix_descriptor_count"] =
+            stats.spmm_dense_matrix_descriptor_count;
         resources["opaque_provider_resource_bytes"] = py::none();
         resources["ownership_scope"] =
             stats.pattern_storage_shared
@@ -6771,6 +6816,10 @@ void export_lang(py::module &m) {
             stats.provider_generic_bsr_spmv_available;
         provider["spmv_preprocess_available"] =
             stats.provider_spmv_preprocess_available;
+        provider["spmm_f32_available"] =
+            stats.provider_spmm_f32_available;
+        provider["spmm_preprocess_available"] =
+            stats.provider_spmm_preprocess_available;
         provider["spmv_preprocess_active"] =
             stats.spmv_preprocess_active;
         provider["spmv_preprocess_last_error"] =
