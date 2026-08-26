@@ -63,7 +63,9 @@ grouped under the behavior they shipped.
   FP16 2:4 matmul, FP32 contraction, or host-CSR solve operations, while probes
   remain non-executing. The thin adapters ship in the unchanged runtime wheel,
   use no vendor link dependency, and add no Graph, automatic, or kernel-inline
-  route. NCCL remains outside the registered provider catalog.
+  route. AmgX coefficient updates use its optional resetup entry point when
+  present and fall back to full setup for compatible runtimes that omit it.
+  NCCL remains outside the registered provider catalog.
 - Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
   `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
   execution lazy-loads the user's compatible cuBLAS and reuses one handle per

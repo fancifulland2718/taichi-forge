@@ -54,7 +54,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   0.8.x-0.9.x、cuTENSOR 2.0.x-2.7.x 与 AmgX stable C API。显式 provider plan 会保留用户
   runtime，并执行有界的 FP16 2:4 matmul、FP32 contraction 或 host-CSR solve；probe 仍不
   执行算法。薄 adapter 随不变的 runtime wheel 提供，不增加 vendor link dependency、
-  Graph、automatic 或 kernel-inline 路线。NCCL 仍不进入已注册 provider catalog。
+  Graph、automatic 或 kernel-inline 路线。AmgX coefficient update 在存在可选 resetup
+  entry point 时使用它，否则对未导出该 symbol 的兼容 runtime 回退到完整 setup。NCCL
+  仍不进入已注册 provider catalog。
 - 新增可选 D1 `ti.hardware.linalg.gemm_f32`，通过 direct Python 与 root Graph 对 compact
   row-major f32 matrix 执行 `C = alpha * A @ B + beta * C`。真实执行才 lazy-load 用户的
   兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、

@@ -133,7 +133,6 @@ constexpr const char *kRequiredSymbols[] = {
     "AMGX_solver_create",
     "AMGX_solver_destroy",
     "AMGX_solver_setup",
-    "AMGX_solver_resetup",
     "AMGX_solver_solve",
     "AMGX_solver_solve_with_0_initial_guess",
     "AMGX_solver_get_status",
@@ -1272,6 +1271,7 @@ struct AmgxSolver {
   AmgxDestroyFn destroy_vector{nullptr};
   AmgxDestroyFn destroy_solver{nullptr};
   AmgxMatrixReplaceFn replace{nullptr};
+  AmgxSolverMatrixFn setup{nullptr};
   AmgxSolverMatrixFn resetup{nullptr};
   AmgxVectorUploadFn vector_upload{nullptr};
   AmgxVectorDownloadFn vector_download{nullptr};
@@ -1375,7 +1375,7 @@ TiForgeRuntimeProviderResult amgx_create_solver(
       reinterpret_cast<AmgxMatrixUploadFn>(symbol("AMGX_matrix_upload_all"));
   auto vector_bind =
       reinterpret_cast<AmgxVectorBindFn>(symbol("AMGX_vector_bind"));
-  auto solver_setup =
+  solver->setup =
       reinterpret_cast<AmgxSolverMatrixFn>(symbol("AMGX_solver_setup"));
   solver->destroy_config =
       reinterpret_cast<AmgxDestroyFn>(symbol("AMGX_config_destroy"));
@@ -1433,7 +1433,7 @@ TiForgeRuntimeProviderResult amgx_create_solver(
           TI_FORGE_RUNTIME_PROVIDER_SUCCESS ||
       checked(vector_bind(solver->solution, solver->matrix),
               "solution binding") != TI_FORGE_RUNTIME_PROVIDER_SUCCESS ||
-      checked(solver_setup(solver->solver, solver->matrix), "solver setup") !=
+      checked(solver->setup(solver->solver, solver->matrix), "solver setup") !=
           TI_FORGE_RUNTIME_PROVIDER_SUCCESS) {
     cleanup_amgx_solver(*solver);
     return TI_FORGE_RUNTIME_PROVIDER_ERROR_VENDOR_CALL;
@@ -1461,9 +1461,13 @@ TiForgeRuntimeProviderResult amgx_replace_coefficients(
     return amgx_runtime_fail(*solver->runtime, status,
                              "coefficient replacement");
   }
-  status = solver->resetup(solver->solver, solver->matrix);
+  const bool use_resetup = solver->resetup != nullptr;
+  status = (use_resetup ? solver->resetup : solver->setup)(solver->solver,
+                                                           solver->matrix);
   if (status != 0) {
-    return amgx_runtime_fail(*solver->runtime, status, "solver resetup");
+    return amgx_runtime_fail(*solver->runtime, status,
+                             use_resetup ? "solver resetup"
+                                         : "solver setup fallback");
   }
   solver->setup_valid = true;
   return TI_FORGE_RUNTIME_PROVIDER_SUCCESS;

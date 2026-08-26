@@ -217,7 +217,9 @@ def d1_provider_operations(_operation):
                 "user-managed cuDSS 0.8.x matching CUDA 12 or CUDA 13",
                 "compatible user-managed cuBLAS dependency",
             ),
-            public_api=("ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"),
+            public_api=(
+                "ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"
+            ),
             dtypes=("matrix:f32", "rhs:f32", "solution:f32"),
             shapes_or_tiles=("single square matrix", "single rhs"),
             layouts=("scalar CSR with i32 offsets and indices",),
@@ -402,6 +404,9 @@ def d1_provider_operations(_operation):
             numeric_contracts=("setup(matrix, config) -> solve(rhs, initial_guess)",),
             notes=(
                 "AmgX owns GPU upload, matrix, preconditioner, and solver state behind the stable C API.",
+                "Fixed-topology coefficient replacement uses AMGX_solver_resetup "
+                "when exported and falls back to full AMGX_solver_setup otherwise; "
+                "hierarchy reuse remains application-configured.",
                 "The adapter reference-counts process-global AMGX_initialize/finalize and refuses runtime close with live solvers.",
                 "This host-synchronized path is not Graph-recordable and is never automatically selected.",
             ),

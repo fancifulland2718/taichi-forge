@@ -408,6 +408,19 @@ with ti.hardware.linalg.AmgxProvider(runtime_path) as provider:
         assert info["converged"]
 ```
 
+`replace_coefficients()` 在替换数值后总会刷新 solver setup。vendor 导出可选/已弃用的
+`AMGX_solver_resetup` C symbol 时，adapter 使用该 fast path；否则执行完整的
+`AMGX_solver_setup`。因此，只保留稳定 setup API、未导出 resetup entry point 的 runtime
+仍可执行；fallback 数值语义正确，但可能重建更多状态。
+
+对 CSR topology 固定、coefficient 反复变化的 workload，应在 AMG 或 AMG preconditioner
+scope 中显式调整 AmgX 自己的 `structure_reuse_levels`。`0` 重建 hierarchy；正数逐级保留
+更多已有 level structure。复用 level 时不会重算 prolongation/restriction operator，但会重算
+coarse matrix，因此 Forge 绝不自动提高该设置。部分 AmgX release 还接受 `-1` 以保留所有
+level；它只能作为 release-qualified 选择，不能作为可移植默认值。任何非零设置都必须针对
+预期 coefficient 变化范围，通过 residual、convergence、iteration count、最差 update time
+和 peak memory 门禁。
+
 必须先关闭每个 plan/solver，再关闭 provider；`ti.reset()` 后两者都不得复用。存在 live child
 resource 时 provider close 会失败。显式选择后的 load、数值和 lifetime 错误会直接暴露，
 不会静默 fallback。
@@ -418,8 +431,8 @@ resource 时 provider close 会失败。显式选择后的 load、数值和 life
   `PCG_AGGREGATION_JACOBI.json` 开始，并验证 symmetry/positive-definite 合同；
 - nonsymmetric system：从 `FGMRES_AGGREGATION.json` 或随附 BiCGSTAB 配置开始；不能只按
   matrix size 选择 PCG；
-- sparsity topology 不变时保留 setup 与 hierarchy object。只有所选 AmgX 配置明确支持，且
-  实际验证该 lifecycle 时，才允许更新 coefficient 而不重建 hierarchy；
+- sparsity topology 不变时保留 setup 与 hierarchy object。只有所选 AmgX release 明确支持
+  `structure_reuse_levels`，且应用实际验证该 lifecycle 时，才允许复用 hierarchy；
 - 同时为 residual/convergence、iteration、setup time、solve time 和 peak memory 设门禁；
   AMG hierarchy memory 可能超过原始 CSR storage；
 - 随部署保存精确 JSON configuration。AmgX tuning surface 很大，只按 library version

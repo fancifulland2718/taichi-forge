@@ -468,6 +468,23 @@ with ti.hardware.linalg.AmgxProvider(runtime_path) as provider:
         assert info["converged"]
 ```
 
+`replace_coefficients()` always refreshes solver setup after replacing numeric
+values. The adapter uses `AMGX_solver_resetup` when that optional/deprecated C
+symbol is exported, and otherwise performs a full `AMGX_solver_setup`. This
+keeps execution compatible with runtimes that retain the stable setup API but
+omit the resetup entry point; the fallback is correct but may rebuild more
+state.
+
+For repeated coefficient updates with fixed CSR topology, tune AmgX's own
+`structure_reuse_levels` in the AMG or AMG-preconditioner scope. `0` rebuilds
+the hierarchy; positive values retain progressively more existing level
+structure. Reused levels keep their prolongation/restriction operators while
+the coarse matrix is recomputed, so Forge never raises this setting
+automatically. Some AmgX releases also accept `-1` to retain all levels; treat
+that as release-qualified rather than a portable default. Admit any nonzero
+setting only after the expected coefficient-change envelope passes residual,
+convergence, iteration-count, worst-case update-time, and peak-memory gates.
+
 Close every plan/solver before its provider and do not reuse either after
 `ti.reset()`. Provider close fails while a child resource is live. Explicit
 selection surfaces load, numerical, and lifecycle errors rather than silently
@@ -481,8 +498,8 @@ Recommended physics starting points:
 - Nonsymmetric systems: start from `FGMRES_AGGREGATION.json` or a shipped
   BiCGSTAB configuration; do not select PCG by matrix size alone.
 - Keep setup and hierarchy objects while the sparsity topology is unchanged.
-  Update coefficients without rebuilding the hierarchy only when the selected
-  AmgX configuration documents and validates that lifecycle.
+  Use `structure_reuse_levels` only when the selected AmgX release documents
+  it and the application validates that lifecycle.
 - Gate on residual/convergence, iterations, setup time, solve time, and peak
   memory. AMG hierarchy memory can dominate the original CSR storage.
 - Store the exact JSON configuration with the deployment. AmgX's large tuning

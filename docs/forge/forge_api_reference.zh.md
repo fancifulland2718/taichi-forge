@@ -167,7 +167,9 @@ Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆�
 - `AmgxProvider(library_path=None).solver(row_offsets, column_indices, values, config,
   config_file=False)` 创建 scalar f32/f64 host-CSR solver；
   `solve(rhs, solution=None, zero_initial_guess=True)` 返回 host solution 与不可变 convergence
-  fact，`replace_coefficients(values)` 在 fixed topology 上复用并 reset solver setup。
+  fact，`replace_coefficients(values)` 在 fixed topology 上复用并刷新 solver setup。adapter
+  在 vendor 导出可选的 `AMGX_solver_resetup` 时走 fast path，否则回退到完整
+  `AMGX_solver_setup`；hierarchy 是否复用仍由应用自有的 AmgX 配置控制。
 
 三者都要求已初始化 CUDA runtime，只有构造 provider 时才加载用户 library。child
 plan/solver 必须先于 provider 关闭；`ti.reset()` 后所有对象失效。这些 API 只允许 direct

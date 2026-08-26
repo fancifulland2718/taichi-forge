@@ -210,7 +210,10 @@ Three user-runtime adapters expose explicit retained execution resources:
   config, config_file=False)` creates a scalar f32/f64 host-CSR solver.
   `solve(rhs, solution=None, zero_initial_guess=True)` returns the host solution
   and immutable convergence facts; `replace_coefficients(values)` reuses the
-  fixed topology and resets solver setup.
+  fixed topology and refreshes solver setup. The adapter uses the optional
+  vendor `AMGX_solver_resetup` fast path when exported and otherwise falls back
+  to a full `AMGX_solver_setup`; hierarchy reuse remains controlled by the
+  application-owned AmgX configuration.
 
 All require an initialized CUDA runtime and load the user library only when the
 provider is constructed. Child plans/solvers must close before their provider;
