@@ -8,6 +8,7 @@ import pytest
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.hardware import _cudss
+from taichi_forge.hardware._retained import retained_execution_contract
 from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
@@ -464,6 +465,15 @@ def test_cudss_staged_solve_and_refactorization():
         recording = plan.recording()
         assert recording.replay_mode == "rerecord"
         assert recording.workspace_ownership == "provider_generation"
+        retained = retained_execution_contract(recording)
+        assert retained.identity.operation_id == "linalg.solve.cudss"
+        assert retained.identity.provider_id == "cudss"
+        assert retained.concurrency_policy == "runtime_ordered"
+        assert retained.cost_model.scale_costs[0].dimensions == (
+            "rows",
+            "nonzeros",
+            "rhs_count",
+        )
         graph.append_native(recording, admission="auto")
         compiled = graph.compile()
         program = ti.lang.impl.get_runtime().prog

@@ -255,6 +255,61 @@ def test_aggregate_separates_stable_speedup_from_formal_claim_evidence():
     assert report["provider_statistics"] == [workers[1]["provider_statistics"]]
 
 
+def test_aggregate_separates_fixed_costs_from_scale_dependent_timing():
+    workers = (
+        _worker("ab", [1.0] * 5, [2.0] * 5, [2.0] * 5),
+        _worker("ba", [1.0] * 5, [2.0] * 5, [2.0] * 5),
+    )
+    cost_model = {
+        "fixed_costs": (
+            {
+                "name": "plan_creation",
+                "kind": "fixed",
+                "amortization_scope": "provider_generation",
+                "dimensions": (),
+            },
+        ),
+        "scale_costs": (
+            {
+                "name": "execution",
+                "kind": "scale",
+                "amortization_scope": "invocation",
+                "dimensions": ("rows", "nonzeros"),
+            },
+        ),
+    }
+    for index, worker in enumerate(workers):
+        worker["cost_contract"] = {
+            "identity": {
+                "operation_id": "linalg.spmv.cusparse_explicit",
+                "provider_id": "cusparse",
+                "backend": "cuda",
+                "persistent_cache_safe": False,
+                "resource_token": index,
+            },
+            "cost_model": cost_model,
+            "workspace_ownership": "provider_generation",
+            "concurrency_policy": "runtime_ordered",
+        }
+        worker["fixed_cost_observation"] = {
+            "resource_setup_ms": 2.0 + index * 2.0,
+            "recording_creation_ms": 0.1 + index * 0.2,
+        }
+
+    report = qualification._aggregate("synthetic", workers, 0.10, 0.10)
+
+    assert report["cost_contract"]["structural_contract_consistent"]
+    assert report["cost_contract"]["identity_scope_consistent"]
+    assert not report["cost_contract"]["persistent_cache_safe_all"]
+    assert report["fixed_cost_observation"]["resource_setup_ms"][
+        "median_ms"
+    ] == pytest.approx(3.0)
+    assert report["fixed_cost_observation"]["recording_creation_ms"][
+        "median_ms"
+    ] == pytest.approx(0.2)
+    assert report["variants"]["hardware"]["median_ms"] == pytest.approx(1.0)
+
+
 def test_aggregate_allows_claim_after_formal_fresh_process_coverage():
     workers = tuple(
         _worker(

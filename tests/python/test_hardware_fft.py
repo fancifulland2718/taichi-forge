@@ -5,6 +5,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.hardware._retained import retained_execution_contract
 from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
@@ -96,6 +97,16 @@ def test_cufft_c2c_executes_directly_and_through_graph():
 
     recording = plan.record(direction="inverse", input="spectrum", output="signal")
     assert recording.replay_mode == "stream_capture"
+    retained = retained_execution_contract(recording)
+    assert retained is retained_execution_contract(plan.record())
+    assert retained.identity.operation_id == "fft.transform.cufft"
+    assert retained.identity.provider_id == "cufft"
+    assert not retained.identity.persistent_cache_safe
+    assert retained.concurrency_policy == "runtime_ordered"
+    assert retained.cost_model.scale_costs[0].dimensions == (
+        "transform_elements",
+        "batch_count",
+    )
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
     ) == (("spectrum", GraphAccess.READ), ("signal", GraphAccess.WRITE))

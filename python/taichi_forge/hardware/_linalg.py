@@ -14,6 +14,15 @@ from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     validate_exact_bindings,
 )
+from taichi_forge.hardware._retained import (
+    HardwareExecutionCostModel,
+    RetainedExecutionContract,
+    attach_retained_execution_contract,
+    fixed_cost,
+    make_retained_plan_identity,
+    passive_dynamic_provider_scope,
+    scale_cost,
+)
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge._hardware_telemetry import (
     hardware_failure_phase,
@@ -45,6 +54,20 @@ def _scalar(value, name):
     if not math.isfinite(result):
         raise ValueError(f"CUDA cuBLAS {name} must be finite")
     return result
+
+
+_CUBLAS_GEMM_EXECUTION_CONTRACT = RetainedExecutionContract(
+    identity=None,
+    cost_model=HardwareExecutionCostModel(
+        (
+            fixed_cost("provider_library_load", "process"),
+            fixed_cost("provider_handle", "runtime_generation"),
+            scale_cost("gemm_execution", "rows", "columns", "inner"),
+        )
+    ),
+    workspace_ownership="none",
+    concurrency_policy="independent_invocations",
+)
 
 
 @instrument_hardware_recording("linalg.gemm.cublas", runtime_resource=True)
@@ -92,6 +115,10 @@ class CublasGemmRecording(BackendCommandRecording):
         object.__setattr__(self, "a", a)
         object.__setattr__(self, "b", b)
         object.__setattr__(self, "output", output)
+        attach_retained_execution_contract(
+            self,
+            _CUBLAS_GEMM_EXECUTION_CONTRACT,
+        )
 
     @property
     def resource_effects(self):
@@ -207,6 +234,72 @@ class _CusparseSpmvCaptureRecipe(_CudaGraphCaptureRecipe):
         )
 
 
+def _cusparse_spmv_execution_contract(matrix, identity):
+    cache_key = int(impl.runtime_generation())
+    cached = getattr(matrix, "_cusparse_spmv_retained_contract", None)
+    if cached is not None and cached[0] == cache_key:
+        return cached[1], cached[2]
+
+    runtime_stats = matrix._debug_runtime_stats()  # pylint: disable=W0212
+    pattern_version = runtime_stats["identity"]["pattern_version"]
+    provider = runtime_stats["provider"]
+    provider_scope = passive_dynamic_provider_scope(
+        "cusparse",
+        "cusparse-dynamic-symbols-v1",
+        version=provider["library_version"],
+    )
+    retained_identity = make_retained_plan_identity(
+        "linalg.spmv.cusparse_explicit",
+        "cusparse",
+        "cuda",
+        provider_scope=provider_scope,
+        problem_scope={
+            "rows": matrix.n,
+            "columns": matrix.m,
+            "nonzeros": runtime_stats["identity"]["nnz"],
+            "storage_format": identity["storage_format"],
+            "block_size": identity.get("block_size"),
+            "dtype": "f32",
+            "topology_fingerprint": matrix._topology_fingerprint,
+            "pattern_id": runtime_stats["identity"]["pattern_id"],
+            "pattern_version": pattern_version,
+            "resource_object_token": id(matrix.matrix),
+            "resource_generation": pattern_version,
+        },
+        execution_scope={
+            "algorithm": "cusparse_spmv_default",
+            "workspace_limit_bytes": None,
+            "stream_binding": "runtime_ordered",
+            "capture_compatible": True,
+        },
+    )
+    fixed_components = [
+        fixed_cost("provider_library_load", "process"),
+        fixed_cost("handle_and_descriptors", "provider_generation"),
+        fixed_cost("workspace_allocation", "provider_generation"),
+        fixed_cost("graph_capture", "graph_instance"),
+    ]
+    if provider["spmv_preprocess_available"]:
+        fixed_components.append(
+            fixed_cost("spmv_preprocess", "provider_generation")
+        )
+    contract = RetainedExecutionContract(
+        identity=retained_identity,
+        cost_model=HardwareExecutionCostModel(
+            (*fixed_components, scale_cost("spmv_execution", "rows", "nonzeros"))
+        ),
+        workspace_ownership="provider_generation",
+        concurrency_policy="runtime_ordered",
+    )
+    memory_resources = dict(runtime_stats["resources"])
+    matrix._cusparse_spmv_retained_contract = (
+        cache_key,
+        contract,
+        memory_resources,
+    )
+    return contract, memory_resources
+
+
 @instrument_hardware_recording("linalg.spmv.cusparse_explicit")
 class CusparseSpmvRecording(BackendCommandRecording):
     """One f32 stored-matrix SpMV executed by the user's cuSPARSE."""
@@ -260,10 +353,17 @@ class CusparseSpmvRecording(BackendCommandRecording):
             "_cuda_capture_recipe",
             _CusparseSpmvCaptureRecipe(matrix, input, output),
         )
+        retained_contract, memory_resources = _cusparse_spmv_execution_contract(
+            matrix, identity
+        )
+        attach_retained_execution_contract(
+            self,
+            retained_contract,
+        )
         object.__setattr__(
             self,
             "_memory_resources",
-            dict(matrix._debug_runtime_stats()["resources"]),  # pylint: disable=W0212
+            memory_resources,
         )
 
     @property
@@ -568,6 +668,67 @@ class CudssPlan:
                 "feature_bits": resolved.feature_bits,
             }
         )
+        provider_scope = dict(self.provider_identity)
+        provider_scope["provider_binary_identity"] = {
+            "adapter_sha256": resolved.adapter_binary_sha256,
+            # Do not hash a potentially large user-managed DLL during plan
+            # creation.  Path + reported version qualify process-local reuse;
+            # the absent content hash keeps persistent reuse fail-closed.
+            "vendor_sha256": None,
+        }
+        self._retained_identity = make_retained_plan_identity(
+            "linalg.solve.cudss",
+            "cudss",
+            "cuda",
+            provider_scope=provider_scope,
+            problem_scope={
+                "rows": self._rows,
+                "columns": self._rows,
+                "nonzeros": self._nnz,
+                "storage_format": "csr",
+                "dtype": "f32",
+                "matrix_type": self.matrix_type,
+                "matrix_view": self.matrix_view,
+                "topology_fingerprint": matrix._topology_fingerprint,
+                "resource_handle": self._handle,
+            },
+            execution_scope={
+                "algorithm": "cudss_default",
+                "workspace_limit_bytes": None,
+                "stream_binding": "runtime_ordered",
+                "capture_compatible": False,
+            },
+        )
+        self._solve_execution_contract = RetainedExecutionContract(
+            identity=self._retained_identity,
+            cost_model=HardwareExecutionCostModel(
+                (
+                    fixed_cost("provider_library_load", "process"),
+                    fixed_cost("plan_creation", "provider_generation"),
+                    fixed_cost("analysis", "provider_generation"),
+                    fixed_cost("factorization", "provider_generation"),
+                    fixed_cost("workspace_allocation", "provider_generation"),
+                    scale_cost("solve_execution", "rows", "nonzeros", "rhs_count"),
+                )
+            ),
+            workspace_ownership="provider_generation",
+            concurrency_policy="runtime_ordered",
+        )
+        self._refactor_solve_execution_contract = RetainedExecutionContract(
+            identity=self._retained_identity,
+            cost_model=HardwareExecutionCostModel(
+                (
+                    fixed_cost("provider_library_load", "process"),
+                    fixed_cost("plan_creation", "provider_generation"),
+                    fixed_cost("analysis", "provider_generation"),
+                    fixed_cost("workspace_allocation", "provider_generation"),
+                    scale_cost("refactorization", "rows", "nonzeros"),
+                    scale_cost("solve_execution", "rows", "nonzeros", "rhs_count"),
+                )
+            ),
+            workspace_ownership="provider_generation",
+            concurrency_policy="single_inflight",
+        )
         _register_loaded_plan(self)
 
     @property
@@ -803,6 +964,10 @@ class CudssSolveRecording(BackendCommandRecording):
         object.__setattr__(self, "plan", plan)
         object.__setattr__(self, "rhs", rhs)
         object.__setattr__(self, "solution", solution)
+        attach_retained_execution_contract(
+            self,
+            plan._solve_execution_contract,  # pylint: disable=W0212
+        )
 
     @property
     def resource_effects(self):
@@ -882,6 +1047,10 @@ class CudssRefactorSolveRecording(BackendCommandRecording):
         object.__setattr__(self, "values", values)
         object.__setattr__(self, "rhs", rhs)
         object.__setattr__(self, "solution", solution)
+        attach_retained_execution_contract(
+            self,
+            plan._refactor_solve_execution_contract,  # pylint: disable=W0212
+        )
 
     @property
     def resource_effects(self):

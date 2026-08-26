@@ -80,6 +80,9 @@ from taichi_forge._lib.utils import _runtime_bitcode_dir  # pylint: disable=C041
 from taichi_forge.hardware._admission import (  # pylint: disable=C0413
     _current_runtime_scope,
 )
+from taichi_forge.hardware._retained import (  # pylint: disable=C0413
+    retained_execution_contract,
+)
 
 
 SCHEMA = "taichi_forge.hardware_acceleration_qualification.v7"
@@ -893,11 +896,16 @@ def _cuda_fft_case(order, args):
             values[batch_index, odd, 0] = even_real - rotated_real
             values[batch_index, odd, 1] = even_imag - rotated_imag
 
+    plan_started = time.perf_counter_ns()
     plan = ti.hardware.fft.CufftPlan1D(length, batch_count=batch)
+    plan_creation_ms = (time.perf_counter_ns() - plan_started) / 1.0e6
+    recording_started = time.perf_counter_ns()
+    recording = plan.record(direction="forward")
+    recording_creation_ms = (time.perf_counter_ns() - recording_started) / 1.0e6
     stages = tuple(1 << exponent for exponent in range(1, bits + 1))
 
     def hardware():
-        plan.execute(source, hardware_output, direction="forward")
+        recording.execute({"input": source, "output": hardware_output})
 
     def baseline():
         reorder(source, bit_reversal, baseline_output)
@@ -939,6 +947,12 @@ def _cuda_fft_case(order, args):
                 "hardware": "cuFFT single-precision C2C plan",
                 "baseline": "Taichi radix-2 f32 complex FFT kernels",
             },
+            "fixed_cost_observation": {
+                "plan_creation_ms": plan_creation_ms,
+                "recording_creation_ms": recording_creation_ms,
+                "first_hardware_execution_ms": timing["cold_ms"]["hardware"],
+            },
+            "cost_contract": retained_execution_contract(recording).to_dict(),
             "timing": timing,
             "correctness": {
                 "hardware_max_abs": hardware_error[0],
@@ -1500,7 +1514,9 @@ def _cuda_spmv_case(order, args):
     matrix = ti.linalg.SparseMatrix.from_pattern(pattern, values)
     setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
 
+    recording_started = time.perf_counter_ns()
     recording = ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    recording_creation_ms = (time.perf_counter_ns() - recording_started) / 1.0e6
     program = ti.lang.impl.get_runtime().prog
 
     def hardware():
@@ -1575,6 +1591,12 @@ def _cuda_spmv_case(order, args):
                 "hardware": "cuSPARSE CSR SpMV",
                 "baseline": "embedded CUDA CSR fallback kernel",
             },
+            "fixed_cost_observation": {
+                "resource_setup_ms": setup_ms,
+                "recording_creation_ms": recording_creation_ms,
+                "first_hardware_execution_ms": timing["cold_ms"]["hardware"],
+            },
+            "cost_contract": retained_execution_contract(recording).to_dict(),
             "timing": timing,
             "correctness": {
                 "hardware_max_abs": hardware_error[0],
@@ -4534,6 +4556,55 @@ def _apply_replay_retention_gate(result):
         )
 
 
+def _aggregate_execution_costs(workers):
+    contracts = [worker.get("cost_contract") for worker in workers]
+    if not contracts or any(contract is None for contract in contracts):
+        return None, None
+    structural = {
+        key: contracts[0][key]
+        for key in ("cost_model", "workspace_ownership", "concurrency_policy")
+    }
+    structural_consistent = all(
+        all(contract[key] == value for key, value in structural.items())
+        for contract in contracts
+    )
+    identities = [contract.get("identity") for contract in contracts]
+    identity_scope = None
+    identity_scope_consistent = all(identity is None for identity in identities)
+    if all(identity is not None for identity in identities):
+        identity_scope = {
+            key: identities[0][key]
+            for key in ("operation_id", "provider_id", "backend")
+        }
+        identity_scope_consistent = all(
+            all(identity[key] == value for key, value in identity_scope.items())
+            for identity in identities
+        )
+    aggregate_contract = {
+        **structural,
+        "structural_contract_consistent": structural_consistent,
+        "identity_scope": identity_scope,
+        "identity_scope_consistent": identity_scope_consistent,
+        "persistent_cache_safe_all": bool(
+            identities
+            and all(
+                identity is not None and identity["persistent_cache_safe"]
+                for identity in identities
+            )
+        ),
+    }
+
+    observations = [worker.get("fixed_cost_observation") for worker in workers]
+    if any(observation is None for observation in observations):
+        return aggregate_contract, None
+    names = set.intersection(*(set(observation) for observation in observations))
+    aggregate_observation = {
+        name: _summary([observation[name] for observation in observations])
+        for name in sorted(names)
+    }
+    return aggregate_contract, aggregate_observation
+
+
 def _aggregate(
     case,
     workers,
@@ -4710,6 +4781,11 @@ def _aggregate(
         "correctness": [worker["correctness"] for worker in workers],
         "route": workers[0]["route"],
     }
+    cost_contract, fixed_cost_observation = _aggregate_execution_costs(workers)
+    if cost_contract is not None:
+        result["cost_contract"] = cost_contract
+    if fixed_cost_observation is not None:
+        result["fixed_cost_observation"] = fixed_cost_observation
     if all(worker.get("submit_timing") is not None for worker in workers):
         submit_variants = {}
         submit_stable = True

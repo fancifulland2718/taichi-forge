@@ -3,6 +3,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge.graph._ir import GraphAccess
+from taichi_forge.hardware._retained import retained_execution_contract
 from tests import test_utils
 from tests.python.hardware_provider_lifecycle_qualification import (
     stress_iterations,
@@ -28,6 +29,22 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
     assert recording.stream_binding == "runtime_ordered"
     assert recording.workspace_ownership == "none"
     assert recording.no_host_readback
+    retained = retained_execution_contract(recording)
+    assert retained.identity is None
+    assert retained is retained_execution_contract(
+        ti.hardware.linalg.CublasGemmRecording(2, 3, 4)
+    )
+    assert tuple(
+        (item.name, item.amortization_scope) for item in retained.cost_model.fixed_costs
+    ) == (
+        ("provider_library_load", "process"),
+        ("provider_handle", "runtime_generation"),
+    )
+    assert retained.cost_model.scale_costs[0].dimensions == (
+        "rows",
+        "columns",
+        "inner",
+    )
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
     ) == (
@@ -140,6 +157,16 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     recording = ti.hardware.linalg.CusparseSpmvRecording(matrix)
     assert recording.replay_mode == "stream_capture"
     assert recording.workspace_ownership == "provider_generation"
+    retained = retained_execution_contract(recording)
+    assert retained is retained_execution_contract(
+        ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    )
+    assert retained.identity.operation_id == "linalg.spmv.cusparse_explicit"
+    assert retained.identity.provider_id == "cusparse"
+    assert not retained.identity.persistent_cache_safe
+    assert retained.workspace_ownership == "provider_generation"
+    assert retained.concurrency_policy == "runtime_ordered"
+    assert retained.cost_model.scale_costs[0].dimensions == ("rows", "nonzeros")
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
     ) == (
@@ -179,6 +206,13 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     if stats["provider"]["spmv_preprocess_available"]:
         assert stats["operations"]["spmv_preprocess_builds"] == 1
         assert stats["operations"]["spmv_preprocess_reuses"] == 1
+
+    updated_values = ti.ndarray(ti.f32, shape=stats["identity"]["nnz"])
+    updated_values.fill(1.0)
+    matrix.update_values(updated_values)
+    assert retained is retained_execution_contract(
+        ti.hardware.linalg.CusparseSpmvRecording(matrix)
+    )
 
     wrong = ti.ndarray(ti.f32, shape=n + 1)
     with pytest.raises(RuntimeError, match="shape"):

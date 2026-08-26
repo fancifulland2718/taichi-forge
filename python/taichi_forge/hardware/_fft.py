@@ -15,6 +15,15 @@ from taichi_forge.hardware._native_adapter import (
     validate_exact_bindings,
     validate_runtime_generation,
 )
+from taichi_forge.hardware._retained import (
+    HardwareExecutionCostModel,
+    RetainedExecutionContract,
+    attach_retained_execution_contract,
+    fixed_cost,
+    make_retained_plan_identity,
+    passive_dynamic_provider_scope,
+    scale_cost,
+)
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
@@ -213,6 +222,10 @@ class CufftRecording(BackendCommandRecording):
             "_cuda_capture_recipe",
             _CufftCaptureRecipe(plan, direction_value, input, output),
         )
+        attach_retained_execution_contract(
+            self,
+            plan._retained_execution_contract,  # pylint: disable=W0212
+        )
 
     @property
     def resource_effects(self):
@@ -329,6 +342,55 @@ class _CufftPlanBase:
         self._handle = int(handle)
         self._workspace_bytes = int(
             program._cuda_cufft_plan_memory_statistics(self._handle)["workspace_bytes"]
+        )
+        provider_scope = passive_dynamic_provider_scope(
+            "cufft", "cufft-plan-many-dynamic-symbols-v3"
+        )
+        self._retained_identity = make_retained_plan_identity(
+            "fft.transform.cufft",
+            "cufft",
+            "cuda",
+            provider_scope=provider_scope,
+            problem_scope={
+                "dimensions": self.dimensions,
+                "batch_count": self.batch_count,
+                "transform": self.transform,
+                "resource_handle": self._handle,
+                "input_layout": {
+                    "embed": self.input_layout.embed,
+                    "stride": self.input_layout.stride,
+                    "batch_distance": self.input_layout.batch_distance,
+                },
+                "output_layout": {
+                    "embed": self.output_layout.embed,
+                    "stride": self.output_layout.stride,
+                    "batch_distance": self.output_layout.batch_distance,
+                },
+            },
+            execution_scope={
+                "algorithm": "cufft_estimate",
+                "workspace_limit_bytes": self._workspace_bytes,
+                "stream_binding": "runtime_ordered",
+                "capture_compatible": True,
+            },
+        )
+        self._retained_execution_contract = RetainedExecutionContract(
+            identity=self._retained_identity,
+            cost_model=HardwareExecutionCostModel(
+                (
+                    fixed_cost("provider_library_load", "process"),
+                    fixed_cost("plan_creation", "provider_generation"),
+                    fixed_cost("workspace_allocation", "provider_generation"),
+                    fixed_cost("graph_capture", "graph_instance"),
+                    scale_cost(
+                        "fft_execution",
+                        "transform_elements",
+                        "batch_count",
+                    ),
+                )
+            ),
+            workspace_ownership="provider_generation",
+            concurrency_policy="runtime_ordered",
         )
 
     @property

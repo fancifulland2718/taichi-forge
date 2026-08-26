@@ -6,6 +6,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
+from taichi_forge.hardware._retained import validate_retained_execution_contract
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang import impl
 
@@ -70,6 +71,9 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         self._runtime_bindings = runtime_bindings
         self._lifetime_leases = lifetime_leases
         self._debug_info = debug_info
+        validate_retained_execution_contract(
+            recording, tuple(_resolve(lifetime_leases, recording))
+        )
         self._action = BackendCommandGraphAction(recording)
 
     def run(self, runtime_args):
