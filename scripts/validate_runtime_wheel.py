@@ -28,10 +28,13 @@ CUDA_VARIANT = re.compile(r"(?:^|[+_.-])(?:cu|cuda)\d+", re.IGNORECASE)
 FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r"(?:"
     r"(?:cublas(?:lt)?64_|cusparse64_|cusolver64_|cufft(?:w)?64_|"
-    r"curand64_|cupti64_|nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda)"
+    r"cusparseLt64_|cudss64_|curand64_|cupti64_|"
+    r"nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda|"
+    r"amgxsh|nccl|cutensor(?:Mg)?(?:64_)?)"
     r"[^/]*\.dll"
     r"|lib(?:cublas(?:lt)?|cusparse|cusolver|cufft(?:w)?|curand|cupti|"
-    r"nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda)(?:-[^.]+)?\.so(?:\..*)?"
+    r"cusparseLt|cudss|nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda|"
+    r"amgxsh|nccl|cutensor(?:Mg)?)(?:-[^.]+)?\.so(?:\..*)?"
     r")",
     re.IGNORECASE,
 )

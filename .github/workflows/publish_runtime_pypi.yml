@@ -198,7 +198,7 @@ jobs:
           runtime_so="$(find _skbuild -name libtaichi_runtime.so -type f | sort | head -n 1)"
           test -n "$runtime_so"
           readelf -d "$runtime_so" | tee /tmp/runtime-needed.txt
-          if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink)' /tmp/runtime-needed.txt; then
+          if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink|cudss|amgxsh|nccl|cutensor)' /tmp/runtime-needed.txt; then
             echo "::error::libtaichi_runtime.so has an implicit CUDA Toolkit dependency."
             exit 1
           fi
@@ -390,7 +390,7 @@ jobs:
           }
           $imports | Write-Output
           $toolkitDlls = @($imports | Where-Object {
-            $_ -match '(?i)\b(?:cudart64_|cupti64_|nvrtc64_|cublas(?:lt)?64_|cusparse64_|curand64_|cufft64_|cusolver64_|nvjitlink_)[^\s]*\.dll\b'
+            $_ -match '(?i)\b(?:cudart64_|cupti64_|nvrtc64_|cublas(?:lt)?64_|cusparse(?:lt)?64_|curand64_|cufft64_|cusolver64_|nvjitlink_|cudss64_|amgxsh|nccl|cutensor(?:mg)?(?:64_)?)[^\s]*\.dll\b'
           })
           if ($toolkitDlls.Count -ne 0) {
             Write-Error "taichi_runtime.dll has implicit CUDA Toolkit dependencies: $($toolkitDlls -join ', ')"

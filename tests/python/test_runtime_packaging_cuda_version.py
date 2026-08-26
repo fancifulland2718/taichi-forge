@@ -742,6 +742,31 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
             "manylinux_2_35_x86_64",
             "taichi_forge_runtime/_lib/runtime_native/libcufft.so.12",
         ),
+        (
+            "windows",
+            "win_amd64",
+            "taichi_forge_runtime/_lib/runtime_native/cudss64_0.dll",
+        ),
+        (
+            "windows",
+            "win_amd64",
+            "taichi_forge_runtime/_lib/runtime_native/amgxsh.dll",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime.libs/libnccl.so.2",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime.libs/libcutensor.so.2",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime.libs/libcusparseLt.so.0",
+        ),
     ),
 )
 def test_runtime_wheel_rejects_bundled_optional_provider_libraries(
@@ -1237,6 +1262,8 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "Reject implicit CUDA Toolkit shared-library imports" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" in workflow
     assert "cudart64_|cupti64_|nvrtc64_" in workflow
+    assert "cudss|amgxsh|nccl|cutensor" in workflow
+    assert "cudss64_|amgxsh|nccl|cutensor" in workflow
     assert not re.search(
         r"taichi[-_]forge[-_]runtime[-_](?:cu|cuda)\d+",
         workflow,
