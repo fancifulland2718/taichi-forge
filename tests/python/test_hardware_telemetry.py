@@ -8,6 +8,7 @@ from taichi_forge._hardware_telemetry import (
     hardware_provider_call,
     instrument_hardware_recording,
 )
+from taichi_forge.hardware._external_providers import external_provider_ids
 from tests import test_utils
 
 
@@ -47,6 +48,8 @@ def test_hardware_telemetry_is_passive_and_classifies_explicit_failure():
     assert before.runtime["native_submissions"] == 0
     assert before.resources == {}
     assert "matrix.mma.cuda" in before.operations
+    if ti_core.with_cuda():
+        assert tuple(before.providers) == external_provider_ids()
 
     recording = ti.hardware.matrix.CudaMatrixMmaRecording(1)
     memory = recording.memory_report()

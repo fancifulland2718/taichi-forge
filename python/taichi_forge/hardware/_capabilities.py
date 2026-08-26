@@ -21,6 +21,12 @@ from taichi_forge.hardware._capability_catalog_vulkan import (
     vulkan_future_operations,
     vulkan_interop_operations,
 )
+from taichi_forge.hardware._external_providers import (
+    external_provider_ids,
+    external_provider_spec,
+    passive_external_provider_status,
+    probe_external_provider,
+)
 
 
 HARDWARE_CAPABILITY_SCHEMA_VERSION = 4
@@ -877,9 +883,17 @@ _PROVIDERS = _build_provider_catalog()
 _PROVIDERS_BY_ID = MappingProxyType(
     {provider.provider_id: provider for provider in _PROVIDERS}
 )
-_TRANSIENT_NATIVE_PROVIDERS = frozenset(
-    ("cublas", "cusparse", "cufft", "cudss", "optix")
+_TRANSIENT_NATIVE_PROVIDERS = frozenset(external_provider_ids())
+_CATALOG_EXTERNAL_PROVIDERS = frozenset(
+    provider.provider_id
+    for provider in _PROVIDERS
+    if provider.dependency_tier == "lazy_external"
 )
+if _CATALOG_EXTERNAL_PROVIDERS != _TRANSIENT_NATIVE_PROVIDERS:
+    raise RuntimeError(
+        "external provider registry and capability catalog must describe "
+        "the same providers"
+    )
 
 
 def operations():
@@ -1445,52 +1459,11 @@ def _failed_external_probe_resolution(
 
 
 def _native_external_probe(provider_id, library_path=None):
-    if provider_id == "optix":
-        from taichi_forge.hardware._optix import (  # pylint: disable=C0415
-            probe_provider,
-        )
-
-        return dict(probe_provider(library_path))
-    from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
-
-    if provider_id != "cudss":
-        if library_path is not None:
-            raise ValueError("library_path is supported for cuDSS probes only")
-        return dict(_ti_core.probe_cuda_external_library(provider_id))
-    from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
-        cudss_dll_directories,
-        resolve_cudss_library_path,
-    )
-
-    resolved = resolve_cudss_library_path(library_path)
-    with cudss_dll_directories(resolved):
-        return dict(_ti_core.probe_cuda_external_library(provider_id, resolved))
+    return probe_external_provider(provider_id, library_path)
 
 
 def _native_external_status(provider_id):
-    if provider_id == "optix":
-        from taichi_forge.hardware._optix import (  # pylint: disable=C0415
-            passive_status,
-        )
-
-        return dict(passive_status())
-    from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
-
-    status = getattr(_ti_core, "cuda_external_library_status", None)
-    if status is None:
-        return {
-            "provider_id": provider_id,
-            "library_loaded": False,
-            "provider_abi": None,
-            "provider_version": None,
-            "native_facts": {
-                "status_policy": "passive_status_unavailable",
-                "external_component_probed": False,
-                "provider_enablement_changed": False,
-                "provider_selection_changed": False,
-            },
-        }
-    return dict(status(provider_id))
+    return passive_external_provider_status(provider_id)
 
 
 def _passive_external_statuses():
@@ -1586,8 +1559,13 @@ def probe(provider_id, *, library_path=None):
     provider = _provider(provider_id)
     if provider.dependency_tier != "lazy_external":
         raise ValueError("only lazy_external providers support runtime probing")
-    if library_path is not None and provider_id not in ("cudss", "optix"):
-        raise ValueError("library_path is supported for cuDSS and OptiX probes only")
+    if library_path is not None and not external_provider_spec(
+        provider_id
+    ).supports_library_path:
+        raise ValueError(
+            "library_path is supported for cuDSS probes only among native-symbol "
+            "providers; the OptiX source-provider probe also accepts a path"
+        )
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()
     external_statuses = _passive_external_statuses()

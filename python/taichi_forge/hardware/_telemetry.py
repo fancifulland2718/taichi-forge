@@ -5,6 +5,10 @@ from types import MappingProxyType
 
 from taichi_forge import _hardware_telemetry as _execution
 from taichi_forge._lib import core as _ti_core
+from taichi_forge.hardware._external_providers import (
+    external_provider_ids,
+    passive_external_provider_status,
+)
 from taichi_forge.lang import impl
 
 
@@ -125,8 +129,8 @@ def telemetry():
 
     providers = {}
     if _ti_core.with_cuda():
-        for provider_id in ("cublas", "cusparse", "cufft", "cudss"):
-            status = dict(_ti_core.cuda_external_library_status(provider_id))
+        for provider_id in external_provider_ids():
+            status = passive_external_provider_status(provider_id)
             provider_facts = {
                 "library_loaded": bool(status["library_loaded"]),
                 "provider_abi": status["provider_abi"],

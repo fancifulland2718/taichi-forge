@@ -342,8 +342,9 @@ class OptixProvider:
             )
         if not isinstance(validation, bool):
             raise TypeError("validation must be a bool")
-        with hardware_failure_phase("provider_plan_failure"):
+        with hardware_failure_phase("provider_load_failure"):
             loaded = _query_provider(library_path)
+        with hardware_failure_phase("provider_plan_failure"):
             context = ctypes.c_void_p()
             desc = _ContextDesc(ctypes.sizeof(_ContextDesc), 0, 0, int(validation), 0)
             result = int(

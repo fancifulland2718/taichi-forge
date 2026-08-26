@@ -132,12 +132,12 @@ def hardware_failure_phase(phase):
 
 def _provider_library_loaded(provider_id):
     try:
-        from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
-
-        return bool(
-            _ti_core.cuda_external_library_status(provider_id)["library_loaded"]
+        from taichi_forge.hardware._external_providers import (  # pylint: disable=C0415
+            external_provider_library_loaded,
         )
-    except (AttributeError, KeyError, RuntimeError, TypeError):
+
+        return external_provider_library_loaded(provider_id)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
         return None
 
 

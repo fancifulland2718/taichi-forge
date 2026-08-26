@@ -197,6 +197,21 @@ def test_optional_optix_cmake_target_has_no_wheel_install_or_sdk_download():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_optix_provider_load_failure_has_explicit_phase(monkeypatch):
+    def fail_load(_path):
+        raise OSError("injected provider load failure")
+
+    monkeypatch.setattr(_optix, "_load_library", fail_load)
+
+    with pytest.raises(OSError, match="provider load failure") as error:
+        ti.hardware.ray.load_optix_provider("missing-provider.dll")
+    assert (
+        error.value._taichi_forge_hardware_failure_phase
+        == "provider_load_failure"
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_fake_optix_provider_scene_graph_lifetime_and_memory(monkeypatch):
     fake = _FakeOptixLibrary(optix_abi=93)
     monkeypatch.setattr(_optix, "_load_library", lambda _path: fake)
