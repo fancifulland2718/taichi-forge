@@ -26,12 +26,14 @@ def _manifest(binary_name, binary_hash):
         "binary": {"path": binary_name, "sha256": binary_hash},
         "toolchain": {
             "cuda_toolkit": "13.2",
-            "cccl": "3.2.0",
             "nvcc": "13.2.51",
             "host_compiler": "MSVC 19.44",
             "cxx_abi": "msvc-19",
             "build_flags": ["--shared", "-O3"],
             "target_code": ["sm_89", "compute_89"],
+            "source_dependencies": [
+                {"name": "cccl/cub", "version": "3.2.0", "sha256": "b" * 64}
+            ],
         },
         "runtime_dependencies": [
             {
@@ -78,6 +80,7 @@ def test_source_provider_manifest_binds_binary_toolchain_and_target(tmp_path):
     assert manifest.supports_cuda_compute_capability(90)
     assert not manifest.supports_cuda_compute_capability(80)
     assert manifest.runtime_dependencies[0].linkage == "static"
+    assert manifest.toolchain["source_dependencies"][0].name == "cccl/cub"
     assert manifest.specializations[0]["temporary_storage"] == "caller_owned"
 
 

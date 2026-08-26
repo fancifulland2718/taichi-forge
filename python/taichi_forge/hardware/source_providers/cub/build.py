@@ -19,7 +19,7 @@ from pathlib import Path
 _PROVIDER_ABI = "taichi-forge-cub-source-provider-c-abi1"
 # Keep the standalone builder runnable from a source checkout that has no
 # Forge extension module yet. The manifest loader's unit test pins this value.
-_MANIFEST_SCHEMA_VERSION = 1
+_MANIFEST_SCHEMA_VERSION = 2
 
 
 def _sha256(path):
@@ -69,7 +69,7 @@ def _toolkit_versions(toolkit_root):
     return version("cuda"), version("cuda_cudart")
 
 
-def _cub_version(toolkit_root):
+def _cub_identity(toolkit_root):
     candidates = (
         toolkit_root / "include" / "cccl" / "cub" / "version.cuh",
         toolkit_root / "include" / "cub" / "version.cuh",
@@ -81,7 +81,8 @@ def _cub_version(toolkit_root):
         match = re.search(r"^#define\s+CUB_VERSION\s+(\d+)\b", source, re.MULTILINE)
         if match:
             encoded = int(match.group(1))
-            return f"{encoded // 100000}.{encoded // 100 % 1000}.{encoded % 100}"
+            version = f"{encoded // 100000}.{encoded // 100 % 1000}.{encoded % 100}"
+            return version, path
     raise RuntimeError("could not determine the CUB/CCCL version")
 
 
@@ -166,7 +167,7 @@ def build_cub_source_provider(
         raise RuntimeError("NVCC is unavailable; pass --nvcc or configure PATH")
     toolkit_root = nvcc_path.parent.parent.resolve()
     cuda_version, cudart_version = _toolkit_versions(toolkit_root)
-    cub_version = _cub_version(toolkit_root)
+    cub_version, cub_version_header = _cub_identity(toolkit_root)
     nvcc_version = _nvcc_version(nvcc_path)
     compiler, compiler_identity, cxx_abi = _host_compiler(host_compiler)
     targets = _target_code(target_code) if isinstance(target_code, str) else tuple(target_code)
@@ -208,12 +209,18 @@ def build_cub_source_provider(
         "binary": {"path": binary.name, "sha256": _sha256(binary)},
         "toolchain": {
             "cuda_toolkit": cuda_version,
-            "cccl": cub_version,
             "nvcc": nvcc_version,
             "host_compiler": compiler_identity,
             "cxx_abi": cxx_abi,
             "build_flags": flags,
             "target_code": list(targets),
+            "source_dependencies": [
+                {
+                    "name": "cccl/cub",
+                    "version": cub_version,
+                    "sha256": _sha256(cub_version_header),
+                }
+            ],
         },
         "runtime_dependencies": [
             {

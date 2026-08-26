@@ -115,6 +115,19 @@ def _encoded_cub_version(value):
     return int(fields[0]) * 100000 + int(fields[1]) * 100 + int(fields[2])
 
 
+def _source_dependency(manifest, name):
+    matches = tuple(
+        dependency
+        for dependency in manifest.toolchain["source_dependencies"]
+        if dependency.name == name
+    )
+    if len(matches) != 1:
+        raise TaichiRuntimeError(
+            f"CUB source-provider manifest must bind exactly one {name} source dependency"
+        )
+    return matches[0]
+
+
 class _CubSourceLibrary:
     def __init__(self, manifest):
         self.manifest = manifest
@@ -167,7 +180,9 @@ class _CubSourceLibrary:
         ):
             raise TaichiRuntimeError("CUB source-provider ABI identity is incomplete")
         expected_cuda = _encoded_cuda_version(manifest.toolchain["cuda_toolkit"])
-        expected_cub = _encoded_cub_version(manifest.toolchain["cccl"])
+        expected_cub = _encoded_cub_version(
+            _source_dependency(manifest, "cccl/cub").version
+        )
         if info.cuda_runtime_version != expected_cuda or info.cub_version != expected_cub:
             raise TaichiRuntimeError(
                 "CUB source-provider reported toolchain identity does not match its manifest"
@@ -416,9 +431,8 @@ class CubSourceProvider:
         self._library = _load_process_library(manifest)
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_generation = int(impl.runtime_generation())
-        self.version = (
-            f"CUB {manifest.toolchain['cccl']} / CUDA {manifest.toolchain['cuda_toolkit']}"
-        )
+        cub = _source_dependency(manifest, "cccl/cub")
+        self.version = f"CUB {cub.version} / CUDA {manifest.toolchain['cuda_toolkit']}"
 
     def plan(self, operation, num_items):
         validate_runtime_generation(

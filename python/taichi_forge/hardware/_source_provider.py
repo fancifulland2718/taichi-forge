@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 
-SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION = 1
+SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION = 2
 
 _TOP_LEVEL_FIELDS = frozenset(
     (
@@ -32,16 +32,17 @@ _BINARY_FIELDS = frozenset(("path", "sha256"))
 _TOOLCHAIN_FIELDS = frozenset(
     (
         "cuda_toolkit",
-        "cccl",
         "nvcc",
         "host_compiler",
         "cxx_abi",
         "build_flags",
         "target_code",
+        "source_dependencies",
     )
 )
 _SOURCE_IDENTITY_FIELDS = frozenset(("kind", "value"))
 _DEPENDENCY_FIELDS = frozenset(("name", "linkage", "version", "sha256"))
+_SOURCE_DEPENDENCY_FIELDS = frozenset(("name", "version", "sha256"))
 
 
 class SourceProviderManifestError(ValueError):
@@ -131,6 +132,40 @@ class SourceProviderRuntimeDependency:
     linkage: str
     version: str
     sha256: str | None
+
+
+@dataclass(frozen=True)
+class SourceProviderSourceDependency:
+    name: str
+    version: str
+    sha256: str
+
+
+def _source_dependencies(value):
+    if not isinstance(value, list) or not value:
+        raise SourceProviderManifestError(
+            "toolchain.source_dependencies must be a nonempty JSON object array"
+        )
+    dependencies = []
+    names = set()
+    for index, item in enumerate(value):
+        name = f"toolchain.source_dependencies[{index}]"
+        item = _mapping(item, name)
+        _exact_fields(item, _SOURCE_DEPENDENCY_FIELDS, name)
+        dependency_name = _string(item["name"], f"{name}.name")
+        if dependency_name in names:
+            raise SourceProviderManifestError(
+                "toolchain source dependency names must be unique"
+            )
+        names.add(dependency_name)
+        dependencies.append(
+            SourceProviderSourceDependency(
+                name=dependency_name,
+                version=_string(item["version"], f"{name}.version"),
+                sha256=_sha256(item["sha256"], f"{name}.sha256"),
+            )
+        )
+    return tuple(dependencies)
 
 
 @dataclass(frozen=True)
@@ -234,7 +269,6 @@ def load_source_provider_manifest(
     toolchain = MappingProxyType(
         {
             "cuda_toolkit": _string(toolchain_value["cuda_toolkit"], "toolchain.cuda_toolkit"),
-            "cccl": _string(toolchain_value["cccl"], "toolchain.cccl"),
             "nvcc": _string(toolchain_value["nvcc"], "toolchain.nvcc"),
             "host_compiler": _string(toolchain_value["host_compiler"], "toolchain.host_compiler"),
             "cxx_abi": _string(toolchain_value["cxx_abi"], "toolchain.cxx_abi"),
@@ -245,6 +279,9 @@ def load_source_provider_manifest(
                 allow_duplicates=True,
             ),
             "target_code": _target_code(toolchain_value["target_code"]),
+            "source_dependencies": _source_dependencies(
+                toolchain_value["source_dependencies"]
+            ),
         }
     )
 
@@ -323,5 +360,6 @@ __all__ = (
     "SourceProviderManifest",
     "SourceProviderManifestError",
     "SourceProviderRuntimeDependency",
+    "SourceProviderSourceDependency",
     "load_source_provider_manifest",
 )
