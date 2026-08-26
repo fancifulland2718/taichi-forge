@@ -57,6 +57,11 @@ struct SparseMatrixRuntimeStatistics {
   bool provider_spmv_preprocess_available{false};
   bool provider_spmm_f32_available{false};
   bool provider_spmm_preprocess_available{false};
+  bool provider_spsv_f32_available{false};
+  bool provider_spsm_f32_available{false};
+  bool provider_spsv_value_update_available{false};
+  bool provider_spsm_value_update_available{false};
+  bool provider_triangular_value_update_available{false};
   bool spmv_preprocess_active{false};
   std::uint32_t spmv_preprocess_last_error{0};
   int rows{0};
@@ -90,6 +95,18 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t spmm_preprocess_builds{0};
   std::uint64_t spmm_preprocess_reuses{0};
   std::uint64_t spmm_preprocess_fallbacks{0};
+  std::uint64_t spsv_calls{0};
+  std::uint64_t spsv_plan_builds{0};
+  std::uint64_t spsv_plan_reuses{0};
+  std::uint64_t spsv_analysis_builds{0};
+  std::uint64_t spsv_dense_descriptor_rebinds{0};
+  std::uint64_t spsv_value_updates{0};
+  std::uint64_t spsm_calls{0};
+  std::uint64_t spsm_plan_builds{0};
+  std::uint64_t spsm_plan_reuses{0};
+  std::uint64_t spsm_analysis_builds{0};
+  std::uint64_t spsm_dense_descriptor_rebinds{0};
+  std::uint64_t spsm_value_updates{0};
   std::uint64_t resource_generations_published{0};
   std::uint64_t resource_generations_retired{0};
   std::uint64_t resource_generations_released{0};
@@ -100,6 +117,8 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t values_reserved_bytes{0};
   std::uint64_t spmv_workspace_reserved_bytes{0};
   std::uint64_t spmm_workspace_reserved_bytes{0};
+  std::uint64_t spsv_workspace_reserved_bytes{0};
+  std::uint64_t spsm_workspace_reserved_bytes{0};
   std::uint64_t operator_owned_reserved_bytes{0};
   std::uint64_t operator_exclusive_reserved_bytes{0};
   std::uint64_t numeric_update_peak_temporary_bytes{0};
@@ -111,6 +130,9 @@ struct SparseMatrixRuntimeStatistics {
   std::uint64_t spmv_handle_count{0};
   std::uint64_t spmm_plan_count{0};
   std::uint64_t spmm_dense_matrix_descriptor_count{0};
+  std::uint64_t spsv_plan_count{0};
+  std::uint64_t spsm_plan_count{0};
+  std::uint64_t triangular_dense_descriptor_count{0};
 
   std::uint64_t host_to_device_bytes{0};
   std::uint64_t device_to_host_bytes{0};
@@ -1077,6 +1099,36 @@ class CuSparseMatrix : public SparseMatrix {
             int algorithm,
             CUstream stream = nullptr);
 
+  void nd_spsv(Program *prog,
+               const Ndarray &input,
+               const Ndarray &output,
+               int fill_mode,
+               bool unit_diagonal,
+               bool transpose);
+
+  void spsv(size_t input,
+            size_t output,
+            int fill_mode,
+            bool unit_diagonal,
+            bool transpose,
+            CUstream stream = nullptr);
+
+  void nd_spsm(Program *prog,
+               const Ndarray &input,
+               const Ndarray &output,
+               int rhs_count,
+               int fill_mode,
+               bool unit_diagonal,
+               bool transpose);
+
+  void spsm(size_t input,
+            size_t output,
+            int rhs_count,
+            int fill_mode,
+            bool unit_diagonal,
+            bool transpose,
+            CUstream stream = nullptr);
+
   void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
 
   bool supports_spmv_stream_binding() const;
@@ -1114,8 +1166,11 @@ class CuSparseMatrix : public SparseMatrix {
 
  private:
   struct SpmmPlan;
+  struct SpsvPlan;
+  struct SpsmPlan;
   void reset_spmv_resources();
   void reset_spmm_resources();
+  void reset_triangular_resources();
 
   cusparseSpMatDescr_t matrix_{nullptr};
   void *csr_row_ptr_{nullptr};
@@ -1148,6 +1203,20 @@ class CuSparseMatrix : public SparseMatrix {
   std::uint64_t spmm_preprocess_builds_{0};
   std::uint64_t spmm_preprocess_reuses_{0};
   std::uint64_t spmm_preprocess_fallbacks_{0};
+  std::unordered_map<std::uint64_t, std::shared_ptr<SpsvPlan>> spsv_plans_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<SpsmPlan>> spsm_plans_;
+  std::uint64_t spsv_calls_{0};
+  std::uint64_t spsv_plan_builds_{0};
+  std::uint64_t spsv_plan_reuses_{0};
+  std::uint64_t spsv_analysis_builds_{0};
+  std::uint64_t spsv_dense_descriptor_rebinds_{0};
+  std::uint64_t spsv_value_updates_{0};
+  std::uint64_t spsm_calls_{0};
+  std::uint64_t spsm_plan_builds_{0};
+  std::uint64_t spsm_plan_reuses_{0};
+  std::uint64_t spsm_analysis_builds_{0};
+  std::uint64_t spsm_dense_descriptor_rebinds_{0};
+  std::uint64_t spsm_value_updates_{0};
 };
 
 // Internal CUDA-only prototype for already-compressed, square dense blocks.

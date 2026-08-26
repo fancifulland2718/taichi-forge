@@ -1216,6 +1216,8 @@ def _passive_core_statuses(runtime_initialized, backend):
 
 _EXTERNAL_OPERATION_REQUIRED_FACTS = {
     "linalg.spmm.cusparse_explicit": "spmm_f32_available",
+    "linalg.spsv.cusparse_explicit": "spsv_f32_available",
+    "linalg.spsm.cusparse_explicit": "spsm_f32_available",
 }
 
 

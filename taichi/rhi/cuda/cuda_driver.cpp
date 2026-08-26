@@ -476,6 +476,15 @@ bool CUSPARSEDriver::load_cusparse() {
       loader_->load_function_optional("cusparseDnMatSetValues"));
   cpDnMatSetValues.set_lock(&lock_);
   cpDnMatSetValues.set_names("cpDnMatSetValues", "cusparseDnMatSetValues");
+  cpDnVecSetValues.set(
+      loader_->load_function_optional("cusparseDnVecSetValues"));
+  cpDnVecSetValues.set_lock(&lock_);
+  cpDnVecSetValues.set_names("cpDnVecSetValues", "cusparseDnVecSetValues");
+  cpSpMatSetAttribute.set(
+      loader_->load_function_optional("cusparseSpMatSetAttribute"));
+  cpSpMatSetAttribute.set_lock(&lock_);
+  cpSpMatSetAttribute.set_names("cpSpMatSetAttribute",
+                                "cusparseSpMatSetAttribute");
   cpSpMMBufferSize.set(
       loader_->load_function_optional("cusparseSpMM_bufferSize"));
   cpSpMMBufferSize.set_lock(&lock_);
@@ -487,6 +496,58 @@ bool CUSPARSEDriver::load_cusparse() {
   cpSpMM.set(loader_->load_function_optional("cusparseSpMM"));
   cpSpMM.set_lock(&lock_);
   cpSpMM.set_names("cpSpMM", "cusparseSpMM");
+  cpSpSVCreateDescr.set(
+      loader_->load_function_optional("cusparseSpSV_createDescr"));
+  cpSpSVCreateDescr.set_lock(&lock_);
+  cpSpSVCreateDescr.set_names("cpSpSVCreateDescr",
+                              "cusparseSpSV_createDescr");
+  cpSpSVDestroyDescr.set(
+      loader_->load_function_optional("cusparseSpSV_destroyDescr"));
+  cpSpSVDestroyDescr.set_lock(&lock_);
+  cpSpSVDestroyDescr.set_names("cpSpSVDestroyDescr",
+                               "cusparseSpSV_destroyDescr");
+  cpSpSVBufferSize.set(
+      loader_->load_function_optional("cusparseSpSV_bufferSize"));
+  cpSpSVBufferSize.set_lock(&lock_);
+  cpSpSVBufferSize.set_names("cpSpSVBufferSize", "cusparseSpSV_bufferSize");
+  cpSpSVAnalysis.set(
+      loader_->load_function_optional("cusparseSpSV_analysis"));
+  cpSpSVAnalysis.set_lock(&lock_);
+  cpSpSVAnalysis.set_names("cpSpSVAnalysis", "cusparseSpSV_analysis");
+  cpSpSVSolve.set(loader_->load_function_optional("cusparseSpSV_solve"));
+  cpSpSVSolve.set_lock(&lock_);
+  cpSpSVSolve.set_names("cpSpSVSolve", "cusparseSpSV_solve");
+  cpSpSVUpdateMatrix.set(
+      loader_->load_function_optional("cusparseSpSV_updateMatrix"));
+  cpSpSVUpdateMatrix.set_lock(&lock_);
+  cpSpSVUpdateMatrix.set_names("cpSpSVUpdateMatrix",
+                               "cusparseSpSV_updateMatrix");
+  cpSpSMCreateDescr.set(
+      loader_->load_function_optional("cusparseSpSM_createDescr"));
+  cpSpSMCreateDescr.set_lock(&lock_);
+  cpSpSMCreateDescr.set_names("cpSpSMCreateDescr",
+                              "cusparseSpSM_createDescr");
+  cpSpSMDestroyDescr.set(
+      loader_->load_function_optional("cusparseSpSM_destroyDescr"));
+  cpSpSMDestroyDescr.set_lock(&lock_);
+  cpSpSMDestroyDescr.set_names("cpSpSMDestroyDescr",
+                               "cusparseSpSM_destroyDescr");
+  cpSpSMBufferSize.set(
+      loader_->load_function_optional("cusparseSpSM_bufferSize"));
+  cpSpSMBufferSize.set_lock(&lock_);
+  cpSpSMBufferSize.set_names("cpSpSMBufferSize", "cusparseSpSM_bufferSize");
+  cpSpSMAnalysis.set(
+      loader_->load_function_optional("cusparseSpSM_analysis"));
+  cpSpSMAnalysis.set_lock(&lock_);
+  cpSpSMAnalysis.set_names("cpSpSMAnalysis", "cusparseSpSM_analysis");
+  cpSpSMSolve.set(loader_->load_function_optional("cusparseSpSM_solve"));
+  cpSpSMSolve.set_lock(&lock_);
+  cpSpSMSolve.set_names("cpSpSMSolve", "cusparseSpSM_solve");
+  cpSpSMUpdateMatrix.set(
+      loader_->load_function_optional("cusparseSpSM_updateMatrix"));
+  cpSpSMUpdateMatrix.set_lock(&lock_);
+  cpSpSMUpdateMatrix.set_names("cpSpSMUpdateMatrix",
+                               "cusparseSpSM_updateMatrix");
 
   capabilities_ = {};
   if (cp_get_property_.available()) {
@@ -522,6 +583,26 @@ bool CUSPARSEDriver::load_cusparse() {
       cpSpMMBufferSize.available() && cpSpMM.available();
   capabilities_.spmm_preprocess_available =
       capabilities_.spmm_f32_available && cpSpMMPreprocess.available();
+  const bool triangular_common =
+      capabilities_.scalar_spmv_available && cpSpMatSetAttribute.available();
+  capabilities_.spsv_f32_available =
+      triangular_common && cpDnVecSetValues.available() &&
+      cpSpSVCreateDescr.available() && cpSpSVDestroyDescr.available() &&
+      cpSpSVBufferSize.available() && cpSpSVAnalysis.available() &&
+      cpSpSVSolve.available();
+  capabilities_.spsm_f32_available =
+      triangular_common && cpCreateDnMat.available() &&
+      cpDestroyDnMat.available() && cpDnMatSetValues.available() &&
+      cpSpSMCreateDescr.available() && cpSpSMDestroyDescr.available() &&
+      cpSpSMBufferSize.available() && cpSpSMAnalysis.available() &&
+      cpSpSMSolve.available();
+  capabilities_.spsv_value_update_available =
+      capabilities_.spsv_f32_available && cpSpSVUpdateMatrix.available();
+  capabilities_.spsm_value_update_available =
+      capabilities_.spsm_f32_available && cpSpSMUpdateMatrix.available();
+  capabilities_.triangular_value_update_available =
+      capabilities_.spsv_value_update_available &&
+      capabilities_.spsm_value_update_available;
   const auto version_at_least = [&](int major, int minor, int patch) {
     const auto actual = std::make_tuple(capabilities_.library_version_major,
                                         capabilities_.library_version_minor,

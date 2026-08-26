@@ -36,6 +36,8 @@ _OPERATION_IDS = (
     "linalg.spmv.cusparse",
     "linalg.spmv.cusparse_explicit",
     "linalg.spmm.cusparse_explicit",
+    "linalg.spsv.cusparse_explicit",
+    "linalg.spsm.cusparse_explicit",
     "fft.transform.cufft",
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",
@@ -480,6 +482,32 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "fixed costs" in spmm.notes[2]
     assert "single-inflight" in spmm.notes[4]
 
+    spsv = ti.hardware.capability("linalg.spsv.cusparse_explicit")
+    assert spsv.implementation_status == "existing_public"
+    assert spsv.scopes == ("python", "graph")
+    assert spsv.graph_integration == "root_ordered"
+    assert spsv.stream_binding == "runtime_ordered"
+    assert spsv.workspace_ownership == "provider_owned"
+    assert spsv.update_policy == "implementation_defined"
+    assert spsv.public_api == "ti.hardware.linalg.spsv_f32"
+    assert "fixed costs" in spsv.notes[2]
+    assert "never selected automatically" in spsv.notes[0]
+    assert "older providers require a new matrix generation" in spsv.notes[3]
+    assert "no host postsolve check" in spsv.notes[5]
+
+    spsm = ti.hardware.capability("linalg.spsm.cusparse_explicit")
+    assert spsm.implementation_status == "existing_public"
+    assert spsm.scopes == ("python", "graph")
+    assert spsm.graph_integration == "root_ordered"
+    assert spsm.stream_binding == "runtime_ordered"
+    assert spsm.workspace_ownership == "provider_owned"
+    assert spsm.update_policy == "implementation_defined"
+    assert spsm.public_api == "ti.hardware.linalg.spsm_f32"
+    assert "right-hand-side count" in spsm.notes[1]
+    assert "older providers require a new matrix generation" in spsm.notes[2]
+    assert "no automatic route" in spsm.notes[3]
+    assert "no host postsolve check" in spsm.notes[4]
+
     cudss = ti.hardware.capability("linalg.solve.cudss")
     assert cudss.implementation_status == "existing_public"
     assert cudss.scopes == ("python", "graph")
@@ -717,6 +745,10 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
                 "provider_selection_changed": False,
                 "generic_bsr_spmv_available": provider_id == "cusparse",
                 "spmm_f32_available": provider_id == "cusparse",
+                "spsv_f32_available": provider_id == "cusparse",
+                "spsm_f32_available": provider_id == "cusparse",
+                "spsv_value_update_available": False,
+                "spsm_value_update_available": False,
             },
         }
 
@@ -728,6 +760,16 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
         operation
         for operation in report.operations
         if operation.descriptor.operation_id == "linalg.spmm.cusparse_explicit"
+    )
+    spsv = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id == "linalg.spsv.cusparse_explicit"
+    )
+    spsm = next(
+        operation
+        for operation in report.operations
+        if operation.descriptor.operation_id == "linalg.spsm.cusparse_explicit"
     )
 
     assert cusparse.discovery == "available"
@@ -741,6 +783,14 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
     assert spmm.discovery == "available"
     assert spmm.selection == "eligible"
     assert spmm.native_facts["spmm_f32_available"]
+    assert spsv.discovery == "available"
+    assert spsv.selection == "eligible"
+    assert spsv.native_facts["spsv_f32_available"]
+    assert not spsv.native_facts["spsv_value_update_available"]
+    assert spsm.discovery == "available"
+    assert spsm.selection == "eligible"
+    assert spsm.native_facts["spsm_f32_available"]
+    assert not spsm.native_facts["spsm_value_update_available"]
     assert cublas.enablement == "disabled"
     assert cublas.selection == "not_considered"
 

@@ -198,6 +198,15 @@ class GraphBuilder {
                                            int rhs_count,
                                            int algorithm);
 
+  void dispatch_cuda_capture_cusparse_triangular(CuSparseMatrix *matrix,
+                                                 Program *program,
+                                                 const aot::Arg &input,
+                                                 const aot::Arg &output,
+                                                 int rhs_count,
+                                                 int fill_mode,
+                                                 bool unit_diagonal,
+                                                 bool transpose);
+
   void dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
                                    Program *program,
                                    const aot::Arg &input,

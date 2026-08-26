@@ -543,6 +543,11 @@ typedef struct cusparseSpMatDescr *cusparseSpMatDescr_t;
 struct cusparseSpGEMMDescr;
 typedef struct cusparseSpGEMMDescr *cusparseSpGEMMDescr_t;
 
+struct cusparseSpSVDescr;
+struct cusparseSpSMDescr;
+typedef struct cusparseSpSVDescr *cusparseSpSVDescr_t;
+typedef struct cusparseSpSMDescr *cusparseSpSMDescr_t;
+
 typedef enum {
   CUSPARSE_INDEX_16U = 1,  ///< 16-bit unsigned integer for matrix/vector
                            ///< indices
@@ -616,6 +621,20 @@ typedef enum {
   CUSPARSE_SPMM_BSR_ALG1 = 14
 } cusparseSpMMAlg_t;
 
+typedef enum { CUSPARSE_SPSV_ALG_DEFAULT = 0 } cusparseSpSVAlg_t;
+
+typedef enum { CUSPARSE_SPSM_ALG_DEFAULT = 0 } cusparseSpSMAlg_t;
+
+typedef enum {
+  CUSPARSE_SPSV_UPDATE_GENERAL = 0,
+  CUSPARSE_SPSV_UPDATE_DIAGONAL = 1
+} cusparseSpSVUpdate_t;
+
+typedef enum {
+  CUSPARSE_SPSM_UPDATE_GENERAL = 0,
+  CUSPARSE_SPSM_UPDATE_DIAGONAL = 1
+} cusparseSpSMUpdate_t;
+
 typedef enum {
   CUSPARSE_SPGEMM_DEFAULT = 0,
   CUSPARSE_SPGEMM_CSR_ALG_DETERMINITIC = 1,
@@ -653,6 +672,11 @@ typedef enum {
   CUSPARSE_DIAG_TYPE_NON_UNIT = 0,
   CUSPARSE_DIAG_TYPE_UNIT = 1
 } cusparseDiagType_t;
+
+typedef enum {
+  CUSPARSE_SPMAT_FILL_MODE = 0,
+  CUSPARSE_SPMAT_DIAG_TYPE = 1
+} cusparseSpMatAttribute_t;
 
 // copy from cusolver.h
 typedef enum libraryPropertyType_t {

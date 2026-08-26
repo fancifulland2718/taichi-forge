@@ -4677,6 +4677,24 @@ void export_lang(py::module &m) {
           },
           py::arg("matrix"), py::arg("program"), py::arg("input"),
           py::arg("output"), py::arg("rhs_count"), py::arg("algorithm"))
+      .def(
+          "_dispatch_cuda_cusparse_triangular_capture_recipe",
+          [](GraphBuilder &builder, const py::object &matrix,
+             Program *program, const aot::Arg &input,
+             const aot::Arg &output, int rhs_count, int fill_mode,
+             bool unit_diagonal, bool transpose) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(
+                matrix.cast<SparseMatrix *>());
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE triangular capture supports scalar "
+                        "CSR matrices only.");
+            builder.dispatch_cuda_capture_cusparse_triangular(
+                csr, program, input, output, rhs_count, fill_mode,
+                unit_diagonal, transpose);
+          },
+          py::arg("matrix"), py::arg("program"), py::arg("input"),
+          py::arg("output"), py::arg("rhs_count"), py::arg("fill_mode"),
+          py::arg("unit_diagonal"), py::arg("transpose"))
       .def("_dispatch_cuda_cufft_capture_recipe",
            &GraphBuilder::dispatch_cuda_capture_cufft,
            py::arg("plan_handle"), py::arg("program"), py::arg("input"),
@@ -6674,6 +6692,36 @@ void export_lang(py::module &m) {
           },
           py::arg("program"), py::arg("input"), py::arg("output"),
           py::arg("rhs_count"), py::arg("algorithm"))
+      .def(
+          "_cuda_cusparse_spsv_f32",
+          [](SparseMatrix &matrix, Program *program, const Ndarray &input,
+             const Ndarray &output, int fill_mode, bool unit_diagonal,
+             bool transpose) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE SpSV supports scalar CSR matrices "
+                        "only.");
+            csr->nd_spsv(program, input, output, fill_mode, unit_diagonal,
+                         transpose);
+          },
+          py::arg("program"), py::arg("input"), py::arg("output"),
+          py::arg("fill_mode"), py::arg("unit_diagonal"),
+          py::arg("transpose"))
+      .def(
+          "_cuda_cusparse_spsm_f32",
+          [](SparseMatrix &matrix, Program *program, const Ndarray &input,
+             const Ndarray &output, int rhs_count, int fill_mode,
+             bool unit_diagonal, bool transpose) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE SpSM supports scalar CSR matrices "
+                        "only.");
+            csr->nd_spsm(program, input, output, rhs_count, fill_mode,
+                         unit_diagonal, transpose);
+          },
+          py::arg("program"), py::arg("input"), py::arg("output"),
+          py::arg("rhs_count"), py::arg("fill_mode"),
+          py::arg("unit_diagonal"), py::arg("transpose"))
       .def("_debug_runtime_stats", [](const SparseMatrix &matrix) {
         const auto stats = matrix.debug_runtime_statistics();
         py::dict identity;
@@ -6736,6 +6784,20 @@ void export_lang(py::module &m) {
             stats.spmm_preprocess_reuses;
         operations["spmm_preprocess_fallbacks"] =
             stats.spmm_preprocess_fallbacks;
+        operations["spsv_calls"] = stats.spsv_calls;
+        operations["spsv_plan_builds"] = stats.spsv_plan_builds;
+        operations["spsv_plan_reuses"] = stats.spsv_plan_reuses;
+        operations["spsv_analysis_builds"] = stats.spsv_analysis_builds;
+        operations["spsv_dense_descriptor_rebinds"] =
+            stats.spsv_dense_descriptor_rebinds;
+        operations["spsv_value_updates"] = stats.spsv_value_updates;
+        operations["spsm_calls"] = stats.spsm_calls;
+        operations["spsm_plan_builds"] = stats.spsm_plan_builds;
+        operations["spsm_plan_reuses"] = stats.spsm_plan_reuses;
+        operations["spsm_analysis_builds"] = stats.spsm_analysis_builds;
+        operations["spsm_dense_descriptor_rebinds"] =
+            stats.spsm_dense_descriptor_rebinds;
+        operations["spsm_value_updates"] = stats.spsm_value_updates;
         operations["resource_generations_published"] =
             stats.resource_generations_published;
         operations["resource_generations_retired"] =
@@ -6751,6 +6813,10 @@ void export_lang(py::module &m) {
             stats.spmv_workspace_reserved_bytes;
         resources["spmm_workspace_reserved_bytes"] =
             stats.spmm_workspace_reserved_bytes;
+        resources["spsv_workspace_reserved_bytes"] =
+            stats.spsv_workspace_reserved_bytes;
+        resources["spsm_workspace_reserved_bytes"] =
+            stats.spsm_workspace_reserved_bytes;
         resources["operator_owned_reserved_bytes"] =
             stats.operator_owned_reserved_bytes;
         resources["numeric_update_peak_temporary_bytes"] =
@@ -6781,6 +6847,10 @@ void export_lang(py::module &m) {
         resources["spmm_plan_count"] = stats.spmm_plan_count;
         resources["spmm_dense_matrix_descriptor_count"] =
             stats.spmm_dense_matrix_descriptor_count;
+        resources["spsv_plan_count"] = stats.spsv_plan_count;
+        resources["spsm_plan_count"] = stats.spsm_plan_count;
+        resources["triangular_dense_descriptor_count"] =
+            stats.triangular_dense_descriptor_count;
         resources["opaque_provider_resource_bytes"] = py::none();
         resources["ownership_scope"] =
             stats.pattern_storage_shared
@@ -6820,6 +6890,16 @@ void export_lang(py::module &m) {
             stats.provider_spmm_f32_available;
         provider["spmm_preprocess_available"] =
             stats.provider_spmm_preprocess_available;
+        provider["spsv_f32_available"] =
+            stats.provider_spsv_f32_available;
+        provider["spsm_f32_available"] =
+            stats.provider_spsm_f32_available;
+        provider["spsv_value_update_available"] =
+            stats.provider_spsv_value_update_available;
+        provider["spsm_value_update_available"] =
+            stats.provider_spsm_value_update_available;
+        provider["triangular_value_update_available"] =
+            stats.provider_triangular_value_update_available;
         provider["spmv_preprocess_active"] =
             stats.spmv_preprocess_active;
         provider["spmv_preprocess_last_error"] =
@@ -6908,6 +6988,8 @@ void export_lang(py::module &m) {
       .def(py::init<int, int, DataType>())
       .def(py::init<const CuSparseMatrix &>())
       .def("spmv", &CuSparseMatrix::nd_spmv)
+      .def("spsv", &CuSparseMatrix::nd_spsv)
+      .def("spsm", &CuSparseMatrix::nd_spsm)
       .def("spmv_kernel", &CuSparseMatrix::nd_spmv_kernel)
       .def(py::self + py::self)
       .def(py::self - py::self)

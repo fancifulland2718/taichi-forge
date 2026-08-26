@@ -231,6 +231,111 @@ class CudaSparseSpmmCaptureCommand final
   int algorithm_{0};
 };
 
+class CudaSparseTriangularCaptureCommand final
+    : public aot::CudaGraphCaptureCommand {
+ public:
+  CudaSparseTriangularCaptureCommand(CuSparseMatrix *matrix,
+                                     Program *program,
+                                     aot::Arg input,
+                                     aot::Arg output,
+                                     int rhs_count,
+                                     int fill_mode,
+                                     bool unit_diagonal,
+                                     bool transpose)
+      : matrix_(matrix),
+        program_(program),
+        input_(std::move(input)),
+        output_(std::move(output)),
+        rhs_count_(rhs_count),
+        fill_mode_(fill_mode),
+        unit_diagonal_(unit_diagonal),
+        transpose_(transpose) {
+  }
+
+  const char *kind() const override {
+    return rhs_count_ == 1 ? "cusparse_spsv_f32" : "cusparse_spsm_f32";
+  }
+
+  Program *program() const override {
+    return program_;
+  }
+
+  bool supports(const std::unordered_map<std::string, aot::IValue> &args,
+                Program &program) const override {
+    if (matrix_ == nullptr || program_ != &program ||
+        matrix_->num_rows() != matrix_->num_cols() || rhs_count_ < 1 ||
+        (fill_mode_ != 0 && fill_mode_ != 1)) {
+      return false;
+    }
+    const Ndarray *input = nullptr;
+    const Ndarray *output = nullptr;
+    if (rhs_count_ == 1) {
+      input = cuda_sparse_spmv_ndarray(input_, args, matrix_->num_rows());
+      output = cuda_sparse_spmv_ndarray(output_, args, matrix_->num_rows());
+    } else {
+      input = cuda_sparse_spmm_ndarray(input_, args, program,
+                                       matrix_->num_rows(), rhs_count_);
+      output = cuda_sparse_spmm_ndarray(output_, args, program,
+                                        matrix_->num_rows(), rhs_count_);
+    }
+    return input != nullptr && output != nullptr &&
+           input->get_device_allocation() != output->get_device_allocation();
+  }
+
+  void prepare(const std::unordered_map<std::string, aot::IValue> &args,
+               Program &program) override {
+    record(args, program, nullptr);
+  }
+
+  void record(const std::unordered_map<std::string, aot::IValue> &args,
+              Program &program,
+              void *stream) override {
+    TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
+                "CUDA cuSPARSE triangular capture recipe generation is "
+                "stale");
+    const Ndarray *input = nullptr;
+    const Ndarray *output = nullptr;
+    if (rhs_count_ == 1) {
+      input = cuda_sparse_spmv_ndarray(input_, args, matrix_->num_rows());
+      output = cuda_sparse_spmv_ndarray(output_, args, matrix_->num_rows());
+    } else {
+      input = cuda_sparse_spmm_ndarray(input_, args, program,
+                                       matrix_->num_rows(), rhs_count_);
+      output = cuda_sparse_spmm_ndarray(output_, args, program,
+                                        matrix_->num_rows(), rhs_count_);
+    }
+    TI_ERROR_IF(input == nullptr || output == nullptr,
+                "CUDA cuSPARSE triangular capture requires owning compact "
+                "f32 input/output arrays for {} right-hand side(s)",
+                rhs_count_);
+    TI_ERROR_IF(input->get_device_allocation() ==
+                    output->get_device_allocation(),
+                "CUDA cuSPARSE triangular capture input/output alias");
+    const auto input_address =
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(input));
+    const auto output_address =
+        static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(output));
+    auto capture_stream = reinterpret_cast<CUstream>(stream);
+    if (rhs_count_ == 1) {
+      matrix_->spsv(input_address, output_address, fill_mode_, unit_diagonal_,
+                    transpose_, capture_stream);
+    } else {
+      matrix_->spsm(input_address, output_address, rhs_count_, fill_mode_,
+                    unit_diagonal_, transpose_, capture_stream);
+    }
+  }
+
+ private:
+  CuSparseMatrix *matrix_{nullptr};
+  Program *program_{nullptr};
+  aot::Arg input_;
+  aot::Arg output_;
+  int rhs_count_{0};
+  int fill_mode_{0};
+  bool unit_diagonal_{false};
+  bool transpose_{false};
+};
+
 class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
  public:
   CudaCufftCaptureCommand(std::uint64_t plan_handle,
@@ -382,6 +487,38 @@ void validate_cuda_sparse_spmm_args(CuSparseMatrix *matrix,
               "right-hand sides");
   TI_ERROR_IF(algorithm != 0 && algorithm != 1,
               "CUDA sparse SpMM Graph proof algorithm is invalid");
+}
+
+void validate_cuda_sparse_triangular_args(CuSparseMatrix *matrix,
+                                          Program *program,
+                                          const aot::Arg &input,
+                                          const aot::Arg &output,
+                                          int rhs_count,
+                                          int fill_mode) {
+  TI_ERROR_IF(matrix == nullptr || program == nullptr,
+              "CUDA sparse triangular Graph command requires a live CSR "
+              "matrix and Program");
+  const int expected_rank = rhs_count == 1 ? 1 : 2;
+  TI_ERROR_IF(input.tag != aot::ArgKind::kNdarray ||
+                  output.tag != aot::ArgKind::kNdarray ||
+                  input.dtype_id != PrimitiveTypeID::f32 ||
+                  output.dtype_id != PrimitiveTypeID::f32 ||
+                  input.field_dim != expected_rank ||
+                  output.field_dim != expected_rank ||
+                  !input.element_shape.empty() || !output.element_shape.empty(),
+              "CUDA sparse triangular Graph command requires scalar f32 "
+              "rank-{} ndarray bindings",
+              expected_rank);
+  TI_ERROR_IF(input.name == output.name,
+              "CUDA sparse triangular Graph input and output must differ");
+  TI_ERROR_IF(matrix->num_rows() != matrix->num_cols(),
+              "CUDA sparse triangular Graph command requires a square "
+              "matrix");
+  TI_ERROR_IF(rhs_count < 1,
+              "CUDA sparse triangular Graph right-hand-side count must be "
+              "positive");
+  TI_ERROR_IF(fill_mode != 0 && fill_mode != 1,
+              "CUDA sparse triangular Graph fill mode is invalid");
 }
 
 void validate_cuda_cufft_args(std::uint64_t plan_handle,
@@ -747,6 +884,27 @@ void GraphBuilder::dispatch_cuda_capture_cusparse_spmm(
   register_arg(output);
   auto command = std::make_shared<CudaSparseSpmmCaptureCommand>(
       matrix, program, input, output, rhs_count, algorithm);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), std::vector<aot::Arg>{input, output}));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_cusparse_triangular(
+    CuSparseMatrix *matrix,
+    Program *program,
+    const aot::Arg &input,
+    const aot::Arg &output,
+    int rhs_count,
+    int fill_mode,
+    bool unit_diagonal,
+    bool transpose) {
+  validate_cuda_sparse_triangular_args(matrix, program, input, output,
+                                       rhs_count, fill_mode);
+  register_arg(input);
+  register_arg(output);
+  auto command = std::make_shared<CudaSparseTriangularCaptureCommand>(
+      matrix, program, input, output, rhs_count, fill_mode, unit_diagonal,
+      transpose);
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), std::vector<aot::Arg>{input, output}));
   seq()->append(all_nodes_.back().get());

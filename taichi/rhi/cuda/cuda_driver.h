@@ -338,6 +338,11 @@ struct CUSPARSEProviderCapabilities {
   bool scalar_spmv_available{false};
   bool spmm_f32_available{false};
   bool spmm_preprocess_available{false};
+  bool spsv_f32_available{false};
+  bool spsm_f32_available{false};
+  bool spsv_value_update_available{false};
+  bool spsm_value_update_available{false};
+  bool triangular_value_update_available{false};
 };
 
 class CUSPARSEDriver : protected CUDADriverBase {
@@ -387,6 +392,12 @@ class CUSPARSEDriver : protected CUDADriverBase {
       cpCreateDnMat;
   CUDADriverFunction<cusparseConstDnMatDescr_t> cpDestroyDnMat;
   CUDADriverFunction<cusparseDnMatDescr_t, void *> cpDnMatSetValues;
+  CUDADriverFunction<cusparseDnVecDescr_t, void *> cpDnVecSetValues;
+  CUDADriverFunction<cusparseSpMatDescr_t,
+                     cusparseSpMatAttribute_t,
+                     const void *,
+                     size_t>
+      cpSpMatSetAttribute;
   CUDADriverFunction<cusparseHandle_t,
                      cusparseOperation_t,
                      cusparseOperation_t,
@@ -423,6 +434,87 @@ class CUSPARSEDriver : protected CUDADriverBase {
                      cusparseSpMMAlg_t,
                      void *>
       cpSpMM;
+  CUDADriverFunction<cusparseSpSVDescr_t *> cpSpSVCreateDescr;
+  CUDADriverFunction<cusparseSpSVDescr_t> cpSpSVDestroyDescr;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnVecDescr_t,
+                     cusparseDnVecDescr_t,
+                     cudaDataType,
+                     cusparseSpSVAlg_t,
+                     cusparseSpSVDescr_t,
+                     size_t *>
+      cpSpSVBufferSize;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnVecDescr_t,
+                     cusparseDnVecDescr_t,
+                     cudaDataType,
+                     cusparseSpSVAlg_t,
+                     cusparseSpSVDescr_t,
+                     void *>
+      cpSpSVAnalysis;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnVecDescr_t,
+                     cusparseDnVecDescr_t,
+                     cudaDataType,
+                     cusparseSpSVAlg_t,
+                     cusparseSpSVDescr_t>
+      cpSpSVSolve;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseSpSVDescr_t,
+                     void *,
+                     cusparseSpSVUpdate_t>
+      cpSpSVUpdateMatrix;
+  CUDADriverFunction<cusparseSpSMDescr_t *> cpSpSMCreateDescr;
+  CUDADriverFunction<cusparseSpSMDescr_t> cpSpSMDestroyDescr;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpSMAlg_t,
+                     cusparseSpSMDescr_t,
+                     size_t *>
+      cpSpSMBufferSize;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpSMAlg_t,
+                     cusparseSpSMDescr_t,
+                     void *>
+      cpSpSMAnalysis;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseOperation_t,
+                     cusparseOperation_t,
+                     const void *,
+                     cusparseSpMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cusparseDnMatDescr_t,
+                     cudaDataType,
+                     cusparseSpSMAlg_t,
+                     cusparseSpSMDescr_t>
+      cpSpSMSolve;
+  CUDADriverFunction<cusparseHandle_t,
+                     cusparseSpSMDescr_t,
+                     void *,
+                     cusparseSpSMUpdate_t>
+      cpSpSMUpdateMatrix;
 
   bool load_cusparse();
 

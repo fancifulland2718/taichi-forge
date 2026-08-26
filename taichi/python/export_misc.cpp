@@ -211,8 +211,23 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
                         "cusparseDnMatSetValues",
                         "cusparseSpMM_bufferSize",
                         "cusparseSpMM_preprocess",
-                        "cusparseSpMM"};
-    native_facts["operation_contract"] = "spmv_f32+optional_spmm_f32";
+                        "cusparseSpMM",
+                        "cusparseDnVecSetValues",
+                        "cusparseSpMatSetAttribute",
+                        "cusparseSpSV_createDescr",
+                        "cusparseSpSV_destroyDescr",
+                        "cusparseSpSV_bufferSize",
+                        "cusparseSpSV_analysis",
+                        "cusparseSpSV_solve",
+                        "cusparseSpSV_updateMatrix",
+                        "cusparseSpSM_createDescr",
+                        "cusparseSpSM_destroyDescr",
+                        "cusparseSpSM_bufferSize",
+                        "cusparseSpSM_analysis",
+                        "cusparseSpSM_solve",
+                        "cusparseSpSM_updateMatrix"};
+    native_facts["operation_contract"] =
+        "spmv_f32+optional_spmm_f32+spsv_f32+spsm_f32";
   } else if (provider_id == "cufft") {
     library_name = "cufft";
     versions = {cuda_major, cuda_major - 1, 12, 11, 10};
@@ -333,6 +348,34 @@ py::dict probe_cuda_external_library(const std::string &provider_id,
         has_symbol("cusparseSpMM_bufferSize") && has_symbol("cusparseSpMM");
     native_facts["spmm_preprocess_available"] =
         has_symbol("cusparseSpMM_preprocess");
+    const bool triangular_common =
+        has_symbol("cusparseSpMatSetAttribute");
+    const bool spsv_f32_available =
+        triangular_common && has_symbol("cusparseDnVecSetValues") &&
+        has_symbol("cusparseSpSV_createDescr") &&
+        has_symbol("cusparseSpSV_destroyDescr") &&
+        has_symbol("cusparseSpSV_bufferSize") &&
+        has_symbol("cusparseSpSV_analysis") &&
+        has_symbol("cusparseSpSV_solve");
+    const bool spsm_f32_available =
+        triangular_common && has_symbol("cusparseCreateDnMat") &&
+        has_symbol("cusparseDestroyDnMat") &&
+        has_symbol("cusparseDnMatSetValues") &&
+        has_symbol("cusparseSpSM_createDescr") &&
+        has_symbol("cusparseSpSM_destroyDescr") &&
+        has_symbol("cusparseSpSM_bufferSize") &&
+        has_symbol("cusparseSpSM_analysis") &&
+        has_symbol("cusparseSpSM_solve");
+    native_facts["spsv_f32_available"] = spsv_f32_available;
+    native_facts["spsm_f32_available"] = spsm_f32_available;
+    native_facts["spsv_value_update_available"] =
+        spsv_f32_available && has_symbol("cusparseSpSV_updateMatrix");
+    native_facts["spsm_value_update_available"] =
+        spsm_f32_available && has_symbol("cusparseSpSM_updateMatrix");
+    native_facts["triangular_value_update_available"] =
+        spsv_f32_available && spsm_f32_available &&
+        has_symbol("cusparseSpSV_updateMatrix") &&
+        has_symbol("cusparseSpSM_updateMatrix");
   }
   native_facts["version_query_succeeded"] = version_query_succeeded;
   if (version_query_succeeded) {
@@ -410,6 +453,16 @@ py::dict cuda_external_library_status(const std::string &provider_id) {
         loaded && capabilities.spmm_f32_available;
     native_facts["spmm_preprocess_available"] =
         loaded && capabilities.spmm_preprocess_available;
+    native_facts["spsv_f32_available"] =
+        loaded && capabilities.spsv_f32_available;
+    native_facts["spsm_f32_available"] =
+        loaded && capabilities.spsm_f32_available;
+    native_facts["spsv_value_update_available"] =
+        loaded && capabilities.spsv_value_update_available;
+    native_facts["spsm_value_update_available"] =
+        loaded && capabilities.spsm_value_update_available;
+    native_facts["triangular_value_update_available"] =
+        loaded && capabilities.triangular_value_update_available;
     if (loaded && capabilities.library_version_major >= 0 &&
         capabilities.library_version_minor >= 0 &&
         capabilities.library_version_patch >= 0) {

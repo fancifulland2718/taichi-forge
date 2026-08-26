@@ -259,6 +259,44 @@ class _CusparseSpmmCaptureRecipe(_CudaGraphCaptureRecipe):
         )
 
 
+class _CusparseTriangularCaptureRecipe(_CudaGraphCaptureRecipe):
+    def __init__(
+        self,
+        matrix,
+        rhs_count,
+        fill_mode,
+        unit_diagonal,
+        transpose,
+        input_name,
+        output_name,
+    ):
+        self.kind = "cusparse_spsv_f32" if rhs_count == 1 else "cusparse_spsm_f32"
+        self._matrix = matrix
+        self._rhs_count = rhs_count
+        self._fill_mode = fill_mode
+        self._unit_diagonal = unit_diagonal
+        self._transpose = transpose
+        self._input_name = input_name
+        self._output_name = output_name
+
+    def append_to_graph(self, builder, program):
+        from taichi_forge.graph._graph import Arg, ArgKind  # pylint: disable=C0415
+
+        ndim = 1 if self._rhs_count == 1 else 2
+        input_arg = Arg(ArgKind.NDARRAY, self._input_name, f32, ndim=ndim)
+        output_arg = Arg(ArgKind.NDARRAY, self._output_name, f32, ndim=ndim)
+        builder._dispatch_cuda_cusparse_triangular_capture_recipe(
+            self._matrix.matrix,
+            program,
+            input_arg,
+            output_arg,
+            self._rhs_count,
+            self._fill_mode,
+            self._unit_diagonal,
+            self._transpose,
+        )
+
+
 def _cusparse_spmv_execution_contract(matrix, identity):
     cache_key = int(impl.runtime_generation())
     cached = getattr(matrix, "_cusparse_spmv_retained_contract", None)
@@ -569,6 +607,68 @@ def spmm_f32(matrix, input, output, *, algorithm="row_major"):
     return output
 
 
+def spsv_f32(
+    matrix,
+    input,
+    output,
+    *,
+    fill_mode="lower",
+    unit_diagonal=False,
+    transpose=False,
+    algorithm="default",
+):
+    """Solve one f32 triangular CSR system with retained cuSPARSE analysis.
+
+    Non-unit systems require finite nonzero pivots. Generic cuSPARSE SpSV has
+    no zero-pivot query, so this low-level explicit operation does not perform
+    a host postsolve check and singular input may produce nonfinite output.
+    """
+
+    recording = CusparseSpsvRecording(
+        matrix,
+        fill_mode=fill_mode,
+        unit_diagonal=unit_diagonal,
+        transpose=transpose,
+        algorithm=algorithm,
+    )
+    recording.execute({"input": input, "output": output})
+    return output
+
+
+def spsm_f32(
+    matrix,
+    input,
+    output,
+    *,
+    fill_mode="lower",
+    unit_diagonal=False,
+    transpose=False,
+    algorithm="default",
+):
+    """Solve a compact row-major f32 triangular CSR multi-RHS system.
+
+    Non-unit systems require finite nonzero pivots. Generic cuSPARSE SpSM has
+    no zero-pivot query, so this low-level explicit operation does not perform
+    a host postsolve check and singular input may produce nonfinite output.
+    """
+
+    input_shape = tuple(getattr(input, "shape", ()))
+    if len(input_shape) != 2:
+        raise TaichiRuntimeError(
+            "CUDA cuSPARSE SpSM input must be a two-dimensional ndarray"
+        )
+    recording = CusparseSpsmRecording(
+        matrix,
+        input_shape[1],
+        fill_mode=fill_mode,
+        unit_diagonal=unit_diagonal,
+        transpose=transpose,
+        algorithm=algorithm,
+    )
+    recording.execute({"input": input, "output": output})
+    return output
+
+
 def cublas_is_available():
     """Explicitly probe whether a compatible cuBLAS provider is present."""
 
@@ -619,6 +719,38 @@ def cusparse_spmm_is_available():
         item
         for item in report.operations
         if item.descriptor.operation_id == "linalg.spmm.cusparse_explicit"
+    )
+    return operation.discovery == "available"
+
+
+def cusparse_spsv_is_available():
+    """Probe the retained cuSPARSE SpSV analysis/solve symbol slice."""
+
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
+        return False
+    from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
+
+    report = probe("cusparse")
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.spsv.cusparse_explicit"
+    )
+    return operation.discovery == "available"
+
+
+def cusparse_spsm_is_available():
+    """Probe the retained cuSPARSE SpSM analysis/solve symbol slice."""
+
+    if impl.get_runtime().prog is None or active_backend() != "cuda":
+        return False
+    from taichi_forge.hardware._capabilities import probe  # pylint: disable=C0415
+
+    report = probe("cusparse")
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.spsm.cusparse_explicit"
     )
     return operation.discovery == "available"
 
@@ -873,6 +1005,380 @@ class CusparseSpmmRecording(BackendCommandRecording):
                 "rhs_count": item.rhs_count,
                 "algorithm": item.algorithm,
             },
+        )
+
+
+def _cusparse_triangular_execution_contract(
+    matrix,
+    identity,
+    operation_id,
+    rhs_count,
+    fill_mode,
+    unit_diagonal,
+    transpose,
+):
+    cache_key = (
+        int(impl.runtime_generation()),
+        operation_id,
+        rhs_count,
+        fill_mode,
+        unit_diagonal,
+        transpose,
+    )
+    cached_contracts = getattr(
+        matrix, "_cusparse_triangular_retained_contracts", None
+    )
+    if cached_contracts is None:
+        cached_contracts = {}
+        matrix._cusparse_triangular_retained_contracts = cached_contracts
+    cached = cached_contracts.get(cache_key)
+    if cached is not None:
+        return cached
+
+    runtime_stats = matrix._debug_runtime_stats()  # pylint: disable=W0212
+    pattern_version = runtime_stats["identity"]["pattern_version"]
+    provider = runtime_stats["provider"]
+    provider_scope = passive_dynamic_provider_scope(
+        "cusparse",
+        "cusparse-dynamic-symbols-v1",
+        version=provider["library_version"],
+    )
+    update_fact = (
+        "spsv_value_update_available"
+        if rhs_count == 1
+        else "spsm_value_update_available"
+    )
+    value_update = (
+        "in_place_retained_plan_update"
+        if provider[update_fact]
+        else "immutable_after_triangular_analysis"
+    )
+    retained_identity = make_retained_plan_identity(
+        operation_id,
+        "cusparse",
+        "cuda",
+        provider_scope=provider_scope,
+        problem_scope={
+            "rows": matrix.n,
+            "columns": matrix.m,
+            "nonzeros": runtime_stats["identity"]["nnz"],
+            "rhs_count": rhs_count,
+            "storage_format": identity["storage_format"],
+            "dtype": "f32",
+            "topology_fingerprint": matrix._topology_fingerprint,
+            "pattern_id": runtime_stats["identity"]["pattern_id"],
+            "pattern_version": pattern_version,
+            "resource_object_token": id(matrix.matrix),
+            "resource_generation": pattern_version,
+        },
+        execution_scope={
+            "algorithm": "default",
+            "fill_mode": fill_mode,
+            "unit_diagonal": unit_diagonal,
+            "transpose": transpose,
+            "value_update": value_update,
+            "stream_binding": "runtime_ordered",
+            "capture_compatible": True,
+        },
+    )
+    scale_dimensions = ["rows", "nonzeros", "dependency_depth"]
+    if rhs_count > 1:
+        scale_dimensions.append("rhs_count")
+    contract = RetainedExecutionContract(
+        identity=retained_identity,
+        cost_model=HardwareExecutionCostModel(
+            (
+                fixed_cost("provider_library_load", "process"),
+                fixed_cost("handle_and_descriptors", "provider_generation"),
+                fixed_cost("triangular_analysis", "provider_generation"),
+                fixed_cost("workspace_allocation", "provider_generation"),
+                fixed_cost("graph_capture", "graph_instance"),
+                scale_cost("triangular_solve", *scale_dimensions),
+            )
+        ),
+        workspace_ownership="provider_generation",
+        concurrency_policy="single_inflight",
+    )
+    result = (contract, dict(runtime_stats["resources"]))
+    cached_contracts[cache_key] = result
+    return result
+
+
+class _CusparseTriangularRecording(BackendCommandRecording):
+    _FILL_MODES = {"lower": 0, "upper": 1}
+
+    def __init__(
+        self,
+        matrix,
+        rhs_count,
+        operation_id,
+        provider_fact,
+        *,
+        fill_mode="lower",
+        unit_diagonal=False,
+        transpose=False,
+        algorithm="default",
+        input="input",
+        output="output",
+    ):
+        from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
+            SparseMatrix,
+        )
+
+        if not isinstance(matrix, SparseMatrix):
+            raise TypeError("CUDA cuSPARSE triangular matrix must be a SparseMatrix")
+        if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):
+            raise TypeError("CUDA cuSPARSE triangular rhs_count must be an integer")
+        if rhs_count < 1 or rhs_count > 0x7FFFFFFF:
+            raise ValueError(
+                "CUDA cuSPARSE triangular rhs_count must be in [1, INT_MAX]"
+            )
+        if fill_mode not in self._FILL_MODES:
+            raise ValueError("CUDA cuSPARSE fill_mode must be lower or upper")
+        if not isinstance(unit_diagonal, bool):
+            raise TypeError("CUDA cuSPARSE unit_diagonal must be a bool")
+        if not isinstance(transpose, bool):
+            raise TypeError("CUDA cuSPARSE transpose must be a bool")
+        if algorithm != "default":
+            raise ValueError("CUDA cuSPARSE triangular algorithm must be default")
+        matrix._ensure_valid()  # pylint: disable=W0212
+        contract = matrix._get_format_contract()  # pylint: disable=W0212
+        identity = contract["identity"]
+        if (
+            identity["backend_family"] != "cuda"
+            or identity["storage_format"] != "csr"
+            or identity["dtype"] != "f32"
+            or matrix.n != matrix.m
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE triangular solve requires a square scalar f32 "
+                "CUDA CSR SparseMatrix"
+            )
+        runtime_stats = matrix._debug_runtime_stats()  # pylint: disable=W0212
+        if not runtime_stats["provider"][provider_fact]:
+            raise TaichiRuntimeError(
+                "The loaded cuSPARSE provider does not expose the retained "
+                "triangular solve and value-update symbol contract"
+            )
+        names = (input, output)
+        if any(not isinstance(name, str) or not name for name in names):
+            raise ValueError("CUDA cuSPARSE binding names must be nonempty strings")
+        if input == output:
+            raise ValueError("CUDA cuSPARSE binding names must be unique")
+        super().__init__(
+            backend="cuda",
+            binding_names=names,
+            command_count=1,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="declared_effects",
+            workspace_ownership="provider_generation",
+            replay_mode="stream_capture",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "matrix", matrix)
+        object.__setattr__(self, "rhs_count", rhs_count)
+        object.__setattr__(self, "fill_mode", fill_mode)
+        object.__setattr__(self, "_fill_mode_code", self._FILL_MODES[fill_mode])
+        object.__setattr__(self, "unit_diagonal", unit_diagonal)
+        object.__setattr__(self, "transpose", transpose)
+        object.__setattr__(self, "algorithm", algorithm)
+        object.__setattr__(self, "input", input)
+        object.__setattr__(self, "output", output)
+        object.__setattr__(self, "_operation_id", operation_id)
+        object.__setattr__(
+            self,
+            "_cuda_capture_recipe",
+            _CusparseTriangularCaptureRecipe(
+                matrix,
+                rhs_count,
+                self._fill_mode_code,
+                unit_diagonal,
+                transpose,
+                input,
+                output,
+            ),
+        )
+        retained_contract, memory_resources = (
+            _cusparse_triangular_execution_contract(
+                matrix,
+                identity,
+                operation_id,
+                rhs_count,
+                fill_mode,
+                unit_diagonal,
+                transpose,
+            )
+        )
+        attach_retained_execution_contract(self, retained_contract)
+        object.__setattr__(self, "_memory_resources", memory_resources)
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self.input, GraphAccess.READ),
+            ResourceEffect(self.output, GraphAccess.WRITE),
+        )
+
+    def execute(self, bindings):
+        validate_exact_bindings(self, bindings, "CUDA cuSPARSE triangular solve")
+        if active_backend() != "cuda":
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE triangular solve requires the CUDA backend; "
+                f"the active backend is {active_backend()}"
+            )
+        program = impl.get_runtime().prog
+        if program is None:
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE triangular solve requires an active runtime"
+            )
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+        input_value = bindings[self.input]
+        output_value = bindings[self.output]
+        shape = (
+            (self.matrix.n,)
+            if self.rhs_count == 1
+            else (self.matrix.n, self.rhs_count)
+        )
+        input_array = CusparseSpmvRecording._validate_array(
+            input_value, self.input, shape
+        )
+        output_array = CusparseSpmvRecording._validate_array(
+            output_value, self.output, shape
+        )
+        if (
+            input_value._runtime_allocation_identity
+            == output_value._runtime_allocation_identity
+        ):
+            raise TaichiRuntimeError(
+                "CUDA cuSPARSE triangular output must not alias the input"
+            )
+        with hardware_provider_call("cusparse"):
+            if self.rhs_count == 1:
+                self.matrix.matrix._cuda_cusparse_spsv_f32(
+                    program,
+                    input_array,
+                    output_array,
+                    self._fill_mode_code,
+                    self.unit_diagonal,
+                    self.transpose,
+                )
+            else:
+                self.matrix.matrix._cuda_cusparse_spsm_f32(
+                    program,
+                    input_array,
+                    output_array,
+                    self.rhs_count,
+                    self._fill_mode_code,
+                    self.unit_diagonal,
+                    self.transpose,
+                )
+
+    def validate_graph_lifetime(self):
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+
+    def memory_report(self):
+        lifecycle_state = "ready"
+        resident = True
+        resources = self._memory_resources
+        try:
+            resources = dict(
+                self.matrix._debug_runtime_stats()["resources"]  # pylint: disable=W0212
+            )
+            object.__setattr__(self, "_memory_resources", resources)
+        except TaichiRuntimeError:
+            lifecycle_state = "runtime_invalid"
+            resident = False
+        prefix = "spsv" if self.rhs_count == 1 else "spsm"
+        workspace_bytes = int(
+            resources.get(f"{prefix}_workspace_reserved_bytes", 0)
+        )
+        return make_memory_report(
+            f"cusparse_{prefix}_f32",
+            "cuda",
+            (
+                HardwareMemoryComponent(
+                    f"retained_{prefix}_workspace",
+                    workspace_bytes,
+                    True,
+                    "provider_generation",
+                    "shared_user_object",
+                    resident=resident,
+                ),
+                HardwareMemoryComponent(
+                    "cusparse_triangular_analysis_and_descriptors",
+                    None,
+                    False,
+                    "provider_generation",
+                    "driver",
+                    resident=resident,
+                ),
+            ),
+            lifecycle_state=lifecycle_state,
+            ownership_scope="sparse_matrix_triangle_rhs_generation",
+        )
+
+    def _graph_provider_memory_report(self):
+        return self.memory_report()
+
+    def _graph_provider_memory_identity(self):
+        return (
+            self._operation_id,
+            id(self.matrix),
+            self.rhs_count,
+            self.fill_mode,
+            self.unit_diagonal,
+            self.transpose,
+        )
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item,),
+            debug_info=lambda item: {
+                "kind": (
+                    "cuda_cusparse_spsv_f32"
+                    if item.rhs_count == 1
+                    else "cuda_cusparse_spsm_f32"
+                ),
+                "shape": item.matrix.shape,
+                "rhs_count": item.rhs_count,
+                "fill_mode": item.fill_mode,
+                "unit_diagonal": item.unit_diagonal,
+                "transpose": item.transpose,
+            },
+        )
+
+
+@instrument_hardware_recording("linalg.spsv.cusparse_explicit")
+class CusparseSpsvRecording(_CusparseTriangularRecording):
+    """Retained f32 CSR triangular solve for one nonsingular right-hand side."""
+
+    def __init__(self, matrix, **options):
+        super().__init__(
+            matrix,
+            1,
+            "linalg.spsv.cusparse_explicit",
+            "spsv_f32_available",
+            **options,
+        )
+
+
+@instrument_hardware_recording("linalg.spsm.cusparse_explicit")
+class CusparseSpsmRecording(_CusparseTriangularRecording):
+    """Retained f32 CSR triangular solve for multiple nonsingular RHSs."""
+
+    def __init__(self, matrix, rhs_count, **options):
+        if isinstance(rhs_count, bool) or not isinstance(rhs_count, int):
+            raise TypeError("CUDA cuSPARSE SpSM rhs_count must be an integer")
+        if rhs_count < 2 or rhs_count > 0x7FFFFFFF:
+            raise ValueError("CUDA cuSPARSE SpSM rhs_count must be in [2, INT_MAX]")
+        super().__init__(
+            matrix,
+            rhs_count,
+            "linalg.spsm.cusparse_explicit",
+            "spsm_f32_available",
+            **options,
         )
 
 
@@ -1422,11 +1928,20 @@ __all__ = [
     "CudssRefactorSolveRecording",
     "CudssSolveRecording",
     "CublasGemmRecording",
+    "CusparseSpmmRecording",
     "CusparseSpmvRecording",
+    "CusparseSpsmRecording",
+    "CusparseSpsvRecording",
     "cublas_is_available",
     "cusparse_is_available",
+    "cusparse_spmm_is_available",
+    "cusparse_spsm_is_available",
+    "cusparse_spsv_is_available",
     "cudss_is_available",
     "gemm_f32",
     "is_available",
     "spmv_f32",
+    "spmm_f32",
+    "spsm_f32",
+    "spsv_f32",
 ]
