@@ -18,7 +18,7 @@ grouped under the behavior they shipped.
 
 | Version | History status | Source boundary | Main scope |
 | --- | --- | --- | --- |
-| [Unreleased](#unreleased) | 0.6.3 development | current `master` | Hardware Capability schema, distribution guards, and Vulkan native-command Graph substrate |
+| [Unreleased](#unreleased) | 0.6.3 development | current `master` | hardware capability/provider contracts, CUDA/Vulkan intrinsics, and retained native execution |
 | [0.6.2](#062) | latest published release | `662affa64` | execution-plan closeout, dynamic-work/Worklist contracts, production Graph replay, runtime export control, device-convergent linear algebra, and minimal MUSA admission |
 | [0.6.1](#061) | published release | `b129ad94c` | task launch manifests/policies, dynamic LLVM SNode directories, device-resident dynamic worklists, bounded Graph dispatch, and correlated pipeline telemetry |
 | [0.6.0](#060) | published release | `106ad65d25` | structured Graph control/telemetry and Vulkan indirect dispatch, sparse runtime/linear algebra, driver-only CUDA primitives, managed interoperability/display, and bounded runtime lifetimes |
@@ -137,8 +137,11 @@ grouped under the behavior they shipped.
   substituted. Added immutable `ti.hardware.sampling.SamplerConfig` min/mag
   filter and per-axis repeat/mirrored-repeat/clamp-to-edge addressing, backed
   by a device sampler cache. Exact `fetch()` remains sampler-independent;
-  one-mip normalized sampling remains the boundary. CUDA texture lowering is
-  not implemented and remains `planned`. No official wheel variant is added.
+  one-mip normalized sampling remains the boundary. Added the matching explicit
+  CUDA JIT-kernel route over Driver-API arrays and texture objects for supported
+  one-, two-, and four-channel formats. CUDA read/write textures, AOT manifests,
+  and Graph capture remain unsupported. Neither backend silently replaces
+  field/ndarray access, and no official wheel variant is added.
 - Added D0 `ti.hardware.graphics.VulkanGraphicsPipeline`, a renderer-neutral
   interface over caller-provided SPIR-V, exact vertex/index layouts,
   runtime-owned color/depth textures, and direct or root-Graph draw recording.
@@ -146,6 +149,14 @@ grouped under the behavior they shipped.
   implicit host wait. The interface deliberately provides no scene, camera,
   material, lighting, shader compiler, or presentation policy and adds no
   dependency or official wheel variant. Driver pipeline memory remains opaque.
+- Extended the Vulkan graphics command with fixed/count-buffer indirect draws,
+  bounded immutable bindless storage-buffer table snapshots, and retained
+  descriptor-generation replay. Indirect inputs may be produced by kernels
+  without a host count readback. Added the explicit
+  `ti.hardware.graphics.VulkanMeshPipeline` command for caller-provided
+  `SPV_EXT_mesh_shader` mesh/task shaders on devices that expose the complete
+  feature and limit chain. Forge supplies no meshlet, culling, material, or
+  renderer policy, and makes no general mesh-shader speedup claim.
 - Added D0 `ti.hardware.raster.RasterPass`, reusing the current Program's
   Vulkan GGUI/RHI graphics pipeline as a compatibility/qualification adapter
   for explicit offscreen hardware raster of
@@ -165,8 +176,11 @@ grouped under the behavior they shipped.
   and root Graph. BLAS/TLAS build and refit are root-ordered actions; refit
   preserves BLAS topology and TLAS BLAS count/order. The compatibility
   `TriangleScene` remains the single identity-instance wrapper. Procedural
-  geometry, topology-changing updates, and kernel-inline query remain
-  unsupported. No SDK runtime dependency or official wheel variant is added.
+  geometry and topology-changing updates remain unsupported. Added the separate
+  explicit JIT Vulkan kernel-inline closest-hit route over opaque triangle
+  acceleration structures; acceleration-structure Graph arguments and AOT
+  remain unsupported. No SDK runtime dependency or official wheel variant is
+  added.
 - Added optional D1 `ti.hardware.fft.CufftPlan1D`/`CufftPlanND` for fixed-size,
   batched single-precision C2C/R2C/C2R transforms, including rank-2/rank-3
   layouts with explicit embed/stride/distance, through direct Python and root
@@ -182,9 +196,12 @@ grouped under the behavior they shipped.
   workloads keep synchronous lowering. `ti.hardware.report()`
   distinguishes provider eligibility from selection by an actually compiled
   kernel specialization. No public CUDA instruction syntax, Toolkit runtime,
-  package, or wheel variant is added. Vulkan mesh shaders remain `planned`
-  because the RHI does not yet implement their feature, shader, pipeline, and
-  command chain.
+  package, or wheel variant is added.
+- Added explicit JIT Vulkan cooperative-matrix kernel lowering through
+  `ti.hardware.matrix.cooperative_mma_f16_f32`. Supported subgroup-scoped
+  f16/f16/f32/f32 M/N/K tuples are enumerated from the active device rather
+  than copied from CUDA WMMA. Ordinary matrix multiplication is not rewritten;
+  unsupported tuples, AOT, escaping tiles, and unqualified devices fail closed.
 
 ## 0.6.2
 

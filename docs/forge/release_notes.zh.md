@@ -14,7 +14,7 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 | 版本 | 历史状态 | 源码边界 | 主要范围 |
 | --- | --- | --- | --- |
-| [待发布](#unreleased) | 0.6.3 开发版本 | 当前 `master` | Hardware Capability schema、发行边界守卫与 Vulkan native-command Graph 基础 |
+| [待发布](#unreleased) | 0.6.3 开发版本 | 当前 `master` | hardware capability/provider 合同、CUDA/Vulkan intrinsic 与 retained native execution |
 | [0.6.2](#062) | 最新正式发布版本 | `662affa64` | execution-plan 收口、dynamic-work/Worklist 合同、生产 Graph replay、runtime export 控制、device-convergent 线性代数与最小 MUSA 准入 |
 | [0.6.1](#061) | 已正式发布 | `b129ad94c` | task launch manifest/policy、动态 LLVM SNode directory、设备端 dynamic worklist、有界 Graph dispatch 与关联 pipeline telemetry |
 | [0.6.0](#060) | 已正式发布 | `106ad65d25` | 结构化 Graph 控制/遥测与 Vulkan indirect dispatch、稀疏 runtime/线性代数、driver-only CUDA primitive、受管互操作/显示与 runtime 生命周期有界化 |
@@ -108,16 +108,24 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   extent 相同，拒绝 alias 和 depth/stencil。由于 Vulkan 不保证物理 copy engine，catalog
   只声明 native device command 与 implementation-defined hardware acceleration。
 - 资格化现有 D0 Vulkan `ti.Texture` 硬件采样路线：显式 texture op 会自动 lowering 到
-  SPIR-V image/sampler 指令；普通 field/ndarray 不会自动替换。CUDA texture lowering
-  尚未实现并保持 `planned`。新增 immutable `ti.hardware.sampling.SamplerConfig` min/mag
-  filter 与逐轴 repeat/mirrored-repeat/clamp-to-edge address，由 device sampler cache
-  复用；精确 `fetch()` 继续与 sampler 无关，边界仍是单 mip normalized sampling。该变更
-  不增加官方 wheel 变体。
+  SPIR-V image/sampler 指令；普通 field/ndarray 不会自动替换。新增 immutable
+  `ti.hardware.sampling.SamplerConfig` min/mag filter 与逐轴
+  repeat/mirrored-repeat/clamp-to-edge address，由 device sampler cache 复用；精确
+  `fetch()` 继续与 sampler 无关，边界仍是单 mip normalized sampling。另新增匹配的显式
+  CUDA JIT-kernel 路线，通过 Driver API array/texture object 支持合格的一、二、四通道格式；
+  CUDA read/write texture、AOT manifest 与 Graph capture 仍不支持。两个 backend 都不会
+  静默替换 field/ndarray 访问，也不增加官方 wheel 变体。
 - 新增 D0 `ti.hardware.graphics.VulkanGraphicsPipeline`，在调用方提供的 SPIR-V、精确
   vertex/index layout、runtime-owned color/depth texture 上提供 renderer-neutral 的 direct
   或 root-Graph draw recording。compute/graphics 排序使用 device-side semaphore bridge，
   不隐式等待 host。接口刻意不提供 scene、camera、material、lighting、shader compiler 或
   presentation policy，不新增依赖或官方 wheel 变体；driver pipeline 内存按 opaque 报告。
+- 扩展 Vulkan graphics command，加入 fixed/count-buffer indirect draw、有界 immutable
+  bindless storage-buffer table snapshot，以及持有 descriptor generation 的 replay。indirect
+  输入可由 kernel 生成，无需把 draw count 读回 host。另新增显式
+  `ti.hardware.graphics.VulkanMeshPipeline` 命令，在设备完整提供 feature/limit chain 时执行
+  调用方提供的 `SPV_EXT_mesh_shader` mesh/task shader。Forge 不提供 meshlet、culling、
+  material 或 renderer policy，也不作通用 mesh-shader 加速声明。
 - 新增 D0 `ti.hardware.raster.RasterPass`，复用当前 Program 的 Vulkan GGUI/RHI
   graphics pipeline，作为兼容/资格 adapter 提供 mesh/instance/particle/line 的显式
   offscreen 硬件光栅与
@@ -132,8 +140,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   multi-instance `InstanceTLAS`、instance transform/mask/custom index，以及 direct Python /
   root Graph batch Ray Query。BLAS/TLAS build/refit 都是 root-ordered action；refit 保持
   BLAS topology 和 TLAS 的 BLAS 数量/顺序。`TriangleScene` 保留为单 identity-instance
-  兼容 wrapper。procedural geometry、改变 topology 的 update 与 kernel-inline query 仍不
-  支持；不增加 SDK runtime 依赖或官方 wheel 变体。
+  兼容 wrapper。procedural geometry 与改变 topology 的 update 仍不支持。另新增显式 JIT
+  Vulkan kernel-inline closest-hit 路线，作用于 opaque triangle acceleration structure；
+  acceleration-structure Graph argument 与 AOT 仍不支持。不增加 SDK runtime 依赖或官方
+  wheel 变体。
 - 新增可选 D1 `ti.hardware.fft.CufftPlan1D`/`CufftPlanND`，通过 direct Python 与 root
   Graph 执行 fixed-size、batched、single-precision C2C/R2C/C2R transform，并支持带显式
   embed/stride/distance 的 rank-2/rank-3 layout。显式 probe 仍为无副作用的
@@ -146,8 +156,11 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   read-write 或较旧 target 的 workload 保留同步 lowering。
   `ti.hardware.report()` 会区分 provider eligibility 与实际 compiled kernel
   specialization 的 selection。该路线不新增公开 CUDA 指令语法、Toolkit runtime、
-  package 或 wheel 变体。Vulkan mesh shader 因 RHI 尚未实现完整 feature、shader、
-  pipeline 与 command chain，继续保持 `planned`。
+  package 或 wheel 变体。
+- 新增显式 JIT Vulkan cooperative-matrix kernel lowering：
+  `ti.hardware.matrix.cooperative_mma_f16_f32`。支持的 subgroup-scoped
+  f16/f16/f32/f32 M/N/K tuple 从当前设备枚举，不照搬 CUDA WMMA。普通 matrix
+  multiplication 不会被改写；不支持的 tuple、AOT、逃逸 tile 与未资格设备均 fail closed。
 
 ## 0.6.2 {#062}
 
