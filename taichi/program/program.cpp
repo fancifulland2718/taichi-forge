@@ -9252,6 +9252,37 @@ intptr_t Program::get_ndarray_data_ptr_as_int(const Ndarray *ndarray) {
   return reinterpret_cast<intptr_t>(data_ptr);
 }
 
+Program::ExternalCudaSubmissionScope::ExternalCudaSubmissionScope(
+    Program *program)
+    : program_(program),
+      guard_(program->acquire_runtime_resource_submission_guard()) {
+  TI_ERROR_IF(program_->compile_config().arch != Arch::cuda,
+              "External CUDA provider submission requires the CUDA backend");
+  TI_ERROR_IF(program_->finalized_,
+              "Cannot register an external CUDA provider submission after "
+              "Program finalize");
+}
+
+void Program::ExternalCudaSubmissionScope::commit(
+    const std::vector<const Ndarray *> &ndarrays,
+    bool failed) {
+  TI_ERROR_IF(committed_,
+              "External CUDA provider submission was already committed");
+  auto leases = program_->acquire_ndarray_leases(ndarrays);
+  program_->pin_ndarray_launch_leases(leases);
+  program_->mark_runtime_submission(RuntimeSubmissionKind::kNative);
+  if (failed) {
+    program_->record_runtime_submission_failure();
+  }
+  committed_ = true;
+}
+
+std::unique_ptr<Program::ExternalCudaSubmissionScope>
+Program::begin_external_cuda_submission() {
+  return std::unique_ptr<ExternalCudaSubmissionScope>(
+      new ExternalCudaSubmissionScope(this));
+}
+
 void Program::fill_ndarray_fast_u32(Ndarray *ndarray, uint32_t val) {
   ScopedCpuPrimitiveProgram cpu_primitive_program_scope(this);
   TI_ERROR_IF(!ndarray, "fill_ndarray_fast_u32 received a null ndarray.");

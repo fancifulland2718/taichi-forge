@@ -285,6 +285,8 @@ class CubSourcePlan(BackendCommandRecording):
                         fixed_cost("manifest_and_binary_validation", "process"),
                         fixed_cost("provider_library_load", "process"),
                         fixed_cost("workspace_query_and_allocation", "provider_generation"),
+                        fixed_cost("ctypes_dispatch", "invocation"),
+                        fixed_cost("submission_registration", "invocation"),
                         scale_cost("primitive_execution", "num_items"),
                     )
                 ),
@@ -349,9 +351,31 @@ class CubSourcePlan(BackendCommandRecording):
         )
 
     def execute(self, bindings):
-        invocation = self._invocation(bindings)
-        with hardware_provider_call("cub_reference"):
-            self.provider._library.execute(invocation)
+        runtime = impl.get_runtime()
+        program = runtime.prog
+        submission = program._begin_external_cuda_submission()
+        invoked = False
+        committed = False
+        try:
+            invocation = self._invocation(bindings)
+            values = [
+                bindings[name] for name in _OPERATION_SPECS[self.operation]["bindings"]
+            ]
+            values.append(self.workspace)
+            with hardware_provider_call("cub_reference"):
+                invoked = True
+                self.provider._library.execute(invocation)
+            submission._commit([value.arr for value in values])
+            committed = True
+        except BaseException:
+            # A provider may report an error after enqueueing some CUDA work.
+            # Conservatively publish that possibility before unwinding.
+            if invoked and not committed:
+                try:
+                    submission._commit([value.arr for value in values], True)
+                except Exception:
+                    pass
+            raise
 
     def run(self, **bindings):
         self.execute(bindings)

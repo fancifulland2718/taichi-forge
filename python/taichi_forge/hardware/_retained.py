@@ -18,6 +18,7 @@ _FIXED_COST_SCOPES = (
     "provider_generation",
     "graph_instance",
     "first_execution",
+    "invocation",
 )
 
 

@@ -791,6 +791,26 @@ class TI_DLL_EXPORT Program {
   using TextureResourceRegistry = RuntimeResourceRegistry<Texture>;
   using TextureResourceHandle = TextureResourceRegistry::Handle;
   using TextureResourceLease = TextureResourceRegistry::Lease;
+  // Holds the same host submission boundary as built-in native primitives
+  // while a Python adapter invokes a user-installed CUDA library. The scope
+  // must be committed after a call that may have enqueued work; destruction
+  // releases the lock but never waits for the GPU.
+  class ExternalCudaSubmissionScope {
+   public:
+    ExternalCudaSubmissionScope(const ExternalCudaSubmissionScope &) = delete;
+    ExternalCudaSubmissionScope &operator=(
+        const ExternalCudaSubmissionScope &) = delete;
+    void commit(const std::vector<const Ndarray *> &ndarrays,
+                bool failed = false);
+
+   private:
+    friend class Program;
+    explicit ExternalCudaSubmissionScope(Program *program);
+
+    Program *program_{nullptr};
+    RuntimeResourceSubmissionGuard guard_;
+    bool committed_{false};
+  };
   RuntimeResourceSubmissionGuard acquire_runtime_resource_submission_guard() {
     ensure_runtime_submission_allowed("runtime resource submission");
     return RuntimeResourceSubmissionGuard(runtime_resource_submission_mutex_);
@@ -801,6 +821,8 @@ class TI_DLL_EXPORT Program {
   RuntimeSubmissionScope acquire_runtime_submission_scope() {
     return RuntimeSubmissionScope(this);
   }
+  std::unique_ptr<ExternalCudaSubmissionScope>
+  begin_external_cuda_submission();
 
   RuntimeResourceHandle capture_argpack_resource_handle(
       const ArgPack *view) const;

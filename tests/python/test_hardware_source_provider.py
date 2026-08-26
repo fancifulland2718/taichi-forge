@@ -14,6 +14,7 @@ from taichi_forge.hardware._source_provider import (
     SourceProviderManifestError,
     load_source_provider_manifest,
 )
+from taichi_forge.lang import impl
 
 
 def _manifest(binary_name, binary_hash):
@@ -133,12 +134,20 @@ def test_cub_source_provider_executes_explicit_primitives_and_graph():
     keys_u32.from_numpy(keys_u32_values)
     values_in.from_numpy(values)
     sort_u32 = provider.plan("radix_sort_pairs_u32", n)
+    program = impl.get_runtime().prog
+    native_before = program._runtime_statistics_snapshot()["submission"][
+        "native_submissions"
+    ]
     sort_u32.run(
         keys_in=keys_u32,
         values_in=values_in,
         keys_out=keys_u32_out,
         values_out=values_out,
     )
+    native_after = program._runtime_statistics_snapshot()["submission"][
+        "native_submissions"
+    ]
+    assert native_after == native_before + 1
     ti.sync()
     stable_order = np.argsort(keys_u32_values, kind="stable")
     np.testing.assert_array_equal(keys_u32_out.to_numpy(), keys_u32_values[stable_order])
@@ -208,6 +217,8 @@ def test_cub_source_provider_executes_explicit_primitives_and_graph():
         "manifest_and_binary_validation",
         "provider_library_load",
         "workspace_query_and_allocation",
+        "ctypes_dispatch",
+        "submission_registration",
     )
     assert retained.cost_model.scale_costs[0].dimensions == ("num_items",)
     assert scan.workspace_bytes > 0

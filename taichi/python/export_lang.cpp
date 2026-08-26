@@ -831,6 +831,17 @@ void export_lang(py::module &m) {
       .def("_finish", &Program::RuntimeSubmissionTransaction::finish,
            py::call_guard<py::gil_scoped_release>());
 
+  py::class_<Program::ExternalCudaSubmissionScope>(
+      m, "_ExternalCudaSubmissionScope")
+      .def("_commit",
+           [](Program::ExternalCudaSubmissionScope &scope,
+              const std::vector<Ndarray *> &ndarrays, bool failed) {
+             std::vector<const Ndarray *> views(ndarrays.begin(),
+                                                ndarrays.end());
+             scope.commit(views, failed);
+           },
+           py::arg("ndarrays"), py::arg("failed") = false);
+
   py::class_<PythonScalarArgumentPatchPlan>(m, "_ScalarArgumentPatchPlan")
       .def(py::init<std::vector<int>, std::string>(), py::arg("indices"),
            py::arg("kinds"))
@@ -1348,6 +1359,8 @@ void export_lang(py::module &m) {
            &Program::begin_runtime_submission_transaction,
            py::call_guard<py::gil_scoped_release>(),
            py::arg("gpu_timing") = false)
+      .def("_begin_external_cuda_submission",
+           &Program::begin_external_cuda_submission)
       .def("_debug_runtime_completion_stats",
            &Program::debug_runtime_completion_stats)
       .def("_set_cpu_scheduler_telemetry_enabled",
