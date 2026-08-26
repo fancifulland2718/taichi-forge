@@ -50,6 +50,12 @@ selection. If an actual algorithm already lazy-loaded a library, passive
 reports observe its cached state without invoking the loader. Unknown
 operations/providers and unimplemented probes fail closed.
 
+Installation ownership, version binding, loader configuration, and recommended
+selection gates for user-managed libraries are documented in
+[Optional external hardware providers](external_hardware_providers.en.md).
+That guide distinguishes registered providers from native-adapter candidates;
+installing a candidate does not add a Forge API.
+
 ### Core kernel hardware routes (0.6.3 qualification)
 
 The hardware catalog also describes existing D0 CUDA/Vulkan kernel routes.

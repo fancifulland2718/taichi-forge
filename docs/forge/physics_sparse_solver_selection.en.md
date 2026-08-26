@@ -192,6 +192,7 @@ provides complementarity or active-set handling.
 
 - [Sparse runtime and linear algebra](sparse_runtime_and_linear_algebra.en.md)
 - [Choosing a sparse layout](sparse_layout_selection.en.md)
+- [Optional external hardware providers](external_hardware_providers.en.md)
 - [Linear solvers](../lang/articles/math/linear_solver.md)
 - [Sparse matrices and fixed patterns](../lang/articles/math/sparse_matrix.md)
 - [Forge API reference](forge_api_reference.en.md)

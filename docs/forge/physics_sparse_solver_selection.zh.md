@@ -168,6 +168,7 @@ payload，不应通过`dynamic`逐项append。经过资格确认的 nonsingular 
 
 - [稀疏 runtime 与线性代数](sparse_runtime_and_linear_algebra.zh.md)
 - [稀疏布局选择指南](sparse_layout_selection.zh.md)
+- [可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)
 - [线性求解器](../lang/articles/math/linear_solver.md)
 - [稀疏矩阵与固定 pattern](../lang/articles/math/sparse_matrix.md)
 - [Forge API 参考](forge_api_reference.zh.md)

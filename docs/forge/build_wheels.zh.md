@@ -123,6 +123,10 @@ Driver API。构建或安装标准 runtime wheel 不需要 CUDA Toolkit、CUB、
 `taichi-forge-runtime` wheel；distribution、依赖、extra 和 wheel tag 均不带
 `cu11` / `cu12` / `cu13` 后缀。
 
+由应用安装的 cuDSS、OptiX、cuSPARSELt、cuTENSOR、AmgX、NCCL 等 library 始终留在该
+发行矩阵之外；其安装、loader、版本、lifecycle 与支持状态边界统一见
+[可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。
+
 `scripts/validate_runtime_wheel.py --dependency-class driver-only` 是标准发行门禁：
 核对项目名/版本、唯一 native runtime、没有 `cuda_runtime_major.txt`、没有包内
 CUDART，并确认 native binary 不依赖 Toolkit runtime library。Windows/Linux workflow

@@ -41,6 +41,10 @@ cuFFT 与 cuDSS 使用瞬时 native handle 检查精确 symbol，返回后关闭
 selection。若实际算法此前已经 lazy-load 某库，被动 report 会观察其缓存状态，但绝不
 自行调用 loader。未知 operation/provider 和未实现的 probe 均 fail closed。
 
+用户管理 library 的安装责任、版本绑定、loader 配置与推荐 selection gate 统一见
+[可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分已注册
+provider 与 native-adapter 候选；安装候选 library 不会增加 Forge API。
+
 ### 核心 kernel 硬件路线（0.6.3 资格化）
 
 hardware catalog 也描述现有 D0 CUDA/Vulkan kernel 路线。它们不新增依赖、wheel
