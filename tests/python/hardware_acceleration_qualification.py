@@ -103,6 +103,8 @@ CASES = (
     "cuda-mma",
     "cuda-spmv",
     "cuda-spmm",
+    "cuda-spsv",
+    "cuda-spsm",
     "cuda-spmv-krylov",
     "cuda-cudss-solve",
     "cuda-cudss-refactor-solve",
@@ -1744,6 +1746,254 @@ def _cuda_spmm_case(order, args):
     )
     ti.reset()
     return result
+
+
+def _cuda_triangular_case(order, args, rhs_count):
+    case_name = "cuda-spsv" if rhs_count == 1 else "cuda-spsm"
+    _init_cuda()
+    available = (
+        ti.hardware.linalg.cusparse_spsv_is_available()
+        if rhs_count == 1
+        else ti.hardware.linalg.cusparse_spsm_is_available()
+    )
+    if not available:
+        result = _provenance(case_name, order)
+        result.update(
+            {
+                "status": "skipped",
+                "reason": f"cusparse_{'spsv' if rhs_count == 1 else 'spsm'}_unavailable",
+            }
+        )
+        ti.reset()
+        return result
+
+    rows = args.spmv_rows
+    block_size = args.triangular_block
+    width = args.triangular_width
+    if block_size > rows or rows % block_size:
+        raise ValueError("triangular-block must divide spmv-rows")
+    if width <= 0 or width > block_size:
+        raise ValueError("triangular-width must be in [1, triangular-block]")
+    block_count = rows // block_size
+
+    row_offsets_host = np.empty(rows + 1, dtype=np.int32)
+    row_offsets_host[0] = 0
+    column_chunks = []
+    value_chunks = []
+    for row in range(rows):
+        block_start = (row // block_size) * block_size
+        first_column = max(block_start, row - width + 1)
+        columns = np.arange(first_column, row + 1, dtype=np.int32)
+        coefficients = (
+            np.float32(0.0125)
+            + (columns.astype(np.float32) % np.float32(7.0)) * np.float32(0.001)
+        )
+        coefficients[-1] = np.float32(1.5) + np.float32(row % 11) * np.float32(0.02)
+        column_chunks.append(columns)
+        value_chunks.append(coefficients.astype(np.float32))
+        row_offsets_host[row + 1] = row_offsets_host[row] + columns.size
+    column_indices_host = np.concatenate(column_chunks)
+    values_host = np.concatenate(value_chunks)
+    nnz = int(values_host.size)
+
+    if rhs_count == 1:
+        input_host = (
+            np.sin(np.arange(rows, dtype=np.float32) * np.float32(0.007))
+            + np.float32(0.75)
+        ).astype(np.float32)
+        expected = np.empty_like(input_host)
+        for row in range(rows):
+            begin = int(row_offsets_host[row])
+            end = int(row_offsets_host[row + 1])
+            subtotal = np.dot(
+                values_host[begin : end - 1],
+                expected[column_indices_host[begin : end - 1]],
+            )
+            expected[row] = (input_host[row] - subtotal) / values_host[end - 1]
+        dense_input = ti.ndarray(ti.f32, shape=rows)
+        hardware_output = ti.ndarray(ti.f32, shape=rows)
+        baseline_output = ti.ndarray(ti.f32, shape=rows)
+    else:
+        input_host = (
+            np.sin(
+                np.arange(rows * rhs_count, dtype=np.float32).reshape(rows, rhs_count)
+                * np.float32(0.007)
+            )
+            + np.float32(0.75)
+        ).astype(np.float32)
+        expected = np.empty_like(input_host)
+        for row in range(rows):
+            begin = int(row_offsets_host[row])
+            end = int(row_offsets_host[row + 1])
+            expected[row] = (
+                input_host[row]
+                - values_host[begin : end - 1]
+                @ expected[column_indices_host[begin : end - 1]]
+            ) / values_host[end - 1]
+        dense_input = ti.ndarray(ti.f32, shape=(rows, rhs_count))
+        hardware_output = ti.ndarray(ti.f32, shape=(rows, rhs_count))
+        baseline_output = ti.ndarray(ti.f32, shape=(rows, rhs_count))
+
+    row_offsets = ti.ndarray(ti.i32, shape=rows + 1)
+    column_indices = ti.ndarray(ti.i32, shape=nnz)
+    values = ti.ndarray(ti.f32, shape=nnz)
+    row_offsets.from_numpy(row_offsets_host)
+    column_indices.from_numpy(column_indices_host)
+    values.from_numpy(values_host)
+    dense_input.from_numpy(input_host)
+
+    setup_started = time.perf_counter_ns()
+    pattern = ti.linalg.SparsePattern.csr(
+        rows, rows, row_offsets, column_indices
+    )
+    matrix = ti.linalg.SparseMatrix.from_pattern(pattern, values)
+    setup_ms = (time.perf_counter_ns() - setup_started) / 1.0e6
+    recording_started = time.perf_counter_ns()
+    if rhs_count == 1:
+        recording = ti.hardware.linalg.CusparseSpsvRecording(matrix)
+    else:
+        recording = ti.hardware.linalg.CusparseSpsmRecording(matrix, rhs_count)
+    recording_creation_ms = (time.perf_counter_ns() - recording_started) / 1.0e6
+
+    @ti.kernel
+    def baseline_vector(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        coefficients: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        dense: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for block in range(block_count):
+            for row in range(block * block_size, (block + 1) * block_size):
+                total = dense[row]
+                for offset in range(offsets[row], offsets[row + 1] - 1):
+                    total -= coefficients[offset] * output[indices[offset]]
+                output[row] = total / coefficients[offsets[row + 1] - 1]
+
+    @ti.kernel
+    def baseline_matrix(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        coefficients: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        dense: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for block, rhs in ti.ndrange(block_count, rhs_count):
+            for row in range(block * block_size, (block + 1) * block_size):
+                total = dense[row, rhs]
+                for offset in range(offsets[row], offsets[row + 1] - 1):
+                    total -= coefficients[offset] * output[indices[offset], rhs]
+                output[row, rhs] = total / coefficients[offsets[row + 1] - 1]
+
+    def hardware():
+        recording.execute({"input": dense_input, "output": hardware_output})
+
+    if rhs_count == 1:
+
+        def baseline():
+            baseline_vector(
+                row_offsets,
+                column_indices,
+                values,
+                dense_input,
+                baseline_output,
+            )
+
+    else:
+
+        def baseline():
+            baseline_matrix(
+                row_offsets,
+                column_indices,
+                values,
+                dense_input,
+                baseline_output,
+            )
+
+    timing = _measure_pair(
+        hardware,
+        baseline,
+        order,
+        args.warmup,
+        args.rounds,
+        args.repetitions,
+        args.minimum_block_ms,
+        args.maximum_repetitions,
+    )
+    hardware_error = _error(hardware_output.to_numpy(), expected)
+    baseline_error = _error(baseline_output.to_numpy(), expected)
+    operation_id = (
+        "linalg.spsv.cusparse_explicit"
+        if rhs_count == 1
+        else "linalg.spsm.cusparse_explicit"
+    )
+    prefix = "spsv" if rhs_count == 1 else "spsm"
+    resolved = _resolved_operation(operation_id)
+    provider_stats = matrix._debug_runtime_stats()
+    passed = (
+        hardware_error[0] <= 5e-5
+        and baseline_error[0] <= 5e-5
+        and resolved["discovery"] == "available"
+        and provider_stats["operations"][f"{prefix}_plan_builds"] == 1
+        and provider_stats["operations"][f"{prefix}_analysis_builds"] == 1
+        and provider_stats["resources"][f"{prefix}_plan_count"] == 1
+    )
+    scale_dimensions = (
+        "rows",
+        "nonzeros",
+        "dependency_depth",
+    ) + (("rhs_count",) if rhs_count > 1 else ())
+    result = _provenance(case_name, order)
+    result.update(
+        {
+            "status": "passed" if passed else "failed",
+            "workload": {
+                "rows": rows,
+                "nnz": nnz,
+                "triangular_width": width,
+                "independent_blocks": block_count,
+                "dependency_depth": block_size,
+                "rhs_count": rhs_count,
+                "scale_work": nnz * rhs_count,
+                "resource_setup_ms": setup_ms,
+                "hardware": f"cuSPARSE CSR {'SpSV' if rhs_count == 1 else 'SpSM'}",
+                "baseline": "Taichi block-parallel scalar forward substitution",
+            },
+            "fixed_cost_observation": {
+                "resource_setup_ms": setup_ms,
+                "recording_creation_ms": recording_creation_ms,
+                "first_hardware_execution_ms": timing["cold_ms"]["hardware"],
+                "analysis_builds": provider_stats["operations"][f"{prefix}_analysis_builds"],
+                "workspace_reserved_bytes": provider_stats["resources"][f"{prefix}_workspace_reserved_bytes"],
+            },
+            "cost_contract": retained_execution_contract(recording).to_dict(),
+            "timing": timing,
+            "correctness": {
+                "hardware_max_abs": hardware_error[0],
+                "hardware_max_rel": hardware_error[1],
+                "baseline_max_abs": baseline_error[0],
+                "baseline_max_rel": baseline_error[1],
+            },
+            "route": resolved,
+            "provider_statistics": provider_stats,
+            "performance_interpretation": {
+                "fixed_costs_excluded_from_steady_state_ratio": True,
+                "scale_dimensions": scale_dimensions,
+                "automatic_selection_eligible": False,
+                "reason": "explicit low-level provider; no workload crossover admission contract",
+            },
+        }
+    )
+    ti.reset()
+    return result
+
+
+def _cuda_spsv_case(order, args):
+    return _cuda_triangular_case(order, args, 1)
+
+
+def _cuda_spsm_case(order, args):
+    return _cuda_triangular_case(order, args, args.spmm_rhs)
 
 
 def _cuda_spmv_krylov_case(order, args):
@@ -4237,6 +4487,8 @@ _CASE_RUNNERS = {
     "cuda-mma": _cuda_mma_case,
     "cuda-spmv": _cuda_spmv_case,
     "cuda-spmm": _cuda_spmm_case,
+    "cuda-spsv": _cuda_spsv_case,
+    "cuda-spsm": _cuda_spsm_case,
     "cuda-spmv-krylov": _cuda_spmv_krylov_case,
     "cuda-cudss-solve": _cuda_cudss_solve_case,
     "cuda-cudss-refactor-solve": _cuda_cudss_refactor_solve_case,
@@ -5597,6 +5849,10 @@ def _parent(args):
                     str(args.spmv_width),
                     "--spmm-rhs",
                     str(args.spmm_rhs),
+                    "--triangular-block",
+                    str(args.triangular_block),
+                    "--triangular-width",
+                    str(args.triangular_width),
                     "--cudss-grid",
                     str(args.cudss_grid),
                     "--cudss-expected-reuse",
@@ -5749,6 +6005,8 @@ def _parent(args):
                 "krylov_stencil_radius": args.krylov_stencil_radius,
                 "krylov_baseline": args.krylov_baseline,
                 "spmm_rhs": args.spmm_rhs,
+                "triangular_block": args.triangular_block,
+                "triangular_width": args.triangular_width,
                 "texture_volume_size": args.texture_volume_size,
                 "offscreen_size": args.offscreen_size,
                 "offscreen_tiles": args.offscreen_tiles,
@@ -5806,6 +6064,8 @@ def _parse_args():
     parser.add_argument("--spmv-rows", type=int, default=131072)
     parser.add_argument("--spmv-width", type=int, default=7)
     parser.add_argument("--spmm-rhs", type=int, default=8)
+    parser.add_argument("--triangular-block", type=int, default=32)
+    parser.add_argument("--triangular-width", type=int, default=7)
     parser.add_argument("--spmv-expected-reuse", type=int, default=100)
     parser.add_argument("--cudss-grid", type=int, default=64)
     parser.add_argument("--cudss-expected-reuse", type=int, default=100)
@@ -5861,6 +6121,11 @@ def _parse_args():
         or args.spmv_rows <= 0
         or args.spmv_width <= 0
         or args.spmm_rhs < 2
+        or args.triangular_block <= 0
+        or args.triangular_width <= 0
+        or args.triangular_width > args.triangular_block
+        or args.triangular_block > args.spmv_rows
+        or args.spmv_rows % args.triangular_block
         or args.spmv_expected_reuse <= 0
         or args.cudss_grid < 2
         or args.cudss_expected_reuse <= 0
