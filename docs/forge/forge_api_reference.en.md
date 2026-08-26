@@ -44,11 +44,12 @@ preserves ordering and lifetime while replay calls the provider again; it does
 not claim CUDA Graph capture or a persistent Vulkan command buffer.
 
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
-current cuBLAS, cuSPARSE, cuFFT, and cuDSS probes check exact symbols through a
-transient native handle, close it before returning, and do not change later
-selection. If an actual algorithm already lazy-loaded a library, passive
-reports observe its cached state without invoking the loader. Unknown
-operations/providers and unimplemented probes fail closed.
+cuBLAS, cuSPARSE, and cuFFT probes check exact symbols through a transient
+native handle. cuDSS uses the wheel-internal Forge adapter to transiently load
+and validate the user vendor runtime. Both cuDSS layers close before the probe
+returns and no probe changes later selection. If an actual algorithm already
+owns a plan, passive reports observe that state without invoking the loader.
+Unknown operations/providers and unimplemented probes fail closed.
 
 Installation ownership, version binding, loader configuration, and recommended
 selection gates for user-managed libraries are documented in
@@ -148,7 +149,8 @@ on CUDA:
   case="cuda-cudss-solve")` can supply the exact-workload profile to
   `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)`. Auto
   considers user-managed cuDSS 0.8.x only after the profile additionally
-  matches the exact loaded cuDSS binary, solver contract, and expected solve
+  matches both the wheel-internal adapter and loaded vendor-runtime binaries,
+  the solver contract, and expected solve
   reuse, and its amortized cost clears the conservative margin against
   cuSOLVERSp. `expected_reuse=N` on `SparseSolver` may replace the evidence
   assumption for the current workload and re-evaluates both routes. Both providers'
@@ -181,8 +183,10 @@ All routes lazy-load user-provided compatible libraries only when their domain
 objects or explicit plans are used. An explicit cuDSS `library_path` is
 exclusive: probing and execution do not fall back to an environment or default
 library candidate. Forge does not install cuDSS, add a Python
-package requirement, link or bundle a vendor library, add a build switch, or
-create a wheel variant. This is domain-level or explicit-plan selection, not a
+package requirement, link or bundle a vendor library, or create a wheel
+variant. The existing runtime wheel carries the Forge-owned thin C-ABI adapter;
+public `library_path` always names the vendor runtime and cannot override that
+internal adapter. This is domain-level or explicit-plan selection, not a
 compiler rewrite of arbitrary kernels. None is kernel-callable. Provider
 analysis, factorization, and numerical failures after explicit selection stay
 visible rather than silently falling back.

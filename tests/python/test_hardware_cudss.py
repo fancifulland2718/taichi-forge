@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -59,6 +60,50 @@ def test_cudss_library_discovery_matches_the_cuda_driver_family(tmp_path, monkey
     assert _cudss.resolve_cudss_library_path(cuda_driver_api_version=11080) == ""
 
 
+def test_cudss_bundled_adapter_probe_and_resolution_are_transient(monkeypatch):
+    info = SimpleNamespace(
+        cudss_header_version=800,
+        provider_name=b"test-cudss-adapter",
+        build_identity=b"test-cudss-0.8",
+        features=_cudss._REQUIRED_FEATURES,  # pylint: disable=W0212
+    )
+    loaded = SimpleNamespace(
+        path="forge-cudss-adapter",
+        api=SimpleNamespace(info=info),
+    )
+    monkeypatch.setattr(
+        _cudss, "_bundled_provider_candidates", lambda: ("forge-cudss-adapter",)
+    )
+    monkeypatch.setattr(_cudss, "_query_provider", lambda _path: loaded)
+    monkeypatch.setattr(_cudss, "cudss_adapter_sha256", lambda _path=None: "a" * 64)
+    monkeypatch.setattr(
+        _cudss,
+        "_probe_provider_runtime",
+        lambda _loaded, runtime_path: {
+            "version_major": 0,
+            "version_minor": 8,
+            "version_patch": 0,
+            "library_path": runtime_path or "cudss64_0.dll",
+        },
+    )
+
+    result = _cudss.probe_provider("vendor/cudss64_0.dll")
+    assert result["discovery"] == "available"
+    assert result["provider_abi"] == "taichi-forge-cudss-provider-c-abi1"
+    assert result["provider_version"] == "0.8.0"
+    assert result["native_facts"]["library_candidate"] == "forge-cudss-adapter"
+    assert result["native_facts"]["provider_adapter_binary_sha256"] == "a" * 64
+    assert result["native_facts"]["runtime_probe_only"] is True
+    assert result["native_facts"]["plan_created"] is False
+
+    resolved = _cudss.resolve_cudss_provider("vendor/cudss64_0.dll")
+    assert resolved.adapter_path == "forge-cudss-adapter"
+    assert resolved.adapter_binary_sha256 == "a" * 64
+    assert resolved.runtime_library_path == "vendor/cudss64_0.dll"
+    assert resolved.provider_version == "0.8.0"
+    assert _cudss.passive_status()["library_loaded"] is False
+
+
 @test_utils.test(arch=ti.cpu)
 def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
     descriptor = ti.hardware.capability("linalg.solve.cudss")
@@ -83,7 +128,7 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
     with pytest.raises(RuntimeError, match="requires the CUDA backend"):
         ti.hardware.linalg.CudssPlan(matrix)
 
-    with pytest.raises(ValueError, match="cuDSS probes only"):
+    with pytest.raises(ValueError, match="explicit user-managed vendor-runtime"):
         ti.hardware.probe("cublas", library_path="ignored")
 
     fake = object.__new__(ti.hardware.linalg.CudssPlan)
@@ -108,13 +153,24 @@ def test_cudss_contract_is_explicit_python_scope_and_fails_closed_on_cpu():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_cudss_explicit_missing_library_probe_does_not_fallback(tmp_path):
+def test_cudss_explicit_missing_library_probe_does_not_fallback(tmp_path, monkeypatch):
     missing = tmp_path / (
         "missing-cudss64_0.dll"
         if os.name == "nt"
         else "missing-libcudss.so.0"
     )
     before = ti.hardware.telemetry().providers["cudss"]["library_loaded"]
+    monkeypatch.setattr(
+        _cudss, "_bundled_provider_candidates", lambda: ("forge-cudss-adapter",)
+    )
+    monkeypatch.setattr(_cudss, "_query_provider", lambda _path: SimpleNamespace())
+
+    def missing_runtime(_loaded, _path):
+        raise _cudss._ProviderRuntimeError(  # pylint: disable=W0212
+            _cudss._RUNTIME_UNAVAILABLE, "test vendor runtime missing"
+        )
+
+    monkeypatch.setattr(_cudss, "_probe_provider_runtime", missing_runtime)
 
     report = ti.hardware.probe("cudss", library_path=missing)
     resolved = next(
@@ -198,9 +254,10 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
             "backend": "cuda",
             "device_scope": _current_cuda_device_scope(),
             "provider_scope": {
-                "provider_abi": "cudss-c-api-0.8",
+                "provider_abi": "taichi-forge-cudss-provider-c-abi1",
                 "provider_version": {"major": 0, "minor": 8, "patch": 1},
                 "provider_binary_sha256": provider_binary_sha256,
+                "provider_adapter_binary_sha256": "a" * 64,
             },
             "workload_scope": {
                 "rows": identity["rows"],
@@ -251,6 +308,7 @@ def test_sparse_solver_auto_without_evidence_does_not_probe_optional_cudss(
         library_path=provider_binary,
         provider_profile=mismatched_profile,
     )
+    monkeypatch.setattr(_cudss, "cudss_adapter_sha256", lambda: "a" * 64)
     mismatched.compute(matrix)
     assert mismatched.selected_provider == "cusolver_sp"
     assert mismatched.provider_status()["fallback_reason"] == (
@@ -508,7 +566,7 @@ def test_cudss_staged_solve_and_refactorization():
 
     status = ti.hardware.telemetry().providers["cudss"]
     assert status["library_loaded"]
-    assert status["provider_abi"] == "cudss-c-api-0.8"
+    assert status["provider_abi"] == "taichi-forge-cudss-provider-c-abi1"
     assert status["provider_version"].startswith("0.8.")
 
 

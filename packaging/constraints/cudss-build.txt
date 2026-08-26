@@ -1,0 +1,6 @@
+# Build-only official headers for the bundled Forge cuDSS 0.8 adapter.
+# The vendor runtime is never copied into taichi-forge-runtime and remains an
+# optional, user-managed execution dependency.
+nvidia-cudss-cu12==0.8.0.10 \
+    --hash=sha256:89bf57d4d05d25c7f6e1288acbc94c5eed519763c55d7ec1f6d73099ace8554e \
+    --hash=sha256:602eb6e394c6595a698ed10b74cf5e251a0fbbd6e84da9a755e02fafb6c60ef1

@@ -2,6 +2,7 @@
 
 import math
 from numbers import Real
+from types import MappingProxyType
 
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import (
@@ -492,8 +493,9 @@ class CudssPlan:
         library_path=None,
     ):
         from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+            _register_loaded_plan,
             cudss_dll_directories,
-            resolve_cudss_library_path,
+            resolve_cudss_provider,
         )
         from taichi_forge.linalg.sparse_matrix import (  # pylint: disable=C0415
             SparseMatrix,
@@ -531,13 +533,14 @@ class CudssPlan:
         if program is None:
             raise TaichiRuntimeError("CUDA cuDSS requires an active runtime")
         with hardware_provider_call("cudss", failure_phase="provider_plan_failure"):
-            resolved_library = resolve_cudss_library_path(library_path)
-            with cudss_dll_directories(resolved_library):
+            resolved = resolve_cudss_provider(library_path)
+            with cudss_dll_directories(resolved.runtime_library_path):
                 handle = program._create_cuda_cudss_plan(
                     matrix.matrix,
                     self._MATRIX_TYPES[matrix_type],
                     self._MATRIX_VIEWS[matrix_view],
-                    resolved_library,
+                    resolved.adapter_path,
+                    resolved.runtime_library_path,
                 )
         self._program = program
         self._runtime_generation = impl.runtime_generation()
@@ -548,7 +551,28 @@ class CudssPlan:
         self._effect_name = f"__cudss_plan_{self._runtime_generation}_{self._handle}"
         self.matrix_type = matrix_type
         self.matrix_view = matrix_view
-        self.library_path = resolved_library or None
+        self.library_path = resolved.runtime_library_path or None
+        self.provider_identity = MappingProxyType(
+            {
+                "library_candidate": resolved.adapter_path,
+                "vendor_library_candidate": self.library_path or "system_default",
+                "provider_source": "forge_runtime_wheel",
+                "provider_abi": "taichi-forge-cudss-provider-c-abi1",
+                "provider_version": resolved.provider_version,
+                "provider_adapter_binary_sha256": (
+                    resolved.adapter_binary_sha256
+                ),
+                "cudss_header_version": resolved.provider_header_version,
+                "provider_name": resolved.provider_name,
+                "build_identity": resolved.build_identity,
+                "feature_bits": resolved.feature_bits,
+            }
+        )
+        _register_loaded_plan(self)
+
+    @property
+    def closed(self):
+        return self._handle is None
 
     def _ensure_open(self):
         if self._handle is None:

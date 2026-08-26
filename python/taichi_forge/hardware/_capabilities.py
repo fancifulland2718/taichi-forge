@@ -1563,8 +1563,8 @@ def probe(provider_id, *, library_path=None):
         provider_id
     ).supports_library_path:
         raise ValueError(
-            "library_path is supported for cuDSS probes only among native-symbol "
-            "providers; the OptiX vendor-runtime probe also accepts a path"
+            "library_path is supported only for providers with an explicit "
+            "user-managed vendor-runtime path"
         )
 
     runtime_initialized, backend, compiled_backends = _runtime_facts()

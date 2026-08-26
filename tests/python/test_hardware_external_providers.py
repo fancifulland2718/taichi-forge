@@ -1,7 +1,7 @@
 import pytest
 
 import taichi_forge as ti
-from taichi_forge.hardware import _optix
+from taichi_forge.hardware import _cudss, _optix
 from taichi_forge.hardware._external_providers import (
     external_provider_ids,
     external_provider_spec,
@@ -31,10 +31,13 @@ def test_external_provider_registry_owns_path_and_lifetime_policy():
 
     cudss = external_provider_spec("cudss")
     assert cudss.supports_library_path
-    assert cudss.install_owner == "user_optional_package"
+    assert cudss.adapter_kind == "bundled_provider_c_abi"
+    assert cudss.install_owner == "forge_runtime_wheel"
+    assert cudss.process_handle_policy == "provider_object"
     assert cudss.runtime_resource_policy == "provider_plan"
     assert cudss.transitive_dependencies == ("cublas",)
-    assert cudss.native_path_resolver == "cudss_package"
+    assert cudss.native_path_resolver is None
+    assert cudss.python_adapter_module == "taichi_forge.hardware._cudss"
 
     optix = external_provider_spec("optix")
     assert optix.supports_library_path
@@ -65,4 +68,17 @@ def test_external_provider_registry_keeps_optix_status_passive(monkeypatch):
 
     assert status["provider_id"] == "optix"
     assert status["library_loaded"] is False
+    assert status["native_facts"]["external_component_probed"] is False
+
+
+def test_external_provider_registry_keeps_cudss_status_passive(monkeypatch):
+    def unexpected_load(_path):
+        raise AssertionError("passive provider status must not load cuDSS")
+
+    monkeypatch.setattr(_cudss, "_load_library", unexpected_load)
+    status = passive_external_provider_status("cudss")
+
+    assert status["provider_id"] == "cudss"
+    assert status["library_loaded"] is False
+    assert status["provider_abi"] == "taichi-forge-cudss-provider-c-abi1"
     assert status["native_facts"]["external_component_probed"] is False

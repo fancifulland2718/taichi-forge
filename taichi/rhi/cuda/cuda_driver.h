@@ -495,43 +495,4 @@ class CUFFTDriver : protected CUDADriverBase {
   CUFFTProviderCapabilities capabilities_;
 };
 
-struct CUDSSProviderCapabilities {
-  int library_version_major{-1};
-  int library_version_minor{-1};
-  int library_version_patch{-1};
-  bool required_symbols_available{false};
-  bool tested_version_family{false};
-};
-
-class CUDSSDriver : protected CUDADriverBase {
- public:
-  static CUDSSDriver &get_instance();
-
-#define PER_CUDSS_FUNCTION(name, symbol_name, ...) \
-  CUDADriverFunction<__VA_ARGS__> name;
-#include "taichi/rhi/cuda/cudss_functions.inc.h"
-#undef PER_CUDSS_FUNCTION
-
-  bool load_cudss(const std::string &library_path = "");
-
-  bool is_loaded() const {
-    return cudss_loaded_.load(std::memory_order_acquire);
-  }
-
-  CUDSSProviderCapabilities capabilities() const {
-    return capabilities_;
-  }
-
-  const std::string &loaded_library_name() const {
-    return loaded_library_name_;
-  }
-
- private:
-  CUDSSDriver();
-  std::mutex load_lock_;
-  std::mutex lock_;
-  std::atomic<bool> cudss_loaded_{false};
-  CUDADriverFunction<int, int *> get_property_;
-  CUDSSProviderCapabilities capabilities_;
-};
 }  // namespace taichi::lang

@@ -149,8 +149,9 @@ name, dependency, extras, and wheel tag never carry a `cu11`, `cu12`, or
 `cu13` suffix.
 
 Application-installed cuDSS, OptiX, cuSPARSELt, cuTENSOR, AmgX, NCCL, and
-similar libraries remain outside this release matrix. Their installation,
-loader, version, lifecycle, and support-status boundaries are documented in
+similar vendor runtimes remain outside this release matrix. The runtime wheel
+may carry thin Forge adapters that do not link those vendor runtimes. Their
+installation, loader, version, lifecycle, and support-status boundaries are documented in
 [Optional external hardware providers](external_hardware_providers.en.md).
 
 `scripts/validate_runtime_wheel.py --dependency-class driver-only` is the

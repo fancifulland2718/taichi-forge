@@ -17,7 +17,7 @@ Forge 注册 provider。
 | cuBLAS | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cublas")` | direct Python 或 root Graph；不能在 kernel 内调用 |
 | cuSPARSE | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | cuFFT | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
-| cuDSS 0.8.x | 已注册 D1 provider | 用户安装可选包 | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
+| cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt | 仅 native-adapter 候选 | 用户安装可选包 | 没有公开 Forge probe 或执行 API | 仅外部 command |
@@ -38,8 +38,9 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 
 所有可选 provider 都应遵守以下规则：
 
-1. 正常安装 Forge，随后在应用环境中安装可选 vendor 包；不得把它们复制进 Forge wheel
-   或 Forge package 目录。
+1. 正常安装 Forge，随后在应用环境中安装可选 vendor 包；不得把 vendor runtime 复制进
+   Forge wheel 或 Forge package 目录。Forge 自有的薄 C-ABI adapter 可以位于现有 runtime
+   wheel，但不得链接或携带 vendor runtime。
 2. 同一个环境中，同一种 library 只选择一个 CUDA-major package family。`-cu12` 或
    `-cu13` 后缀描述 vendor package，不描述 Forge wheel。
 3. 核对 GPU architecture、driver、provider release、CUDA family、OS 与 Forge operation
@@ -114,6 +115,10 @@ print(ti.hardware.probe("cufft"))
 
 ### cuDSS 0.8.x
 
+平台 `taichi-forge-runtime` wheel 携带一份基于官方 cuDSS 0.8 header 构建的 Forge 薄
+C-ABI 1 adapter。adapter 不链接 `cudss`、CUDA runtime、cuBLAS 或 Python，也不会创建新的
+wheel 变体；用户无需重编 Forge。厂商 cuDSS runtime 及其传递依赖仍由应用环境提供。
+
 Forge 公开切片绑定 cuDSS 0.8.x。安装与应用 CUDA family 匹配的 package：
 
 ```bash
@@ -130,7 +135,8 @@ cuDSS 还需要兼容 cuBLAS library。当前 Forge resolver 的优先级为：
 
 显式 path 可以是 shared library，也可以是包含它的目录。它是唯一候选：路径错误时 Forge
 不会回退到其它位置。Linux 上 NVIDIA cuDSS wheel 可能只包含 `libcudss.so.0` 而没有无版本
-symlink；Forge 会直接解析 versioned library。
+symlink；Forge 会直接解析 versioned library。`library_path` 始终指 vendor runtime；wheel
+内部 adapter 不属于公开路径合同，也不能被覆盖。
 
 ```powershell
 # 可选：为当前 Windows process 显式绑定部署库。
@@ -153,6 +159,10 @@ path = os.environ.get("TI_CUDSS_LIBRARY_PATH")
 report = ti.hardware.probe("cudss", library_path=path)
 print(report)
 ```
+
+probe 会瞬时加载 adapter 和 vendor runtime、查询其 0.8.x 版本后立即释放；不会创建或保留
+solver handle、factor 或 workspace。只有 `CudssPlan` 拥有执行期 adapter/runtime handle，
+并随 plan 确定性关闭。
 
 Forge 当前要求 CUDA Driver API 12.0 或更高版本，以及 square scalar f32 CUDA CSR matrix。
 `CudssPlan` 把 `analyze()`、`factorize()`/`refactorize()` 与 `solve()` 分开：

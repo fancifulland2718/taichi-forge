@@ -59,13 +59,13 @@ _EXTERNAL_PROVIDER_SPECS = (
     ),
     ExternalProviderSpec(
         provider_id="cudss",
-        adapter_kind="native_symbols",
-        install_owner="user_optional_package",
+        adapter_kind="bundled_provider_c_abi",
+        install_owner="forge_runtime_wheel",
         library_path_policy="optional",
-        process_handle_policy="process_resident",
+        process_handle_policy="provider_object",
         runtime_resource_policy="provider_plan",
         transitive_dependencies=("cublas",),
-        native_path_resolver="cudss_package",
+        python_adapter_module="taichi_forge.hardware._cudss",
     ),
     ExternalProviderSpec(
         provider_id="optix",
@@ -115,22 +115,12 @@ def probe_external_provider(provider_id, library_path=None):
 
     from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
 
-    if spec.native_path_resolver is None:
-        return dict(_ti_core.probe_cuda_external_library(provider_id))
-    if spec.native_path_resolver != "cudss_package":
+    if spec.native_path_resolver is not None:
         raise RuntimeError(
             f"unknown native path resolver for {provider_id}: "
             f"{spec.native_path_resolver}"
         )
-
-    from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
-        cudss_dll_directories,
-        resolve_cudss_library_path,
-    )
-
-    resolved = resolve_cudss_library_path(library_path)
-    with cudss_dll_directories(resolved):
-        return dict(_ti_core.probe_cuda_external_library(provider_id, resolved))
+    return dict(_ti_core.probe_cuda_external_library(provider_id))
 
 
 def passive_external_provider_status(provider_id):

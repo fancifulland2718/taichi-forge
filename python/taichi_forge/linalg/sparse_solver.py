@@ -271,6 +271,7 @@ class SparseSolver:
         )
         resolved_cudss_library = self._library_path
         cudss_provider_binary_sha256 = None
+        cudss_adapter_binary_sha256 = None
         if self._provider_request == "cusolver_sp":
             cudss_eligible = False
             self._provider_fallback_reason = "explicit_cusolver_sp"
@@ -304,6 +305,7 @@ class SparseSolver:
         elif cudss_eligible and self._provider_request in ("auto", "cudss"):
             if self._provider_request == "auto":
                 from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+                    cudss_adapter_sha256,
                     cudss_library_sha256,
                     resolve_cudss_library_path,
                 )
@@ -315,7 +317,11 @@ class SparseSolver:
                 cudss_provider_binary_sha256 = cudss_library_sha256(
                     resolved_cudss_library
                 )
-                if cudss_provider_binary_sha256 is None:
+                cudss_adapter_binary_sha256 = cudss_adapter_sha256()
+                if (
+                    cudss_provider_binary_sha256 is None
+                    or cudss_adapter_binary_sha256 is None
+                ):
                     self._provider_fallback_reason = (
                         "provider_binary_identity_unavailable"
                     )
@@ -333,12 +339,15 @@ class SparseSolver:
                 preflight = self._evaluate_cudss_admission(
                     sparse_matrix,
                     {
-                        "provider_abi": "cudss-c-api-0.8",
+                        "provider_abi": "taichi-forge-cudss-provider-c-abi1",
                         "provider_version": dict(
                             self._provider_profile.provider_scope["provider_version"]
                         ),
                         "provider_binary_sha256": (
                             cudss_provider_binary_sha256
+                        ),
+                        "provider_adapter_binary_sha256": (
+                            cudss_adapter_binary_sha256
                         ),
                     },
                 )
@@ -371,6 +380,9 @@ class SparseSolver:
                             ),
                             "provider_binary_sha256": (
                                 cudss_provider_binary_sha256
+                            ),
+                            "provider_adapter_binary_sha256": (
+                                cudss_adapter_binary_sha256
                             ),
                         },
                     )

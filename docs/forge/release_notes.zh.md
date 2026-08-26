@@ -47,8 +47,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
   被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`
   现在区分 inline、root-ordered rerecord、backend-recorded、stream-captured、opaque 与
-  unsupported，不再把所有 root-Graph action 混称为 recordable。显式 cuBLAS、cuSPARSE、
-  cuFFT 与 cuDSS probe 使用瞬时 handle，不会隐式启用 provider。
+  unsupported，不再把所有 root-Graph action 混称为 recordable。显式 cuBLAS、cuSPARSE 与
+  cuFFT probe 使用瞬时 vendor handle；cuDSS probe 通过 wheel 内薄 C-ABI adapter 瞬时核对
+  用户 vendor runtime。它们都不会隐式启用 provider。
 - 新增可选 D1 `ti.hardware.linalg.gemm_f32`，通过 direct Python 与 root Graph 对 compact
   row-major f32 matrix 执行 `C = alpha * A @ B + beta * C`。真实执行才 lazy-load 用户的
   兼容 cuBLAS，并在每个 Program 内复用一个 handle；Forge 不新增 Toolkit header、
@@ -58,7 +59,8 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   `SparseMatrix.spmv(method="auto")` 只有在存在匹配且稳定的 matrix-scoped 成本证据时才
   考虑 cuSPARSE；证据只能从严格的 fresh-process qualification artifact 加载。
   admission-schema-v2 证据绑定精确 topology、device、Python extension、split native runtime、
-  runtime bitcode 与 provider ABI；cuDSS 证据还绑定精确 provider binary，旧 profile 会
+  runtime bitcode 与 provider ABI；cuDSS 证据还分别绑定精确 adapter 与 vendor runtime
+  binary，旧 profile 会
   fail closed。原手填 timing setter 已移除；当前 workload 可提供正整数 `expected_reuse`
   覆盖值，以重新计算 provider 和内嵌 baseline 两侧首次成本。显式
   provider 路线不受成本 gate 限制；
@@ -71,6 +73,8 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   不依赖 host numeric-version 推断的 fixed-pattern 事务化 `record_refactor_solve()` action。
   provider 执行失败会在 submission retire 前保持 transaction reserved 并使 factor 失效，
   之后可通过完整 factorization 恢复；
+  cuDSS 的 0.8 厂商 ABI 已从核心 runtime 移到 plan-owned bundled adapter；adapter 不链接或
+  捆绑厂商库，不新增 wheel 变体，用户也无需重编 Forge；
   另新增独立的手动
   `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` 路线，支持调用方持有 output，
   并在复用 matrix-owned provider

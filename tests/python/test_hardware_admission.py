@@ -203,9 +203,10 @@ def test_admission_accepts_exact_cudss_auto_workload_scope(tmp_path):
             "provider_id": "cudss",
             "baseline_id": "cusolver_sp",
             "provider_scope": {
-                "provider_abi": "cudss-c-api-0.8",
+                "provider_abi": "taichi-forge-cudss-provider-c-abi1",
                 "provider_version": {"major": 0, "minor": 8, "patch": 1},
                 "provider_binary_sha256": "f" * 64,
+                "provider_adapter_binary_sha256": "a" * 64,
             },
         }
     )
@@ -226,13 +227,21 @@ def test_admission_accepts_exact_cudss_auto_workload_scope(tmp_path):
     )
 
     assert evidence.operation_id == "linalg.solve.cudss_auto"
-    assert evidence.provider_scope["provider_abi"] == "cudss-c-api-0.8"
+    assert evidence.provider_scope["provider_abi"] == (
+        "taichi-forge-cudss-provider-c-abi1"
+    )
     assert evidence.workload_scope["workflow"] == (
         "analyze_factorize_then_repeated_solve"
     )
     current_provider = dict(evidence.provider_scope)
     assert _evaluate(evidence, provider_scope=current_provider).admitted
     current_provider["provider_binary_sha256"] = "0" * 64
+    rejected = _evaluate(evidence, provider_scope=current_provider)
+    assert not rejected.admitted
+    assert rejected.reason == "provider_scope_mismatch"
+
+    current_provider = dict(evidence.provider_scope)
+    current_provider["provider_adapter_binary_sha256"] = "0" * 64
     rejected = _evaluate(evidence, provider_scope=current_provider)
     assert not rejected.admitted
     assert rejected.reason == "provider_scope_mismatch"

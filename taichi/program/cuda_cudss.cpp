@@ -2,10 +2,14 @@
 
 #include <cstdint>
 #include <limits>
+#include <memory>
+#include <string>
 #include <utility>
 #include <vector>
 
 #if defined(TI_WITH_CUDA)
+#include "taichi/common/dynamic_loader.h"
+#include "taichi/cudss/forge_cudss_provider.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 
@@ -33,6 +37,13 @@ void require_cudss_success(std::uint32_t status, const char *operation) {
               "CUDA cuDSS {} failed (status {}).", operation, status);
 }
 
+void warn_cudss_failure(std::uint32_t status, const char *operation) {
+  if (status != kCudssStatusSuccess) {
+    TI_WARN("CUDA cuDSS {} failed during cleanup (status {}).", operation,
+            status);
+  }
+}
+
 const CuSparseMatrix &require_cudss_matrix(SparseMatrix *matrix,
                                            Program *program) {
   TI_ERROR_IF(!matrix, "CUDA cuDSS received a null sparse matrix.");
@@ -56,13 +67,12 @@ void validate_cudss_matrix_contract(int matrix_type, int matrix_view) {
                   matrix_type != kCudssMatrixSymmetric &&
                   matrix_type != kCudssMatrixSpd,
               "CUDA cuDSS matrix_type must be general, symmetric, or spd.");
-  TI_ERROR_IF(matrix_view != kCudssViewFull &&
-                  matrix_view != kCudssViewLower &&
+  TI_ERROR_IF(matrix_view != kCudssViewFull && matrix_view != kCudssViewLower &&
                   matrix_view != kCudssViewUpper,
               "CUDA cuDSS matrix_view must be full, lower, or upper.");
-  TI_ERROR_IF(matrix_type == kCudssMatrixGeneral &&
-                  matrix_view != kCudssViewFull,
-              "CUDA cuDSS general matrices require the full matrix view.");
+  TI_ERROR_IF(
+      matrix_type == kCudssMatrixGeneral && matrix_view != kCudssViewFull,
+      "CUDA cuDSS general matrices require the full matrix view.");
 }
 
 void validate_cudss_vector(Ndarray *array,
@@ -98,37 +108,164 @@ void validate_cudss_values(Ndarray *array,
 
 }  // namespace
 
+class CudssProviderRuntime {
+ public:
+  CudssProviderRuntime(const std::string &adapter_path,
+                       const std::string &runtime_library_path) {
+    TI_ERROR_IF(adapter_path.empty(),
+                "CUDA cuDSS requires a bundled Forge provider adapter.");
+    auto &cuda_driver = CUDADriver::get_instance_without_context();
+    TI_ERROR_IF(!cuda_driver.nvidia_extensions_available() ||
+                    cuda_driver.get_version_major() < 12,
+                "CUDA cuDSS requires the NVIDIA CUDA driver API 12.0 or "
+                "newer.");
+    auto &cublas = CUBLASDriver::get_instance();
+    TI_ERROR_IF(!cublas.is_loaded() && !cublas.load_cublas(),
+                "CUDA cuDSS requires a compatible user-managed cuBLAS "
+                "runtime.");
+
+    loader_ = std::make_unique<DynamicLoader>(adapter_path);
+    TI_ERROR_IF(!loader_->loaded(),
+                "CUDA cuDSS could not load bundled adapter {}.", adapter_path);
+    auto *query_symbol =
+        loader_->load_function_optional(TI_FORGE_CUDSS_PROVIDER_QUERY_SYMBOL);
+    TI_ERROR_IF(!query_symbol,
+                "CUDA cuDSS bundled adapter is missing its query symbol.");
+    auto query = reinterpret_cast<TiForgeCudssProviderQueryFn>(query_symbol);
+    const auto query_result =
+        query(TI_FORGE_CUDSS_PROVIDER_ABI_VERSION, sizeof(api_), &api_);
+    TI_ERROR_IF(query_result != TI_FORGE_CUDSS_SUCCESS,
+                "CUDA cuDSS bundled adapter rejected Forge provider ABI {} "
+                "(result {}).",
+                TI_FORGE_CUDSS_PROVIDER_ABI_VERSION,
+                static_cast<int>(query_result));
+    TI_ERROR_IF(
+        api_.struct_size < sizeof(api_) ||
+            api_.provider_abi_version != TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
+            api_.info.struct_size < sizeof(api_.info) ||
+            api_.info.provider_abi_version !=
+                TI_FORGE_CUDSS_PROVIDER_ABI_VERSION ||
+            api_.info.cudss_header_version / 100 != 8,
+        "CUDA cuDSS bundled adapter identity is incompatible.");
+    constexpr uint64_t required_features =
+        TI_FORGE_CUDSS_FEATURE_CSR | TI_FORGE_CUDSS_FEATURE_DENSE_VECTOR |
+        TI_FORGE_CUDSS_FEATURE_STAGED_EXECUTION |
+        TI_FORGE_CUDSS_FEATURE_VALUE_REBIND |
+        TI_FORGE_CUDSS_FEATURE_EXPLICIT_STREAM;
+    TI_ERROR_IF((api_.info.features & required_features) != required_features,
+                "CUDA cuDSS bundled adapter lacks required features.");
+    TI_ERROR_IF(!api_.create_runtime || !api_.destroy_runtime || !api_.create ||
+                    !api_.destroy || !api_.set_stream || !api_.config_create ||
+                    !api_.config_destroy || !api_.data_create ||
+                    !api_.data_destroy || !api_.matrix_create_csr ||
+                    !api_.matrix_create_dn || !api_.matrix_destroy ||
+                    !api_.matrix_set_values || !api_.matrix_set_csr_pointers ||
+                    !api_.execute || !api_.get_last_error,
+                "CUDA cuDSS bundled adapter API table is incomplete.");
+    TiForgeCudssRuntime candidate_runtime = nullptr;
+    TiForgeCudssRuntimeInfo candidate_info{};
+    candidate_info.struct_size = sizeof(candidate_info);
+    const char *runtime_path =
+        runtime_library_path.empty() ? nullptr : runtime_library_path.c_str();
+    const auto runtime_result =
+        api_.create_runtime(runtime_path, &candidate_runtime, &candidate_info);
+    if (runtime_result != TI_FORGE_CUDSS_SUCCESS || !candidate_runtime) {
+      if (candidate_runtime) {
+        api_.destroy_runtime(candidate_runtime);
+      }
+      TI_ERROR("CUDA cuDSS vendor runtime initialization failed: {}",
+               adapter_error());
+    }
+    if (candidate_info.version_major != 0 ||
+        candidate_info.version_minor != 8) {
+      api_.destroy_runtime(candidate_runtime);
+      TI_ERROR(
+          "CUDA cuDSS adapter loaded an unsupported vendor runtime "
+          "version {}.{}.{}.",
+          candidate_info.version_major, candidate_info.version_minor,
+          candidate_info.version_patch);
+    }
+    runtime_ = candidate_runtime;
+    runtime_info_ = candidate_info;
+  }
+
+  CudssProviderRuntime(const CudssProviderRuntime &) = delete;
+  CudssProviderRuntime &operator=(const CudssProviderRuntime &) = delete;
+
+  ~CudssProviderRuntime() {
+    if (runtime_ && api_.destroy_runtime) {
+      const auto result = api_.destroy_runtime(runtime_);
+      if (result != TI_FORGE_CUDSS_SUCCESS) {
+        TI_WARN("CUDA cuDSS adapter runtime cleanup failed (result {}).",
+                static_cast<int>(result));
+      }
+      runtime_ = nullptr;
+    }
+  }
+
+  const TiForgeCudssProviderApi &api() const {
+    return api_;
+  }
+
+  TiForgeCudssRuntime runtime() const {
+    return runtime_;
+  }
+
+  const TiForgeCudssRuntimeInfo &runtime_info() const {
+    return runtime_info_;
+  }
+
+ private:
+  std::string adapter_error() const {
+    if (!api_.get_last_error) {
+      return "adapter error unavailable";
+    }
+    const auto required = api_.get_last_error(nullptr, 0);
+    if (required <= 1) {
+      return "adapter call failed without detail";
+    }
+    std::vector<char> message(required, '\0');
+    api_.get_last_error(message.data(), message.size());
+    return message.data();
+  }
+
+  std::unique_ptr<DynamicLoader> loader_;
+  TiForgeCudssProviderApi api_{};
+  TiForgeCudssRuntime runtime_{nullptr};
+  TiForgeCudssRuntimeInfo runtime_info_{};
+};
+
 class CudaCudssPlan final : public CudaProviderCompletionResource {
  public:
   CudaCudssPlan(const CuSparseMatrix &matrix,
                 int matrix_type,
                 int matrix_view,
-                const std::string &library_path,
+                const std::string &adapter_path,
+                const std::string &runtime_library_path,
                 std::shared_ptr<RuntimeFaultDomain> fault_domain)
       : rows_(static_cast<std::size_t>(matrix.num_rows())),
         nonzeros_(static_cast<std::size_t>(matrix.get_nnz())),
+        provider_(std::make_unique<CudssProviderRuntime>(adapter_path,
+                                                         runtime_library_path)),
         fault_domain_(std::move(fault_domain)) {
     validate_cudss_matrix_contract(matrix_type, matrix_view);
-    auto &driver = CUDSSDriver::get_instance();
-    TI_ERROR_IF(!driver.load_cudss(library_path),
-                "CUDA cuDSS could not load the tested 0.8.x ABI and its "
-                "required symbols. Install a matching user-managed cuDSS "
-                "package or pass its shared-library path explicitly.");
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
     try {
-      require_cudss_success(driver.create.call(&context_), "handle creation");
+      require_cudss_success(api.create(runtime, &context_), "handle creation");
       TI_ERROR_IF(!context_, "CUDA cuDSS returned a null handle.");
-      require_cudss_success(driver.set_stream.call(context_, nullptr),
+      require_cudss_success(api.set_stream(runtime, context_, nullptr),
                             "runtime stream binding");
-      require_cudss_success(driver.config_create.call(&config_),
+      require_cudss_success(api.config_create(runtime, &config_),
                             "configuration creation");
-      require_cudss_success(driver.data_create.call(context_, &data_),
+      require_cudss_success(api.data_create(runtime, context_, &data_),
                             "solver-data creation");
       auto *row_start = matrix.get_row_ptr();
       // cuDSS accepts the canonical three-array CSR form when rowEnd is null.
       // Passing rowOffsets + 1 selects its unsupported four-array CSR form.
       require_cudss_success(
-          driver.matrix_create_csr.call(
-              &matrix_, static_cast<std::int64_t>(matrix.num_rows()),
+          api.matrix_create_csr(
+              runtime, &matrix_, static_cast<std::int64_t>(matrix.num_rows()),
               static_cast<std::int64_t>(matrix.num_cols()),
               static_cast<std::int64_t>(matrix.get_nnz()), row_start, nullptr,
               matrix.get_col_ind(), matrix.get_val_ptr(), kCudssDataTypeI32,
@@ -166,10 +303,11 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
                     matrix.get_data_type() != PrimitiveType::f32,
                 "CUDA cuDSS analyze received a matrix that does not match "
                 "the plan shape or dtype.");
-    auto &driver = CUDSSDriver::get_instance();
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
     require_cudss_success(
-        driver.execute.call(context_, kCudssPhaseAnalysis, config_, data_,
-                            matrix_, nullptr, nullptr),
+        api.execute(runtime, context_, kCudssPhaseAnalysis, config_, data_,
+                    matrix_, nullptr, nullptr),
         "analysis");
     analyzed_csr_row_ptr_.resize(rows_ + 1);
     analyzed_csr_col_ind_.resize(matrix.get_nnz());
@@ -198,20 +336,20 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
                 "CUDA cuDSS refactorization requires a prior successful "
                 "factorization.");
     validate_analyzed_pattern(matrix);
-    auto &driver = CUDSSDriver::get_instance();
-    require_cudss_success(
-        driver.matrix_set_csr_pointers.call(
-            matrix_, matrix.get_row_ptr(), nullptr, matrix.get_col_ind(),
-            matrix.get_val_ptr()),
-        "CSR descriptor rebinding");
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
+    require_cudss_success(api.matrix_set_csr_pointers(
+                              runtime, matrix_, matrix.get_row_ptr(), nullptr,
+                              matrix.get_col_ind(), matrix.get_val_ptr()),
+                          "CSR descriptor rebinding");
     factorized_ = false;
     factorized_from_explicit_values_ = false;
     ++factor_invalidations_;
     require_cudss_success(
-        driver.execute.call(context_,
-                            refactorize ? kCudssPhaseRefactorization
-                                        : kCudssPhaseFactorization,
-                            config_, data_, matrix_, nullptr, nullptr),
+        api.execute(
+            runtime, context_,
+            refactorize ? kCudssPhaseRefactorization : kCudssPhaseFactorization,
+            config_, data_, matrix_, nullptr, nullptr),
         refactorize ? "refactorization" : "factorization");
     factorized_ = true;
     factorized_matrix_id_ = matrix.matrix_id();
@@ -290,18 +428,19 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
     TI_ERROR_IF(closed_, "CUDA cuDSS plan is closed.");
     TI_ERROR_IF(!refactor_solve_inflight_,
                 "CUDA cuDSS refactorize+solve has no reserved transaction.");
-    auto &driver = CUDSSDriver::get_instance();
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
     try {
-      require_cudss_success(driver.matrix_set_values.call(matrix_, values),
+      require_cudss_success(api.matrix_set_values(runtime, matrix_, values),
                             "explicit matrix-values rebinding");
       bind_dense_vectors(rhs, solution);
       refactor_solve_provider_started_ = true;
-      const auto factorization_phase =
-          refactor_solve_uses_full_factorization_ ? kCudssPhaseFactorization
-                                                  : kCudssPhaseRefactorization;
-      const auto refactor_status = driver.execute.call(
-          context_, factorization_phase, config_, data_, matrix_, nullptr,
-          nullptr);
+      const auto factorization_phase = refactor_solve_uses_full_factorization_
+                                           ? kCudssPhaseFactorization
+                                           : kCudssPhaseRefactorization;
+      const auto refactor_status =
+          api.execute(runtime, context_, factorization_phase, config_, data_,
+                      matrix_, nullptr, nullptr);
       const bool inject_failure =
           debug_fail_next_refactor_solve_after_provider_call_;
       debug_fail_next_refactor_solve_after_provider_call_ = false;
@@ -349,7 +488,12 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
 
   std::unordered_map<std::string, std::uint64_t> statistics() const {
     std::lock_guard<std::mutex> lock(mutex_);
+    const auto &runtime_info = provider_->runtime_info();
     return {{"rows", static_cast<std::uint64_t>(rows_)},
+            {"provider_abi_version", TI_FORGE_CUDSS_PROVIDER_ABI_VERSION},
+            {"provider_version_major", runtime_info.version_major},
+            {"provider_version_minor", runtime_info.version_minor},
+            {"provider_version_patch", runtime_info.version_patch},
             {"analyzed", analyzed_ ? 1u : 0u},
             {"factorized", factorized_ ? 1u : 0u},
             {"factorized_from_explicit_values",
@@ -372,32 +516,38 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
       return;
     }
     closed_ = true;
-    if (!provider_calls_safe || !CUDSSDriver::get_instance().is_loaded()) {
+    if (!provider_calls_safe || !provider_) {
       return;
     }
-    auto &driver = CUDSSDriver::get_instance();
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
     if (solution_) {
-      driver.matrix_destroy.call_with_warning(solution_);
+      warn_cudss_failure(api.matrix_destroy(runtime, solution_),
+                         "solution descriptor destruction");
       solution_ = nullptr;
     }
     if (rhs_) {
-      driver.matrix_destroy.call_with_warning(rhs_);
+      warn_cudss_failure(api.matrix_destroy(runtime, rhs_),
+                         "right-hand-side descriptor destruction");
       rhs_ = nullptr;
     }
     if (matrix_) {
-      driver.matrix_destroy.call_with_warning(matrix_);
+      warn_cudss_failure(api.matrix_destroy(runtime, matrix_),
+                         "CSR descriptor destruction");
       matrix_ = nullptr;
     }
     if (data_) {
-      driver.data_destroy.call_with_warning(context_, data_);
+      warn_cudss_failure(api.data_destroy(runtime, context_, data_),
+                         "solver-data destruction");
       data_ = nullptr;
     }
     if (config_) {
-      driver.config_destroy.call_with_warning(config_);
+      warn_cudss_failure(api.config_destroy(runtime, config_),
+                         "configuration destruction");
       config_ = nullptr;
     }
     if (context_) {
-      driver.destroy.call_with_warning(context_);
+      warn_cudss_failure(api.destroy(runtime, context_), "handle destruction");
       context_ = nullptr;
     }
   }
@@ -412,58 +562,60 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
   }
 
   void bind_dense_vectors(void *rhs, void *solution) {
-    auto &driver = CUDSSDriver::get_instance();
+    const auto &api = provider_->api();
+    auto runtime = provider_->runtime();
     if (!rhs_) {
       try {
         require_cudss_success(
-            driver.matrix_create_dn.call(
-                &rhs_, static_cast<std::int64_t>(rows_), 1,
-                static_cast<std::int64_t>(rows_), rhs, kCudssDataTypeF32,
-                kCudssLayoutColumnMajor),
+            api.matrix_create_dn(runtime, &rhs_,
+                                 static_cast<std::int64_t>(rows_), 1,
+                                 static_cast<std::int64_t>(rows_), rhs,
+                                 kCudssDataTypeF32, kCudssLayoutColumnMajor),
             "right-hand-side descriptor creation");
         require_cudss_success(
-            driver.matrix_create_dn.call(
-                &solution_, static_cast<std::int64_t>(rows_), 1,
-                static_cast<std::int64_t>(rows_), solution,
-                kCudssDataTypeF32, kCudssLayoutColumnMajor),
+            api.matrix_create_dn(runtime, &solution_,
+                                 static_cast<std::int64_t>(rows_), 1,
+                                 static_cast<std::int64_t>(rows_), solution,
+                                 kCudssDataTypeF32, kCudssLayoutColumnMajor),
             "solution descriptor creation");
       } catch (...) {
         if (solution_) {
-          driver.matrix_destroy.call_with_warning(solution_);
+          warn_cudss_failure(api.matrix_destroy(runtime, solution_),
+                             "solution descriptor rollback");
           solution_ = nullptr;
         }
         if (rhs_) {
-          driver.matrix_destroy.call_with_warning(rhs_);
+          warn_cudss_failure(api.matrix_destroy(runtime, rhs_),
+                             "right-hand-side descriptor rollback");
           rhs_ = nullptr;
         }
         throw;
       }
     } else {
-      require_cudss_success(driver.matrix_set_values.call(rhs_, rhs),
+      require_cudss_success(api.matrix_set_values(runtime, rhs_, rhs),
                             "right-hand-side rebinding");
-      require_cudss_success(
-          driver.matrix_set_values.call(solution_, solution),
-          "solution rebinding");
+      require_cudss_success(api.matrix_set_values(runtime, solution_, solution),
+                            "solution rebinding");
     }
   }
 
   void execute_solve() {
-    auto &driver = CUDSSDriver::get_instance();
+    const auto &api = provider_->api();
     require_cudss_success(
-        driver.execute.call(context_, kCudssPhaseSolve, config_, data_,
-                            matrix_, solution_, rhs_),
+        api.execute(provider_->runtime(), context_, kCudssPhaseSolve, config_,
+                    data_, matrix_, solution_, rhs_),
         "solve");
   }
 
   void validate_analyzed_pattern(const CuSparseMatrix &matrix) const {
-    TI_ERROR_IF(static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
-                    matrix.num_rows() != matrix.num_cols() ||
-                    matrix.get_data_type() != PrimitiveType::f32 ||
-                    matrix.get_nnz() !=
-                        static_cast<int>(analyzed_csr_col_ind_.size()),
-                "CUDA cuDSS factorize() requires the same sparse pattern "
-                "that was passed to analyze(); shape, dtype, or nonzero "
-                "count changed.");
+    TI_ERROR_IF(
+        static_cast<std::size_t>(matrix.num_rows()) != rows_ ||
+            matrix.num_rows() != matrix.num_cols() ||
+            matrix.get_data_type() != PrimitiveType::f32 ||
+            matrix.get_nnz() != static_cast<int>(analyzed_csr_col_ind_.size()),
+        "CUDA cuDSS factorize() requires the same sparse pattern "
+        "that was passed to analyze(); shape, dtype, or nonzero "
+        "count changed.");
     const auto stats = matrix.debug_runtime_statistics();
     if ((matrix.matrix_id() == analyzed_matrix_id_ &&
          matrix.pattern_version() == analyzed_pattern_version_) ||
@@ -477,10 +629,10 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
         row_ptr.data(), matrix.get_row_ptr(), sizeof(int) * row_ptr.size());
     CUDADriver::get_instance().memcpy_device_to_host(
         col_ind.data(), matrix.get_col_ind(), sizeof(int) * col_ind.size());
-    TI_ERROR_IF(row_ptr != analyzed_csr_row_ptr_ ||
-                    col_ind != analyzed_csr_col_ind_,
-                "CUDA cuDSS factorize() requires the same sparse pattern "
-                "that was passed to analyze(); a CSR index changed.");
+    TI_ERROR_IF(
+        row_ptr != analyzed_csr_row_ptr_ || col_ind != analyzed_csr_col_ind_,
+        "CUDA cuDSS factorize() requires the same sparse pattern "
+        "that was passed to analyze(); a CSR index changed.");
   }
 
   std::size_t rows_{0};
@@ -515,6 +667,7 @@ class CudaCudssPlan final : public CudaProviderCompletionResource {
   std::uint64_t refactor_solve_retirements_{0};
   std::uint64_t next_refactor_solve_generation_{1};
   std::uint64_t active_refactor_solve_generation_{0};
+  std::unique_ptr<CudssProviderRuntime> provider_;
   std::shared_ptr<RuntimeFaultDomain> fault_domain_;
   mutable std::mutex mutex_;
 };
@@ -523,19 +676,21 @@ std::uint64_t Program::create_cuda_cudss_plan(
     SparseMatrix *matrix,
     int matrix_type,
     int matrix_view,
-    const std::string &library_path) {
+    const std::string &adapter_path,
+    const std::string &runtime_library_path) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA cuDSS plans require the CUDA backend.");
-  TI_ERROR_IF(!CUDADriver::get_instance_without_context()
-                   .nvidia_extensions_available(),
-              "CUDA cuDSS requires the NVIDIA CUDA provider.");
+  TI_ERROR_IF(
+      !CUDADriver::get_instance_without_context().nvidia_extensions_available(),
+      "CUDA cuDSS requires the NVIDIA CUDA provider.");
   const auto &csr = require_cudss_matrix(matrix, this);
   auto cuda_submission_guard =
       CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
   auto plan = std::make_shared<CudaCudssPlan>(
-      csr, matrix_type, matrix_view, library_path, runtime_fault_domain_);
+      csr, matrix_type, matrix_view, adapter_path, runtime_library_path,
+      runtime_fault_domain_);
   std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
   TI_ERROR_IF(next_cuda_cudss_plan_handle_ == 0,
               "CUDA cuDSS plan handle space exhausted.");
@@ -682,8 +837,7 @@ Program::cuda_cudss_plan_statistics(std::uint64_t handle) {
   return found->second->statistics();
 }
 
-void Program::debug_cuda_cudss_fail_next_refactor_solve(
-    std::uint64_t handle) {
+void Program::debug_cuda_cudss_fail_next_refactor_solve(std::uint64_t handle) {
   std::shared_ptr<CudaCudssPlan> plan;
   {
     std::lock_guard<std::mutex> lock(cuda_cudss_plan_mutex_);
@@ -746,6 +900,7 @@ namespace taichi::lang {
 std::uint64_t Program::create_cuda_cudss_plan(SparseMatrix *,
                                               int,
                                               int,
+                                              const std::string &,
                                               const std::string &) {
   TI_ERROR("CUDA cuDSS requires TI_WITH_CUDA=ON.");
 }

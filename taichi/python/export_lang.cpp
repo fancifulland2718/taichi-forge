@@ -2571,7 +2571,8 @@ void export_lang(py::module &m) {
       .def("_create_cuda_cudss_plan",
            tracked_native_program_method(&Program::create_cuda_cudss_plan),
            py::arg("matrix"), py::arg("matrix_type"),
-           py::arg("matrix_view"), py::arg("library_path") = "",
+           py::arg("matrix_view"), py::arg("adapter_path"),
+           py::arg("runtime_library_path") = "",
            py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cudss_analyze",
            tracked_native_program_method(&Program::cuda_cudss_analyze),

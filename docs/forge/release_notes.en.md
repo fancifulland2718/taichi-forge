@@ -53,8 +53,10 @@ grouped under the behavior they shipped.
   benchmark, enable, or select optional providers. `graph_integration` now
   distinguishes inline, root-ordered rerecord, backend-recorded,
   stream-captured, opaque, and unsupported routes instead of conflating every
-  root-Graph action as recordable. Explicit cuBLAS, cuSPARSE, cuFFT, and cuDSS
-  probes use transient handles and never enable a provider implicitly.
+  root-Graph action as recordable. Explicit cuBLAS, cuSPARSE, and cuFFT probes
+  use transient vendor handles. The cuDSS probe transiently validates the user
+  vendor runtime through the wheel-internal thin C-ABI adapter. None enables a
+  provider implicitly.
 - Added optional D1 `ti.hardware.linalg.gemm_f32` for compact row-major f32
   `C = alpha * A @ B + beta * C` through direct Python and root Graph. Real
   execution lazy-loads the user's compatible cuBLAS and reuses one handle per
@@ -67,7 +69,8 @@ grouped under the behavior they shipped.
   qualification artifact, while its explicit provider route is not cost-gated.
   Admission-schema-v2 evidence is bound to the exact topology, device, Python
   extension, split native runtime, runtime bitcode, and provider ABI; cuDSS
-  evidence also binds the exact provider binary. Older profiles fail closed,
+  evidence also binds the exact adapter and vendor-runtime binaries. Older
+  profiles fail closed,
   and the former handwritten timing setter was removed. A positive current
   `expected_reuse` override re-evaluates provider and embedded-baseline
   first-use costs instead of trusting the qualification assumption blindly.
@@ -83,7 +86,10 @@ grouped under the behavior they shipped.
   current device values without host-side numeric-version inference. Failed
   provider execution keeps the transaction reserved through submission
   retirement, invalidates its factors, and permits a later full-factorization
-  recovery. Also added the
+  recovery. The cuDSS 0.8 vendor ABI now lives in a plan-owned bundled adapter
+  instead of the core runtime. The adapter neither links nor bundles the
+  vendor library, creates no wheel variant, and requires no Forge rebuild.
+  Also added the
   separate manual `ti.hardware.linalg.spmv_f32`/`CusparseSpmvRecording` route
   for caller-owned output and root-Graph recording over the existing
   matrix-owned provider state. None is a kernel rewrite; vendor libraries

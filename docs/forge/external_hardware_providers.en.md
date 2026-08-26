@@ -20,7 +20,7 @@ Forge provider.
 | cuBLAS | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cublas")` | Direct Python or root Graph; not kernel-callable |
 | cuSPARSE | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cusparse")` | Domain auto/explicit or root Graph; not kernel-callable |
 | cuFFT | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
-| cuDSS 0.8.x | Registered D1 provider | User optional package | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
+| cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
 | cuSPARSELt | Native-adapter candidate only | User optional package | No public Forge probe or execution API | External command only |
@@ -44,8 +44,9 @@ AmgX, or NCCL never causes compiler rewriting.
 Use the following rules for every optional provider:
 
 1. Install Forge normally. Install optional vendor packages afterwards in the
-   application environment; never copy them into a Forge wheel or its package
-   directory.
+   application environment; never copy vendor runtimes into a Forge wheel or
+   its package directory. A Forge-owned thin C-ABI adapter may live in the
+   existing runtime wheel, but must not link or carry the vendor runtime.
 2. Select exactly one CUDA-major package family for a given library in one
    environment. A `-cu12` or `-cu13` suffix describes that vendor package, not
    the Forge wheel.
@@ -135,6 +136,12 @@ Recommended lifecycle:
 
 ### cuDSS 0.8.x
 
+The platform `taichi-forge-runtime` wheel contains one Forge-owned thin C ABI 1
+adapter built against official cuDSS 0.8 headers. It does not link cuDSS, the
+CUDA runtime, cuBLAS, or Python, and creates no new wheel variant. Users do not
+rebuild Forge. The application environment still supplies the vendor cuDSS
+runtime and its transitive dependencies.
+
 Forge's public slice is bound to cuDSS 0.8.x. Install the package matching the
 application CUDA family:
 
@@ -156,6 +163,8 @@ An explicit path may name the shared library or a directory containing it. It
 is exclusive: Forge does not fall back to another candidate when that path is
 wrong. On Linux, NVIDIA's cuDSS wheel may contain `libcudss.so.0` without an
 unversioned symlink; Forge resolves the versioned library directly.
+`library_path` always names the vendor runtime. The wheel-internal adapter is
+not part of the public path contract and cannot be overridden.
 
 ```powershell
 # Optional explicit Windows deployment binding for the current process.
@@ -178,6 +187,11 @@ path = os.environ.get("TI_CUDSS_LIBRARY_PATH")
 report = ti.hardware.probe("cudss", library_path=path)
 print(report)
 ```
+
+The probe transiently loads the adapter and vendor runtime, queries the 0.8.x
+version, and releases both. It creates or retains no solver handle, factor, or
+workspace. Only `CudssPlan` owns execution-time adapter/runtime handles, which
+close deterministically with the plan.
 
 Forge currently requires CUDA Driver API 12.0 or newer and a square scalar f32
 CUDA CSR matrix. `CudssPlan` separates `analyze()`, `factorize()` /

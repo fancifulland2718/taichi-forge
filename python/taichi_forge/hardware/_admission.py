@@ -325,6 +325,10 @@ class ProviderAdmissionEvidence:
                 provider_scope.get("provider_binary_sha256"),
                 "provider_scope.provider_binary_sha256",
             )
+            _sha256_string(
+                provider_scope.get("provider_adapter_binary_sha256"),
+                "provider_scope.provider_adapter_binary_sha256",
+            )
 
         self = object.__new__(cls)
         fields = {

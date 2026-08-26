@@ -150,6 +150,8 @@ jobs:
         run: |
           python -m pip install "pip==26.2.1"
           python -m pip install --requirement packaging/constraints/release-build.txt
+          python -m pip install --require-hashes --no-deps \
+            --requirement packaging/constraints/cudss-build.txt
           python -c "import sys, sysconfig; print(sys.version); print(sysconfig.get_config_var('SOABI'))"
           python -m pip freeze
 
@@ -177,6 +179,7 @@ jobs:
           grep -F "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUPTI:BOOL=OFF" "$cache"
           grep -F "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON" "$cache"
+          grep -F "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON" "$cache"
           grep -F "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
@@ -223,21 +226,21 @@ jobs:
             echo "::error::py3-none runtime wheel has unresolved CPython symbols."
             exit 1
           fi
-          mapfile -t optix_providers < <(
+          mapfile -t hardware_providers < <(
             find build _skbuild -type f \
-              -name 'libtaichi_forge_optix_provider_abi1_optix*.so' | sort -u
+              -name 'libtaichi_forge_*_provider_abi1_*.so' | sort -u
           )
-          if [[ "${#optix_providers[@]}" -ne 3 ]]; then
-            echo "::error::Expected three bundled OptiX adapters, found: ${optix_providers[*]}"
+          if [[ "${#hardware_providers[@]}" -ne 4 ]]; then
+            echo "::error::Expected three OptiX adapters and one cuDSS adapter, found: ${hardware_providers[*]}"
             exit 1
           fi
-          for provider_so in "${optix_providers[@]}"; do
-            readelf -d "$provider_so" | tee /tmp/optix-provider-needed.txt
-            if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink|nvoptix|cudss|amgxsh|nccl|cutensor)' /tmp/optix-provider-needed.txt; then
+          for provider_so in "${hardware_providers[@]}"; do
+            readelf -d "$provider_so" | tee /tmp/hardware-provider-needed.txt
+            if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink|nvoptix|cudss|amgxsh|nccl|cutensor)' /tmp/hardware-provider-needed.txt; then
               echo "::error::$provider_so has an implicit vendor runtime dependency."
               exit 1
             fi
-            if grep -Ei 'NEEDED.*libpython' /tmp/optix-provider-needed.txt; then
+            if grep -Ei 'NEEDED.*libpython' /tmp/hardware-provider-needed.txt; then
               echo "::error::$provider_so depends on CPython."
               exit 1
             fi
@@ -347,6 +350,8 @@ jobs:
         run: |
           python -m pip install "pip==26.2.1"
           python -m pip install --requirement packaging/constraints/release-build.txt
+          python -m pip install --require-hashes --no-deps `
+            --requirement packaging/constraints/cudss-build.txt
           python -c "import sys, sysconfig; print(sys.version); print(sysconfig.get_config_var('SOABI'))"
           python -m pip freeze
 
@@ -379,6 +384,7 @@ jobs:
               "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF",
               "TI_WITH_CUPTI:BOOL=OFF",
               "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON",
+              "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON",
               "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA:BOOL=ON",
               "TI_WITH_VULKAN:BOOL=ON",
@@ -445,14 +451,14 @@ jobs:
             Write-Error "py3-none runtime wheel depends on CPython: $($pythonDlls -join ', ')"
             exit 1
           }
-          $optixProviders = @(Get-ChildItem -Path build,_skbuild -Recurse `
-            -Filter "taichi_forge_optix_provider_abi1_optix*.dll" |
+          $hardwareProviders = @(Get-ChildItem -Path build,_skbuild -Recurse `
+            -Filter "taichi_forge_*_provider_abi1_*.dll" |
             Sort-Object FullName -Unique)
-          if ($optixProviders.Count -ne 3) {
-            Write-Error "Expected three bundled OptiX adapters, found: $($optixProviders.FullName -join ', ')"
+          if ($hardwareProviders.Count -ne 4) {
+            Write-Error "Expected three OptiX adapters and one cuDSS adapter, found: $($hardwareProviders.FullName -join ', ')"
             exit 1
           }
-          foreach ($provider in $optixProviders) {
+          foreach ($provider in $hardwareProviders) {
             $providerImports = & dumpbin /dependents $provider.FullName 2>&1
             if ($LASTEXITCODE -ne 0) {
               $providerImports | Write-Output

@@ -486,7 +486,8 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cudss.workspace_ownership == "provider_owned"
     assert cudss.public_api == ("ti.hardware.linalg.CudssPlan / CudssSolveRecording")
     assert cudss.requirements[0] == "CUDA driver API >= 12.0"
-    assert cudss.requirements[1] == "user-managed cuDSS 0.8.x shared library"
+    assert cudss.requirements[1] == "bundled Forge cuDSS provider C ABI adapter"
+    assert cudss.requirements[2] == "user-managed cuDSS 0.8.x shared library"
     assert "never rewritten" in cudss.notes[0]
     assert "no Forge wheel variant" in cudss.notes[1]
 

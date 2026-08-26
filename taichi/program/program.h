@@ -1268,7 +1268,8 @@ class TI_DLL_EXPORT Program {
   std::uint64_t create_cuda_cudss_plan(SparseMatrix *matrix,
                                        int matrix_type,
                                        int matrix_view,
-                                       const std::string &library_path);
+                                       const std::string &adapter_path,
+                                       const std::string &runtime_library_path);
 
   void cuda_cudss_analyze(std::uint64_t handle, SparseMatrix *matrix);
 

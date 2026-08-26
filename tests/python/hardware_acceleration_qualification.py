@@ -1933,13 +1933,18 @@ def _cuda_cudss_solve_case(order, args):
         ti.reset()
         return result
     from taichi_forge.hardware._cudss import (  # pylint: disable=C0415
+        cudss_adapter_sha256,
         cudss_library_sha256,
         resolve_cudss_library_path,
     )
 
     library_path = resolve_cudss_library_path(library_path)
     provider_binary_sha256 = cudss_library_sha256(library_path)
-    if provider_binary_sha256 is None:
+    provider_adapter_binary_sha256 = cudss_adapter_sha256()
+    if (
+        provider_binary_sha256 is None
+        or provider_adapter_binary_sha256 is None
+    ):
         result = _provenance("cuda-cudss-solve", order)
         result.update(
             {
@@ -2062,6 +2067,9 @@ def _cuda_cudss_solve_case(order, args):
                 "patch": provider_version[2],
             },
             "provider_binary_sha256": provider_binary_sha256,
+            "provider_adapter_binary_sha256": (
+                provider_adapter_binary_sha256
+            ),
         },
         "workload_scope": {
             "rows": matrix_stats["identity"]["rows"],

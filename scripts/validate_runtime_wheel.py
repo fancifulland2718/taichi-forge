@@ -40,6 +40,7 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     re.IGNORECASE,
 )
 OPTIX_PROVIDER_ABIS = (93, 105, 118)
+CUDSS_PROVIDER_HEADER_VERSIONS = (80,)
 
 
 def _expected_optix_provider_members(platform: str) -> set[str]:
@@ -54,6 +55,21 @@ def _expected_optix_provider_members(platform: str) -> set[str]:
     return {
         f"{prefix}libtaichi_forge_optix_provider_abi1_optix{abi}.so"
         for abi in OPTIX_PROVIDER_ABIS
+    }
+
+
+def _expected_cudss_provider_members(platform: str) -> set[str]:
+    if platform == "macos":
+        return set()
+    prefix = f"{PACKAGE}/_lib/hardware_providers/"
+    if platform == "windows":
+        return {
+            f"{prefix}taichi_forge_cudss_provider_abi1_cudss{version:03d}.dll"
+            for version in CUDSS_PROVIDER_HEADER_VERSIONS
+        }
+    return {
+        f"{prefix}libtaichi_forge_cudss_provider_abi1_cudss{version:03d}.so"
+        for version in CUDSS_PROVIDER_HEADER_VERSIONS
     }
 
 
@@ -310,17 +326,12 @@ def _strict_binary_exports(
             )
 
 
-def _strict_optix_provider_exports(
-    zf: ZipFile, members: set[str], platform: str
+def _strict_provider_exports(
+    zf: ZipFile, members: dict[str, str], platform: str
 ) -> None:
-    required = {"taichi_forge_optix_provider_query"}
-    forbidden = {
-        "taichi_forge_optix_provider_probe_runtime",
-        "taichi_forge_optix_provider_set_runtime_library",
-    }
-    for member in sorted(members):
+    for member, required in sorted(members.items()):
         with tempfile.TemporaryDirectory(
-            prefix="taichi-optix-provider-export-audit-"
+            prefix="taichi-hardware-provider-export-audit-"
         ) as td:
             binary = Path(td) / Path(member).name
             binary.write_bytes(zf.read(member))
@@ -328,13 +339,13 @@ def _strict_optix_provider_exports(
                 tool = shutil.which("dumpbin")
                 if tool is None:
                     raise RuntimeError(
-                        "strict Windows OptiX adapter audit requires dumpbin"
+                        "strict Windows provider adapter audit requires dumpbin"
                     )
                 command = [tool, "/nologo", "/exports", str(binary)]
             else:
                 tool = shutil.which("nm") or shutil.which("llvm-nm")
                 if tool is None:
-                    raise RuntimeError("strict ELF OptiX adapter audit requires nm")
+                    raise RuntimeError("strict ELF provider adapter audit requires nm")
                 command = [tool, "-D", "-P", "-g", "--defined-only", str(binary)]
             completed = subprocess.run(
                 command,
@@ -347,22 +358,29 @@ def _strict_optix_provider_exports(
             )
             if completed.returncode != 0:
                 raise RuntimeError(
-                    f"strict OptiX adapter export audit failed for {member}: "
+                    f"strict provider adapter export audit failed for {member}: "
                     f"{completed.stdout.strip()}"
                 )
-            missing = sorted(
-                symbol for symbol in required if symbol not in completed.stdout
-            )
-            if missing:
-                raise RuntimeError(
-                    f"OptiX adapter {member} is missing Forge exports: {missing}"
+            if platform == "windows":
+                pattern = re.compile(
+                    r"^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]+\s+(\S+)", re.MULTILINE
                 )
-            leaked = sorted(
-                symbol for symbol in forbidden if symbol in completed.stdout
-            )
-            if leaked:
+                symbols = {
+                    match.group(1) for match in pattern.finditer(completed.stdout)
+                }
+            else:
+                symbols = {
+                    line.split()[0].split("@", 1)[0]
+                    for line in completed.stdout.splitlines()
+                    if line.split()
+                }
+            forge_exports = {
+                symbol for symbol in symbols if symbol.startswith("taichi_forge_")
+            }
+            if forge_exports != {required}:
                 raise RuntimeError(
-                    f"OptiX adapter {member} leaks obsolete Forge exports: {leaked}"
+                    f"provider adapter {member} must export exactly {required!r}; "
+                    f"found Forge exports {sorted(forge_exports)}"
                 )
 
 
@@ -425,6 +443,7 @@ def inspect_runtime_wheel(
                 f"filename={filename_version}, metadata={version}"
             )
         actual_optix_providers: set[str] = set()
+        actual_cudss_providers: set[str] = set()
         if Version(version) >= Version("0.6.3"):
             provider_prefix = f"{PACKAGE}/_lib/hardware_providers/"
             optix_provider_entries = [
@@ -443,6 +462,23 @@ def inspect_runtime_wheel(
                     "Runtime wheel OptiX adapter set is incomplete or ambiguous: "
                     f"expected={sorted(expected_optix_providers)}, "
                     f"actual={sorted(actual_optix_providers)}"
+                )
+            cudss_provider_entries = [
+                name
+                for name in names
+                if name.startswith(provider_prefix)
+                and "taichi_forge_cudss_provider" in Path(name).name
+            ]
+            actual_cudss_providers = set(cudss_provider_entries)
+            expected_cudss_providers = _expected_cudss_provider_members(platform)
+            if (
+                len(cudss_provider_entries) != len(actual_cudss_providers)
+                or actual_cudss_providers != expected_cudss_providers
+            ):
+                raise RuntimeError(
+                    "Runtime wheel cuDSS adapter set is incomplete or ambiguous: "
+                    f"expected={sorted(expected_cudss_providers)}, "
+                    f"actual={sorted(actual_cudss_providers)}"
                 )
         if CUDA_VARIANT.search(version):
             raise RuntimeError(
@@ -594,8 +630,19 @@ def inspect_runtime_wheel(
                 platform,
                 export_manifest["actual_exports"],
             )
-            _strict_optix_provider_exports(
-                zf, actual_optix_providers, platform
+            _strict_provider_exports(
+                zf,
+                {
+                    **{
+                        member: "taichi_forge_optix_provider_query"
+                        for member in actual_optix_providers
+                    },
+                    **{
+                        member: "taichi_forge_cudss_provider_query"
+                        for member in actual_cudss_providers
+                    },
+                },
+                platform,
             )
         if platform == "windows":
             import_library = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.lib"

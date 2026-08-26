@@ -170,6 +170,7 @@ def d1_provider_operations(_operation):
             update_policy="rebind",
             requirements=(
                 "CUDA driver API >= 12.0",
+                "bundled Forge cuDSS provider C ABI adapter",
                 "user-managed cuDSS 0.8.x shared library",
                 "compatible user-managed cuBLAS dependency",
             ),
@@ -180,7 +181,7 @@ def d1_provider_operations(_operation):
             numeric_contracts=("analysis -> factorization -> solve",),
             notes=(
                 "Explicit Python plan or root-Graph native solve; Taichi kernels are never rewritten to call cuDSS.",
-                "The provider is installed by the user and loaded lazily, so it adds no Forge wheel variant.",
+                "The thin Forge adapter is bundled in the existing runtime wheel; the vendor runtime is user-managed and adds no Forge wheel variant.",
                 "cuDSS is Preview, therefore execution is fail-closed outside the qualified 0.8.x ABI family.",
                 "Graph replay re-records one runtime-ordered solve call; this is not CUDA stream capture and does not claim CUDA Graph serialization.",
             ),
@@ -212,6 +213,7 @@ def d1_provider_operations(_operation):
             update_policy="rebind",
             requirements=(
                 "CUDA driver API >= 12.0",
+                "bundled Forge cuDSS provider C ABI adapter",
                 "user-managed cuDSS 0.8.x matching CUDA 12 or CUDA 13",
                 "compatible user-managed cuBLAS dependency",
             ),
@@ -257,6 +259,7 @@ def d1_provider_operations(_operation):
             update_policy="rebind",
             requirements=(
                 "CUDA driver API >= 12.0",
+                "bundled Forge cuDSS provider C ABI adapter",
                 "user-managed cuDSS 0.8.x shared library",
                 "prior successful analysis and factorization",
             ),

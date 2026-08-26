@@ -36,10 +36,11 @@ scope、resource effect 与 native fact 等专家信息。每个 operation 用 `
 `unsupported`。其中 `root_ordered` 只表示 Forge root Graph 保持顺序和 lifetime，并在
 replay 时再次调用 provider；它不表示 CUDA Graph capture 或持久 Vulkan command buffer。
 
-`probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；当前 cuBLAS、cuSPARSE、
-cuFFT 与 cuDSS 使用瞬时 native handle 检查精确 symbol，返回后关闭 handle，不改变后续
-selection。若实际算法此前已经 lazy-load 某库，被动 report 会观察其缓存状态，但绝不
-自行调用 loader。未知 operation/provider 和未实现的 probe 均 fail closed。
+`probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；cuBLAS、cuSPARSE 与
+cuFFT 使用瞬时 native handle 检查精确 symbol；cuDSS 通过 wheel 内 Forge adapter 瞬时
+加载并核对用户 vendor runtime。返回后两层 handle 都关闭，不改变后续 selection。若实际
+算法此前已经 lazy-load 某库，被动 report 会观察其 plan 状态，但绝不自行调用 loader。
+未知 operation/provider 和未实现的 probe 均 fail closed。
 
 用户管理 library 的安装责任、版本绑定、loader 配置与推荐 selection gate 统一见
 [可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分已注册
@@ -119,7 +120,8 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
   workspace 与 preprocessing。
 - `ti.hardware.load_provider_admission_evidence(path, case="cuda-cudss-solve")`
   可为 `ti.linalg.SparseSolver(provider="auto", provider_profile=profile)` 提供对应的
-  exact-workload profile。只有 profile 进一步精确匹配实际加载的 cuDSS 二进制、solver 合同
+  exact-workload profile。只有 profile 进一步精确匹配 wheel 内 adapter 与实际加载的
+  cuDSS vendor runtime 两份二进制、solver 合同
   和预期 solve 复用次数，且摊销成本相对 cuSOLVERSp 达到保守收益
   阈值时，auto 才会考虑用户管理的 cuDSS 0.8.x；两侧首次 analysis/factorization 成本都会
   纳入计算。`SparseSolver(..., expected_reuse=N)` 可为当前 workload 覆盖证据假设并重新计算
@@ -143,9 +145,10 @@ link dependency、bundled library、package dependency、新 build switch 或 wh
 所有路线都只在实际使用相应领域对象或显式 plan 时 lazy-load 用户提供的兼容 library。
 显式 cuDSS `library_path` 是唯一候选，probe 和执行都不会回退到环境变量或默认 library。
 Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆绑 vendor library，
-不增加 build switch 或 wheel 变体。这属于领域级或显式 plan 选择，不是编译器改写任意
-kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生的 analysis、factorization
-或数值失败保持可见，不会静默 fallback。
+也不增加 wheel 变体。现有 runtime wheel 携带 Forge 自有的薄 C-ABI adapter；公开
+`library_path` 始终指 vendor runtime，不能覆盖内部 adapter。这属于领域级或显式 plan
+选择，不是编译器改写任意 kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生
+的 analysis、factorization 或数值失败保持可见，不会静默 fallback。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 
