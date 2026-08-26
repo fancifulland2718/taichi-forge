@@ -9,9 +9,9 @@ variant. This guide explains that user-managed boundary and gives recommended
 configuration for the optional libraries most relevant to simulation and
 rendering.
 
-This page is an installation and deployment guide, not an expansion of the
-public API. In particular, installing a library does not make it a registered
-Forge provider.
+This page is an installation and deployment guide. Installing a library does
+not create an execution route. Some libraries have a registered probe-only
+Forge adapter, which reports compatibility but exposes no algorithm API.
 
 ## Support status and call boundary
 
@@ -23,16 +23,18 @@ Forge provider.
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
-| cuSPARSELt | Native-adapter candidate only | User optional package | No public Forge probe or execution API | External command only |
-| cuTENSOR | Native-adapter candidate only | User optional package | No public Forge probe or execution API | External command only |
-| AmgX | Native-adapter candidate only | User source build | No public Forge probe or execution API | External solver command only |
+| cuSPARSELt 0.4.x-0.9.x | Registered probe-only bundled adapter | Forge adapter; user optional package | `ti.hardware.probe("cusparselt", library_path=...)` | Host diagnostic probe only; no execution/Graph/kernel API |
+| cuTENSOR 2.0.x-2.7.x | Registered probe-only bundled adapter | Forge adapter; user optional package | `ti.hardware.probe("cutensor", library_path=...)` | Host diagnostic probe only; no execution/Graph/kernel API |
+| AmgX stable C API | Registered probe-only bundled adapter | Forge adapter; user source build | `ti.hardware.probe("amgx", library_path=...)` | Host diagnostic probe only; no solve/Graph/kernel API |
 | NCCL | Native-adapter candidate only | User system package | No public Forge probe or execution API | External multi-GPU communication only |
 
-The candidate rows deliberately do not appear in `ti.hardware.providers()`.
-Applications may experiment with their own native adapter, but must not report
-that as Forge provider support. A future Forge integration must first define a
-stable ABI, resource effects, stream ordering, lifetime, error, memory, and
-performance-admission contract.
+The three probe-only rows appear in `ti.hardware.providers()` and audit a
+bounded version family plus the core execution-symbol surface. Probe success
+means only that the runtime can be loaded through that ABI; it does not mean
+that Forge can execute or select the library. NCCL remains an unregistered
+candidate. Any future execution integration must separately define resource
+effects, stream ordering, lifetime, error, memory, and performance-admission
+contracts.
 
 None of these host libraries can be called from inside `@ti.kernel`. Automatic
 use is currently limited to documented domain APIs such as qualified
@@ -272,11 +274,13 @@ Graph work retains both. Close scenes before the provider and do not reuse any
 object after `ti.reset()`. `validation=True` is recommended for development,
 not as a default performance setting.
 
-## Native-adapter candidates without a Forge API
+## Probe-only bundled adapters without execution APIs
 
-The remaining libraries can be useful, but their installation commands only
-prepare an application-owned adapter. They do not enable a Forge symbol,
-probe, Graph action, or automatic route.
+The following three libraries have a Forge-owned probe adapter in the standard
+runtime wheel. The adapter contains no vendor code or dependency: it loads the
+user runtime transiently, queries its version, audits required symbols, and
+unloads it. This does not enable a Graph action, algorithm call, or automatic
+route.
 
 ### cuSPARSELt recommended configuration
 
@@ -291,6 +295,21 @@ Install one CUDA family and inspect the actual shared-library location:
 python -m pip install nvidia-cusparselt-cu12
 python -m pip install nvidia-cusparselt-cu13
 python -m pip show -f nvidia-cusparselt-cu13
+```
+
+Probe an explicit file or directory. If `library_path` is omitted, Forge reads
+`TI_CUSPARSELT_LIBRARY_PATH`, then checks the installed NVIDIA package files,
+then asks the operating-system loader:
+
+```python
+report = ti.hardware.probe(
+    "cusparselt", library_path=r"C:\absolute\path\cusparseLt64_0.dll"
+)
+probe = next(
+    item for item in report.operations
+    if item.descriptor.operation_id == "runtime.probe.cusparselt"
+)
+assert probe.discovery == "available"
 ```
 
 Follow the selected release's support table. Current cuSPARSELt documentation
@@ -360,6 +379,14 @@ python -m pip install cutensor-cu12
 python -m pip install cutensor-cu13
 ```
 
+Use an explicit path or set `TI_CUTENSOR_LIBRARY_PATH`. Without either, Forge
+checks the installed `cutensor-cu13`/`cutensor-cu12` package files before the
+system loader:
+
+```python
+report = ti.hardware.probe("cutensor", library_path="/opt/cutensor/lib/libcutensor.so.2")
+```
+
 cuTENSOR is a candidate for large contractions, reductions, permutations, and
 elementwise tensor operations with layouts that would otherwise require
 substantial handwritten indexing. It depends on CUDART and remains entirely
@@ -402,6 +429,14 @@ resulting `amgxsh.dll` or `libamgxsh.so` directory to the runtime loader path.
 Windows is supported upstream but has more limited upstream test coverage, so
 keep it behind an explicit deployment qualification.
 
+AmgX has no default Python-package search. Pass the built library explicitly or
+set `TI_AMGX_LIBRARY_PATH`; compatible CUDA, cuBLAS, and cuSPARSE dependencies
+must remain visible to the loader:
+
+```python
+report = ti.hardware.probe("amgx", library_path="/opt/amgx/lib/libamgxsh.so")
+```
+
 Recommended physics starting points:
 
 - SPD elliptic/Poisson-like systems: start from the shipped `PCG_V.json` or
@@ -416,6 +451,11 @@ Recommended physics starting points:
   memory. AMG hierarchy memory can dominate the original CSR storage.
 - Store the exact JSON configuration with the deployment. AmgX's large tuning
   surface makes a library-version-only performance claim meaningless.
+
+## Unregistered candidate: NCCL
+
+NCCL is intentionally not part of this adapter mount and has no Forge probe or
+execution API.
 
 ### NCCL recommended configuration
 

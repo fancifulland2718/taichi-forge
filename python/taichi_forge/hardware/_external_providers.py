@@ -77,11 +77,39 @@ _EXTERNAL_PROVIDER_SPECS = (
         transitive_dependencies=("cuda_driver", "optix_driver_runtime"),
         python_adapter_module="taichi_forge.hardware._optix",
     ),
+    ExternalProviderSpec(
+        provider_id="cusparselt",
+        adapter_kind="bundled_probe_only_provider_c_abi",
+        install_owner="forge_runtime_wheel",
+        library_path_policy="optional",
+        process_handle_policy="transient_probe",
+        runtime_resource_policy="call",
+        transitive_dependencies=("cuda_runtime",),
+        python_adapter_module="taichi_forge.hardware._cusparselt",
+    ),
+    ExternalProviderSpec(
+        provider_id="cutensor",
+        adapter_kind="bundled_probe_only_provider_c_abi",
+        install_owner="forge_runtime_wheel",
+        library_path_policy="optional",
+        process_handle_policy="transient_probe",
+        runtime_resource_policy="call",
+        transitive_dependencies=("cuda_runtime",),
+        python_adapter_module="taichi_forge.hardware._cutensor",
+    ),
+    ExternalProviderSpec(
+        provider_id="amgx",
+        adapter_kind="bundled_probe_only_provider_c_abi",
+        install_owner="forge_runtime_wheel",
+        library_path_policy="optional",
+        process_handle_policy="transient_probe",
+        runtime_resource_policy="call",
+        transitive_dependencies=("cuda_runtime", "cublas", "cusparse"),
+        python_adapter_module="taichi_forge.hardware._amgx",
+    ),
 )
 
-_EXTERNAL_PROVIDER_SPECS_BY_ID = MappingProxyType(
-    {spec.provider_id: spec for spec in _EXTERNAL_PROVIDER_SPECS}
-)
+_EXTERNAL_PROVIDER_SPECS_BY_ID = MappingProxyType({spec.provider_id: spec for spec in _EXTERNAL_PROVIDER_SPECS})
 
 
 def external_provider_specs():
@@ -106,9 +134,7 @@ def probe_external_provider(provider_id, library_path=None):
 
     spec = external_provider_spec(provider_id)
     if library_path is not None and not spec.supports_library_path:
-        raise ValueError(
-            f"library_path is not supported for {provider_id} provider probes"
-        )
+        raise ValueError(f"library_path is not supported for {provider_id} provider probes")
     if spec.python_adapter_module is not None:
         adapter = importlib.import_module(spec.python_adapter_module)
         return dict(adapter.probe_provider(library_path))
@@ -116,10 +142,7 @@ def probe_external_provider(provider_id, library_path=None):
     from taichi_forge._lib import core as _ti_core  # pylint: disable=C0415
 
     if spec.native_path_resolver is not None:
-        raise RuntimeError(
-            f"unknown native path resolver for {provider_id}: "
-            f"{spec.native_path_resolver}"
-        )
+        raise RuntimeError(f"unknown native path resolver for {provider_id}: " f"{spec.native_path_resolver}")
     return dict(_ti_core.probe_cuda_external_library(provider_id))
 
 

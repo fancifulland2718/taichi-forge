@@ -180,6 +180,7 @@ jobs:
           grep -F "TI_WITH_CUPTI:BOOL=OFF" "$cache"
           grep -F "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON" "$cache"
           grep -F "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON" "$cache"
+          grep -F "TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS:BOOL=ON" "$cache"
           grep -F "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
@@ -230,8 +231,8 @@ jobs:
             find build _skbuild -type f \
               -name 'libtaichi_forge_*_provider_abi1_*.so' | sort -u
           )
-          if [[ "${#hardware_providers[@]}" -ne 4 ]]; then
-            echo "::error::Expected three OptiX adapters and one cuDSS adapter, found: ${hardware_providers[*]}"
+          if [[ "${#hardware_providers[@]}" -ne 7 ]]; then
+            echo "::error::Expected seven bundled hardware adapters, found: ${hardware_providers[*]}"
             exit 1
           fi
           for provider_so in "${hardware_providers[@]}"; do
@@ -385,6 +386,7 @@ jobs:
               "TI_WITH_CUPTI:BOOL=OFF",
               "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON",
               "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON",
+              "TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS:BOOL=ON",
               "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA:BOOL=ON",
               "TI_WITH_VULKAN:BOOL=ON",
@@ -454,8 +456,8 @@ jobs:
           $hardwareProviders = @(Get-ChildItem -Path build,_skbuild -Recurse `
             -Filter "taichi_forge_*_provider_abi1_*.dll" |
             Sort-Object FullName -Unique)
-          if ($hardwareProviders.Count -ne 4) {
-            Write-Error "Expected three OptiX adapters and one cuDSS adapter, found: $($hardwareProviders.FullName -join ', ')"
+          if ($hardwareProviders.Count -ne 7) {
+            Write-Error "Expected seven bundled hardware adapters, found: $($hardwareProviders.FullName -join ', ')"
             exit 1
           }
           foreach ($provider in $hardwareProviders) {

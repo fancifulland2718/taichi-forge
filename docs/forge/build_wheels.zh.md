@@ -127,6 +127,8 @@ Driver API。构建或安装标准 runtime wheel 不需要 CUDA Toolkit、CUB、
 留在该发行矩阵之外。runtime wheel 可以携带不链接这些 vendor runtime 的 Forge 薄
 adapter；其安装、loader、版本、lifecycle 与支持状态边界统一见
 [可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。
+标准 wheel 还带有 cuSPARSELt、cuTENSOR 与 AmgX 三个 query-only adapter；它们不需要
+vendor header/library 即可构建，发行门禁会拒绝任何隐式 vendor-runtime 依赖。
 
 `scripts/validate_runtime_wheel.py --dependency-class driver-only` 是标准发行门禁：
 核对项目名/版本、唯一 native runtime、没有 `cuda_runtime_major.txt`、没有包内

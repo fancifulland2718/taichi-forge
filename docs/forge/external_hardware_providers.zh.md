@@ -7,8 +7,8 @@ Taichi Forge 的官方 runtime wheel 始终保持 driver-only。可选 CUDA/vend
 `cu12`/`cu13` Forge wheel 变体。本文说明这一用户管理边界，并为 simulation 与 rendering
 中最相关的可选 library 给出推荐配置。
 
-本文是安装与部署指南，不扩展公开 API。特别地，安装某个 library 并不表示它已经成为
-Forge 注册 provider。
+本文是安装与部署指南。安装 library 不会自动产生执行路线；部分 library 有已注册的
+probe-only Forge adapter，它只报告兼容性，不提供算法执行 API。
 
 ## 支持状态与调用边界
 
@@ -20,15 +20,15 @@ Forge 注册 provider。
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
-| cuSPARSELt | 仅 native-adapter 候选 | 用户安装可选包 | 没有公开 Forge probe 或执行 API | 仅外部 command |
-| cuTENSOR | 仅 native-adapter 候选 | 用户安装可选包 | 没有公开 Forge probe 或执行 API | 仅外部 command |
-| AmgX | 仅 native-adapter 候选 | 用户源码构建 | 没有公开 Forge probe 或执行 API | 仅外部 solver command |
+| cuSPARSELt 0.4.x-0.9.x | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe("cusparselt", library_path=...)` | 仅 host diagnostic probe；无 execution/Graph/kernel API |
+| cuTENSOR 2.0.x-2.7.x | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe("cutensor", library_path=...)` | 仅 host diagnostic probe；无 execution/Graph/kernel API |
+| AmgX stable C API | 已注册 probe-only bundled adapter | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe("amgx", library_path=...)` | 仅 host diagnostic probe；无 solve/Graph/kernel API |
 | NCCL | 仅 native-adapter 候选 | 用户安装系统包 | 没有公开 Forge probe 或执行 API | 仅外部 multi-GPU communication |
 
-候选项不会出现在 `ti.hardware.providers()` 中，这是有意的边界。应用可以试验自有 native
-adapter，但不能把它报告为 Forge provider 支持。未来若要正式接入 Forge，必须先定义稳定
-ABI、resource effect、stream ordering、lifetime、error、memory 与 performance admission
-合同。
+三个 probe-only 项会出现在 `ti.hardware.providers()` 中，并检查有界版本族和核心执行
+symbol surface。probe 成功只表示该 runtime 能通过该 ABI 被加载，不表示 Forge 已能执行或
+选择它。NCCL 仍是未注册候选。未来增加执行集成时，仍须另行定义 resource effect、stream
+ordering、lifetime、error、memory 与 performance admission 合同。
 
 这些 host library 都不能从 `@ti.kernel` 内调用。当前只有文档明确说明的领域 API 可以自动
 选择，例如已资格化的 cuSPARSE SpMV 与 cuDSS solver selection。安装 cuSPARSELt、
@@ -231,10 +231,11 @@ provider 持有 OptiX context，scene 持有 provider，已提交 Graph work 同
 关闭 scene，再关闭 provider；`ti.reset()` 后不得复用任何旧对象。`validation=True` 推荐用于
 开发阶段，而不是默认性能配置。
 
-## 尚无 Forge API 的 native-adapter 候选
+## 没有执行 API 的 probe-only bundled adapter
 
-下面这些 library 可能有价值，但安装命令只是在准备应用自有 adapter，不会启用 Forge
-symbol、probe、Graph action 或 automatic route。
+下面三个 library 的 Forge 自有 probe adapter 已随标准 runtime wheel 提供。adapter 不包含
+vendor code 或依赖，只瞬时加载用户 runtime、查询版本、检查 required symbol 后卸载；它
+不会启用 Graph action、算法调用或 automatic route。
 
 ### cuSPARSELt 推荐配置
 
@@ -248,6 +249,20 @@ multiplication。它不是通用 sparse-matrix solver，也不替代普通 CSR S
 python -m pip install nvidia-cusparselt-cu12
 python -m pip install nvidia-cusparselt-cu13
 python -m pip show -f nvidia-cusparselt-cu13
+```
+
+可以显式传入文件/目录。省略 `library_path` 时，Forge 先读取
+`TI_CUSPARSELT_LIBRARY_PATH`，再检查已安装 NVIDIA package 文件，最后交给 OS loader：
+
+```python
+report = ti.hardware.probe(
+    "cusparselt", library_path=r"C:\absolute\path\cusparseLt64_0.dll"
+)
+probe = next(
+    item for item in report.operations
+    if item.descriptor.operation_id == "runtime.probe.cusparselt"
+)
+assert probe.discovery == "available"
 ```
 
 必须遵守所选 release 的 support table。当前 cuSPARSELt 文档要求 compute capability 8.0
@@ -310,6 +325,13 @@ python -m pip install cutensor-cu12
 python -m pip install cutensor-cu13
 ```
 
+显式传入路径或设置 `TI_CUTENSOR_LIBRARY_PATH`。两者都没有时，Forge 先检查已安装的
+`cutensor-cu13`/`cutensor-cu12` package 文件，再使用 system loader：
+
+```python
+report = ti.hardware.probe("cutensor", library_path="/opt/cutensor/lib/libcutensor.so.2")
+```
+
 cuTENSOR 适合 large contraction、reduction、permutation 和 elementwise tensor operation，
 特别是那些否则需要大量手写 indexing 的 layout。它依赖 CUDART，必须完全留在 driver-only
 Forge wheel 之外。
@@ -347,6 +369,13 @@ single-GPU adapter 设置 `CMAKE_NO_MPI=ON`；distributed build 还需要兼容 
 implementation。把生成的 `amgxsh.dll` 或 `libamgxsh.so` 目录加入 runtime loader path。
 upstream 支持 Windows，但其 Windows test coverage 更有限，因此必须放在显式部署资格化之后。
 
+AmgX 不做默认 Python package 搜索。显式传入构建出的 library，或设置
+`TI_AMGX_LIBRARY_PATH`；兼容的 CUDA、cuBLAS 与 cuSPARSE 依赖必须同时对 loader 可见：
+
+```python
+report = ti.hardware.probe("amgx", library_path="/opt/amgx/lib/libamgxsh.so")
+```
+
 推荐的 physics 起点：
 
 - SPD elliptic/Poisson-like system：从随附 `PCG_V.json` 或
@@ -359,6 +388,10 @@ upstream 支持 Windows，但其 Windows test coverage 更有限，因此必须�
   AMG hierarchy memory 可能超过原始 CSR storage；
 - 随部署保存精确 JSON configuration。AmgX tuning surface 很大，只按 library version
   宣称性能没有意义。
+
+## 未注册候选：NCCL
+
+本次 adapter 挂载明确不包含 NCCL；它目前没有 Forge probe 或执行 API。
 
 ### NCCL 推荐配置
 

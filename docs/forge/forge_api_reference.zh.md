@@ -38,13 +38,15 @@ replay 时再次调用 provider；它不表示 CUDA Graph capture 或持久 Vulk
 
 `probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；cuBLAS、cuSPARSE 与
 cuFFT 使用瞬时 native handle 检查精确 symbol；cuDSS 通过 wheel 内 Forge adapter 瞬时
-加载并核对用户 vendor runtime。返回后两层 handle 都关闭，不改变后续 selection。若实际
-算法此前已经 lazy-load 某库，被动 report 会观察其 plan 状态，但绝不自行调用 loader。
-未知 operation/provider 和未实现的 probe 均 fail closed。
+加载并核对用户 vendor runtime。probe-only bundled adapter 同样检查 cuSPARSELt
+0.4.x-0.9.x、cuTENSOR 2.0.x-2.7.x 与 AmgX stable C API，但不提供执行或 automatic route。
+所有 probe handle 都在返回前关闭，不改变后续 selection。若实际算法此前已经 lazy-load
+某库，被动 report 会观察其 plan 状态，但绝不自行调用 loader。未知 operation/provider 和
+未实现的 probe 均 fail closed。
 
 用户管理 library 的安装责任、版本绑定、loader 配置与推荐 selection gate 统一见
-[可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分已注册
-provider 与 native-adapter 候选；安装候选 library 不会增加 Forge API。
+[可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分执行
+provider、probe-only provider 与 native-adapter 候选；安装 runtime 不会增加执行 API。
 
 ### 核心 kernel 硬件路线（0.6.3 资格化）
 

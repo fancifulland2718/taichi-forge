@@ -130,6 +130,7 @@ include(cmake/TaichiCXXFlags.cmake)
 include(cmake/TaichiCore.cmake)
 include(cmake/TaichiOptixProvider.cmake)
 include(cmake/TaichiCudssProvider.cmake)
+include(cmake/TaichiOptionalRuntimeProviders.cmake)
 
 option(TI_BUILD_TESTS "Build the CPP tests" OFF)
 

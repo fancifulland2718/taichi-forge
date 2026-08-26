@@ -39,6 +39,9 @@ _OPERATION_IDS = (
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",
     "linalg.refactor_solve.cudss",
+    "runtime.probe.cusparselt",
+    "runtime.probe.cutensor",
+    "runtime.probe.amgx",
     "ray.as_build.optix",
     "ray.as_refit.optix",
     "ray.query.batch.optix",
@@ -53,8 +56,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
 
     assert tuple(operation.operation_id for operation in operations) == _OPERATION_IDS
     assert all(
-        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 4
-        for operation in operations
+        operation.schema_version == ti.hardware.HARDWARE_CAPABILITY_SCHEMA_VERSION == 4 for operation in operations
     )
     assert ti.algorithms.PRIMITIVE_CAPABILITY_SCHEMA_VERSION == 2
     assert ti.hardware.DEPENDENCY_TIERS == (
@@ -92,10 +94,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
     assert all(operation.backends for operation in operations)
     assert all(operation.scopes for operation in operations)
     assert all(operation.provider_id for operation in operations)
-    assert all(
-        operation.graph_integration in ti.hardware.GRAPH_INTEGRATION_MODES
-        for operation in operations
-    )
+    assert all(operation.graph_integration in ti.hardware.GRAPH_INTEGRATION_MODES for operation in operations)
 
     with pytest.raises(FrozenInstanceError):
         operations[0].dependency_tier = "wheel_variant"
@@ -117,9 +116,7 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
 
 
 def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
-    by_id = {
-        operation.operation_id: operation for operation in ti.hardware.operations()
-    }
+    by_id = {operation.operation_id: operation for operation in ti.hardware.operations()}
     expected = {
         "domain_api_auto_provider": {
             "linalg.spmv.cusparse",
@@ -145,9 +142,7 @@ def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
     }
     for mode, operation_ids in expected.items():
         assert {
-            operation_id
-            for operation_id, operation in by_id.items()
-            if operation.activation_mode == mode
+            operation_id for operation_id, operation in by_id.items() if operation.activation_mode == mode
         } == operation_ids
     explicit = {
         operation_id
@@ -156,9 +151,7 @@ def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
     }
     assert explicit == set(by_id).difference(set().union(*expected.values()))
     assert by_id["linalg.spmv.cusparse"].activation_mode == ("domain_api_auto_provider")
-    assert by_id["linalg.spmv.cusparse_explicit"].activation_mode == (
-        "explicit_hardware_api"
-    )
+    assert by_id["linalg.spmv.cusparse_explicit"].activation_mode == ("explicit_hardware_api")
 
 
 def test_hardware_route_and_scoped_performance_evidence_are_separate():
@@ -175,8 +168,7 @@ def test_hardware_route_and_scoped_performance_evidence_are_separate():
 
     report = ti.hardware.report()
     assert all(
-        operation.performance_state == "not_measured"
-        and not operation.performance_scope
+        operation.performance_state == "not_measured" and not operation.performance_scope
         for operation in report.operations
     )
     payload = report.operations[0].to_dict()
@@ -240,9 +232,7 @@ def test_stable_hardware_status_layer_excludes_diagnostic_planner_fields():
 
 
 def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
-    by_id = {
-        operation.operation_id: operation for operation in ti.hardware.operations()
-    }
+    by_id = {operation.operation_id: operation for operation in ti.hardware.operations()}
 
     optix = by_id["ray.query.batch.optix"]
     cufft = by_id["fft.transform.cufft"]
@@ -267,9 +257,7 @@ def test_hardware_catalog_keeps_dependency_and_provider_axes_orthogonal():
             "build_external": "build_only",
         }[operation.dependency_tier]
         assert operation.load_mode == expected_load_mode
-        assert (operation.dependency_name is None) == (
-            operation.dependency_tier == "core"
-        )
+        assert (operation.dependency_name is None) == (operation.dependency_tier == "core")
 
     for operation in by_id.values():
         if operation.implementation_status in (
@@ -495,9 +483,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert automatic_cudss.activation_mode == "domain_api_auto_provider"
     assert automatic_cudss.scopes == ("python",)
     assert automatic_cudss.graph_integration == "unsupported"
-    assert automatic_cudss.public_api == (
-        "ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"
-    )
+    assert automatic_cudss.public_api == ("ti.linalg.SparseSolver(provider='auto', provider_profile=profile)")
     assert "exact topology" in automatic_cudss.notes[1]
     assert "does not probe or load" in automatic_cudss.notes[2]
     assert "never performance-gated" in automatic_cudss.notes[4]
@@ -526,9 +512,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert async_tile.scopes == ("internal",)
     assert async_tile.execution_kind == "kernel_intrinsic"
     assert async_tile.public_api is None
-    assert async_tile.shapes_or_tiles == (
-        "compiler-generated struct-for BLS >= 8192 bytes",
-    )
+    assert async_tile.shapes_or_tiles == ("compiler-generated struct-for BLS >= 8192 bytes",)
     assert "no public cp.async or TMA API" in async_tile.notes[0]
 
     mesh_shader = ti.hardware.capability("raster.mesh_tasks.vulkan")
@@ -550,9 +534,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "cudss" in provider_ids
     assert "cub_reference" in provider_ids
     assert all(provider.operation_ids for provider in providers)
-    assert next(
-        provider for provider in providers if provider.provider_id == "cublas"
-    ).to_dict() == {
+    assert next(provider for provider in providers if provider.provider_id == "cublas").to_dict() == {
         "schema_version": 4,
         "provider_id": "cublas",
         "dependency_tier": "lazy_external",
@@ -561,13 +543,9 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
         "provider_class": "vendor_algorithm",
         "operation_ids": ("linalg.gemm.cublas",),
     }
-    assert len(
-        {
-            operation_id
-            for provider in providers
-            for operation_id in provider.operation_ids
-        }
-    ) == len(ti.hardware.operations())
+    assert len({operation_id for provider in providers for operation_id in provider.operation_ids}) == len(
+        ti.hardware.operations()
+    )
 
 
 def test_static_hardware_descriptor_serialization_is_plain_and_complete():
@@ -610,9 +588,7 @@ def test_vulkan_cooperative_matrix_properties_are_exact_admission_tuples():
     ti.init(arch=ti.vulkan)
     program = ti.lang.impl.get_runtime().prog
     available = bool(program.vulkan_cooperative_matrix_available())
-    properties = tuple(
-        dict(item) for item in program._vulkan_cooperative_matrix_properties()
-    )
+    properties = tuple(dict(item) for item in program._vulkan_cooperative_matrix_properties())
 
     assert available == bool(properties)
     required = {
@@ -658,9 +634,7 @@ def test_vulkan_cooperative_matrix_properties_are_exact_admission_tuples():
     assert resolved.native_facts["operation_requirements_evaluated"] is True
     assert resolved.native_facts["executable_f16_f32_tuple_count"] == len(executable)
     assert resolved.selection == ("eligible" if executable else "rejected")
-    assert resolved.unavailable_reason == (
-        "none" if executable else "hardware_requirement_not_met"
-    )
+    assert resolved.unavailable_reason == ("none" if executable else "hardware_requirement_not_met")
 
 
 def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch):
@@ -692,9 +666,7 @@ def test_passive_report_does_not_probe_or_enable_external_components(monkeypatch
     assert set(report.compiled_backends) == {"cuda", "vulkan"}
     assert len(report.operations) == len(ti.hardware.operations())
 
-    by_id = {
-        operation.descriptor.operation_id: operation for operation in report.operations
-    }
+    by_id = {operation.descriptor.operation_id: operation for operation in report.operations}
     cublas = by_id["linalg.gemm.cublas"]
     if cublas.unavailable_reason == "external_probe_not_requested":
         assert cublas.discovery is None
@@ -735,16 +707,8 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
 
     monkeypatch.setattr(_capabilities, "_native_external_status", provider_status)
     report = ti.hardware.report()
-    cusparse = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.provider_id == "cusparse"
-    )
-    cublas = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.provider_id == "cublas"
-    )
+    cusparse = next(operation for operation in report.operations if operation.descriptor.provider_id == "cusparse")
+    cublas = next(operation for operation in report.operations if operation.descriptor.provider_id == "cublas")
 
     assert cusparse.discovery == "available"
     assert cusparse.enablement == "enabled"
@@ -770,19 +734,11 @@ def test_native_passive_status_does_not_load_external_libraries():
     }
 
     assert report.external_components_probed is False
-    assert {
-        provider_id: status["library_loaded"] for provider_id, status in after.items()
-    } == {
+    assert {provider_id: status["library_loaded"] for provider_id, status in after.items()} == {
         provider_id: status["library_loaded"] for provider_id, status in before.items()
     }
-    assert all(
-        status["native_facts"]["status_policy"] == "passive_existing_loader"
-        for status in after.values()
-    )
-    assert all(
-        not status["native_facts"]["external_component_probed"]
-        for status in after.values()
-    )
+    assert all(status["native_facts"]["status_policy"] == "passive_existing_loader" for status in after.values())
+    assert all(not status["native_facts"]["external_component_probed"] for status in after.values())
 
 
 def test_multibackend_core_route_requires_every_backend(monkeypatch):
@@ -893,16 +849,7 @@ def test_cuda_async_tile_is_automatic_workload_gated_and_reported():
         ti.loop_config(block_dim=256)
         ti.block_local(x0, x1, x2, x3, x4, x5, x6, x7)
         for i, j in x0:
-            output[i, j] = (
-                x0[i, j]
-                + x1[i, j]
-                + x2[i, j]
-                + x3[i, j]
-                + x4[i, j]
-                + x5[i, j]
-                + x6[i, j]
-                + x7[i, j]
-            )
+            output[i, j] = x0[i, j] + x1[i, j] + x2[i, j] + x3[i, j] + x4[i, j] + x5[i, j] + x6[i, j] + x7[i, j]
 
     initialize()
     small_copy()
@@ -1036,9 +983,7 @@ def test_cuda_async_tile_rejects_read_write_block_local_cache():
     initialize()
     update()
     ti.sync()
-    np.testing.assert_array_equal(
-        values.to_numpy(), np.full((64, 64), 2.0, dtype=np.float32)
-    )
+    np.testing.assert_array_equal(values.to_numpy(), np.full((64, 64), 2.0, dtype=np.float32))
 
     after_update = next(
         operation
@@ -1107,9 +1052,7 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
         "raster.draw.vulkan",
     ):
         operation = next(
-            operation
-            for operation in report.operations
-            if operation.descriptor.operation_id == operation_id
+            operation for operation in report.operations if operation.descriptor.operation_id == operation_id
         )
 
         assert operation.discovery == "available"
@@ -1119,18 +1062,14 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
         assert not operation.native_facts["external_component_probed"]
 
     raster = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.operation_id == "raster.draw.vulkan"
+        operation for operation in report.operations if operation.descriptor.operation_id == "raster.draw.vulkan"
     )
     assert raster.native_facts["indirect_fixed_count"]
     assert raster.native_facts["max_draw_indirect_count"] >= 1
     assert isinstance(raster.native_facts["indirect_count_buffer"], bool)
 
     sampling = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.operation_id == "sampling.texture.vulkan"
+        operation for operation in report.operations if operation.descriptor.operation_id == "sampling.texture.vulkan"
     )
     assert sampling.discovery == "present"
     assert sampling.enablement == "enabled"
@@ -1141,15 +1080,13 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
     ray_routes = {
         operation.descriptor.operation_id: operation
         for operation in report.operations
-        if operation.descriptor.operation_id
-        in ("ray.as_build.vulkan", "ray.as_refit.vulkan", "ray.query.batch.vulkan")
+        if operation.descriptor.operation_id in ("ray.as_build.vulkan", "ray.as_refit.vulkan", "ray.query.batch.vulkan")
     }
     assert len(ray_routes) == 3
     assert len({operation.discovery for operation in ray_routes.values()}) == 1
     assert len({operation.selection for operation in ray_routes.values()}) == 1
     assert all(
-        operation.native_facts["capability_query"] == "active_vulkan_feature_chain"
-        for operation in ray_routes.values()
+        operation.native_facts["capability_query"] == "active_vulkan_feature_chain" for operation in ray_routes.values()
     )
 
 
@@ -1261,11 +1198,7 @@ def test_explicit_external_probe_normalizes_native_facts_without_enabling(
     )
 
     report = ti.hardware.probe(provider_id)
-    operation = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.provider_id == provider_id
-    )
+    operation = next(operation for operation in report.operations if operation.descriptor.provider_id == provider_id)
 
     assert operation.discovery == expected_discovery
     assert operation.unavailable_reason == expected_reason
@@ -1290,11 +1223,7 @@ def test_explicit_external_probe_failures_remain_provider_scoped(monkeypatch):
 
     monkeypatch.setattr(_capabilities, "_native_external_probe", fail_probe)
     report = ti.hardware.probe("cusparse")
-    operation = next(
-        operation
-        for operation in report.operations
-        if operation.descriptor.provider_id == "cusparse"
-    )
+    operation = next(operation for operation in report.operations if operation.descriptor.provider_id == "cusparse")
 
     assert operation.discovery == "incompatible"
     assert operation.unavailable_reason == "native_probe_failed"
@@ -1314,20 +1243,15 @@ def test_optional_optix_probe_and_invalid_tiers_fail_closed(monkeypatch):
 
     report = ti.hardware.probe("optix")
     optix_operations = tuple(
-        operation
-        for operation in report.operations
-        if operation.descriptor.provider_id == "optix"
+        operation for operation in report.operations if operation.descriptor.provider_id == "optix"
     )
     assert len(optix_operations) == 3
     assert all(operation.discovery == "missing" for operation in optix_operations)
     assert all(
-        operation.unavailable_reason == "bundled_provider_adapter_not_installed"
-        for operation in optix_operations
+        operation.unavailable_reason == "bundled_provider_adapter_not_installed" for operation in optix_operations
     )
     assert all(operation.enablement == "disabled" for operation in optix_operations)
-    assert all(
-        operation.selection == "not_considered" for operation in optix_operations
-    )
+    assert all(operation.selection == "not_considered" for operation in optix_operations)
     assert report.external_components_probed is False
 
     with pytest.raises(ValueError, match="only lazy_external"):

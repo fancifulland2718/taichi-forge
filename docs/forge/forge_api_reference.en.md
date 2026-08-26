@@ -46,16 +46,18 @@ not claim CUDA Graph capture or a persistent Vulkan command buffer.
 `probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
 cuBLAS, cuSPARSE, and cuFFT probes check exact symbols through a transient
 native handle. cuDSS uses the wheel-internal Forge adapter to transiently load
-and validate the user vendor runtime. Both cuDSS layers close before the probe
-returns and no probe changes later selection. If an actual algorithm already
-owns a plan, passive reports observe that state without invoking the loader.
-Unknown operations/providers and unimplemented probes fail closed.
+and validate the user vendor runtime. Probe-only bundled adapters similarly
+audit cuSPARSELt 0.4.x-0.9.x, cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API,
+but expose no execution or automatic route. Probe handles close before return
+and no probe changes later selection. If an actual algorithm already owns a
+plan, passive reports observe that state without invoking the loader. Unknown
+operations/providers and unimplemented probes fail closed.
 
 Installation ownership, version binding, loader configuration, and recommended
 selection gates for user-managed libraries are documented in
 [Optional external hardware providers](external_hardware_providers.en.md).
-That guide distinguishes registered providers from native-adapter candidates;
-installing a candidate does not add a Forge API.
+That guide distinguishes execution providers, probe-only providers, and
+native-adapter candidates; installing a runtime never adds an execution API.
 
 ### Core kernel hardware routes (0.6.3 qualification)
 

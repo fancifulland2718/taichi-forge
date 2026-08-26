@@ -53,6 +53,7 @@ def _write_runtime_wheel(
     requirements: tuple[str, ...] = (),
     include_optix_providers: bool = True,
     include_cudss_provider: bool = True,
+    include_optional_runtime_providers: bool = True,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -63,59 +64,41 @@ def _write_runtime_wheel(
         runtime_name = "libtaichi_runtime.dylib"
         cudart_name = ""
     else:
-        runtime_name = (
-            "libtaichi_runtime-deadbeef.so"
-            if hashed_runtime
-            else "libtaichi_runtime.so"
-        )
-        cudart_name = (
-            f"libcudart-deadbeef.so.{cuda_major}.2.75"
-            if auditwheel_layout
-            else f"libcudart.so.{cuda_major}"
-        )
+        runtime_name = "libtaichi_runtime-deadbeef.so" if hashed_runtime else "libtaichi_runtime.so"
+        cudart_name = f"libcudart-deadbeef.so.{cuda_major}.2.75" if auditwheel_layout else f"libcudart.so.{cuda_major}"
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
             f"{dist_info}/METADATA",
             f"Metadata-Version: 2.1\nName: taichi-forge-runtime\nVersion: {version}\n"
-            + "".join(
-                f"Requires-Dist: {requirement}\n" for requirement in requirements
-            ),
+            + "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements),
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
-        if (
-            include_optix_providers
-            and Version(version) >= Version("0.6.3")
-            and platform != "macos"
-        ):
+        if include_optix_providers and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
             for optix_abi in (93, 105, 118):
                 if platform == "windows":
-                    provider_name = (
-                        "taichi_forge_optix_provider_abi1_"
-                        f"optix{optix_abi}.dll"
-                    )
+                    provider_name = "taichi_forge_optix_provider_abi1_" f"optix{optix_abi}.dll"
                 else:
-                    provider_name = (
-                        "libtaichi_forge_optix_provider_abi1_"
-                        f"optix{optix_abi}.so"
-                    )
+                    provider_name = "libtaichi_forge_optix_provider_abi1_" f"optix{optix_abi}.so"
                 zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
-        if (
-            include_cudss_provider
-            and Version(version) >= Version("0.6.3")
-            and platform != "macos"
-        ):
+        if include_cudss_provider and Version(version) >= Version("0.6.3") and platform != "macos":
             provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
             if platform == "windows":
-                provider_name = (
-                    "taichi_forge_cudss_provider_abi1_cudss080.dll"
-                )
+                provider_name = "taichi_forge_cudss_provider_abi1_cudss080.dll"
             else:
-                provider_name = (
-                    "libtaichi_forge_cudss_provider_abi1_cudss080.so"
-                )
+                provider_name = "libtaichi_forge_cudss_provider_abi1_cudss080.so"
             zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
+        if include_optional_runtime_providers and Version(version) >= Version("0.6.3") and platform != "macos":
+            provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
+            stems = (
+                "taichi_forge_cusparselt_provider_abi1_api040_090",
+                "taichi_forge_cutensor_provider_abi1_api200_207",
+                "taichi_forge_amgx_provider_abi1_stable_c",
+            )
+            for stem in stems:
+                provider_name = f"{stem}.dll" if platform == "windows" else f"lib{stem}.so"
+                zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
         if dependency_class == "toolkit-reference":
             if platform == "macos":
                 raise ValueError("macOS test wheels do not bundle CUDART")
@@ -169,12 +152,8 @@ def _write_runtime_wheel(
                 platform_name = "linux-elf"
             requested.sort()
             actual.sort()
-            requested_digest = hashlib.sha256(
-                "\n".join(requested).encode("utf-8")
-            ).hexdigest()
-            actual_digest = hashlib.sha256(
-                "\n".join(actual).encode("utf-8")
-            ).hexdigest()
+            requested_digest = hashlib.sha256("\n".join(requested).encode("utf-8")).hexdigest()
+            actual_digest = hashlib.sha256("\n".join(actual).encode("utf-8")).hexdigest()
             manifest = {
                 "schema_version": export_manifest_schema,
                 "abi_revision": 1,
@@ -182,18 +161,14 @@ def _write_runtime_wheel(
                 "binary_audited": True,
                 "binary_audit_kind": audit_kind,
                 "forbidden_export_families": [],
-                "private_abi_collision_probe_symbols": [
-                    "taichi_runtime_anchor"
-                ],
+                "private_abi_collision_probe_symbols": ["taichi_runtime_anchor"],
                 "raw_defined_symbol_count": 5,
                 "shim_direct_runtime_symbol_count": 1,
                 "shim_shared_odr_symbol_count": 0,
                 "shim_required_runtime_symbol_count": 1,
                 "exported_symbol_count": 2,
                 "actual_exported_symbol_count": len(actual),
-                "implicit_exported_symbol_count": len(
-                    set(actual) - set(requested)
-                ),
+                "implicit_exported_symbol_count": len(set(actual) - set(requested)),
                 "dropped_raw_symbol_count": 4,
                 "configured_export_limit": 32_768,
                 "exports": requested,
@@ -262,19 +237,13 @@ def _write_shim_wheel(
         requirements = [
             requirement
             for requirement in requirements
-            if validate_shim_wheel._requirement_project(requirement)
-            != missing_dependency
+            if validate_shim_wheel._requirement_project(requirement) != missing_dependency
         ]
-    requirement_metadata = "".join(
-        f"Requires-Dist: {requirement}\n" for requirement in requirements
-    )
+    requirement_metadata = "".join(f"Requires-Dist: {requirement}\n" for requirement in requirements)
     with ZipFile(wheel, "w") as zf:
         zf.writestr(
             f"{dist_info}/METADATA",
-            "Metadata-Version: 2.1\n"
-            "Name: taichi-forge\n"
-            f"Version: {version}\n"
-            f"{requirement_metadata}",
+            "Metadata-Version: 2.1\n" "Name: taichi-forge\n" f"Version: {version}\n" f"{requirement_metadata}",
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         extension_payload = b"shim"
@@ -285,15 +254,9 @@ def _write_shim_wheel(
         elif platform == "macos" and not missing_runtime_dependency:
             extension_payload += b"\0@rpath/libtaichi_runtime.dylib\0"
         if platform == "manylinux" and not missing_runtime_rpath:
-            extension_payload += (
-                b"\0$ORIGIN/../../../taichi_forge_runtime/"
-                b"_lib/runtime_native\0"
-            )
+            extension_payload += b"\0$ORIGIN/../../../taichi_forge_runtime/" b"_lib/runtime_native\0"
         elif platform == "macos" and not missing_runtime_rpath:
-            extension_payload += (
-                b"\0@loader_path/../../../taichi_forge_runtime/"
-                b"_lib/runtime_native\0"
-            )
+            extension_payload += b"\0@loader_path/../../../taichi_forge_runtime/" b"_lib/runtime_native\0"
         if llvm_abi_sentinel:
             extension_payload += b"\0_ZN4llvm24DisableABIBreakingChecksE\0"
         zf.writestr(f"taichi_forge/_lib/core/{extension}", extension_payload)
@@ -314,8 +277,7 @@ def test_complete_release_set_validator_accepts_expected_matrix(tmp_path):
         dependency_class="driver-only",
     )
     _write_runtime_wheel(
-        tmp_path
-        / f"taichi_forge_runtime-{version}-py3-none-manylinux_2_35_x86_64.whl",
+        tmp_path / f"taichi_forge_runtime-{version}-py3-none-manylinux_2_35_x86_64.whl",
         platform="manylinux",
         version=version,
         cuda_major=0,
@@ -325,19 +287,14 @@ def test_complete_release_set_validator_accepts_expected_matrix(tmp_path):
         ("windows", "win_amd64"),
         ("manylinux", "manylinux_2_35_x86_64"),
     ):
-        for python_tag in sorted(
-            validate_release_wheel_set.EXPECTED_PYTHON_TAGS
-        ):
+        for python_tag in sorted(validate_release_wheel_set.EXPECTED_PYTHON_TAGS):
             _write_shim_wheel(
-                tmp_path
-                / f"taichi_forge-{version}-{python_tag}-{python_tag}-{suffix}.whl",
+                tmp_path / f"taichi_forge-{version}-{python_tag}-{python_tag}-{suffix}.whl",
                 platform=platform,
                 version=version,
             )
 
-    validate_release_wheel_set.validate_release_set(
-        tmp_path, Version(version)
-    )
+    validate_release_wheel_set.validate_release_set(tmp_path, Version(version))
 
 
 def test_shim_wheel_validator_rejects_abi_tag_mismatch(tmp_path):
@@ -371,10 +328,7 @@ def test_runtime_repair_discovers_versioned_linux_cudart(tmp_path):
     runtime = tmp_path / "libtaichi_runtime.so"
     runtime.write_bytes(b"libcudart.so.12\0libcudart.so.12.8.90\0")
 
-    assert (
-        repair_runtime_wheel._linux_cudart_name(runtime)
-        == "libcudart.so.12.8.90"
-    )
+    assert repair_runtime_wheel._linux_cudart_name(runtime) == "libcudart.so.12.8.90"
 
 
 @pytest.mark.parametrize(
@@ -397,18 +351,13 @@ def test_runtime_repair_uses_only_selected_build_cache(tmp_path):
     old.mkdir()
     current.mkdir()
     runtime_output.mkdir(parents=True)
-    (old / "CMakeCache.txt").write_text(
-        "CUDAToolkit_VERSION_MAJOR:STRING=13\n", encoding="utf-8"
-    )
+    (old / "CMakeCache.txt").write_text("CUDAToolkit_VERSION_MAJOR:STRING=13\n", encoding="utf-8")
     (current / "CMakeCache.txt").write_text(
-        "CUDAToolkit_VERSION_MAJOR:STRING=11\n"
-        f"CMAKE_HOME_DIRECTORY:INTERNAL={source.as_posix()}\n",
+        "CUDAToolkit_VERSION_MAJOR:STRING=11\n" f"CMAKE_HOME_DIRECTORY:INTERNAL={source.as_posix()}\n",
         encoding="utf-8",
     )
 
-    assert repair_runtime_wheel._artifact_roots(current, "windows") == [
-        runtime_output
-    ]
+    assert repair_runtime_wheel._artifact_roots(current, "windows") == [runtime_output]
     assert repair_runtime_wheel._artifact_roots(current, "linux") == [current]
     assert repair_runtime_wheel._cmake_cache_values([current]) == {
         "CUDAToolkit_VERSION_MAJOR": "11",
@@ -426,23 +375,17 @@ def test_runtime_repair_uses_only_selected_build_cache(tmp_path):
         ("Linux", "libcudart-deadbeef.so.13", 13),
     ],
 )
-def test_installed_runtime_validator_derives_cudart_major(
-    monkeypatch, system, name, major
-):
+def test_installed_runtime_validator_derives_cudart_major(monkeypatch, system, name, major):
     monkeypatch.setattr(validate_installed_runtime.platform, "system", lambda: system)
 
     assert validate_installed_runtime._packaged_cuda_runtime_major(Path(name)) == major
 
 
 def test_installed_runtime_validator_rejects_unversioned_cudart(monkeypatch):
-    monkeypatch.setattr(
-        validate_installed_runtime.platform, "system", lambda: "Linux"
-    )
+    monkeypatch.setattr(validate_installed_runtime.platform, "system", lambda: "Linux")
 
     with pytest.raises(RuntimeError, match="unrecognized bundled CUDART"):
-        validate_installed_runtime._packaged_cuda_runtime_major(
-            Path("libcudart.so")
-        )
+        validate_installed_runtime._packaged_cuda_runtime_major(Path("libcudart.so"))
 
 
 def test_installed_runtime_validator_requires_matching_distribution_versions(
@@ -462,17 +405,11 @@ def test_installed_runtime_validator_requires_matching_distribution_versions(
         validate_installed_runtime._validate_distribution_versions()
 
 
-def test_installed_runtime_validator_accepts_driver_only_package(
-    monkeypatch, tmp_path
-):
+def test_installed_runtime_validator_accepts_driver_only_package(monkeypatch, tmp_path):
     package = tmp_path / "taichi_forge_runtime"
     package.mkdir()
-    monkeypatch.setattr(
-        validate_installed_runtime, "_runtime_package_dirs", lambda: [package]
-    )
-    monkeypatch.setattr(
-        validate_installed_runtime.platform, "system", lambda: "Linux"
-    )
+    monkeypatch.setattr(validate_installed_runtime, "_runtime_package_dirs", lambda: [package])
+    monkeypatch.setattr(validate_installed_runtime.platform, "system", lambda: "Linux")
     monkeypatch.delenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", raising=False)
 
     assert validate_installed_runtime._validate_packaged_cuda_runtime() == (
@@ -481,20 +418,14 @@ def test_installed_runtime_validator_accepts_driver_only_package(
     )
 
 
-def test_installed_runtime_validator_rejects_unannounced_packaged_cudart(
-    monkeypatch, tmp_path
-):
+def test_installed_runtime_validator_rejects_unannounced_packaged_cudart(monkeypatch, tmp_path):
     package = tmp_path / "taichi_forge_runtime"
     package.mkdir()
     libs = tmp_path / "taichi_forge_runtime.libs"
     libs.mkdir()
     (libs / "libcudart-deadbeef.so.13.2.75").write_bytes(b"")
-    monkeypatch.setattr(
-        validate_installed_runtime, "_runtime_package_dirs", lambda: [package]
-    )
-    monkeypatch.setattr(
-        validate_installed_runtime.platform, "system", lambda: "Linux"
-    )
+    monkeypatch.setattr(validate_installed_runtime, "_runtime_package_dirs", lambda: [package])
+    monkeypatch.setattr(validate_installed_runtime.platform, "system", lambda: "Linux")
     monkeypatch.delenv("TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH", raising=False)
 
     with pytest.raises(RuntimeError, match="undiscovered CUDART"):
@@ -503,13 +434,8 @@ def test_installed_runtime_validator_rejects_unannounced_packaged_cudart(
 
 def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
     windows = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
-    linux = (
-        tmp_path
-        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
-    )
-    _write_runtime_wheel(
-        windows, platform="windows", version="0.4.3", cuda_major=12
-    )
+    linux = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
+    _write_runtime_wheel(windows, platform="windows", version="0.4.3", cuda_major=12)
     _write_runtime_wheel(
         linux,
         platform="manylinux",
@@ -518,19 +444,14 @@ def test_shared_wheel_validator_accepts_windows_and_manylinux_pair(tmp_path):
         auditwheel_layout=True,
     )
 
-    infos = validate_runtime_wheel.validate_runtime_wheels(
-        tmp_path, "pair", expected_cuda_major=12
-    )
+    infos = validate_runtime_wheel.validate_runtime_wheels(tmp_path, "pair", expected_cuda_major=12)
 
     assert {info.platform for info in infos} == {"windows", "manylinux"}
 
 
 def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
     windows = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-win_amd64.whl"
-    linux = (
-        tmp_path
-        / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
-    )
+    linux = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
     _write_runtime_wheel(
         windows,
         platform="windows",
@@ -557,10 +478,7 @@ def test_shared_wheel_validator_accepts_driver_only_pair(tmp_path):
 
 
 def test_manylinux_runtime_wheel_rejects_hashed_primary_runtime(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge_runtime-0.6.2-py3-none-manylinux_2_35_x86_64.whl"
-    )
+    wheel = tmp_path / "taichi_forge_runtime-0.6.2-py3-none-manylinux_2_35_x86_64.whl"
     _write_runtime_wheel(
         wheel,
         platform="manylinux",
@@ -609,10 +527,7 @@ def test_current_local_runtime_requires_private_abi_manifest_schema(tmp_path):
 
 
 def test_macos_runtime_wheel_accepts_private_macho_manifest(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge_runtime-0.6.2-py3-none-macosx_12_0_arm64.whl"
-    )
+    wheel = tmp_path / "taichi_forge_runtime-0.6.2-py3-none-macosx_12_0_arm64.whl"
     _write_runtime_wheel(
         wheel,
         platform="macos",
@@ -621,9 +536,7 @@ def test_macos_runtime_wheel_accepts_private_macho_manifest(tmp_path):
         dependency_class="driver-only",
     )
 
-    info = validate_runtime_wheel.inspect_runtime_wheel(
-        wheel, expected_dependency_class="driver-only"
-    )
+    info = validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
     assert info.platform == "macos"
 
@@ -632,21 +545,14 @@ def test_shared_wheel_validator_rejects_reference_when_driver_only_required(
     tmp_path,
 ):
     wheel = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-win_amd64.whl"
-    _write_runtime_wheel(
-        wheel, platform="windows", version="0.5.1", cuda_major=13
-    )
+    _write_runtime_wheel(wheel, platform="windows", version="0.5.1", cuda_major=13)
 
     with pytest.raises(RuntimeError, match="dependency class mismatch"):
-        validate_runtime_wheel.inspect_runtime_wheel(
-            wheel, expected_dependency_class="driver-only"
-        )
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 def test_manylinux_normalizer_accepts_driver_only_wheel(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
-    )
+    wheel = tmp_path / "taichi_forge_runtime-0.5.1-py3-none-manylinux_2_35_x86_64.whl"
     _write_runtime_wheel(
         wheel,
         platform="manylinux",
@@ -657,17 +563,12 @@ def test_manylinux_normalizer_accepts_driver_only_wheel(tmp_path):
 
     repair_runtime_wheel.normalize_manylinux_wheel(wheel)
 
-    info = validate_runtime_wheel.inspect_runtime_wheel(
-        wheel, expected_dependency_class="driver-only"
-    )
+    info = validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
     assert info.cuda_major is None
 
 
 def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
-    )
+    wheel = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
     _write_runtime_wheel(
         wheel,
         platform="manylinux",
@@ -686,19 +587,10 @@ def test_manylinux_normalizer_prunes_raw_cudart_and_rewrites_record(tmp_path):
     assert info.cuda_major == 13
     with ZipFile(wheel) as zf:
         names = zf.namelist()
-        assert (
-            "taichi_forge_runtime/_lib/runtime_native/libcudart.so.13"
-            not in names
-        )
-        hashed = [
-            name
-            for name in names
-            if name.startswith("taichi_forge_runtime.libs/libcudart-")
-        ]
+        assert "taichi_forge_runtime/_lib/runtime_native/libcudart.so.13" not in names
+        hashed = [name for name in names if name.startswith("taichi_forge_runtime.libs/libcudart-")]
         assert len(hashed) == 1
-        record_name = next(
-            name for name in names if name.endswith(".dist-info/RECORD")
-        )
+        record_name = next(name for name in names if name.endswith(".dist-info/RECORD"))
         record = zf.read(record_name).decode("utf-8")
         assert hashed[0] in record
         assert "runtime_native/libcudart.so.13" not in record
@@ -734,16 +626,9 @@ def test_shared_wheel_validator_rejects_cudart_outside_runtime_package(tmp_path)
 
 def test_shared_wheel_validator_rejects_pair_with_different_majors(tmp_path):
     windows = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-win_amd64.whl"
-    linux = (
-        tmp_path
-        / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
-    )
-    _write_runtime_wheel(
-        windows, platform="windows", version="0.4.3", cuda_major=12
-    )
-    _write_runtime_wheel(
-        linux, platform="manylinux", version="0.4.3", cuda_major=13
-    )
+    linux = tmp_path / "taichi_forge_runtime-0.4.3-py3-none-manylinux_2_35_x86_64.whl"
+    _write_runtime_wheel(windows, platform="windows", version="0.4.3", cuda_major=12)
+    _write_runtime_wheel(linux, platform="manylinux", version="0.4.3", cuda_major=13)
 
     with pytest.raises(RuntimeError, match="CUDART majors differ"):
         validate_runtime_wheel.validate_runtime_wheels(tmp_path, "pair")
@@ -751,9 +636,7 @@ def test_shared_wheel_validator_rejects_pair_with_different_majors(tmp_path):
 
 def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
     wheel = tmp_path / "taichi_forge_runtime-0.4.3+cu12-py3-none-win_amd64.whl"
-    _write_runtime_wheel(
-        wheel, platform="windows", version="0.4.3+cu12", cuda_major=12
-    )
+    _write_runtime_wheel(wheel, platform="windows", version="0.4.3+cu12", cuda_major=12)
 
     with pytest.raises(RuntimeError, match="CUDA-versioned runtime wheel"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
@@ -804,9 +687,7 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
         ),
     ),
 )
-def test_runtime_wheel_rejects_bundled_optional_provider_libraries(
-    tmp_path, platform, tag, member
-):
+def test_runtime_wheel_rejects_bundled_optional_provider_libraries(tmp_path, platform, tag, member):
     wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
     _write_runtime_wheel(
         wheel,
@@ -819,9 +700,7 @@ def test_runtime_wheel_rejects_bundled_optional_provider_libraries(
         zf.writestr(member, b"optional provider library")
 
     with pytest.raises(RuntimeError, match="bundles optional CUDA"):
-        validate_runtime_wheel.inspect_runtime_wheel(
-            wheel, expected_dependency_class="driver-only"
-        )
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
@@ -836,9 +715,7 @@ def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="must not declare mandatory"):
-        validate_runtime_wheel.inspect_runtime_wheel(
-            wheel, expected_dependency_class="driver-only"
-        )
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 @pytest.mark.parametrize(
@@ -848,9 +725,7 @@ def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
         ("manylinux", "manylinux_2_35_x86_64"),
     ),
 )
-def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(
-    tmp_path, platform, tag
-):
+def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(tmp_path, platform, tag):
     wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
     _write_runtime_wheel(
         wheel,
@@ -862,9 +737,7 @@ def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(
     )
 
     with pytest.raises(RuntimeError, match="adapter set is incomplete"):
-        validate_runtime_wheel.inspect_runtime_wheel(
-            wheel, expected_dependency_class="driver-only"
-        )
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 @pytest.mark.parametrize(
@@ -886,9 +759,29 @@ def test_runtime_wheel_requires_bundled_cudss_adapter(tmp_path, platform, tag):
     )
 
     with pytest.raises(RuntimeError, match="cuDSS adapter set is incomplete"):
-        validate_runtime_wheel.inspect_runtime_wheel(
-            wheel, expected_dependency_class="driver-only"
-        )
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
+
+
+@pytest.mark.parametrize(
+    ("platform", "tag"),
+    (
+        ("windows", "win_amd64"),
+        ("manylinux", "manylinux_2_35_x86_64"),
+    ),
+)
+def test_runtime_wheel_requires_probe_only_optional_runtime_adapters(tmp_path, platform, tag):
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform=platform,
+        version="0.6.3",
+        cuda_major=13,
+        dependency_class="driver-only",
+        include_optional_runtime_providers=False,
+    )
+
+    with pytest.raises(RuntimeError, match="optional provider adapter set"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, expected_dependency_class="driver-only")
 
 
 @pytest.mark.parametrize(
@@ -899,9 +792,7 @@ def test_runtime_wheel_requires_bundled_cudss_adapter(tmp_path, platform, tag):
         ("macos", "cp310-cp310-macosx_12_0_arm64"),
     ],
 )
-def test_shim_wheel_validator_accepts_runtime_free_wheel(
-    tmp_path, platform, tag
-):
+def test_shim_wheel_validator_accepts_runtime_free_wheel(tmp_path, platform, tag):
     wheel = tmp_path / f"taichi_forge-0.4.3-{tag}.whl"
     _write_shim_wheel(wheel, platform=platform, version="0.4.3")
 
@@ -935,9 +826,7 @@ def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
 
 
 @pytest.mark.parametrize("dependency", ["colorama", "dill", "numpy", "rich"])
-def test_shim_wheel_validator_rejects_missing_python_dependency(
-    tmp_path, dependency
-):
+def test_shim_wheel_validator_rejects_missing_python_dependency(tmp_path, dependency):
     wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
     _write_shim_wheel(
         wheel,
@@ -951,10 +840,7 @@ def test_shim_wheel_validator_rejects_missing_python_dependency(
 
 
 def test_manylinux_shim_rejects_llvm_abi_link_sentinel(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
-    )
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
     _write_shim_wheel(
         wheel,
         platform="manylinux",
@@ -967,10 +853,7 @@ def test_manylinux_shim_rejects_llvm_abi_link_sentinel(tmp_path):
 
 
 def test_manylinux_shim_rejects_private_static_cpp_runtime(tmp_path):
-    wheel = (
-        tmp_path
-        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
-    )
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
     _write_shim_wheel(
         wheel,
         platform="manylinux",
@@ -989,13 +872,8 @@ def test_manylinux_shim_rejects_private_static_cpp_runtime(tmp_path):
         ("missing_runtime_rpath", "RUNPATH"),
     ],
 )
-def test_manylinux_shim_requires_local_runtime_dependency_contract(
-    tmp_path, argument, message
-):
-    wheel = (
-        tmp_path
-        / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
-    )
+def test_manylinux_shim_requires_local_runtime_dependency_contract(tmp_path, argument, message):
+    wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-manylinux_2_35_x86_64.whl"
     _write_shim_wheel(
         wheel,
         platform="manylinux",
@@ -1016,12 +894,8 @@ def test_manylinux_shim_requires_local_runtime_dependency_contract(
         ("linux", "libcudart.so.13.2.0", 13),
     ],
 )
-def test_shim_uses_single_runtime_manifest_major(
-    monkeypatch, tmp_path, system, library_name, major
-):
-    (tmp_path / "cuda_runtime_major.txt").write_text(
-        f"{major}\n", encoding="ascii"
-    )
+def test_shim_uses_single_runtime_manifest_major(monkeypatch, tmp_path, system, library_name, major):
+    (tmp_path / "cuda_runtime_major.txt").write_text(f"{major}\n", encoding="ascii")
     runtime = tmp_path / library_name
     runtime.write_bytes(b"")
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: system)
@@ -1036,9 +910,7 @@ def test_shim_uses_single_runtime_manifest_major(
     assert os.environ[major_var] == str(major)
 
 
-def test_shim_discovers_auditwheel_cudart_separate_from_manifest(
-    monkeypatch, tmp_path
-):
+def test_shim_discovers_auditwheel_cudart_separate_from_manifest(monkeypatch, tmp_path):
     native = tmp_path / "taichi_forge_runtime" / "_lib" / "runtime_native"
     auditwheel_libs = tmp_path / "taichi_forge_runtime.libs"
     native.mkdir(parents=True)
@@ -1048,13 +920,9 @@ def test_shim_discovers_auditwheel_cudart_separate_from_manifest(
     cudart.write_bytes(b"")
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
 
-    runtime_utils._prepare_bundled_cuda_runtime(
-        [str(native), str(auditwheel_libs)]
-    )
+    runtime_utils._prepare_bundled_cuda_runtime([str(native), str(auditwheel_libs)])
 
-    assert Path(
-        os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH"]
-    ) == cudart
+    assert Path(os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_PATH"]) == cudart
     assert os.environ["TI_CUDA_CUB_SORT_BUNDLED_CUDART_MAJOR"] == "13"
 
 
@@ -1065,9 +933,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
     calls = []
 
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
-    monkeypatch.setattr(
-        runtime_utils, "_native_runtime_dirs", lambda: [str(tmp_path)]
-    )
+    monkeypatch.setattr(runtime_utils, "_native_runtime_dirs", lambda: [str(tmp_path)])
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
     monkeypatch.setattr(runtime_utils, "_loaded_native_runtime_path", None)
     monkeypatch.setattr(runtime_utils, "_native_library_handles", [])
@@ -1093,22 +959,16 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
 def test_split_runtime_dlopen_flags_omit_deepbind(monkeypatch):
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", True)
 
-    assert runtime_utils._python_core_dlopen_flags() == (
-        getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2)
-    )
+    assert runtime_utils._python_core_dlopen_flags() == (getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2))
 
 
-def test_split_runtime_rejects_an_earlier_global_private_abi(
-    monkeypatch, tmp_path
-):
+def test_split_runtime_rejects_an_earlier_global_private_abi(monkeypatch, tmp_path):
     manifest = tmp_path / "taichi_runtime.exports.json"
     manifest.write_text(
         json.dumps(
             {
                 "schema_version": 2,
-                "private_abi_collision_probe_symbols": [
-                    "taichi_runtime_anchor"
-                ],
+                "private_abi_collision_probe_symbols": ["taichi_runtime_anchor"],
             }
         ),
         encoding="utf-8",
@@ -1128,9 +988,7 @@ def test_monolithic_dlopen_flags_keep_deepbind(monkeypatch):
     monkeypatch.setattr(runtime_utils, "_native_runtime_loaded", False)
 
     assert runtime_utils._python_core_dlopen_flags() == (
-        getattr(os, "RTLD_LOCAL", 0)
-        | getattr(os, "RTLD_NOW", 2)
-        | getattr(os, "RTLD_DEEPBIND", 8)
+        getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2) | getattr(os, "RTLD_DEEPBIND", 8)
     )
 
 
@@ -1147,9 +1005,7 @@ def test_shim_rejects_conflicting_runtime_manifests(monkeypatch, tmp_path):
         runtime_utils._bundled_cuda_runtime_major([str(first), str(second)])
 
 
-def test_shim_rejects_library_major_conflicting_with_manifest(
-    monkeypatch, tmp_path
-):
+def test_shim_rejects_library_major_conflicting_with_manifest(monkeypatch, tmp_path):
     (tmp_path / "cuda_runtime_major.txt").write_text("12\n", encoding="ascii")
     (tmp_path / "cudart64_11.dll").write_bytes(b"")
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "win")
@@ -1159,16 +1015,9 @@ def test_shim_rejects_library_major_conflicting_with_manifest(
 
 
 def test_runtime_distribution_is_platform_only_not_cuda_versioned():
-    runtime_pyproject = (
-        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
-    ).read_text(encoding="utf-8")
+    runtime_pyproject = (REPO_ROOT / "packaging" / "runtime" / "pyproject.toml").read_text(encoding="utf-8")
     root_pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    release_version = (
-        (REPO_ROOT / "version.txt")
-        .read_text(encoding="utf-8")
-        .strip()
-        .removeprefix("v")
-    )
+    release_version = (REPO_ROOT / "version.txt").read_text(encoding="utf-8").strip().removeprefix("v")
 
     assert re.search(
         r'^name\s*=\s*"taichi-forge-runtime"\s*$',
@@ -1185,9 +1034,7 @@ def test_runtime_distribution_is_platform_only_not_cuda_versioned():
         root_pyproject,
         re.MULTILINE,
     )
-    assert runtime_dependencies == [
-        f"taichi-forge-runtime=={release_version}"
-    ]
+    assert runtime_dependencies == [f"taichi-forge-runtime=={release_version}"]
     assert not re.search(
         r"taichi[-_]forge[-_]runtime[-_](?:cu|cuda)\d+",
         runtime_pyproject + root_pyproject,
@@ -1196,17 +1043,11 @@ def test_runtime_distribution_is_platform_only_not_cuda_versioned():
 
 
 def test_release_version_surfaces_are_aligned():
-    version = sync_runtime_dependency._normalize_version(
-        (REPO_ROOT / "version.txt").read_text(encoding="utf-8")
-    )
+    version = sync_runtime_dependency._normalize_version((REPO_ROOT / "version.txt").read_text(encoding="utf-8"))
     major, minor, patch = sync_runtime_dependency._version_parts(version)
     root_pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    runtime_pyproject = (
-        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
-    ).read_text(encoding="utf-8")
-    version_header = (REPO_ROOT / "taichi" / "common" / "version.h").read_text(
-        encoding="utf-8"
-    )
+    runtime_pyproject = (REPO_ROOT / "packaging" / "runtime" / "pyproject.toml").read_text(encoding="utf-8")
+    version_header = (REPO_ROOT / "taichi" / "common" / "version.h").read_text(encoding="utf-8")
 
     assert f'"taichi-forge-runtime=={version}"' in root_pyproject
     for text in (root_pyproject, runtime_pyproject):
@@ -1220,18 +1061,14 @@ def test_release_version_surfaces_are_aligned():
 
 def test_release_build_dependencies_and_numpy_contract_are_bounded():
     root_project = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    runtime_project = (
-        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
-    ).read_text(encoding="utf-8")
-    constraints = (
-        REPO_ROOT / "packaging" / "constraints" / "release-build.txt"
-    ).read_text(encoding="utf-8")
+    runtime_project = (REPO_ROOT / "packaging" / "runtime" / "pyproject.toml").read_text(encoding="utf-8")
+    constraints = (REPO_ROOT / "packaging" / "constraints" / "release-build.txt").read_text(encoding="utf-8")
 
     for project in (root_project, runtime_project):
-        assert 'scikit-build-core>=1.0.3,<2' in project
-        assert 'pybind11>=3.0.4,<4' in project
-        assert 'numpy==2.2.6; python_version < \'3.14\'' in project
-        assert 'numpy==2.4.3; python_version >= \'3.14\'' in project
+        assert "scikit-build-core>=1.0.3,<2" in project
+        assert "pybind11>=3.0.4,<4" in project
+        assert "numpy==2.2.6; python_version < '3.14'" in project
+        assert "numpy==2.4.3; python_version >= '3.14'" in project
         assert 'minimum-version = "build-system.requires"' in project
     for requirement in (
         "pip==26.2.1",
@@ -1248,9 +1085,7 @@ def test_release_build_dependencies_and_numpy_contract_are_bounded():
 
 
 def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
-    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
-        encoding="utf-8"
-    )
+    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(encoding="utf-8")
     guarded_runtime_assets = re.search(
         r"if\s*\(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME\)"
         r".*install\(FILES[^)]*_ti_cuda_libdevice_filename[^)]*"
@@ -1260,30 +1095,21 @@ def test_prebuilt_shim_configures_libdevice_version_without_installing_assets():
     )
 
     version_discovery = cmake.index("file(GLOB _ti_cuda_libdevice_files")
-    prebuilt_source_guard = cmake.index(
-        "if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)", version_discovery
-    )
+    prebuilt_source_guard = cmake.index("if(NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)", version_discovery)
     assert version_discovery < prebuilt_source_guard
     assert guarded_runtime_assets
 
 
 def test_prebuilt_linux_shim_disables_llvm_abi_link_sentinel():
-    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(
-        encoding="utf-8"
-    )
+    cmake = (REPO_ROOT / "cmake" / "TaichiCore.cmake").read_text(encoding="utf-8")
     prebuilt_llvm = cmake[cmake.index("if(TI_WITH_PREBUILT_PYTHON_RUNTIME)") :]
 
     assert "if(LINUX)" in prebuilt_llvm
-    assert (
-        "PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1"
-        in prebuilt_llvm
-    )
+    assert "PRIVATE LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" in prebuilt_llvm
 
 
 def test_shim_publish_workflow_validates_wheel_boundaries():
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml").read_text(encoding="utf-8")
 
     assert workflow.count("scripts/validate_runtime_wheel.py") == 2
     assert workflow.count("scripts/validate_shim_wheel.py") == 2
@@ -1312,19 +1138,14 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
-    workflow = (
-        REPO_ROOT / ".github" / "workflows" / "publish_runtime_pypi.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_runtime_pypi.yml").read_text(encoding="utf-8")
 
     assert "build_linux_runtime:" in workflow
     assert "build_windows_runtime:" in workflow
     assert "matrix:" not in workflow
     assert workflow.count("scripts/validate_runtime_wheel.py") == 3
     assert "--wheel-dir dist-runtime --platform linux" in workflow
-    assert (
-        workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux")
-        == 2
-    )
+    assert workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux") == 2
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "workflow_call:" in workflow
     assert "gh-action-pypi-publish" not in workflow
@@ -1335,21 +1156,17 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON") == 4
     assert workflow.count("TI_WITH_PYTHON:BOOL=ON") == 4
     assert workflow.count("TI_WITH_CUDA_TOOLKIT:BOOL=OFF") == 4
-    assert (
-        workflow.count(
-            "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF"
-        )
-        == 4
-    )
+    assert workflow.count("TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF") == 4
     assert 'CUDA_TOOLKIT_VERSION: "12.5.1"' in workflow
     assert workflow.count("Jimver/cuda-toolkit") == 2
     assert workflow.count("nvcc -V") == 2
     assert workflow.count("TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON") == 2
     assert workflow.count("TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON") == 2
+    assert workflow.count("TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS:BOOL=ON") == 2
     assert workflow.count("TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF") == 2
     assert workflow.count("packaging/constraints/cudss-build.txt") == 2
     assert workflow.count("--require-hashes --no-deps") == 2
-    assert "Expected three OptiX adapters and one cuDSS adapter" in workflow
+    assert "Expected seven bundled hardware adapters" in workflow
     assert "CUDAToolkit_NVCC_EXECUTABLE" not in workflow
     assert "Reject implicit CUDA Toolkit shared-library imports" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" in workflow
@@ -1364,22 +1181,16 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
 
 
 def test_runtime_project_defaults_to_driver_only():
-    runtime_project = (
-        REPO_ROOT / "packaging" / "runtime" / "pyproject.toml"
-    ).read_text(encoding="utf-8")
+    runtime_project = (REPO_ROOT / "packaging" / "runtime" / "pyproject.toml").read_text(encoding="utf-8")
 
     assert 'TI_WITH_CUDA_TOOLKIT = "OFF"' in runtime_project
     assert 'TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE = "OFF"' in runtime_project
     assert 'TI_WITH_CUPTI = "OFF"' in runtime_project
+    assert 'TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS = "ON"' in runtime_project
 
 
 def test_cuda_toolkit_reference_workflow_is_non_publishing_and_separate():
-    workflow = (
-        REPO_ROOT
-        / ".github"
-        / "workflows"
-        / "test_cuda_toolkit_reference.yml"
-    ).read_text(encoding="utf-8")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "test_cuda_toolkit_reference.yml").read_text(encoding="utf-8")
 
     assert "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=ON" in workflow
     assert "--dependency-class toolkit-reference" in workflow
