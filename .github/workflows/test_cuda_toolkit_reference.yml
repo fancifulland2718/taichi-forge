@@ -13,6 +13,10 @@ on:
       - "scripts/repair_runtime_wheel.py"
       - "scripts/validate_runtime_wheel.py"
       - "taichi/rhi/cuda/**"
+      - "python/taichi_forge/hardware/_cub_source_provider.py"
+      - "python/taichi_forge/hardware/_source_provider.py"
+      - "python/taichi_forge/hardware/source_providers/cub/**"
+      - "tests/python/test_hardware_source_provider.py"
 
 permissions:
   contents: read
@@ -65,6 +69,14 @@ jobs:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
           log-file-suffix: linux-reference.txt
+
+      - name: Compile standalone CUB source provider
+        run: |
+          set -euo pipefail
+          python python/taichi_forge/hardware/source_providers/cub/build.py \
+            --output dist-source-provider \
+            --target-code sm_80,compute_80
+          python -c 'import hashlib,json,pathlib; p=pathlib.Path("dist-source-provider/cub_source_provider.json"); d=json.loads(p.read_text()); b=p.parent/d["binary"]["path"]; assert hashlib.sha256(b.read_bytes()).hexdigest()==d["binary"]["sha256"]'
 
       - name: Download prebuilt LLVM 20
         run: |
@@ -121,6 +133,14 @@ jobs:
           cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
           method: network
           log-file-suffix: windows-reference.txt
+
+      - name: Compile standalone CUB source provider
+        shell: pwsh
+        run: |
+          python python/taichi_forge/hardware/source_providers/cub/build.py `
+            --output dist-source-provider `
+            --target-code sm_80,compute_80
+          python -c 'import hashlib,json,pathlib; p=pathlib.Path("dist-source-provider/cub_source_provider.json"); d=json.loads(p.read_text()); b=p.parent/d["binary"]["path"]; assert hashlib.sha256(b.read_bytes()).hexdigest()==d["binary"]["sha256"]'
 
       - name: Download prebuilt LLVM 20
         shell: pwsh

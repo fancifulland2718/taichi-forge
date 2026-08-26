@@ -1,8 +1,14 @@
 import hashlib
 import json
+import os
 
+import numpy as np
 import pytest
 
+import taichi_forge as ti
+from tests import test_utils
+from taichi_forge.hardware._cub_source_provider import load_cub_source_provider
+from taichi_forge.hardware._retained import retained_execution_contract
 from taichi_forge.hardware._source_provider import (
     SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION,
     SourceProviderManifestError,
@@ -106,3 +112,108 @@ def test_source_provider_manifest_rejects_provider_identity_mismatch(tmp_path):
 
     with pytest.raises(SourceProviderManifestError, match="does not match"):
         load_source_provider_manifest(path, expected_provider_id="mathdx_reference")
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cub_source_provider_executes_explicit_primitives_and_graph():
+    manifest_path = os.environ.get("TI_FORGE_TEST_CUB_SOURCE_PROVIDER_MANIFEST")
+    if not manifest_path:
+        pytest.skip("a user-built CUB source-provider manifest was not supplied")
+
+    provider = load_cub_source_provider(manifest_path)
+    assert load_cub_source_provider(manifest_path)._library is provider._library
+    n = 257
+    rng = np.random.default_rng(20260827)
+    keys_u32_values = rng.integers(0, 19, size=n, dtype=np.uint32)
+    values = np.arange(n, dtype=np.uint32)
+    keys_u32 = ti.ndarray(ti.u32, shape=n)
+    values_in = ti.ndarray(ti.u32, shape=n)
+    keys_u32_out = ti.ndarray(ti.u32, shape=n)
+    values_out = ti.ndarray(ti.u32, shape=n)
+    keys_u32.from_numpy(keys_u32_values)
+    values_in.from_numpy(values)
+    sort_u32 = provider.plan("radix_sort_pairs_u32", n)
+    sort_u32.run(
+        keys_in=keys_u32,
+        values_in=values_in,
+        keys_out=keys_u32_out,
+        values_out=values_out,
+    )
+    ti.sync()
+    stable_order = np.argsort(keys_u32_values, kind="stable")
+    np.testing.assert_array_equal(keys_u32_out.to_numpy(), keys_u32_values[stable_order])
+    np.testing.assert_array_equal(values_out.to_numpy(), values[stable_order])
+
+    keys_u64_values = (
+        rng.integers(0, 31, size=n, dtype=np.uint64) << np.uint64(33)
+    ) | rng.integers(0, 37, size=n, dtype=np.uint64)
+    keys_u64 = ti.ndarray(ti.u64, shape=n)
+    keys_u64_out = ti.ndarray(ti.u64, shape=n)
+    keys_u64.from_numpy(keys_u64_values)
+    sort_u64 = provider.plan("radix_sort_pairs_u64", n)
+    sort_u64.run(
+        keys_in=keys_u64,
+        values_in=values_in,
+        keys_out=keys_u64_out,
+        values_out=values_out,
+    )
+    ti.sync()
+    stable_order = np.argsort(keys_u64_values, kind="stable")
+    np.testing.assert_array_equal(keys_u64_out.to_numpy(), keys_u64_values[stable_order])
+    np.testing.assert_array_equal(values_out.to_numpy(), values[stable_order])
+
+    scan_values = rng.integers(0, 7, size=n, dtype=np.uint32)
+    scan_in = ti.ndarray(ti.u32, shape=n)
+    scan_out = ti.ndarray(ti.u32, shape=n)
+    scan_in.from_numpy(scan_values)
+    scan = provider.plan("exclusive_scan_u32", n)
+    scan.run(input=scan_in, output=scan_out)
+    ti.sync()
+    expected_scan = np.zeros(n, dtype=np.uint32)
+    expected_scan[1:] = np.cumsum(scan_values[:-1], dtype=np.uint32)
+    np.testing.assert_array_equal(scan_out.to_numpy(), expected_scan)
+
+    flags_values = rng.integers(0, 2, size=n, dtype=np.uint32)
+    flags = ti.ndarray(ti.u32, shape=n)
+    selected = ti.ndarray(ti.u32, shape=n)
+    selected_count = ti.ndarray(ti.u32, shape=1)
+    flags.from_numpy(flags_values)
+    select = provider.plan("select_flagged_u32", n)
+    select.run(input=values_in, flags=flags, output=selected, count=selected_count)
+    ti.sync()
+    expected_selected = values[flags_values != 0]
+    assert int(selected_count.to_numpy()[0]) == len(expected_selected)
+    np.testing.assert_array_equal(
+        selected.to_numpy()[: len(expected_selected)], expected_selected
+    )
+
+    scan_out.fill(0)
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(scan)
+    graph = builder.compile()
+    for _ in range(3):
+        graph.run({"input": scan_in, "output": scan_out})
+    ti.sync()
+    np.testing.assert_array_equal(scan_out.to_numpy(), expected_scan)
+    assert graph._debug_info["native_count"] == 1
+    assert graph._spec.lifetime_leases
+
+    retained = retained_execution_contract(scan)
+    assert retained.identity.provider_id == "cub_reference"
+    assert retained.identity.to_dict()["problem_scope"] == {
+        "num_items": n,
+        "operation": "exclusive_scan_u32",
+    }
+    assert tuple(item.name for item in retained.cost_model.fixed_costs) == (
+        "manifest_and_binary_validation",
+        "provider_library_load",
+        "workspace_query_and_allocation",
+    )
+    assert retained.cost_model.scale_costs[0].dimensions == ("num_items",)
+    assert scan.workspace_bytes > 0
+
+    with pytest.raises(RuntimeError, match="must not alias"):
+        scan.run(input=scan_in, output=scan_in)
+    wrong = ti.ndarray(ti.u64, shape=n)
+    with pytest.raises(RuntimeError, match="compact scalar"):
+        scan.run(input=wrong, output=scan_out)
