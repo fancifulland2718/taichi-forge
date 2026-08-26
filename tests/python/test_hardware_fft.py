@@ -101,6 +101,7 @@ def test_cufft_c2c_executes_directly_and_through_graph():
     assert retained is retained_execution_contract(plan.record())
     assert retained.identity.operation_id == "fft.transform.cufft"
     assert retained.identity.provider_id == "cufft"
+    assert retained.automatic_selection_policy == "forbidden"
     assert not retained.identity.persistent_cache_safe
     assert retained.concurrency_policy == "runtime_ordered"
     assert retained.cost_model.scale_costs[0].dimensions == (

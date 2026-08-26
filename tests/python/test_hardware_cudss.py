@@ -469,6 +469,7 @@ def test_cudss_staged_solve_and_refactorization():
         assert retained.identity.operation_id == "linalg.solve.cudss"
         assert retained.identity.provider_id == "cudss"
         assert retained.concurrency_policy == "runtime_ordered"
+        assert retained.automatic_selection_policy == "qualification_gated"
         assert retained.cost_model.scale_costs[0].dimensions == (
             "rows",
             "nonzeros",

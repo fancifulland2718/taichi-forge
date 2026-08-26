@@ -212,6 +212,7 @@ class RetainedExecutionContract:
     cost_model: HardwareExecutionCostModel
     workspace_ownership: str
     concurrency_policy: str
+    automatic_selection_policy: str
 
     def __post_init__(self):
         if self.identity is not None and not isinstance(
@@ -233,6 +234,12 @@ class RetainedExecutionContract:
             "single_inflight",
         ):
             raise ValueError("unsupported retained concurrency policy")
+        if self.automatic_selection_policy not in (
+            "forbidden",
+            "qualification_gated",
+            "compiler_owned",
+        ):
+            raise ValueError("unsupported retained automatic-selection policy")
         if self.workspace_ownership == "provider_generation" and self.identity is None:
             raise ValueError("provider-owned workspace requires a retained identity")
 
@@ -242,6 +249,7 @@ class RetainedExecutionContract:
             "cost_model": self.cost_model.to_dict(),
             "workspace_ownership": self.workspace_ownership,
             "concurrency_policy": self.concurrency_policy,
+            "automatic_selection_policy": self.automatic_selection_policy,
         }
 
 

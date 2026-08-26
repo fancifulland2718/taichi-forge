@@ -212,6 +212,7 @@ def test_cub_source_provider_executes_explicit_primitives_and_graph():
 
     retained = retained_execution_contract(scan)
     assert retained.identity.provider_id == "cub_reference"
+    assert retained.automatic_selection_policy == "forbidden"
     assert retained.identity.to_dict()["problem_scope"] == {
         "num_items": n,
         "operation": "exclusive_scan_u32",

@@ -31,6 +31,7 @@ def test_cublas_gemm_contract_rejects_non_cuda_runtime_and_bad_arguments():
     assert recording.no_host_readback
     retained = retained_execution_contract(recording)
     assert retained.identity is None
+    assert retained.automatic_selection_policy == "forbidden"
     assert retained is retained_execution_contract(
         ti.hardware.linalg.CublasGemmRecording(2, 3, 4)
     )
@@ -195,6 +196,7 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     assert not retained.identity.persistent_cache_safe
     assert retained.workspace_ownership == "provider_generation"
     assert retained.concurrency_policy == "runtime_ordered"
+    assert retained.automatic_selection_policy == "qualification_gated"
     assert retained.cost_model.scale_costs[0].dimensions == ("rows", "nonzeros")
     assert tuple(
         (effect.resource, effect.access) for effect in recording.resource_effects
@@ -285,6 +287,7 @@ def test_cusparse_spmm_retains_plans_and_executes_directly_and_through_graph():
     assert retained.identity.operation_id == "linalg.spmm.cusparse_explicit"
     assert retained.identity.to_dict()["problem_scope"]["rhs_count"] == rhs_count
     assert retained.concurrency_policy == "single_inflight"
+    assert retained.automatic_selection_policy == "forbidden"
     assert retained.cost_model.scale_costs[0].dimensions == (
         "rows",
         "nonzeros",
@@ -405,6 +408,7 @@ def test_cusparse_triangular_retains_analysis_updates_values_and_captures_graph(
         "dependency_depth",
     )
     assert retained.concurrency_policy == "single_inflight"
+    assert retained.automatic_selection_policy == "forbidden"
 
     transposed_solution = ti.ndarray(ti.f32, shape=n)
     ti.hardware.linalg.spsv_f32(
@@ -448,6 +452,7 @@ def test_cusparse_triangular_retains_analysis_updates_values_and_captures_graph(
 
     spsm_recording = ti.hardware.linalg.CusparseSpsmRecording(matrix, rhs_count)
     spsm_retained = retained_execution_contract(spsm_recording)
+    assert spsm_retained.automatic_selection_policy == "forbidden"
     assert spsm_retained.cost_model.scale_costs[0].dimensions == (
         "rows",
         "nonzeros",

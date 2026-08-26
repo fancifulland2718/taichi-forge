@@ -625,6 +625,7 @@ class CublasLtMatmulPlan(BackendCommandRecording):
                 ),
                 workspace_ownership="provider_generation",
                 concurrency_policy="runtime_ordered",
+                automatic_selection_policy="forbidden",
             ),
         )
 

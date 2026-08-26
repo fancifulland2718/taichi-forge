@@ -67,6 +67,7 @@ _CUBLAS_GEMM_EXECUTION_CONTRACT = RetainedExecutionContract(
     ),
     workspace_ownership="none",
     concurrency_policy="independent_invocations",
+    automatic_selection_policy="forbidden",
 )
 
 
@@ -351,6 +352,7 @@ def _cusparse_spmv_execution_contract(matrix, identity):
         ),
         workspace_ownership="provider_generation",
         concurrency_policy="runtime_ordered",
+        automatic_selection_policy="qualification_gated",
     )
     memory_resources = dict(runtime_stats["resources"])
     matrix._cusparse_spmv_retained_contract = (
@@ -816,6 +818,7 @@ def _cusparse_spmm_execution_contract(matrix, identity, rhs_count, algorithm):
         ),
         workspace_ownership="provider_generation",
         concurrency_policy="single_inflight",
+        automatic_selection_policy="forbidden",
     )
     result = (contract, dict(runtime_stats["resources"]))
     cached_contracts[cache_key] = result
@@ -1098,6 +1101,7 @@ def _cusparse_triangular_execution_contract(
         ),
         workspace_ownership="provider_generation",
         concurrency_policy="single_inflight",
+        automatic_selection_policy="forbidden",
     )
     result = (contract, dict(runtime_stats["resources"]))
     cached_contracts[cache_key] = result
@@ -1523,6 +1527,7 @@ class CudssPlan:
             ),
             workspace_ownership="provider_generation",
             concurrency_policy="runtime_ordered",
+            automatic_selection_policy="qualification_gated",
         )
         self._refactor_solve_execution_contract = RetainedExecutionContract(
             identity=self._retained_identity,
@@ -1538,6 +1543,7 @@ class CudssPlan:
             ),
             workspace_ownership="provider_generation",
             concurrency_policy="single_inflight",
+            automatic_selection_policy="forbidden",
         )
         _register_loaded_plan(self)
 

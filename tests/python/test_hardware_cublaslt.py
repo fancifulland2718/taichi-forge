@@ -93,6 +93,7 @@ def test_cublaslt_retained_single_matmul_and_graph():
 
     contract = retained_execution_contract(plan)
     assert contract.identity.provider_id == "cublaslt"
+    assert contract.automatic_selection_policy == "forbidden"
     assert contract.identity.to_dict()["problem_scope"] == {
         "batch_count": 1,
         "k": inner,
