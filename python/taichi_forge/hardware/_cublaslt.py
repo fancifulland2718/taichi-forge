@@ -333,23 +333,45 @@ def passive_status():
 def probe_provider(library_path=None):
     """Transiently inspect symbols/version without selecting the provider."""
 
-    candidate = resolve_library_path(library_path)
-    library = _CublasLtLibrary(candidate)
-    version = library.version
-    _unload_library(library.library)
-    return {
-        "provider_id": "cublaslt",
-        "library_loaded": True,
-        "provider_abi": CUBLASLT_PROVIDER_ABI,
-        "provider_version": _version_string(version),
-        "native_facts": {
-            "external_component_probed": True,
-            "provider_enablement_changed": False,
-            "provider_selection_changed": False,
-            "library_candidate": candidate,
-            "symbol_slice": "retained_f32_matmul",
-        },
+    native_facts = {
+        "probe_policy": "transient_vendor_runtime_query",
+        "provider_enablement_changed": False,
+        "provider_selection_changed": False,
+        "symbol_slice": "retained_f32_matmul",
     }
+    result = {
+        "provider_id": "cublaslt",
+        "external_component_probed": False,
+        "discovery": "missing",
+        "unavailable_reason": "vendor_runtime_not_found",
+        "provider_abi": CUBLASLT_PROVIDER_ABI,
+        "provider_version": None,
+        "last_error": None,
+        "failure_scope": None,
+        "native_facts": native_facts,
+    }
+    candidate = resolve_library_path(library_path)
+    native_facts["library_candidate"] = candidate
+    try:
+        library = _CublasLtLibrary(candidate)
+    except (OSError, TaichiRuntimeError) as exc:
+        result.update(
+            discovery="incompatible",
+            unavailable_reason="vendor_runtime_probe_failed",
+            last_error=str(exc) or type(exc).__name__,
+            failure_scope="provider",
+        )
+        return result
+    try:
+        result.update(
+            external_component_probed=True,
+            discovery="available",
+            unavailable_reason="none",
+            provider_version=_version_string(library.version),
+        )
+        return result
+    finally:
+        _unload_library(library.library)
 
 
 def _positive_dimension(value, name):

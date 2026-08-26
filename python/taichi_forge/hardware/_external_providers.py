@@ -40,6 +40,16 @@ _EXTERNAL_PROVIDER_SPECS = (
         transitive_dependencies=(),
     ),
     ExternalProviderSpec(
+        provider_id="cublaslt",
+        adapter_kind="python_dynamic_symbols",
+        install_owner="user_cuda_environment",
+        library_path_policy="optional",
+        process_handle_policy="process_resident",
+        runtime_resource_policy="provider_plan",
+        transitive_dependencies=("cuda_runtime",),
+        python_adapter_module="taichi_forge.hardware._cublaslt",
+    ),
+    ExternalProviderSpec(
         provider_id="cusparse",
         adapter_kind="native_symbols",
         install_owner="user_cuda_environment",

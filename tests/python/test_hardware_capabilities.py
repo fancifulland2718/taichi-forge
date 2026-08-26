@@ -33,6 +33,7 @@ _OPERATION_IDS = (
     "matrix.mma.vulkan",
     "interop.external_buffer.cuda_vulkan",
     "linalg.gemm.cublas",
+    "linalg.matmul.cublaslt_explicit",
     "linalg.spmv.cusparse",
     "linalg.spmv.cusparse_explicit",
     "linalg.spmm.cusparse_explicit",
@@ -573,6 +574,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     provider_ids = tuple(provider.provider_id for provider in providers)
     assert provider_ids == tuple(sorted(provider_ids))
     assert "cublas" in provider_ids
+    assert "cublaslt" in provider_ids
     assert "cudss" in provider_ids
     assert "cub_reference" in provider_ids
     assert all(provider.operation_ids for provider in providers)
@@ -585,6 +587,23 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
         "provider_class": "vendor_algorithm",
         "operation_ids": ("linalg.gemm.cublas",),
     }
+    cublaslt = ti.hardware.capability("linalg.matmul.cublaslt_explicit")
+    assert cublaslt.implementation_status == "existing_internal"
+    assert cublaslt.activation_mode == "explicit_hardware_api"
+    assert cublaslt.scopes == ("python", "graph")
+    assert cublaslt.workspace_ownership == "provider_owned"
+    assert cublaslt.lifetime_policy == "provider_plan"
+    assert cublaslt.update_policy == "rebind"
+    assert cublaslt.public_api is None
+    assert "no automatic crossover" in cublaslt.notes[2]
+    cub = ti.hardware.capability("algorithms.primitives.cub")
+    assert cub.scopes == ("python", "graph")
+    assert cub.stream_binding == "runtime_ordered"
+    assert cub.workspace_ownership == "provider_owned"
+    assert cub.lifetime_policy == "provider_plan"
+    assert cub.update_policy == "rebind"
+    assert cub.public_api is None
+    assert "explicit only" in cub.notes[2]
     assert len({operation_id for provider in providers for operation_id in provider.operation_ids}) == len(
         ti.hardware.operations()
     )

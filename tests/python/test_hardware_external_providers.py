@@ -1,7 +1,7 @@
 import pytest
 
 import taichi_forge as ti
-from taichi_forge.hardware import _cudss, _optix
+from taichi_forge.hardware import _cublaslt, _cudss, _optix
 from taichi_forge.hardware._external_providers import (
     external_provider_ids,
     external_provider_spec,
@@ -26,6 +26,15 @@ def test_external_provider_registry_owns_path_and_lifetime_policy():
     assert not external_provider_spec("cublas").supports_library_path
     assert not external_provider_spec("cusparse").supports_library_path
     assert not external_provider_spec("cufft").supports_library_path
+
+    cublaslt = external_provider_spec("cublaslt")
+    assert cublaslt.supports_library_path
+    assert cublaslt.adapter_kind == "python_dynamic_symbols"
+    assert cublaslt.install_owner == "user_cuda_environment"
+    assert cublaslt.process_handle_policy == "process_resident"
+    assert cublaslt.runtime_resource_policy == "provider_plan"
+    assert cublaslt.transitive_dependencies == ("cuda_runtime",)
+    assert cublaslt.python_adapter_module == "taichi_forge.hardware._cublaslt"
 
     cudss = external_provider_spec("cudss")
     assert cudss.supports_library_path
@@ -103,4 +112,17 @@ def test_external_provider_registry_keeps_cudss_status_passive(monkeypatch):
     assert status["provider_id"] == "cudss"
     assert status["library_loaded"] is False
     assert status["provider_abi"] == "taichi-forge-cudss-provider-c-abi1"
+    assert status["native_facts"]["external_component_probed"] is False
+
+
+def test_external_provider_registry_keeps_cublaslt_status_passive(monkeypatch):
+    def unexpected_load(_path=None):
+        raise AssertionError("passive provider status must not load cuBLASLt")
+
+    monkeypatch.setattr(_cublaslt, "_load_process_library", unexpected_load)
+    status = passive_external_provider_status("cublaslt")
+
+    assert status["provider_id"] == "cublaslt"
+    assert status["library_loaded"] is False
+    assert status["provider_abi"] == "cublaslt-dynamic-symbols-v1"
     assert status["native_facts"]["external_component_probed"] is False

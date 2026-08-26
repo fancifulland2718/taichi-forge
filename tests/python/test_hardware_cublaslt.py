@@ -5,6 +5,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge.hardware._cublaslt import CublasLtProvider
+from taichi_forge.hardware._cublaslt import passive_status as cublaslt_passive_status
 from taichi_forge.hardware._retained import retained_execution_contract
 from taichi_forge.lang import impl
 from tests import test_utils
@@ -16,6 +17,31 @@ def _provider_or_skip():
         return CublasLtProvider(library_path)
     except RuntimeError as exc:
         pytest.skip(f"a compatible user-provided cuBLASLt is unavailable: {exc}")
+
+
+def test_cublaslt_generic_probe_is_transient():
+    library_path = os.environ.get("TI_FORGE_TEST_CUBLASLT_LIBRARY_PATH")
+    if not library_path:
+        pytest.skip("a user-provided cuBLASLt path is required")
+    ti.reset()
+    loaded_before = cublaslt_passive_status()["library_loaded"]
+
+    report = ti.hardware.probe("cublaslt", library_path=library_path)
+    operation = next(
+        item
+        for item in report.operations
+        if item.descriptor.operation_id == "linalg.matmul.cublaslt_explicit"
+    )
+
+    assert operation.discovery == "available"
+    assert operation.enablement == "disabled"
+    assert operation.selection == "not_considered"
+    assert operation.provider_abi == "cublaslt-dynamic-symbols-v1"
+    assert operation.provider_version
+    assert operation.native_facts["external_component_probed"]
+    assert not operation.native_facts["provider_enablement_changed"]
+    assert not operation.native_facts["provider_selection_changed"]
+    assert cublaslt_passive_status()["library_loaded"] == loaded_before
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
