@@ -187,15 +187,15 @@ def ray_optional_operations(_operation):
             lifetime_policy="provider_plan",
             update_policy="rebuild",
             requirements=(
-                "user-built Forge OptiX provider ABI 1",
-                "OptiX SDK ABI 93 or 105 and a compatible display driver",
+                "Forge runtime wheel with bundled OptiX provider ABI 1 adapters",
+                "OptiX driver runtime compatible with ABI 93, 105, or 118",
                 "active Taichi CUDA context and CUDA device storage",
             ),
             public_api="ti.hardware.ray.OptixProvider.triangle_scene",
             notes=(
                 "Builds an update-capable triangle GAS plus an identity IAS; it is an explicit resource operation, not a kernel call.",
-                "The provider target has no wheel install rule and is never built unless TI_BUILD_OPTIX_PROVIDER is explicitly enabled.",
-                "Source ABI is implemented, but no real OptiX SDK/device qualification is available in the Forge default build.",
+                "All qualified adapters share one runtime wheel; Forge selects the newest adapter accepted by the installed driver.",
+                "The vendor runtime remains optional and may be discovered from the system or supplied by absolute path.",
             ),
         ),
         _operation(
@@ -250,13 +250,13 @@ def ray_optional_operations(_operation):
             lifetime_policy="provider_plan",
             update_policy="rebind",
             requirements=(
-                "user-built Forge OptiX provider ABI 1",
-                "provider compiled from SDK headers with OPTIX_ABI_VERSION 93 or 105",
+                "bundled Forge OptiX provider ABI 1",
+                "installed driver runtime accepting OPTIX_ABI_VERSION 93, 105, or 118",
                 "fixed Forge f32x8 ray and f32x4 closest-hit storage ABI",
             ),
             public_api="ti.hardware.ray.OptixTriangleScene.record",
             notes=(
-                "The optional provider compiles the official SDK function table, module, program groups, pipeline, SBT, GAS/IAS, and device PTX outside Forge wheels.",
+                "The runtime wheel carries thin adapters compiled from pinned official headers; it does not bundle nvoptix or the CUDA Toolkit.",
                 "Provider loading is explicit and failure-isolated; normal CUDA initialization and every other provider remain independent.",
                 "No kernel-inline route, automatic selection, cross-device qualification, or performance claim is made.",
             ),

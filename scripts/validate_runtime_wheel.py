@@ -16,6 +16,7 @@ import tempfile
 from zipfile import ZipFile
 
 from packaging.utils import canonicalize_name, parse_wheel_filename
+from packaging.version import Version
 
 
 PROJECT = "taichi-forge-runtime"
@@ -38,6 +39,22 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r")",
     re.IGNORECASE,
 )
+OPTIX_PROVIDER_ABIS = (93, 105, 118)
+
+
+def _expected_optix_provider_members(platform: str) -> set[str]:
+    if platform == "macos":
+        return set()
+    prefix = f"{PACKAGE}/_lib/hardware_providers/"
+    if platform == "windows":
+        return {
+            f"{prefix}taichi_forge_optix_provider_abi1_optix{abi}.dll"
+            for abi in OPTIX_PROVIDER_ABIS
+        }
+    return {
+        f"{prefix}libtaichi_forge_optix_provider_abi1_optix{abi}.so"
+        for abi in OPTIX_PROVIDER_ABIS
+    }
 
 
 @dataclass(frozen=True)
@@ -293,6 +310,62 @@ def _strict_binary_exports(
             )
 
 
+def _strict_optix_provider_exports(
+    zf: ZipFile, members: set[str], platform: str
+) -> None:
+    required = {"taichi_forge_optix_provider_query"}
+    forbidden = {
+        "taichi_forge_optix_provider_probe_runtime",
+        "taichi_forge_optix_provider_set_runtime_library",
+    }
+    for member in sorted(members):
+        with tempfile.TemporaryDirectory(
+            prefix="taichi-optix-provider-export-audit-"
+        ) as td:
+            binary = Path(td) / Path(member).name
+            binary.write_bytes(zf.read(member))
+            if platform == "windows":
+                tool = shutil.which("dumpbin")
+                if tool is None:
+                    raise RuntimeError(
+                        "strict Windows OptiX adapter audit requires dumpbin"
+                    )
+                command = [tool, "/nologo", "/exports", str(binary)]
+            else:
+                tool = shutil.which("nm") or shutil.which("llvm-nm")
+                if tool is None:
+                    raise RuntimeError("strict ELF OptiX adapter audit requires nm")
+                command = [tool, "-D", "-P", "-g", "--defined-only", str(binary)]
+            completed = subprocess.run(
+                command,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"strict OptiX adapter export audit failed for {member}: "
+                    f"{completed.stdout.strip()}"
+                )
+            missing = sorted(
+                symbol for symbol in required if symbol not in completed.stdout
+            )
+            if missing:
+                raise RuntimeError(
+                    f"OptiX adapter {member} is missing Forge exports: {missing}"
+                )
+            leaked = sorted(
+                symbol for symbol in forbidden if symbol in completed.stdout
+            )
+            if leaked:
+                raise RuntimeError(
+                    f"OptiX adapter {member} leaks obsolete Forge exports: {leaked}"
+                )
+
+
 def inspect_runtime_wheel(
     wheel: Path,
     expected_cuda_major: int | None = None,
@@ -351,6 +424,26 @@ def inspect_runtime_wheel(
                 "Runtime wheel filename and METADATA versions differ: "
                 f"filename={filename_version}, metadata={version}"
             )
+        actual_optix_providers: set[str] = set()
+        if Version(version) >= Version("0.6.3"):
+            provider_prefix = f"{PACKAGE}/_lib/hardware_providers/"
+            optix_provider_entries = [
+                name
+                for name in names
+                if name.startswith(provider_prefix)
+                and "taichi_forge_optix_provider" in Path(name).name
+            ]
+            actual_optix_providers = set(optix_provider_entries)
+            expected_optix_providers = _expected_optix_provider_members(platform)
+            if (
+                len(optix_provider_entries) != len(actual_optix_providers)
+                or actual_optix_providers != expected_optix_providers
+            ):
+                raise RuntimeError(
+                    "Runtime wheel OptiX adapter set is incomplete or ambiguous: "
+                    f"expected={sorted(expected_optix_providers)}, "
+                    f"actual={sorted(actual_optix_providers)}"
+                )
         if CUDA_VARIANT.search(version):
             raise RuntimeError(
                 f"CUDA-versioned runtime wheel versions are forbidden: {version}"
@@ -500,6 +593,9 @@ def inspect_runtime_wheel(
                 native_runtimes[0],
                 platform,
                 export_manifest["actual_exports"],
+            )
+            _strict_optix_provider_exports(
+                zf, actual_optix_providers, platform
             )
         if platform == "windows":
             import_library = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.lib"

@@ -18,7 +18,7 @@ Forge 注册 provider。
 | cuSPARSE | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | cuFFT | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
 | cuDSS 0.8.x | 已注册 D1 provider | 用户安装可选包 | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
-| OptiX ABI 93/105 | 已注册 source-provider ABI | 用户 SDK 与源码构建 | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
+| OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt | 仅 native-adapter 候选 | 用户安装可选包 | 没有公开 Forge probe 或执行 API | 仅外部 command |
 | cuTENSOR | 仅 native-adapter 候选 | 用户安装可选包 | 没有公开 Forge probe 或执行 API | 仅外部 command |
@@ -169,43 +169,51 @@ Forge 当前要求 CUDA Driver API 12.0 或更高版本，以及 square scalar f
 refactorization，能够被充分摊销。对于一次性、小规模或频繁 remesh 的系统，应测量完整
 analysis-factor-solve lifecycle，不能只看 solve 时间。
 
-### OptiX source provider
+### OptiX runtime provider
 
-Forge 不下载 OptiX SDK，也不安装可选 provider。当前 source target 只接受 OptiX ABI 93
-（OptiX 8.1）和 ABI 105（OptiX 9.0）。不要因为 driver 支持新版 SDK 就直接使用新版 SDK；
-不支持的 header ABI 会在配置阶段按设计失败。
+每个平台的 `taichi-forge-runtime` wheel 都携带三份 Forge 自有的薄 adapter，分别用固定的
+NVIDIA 官方 header 构建：ABI 93（OptiX 8.1）、ABI 105（OptiX 9.0）和 ABI 118
+（OptiX 9.1）。三者共用 Forge provider C ABI 1，并位于同一个 wheel 中。用户不需要安装
+OptiX SDK、CUDA Toolkit，也不需要重编 Forge。wheel 仍不包含 `nvoptix.dll` 或
+`libnvoptix.so.1`，也不会产生 CUDA/OptiX 版本化 wheel 变体。
 
-从 NVIDIA 下载已资格化 SDK，安装满足该 SDK release notes 的 driver，然后在官方 wheel
-之外构建 provider：
+vendor runtime 通常由 NVIDIA display driver 提供。ABI 93、105、118 的最低 driver branch
+分别为 R555、R570、R590。Forge 从最新到最旧尝试 adapter，保留 installed runtime 接受的
+第一项。较新 ABI 不受支持是允许回退的明确条件；context 或 scene 创建之后的执行错误不能
+触发静默换实现。
 
-```bash
-cmake -S . -B build/optix-provider \
-  -DTI_BUILD_OPTIX_PROVIDER=ON \
-  -DTI_OPTIX_ROOT=/absolute/path/to/OptiX-SDK \
-  -DTI_WITH_CUDA=ON \
-  -DTI_WITH_PYTHON=OFF \
-  -DTI_WITH_LLVM=OFF \
-  -DTI_WITH_VULKAN=OFF \
-  -DTI_WITH_OPENGL=OFF \
-  -DTI_BUILD_TESTS=OFF \
-  -DTI_BUILD_EXAMPLES=OFF
-cmake --build build/optix-provider --config Release \
-  --target taichi_forge_optix_provider
-```
+adapter 内嵌由发布流程固定的 CUDA 12.5.x 编译器生成的 `compute_75` PTX 8.5。这个依赖只
+存在于构建期，不进入 wheel，也不要求用户安装 CUDA Toolkit。构建过程会审计 PTX 上限，
+防止未来发布编译器静默抬高 ABI 93 / R555 的 driver 下限。
 
-输出名称为 `taichi_forge_optix_provider_abi1` 加平台 shared-library suffix；该 target 有意
-不提供 install rule。绑定精确产物：
+runtime 发现顺序如下：
+
+1. 指向 `nvoptix.dll` 或 `libnvoptix.so.1` 的 `library_path=` 参数；
+2. `TAICHI_FORGE_OPTIX_LIBRARY`；
+3. OptiX loader 实现的标准 NVIDIA driver 搜索路径。
+
+显式路径是唯一候选，适用于 container 或非标准 driver layout。它始终表示 vendor
+runtime；Forge adapter 是 runtime wheel 的内部资源，不能通过公开 API 覆盖。`probe()`
+会瞬时加载 adapter 与 vendor runtime 来核对精确 ABI，但不会创建或保留 CUDA/OptiX
+context。
 
 ```python
 import taichi_forge as ti
 
-# Windows 使用精确 .dll，Linux 使用精确 .so。
-provider_library = "/absolute/path/to/taichi_forge_optix_provider_abi1.so"
 ti.init(arch=ti.cuda)
-print(ti.hardware.probe("optix", library_path=provider_library))
+print(ti.hardware.probe("optix"))
 
-with ti.hardware.ray.load_optix_provider(provider_library) as provider:
+with ti.hardware.ray.load_optix_provider() as provider:
     # 创建 scene，在已提交任务完成前保持存活，然后关闭 scene。
+    pass
+```
+
+如果 vendor runtime 位于非标准路径，可显式绑定：
+
+```python
+vendor_runtime = "/opt/nvidia/lib/libnvoptix.so.1"  # Windows 使用 nvoptix.dll
+print(ti.hardware.probe("optix", library_path=vendor_runtime))
+with ti.hardware.ray.load_optix_provider(vendor_runtime) as provider:
     pass
 ```
 

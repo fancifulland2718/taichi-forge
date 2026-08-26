@@ -1,5 +1,9 @@
 #include "taichi/optix/forge_optix_provider.h"
 
+#if defined(_WIN32) && !defined(NOMINMAX)
+#define NOMINMAX
+#endif
+
 #include <algorithm>
 #include <atomic>
 #include <cstring>
@@ -14,16 +18,19 @@
 
 #include "device_program_ptx.h"
 
-#if OPTIX_ABI_VERSION != 93 && OPTIX_ABI_VERSION != 105
-#error "Forge OptiX provider supports only SDK ABI 93 and 105"
+#if OPTIX_ABI_VERSION != 93 && OPTIX_ABI_VERSION != 105 && \
+    OPTIX_ABI_VERSION != 118
+#error "Forge OptiX provider supports only SDK ABI 93, 105, and 118"
 #endif
 
 namespace {
 
 thread_local std::string last_error;
+thread_local std::string last_optix_log;
 std::mutex optix_loader_mutex;
 void *optix_library_handle{nullptr};
 std::size_t optix_context_count{0};
+std::string active_optix_runtime_library_path;
 
 #define TI_FORGE_STRINGIFY_IMPL(value) #value
 #define TI_FORGE_STRINGIFY(value) TI_FORGE_STRINGIFY_IMPL(value)
@@ -39,6 +46,11 @@ constexpr uint64_t kFeatures =
     TI_FORGE_OPTIX_FEATURE_BATCH_CLOSEST_HIT |
     TI_FORGE_OPTIX_FEATURE_RUNTIME_ORDERED_STREAM |
     TI_FORGE_OPTIX_FEATURE_EXACT_DEVICE_MEMORY;
+
+void clear_error_state() {
+  last_error.clear();
+  last_optix_log.clear();
+}
 
 TiForgeOptixResult fail(TiForgeOptixResult result, std::string message) {
   last_error = std::move(message);
@@ -62,13 +74,19 @@ TiForgeOptixResult cuda_check(CUresult result, const char *operation) {
 
 TiForgeOptixResult optix_check(OptixResult result, const char *operation) {
   if (result == OPTIX_SUCCESS) {
+    last_optix_log.clear();
     return TI_FORGE_OPTIX_SUCCESS;
   }
-  return fail(TI_FORGE_OPTIX_ERROR_OPTIX_CALL,
-              std::string(operation) + " failed: " +
-                  (optixGetErrorName(result) == nullptr
-                       ? std::to_string(static_cast<int>(result))
-                       : optixGetErrorName(result)));
+  std::string message =
+      std::string(operation) + " failed: " +
+      (optixGetErrorName(result) == nullptr
+           ? std::to_string(static_cast<int>(result))
+           : optixGetErrorName(result));
+  if (!last_optix_log.empty()) {
+    message += "; validation log: " + last_optix_log;
+  }
+  last_optix_log.clear();
+  return fail(TI_FORGE_OPTIX_ERROR_OPTIX_CALL, std::move(message));
 }
 
 struct DeviceBuffer {
@@ -155,24 +173,75 @@ void optix_log(unsigned int level,
                const char *tag,
                const char *message,
                void *) {
-  if (level <= 1 && message != nullptr) {
-    last_error = std::string("OptiX[") + (tag == nullptr ? "" : tag) +
-                 "]: " + message;
+  if (level <= 3 && message != nullptr) {
+    last_optix_log = std::string("OptiX[") + (tag == nullptr ? "" : tag) +
+                     "]: " + message;
   }
 }
 
-TiForgeOptixResult retain_optix_loader() {
+OptixResult init_optix_library(const std::string &library_path, void **handle) {
+  if (library_path.empty()) {
+    return optixInitWithHandle(handle);
+  }
+  *handle = nullptr;
+#if defined(_WIN32)
+  const int wide_size = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             library_path.c_str(), -1, nullptr, 0);
+  if (wide_size <= 0) {
+    return OPTIX_ERROR_LIBRARY_NOT_FOUND;
+  }
+  std::wstring wide_path(static_cast<std::size_t>(wide_size), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                          library_path.c_str(), -1, wide_path.data(),
+                          wide_size) <= 0) {
+    return OPTIX_ERROR_LIBRARY_NOT_FOUND;
+  }
+  *handle = LoadLibraryW(wide_path.c_str());
+  if (*handle == nullptr) {
+    return OPTIX_ERROR_LIBRARY_NOT_FOUND;
+  }
+  void *symbol = reinterpret_cast<void *>(
+      GetProcAddress(static_cast<HMODULE>(*handle), "optixQueryFunctionTable"));
+#else
+  *handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (*handle == nullptr) {
+    return OPTIX_ERROR_LIBRARY_NOT_FOUND;
+  }
+  void *symbol = dlsym(*handle, "optixQueryFunctionTable");
+#endif
+  if (symbol == nullptr) {
+    optixUninitWithHandle(*handle);
+    *handle = nullptr;
+    return OPTIX_ERROR_ENTRY_SYMBOL_NOT_FOUND;
+  }
+  auto *query = reinterpret_cast<OptixQueryFunctionTable_t *>(symbol);
+  const auto result = query(OPTIX_ABI_VERSION, 0, nullptr, nullptr,
+                            &OPTIX_FUNCTION_TABLE_SYMBOL,
+                            sizeof(OPTIX_FUNCTION_TABLE_SYMBOL));
+  if (result != OPTIX_SUCCESS) {
+    optixUninitWithHandle(*handle);
+    *handle = nullptr;
+  }
+  return result;
+}
+
+TiForgeOptixResult retain_optix_loader(const char *library_path) {
   std::lock_guard<std::mutex> lock(optix_loader_mutex);
+  const std::string requested = library_path == nullptr ? "" : library_path;
   if (optix_context_count == 0) {
-    const auto result = optixInitWithHandle(&optix_library_handle);
+    const auto result = init_optix_library(requested, &optix_library_handle);
     if (result != OPTIX_SUCCESS) {
       optix_library_handle = nullptr;
       return fail(TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
-                  std::string("optixInitWithHandle failed: ") +
+                  std::string("OptiX runtime initialization failed: ") +
                       (optixGetErrorName(result) == nullptr
                            ? std::to_string(static_cast<int>(result))
                            : optixGetErrorName(result)));
     }
+    active_optix_runtime_library_path = requested;
+  } else if (requested != active_optix_runtime_library_path) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "all live contexts in one adapter must use the same OptiX runtime library");
   }
   ++optix_context_count;
   return TI_FORGE_OPTIX_SUCCESS;
@@ -187,7 +256,32 @@ void release_optix_loader() {
   if (optix_context_count == 0 && optix_library_handle != nullptr) {
     optixUninitWithHandle(optix_library_handle);
     optix_library_handle = nullptr;
+    active_optix_runtime_library_path.clear();
   }
+}
+
+TiForgeOptixResult probe_runtime(const char *library_path) {
+  clear_error_state();
+  std::lock_guard<std::mutex> lock(optix_loader_mutex);
+  const std::string requested = library_path == nullptr ? "" : library_path;
+  if (optix_context_count != 0) {
+    if (requested == active_optix_runtime_library_path) {
+      return TI_FORGE_OPTIX_SUCCESS;
+    }
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "cannot probe another OptiX runtime while contexts are live");
+  }
+  void *handle = nullptr;
+  const auto result = init_optix_library(requested, &handle);
+  if (result != OPTIX_SUCCESS) {
+    return fail(TI_FORGE_OPTIX_ERROR_OPTIX_UNAVAILABLE,
+                std::string("OptiX runtime probe failed: ") +
+                    (optixGetErrorName(result) == nullptr
+                         ? std::to_string(static_cast<int>(result))
+                         : optixGetErrorName(result)));
+  }
+  optixUninitWithHandle(handle);
+  return TI_FORGE_OPTIX_SUCCESS;
 }
 
 TiForgeOptixResult copy_sbt_record(DeviceBuffer &destination,
@@ -220,6 +314,9 @@ TiForgeOptixResult create_pipeline(Context *context) {
   pipeline_options.numAttributeValues = 2;
   pipeline_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
   pipeline_options.pipelineLaunchParamsVariableName = "params";
+#if OPTIX_ABI_VERSION == 118
+  pipeline_options.pipelineLaunchParamsSizeInBytes = sizeof(LaunchParams);
+#endif
 
   char log[8192]{};
   std::size_t log_size = sizeof(log);
@@ -464,7 +561,7 @@ TiForgeOptixResult create_ias(Scene *scene, CUstream stream) {
 
 TiForgeOptixResult create_context(const TiForgeOptixContextDesc *desc,
                                   TiForgeOptixContext *out_context) {
-  last_error.clear();
+  clear_error_state();
   if (desc == nullptr || out_context == nullptr ||
       desc->struct_size < sizeof(TiForgeOptixContextDesc)) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
@@ -482,7 +579,7 @@ TiForgeOptixResult create_context(const TiForgeOptixContextDesc *desc,
     return fail(TI_FORGE_OPTIX_ERROR_CUDA_CONTEXT,
                 "Forge OptiX provider requires the active Taichi CUDA context");
   }
-  auto result = retain_optix_loader();
+  auto result = retain_optix_loader(desc->runtime_library_path);
   if (result != TI_FORGE_OPTIX_SUCCESS) {
     return result;
   }
@@ -516,7 +613,7 @@ TiForgeOptixResult create_context(const TiForgeOptixContextDesc *desc,
 }
 
 TiForgeOptixResult destroy_context(TiForgeOptixContext raw_context) {
-  last_error.clear();
+  clear_error_state();
   auto *context = static_cast<Context *>(raw_context);
   if (context == nullptr) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
@@ -540,7 +637,7 @@ TiForgeOptixResult create_triangle_scene(
     TiForgeOptixContext raw_context,
     const TiForgeOptixTriangleSceneDesc *desc,
     TiForgeOptixTriangleScene *out_scene) {
-  last_error.clear();
+  clear_error_state();
   auto *context = static_cast<Context *>(raw_context);
   if (context == nullptr || desc == nullptr || out_scene == nullptr ||
       desc->struct_size < sizeof(TiForgeOptixTriangleSceneDesc) ||
@@ -578,7 +675,7 @@ TiForgeOptixResult create_triangle_scene(
 TiForgeOptixResult update_triangle_scene(
     TiForgeOptixTriangleScene raw_scene,
     const TiForgeOptixTriangleSceneDesc *desc) {
-  last_error.clear();
+  clear_error_state();
   auto *scene = static_cast<Scene *>(raw_scene);
   if (scene == nullptr || desc == nullptr ||
       desc->struct_size < sizeof(TiForgeOptixTriangleSceneDesc) ||
@@ -613,7 +710,7 @@ TiForgeOptixResult update_triangle_scene(
 
 TiForgeOptixResult trace(TiForgeOptixTriangleScene raw_scene,
                          const TiForgeOptixTraceDesc *desc) {
-  last_error.clear();
+  clear_error_state();
   auto *scene = static_cast<Scene *>(raw_scene);
   if (scene == nullptr || desc == nullptr ||
       desc->struct_size < sizeof(TiForgeOptixTraceDesc) ||
@@ -639,7 +736,7 @@ TiForgeOptixResult trace(TiForgeOptixTriangleScene raw_scene,
 
 TiForgeOptixResult get_scene_memory(TiForgeOptixTriangleScene raw_scene,
                                     TiForgeOptixSceneMemory *out_memory) {
-  last_error.clear();
+  clear_error_state();
   auto *scene = static_cast<Scene *>(raw_scene);
   if (scene == nullptr || out_memory == nullptr ||
       out_memory->struct_size < sizeof(TiForgeOptixSceneMemory)) {
@@ -660,7 +757,7 @@ TiForgeOptixResult get_scene_memory(TiForgeOptixTriangleScene raw_scene,
 
 TiForgeOptixResult destroy_triangle_scene(
     TiForgeOptixTriangleScene raw_scene) {
-  last_error.clear();
+  clear_error_state();
   auto *scene = static_cast<Scene *>(raw_scene);
   if (scene == nullptr) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
@@ -688,7 +785,7 @@ extern "C" TI_FORGE_OPTIX_EXPORT TiForgeOptixResult
 taichi_forge_optix_provider_query(uint32_t requested_abi_version,
                                   size_t api_size,
                                   TiForgeOptixProviderApi *out_api) {
-  last_error.clear();
+  clear_error_state();
   if (requested_abi_version != TI_FORGE_OPTIX_PROVIDER_ABI_VERSION) {
     return fail(TI_FORGE_OPTIX_ERROR_ABI_MISMATCH,
                 "unsupported Forge OptiX provider ABI");
@@ -707,6 +804,7 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->info.features = kFeatures;
   out_api->info.provider_name = kProviderName;
   out_api->info.build_identity = kBuildIdentity;
+  out_api->probe_runtime = probe_runtime;
   out_api->create_context = create_context;
   out_api->destroy_context = destroy_context;
   out_api->create_triangle_scene = create_triangle_scene;

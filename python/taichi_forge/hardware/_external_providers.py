@@ -69,12 +69,12 @@ _EXTERNAL_PROVIDER_SPECS = (
     ),
     ExternalProviderSpec(
         provider_id="optix",
-        adapter_kind="source_provider_c_abi",
-        install_owner="user_source_build",
-        library_path_policy="required",
+        adapter_kind="bundled_provider_c_abi",
+        install_owner="forge_runtime_wheel",
+        library_path_policy="optional",
         process_handle_policy="provider_object",
         runtime_resource_policy="provider_context",
-        transitive_dependencies=("cuda_driver",),
+        transitive_dependencies=("cuda_driver", "optix_driver_runtime"),
         python_adapter_module="taichi_forge.hardware._optix",
     ),
 )

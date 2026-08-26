@@ -59,6 +59,7 @@ typedef struct TiForgeOptixContextDesc {
   uint64_t cuda_context;
   uint32_t validation_mode;
   uint32_t reserved;
+  const char *runtime_library_path;
 } TiForgeOptixContextDesc;
 
 typedef struct TiForgeOptixTriangleSceneDesc {
@@ -93,6 +94,8 @@ typedef struct TiForgeOptixSceneMemory {
 typedef void *TiForgeOptixContext;
 typedef void *TiForgeOptixTriangleScene;
 
+typedef TiForgeOptixResult (*TiForgeOptixProbeRuntimeFn)(
+    const char *library_path);
 typedef TiForgeOptixResult (*TiForgeOptixCreateContextFn)(
     const TiForgeOptixContextDesc *desc,
     TiForgeOptixContext *out_context);
@@ -120,6 +123,7 @@ typedef struct TiForgeOptixProviderApi {
   uint32_t struct_size;
   uint32_t provider_abi_version;
   TiForgeOptixProviderInfo info;
+  TiForgeOptixProbeRuntimeFn probe_runtime;
   TiForgeOptixCreateContextFn create_context;
   TiForgeOptixDestroyContextFn destroy_context;
   TiForgeOptixCreateTriangleSceneFn create_triangle_scene;

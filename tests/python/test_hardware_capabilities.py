@@ -5,7 +5,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
-from taichi_forge.hardware import _capabilities
+from taichi_forge.hardware import _capabilities, _optix
 from tests import test_utils
 
 
@@ -443,14 +443,14 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
 
     optix = ti.hardware.capability("ray.query.batch.optix")
     assert optix.implementation_status == "internal_foundation"
-    assert "OPTIX_ABI_VERSION 93 or 105" in optix.requirements[1]
-    assert "loading is explicit" in optix.notes[1]
+    assert "OPTIX_ABI_VERSION 93, 105, or 118" in optix.requirements[1]
+    assert "failure-isolated" in optix.notes[1]
     assert "No kernel-inline route" in optix.notes[2]
 
     optix_build = ti.hardware.capability("ray.as_build.optix")
     assert optix_build.graph_integration == "unsupported"
     assert optix_build.update_policy == "rebuild"
-    assert "no wheel install rule" in optix_build.notes[1]
+    assert "share one runtime wheel" in optix_build.notes[1]
 
     optix_refit = ti.hardware.capability("ray.as_refit.optix")
     assert optix_refit.graph_integration == "opaque"
@@ -1304,6 +1304,7 @@ def test_explicit_external_probe_failures_remain_provider_scoped(monkeypatch):
 
 
 def test_optional_optix_probe_and_invalid_tiers_fail_closed(monkeypatch):
+    monkeypatch.setattr(_optix, "_bundled_provider_candidates", lambda: ())
     monkeypatch.setattr(
         _capabilities,
         "_runtime_facts",
@@ -1319,7 +1320,7 @@ def test_optional_optix_probe_and_invalid_tiers_fail_closed(monkeypatch):
     assert len(optix_operations) == 3
     assert all(operation.discovery == "missing" for operation in optix_operations)
     assert all(
-        operation.unavailable_reason == "provider_library_path_required"
+        operation.unavailable_reason == "bundled_provider_adapter_not_installed"
         for operation in optix_operations
     )
     assert all(operation.enablement == "disabled" for operation in optix_operations)

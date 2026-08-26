@@ -51,6 +51,7 @@ def _write_runtime_wheel(
     include_export_manifest: bool = True,
     export_manifest_schema: int = 2,
     requirements: tuple[str, ...] = (),
+    include_optix_providers: bool = True,
 ) -> None:
     dist_info = f"taichi_forge_runtime-{version}.dist-info"
     native = "taichi_forge_runtime/_lib/runtime_native"
@@ -81,6 +82,24 @@ def _write_runtime_wheel(
         )
         zf.writestr(f"{dist_info}/RECORD", "")
         zf.writestr(f"{native}/{runtime_name}", b"runtime")
+        if (
+            include_optix_providers
+            and Version(version) >= Version("0.6.3")
+            and platform != "macos"
+        ):
+            provider_dir = "taichi_forge_runtime/_lib/hardware_providers"
+            for optix_abi in (93, 105, 118):
+                if platform == "windows":
+                    provider_name = (
+                        "taichi_forge_optix_provider_abi1_"
+                        f"optix{optix_abi}.dll"
+                    )
+                else:
+                    provider_name = (
+                        "libtaichi_forge_optix_provider_abi1_"
+                        f"optix{optix_abi}.so"
+                    )
+                zf.writestr(f"{provider_dir}/{provider_name}", b"forge adapter")
         if dependency_class == "toolkit-reference":
             if platform == "macos":
                 raise ValueError("macOS test wheels do not bundle CUDART")
@@ -808,6 +827,32 @@ def test_runtime_wheel_rejects_mandatory_provider_python_dependencies(tmp_path):
 
 @pytest.mark.parametrize(
     ("platform", "tag"),
+    (
+        ("windows", "win_amd64"),
+        ("manylinux", "manylinux_2_35_x86_64"),
+    ),
+)
+def test_runtime_wheel_requires_complete_bundled_optix_adapter_set(
+    tmp_path, platform, tag
+):
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform=platform,
+        version="0.6.3",
+        cuda_major=13,
+        dependency_class="driver-only",
+        include_optix_providers=False,
+    )
+
+    with pytest.raises(RuntimeError, match="adapter set is incomplete"):
+        validate_runtime_wheel.inspect_runtime_wheel(
+            wheel, expected_dependency_class="driver-only"
+        )
+
+
+@pytest.mark.parametrize(
+    ("platform", "tag"),
     [
         ("windows", "cp310-cp310-win_amd64"),
         ("manylinux", "cp310-cp310-manylinux_2_35_x86_64"),
@@ -1256,8 +1301,11 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
         )
         == 4
     )
-    assert "CUDA_TOOLKIT_VERSION" not in workflow
-    assert "Jimver/cuda-toolkit" not in workflow
+    assert 'CUDA_TOOLKIT_VERSION: "12.5.1"' in workflow
+    assert workflow.count("Jimver/cuda-toolkit") == 2
+    assert workflow.count("nvcc -V") == 2
+    assert workflow.count("TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON") == 2
+    assert workflow.count("TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF") == 2
     assert "CUDAToolkit_NVCC_EXECUTABLE" not in workflow
     assert "Reject implicit CUDA Toolkit shared-library imports" in workflow
     assert "Reject implicit CUDA Toolkit DLL imports" in workflow

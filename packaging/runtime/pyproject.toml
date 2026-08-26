@@ -37,7 +37,7 @@ build-dir = "../../_skbuild/runtime-{wheel_tag}"
 wheel.packages = ["src/taichi_forge_runtime"]
 wheel.py-api = "py3"
 install.components = ["runtime"]
-build.targets = ["taichi_runtime"]
+build.targets = ["taichi_runtime", "taichi_forge_optix_providers"]
 wheel.exclude = [
   "**/__pycache__/**",
   "**/*.pyc",
@@ -63,6 +63,8 @@ TI_BUILD_TESTS = "OFF"
 TI_WITH_CUDA_TOOLKIT = "OFF"
 TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE = "OFF"
 TI_WITH_CUPTI = "OFF"
+TI_BUILD_BUNDLED_OPTIX_PROVIDERS = "ON"
+TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT = "OFF"
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"

@@ -38,8 +38,13 @@ def test_external_provider_registry_owns_path_and_lifetime_policy():
 
     optix = external_provider_spec("optix")
     assert optix.supports_library_path
-    assert optix.library_path_policy == "required"
-    assert optix.adapter_kind == "source_provider_c_abi"
+    assert optix.library_path_policy == "optional"
+    assert optix.adapter_kind == "bundled_provider_c_abi"
+    assert optix.install_owner == "forge_runtime_wheel"
+    assert optix.transitive_dependencies == (
+        "cuda_driver",
+        "optix_driver_runtime",
+    )
     assert optix.runtime_resource_policy == "provider_context"
     assert optix.python_adapter_module == "taichi_forge.hardware._optix"
 

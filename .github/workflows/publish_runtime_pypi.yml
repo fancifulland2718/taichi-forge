@@ -24,6 +24,9 @@ permissions:
 env:
   TI_SKIP_VERSION_CHECK: "ON"
   TI_CI: "1"
+  # OptiX device code is PTX-JITed by the display driver. CUDA 12.5 emits PTX
+  # 8.5, preserving the oldest qualified OptiX 8.1 / R555 runtime floor.
+  CUDA_TOOLKIT_VERSION: "12.5.1"
   LLVM20_WIN_URL: ${{ vars.LLVM20_WIN_URL }}
   LLVM20_LINUX_MANYLINUX_URL: ${{ vars.LLVM20_LINUX_MANYLINUX_URL }}
   LLVM20_WIN_SHA256: ${{ vars.LLVM20_WIN_SHA256 }}
@@ -78,6 +81,13 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
+
+      - name: Install CUDA Toolkit build compiler
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
+          method: network
+          log-file-suffix: linux-runtime-optix.txt
 
       - name: Install system deps
         run: |
@@ -152,6 +162,7 @@ jobs:
 
       - name: Build runtime wheel
         run: |
+          nvcc -V
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
       - name: Validate runtime native build options
@@ -165,6 +176,8 @@ jobs:
           grep -F "TI_WITH_CUDA_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUPTI:BOOL=OFF" "$cache"
+          grep -F "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON" "$cache"
+          grep -F "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
           grep -F "TI_WITH_OPENGL:BOOL=ON" "$cache"
@@ -210,6 +223,25 @@ jobs:
             echo "::error::py3-none runtime wheel has unresolved CPython symbols."
             exit 1
           fi
+          mapfile -t optix_providers < <(
+            find build _skbuild -type f \
+              -name 'libtaichi_forge_optix_provider_abi1_optix*.so' | sort -u
+          )
+          if [[ "${#optix_providers[@]}" -ne 3 ]]; then
+            echo "::error::Expected three bundled OptiX adapters, found: ${optix_providers[*]}"
+            exit 1
+          fi
+          for provider_so in "${optix_providers[@]}"; do
+            readelf -d "$provider_so" | tee /tmp/optix-provider-needed.txt
+            if grep -Ei 'NEEDED.*lib(cudart|cupti|nvrtc|cublas|cusparse|curand|cufft|cusolver|nvjitlink|nvoptix|cudss|amgxsh|nccl|cutensor)' /tmp/optix-provider-needed.txt; then
+              echo "::error::$provider_so has an implicit vendor runtime dependency."
+              exit 1
+            fi
+            if grep -Ei 'NEEDED.*libpython' /tmp/optix-provider-needed.txt; then
+              echo "::error::$provider_so depends on CPython."
+              exit 1
+            fi
+          done
 
       - name: Audit runtime wheel
         run: |
@@ -258,6 +290,13 @@ jobs:
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.10"
+
+      - name: Install CUDA Toolkit build compiler
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: ${{ env.CUDA_TOOLKIT_VERSION }}
+          method: network
+          log-file-suffix: windows-runtime-optix.txt
 
       - name: Setup MSVC dev cmd
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
@@ -321,6 +360,7 @@ jobs:
       - name: Build runtime wheel
         shell: pwsh
         run: |
+          nvcc -V
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
       - name: Validate runtime native build options
@@ -338,6 +378,8 @@ jobs:
               "TI_WITH_CUDA_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF",
               "TI_WITH_CUPTI:BOOL=OFF",
+              "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON",
+              "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA:BOOL=ON",
               "TI_WITH_VULKAN:BOOL=ON",
               "TI_WITH_OPENGL:BOOL=ON",
@@ -402,6 +444,29 @@ jobs:
           if ($pythonDlls.Count -ne 0) {
             Write-Error "py3-none runtime wheel depends on CPython: $($pythonDlls -join ', ')"
             exit 1
+          }
+          $optixProviders = @(Get-ChildItem -Path build,_skbuild -Recurse `
+            -Filter "taichi_forge_optix_provider_abi1_optix*.dll" |
+            Sort-Object FullName -Unique)
+          if ($optixProviders.Count -ne 3) {
+            Write-Error "Expected three bundled OptiX adapters, found: $($optixProviders.FullName -join ', ')"
+            exit 1
+          }
+          foreach ($provider in $optixProviders) {
+            $providerImports = & dumpbin /dependents $provider.FullName 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $providerImports | Write-Output
+              Write-Error "dumpbin failed for $($provider.FullName)"
+              exit 1
+            }
+            $providerImports | Write-Output
+            $forbidden = @($providerImports | Where-Object {
+              $_ -match '(?i)\b(?:cudart64_|cupti64_|nvrtc64_|cublas(?:lt)?64_|cusparse(?:lt)?64_|curand64_|cufft64_|cusolver64_|nvjitlink_|nvoptix|cudss64_|amgxsh|nccl|cutensor(?:mg)?(?:64_)?)[^\s]*\.dll\b'
+            })
+            if ($forbidden.Count -ne 0) {
+              Write-Error "$($provider.FullName) has implicit vendor runtime dependencies: $($forbidden -join ', ')"
+              exit 1
+            }
           }
 
       - name: Upload artifact
