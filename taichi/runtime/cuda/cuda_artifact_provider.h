@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 #include "taichi/program/compile_config.h"
 #include "taichi/runtime/cuda/jit_cuda.h"
@@ -25,6 +26,8 @@ struct CUDAArtifactProviderTelemetrySnapshot {
 
 CUDAKernelArtifact select_cuda_kernel_artifact(CUDAKernelArtifact artifact,
                                                const CompileConfig &config);
+
+std::string cuda_artifact_provider_configuration_identity();
 
 void record_cuda_artifact_load(std::size_t entry_count,
                                bool is_cubin,

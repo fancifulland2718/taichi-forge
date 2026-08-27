@@ -263,5 +263,16 @@ TEST(Serialization, JsonSerde) {
   EXPECT_EQ(foo, t);
 }
 
+TEST(Serialization, JsonEscapedStringRoundTrip) {
+  using namespace ::liong::json;
+
+  const std::string windows_path = "C:\\tools\\worker\n\"quoted\"";
+  const auto encoded = print(JsonValue(windows_path));
+  EXPECT_EQ(encoded, R"("C:\\tools\\worker\n\"quoted\"")");
+  const auto decoded = parse(encoded);
+  EXPECT_TRUE(decoded.is_str());
+  EXPECT_EQ(static_cast<const std::string &>(decoded), windows_path);
+}
+
 }  // namespace
 }  // namespace taichi::lang

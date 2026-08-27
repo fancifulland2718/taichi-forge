@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -171,6 +172,7 @@ class JITSessionCUDA : public JITSession {
   CUDAKernelArtifact select_artifact(CUDAKernelArtifact artifact);
   void *load_artifact(const CUDAKernelArtifact &artifact);
   std::vector<char> emit_module_to_ptx(std::unique_ptr<llvm::Module> &module);
+  std::optional<std::string> artifact_provider_configuration_identity_;
 };
 
 #endif

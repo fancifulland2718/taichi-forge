@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
+#include "taichi/runtime/cuda/cuda_compileiq_protocol.h"
 
 #include <algorithm>
 #include <array>
@@ -9,7 +10,9 @@
 #include <fstream>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,6 +42,9 @@ constexpr int kArtifactLockTryCount = 1200;
 struct ExternalPtxasIdentity {
   std::string path;
   std::string binary_sha256;
+  std::string version;
+  int version_major{-1};
+  int version_minor{-1};
 };
 
 struct CUDAArtifactProviderTelemetry {
@@ -207,7 +213,51 @@ void install_cached_cubin(const std::filesystem::path &cubin_path,
   atomic_install(hash_install_path, hash_path);
 }
 
-ExternalPtxasIdentity resolve_ptxas() {
+std::tuple<std::string, int, int> query_ptxas_version(
+    const std::filesystem::path &ptxas,
+    const std::filesystem::path &cache_root) {
+  static std::atomic<std::uint64_t> counter{0};
+  const auto suffix =
+      std::to_string(llvm::sys::Process::getProcessId()) + "." +
+      std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+  const auto stdout_path = cache_root / ("ptxas-version." + suffix + ".out");
+  const auto stderr_path = cache_root / ("ptxas-version." + suffix + ".err");
+  auto cleanup = make_cleanup([&]() {
+    std::error_code ignored;
+    std::filesystem::remove(stdout_path, ignored);
+    std::filesystem::remove(stderr_path, ignored);
+  });
+  const std::vector<std::string> storage{ptxas.string(), "--version"};
+  const std::vector<llvm::StringRef> arguments{storage[0], storage[1]};
+  const auto stdout_string = stdout_path.string();
+  const auto stderr_string = stderr_path.string();
+  std::array<std::optional<llvm::StringRef>, 3> redirects{
+      llvm::StringRef(""), llvm::StringRef(stdout_string),
+      llvm::StringRef(stderr_string)};
+  std::string execution_error;
+  bool execution_failed = false;
+  const int return_code = llvm::sys::ExecuteAndWait(
+      ptxas.string(), arguments, std::nullopt, redirects,
+      /*SecondsToWait=*/10, /*MemoryLimit=*/0, &execution_error,
+      &execution_failed);
+  auto text =
+      read_diagnostic_file(stdout_path) + read_diagnostic_file(stderr_path);
+  if (execution_failed || return_code != 0) {
+    TI_WARN("Could not query external ptxas version: exit={}, error='{}'.",
+            return_code, execution_error);
+    return {"unknown", -1, -1};
+  }
+  std::smatch match;
+  const std::regex release_pattern(R"(release\s+([0-9]+)\.([0-9]+))",
+                                   std::regex::icase);
+  if (!std::regex_search(text, match, release_pattern)) {
+    TI_WARN("Could not parse external ptxas version output '{}'.", text);
+    return {text, -1, -1};
+  }
+  return {text, std::stoi(match[1].str()), std::stoi(match[2].str())};
+}
+
+ExternalPtxasIdentity resolve_ptxas(const std::filesystem::path &cache_root) {
   std::string path = env_string("TI_CUDA_PTXAS_PATH");
   if (path.empty()) {
     auto discovered = llvm::sys::findProgramByName("ptxas");
@@ -237,7 +287,10 @@ ExternalPtxasIdentity resolve_ptxas() {
   if (found != identities.end()) {
     return found->second;
   }
-  ExternalPtxasIdentity identity{canonical_path, sha256_file(canonical)};
+  auto [version, version_major, version_minor] =
+      query_ptxas_version(canonical, cache_root);
+  ExternalPtxasIdentity identity{canonical_path, sha256_file(canonical),
+                                 version, version_major, version_minor};
   identities.emplace(canonical_path, identity);
   return identity;
 }
@@ -257,7 +310,8 @@ std::filesystem::path artifact_cache_root(const CompileConfig &config) {
 }
 
 std::string artifact_cache_key(const CUDAKernelArtifact &artifact,
-                               const ExternalPtxasIdentity &ptxas) {
+                               const ExternalPtxasIdentity &ptxas,
+                               const CUDAAdvancedControls *controls) {
   llvm::SHA256 hash;
   auto add = [&hash](llvm::StringRef value) {
     hash.update(value);
@@ -273,6 +327,13 @@ std::string artifact_cache_key(const CUDAKernelArtifact &artifact,
   add(artifact.fast_math ? "fast_math=1" : "fast_math=0");
   add(std::to_string(artifact.llvm_opt_level));
   add(ptxas.binary_sha256);
+  add(ptxas.version);
+  if (controls != nullptr) {
+    add(controls->sha256);
+    add(controls->source_identity);
+  } else {
+    add("no_advanced_controls");
+  }
   hash.update(llvm::StringRef(artifact.payload.data(), artifact.code_size()));
   return llvm::toHex(hash.final(), /*LowerCase=*/true);
 }
@@ -284,6 +345,7 @@ std::string target_arch(const CUDAKernelArtifact &artifact) {
 
 std::vector<char> invoke_ptxas(const CUDAKernelArtifact &artifact,
                                const ExternalPtxasIdentity &ptxas,
+                               const CUDAAdvancedControls *controls,
                                const std::filesystem::path &cache_root,
                                const std::string &cache_key) {
   static std::atomic<std::uint64_t> temp_counter{0};
@@ -319,6 +381,9 @@ std::vector<char> invoke_ptxas(const CUDAKernelArtifact &artifact,
   if (artifact.max_registers != 0) {
     argument_storage.push_back("--maxrregcount=" +
                                std::to_string(artifact.max_registers));
+  }
+  if (controls != nullptr) {
+    argument_storage.push_back("--apply-controls=" + controls->path.string());
   }
   std::vector<llvm::StringRef> arguments;
   arguments.reserve(argument_storage.size());
@@ -378,9 +443,25 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
   auto &telemetry = provider_telemetry();
   telemetry.external_requests.fetch_add(1, std::memory_order_relaxed);
 
-  const auto ptxas = resolve_ptxas();
   const auto cache_root = artifact_cache_root(config);
-  const auto cache_key = artifact_cache_key(artifact, ptxas);
+  const auto ptxas = resolve_ptxas(cache_root);
+  const auto base_cache_key =
+      artifact_cache_key(artifact, ptxas, /*controls=*/nullptr);
+  auto controls = resolve_cuda_advanced_controls(CUDACompileIQProtocolRequest{
+      artifact, base_cache_key, cache_root, ptxas.path, ptxas.binary_sha256,
+      ptxas.version});
+  if (controls) {
+    const bool supports_acf =
+        ptxas.version_major > 13 ||
+        (ptxas.version_major == 13 && ptxas.version_minor >= 3);
+    TI_ERROR_IF(!supports_acf,
+                "CUDA Advanced Controls require ptxas 13.3 or newer; "
+                "resolved version is '{}'.",
+                ptxas.version);
+  }
+  const auto cache_key = controls
+                             ? artifact_cache_key(artifact, ptxas, &*controls)
+                             : base_cache_key;
   const auto cubin_path = cache_root / (cache_key + ".cubin");
   auto cubin = read_cached_cubin(cubin_path);
   if (!cubin.empty()) {
@@ -403,7 +484,8 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
       telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
     } else {
       telemetry.cache_misses.fetch_add(1, std::memory_order_relaxed);
-      cubin = invoke_ptxas(artifact, ptxas, cache_root, cache_key);
+      cubin = invoke_ptxas(artifact, ptxas, controls ? &*controls : nullptr,
+                           cache_root, cache_key);
       install_cached_cubin(cubin_path, cubin);
     }
   }
@@ -412,6 +494,9 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
   artifact.payload = std::move(cubin);
   artifact.provider_identity =
       "external_ptxas:" + ptxas.binary_sha256.substr(0, 16);
+  if (controls) {
+    artifact.provider_identity += ":" + controls->source_identity;
+  }
   return artifact;
 }
 
@@ -428,6 +513,32 @@ CUDAKernelArtifact select_cuda_kernel_artifact(CUDAKernelArtifact artifact,
               "'external'.",
               mode);
   return select_external_ptxas_artifact(std::move(artifact), config);
+}
+
+std::string cuda_artifact_provider_configuration_identity() {
+  llvm::SHA256 hash;
+  auto mode = normalized_mode();
+  if (mode.empty()) {
+    mode = "driver";
+  }
+  hash.update(llvm::StringRef("TI_CUDA_PTXAS_MODE"));
+  hash.update(llvm::StringRef("\0", 1));
+  hash.update(llvm::StringRef(mode));
+  hash.update(llvm::StringRef("\0", 1));
+  if (mode != "external") {
+    return llvm::toHex(hash.final(), /*LowerCase=*/true);
+  }
+  for (const char *name :
+       {"TI_CUDA_PTXAS_PATH", "TI_CUDA_ARTIFACT_CACHE_PATH",
+        "TI_CUDA_PTXAS_TIMEOUT_SECONDS", "TI_CUDA_PTXAS_ACF_PATH",
+        "TI_CUDA_COMPILEIQ_WORKER", "TI_CUDA_COMPILEIQ_PYTHON",
+        "TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS"}) {
+    hash.update(llvm::StringRef(name));
+    hash.update(llvm::StringRef("\0", 1));
+    hash.update(llvm::StringRef(env_string(name)));
+    hash.update(llvm::StringRef("\0", 1));
+  }
+  return llvm::toHex(hash.final(), /*LowerCase=*/true);
 }
 
 void record_cuda_artifact_load(std::size_t entry_count,

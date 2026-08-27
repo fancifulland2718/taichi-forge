@@ -176,6 +176,7 @@ struct Tokenizer {
             switch (c) {
               case '"':
               case '/':
+              case '\\':
                 break;
               case 'b':
                 c = '\b';
@@ -368,6 +369,39 @@ bool try_parse(const std::string &json_lit, JsonValue &out) {
   return false;
 }
 
+void print_escaped_string(const std::string &value, std::stringstream &out) {
+  out << '"';
+  for (const char c : value) {
+    switch (c) {
+      case '"':
+        out << "\\\"";
+        break;
+      case '\\':
+        out << "\\\\";
+        break;
+      case '\b':
+        out << "\\b";
+        break;
+      case '\f':
+        out << "\\f";
+        break;
+      case '\n':
+        out << "\\n";
+        break;
+      case '\r':
+        out << "\\r";
+        break;
+      case '\t':
+        out << "\\t";
+        break;
+      default:
+        out << c;
+        break;
+    }
+  }
+  out << '"';
+}
+
 void print_impl(const JsonValue &json, std::stringstream &out) {
   switch (json.ty) {
     case L_JSON_NULL:
@@ -383,7 +417,7 @@ void print_impl(const JsonValue &json, std::stringstream &out) {
       out << json.num_int;
       return;
     case L_JSON_STRING:
-      out << "\"" << json.str << "\"";
+      print_escaped_string(json.str, out);
       return;
     case L_JSON_OBJECT:
       out << "{";
@@ -395,7 +429,8 @@ void print_impl(const JsonValue &json, std::stringstream &out) {
           } else {
             out << ",";
           }
-          out << "\"" << pair.first << "\":";
+          print_escaped_string(pair.first, out);
+          out << ":";
           print_impl(pair.second, out);
         }
       }

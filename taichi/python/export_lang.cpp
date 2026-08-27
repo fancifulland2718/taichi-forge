@@ -63,6 +63,7 @@
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
+#include "taichi/runtime/cuda/cuda_compileiq_protocol.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 #if defined(TI_WITH_VULKAN)
@@ -6653,6 +6654,58 @@ void export_lang(py::module &m) {
       return static_cast<int64_t>(
           cuda::get_cuda_artifact_provider_telemetry_snapshot()
               .multi_entry_artifacts);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_protocol_requests") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot().requests);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_protocol_cache_hits") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot().cache_hits);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_worker_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot().worker_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_worker_failures") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
+              .worker_failures);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_worker_wall_ns") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
+              .worker_wall_ns);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_acf_responses") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot().acf_responses);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_pass_responses") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
+              .pass_responses);
 #else
       TI_NOT_IMPLEMENTED
 #endif

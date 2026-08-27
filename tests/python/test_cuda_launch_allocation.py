@@ -6,6 +6,7 @@ import sys
 import textwrap
 
 import numpy as np
+import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
@@ -68,6 +69,13 @@ def _artifact_snapshot():
             "cuda_artifact_cubin_peak_bytes",
             "cuda_artifact_entry_points_loaded",
             "cuda_artifact_multi_entry_artifacts",
+            "cuda_compileiq_protocol_requests",
+            "cuda_compileiq_protocol_cache_hits",
+            "cuda_compileiq_worker_calls",
+            "cuda_compileiq_worker_failures",
+            "cuda_compileiq_worker_wall_ns",
+            "cuda_compileiq_acf_responses",
+            "cuda_compileiq_pass_responses",
         )
     }
 
@@ -109,11 +117,27 @@ def test_cuda_jit_diagnostics_are_opt_in_and_accounted(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda)
+def test_cuda_artifact_provider_configuration_is_session_stable(monkeypatch):
+    values = ti.field(dtype=ti.i32, shape=8)
+
+    # The CUDA runtime module has already latched the default provider route.
+    # Changing any provider setting mid-session must fail before compiling a
+    # user module, rather than mixing Driver PTX and external cubins.
+    monkeypatch.setenv("TI_CUDA_PTXAS_MODE", "external")
+
+    @ti.kernel
+    def write_values():
+        for i in values:
+            values[i] = i + 1
+
+    with pytest.raises(RuntimeError, match="environment changed after JIT session"):
+        write_values()
+
+
+@test_utils.test(arch=ti.cuda)
 def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
     ptxas = shutil.which("ptxas") or shutil.which("ptxas.exe")
     if ptxas is None:
-        import pytest
-
         pytest.skip("optional ptxas is not installed")
 
     script = tmp_path / "external_ptxas_smoke.py"
@@ -156,6 +180,13 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
                 "cuda_artifact_cubin_peak_bytes",
                 "cuda_artifact_entry_points_loaded",
                 "cuda_artifact_multi_entry_artifacts",
+                "cuda_compileiq_protocol_requests",
+                "cuda_compileiq_protocol_cache_hits",
+                "cuda_compileiq_worker_calls",
+                "cuda_compileiq_worker_failures",
+                "cuda_compileiq_worker_wall_ns",
+                "cuda_compileiq_acf_responses",
+                "cuda_compileiq_pass_responses",
             )
             evidence = {key: int(ti_core.query_int64(key)) for key in keys}
             ti.reset()
@@ -266,6 +297,169 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
     assert sum(row["cuda_artifact_cache_misses"] for row in concurrent_evidence) == 2
     assert sum(row["cuda_artifact_compile_calls"] for row in concurrent_evidence) == 2
     assert sum(row["cuda_artifact_cache_hits"] for row in concurrent_evidence) >= 2
+
+    # The runtime-side CompileIQ boundary is a versioned JSON worker protocol,
+    # not a wheel dependency. A pass response retains ordinary ptxas and is
+    # cached per PTX/tool/worker identity, so the worker is not relaunched in a
+    # later process for the same artifact.
+    worker = tmp_path / "compileiq_worker.py"
+    worker.write_text(
+        textwrap.dedent(
+            """
+            import argparse
+            import json
+            from pathlib import Path
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--request", required=True)
+            parser.add_argument("--response", required=True)
+            args = parser.parse_args()
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            assert request["schema_version"] == 1
+            assert request["kind"] == "taichi_cuda_compileiq_request"
+            assert request["provider"] == "taichi_forge_cuda_artifact_v1"
+            assert request["target"].startswith("sm_")
+            assert Path(request["ptx_path"]).is_file()
+            assert request["entry_names"]
+            Path(args.response).write_text(
+                json.dumps({"schema_version": 1, "status": "pass"}),
+                encoding="utf-8",
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    worker_env = env.copy()
+    worker_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "worker-cache"),
+            "TI_CUDA_COMPILEIQ_WORKER": str(worker),
+            "TI_CUDA_COMPILEIQ_PYTHON": sys.executable,
+        }
+    )
+    worker_first, worker_first_evidence = run(worker_env)
+    assert worker_first.returncode == 0, worker_first.stdout + worker_first.stderr
+    assert worker_first_evidence["cuda_compileiq_protocol_requests"] >= 2
+    assert worker_first_evidence["cuda_compileiq_worker_calls"] >= 2
+    assert worker_first_evidence["cuda_compileiq_worker_failures"] == 0
+    assert worker_first_evidence["cuda_compileiq_pass_responses"] >= 2
+    assert worker_first_evidence["cuda_artifact_compile_calls"] >= 2
+
+    worker_second, worker_second_evidence = run(worker_env)
+    assert worker_second.returncode == 0, worker_second.stdout + worker_second.stderr
+    assert worker_second_evidence["cuda_compileiq_protocol_cache_hits"] >= 2
+    assert worker_second_evidence["cuda_compileiq_worker_calls"] == 0
+    assert worker_second_evidence["cuda_artifact_compile_calls"] == 0
+
+    pass_entries = list((tmp_path / "worker-cache").glob("*.compileiq.pass"))
+    assert len(pass_entries) >= 2
+    for entry in pass_entries:
+        entry.write_text("corrupt", encoding="utf-8")
+    worker_repaired, worker_repaired_evidence = run(worker_env)
+    assert worker_repaired.returncode == 0, (
+        worker_repaired.stdout + worker_repaired.stderr
+    )
+    assert worker_repaired_evidence["cuda_compileiq_worker_calls"] >= 2
+    assert worker_repaired_evidence["cuda_artifact_compile_calls"] == 0
+
+    bad_worker = tmp_path / "bad_compileiq_worker.py"
+    bad_worker.write_text(
+        textwrap.dedent(
+            """
+            import argparse
+            import json
+            from pathlib import Path
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--request", required=True)
+            parser.add_argument("--response", required=True)
+            args = parser.parse_args()
+            Path(args.response).write_text(
+                json.dumps({"schema_version": 1, "status": "unsupported"}),
+                encoding="utf-8",
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    bad_worker_env = env.copy()
+    bad_worker_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "bad-worker-cache"),
+            "TI_CUDA_COMPILEIQ_WORKER": str(bad_worker),
+            "TI_CUDA_COMPILEIQ_PYTHON": sys.executable,
+        }
+    )
+    bad_worker_result, bad_worker_evidence = run(bad_worker_env)
+    assert bad_worker_result.returncode != 0
+    assert bad_worker_evidence is None
+    assert "unsupported status" in bad_worker_result.stderr
+
+    acf_worker = tmp_path / "acf_compileiq_worker.py"
+    acf_worker.write_text(
+        textwrap.dedent(
+            """
+            import argparse
+            import hashlib
+            import json
+            from pathlib import Path
+
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--request", required=True)
+            parser.add_argument("--response", required=True)
+            args = parser.parse_args()
+            request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+            assert Path(request["ptx_path"]).is_file()
+            acf_path = Path(args.response).with_suffix(".acf")
+            acf = b"mock-acf-for-protocol-validation"
+            acf_path.write_bytes(acf)
+            Path(args.response).write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "status": "ok",
+                        "acf_path": str(acf_path),
+                        "acf_sha256": hashlib.sha256(acf).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            """
+        ),
+        encoding="utf-8",
+    )
+    worker_acf_env = env.copy()
+    worker_acf_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "worker-acf-cache"),
+            "TI_CUDA_COMPILEIQ_WORKER": str(acf_worker),
+            "TI_CUDA_COMPILEIQ_PYTHON": sys.executable,
+        }
+    )
+    worker_acf_result, worker_acf_evidence = run(worker_acf_env)
+    assert worker_acf_result.returncode != 0
+    assert worker_acf_evidence is None
+    assert (
+        "Advanced Controls require ptxas 13.3" in worker_acf_result.stderr
+        or "External ptxas failed" in worker_acf_result.stderr
+    )
+
+    dummy_acf = tmp_path / "dummy.acf"
+    dummy_acf.write_bytes(b"not-an-acf")
+    acf_env = env.copy()
+    acf_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "acf-cache"),
+            "TI_CUDA_PTXAS_ACF_PATH": str(dummy_acf),
+        }
+    )
+    acf_result, acf_evidence = run(acf_env)
+    assert acf_result.returncode != 0
+    assert acf_evidence is None
+    assert (
+        "Advanced Controls require ptxas 13.3" in acf_result.stderr
+        or "External ptxas failed" in acf_result.stderr
+    )
 
     invalid_env = env.copy()
     invalid_env["TI_CUDA_PTXAS_PATH"] = str(tmp_path / "missing-ptxas")

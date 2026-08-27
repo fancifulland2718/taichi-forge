@@ -132,6 +132,17 @@ CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
 
 CUDAKernelArtifact JITSessionCUDA::select_artifact(
     CUDAKernelArtifact artifact) {
+  const auto configuration_identity =
+      cuda::cuda_artifact_provider_configuration_identity();
+  if (!artifact_provider_configuration_identity_) {
+    artifact_provider_configuration_identity_ = configuration_identity;
+  } else {
+    TI_ERROR_IF(
+        *artifact_provider_configuration_identity_ != configuration_identity,
+        "CUDA artifact provider environment changed after JIT "
+        "session initialization. Set provider options before "
+        "ti.init() and keep them stable until ti.reset().");
+  }
   return cuda::select_cuda_kernel_artifact(std::move(artifact), config_);
 }
 

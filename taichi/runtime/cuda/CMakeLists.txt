@@ -4,6 +4,7 @@ ti_add_native_library(cuda_runtime)
 target_sources(cuda_runtime
   PRIVATE
     cuda_artifact_provider.cpp
+    cuda_compileiq_protocol.cpp
     jit_cuda.cpp
     kernel_launcher.cpp
   )
