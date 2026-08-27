@@ -8,7 +8,7 @@ only validates and consumes that record.
 """
 
 from collections import OrderedDict
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 import hashlib
 import json
@@ -23,7 +23,7 @@ from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _CANDIDATE_BLOCK_DIMS = (64, 128, 256, 512)
 _HOT_CALL_THRESHOLD = 8
 _MIN_INDEPENDENT_BLOCKS = 5
@@ -41,6 +41,80 @@ class _TaskLaunchTuningDecision:
     candidates: tuple
     block_dim: int | None = None
     observed_calls: int = 0
+    workload_profile_id: str = ""
+    record_scope_json: str = ""
+
+
+@dataclass(frozen=True)
+class _TaskLaunchWorkloadProfile:
+    """Explicit, qualification-owned identity for one replayable workload."""
+
+    workload_id: str
+    input_distribution_id: str
+    shape: tuple = ()
+    shape_bucket: str = ""
+    graph_capacity: int | None = None
+    graph_signature: str = ""
+    sparse_active_ratio_bucket: str = "not_applicable"
+    topology_stability: str = "static"
+    ir_identity: str = ""
+    ptx_identity: str = ""
+    oracle_identity: str = ""
+    replay_identity: str = ""
+
+    def __post_init__(self):
+        for name in (
+            "workload_id",
+            "input_distribution_id",
+            "ir_identity",
+            "ptx_identity",
+            "oracle_identity",
+            "replay_identity",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip() or "\n" in value:
+                raise ValueError(f"{name} must be a non-empty single-line string")
+        if not isinstance(self.shape, tuple) or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in self.shape
+        ):
+            raise ValueError("shape must be a tuple of positive integers")
+        if not self.shape and not self.shape_bucket:
+            raise ValueError("an exact shape or a shape_bucket is required")
+        if not isinstance(self.shape_bucket, str) or "\n" in self.shape_bucket:
+            raise ValueError("shape_bucket must be a single-line string")
+        if self.graph_capacity is not None and (
+            isinstance(self.graph_capacity, bool)
+            or not isinstance(self.graph_capacity, int)
+            or self.graph_capacity <= 0
+        ):
+            raise ValueError("graph_capacity must be a positive integer")
+        if bool(self.graph_signature) != (self.graph_capacity is not None):
+            raise ValueError(
+                "graph_signature and graph_capacity must either both be set or both be absent"
+            )
+        if self.sparse_active_ratio_bucket not in (
+            "not_applicable",
+            "dense",
+            "low",
+            "medium",
+            "high",
+        ):
+            raise ValueError("unsupported sparse_active_ratio_bucket")
+        if self.topology_stability not in (
+            "static",
+            "bounded_dynamic",
+            "dynamic",
+        ):
+            raise ValueError("unsupported topology_stability")
+
+    @property
+    def stable_scope(self):
+        return json.loads(_canonical_json(asdict(self)))
+
+    @property
+    def identity(self):
+        return f"tlw1:{_sha256_json(self.stable_scope)}"
 
 
 def _canonical_json(value):
@@ -87,7 +161,10 @@ def _compiler_scope():
     mode = os.environ.get("TI_CUDA_PTXAS_MODE", "driver").strip().lower()
     if not mode:
         mode = "driver"
-    result = {"mode": mode}
+    result = {
+        "mode": mode,
+        "llvm_version": _ti_core.get_llvm_target_support(),
+    }
     if mode != "external":
         return result
 
@@ -95,24 +172,44 @@ def _compiler_scope():
     if not ptxas:
         ptxas = shutil.which("ptxas") or shutil.which("ptxas.exe")
     result["ptxas"] = _optional_file_identity(ptxas)
-    result["direct_acf"] = _optional_file_identity(
-        os.environ.get("TI_CUDA_PTXAS_ACF_PATH")
-    )
-    result["compileiq_worker"] = _optional_file_identity(
-        os.environ.get("TI_CUDA_COMPILEIQ_WORKER")
-    )
-    result["compileiq_python"] = _optional_file_identity(
-        os.environ.get("TI_CUDA_COMPILEIQ_PYTHON")
-    )
+    direct_acf = os.environ.get("TI_CUDA_PTXAS_ACF_PATH")
+    worker = os.environ.get("TI_CUDA_COMPILEIQ_WORKER")
+    active_request = os.environ.get("TI_CUDA_COMPILEIQ_ACTIVE_REQUEST") == "1"
+    if direct_acf:
+        result["advanced_controls_mode"] = "apply_explicit_acf"
+        result["direct_acf"] = _optional_file_identity(direct_acf)
+    elif worker and not active_request:
+        result["advanced_controls_mode"] = "request_tuning"
+        result["compileiq_worker"] = _optional_file_identity(worker)
+        result["compileiq_python"] = _optional_file_identity(
+            os.environ.get("TI_CUDA_COMPILEIQ_PYTHON")
+        )
+    else:
+        result["advanced_controls_mode"] = "baseline"
     return result
 
 
 def _hardware_scope():
     program = impl.get_runtime().prog
     device = program._cuda_device_identity()
+    try:
+        from taichi_forge.interop import current_cuda_device_uuid
+
+        device_uuid = current_cuda_device_uuid().hex()
+    except (RuntimeError, ValueError) as error:
+        raise RuntimeError(
+            "qualified CUDA workload profiles require a stable device UUID"
+        ) from error
+    multiprocessor_count = int(device["multiprocessor_count"])
+    if len(device_uuid) != 32 or multiprocessor_count <= 0:
+        raise RuntimeError(
+            "qualified CUDA workload profiles require exact UUID and SM identity"
+        )
     return {
         "backend": "cuda",
         "device_name": str(device["device_name"]),
+        "device_uuid": device_uuid,
+        "multiprocessor_count": multiprocessor_count,
         "compute_capability": int(device["device_compute_capability"]),
         "codegen_compute_capability": int(device["codegen_compute_capability"]),
         "target": str(device["target"]),
@@ -128,7 +225,7 @@ def _cache_root_from_config(config):
     configured = str(config.offline_cache_file_path).strip()
     if not configured:
         return None
-    return Path(configured) / "task_launch_tuning_v1"
+    return Path(configured) / "task_launch_tuning_v2"
 
 
 def _candidate_blocks(tasks, max_threads):
@@ -145,10 +242,28 @@ def _candidate_blocks(tasks, max_threads):
     return candidates, "canonical CUDA block candidates"
 
 
-def _record_scope(kernel_key, hardware):
+def _task_scope(tasks):
+    return [
+        {
+            "ordinal": index,
+            "task_type": task.task_type,
+            "logical_task_id": task.logical_task_id,
+            "optimization_spec_id": task.optimization_spec_id,
+        }
+        for index, task in enumerate(tasks)
+    ]
+
+
+def _record_scope(kernel_key, tasks, hardware, workload_profile):
     return {
         "schema_version": _SCHEMA_VERSION,
-        "kernel_key": kernel_key,
+        "kernel": {
+            "cache_key": kernel_key,
+            "tasks": _task_scope(tasks),
+            "ir_identity": workload_profile.ir_identity,
+            "ptx_identity": workload_profile.ptx_identity,
+        },
+        "workload": workload_profile.stable_scope,
         "hardware": hardware,
     }
 
@@ -180,7 +295,7 @@ def _validated_record(path, scope, record_id):
     evidence = record.get("evidence")
     if not isinstance(evidence, dict):
         return None
-    if record.get("admission") != "auto":
+    if record.get("admission") != "explicit_profile":
         return None
     if evidence.get("correctness_passed") is not True:
         return None
@@ -263,6 +378,7 @@ class _TaskLaunchTuningCoordinator:
         tasks,
         config,
         observe,
+        workload_profile=None,
         hardware=None,
         cache_root=None,
     ):
@@ -278,7 +394,29 @@ class _TaskLaunchTuningCoordinator:
         hardware_tuple = tuple(
             sorted((key, _canonical_json(value)) for key, value in hardware.items())
         )
-        scope = _record_scope(kernel_key, hardware)
+        if workload_profile is None:
+            return _TaskLaunchTuningDecision(
+                "profile_required",
+                "qualified records require an explicit workload profile binding",
+                "",
+                kernel_key,
+                hardware_tuple,
+                () if candidates is None else candidates,
+            )
+        if not isinstance(workload_profile, _TaskLaunchWorkloadProfile):
+            raise TypeError("workload_profile must be a _TaskLaunchWorkloadProfile")
+        if tasks is None:
+            return _TaskLaunchTuningDecision(
+                "manifest_required",
+                "an exact workload profile requires a materialized task manifest",
+                "",
+                kernel_key,
+                hardware_tuple,
+                (),
+                workload_profile_id=workload_profile.identity,
+            )
+        scope = _record_scope(kernel_key, tasks, hardware, workload_profile)
+        scope_json = _canonical_json(scope)
         record_id = _sha256_json(scope)
 
         with self._lock:
@@ -304,6 +442,8 @@ class _TaskLaunchTuningCoordinator:
                 hardware_tuple,
                 candidates,
                 observed_calls=observed,
+                workload_profile_id=workload_profile.identity,
+                record_scope_json=scope_json,
             )
 
         root = _cache_root_from_config(config) if cache_root is None else cache_root
@@ -322,24 +462,15 @@ class _TaskLaunchTuningCoordinator:
             record_candidates = tuple(int(value) for value in record["candidates"])
             return _TaskLaunchTuningDecision(
                 "qualified",
-                "exact qualified record matched kernel, device, driver, and compiler",
+                "exact qualified record matched workload, kernel, device, driver, and compiler",
                 record_id,
                 kernel_key,
                 hardware_tuple,
                 record_candidates,
                 block_dim=int(record["block_dim"]),
                 observed_calls=observed,
-            )
-
-        if candidates is None:
-            return _TaskLaunchTuningDecision(
-                "manifest_required",
-                "no exact qualified record; task manifest is required for qualification",
-                record_id,
-                kernel_key,
-                hardware_tuple,
-                (),
-                observed_calls=observed,
+                workload_profile_id=workload_profile.identity,
+                record_scope_json=scope_json,
             )
         if observed >= _HOT_CALL_THRESHOLD:
             status = "qualification_required"
@@ -358,6 +489,8 @@ class _TaskLaunchTuningCoordinator:
             hardware_tuple,
             candidates,
             observed_calls=observed,
+            workload_profile_id=workload_profile.identity,
+            record_scope_json=scope_json,
         )
 
 
@@ -370,14 +503,13 @@ def _publish_qualified_record(
     cache_root,
     block_dim,
     evidence,
-    admission="auto",
+    admission="explicit_profile",
 ):
     if block_dim not in decision.candidates:
         raise ValueError("qualified block_dim must be one of the decision candidates")
-    hardware = {
-        key: json.loads(value) for key, value in decision.hardware_scope
-    }
-    scope = _record_scope(decision.kernel_key, hardware)
+    if not decision.record_scope_json or not decision.workload_profile_id:
+        raise ValueError("decision is not bound to an explicit workload profile")
+    scope = json.loads(decision.record_scope_json)
     if _sha256_json(scope) != decision.record_id:
         raise ValueError("decision scope does not match its record id")
     record = {
@@ -414,6 +546,12 @@ def _publish_qualified_record(
             pass
     _coordinator.invalidate(decision.record_id)
     return destination
+
+
+def _bind_workload_profile(binding, profile):
+    if not isinstance(profile, _TaskLaunchWorkloadProfile):
+        raise TypeError("profile must be a _TaskLaunchWorkloadProfile")
+    return binding._with_workload_profile(profile)
 
 
 __all__ = []

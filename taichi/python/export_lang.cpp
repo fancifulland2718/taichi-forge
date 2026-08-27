@@ -2480,6 +2480,12 @@ void export_lang(py::module &m) {
         result["codegen_compute_capability"] =
             context.get_codegen_compute_capability();
         result["target"] = context.get_mcpu() + "|" + context.get_mattrs();
+        int multiprocessor_count = 0;
+        CUDADriver::get_instance().device_get_attribute(
+            &multiprocessor_count,
+            CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            context.get_device());
+        result["multiprocessor_count"] = multiprocessor_count;
 #else
         TI_NOT_IMPLEMENTED
 #endif

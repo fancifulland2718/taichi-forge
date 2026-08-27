@@ -19,6 +19,23 @@ def _range_task(tasks):
     return selected[0]
 
 
+def _workload_profile(**overrides):
+    values = {
+        "workload_id": "test:particle-update",
+        "input_distribution_id": "uniform-seed-7",
+        "shape": (4099,),
+        "shape_bucket": "medium",
+        "sparse_active_ratio_bucket": "dense",
+        "topology_stability": "static",
+        "ir_identity": "ir:test-kernel-v1",
+        "ptx_identity": "ptx:test-kernel-v1",
+        "oracle_identity": "oracle:exact-array-v1",
+        "replay_identity": "replay:fresh-state-v1",
+    }
+    values.update(overrides)
+    return launch_tuning._TaskLaunchWorkloadProfile(**values)
+
+
 def test_task_launch_policy_value_validation():
     assert ti.TaskLaunchPolicy() == ti.TaskLaunchPolicy.auto()
     assert ti.TaskLaunchPolicy.block(256, mode="require").block_dim == 256
@@ -32,6 +49,12 @@ def test_task_launch_policy_value_validation():
         ti.TaskLaunchPolicy.block(2048)
     with pytest.raises(ValueError, match="power of two or a multiple of 32"):
         ti.TaskLaunchPolicy.block(48)
+    with pytest.raises(ValueError, match="exact shape or a shape_bucket"):
+        _workload_profile(shape=(), shape_bucket="")
+    with pytest.raises(ValueError, match="graph_signature and graph_capacity"):
+        _workload_profile(graph_capacity=1024)
+    with pytest.raises(ValueError, match="sparse_active_ratio_bucket"):
+        _workload_profile(sparse_active_ratio_bucket="unknown")
 
 
 def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
@@ -39,6 +62,8 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
         task_type="range_for",
         static_shared_bytes=0,
         dynamic_shared_bytes=0,
+        logical_task_id="tfl:test:0:range_for",
+        optimization_spec_id="",
     )
     config = SimpleNamespace(max_block_dim=512, offline_cache_file_path=str(tmp_path))
     hardware = {
@@ -50,6 +75,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
         "forge_version": "test",
         "compiler": {"mode": "driver"},
     }
+    workload_profile = _workload_profile()
     coordinator = launch_tuning._TaskLaunchTuningCoordinator()
     decision = None
     for _ in range(launch_tuning._HOT_CALL_THRESHOLD):
@@ -58,6 +84,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
             tasks=(task,),
             config=config,
             observe=True,
+            workload_profile=workload_profile,
             hardware=hardware,
             cache_root=tmp_path,
         )
@@ -79,6 +106,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
         tasks=(task,),
         config=config,
         observe=False,
+        workload_profile=workload_profile,
         hardware=hardware,
         cache_root=tmp_path,
     )
@@ -99,6 +127,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
         tasks=(task,),
         config=config,
         observe=False,
+        workload_profile=workload_profile,
         hardware=hardware,
         cache_root=tmp_path,
     )
@@ -119,11 +148,77 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
         tasks=(task,),
         config=config,
         observe=False,
+        workload_profile=workload_profile,
         hardware=hardware,
         cache_root=tmp_path,
     )
     assert admitted.status == "qualified"
     assert admitted.block_dim == 256
+
+    profile_variants = (
+        _workload_profile(workload_id="test:contact-solve"),
+        _workload_profile(input_distribution_id="clustered-seed-9"),
+        _workload_profile(shape=(8192,)),
+        _workload_profile(shape_bucket="large"),
+        _workload_profile(graph_capacity=4099, graph_signature="graph:test-v1"),
+        _workload_profile(sparse_active_ratio_bucket="medium"),
+        _workload_profile(topology_stability="bounded_dynamic"),
+        _workload_profile(ir_identity="ir:test-kernel-v2"),
+        _workload_profile(ptx_identity="ptx:test-kernel-v2"),
+        _workload_profile(oracle_identity="oracle:tolerance-v2"),
+        _workload_profile(replay_identity="replay:snapshot-v2"),
+    )
+    for variant in profile_variants:
+        mismatch = launch_tuning._TaskLaunchTuningCoordinator().resolve(
+            kernel_key="kernel-key",
+            tasks=(task,),
+            config=config,
+            observe=False,
+            workload_profile=variant,
+            hardware=hardware,
+            cache_root=tmp_path,
+        )
+        assert mismatch.status == "cache_miss"
+        assert mismatch.record_id != admitted.record_id
+
+    optimized_task = SimpleNamespace(
+        task_type="range_for",
+        static_shared_bytes=0,
+        dynamic_shared_bytes=0,
+        logical_task_id=task.logical_task_id,
+        optimization_spec_id="kos1:test-variant",
+    )
+    assert (
+        launch_tuning._TaskLaunchTuningCoordinator()
+        .resolve(
+            kernel_key="kernel-key",
+            tasks=(optimized_task,),
+            config=config,
+            observe=False,
+            workload_profile=workload_profile,
+            hardware=hardware,
+            cache_root=tmp_path,
+        )
+        .status
+        == "cache_miss"
+    )
+    different_hardware = dict(
+        hardware, device_uuid="device-2", multiprocessor_count=120
+    )
+    assert (
+        launch_tuning._TaskLaunchTuningCoordinator()
+        .resolve(
+            kernel_key="kernel-key",
+            tasks=(task,),
+            config=config,
+            observe=False,
+            workload_profile=workload_profile,
+            hardware=different_hardware,
+            cache_root=tmp_path,
+        )
+        .status
+        == "cache_miss"
+    )
 
     different_limit = SimpleNamespace(
         max_block_dim=256,
@@ -136,6 +231,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
             tasks=(task,),
             config=different_limit,
             observe=False,
+            workload_profile=workload_profile,
             hardware=hardware,
             cache_root=tmp_path,
         )
@@ -154,6 +250,7 @@ def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
             tasks=(task,),
             config=config,
             observe=False,
+            workload_profile=workload_profile,
             hardware=hardware,
             cache_root=tmp_path,
         )
@@ -169,6 +266,8 @@ def test_task_launch_tuning_coordinator_caches_are_bounded(monkeypatch):
         task_type="range_for",
         static_shared_bytes=0,
         dynamic_shared_bytes=0,
+        logical_task_id="tfl:bounded:0:range_for",
+        optimization_spec_id="",
     )
     config = SimpleNamespace(max_block_dim=512, offline_cache_file_path="")
     hardware = {"backend": "cuda", "device_name": "bounded-test"}
@@ -179,6 +278,7 @@ def test_task_launch_tuning_coordinator_caches_are_bounded(monkeypatch):
             tasks=(task,),
             config=config,
             observe=True,
+            workload_profile=_workload_profile(),
             hardware=hardware,
             cache_root=None,
         )
@@ -187,9 +287,7 @@ def test_task_launch_tuning_coordinator_caches_are_bounded(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_task_launch_auto_consumes_only_exact_qualified_record(
-    tmp_path, monkeypatch
-):
+def test_task_launch_auto_consumes_only_exact_qualified_record(tmp_path, monkeypatch):
     monkeypatch.setattr(
         launch_tuning, "_cache_root_from_config", lambda config: tmp_path
     )
@@ -201,14 +299,21 @@ def test_task_launch_auto_consumes_only_exact_qualified_record(
             out[i] = i * 5 + 1
 
     automatic = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
+    profiled = launch_tuning._bind_workload_profile(automatic, _workload_profile())
     program = impl.get_runtime().prog
     before = program._runtime_statistics_snapshot()["submission"]
-    initial = automatic.report(values)
+    assert automatic.report(values).status == "auto"
+    initial = profiled.report(values)
     assert initial.status == "auto"
     assert program._runtime_statistics_snapshot()["submission"] == before
-    decision = automatic._last_auto_decision
+    decision = profiled._last_auto_decision
     assert decision.status == "cache_miss"
     assert 256 in decision.candidates
+    exact_scope = json.loads(decision.record_scope_json)
+    assert len(exact_scope["hardware"]["device_uuid"]) == 32
+    assert exact_scope["hardware"]["multiprocessor_count"] > 0
+    assert exact_scope["hardware"]["compiler"]["llvm_version"]
+    assert exact_scope["workload"]["oracle_identity"] == "oracle:exact-array-v1"
 
     launch_tuning._publish_qualified_record(
         decision=decision,
@@ -220,33 +325,45 @@ def test_task_launch_auto_consumes_only_exact_qualified_record(
             "worst_candidate_over_baseline_ratio": 0.97,
         },
     )
-    qualified = automatic.report(values)
+    qualified = profiled.report(values)
     assert qualified.status == "auto_qualified"
     assert _range_task(qualified.tasks).actual_block_size == 256
     assert program._runtime_statistics_snapshot()["submission"] == before
+    assert automatic.report(values).status == "auto"
+    assert automatic._last_auto_decision is None
 
-    automatic(values)
+    profiled(values)
     ti.sync()
     np.testing.assert_array_equal(
         values.to_numpy(), np.arange(4099, dtype=np.int32) * 5 + 1
     )
+    runtime_memory = program._runtime_statistics_snapshot()["memory"]
+    host_memory = dict(ti_core.get_host_memory_pool_stats())
+    device_memory = dict(ti_core.get_device_memory_pool_stats())
+    for _ in range(500):
+        assert profiled.report(values) == qualified
+    for _ in range(64):
+        profiled(values)
+    ti.sync()
+    assert program._runtime_statistics_snapshot()["memory"] == runtime_memory
+    assert dict(ti_core.get_host_memory_pool_stats()) == host_memory
+    assert dict(ti_core.get_device_memory_pool_stats()) == device_memory
 
     record_id = decision.record_id
     ti.reset()
     ti.init(arch=ti.cuda, offline_cache=False)
     values = ti.ndarray(ti.i32, shape=4099)
-    after_reset = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
-    entries_before = int(
-        ti_core.query_int64("cuda_artifact_entry_points_loaded")
+    after_reset = launch_tuning._bind_workload_profile(
+        fill.with_launch_policy(ti.TaskLaunchPolicy.auto()),
+        _workload_profile(),
     )
+    entries_before = int(ti_core.query_int64("cuda_artifact_entry_points_loaded"))
     reset_report = after_reset.report(values)
     assert reset_report.status == "auto_qualified"
     assert after_reset._last_auto_decision.record_id == record_id
     after_reset(values)
     ti.sync()
-    entries_after = int(
-        ti_core.query_int64("cuda_artifact_entry_points_loaded")
-    )
+    entries_after = int(ti_core.query_int64("cuda_artifact_entry_points_loaded"))
     assert entries_after - entries_before == 1
     np.testing.assert_array_equal(
         values.to_numpy(), np.arange(4099, dtype=np.int32) * 5 + 1

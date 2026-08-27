@@ -2195,7 +2195,7 @@ class Kernel:
         self._task_launch_policy_manifests[key] = tasks
         return tasks
 
-    def _task_launch_auto_decision(self, args, *, observe):
+    def _task_launch_auto_decision(self, args, *, observe, workload_profile):
         """Resolve an exact qualified launch record without submitting work."""
 
         from taichi_forge.lang._task_launch_tuning import _coordinator
@@ -2206,21 +2206,14 @@ class Kernel:
         self.materialize(key=key, args=args, arg_features=arg_features)
         kernel_cpp = self.compiled_kernels[key]
         kernel_key = self.runtime.prog._kernel_cache_key_no_compile(kernel_cpp)
-        decision = _coordinator.resolve(
-            kernel_key=kernel_key,
-            tasks=None,
-            config=impl.current_cfg(),
-            observe=observe,
-        )
-        if decision.status == "qualified":
-            return key, (), decision
         raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
         tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
         decision = _coordinator.resolve(
             kernel_key=kernel_key,
             tasks=tasks,
             config=impl.current_cfg(),
-            observe=False,
+            observe=observe,
+            workload_profile=workload_profile,
         )
         return key, tasks, decision
 
@@ -2425,10 +2418,11 @@ class Kernel:
 class _TaskLaunchBinding:
     """A reusable policy-bound view of a direct JIT kernel."""
 
-    def __init__(self, kernel, policy, bound_args=()):
+    def __init__(self, kernel, policy, bound_args=(), workload_profile=None):
         self._kernel = kernel
         self.policy = policy
         self._bound_args = tuple(bound_args)
+        self._workload_profile = workload_profile
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
@@ -2446,6 +2440,18 @@ class _TaskLaunchBinding:
         else:
             self._auto_coordinator = None
         self.__name__ = kernel.func.__name__
+
+    def _with_workload_profile(self, profile):
+        if self.policy.mode != "auto":
+            raise ValueError(
+                "workload profiles may only bind TaskLaunchPolicy.auto()"
+            )
+        return _TaskLaunchBinding(
+            self._kernel,
+            self.policy,
+            self._bound_args,
+            workload_profile=profile,
+        )
 
     def _refresh_fast_path(self, report=None):
         if report is not None and report.status == "fallback_auto":
@@ -2475,6 +2481,9 @@ class _TaskLaunchBinding:
         )
 
         runtime = self._kernel.runtime
+        if self._workload_profile is None:
+            self._last_auto_decision = None
+            return None, None
         if (
             self._kernel._task_launch_backend_kind()[0] != "cuda"
             or self._kernel.autodiff_mode != AutodiffMode.NONE
@@ -2514,7 +2523,9 @@ class _TaskLaunchBinding:
             )
         processed = _process_args(self._kernel, args, kwargs)
         _, _, decision = self._kernel._task_launch_auto_decision(
-            processed, observe=observe
+            processed,
+            observe=observe,
+            workload_profile=self._workload_profile,
         )
         self._last_auto_decision = decision
         if not self._kernel.mapper._dynamic_arg_extractors:
