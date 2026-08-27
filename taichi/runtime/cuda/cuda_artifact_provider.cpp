@@ -461,13 +461,17 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
   const auto ptxas = resolve_ptxas(cache_root);
   const auto base_cache_key =
       artifact_cache_key(artifact, ptxas, /*controls=*/nullptr);
+  const auto advanced_controls_configuration =
+      cuda_advanced_controls_configuration_from_environment();
   std::optional<CUDAAdvancedControls> controls;
   if (artifact.role == JITModuleRole::user_kernel) {
     controls = resolve_cuda_advanced_controls(CUDACompileIQProtocolRequest{
         artifact, base_cache_key, cache_root, ptxas.path, ptxas.binary_sha256,
-        ptxas.version});
-  } else if (!env_string("TI_CUDA_PTXAS_ACF_PATH").empty() ||
-             !env_string("TI_CUDA_COMPILEIQ_WORKER").empty()) {
+        ptxas.version},
+                                               advanced_controls_configuration);
+  } else if (advanced_controls_configuration.mode !=
+                 CUDAAdvancedControlsMode::baseline ||
+             advanced_controls_configuration.nested_tuning_request_rejected) {
     telemetry.advanced_controls_skipped_non_user.fetch_add(
         1, std::memory_order_relaxed);
   }
@@ -608,13 +612,30 @@ std::string cuda_artifact_provider_configuration_identity() {
   }
   for (const char *name :
        {"TI_CUDA_PTXAS_PATH", "TI_CUDA_ARTIFACT_CACHE_PATH",
-        "TI_CUDA_PTXAS_TIMEOUT_SECONDS", "TI_CUDA_PTXAS_ACF_PATH",
-        "TI_CUDA_COMPILEIQ_WORKER", "TI_CUDA_COMPILEIQ_PYTHON",
-        "TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS"}) {
+        "TI_CUDA_PTXAS_TIMEOUT_SECONDS"}) {
     hash.update(llvm::StringRef(name));
     hash.update(llvm::StringRef("\0", 1));
     hash.update(llvm::StringRef(env_string(name)));
     hash.update(llvm::StringRef("\0", 1));
+  }
+  const auto controls = cuda_advanced_controls_configuration_from_environment();
+  hash.update(llvm::StringRef("CUDA_ADVANCED_CONTROLS_MODE"));
+  hash.update(llvm::StringRef("\0", 1));
+  hash.update(llvm::StringRef(cuda_advanced_controls_mode_name(controls.mode)));
+  hash.update(llvm::StringRef("\0", 1));
+  auto add_environment = [&](const char *name, const std::string &value) {
+    hash.update(llvm::StringRef(name));
+    hash.update(llvm::StringRef("\0", 1));
+    hash.update(llvm::StringRef(value));
+    hash.update(llvm::StringRef("\0", 1));
+  };
+  if (controls.mode == CUDAAdvancedControlsMode::apply_explicit_acf) {
+    add_environment("TI_CUDA_PTXAS_ACF_PATH", controls.explicit_acf_path);
+  } else if (controls.mode == CUDAAdvancedControlsMode::request_tuning) {
+    add_environment("TI_CUDA_COMPILEIQ_WORKER", controls.worker_path);
+    add_environment("TI_CUDA_COMPILEIQ_PYTHON", controls.python_path);
+    add_environment("TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS",
+                    env_string("TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS"));
   }
   return llvm::toHex(hash.final(), /*LowerCase=*/true);
 }

@@ -80,6 +80,7 @@ def _artifact_snapshot():
             "cuda_compileiq_acf_responses",
             "cuda_compileiq_pass_responses",
             "cuda_compileiq_fail_open_responses",
+            "cuda_compileiq_nested_requests_rejected",
         )
     }
 
@@ -159,6 +160,11 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
                 offline_cache=False,
                 gpu_max_reg=int(os.environ.get("FORGE_TEST_GPU_MAX_REG", "0")),
             )
+            mutation_name = os.environ.get("FORGE_TEST_MUTATE_PROVIDER_SETTING")
+            if mutation_name:
+                os.environ[mutation_name] = os.environ[
+                    "FORGE_TEST_MUTATE_PROVIDER_VALUE"
+                ]
             values = ti.field(dtype=ti.i32, shape=256)
 
             @ti.kernel
@@ -200,6 +206,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
                 "cuda_compileiq_acf_responses",
                 "cuda_compileiq_pass_responses",
                 "cuda_compileiq_fail_open_responses",
+                "cuda_compileiq_nested_requests_rejected",
             )
             evidence = {key: int(ti_core.query_int64(key)) for key in keys}
             ti.reset()
@@ -278,6 +285,22 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
     assert second_evidence["cuda_artifact_compile_calls"] == 0
     assert second_evidence["cuda_artifact_cubin_loads"] >= 2
 
+    # Tuning-only settings are deliberately absent from baseline provider
+    # identity. Mutating one after ti.init() must not invalidate the session.
+    baseline_identity_env = env.copy()
+    baseline_identity_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "baseline-identity-cache"),
+            "FORGE_TEST_MUTATE_PROVIDER_SETTING": ("TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS"),
+            "FORGE_TEST_MUTATE_PROVIDER_VALUE": "17",
+        }
+    )
+    baseline_identity, baseline_identity_evidence = run(baseline_identity_env)
+    assert baseline_identity.returncode == 0, (
+        baseline_identity.stdout + baseline_identity.stderr
+    )
+    assert baseline_identity_evidence["cuda_compileiq_protocol_requests"] == 0
+
     # A non-empty but corrupted payload must not be handed to the driver. The
     # checksum turns it into a bounded cache miss and recompilation.
     cached_cubin = next(cache_path.glob("*.cubin"))
@@ -321,7 +344,11 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             """
             import argparse
             import json
+            import os
             from pathlib import Path
+
+            import taichi_forge as ti
+            from taichi_forge._lib import core as ti_core
 
             parser = argparse.ArgumentParser()
             parser.add_argument("--request", required=True)
@@ -336,6 +363,34 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             assert Path(request["ptx_path"]).is_file()
             assert request["entry_names"]
             assert request["options"]["max_registers"] == 96
+            assert os.environ["TI_CUDA_COMPILEIQ_ACTIVE_REQUEST"] == "1"
+
+            # A worker is allowed to evaluate Forge baseline candidates, but
+            # its inherited request configuration must never launch itself
+            # recursively.
+            ti.init(arch=ti.cuda, offline_cache=False)
+            nested_values = ti.field(dtype=ti.i32, shape=8)
+
+            @ti.kernel
+            def nested_fill():
+                for i in nested_values:
+                    nested_values[i] = i + 4
+
+            nested_fill()
+            ti.sync()
+            nested_evidence = {
+                "protocol_requests": int(
+                    ti_core.query_int64("cuda_compileiq_protocol_requests")
+                ),
+                "worker_calls": int(ti_core.query_int64("cuda_compileiq_worker_calls")),
+                "nested_requests_rejected": int(
+                    ti_core.query_int64("cuda_compileiq_nested_requests_rejected")
+                ),
+            }
+            ti.reset()
+            Path(os.environ["FORGE_TEST_NESTED_EVIDENCE"]).write_text(
+                json.dumps(nested_evidence, sort_keys=True), encoding="utf-8"
+            )
             Path(args.response).write_text(
                 json.dumps({"schema_version": 2, "status": "pass"}),
                 encoding="utf-8",
@@ -345,12 +400,14 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
         encoding="utf-8",
     )
     worker_env = env.copy()
+    nested_evidence_path = tmp_path / "nested-worker-evidence.json"
     worker_env.update(
         {
             "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "worker-cache"),
             "TI_CUDA_COMPILEIQ_WORKER": str(worker),
             "TI_CUDA_COMPILEIQ_PYTHON": sys.executable,
             "FORGE_TEST_GPU_MAX_REG": "96",
+            "FORGE_TEST_NESTED_EVIDENCE": str(nested_evidence_path),
         }
     )
     worker_first, worker_first_evidence = run(worker_env)
@@ -359,9 +416,31 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
     assert worker_first_evidence["cuda_compileiq_worker_calls"] == 1
     assert worker_first_evidence["cuda_compileiq_worker_failures"] == 0
     assert worker_first_evidence["cuda_compileiq_pass_responses"] == 1
+    nested_evidence = json.loads(nested_evidence_path.read_text(encoding="utf-8"))
+    assert nested_evidence == {
+        "nested_requests_rejected": 1,
+        "protocol_requests": 0,
+        "worker_calls": 0,
+    }
+
+    # The same setting is identity-bearing in request_tuning mode, so changing
+    # it after the runtime artifact has latched the session is rejected before
+    # a worker can be launched.
+    request_identity_env = worker_env.copy()
+    request_identity_env.update(
+        {
+            "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "request-identity-cache"),
+            "TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS": "60",
+            "FORGE_TEST_MUTATE_PROVIDER_SETTING": ("TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS"),
+            "FORGE_TEST_MUTATE_PROVIDER_VALUE": "17",
+        }
+    )
+    request_identity, request_identity_evidence = run(request_identity_env)
+    assert request_identity.returncode != 0
+    assert request_identity_evidence is None
+    assert "environment changed after JIT session" in request_identity.stderr
     assert (
-        worker_first_evidence["cuda_artifact_advanced_controls_skipped_non_user"]
-        >= 1
+        worker_first_evidence["cuda_artifact_advanced_controls_skipped_non_user"] >= 1
     )
     assert worker_first_evidence["cuda_artifact_compile_calls"] >= 2
 

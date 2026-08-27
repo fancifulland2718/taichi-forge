@@ -3,19 +3,32 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
+#include <cstring>
 #include <cstdlib>
+#include <cwchar>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Process.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/SHA256.h"
 
 #include "taichi/common/cleanup.h"
 #include "taichi/common/json.h"
+#include "taichi/common/platform_macros.h"
+#if defined(TI_PLATFORM_WINDOWS)
+#include "taichi/platform/windows/windows.h"
+#elif defined(TI_PLATFORM_OSX)
+#include <crt_externs.h>
+#else
+extern char **environ;
+#endif
 #include "taichi/system/timer.h"
 #include "taichi/util/environ_config.h"
 #include "taichi/util/lock.h"
@@ -28,6 +41,8 @@ constexpr int kCompileIQProtocolSchema = 2;
 constexpr int kWorkerLockDelayMs = 50;
 constexpr int kWorkerLockTryCount = 1200;
 constexpr std::size_t kMaxWorkerLogBytes = 64 * 1024;
+constexpr char kCompileIQActiveRequestEnvironment[] =
+    "TI_CUDA_COMPILEIQ_ACTIVE_REQUEST";
 
 struct ProtocolTelemetry {
   std::atomic<std::uint64_t> requests{0};
@@ -38,6 +53,7 @@ struct ProtocolTelemetry {
   std::atomic<std::uint64_t> acf_responses{0};
   std::atomic<std::uint64_t> pass_responses{0};
   std::atomic<std::uint64_t> fail_open_responses{0};
+  std::atomic<std::uint64_t> nested_requests_rejected{0};
 };
 
 ProtocolTelemetry &protocol_telemetry() {
@@ -171,6 +187,55 @@ std::optional<CUDAAdvancedControls> read_cached_acf(
 
 bool read_cached_pass(const std::filesystem::path &pass_path) {
   return read_text(pass_path, 16) == "pass\n";
+}
+
+bool environment_entry_has_name(const std::string &entry, const char *name) {
+  const auto separator = entry.find('=');
+  if (separator == std::string::npos || separator != std::strlen(name)) {
+    return false;
+  }
+#if defined(TI_PLATFORM_WINDOWS)
+  return std::equal(entry.begin(), entry.begin() + separator, name,
+                    [](unsigned char lhs, unsigned char rhs) {
+                      return std::tolower(lhs) == std::tolower(rhs);
+                    });
+#else
+  return entry.compare(0, separator, name) == 0;
+#endif
+}
+
+std::vector<std::string> worker_environment() {
+  std::vector<std::string> result;
+#if defined(TI_PLATFORM_WINDOWS)
+  auto *block = GetEnvironmentStringsW();
+  TI_ERROR_IF(block == nullptr,
+              "Cannot capture the environment for the CompileIQ worker.");
+  auto release = make_cleanup([&]() { FreeEnvironmentStringsW(block); });
+  for (auto *entry = block; *entry != L'\0'; entry += std::wcslen(entry) + 1) {
+    llvm::SmallVector<char, 256> utf8;
+    const auto length = std::wcslen(entry);
+    TI_ERROR_IF(llvm::sys::windows::UTF16ToUTF8(entry, length, utf8),
+                "Cannot encode a CompileIQ worker environment entry.");
+    result.emplace_back(utf8.begin(), utf8.end());
+  }
+#elif defined(TI_PLATFORM_OSX)
+  for (auto **entry = *_NSGetEnviron(); entry != nullptr && *entry != nullptr;
+       ++entry) {
+    result.emplace_back(*entry);
+  }
+#else
+  for (auto **entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+    result.emplace_back(*entry);
+  }
+#endif
+  result.erase(
+      std::remove_if(result.begin(), result.end(), [](const std::string &entry) {
+        return environment_entry_has_name(
+            entry, kCompileIQActiveRequestEnvironment);
+      }),
+      result.end());
+  result.emplace_back(std::string(kCompileIQActiveRequestEnvironment) + "=1");
+  return result;
 }
 
 bool read_cached_fail_open(const std::filesystem::path &path) {
@@ -320,6 +385,13 @@ std::optional<CUDAAdvancedControls> invoke_worker(
   for (const auto &argument : argument_storage) {
     arguments.emplace_back(argument);
   }
+  const auto environment_storage = worker_environment();
+  std::vector<llvm::StringRef> environment;
+  environment.reserve(environment_storage.size());
+  for (const auto &entry : environment_storage) {
+    environment.emplace_back(entry);
+  }
+  const llvm::ArrayRef<llvm::StringRef> environment_ref(environment);
   const auto stdout_string = stdout_path.string();
   const auto stderr_string = stderr_path.string();
   std::array<std::optional<llvm::StringRef>, 3> redirects{
@@ -333,7 +405,7 @@ std::optional<CUDAAdvancedControls> invoke_worker(
   telemetry.worker_calls.fetch_add(1, std::memory_order_relaxed);
   const auto started = Time::get_time();
   const int return_code = llvm::sys::ExecuteAndWait(
-      program, arguments, std::nullopt, redirects, timeout,
+      program, arguments, environment_ref, redirects, timeout,
       /*MemoryLimit=*/0, &execution_error, &execution_failed);
   telemetry.worker_wall_ns.fetch_add(
       static_cast<std::uint64_t>((Time::get_time() - started) * 1.0e9),
@@ -471,21 +543,65 @@ std::optional<CUDAAdvancedControls> resolve_worker_controls(
 
 }  // namespace
 
+CUDAAdvancedControlsConfiguration
+cuda_advanced_controls_configuration_from_environment() {
+  CUDAAdvancedControlsConfiguration configuration;
+  configuration.explicit_acf_path = env_string("TI_CUDA_PTXAS_ACF_PATH");
+  configuration.worker_path = env_string("TI_CUDA_COMPILEIQ_WORKER");
+  configuration.python_path = env_string("TI_CUDA_COMPILEIQ_PYTHON");
+  const bool active_request =
+      env_string(kCompileIQActiveRequestEnvironment) == "1";
+
+  if (!active_request) {
+    TI_ERROR_IF(!configuration.explicit_acf_path.empty() &&
+                    !configuration.worker_path.empty(),
+                "TI_CUDA_PTXAS_ACF_PATH and TI_CUDA_COMPILEIQ_WORKER are "
+                "mutually exclusive.");
+  } else if (!configuration.worker_path.empty()) {
+    // A worker may compile baseline or explicit-ACF candidates, but it must
+    // never recursively request another tuning worker. An explicit ACF wins
+    // over the inherited worker setting for an outer search candidate.
+    configuration.nested_tuning_request_rejected = true;
+  }
+
+  if (!configuration.explicit_acf_path.empty()) {
+    configuration.mode = CUDAAdvancedControlsMode::apply_explicit_acf;
+  } else if (!configuration.worker_path.empty() && !active_request) {
+    configuration.mode = CUDAAdvancedControlsMode::request_tuning;
+  }
+  return configuration;
+}
+
+const char *cuda_advanced_controls_mode_name(
+    CUDAAdvancedControlsMode mode) noexcept {
+  switch (mode) {
+    case CUDAAdvancedControlsMode::baseline:
+      return "baseline";
+    case CUDAAdvancedControlsMode::apply_explicit_acf:
+      return "apply_explicit_acf";
+    case CUDAAdvancedControlsMode::request_tuning:
+      return "request_tuning";
+  }
+  return "unknown";
+}
+
 std::optional<CUDAAdvancedControls> resolve_cuda_advanced_controls(
-    const CUDACompileIQProtocolRequest &request) {
-  const auto direct_acf = env_string("TI_CUDA_PTXAS_ACF_PATH");
-  const auto worker = env_string("TI_CUDA_COMPILEIQ_WORKER");
-  TI_ERROR_IF(!direct_acf.empty() && !worker.empty(),
-              "TI_CUDA_PTXAS_ACF_PATH and TI_CUDA_COMPILEIQ_WORKER are "
-              "mutually exclusive.");
-  if (direct_acf.empty() && worker.empty()) {
+    const CUDACompileIQProtocolRequest &request,
+    const CUDAAdvancedControlsConfiguration &configuration) {
+  auto &telemetry = protocol_telemetry();
+  if (configuration.nested_tuning_request_rejected) {
+    telemetry.nested_requests_rejected.fetch_add(1,
+                                                  std::memory_order_relaxed);
+  }
+  if (configuration.mode == CUDAAdvancedControlsMode::baseline) {
     return std::nullopt;
   }
-  auto &telemetry = protocol_telemetry();
   telemetry.requests.fetch_add(1, std::memory_order_relaxed);
   try {
-    if (!direct_acf.empty()) {
-      const auto path = regular_file(direct_acf, "TI_CUDA_PTXAS_ACF_PATH");
+    if (configuration.mode ==
+        CUDAAdvancedControlsMode::apply_explicit_acf) {
+      const auto path = regular_file(configuration.explicit_acf_path,
+                                     "TI_CUDA_PTXAS_ACF_PATH");
       auto bytes = read_binary(path);
       TI_ERROR_IF(bytes.empty(), "TI_CUDA_PTXAS_ACF_PATH '{}' is empty.",
                   path.string());
@@ -517,10 +633,10 @@ std::optional<CUDAAdvancedControls> resolve_cuda_advanced_controls(
       telemetry.acf_responses.fetch_add(1, std::memory_order_relaxed);
       return CUDAAdvancedControls{cached_path, hash, source_identity};
     }
-    return resolve_worker_controls(request, worker,
-                                   env_string("TI_CUDA_COMPILEIQ_PYTHON"));
+    return resolve_worker_controls(request, configuration.worker_path,
+                                   configuration.python_path);
   } catch (...) {
-    if (!worker.empty()) {
+    if (configuration.mode == CUDAAdvancedControlsMode::request_tuning) {
       telemetry.worker_failures.fetch_add(1, std::memory_order_relaxed);
     }
     telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
@@ -542,6 +658,7 @@ get_cuda_compileiq_protocol_telemetry_snapshot() {
       telemetry.acf_responses.load(std::memory_order_relaxed),
       telemetry.pass_responses.load(std::memory_order_relaxed),
       telemetry.fail_open_responses.load(std::memory_order_relaxed),
+      telemetry.nested_requests_rejected.load(std::memory_order_relaxed),
   };
 }
 

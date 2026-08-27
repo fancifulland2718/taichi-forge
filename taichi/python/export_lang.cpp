@@ -6776,6 +6776,14 @@ void export_lang(py::module &m) {
 #else
       TI_NOT_IMPLEMENTED
 #endif
+    } else if (key == "cuda_compileiq_nested_requests_rejected") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
+              .nested_requests_rejected);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
     } else if (key == "cuda_retained_launch_current_bytes") {
 #if defined(TI_WITH_CUDA)
       return static_cast<int64_t>(
