@@ -172,6 +172,11 @@ class KernelCompilationManager final {
                               const DeviceCapabilityConfig &caps,
                               const Kernel &kernel_def) const;
 
+  std::string make_kernel_semantic_key(
+      const CompileConfig &compile_config,
+      const DeviceCapabilityConfig &caps,
+      const Kernel &kernel_def) const;
+
   const CompiledKernelData *try_load_cached_kernel_locked(
       const Kernel &kernel_def,
       const std::string &kernel_key,
@@ -183,6 +188,7 @@ class KernelCompilationManager final {
   // previously registered `kernel_key` in `in_progress_keys_`.
   const CompiledKernelData &install_compiled_kernel_locked(
       const std::string &kernel_key,
+      const std::string &logical_kernel_key,
       const std::string &optimization_spec_identity,
       CacheData::CacheMode cache_mode,
       std::unique_ptr<CompiledKernelData> compiled);

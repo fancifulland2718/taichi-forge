@@ -136,9 +136,17 @@ std::string get_hashed_offline_cache_key_context(
     const CompileConfig &config,
     const DeviceCapabilityConfig &caps,
     Kernel *kernel);
+std::string get_hashed_offline_cache_semantic_key_context(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel);
 std::string get_hashed_offline_cache_key(const CompileConfig &config,
                                          const DeviceCapabilityConfig &caps,
                                          Kernel *kernel);
+std::string get_hashed_offline_cache_semantic_key(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel);
 void gen_offline_cache_key(IRNode *ast, std::ostream *os);
 
 }  // namespace taichi::lang

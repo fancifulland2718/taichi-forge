@@ -146,6 +146,16 @@ std::string CompiledKernelData::make_task_identity(
                      offloaded_task_type_name(task_type));
 }
 
+std::string CompiledKernelData::make_logical_task_identity(
+    std::size_t task_index,
+    OffloadedTaskType task_type) const {
+  if (logical_kernel_identity_.empty()) {
+    return {};
+  }
+  return fmt::format("tfl:{}:{}:{}", logical_kernel_identity_, task_index,
+                     offloaded_task_type_name(task_type));
+}
+
 static CompiledKernelData::Err translate_err(CompiledKernelDataFile::Err err) {
   switch (err) {
     case CompiledKernelDataFile::Err::kNoError:

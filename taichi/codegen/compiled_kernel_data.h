@@ -143,6 +143,14 @@ class CompiledKernelData {
     return kernel_identity_;
   }
 
+  void set_logical_kernel_identity(std::string identity) {
+    logical_kernel_identity_ = std::move(identity);
+  }
+
+  const std::string &logical_kernel_identity() const {
+    return logical_kernel_identity_;
+  }
+
   void set_optimization_spec_identity(std::string identity) {
     optimization_spec_identity_ = std::move(identity);
   }
@@ -208,6 +216,9 @@ class CompiledKernelData {
   std::string make_task_identity(std::size_t task_index,
                                  OffloadedTaskType task_type) const;
 
+  std::string make_logical_task_identity(std::size_t task_index,
+                                         OffloadedTaskType task_type) const;
+
   virtual void refresh_task_identities() = 0;
 
   virtual Err load_impl(const CompiledKernelDataFile &file) = 0;
@@ -226,6 +237,7 @@ class CompiledKernelData {
   // not be cached by a reusable raw object address.
   mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
   std::string kernel_identity_;
+  std::string logical_kernel_identity_;
   std::string optimization_spec_identity_;
   SNodeRelocationDescriptor snode_relocation_descriptor_;
 };

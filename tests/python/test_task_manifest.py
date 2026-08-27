@@ -35,6 +35,8 @@ def test_task_manifest_is_stable_read_only_and_does_not_launch():
     assert first == second
     assert len({task.task_id for task in first}) == len(first)
     assert all(task.task_id.startswith("tf:") for task in first)
+    assert len({task.logical_task_id for task in first}) == len(first)
+    assert all(task.logical_task_id.startswith("tfl:") for task in first)
     assert all(task.optimization_spec_id == "" for task in first)
     assert all(
         task.backend == ti_core.arch_name(impl.current_cfg().arch) for task in first
@@ -104,12 +106,32 @@ def test_task_manifest_identity_survives_runtime_recompilation():
     values = ti.ndarray(ti.i32, shape=32)
     first = increment.task_manifest(values)
     first_ids = tuple(task.task_id for task in first)
+    first_logical_ids = tuple(task.logical_task_id for task in first)
 
     ti.reset()
     ti.init(arch=ti.cpu, offline_cache=False)
     values = ti.ndarray(ti.i32, shape=32)
     second = increment.task_manifest(values)
     assert tuple(task.task_id for task in second) == first_ids
+    assert tuple(task.logical_task_id for task in second) == first_logical_ids
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_logical_task_identity_separates_multi_offload_ordinals():
+    values = ti.field(dtype=ti.i32, shape=32)
+
+    @ti.kernel
+    def two_ranges():
+        for i in range(32):
+            values[i] = i
+        for i in range(16):
+            values[i] += 1
+
+    manifest = two_ranges.task_manifest()
+    ranges = tuple(task for task in manifest if task.task_type == "range_for")
+    assert len(ranges) == 2
+    assert ranges[0].task_index != ranges[1].task_index
+    assert ranges[0].logical_task_id != ranges[1].logical_task_id
 
 
 @test_utils.test(

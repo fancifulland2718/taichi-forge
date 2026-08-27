@@ -65,8 +65,11 @@ TaskLaunchPolicyApplication apply_task_launch_policy(
 
   TaskLaunchPolicyApplication result;
   result.active = true;
-  if (loop->block_dim == policy->block_dim) {
-    result.changed_block_dim = policy->injected_block_dim;
+  if (policy->injected_block_dim) {
+    loop->block_dim = policy->block_dim;
+    result.changed_block_dim = true;
+  } else if (loop->block_dim == policy->block_dim) {
+    result.changed_block_dim = false;
   } else if (policy->mode == Kernel::TaskLaunchPolicyMode::require) {
     TI_ERROR("TaskLaunchPolicy require(block_dim={}) conflicts with the "
              "kernel's explicit ti.loop_config(block_dim={})",

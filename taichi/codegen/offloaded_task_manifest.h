@@ -17,6 +17,7 @@ namespace taichi::lang {
 // separate, later contract.
 struct OffloadedTaskManifest {
   std::string task_id;
+  std::string logical_task_id;
   std::string optimization_spec_id;
   std::string task_name;
   Arch arch{Arch::x64};

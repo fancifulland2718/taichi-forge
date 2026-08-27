@@ -18,6 +18,7 @@ class OffloadedTaskManifest:
     """
 
     task_id: str
+    logical_task_id: str
     optimization_spec_id: str
     task_name: str
     backend: str

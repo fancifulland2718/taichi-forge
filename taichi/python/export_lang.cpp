@@ -166,6 +166,7 @@ py::dict offloaded_task_manifest_to_python(
     const lang::OffloadedTaskManifest &task) {
   py::dict item;
   item["task_id"] = task.task_id;
+  item["logical_task_id"] = task.logical_task_id;
   item["optimization_spec_id"] = task.optimization_spec_id;
   item["task_name"] = task.task_name;
   item["backend"] = arch_name(task.arch);

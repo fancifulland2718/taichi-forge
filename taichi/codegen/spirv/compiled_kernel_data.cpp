@@ -22,6 +22,7 @@ Arch CompiledKernelData::arch() const {
 std::unique_ptr<lang::CompiledKernelData> CompiledKernelData::clone() const {
   auto result = std::make_unique<CompiledKernelData>(arch_, data_);
   result->set_kernel_identity(kernel_identity());
+  result->set_logical_kernel_identity(logical_kernel_identity());
   result->set_optimization_spec_identity(optimization_spec_identity());
   result->set_snode_relocation_descriptor(snode_relocation_descriptor());
   return result;
@@ -65,6 +66,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     const auto &task = tasks[index];
     OffloadedTaskManifest item;
     item.task_id = task.task_id;
+    item.logical_task_id = make_logical_task_identity(index, task.task_type);
     item.optimization_spec_id = optimization_spec_identity();
     item.task_name = task.name;
     item.arch = arch_;

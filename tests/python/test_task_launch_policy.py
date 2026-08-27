@@ -368,6 +368,7 @@ def test_task_launch_policy_cross_backend_correctness_and_report():
         assert task.selected_block_size == 256
         assert task.actual_block_size == 256
         assert task.task_id != _range_task(auto_manifest).task_id
+        assert task.logical_task_id == _range_task(auto_manifest).logical_task_id
         assert task.optimization_spec_id.startswith("kos1:")
 
         required = fill.with_launch_policy(
@@ -380,6 +381,10 @@ def test_task_launch_policy_cross_backend_correctness_and_report():
         assert (
             _range_task(required_report.tasks).optimization_spec_id
             != task.optimization_spec_id
+        )
+        assert (
+            _range_task(required_report.tasks).logical_task_id
+            == task.logical_task_id
         )
 
 
@@ -592,6 +597,7 @@ def test_task_launch_policy_concurrency_reset_and_resource_stability():
     host_before = dict(ti_core.get_host_memory_pool_stats())
     device_before = dict(ti_core.get_device_memory_pool_stats())
     report = launch.report(values)
+    logical_task_ids = tuple(task.logical_task_id for task in report.tasks)
     for _ in range(500):
         assert launch.report(values) == report
     for _ in range(64):
@@ -604,6 +610,11 @@ def test_task_launch_policy_concurrency_reset_and_resource_stability():
     ti.reset()
     ti.init(arch=arch, offline_cache=False)
     values = ti.ndarray(ti.i32, shape=count)
+    reset_report = launch.report(values)
+    assert (
+        tuple(task.logical_task_id for task in reset_report.tasks)
+        == logical_task_ids
+    )
     launch(values)
     ti.sync()
     assert np.all(values.to_numpy() == 1)

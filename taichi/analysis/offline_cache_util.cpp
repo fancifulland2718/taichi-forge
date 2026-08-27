@@ -273,9 +273,13 @@ std::string get_hashed_offline_cache_key_of_snode(const SNode *snode) {
   return picosha2::get_hash_hex_string(hasher);
 }
 
-std::string get_hashed_offline_cache_key(const CompileConfig &config,
-                                         const DeviceCapabilityConfig &caps,
-                                         Kernel *kernel) {
+namespace {
+
+std::string get_hashed_offline_cache_key_impl(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel,
+    bool include_optimization_spec) {
   TI_AUTO_PROF;
   std::vector<std::uint8_t> kernel_params_string, kernel_rets_string;
   std::string kernel_body_string;
@@ -301,9 +305,13 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   std::string autodiff_mode =
       std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
   const std::string task_launch_policy =
-      kernel ? kernel->task_launch_policy_cache_key() : "";
+      include_optimization_spec && kernel
+          ? kernel->task_launch_policy_cache_key()
+          : "";
   picosha2::hash256_one_by_one hasher;
-  std::string schema_tag = "tcs:" + std::to_string(kOfflineCacheSchemaVersion);
+  std::string schema_tag =
+      std::string(include_optimization_spec ? "tcs:" : "tcs-semantic:") +
+      std::to_string(kOfflineCacheSchemaVersion);
   hasher.process(schema_tag.begin(), schema_tag.end());
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
@@ -315,14 +323,17 @@ std::string get_hashed_offline_cache_key(const CompileConfig &config,
   hasher.finish();
 
   auto res = picosha2::get_hash_hex_string(hasher);
-  res.insert(res.begin(), 'T');  // The key must start with a letter
+  // Cache keys use T; host-only semantic identities use S. Both must start
+  // with a letter because downstream metadata treats them as identifiers.
+  res.insert(res.begin(), include_optimization_spec ? 'T' : 'S');
   return res;
 }
 
-std::string get_hashed_offline_cache_key_context(
+std::string get_hashed_offline_cache_key_context_impl(
     const CompileConfig &config,
     const DeviceCapabilityConfig &caps,
-    Kernel *kernel) {
+    Kernel *kernel,
+    bool include_optimization_spec) {
   TI_AUTO_PROF;
   std::vector<std::uint8_t> kernel_params_string, kernel_rets_string;
   if (kernel) {
@@ -337,11 +348,15 @@ std::string get_hashed_offline_cache_key_context(
       kernel ? std::to_string(static_cast<std::size_t>(kernel->autodiff_mode))
              : "";
   const std::string task_launch_policy =
-      kernel ? kernel->task_launch_policy_cache_key() : "";
+      include_optimization_spec && kernel
+          ? kernel->task_launch_policy_cache_key()
+          : "";
 
   picosha2::hash256_one_by_one hasher;
-  std::string schema_tag =
-      "tcs-ctx:" + std::to_string(kOfflineCacheSchemaVersion);
+  std::string schema_tag = std::string(include_optimization_spec
+                                           ? "tcs-ctx:"
+                                           : "tcs-ctx-semantic:") +
+                           std::to_string(kOfflineCacheSchemaVersion);
   hasher.process(schema_tag.begin(), schema_tag.end());
   hasher.process(compile_config_key.begin(), compile_config_key.end());
   hasher.process(device_caps_key.begin(), device_caps_key.end());
@@ -352,8 +367,41 @@ std::string get_hashed_offline_cache_key_context(
   hasher.finish();
 
   auto res = picosha2::get_hash_hex_string(hasher);
-  res.insert(res.begin(), 'C');
+  res.insert(res.begin(), include_optimization_spec ? 'C' : 'S');
   return res;
+}
+
+}  // namespace
+
+std::string get_hashed_offline_cache_key(const CompileConfig &config,
+                                         const DeviceCapabilityConfig &caps,
+                                         Kernel *kernel) {
+  return get_hashed_offline_cache_key_impl(
+      config, caps, kernel, /*include_optimization_spec=*/true);
+}
+
+std::string get_hashed_offline_cache_semantic_key(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel) {
+  return get_hashed_offline_cache_key_impl(
+      config, caps, kernel, /*include_optimization_spec=*/false);
+}
+
+std::string get_hashed_offline_cache_key_context(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel) {
+  return get_hashed_offline_cache_key_context_impl(
+      config, caps, kernel, /*include_optimization_spec=*/true);
+}
+
+std::string get_hashed_offline_cache_semantic_key_context(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps,
+    Kernel *kernel) {
+  return get_hashed_offline_cache_key_context_impl(
+      config, caps, kernel, /*include_optimization_spec=*/false);
 }
 
 }  // namespace taichi::lang

@@ -1417,13 +1417,13 @@ class Kernel:
                 if (
                     task_launch_policy is not None
                     and task_launch_policy.mode != "auto"
-                    and not _has_explicit_loop_block_dim(tree)
                 ):
-                    # Use the same frontend loop decorator as source-level
-                    # ti.loop_config. A late FrontendForStmt mutation can keep
-                    # constant range setup in an extra serial offload.
-                    ctx.ast_builder.block_dim(task_launch_policy.block_dim)
-                    task_launch_policy_injected = True
+                    # Preserve the pre-tuning frontend IR. The C++ pre-offload
+                    # pass applies the requested block only when the source did
+                    # not own an explicit loop_config block contract.
+                    task_launch_policy_injected = not _has_explicit_loop_block_dim(
+                        tree
+                    )
                 with python_compile_profile_event(f"python.kernel.ast_transform:{self.func.__name__}"):
                     transform_tree(tree, ctx)
                 if not ctx.is_real_function:

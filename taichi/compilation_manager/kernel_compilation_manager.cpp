@@ -165,6 +165,8 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     const Kernel &kernel_def) {
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
+  const auto logical_kernel_key =
+      make_kernel_semantic_key(compile_config, caps, kernel_def);
 
   // P5.a — serialize all cache-map mutation with cache_mutex_. Heavy
   // compile work happens OUTSIDE the lock inside
@@ -244,8 +246,8 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     }
   }
   const auto &result = install_compiled_kernel_locked(
-      kernel_key, kernel_def.optimization_spec_identity(), cache_mode,
-      std::move(compiled));
+      kernel_key, logical_kernel_key, kernel_def.optimization_spec_identity(),
+      cache_mode, std::move(compiled));
   in_progress_keys_.erase(kernel_key);
   cache_cv_.notify_all();
   return result;
@@ -796,6 +798,19 @@ std::string KernelCompilationManager::make_kernel_key(
   return kernel_key;
 }
 
+std::string KernelCompilationManager::make_kernel_semantic_key(
+    const CompileConfig &compile_config,
+    const DeviceCapabilityConfig &caps,
+    const Kernel &kernel_def) const {
+  if (!kernel_def.ir_is_ast()) {
+    const auto context_key = get_hashed_offline_cache_semantic_key_context(
+        compile_config, caps, (Kernel *)&kernel_def);
+    return "N" + context_key + "_" + kernel_def.get_name();
+  }
+  return get_hashed_offline_cache_semantic_key(
+      compile_config, caps, (Kernel *)&kernel_def);
+}
+
 const CompiledKernelData *KernelCompilationManager::try_load_cached_kernel_locked(
     const Kernel &kernel_def,
     const std::string &kernel_key,
@@ -857,6 +872,7 @@ KernelCompilationManager::ensure_execution_handle_locked(
 const CompiledKernelData &
 KernelCompilationManager::install_compiled_kernel_locked(
     const std::string &kernel_key,
+    const std::string &logical_kernel_key,
     const std::string &optimization_spec_identity,
     CacheData::CacheMode cache_mode,
     std::unique_ptr<CompiledKernelData> compiled) {
@@ -869,6 +885,7 @@ KernelCompilationManager::install_compiled_kernel_locked(
   // kernel_key at a time, so this must still be absent.
   TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
   compiled->set_kernel_identity(kernel_key);
+  compiled->set_logical_kernel_identity(logical_kernel_key);
   compiled->set_optimization_spec_identity(optimization_spec_identity);
   KernelCacheData k;
   k.kernel_key = kernel_key;
