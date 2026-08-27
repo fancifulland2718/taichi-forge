@@ -149,11 +149,16 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
         textwrap.dedent(
             """
             import json
+            import os
             import numpy as np
             import taichi_forge as ti
             from taichi_forge._lib import core as ti_core
 
-            ti.init(arch=ti.cuda, offline_cache=False)
+            ti.init(
+                arch=ti.cuda,
+                offline_cache=False,
+                gpu_max_reg=int(os.environ.get("FORGE_TEST_GPU_MAX_REG", "0")),
+            )
             values = ti.field(dtype=ti.i32, shape=256)
 
             @ti.kernel
@@ -330,6 +335,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             assert request["target"].startswith("sm_")
             assert Path(request["ptx_path"]).is_file()
             assert request["entry_names"]
+            assert request["options"]["max_registers"] == 96
             Path(args.response).write_text(
                 json.dumps({"schema_version": 2, "status": "pass"}),
                 encoding="utf-8",
@@ -344,6 +350,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             "TI_CUDA_ARTIFACT_CACHE_PATH": str(tmp_path / "worker-cache"),
             "TI_CUDA_COMPILEIQ_WORKER": str(worker),
             "TI_CUDA_COMPILEIQ_PYTHON": sys.executable,
+            "FORGE_TEST_GPU_MAX_REG": "96",
         }
     )
     worker_first, worker_first_evidence = run(worker_env)
