@@ -77,10 +77,13 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Setup Python 3.10
+      # The runtime artifact is py3-none and is separately audited for any
+      # CPython imports. Use the common 3.13 tooling host; only the shim matrix
+      # in publish_pypi.yml varies with the target CPython ABI.
+      - name: Setup Python 3.13 tooling host
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.10"
+          python-version: "3.13"
 
       - name: Install CUDA Toolkit build compiler
         uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
@@ -290,10 +293,12 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Setup Python 3.10
+      # Keep the ABI-independent runtime build on the same tooling host as
+      # Linux and release-set validation.
+      - name: Setup Python 3.13 tooling host
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: "3.10"
+          python-version: "3.13"
 
       - name: Install CUDA Toolkit build compiler
         uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
