@@ -324,7 +324,9 @@ class JITSessionCPU : public JITSession {
     return dl_;
   }
 
-  JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override {
+  JITModule *add_module(std::unique_ptr<llvm::Module> M,
+                        int max_reg,
+                        [[maybe_unused]] JITModuleRole role) override {
     TI_ASSERT(max_reg == 0);  // No need to specify max_reg on CPUs
     TI_ASSERT(M);
     std::lock_guard<std::mutex> _(mut_);

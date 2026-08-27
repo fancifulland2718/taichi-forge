@@ -24,7 +24,7 @@ namespace taichi::lang::cuda {
 
 namespace {
 
-constexpr int kCompileIQProtocolSchema = 1;
+constexpr int kCompileIQProtocolSchema = 2;
 constexpr int kWorkerLockDelayMs = 50;
 constexpr int kWorkerLockTryCount = 1200;
 constexpr std::size_t kMaxWorkerLogBytes = 64 * 1024;
@@ -37,6 +37,7 @@ struct ProtocolTelemetry {
   std::atomic<std::uint64_t> worker_wall_ns{0};
   std::atomic<std::uint64_t> acf_responses{0};
   std::atomic<std::uint64_t> pass_responses{0};
+  std::atomic<std::uint64_t> fail_open_responses{0};
 };
 
 ProtocolTelemetry &protocol_telemetry() {
@@ -172,6 +173,33 @@ bool read_cached_pass(const std::filesystem::path &pass_path) {
   return read_text(pass_path, 16) == "pass\n";
 }
 
+bool read_cached_fail_open(const std::filesystem::path &path) {
+  return read_text(path, 32) == "fail_open\n";
+}
+
+void install_marker(const std::filesystem::path &path,
+                    llvm::StringRef marker) {
+  auto temporary = path;
+  temporary += ".install.tmp";
+  auto cleanup = make_cleanup([&]() {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+  });
+  TI_ERROR_IF(!write_binary(temporary, marker.data(), marker.size()),
+              "Cannot write CompileIQ marker '{}'.", temporary.string());
+  atomic_install(temporary, path);
+}
+
+const char *artifact_role_name(JITModuleRole role) {
+  switch (role) {
+    case JITModuleRole::runtime:
+      return "runtime";
+    case JITModuleRole::user_kernel:
+      return "user_kernel";
+  }
+  TI_NOT_IMPLEMENTED
+}
+
 std::string worker_cache_key(const CUDACompileIQProtocolRequest &request,
                              const std::filesystem::path &worker,
                              const std::filesystem::path &python) {
@@ -206,6 +234,9 @@ std::string make_request_json(const CUDACompileIQProtocolRequest &request,
                      liong::json::JsonValue(request.artifact.target_identity));
   root.inner.emplace("provider",
                      liong::json::JsonValue("taichi_forge_cuda_artifact_v1"));
+  root.inner.emplace(
+      "artifact_role",
+      liong::json::JsonValue(artifact_role_name(request.artifact.role)));
 
   liong::json::JsonArray entries;
   for (const auto &entry : request.artifact.entry_names) {
@@ -363,6 +394,8 @@ std::optional<CUDAAdvancedControls> resolve_worker_controls(
   const auto key = worker_cache_key(request, worker, python);
   const auto acf_path = request.cache_root / (key + ".compileiq.acf");
   const auto pass_path = request.cache_root / (key + ".compileiq.pass");
+  const auto fail_open_path =
+      request.cache_root / (key + ".compileiq.fail_open");
   const auto source_identity = "compileiq_worker:" + key.substr(0, 16);
   auto &telemetry = protocol_telemetry();
   if (auto cached = read_cached_acf(acf_path, source_identity)) {
@@ -373,6 +406,11 @@ std::optional<CUDAAdvancedControls> resolve_worker_controls(
   if (read_cached_pass(pass_path)) {
     telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
     telemetry.pass_responses.fetch_add(1, std::memory_order_relaxed);
+    return std::nullopt;
+  }
+  if (read_cached_fail_open(fail_open_path)) {
+    telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
+    telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
     return std::nullopt;
   }
 
@@ -398,22 +436,35 @@ std::optional<CUDAAdvancedControls> resolve_worker_controls(
     return std::nullopt;
   }
 
-  auto controls = invoke_worker(request, worker, python, key);
+  if (read_cached_fail_open(fail_open_path)) {
+    telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
+    telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
+    return std::nullopt;
+  }
+
+  std::optional<CUDAAdvancedControls> controls;
+  try {
+    controls = invoke_worker(request, worker, python, key);
+  } catch (const std::exception &error) {
+    telemetry.worker_failures.fetch_add(1, std::memory_order_relaxed);
+    telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
+    TI_WARN("CompileIQ worker failed open for artifact {}: {}",
+            request.base_artifact_key, error.what());
+    install_marker(fail_open_path, "fail_open\n");
+    return std::nullopt;
+  } catch (...) {
+    telemetry.worker_failures.fetch_add(1, std::memory_order_relaxed);
+    telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
+    TI_WARN("CompileIQ worker failed open for artifact {}",
+            request.base_artifact_key);
+    install_marker(fail_open_path, "fail_open\n");
+    return std::nullopt;
+  }
   if (controls) {
     telemetry.acf_responses.fetch_add(1, std::memory_order_relaxed);
     return controls;
   }
-  const std::string marker = "pass\n";
-  auto pass_tmp = pass_path;
-  pass_tmp += ".install.tmp";
-  TI_ERROR_IF(!write_binary(pass_tmp, marker.data(), marker.size()),
-              "Cannot write CompileIQ pass cache entry '{}'.",
-              pass_tmp.string());
-  auto cleanup = make_cleanup([&]() {
-    std::error_code ignored;
-    std::filesystem::remove(pass_tmp, ignored);
-  });
-  atomic_install(pass_tmp, pass_path);
+  install_marker(pass_path, "pass\n");
   telemetry.pass_responses.fetch_add(1, std::memory_order_relaxed);
   return std::nullopt;
 }
@@ -472,7 +523,10 @@ std::optional<CUDAAdvancedControls> resolve_cuda_advanced_controls(
     if (!worker.empty()) {
       telemetry.worker_failures.fetch_add(1, std::memory_order_relaxed);
     }
-    throw;
+    telemetry.fail_open_responses.fetch_add(1, std::memory_order_relaxed);
+    TI_WARN(
+        "CUDA Advanced Controls resolution failed open; using baseline ptxas");
+    return std::nullopt;
   }
 }
 
@@ -487,6 +541,7 @@ get_cuda_compileiq_protocol_telemetry_snapshot() {
       telemetry.worker_wall_ns.load(std::memory_order_relaxed),
       telemetry.acf_responses.load(std::memory_order_relaxed),
       telemetry.pass_responses.load(std::memory_order_relaxed),
+      telemetry.fail_open_responses.load(std::memory_order_relaxed),
   };
 }
 

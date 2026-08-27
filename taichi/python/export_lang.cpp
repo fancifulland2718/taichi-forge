@@ -6657,6 +6657,30 @@ void export_lang(py::module &m) {
 #else
       TI_NOT_IMPLEMENTED
 #endif
+    } else if (key == "cuda_artifact_advanced_controls_skipped_non_user") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .advanced_controls_skipped_non_user);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_advanced_controls_fallbacks") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .advanced_controls_fallbacks);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_driver_ptx_fallbacks") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .driver_ptx_fallbacks);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
     } else if (key == "cuda_compileiq_protocol_requests") {
 #if defined(TI_WITH_CUDA)
       return static_cast<int64_t>(
@@ -6706,6 +6730,14 @@ void export_lang(py::module &m) {
       return static_cast<int64_t>(
           cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
               .pass_responses);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_compileiq_fail_open_responses") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_compileiq_protocol_telemetry_snapshot()
+              .fail_open_responses);
 #else
       TI_NOT_IMPLEMENTED
 #endif

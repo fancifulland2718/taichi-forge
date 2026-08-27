@@ -32,6 +32,7 @@ struct CUDACompileIQProtocolTelemetrySnapshot {
   std::uint64_t worker_wall_ns{0};
   std::uint64_t acf_responses{0};
   std::uint64_t pass_responses{0};
+  std::uint64_t fail_open_responses{0};
 };
 
 std::optional<CUDAAdvancedControls> resolve_cuda_advanced_controls(

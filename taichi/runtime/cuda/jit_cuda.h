@@ -50,6 +50,7 @@ enum class CUDAArtifactKind {
 // cubins from accidentally flowing through text-only PTX assumptions.
 struct CUDAKernelArtifact {
   CUDAArtifactKind kind{CUDAArtifactKind::ptx};
+  JITModuleRole role{JITModuleRole::user_kernel};
   std::vector<char> payload;
   std::vector<std::string> entry_names;
   std::string target_identity;
@@ -157,7 +158,9 @@ class JITSessionCUDA : public JITSession {
       : JITSession(tlctx, config), data_layout(data_layout) {
   }
   ~JITSessionCUDA() override;
-  JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
+  JITModule *add_module(std::unique_ptr<llvm::Module> M,
+                        int max_reg,
+                        JITModuleRole role) override;
 
   bool remove_module(JITModule *module) override;
 
@@ -168,7 +171,8 @@ class JITSessionCUDA : public JITSession {
  private:
   CUDAKernelArtifact build_canonical_artifact(
       std::unique_ptr<llvm::Module> &module,
-      int max_reg);
+      int max_reg,
+      JITModuleRole role);
   CUDAKernelArtifact select_artifact(CUDAKernelArtifact artifact);
   void *load_artifact(const CUDAKernelArtifact &artifact);
   std::vector<char> emit_module_to_ptx(std::unique_ptr<llvm::Module> &module);

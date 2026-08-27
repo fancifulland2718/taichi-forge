@@ -69,6 +69,9 @@ def _artifact_snapshot():
             "cuda_artifact_cubin_peak_bytes",
             "cuda_artifact_entry_points_loaded",
             "cuda_artifact_multi_entry_artifacts",
+            "cuda_artifact_advanced_controls_skipped_non_user",
+            "cuda_artifact_advanced_controls_fallbacks",
+            "cuda_artifact_driver_ptx_fallbacks",
             "cuda_compileiq_protocol_requests",
             "cuda_compileiq_protocol_cache_hits",
             "cuda_compileiq_worker_calls",
@@ -76,6 +79,7 @@ def _artifact_snapshot():
             "cuda_compileiq_worker_wall_ns",
             "cuda_compileiq_acf_responses",
             "cuda_compileiq_pass_responses",
+            "cuda_compileiq_fail_open_responses",
         )
     }
 
@@ -180,6 +184,9 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
                 "cuda_artifact_cubin_peak_bytes",
                 "cuda_artifact_entry_points_loaded",
                 "cuda_artifact_multi_entry_artifacts",
+                "cuda_artifact_advanced_controls_skipped_non_user",
+                "cuda_artifact_advanced_controls_fallbacks",
+                "cuda_artifact_driver_ptx_fallbacks",
                 "cuda_compileiq_protocol_requests",
                 "cuda_compileiq_protocol_cache_hits",
                 "cuda_compileiq_worker_calls",
@@ -187,6 +194,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
                 "cuda_compileiq_worker_wall_ns",
                 "cuda_compileiq_acf_responses",
                 "cuda_compileiq_pass_responses",
+                "cuda_compileiq_fail_open_responses",
             )
             evidence = {key: int(ti_core.query_int64(key)) for key in keys}
             ti.reset()
@@ -315,14 +323,15 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             parser.add_argument("--response", required=True)
             args = parser.parse_args()
             request = json.loads(Path(args.request).read_text(encoding="utf-8"))
-            assert request["schema_version"] == 1
+            assert request["schema_version"] == 2
             assert request["kind"] == "taichi_cuda_compileiq_request"
             assert request["provider"] == "taichi_forge_cuda_artifact_v1"
+            assert request["artifact_role"] == "user_kernel"
             assert request["target"].startswith("sm_")
             assert Path(request["ptx_path"]).is_file()
             assert request["entry_names"]
             Path(args.response).write_text(
-                json.dumps({"schema_version": 1, "status": "pass"}),
+                json.dumps({"schema_version": 2, "status": "pass"}),
                 encoding="utf-8",
             )
             """
@@ -339,27 +348,31 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
     )
     worker_first, worker_first_evidence = run(worker_env)
     assert worker_first.returncode == 0, worker_first.stdout + worker_first.stderr
-    assert worker_first_evidence["cuda_compileiq_protocol_requests"] >= 2
-    assert worker_first_evidence["cuda_compileiq_worker_calls"] >= 2
+    assert worker_first_evidence["cuda_compileiq_protocol_requests"] == 1
+    assert worker_first_evidence["cuda_compileiq_worker_calls"] == 1
     assert worker_first_evidence["cuda_compileiq_worker_failures"] == 0
-    assert worker_first_evidence["cuda_compileiq_pass_responses"] >= 2
+    assert worker_first_evidence["cuda_compileiq_pass_responses"] == 1
+    assert (
+        worker_first_evidence["cuda_artifact_advanced_controls_skipped_non_user"]
+        >= 1
+    )
     assert worker_first_evidence["cuda_artifact_compile_calls"] >= 2
 
     worker_second, worker_second_evidence = run(worker_env)
     assert worker_second.returncode == 0, worker_second.stdout + worker_second.stderr
-    assert worker_second_evidence["cuda_compileiq_protocol_cache_hits"] >= 2
+    assert worker_second_evidence["cuda_compileiq_protocol_cache_hits"] == 1
     assert worker_second_evidence["cuda_compileiq_worker_calls"] == 0
     assert worker_second_evidence["cuda_artifact_compile_calls"] == 0
 
     pass_entries = list((tmp_path / "worker-cache").glob("*.compileiq.pass"))
-    assert len(pass_entries) >= 2
+    assert len(pass_entries) == 1
     for entry in pass_entries:
         entry.write_text("corrupt", encoding="utf-8")
     worker_repaired, worker_repaired_evidence = run(worker_env)
     assert worker_repaired.returncode == 0, (
         worker_repaired.stdout + worker_repaired.stderr
     )
-    assert worker_repaired_evidence["cuda_compileiq_worker_calls"] >= 2
+    assert worker_repaired_evidence["cuda_compileiq_worker_calls"] == 1
     assert worker_repaired_evidence["cuda_artifact_compile_calls"] == 0
 
     bad_worker = tmp_path / "bad_compileiq_worker.py"
@@ -375,7 +388,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             parser.add_argument("--response", required=True)
             args = parser.parse_args()
             Path(args.response).write_text(
-                json.dumps({"schema_version": 1, "status": "unsupported"}),
+                json.dumps({"schema_version": 2, "status": "unsupported"}),
                 encoding="utf-8",
             )
             """
@@ -391,9 +404,12 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
         }
     )
     bad_worker_result, bad_worker_evidence = run(bad_worker_env)
-    assert bad_worker_result.returncode != 0
-    assert bad_worker_evidence is None
-    assert "unsupported status" in bad_worker_result.stderr
+    assert bad_worker_result.returncode == 0, (
+        bad_worker_result.stdout + bad_worker_result.stderr
+    )
+    assert bad_worker_evidence["cuda_compileiq_worker_failures"] == 1
+    assert bad_worker_evidence["cuda_compileiq_fail_open_responses"] == 1
+    assert bad_worker_evidence["cuda_artifact_compile_calls"] >= 2
 
     acf_worker = tmp_path / "acf_compileiq_worker.py"
     acf_worker.write_text(
@@ -416,7 +432,7 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
             Path(args.response).write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
+                        "schema_version": 2,
                         "status": "ok",
                         "acf_path": str(acf_path),
                         "acf_sha256": hashlib.sha256(acf).hexdigest(),
@@ -437,12 +453,10 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
         }
     )
     worker_acf_result, worker_acf_evidence = run(worker_acf_env)
-    assert worker_acf_result.returncode != 0
-    assert worker_acf_evidence is None
-    assert (
-        "Advanced Controls require ptxas 13.3" in worker_acf_result.stderr
-        or "External ptxas failed" in worker_acf_result.stderr
+    assert worker_acf_result.returncode == 0, (
+        worker_acf_result.stdout + worker_acf_result.stderr
     )
+    assert worker_acf_evidence["cuda_artifact_advanced_controls_fallbacks"] >= 1
 
     dummy_acf = tmp_path / "dummy.acf"
     dummy_acf.write_bytes(b"not-an-acf")
@@ -454,12 +468,8 @@ def test_cuda_external_ptxas_cache_and_failure_isolation(tmp_path):
         }
     )
     acf_result, acf_evidence = run(acf_env)
-    assert acf_result.returncode != 0
-    assert acf_evidence is None
-    assert (
-        "Advanced Controls require ptxas 13.3" in acf_result.stderr
-        or "External ptxas failed" in acf_result.stderr
-    )
+    assert acf_result.returncode == 0, acf_result.stdout + acf_result.stderr
+    assert acf_evidence["cuda_artifact_advanced_controls_fallbacks"] >= 1
 
     invalid_env = env.copy()
     invalid_env["TI_CUDA_PTXAS_PATH"] = str(tmp_path / "missing-ptxas")

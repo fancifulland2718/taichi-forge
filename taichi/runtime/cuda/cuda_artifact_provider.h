@@ -22,6 +22,9 @@ struct CUDAArtifactProviderTelemetrySnapshot {
   std::uint64_t cubin_peak_bytes{0};
   std::uint64_t entry_points_loaded{0};
   std::uint64_t multi_entry_artifacts{0};
+  std::uint64_t advanced_controls_skipped_non_user{0};
+  std::uint64_t advanced_controls_fallbacks{0};
+  std::uint64_t driver_ptx_fallbacks{0};
 };
 
 CUDAKernelArtifact select_cuda_kernel_artifact(CUDAKernelArtifact artifact,

@@ -110,7 +110,9 @@ class JITSessionAMDGPU : public JITSession {
     create_directories(tmp_dir_);
   }
 
-  JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
+  JITModule *add_module(std::unique_ptr<llvm::Module> M,
+                        int max_reg,
+                        JITModuleRole role) override;
 
   llvm::DataLayout get_data_layout() override {
     return data_layout;

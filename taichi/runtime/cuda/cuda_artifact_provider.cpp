@@ -34,7 +34,7 @@ namespace taichi::lang::cuda {
 
 namespace {
 
-constexpr int kArtifactCacheSchema = 1;
+constexpr int kArtifactCacheSchema = 2;
 constexpr std::size_t kMaxDiagnosticBytes = 64 * 1024;
 constexpr int kArtifactLockDelayMs = 50;
 constexpr int kArtifactLockTryCount = 1200;
@@ -61,6 +61,9 @@ struct CUDAArtifactProviderTelemetry {
   std::atomic<std::uint64_t> cubin_peak_bytes{0};
   std::atomic<std::uint64_t> entry_points_loaded{0};
   std::atomic<std::uint64_t> multi_entry_artifacts{0};
+  std::atomic<std::uint64_t> advanced_controls_skipped_non_user{0};
+  std::atomic<std::uint64_t> advanced_controls_fallbacks{0};
+  std::atomic<std::uint64_t> driver_ptx_fallbacks{0};
 };
 
 CUDAArtifactProviderTelemetry &provider_telemetry() {
@@ -88,6 +91,16 @@ std::string normalized_mode() {
     return static_cast<char>(std::tolower(c));
   });
   return mode;
+}
+
+const char *artifact_role_name(JITModuleRole role) {
+  switch (role) {
+    case JITModuleRole::runtime:
+      return "runtime";
+    case JITModuleRole::user_kernel:
+      return "user_kernel";
+  }
+  TI_NOT_IMPLEMENTED
 }
 
 std::vector<char> read_binary_file(const std::filesystem::path &path) {
@@ -322,6 +335,7 @@ std::string artifact_cache_key(const CUDAKernelArtifact &artifact,
   add(std::to_string(TI_VERSION_MAJOR));
   add(std::to_string(TI_VERSION_MINOR));
   add(std::to_string(TI_VERSION_PATCH));
+  add(artifact_role_name(artifact.role));
   add(artifact.target_identity);
   add(std::to_string(artifact.max_registers));
   add(artifact.fast_math ? "fast_math=1" : "fast_math=0");
@@ -447,26 +461,42 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
   const auto ptxas = resolve_ptxas(cache_root);
   const auto base_cache_key =
       artifact_cache_key(artifact, ptxas, /*controls=*/nullptr);
-  auto controls = resolve_cuda_advanced_controls(CUDACompileIQProtocolRequest{
-      artifact, base_cache_key, cache_root, ptxas.path, ptxas.binary_sha256,
-      ptxas.version});
+  std::optional<CUDAAdvancedControls> controls;
+  if (artifact.role == JITModuleRole::user_kernel) {
+    controls = resolve_cuda_advanced_controls(CUDACompileIQProtocolRequest{
+        artifact, base_cache_key, cache_root, ptxas.path, ptxas.binary_sha256,
+        ptxas.version});
+  } else if (!env_string("TI_CUDA_PTXAS_ACF_PATH").empty() ||
+             !env_string("TI_CUDA_COMPILEIQ_WORKER").empty()) {
+    telemetry.advanced_controls_skipped_non_user.fetch_add(
+        1, std::memory_order_relaxed);
+  }
   if (controls) {
     const bool supports_acf =
         ptxas.version_major > 13 ||
         (ptxas.version_major == 13 && ptxas.version_minor >= 3);
-    TI_ERROR_IF(!supports_acf,
-                "CUDA Advanced Controls require ptxas 13.3 or newer; "
-                "resolved version is '{}'.",
-                ptxas.version);
+    if (!supports_acf) {
+      telemetry.advanced_controls_fallbacks.fetch_add(
+          1, std::memory_order_relaxed);
+      TI_WARN(
+          "CUDA Advanced Controls require ptxas 13.3 or newer; resolved "
+          "version is '{}'. Compiling this artifact with baseline ptxas.",
+          ptxas.version);
+      controls.reset();
+    }
   }
-  const auto cache_key = controls
-                             ? artifact_cache_key(artifact, ptxas, &*controls)
-                             : base_cache_key;
-  const auto cubin_path = cache_root / (cache_key + ".cubin");
-  auto cubin = read_cached_cubin(cubin_path);
-  if (!cubin.empty()) {
-    telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
-  } else {
+
+  auto materialize = [&](const CUDAAdvancedControls *selected_controls) {
+    const auto cache_key =
+        selected_controls != nullptr
+            ? artifact_cache_key(artifact, ptxas, selected_controls)
+            : base_cache_key;
+    const auto cubin_path = cache_root / (cache_key + ".cubin");
+    auto cubin = read_cached_cubin(cubin_path);
+    if (!cubin.empty()) {
+      telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
+      return cubin;
+    }
     const auto lock_path = cache_root / (cache_key + ".lock");
     TI_ERROR_IF(!lock_with_file_handle(lock_path.string(), kArtifactLockDelayMs,
                                        kArtifactLockTryCount),
@@ -484,9 +514,57 @@ CUDAKernelArtifact select_external_ptxas_artifact(CUDAKernelArtifact artifact,
       telemetry.cache_hits.fetch_add(1, std::memory_order_relaxed);
     } else {
       telemetry.cache_misses.fetch_add(1, std::memory_order_relaxed);
-      cubin = invoke_ptxas(artifact, ptxas, controls ? &*controls : nullptr,
-                           cache_root, cache_key);
+      cubin = invoke_ptxas(artifact, ptxas, selected_controls, cache_root,
+                           cache_key);
       install_cached_cubin(cubin_path, cubin);
+    }
+    return cubin;
+  };
+
+  std::vector<char> cubin;
+  if (controls) {
+    try {
+      cubin = materialize(&*controls);
+    } catch (const std::exception &error) {
+      telemetry.advanced_controls_fallbacks.fetch_add(
+          1, std::memory_order_relaxed);
+      TI_WARN(
+          "CUDA Advanced Controls failed open for role={} target={}: {}. "
+          "Retrying with baseline ptxas.",
+          artifact_role_name(artifact.role), artifact.target_identity,
+          error.what());
+      controls.reset();
+    } catch (...) {
+      telemetry.advanced_controls_fallbacks.fetch_add(
+          1, std::memory_order_relaxed);
+      TI_WARN(
+          "CUDA Advanced Controls failed open for role={} target={}; "
+          "retrying with baseline ptxas.",
+          artifact_role_name(artifact.role), artifact.target_identity);
+      controls.reset();
+    }
+  }
+
+  if (cubin.empty()) {
+    try {
+      cubin = materialize(/*selected_controls=*/nullptr);
+    } catch (const std::exception &error) {
+      telemetry.driver_ptx_fallbacks.fetch_add(1,
+                                               std::memory_order_relaxed);
+      TI_WARN(
+          "External ptxas failed open for role={} target={}: {}. Loading "
+          "canonical PTX with the CUDA driver.",
+          artifact_role_name(artifact.role), artifact.target_identity,
+          error.what());
+      return artifact;
+    } catch (...) {
+      telemetry.driver_ptx_fallbacks.fetch_add(1,
+                                               std::memory_order_relaxed);
+      TI_WARN(
+          "External ptxas failed open for role={} target={}; loading "
+          "canonical PTX with the CUDA driver.",
+          artifact_role_name(artifact.role), artifact.target_identity);
+      return artifact;
     }
   }
 
@@ -588,6 +666,10 @@ get_cuda_artifact_provider_telemetry_snapshot() {
       telemetry.cubin_peak_bytes.load(std::memory_order_relaxed),
       telemetry.entry_points_loaded.load(std::memory_order_relaxed),
       telemetry.multi_entry_artifacts.load(std::memory_order_relaxed),
+      telemetry.advanced_controls_skipped_non_user.load(
+          std::memory_order_relaxed),
+      telemetry.advanced_controls_fallbacks.load(std::memory_order_relaxed),
+      telemetry.driver_ptx_fallbacks.load(std::memory_order_relaxed),
   };
 }
 

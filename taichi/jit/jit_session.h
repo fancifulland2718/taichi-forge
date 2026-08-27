@@ -14,6 +14,14 @@ namespace taichi::lang {
 class TaichiLLVMContext;
 struct CompileConfig;
 
+// Semantic ownership of a JIT module. Optional backend artifact providers use
+// this role instead of entry-point names to keep runtime initialization out of
+// user-kernel tuning.
+enum class JITModuleRole {
+  runtime,
+  user_kernel,
+};
+
 class JITSession {
  protected:
   TaichiLLVMContext *tlctx_;
@@ -25,7 +33,9 @@ class JITSession {
   JITSession(TaichiLLVMContext *tlctx, const CompileConfig &config);
 
   virtual JITModule *add_module(std::unique_ptr<llvm::Module> M,
-                                int max_reg = 0) = 0;
+                                int max_reg = 0,
+                                JITModuleRole role =
+                                    JITModuleRole::user_kernel) = 0;
 
   // Release a non-runtime module after the owning launcher has drained every
   // invocation that can call it. Backends that cannot unload individual

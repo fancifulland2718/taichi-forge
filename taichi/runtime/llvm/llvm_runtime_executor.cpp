@@ -215,7 +215,8 @@ TaichiLLVMContext *LlvmRuntimeExecutor::get_llvm_context() {
 
 JITModule *LlvmRuntimeExecutor::create_jit_module(
     std::unique_ptr<llvm::Module> module) {
-  return jit_session_->add_module(std::move(module));
+  return jit_session_->add_module(std::move(module), /*max_reg=*/0,
+                                  JITModuleRole::user_kernel);
 }
 
 bool LlvmRuntimeExecutor::remove_jit_module(JITModule *module) {
@@ -1782,7 +1783,8 @@ LLVMRuntime *LlvmRuntimeExecutor::get_llvm_runtime() {
 void LlvmRuntimeExecutor::init_runtime_jit_module(
     std::unique_ptr<llvm::Module> module) {
   llvm_context_->init_runtime_module(module.get());
-  runtime_jit_module_ = create_jit_module(std::move(module));
+  runtime_jit_module_ = jit_session_->add_module(
+      std::move(module), /*max_reg=*/0, JITModuleRole::runtime);
 }
 
 }  // namespace taichi::lang

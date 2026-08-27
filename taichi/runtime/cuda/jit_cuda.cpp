@@ -61,13 +61,24 @@ const char *cuda_artifact_kind_name(CUDAArtifactKind kind) {
   TI_NOT_IMPLEMENTED
 }
 
+const char *cuda_artifact_role_name(JITModuleRole role) {
+  switch (role) {
+    case JITModuleRole::runtime:
+      return "runtime";
+    case JITModuleRole::user_kernel:
+      return "user_kernel";
+  }
+  TI_NOT_IMPLEMENTED
+}
+
 }  // namespace
 
 std::string convert(std::string new_name);
 
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
-                                       int max_reg) {
-  auto artifact = build_canonical_artifact(M, max_reg);
+                                       int max_reg,
+                                       JITModuleRole role) {
+  auto artifact = build_canonical_artifact(M, max_reg, role);
   if (this->config_.print_kernel_asm) {
     static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
                                      "module NVPTX");
@@ -105,9 +116,11 @@ JITSessionCUDA::~JITSessionCUDA() {
 
 CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
     std::unique_ptr<llvm::Module> &module,
-    int max_reg) {
+    int max_reg,
+    JITModuleRole role) {
   CUDAKernelArtifact artifact;
   artifact.kind = CUDAArtifactKind::ptx;
+  artifact.role = role;
 
   // Canonicalize names before capturing the entry manifest. LLVM's optimizer
   // may discard metadata nodes after code generation, so the manifest cannot
@@ -156,9 +169,11 @@ void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
            cuda_artifact_kind_name(artifact.kind),
            artifact.code_size() / 1024.0);
   auto t = Time::get_time();
-  TI_TRACE("Loading CUDA artifact: kind={}, provider={}, target={}, entries={}",
-           cuda_artifact_kind_name(artifact.kind), artifact.provider_identity,
-           artifact.target_identity, artifact.entry_names.size());
+  TI_TRACE(
+      "Loading CUDA artifact: kind={}, role={}, provider={}, target={}, entries={}",
+      cuda_artifact_kind_name(artifact.kind),
+      cuda_artifact_role_name(artifact.role), artifact.provider_identity,
+      artifact.target_identity, artifact.entry_names.size());
   [[maybe_unused]] auto _ = CUDAContext::get_instance().get_lock_guard();
 
   constexpr int max_num_options = 8;
