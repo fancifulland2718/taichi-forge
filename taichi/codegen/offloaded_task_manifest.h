@@ -50,6 +50,7 @@ struct OffloadedTaskManifest {
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};
+  std::uint64_t thread_local_bytes{0};
 };
 
 }  // namespace taichi::lang

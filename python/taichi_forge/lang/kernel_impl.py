@@ -1458,6 +1458,7 @@ class Kernel:
                 task_launch_policy.block_dim,
                 task_launch_policy_injected,
                 kernel_optimization_spec.compilation_identity,
+                kernel_optimization_spec.ir.thread_local,
             )
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
@@ -2262,11 +2263,15 @@ class Kernel:
         backend, kind = self._task_launch_backend_kind()
         if (
             _kernel_optimization_spec is not None
-            and _kernel_optimization_spec.launch.grid_residency_waves is not None
+            and (
+                _kernel_optimization_spec.launch.grid_residency_waves is not None
+                or _kernel_optimization_spec.ir.thread_local != "auto"
+            )
             and backend != "cuda"
         ):
             raise TaichiRuntimeError(
-                "grid residency optimization specs require the CUDA backend"
+                "grid-residency and thread-local optimization specs require "
+                "the CUDA backend"
             )
         if policy.mode == "auto" or (kind == "cpu" and policy.mode == "hint"):
             return self(*args, **kwargs)
@@ -2312,11 +2317,15 @@ class Kernel:
         backend, kind = self._task_launch_backend_kind()
         if (
             _kernel_optimization_spec is not None
-            and _kernel_optimization_spec.launch.grid_residency_waves is not None
+            and (
+                _kernel_optimization_spec.launch.grid_residency_waves is not None
+                or _kernel_optimization_spec.ir.thread_local != "auto"
+            )
             and backend != "cuda"
         ):
             raise TaichiRuntimeError(
-                "grid residency optimization specs require the CUDA backend"
+                "grid-residency and thread-local optimization specs require "
+                "the CUDA backend"
             )
         if policy.mode == "auto":
             tasks = self.task_manifest(*args, **kwargs)

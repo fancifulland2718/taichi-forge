@@ -33,8 +33,16 @@ class TI_DLL_EXPORT Kernel : public Callable {
     require,
   };
 
+  enum class TaskLaunchThreadLocalMode {
+    automatic,
+    enabled,
+    disabled,
+  };
+
   struct TaskLaunchPolicy {
     TaskLaunchPolicyMode mode{TaskLaunchPolicyMode::hint};
+    TaskLaunchThreadLocalMode thread_local_mode{
+        TaskLaunchThreadLocalMode::automatic};
     int block_dim{0};
     bool injected_block_dim{false};
     std::string optimization_spec_identity;
@@ -100,7 +108,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
       const std::string &mode,
       int block_dim,
       bool injected_block_dim,
-      const std::string &optimization_spec_identity);
+      const std::string &optimization_spec_identity,
+      const std::string &thread_local_mode);
 
   const std::optional<TaskLaunchPolicy> &get_task_launch_policy() const;
 

@@ -190,6 +190,7 @@ py::dict offloaded_task_manifest_to_python(
   item["range_mapping"] = task.range_mapping;
   item["static_shared_bytes"] = task.static_shared_bytes;
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
+  item["thread_local_bytes"] = task.thread_local_bytes;
   return item;
 }
 

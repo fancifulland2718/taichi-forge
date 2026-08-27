@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <unordered_set>
 
@@ -28,6 +29,7 @@ class OffloadedTask {
   int grid_dim{0};
   int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
+  std::uint64_t thread_local_bytes{0};
   bool one_to_one{false};
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
@@ -51,6 +53,7 @@ class OffloadedTask {
             grid_dim,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
+            thread_local_bytes,
             one_to_one,
             sparse_list_op,
             sparse_list_snode_id,

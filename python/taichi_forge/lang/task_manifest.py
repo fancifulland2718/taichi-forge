@@ -35,6 +35,7 @@ class OffloadedTaskManifest:
     range_mapping: str
     static_shared_bytes: int
     dynamic_shared_bytes: int
+    thread_local_bytes: int
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):

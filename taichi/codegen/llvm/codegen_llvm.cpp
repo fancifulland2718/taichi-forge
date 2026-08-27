@@ -2470,6 +2470,8 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->requested_grid_dim = stmt->grid_dim;
   current_task->requested_block_dim = stmt->block_dim;
   current_task->static_shared_array_bytes = stmt->bls_size;
+  current_task->thread_local_bytes =
+      stmt->tls_size > 1 ? static_cast<std::uint64_t>(stmt->tls_size) : 0;
   current_task->one_to_one = stmt->one_to_one;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
@@ -3259,12 +3261,23 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
     if (kernel->is_accessor && !config.print_accessor_ir) {
       verbose = false;
     }
+    bool make_thread_local = config.make_thread_local;
+    if (const auto &policy = kernel->get_task_launch_policy();
+        policy.has_value()) {
+      if (policy->thread_local_mode ==
+          Kernel::TaskLaunchThreadLocalMode::enabled) {
+        make_thread_local = true;
+      } else if (policy->thread_local_mode ==
+                 Kernel::TaskLaunchThreadLocalMode::disabled) {
+        make_thread_local = false;
+      }
+    }
     irpass::offload_to_executable(
         ir, config, kernel, verbose,
         /*determine_ad_stack_size=*/kernel->autodiff_mode ==
             AutodiffMode::kReverse,
         /*lower_global_access=*/true,
-        /*make_thread_local=*/config.make_thread_local,
+        /*make_thread_local=*/make_thread_local,
         /*make_block_local=*/
         is_extension_supported(config.arch, Extension::bls) &&
             config.make_block_local);

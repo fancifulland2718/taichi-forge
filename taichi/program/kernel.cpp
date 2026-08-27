@@ -148,7 +148,8 @@ void Kernel::set_task_launch_policy(
     const std::string &mode,
     int block_dim,
     bool injected_block_dim,
-    const std::string &optimization_spec_identity) {
+    const std::string &optimization_spec_identity,
+    const std::string &thread_local_mode) {
   TI_ERROR_IF(block_dim <= 0 || block_dim > taichi_max_gpu_block_dim,
               "TaskLaunchPolicy block_dim must be in [1, {}], got {}",
               taichi_max_gpu_block_dim, block_dim);
@@ -163,6 +164,17 @@ void Kernel::set_task_launch_policy(
     policy.mode = TaskLaunchPolicyMode::require;
   } else {
     TI_ERROR("TaskLaunchPolicy mode must be 'hint' or 'require', got {}", mode);
+  }
+  if (thread_local_mode == "auto") {
+    policy.thread_local_mode = TaskLaunchThreadLocalMode::automatic;
+  } else if (thread_local_mode == "on") {
+    policy.thread_local_mode = TaskLaunchThreadLocalMode::enabled;
+  } else if (thread_local_mode == "off") {
+    policy.thread_local_mode = TaskLaunchThreadLocalMode::disabled;
+  } else {
+    TI_ERROR("TaskLaunchPolicy thread-local mode must be 'auto', 'on', or "
+             "'off', got {}",
+             thread_local_mode);
   }
   policy.block_dim = block_dim;
   policy.injected_block_dim = injected_block_dim;
@@ -185,8 +197,17 @@ std::string Kernel::task_launch_policy_cache_key() const {
   }
   const char mode =
       task_launch_policy_->mode == TaskLaunchPolicyMode::require ? 'r' : 'h';
-  return fmt::format("{}:{}:{}:{}", mode, task_launch_policy_->block_dim,
+  const char thread_local_mode =
+      task_launch_policy_->thread_local_mode ==
+              TaskLaunchThreadLocalMode::enabled
+          ? 'e'
+          : (task_launch_policy_->thread_local_mode ==
+                     TaskLaunchThreadLocalMode::disabled
+                 ? 'd'
+                 : 'a');
+  return fmt::format("{}:{}:{}:{}:{}", mode, task_launch_policy_->block_dim,
                      task_launch_policy_->injected_block_dim ? 'i' : 's',
+                     thread_local_mode,
                      task_launch_policy_->optimization_spec_identity);
 }
 

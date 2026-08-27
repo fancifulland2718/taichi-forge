@@ -98,6 +98,7 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
           std::max(task.static_shared_array_bytes, 0));
       item.dynamic_shared_bytes = static_cast<std::uint64_t>(
           std::max(task.dynamic_shared_array_bytes, 0));
+      item.thread_local_bytes = task.thread_local_bytes;
       item.selected_grid_size = positive_geometry(task.grid_dim);
       item.selected_block_size = positive_geometry(task.block_dim);
       item.actual_grid_size = item.selected_grid_size;
