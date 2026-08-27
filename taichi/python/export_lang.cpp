@@ -62,6 +62,7 @@
 
 #if defined(TI_WITH_CUDA)
 #include "taichi/rhi/cuda/cuda_context.h"
+#include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 #if defined(TI_WITH_VULKAN)
@@ -6554,6 +6555,104 @@ void export_lang(py::module &m) {
       return static_cast<int64_t>(CUDADriver::get_instance()
                                       .get_telemetry_snapshot()
                                       .jit_error_log_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_external_requests") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .external_requests);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cache_hits") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().cache_hits);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cache_misses") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().cache_misses);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_compile_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().compile_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_compile_failures") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .compile_failures);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_compile_wall_ns") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .compile_wall_ns);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cubin_loads") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().cubin_loads);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cubin_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().cubin_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cubin_unloads") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot().cubin_unloads);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cubin_current_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .cubin_current_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_cubin_peak_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .cubin_peak_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_entry_points_loaded") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .entry_points_loaded);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_artifact_multi_entry_artifacts") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_cuda_artifact_provider_telemetry_snapshot()
+              .multi_entry_artifacts);
 #else
       TI_NOT_IMPLEMENTED
 #endif

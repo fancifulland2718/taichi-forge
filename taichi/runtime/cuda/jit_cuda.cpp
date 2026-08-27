@@ -1,4 +1,5 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
+#include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
 #include "taichi/util/environ_config.h"
@@ -66,16 +67,40 @@ std::string convert(std::string new_name);
 
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
                                        int max_reg) {
-  auto artifact = select_artifact(build_canonical_artifact(M, max_reg));
-  if (this->config_.print_kernel_asm &&
-      artifact.kind == CUDAArtifactKind::ptx) {
+  auto artifact = build_canonical_artifact(M, max_reg);
+  if (this->config_.print_kernel_asm) {
     static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
                                      "module NVPTX");
     writer.write(std::string(artifact.payload.data(), artifact.code_size()));
   }
+  artifact = select_artifact(std::move(artifact));
   auto *cuda_module = load_artifact(artifact);
-  modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
+  modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module, artifact.kind,
+                                                    artifact.code_size()));
   return modules.back().get();
+}
+
+JITSessionCUDA::~JITSessionCUDA() {
+  try {
+    CUDAContext::get_instance().make_current();
+    auto context_lock = CUDAContext::get_instance().get_lock_guard();
+    for (auto &owned : modules) {
+      auto *cuda_module = dynamic_cast<JITModuleCUDA *>(owned.get());
+      if (cuda_module == nullptr || cuda_module->module_ == nullptr) {
+        continue;
+      }
+      CUDADriver::get_instance().module_unload(cuda_module->module_);
+      cuda::record_cuda_artifact_unload(
+          cuda_module->artifact_kind_ == CUDAArtifactKind::cubin,
+          cuda_module->artifact_code_size_);
+      cuda_module->module_ = nullptr;
+    }
+  } catch (const std::exception &error) {
+    TI_WARN("CUDA JIT session teardown failed: {}", error.what());
+  } catch (...) {
+    TI_WARN("CUDA JIT session teardown failed");
+  }
+  modules.clear();
 }
 
 CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
@@ -107,9 +132,7 @@ CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
 
 CUDAKernelArtifact JITSessionCUDA::select_artifact(
     CUDAKernelArtifact artifact) {
-  // The driver-only PTX path is deliberately the default. Optional providers
-  // can replace this artifact without changing LLVM lowering or wheel inputs.
-  return artifact;
+  return cuda::select_cuda_kernel_artifact(std::move(artifact), config_);
 }
 
 void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
@@ -209,6 +232,9 @@ void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
       static_cast<uint64_t>(host_wall_ms * 1000000.0),
       static_cast<uint64_t>(driver_wall_time_ms * 1000.0f), jit_diagnostics,
       info.size(), error.size());
+  cuda::record_cuda_artifact_load(artifact.entry_names.size(),
+                                  artifact.kind == CUDAArtifactKind::cubin,
+                                  artifact.code_size());
   TI_TRACE("CUDA module load time : {}ms", host_wall_ms);
   if (jit_diagnostics && load_succeeded) {
     TI_INFO(
@@ -241,6 +267,9 @@ bool JITSessionCUDA::remove_module(JITModule *module) {
   CUDAContext::get_instance().make_current();
   auto context_lock = CUDAContext::get_instance().get_lock_guard();
   CUDADriver::get_instance().module_unload(cuda_module->module_);
+  cuda::record_cuda_artifact_unload(
+      cuda_module->artifact_kind_ == CUDAArtifactKind::cubin,
+      cuda_module->artifact_code_size_);
   cuda_module->module_ = nullptr;
   modules.erase(module_it);
   return true;

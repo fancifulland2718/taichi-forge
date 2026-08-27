@@ -1,3 +1,5 @@
+#pragma once
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -76,9 +78,16 @@ class JITModuleCUDA : public JITModule {
  private:
   friend class JITSessionCUDA;
   void *module_;
+  CUDAArtifactKind artifact_kind_;
+  std::size_t artifact_code_size_;
 
  public:
-  explicit JITModuleCUDA(void *module) : module_(module) {
+  explicit JITModuleCUDA(void *module,
+                         CUDAArtifactKind artifact_kind,
+                         std::size_t artifact_code_size)
+      : module_(module),
+        artifact_kind_(artifact_kind),
+        artifact_code_size_(artifact_code_size) {
   }
 
   void *lookup_function(const std::string &name) override {
@@ -146,6 +155,7 @@ class JITSessionCUDA : public JITSession {
                  llvm::DataLayout data_layout)
       : JITSession(tlctx, config), data_layout(data_layout) {
   }
+  ~JITSessionCUDA() override;
   JITModule *add_module(std::unique_ptr<llvm::Module> M, int max_reg) override;
 
   bool remove_module(JITModule *module) override;
