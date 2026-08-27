@@ -50,8 +50,12 @@ class JITModuleCUDA : public JITModule {
     CUDAContext::get_instance().make_current();
     void *func = nullptr;
     auto t = Time::get_time();
-    auto err = CUDADriver::get_instance().module_get_function.call_with_warning(
-        &func, module_, name.c_str());
+    uint32 err;
+    {
+      TI_COMPILE_PROFILER("cuda_driver_function_lookup")
+      err = CUDADriver::get_instance().module_get_function.call_with_warning(
+          &func, module_, name.c_str());
+    }
     if (err) {
       TI_ERROR("Cannot look up function {}", name);
     }

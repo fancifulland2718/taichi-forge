@@ -62,6 +62,11 @@ constexpr uint32 CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED = 900;
 constexpr uint32 CUDA_ERROR_STREAM_CAPTURE_INVALIDATED = 901;
 constexpr uint32 CUDA_ERROR_NOT_READY = 600;
 constexpr uint32 CU_JIT_MAX_REGISTERS = 0;
+constexpr uint32 CU_JIT_WALL_TIME = 2;
+constexpr uint32 CU_JIT_INFO_LOG_BUFFER = 3;
+constexpr uint32 CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES = 4;
+constexpr uint32 CU_JIT_ERROR_LOG_BUFFER = 5;
+constexpr uint32 CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES = 6;
 constexpr uint32 CU_POINTER_ATTRIBUTE_MEMORY_TYPE = 2;
 constexpr uint32 CU_DEVICE_ATTRIBUTE_UNIFIED_ADDRESSING = 41;
 constexpr uint32 CUDA_SUCCESS = 0;
@@ -135,6 +140,13 @@ struct CUDADriverTelemetrySnapshot {
   uint64_t sync_allocation_fallback_calls;
   uint64_t async_free_calls;
   uint64_t sync_free_fallback_calls;
+  uint64_t jit_module_load_calls;
+  uint64_t jit_ptx_bytes;
+  uint64_t jit_host_wall_ns;
+  uint64_t jit_driver_wall_us;
+  uint64_t jit_diagnostic_loads;
+  uint64_t jit_info_log_bytes;
+  uint64_t jit_error_log_bytes;
 };
 
 template <typename... Args>
@@ -300,13 +312,37 @@ class CUDADriver : protected CUDADriverBase {
     return detected() && !is_musa();
   }
 
+  void record_jit_module_load(uint64_t ptx_bytes,
+                              uint64_t host_wall_ns,
+                              uint64_t driver_wall_us,
+                              bool diagnostics_enabled,
+                              uint64_t info_log_bytes,
+                              uint64_t error_log_bytes) noexcept {
+    jit_module_load_calls_.fetch_add(1, std::memory_order_relaxed);
+    jit_ptx_bytes_.fetch_add(ptx_bytes, std::memory_order_relaxed);
+    jit_host_wall_ns_.fetch_add(host_wall_ns, std::memory_order_relaxed);
+    jit_driver_wall_us_.fetch_add(driver_wall_us, std::memory_order_relaxed);
+    if (diagnostics_enabled) {
+      jit_diagnostic_loads_.fetch_add(1, std::memory_order_relaxed);
+    }
+    jit_info_log_bytes_.fetch_add(info_log_bytes, std::memory_order_relaxed);
+    jit_error_log_bytes_.fetch_add(error_log_bytes, std::memory_order_relaxed);
+  }
+
   CUDADriverTelemetrySnapshot get_telemetry_snapshot() const {
     return {lock_telemetry_.snapshot(),
             wait_telemetry_.snapshot(),
             async_allocation_calls_.load(std::memory_order_relaxed),
             sync_allocation_fallback_calls_.load(std::memory_order_relaxed),
             async_free_calls_.load(std::memory_order_relaxed),
-            sync_free_fallback_calls_.load(std::memory_order_relaxed)};
+            sync_free_fallback_calls_.load(std::memory_order_relaxed),
+            jit_module_load_calls_.load(std::memory_order_relaxed),
+            jit_ptx_bytes_.load(std::memory_order_relaxed),
+            jit_host_wall_ns_.load(std::memory_order_relaxed),
+            jit_driver_wall_us_.load(std::memory_order_relaxed),
+            jit_diagnostic_loads_.load(std::memory_order_relaxed),
+            jit_info_log_bytes_.load(std::memory_order_relaxed),
+            jit_error_log_bytes_.load(std::memory_order_relaxed)};
   }
 
  private:
@@ -320,6 +356,13 @@ class CUDADriver : protected CUDADriverBase {
   std::atomic<uint64_t> sync_allocation_fallback_calls_{0};
   std::atomic<uint64_t> async_free_calls_{0};
   std::atomic<uint64_t> sync_free_fallback_calls_{0};
+  std::atomic<uint64_t> jit_module_load_calls_{0};
+  std::atomic<uint64_t> jit_ptx_bytes_{0};
+  std::atomic<uint64_t> jit_host_wall_ns_{0};
+  std::atomic<uint64_t> jit_driver_wall_us_{0};
+  std::atomic<uint64_t> jit_diagnostic_loads_{0};
+  std::atomic<uint64_t> jit_info_log_bytes_{0};
+  std::atomic<uint64_t> jit_error_log_bytes_{0};
 
   bool cuda_version_valid_{false};
   CUDADriverProvider provider_{CUDADriverProvider::nvidia_cuda};

@@ -1,10 +1,29 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
+#include "taichi/util/environ_config.h"
+
+#include <cstdlib>
 
 namespace taichi::lang {
 
 #if defined(TI_WITH_CUDA)
+
+namespace {
+
+constexpr std::size_t kCudaJitLogCapacity = 16 * 1024;
+
+std::string cuda_jit_log_text(const std::vector<char> &buffer) {
+  const auto end = std::find(buffer.begin(), buffer.end(), '\0');
+  return std::string(buffer.begin(), end);
+}
+
+const char *cuda_jit_env(const char *name) {
+  const char *value = std::getenv(name);
+  return value != nullptr && value[0] != '\0' ? value : "<driver-default>";
+}
+
+}  // namespace
 
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
                                        int max_reg) {
@@ -29,6 +48,20 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
   uint32 options[max_num_options];
   void *option_values[max_num_options];
 
+  auto &driver = CUDADriver::get_instance();
+  const bool jit_diagnostics =
+      get_environ_config("TI_CUDA_JIT_DIAGNOSTICS", 0) != 0 &&
+      driver.nvidia_extensions_available();
+  float driver_wall_time_ms = 0.0f;
+  std::vector<char> info_log;
+  std::vector<char> error_log;
+  if (jit_diagnostics) {
+    info_log.resize(kCudaJitLogCapacity);
+    error_log.resize(kCudaJitLogCapacity);
+  }
+  uint32 info_log_capacity = static_cast<uint32>(info_log.size());
+  uint32 error_log_capacity = static_cast<uint32>(error_log.size());
+
   // Insert options
   if (max_reg != 0) {
     options[num_options] = CU_JIT_MAX_REGISTERS;
@@ -36,11 +69,69 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
     num_options++;
   }
 
+  if (jit_diagnostics) {
+    options[num_options] = CU_JIT_WALL_TIME;
+    option_values[num_options] = &driver_wall_time_ms;
+    num_options++;
+    options[num_options] = CU_JIT_INFO_LOG_BUFFER;
+    option_values[num_options] = info_log.data();
+    num_options++;
+    options[num_options] = CU_JIT_INFO_LOG_BUFFER_SIZE_BYTES;
+    option_values[num_options] = &info_log_capacity;
+    num_options++;
+    options[num_options] = CU_JIT_ERROR_LOG_BUFFER;
+    option_values[num_options] = error_log.data();
+    num_options++;
+    options[num_options] = CU_JIT_ERROR_LOG_BUFFER_SIZE_BYTES;
+    option_values[num_options] = &error_log_capacity;
+    num_options++;
+  }
+
   TI_ASSERT(num_options <= max_num_options);
 
-  CUDADriver::get_instance().module_load_data_ex(
-      &cuda_module, ptx.c_str(), num_options, options, option_values);
-  TI_TRACE("CUDA module load time : {}ms", (Time::get_time() - t) * 1000);
+  bool load_succeeded = false;
+  try {
+    TI_COMPILE_PROFILER("cuda_driver_module_load")
+    driver.module_load_data_ex(&cuda_module, ptx.c_str(), num_options, options,
+                               option_values);
+    load_succeeded = true;
+  } catch (...) {
+    const auto host_wall_ms = (Time::get_time() - t) * 1000.0;
+    const auto info = cuda_jit_log_text(info_log);
+    const auto error = cuda_jit_log_text(error_log);
+    driver.record_jit_module_load(
+        ptx.empty() ? 0 : ptx.size() - 1,
+        static_cast<uint64_t>(host_wall_ms * 1000000.0),
+        static_cast<uint64_t>(driver_wall_time_ms * 1000.0f), jit_diagnostics,
+        info.size(), error.size());
+    if (jit_diagnostics) {
+      TI_WARN("CUDA JIT module load failed: host_wall_ms={}, "
+              "driver_wall_ms={}, info='{}', error='{}'",
+              host_wall_ms, driver_wall_time_ms, info, error);
+    }
+    throw;
+  }
+
+  const auto host_wall_ms = (Time::get_time() - t) * 1000.0;
+  const auto info = cuda_jit_log_text(info_log);
+  const auto error = cuda_jit_log_text(error_log);
+  driver.record_jit_module_load(
+      ptx.empty() ? 0 : ptx.size() - 1,
+      static_cast<uint64_t>(host_wall_ms * 1000000.0),
+      static_cast<uint64_t>(driver_wall_time_ms * 1000.0f), jit_diagnostics,
+      info.size(), error.size());
+  TI_TRACE("CUDA module load time : {}ms", host_wall_ms);
+  if (jit_diagnostics && load_succeeded) {
+    TI_INFO("CUDA JIT diagnostics: route=driver_ptx, ptx_bytes={}, "
+            "host_wall_ms={}, driver_wall_ms={}, CUDA_CACHE_DISABLE={}, "
+            "CUDA_CACHE_PATH={}, CUDA_CACHE_MAXSIZE={}, "
+            "CUDA_FORCE_PTX_JIT={}, info='{}', error='{}'",
+            ptx.empty() ? 0 : ptx.size() - 1, host_wall_ms,
+            driver_wall_time_ms, cuda_jit_env("CUDA_CACHE_DISABLE"),
+            cuda_jit_env("CUDA_CACHE_PATH"),
+            cuda_jit_env("CUDA_CACHE_MAXSIZE"),
+            cuda_jit_env("CUDA_FORCE_PTX_JIT"), info, error);
+  }
   // cudaModules.push_back(cudaModule);
   modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
   return modules.back().get();

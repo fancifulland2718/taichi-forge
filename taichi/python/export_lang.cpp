@@ -6502,6 +6502,61 @@ void export_lang(py::module &m) {
 #else
       TI_NOT_IMPLEMENTED
 #endif
+    } else if (key == "cuda_jit_module_load_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_module_load_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_ptx_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          CUDADriver::get_instance().get_telemetry_snapshot().jit_ptx_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_host_wall_ns") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_host_wall_ns);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_driver_wall_us") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_driver_wall_us);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_diagnostic_loads") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_diagnostic_loads);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_info_log_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_info_log_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_jit_error_log_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(CUDADriver::get_instance()
+                                      .get_telemetry_snapshot()
+                                      .jit_error_log_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
     } else if (key == "vulkan_graph_replay_slot_saturation_fallbacks") {
 #if defined(TI_WITH_VULKAN)
       return static_cast<int64_t>(
