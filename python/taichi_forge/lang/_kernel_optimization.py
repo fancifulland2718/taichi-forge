@@ -46,7 +46,9 @@ class _ArtifactOptions:
             )
         value = self.max_registers
         if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 255
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 1 <= value <= 255
         ):
             raise ValueError("max_registers must be an integer in [1, 255]")
 
@@ -102,6 +104,19 @@ class _KernelOptimizationSpec:
         )
 
     @property
+    def compilation_payload(self):
+        payload = asdict(self)
+        # Grid residency is resolved from the materialized CUfunction at
+        # launch registration. It must not manufacture a second IR/PTX cache
+        # entry for the same block/TLS/artifact variant.
+        payload["launch"]["grid_residency_waves"] = None
+        return json.dumps(
+            {"schema_version": 1, **payload},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @property
     def identity(self):
         if self.is_baseline:
             return ""
@@ -109,8 +124,44 @@ class _KernelOptimizationSpec:
         return f"kos1:{digest}"
 
     @property
+    def compilation_identity(self):
+        baseline = type(self)(
+            ir=self.ir,
+            backend=self.backend,
+            artifact=self.artifact,
+            launch=_LaunchOptions(block_mode=self.launch.block_mode),
+        )
+        if baseline.is_baseline:
+            return ""
+        digest = hashlib.sha256(self.compilation_payload.encode("utf-8")).hexdigest()
+        return f"kos1:{digest}"
+
+    @property
     def specialization_key(self):
         return self.stable_payload
+
+    @property
+    def compilation_specialization_key(self):
+        return self.compilation_payload
+
+
+def _bind_kernel_optimization_spec(kernel, spec):
+    """Bind one private P1 spec without expanding the public kernel API."""
+
+    if not isinstance(spec, _KernelOptimizationSpec):
+        raise TypeError("spec must be a _KernelOptimizationSpec")
+    if spec.artifact.provider_mode == "request_tuning":
+        raise ValueError(
+            "an outer optimization spec cannot recursively request provider tuning"
+        )
+    if spec.backend.workgroup_size is None:
+        raise ValueError("P1 optimization specs require an explicit workgroup_size")
+    from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+    policy = TaskLaunchPolicy.block(
+        spec.backend.workgroup_size, mode=spec.launch.block_mode
+    )
+    return kernel.with_launch_policy(policy)._with_optimization_spec(spec)
 
 
 __all__ = [
@@ -119,4 +170,5 @@ __all__ = [
     "_IrOptimizationOptions",
     "_KernelOptimizationSpec",
     "_LaunchOptions",
+    "_bind_kernel_optimization_spec",
 ]

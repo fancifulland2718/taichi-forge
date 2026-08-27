@@ -76,6 +76,16 @@ class LaunchContextBuilder {
     return cuda_bounded_capacity_;
   }
 
+  void set_cuda_grid_residency_waves(std::int32_t waves) {
+    TI_ERROR_IF(waves != 1 && waves != 2 && waves != 4,
+                "CUDA grid residency waves must be 1, 2, or 4");
+    cuda_grid_residency_waves_ = waves;
+  }
+
+  std::int32_t cuda_grid_residency_waves() const noexcept {
+    return cuda_grid_residency_waves_;
+  }
+
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
   LaunchContextBuilder(const LaunchContextBuilder &) = delete;
@@ -210,6 +220,7 @@ class LaunchContextBuilder {
   bool has_cuda_bounded_range_binding_{false};
   std::vector<int> cuda_bounded_extent_arg_id_;
   std::int32_t cuda_bounded_capacity_{0};
+  std::int32_t cuda_grid_residency_waves_{0};
   std::string dispatch_label_;
 
  public:

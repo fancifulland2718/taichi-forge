@@ -1457,7 +1457,7 @@ class Kernel:
                 task_launch_policy.mode,
                 task_launch_policy.block_dim,
                 task_launch_policy_injected,
-                kernel_optimization_spec.identity,
+                kernel_optimization_spec.compilation_identity,
             )
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
@@ -1468,6 +1468,7 @@ class Kernel:
         *args,
         _allocate_all_external_grad=False,
         _explicit_external_grad_args=frozenset(),
+        _grid_residency_waves=None,
     ):
         assert len(args) == len(self.arguments), f"{len(self.arguments)} arguments needed but {len(args)} provided"
 
@@ -1476,6 +1477,8 @@ class Kernel:
 
         actual_argument_slot = 0
         launch_ctx = t_kernel.make_launch_context()
+        if _grid_residency_waves is not None:
+            launch_ctx._set_cuda_grid_residency_waves(_grid_residency_waves)
         max_arg_num = 64
         exceed_max_arg_num = False
 
@@ -2126,19 +2129,37 @@ class Kernel:
             self.materialize(key=key, args=args, arg_features=arg_features)
             return key
 
-    def _ensure_compiled_with_task_launch_policy(self, policy, *args, range_one_to_one=False):
+    def _ensure_compiled_with_task_launch_policy(
+        self,
+        policy,
+        *args,
+        range_one_to_one=False,
+        optimization_spec=None,
+    ):
         from taichi_forge.lang._kernel_optimization import _KernelOptimizationSpec
 
         with python_compile_profile_event(
             f"python.kernel.ensure_compiled_with_task_launch_policy:{self.func.__name__}"
         ):
-            optimization_spec = _KernelOptimizationSpec.from_task_launch_policy(policy)
+            if optimization_spec is None:
+                optimization_spec = _KernelOptimizationSpec.from_task_launch_policy(
+                    policy
+                )
+            elif not isinstance(optimization_spec, _KernelOptimizationSpec):
+                raise TypeError("optimization_spec must be a _KernelOptimizationSpec")
+            policy_spec = _KernelOptimizationSpec.from_task_launch_policy(policy)
+            if (
+                optimization_spec.backend != policy_spec.backend
+                or optimization_spec.launch.block_mode
+                != policy_spec.launch.block_mode
+            ):
+                raise ValueError("optimization_spec block contract does not match policy")
             instance_id, arg_features = self.mapper.lookup(args)
             key = (
                 self.func,
                 instance_id,
                 self.autodiff_mode,
-                optimization_spec.specialization_key,
+                optimization_spec.compilation_specialization_key,
                 bool(range_one_to_one),
             )
             if (
@@ -2235,8 +2256,18 @@ class Kernel:
             raise TypeError("with_launch_policy expects a TaskLaunchPolicy")
         return _TaskLaunchBinding(self, policy)
 
-    def _call_with_task_launch_policy(self, policy, *args, **kwargs):
+    def _call_with_task_launch_policy(
+        self, policy, *args, _kernel_optimization_spec=None, **kwargs
+    ):
         backend, kind = self._task_launch_backend_kind()
+        if (
+            _kernel_optimization_spec is not None
+            and _kernel_optimization_spec.launch.grid_residency_waves is not None
+            and backend != "cuda"
+        ):
+            raise TaichiRuntimeError(
+                "grid residency optimization specs require the CUDA backend"
+            )
         if policy.mode == "auto" or (kind == "cpu" and policy.mode == "hint"):
             return self(*args, **kwargs)
         if kind == "cpu":
@@ -2256,18 +2287,37 @@ class Kernel:
             raise TaichiRuntimeError("TaskLaunchPolicy cannot be used inside an automatic " "differentiation context")
 
         args = _process_args(self, args, kwargs)
-        key = self._ensure_compiled_with_task_launch_policy(policy, *args)
+        key = self._ensure_compiled_with_task_launch_policy(
+            policy, *args, optimization_spec=_kernel_optimization_spec
+        )
         self._validate_task_launch_policy_specialization(key, policy)
         kernel_cpp = self.compiled_kernels[key]
-        return self.launch_kernel(kernel_cpp, *args)
+        waves = (
+            None
+            if _kernel_optimization_spec is None
+            else _kernel_optimization_spec.launch.grid_residency_waves
+        )
+        return self.launch_kernel(
+            kernel_cpp, *args, _grid_residency_waves=waves
+        )
 
-    def _task_launch_report(self, policy, *args, **kwargs):
+    def _task_launch_report(
+        self, policy, *args, _kernel_optimization_spec=None, **kwargs
+    ):
         from taichi_forge.lang.task_launch import (
             TaskLaunchReport,
             _task_launch_resource_reports,
         )
 
         backend, kind = self._task_launch_backend_kind()
+        if (
+            _kernel_optimization_spec is not None
+            and _kernel_optimization_spec.launch.grid_residency_waves is not None
+            and backend != "cuda"
+        ):
+            raise TaichiRuntimeError(
+                "grid residency optimization specs require the CUDA backend"
+            )
         if policy.mode == "auto":
             tasks = self.task_manifest(*args, **kwargs)
             return TaskLaunchReport(
@@ -2297,7 +2347,11 @@ class Kernel:
             raise TaichiRuntimeError(f"TaskLaunchPolicy is unavailable on backend {backend}")
 
         processed = _process_args(self, args, kwargs)
-        key = self._ensure_compiled_with_task_launch_policy(policy, *processed)
+        key = self._ensure_compiled_with_task_launch_policy(
+            policy,
+            *processed,
+            optimization_spec=_kernel_optimization_spec,
+        )
         tasks = self._validate_task_launch_policy_specialization(key, policy)
         range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
         selected = range_tasks[0].selected_block_size
@@ -2418,11 +2472,25 @@ class Kernel:
 class _TaskLaunchBinding:
     """A reusable policy-bound view of a direct JIT kernel."""
 
-    def __init__(self, kernel, policy, bound_args=(), workload_profile=None):
+    def __init__(
+        self,
+        kernel,
+        policy,
+        bound_args=(),
+        workload_profile=None,
+        optimization_spec=None,
+    ):
+        from taichi_forge.lang._kernel_optimization import _KernelOptimizationSpec
+
         self._kernel = kernel
         self.policy = policy
         self._bound_args = tuple(bound_args)
         self._workload_profile = workload_profile
+        self._optimization_spec = (
+            _KernelOptimizationSpec.from_task_launch_policy(policy)
+            if optimization_spec is None
+            else optimization_spec
+        )
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
@@ -2451,6 +2519,26 @@ class _TaskLaunchBinding:
             self.policy,
             self._bound_args,
             workload_profile=profile,
+            optimization_spec=self._optimization_spec,
+        )
+
+    def _with_optimization_spec(self, spec):
+        from taichi_forge.lang._kernel_optimization import _KernelOptimizationSpec
+
+        if not isinstance(spec, _KernelOptimizationSpec):
+            raise TypeError("spec must be a _KernelOptimizationSpec")
+        policy_spec = _KernelOptimizationSpec.from_task_launch_policy(self.policy)
+        if (
+            spec.backend != policy_spec.backend
+            or spec.launch.block_mode != policy_spec.launch.block_mode
+        ):
+            raise ValueError("optimization spec block contract does not match binding")
+        return _TaskLaunchBinding(
+            self._kernel,
+            self.policy,
+            self._bound_args,
+            workload_profile=self._workload_profile,
+            optimization_spec=spec,
         )
 
     def _refresh_fast_path(self, report=None):
@@ -2467,7 +2555,8 @@ class _TaskLaunchBinding:
             self._kernel.func,
             0,
             self._kernel.autodiff_mode,
-            self.policy._specialization_key,
+            self._optimization_spec.compilation_specialization_key,
+            False,
         )
         if key in self._kernel._task_launch_policy_manifests:
             self._fast_runtime = self._kernel.runtime
@@ -2612,11 +2701,33 @@ class _TaskLaunchBinding:
                     self._fast_kernel_cpp is not None
                     and self._kernel.compiled_kernels.get(self._fast_key) is self._fast_kernel_cpp
                 ):
-                    return self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
-                key = self._kernel._ensure_compiled_with_task_launch_policy(self.policy, *processed)
+                    return self._kernel.launch_kernel(
+                        self._fast_kernel_cpp,
+                        *processed,
+                        _grid_residency_waves=(
+                            self._optimization_spec.launch.grid_residency_waves
+                        ),
+                    )
+                key = self._kernel._ensure_compiled_with_task_launch_policy(
+                    self.policy,
+                    *processed,
+                    optimization_spec=self._optimization_spec,
+                )
                 self._kernel._validate_task_launch_policy_specialization(key, self.policy)
-                return self._kernel.launch_kernel(self._kernel.compiled_kernels[key], *processed)
-            result = self._kernel._call_with_task_launch_policy(self.policy, *self._bound_args, *args, **kwargs)
+                return self._kernel.launch_kernel(
+                    self._kernel.compiled_kernels[key],
+                    *processed,
+                    _grid_residency_waves=(
+                        self._optimization_spec.launch.grid_residency_waves
+                    ),
+                )
+            result = self._kernel._call_with_task_launch_policy(
+                self.policy,
+                *self._bound_args,
+                *args,
+                _kernel_optimization_spec=self._optimization_spec,
+                **kwargs,
+            )
             if self.policy.mode == "hint" and self._kernel._task_launch_backend_kind()[1] == "cpu":
                 self._fallback_auto = True
                 self._fast_runtime = runtime
@@ -2673,7 +2784,10 @@ class _TaskLaunchBinding:
                 )
         else:
             report = self._kernel._task_launch_report(
-                self.policy, *combined_args, **kwargs
+                self.policy,
+                *combined_args,
+                _kernel_optimization_spec=self._optimization_spec,
+                **kwargs,
             )
         self._refresh_fast_path(report)
         return report

@@ -5962,6 +5962,8 @@ void export_lang(py::module &m) {
                                                generation});
            })
       .def("set_arg_rw_texture", &LaunchContextBuilder::set_arg_rw_texture)
+      .def("_set_cuda_grid_residency_waves",
+           &LaunchContextBuilder::set_cuda_grid_residency_waves)
       .def("get_struct_ret_int", &LaunchContextBuilder::get_struct_ret_int)
       .def("get_struct_ret_uint", &LaunchContextBuilder::get_struct_ret_uint)
       .def("get_struct_ret_float", &LaunchContextBuilder::get_struct_ret_float);
@@ -6816,6 +6818,57 @@ void export_lang(py::module &m) {
 #if defined(TI_WITH_CUDA)
       return static_cast<int64_t>(
           cuda::get_retained_launch_buffer_telemetry_snapshot().release_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_resolution_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_grid_residency_telemetry_snapshot().resolution_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_resolution_failures") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_grid_residency_telemetry_snapshot().resolution_failures);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_last_requested_waves") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_requested_waves);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_last_baseline_grid") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_baseline_grid);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_last_resolved_grid") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_resolved_grid);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (
+        key ==
+        "cuda_grid_residency_last_active_blocks_per_multiprocessor") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_active_blocks_per_multiprocessor);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_grid_residency_last_multiprocessor_count") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_multiprocessor_count);
 #else
       TI_NOT_IMPLEMENTED
 #endif

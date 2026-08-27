@@ -24,8 +24,19 @@ struct RetainedLaunchBufferTelemetrySnapshot {
   std::uint64_t release_calls{0};
 };
 
+struct GridResidencyTelemetrySnapshot {
+  std::uint64_t resolution_calls{0};
+  std::uint64_t resolution_failures{0};
+  std::uint64_t last_requested_waves{0};
+  std::uint64_t last_baseline_grid{0};
+  std::uint64_t last_resolved_grid{0};
+  std::uint64_t last_active_blocks_per_multiprocessor{0};
+  std::uint64_t last_multiprocessor_count{0};
+};
+
 RetainedLaunchBufferTelemetrySnapshot
 get_retained_launch_buffer_telemetry_snapshot();
+GridResidencyTelemetrySnapshot get_grid_residency_telemetry_snapshot();
 
 class KernelLauncher : public LLVM::KernelLauncher {
   using Base = LLVM::KernelLauncher;
@@ -67,6 +78,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
         ordinary_arg_buffers;
     mutable std::size_t ordinary_arg_buffer_cursor{0};
     mutable RetainedDeviceBuffer ordinary_result_buffer;
+    mutable std::array<std::once_flag, 3> grid_residency_once;
+    mutable std::array<std::vector<OffloadedTask>, 3> grid_residency_tasks;
     bool uses_root_binding{false};
   };
 
@@ -151,6 +164,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void configure_root_binding(const LLVM::CompiledKernelData &compiled,
                               Context &context);
   void ensure_root_binding(const Context &context);
+  const std::vector<OffloadedTask> &resolve_grid_residency_tasks(
+      const Context &context,
+      std::int32_t waves);
 
   bool listgen_reuse_adaptive_{false};
   // Sparse-list reuse metadata describes one CUDA runtime, not one launch.
