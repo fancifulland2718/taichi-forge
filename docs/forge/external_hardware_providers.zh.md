@@ -75,6 +75,90 @@ Vulkan SDK 是提供 header、tool 与 validation 的源码构建/开发依赖�
 也不能成为创建 Vulkan-versioned Forge wheel 的理由。未来任何 external Vulkan library 都
 必须定义自己的 provider ABI 与 lifetime 合同，不能仅因环境中存在 SDK 就被隐式加载。
 
+### 可选 CUDA 编译 provider
+
+Forge 的默认 CUDA kernel 路线仍把 PTX 交给 CUDA Driver JIT，不要求 CUDA Toolkit，也不
+执行外部程序。需要离线 cubin 或编译器级实验优化的部署，可以在启动前选择外部 `ptxas`：
+
+```powershell
+$env:TI_CUDA_PTXAS_MODE = "external"
+$env:TI_CUDA_PTXAS_PATH = "C:\CUDA\bin\ptxas.exe"
+$env:TI_CUDA_ARTIFACT_CACHE_PATH = "D:\cache\taichi-cuda-artifacts"
+```
+
+Linux 可以把 `TI_CUDA_PTXAS_PATH` 设为绝对路径，或让 `ptxas` 可由当前 process 的 `PATH`
+解析。Forge 不把 `ptxas`、CUDA Toolkit、CompileIQ 或 Python 优化包放进 wheel；这些工具
+及其版本均由应用环境管理。未设置 `TI_CUDA_PTXAS_MODE=external` 时，其它编译 provider
+变量不会改变默认 Driver JIT 路线。
+
+| 变量 | 合同 |
+| --- | --- |
+| `TI_CUDA_PTXAS_MODE` | `driver`（默认）或 `external` |
+| `TI_CUDA_PTXAS_PATH` | 可选的 `ptxas` 绝对路径；省略时使用 `PATH` |
+| `TI_CUDA_ARTIFACT_CACHE_PATH` | cubin、校验和、lock 与 worker manifest 的持久 cache 根目录 |
+| `TI_CUDA_PTXAS_TIMEOUT_SECONDS` | 单次 cache-miss `ptxas` process 的有界 timeout，默认 60 秒 |
+| `TI_CUDA_PTXAS_ACF_PATH` | 可选的静态 Advanced Controls File；与 worker 二选一 |
+| `TI_CUDA_COMPILEIQ_WORKER` | 可选的用户 worker executable 或 Python script |
+| `TI_CUDA_COMPILEIQ_PYTHON` | 执行 worker script 的独立 Python，可与 Forge Python 不同 |
+| `TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS` | 单次 cache-miss worker 的有界 timeout，默认 3600 秒 |
+
+所有变量必须在 `ti.init()` 前确定。同一个 CUDA session 首次加载 module 后，Forge 会拒绝
+切换 provider identity；需要改变配置时先让旧 work 完成，调用 `ti.reset()`，再用新配置
+初始化。cache key 绑定 PTX、GPU target、编译选项、Forge artifact schema、`ptxas` 内容与
+版本，以及 ACF/worker identity。cache hit 直接加载已校验 cubin，不重复启动 worker 或
+`ptxas`；首次 binary hash、worker 与 `ptxas` 都属于固定编译成本，不属于 kernel 的规模
+相关执行成本。
+
+CUDA Advanced Controls File 通过 `ptxas --apply-controls` 应用，因此要求 `ptxas` 13.3 或
+更新版本。静态 ACF 适合已离线资格化的固定 kernel family。由于 ACF 是实验性 compiler
+control，应用必须保留数值 oracle、compile timeout、目标 GPU 和 `ptxas` 版本，并在任何
+compile/校验失败时停用该配置；Forge 不会在失败后静默执行另一个显式 provider。
+
+CompileIQ 不作为 in-process Forge 依赖导入。用户可以在独立、受支持的 Python 环境中安装
+它，并提供一个 workload-specific worker：
+
+```powershell
+py -3.11 -m venv C:\venvs\compileiq
+C:\venvs\compileiq\Scripts\python.exe -m pip install compileiq
+$env:TI_CUDA_PTXAS_MODE = "external"
+$env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
+$env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
+```
+
+CompileIQ 当前发布线声明支持 Python 3.11--3.13；部署时仍应按所选 CompileIQ release
+重新核对其 Python 与 CUDA/`ptxas` support table。这个独立解释器约束不会改变 Forge wheel
+自身的 Python 支持矩阵。
+
+Forge 使用 versioned JSON v1 process protocol 调用：
+
+```text
+PYTHON WORKER --request REQUEST.json --response RESPONSE.json
+```
+
+request 包含 PTX 临时路径、artifact key、target、entry manifest、编译选项和精确 `ptxas`
+identity。worker 必须原子写出以下一种 response：
+
+```json
+{"schema_version": 1, "status": "pass"}
+```
+
+或：
+
+```json
+{
+  "schema_version": 1,
+  "status": "ok",
+  "acf_path": "C:/absolute/path/controls.acf",
+  "acf_sha256": "EXPECTED_SHA256"
+}
+```
+
+`pass` 表示该 artifact 使用普通 external `ptxas`；`ok` 表示先校验并复制 ACF，再调用
+`ptxas`。worker 必须自己定义代表性输入、目标函数、正确性与生命周期 gate。Forge 只在
+compile 阶段拥有 PTX 和静态选项，并不了解任意 kernel 的生产输入或物理不变量，因此不会
+自动替应用运行全局 autotuning。worker 非零退出、timeout、非法 JSON/status/path/checksum
+或不支持的 `ptxas` 都 fail closed。
+
 ## 用户环境中的已注册 provider
 
 ### cuBLAS、cuSPARSE 与 cuFFT
@@ -504,3 +588,5 @@ exact-scope、fail-closed admission 合同；否则应保持 provider 显式选�
 - [AmgX 源码与构建指南](https://github.com/NVIDIA/AMGX)
 - [NCCL 安装指南](https://docs.nvidia.com/deeplearning/nccl/install-guide/index.html)
 - [OptiX SDK 下载与 release 要求](https://developer.nvidia.com/designworks/optix/download)
+- [CUDA compiler Advanced Controls](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/nvcc.html)
+- [NVIDIA CompileIQ](https://developer.nvidia.com/cuda/compileiq)

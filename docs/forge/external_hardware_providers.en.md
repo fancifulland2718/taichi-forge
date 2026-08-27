@@ -93,6 +93,103 @@ Vulkan-versioned Forge wheel. Any future external Vulkan library must define
 its own provider ABI and lifetime contract instead of being loaded implicitly
 because the SDK is present.
 
+### Optional CUDA compilation providers
+
+The default Forge CUDA-kernel route still submits PTX to the CUDA Driver JIT.
+It requires no CUDA Toolkit and starts no external process. A deployment that
+needs offline cubins or compiler-level experimental optimization can select an
+external `ptxas` before startup:
+
+```powershell
+$env:TI_CUDA_PTXAS_MODE = "external"
+$env:TI_CUDA_PTXAS_PATH = "C:\CUDA\bin\ptxas.exe"
+$env:TI_CUDA_ARTIFACT_CACHE_PATH = "D:\cache\taichi-cuda-artifacts"
+```
+
+On Linux, set `TI_CUDA_PTXAS_PATH` to an absolute path or make `ptxas`
+resolvable from the current process's `PATH`. Forge packages no `ptxas`, CUDA
+Toolkit, CompileIQ, or Python optimizer in its wheel. The application
+environment owns every such tool and version. Other compilation-provider
+variables do not change the default Driver JIT route unless
+`TI_CUDA_PTXAS_MODE=external` is set.
+
+| Variable | Contract |
+| --- | --- |
+| `TI_CUDA_PTXAS_MODE` | `driver` (default) or `external` |
+| `TI_CUDA_PTXAS_PATH` | Optional absolute `ptxas` path; otherwise use `PATH` |
+| `TI_CUDA_ARTIFACT_CACHE_PATH` | Persistent root for cubins, checksums, locks, and worker manifests |
+| `TI_CUDA_PTXAS_TIMEOUT_SECONDS` | Bounded timeout for each cache-miss `ptxas` process; default 60 seconds |
+| `TI_CUDA_PTXAS_ACF_PATH` | Optional static Advanced Controls File; mutually exclusive with a worker |
+| `TI_CUDA_COMPILEIQ_WORKER` | Optional user worker executable or Python script |
+| `TI_CUDA_COMPILEIQ_PYTHON` | Separate Python used to run a worker script; it may differ from Forge Python |
+| `TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS` | Bounded timeout for each cache-miss worker; default 3600 seconds |
+
+Set every variable before `ti.init()`. After the first module load in a CUDA
+session, Forge rejects a change in provider identity. To change configuration,
+retire old work, call `ti.reset()`, and initialize with the new values. Cache
+keys bind the PTX, GPU target, compiler options, Forge artifact schema, `ptxas`
+content and version, and the ACF/worker identity. A cache hit loads the verified
+cubin without starting the worker or `ptxas` again. Initial binary hashing, the
+worker, and `ptxas` are fixed compilation costs, not scale-dependent kernel
+execution costs.
+
+CUDA Advanced Controls Files are applied through `ptxas --apply-controls` and
+therefore require `ptxas` 13.3 or newer. A static ACF is appropriate for a
+fixed, offline-qualified kernel family. ACF is an experimental compiler
+control, so the application must retain its numerical oracle, compile timeout,
+target GPU, and `ptxas` version, and disable the configuration after any
+compile or validation failure. Forge does not silently execute another
+explicit provider after a failure.
+
+CompileIQ is never imported as an in-process Forge dependency. Install it in a
+separate supported Python environment and supply a workload-specific worker:
+
+```powershell
+py -3.11 -m venv C:\venvs\compileiq
+C:\venvs\compileiq\Scripts\python.exe -m pip install compileiq
+$env:TI_CUDA_PTXAS_MODE = "external"
+$env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
+$env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
+```
+
+The current CompileIQ release line declares Python 3.11--3.13 support. Recheck
+the selected CompileIQ release's Python and CUDA/`ptxas` support table during
+deployment. This separate-interpreter constraint does not change the Python
+support matrix of the Forge wheel itself.
+
+Forge invokes the versioned JSON v1 process protocol as:
+
+```text
+PYTHON WORKER --request REQUEST.json --response RESPONSE.json
+```
+
+The request contains a temporary PTX path, artifact key, target, entry
+manifest, compiler options, and the exact `ptxas` identity. The worker must
+atomically write one of these responses:
+
+```json
+{"schema_version": 1, "status": "pass"}
+```
+
+or:
+
+```json
+{
+  "schema_version": 1,
+  "status": "ok",
+  "acf_path": "C:/absolute/path/controls.acf",
+  "acf_sha256": "EXPECTED_SHA256"
+}
+```
+
+`pass` uses ordinary external `ptxas` for this artifact. `ok` verifies and
+copies the ACF before invoking `ptxas`. The worker owns representative inputs,
+the objective, and correctness and lifecycle gates. Forge has only PTX and
+static options during compilation; it does not know an arbitrary kernel's
+production inputs or physical invariants and therefore does not run global
+autotuning on the application's behalf. A nonzero worker exit, timeout,
+invalid JSON/status/path/checksum, or unsupported `ptxas` fails closed.
+
 ## Registered providers from the user environment
 
 ### cuBLAS, cuSPARSE, and cuFFT
@@ -578,3 +675,5 @@ keep the provider explicit.
 - [AmgX source and build guide](https://github.com/NVIDIA/AMGX)
 - [NCCL installation guide](https://docs.nvidia.com/deeplearning/nccl/install-guide/index.html)
 - [OptiX SDK downloads and release requirements](https://developer.nvidia.com/designworks/optix/download)
+- [CUDA compiler Advanced Controls](https://docs.nvidia.com/cuda/cuda-programming-guide/02-basics/nvcc.html)
+- [NVIDIA CompileIQ](https://developer.nvidia.com/cuda/compileiq)
