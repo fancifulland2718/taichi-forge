@@ -124,7 +124,12 @@ class Kernel;
 //  27 - Vulkan kernel acceleration-structure bindings (2026-08). SPIR-V
 //       TaskAttributes now carry descriptor bindings for kernel-inline ray
 //       queries. Older cache payloads cannot retain or bind the TLAS safely.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 27;
+//  28 - Forge optimization-input audit (2026-08). Cache keys now cover every
+//       active IR/backend-shaping CompileConfig switch that was previously
+//       omitted, including global-value caching, CPU range lowering, quant
+//       lowering, SPIR-V loop unrolling, resolved GPU block limits, and the
+//       complete CUDA deterministic sparse-pool gate.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 28;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

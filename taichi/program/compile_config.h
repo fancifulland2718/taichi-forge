@@ -49,9 +49,9 @@ struct CompileConfig {
   // Intel / Mesa) all unroll loops in their own shader compilers, so the
   // spvtools-side unroll is largely redundant and only inflates compile
   // time. Default false to preserve legacy SPIR-V output bit-exactly;
-  // opt-in via ti.init(spirv_skip_loop_unroll=True). Not part of the
-  // offline-cache key (treated like spirv_parallel_codegen — the user
-  // explicitly accepts a different optimizer chain when toggling).
+  // opt-in via ti.init(spirv_skip_loop_unroll=True). Unlike the scheduling-
+  // only spirv_parallel_codegen switch, this changes emitted SPIR-V and is
+  // therefore part of the offline-cache key.
   bool spirv_skip_loop_unroll{false};
   // Phase 1c-D (taichi-forge 0.3.x): opt-in for the experimental sparse SNode
   // path on the Vulkan backend (bitmasked storage + listgen for depth-1

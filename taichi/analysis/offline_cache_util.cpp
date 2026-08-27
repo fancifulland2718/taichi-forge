@@ -62,18 +62,23 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   serializer(config.kernel_profiler);
   serializer(config.fast_math);
   serializer(config.flatten_if);
+  serializer(config.cache_loop_invariant_global_vars);
   serializer(config.make_thread_local);
   serializer(config.make_block_local);
   serializer(config.detect_read_only);
+  serializer(config.quant_opt_store_fusion);
+  serializer(config.quant_opt_atomic_demotion);
   serializer(config.default_fp->to_string());
   serializer(config.default_ip.to_string());
   if (arch_is_cpu(config.arch)) {
     serializer(config.default_cpu_block_dim);
     serializer(config.cpu_max_num_threads);
+    serializer(config.make_cpu_multithreading_loop);
   } else if (arch_is_gpu(config.arch)) {
     serializer(config.default_gpu_block_dim);
     serializer(config.gpu_max_reg);
     serializer(config.saturating_grid_dim);
+    serializer(config.max_block_dim);
     serializer(config.cpu_max_num_threads);
   }
   serializer(config.ad_stack_size);
@@ -119,6 +124,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   // SPIR-V per task, so ON/OFF and threshold changes must not share cache.
   serializer(config.spirv_adaptive_opt);
   serializer(config.spirv_adaptive_opt_threshold);
+  if (arch_uses_spirv(config.arch)) {
+    serializer(config.spirv_skip_loop_unroll);
+  }
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
   // root-buffer layout and pointer-SNode SPIR-V codegen. They MUST be
   // part of the cache key, otherwise toggling vulkan_pointer_ambient_zone
@@ -156,6 +164,7 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     // runtime metadata decisions. Include them so ON/OFF runs do not reuse
     // stale offline-cache entries.
     serializer(config.cuda_pointer_deterministic_slot);
+    serializer(config.cuda_pointer_deterministic_pool_enabled());
     serializer(config.cuda_pointer_fast_reset);
     serializer(config.cuda_listgen_reuse);
     serializer(config.bitmasked_clear_data_on_deactivate);
