@@ -6557,6 +6557,35 @@ void export_lang(py::module &m) {
 #else
       TI_NOT_IMPLEMENTED
 #endif
+    } else if (key == "cuda_retained_launch_current_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_retained_launch_buffer_telemetry_snapshot().current_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_retained_launch_peak_bytes") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_retained_launch_buffer_telemetry_snapshot().peak_bytes);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_retained_launch_allocation_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_retained_launch_buffer_telemetry_snapshot()
+              .allocation_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_retained_launch_release_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(
+          cuda::get_retained_launch_buffer_telemetry_snapshot().release_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
     } else if (key == "vulkan_graph_replay_slot_saturation_fallbacks") {
 #if defined(TI_WITH_VULKAN)
       return static_cast<int64_t>(

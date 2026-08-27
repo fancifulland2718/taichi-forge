@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -14,8 +15,33 @@
 namespace taichi::lang {
 namespace cuda {
 
+constexpr std::size_t kMaxOrdinaryLaunchArgRingSize = 8;
+
+struct RetainedLaunchBufferTelemetrySnapshot {
+  std::uint64_t current_bytes{0};
+  std::uint64_t peak_bytes{0};
+  std::uint64_t allocation_calls{0};
+  std::uint64_t release_calls{0};
+};
+
+RetainedLaunchBufferTelemetrySnapshot
+get_retained_launch_buffer_telemetry_snapshot();
+
 class KernelLauncher : public LLVM::KernelLauncher {
   using Base = LLVM::KernelLauncher;
+
+  struct RetainedDeviceBuffer {
+    RetainedDeviceBuffer() = default;
+    RetainedDeviceBuffer(const RetainedDeviceBuffer &) = delete;
+    RetainedDeviceBuffer &operator=(const RetainedDeviceBuffer &) = delete;
+    ~RetainedDeviceBuffer();
+
+    void *reserve(std::size_t required_bytes) const;
+    void release() const;
+
+    mutable void *ptr{nullptr};
+    mutable std::size_t capacity{0};
+  };
 
   struct SparseListState {
     int64 dirty_epoch{0};
@@ -36,11 +62,16 @@ class KernelLauncher : public LLVM::KernelLauncher {
     mutable std::once_flag root_binding_once;
     mutable void *root_binding{nullptr};
     mutable std::shared_ptr<void> root_binding_owner;
+    mutable std::array<RetainedDeviceBuffer,
+                       kMaxOrdinaryLaunchArgRingSize>
+        ordinary_arg_buffers;
+    mutable std::size_t ordinary_arg_buffer_cursor{0};
+    mutable RetainedDeviceBuffer ordinary_result_buffer;
     bool uses_root_binding{false};
   };
 
  public:
-  using Base::Base;
+  explicit KernelLauncher(LLVM::KernelLauncher::Config config);
 
   struct GraphLaunchPacket {
     Handle handle;
@@ -132,6 +163,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
   std::unordered_map<int, SparseListgenNodeStatistics>
       sparse_listgen_telemetry_;
   std::unordered_map<int, std::shared_ptr<const Context>> contexts_;
+  const bool retain_ordinary_launch_buffers_;
+  const std::size_t ordinary_launch_arg_ring_size_;
 };
 
 }  // namespace cuda

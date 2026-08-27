@@ -6,13 +6,15 @@ from tests import test_utils
 
 
 def _allocation_calls():
-    return (ti_core.query_int64("cuda_async_allocation_calls") +
-            ti_core.query_int64("cuda_sync_allocation_fallback_calls"))
+    return ti_core.query_int64("cuda_async_allocation_calls") + ti_core.query_int64(
+        "cuda_sync_allocation_fallback_calls"
+    )
 
 
 def _free_calls():
-    return (ti_core.query_int64("cuda_async_free_calls") +
-            ti_core.query_int64("cuda_sync_free_fallback_calls"))
+    return ti_core.query_int64("cuda_async_free_calls") + ti_core.query_int64(
+        "cuda_sync_free_fallback_calls"
+    )
 
 
 def _jit_snapshot():
@@ -26,6 +28,18 @@ def _jit_snapshot():
             "cuda_jit_diagnostic_loads",
             "cuda_jit_info_log_bytes",
             "cuda_jit_error_log_bytes",
+        )
+    }
+
+
+def _retained_launch_snapshot():
+    return {
+        key: int(ti_core.query_int64(key))
+        for key in (
+            "cuda_retained_launch_current_bytes",
+            "cuda_retained_launch_peak_bytes",
+            "cuda_retained_launch_allocation_calls",
+            "cuda_retained_launch_release_calls",
         )
     }
 
@@ -100,3 +114,80 @@ def test_cuda_void_field_launch_avoids_temporary_result_buffer():
     increment_host_array(values)
     ti.sync()
     np.testing.assert_array_equal(values, np.ones(32, dtype=np.int32))
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_scalar_launch_reuses_retained_argument_and_result_buffers():
+    counter = ti.field(dtype=ti.i32, shape=())
+
+    @ti.kernel
+    def add(amount: ti.i32):
+        ti.atomic_add(counter[None], amount)
+
+    @ti.kernel
+    def answer(scale: ti.i32) -> ti.i32:
+        return counter[None] * scale + 5
+
+    # Warm every supported retained argument slot before taking the allocation
+    # baseline. The default ring may be tuned within the bounded internal cap.
+    for _ in range(8):
+        add(1)
+    assert answer(2) == 21
+    ti.sync()
+    allocations_before = _allocation_calls()
+    frees_before = _free_calls()
+    retained_before = _retained_launch_snapshot()
+
+    for _ in range(128):
+        add(1)
+    for _ in range(16):
+        assert answer(2) >= 7
+    ti.sync()
+
+    retained_after = _retained_launch_snapshot()
+    assert _allocation_calls() == allocations_before
+    assert _free_calls() == frees_before
+    assert retained_after["cuda_retained_launch_current_bytes"] > 0
+    assert (
+        retained_after["cuda_retained_launch_peak_bytes"]
+        >= retained_after["cuda_retained_launch_current_bytes"]
+    )
+    assert (
+        retained_after["cuda_retained_launch_allocation_calls"]
+        == retained_before["cuda_retained_launch_allocation_calls"]
+    )
+    assert counter[None] == 136
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_retained_launch_buffers_release_with_snode_tree():
+    baseline = _retained_launch_snapshot()
+    builder = ti.FieldsBuilder()
+    values = ti.field(dtype=ti.i32)
+    builder.dense(ti.i, 32).place(values)
+    tree = builder.finalize()
+
+    @ti.kernel
+    def update(amount: ti.i32):
+        for i in values:
+            values[i] += amount
+
+    update(3)
+    ti.sync()
+    materialized = _retained_launch_snapshot()
+    assert (
+        materialized["cuda_retained_launch_current_bytes"]
+        > baseline["cuda_retained_launch_current_bytes"]
+    )
+
+    tree.destroy()
+    ti.sync()
+    retired = _retained_launch_snapshot()
+    assert (
+        retired["cuda_retained_launch_current_bytes"]
+        == baseline["cuda_retained_launch_current_bytes"]
+    )
+    assert (
+        retired["cuda_retained_launch_release_calls"]
+        > materialized["cuda_retained_launch_release_calls"]
+    )

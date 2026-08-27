@@ -2,7 +2,9 @@
 #include "taichi/runtime/cuda/jit_cuda.h"
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/system/profiler_annotation.h"
+#include "taichi/util/environ_config.h"
 
+#include <atomic>
 #include <cstring>
 #include <cstdint>
 #include <unordered_map>
@@ -12,6 +14,125 @@
 
 namespace taichi::lang {
 namespace cuda {
+
+namespace {
+
+struct RetainedLaunchBufferTelemetry {
+  std::atomic<std::uint64_t> current_bytes{0};
+  std::atomic<std::uint64_t> peak_bytes{0};
+  std::atomic<std::uint64_t> allocation_calls{0};
+  std::atomic<std::uint64_t> release_calls{0};
+};
+
+RetainedLaunchBufferTelemetry &retained_launch_buffer_telemetry() {
+  // Process-lifetime telemetry avoids static-destruction ordering with the
+  // Program singleton, whose CUDA launcher may release buffers during exit.
+  static auto *telemetry = new RetainedLaunchBufferTelemetry();
+  return *telemetry;
+}
+
+void update_retained_launch_peak(std::uint64_t candidate) {
+  auto &peak = retained_launch_buffer_telemetry().peak_bytes;
+  auto observed = peak.load(std::memory_order_relaxed);
+  while (observed < candidate &&
+         !peak.compare_exchange_weak(observed, candidate,
+                                     std::memory_order_relaxed,
+                                     std::memory_order_relaxed)) {
+  }
+}
+
+void record_retained_launch_allocation(std::size_t old_bytes,
+                                       std::size_t new_bytes) {
+  auto &telemetry = retained_launch_buffer_telemetry();
+  telemetry.allocation_calls.fetch_add(1, std::memory_order_relaxed);
+  const auto current = telemetry.current_bytes.fetch_add(
+                           new_bytes - old_bytes, std::memory_order_relaxed) +
+                       new_bytes - old_bytes;
+  update_retained_launch_peak(current);
+}
+
+void record_retained_launch_release(std::size_t bytes) {
+  auto &telemetry = retained_launch_buffer_telemetry();
+  telemetry.release_calls.fetch_add(1, std::memory_order_relaxed);
+  const auto previous =
+      telemetry.current_bytes.fetch_sub(bytes, std::memory_order_relaxed);
+  TI_ASSERT(previous >= bytes);
+}
+
+}  // namespace
+
+KernelLauncher::KernelLauncher(LLVM::KernelLauncher::Config config)
+    : Base(std::move(config)),
+      retain_ordinary_launch_buffers_(
+          get_environ_config("TI_CUDA_RETAIN_ORDINARY_LAUNCH_BUFFERS", 1) !=
+          0),
+      ordinary_launch_arg_ring_size_(static_cast<std::size_t>(std::clamp(
+          get_environ_config("TI_CUDA_RETAINED_LAUNCH_ARG_RING_SIZE", 1), 1,
+          static_cast<int>(kMaxOrdinaryLaunchArgRingSize)))) {
+}
+
+RetainedLaunchBufferTelemetrySnapshot
+get_retained_launch_buffer_telemetry_snapshot() {
+  const auto &telemetry = retained_launch_buffer_telemetry();
+  return {
+      telemetry.current_bytes.load(std::memory_order_relaxed),
+      telemetry.peak_bytes.load(std::memory_order_relaxed),
+      telemetry.allocation_calls.load(std::memory_order_relaxed),
+      telemetry.release_calls.load(std::memory_order_relaxed),
+  };
+}
+
+KernelLauncher::RetainedDeviceBuffer::~RetainedDeviceBuffer() {
+  try {
+    release();
+  } catch (const std::exception &error) {
+    TI_WARN("Failed to release a retained CUDA launch buffer: {}",
+            error.what());
+  } catch (...) {
+    TI_WARN("Failed to release a retained CUDA launch buffer");
+  }
+}
+
+void *KernelLauncher::RetainedDeviceBuffer::reserve(
+    std::size_t required_bytes) const {
+  if (required_bytes == 0) {
+    return nullptr;
+  }
+  if (ptr != nullptr && capacity >= required_bytes) {
+    return ptr;
+  }
+
+  void *replacement = nullptr;
+  CUDADriver::get_instance().malloc_async(&replacement, required_bytes,
+                                          nullptr);
+  const auto old_capacity = capacity;
+  if (ptr != nullptr) {
+    try {
+      CUDADriver::get_instance().mem_free_async(ptr, nullptr);
+    } catch (...) {
+      try {
+        CUDADriver::get_instance().mem_free_async(replacement, nullptr);
+      } catch (...) {
+      }
+      throw;
+    }
+  }
+  ptr = replacement;
+  capacity = required_bytes;
+  record_retained_launch_allocation(old_capacity, capacity);
+  return ptr;
+}
+
+void KernelLauncher::RetainedDeviceBuffer::release() const {
+  if (ptr == nullptr) {
+    return;
+  }
+  CUDAContext::get_instance().make_current();
+  CUDADriver::get_instance().mem_free_async(ptr, nullptr);
+  record_retained_launch_release(capacity);
+  ptr = nullptr;
+  capacity = 0;
+}
 
 namespace {
 
@@ -785,9 +906,16 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   // free while avoiding one async allocation/free pair per ordinary launch.
   auto ensure_device_result_buffer = [&] {
     if (device_result_buffer == nullptr) {
-      CUDADriver::get_instance().malloc_async(
-          (void **)&device_result_buffer,
-          std::max(ctx.result_buffer_size, sizeof(uint64)), nullptr);
+      const auto required =
+          std::max(ctx.result_buffer_size, sizeof(uint64));
+      if (retain_ordinary_launch_buffers_) {
+        device_result_buffer = static_cast<char *>(
+            launcher_ctx->ordinary_result_buffer.reserve(required));
+      } else {
+        CUDADriver::get_instance().malloc_async(
+            reinterpret_cast<void **>(&device_result_buffer), required,
+            nullptr);
+      }
     }
     return device_result_buffer;
   };
@@ -924,8 +1052,20 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   const std::size_t device_arg_buffer_size =
       arg_buffer_prefix_size + ctx.arg_buffer_size;
   if (device_arg_buffer_size > 0) {
-    CUDADriver::get_instance().malloc_async((void **)&device_arg_buffer,
-                                            device_arg_buffer_size, nullptr);
+    if (retain_ordinary_launch_buffers_) {
+      std::size_t slot = 0;
+      if (ordinary_launch_arg_ring_size_ > 1) {
+        slot = launcher_ctx->ordinary_arg_buffer_cursor++ %
+               ordinary_launch_arg_ring_size_;
+      }
+      device_arg_buffer = static_cast<char *>(
+          launcher_ctx->ordinary_arg_buffers[slot].reserve(
+              device_arg_buffer_size));
+    } else {
+      CUDADriver::get_instance().malloc_async(
+          reinterpret_cast<void **>(&device_arg_buffer),
+          device_arg_buffer_size, nullptr);
+    }
     if (ctx.has_cuda_bounded_range()) {
       auto extent_ptr_idx = ctx.cuda_bounded_extent_arg_id();
       extent_ptr_idx.push_back(TypeFactory::DATA_PTR_POS_IN_NDARRAY);
@@ -984,7 +1124,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
       invalidate_sparse_list_cache(task.sparse_mutation_snode_id);
     }
   }
-  if (device_arg_buffer_size > 0) {
+  if (!retain_ordinary_launch_buffers_ && device_arg_buffer != nullptr) {
     CUDADriver::get_instance().mem_free_async(device_arg_buffer, nullptr);
   }
   if (ctx.result_buffer_size > 0) {
@@ -992,7 +1132,7 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
         host_result_buffer, device_result_buffer, ctx.result_buffer_size,
         nullptr);
   }
-  if (device_result_buffer != nullptr) {
+  if (!retain_ordinary_launch_buffers_ && device_result_buffer != nullptr) {
     CUDADriver::get_instance().mem_free_async(device_result_buffer, nullptr);
   }
   ctx.get_context().arg_buffer = host_arg_buffer;
@@ -1089,6 +1229,10 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
         retired_sparse_snode_ids.push_back(task.sparse_list_snode_id);
       }
     }
+    for (const auto &buffer : context->ordinary_arg_buffers) {
+      buffer.release();
+    }
+    context->ordinary_result_buffer.release();
     auto module = context->jit_module;
     iter = contexts_.erase(iter);
     executor->remove_jit_module(module);
