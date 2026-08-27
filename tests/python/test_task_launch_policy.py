@@ -1,4 +1,6 @@
 from dataclasses import FrozenInstanceError
+from types import SimpleNamespace
+import json
 import threading
 
 import numpy as np
@@ -7,6 +9,7 @@ import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang import _task_launch_tuning as launch_tuning
 from tests import test_utils
 
 
@@ -29,6 +32,242 @@ def test_task_launch_policy_value_validation():
         ti.TaskLaunchPolicy.block(2048)
     with pytest.raises(ValueError, match="power of two or a multiple of 32"):
         ti.TaskLaunchPolicy.block(48)
+
+
+def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
+    task = SimpleNamespace(
+        task_type="range_for",
+        static_shared_bytes=0,
+        dynamic_shared_bytes=0,
+    )
+    config = SimpleNamespace(max_block_dim=512, offline_cache_file_path=str(tmp_path))
+    hardware = {
+        "backend": "cuda",
+        "device_name": "test-device",
+        "compute_capability": 90,
+        "driver_api_version": 13000,
+        "driver_provider": "nvidia",
+        "forge_version": "test",
+        "compiler": {"mode": "driver"},
+    }
+    coordinator = launch_tuning._TaskLaunchTuningCoordinator()
+    decision = None
+    for _ in range(launch_tuning._HOT_CALL_THRESHOLD):
+        decision = coordinator.resolve(
+            kernel_key="kernel-key",
+            tasks=(task,),
+            config=config,
+            observe=True,
+            hardware=hardware,
+            cache_root=tmp_path,
+        )
+    assert decision.status == "qualification_required"
+    assert decision.candidates == (64, 128, 256, 512)
+
+    launch_tuning._publish_qualified_record(
+        decision=decision,
+        cache_root=tmp_path,
+        block_dim=256,
+        evidence={
+            "correctness_passed": True,
+            "independent_abba_blocks": 5,
+            "worst_candidate_over_baseline_ratio": 1.001,
+        },
+    )
+    rejected = launch_tuning._TaskLaunchTuningCoordinator().resolve(
+        kernel_key="kernel-key",
+        tasks=(task,),
+        config=config,
+        observe=False,
+        hardware=hardware,
+        cache_root=tmp_path,
+    )
+    assert rejected.status == "cache_miss"
+
+    launch_tuning._publish_qualified_record(
+        decision=decision,
+        cache_root=tmp_path,
+        block_dim=256,
+        evidence={
+            "correctness_passed": True,
+            "independent_abba_blocks": 10,
+            "worst_candidate_over_baseline_ratio": 0.0,
+        },
+    )
+    nonpositive = launch_tuning._TaskLaunchTuningCoordinator().resolve(
+        kernel_key="kernel-key",
+        tasks=(task,),
+        config=config,
+        observe=False,
+        hardware=hardware,
+        cache_root=tmp_path,
+    )
+    assert nonpositive.status == "cache_miss"
+
+    launch_tuning._publish_qualified_record(
+        decision=decision,
+        cache_root=tmp_path,
+        block_dim=256,
+        evidence={
+            "correctness_passed": True,
+            "independent_abba_blocks": 10,
+            "worst_candidate_over_baseline_ratio": 0.98,
+        },
+    )
+    admitted = launch_tuning._TaskLaunchTuningCoordinator().resolve(
+        kernel_key="kernel-key",
+        tasks=(task,),
+        config=config,
+        observe=False,
+        hardware=hardware,
+        cache_root=tmp_path,
+    )
+    assert admitted.status == "qualified"
+    assert admitted.block_dim == 256
+
+    different_limit = SimpleNamespace(
+        max_block_dim=256,
+        offline_cache_file_path=str(tmp_path),
+    )
+    assert (
+        launch_tuning._TaskLaunchTuningCoordinator()
+        .resolve(
+            kernel_key="kernel-key",
+            tasks=(task,),
+            config=different_limit,
+            observe=False,
+            hardware=hardware,
+            cache_root=tmp_path,
+        )
+        .status
+        == "cache_miss"
+    )
+
+    record = next((tmp_path / "qualified").glob("*.json"))
+    corrupted = json.loads(record.read_text(encoding="utf-8"))
+    corrupted["block_dim"] = 512
+    record.write_text(json.dumps(corrupted), encoding="utf-8")
+    assert (
+        launch_tuning._TaskLaunchTuningCoordinator()
+        .resolve(
+            kernel_key="kernel-key",
+            tasks=(task,),
+            config=config,
+            observe=False,
+            hardware=hardware,
+            cache_root=tmp_path,
+        )
+        .status
+        == "cache_miss"
+    )
+
+
+def test_task_launch_tuning_coordinator_caches_are_bounded(monkeypatch):
+    monkeypatch.setattr(launch_tuning, "_MAX_RECORD_CACHE_ENTRIES", 2)
+    monkeypatch.setattr(launch_tuning, "_MAX_OBSERVED_KERNELS", 3)
+    task = SimpleNamespace(
+        task_type="range_for",
+        static_shared_bytes=0,
+        dynamic_shared_bytes=0,
+    )
+    config = SimpleNamespace(max_block_dim=512, offline_cache_file_path="")
+    hardware = {"backend": "cuda", "device_name": "bounded-test"}
+    coordinator = launch_tuning._TaskLaunchTuningCoordinator()
+    for index in range(5):
+        coordinator.resolve(
+            kernel_key=f"kernel-{index}",
+            tasks=(task,),
+            config=config,
+            observe=True,
+            hardware=hardware,
+            cache_root=None,
+        )
+    assert len(coordinator._records) == 2
+    assert len(coordinator._observed_calls) == 3
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_task_launch_auto_consumes_only_exact_qualified_record(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        launch_tuning, "_cache_root_from_config", lambda config: tmp_path
+    )
+    values = ti.ndarray(ti.i32, shape=4099)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(4099):
+            out[i] = i * 5 + 1
+
+    automatic = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
+    program = impl.get_runtime().prog
+    before = program._runtime_statistics_snapshot()["submission"]
+    initial = automatic.report(values)
+    assert initial.status == "auto"
+    assert program._runtime_statistics_snapshot()["submission"] == before
+    decision = automatic._last_auto_decision
+    assert decision.status == "cache_miss"
+    assert 256 in decision.candidates
+
+    launch_tuning._publish_qualified_record(
+        decision=decision,
+        cache_root=tmp_path,
+        block_dim=256,
+        evidence={
+            "correctness_passed": True,
+            "independent_abba_blocks": 10,
+            "worst_candidate_over_baseline_ratio": 0.97,
+        },
+    )
+    qualified = automatic.report(values)
+    assert qualified.status == "auto_qualified"
+    assert _range_task(qualified.tasks).actual_block_size == 256
+    assert program._runtime_statistics_snapshot()["submission"] == before
+
+    automatic(values)
+    ti.sync()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.arange(4099, dtype=np.int32) * 5 + 1
+    )
+
+    record_id = decision.record_id
+    ti.reset()
+    ti.init(arch=ti.cuda, offline_cache=False)
+    values = ti.ndarray(ti.i32, shape=4099)
+    after_reset = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
+    entries_before = int(
+        ti_core.query_int64("cuda_artifact_entry_points_loaded")
+    )
+    reset_report = after_reset.report(values)
+    assert reset_report.status == "auto_qualified"
+    assert after_reset._last_auto_decision.record_id == record_id
+    after_reset(values)
+    ti.sync()
+    entries_after = int(
+        ti_core.query_int64("cuda_artifact_entry_points_loaded")
+    )
+    assert entries_after - entries_before == 1
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.arange(4099, dtype=np.int32) * 5 + 1
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.vulkan], offline_cache=False)
+def test_task_launch_auto_remains_default_on_non_cuda_backends():
+    values = ti.ndarray(ti.i32, shape=257)
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(257):
+            out[i] = i + 7
+
+    automatic = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
+    assert automatic.report(values).status == "auto"
+    automatic(values)
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.arange(257, dtype=np.int32) + 7
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

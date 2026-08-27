@@ -1,5 +1,6 @@
 import ast
 import copy
+from dataclasses import replace
 import functools
 import inspect
 import operator
@@ -1127,6 +1128,7 @@ class Kernel:
         self._ordinary_launch_plans = []
         self._ordinary_launch_plan_negative_keys = set()
         self._task_launch_policy_manifests = {}
+        self._task_launch_auto_failed_records = set()
         self._external_grad_accesses = {}
         self._materializing_external_grad_accesses = set()
         # First-level index for executable templates already validated by the
@@ -2183,6 +2185,35 @@ class Kernel:
         self._task_launch_policy_manifests[key] = tasks
         return tasks
 
+    def _task_launch_auto_decision(self, args, *, observe):
+        """Resolve an exact qualified launch record without submitting work."""
+
+        from taichi_forge.lang._task_launch_tuning import _coordinator
+        from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+        instance_id, arg_features = self.mapper.lookup(args)
+        key = (self.func, instance_id, self.autodiff_mode)
+        self.materialize(key=key, args=args, arg_features=arg_features)
+        kernel_cpp = self.compiled_kernels[key]
+        kernel_key = self.runtime.prog._kernel_cache_key_no_compile(kernel_cpp)
+        decision = _coordinator.resolve(
+            kernel_key=kernel_key,
+            tasks=None,
+            config=impl.current_cfg(),
+            observe=observe,
+        )
+        if decision.status == "qualified":
+            return key, (), decision
+        raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
+        tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+        decision = _coordinator.resolve(
+            kernel_key=kernel_key,
+            tasks=tasks,
+            config=impl.current_cfg(),
+            observe=False,
+        )
+        return key, tasks, decision
+
     @staticmethod
     def _task_launch_backend_kind():
         backend = _ti_core.arch_name(impl.current_cfg().arch)
@@ -2391,7 +2422,19 @@ class _TaskLaunchBinding:
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
-        self._fallback_auto = policy.mode == "auto"
+        self._fallback_auto = False
+        self._last_auto_decision = None
+        self._auto_cache_runtime = None
+        self._auto_cache_generation = -1
+        self._auto_cache_decision = None
+        self._auto_default_runtime = None
+        self._auto_default_generation = -1
+        if policy.mode == "auto":
+            from taichi_forge.lang._task_launch_tuning import _coordinator
+
+            self._auto_coordinator = _coordinator
+        else:
+            self._auto_coordinator = None
         self.__name__ = kernel.func.__name__
 
     def _refresh_fast_path(self, report=None):
@@ -2415,10 +2458,127 @@ class _TaskLaunchBinding:
             self._fast_key = key
             self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
 
+    def _auto_resolution(self, args, kwargs, *, observe):
+        from taichi_forge.lang._task_launch_tuning import (
+            _HOT_CALL_THRESHOLD,
+            _coordinator,
+        )
+
+        runtime = self._kernel.runtime
+        if (
+            self._kernel._task_launch_backend_kind()[0] != "cuda"
+            or self._kernel.autodiff_mode != AutodiffMode.NONE
+            or runtime.target_tape is not None
+            or runtime.fwd_mode_manager is not None
+            or runtime.grad_replaced
+        ):
+            return None, None
+        if (
+            not self._kernel.mapper._dynamic_arg_extractors
+            and self._auto_cache_runtime is runtime
+            and self._auto_cache_generation == _coordinator.generation
+            and self._auto_cache_decision is not None
+        ):
+            decision = self._auto_cache_decision
+            if (
+                observe
+                and decision.observed_calls
+                < _HOT_CALL_THRESHOLD
+            ):
+                decision = _coordinator.observe_cached(decision)
+                self._auto_cache_decision = decision
+            self._last_auto_decision = decision
+            if decision.status == "qualification_required":
+                self._auto_default_runtime = runtime
+                self._auto_default_generation = _coordinator.generation
+            if (
+                decision.status != "qualified"
+                or decision.record_id
+                in self._kernel._task_launch_auto_failed_records
+            ):
+                return None, None
+            from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+            return _process_args(self._kernel, args, kwargs), TaskLaunchPolicy.block(
+                decision.block_dim, mode="require"
+            )
+        processed = _process_args(self._kernel, args, kwargs)
+        _, _, decision = self._kernel._task_launch_auto_decision(
+            processed, observe=observe
+        )
+        self._last_auto_decision = decision
+        if not self._kernel.mapper._dynamic_arg_extractors:
+            self._auto_cache_runtime = runtime
+            self._auto_cache_generation = _coordinator.generation
+            self._auto_cache_decision = decision
+        if (
+            decision is None
+            or decision.status != "qualified"
+            or decision.record_id
+            in self._kernel._task_launch_auto_failed_records
+        ):
+            return processed, None
+        from taichi_forge.lang.task_launch import TaskLaunchPolicy
+
+        return processed, TaskLaunchPolicy.block(
+            decision.block_dim, mode="require"
+        )
+
+    def _call_auto(self, args, kwargs):
+        runtime = self._kernel.runtime
+        if (
+            self._fast_runtime is runtime
+            and runtime.target_tape is None
+            and runtime.fwd_mode_manager is None
+            and not runtime.grad_replaced
+        ):
+            processed = _process_args(self._kernel, args, kwargs)
+            if (
+                self._fast_kernel_cpp is not None
+                and self._kernel.compiled_kernels.get(self._fast_key)
+                is self._fast_kernel_cpp
+            ):
+                return self._kernel.launch_kernel(
+                    self._fast_kernel_cpp, *processed
+                )
+
+        processed, resolved = self._auto_resolution(args, kwargs, observe=True)
+        if resolved is None:
+            return self._kernel(*args, **kwargs)
+        try:
+            key = self._kernel._ensure_compiled_with_task_launch_policy(
+                resolved, *processed
+            )
+            self._kernel._validate_task_launch_policy_specialization(
+                key, resolved
+            )
+        except (TaichiCompilationError, TaichiRuntimeError):
+            self._kernel._task_launch_auto_failed_records.add(
+                self._last_auto_decision.record_id
+            )
+            return self._kernel(*args, **kwargs)
+        if not self._kernel.mapper._dynamic_arg_extractors:
+            self._fast_runtime = runtime
+            self._fast_key = key
+            self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+        return self._kernel.launch_kernel(
+            self._kernel.compiled_kernels[key], *processed
+        )
+
     def __call__(self, *args, **kwargs):
         try:
             runtime = self._kernel.runtime
-            if self.policy.mode == "auto" or (self._fallback_auto and self._fast_runtime is runtime):
+            combined_args = (*self._bound_args, *args)
+            if self.policy.mode == "auto":
+                if self._auto_default_runtime is runtime:
+                    if (
+                        self._auto_default_generation
+                        == self._auto_coordinator.generation
+                    ):
+                        return self._kernel(*combined_args, **kwargs)
+                    self._auto_default_runtime = None
+                return self._call_auto(combined_args, kwargs)
+            if self._fallback_auto and self._fast_runtime is runtime:
                 return self._kernel(*self._bound_args, *args, **kwargs)
             if (
                 self._fast_runtime is runtime
@@ -2449,8 +2609,51 @@ class _TaskLaunchBinding:
 
     def report(self, *args, **kwargs):
         """Compile if needed and report resolution without submitting work."""
-
-        report = self._kernel._task_launch_report(self.policy, *self._bound_args, *args, **kwargs)
+        combined_args = (*self._bound_args, *args)
+        if self.policy.mode == "auto":
+            _, resolved = self._auto_resolution(
+                combined_args, kwargs, observe=False
+            )
+            if resolved is not None:
+                try:
+                    report = self._kernel._task_launch_report(
+                        resolved, *combined_args, **kwargs
+                    )
+                except (TaichiCompilationError, TaichiRuntimeError):
+                    self._kernel._task_launch_auto_failed_records.add(
+                        self._last_auto_decision.record_id
+                    )
+                else:
+                    report = replace(
+                        report,
+                        policy=self.policy,
+                        status="auto_qualified",
+                        reason=self._last_auto_decision.reason,
+                    )
+                    if not self._kernel.mapper._dynamic_arg_extractors:
+                        processed = _process_args(
+                            self._kernel, combined_args, kwargs
+                        )
+                        key = self._kernel._ensure_compiled_with_task_launch_policy(
+                            resolved, *processed
+                        )
+                        self._fast_runtime = self._kernel.runtime
+                        self._fast_key = key
+                        self._fast_kernel_cpp = self._kernel.compiled_kernels[
+                            key
+                        ]
+                    return report
+            report = self._kernel._task_launch_report(
+                self.policy, *combined_args, **kwargs
+            )
+            if self._last_auto_decision is not None:
+                report = replace(
+                    report, reason=self._last_auto_decision.reason
+                )
+        else:
+            report = self._kernel._task_launch_report(
+                self.policy, *combined_args, **kwargs
+            )
         self._refresh_fast_path(report)
         return report
 

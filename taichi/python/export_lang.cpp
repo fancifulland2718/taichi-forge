@@ -28,6 +28,7 @@
 #include "taichi/ir/expression_ops.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/analysis/offline_cache_util.h"
 #include "taichi/program/graph_builder.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/ndarray.h"
@@ -890,6 +891,21 @@ void export_lang(py::module &m) {
            })
       .def("kernel_profiler_total_time",
            [](Program *program) { return program->profiler->get_total_time(); })
+      .def("_kernel_cache_key_no_compile",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "Kernel cache-key query received a null kernel");
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             auto key = kernel->get_cached_kernel_key();
+             if (key.empty()) {
+               key = get_hashed_offline_cache_key(
+                   program.compile_config(), program.get_device_caps(),
+                   kernel);
+               kernel->set_kernel_key_for_cache(key);
+             }
+             return key;
+           })
       .def("_kernel_task_manifest",
            [](Program &program, Kernel *kernel) {
              TI_ERROR_IF(kernel == nullptr,
@@ -2447,6 +2463,23 @@ void export_lang(py::module &m) {
               context.get_codegen_compute_capability();
           result["ptx_version"] = context.get_ptx_version();
         }
+#endif
+        return result;
+      })
+      .def("_cuda_device_identity", [](Program *program) {
+        py::dict result;
+#ifdef TI_WITH_CUDA
+        TI_ERROR_IF(program->compile_config().arch != Arch::cuda,
+                    "CUDA device identity requires the CUDA backend");
+        auto &context = CUDAContext::get_instance();
+        result["device_name"] = context.get_device_name();
+        result["device_compute_capability"] =
+            context.get_compute_capability();
+        result["codegen_compute_capability"] =
+            context.get_codegen_compute_capability();
+        result["target"] = context.get_mcpu() + "|" + context.get_mattrs();
+#else
+        TI_NOT_IMPLEMENTED
 #endif
         return result;
       })
