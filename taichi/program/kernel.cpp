@@ -144,9 +144,11 @@ const std::optional<std::string> &Kernel::get_compile_tier_override() const {
   return compile_tier_override_;
 }
 
-void Kernel::set_task_launch_policy(const std::string &mode,
-                                    int block_dim,
-                                    bool injected_block_dim) {
+void Kernel::set_task_launch_policy(
+    const std::string &mode,
+    int block_dim,
+    bool injected_block_dim,
+    const std::string &optimization_spec_identity) {
   TI_ERROR_IF(block_dim <= 0 || block_dim > taichi_max_gpu_block_dim,
               "TaskLaunchPolicy block_dim must be in [1, {}], got {}",
               taichi_max_gpu_block_dim, block_dim);
@@ -164,6 +166,10 @@ void Kernel::set_task_launch_policy(const std::string &mode,
   }
   policy.block_dim = block_dim;
   policy.injected_block_dim = injected_block_dim;
+  TI_ERROR_IF(optimization_spec_identity.empty(),
+              "TaskLaunchPolicy requires a non-empty optimization spec "
+              "identity");
+  policy.optimization_spec_identity = optimization_spec_identity;
   task_launch_policy_ = policy;
   invalidate_kernel_key_for_cache();
 }
@@ -179,8 +185,16 @@ std::string Kernel::task_launch_policy_cache_key() const {
   }
   const char mode =
       task_launch_policy_->mode == TaskLaunchPolicyMode::require ? 'r' : 'h';
-  return fmt::format("{}:{}:{}", mode, task_launch_policy_->block_dim,
-                     task_launch_policy_->injected_block_dim ? 'i' : 's');
+  return fmt::format("{}:{}:{}:{}", mode, task_launch_policy_->block_dim,
+                     task_launch_policy_->injected_block_dim ? 'i' : 's',
+                     task_launch_policy_->optimization_spec_identity);
+}
+
+const std::string &Kernel::optimization_spec_identity() const {
+  static const std::string kEmptyIdentity;
+  return task_launch_policy_.has_value()
+             ? task_launch_policy_->optimization_spec_identity
+             : kEmptyIdentity;
 }
 
 void Kernel::set_snode_tree_dependencies(

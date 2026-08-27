@@ -37,6 +37,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
     TaskLaunchPolicyMode mode{TaskLaunchPolicyMode::hint};
     int block_dim{0};
     bool injected_block_dim{false};
+    std::string optimization_spec_identity;
   };
 
   std::vector<SNode *> no_activate;
@@ -95,13 +96,17 @@ class TI_DLL_EXPORT Kernel : public Callable {
   // N1: immutable per-Kernel launch-policy metadata. Python materializes a
   // distinct Kernel for every policy specialization, so this is configured
   // before the first compilation and is never mutated on a warm launch.
-  void set_task_launch_policy(const std::string &mode,
-                              int block_dim,
-                              bool injected_block_dim);
+  void set_task_launch_policy(
+      const std::string &mode,
+      int block_dim,
+      bool injected_block_dim,
+      const std::string &optimization_spec_identity);
 
   const std::optional<TaskLaunchPolicy> &get_task_launch_policy() const;
 
   std::string task_launch_policy_cache_key() const;
+
+  const std::string &optimization_spec_identity() const;
 
   const std::vector<int> &snode_tree_dependencies() const {
     return snode_tree_dependencies_;

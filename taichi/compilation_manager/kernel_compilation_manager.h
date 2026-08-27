@@ -183,6 +183,7 @@ class KernelCompilationManager final {
   // previously registered `kernel_key` in `in_progress_keys_`.
   const CompiledKernelData &install_compiled_kernel_locked(
       const std::string &kernel_key,
+      const std::string &optimization_spec_identity,
       CacheData::CacheMode cache_mode,
       std::unique_ptr<CompiledKernelData> compiled);
 

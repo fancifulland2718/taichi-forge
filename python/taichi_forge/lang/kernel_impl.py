@@ -1309,6 +1309,7 @@ class Kernel:
         args=None,
         arg_features=None,
         task_launch_policy=None,
+        kernel_optimization_spec=None,
         range_one_to_one=False,
     ):
         if key is None:
@@ -1362,6 +1363,7 @@ class Kernel:
                 args,
                 arg_features,
                 task_launch_policy,
+                kernel_optimization_spec,
                 range_one_to_one,
             )
             self.runtime._compiled_specialization_count += 1
@@ -1374,6 +1376,7 @@ class Kernel:
         args,
         arg_features,
         task_launch_policy=None,
+        kernel_optimization_spec=None,
         range_one_to_one=False,
     ):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
@@ -1448,10 +1451,13 @@ class Kernel:
         if self.opt_level is not None:
             taichi_kernel.set_compile_tier_override(self.opt_level)
         if task_launch_policy is not None and task_launch_policy.mode != "auto":
+            assert kernel_optimization_spec is not None
+            assert kernel_optimization_spec.identity
             taichi_kernel.set_task_launch_policy(
                 task_launch_policy.mode,
                 task_launch_policy.block_dim,
                 task_launch_policy_injected,
+                kernel_optimization_spec.identity,
             )
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
@@ -2121,15 +2127,18 @@ class Kernel:
             return key
 
     def _ensure_compiled_with_task_launch_policy(self, policy, *args, range_one_to_one=False):
+        from taichi_forge.lang._kernel_optimization import _KernelOptimizationSpec
+
         with python_compile_profile_event(
             f"python.kernel.ensure_compiled_with_task_launch_policy:{self.func.__name__}"
         ):
+            optimization_spec = _KernelOptimizationSpec.from_task_launch_policy(policy)
             instance_id, arg_features = self.mapper.lookup(args)
             key = (
                 self.func,
                 instance_id,
                 self.autodiff_mode,
-                policy._specialization_key,
+                optimization_spec.specialization_key,
                 bool(range_one_to_one),
             )
             if (
@@ -2146,6 +2155,7 @@ class Kernel:
                 args=args,
                 arg_features=arg_features,
                 task_launch_policy=policy,
+                kernel_optimization_spec=optimization_spec,
                 range_one_to_one=range_one_to_one,
             )
             return key

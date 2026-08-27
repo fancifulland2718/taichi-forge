@@ -143,6 +143,14 @@ class CompiledKernelData {
     return kernel_identity_;
   }
 
+  void set_optimization_spec_identity(std::string identity) {
+    optimization_spec_identity_ = std::move(identity);
+  }
+
+  const std::string &optimization_spec_identity() const {
+    return optimization_spec_identity_;
+  }
+
   void set_snode_relocation_descriptor(
       SNodeRelocationDescriptor descriptor) {
     snode_relocation_descriptor_ = std::move(descriptor);
@@ -218,6 +226,7 @@ class CompiledKernelData {
   // not be cached by a reusable raw object address.
   mutable std::optional<KernelLaunchHandle> graph_masked_launch_handle_;
   std::string kernel_identity_;
+  std::string optimization_spec_identity_;
   SNodeRelocationDescriptor snode_relocation_descriptor_;
 };
 

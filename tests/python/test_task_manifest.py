@@ -35,6 +35,7 @@ def test_task_manifest_is_stable_read_only_and_does_not_launch():
     assert first == second
     assert len({task.task_id for task in first}) == len(first)
     assert all(task.task_id.startswith("tf:") for task in first)
+    assert all(task.optimization_spec_id == "" for task in first)
     assert all(
         task.backend == ti_core.arch_name(impl.current_cfg().arch) for task in first
     )

@@ -244,7 +244,8 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     }
   }
   const auto &result = install_compiled_kernel_locked(
-      kernel_key, cache_mode, std::move(compiled));
+      kernel_key, kernel_def.optimization_spec_identity(), cache_mode,
+      std::move(compiled));
   in_progress_keys_.erase(kernel_key);
   cache_cv_.notify_all();
   return result;
@@ -856,6 +857,7 @@ KernelCompilationManager::ensure_execution_handle_locked(
 const CompiledKernelData &
 KernelCompilationManager::install_compiled_kernel_locked(
     const std::string &kernel_key,
+    const std::string &optimization_spec_identity,
     CacheData::CacheMode cache_mode,
     std::unique_ptr<CompiledKernelData> compiled) {
   // Precondition: cache_mutex_ held by caller; `kernel_key` is present in
@@ -867,6 +869,7 @@ KernelCompilationManager::install_compiled_kernel_locked(
   // kernel_key at a time, so this must still be absent.
   TI_ASSERT(caching_kernels_.find(kernel_key) == caching_kernels_.end());
   compiled->set_kernel_identity(kernel_key);
+  compiled->set_optimization_spec_identity(optimization_spec_identity);
   KernelCacheData k;
   k.kernel_key = kernel_key;
   k.created_at = k.last_used_at = std::time(nullptr);

@@ -332,6 +332,7 @@ def test_task_launch_policy_cross_backend_correctness_and_report():
             out[i] = i * 3 + 7
 
     auto_manifest = fill.task_manifest(values)
+    assert all(task.optimization_spec_id == "" for task in auto_manifest)
     hint = fill.with_launch_policy(ti.TaskLaunchPolicy.block(256))
     report = hint.report(values)
     assert report.policy == hint.policy
@@ -367,13 +368,19 @@ def test_task_launch_policy_cross_backend_correctness_and_report():
         assert task.selected_block_size == 256
         assert task.actual_block_size == 256
         assert task.task_id != _range_task(auto_manifest).task_id
+        assert task.optimization_spec_id.startswith("kos1:")
 
         required = fill.with_launch_policy(
             ti.TaskLaunchPolicy.block(256, mode="require")
         )
         required(values)
         ti.sync()
-        assert required.report(values).status == "applied"
+        required_report = required.report(values)
+        assert required_report.status == "applied"
+        assert (
+            _range_task(required_report.tasks).optimization_spec_id
+            != task.optimization_spec_id
+        )
 
 
 
