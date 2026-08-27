@@ -5,6 +5,8 @@
 
 #include <cstdlib>
 
+#include "llvm/IR/Metadata.h"
+
 namespace taichi::lang {
 
 #if defined(TI_WITH_CUDA)
@@ -23,30 +25,113 @@ const char *cuda_jit_env(const char *name) {
   return value != nullptr && value[0] != '\0' ? value : "<driver-default>";
 }
 
+std::vector<std::string> cuda_kernel_entry_names(llvm::Module &module) {
+  std::vector<std::string> entries;
+  auto *annotations = module.getNamedMetadata("nvvm.annotations");
+  if (annotations == nullptr) {
+    return entries;
+  }
+  for (const auto *node : annotations->operands()) {
+    if (node->getNumOperands() < 3) {
+      continue;
+    }
+    const auto *key =
+        llvm::dyn_cast_if_present<llvm::MDString>(node->getOperand(1).get());
+    const auto *value = llvm::dyn_cast_if_present<llvm::ValueAsMetadata>(
+        node->getOperand(0).get());
+    if (key == nullptr || key->getString() != "kernel" || value == nullptr) {
+      continue;
+    }
+    const auto *function = llvm::dyn_cast<llvm::Function>(value->getValue());
+    if (function != nullptr) {
+      entries.push_back(function->getName().str());
+    }
+  }
+  return entries;
+}
+
+const char *cuda_artifact_kind_name(CUDAArtifactKind kind) {
+  switch (kind) {
+    case CUDAArtifactKind::ptx:
+      return "ptx";
+    case CUDAArtifactKind::cubin:
+      return "cubin";
+  }
+  TI_NOT_IMPLEMENTED
+}
+
 }  // namespace
+
+std::string convert(std::string new_name);
 
 JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
                                        int max_reg) {
-  auto ptx = compile_module_to_ptx(M);
-  if (this->config_.print_kernel_asm) {
+  auto artifact = select_artifact(build_canonical_artifact(M, max_reg));
+  if (this->config_.print_kernel_asm &&
+      artifact.kind == CUDAArtifactKind::ptx) {
     static FileSequenceWriter writer("taichi_kernel_nvptx_{:04d}.ptx",
                                      "module NVPTX");
-    writer.write(ptx);
+    writer.write(std::string(artifact.payload.data(), artifact.code_size()));
   }
+  auto *cuda_module = load_artifact(artifact);
+  modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
+  return modules.back().get();
+}
+
+CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
+    std::unique_ptr<llvm::Module> &module,
+    int max_reg) {
+  CUDAKernelArtifact artifact;
+  artifact.kind = CUDAArtifactKind::ptx;
+
+  // Canonicalize names before capturing the entry manifest. LLVM's optimizer
+  // may discard metadata nodes after code generation, so the manifest cannot
+  // be reconstructed reliably from the emitted module.
+  for (auto &global : module->globals()) {
+    global.setName(convert(global.getName().str()));
+  }
+  for (auto &function : *module) {
+    function.setName(convert(function.getName().str()));
+  }
+  artifact.entry_names = cuda_kernel_entry_names(*module);
+  artifact.payload = emit_module_to_ptx(module);
+  artifact.target_identity = CUDAContext::get_instance().get_mcpu() + "|" +
+                             CUDAContext::get_instance().get_mattrs();
+  artifact.provider_identity = "llvm_nvptx";
+  artifact.max_registers = max_reg;
+  artifact.fast_math = config_.fast_math;
+  artifact.llvm_opt_level = effective_llvm_opt_level(
+      config_.llvm_opt_level, config_.compile_tier, /*min_level=*/1);
+  return artifact;
+}
+
+CUDAKernelArtifact JITSessionCUDA::select_artifact(
+    CUDAKernelArtifact artifact) {
+  // The driver-only PTX path is deliberately the default. Optional providers
+  // can replace this artifact without changing LLVM lowering or wheel inputs.
+  return artifact;
+}
+
+void *JITSessionCUDA::load_artifact(const CUDAKernelArtifact &artifact) {
   // TODO: figure out why using the guard leads to wrong tests results
   // auto context_guard = CUDAContext::get_instance().get_guard();
   CUDAContext::get_instance().make_current();
   // Create module for object
-  void *cuda_module;
-  TI_TRACE("PTX size: {:.2f}KB", ptx.size() / 1024.0);
+  void *cuda_module = nullptr;
+  TI_TRACE("CUDA {} artifact size: {:.2f}KB",
+           cuda_artifact_kind_name(artifact.kind),
+           artifact.code_size() / 1024.0);
   auto t = Time::get_time();
-  TI_TRACE("Loading module...");
+  TI_TRACE("Loading CUDA artifact: kind={}, provider={}, target={}, entries={}",
+           cuda_artifact_kind_name(artifact.kind), artifact.provider_identity,
+           artifact.target_identity, artifact.entry_names.size());
   [[maybe_unused]] auto _ = CUDAContext::get_instance().get_lock_guard();
 
   constexpr int max_num_options = 8;
   int num_options = 0;
   uint32 options[max_num_options];
   void *option_values[max_num_options];
+  int max_registers = artifact.max_registers;
 
   auto &driver = CUDADriver::get_instance();
   const bool jit_diagnostics =
@@ -63,9 +148,9 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
   uint32 error_log_capacity = static_cast<uint32>(error_log.size());
 
   // Insert options
-  if (max_reg != 0) {
+  if (artifact.kind == CUDAArtifactKind::ptx && max_registers != 0) {
     options[num_options] = CU_JIT_MAX_REGISTERS;
-    option_values[num_options] = &max_reg;
+    option_values[num_options] = &max_registers;
     num_options++;
   }
 
@@ -92,22 +177,26 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
   bool load_succeeded = false;
   try {
     TI_COMPILE_PROFILER("cuda_driver_module_load")
-    driver.module_load_data_ex(&cuda_module, ptx.c_str(), num_options, options,
-                               option_values);
+    driver.module_load_data_ex(&cuda_module,
+                               reinterpret_cast<const char *>(artifact.data()),
+                               num_options, options, option_values);
     load_succeeded = true;
   } catch (...) {
     const auto host_wall_ms = (Time::get_time() - t) * 1000.0;
     const auto info = cuda_jit_log_text(info_log);
     const auto error = cuda_jit_log_text(error_log);
     driver.record_jit_module_load(
-        ptx.empty() ? 0 : ptx.size() - 1,
+        artifact.kind == CUDAArtifactKind::ptx ? artifact.code_size() : 0,
         static_cast<uint64_t>(host_wall_ms * 1000000.0),
         static_cast<uint64_t>(driver_wall_time_ms * 1000.0f), jit_diagnostics,
         info.size(), error.size());
     if (jit_diagnostics) {
-      TI_WARN("CUDA JIT module load failed: host_wall_ms={}, "
-              "driver_wall_ms={}, info='{}', error='{}'",
-              host_wall_ms, driver_wall_time_ms, info, error);
+      TI_WARN(
+          "CUDA artifact load failed: kind={}, provider={}, target={}, "
+          "host_wall_ms={}, driver_wall_ms={}, info='{}', error='{}'",
+          cuda_artifact_kind_name(artifact.kind), artifact.provider_identity,
+          artifact.target_identity, host_wall_ms, driver_wall_time_ms, info,
+          error);
     }
     throw;
   }
@@ -116,33 +205,34 @@ JITModule *JITSessionCUDA ::add_module(std::unique_ptr<llvm::Module> M,
   const auto info = cuda_jit_log_text(info_log);
   const auto error = cuda_jit_log_text(error_log);
   driver.record_jit_module_load(
-      ptx.empty() ? 0 : ptx.size() - 1,
+      artifact.kind == CUDAArtifactKind::ptx ? artifact.code_size() : 0,
       static_cast<uint64_t>(host_wall_ms * 1000000.0),
       static_cast<uint64_t>(driver_wall_time_ms * 1000.0f), jit_diagnostics,
       info.size(), error.size());
   TI_TRACE("CUDA module load time : {}ms", host_wall_ms);
   if (jit_diagnostics && load_succeeded) {
-    TI_INFO("CUDA JIT diagnostics: route=driver_ptx, ptx_bytes={}, "
-            "host_wall_ms={}, driver_wall_ms={}, CUDA_CACHE_DISABLE={}, "
-            "CUDA_CACHE_PATH={}, CUDA_CACHE_MAXSIZE={}, "
-            "CUDA_FORCE_PTX_JIT={}, info='{}', error='{}'",
-            ptx.empty() ? 0 : ptx.size() - 1, host_wall_ms,
-            driver_wall_time_ms, cuda_jit_env("CUDA_CACHE_DISABLE"),
-            cuda_jit_env("CUDA_CACHE_PATH"),
-            cuda_jit_env("CUDA_CACHE_MAXSIZE"),
-            cuda_jit_env("CUDA_FORCE_PTX_JIT"), info, error);
+    TI_INFO(
+        "CUDA JIT diagnostics: route=driver_{}, provider={}, target={}, "
+        "entries={}, code_bytes={}, "
+        "host_wall_ms={}, driver_wall_ms={}, CUDA_CACHE_DISABLE={}, "
+        "CUDA_CACHE_PATH={}, CUDA_CACHE_MAXSIZE={}, "
+        "CUDA_FORCE_PTX_JIT={}, info='{}', error='{}'",
+        cuda_artifact_kind_name(artifact.kind), artifact.provider_identity,
+        artifact.target_identity, artifact.entry_names.size(),
+        artifact.code_size(), host_wall_ms, driver_wall_time_ms,
+        cuda_jit_env("CUDA_CACHE_DISABLE"), cuda_jit_env("CUDA_CACHE_PATH"),
+        cuda_jit_env("CUDA_CACHE_MAXSIZE"), cuda_jit_env("CUDA_FORCE_PTX_JIT"),
+        info, error);
   }
-  // cudaModules.push_back(cudaModule);
-  modules.push_back(std::make_unique<JITModuleCUDA>(cuda_module));
-  return modules.back().get();
+  return cuda_module;
 }
 
 bool JITSessionCUDA::remove_module(JITModule *module) {
-  auto module_it = std::find_if(
-      modules.begin(), modules.end(),
-      [module](const std::unique_ptr<JITModule> &owned) {
-        return owned.get() == module;
-      });
+  auto module_it =
+      std::find_if(modules.begin(), modules.end(),
+                   [module](const std::unique_ptr<JITModule> &owned) {
+                     return owned.get() == module;
+                   });
   if (module_it == modules.end()) {
     return false;
   }
@@ -184,7 +274,7 @@ std::string convert(std::string new_name) {
   return new_name;
 }
 
-std::string JITSessionCUDA::compile_module_to_ptx(
+std::vector<char> JITSessionCUDA::emit_module_to_ptx(
     std::unique_ptr<llvm::Module> &module) {
   TI_AUTO_PROF
   // Part of this function is borrowed from Halide::CodeGen_PTX_Dev.cpp
@@ -200,11 +290,6 @@ std::string JITSessionCUDA::compile_module_to_ptx(
                                      "unoptimized LLVM IR (CUDA)");
     writer.write(module.get());
   }
-
-  for (auto &f : module->globals())
-    f.setName(convert(f.getName().str()));
-  for (auto &f : *module)
-    f.setName(convert(f.getName().str()));
 
   llvm::Triple triple(module->getTargetTriple());
 
@@ -319,7 +404,7 @@ std::string JITSessionCUDA::compile_module_to_ptx(
     writer.write(module.get());
   }
 
-  std::string buffer(outstr.begin(), outstr.end());
+  std::vector<char> buffer(outstr.begin(), outstr.end());
 
   // Null-terminate the ptx source
   buffer.push_back(0);

@@ -1,4 +1,6 @@
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/DynamicLibrary.h"
@@ -35,6 +37,41 @@
 namespace taichi::lang {
 
 #if defined(TI_WITH_CUDA)
+enum class CUDAArtifactKind {
+  ptx,
+  cubin,
+};
+
+// Internal hand-off object between LLVM NVPTX emission, optional artifact
+// providers, and the CUDA module loader.  Keeping this typed prevents binary
+// cubins from accidentally flowing through text-only PTX assumptions.
+struct CUDAKernelArtifact {
+  CUDAArtifactKind kind{CUDAArtifactKind::ptx};
+  std::vector<char> payload;
+  std::vector<std::string> entry_names;
+  std::string target_identity;
+  std::string provider_identity;
+  int max_registers{0};
+  bool fast_math{false};
+  int llvm_opt_level{0};
+
+  const void *data() const {
+    return payload.data();
+  }
+
+  std::size_t payload_size() const {
+    return payload.size();
+  }
+
+  std::size_t code_size() const {
+    if (kind == CUDAArtifactKind::ptx && !payload.empty() &&
+        payload.back() == '\0') {
+      return payload.size() - 1;
+    }
+    return payload.size();
+  }
+};
+
 class JITModuleCUDA : public JITModule {
  private:
   friend class JITSessionCUDA;
@@ -118,7 +155,12 @@ class JITSessionCUDA : public JITSession {
   }
 
  private:
-  std::string compile_module_to_ptx(std::unique_ptr<llvm::Module> &module);
+  CUDAKernelArtifact build_canonical_artifact(
+      std::unique_ptr<llvm::Module> &module,
+      int max_reg);
+  CUDAKernelArtifact select_artifact(CUDAKernelArtifact artifact);
+  void *load_artifact(const CUDAKernelArtifact &artifact);
+  std::vector<char> emit_module_to_ptx(std::unique_ptr<llvm::Module> &module);
 };
 
 #endif
