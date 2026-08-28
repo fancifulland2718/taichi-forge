@@ -211,7 +211,12 @@ class MetadataVisitor final : public BasicStmtVisitor {
 
   bool pointwise_indices(const std::vector<Stmt *> &indices,
                          int external_dimensions) const {
-    if (indices.empty() || external_dimensions != 1 ||
+    // A physics map commonly iterates particles in the first dimension while
+    // accessing a fixed vector/matrix component in the remaining dimensions.
+    // This remains pointwise across loop iterations. Dynamic secondary
+    // indices are rejected below, so stencil/gather accesses stay opaque.
+    if (indices.empty() || external_dimensions < 1 ||
+        indices.size() < static_cast<std::size_t>(external_dimensions) ||
         !is_loop_index(indices.front(), loop_, domain_)) {
       return false;
     }

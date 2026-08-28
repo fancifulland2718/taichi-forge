@@ -234,6 +234,11 @@ struct GraphSourceDispatchMetadata {
   // segments cannot accidentally share a tuning identity.
   std::uint64_t logical_dispatch_id{
       std::numeric_limits<std::uint64_t>::max()};
+  // JIT-only compiler identity for the unfused logical source kernel. This
+  // scopes offline executable recipes to code, not just to a same-shaped
+  // Graph position/name/effect description. It is deliberately excluded from
+  // the AOT CGraph v1 schema.
+  std::string logical_kernel_identity;
 };
 
 struct CudaBoundedDispatchMetadata {

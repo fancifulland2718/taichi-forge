@@ -13,6 +13,79 @@ _FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_map_recipe_identity_tracks_source_kernel_code(monkeypatch):
+    monkeypatch.setenv(_FUSION_ENV, "map2")
+
+    @ti.kernel
+    def producer_add(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            temporary[i] = source[i] + 1
+
+    @ti.kernel
+    def producer_multiply(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            temporary[i] = source[i] * 2
+
+    @ti.kernel
+    def consumer(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = temporary[i] - source[i]
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "temporary", "output")
+    }
+
+    def build(producer):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            producer,
+            symbolic["source"],
+            symbolic["temporary"],
+        )
+        builder.dispatch(
+            consumer,
+            symbolic["source"],
+            symbolic["temporary"],
+            symbolic["output"],
+        )
+        return builder.compile()
+
+    add_graph = build(producer_add)
+    multiply_graph = build(producer_multiply)
+    add_recipe = add_graph._ir_debug_info["fusion_plan"]["recipes"][0]
+    multiply_recipe = multiply_graph._ir_debug_info["fusion_plan"]["recipes"][0]
+
+    assert add_recipe["schema_version"] == 2
+    assert multiply_recipe["schema_version"] == 2
+    assert all(add_recipe["source_kernel_identities"])
+    assert all(multiply_recipe["source_kernel_identities"])
+    assert (
+        add_recipe["source_kernel_identities"][1]
+        == multiply_recipe["source_kernel_identities"][1]
+    )
+    assert (
+        add_recipe["source_kernel_identities"][0]
+        != multiply_recipe["source_kernel_identities"][0]
+    )
+    assert add_recipe["recipe_id"] != multiply_recipe["recipe_id"]
+    assert (
+        add_graph._executable_optimization_space.semantic_plan_id
+        != multiply_graph._executable_optimization_space.semantic_plan_id
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker(monkeypatch):
     monkeypatch.setenv(_FUSION_ENV, "map4")
 
@@ -224,6 +297,256 @@ def test_map4_physics_vector_chain_matches_unfused(monkeypatch):
     fused_position, fused_velocity = execute(fused)
     np.testing.assert_allclose(fused_position, baseline_position, rtol=0, atol=0)
     np.testing.assert_allclose(fused_velocity, baseline_velocity, rtol=0, atol=0)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_map4_particle_contact_chain_matches_unfused(monkeypatch):
+    @ti.kernel
+    def integrate_velocity(
+        velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        force: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        inverse_mass: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        dt: ti.f32,
+        gravity: ti.f32,
+        count: ti.i32,
+    ):
+        for i in range(count):
+            velocity[i, 0] = (
+                velocity[i, 0] + dt * force[i, 0] * inverse_mass[i]
+            )
+            velocity[i, 1] = velocity[i, 1] + dt * (
+                force[i, 1] * inverse_mass[i] + gravity
+            )
+            velocity[i, 2] = (
+                velocity[i, 2] + dt * force[i, 2] * inverse_mass[i]
+            )
+
+    @ti.kernel
+    def integrate_position(
+        position: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        dt: ti.f32,
+        count: ti.i32,
+    ):
+        for i in range(count):
+            for axis in ti.static(range(3)):
+                position[i, axis] = (
+                    position[i, axis] + dt * velocity[i, axis]
+                )
+
+    @ti.kernel
+    def project_plane_contact(
+        position: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        correction: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        friction: ti.f32,
+        count: ti.i32,
+    ):
+        for i in range(count):
+            correction[i, 0] = 0.0
+            correction[i, 1] = 0.0
+            correction[i, 2] = 0.0
+            if position[i, 1] < 0.0:
+                normal_delta = ti.max(-velocity[i, 1], 0.0)
+                normal_delta = normal_delta + ti.min(
+                    -position[i, 1] * 32.0, 8.0
+                )
+                tangent_speed = ti.sqrt(
+                    velocity[i, 0] * velocity[i, 0]
+                    + velocity[i, 2] * velocity[i, 2]
+                    + 1e-12
+                )
+                tangent_scale = ti.max(
+                    0.0,
+                    1.0 - friction * normal_delta / tangent_speed,
+                )
+                correction[i, 0] = (
+                    tangent_scale - 1.0
+                ) * velocity[i, 0]
+                correction[i, 1] = normal_delta
+                correction[i, 2] = (
+                    tangent_scale - 1.0
+                ) * velocity[i, 2]
+
+    @ti.kernel
+    def apply_contact(
+        position: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        correction: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            for axis in ti.static(range(3)):
+                velocity[i, axis] = (
+                    velocity[i, axis] + correction[i, axis]
+                )
+            position[i, 1] = ti.max(position[i, 1], 0.0)
+
+    symbolic = {
+        name: ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY,
+            name,
+            ti.f32,
+            ndim=2 if name != "inverse_mass" else 1,
+        )
+        for name in (
+            "position",
+            "velocity",
+            "force",
+            "inverse_mass",
+            "correction",
+        )
+    }
+    for name in ("dt", "gravity", "friction"):
+        symbolic[name] = ti.graph.Arg(
+            ti.graph.ArgKind.SCALAR, name, ti.f32
+        )
+    symbolic["count"] = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "count", ti.i32
+    )
+
+    def build(recipe):
+        monkeypatch.setenv(_FUSION_ENV, recipe)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            integrate_velocity,
+            symbolic["velocity"],
+            symbolic["force"],
+            symbolic["inverse_mass"],
+            symbolic["dt"],
+            symbolic["gravity"],
+            symbolic["count"],
+        )
+        builder.dispatch(
+            integrate_position,
+            symbolic["position"],
+            symbolic["velocity"],
+            symbolic["dt"],
+            symbolic["count"],
+        )
+        builder.dispatch(
+            project_plane_contact,
+            symbolic["position"],
+            symbolic["velocity"],
+            symbolic["correction"],
+            symbolic["friction"],
+            symbolic["count"],
+        )
+        builder.dispatch(
+            apply_contact,
+            symbolic["position"],
+            symbolic["velocity"],
+            symbolic["correction"],
+            symbolic["count"],
+        )
+        return builder.compile()
+
+    baseline = build("baseline")
+    fused = build("map4")
+    assert baseline.physical_plan()["physical_dispatch_count"] == 4
+    assert fused.physical_plan()["physical_dispatch_count"] == 1, (
+        fused._ir_debug_info["fusion_plan"]
+    )
+
+    rng = np.random.default_rng(20260828)
+    count = 4099
+    inputs = {
+        "position": rng.normal(0.0, 1.5, (count, 3)).astype(np.float32),
+        "velocity": rng.normal(0.0, 4.0, (count, 3)).astype(np.float32),
+        "force": rng.normal(0.0, 10.0, (count, 3)).astype(np.float32),
+        "inverse_mass": rng.uniform(0.0, 2.0, count).astype(np.float32),
+    }
+
+    def execute(graph):
+        arrays = {
+            name: ti.ndarray(ti.f32, shape=values.shape)
+            for name, values in inputs.items()
+        }
+        arrays["correction"] = ti.ndarray(ti.f32, shape=(count, 3))
+        for name, values in inputs.items():
+            arrays[name].from_numpy(values)
+        arrays["correction"].fill(0.0)
+        graph.run(
+            {
+                **arrays,
+                "dt": 1.0 / 120.0,
+                "gravity": -9.81,
+                "friction": 0.45,
+                "count": count,
+            }
+        )
+        return (
+            arrays["position"].to_numpy(),
+            arrays["velocity"].to_numpy(),
+            arrays["correction"].to_numpy(),
+        )
+
+    baseline_results = execute(baseline)
+    fused_results = execute(fused)
+    for baseline_value, fused_value in zip(baseline_results, fused_results):
+        np.testing.assert_allclose(fused_value, baseline_value, rtol=0, atol=0)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_multicomponent_dynamic_lane_stays_a_fusion_blocker(monkeypatch):
+    monkeypatch.setenv(_FUSION_ENV, "map2")
+
+    @ti.kernel
+    def dynamic_lane(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            output[i] = source[i, i % 3]
+
+    source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2
+    )
+    output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(dynamic_lane, source, output, count)
+    builder.dispatch(dynamic_lane, source, output, count)
+    graph = builder.compile()
+
+    fusion = graph._ir_debug_info["fusion_plan"]
+    assert graph.physical_plan()["physical_dispatch_count"] == 2
+    assert fusion["candidate_groups"] == 0
+    assert fusion["blockers"] == {"non_pointwise_access": 2}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_map4_graph_rejects_active_ad_without_poisoning_replay(monkeypatch):
+    monkeypatch.setenv(_FUSION_ENV, "map4")
+
+    @ti.kernel
+    def add_one(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in values:
+            values[i] = values[i] + 1.0
+
+    values_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    for _ in range(4):
+        builder.dispatch(add_one, values_arg)
+    graph = builder.compile()
+    assert graph.physical_plan()["physical_dispatch_count"] == 1
+
+    values = ti.ndarray(ti.f32, shape=257)
+    values.fill(0.0)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+    with ti.ad.Tape(loss=loss):
+        with pytest.raises(RuntimeError, match="primal-only"):
+            graph.run({"values": values})
+
+    graph.run({"values": values})
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.full(257, 4.0, dtype=np.float32)
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

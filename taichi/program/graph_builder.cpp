@@ -585,6 +585,8 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
   dispatch.source_dispatches.push_back(
       {dispatch.kernel_name, dispatch.dispatch_label, dispatch.symbolic_args,
        dispatch.graph_metadata, logical_dispatch_id_});
+  dispatch.source_dispatches.back().logical_kernel_identity =
+      compiled.logical_kernel_identity();
   dispatch.snode_tree_dependencies =
       kernel_->program->snapshot_snode_tree_dependencies(
           compiled.snode_tree_ids());

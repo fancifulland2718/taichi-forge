@@ -212,6 +212,7 @@ class DispatchNode:
     bounded_domain: Optional[BoundedDomain] = None
     dispatch_label: str = ""
     logical_dispatch_id: str = ""
+    logical_kernel_identity: str = ""
     fusion_blocker: str = ""
 
     @property
@@ -625,6 +626,7 @@ class _KernelFusionRecipe:
     region_path: str
     source_dispatch_ids: Tuple[str, ...]
     source_names: Tuple[str, ...]
+    source_kernel_identities: Tuple[str, ...]
     iteration_domain: str
     lowering_kind: str = "preoffload_range_map"
     expected_physical_dispatches: int = 1
@@ -639,6 +641,13 @@ class _KernelFusionRecipe:
             raise ValueError("map fusion source dispatches must be unique")
         if len(self.source_names) != source_count:
             raise ValueError("map fusion source names must match dispatches")
+        if (
+            len(self.source_kernel_identities) != source_count
+            or any(not identity for identity in self.source_kernel_identities)
+        ):
+            raise ValueError(
+                "map fusion source kernel identities must match dispatches"
+            )
         if not self.region_path or not self.iteration_domain:
             raise ValueError("map fusion recipe requires region and domain")
         if self.expected_physical_dispatches != 1:
@@ -646,11 +655,12 @@ class _KernelFusionRecipe:
 
     def to_dict(self):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "recipe_id": self.recipe_id,
             "region_path": self.region_path,
             "source_dispatch_ids": self.source_dispatch_ids,
             "source_names": self.source_names,
+            "source_kernel_identities": self.source_kernel_identities,
             "iteration_domain": self.iteration_domain,
             "lowering_kind": self.lowering_kind,
             "expected_physical_dispatches": self.expected_physical_dispatches,
@@ -1007,6 +1017,8 @@ def _fusion_blocker(node):
             return "atomic_effect"
         if effect.access == GraphAccess.OPAQUE:
             return "opaque_effect"
+    if not node.logical_kernel_identity:
+        return "missing_logical_kernel_identity"
     return None
 
 
@@ -1016,6 +1028,9 @@ def _map_fusion_recipe(region_path, indexed_nodes, iteration_domain):
         for index, node in indexed_nodes
     )
     source_names = tuple(node.name for _, node in indexed_nodes)
+    source_kernel_identities = tuple(
+        node.logical_kernel_identity for _, node in indexed_nodes
+    )
     effect_signatures = tuple(
         tuple(
             (
@@ -1039,6 +1054,7 @@ def _map_fusion_recipe(region_path, indexed_nodes, iteration_domain):
         {
             "region_path": region_path,
             "source_dispatch_ids": source_ids,
+            "source_kernel_identities": source_kernel_identities,
             "iteration_domain": iteration_domain,
             "effects": effect_signatures,
             "bindings": binding_signatures,
@@ -1054,6 +1070,7 @@ def _map_fusion_recipe(region_path, indexed_nodes, iteration_domain):
         region_path=region_path,
         source_dispatch_ids=source_ids,
         source_names=source_names,
+        source_kernel_identities=source_kernel_identities,
         iteration_domain=iteration_domain,
     )
 
@@ -1421,6 +1438,7 @@ def graph_ir_to_dict(node, _structured_depth=0):
         result["side_effects"] = node.side_effects
         result["dispatch_label"] = node.dispatch_label
         result["logical_dispatch_id"] = node.logical_dispatch_id
+        result["logical_kernel_identity"] = node.logical_kernel_identity
         result["fusion_blocker"] = node.fusion_blocker
         result["bounded_domain"] = (
             None

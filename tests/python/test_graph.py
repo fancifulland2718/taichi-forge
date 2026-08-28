@@ -1124,6 +1124,7 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
                 iteration_domain="range:n",
                 opaque=False,
                 elementwise=True,
+                logical_kernel_identity="kernel:map_a",
             ),
             DispatchNode(
                 "map_b",
@@ -1131,6 +1132,7 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
                 iteration_domain="range:n",
                 opaque=False,
                 elementwise=True,
+                logical_kernel_identity="kernel:map_b",
             ),
             DispatchNode(
                 "atomic_map",
@@ -1145,6 +1147,7 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
                 iteration_domain="range:m",
                 opaque=False,
                 elementwise=True,
+                logical_kernel_identity="kernel:other_domain",
             ),
             DispatchNode(
                 "random_map",
@@ -1193,6 +1196,7 @@ def test_elementwise_fusion_partitions_cover_all_eligible_regions():
             iteration_domain="range:n",
             opaque=False,
             elementwise=True,
+            logical_kernel_identity=f"kernel:{name}",
         )
 
     root = SequentialRegion(
@@ -2484,6 +2488,9 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
     assert len(plan["recipes"]) == 1
     recipe = plan["recipes"][0]
     assert recipe["recipe_id"].startswith("fusion:map2:")
+    assert recipe["schema_version"] == 2
+    assert len(recipe["source_kernel_identities"]) == 2
+    assert all(recipe["source_kernel_identities"])
     assert recipe["source_dispatch_ids"] == (
         "graph/0:cgraph/dispatch:0",
         "graph/0:cgraph/dispatch:1",
