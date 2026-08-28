@@ -6,6 +6,8 @@ import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._gpu_semantics import (
+    _CudaArtifactExtension,
+    _CudaLaunchExtension,
     _GpuAutodiffRole,
     _GpuAvailability,
     _GpuBackend,
@@ -114,6 +116,29 @@ def test_program_effects_do_not_leak_into_multiple_dispatches():
     assert all(
         dispatch.logical_work_extent.availability == _GpuAvailability.UNKNOWN
         for dispatch in snapshot.dispatches
+    )
+
+
+def test_cuda_resident_adapter_separates_manifest_and_native_facts():
+    snapshot = _build_resident_gpu_semantics(_raw_snapshot("cuda"))
+    artifact = snapshot.artifacts[0]
+    launch = snapshot.launches[0]
+    assert isinstance(artifact.extension, _CudaArtifactExtension)
+    assert isinstance(launch.extension, _CudaLaunchExtension)
+    assert artifact.extension.registers_per_thread.availability == (
+        _GpuAvailability.UNKNOWN
+    )
+    assert "does not materialize CUfunction" in (
+        artifact.extension.registers_per_thread.reason
+    )
+    assert launch.extension.cooperative.value is False
+    assert launch.extension.cluster_shape.availability == (
+        _GpuAvailability.UNSUPPORTED
+    )
+    assert artifact.compiler_thread_local_scratch_bytes.value == 32
+    assert artifact.extension.local_memory_bytes_per_thread.value is None
+    assert snapshot.dispatches[0].intrinsic_requirements[0].name == (
+        "workgroup_memory"
     )
 
 

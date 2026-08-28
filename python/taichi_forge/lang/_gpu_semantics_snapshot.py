@@ -358,7 +358,7 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
         ),
         provenance="compiled_kernel_data",
     )
-    return _GpuSemanticSnapshot(
+    snapshot = _GpuSemanticSnapshot(
         target=target,
         program=program,
         binding_schemas=tuple(binding_schemas),
@@ -367,6 +367,13 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
         dispatches=tuple(dispatches),
         resident_only=True,
     )
+    if backend == _GpuBackend.CUDA:
+        from taichi_forge.lang._gpu_semantics_cuda import (
+            _adapt_cuda_resident_snapshot,
+        )
+
+        return _adapt_cuda_resident_snapshot(snapshot)
+    return snapshot
 
 
 __all__ = ["_build_resident_gpu_semantics"]
