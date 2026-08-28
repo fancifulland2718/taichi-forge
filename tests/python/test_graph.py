@@ -1163,6 +1163,10 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
         "eligible_dispatches": 3,
         "blocked_dispatches": 2,
         "blockers": {"atomic_effect": 1, "side_effect": 1},
+        "recipes": plan["recipes"],
+        "candidate_partitions": plan["candidate_partitions"],
+        "applied_recipe_ids": (),
+        "unmatched_applied_groups": 0,
         "applied_groups": 0,
         "lowering_available": False,
         "decision": "cross_kernel_ir_composer_unavailable",
@@ -1174,6 +1178,53 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
     assert opaque["candidate_groups"] == 0
     assert opaque["blockers"] == {"opaque_dispatch": 1}
     assert opaque["decision"] == "no_safe_candidates"
+
+
+def test_elementwise_fusion_partitions_cover_all_eligible_regions():
+    safe_effects = (
+        ResourceEffect("source", GraphAccess.READ),
+        ResourceEffect("destination", GraphAccess.WRITE),
+    )
+
+    def safe(name):
+        return DispatchNode(
+            name,
+            effects=safe_effects,
+            iteration_domain="range:n",
+            opaque=False,
+            elementwise=True,
+        )
+
+    root = SequentialRegion(
+        (
+            safe("first_a"),
+            safe("first_b"),
+            safe("first_c"),
+            DispatchNode(
+                "barrier",
+                effects=(ResourceEffect("sum", GraphAccess.ATOMIC),),
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+            ),
+            safe("second_a"),
+            safe("second_b"),
+            safe("second_c"),
+        )
+    )
+    plan = analyze_elementwise_fusion(root)
+
+    assert len(plan.candidate_groups) == 2
+    assert len(plan.candidate_partitions) == 2
+    assert all(len(partition) == 2 for partition in plan.candidate_partitions)
+    assert all(
+        recipe_id.startswith("fusion:map2:")
+        for recipe_id in plan.candidate_partitions[0]
+    )
+    assert all(
+        recipe_id.startswith("fusion:map3:")
+        for recipe_id in plan.candidate_partitions[1]
+    )
 
 
 def test_structured_control_ir_validates_and_serializes_fixed_schema():

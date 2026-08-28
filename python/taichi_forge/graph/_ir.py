@@ -1069,7 +1069,7 @@ def analyze_elementwise_fusion(
 
     groups = []
     recipes = []
-    partitions = []
+    partition_recipes = {2: [], 3: [], 4: []}
     blockers = {}
     eligible_dispatches = 0
     blocked_dispatches = 0
@@ -1100,8 +1100,8 @@ def analyze_elementwise_fusion(
                         recipe_by_sources[recipe.source_dispatch_ids] = (
                             recipe.recipe_id
                         )
-                for max_group_size in (2, 3, 4):
-                    partition = []
+                for max_group_size in partition_recipes:
+                    partition = partition_recipes[max_group_size]
                     offset = 0
                     while offset < len(pending):
                         source_count = min(
@@ -1117,9 +1117,6 @@ def analyze_elementwise_fusion(
                         )
                         partition.append(recipe_by_sources[source_ids])
                         offset += source_count
-                    candidate = tuple(partition)
-                    if candidate and candidate not in partitions:
-                        partitions.append(candidate)
             pending = []
             domain = None
 
@@ -1154,6 +1151,11 @@ def analyze_elementwise_fusion(
 
     if isinstance(root, SequentialRegion):
         scan(root, root.name or "root")
+    partitions = []
+    for partition in partition_recipes.values():
+        candidate = tuple(partition)
+        if candidate and candidate not in partitions:
+            partitions.append(candidate)
     recipe_by_sources = {
         recipe.source_dispatch_ids: recipe.recipe_id for recipe in recipes
     }

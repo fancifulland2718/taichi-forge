@@ -13754,6 +13754,12 @@ class Graph:
             return self._spec.ir_debug_info
 
     @property
+    def _executable_optimization_space(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return self._spec.executable_optimization_space
+
+    @property
     def _instance_debug_info(self):
         with self._lifecycle_lock:
             self._check_runtime_valid()

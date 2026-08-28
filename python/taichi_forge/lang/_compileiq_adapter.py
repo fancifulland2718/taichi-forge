@@ -45,6 +45,87 @@ class _CompileIQCandidateEvidence:
         return self.worst_ratio < 1.0
 
 
+def _balanced_paired_schedule(candidate_ids, *, blocks=2):
+    if isinstance(blocks, bool) or not isinstance(blocks, int):
+        raise TypeError("blocks must be an integer")
+    if blocks < 2 or blocks % 2:
+        raise ValueError("blocks must be an even integer >= 2")
+    return tuple(
+        _CompileIQPairedTrial(
+            variant_id=candidate_id,
+            block=block,
+            order=(
+                ("baseline", "candidate")
+                if block % 2 == 0
+                else ("candidate", "baseline")
+            ),
+        )
+        for candidate_id in candidate_ids
+        for block in range(blocks)
+    )
+
+
+def _rank_complete_paired_evidence(
+    measurements,
+    candidate_ids,
+    *,
+    blocks=2,
+    candidate_kind="variant",
+    collection_name="stage candidates",
+):
+    _balanced_paired_schedule((), blocks=blocks)
+    candidate_ids = tuple(candidate_ids)
+    if not isinstance(measurements, dict):
+        raise TypeError("measurements must map candidate IDs to paired ratios")
+    missing = tuple(
+        candidate_id
+        for candidate_id in candidate_ids
+        if candidate_id not in measurements
+    )
+    extra = tuple(
+        candidate_id
+        for candidate_id in measurements
+        if candidate_id not in candidate_ids
+    )
+    if missing or extra:
+        raise ValueError(
+            f"paired measurements do not match {collection_name}; "
+            f"missing={missing}, extra={extra}"
+        )
+
+    evidence = []
+    for candidate_id in candidate_ids:
+        raw_ratios = measurements[candidate_id]
+        if not isinstance(raw_ratios, (tuple, list)):
+            raise TypeError("paired ratios must be a tuple or list")
+        if len(raw_ratios) != blocks:
+            raise ValueError(
+                f"{candidate_kind} {candidate_id!r} requires exactly "
+                f"{blocks} paired ratios"
+            )
+        ratios = tuple(float(value) for value in raw_ratios)
+        if any(not math.isfinite(value) or value <= 0.0 for value in ratios):
+            raise ValueError("paired ratios must be finite and positive")
+        evidence.append(
+            _CompileIQCandidateEvidence(
+                variant_id=candidate_id,
+                ratios=ratios,
+                median_ratio=float(statistics.median(ratios)),
+                worst_ratio=max(ratios),
+            )
+        )
+    return tuple(
+        sorted(
+            evidence,
+            key=lambda item: (
+                item.worst_ratio,
+                item.median_ratio,
+                item.variant_id,
+            ),
+        )
+    )
+
+
 class _CompileIQVariantAdapter:
     """Expose stable Forge variant IDs without importing CompileIQ at startup.
 
@@ -131,22 +212,9 @@ class _CompileIQVariantAdapter:
         candidate.
         """
 
-        if isinstance(blocks, bool) or not isinstance(blocks, int):
-            raise TypeError("blocks must be an integer")
-        if blocks < 2 or blocks % 2:
-            raise ValueError("blocks must be an even integer >= 2")
-        return tuple(
-            _CompileIQPairedTrial(
-                variant_id=variant_id,
-                block=block,
-                order=(
-                    ("baseline", "candidate")
-                    if block % 2 == 0
-                    else ("candidate", "baseline")
-                ),
-            )
-            for variant_id in self.variant_ids(stage, compilation_id=compilation_id)
-            for block in range(blocks)
+        return _balanced_paired_schedule(
+            self.variant_ids(stage, compilation_id=compilation_id),
+            blocks=blocks,
         )
 
     def rank_paired(
@@ -159,49 +227,10 @@ class _CompileIQVariantAdapter:
     ):
         """Rank complete paired evidence by worst ratio, then median ratio."""
 
-        expected = self.variant_ids(stage, compilation_id=compilation_id)
-        if not isinstance(measurements, dict):
-            raise TypeError("measurements must map variant IDs to paired ratios")
-        missing = tuple(
-            variant_id for variant_id in expected if variant_id not in measurements
-        )
-        extra = tuple(
-            variant_id for variant_id in measurements if variant_id not in expected
-        )
-        if missing or extra:
-            raise ValueError(
-                f"paired measurements do not match stage candidates; missing={missing}, extra={extra}"
-            )
-
-        evidence = []
-        for variant_id in expected:
-            raw_ratios = measurements[variant_id]
-            if not isinstance(raw_ratios, (tuple, list)):
-                raise TypeError("paired ratios must be a tuple or list")
-            if len(raw_ratios) != blocks:
-                raise ValueError(
-                    f"variant {variant_id!r} requires exactly {blocks} paired ratios"
-                )
-            ratios = tuple(float(value) for value in raw_ratios)
-            if any(not math.isfinite(value) or value <= 0.0 for value in ratios):
-                raise ValueError("paired ratios must be finite and positive")
-            evidence.append(
-                _CompileIQCandidateEvidence(
-                    variant_id=variant_id,
-                    ratios=ratios,
-                    median_ratio=float(statistics.median(ratios)),
-                    worst_ratio=max(ratios),
-                )
-            )
-        return tuple(
-            sorted(
-                evidence,
-                key=lambda item: (
-                    item.worst_ratio,
-                    item.median_ratio,
-                    item.variant_id,
-                ),
-            )
+        return _rank_complete_paired_evidence(
+            measurements,
+            self.variant_ids(stage, compilation_id=compilation_id),
+            blocks=blocks,
         )
 
     @staticmethod
@@ -332,4 +361,6 @@ __all__ = [
     "_CompileIQCandidateEvidence",
     "_CompileIQPairedTrial",
     "_CompileIQVariantSelection",
+    "_balanced_paired_schedule",
+    "_rank_complete_paired_evidence",
 ]
