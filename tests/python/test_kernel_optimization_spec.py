@@ -97,7 +97,9 @@ def test_private_binding_rejects_recursive_provider_tuning():
         lambda: _LaunchOptions(grid_residency_waves=3),
         lambda: _IrOptimizationOptions(thread_local="sometimes"),
         lambda: _ArtifactOptions(provider_mode="recursive"),
-        lambda: _ArtifactOptions(max_registers=0),
+        # A per-kernel register cap is intentionally unavailable until it has
+        # physical lowering; identity-only options must fail closed.
+        lambda: _ArtifactOptions(max_registers=64),
     ),
 )
 def test_kernel_optimization_spec_rejects_invalid_contracts(factory):

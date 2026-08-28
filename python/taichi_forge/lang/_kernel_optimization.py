@@ -32,7 +32,6 @@ class _BackendCodegenOptions:
 @dataclass(frozen=True)
 class _ArtifactOptions:
     provider_mode: str = "baseline"
-    max_registers: Optional[int] = None
 
     def __post_init__(self):
         if self.provider_mode not in (
@@ -44,13 +43,6 @@ class _ArtifactOptions:
                 "provider_mode must be 'baseline', 'apply_explicit_acf', or "
                 "'request_tuning'"
             )
-        value = self.max_registers
-        if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, int)
-            or not 1 <= value <= 255
-        ):
-            raise ValueError("max_registers must be an integer in [1, 255]")
 
 
 @dataclass(frozen=True)
