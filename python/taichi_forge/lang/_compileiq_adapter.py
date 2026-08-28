@@ -1,6 +1,8 @@
 """Private, optional CompileIQ boundary for Forge kernel variants."""
 
 from dataclasses import dataclass
+import math
+import statistics
 from types import MappingProxyType
 
 
@@ -19,6 +21,25 @@ def _compileiq_import_error():
 class _CompileIQVariantSelection:
     variant_id: str
     compilation_id: str
+
+
+@dataclass(frozen=True)
+class _CompileIQPairedTrial:
+    variant_id: str
+    block: int
+    order: tuple[str, str]
+
+
+@dataclass(frozen=True)
+class _CompileIQCandidateEvidence:
+    variant_id: str
+    ratios: tuple[float, ...]
+    median_ratio: float
+    worst_ratio: float
+
+    @property
+    def worst_positive(self):
+        return self.worst_ratio < 1.0
 
 
 class _CompileIQVariantAdapter:
@@ -84,6 +105,94 @@ class _CompileIQVariantAdapter:
             )
         }
 
+    def paired_schedule(
+        self,
+        stage="structural",
+        *,
+        compilation_id=None,
+        blocks=2,
+    ):
+        """Return a deterministic AB/BA plan for a finite Forge stage.
+
+        Forge variant stages are deliberately enumerated instead of delegated
+        to CompileIQ's genetic core.  This prevents a noisy first-generation
+        sample from permanently eliminating a legal structural or launch
+        candidate.
+        """
+
+        if isinstance(blocks, bool) or not isinstance(blocks, int):
+            raise TypeError("blocks must be an integer")
+        if blocks < 2 or blocks % 2:
+            raise ValueError("blocks must be an even integer >= 2")
+        return tuple(
+            _CompileIQPairedTrial(
+                variant_id=variant_id,
+                block=block,
+                order=(
+                    ("baseline", "candidate")
+                    if block % 2 == 0
+                    else ("candidate", "baseline")
+                ),
+            )
+            for variant_id in self.variant_ids(stage, compilation_id=compilation_id)
+            for block in range(blocks)
+        )
+
+    def rank_paired(
+        self,
+        measurements,
+        stage="structural",
+        *,
+        compilation_id=None,
+        blocks=2,
+    ):
+        """Rank complete paired evidence by worst ratio, then median ratio."""
+
+        expected = self.variant_ids(stage, compilation_id=compilation_id)
+        if not isinstance(measurements, dict):
+            raise TypeError("measurements must map variant IDs to paired ratios")
+        missing = tuple(
+            variant_id for variant_id in expected if variant_id not in measurements
+        )
+        extra = tuple(
+            variant_id for variant_id in measurements if variant_id not in expected
+        )
+        if missing or extra:
+            raise ValueError(
+                f"paired measurements do not match stage candidates; missing={missing}, extra={extra}"
+            )
+
+        evidence = []
+        for variant_id in expected:
+            raw_ratios = measurements[variant_id]
+            if not isinstance(raw_ratios, (tuple, list)):
+                raise TypeError("paired ratios must be a tuple or list")
+            if len(raw_ratios) != blocks:
+                raise ValueError(
+                    f"variant {variant_id!r} requires exactly {blocks} paired ratios"
+                )
+            ratios = tuple(float(value) for value in raw_ratios)
+            if any(not math.isfinite(value) or value <= 0.0 for value in ratios):
+                raise ValueError("paired ratios must be finite and positive")
+            evidence.append(
+                _CompileIQCandidateEvidence(
+                    variant_id=variant_id,
+                    ratios=ratios,
+                    median_ratio=float(statistics.median(ratios)),
+                    worst_ratio=max(ratios),
+                )
+            )
+        return tuple(
+            sorted(
+                evidence,
+                key=lambda item: (
+                    item.worst_ratio,
+                    item.median_ratio,
+                    item.variant_id,
+                ),
+            )
+        )
+
     @staticmethod
     def ptxas_search_space(*, version="13.3", variant="default", tag="latest"):
         """Create a separate optional PTXAS provider through a lazy import."""
@@ -134,5 +243,7 @@ class _CompileIQVariantAdapter:
 
 __all__ = [
     "_CompileIQVariantAdapter",
+    "_CompileIQCandidateEvidence",
+    "_CompileIQPairedTrial",
     "_CompileIQVariantSelection",
 ]

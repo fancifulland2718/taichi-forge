@@ -110,3 +110,72 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
         "c0",
         "c1",
     ]
+
+
+def test_compileiq_adapter_builds_balanced_exhaustive_stage_schedule():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+
+    schedule = adapter.paired_schedule(blocks=4)
+    assert len(schedule) == 8
+    assert [trial.variant_id for trial in schedule] == [
+        "v0-auto",
+        "v0-auto",
+        "v0-auto",
+        "v0-auto",
+        "v1-auto",
+        "v1-auto",
+        "v1-auto",
+        "v1-auto",
+    ]
+    assert [trial.order for trial in schedule[:4]] == [
+        ("baseline", "candidate"),
+        ("candidate", "baseline"),
+        ("baseline", "candidate"),
+        ("candidate", "baseline"),
+    ]
+
+    launch = adapter.paired_schedule("launch", compilation_id="c0", blocks=2)
+    assert [(trial.variant_id, trial.block) for trial in launch] == [
+        ("v0-auto", 0),
+        ("v0-auto", 1),
+        ("v0-one", 0),
+        ("v0-one", 1),
+    ]
+
+
+def test_compileiq_adapter_ranks_complete_paired_evidence_fail_closed():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    ranked = adapter.rank_paired(
+        {
+            "v0-auto": (0.93, 1.01, 0.95, 0.97),
+            "v1-auto": (0.98, 0.99, 0.97, 0.96),
+        },
+        blocks=4,
+    )
+
+    assert [item.variant_id for item in ranked] == ["v1-auto", "v0-auto"]
+    assert ranked[0].worst_ratio == pytest.approx(0.99)
+    assert ranked[0].median_ratio == pytest.approx(0.975)
+    assert ranked[0].worst_positive
+    assert ranked[1].worst_ratio == pytest.approx(1.01)
+    assert not ranked[1].worst_positive
+
+
+@pytest.mark.parametrize("blocks", [0, 1, 3, True])
+def test_compileiq_adapter_rejects_unbalanced_pairing(blocks):
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    with pytest.raises((TypeError, ValueError)):
+        adapter.paired_schedule(blocks=blocks)
+
+
+def test_compileiq_adapter_rejects_incomplete_or_invalid_evidence():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    with pytest.raises(ValueError, match="missing"):
+        adapter.rank_paired({"v0-auto": (0.9, 0.9)}, blocks=2)
+    with pytest.raises(ValueError, match="exactly 2"):
+        adapter.rank_paired({"v0-auto": (0.9,), "v1-auto": (0.9, 0.9)}, blocks=2)
+    with pytest.raises(ValueError, match="finite and positive"):
+        adapter.rank_paired(
+            {"v0-auto": (0.9, float("nan")), "v1-auto": (0.9, 0.9)},
+            blocks=2,
+        )
