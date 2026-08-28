@@ -3,7 +3,10 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from taichi_forge.lang._compileiq_adapter import _CompileIQVariantAdapter
+from taichi_forge.lang._compileiq_adapter import (
+    _CompileIQVariantAdapter,
+    _CompileIQVariantBundle,
+)
 
 
 class _FakeSession:
@@ -110,6 +113,70 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
         "c0",
         "c1",
     ]
+
+
+def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):
+    _install_fake_compileiq(monkeypatch)
+    adapter = _CompileIQVariantAdapter(
+        _FakeSession(), parameter="forge_variant_composite"
+    )
+
+    assert adapter.search_space("full") == {
+        "forge_variant_composite": (
+            "choice",
+            ("v0-auto", "v0-one", "v1-auto"),
+        )
+    }
+    assert adapter.select({"forge_variant_composite": "v1-auto"}).variant_id == (
+        "v1-auto"
+    )
+    assert adapter.manifest()["parameter"] == "forge_variant_composite"
+
+
+@pytest.mark.parametrize("parameter", ["", "1variant", "forge.variant", None])
+def test_compileiq_adapter_rejects_invalid_parameter_name(parameter):
+    with pytest.raises((TypeError, ValueError)):
+        _CompileIQVariantAdapter(_FakeSession(), parameter=parameter)
+
+
+def test_compileiq_bundle_composes_forge_only_kernel_dimensions(monkeypatch):
+    _install_fake_compileiq(monkeypatch)
+    bundle = _CompileIQVariantBundle(
+        {"composite": _FakeSession(), "combine": _FakeSession()}
+    )
+
+    assert bundle.kernel_names == ("composite", "combine")
+    assert bundle.search_space("structural") == {
+        "forge_variant_composite": ("choice", ("v0-auto", "v1-auto")),
+        "forge_variant_combine": ("choice", ("v0-auto", "v1-auto")),
+    }
+    params = {
+        "forge_variant_composite": "v0-one",
+        "forge_variant_combine": "v1-auto",
+    }
+    assert dict(bundle.bind(params)) == {
+        "composite": ("bound", "v0-one"),
+        "combine": ("bound", "v1-auto"),
+    }
+    manifest = bundle.manifest()
+    assert manifest["provider"] == "compileiq_user_space"
+    assert not manifest["uses_ptxas_search_space"]
+    assert manifest["kernels"]["combine"]["parameter"] == (
+        "forge_variant_combine"
+    )
+
+
+def test_compileiq_bundle_rejects_invalid_shape_and_ambiguous_launch_stage():
+    with pytest.raises(TypeError):
+        _CompileIQVariantBundle([])
+    with pytest.raises(ValueError, match="at least one"):
+        _CompileIQVariantBundle({})
+    with pytest.raises(ValueError, match="kernel names"):
+        _CompileIQVariantBundle({"bad-name": _FakeSession()})
+
+    bundle = _CompileIQVariantBundle({"kernel": _FakeSession()})
+    with pytest.raises(ValueError, match="per-kernel compilation group"):
+        bundle.search_space("launch")
 
 
 def test_compileiq_adapter_builds_balanced_exhaustive_stage_schedule():

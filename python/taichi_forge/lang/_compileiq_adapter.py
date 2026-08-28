@@ -2,12 +2,15 @@
 
 from dataclasses import dataclass
 import math
+import re
 import statistics
 from types import MappingProxyType
 
 
 _FORGE_VARIANT_PARAMETER = "forge_variant"
+_FORGE_VARIANT_PARAMETER_PREFIX = f"{_FORGE_VARIANT_PARAMETER}_"
 _SEARCH_STAGES = ("structural", "launch", "full")
+_PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 def _compileiq_import_error():
@@ -51,7 +54,14 @@ class _CompileIQVariantAdapter:
     lists.
     """
 
-    def __init__(self, session):
+    def __init__(self, session, *, parameter=_FORGE_VARIANT_PARAMETER):
+        if not isinstance(parameter, str):
+            raise TypeError("CompileIQ parameter must be a string")
+        if not _PARAMETER_PATTERN.fullmatch(parameter):
+            raise ValueError(
+                "CompileIQ parameter must start with a letter and contain only "
+                "letters, digits, and underscores"
+            )
         variants = tuple(
             session.variant(variant_id) for variant_id in session.variant_ids()
         )
@@ -62,6 +72,7 @@ class _CompileIQVariantAdapter:
             raise ValueError("a CompileIQ adapter requires compilation groups")
 
         self._session = session
+        self._parameter = parameter
         self._variants = MappingProxyType(
             {variant.variant_id: variant for variant in variants}
         )
@@ -100,7 +111,7 @@ class _CompileIQVariantAdapter:
         except ImportError as error:
             raise _compileiq_import_error() from error
         return {
-            _FORGE_VARIANT_PARAMETER: choice(
+            self._parameter: choice(
                 self.variant_ids(stage, compilation_id=compilation_id)
             )
         }
@@ -206,11 +217,11 @@ class _CompileIQVariantAdapter:
     def select(self, parameters):
         if not isinstance(parameters, dict):
             raise TypeError("CompileIQ parameters must be a dictionary")
-        if _FORGE_VARIANT_PARAMETER not in parameters:
-            raise KeyError(f"CompileIQ parameters require {_FORGE_VARIANT_PARAMETER!r}")
-        variant_id = parameters[_FORGE_VARIANT_PARAMETER]
+        if self._parameter not in parameters:
+            raise KeyError(f"CompileIQ parameters require {self._parameter!r}")
+        variant_id = parameters[self._parameter]
         if not isinstance(variant_id, str):
-            raise TypeError("forge_variant must be a string")
+            raise TypeError(f"{self._parameter} must be a string")
         try:
             variant = self._variants[variant_id]
         except KeyError as error:
@@ -228,7 +239,7 @@ class _CompileIQVariantAdapter:
 
         return {
             "schema_version": 1,
-            "parameter": _FORGE_VARIANT_PARAMETER,
+            "parameter": self._parameter,
             "structural_variant_ids": self._structural_ids,
             "variants": tuple(
                 {
@@ -241,7 +252,82 @@ class _CompileIQVariantAdapter:
         }
 
 
+class _CompileIQVariantBundle:
+    """Compose independent kernel variants into a Forge-only CompileIQ space.
+
+    CompileIQ treats every named kernel as a user-defined categorical
+    dimension, matching the way its Triton integration searches source-level
+    launch configurations.  No compiler-provider or PTXAS search space is
+    created by this adapter.
+    """
+
+    def __init__(self, sessions):
+        if not isinstance(sessions, dict):
+            raise TypeError("CompileIQ variant sessions must be a dictionary")
+        if not sessions:
+            raise ValueError("CompileIQ variant bundle requires at least one kernel")
+        adapters = {}
+        for name, session in sessions.items():
+            if not isinstance(name, str) or not _PARAMETER_PATTERN.fullmatch(name):
+                raise ValueError(
+                    "kernel names must start with a letter and contain only "
+                    "letters, digits, and underscores"
+                )
+            adapters[name] = _CompileIQVariantAdapter(
+                session,
+                parameter=f"{_FORGE_VARIANT_PARAMETER_PREFIX}{name}",
+            )
+        self._adapters = MappingProxyType(adapters)
+
+    @property
+    def kernel_names(self):
+        return tuple(self._adapters)
+
+    def search_space(self, stage="full"):
+        if stage == "launch":
+            raise ValueError(
+                "joint launch search requires a per-kernel compilation group; "
+                "use stage='full' or tune each adapter separately"
+            )
+        search_space = {}
+        for adapter in self._adapters.values():
+            search_space.update(adapter.search_space(stage))
+        return search_space
+
+    def select(self, parameters):
+        if not isinstance(parameters, dict):
+            raise TypeError("CompileIQ parameters must be a dictionary")
+        return MappingProxyType(
+            {
+                name: adapter.select(parameters)
+                for name, adapter in self._adapters.items()
+            }
+        )
+
+    def bind(self, parameters):
+        if not isinstance(parameters, dict):
+            raise TypeError("CompileIQ parameters must be a dictionary")
+        return MappingProxyType(
+            {
+                name: adapter.bind(parameters)
+                for name, adapter in self._adapters.items()
+            }
+        )
+
+    def manifest(self):
+        return {
+            "schema_version": 1,
+            "provider": "compileiq_user_space",
+            "uses_ptxas_search_space": False,
+            "kernels": {
+                name: adapter.manifest()
+                for name, adapter in self._adapters.items()
+            },
+        }
+
+
 __all__ = [
+    "_CompileIQVariantBundle",
     "_CompileIQVariantAdapter",
     "_CompileIQCandidateEvidence",
     "_CompileIQPairedTrial",
