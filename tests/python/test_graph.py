@@ -2438,7 +2438,9 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
         "graph/0:cgraph/dispatch:1",
     )
     optimization = ir["executable_optimization"]
-    assert optimization["selection_status"] == "selected_greedy_pair"
+    assert plan["applied_recipe_ids"] == (recipe["recipe_id"],)
+    assert plan["unmatched_applied_groups"] == 0
+    assert optimization["selection_status"] == "selected_pair_recipe"
     assert optimization["selected"]["fusion_recipe_ids"] == (
         recipe["recipe_id"],
     )
@@ -2497,6 +2499,26 @@ def test_two_map_composer_auto_gate_preserves_vulkan_latency(monkeypatch):
     builder = _new_runtime_graph_builder()
     expected = impl.current_cfg().arch != ti_core.Arch.vulkan
     assert builder.enabled == expected
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_internal_map_fusion_recipe_overrides_legacy_auto_gate(monkeypatch):
+    class ProbeBuilder:
+        def __init__(self):
+            self.enabled = False
+
+        def _enable_two_map_composer(self):
+            self.enabled = True
+
+    monkeypatch.setattr(ti_core, "GraphBuilder", ProbeBuilder)
+    monkeypatch.setenv("TI_GRAPH_TWO_MAP_COMPOSER", "1")
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
+    assert not _new_runtime_graph_builder().enabled
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "pair")
+    assert _new_runtime_graph_builder().enabled
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "invalid")
+    with pytest.raises(TaichiRuntimeError, match="must be 'baseline' or 'pair'"):
+        _new_runtime_graph_builder()
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

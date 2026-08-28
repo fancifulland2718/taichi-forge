@@ -582,6 +582,8 @@ class ElementwiseFusionPlan:
     blocked_dispatches: int
     blocker_counts: Tuple[Tuple[str, int], ...]
     candidate_recipes: tuple = ()
+    applied_recipe_ids: tuple = ()
+    unmatched_applied_groups: int = 0
     applied_groups: int = 0
     lowering_available: bool = False
 
@@ -595,6 +597,8 @@ class ElementwiseFusionPlan:
             "recipes": tuple(
                 recipe.to_dict() for recipe in self.candidate_recipes
             ),
+            "applied_recipe_ids": self.applied_recipe_ids,
+            "unmatched_applied_groups": self.unmatched_applied_groups,
             "applied_groups": self.applied_groups,
             "lowering_available": self.lowering_available,
             "decision": (
@@ -1050,7 +1054,13 @@ def _pair_fusion_recipe(region_path, indexed_nodes, iteration_domain):
     )
 
 
-def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=False):
+def analyze_elementwise_fusion(
+    root,
+    *,
+    applied_groups=0,
+    applied_source_groups=(),
+    lowering_available=False,
+):
     """Find safe pointwise fusion groups without pretending to lower them."""
 
     groups = []
@@ -1115,12 +1125,25 @@ def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=Fal
 
     if isinstance(root, SequentialRegion):
         scan(root, root.name or "root")
+    recipe_by_sources = {
+        recipe.source_dispatch_ids: recipe.recipe_id for recipe in recipes
+    }
+    applied_recipe_ids = tuple(
+        recipe_by_sources[group]
+        for group in applied_source_groups
+        if group in recipe_by_sources
+    )
+    unmatched_applied_groups = sum(
+        group not in recipe_by_sources for group in applied_source_groups
+    )
     return ElementwiseFusionPlan(
         candidate_groups=tuple(groups),
         eligible_dispatches=eligible_dispatches,
         blocked_dispatches=blocked_dispatches,
         blocker_counts=tuple(sorted(blockers.items())),
         candidate_recipes=tuple(recipes),
+        applied_recipe_ids=applied_recipe_ids,
+        unmatched_applied_groups=unmatched_applied_groups,
         applied_groups=int(applied_groups),
         lowering_available=bool(lowering_available),
     )

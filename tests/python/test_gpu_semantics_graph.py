@@ -68,7 +68,7 @@ def test_graph_gpu_semantics_is_physical_lazy_and_replay_safe():
     assert plan.optimization_spec_id.startswith("executable:")
     assert plan.optimization_status in (
         "selected_baseline",
-        "selected_greedy_pair",
+        "selected_pair_recipe",
     )
     if warm.target.backend == _GpuBackend.CUDA:
         assert len(plan.fusion_recipe_ids) == 1

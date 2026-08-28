@@ -84,6 +84,8 @@ from taichi_forge.graph._optimization import (
 
 ArgKind = _ti_core.ArgKind
 
+_INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
+
 
 @kernel_impl.kernel
 def _prepare_bounded_dispatch_packet(
@@ -233,6 +235,16 @@ def segmented_dispatch_count(state: template()):
 
 def _new_runtime_graph_builder():
     builder = _ti_core.GraphBuilder()
+    internal_recipe = os.environ.get(_INTERNAL_MAP_FUSION_ENV)
+    if internal_recipe is not None:
+        internal_recipe = internal_recipe.strip().lower()
+        if internal_recipe not in ("baseline", "pair"):
+            raise TaichiRuntimeError(
+                f"{_INTERNAL_MAP_FUSION_ENV} must be 'baseline' or 'pair'"
+            )
+        if internal_recipe == "pair":
+            builder._enable_two_map_composer()
+        return builder
     composer_setting = os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER")
     composer_enabled = (
         composer_setting != "0"
@@ -4923,6 +4935,13 @@ class _CompiledCGraphNode:
             composer_stats.get("physical_dispatches", dispatch_count)
         )
         self.composer_applied_groups = int(composer_stats.get("applied_groups", 0))
+        self.composer_source_groups = tuple(
+            tuple(
+                None if item is None else f"dispatch:{int(item)}"
+                for item in group
+            )
+            for group in composer_stats.get("source_groups", ())
+        )
         self.composer_lowering_available = bool(
             composer_stats.get("lowering_available", False)
         )
@@ -9226,12 +9245,22 @@ class _GraphSpec:
         applied_groups = sum(
             getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
+        applied_source_groups = tuple(
+            tuple(
+                f"graph/{source_index}:{node.ir_node.name}/{item}"
+                for item in group
+            )
+            for source_index, node in enumerate(source_nodes)
+            for group in getattr(node, "composer_source_groups", ())
+            if all(item is not None for item in group)
+        )
         lowering_available = any(
             getattr(node, "composer_lowering_available", False) for node in self.nodes
         )
         self.fusion_plan = analyze_elementwise_fusion(
             self.pre_optimization_ir_root,
             applied_groups=applied_groups,
+            applied_source_groups=applied_source_groups,
             lowering_available=lowering_available,
         )
         self.executable_optimization_space = (

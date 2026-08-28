@@ -110,17 +110,30 @@ def _build_executable_optimization_space(root, fusion_plan, backend):
     recipe_ids = tuple(
         recipe.recipe_id for recipe in fusion_plan.candidate_recipes
     )
-    candidates = (
-        (_make_spec(semantic_plan_id, backend, recipe_ids),)
-        if recipe_ids
-        else ()
+    candidate_recipe_sets = []
+    if recipe_ids:
+        candidate_recipe_sets.append(recipe_ids)
+    applied_recipe_ids = tuple(fusion_plan.applied_recipe_ids)
+    if applied_recipe_ids and applied_recipe_ids not in candidate_recipe_sets:
+        candidate_recipe_sets.append(applied_recipe_ids)
+    candidates = tuple(
+        _make_spec(semantic_plan_id, backend, candidate)
+        for candidate in candidate_recipe_sets
     )
     if fusion_plan.applied_groups == 0:
         selected_spec_id = baseline.spec_id
         selection_status = "selected_baseline"
-    elif candidates and fusion_plan.applied_groups == len(recipe_ids):
-        selected_spec_id = candidates[0].spec_id
-        selection_status = "selected_greedy_pair"
+    elif (
+        applied_recipe_ids
+        and fusion_plan.applied_groups == len(applied_recipe_ids)
+        and fusion_plan.unmatched_applied_groups == 0
+    ):
+        selected_spec_id = next(
+            spec.spec_id
+            for spec in candidates
+            if spec.fusion_recipe_ids == applied_recipe_ids
+        )
+        selection_status = "selected_pair_recipe"
     else:
         selected_spec_id = None
         selection_status = "applied_group_count_mismatch"

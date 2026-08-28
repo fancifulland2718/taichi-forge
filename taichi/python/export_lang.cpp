@@ -5763,12 +5763,25 @@ void export_lang(py::module &m) {
             std::uint32_t applied_groups = 0;
             std::uint64_t compiled_tasks = 0;
             bool tasks_known = true;
+            py::list source_groups;
             for (const auto &dispatch : graph.dispatches) {
               const auto source_count = static_cast<std::uint32_t>(
                   std::max<std::size_t>(1,
                       dispatch.source_dispatches.size()));
               source_dispatches += source_count;
               applied_groups += source_count > 1 ? 1 : 0;
+              if (source_count > 1) {
+                py::list group;
+                for (const auto &source : dispatch.source_dispatches) {
+                  if (source.logical_dispatch_id ==
+                      std::numeric_limits<std::uint64_t>::max()) {
+                    group.append(py::none());
+                  } else {
+                    group.append(source.logical_dispatch_id);
+                  }
+                }
+                source_groups.append(std::move(group));
+              }
               if (dispatch.compiled_task_count ==
                   std::numeric_limits<std::uint32_t>::max()) {
                 tasks_known = false;
@@ -5779,6 +5792,7 @@ void export_lang(py::module &m) {
             result["source_dispatches"] = source_dispatches;
             result["physical_dispatches"] = graph.dispatches.size();
             result["applied_groups"] = applied_groups;
+            result["source_groups"] = std::move(source_groups);
             result["compiled_tasks"] =
                 tasks_known ? py::cast(compiled_tasks) : py::none();
             result["lowering_available"] = true;
