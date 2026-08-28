@@ -2393,6 +2393,29 @@ class Kernel:
         raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
         return tuple(OffloadedTaskManifest._from_core(item) for item in raw)
 
+    def _gpu_semantics_snapshot(
+        self, *args, _primal_program_id="", **kwargs
+    ):
+        """Build an explicit, no-submit CUDA/Vulkan resident snapshot."""
+
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        backend, kind = self._task_launch_backend_kind()
+        if kind != "native":
+            raise TaichiRuntimeError(
+                "GPU semantics are supported only on CUDA and Vulkan, "
+                f"not {backend}"
+            )
+        args = _process_args(self, args, kwargs)
+        key = self.ensure_compiled(*args)
+        kernel_cpp = self.compiled_kernels[key]
+        raw = self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+        return _build_resident_gpu_semantics(
+            raw, primal_program_id=_primal_program_id
+        )
+
     # For small kernels (< 3us), the performance can be pretty sensitive to overhead in __call__
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
     @_shell_pop_print

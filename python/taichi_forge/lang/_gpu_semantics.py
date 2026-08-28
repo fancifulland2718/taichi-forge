@@ -672,6 +672,67 @@ class _GpuExecutablePlanSemantics:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuSemanticSnapshot:
+    target: _GpuTargetSemantics
+    program: _GpuProgramSemantics
+    binding_schemas: Tuple[_GpuBindingSchema, ...]
+    artifacts: Tuple[_GpuArtifactSemantics, ...]
+    launches: Tuple[_GpuLaunchSemantics, ...]
+    dispatches: Tuple[_GpuDispatchSemantics, ...]
+    executable_plan: Optional[_GpuExecutablePlanSemantics] = None
+    resident_only: bool = True
+
+    def __post_init__(self):
+        if not isinstance(self.target, _GpuTargetSemantics):
+            raise TypeError("snapshot target must be _GpuTargetSemantics")
+        if not isinstance(self.program, _GpuProgramSemantics):
+            raise TypeError("snapshot program must be _GpuProgramSemantics")
+        _require_tuple_members(
+            self.binding_schemas, _GpuBindingSchema, "snapshot binding_schemas"
+        )
+        _require_tuple_members(
+            self.artifacts, _GpuArtifactSemantics, "snapshot artifacts"
+        )
+        _require_tuple_members(
+            self.launches, _GpuLaunchSemantics, "snapshot launches"
+        )
+        _require_tuple_members(
+            self.dispatches, _GpuDispatchSemantics, "snapshot dispatches"
+        )
+        if self.executable_plan is not None and not isinstance(
+            self.executable_plan, _GpuExecutablePlanSemantics
+        ):
+            raise TypeError(
+                "snapshot executable_plan must be _GpuExecutablePlanSemantics"
+            )
+        backend = self.target.backend
+        if self.program.backend != backend:
+            raise ValueError("snapshot target/program backend mismatch")
+        if any(item.backend != backend for item in self.artifacts):
+            raise ValueError("snapshot artifact backend mismatch")
+        if any(item.backend != backend for item in self.launches):
+            raise ValueError("snapshot launch backend mismatch")
+        if any(item.backend != backend for item in self.dispatches):
+            raise ValueError("snapshot dispatch backend mismatch")
+        dispatch_ids = tuple(item.physical_dispatch_id for item in self.dispatches)
+        if self.program.dispatch_ids != dispatch_ids:
+            raise ValueError("snapshot program dispatch order mismatch")
+        if {item.artifact_id for item in self.artifacts} != {
+            item.artifact_id for item in self.dispatches
+        }:
+            raise ValueError("snapshot artifact coverage mismatch")
+        if {item.launch_id for item in self.launches} != {
+            item.launch_id for item in self.dispatches
+        }:
+            raise ValueError("snapshot launch coverage mismatch")
+        if {item.schema_id for item in self.binding_schemas} != {
+            item.binding_schema_id for item in self.dispatches
+        }:
+            raise ValueError("snapshot binding schema coverage mismatch")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuTuningDimension:
     name: str
     locus: _GpuTuningLocus
@@ -813,6 +874,7 @@ __all__ = [
     "_GpuResourceEffect",
     "_GpuResourceKind",
     "_GpuRuntimeObservation",
+    "_GpuSemanticSnapshot",
     "_GpuTargetSemantics",
     "_GpuTuningDimension",
     "_GpuTuningLocus",

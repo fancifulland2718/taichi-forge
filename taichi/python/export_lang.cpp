@@ -194,6 +194,52 @@ py::dict offloaded_task_manifest_to_python(
   return item;
 }
 
+py::dict graph_kernel_metadata_to_python(
+    const lang::GraphKernelMetadata &metadata) {
+  py::dict item;
+  item["version"] = metadata.version;
+  item["available"] = metadata.available;
+  item["opaque"] = metadata.opaque;
+  item["elementwise"] = metadata.elementwise;
+  item["synchronization"] = metadata.synchronization;
+  item["blocker"] = metadata.blocker;
+  item["side_effects"] = metadata.side_effects;
+  py::dict domain;
+  domain["kind"] = metadata.iteration_domain.kind;
+  domain["arg_id"] = metadata.iteration_domain.arg_id;
+  domain["axis"] = metadata.iteration_domain.axis;
+  domain["begin"] = metadata.iteration_domain.begin;
+  domain["end"] = metadata.iteration_domain.end;
+  item["iteration_domain"] = std::move(domain);
+  py::list effects;
+  for (const auto &effect : metadata.effects) {
+    py::dict encoded;
+    encoded["resource_kind"] = effect.resource_kind;
+    encoded["arg_id"] = effect.arg_id;
+    encoded["snode_tree_id"] = effect.snode_tree_id;
+    encoded["snode_id"] = effect.snode_id;
+    encoded["is_grad"] = effect.is_grad;
+    encoded["access"] = effect.access;
+    effects.append(std::move(encoded));
+  }
+  item["effects"] = std::move(effects);
+  return item;
+}
+
+const char *autodiff_mode_name(AutodiffMode mode) {
+  switch (mode) {
+    case AutodiffMode::kNone:
+      return "primal";
+    case AutodiffMode::kForward:
+      return "forward";
+    case AutodiffMode::kReverse:
+      return "adjoint";
+    case AutodiffMode::kCheckAutodiffValid:
+      return "validation";
+  }
+  return "unknown";
+}
+
 // Record native primitive telemetry inside the existing pybind call. Keeping
 // this at the binding boundary covers cold calls, cached plan descriptors and
 // direct advanced usage without adding a second Python-to-C++ round trip.
@@ -922,6 +968,42 @@ void export_lang(py::module &m) {
              for (const auto &task : compiled.task_manifest()) {
                result.append(offloaded_task_manifest_to_python(task));
              }
+             return result;
+           })
+      .def("_kernel_gpu_semantics_snapshot",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "GPU semantics query received a null kernel");
+             const auto backend = program.compile_config().arch;
+             TI_ERROR_IF(backend != Arch::cuda && backend != Arch::vulkan,
+                         "GPU semantics are supported only on CUDA and Vulkan, "
+                         "not {}",
+                         arch_name(backend));
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             const auto &compiled = program.compile_kernel(
+                 program.compile_config(), program.get_device_caps(),
+                 *kernel);
+             py::dict result;
+             result["backend"] = arch_name(compiled.arch());
+             result["kernel_identity"] = compiled.kernel_identity();
+             result["logical_kernel_identity"] =
+                 compiled.logical_kernel_identity();
+             result["optimization_spec_identity"] =
+                 compiled.optimization_spec_identity();
+             result["autodiff_role"] =
+                 autodiff_mode_name(kernel->autodiff_mode);
+             result["graph_metadata"] =
+                 graph_kernel_metadata_to_python(compiled.graph_metadata());
+             result["regular_handle_registered"] =
+                 compiled.get_handle().has_value();
+             result["graph_masked_handle_registered"] =
+                 compiled.get_graph_masked_handle().has_value();
+             py::list tasks;
+             for (const auto &task : compiled.task_manifest()) {
+               tasks.append(offloaded_task_manifest_to_python(task));
+             }
+             result["tasks"] = std::move(tasks);
              return result;
            })
       .def("_debug_snode_relocation_manifest",
@@ -5354,35 +5436,9 @@ void export_lang(py::module &m) {
                               const std::string &dispatch_label,
                               const std::vector<aot::Arg> &args,
                               const GraphKernelMetadata &metadata) {
-              py::dict item;
+              py::dict item = graph_kernel_metadata_to_python(metadata);
               item["kernel_name"] = kernel_name;
               item["dispatch_label"] = dispatch_label;
-              item["version"] = metadata.version;
-              item["available"] = metadata.available;
-              item["opaque"] = metadata.opaque;
-              item["elementwise"] = metadata.elementwise;
-              item["synchronization"] = metadata.synchronization;
-              item["blocker"] = metadata.blocker;
-              item["side_effects"] = metadata.side_effects;
-              py::dict domain;
-              domain["kind"] = metadata.iteration_domain.kind;
-              domain["arg_id"] = metadata.iteration_domain.arg_id;
-              domain["axis"] = metadata.iteration_domain.axis;
-              domain["begin"] = metadata.iteration_domain.begin;
-              domain["end"] = metadata.iteration_domain.end;
-              item["iteration_domain"] = std::move(domain);
-              py::list effects;
-              for (const auto &effect : metadata.effects) {
-                py::dict encoded;
-                encoded["resource_kind"] = effect.resource_kind;
-                encoded["arg_id"] = effect.arg_id;
-                encoded["snode_tree_id"] = effect.snode_tree_id;
-                encoded["snode_id"] = effect.snode_id;
-                encoded["is_grad"] = effect.is_grad;
-                encoded["access"] = effect.access;
-                effects.append(std::move(encoded));
-              }
-              item["effects"] = std::move(effects);
               py::list symbolic_args;
               for (const auto &arg : args) {
                 py::dict encoded;
