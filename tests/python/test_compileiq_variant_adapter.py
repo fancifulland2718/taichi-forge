@@ -106,13 +106,15 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
         adapter.select({"forge_variant": "missing"})
 
     manifest = adapter.manifest()
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["structural_variant_ids"] == ("v0-auto", "v1-auto")
+    assert manifest["dimensions"] == ()
     assert [item["compilation_id"] for item in manifest["variants"]] == [
         "c0",
         "c0",
         "c1",
     ]
+    assert all(item["selections"] == () for item in manifest["variants"])
 
 
 def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):

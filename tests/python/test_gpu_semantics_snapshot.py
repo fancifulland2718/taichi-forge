@@ -11,6 +11,7 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuAutodiffRole,
     _GpuAvailability,
     _GpuBackend,
+    _GpuBottleneckClass,
     _GpuExtent3,
     _GpuBindingTime,
     _GpuOwnership,
@@ -32,6 +33,7 @@ from taichi_forge.lang._gpu_semantics_tuning import (
     _derive_gpu_tuning_dimensions,
     _dimension_by_name,
     _gpu_physical_equivalence_key,
+    _gpu_tuning_dimension_manifest,
 )
 from tests import test_utils
 
@@ -220,6 +222,10 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     )
     assert cuda_workgroup.legal_values == (64, 128, 256)
     assert cuda_workgroup.binding_time == _GpuBindingTime.CODEGEN
+    assert cuda_workgroup.bottleneck_classes == (
+        _GpuBottleneckClass.DISPATCH,
+        _GpuBottleneckClass.OCCUPANCY,
+    )
     assert _dimension_by_name(
         cuda_dimensions, _TLS_DIMENSION
     ).legal_values == ("auto", "off")
@@ -238,6 +244,10 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     ) == _gpu_physical_equivalence_key(
         cuda_dimensions, second, _GpuPhysicalEffect.ARTIFACT
     )
+    manifest = _gpu_tuning_dimension_manifest(cuda_workgroup)
+    assert manifest["locus"] == "artifact_codegen"
+    assert manifest["bottleneck_classes"] == ("dispatch", "occupancy")
+    assert manifest["autodiff_policy"] == "primal_only"
 
     vulkan_raw = deepcopy(_raw_snapshot("vulkan"))
     vulkan_raw["tasks"][0]["static_shared_bytes"] = 0

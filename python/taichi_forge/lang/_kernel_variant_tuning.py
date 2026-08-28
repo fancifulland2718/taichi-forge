@@ -27,6 +27,7 @@ class _KernelVariant:
     logical_task_id: str
     baseline_thread_local_bytes: int
     physical_equivalence_key: tuple
+    selections: tuple
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class _KernelVariantSession:
         self._args = tuple(args)
         variants = []
         rejections = []
+        dimension_contract = None
         for block_dim in requested:
             baseline_spec = self._spec(block_dim, "auto", None)
             baseline_binding = _bind_kernel_optimization_spec(
@@ -72,6 +74,13 @@ class _KernelVariantSession:
             except (RuntimeError, TypeError, ValueError) as error:
                 rejections.append(_KernelVariantRejection(block_dim, str(error)))
                 continue
+
+            if dimension_contract is None:
+                dimension_contract = dimensions
+            elif dimension_contract != dimensions:
+                raise RuntimeError(
+                    "GPU tuning dimension contract changed across block candidates"
+                )
 
             from taichi_forge.lang._gpu_semantics import _GpuPhysicalEffect
             from taichi_forge.lang._gpu_semantics_tuning import (
@@ -115,6 +124,7 @@ class _KernelVariantSession:
                                     _GpuPhysicalEffect.ARTIFACT,
                                 )
                             ),
+                            selections=tuple(selections.items()),
                         )
                     )
 
@@ -124,6 +134,7 @@ class _KernelVariantSession:
             {variant.variant_id: variant for variant in variants}
         )
         self._rejections = tuple(rejections)
+        self._dimensions = () if dimension_contract is None else dimension_contract
         members = {}
         for variant in variants:
             group = members.setdefault(
@@ -187,6 +198,10 @@ class _KernelVariantSession:
     @property
     def compilation_groups(self):
         return self._compilation_groups
+
+    @property
+    def dimensions(self):
+        return self._dimensions
 
     def variant_ids(self):
         return tuple(self._variants)

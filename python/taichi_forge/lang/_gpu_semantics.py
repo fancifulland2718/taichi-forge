@@ -96,6 +96,23 @@ class _GpuPhysicalEffect(str, Enum):
     NONE = "none"
 
 
+class _GpuBottleneckClass(str, Enum):
+    DISPATCH = "dispatch"
+    OCCUPANCY = "occupancy"
+    MEMORY_BANDWIDTH = "memory_bandwidth"
+    MEMORY_LATENCY = "memory_latency"
+    REDUCTION_ATOMIC = "reduction_atomic"
+    COMPUTE = "compute"
+    WORKGROUP_STORAGE = "workgroup_storage"
+
+
+class _GpuTuningAutodiffPolicy(str, Enum):
+    PRESERVED = "preserved"
+    PRIMAL_ONLY = "primal_only"
+    INDEPENDENT_ORACLE = "independent_oracle"
+    UNSUPPORTED = "unsupported"
+
+
 _ENUM_TYPES = {
     enum_type.__name__: enum_type
     for enum_type in (
@@ -109,6 +126,8 @@ _ENUM_TYPES = {
         _GpuResourceAccess,
         _GpuTuningLocus,
         _GpuPhysicalEffect,
+        _GpuBottleneckClass,
+        _GpuTuningAutodiffPolicy,
     )
 }
 _SCHEMA_TYPES = {}
@@ -876,6 +895,10 @@ class _GpuTuningDimension:
     physical_effect: _GpuPhysicalEffect
     equivalence_key: str
     dependencies: Tuple[str, ...] = ()
+    bottleneck_classes: Tuple[_GpuBottleneckClass, ...] = ()
+    autodiff_policy: _GpuTuningAutodiffPolicy = (
+        _GpuTuningAutodiffPolicy.INDEPENDENT_ORACLE
+    )
     status: _GpuFact = field(default_factory=_default_unknown_fact)
 
     def __post_init__(self):
@@ -894,6 +917,13 @@ class _GpuTuningDimension:
             self.required_capabilities, str, "required_capabilities"
         )
         _require_tuple_members(self.dependencies, str, "dimension dependencies")
+        _require_tuple_members(
+            self.bottleneck_classes,
+            _GpuBottleneckClass,
+            "dimension bottleneck_classes",
+        )
+        if not isinstance(self.autodiff_policy, _GpuTuningAutodiffPolicy):
+            raise TypeError("autodiff_policy must be a _GpuTuningAutodiffPolicy")
         _require_text(self.controller, "tuning dimension controller")
         if not isinstance(self.binding_time, _GpuBindingTime):
             raise TypeError("binding_time must be a _GpuBindingTime")
@@ -987,6 +1017,7 @@ __all__ = [
     "_GpuAutodiffRole",
     "_GpuAvailability",
     "_GpuBackend",
+    "_GpuBottleneckClass",
     "_GpuBinding",
     "_GpuBindingSchema",
     "_GpuBindingTime",
@@ -1010,6 +1041,7 @@ __all__ = [
     "_GpuSemanticSnapshot",
     "_GpuTargetSemantics",
     "_GpuTuningDimension",
+    "_GpuTuningAutodiffPolicy",
     "_GpuTuningLocus",
     "_VulkanArtifactExtension",
     "_VulkanLaunchExtension",

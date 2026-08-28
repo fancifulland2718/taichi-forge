@@ -5,8 +5,10 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuAutodiffRole,
     _GpuAvailability,
     _GpuBindingTime,
+    _GpuBottleneckClass,
     _GpuOwnership,
     _GpuPhysicalEffect,
+    _GpuTuningAutodiffPolicy,
     _GpuTuningDimension,
     _GpuTuningLocus,
     _VulkanArtifactExtension,
@@ -48,6 +50,8 @@ def _blocked_dimension(
     physical_effect,
     equivalence_key,
     status,
+    bottleneck_classes=(),
+    autodiff_policy=_GpuTuningAutodiffPolicy.UNSUPPORTED,
 ):
     return _GpuTuningDimension(
         name=name,
@@ -59,6 +63,8 @@ def _blocked_dimension(
         binding_time=binding_time,
         physical_effect=physical_effect,
         equivalence_key=equivalence_key,
+        bottleneck_classes=tuple(bottleneck_classes),
+        autodiff_policy=autodiff_policy,
         status=status,
     )
 
@@ -104,6 +110,11 @@ def _workgroup_dimension(
         binding_time=binding_time,
         physical_effect=_GpuPhysicalEffect.ARTIFACT,
         equivalence_key="artifact:workgroup_shape_x",
+        bottleneck_classes=(
+            _GpuBottleneckClass.DISPATCH,
+            _GpuBottleneckClass.OCCUPANCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
     )
     if snapshot.program.autodiff_role != _GpuAutodiffRole.PRIMAL:
         return _blocked_dimension(
@@ -179,6 +190,11 @@ def _workgroup_dimension(
         binding_time=binding_time,
         physical_effect=_GpuPhysicalEffect.ARTIFACT,
         equivalence_key="artifact:workgroup_shape_x",
+        bottleneck_classes=(
+            _GpuBottleneckClass.DISPATCH,
+            _GpuBottleneckClass.OCCUPANCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
         status=_status_proven("resident_gpu_dispatch_semantics"),
     )
 
@@ -197,6 +213,11 @@ def _tls_dimension(snapshot):
             binding_time=_GpuBindingTime.CODEGEN,
             physical_effect=_GpuPhysicalEffect.ARTIFACT,
             equivalence_key="artifact:compiler_thread_local_strategy",
+            bottleneck_classes=(
+                _GpuBottleneckClass.REDUCTION_ATOMIC,
+                _GpuBottleneckClass.MEMORY_LATENCY,
+            ),
+            autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
             status=_status_unsupported(
                 "current TLS strategy dimension is implemented only by CUDA lowering"
             ),
@@ -217,6 +238,11 @@ def _tls_dimension(snapshot):
         binding_time=_GpuBindingTime.CODEGEN,
         physical_effect=_GpuPhysicalEffect.ARTIFACT,
         equivalence_key="artifact:compiler_thread_local_strategy",
+        bottleneck_classes=(
+            _GpuBottleneckClass.REDUCTION_ATOMIC,
+            _GpuBottleneckClass.MEMORY_LATENCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
         status=_status_proven("cuda_task_manifest_thread_local_scratch"),
     )
 
@@ -235,6 +261,11 @@ def _residency_dimension(snapshot, legal_values):
             binding_time=_GpuBindingTime.LAUNCH,
             physical_effect=_GpuPhysicalEffect.LAUNCH,
             equivalence_key="launch:grid_residency_waves",
+            bottleneck_classes=(
+                _GpuBottleneckClass.DISPATCH,
+                _GpuBottleneckClass.OCCUPANCY,
+            ),
+            autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
             status=_status_unsupported(
                 "grid-residency waves have no Vulkan launch contract"
             ),
@@ -249,6 +280,11 @@ def _residency_dimension(snapshot, legal_values):
         binding_time=_GpuBindingTime.LAUNCH,
         physical_effect=_GpuPhysicalEffect.LAUNCH,
         equivalence_key="launch:grid_residency_waves",
+        bottleneck_classes=(
+            _GpuBottleneckClass.DISPATCH,
+            _GpuBottleneckClass.OCCUPANCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
         status=_status_proven("cuda_standard_kernel_launcher"),
     )
 
@@ -289,6 +325,34 @@ def _gpu_physical_equivalence_key(dimensions, selections, physical_effect):
     )
 
 
+def _gpu_tuning_dimension_manifest(dimension):
+    """Return the dependency-free optimization protocol for one dimension."""
+
+    if not isinstance(dimension, _GpuTuningDimension):
+        raise TypeError("dimension must be a _GpuTuningDimension")
+    return {
+        "name": dimension.name,
+        "locus": dimension.locus.value,
+        "backend_applicability": tuple(
+            backend.value for backend in dimension.backend_applicability
+        ),
+        "legal_values": dimension.legal_values,
+        "required_capabilities": dimension.required_capabilities,
+        "controller": dimension.controller,
+        "binding_time": dimension.binding_time.value,
+        "physical_effect": dimension.physical_effect.value,
+        "equivalence_key": dimension.equivalence_key,
+        "dependencies": dimension.dependencies,
+        "bottleneck_classes": tuple(
+            item.value for item in dimension.bottleneck_classes
+        ),
+        "autodiff_policy": dimension.autodiff_policy.value,
+        "availability": dimension.status.availability.value,
+        "reason": dimension.status.reason,
+        "provenance": dimension.status.provenance,
+    }
+
+
 __all__ = [
     "_RESIDENCY_DIMENSION",
     "_TLS_DIMENSION",
@@ -296,4 +360,5 @@ __all__ = [
     "_derive_gpu_tuning_dimensions",
     "_dimension_by_name",
     "_gpu_physical_equivalence_key",
+    "_gpu_tuning_dimension_manifest",
 ]

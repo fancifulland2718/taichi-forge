@@ -266,15 +266,24 @@ class _CompileIQVariantAdapter:
     def manifest(self):
         """Return a dependency-free, serializable worker/replay manifest."""
 
+        from taichi_forge.lang._gpu_semantics_tuning import (
+            _gpu_tuning_dimension_manifest,
+        )
+
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "parameter": self._parameter,
             "structural_variant_ids": self._structural_ids,
+            "dimensions": tuple(
+                _gpu_tuning_dimension_manifest(dimension)
+                for dimension in getattr(self._session, "dimensions", ())
+            ),
             "variants": tuple(
                 {
                     "variant_id": variant.variant_id,
                     "compilation_id": variant.compilation_id,
                     "spec": variant.spec.stable_payload,
+                    "selections": tuple(getattr(variant, "selections", ())),
                 }
                 for variant in self._variants.values()
             ),
