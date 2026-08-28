@@ -733,6 +733,78 @@ class _GpuSemanticSnapshot:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuExecutablePlanSnapshot:
+    target: _GpuTargetSemantics
+    programs: Tuple[_GpuProgramSemantics, ...]
+    binding_schemas: Tuple[_GpuBindingSchema, ...]
+    artifacts: Tuple[_GpuArtifactSemantics, ...]
+    launches: Tuple[_GpuLaunchSemantics, ...]
+    dispatches: Tuple[_GpuDispatchSemantics, ...]
+    executable_plan: _GpuExecutablePlanSemantics
+    resident_only: bool = True
+
+    def __post_init__(self):
+        if not isinstance(self.target, _GpuTargetSemantics):
+            raise TypeError("plan snapshot target must be _GpuTargetSemantics")
+        _require_tuple_members(
+            self.programs, _GpuProgramSemantics, "plan snapshot programs"
+        )
+        _require_tuple_members(
+            self.binding_schemas,
+            _GpuBindingSchema,
+            "plan snapshot binding_schemas",
+        )
+        _require_tuple_members(
+            self.artifacts, _GpuArtifactSemantics, "plan snapshot artifacts"
+        )
+        _require_tuple_members(
+            self.launches, _GpuLaunchSemantics, "plan snapshot launches"
+        )
+        _require_tuple_members(
+            self.dispatches, _GpuDispatchSemantics, "plan snapshot dispatches"
+        )
+        if not isinstance(self.executable_plan, _GpuExecutablePlanSemantics):
+            raise TypeError(
+                "plan snapshot executable_plan must be "
+                "_GpuExecutablePlanSemantics"
+            )
+        backend = self.target.backend
+        for collection in (
+            self.programs,
+            self.artifacts,
+            self.launches,
+            self.dispatches,
+        ):
+            if any(item.backend != backend for item in collection):
+                raise ValueError("plan snapshot backend mismatch")
+        if self.executable_plan.backend != backend:
+            raise ValueError("plan snapshot executable backend mismatch")
+        dispatch_ids = {
+            dispatch.physical_dispatch_id for dispatch in self.dispatches
+        }
+        if set(self.executable_plan.dispatch_ids) != dispatch_ids:
+            raise ValueError("plan snapshot dispatch coverage mismatch")
+        if len(dispatch_ids) != len(self.dispatches):
+            raise ValueError("plan snapshot dispatch identities must be unique")
+        if {launch.launch_id for launch in self.launches} != {
+            dispatch.launch_id for dispatch in self.dispatches
+        }:
+            raise ValueError("plan snapshot launch coverage mismatch")
+        if {artifact.artifact_id for artifact in self.artifacts} != {
+            dispatch.artifact_id for dispatch in self.dispatches
+        }:
+            raise ValueError("plan snapshot artifact coverage mismatch")
+        schema_ids = {schema.schema_id for schema in self.binding_schemas}
+        if not {
+            dispatch.binding_schema_id for dispatch in self.dispatches
+        } <= schema_ids:
+            raise ValueError("plan snapshot binding coverage mismatch")
+        if set(self.executable_plan.binding_schema_ids) != schema_ids:
+            raise ValueError("plan snapshot executable binding coverage mismatch")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuTuningDimension:
     name: str
     locus: _GpuTuningLocus

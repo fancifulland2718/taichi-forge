@@ -8659,6 +8659,20 @@ def _native_action_manifests_for_node(node):
     return manifests
 
 
+def _gpu_plan_logical_order(ir_node):
+    if isinstance(ir_node, SequentialRegion):
+        return tuple(
+            kind
+            for child in ir_node.children
+            for kind in _gpu_plan_logical_order(child)
+        )
+    if isinstance(ir_node, DispatchNode):
+        return ("dispatch",)
+    if isinstance(ir_node, NativeCallNode):
+        return ("native",)
+    return ("structured",)
+
+
 def _ir_contains_flag(node, flag):
     return bool(getattr(node, flag, False)) or any(
         _ir_contains_flag(child, flag) for child in getattr(node, "children", ())
@@ -12939,6 +12953,84 @@ class Graph:
             compiled_graph = nodes[0].compiled_graph
             raw = impl.get_runtime().prog._graph_task_manifest(compiled_graph)
         return tuple(GraphTaskManifest._from_core(item) for item in raw)
+
+    def _gpu_semantics_snapshot(self):
+        """Build a lazy, value-only CUDA/Vulkan executable-plan snapshot."""
+
+        from taichi_forge.lang._gpu_semantics_graph import (
+            _build_gpu_executable_plan_semantics,
+        )
+
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            program = impl.get_runtime().prog
+            stages = []
+            pipeline = self._spec.pipeline_definition
+            for node, stage in zip(self._spec.nodes, pipeline):
+                raw = (
+                    program._graph_gpu_semantics_snapshot(node.compiled_graph)
+                    if isinstance(node, _CompiledCGraphNode)
+                    else {"backend": self._execution_arch, "segments": ()}
+                )
+                if raw["backend"] != self._execution_arch:
+                    raise TaichiRuntimeError(
+                        "Graph GPU semantics backend changed after compilation"
+                    )
+                logical_order = _gpu_plan_logical_order(node.ir_node)
+                actions = tuple(
+                    action.to_dict() for action in stage["native_actions"]
+                )
+                topology_static = "structured" not in logical_order
+                if not topology_static:
+                    logical_order = tuple(
+                        "native" if kind == "structured" else kind
+                        for kind in logical_order
+                    )
+                    actions = (
+                        *actions,
+                        {
+                            "name": f"structured:{stage['path_id']}",
+                            "recordable": bool(
+                                getattr(node, "supports_native_submission", False)
+                            ),
+                            "backends": (self._execution_arch,),
+                            "runtime_bindings": tuple(
+                                {
+                                    "name": name,
+                                    "kind": "opaque",
+                                    "required": True,
+                                }
+                                for name in sorted(node.runtime_arg_names)
+                            ),
+                            "derived_runtime_bindings": (),
+                            "effects": (),
+                            "fixed_binding_names": (),
+                        },
+                    )
+                stages.append(
+                    {
+                        "stage_index": int(stage["stage_index"]),
+                        "path_id": str(stage["path_id"]),
+                        "kind": str(stage["kind"]),
+                        "region_kind": str(stage["region_kind"]),
+                        "logical_order": logical_order,
+                        "topology_static": topology_static,
+                        "raw": raw,
+                        "native_actions": actions,
+                    }
+                )
+            temporary = self._spec.temporary_memory_plan
+            definition = {
+                "backend": self._execution_arch,
+                "stages": tuple(stages),
+                "workspace_lane_capacity": self._workspace_lane_capacity,
+                "fixed_internal_storage_bytes": self._spec.internal_storage_bytes,
+                "temporary_peak_bytes": (
+                    temporary.planned_peak_bytes + temporary.opaque_bytes
+                ),
+                "lifetime_lease_count": len(self._spec.lifetime_leases),
+            }
+        return _build_gpu_executable_plan_semantics(definition)
 
     def physical_plan(self):
         """Return the immutable logical-to-physical Graph execution plan.

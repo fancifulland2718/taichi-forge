@@ -326,6 +326,79 @@ py::dict spirv_task_metadata_to_python(
 }
 #endif
 
+py::dict compiled_kernel_gpu_semantics_to_python(
+    const lang::CompiledKernelData &compiled,
+    AutodiffMode autodiff_mode,
+    const lang::aot::CompiledDispatch *graph_dispatch = nullptr,
+    std::size_t graph_dispatch_index = 0) {
+  const auto backend = compiled.arch();
+  py::dict result;
+  result["backend"] = arch_name(backend);
+  result["kernel_identity"] = compiled.kernel_identity();
+  result["logical_kernel_identity"] = compiled.logical_kernel_identity();
+  result["optimization_spec_identity"] =
+      compiled.optimization_spec_identity();
+  result["autodiff_role"] = autodiff_mode_name(autodiff_mode);
+  result["graph_metadata"] =
+      graph_kernel_metadata_to_python(compiled.graph_metadata());
+  result["regular_handle_registered"] = compiled.get_handle().has_value();
+  result["graph_masked_handle_registered"] =
+      compiled.get_graph_masked_handle().has_value();
+  if (graph_dispatch != nullptr) {
+    result["graph_dispatch_index"] = graph_dispatch_index;
+    result["graph_kernel_name"] = graph_dispatch->kernel_name;
+    result["graph_dispatch_label"] = graph_dispatch->dispatch_label;
+    result["graph_indirect"] =
+        graph_dispatch->indirect_dispatch_arg.has_value();
+    result["graph_source_dispatch_count"] =
+        std::max<std::size_t>(1, graph_dispatch->source_dispatches.size());
+  }
+#if defined(TI_WITH_VULKAN)
+  const lang::spirv::CompiledKernelData *spirv_compiled = nullptr;
+  if (backend == Arch::vulkan) {
+    spirv_compiled =
+        dynamic_cast<const lang::spirv::CompiledKernelData *>(&compiled);
+    TI_ERROR_IF(spirv_compiled == nullptr,
+                "Vulkan GPU semantics require SPIR-V compiled data");
+  }
+#endif
+  py::list tasks;
+  const auto manifest = compiled.task_manifest();
+  for (std::size_t index = 0; index < manifest.size(); ++index) {
+    auto encoded = offloaded_task_manifest_to_python(manifest[index]);
+    if (graph_dispatch != nullptr) {
+      encoded["graph_dispatch_index"] = graph_dispatch_index;
+      encoded["graph_kernel_name"] = graph_dispatch->kernel_name;
+      encoded["graph_dispatch_label"] = graph_dispatch->dispatch_label;
+      encoded["graph_indirect"] =
+          graph_dispatch->indirect_dispatch_arg.has_value();
+      encoded["graph_source_dispatch_count"] =
+          std::max<std::size_t>(1, graph_dispatch->source_dispatches.size());
+      if (graph_dispatch->indirect_dispatch_arg.has_value()) {
+        encoded["actual_grid_size"] = py::none();
+        encoded["actual_block_size"] = py::none();
+        encoded["actual_geometry_kind"] = "runtime_indirect";
+        encoded["actual_geometry_reason"] =
+            "the device-owned dispatch packet determines geometry for each "
+            "invocation without host readback";
+      }
+    }
+#if defined(TI_WITH_VULKAN)
+    if (spirv_compiled != nullptr) {
+      const auto &attributes = spirv_compiled->get_internal_data()
+                                   .metadata.kernel_attribs.tasks_attribs;
+      TI_ERROR_IF(attributes.size() != manifest.size(),
+                  "Vulkan task metadata count mismatch");
+      encoded["backend_metadata"] =
+          spirv_task_metadata_to_python(attributes[index]);
+    }
+#endif
+    tasks.append(std::move(encoded));
+  }
+  result["tasks"] = std::move(tasks);
+  return result;
+}
+
 // Record native primitive telemetry inside the existing pybind call. Keeping
 // this at the binding boundary covers cold calls, cached plan descriptors and
 // direct advanced usage without adding a second Python-to-C++ round trip.
@@ -1070,50 +1143,8 @@ void export_lang(py::module &m) {
              const auto &compiled = program.compile_kernel(
                  program.compile_config(), program.get_device_caps(),
                  *kernel);
-             py::dict result;
-             result["backend"] = arch_name(compiled.arch());
-             result["kernel_identity"] = compiled.kernel_identity();
-             result["logical_kernel_identity"] =
-                 compiled.logical_kernel_identity();
-             result["optimization_spec_identity"] =
-                 compiled.optimization_spec_identity();
-             result["autodiff_role"] =
-                 autodiff_mode_name(kernel->autodiff_mode);
-             result["graph_metadata"] =
-                 graph_kernel_metadata_to_python(compiled.graph_metadata());
-             result["regular_handle_registered"] =
-                 compiled.get_handle().has_value();
-             result["graph_masked_handle_registered"] =
-                 compiled.get_graph_masked_handle().has_value();
-#if defined(TI_WITH_VULKAN)
-             const lang::spirv::CompiledKernelData *spirv_compiled = nullptr;
-             if (backend == Arch::vulkan) {
-               spirv_compiled =
-                   dynamic_cast<const lang::spirv::CompiledKernelData *>(
-                       &compiled);
-               TI_ERROR_IF(spirv_compiled == nullptr,
-                           "Vulkan GPU semantics require SPIR-V compiled data");
-             }
-#endif
-             py::list tasks;
-             const auto manifest = compiled.task_manifest();
-             for (std::size_t index = 0; index < manifest.size(); ++index) {
-               auto encoded = offloaded_task_manifest_to_python(manifest[index]);
-#if defined(TI_WITH_VULKAN)
-               if (spirv_compiled != nullptr) {
-                 const auto &attributes =
-                     spirv_compiled->get_internal_data()
-                         .metadata.kernel_attribs.tasks_attribs;
-                 TI_ERROR_IF(attributes.size() != manifest.size(),
-                             "Vulkan task metadata count mismatch");
-                 encoded["backend_metadata"] =
-                     spirv_task_metadata_to_python(attributes[index]);
-               }
-#endif
-               tasks.append(std::move(encoded));
-             }
-             result["tasks"] = std::move(tasks);
-             return result;
+             return compiled_kernel_gpu_semantics_to_python(
+                 compiled, kernel->autodiff_mode);
            })
       .def("_debug_snode_relocation_manifest",
            [](Program &program, Kernel *kernel) {
@@ -1253,6 +1284,37 @@ void export_lang(py::module &m) {
                  result.append(std::move(item));
                }
              }
+             return result;
+           })
+      .def("_graph_gpu_semantics_snapshot",
+           [](Program &program, const aot::CompiledGraph &graph) {
+             const auto backend = program.compile_config().arch;
+             TI_ERROR_IF(backend != Arch::cuda && backend != Arch::vulkan,
+                         "GPU executable-plan semantics are supported only "
+                         "on CUDA and Vulkan, not {}",
+                         arch_name(backend));
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             py::dict result;
+             result["backend"] = arch_name(backend);
+             py::list segments;
+             for (std::size_t dispatch_index = 0;
+                  dispatch_index < graph.dispatches.size();
+                  ++dispatch_index) {
+               const auto &dispatch = graph.dispatches[dispatch_index];
+               TI_ERROR_IF(
+                   dispatch.ti_kernel == nullptr,
+                   "GPU executable-plan semantics are unavailable for "
+                   "AOT-only Graph dispatch {} ({})",
+                   dispatch_index, dispatch.kernel_name);
+               const auto &compiled = program.compile_kernel(
+                   program.compile_config(), program.get_device_caps(),
+                   *dispatch.ti_kernel);
+               segments.append(compiled_kernel_gpu_semantics_to_python(
+                   compiled, dispatch.ti_kernel->autodiff_mode, &dispatch,
+                   dispatch_index));
+             }
+             result["segments"] = std::move(segments);
              return result;
            })
       .def("set_kernel_profiler_toolkit",
