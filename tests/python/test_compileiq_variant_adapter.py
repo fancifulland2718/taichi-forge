@@ -3,10 +3,15 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+import taichi_forge as ti
 from taichi_forge.lang._compileiq_adapter import (
+    _CompileIQSearchStage,
     _CompileIQVariantAdapter,
     _CompileIQVariantBundle,
+    _CompileIQWinnerScope,
 )
+from taichi_forge.lang._kernel_variant_tuning import _KernelVariantSession
+from tests import test_utils
 
 
 class _FakeSession:
@@ -123,12 +128,14 @@ def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):
         _FakeSession(), parameter="forge_variant_composite"
     )
 
-    assert adapter.search_space("full") == {
+    assert adapter.search_space("structural") == {
         "forge_variant_composite": (
             "choice",
-            ("v0-auto", "v0-one", "v1-auto"),
+            ("v0-auto", "v1-auto"),
         )
     }
+    with pytest.raises(ValueError, match="Cartesian"):
+        adapter.search_space("full")
     assert adapter.select({"forge_variant_composite": "v1-auto"}).variant_id == (
         "v1-auto"
     )
@@ -177,7 +184,7 @@ def test_compileiq_bundle_rejects_invalid_shape_and_ambiguous_launch_stage():
         _CompileIQVariantBundle({"bad-name": _FakeSession()})
 
     bundle = _CompileIQVariantBundle({"kernel": _FakeSession()})
-    with pytest.raises(ValueError, match="per-kernel compilation group"):
+    with pytest.raises(ValueError, match="Cartesian search is disabled"):
         bundle.search_space("launch")
 
 
@@ -248,3 +255,167 @@ def test_compileiq_adapter_rejects_incomplete_or_invalid_evidence():
             {"v0-auto": (0.9, float("nan")), "v1-auto": (0.9, 0.9)},
             blocks=2,
         )
+
+
+def _winner_scope(final_candidate_id, provider_scope_id="explicit-acf:sha256"):
+    return _CompileIQWinnerScope(
+        final_candidate_id=final_candidate_id,
+        kernel_specialization_id="kernel:contact-v3",
+        workload_profile_id="tlw1:production-sap",
+        shape_scope_id="dofs=32768/contacts=8192",
+        replay_scope_id="fresh-process-reset-v2",
+        runtime_scope_id="cuda:uuid:driver",
+        compiler_scope_id="llvm20:ptxas13.3",
+        provider_scope_id=provider_scope_id,
+        variant_manifest_id="manifest:sha256",
+    )
+
+
+def test_compileiq_staged_plan_exhausts_bounded_groups_before_qualification():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    plan = adapter.staged_plan(
+        structural_blocks=4,
+        launch_blocks=4,
+        qualification_blocks=10,
+        structural_shortlist=2,
+    )
+    structural = {
+        "v0-auto": (0.98, 0.99, 0.97, 0.98),
+        "v1-auto": (0.96, 0.97, 0.98, 0.97),
+    }
+
+    assert plan.structural_stage.candidate_kind == "forge_structural"
+    assert len(plan.structural_stage.schedule) == 8
+    assert plan.shortlisted_compilation_ids(structural) == ("c1", "c0")
+    launch_stages = plan.launch_stages(structural)
+    assert [stage.compilation_id for stage in launch_stages] == ["c1", "c0"]
+    assert all(len(stage.candidate_ids) <= 32 for stage in launch_stages)
+
+    launch = {
+        "c1": {"v1-auto": (1.0, 1.0, 1.0, 1.0)},
+        "c0": {
+            "v0-auto": (1.0, 1.0, 1.0, 1.0),
+            "v0-one": (0.96, 0.97, 0.95, 0.96),
+        },
+    }
+    finalist_variants = plan.launch_finalists(structural, launch)
+    assert finalist_variants == ("v1-auto", "v0-one")
+    finalists = tuple(
+        plan.final_candidate(variant_id) for variant_id in finalist_variants
+    )
+    assert len(plan.qualification_stage(finalists).schedule) == 20
+
+    ptxas = plan.ptxas_stage("v0-one", ("acf-baseline", "acf-candidate"))
+    assert ptxas.candidate_kind == "ptxas_control"
+    assert ptxas.forge_variant_id == "v0-one"
+    assert plan.manifest()["compileiq_stage"] == "optional_ptxas_control_only"
+
+
+def test_compileiq_final_qualification_binds_exact_scope_and_worst_gate():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    plan = adapter.staged_plan(qualification_blocks=10)
+    finalists = (
+        plan.final_candidate("v0-one", "acf-fast"),
+        plan.final_candidate("v1-auto", "baseline"),
+    )
+    candidate_ids = tuple(candidate.identity for candidate in finalists)
+    decision = plan.qualify(
+        {
+            candidate_ids[0]: (0.96,) * 10,
+            candidate_ids[1]: (0.95,) * 9 + (1.01,),
+        },
+        finalists,
+        scopes={
+            candidate_ids[0]: _winner_scope(
+                candidate_ids[0], "acf-fast:sha256"
+            ),
+            candidate_ids[1]: _winner_scope(
+                candidate_ids[1], "driver-baseline"
+            ),
+        },
+        correctness={candidate_ids[0]: True, candidate_ids[1]: True},
+        memory_stable={candidate_ids[0]: True, candidate_ids[1]: True},
+    )
+
+    assert decision.admitted
+    assert decision.selected_candidate_id == candidate_ids[0]
+    assert decision.selected_forge_variant_id == "v0-one"
+    assert decision.selected_provider_candidate_id == "acf-fast"
+    assert decision.scope_id == _winner_scope(
+        candidate_ids[0], "acf-fast:sha256"
+    ).identity
+    by_id = {item.variant_id: item for item in decision.evidence}
+    assert by_id[candidate_ids[0]].ratio_cv == pytest.approx(0.0)
+    assert by_id[candidate_ids[1]].worst_ratio == pytest.approx(1.01)
+
+    rejected_candidate = plan.final_candidate("v0-one")
+    rejected = plan.qualify(
+        {rejected_candidate.identity: (0.99,) * 9 + (1.001,)},
+        (rejected_candidate,),
+        scopes={
+            rejected_candidate.identity: _winner_scope(
+                rejected_candidate.identity, "baseline"
+            )
+        },
+        correctness={rejected_candidate.identity: True},
+        memory_stable={rejected_candidate.identity: True},
+    )
+    assert not rejected.admitted
+    assert rejected.selected_candidate_id is None
+    assert "worst-positive" in rejected.reason
+
+
+def test_compileiq_staged_contract_rejects_oversized_or_weak_final_stage():
+    with pytest.raises(ValueError, match="at most 32"):
+        _CompileIQSearchStage(
+            stage_id="oversized",
+            candidate_kind="forge_structural",
+            candidate_ids=tuple(f"v{index}" for index in range(33)),
+            blocks=2,
+        )
+    with pytest.raises(ValueError, match="at least 10"):
+        _CompileIQSearchStage(
+            stage_id="weak-final",
+            candidate_kind="qualification",
+            candidate_ids=("v0",),
+            blocks=8,
+        )
+    with pytest.raises(ValueError, match="non-empty single-line"):
+        _CompileIQWinnerScope(
+            final_candidate_id="candidate",
+            kernel_specialization_id="",
+            workload_profile_id="profile",
+            shape_scope_id="shape",
+            replay_scope_id="replay",
+            runtime_scope_id="runtime",
+            compiler_scope_id="compiler",
+            provider_scope_id="provider",
+            variant_manifest_id="manifest",
+        )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_compileiq_staged_plan_covers_real_bounded_cuda_variant_groups():
+    count = 4096
+    values = ti.ndarray(ti.i32, shape=count)
+    result = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def reduce(inp: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in range(count):
+            result[None] += inp[i]
+
+    adapter = _CompileIQVariantAdapter(_KernelVariantSession(reduce, (values,)))
+    plan = adapter.staged_plan(structural_shortlist=2)
+    structural_ids = plan.structural_stage.candidate_ids
+    measurements = {
+        candidate_id: (1.0 + index * 0.001,) * 4
+        for index, candidate_id in enumerate(structural_ids)
+    }
+    launch_stages = plan.launch_stages(measurements)
+
+    assert len(structural_ids) == 8
+    assert len(plan.structural_stage.schedule) == 32
+    assert len(launch_stages) == 2
+    assert all(len(stage.candidate_ids) == 16 for stage in launch_stages)
+    assert all(len(stage.schedule) == 64 for stage in launch_stages)
