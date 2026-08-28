@@ -2424,6 +2424,38 @@ class Kernel:
             raw, primal_program_id=_primal_program_id
         )
 
+    def _gpu_semantics_qualification(
+        self, *args, _primal_program_id="", **kwargs
+    ):
+        """Explicitly materialize/query backend artifact facts without launch."""
+
+        from taichi_forge.lang._gpu_semantics_qualification import (
+            _build_gpu_artifact_qualification,
+        )
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        backend, kind = self._task_launch_backend_kind()
+        if kind != "native":
+            raise TaichiRuntimeError(
+                "GPU artifact qualification is supported only on CUDA and "
+                f"Vulkan, not {backend}"
+            )
+        args = _process_args(self, args, kwargs)
+        key = self.ensure_compiled(*args)
+        kernel_cpp = self.compiled_kernels[key]
+        snapshot = _build_resident_gpu_semantics(
+            self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp),
+            primal_program_id=_primal_program_id,
+        )
+        started = time.perf_counter_ns()
+        raw = self.runtime.prog._kernel_gpu_artifact_qualification(kernel_cpp)
+        fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
+        return _build_gpu_artifact_qualification(
+            snapshot, raw, fixed_cost_seconds
+        )
+
     # For small kernels (< 3us), the performance can be pretty sensitive to overhead in __call__
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
     @_shell_pop_print
@@ -2600,6 +2632,37 @@ class _TaskLaunchBinding:
             self._kernel.compiled_kernels[key]
         )
         return _build_resident_gpu_semantics(raw)
+
+    def _gpu_semantics_qualification(self, *args, **kwargs):
+        """Qualify the exact policy/spec specialization without submitting it."""
+
+        from taichi_forge.lang._gpu_semantics_qualification import (
+            _build_gpu_artifact_qualification,
+        )
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        combined_args = (*self._bound_args, *args)
+        processed = _process_args(self._kernel, combined_args, kwargs)
+        key = self._kernel._ensure_compiled_with_task_launch_policy(
+            self.policy,
+            *processed,
+            optimization_spec=self._optimization_spec,
+        )
+        self._kernel._validate_task_launch_policy_specialization(key, self.policy)
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        snapshot = _build_resident_gpu_semantics(
+            self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+        )
+        started = time.perf_counter_ns()
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
+            kernel_cpp
+        )
+        fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
+        return _build_gpu_artifact_qualification(
+            snapshot, raw, fixed_cost_seconds
+        )
 
     def _refresh_fast_path(self, report=None):
         if report is not None and report.status == "fallback_auto":

@@ -34,9 +34,18 @@ struct GridResidencyTelemetrySnapshot {
   std::uint64_t last_multiprocessor_count{0};
 };
 
+struct ArtifactQualificationTelemetrySnapshot {
+  std::uint64_t qualification_calls{0};
+  std::uint64_t registration_materializations{0};
+  std::uint64_t function_attribute_queries{0};
+  std::uint64_t occupancy_queries{0};
+};
+
 RetainedLaunchBufferTelemetrySnapshot
 get_retained_launch_buffer_telemetry_snapshot();
 GridResidencyTelemetrySnapshot get_grid_residency_telemetry_snapshot();
+ArtifactQualificationTelemetrySnapshot
+get_artifact_qualification_telemetry_snapshot();
 
 class KernelLauncher : public LLVM::KernelLauncher {
   using Base = LLVM::KernelLauncher;
@@ -86,6 +95,25 @@ class KernelLauncher : public LLVM::KernelLauncher {
  public:
   explicit KernelLauncher(LLVM::KernelLauncher::Config config);
 
+  struct ArtifactQualification {
+    std::string entry_point;
+    std::uintptr_t function_identity{0};
+    int max_threads_per_block{0};
+    int static_shared_memory_bytes{0};
+    int constant_memory_bytes{0};
+    int local_memory_bytes_per_thread{0};
+    int registers_per_thread{0};
+    int ptx_version{0};
+    int binary_version{0};
+    int cache_mode_ca{0};
+    int max_dynamic_shared_bytes{0};
+    int preferred_shared_carveout{0};
+    int block_dim{0};
+    int dynamic_shared_bytes{0};
+    int active_blocks_per_multiprocessor{0};
+    int multiprocessor_count{0};
+  };
+
   struct GraphLaunchPacket {
     Handle handle;
     RuntimeContext context;
@@ -110,6 +138,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const LLVM::CompiledKernelData &compiled);
   void retire_snode_tree(int tree_id) override;
   std::size_t debug_registered_kernel_count() override;
+  std::vector<ArtifactQualification> qualify_llvm_kernel_artifacts(
+      const LLVM::CompiledKernelData &compiled);
   void debug_reset_sparse_listgen_statistics() override;
   SparseSNodeTreeListgenStatistics debug_sparse_listgen_statistics(
       const std::vector<int> &snode_ids) override;

@@ -33,6 +33,9 @@ def _cuda_artifact_extension():
         max_threads_per_block=_gpu_fact_unknown(
             not_materialized, binding_time=_GpuBindingTime.ARTIFACT
         ),
+        static_shared_memory_bytes=_gpu_fact_unknown(
+            not_materialized, binding_time=_GpuBindingTime.ARTIFACT
+        ),
         registers_per_thread=_gpu_fact_unknown(
             not_materialized, binding_time=_GpuBindingTime.ARTIFACT
         ),
@@ -46,6 +49,9 @@ def _cuda_artifact_extension():
             not_materialized, binding_time=_GpuBindingTime.ARTIFACT
         ),
         binary_version=_gpu_fact_unknown(
+            not_materialized, binding_time=_GpuBindingTime.ARTIFACT
+        ),
+        cache_mode_ca=_gpu_fact_unknown(
             not_materialized, binding_time=_GpuBindingTime.ARTIFACT
         ),
         max_dynamic_shared_bytes=_gpu_fact_unknown(

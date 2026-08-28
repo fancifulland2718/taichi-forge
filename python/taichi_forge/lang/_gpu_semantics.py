@@ -384,11 +384,13 @@ class _GpuIntrinsicRequirement:
 class _CudaArtifactExtension:
     function_identity: _GpuFact = field(default_factory=_default_unknown_fact)
     max_threads_per_block: _GpuFact = field(default_factory=_default_unknown_fact)
+    static_shared_memory_bytes: _GpuFact = field(default_factory=_default_unknown_fact)
     registers_per_thread: _GpuFact = field(default_factory=_default_unknown_fact)
     constant_memory_bytes: _GpuFact = field(default_factory=_default_unknown_fact)
     local_memory_bytes_per_thread: _GpuFact = field(default_factory=_default_unknown_fact)
     ptx_version: _GpuFact = field(default_factory=_default_unknown_fact)
     binary_version: _GpuFact = field(default_factory=_default_unknown_fact)
+    cache_mode_ca: _GpuFact = field(default_factory=_default_unknown_fact)
     max_dynamic_shared_bytes: _GpuFact = field(default_factory=_default_unknown_fact)
     preferred_shared_carveout: _GpuFact = field(default_factory=_default_unknown_fact)
 
@@ -733,6 +735,50 @@ class _GpuSemanticSnapshot:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuArtifactQualificationSnapshot:
+    semantics: _GpuSemanticSnapshot
+    observations: Tuple[_GpuRuntimeObservation, ...]
+    provider: str
+    provider_version: str
+    fixed_cost_seconds: float
+    scale_dependent_cost_seconds: float
+    qualified_artifact_count: int
+    registration_materialization_count: int
+
+    def __post_init__(self):
+        if not isinstance(self.semantics, _GpuSemanticSnapshot):
+            raise TypeError("qualification semantics must be _GpuSemanticSnapshot")
+        _require_tuple_members(self.observations, _GpuRuntimeObservation, "qualification observations")
+        _require_text(self.provider, "qualification provider")
+        _require_text(self.provider_version, "qualification provider_version")
+        for name, value in (
+            ("fixed_cost_seconds", self.fixed_cost_seconds),
+            ("scale_dependent_cost_seconds", self.scale_dependent_cost_seconds),
+        ):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise TypeError(f"{name} must be numeric")
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative")
+        for name, value in (
+            ("qualified_artifact_count", self.qualified_artifact_count),
+            ("registration_materialization_count", self.registration_materialization_count),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        target_id = self.semantics.target.target_id
+        artifact_ids = {item.artifact_id for item in self.semantics.artifacts}
+        launch_ids = {item.launch_id for item in self.semantics.launches}
+        for observation in self.observations:
+            if observation.target_id != target_id:
+                raise ValueError("qualification observation target mismatch")
+            if observation.artifact_id not in artifact_ids:
+                raise ValueError("qualification observation artifact mismatch")
+            if observation.launch_id not in launch_ids:
+                raise ValueError("qualification observation launch mismatch")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuExecutablePlanSnapshot:
     target: _GpuTargetSemantics
     programs: Tuple[_GpuProgramSemantics, ...]
@@ -922,6 +968,7 @@ __all__ = [
     "_CudaArtifactExtension",
     "_CudaLaunchExtension",
     "_GPU_SEMANTICS_SCHEMA_VERSION",
+    "_GpuArtifactQualificationSnapshot",
     "_GpuArtifactSemantics",
     "_GpuAutodiffRole",
     "_GpuAvailability",

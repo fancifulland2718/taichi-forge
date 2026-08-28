@@ -34,6 +34,13 @@ struct GridResidencyTelemetry {
   std::atomic<std::uint64_t> last_multiprocessor_count{0};
 };
 
+struct ArtifactQualificationTelemetry {
+  std::atomic<std::uint64_t> qualification_calls{0};
+  std::atomic<std::uint64_t> registration_materializations{0};
+  std::atomic<std::uint64_t> function_attribute_queries{0};
+  std::atomic<std::uint64_t> occupancy_queries{0};
+};
+
 RetainedLaunchBufferTelemetry &retained_launch_buffer_telemetry() {
   // Process-lifetime telemetry avoids static-destruction ordering with the
   // Program singleton, whose CUDA launcher may release buffers during exit.
@@ -43,6 +50,11 @@ RetainedLaunchBufferTelemetry &retained_launch_buffer_telemetry() {
 
 GridResidencyTelemetry &grid_residency_telemetry() {
   static auto *telemetry = new GridResidencyTelemetry();
+  return *telemetry;
+}
+
+ArtifactQualificationTelemetry &artifact_qualification_telemetry() {
+  static auto *telemetry = new ArtifactQualificationTelemetry();
   return *telemetry;
 }
 
@@ -108,6 +120,17 @@ GridResidencyTelemetrySnapshot get_grid_residency_telemetry_snapshot() {
       telemetry.last_active_blocks_per_multiprocessor.load(
           std::memory_order_relaxed),
       telemetry.last_multiprocessor_count.load(std::memory_order_relaxed),
+  };
+}
+
+ArtifactQualificationTelemetrySnapshot
+get_artifact_qualification_telemetry_snapshot() {
+  const auto &telemetry = artifact_qualification_telemetry();
+  return {
+      telemetry.qualification_calls.load(std::memory_order_relaxed),
+      telemetry.registration_materializations.load(std::memory_order_relaxed),
+      telemetry.function_attribute_queries.load(std::memory_order_relaxed),
+      telemetry.occupancy_queries.load(std::memory_order_relaxed),
   };
 }
 
@@ -1354,6 +1377,78 @@ void KernelLauncher::retire_snode_tree(int tree_id) {
 std::size_t KernelLauncher::debug_registered_kernel_count() {
   std::shared_lock<std::shared_mutex> lock(registration_mutex());
   return contexts_.size();
+}
+
+std::vector<KernelLauncher::ArtifactQualification>
+KernelLauncher::qualify_llvm_kernel_artifacts(
+    const LLVM::CompiledKernelData &compiled) {
+  TI_ASSERT(compiled.arch() == Arch::cuda);
+  auto &telemetry = artifact_qualification_telemetry();
+  telemetry.qualification_calls.fetch_add(1, std::memory_order_relaxed);
+
+  const bool was_registered = compiled.get_handle().has_value();
+  const Handle handle = register_llvm_kernel(compiled);
+  if (!was_registered) {
+    telemetry.registration_materializations.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+
+  std::shared_lock<std::shared_mutex> lock(registration_mutex());
+  const auto iter = contexts_.find(handle.get_launch_id());
+  TI_ERROR_IF(iter == contexts_.end(),
+              "CUDA artifact qualification lost its registered context");
+  const auto &context = *iter->second;
+  auto *cuda_module = dynamic_cast<JITModuleCUDA *>(context.jit_module);
+  TI_ERROR_IF(cuda_module == nullptr,
+              "CUDA artifact qualification requires a CUDA JIT module");
+
+  CUDAContext::get_instance().make_current();
+  int multiprocessor_count = 0;
+  CUDADriver::get_instance().device_get_attribute(
+      &multiprocessor_count, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+      CUDAContext::get_instance().get_device());
+
+  std::vector<ArtifactQualification> result;
+  result.reserve(context.offloaded_tasks.size());
+  for (const auto &task : context.offloaded_tasks) {
+    ArtifactQualification item;
+    item.entry_point = task.name;
+    void *function = cuda_module->lookup_function(task.name);
+    item.function_identity = reinterpret_cast<std::uintptr_t>(function);
+    const auto query_attribute = [&](int attribute, int *value) {
+      CUDADriver::get_instance().kernel_get_attribute(value, attribute,
+                                                       function);
+      telemetry.function_attribute_queries.fetch_add(
+          1, std::memory_order_relaxed);
+    };
+    query_attribute(CU_FUNC_ATTRIBUTE_MAX_THREADS_PER_BLOCK,
+                    &item.max_threads_per_block);
+    query_attribute(CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES,
+                    &item.static_shared_memory_bytes);
+    query_attribute(CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES,
+                    &item.constant_memory_bytes);
+    query_attribute(CU_FUNC_ATTRIBUTE_LOCAL_SIZE_BYTES,
+                    &item.local_memory_bytes_per_thread);
+    query_attribute(CU_FUNC_ATTRIBUTE_NUM_REGS, &item.registers_per_thread);
+    query_attribute(CU_FUNC_ATTRIBUTE_PTX_VERSION, &item.ptx_version);
+    query_attribute(CU_FUNC_ATTRIBUTE_BINARY_VERSION, &item.binary_version);
+    query_attribute(CU_FUNC_ATTRIBUTE_CACHE_MODE_CA, &item.cache_mode_ca);
+    query_attribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    &item.max_dynamic_shared_bytes);
+    query_attribute(CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT,
+                    &item.preferred_shared_carveout);
+    item.block_dim = task.block_dim;
+    item.dynamic_shared_bytes = task.dynamic_shared_array_bytes;
+    item.multiprocessor_count = multiprocessor_count;
+    if (item.block_dim > 0 && item.dynamic_shared_bytes >= 0) {
+      CUDADriver::get_instance().kernel_get_occupancy(
+          &item.active_blocks_per_multiprocessor, function, item.block_dim,
+          static_cast<std::size_t>(item.dynamic_shared_bytes));
+      telemetry.occupancy_queries.fetch_add(1, std::memory_order_relaxed);
+    }
+    result.push_back(std::move(item));
+  }
+  return result;
 }
 
 void KernelLauncher::debug_reset_sparse_listgen_statistics() {

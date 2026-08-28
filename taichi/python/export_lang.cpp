@@ -1146,6 +1146,119 @@ void export_lang(py::module &m) {
              return compiled_kernel_gpu_semantics_to_python(
                  compiled, kernel->autodiff_mode);
            })
+      .def("_kernel_gpu_artifact_qualification",
+           [](Program &program, Kernel *kernel) {
+             TI_ERROR_IF(kernel == nullptr,
+                         "GPU artifact qualification received a null kernel");
+             const auto backend = program.compile_config().arch;
+             TI_ERROR_IF(backend != Arch::cuda && backend != Arch::vulkan,
+                         "GPU artifact qualification is supported only on "
+                         "CUDA and Vulkan, not {}",
+                         arch_name(backend));
+             auto tree_guard =
+                 program.acquire_snode_tree_lifecycle_read_guard();
+             const auto &compiled = program.compile_kernel(
+                 program.compile_config(), program.get_device_caps(),
+                 *kernel);
+             py::dict result;
+             result["backend"] = arch_name(backend);
+             result["registered_before"] = compiled.get_handle().has_value();
+             py::list tasks;
+#if defined(TI_WITH_CUDA)
+             if (backend == Arch::cuda) {
+               const auto *llvm_compiled =
+                   dynamic_cast<const LLVM::CompiledKernelData *>(&compiled);
+               TI_ERROR_IF(
+                   llvm_compiled == nullptr,
+                   "CUDA artifact qualification requires LLVM compiled data");
+               auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
+                   &program.get_kernel_launcher());
+               TI_ERROR_IF(launcher == nullptr,
+                           "CUDA artifact qualification requires the CUDA "
+                           "kernel launcher");
+               for (const auto &item :
+                    launcher->qualify_llvm_kernel_artifacts(*llvm_compiled)) {
+                 py::dict encoded;
+                 encoded["entry_point"] = item.entry_point;
+                 encoded["function_identity"] =
+                     py::int_(item.function_identity);
+                 encoded["max_threads_per_block"] =
+                     item.max_threads_per_block;
+                 encoded["static_shared_memory_bytes"] =
+                     item.static_shared_memory_bytes;
+                 encoded["constant_memory_bytes"] =
+                     item.constant_memory_bytes;
+                 encoded["local_memory_bytes_per_thread"] =
+                     item.local_memory_bytes_per_thread;
+                 encoded["registers_per_thread"] =
+                     item.registers_per_thread;
+                 encoded["ptx_version"] = item.ptx_version;
+                 encoded["binary_version"] = item.binary_version;
+                 encoded["cache_mode_ca"] = item.cache_mode_ca;
+                 encoded["max_dynamic_shared_bytes"] =
+                     item.max_dynamic_shared_bytes;
+                 encoded["preferred_shared_carveout"] =
+                     item.preferred_shared_carveout;
+                 encoded["block_dim"] = item.block_dim;
+                 encoded["dynamic_shared_bytes"] =
+                     item.dynamic_shared_bytes;
+                 encoded["active_blocks_per_multiprocessor"] =
+                     item.active_blocks_per_multiprocessor;
+                 encoded["multiprocessor_count"] =
+                     item.multiprocessor_count;
+                 tasks.append(std::move(encoded));
+               }
+               result["provider"] = "cuda_driver";
+               result["materialized"] = true;
+             }
+#endif
+#if defined(TI_WITH_VULKAN)
+             if (backend == Arch::vulkan) {
+               const auto *spirv_compiled =
+                   dynamic_cast<const lang::spirv::CompiledKernelData *>(
+                       &compiled);
+               TI_ERROR_IF(spirv_compiled == nullptr,
+                           "Vulkan artifact qualification requires SPIR-V "
+                           "compiled data");
+               for (const auto &item : spirv_compiled->get_internal_data()
+                                                .metadata.kernel_attribs
+                                                .tasks_attribs) {
+                 py::dict encoded = spirv_task_metadata_to_python(item);
+                 encoded["pipeline_executable_statistics_available"] = false;
+                 encoded["pipeline_executable_statistics_reason"] =
+                     "no optional Vulkan pipeline executable provider is "
+                     "installed";
+                 tasks.append(std::move(encoded));
+               }
+               result["provider"] = "spirv_static_reflection";
+               result["materialized"] = false;
+             }
+#endif
+             result["registered_after"] = compiled.get_handle().has_value();
+             result["tasks"] = std::move(tasks);
+             return result;
+           })
+      .def("_debug_gpu_artifact_qualification_stats", [](Program &program) {
+        py::dict result;
+        result["schema_version"] = 1;
+        result["backend"] = arch_name(program.compile_config().arch);
+#if defined(TI_WITH_CUDA)
+        const auto stats =
+            cuda::get_artifact_qualification_telemetry_snapshot();
+        result["qualification_calls"] = stats.qualification_calls;
+        result["registration_materializations"] =
+            stats.registration_materializations;
+        result["function_attribute_queries"] =
+            stats.function_attribute_queries;
+        result["occupancy_queries"] = stats.occupancy_queries;
+#else
+        result["qualification_calls"] = 0;
+        result["registration_materializations"] = 0;
+        result["function_attribute_queries"] = 0;
+        result["occupancy_queries"] = 0;
+#endif
+        return result;
+      })
       .def("_debug_snode_relocation_manifest",
            [](Program &program, Kernel *kernel) {
              TI_ERROR_IF(kernel == nullptr,
