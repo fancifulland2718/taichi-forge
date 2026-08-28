@@ -691,34 +691,152 @@ def test_sparse_field_activation_stays_a_fusion_blocker(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_multicomponent_dynamic_lane_stays_a_fusion_blocker(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map2")
+def test_multicomponent_dynamic_lane_is_row_local_and_fuses(monkeypatch):
+    @ti.kernel
+    def gather_component(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        lanes: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            temporary[i] = source[i, lanes[i]] * 2.0
 
     @ti.kernel
-    def dynamic_lane(
+    def combine_component(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        lanes: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            output[i] = temporary[i] + source[i, (lanes[i] + 1) % 3]
+
+    symbolic = {
+        "source": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2
+        ),
+        "lanes": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "lanes", ti.i32, ndim=1
+        ),
+        "temporary": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "temporary", ti.f32, ndim=1
+        ),
+        "output": ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+        ),
+        "count": ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32),
+    }
+
+    def build(recipe):
+        monkeypatch.setenv(_FUSION_ENV, recipe)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            gather_component,
+            symbolic["source"],
+            symbolic["lanes"],
+            symbolic["temporary"],
+            symbolic["count"],
+        )
+        builder.dispatch(
+            combine_component,
+            symbolic["source"],
+            symbolic["lanes"],
+            symbolic["temporary"],
+            symbolic["output"],
+            symbolic["count"],
+        )
+        return builder.compile()
+
+    baseline = build("baseline")
+    fused = build("map2")
+    assert baseline.physical_plan()["physical_dispatch_count"] == 2
+    assert fused.physical_plan()["physical_dispatch_count"] == 1, (
+        fused._ir_debug_info["fusion_plan"]
+    )
+
+    rng = np.random.default_rng(20260829)
+    count = 4099
+    source_np = rng.normal(0.0, 4.0, (count, 3)).astype(np.float32)
+    lanes_np = rng.integers(0, 3, count, dtype=np.int32)
+
+    def execute(graph):
+        source = ti.ndarray(ti.f32, shape=(count, 3))
+        lanes = ti.ndarray(ti.i32, shape=count)
+        temporary = ti.ndarray(ti.f32, shape=count)
+        output = ti.ndarray(ti.f32, shape=count)
+        source.from_numpy(source_np)
+        lanes.from_numpy(lanes_np)
+        graph.run(
+            {
+                "source": source,
+                "lanes": lanes,
+                "temporary": temporary,
+                "output": output,
+                "count": count,
+            }
+        )
+        return output.to_numpy()
+
+    baseline_result = execute(baseline)
+    fused_result = execute(fused)
+    rows = np.arange(count)
+    expected = (
+        source_np[rows, lanes_np] * np.float32(2.0)
+        + source_np[rows, (lanes_np + 1) % 3]
+    )
+    np.testing.assert_array_equal(fused_result, baseline_result)
+    np.testing.assert_array_equal(fused_result, expected)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers(monkeypatch):
+    @ti.kernel
+    def dynamic_leading(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        row_indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        count: ti.i32,
+    ):
+        for i in range(count):
+            output[i] = source[row_indices[i], i % 3]
+
+    @ti.kernel
+    def cross_row(
         source: ti.types.ndarray(dtype=ti.f32, ndim=2),
         output: ti.types.ndarray(dtype=ti.f32, ndim=1),
         count: ti.i32,
     ):
         for i in range(count):
-            output[i] = source[i, i % 3]
+            output[i] = source[(i + 1) % count, i % 3]
 
     source = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2
+    )
+    rows = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "row_indices", ti.i32, ndim=1
     )
     output = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
     )
     count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-    builder = ti.graph.GraphBuilder()
-    builder.dispatch(dynamic_lane, source, output, count)
-    builder.dispatch(dynamic_lane, source, output, count)
-    graph = builder.compile()
 
-    fusion = graph._ir_debug_info["fusion_plan"]
-    assert graph.physical_plan()["physical_dispatch_count"] == 2
-    assert fusion["candidate_groups"] == 0
-    assert fusion["blockers"] == {"non_pointwise_access": 2}
+    def build(kernel, *args):
+        monkeypatch.setenv(_FUSION_ENV, "map2")
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(kernel, *args)
+        builder.dispatch(kernel, *args)
+        return builder.compile()
+
+    for graph in (
+        build(dynamic_leading, source, rows, output, count),
+        build(cross_row, source, output, count),
+    ):
+        fusion = graph._ir_debug_info["fusion_plan"]
+        assert graph.physical_plan()["physical_dispatch_count"] == 2
+        assert fusion["candidate_groups"] == 0
+        assert fusion["blockers"] == {"non_pointwise_access": 2}
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
