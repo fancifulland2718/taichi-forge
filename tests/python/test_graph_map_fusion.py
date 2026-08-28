@@ -488,6 +488,209 @@ def test_map4_particle_contact_chain_matches_unfused(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_map4_dense_scalar_field_same_domain_matches_unfused(monkeypatch):
+    count = 4099
+    source = ti.field(ti.i32, shape=count)
+    first = ti.field(ti.i32, shape=count)
+    second = ti.field(ti.i32, shape=count)
+    third = ti.field(ti.i32, shape=count)
+    output = ti.field(ti.i32, shape=count)
+
+    @ti.kernel
+    def initialize():
+        for i in range(count):
+            source[i] = i - 2048
+
+    @ti.kernel
+    def stage_one():
+        for i in range(count):
+            first[i] = source[i] * 2
+
+    @ti.kernel
+    def stage_two():
+        for i in range(count):
+            second[i] = first[i] + 3
+
+    @ti.kernel
+    def stage_three():
+        for i in range(count):
+            third[i] = second[i] * 4
+
+    @ti.kernel
+    def stage_four():
+        for i in range(count):
+            output[i] = third[i] - 5
+
+    def build(recipe):
+        monkeypatch.setenv(_FUSION_ENV, recipe)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(stage_one)
+        builder.dispatch(stage_two)
+        builder.dispatch(stage_three)
+        builder.dispatch(stage_four)
+        return builder.compile()
+
+    baseline = build("baseline")
+    fused = build("map4")
+    assert baseline.physical_plan()["physical_dispatch_count"] == 4
+    assert fused.physical_plan()["physical_dispatch_count"] == 1, fused._ir_debug_info[
+        "fusion_plan"
+    ]
+    assert (
+        baseline._executable_optimization_space.semantic_plan_id
+        == fused._executable_optimization_space.semantic_plan_id
+    )
+
+    initialize()
+    baseline.run({})
+    baseline_result = output.to_numpy()
+    initialize()
+    fused.run({})
+    fused_result = output.to_numpy()
+    np.testing.assert_array_equal(fused_result, baseline_result)
+    np.testing.assert_array_equal(
+        fused_result,
+        (np.arange(count, dtype=np.int32) - 2048) * 8 + 7,
+    )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_map2_dense_vector_field_same_domain_matches_unfused(monkeypatch):
+    count = 1021
+    source = ti.Vector.field(3, ti.f32, shape=count)
+    temporary = ti.Vector.field(3, ti.f32, shape=count)
+    output = ti.Vector.field(3, ti.f32, shape=count)
+
+    @ti.kernel
+    def initialize():
+        for i in range(count):
+            source[i] = ti.Vector([i * 0.25, i * -0.5, i * 0.75])
+
+    @ti.kernel
+    def predict():
+        for i in range(count):
+            temporary[i] = source[i] * 2.0 + ti.Vector([1.0, 2.0, 3.0])
+
+    @ti.kernel
+    def apply():
+        for i in range(count):
+            output[i] = temporary[i] * 0.5 - ti.Vector([0.5, 1.0, 1.5])
+
+    def build(recipe):
+        monkeypatch.setenv(_FUSION_ENV, recipe)
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(predict)
+        builder.dispatch(apply)
+        return builder.compile()
+
+    baseline = build("baseline")
+    fused = build("map2")
+    assert baseline.physical_plan()["physical_dispatch_count"] == 2
+    assert fused.physical_plan()["physical_dispatch_count"] == 1, fused._ir_debug_info[
+        "fusion_plan"
+    ]
+
+    initialize()
+    baseline.run({})
+    baseline_result = output.to_numpy()
+    initialize()
+    fused.run({})
+    np.testing.assert_allclose(output.to_numpy(), baseline_result, rtol=0, atol=0)
+    np.testing.assert_allclose(output.to_numpy(), source.to_numpy(), rtol=0, atol=0)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_fused_dense_field_rejects_destroyed_snode_tree(monkeypatch):
+    count = 257
+    source = ti.field(ti.i32)
+    temporary = ti.field(ti.i32)
+    output = ti.field(ti.i32)
+    fields = ti.FieldsBuilder()
+    fields.dense(ti.i, count).place(source, temporary, output)
+    tree = fields.finalize()
+
+    @ti.kernel
+    def produce():
+        for i in range(count):
+            temporary[i] = source[i] * 2
+
+    @ti.kernel
+    def consume():
+        for i in range(count):
+            output[i] = temporary[i] + 1
+
+    monkeypatch.setenv(_FUSION_ENV, "map2")
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(produce)
+    builder.dispatch(consume)
+    graph = builder.compile()
+    assert graph.physical_plan()["physical_dispatch_count"] == 1
+
+    graph.run({})
+    tree.destroy()
+    with pytest.raises(RuntimeError, match="stale|destroyed|retired"):
+        graph.run({})
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_dense_field_cross_index_and_struct_for_stay_fusion_blockers(monkeypatch):
+    count = 257
+    source = ti.field(ti.i32, shape=count)
+    output = ti.field(ti.i32, shape=count)
+
+    @ti.kernel
+    def cross_index():
+        for i in range(count):
+            output[i] = source[(i + 1) % count]
+
+    @ti.kernel
+    def struct_for():
+        for i in source:
+            output[i] = source[i] + 1
+
+    def build(kernel):
+        monkeypatch.setenv(_FUSION_ENV, "map2")
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(kernel)
+        builder.dispatch(kernel)
+        return builder.compile()
+
+    cross = build(cross_index)
+    assert cross.physical_plan()["physical_dispatch_count"] == 2
+    assert cross._ir_debug_info["fusion_plan"]["blockers"] == {
+        "non_pointwise_access": 2
+    }
+
+    structured = build(struct_for)
+    assert structured.physical_plan()["physical_dispatch_count"] == 2
+    assert structured._ir_debug_info["fusion_plan"]["blockers"] == {
+        "top_level_side_effect": 2
+    }
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda])
+def test_sparse_field_activation_stays_a_fusion_blocker(monkeypatch):
+    count = 256
+    values = ti.field(ti.i32)
+    block = ti.root.pointer(ti.i, count // 16)
+    block.dense(ti.i, 16).place(values)
+
+    @ti.kernel
+    def activate_and_store():
+        for i in range(count):
+            values[i] = i
+
+    monkeypatch.setenv(_FUSION_ENV, "map2")
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(activate_and_store)
+    builder.dispatch(activate_and_store)
+    graph = builder.compile()
+
+    assert graph.physical_plan()["physical_dispatch_count"] == 2
+    assert graph._ir_debug_info["fusion_plan"]["blockers"] == {"sparse_activation": 2}
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_multicomponent_dynamic_lane_stays_a_fusion_blocker(monkeypatch):
     monkeypatch.setenv(_FUSION_ENV, "map2")
 

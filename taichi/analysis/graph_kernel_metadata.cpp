@@ -137,6 +137,17 @@ class MetadataVisitor final : public BasicStmtVisitor {
   using BasicStmtVisitor::visit;
 
   void visit(Stmt *stmt) override {
+    if (auto *global = stmt->cast<GlobalPtrStmt>()) {
+      // Frontend stores conservatively carry activate=true even for a fully
+      // dense SNode path. Dense/root nodes are permanently resident, so that
+      // flag has no lifecycle side effect; the enclosing GlobalStoreStmt is
+      // still recorded as a write below. Sparse paths remain fail-closed.
+      if (global->activate &&
+          (global->snode == nullptr || !global->snode->is_path_all_dense)) {
+        block("sparse_activation", "opaque_access");
+      }
+      return;
+    }
     if (stmt->has_global_side_effect()) {
       block("unsupported_side_effect", "opaque");
     }
@@ -245,11 +256,14 @@ class MetadataVisitor final : public BasicStmtVisitor {
       return;
     }
     if (auto *global = pointer ? pointer->cast<GlobalPtrStmt>() : nullptr) {
-      if (global->activate || global->indices.size() != 1 ||
+      const bool sparse_activation =
+          global->activate &&
+          (global->snode == nullptr || !global->snode->is_path_all_dense);
+      if (sparse_activation || global->indices.size() != 1 ||
           !is_loop_index(global->indices.front(), loop_, domain_)) {
         add_effect({"opaque", {}, -1, -1, false}, "opaque");
-        block(global->activate ? "sparse_activation" :
-                                 "non_pointwise_access",
+        block(sparse_activation ? "sparse_activation" :
+                                  "non_pointwise_access",
               "opaque_access");
         return;
       }
