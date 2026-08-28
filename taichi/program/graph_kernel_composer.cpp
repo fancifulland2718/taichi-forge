@@ -48,7 +48,7 @@ std::optional<std::string> canonical_domain(
                      domain.axis);
 }
 
-bool qualified_source(const GraphTwoMapSource &source) {
+bool qualified_source(const GraphMapSource &source) {
   if (source.kernel == nullptr || source.symbolic_args == nullptr ||
       source.metadata == nullptr || source.kernel->definition_retired() ||
       source.kernel->autodiff_mode != AutodiffMode::kNone ||
@@ -76,14 +76,12 @@ bool qualified_source(const GraphTwoMapSource &source) {
 }
 
 bool build_argument_union(
-    const GraphTwoMapSource &first,
-    const GraphTwoMapSource &second,
+    const std::vector<GraphMapSource> &sources,
     std::vector<aot::Arg> *combined_args,
     std::vector<Callable::Parameter> *combined_parameters,
-    std::vector<int> *first_remap,
-    std::vector<int> *second_remap) {
+    std::vector<std::vector<int>> *remaps) {
   std::unordered_map<std::string, int> indices;
-  auto append = [&](const GraphTwoMapSource &source,
+  auto append = [&](const GraphMapSource &source,
                     std::vector<int> *remap) {
     const auto &args = *source.symbolic_args;
     remap->reserve(args.size());
@@ -108,7 +106,14 @@ bool build_argument_union(
     }
     return true;
   };
-  return append(first, first_remap) && append(second, second_remap);
+  remaps->reserve(sources.size());
+  for (const auto &source : sources) {
+    remaps->emplace_back();
+    if (!append(source, &remaps->back())) {
+      return false;
+    }
+  }
+  return true;
 }
 
 class FlatArgumentRemapper final : public BasicStmtVisitor {
@@ -220,70 +225,86 @@ class LoopIndexRebaser final : public BasicStmtVisitor {
   RangeForStmt *destination_{nullptr};
 };
 
-std::unique_ptr<IRNode> fuse_preoffload_loops(SingleLoopIR first,
-                                              SingleLoopIR second) {
-  if (!compatible_loops(*first.loop, *second.loop)) {
+std::unique_ptr<IRNode> fuse_preoffload_loops(
+    std::vector<SingleLoopIR> loops) {
+  if (loops.size() < 2 || loops.size() > 4) {
     return nullptr;
   }
-  LoopIndexRebaser rebaser(second.loop.get(), first.loop.get());
-  second.loop->body->accept(&rebaser);
-  while (!second.loop->body->statements.empty()) {
-    first.loop->body->insert(second.loop->body->extract(0));
+  for (std::size_t index = 1; index < loops.size(); ++index) {
+    if (!compatible_loops(*loops[0].loop, *loops[index].loop)) {
+      return nullptr;
+    }
+  }
+  for (std::size_t index = 1; index < loops.size(); ++index) {
+    LoopIndexRebaser rebaser(loops[index].loop.get(), loops[0].loop.get());
+    loops[index].loop->body->accept(&rebaser);
+    while (!loops[index].loop->body->statements.empty()) {
+      loops[0].loop->body->insert(loops[index].loop->body->extract(0));
+    }
   }
 
   auto root = std::make_unique<Block>();
-  root->insert(std::move(first.setup));
-  root->insert(std::move(second.setup));
-  root->insert(std::move(first.loop));
+  for (auto &loop : loops) {
+    root->insert(std::move(loop.setup));
+  }
+  root->insert(std::move(loops[0].loop));
   return root;
 }
 
 }  // namespace
 
-std::optional<GraphTwoMapComposition> compose_graph_two_map_kernel(
+std::optional<GraphMapComposition> compose_graph_map_kernels(
     const CompileConfig &config,
-    const GraphTwoMapSource &first,
-    const GraphTwoMapSource &second) {
-  if (!qualified_source(first) || !qualified_source(second) ||
-      first.kernel->program != second.kernel->program || config.debug) {
+    const std::vector<GraphMapSource> &sources) {
+  if (sources.size() < 2 || sources.size() > 4 || config.debug) {
+    return std::nullopt;
+  }
+  const auto &first = sources.front();
+  if (!qualified_source(first)) {
     return std::nullopt;
   }
   const auto first_domain =
       canonical_domain(*first.metadata, *first.symbolic_args);
-  const auto second_domain =
-      canonical_domain(*second.metadata, *second.symbolic_args);
-  if (!first_domain || first_domain != second_domain) {
+  if (!first_domain) {
     return std::nullopt;
   }
+  for (std::size_t index = 1; index < sources.size(); ++index) {
+    const auto &source = sources[index];
+    if (!qualified_source(source) ||
+        first.kernel->program != source.kernel->program ||
+        canonical_domain(*source.metadata, *source.symbolic_args) !=
+            first_domain) {
+      return std::nullopt;
+    }
+  }
 
-  GraphTwoMapComposition result;
+  GraphMapComposition result;
   std::vector<Callable::Parameter> parameters;
-  std::vector<int> first_remap;
-  std::vector<int> second_remap;
-  if (!build_argument_union(first, second, &result.symbolic_args, &parameters,
-                            &first_remap, &second_remap)) {
+  std::vector<std::vector<int>> remaps;
+  if (!build_argument_union(sources, &result.symbolic_args, &parameters,
+                            &remaps)) {
     return std::nullopt;
   }
 
-  auto first_ir =
-      lower_to_preoffload(config, first.kernel, first_remap);
-  auto second_ir =
-      lower_to_preoffload(config, second.kernel, second_remap);
-  auto first_loop = split_single_loop(std::move(first_ir));
-  auto second_loop = split_single_loop(std::move(second_ir));
-  if (!first_loop || !second_loop) {
-    return std::nullopt;
+  std::vector<SingleLoopIR> loops;
+  loops.reserve(sources.size());
+  for (std::size_t index = 0; index < sources.size(); ++index) {
+    auto ir = lower_to_preoffload(config, sources[index].kernel, remaps[index]);
+    auto loop = split_single_loop(std::move(ir));
+    if (!loop) {
+      return std::nullopt;
+    }
+    loops.push_back(std::move(*loop));
   }
-  auto fused_ir =
-      fuse_preoffload_loops(std::move(*first_loop), std::move(*second_loop));
+  auto fused_ir = fuse_preoffload_loops(std::move(loops));
   if (!fused_ir) {
     return std::nullopt;
   }
 
   result.kernel = std::make_unique<Kernel>(
       *first.kernel->program, std::move(fused_ir),
-      fmt::format("{}__graph_fused__{}", first.kernel->get_name(),
-                  second.kernel->get_name()));
+      fmt::format("{}__graph_fused_map{}", first.kernel->get_name(),
+                  sources.size()));
   result.kernel->parameter_list = std::move(parameters);
   for (std::size_t index = 0; index < result.kernel->parameter_list.size();
        ++index) {

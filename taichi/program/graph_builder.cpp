@@ -598,14 +598,44 @@ void Dispatch::compile(
 
 void Sequential::compile(
     std::vector<aot::CompiledDispatch> &compiled_dispatches) {
-  Dispatch *pending_dispatch = nullptr;
-  std::optional<aot::CompiledDispatch> pending_compiled;
+  struct PendingDispatch {
+    Dispatch *source{nullptr};
+    aot::CompiledDispatch compiled;
+  };
+  std::vector<PendingDispatch> pending;
   auto flush_pending = [&]() {
-    if (pending_compiled) {
-      compiled_dispatches.push_back(std::move(*pending_compiled));
-      pending_compiled.reset();
-      pending_dispatch = nullptr;
+    std::size_t offset = 0;
+    while (offset < pending.size()) {
+      const auto remaining = pending.size() - offset;
+      const auto max_group_size = std::min<std::size_t>(
+          owning_graph_->map_composer_max_group_size(), remaining);
+      bool composed = false;
+      for (std::size_t group_size = max_group_size;
+           group_size >= 2; --group_size) {
+        std::vector<const Dispatch *> sources;
+        std::vector<const aot::CompiledDispatch *> compiled_sources;
+        sources.reserve(group_size);
+        compiled_sources.reserve(group_size);
+        for (std::size_t index = 0; index < group_size; ++index) {
+          sources.push_back(pending[offset + index].source);
+          compiled_sources.push_back(&pending[offset + index].compiled);
+        }
+        auto candidate = owning_graph_->try_compose_maps(
+            sources, compiled_sources);
+        if (candidate) {
+          compiled_dispatches.push_back(std::move(*candidate));
+          offset += group_size;
+          composed = true;
+          break;
+        }
+      }
+      if (!composed) {
+        compiled_dispatches.push_back(
+            std::move(pending[offset].compiled));
+        ++offset;
+      }
     }
+    pending.clear();
   };
 
   for (Node *n : sequence_) {
@@ -622,21 +652,10 @@ void Sequential::compile(
       compiled_dispatches.push_back(std::move(compiled));
       continue;
     }
-    if (pending_dispatch != nullptr) {
-      if (owning_graph_->two_map_composer_enabled()) {
-        auto composed = owning_graph_->try_compose_two_maps(
-            *pending_dispatch, *pending_compiled, *dispatch, compiled);
-        if (composed) {
-          compiled_dispatches.push_back(std::move(*composed));
-          pending_dispatch = nullptr;
-          pending_compiled.reset();
-          continue;
-        }
-      }
+    pending.push_back({dispatch, std::move(compiled)});
+    if (!owning_graph_->two_map_composer_enabled()) {
       flush_pending();
     }
-    pending_dispatch = dispatch;
-    pending_compiled = std::move(compiled);
   }
   flush_pending();
 }
@@ -933,20 +952,33 @@ void GraphBuilder::dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
   seq()->append(all_nodes_.back().get());
 }
 
-std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
-    const Dispatch &first,
-    const aot::CompiledDispatch &first_compiled,
-    const Dispatch &second,
-    const aot::CompiledDispatch &second_compiled) {
-  if (!first.dispatch_label().empty() ||
-      !second.dispatch_label().empty()) {
+void GraphBuilder::set_map_composer_max_group_size(
+    std::uint32_t max_group_size) {
+  TI_ERROR_IF(max_group_size < 1 || max_group_size > 4,
+              "Graph map composer group size must be in [1, 4]");
+  map_composer_max_group_size_ = max_group_size;
+}
+
+std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(
+    const std::vector<const Dispatch *> &sources,
+    const std::vector<const aot::CompiledDispatch *> &compiled_sources) {
+  if (sources.size() < 2 || sources.size() > 4 ||
+      compiled_sources.size() != sources.size()) {
     return std::nullopt;
   }
-  auto composition = compose_graph_two_map_kernel(
-      first.kernel()->program->compile_config(),
-      {first.kernel(), &first.symbolic_args(), &first_compiled.graph_metadata},
-      {second.kernel(), &second.symbolic_args(),
-       &second_compiled.graph_metadata});
+  std::vector<GraphMapSource> map_sources;
+  map_sources.reserve(sources.size());
+  for (std::size_t index = 0; index < sources.size(); ++index) {
+    if (sources[index] == nullptr || compiled_sources[index] == nullptr ||
+        !sources[index]->dispatch_label().empty()) {
+      return std::nullopt;
+    }
+    map_sources.push_back(
+        {sources[index]->kernel(), &sources[index]->symbolic_args(),
+         &compiled_sources[index]->graph_metadata});
+  }
+  auto composition = compose_graph_map_kernels(
+      sources.front()->kernel()->program->compile_config(), map_sources);
   if (!composition) {
     return std::nullopt;
   }
@@ -954,20 +986,20 @@ std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_two_maps(
   Dispatch composed_dispatch(composition->kernel.get(),
                              composition->symbolic_args);
   auto compiled = composed_dispatch.compile_dispatch();
-  const auto source_task_count =
-      static_cast<std::uint64_t>(first_compiled.compiled_task_count) +
-      static_cast<std::uint64_t>(second_compiled.compiled_task_count);
+  std::uint64_t source_task_count = 0;
+  for (const auto *source : compiled_sources) {
+    source_task_count += source->compiled_task_count;
+  }
   if (compiled.compiled_task_count >= source_task_count ||
       compiled.graph_metadata.opaque || !compiled.graph_metadata.elementwise) {
     return std::nullopt;
   }
   compiled.source_dispatches.clear();
-  compiled.source_dispatches.insert(compiled.source_dispatches.end(),
-                                    first_compiled.source_dispatches.begin(),
-                                    first_compiled.source_dispatches.end());
-  compiled.source_dispatches.insert(compiled.source_dispatches.end(),
-                                    second_compiled.source_dispatches.begin(),
-                                    second_compiled.source_dispatches.end());
+  for (const auto *source : compiled_sources) {
+    compiled.source_dispatches.insert(compiled.source_dispatches.end(),
+                                      source->source_dispatches.begin(),
+                                      source->source_dispatches.end());
+  }
   composed_kernels_.push_back(std::move(composition->kernel));
   return compiled;
 }

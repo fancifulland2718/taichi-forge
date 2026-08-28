@@ -12,23 +12,23 @@ namespace taichi::lang {
 class CompileConfig;
 class Kernel;
 
-struct GraphTwoMapSource {
+struct GraphMapSource {
   Kernel *kernel{nullptr};
   const std::vector<aot::Arg> *symbolic_args{nullptr};
   const GraphKernelMetadata *metadata{nullptr};
 };
 
-struct GraphTwoMapComposition {
+struct GraphMapComposition {
   std::unique_ptr<Kernel> kernel;
   std::vector<aot::Arg> symbolic_args;
 };
 
-// Compose exactly two compiler-proven pointwise maps into one pre-offload
-// range-for kernel. The contract is deliberately internal and fail-closed:
-// unsupported argument paths, loop layouts, or effects return std::nullopt.
-std::optional<GraphTwoMapComposition> compose_graph_two_map_kernel(
+// Compose between two and four compiler-proven pointwise maps into one
+// pre-offload range-for kernel. The contract is deliberately internal and
+// fail-closed: unsupported argument paths, loop layouts, or effects return
+// std::nullopt.
+std::optional<GraphMapComposition> compose_graph_map_kernels(
     const CompileConfig &config,
-    const GraphTwoMapSource &first,
-    const GraphTwoMapSource &second);
+    const std::vector<GraphMapSource> &sources);
 
 }  // namespace taichi::lang

@@ -238,12 +238,22 @@ def _new_runtime_graph_builder():
     internal_recipe = os.environ.get(_INTERNAL_MAP_FUSION_ENV)
     if internal_recipe is not None:
         internal_recipe = internal_recipe.strip().lower()
-        if internal_recipe not in ("baseline", "pair"):
+        recipe_sizes = {
+            "baseline": 1,
+            "pair": 2,
+            "map2": 2,
+            "map3": 3,
+            "map4": 4,
+        }
+        if internal_recipe not in recipe_sizes:
             raise TaichiRuntimeError(
-                f"{_INTERNAL_MAP_FUSION_ENV} must be 'baseline' or 'pair'"
+                f"{_INTERNAL_MAP_FUSION_ENV} must be baseline, pair, map3, or map4"
             )
-        if internal_recipe == "pair":
+        max_group_size = recipe_sizes[internal_recipe]
+        if max_group_size == 2:
             builder._enable_two_map_composer()
+        elif max_group_size > 2:
+            builder._set_map_composer_max_group_size(max_group_size)
         return builder
     composer_setting = os.environ.get("TI_GRAPH_TWO_MAP_COMPOSER")
     composer_enabled = (

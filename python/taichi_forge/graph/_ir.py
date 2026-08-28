@@ -582,6 +582,7 @@ class ElementwiseFusionPlan:
     blocked_dispatches: int
     blocker_counts: Tuple[Tuple[str, int], ...]
     candidate_recipes: tuple = ()
+    candidate_partitions: tuple = ()
     applied_recipe_ids: tuple = ()
     unmatched_applied_groups: int = 0
     applied_groups: int = 0
@@ -597,6 +598,7 @@ class ElementwiseFusionPlan:
             "recipes": tuple(
                 recipe.to_dict() for recipe in self.candidate_recipes
             ),
+            "candidate_partitions": self.candidate_partitions,
             "applied_recipe_ids": self.applied_recipe_ids,
             "unmatched_applied_groups": self.unmatched_applied_groups,
             "applied_groups": self.applied_groups,
@@ -628,18 +630,19 @@ class _KernelFusionRecipe:
     expected_physical_dispatches: int = 1
 
     def __post_init__(self):
-        if not self.recipe_id.startswith("fusion:map2:"):
-            raise ValueError("pair fusion recipe ID is invalid")
-        if len(self.source_dispatch_ids) != 2:
-            raise ValueError("pair fusion recipe requires two source dispatches")
-        if len(set(self.source_dispatch_ids)) != 2:
-            raise ValueError("pair fusion source dispatches must be unique")
-        if len(self.source_names) != 2:
-            raise ValueError("pair fusion source names must match dispatches")
+        source_count = len(self.source_dispatch_ids)
+        if not 2 <= source_count <= 4:
+            raise ValueError("map fusion recipe requires two to four dispatches")
+        if not self.recipe_id.startswith(f"fusion:map{source_count}:"):
+            raise ValueError("map fusion recipe ID is invalid")
+        if len(set(self.source_dispatch_ids)) != source_count:
+            raise ValueError("map fusion source dispatches must be unique")
+        if len(self.source_names) != source_count:
+            raise ValueError("map fusion source names must match dispatches")
         if not self.region_path or not self.iteration_domain:
-            raise ValueError("pair fusion recipe requires region and domain")
+            raise ValueError("map fusion recipe requires region and domain")
         if self.expected_physical_dispatches != 1:
-            raise ValueError("pair fusion must materialize one dispatch")
+            raise ValueError("map fusion must materialize one dispatch")
 
     def to_dict(self):
         return {
@@ -1007,7 +1010,7 @@ def _fusion_blocker(node):
     return None
 
 
-def _pair_fusion_recipe(region_path, indexed_nodes, iteration_domain):
+def _map_fusion_recipe(region_path, indexed_nodes, iteration_domain):
     source_ids = tuple(
         f"{region_path}/{node.logical_dispatch_id or f'node:{index}'}"
         for index, node in indexed_nodes
@@ -1045,8 +1048,9 @@ def _pair_fusion_recipe(region_path, indexed_nodes, iteration_domain):
         ensure_ascii=True,
     )
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    source_count = len(source_ids)
     return _KernelFusionRecipe(
-        recipe_id=f"fusion:map2:{digest}",
+        recipe_id=f"fusion:map{source_count}:{digest}",
         region_path=region_path,
         source_dispatch_ids=source_ids,
         source_names=source_names,
@@ -1065,6 +1069,7 @@ def analyze_elementwise_fusion(
 
     groups = []
     recipes = []
+    partitions = []
     blockers = {}
     eligible_dispatches = 0
     blocked_dispatches = 0
@@ -1083,14 +1088,38 @@ def analyze_elementwise_fusion(
             nonlocal domain
             if len(pending) >= 2:
                 groups.append(tuple(node.name for _, node in pending))
-                for offset in range(0, len(pending) - 1, 2):
-                    recipes.append(
-                        _pair_fusion_recipe(
+                recipe_by_sources = {}
+                for source_count in range(2, min(4, len(pending)) + 1):
+                    for offset in range(0, len(pending) - source_count + 1):
+                        recipe = _map_fusion_recipe(
                             path,
-                            tuple(pending[offset : offset + 2]),
+                            tuple(pending[offset : offset + source_count]),
                             domain,
                         )
-                    )
+                        recipes.append(recipe)
+                        recipe_by_sources[recipe.source_dispatch_ids] = (
+                            recipe.recipe_id
+                        )
+                for max_group_size in (2, 3, 4):
+                    partition = []
+                    offset = 0
+                    while offset < len(pending):
+                        source_count = min(
+                            max_group_size, len(pending) - offset
+                        )
+                        if source_count < 2:
+                            break
+                        source_ids = tuple(
+                            f"{path}/{node.logical_dispatch_id or f'node:{index}'}"
+                            for index, node in pending[
+                                offset : offset + source_count
+                            ]
+                        )
+                        partition.append(recipe_by_sources[source_ids])
+                        offset += source_count
+                    candidate = tuple(partition)
+                    if candidate and candidate not in partitions:
+                        partitions.append(candidate)
             pending = []
             domain = None
 
@@ -1142,6 +1171,7 @@ def analyze_elementwise_fusion(
         blocked_dispatches=blocked_dispatches,
         blocker_counts=tuple(sorted(blockers.items())),
         candidate_recipes=tuple(recipes),
+        candidate_partitions=tuple(partitions),
         applied_recipe_ids=applied_recipe_ids,
         unmatched_applied_groups=unmatched_applied_groups,
         applied_groups=int(applied_groups),

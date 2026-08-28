@@ -222,18 +222,22 @@ class GraphBuilder {
   Sequential *seq() const;
 
   void enable_two_map_composer() {
-    enable_two_map_composer_ = true;
+    map_composer_max_group_size_ = 2;
   }
 
   bool two_map_composer_enabled() const {
-    return enable_two_map_composer_;
+    return map_composer_max_group_size_ >= 2;
   }
 
-  std::optional<aot::CompiledDispatch> try_compose_two_maps(
-      const Dispatch &first,
-      const aot::CompiledDispatch &first_compiled,
-      const Dispatch &second,
-      const aot::CompiledDispatch &second_compiled);
+  void set_map_composer_max_group_size(std::uint32_t max_group_size);
+
+  std::uint32_t map_composer_max_group_size() const {
+    return map_composer_max_group_size_;
+  }
+
+  std::optional<aot::CompiledDispatch> try_compose_maps(
+      const std::vector<const Dispatch *> &sources,
+      const std::vector<const aot::CompiledDispatch *> &compiled_sources);
 
  private:
   void register_arg(const aot::Arg &arg);
@@ -242,7 +246,7 @@ class GraphBuilder {
   std::unordered_map<std::string, aot::Arg> all_args_;
   std::vector<std::unique_ptr<Node>> all_nodes_;
   std::vector<std::unique_ptr<Kernel>> composed_kernels_;
-  bool enable_two_map_composer_{false};
+  std::uint32_t map_composer_max_group_size_{1};
   std::uint64_t next_logical_dispatch_id_{0};
 };
 

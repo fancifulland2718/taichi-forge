@@ -2440,7 +2440,7 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
     optimization = ir["executable_optimization"]
     assert plan["applied_recipe_ids"] == (recipe["recipe_id"],)
     assert plan["unmatched_applied_groups"] == 0
-    assert optimization["selection_status"] == "selected_pair_recipe"
+    assert optimization["selection_status"] == "selected_map_recipe"
     assert optimization["selected"]["fusion_recipe_ids"] == (
         recipe["recipe_id"],
     )
@@ -2517,8 +2517,102 @@ def test_internal_map_fusion_recipe_overrides_legacy_auto_gate(monkeypatch):
     monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "pair")
     assert _new_runtime_graph_builder().enabled
     monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "invalid")
-    with pytest.raises(TaichiRuntimeError, match="must be 'baseline' or 'pair'"):
+    with pytest.raises(TaichiRuntimeError, match="must be baseline"):
         _new_runtime_graph_builder()
+
+
+@pytest.mark.parametrize(
+    ("recipe_name", "expected_group_size", "expected_physical"),
+    (("map3", 3, 2), ("map4", 4, 1)),
+)
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_bounded_map_composer_materializes_three_and_four_stage_groups(
+    monkeypatch, recipe_name, expected_group_size, expected_physical
+):
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", recipe_name)
+
+    @ti.kernel
+    def stage_one(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        first: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            first[i] = source[i] * 2
+
+    @ti.kernel
+    def stage_two(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        first: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            second[i] = first[i] + 3
+
+    @ti.kernel
+    def stage_three(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        third: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            third[i] = second[i] * 4
+
+    @ti.kernel
+    def stage_four(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        third: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = third[i] - 5
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "first", "second", "third", "output")
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stage_one, symbolic["source"], symbolic["first"])
+    builder.dispatch(
+        stage_two,
+        symbolic["source"],
+        symbolic["first"],
+        symbolic["second"],
+    )
+    builder.dispatch(
+        stage_three,
+        symbolic["source"],
+        symbolic["second"],
+        symbolic["third"],
+    )
+    builder.dispatch(
+        stage_four,
+        symbolic["source"],
+        symbolic["third"],
+        symbolic["output"],
+    )
+    graph = builder.compile()
+
+    physical = graph.physical_plan()
+    assert physical["logical_dispatch_count"] == 4
+    assert physical["physical_dispatch_count"] == expected_physical
+    fusion = graph._ir_debug_info["fusion_plan"]
+    assert fusion["applied_groups"] == 1
+    assert fusion["unmatched_applied_groups"] == 0
+    assert len(fusion["applied_recipe_ids"]) == 1
+    assert fusion["applied_recipe_ids"][0].startswith(
+        f"fusion:map{expected_group_size}:"
+    )
+    selected = graph._ir_debug_info["executable_optimization"]["selected"]
+    assert selected["fusion_recipe_ids"] == fusion["applied_recipe_ids"]
+
+    count = 257
+    arrays = {name: ti.ndarray(ti.i32, shape=count) for name in symbolic}
+    source_np = np.arange(count, dtype=np.int32)
+    arrays["source"].from_numpy(source_np)
+    graph.run(arrays)
+    np.testing.assert_array_equal(
+        arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5
+    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

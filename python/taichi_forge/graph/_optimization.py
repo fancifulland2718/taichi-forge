@@ -107,12 +107,11 @@ def _build_executable_optimization_space(root, fusion_plan, backend):
     semantic_digest = _canonical_hash(graph_ir_to_dict(root))
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
     baseline = _make_spec(semantic_plan_id, backend, ())
-    recipe_ids = tuple(
-        recipe.recipe_id for recipe in fusion_plan.candidate_recipes
-    )
     candidate_recipe_sets = []
-    if recipe_ids:
-        candidate_recipe_sets.append(recipe_ids)
+    for partition in fusion_plan.candidate_partitions:
+        partition = tuple(partition)
+        if partition and partition not in candidate_recipe_sets:
+            candidate_recipe_sets.append(partition)
     applied_recipe_ids = tuple(fusion_plan.applied_recipe_ids)
     if applied_recipe_ids and applied_recipe_ids not in candidate_recipe_sets:
         candidate_recipe_sets.append(applied_recipe_ids)
@@ -133,7 +132,7 @@ def _build_executable_optimization_space(root, fusion_plan, backend):
             for spec in candidates
             if spec.fusion_recipe_ids == applied_recipe_ids
         )
-        selection_status = "selected_pair_recipe"
+        selection_status = "selected_map_recipe"
     else:
         selected_spec_id = None
         selection_status = "applied_group_count_mismatch"
