@@ -2430,6 +2430,18 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
     assert plan["decision"] == "applied"
     assert plan["eligible_dispatches"] == 2
     assert plan["blocked_dispatches"] == 0
+    assert len(plan["recipes"]) == 1
+    recipe = plan["recipes"][0]
+    assert recipe["recipe_id"].startswith("fusion:map2:")
+    assert recipe["source_dispatch_ids"] == (
+        "graph/0:cgraph/dispatch:0",
+        "graph/0:cgraph/dispatch:1",
+    )
+    optimization = ir["executable_optimization"]
+    assert optimization["selection_status"] == "selected_greedy_pair"
+    assert optimization["selected"]["fusion_recipe_ids"] == (
+        recipe["recipe_id"],
+    )
     assert graph._debug_info["nodes"] == [
         {
             "kind": "cgraph",

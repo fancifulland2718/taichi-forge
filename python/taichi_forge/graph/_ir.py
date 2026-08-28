@@ -5,6 +5,8 @@ schema. It gives JIT/runtime optimization passes a versioned, conservative
 description without changing the stable public execution-report contract.
 """
 
+import hashlib
+import json
 from dataclasses import dataclass
 from enum import Enum
 from math import gcd
@@ -579,6 +581,7 @@ class ElementwiseFusionPlan:
     eligible_dispatches: int
     blocked_dispatches: int
     blocker_counts: Tuple[Tuple[str, int], ...]
+    candidate_recipes: tuple = ()
     applied_groups: int = 0
     lowering_available: bool = False
 
@@ -589,6 +592,9 @@ class ElementwiseFusionPlan:
             "eligible_dispatches": self.eligible_dispatches,
             "blocked_dispatches": self.blocked_dispatches,
             "blockers": dict(self.blocker_counts),
+            "recipes": tuple(
+                recipe.to_dict() for recipe in self.candidate_recipes
+            ),
             "applied_groups": self.applied_groups,
             "lowering_available": self.lowering_available,
             "decision": (
@@ -604,6 +610,43 @@ class ElementwiseFusionPlan:
                     )
                 )
             ),
+        }
+
+
+@dataclass(frozen=True)
+class _KernelFusionRecipe:
+    recipe_id: str
+    region_path: str
+    source_dispatch_ids: Tuple[str, ...]
+    source_names: Tuple[str, ...]
+    iteration_domain: str
+    lowering_kind: str = "preoffload_range_map"
+    expected_physical_dispatches: int = 1
+
+    def __post_init__(self):
+        if not self.recipe_id.startswith("fusion:map2:"):
+            raise ValueError("pair fusion recipe ID is invalid")
+        if len(self.source_dispatch_ids) != 2:
+            raise ValueError("pair fusion recipe requires two source dispatches")
+        if len(set(self.source_dispatch_ids)) != 2:
+            raise ValueError("pair fusion source dispatches must be unique")
+        if len(self.source_names) != 2:
+            raise ValueError("pair fusion source names must match dispatches")
+        if not self.region_path or not self.iteration_domain:
+            raise ValueError("pair fusion recipe requires region and domain")
+        if self.expected_physical_dispatches != 1:
+            raise ValueError("pair fusion must materialize one dispatch")
+
+    def to_dict(self):
+        return {
+            "schema_version": 1,
+            "recipe_id": self.recipe_id,
+            "region_path": self.region_path,
+            "source_dispatch_ids": self.source_dispatch_ids,
+            "source_names": self.source_names,
+            "iteration_domain": self.iteration_domain,
+            "lowering_kind": self.lowering_kind,
+            "expected_physical_dispatches": self.expected_physical_dispatches,
         }
 
 
@@ -960,10 +1003,58 @@ def _fusion_blocker(node):
     return None
 
 
+def _pair_fusion_recipe(region_path, indexed_nodes, iteration_domain):
+    source_ids = tuple(
+        f"{region_path}/{node.logical_dispatch_id or f'node:{index}'}"
+        for index, node in indexed_nodes
+    )
+    source_names = tuple(node.name for _, node in indexed_nodes)
+    effect_signatures = tuple(
+        tuple(
+            (
+                effect.resource,
+                effect.access.value,
+                effect.runtime_bound,
+                repr(effect.subresource),
+            )
+            for effect in node.effects
+        )
+        for _, node in indexed_nodes
+    )
+    binding_signatures = tuple(
+        tuple(
+            (binding.name, binding.kind, binding.required)
+            for binding in node.bindings
+        )
+        for _, node in indexed_nodes
+    )
+    payload = json.dumps(
+        {
+            "region_path": region_path,
+            "source_dispatch_ids": source_ids,
+            "iteration_domain": iteration_domain,
+            "effects": effect_signatures,
+            "bindings": binding_signatures,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return _KernelFusionRecipe(
+        recipe_id=f"fusion:map2:{digest}",
+        region_path=region_path,
+        source_dispatch_ids=source_ids,
+        source_names=source_names,
+        iteration_domain=iteration_domain,
+    )
+
+
 def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=False):
     """Find safe pointwise fusion groups without pretending to lower them."""
 
     groups = []
+    recipes = []
     blockers = {}
     eligible_dispatches = 0
     blocked_dispatches = 0
@@ -971,7 +1062,7 @@ def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=Fal
     def add_blocker(reason):
         blockers[reason] = blockers.get(reason, 0) + 1
 
-    def scan(region):
+    def scan(region, path):
         nonlocal eligible_dispatches
         nonlocal blocked_dispatches
         pending = []
@@ -981,11 +1072,19 @@ def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=Fal
             nonlocal pending
             nonlocal domain
             if len(pending) >= 2:
-                groups.append(tuple(node.name for node in pending))
+                groups.append(tuple(node.name for _, node in pending))
+                for offset in range(0, len(pending) - 1, 2):
+                    recipes.append(
+                        _pair_fusion_recipe(
+                            path,
+                            tuple(pending[offset : offset + 2]),
+                            domain,
+                        )
+                    )
             pending = []
             domain = None
 
-        for node in region.children:
+        for child_index, node in enumerate(region.children):
             if isinstance(node, DispatchNode):
                 blocker = _fusion_blocker(node)
                 if blocker is not None:
@@ -999,24 +1098,29 @@ def analyze_elementwise_fusion(root, *, applied_groups=0, lowering_available=Fal
                         flush()
                     if not pending:
                         domain = node.iteration_domain
-                    pending.append(node)
+                    pending.append((child_index, node))
             else:
                 flush()
             if isinstance(node, SequentialRegion):
-                scan(node)
+                scan(node, f"{path}/{child_index}:{node.name}")
             else:
-                for child in node.children:
+                for nested_index, child in enumerate(node.children):
                     if isinstance(child, SequentialRegion):
-                        scan(child)
+                        scan(
+                            child,
+                            f"{path}/{child_index}:{node.name}/"
+                            f"{nested_index}:{child.name}",
+                        )
         flush()
 
     if isinstance(root, SequentialRegion):
-        scan(root)
+        scan(root, root.name or "root")
     return ElementwiseFusionPlan(
         candidate_groups=tuple(groups),
         eligible_dispatches=eligible_dispatches,
         blocked_dispatches=blocked_dispatches,
         blocker_counts=tuple(sorted(blockers.items())),
+        candidate_recipes=tuple(recipes),
         applied_groups=int(applied_groups),
         lowering_available=bool(lowering_available),
     )

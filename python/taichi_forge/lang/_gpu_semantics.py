@@ -649,6 +649,10 @@ class _GpuExecutablePlanSemantics:
     backend: _GpuBackend
     target_id: str
     ordered_node_ids: Tuple[str, ...]
+    semantic_plan_id: str = ""
+    optimization_spec_id: str = ""
+    fusion_recipe_ids: Tuple[str, ...] = ()
+    optimization_status: str = ""
     dispatch_ids: Tuple[str, ...] = ()
     native_action_ids: Tuple[str, ...] = ()
     dependencies: Tuple[_GpuPlanDependency, ...] = ()
@@ -662,6 +666,13 @@ class _GpuExecutablePlanSemantics:
         _require_text(self.plan_id, "plan_id")
         _require_backend(self.backend)
         _require_text(self.target_id, "plan target_id")
+        if self.optimization_spec_id and not self.semantic_plan_id:
+            raise ValueError(
+                "optimized executable plan requires semantic plan identity"
+            )
+        _require_tuple_members(
+            self.fusion_recipe_ids, str, "plan fusion recipe IDs"
+        )
         known_nodes = set(self.dispatch_ids) | set(self.native_action_ids)
         if set(self.ordered_node_ids) != known_nodes:
             raise ValueError("ordered plan nodes must match dispatch/native action ids")

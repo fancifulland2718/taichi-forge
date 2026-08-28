@@ -78,6 +78,9 @@ from taichi_forge.graph._submission import (
     _new_submission_lane,
     _reserve_paced_submission,
 )
+from taichi_forge.graph._optimization import (
+    _build_executable_optimization_space,
+)
 
 ArgKind = _ti_core.ArgKind
 
@@ -9231,6 +9234,13 @@ class _GraphSpec:
             applied_groups=applied_groups,
             lowering_available=lowering_available,
         )
+        self.executable_optimization_space = (
+            _build_executable_optimization_space(
+                self.pre_optimization_ir_root,
+                self.fusion_plan,
+                _backend_name(_ti_core.arch_name(impl.current_cfg().arch)),
+            )
+        )
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -9865,6 +9875,9 @@ class _GraphSpec:
             "pre_optimization_root": graph_ir_to_dict(self.pre_optimization_ir_root),
             "optimization": dict(self.optimization),
             "fusion_plan": self.fusion_plan.to_dict(),
+            "executable_optimization": (
+                self.executable_optimization_space.to_dict()
+            ),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
@@ -13040,6 +13053,9 @@ class Graph:
                     temporary.planned_peak_bytes + temporary.opaque_bytes
                 ),
                 "lifetime_lease_count": len(self._spec.lifetime_leases),
+                "executable_optimization": (
+                    self._spec.executable_optimization_space.to_dict()
+                ),
             }
         return _build_gpu_executable_plan_semantics(definition)
 

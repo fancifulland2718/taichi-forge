@@ -290,9 +290,16 @@ def _build_gpu_executable_plan_semantics(definition):
         raise RuntimeError(
             "GPU executable-plan semantics require CUDA or Vulkan"
         ) from error
+    optimization = definition.get("executable_optimization", {})
+    selected_optimization = optimization.get("selected") or {}
     plan_seed = _canonical_hash(
         {
             "backend": backend.value,
+            "semantic_plan_id": optimization.get("semantic_plan_id", ""),
+            "optimization_spec_id": selected_optimization.get("spec_id", ""),
+            "fusion_recipe_ids": tuple(
+                selected_optimization.get("fusion_recipe_ids", ())
+            ),
             "stages": tuple(
                 {
                     "path": stage["path_id"],
@@ -450,6 +457,13 @@ def _build_gpu_executable_plan_semantics(definition):
         backend=backend,
         target_id=target_id,
         ordered_node_ids=tuple(ordered),
+        semantic_plan_id=str(optimization.get("semantic_plan_id", "")),
+        optimization_spec_id=str(selected_optimization.get("spec_id", "")),
+        fusion_recipe_ids=tuple(
+            str(item)
+            for item in selected_optimization.get("fusion_recipe_ids", ())
+        ),
+        optimization_status=str(optimization.get("selection_status", "")),
         dispatch_ids=tuple(
             dispatch.physical_dispatch_id for dispatch in dispatches
         ),

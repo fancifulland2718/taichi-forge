@@ -64,6 +64,16 @@ def test_graph_gpu_semantics_is_physical_lazy_and_replay_safe():
         for launch in warm.launches
     )
     plan = warm.executable_plan
+    assert plan.semantic_plan_id.startswith("semantic-plan:")
+    assert plan.optimization_spec_id.startswith("executable:")
+    assert plan.optimization_status in (
+        "selected_baseline",
+        "selected_greedy_pair",
+    )
+    if warm.target.backend == _GpuBackend.CUDA:
+        assert len(plan.fusion_recipe_ids) == 1
+    else:
+        assert not plan.fusion_recipe_ids
     assert set(plan.ordered_node_ids) == set(plan.dispatch_ids)
     assert len(plan.dependencies) == max(0, len(plan.ordered_node_ids) - 1)
     assert plan.retained_replay.value is True
