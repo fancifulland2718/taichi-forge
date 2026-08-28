@@ -228,7 +228,25 @@ def _cache_root_from_config(config):
     return Path(configured) / "task_launch_tuning_v2"
 
 
-def _candidate_blocks(tasks, max_threads):
+def _candidate_blocks(tasks, max_threads, semantics=None):
+    if semantics is not None:
+        from taichi_forge.lang._gpu_semantics import _GpuAvailability
+        from taichi_forge.lang._gpu_semantics_tuning import (
+            _WORKGROUP_DIMENSION,
+            _derive_gpu_tuning_dimensions,
+            _dimension_by_name,
+        )
+
+        dimensions = _derive_gpu_tuning_dimensions(
+            semantics,
+            max_threads=max_threads,
+            canonical_workgroup_sizes=_CANDIDATE_BLOCK_DIMS,
+            require_safe_serial_setup=False,
+        )
+        workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
+        if workgroup.status.availability != _GpuAvailability.PROVEN:
+            return (), workgroup.status.reason
+        return workgroup.legal_values, "semantic CUDA workgroup candidates"
     ranges = tuple(task for task in tasks if task.task_type == "range_for")
     if len(ranges) != 1:
         return (), "requires exactly one parallel range task"
@@ -381,13 +399,14 @@ class _TaskLaunchTuningCoordinator:
         workload_profile=None,
         hardware=None,
         cache_root=None,
+        semantics=None,
     ):
         if tasks is None:
             candidates = None
             candidate_reason = "task manifest not materialized"
         else:
             candidates, candidate_reason = _candidate_blocks(
-                tasks, config.max_block_dim
+                tasks, config.max_block_dim, semantics
             )
         hardware = dict(_hardware_scope() if hardware is None else hardware)
         hardware["runtime_max_block_dim"] = int(config.max_block_dim)

@@ -2230,12 +2230,20 @@ class Kernel:
         kernel_key = self.runtime.prog._kernel_cache_key_no_compile(kernel_cpp)
         raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
         tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        semantics = _build_resident_gpu_semantics(
+            self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+        )
         decision = _coordinator.resolve(
             kernel_key=kernel_key,
             tasks=tasks,
             config=impl.current_cfg(),
             observe=observe,
             workload_profile=workload_profile,
+            semantics=semantics,
         )
         return key, tasks, decision
 
@@ -2572,6 +2580,26 @@ class _TaskLaunchBinding:
             workload_profile=self._workload_profile,
             optimization_spec=spec,
         )
+
+    def _gpu_semantics_snapshot(self, *args, **kwargs):
+        """Return this exact policy/spec specialization without submitting it."""
+
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        combined_args = (*self._bound_args, *args)
+        processed = _process_args(self._kernel, combined_args, kwargs)
+        key = self._kernel._ensure_compiled_with_task_launch_policy(
+            self.policy,
+            *processed,
+            optimization_spec=self._optimization_spec,
+        )
+        self._kernel._validate_task_launch_policy_specialization(key, self.policy)
+        raw = self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(
+            self._kernel.compiled_kernels[key]
+        )
+        return _build_resident_gpu_semantics(raw)
 
     def _refresh_fast_path(self, report=None):
         if report is not None and report.status == "fallback_auto":

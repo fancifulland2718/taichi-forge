@@ -26,6 +26,7 @@ class _KernelVariant:
     spec: _KernelOptimizationSpec
     logical_task_id: str
     baseline_thread_local_bytes: int
+    physical_equivalence_key: tuple
 
 
 @dataclass(frozen=True)
@@ -61,21 +62,45 @@ class _KernelVariantSession:
         rejections = []
         for block_dim in requested:
             baseline_spec = self._spec(block_dim, "auto", None)
+            baseline_binding = _bind_kernel_optimization_spec(
+                kernel, baseline_spec
+            )
             try:
-                report = _bind_kernel_optimization_spec(kernel, baseline_spec).report(
-                    *self._args
-                )
-                task = self._eligible_range_task(report)
+                report = baseline_binding.report(*self._args)
+                snapshot = baseline_binding._gpu_semantics_snapshot(*self._args)
+                task, dimensions = self._eligible_range_task(report, snapshot)
             except (RuntimeError, TypeError, ValueError) as error:
                 rejections.append(_KernelVariantRejection(block_dim, str(error)))
                 continue
 
-            tls_modes = (
-                ("auto", "off") if int(task.thread_local_bytes) > 0 else ("auto",)
+            from taichi_forge.lang._gpu_semantics import _GpuPhysicalEffect
+            from taichi_forge.lang._gpu_semantics_tuning import (
+                _RESIDENCY_DIMENSION,
+                _TLS_DIMENSION,
+                _WORKGROUP_DIMENSION,
+                _dimension_by_name,
+                _gpu_physical_equivalence_key,
             )
+            workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
+            if block_dim not in workgroup.legal_values:
+                rejections.append(
+                    _KernelVariantRejection(block_dim, workgroup.status.reason)
+                )
+                continue
+            tls_modes = _dimension_by_name(
+                dimensions, _TLS_DIMENSION
+            ).legal_values
+            residency_values = _dimension_by_name(
+                dimensions, _RESIDENCY_DIMENSION
+            ).legal_values
             for thread_local in tls_modes:
-                for waves in _GRID_RESIDENCY_WAVES:
+                for waves in residency_values:
                     spec = self._spec(block_dim, thread_local, waves)
+                    selections = {
+                        _WORKGROUP_DIMENSION: block_dim,
+                        _TLS_DIMENSION: thread_local,
+                        _RESIDENCY_DIMENSION: waves,
+                    }
                     variants.append(
                         _KernelVariant(
                             variant_id=spec.identity,
@@ -83,6 +108,13 @@ class _KernelVariantSession:
                             spec=spec,
                             logical_task_id=task.logical_task_id,
                             baseline_thread_local_bytes=int(task.thread_local_bytes),
+                            physical_equivalence_key=(
+                                _gpu_physical_equivalence_key(
+                                    dimensions,
+                                    selections,
+                                    _GpuPhysicalEffect.ARTIFACT,
+                                )
+                            ),
                         )
                     )
 
@@ -94,14 +126,22 @@ class _KernelVariantSession:
         self._rejections = tuple(rejections)
         members = {}
         for variant in variants:
-            members.setdefault(variant.compilation_id, []).append(variant.variant_id)
+            group = members.setdefault(
+                variant.physical_equivalence_key,
+                (variant.compilation_id, []),
+            )
+            if group[0] != variant.compilation_id:
+                raise RuntimeError(
+                    "semantic artifact equivalence disagrees with compilation identity"
+                )
+            group[1].append(variant.variant_id)
         self._compilation_groups = tuple(
             _KernelCompilationGroup(
                 compilation_id=compilation_id,
                 representative_variant_id=variant_ids[0],
                 variant_ids=tuple(variant_ids),
             )
-            for compilation_id, variant_ids in members.items()
+            for compilation_id, variant_ids in members.values()
         )
 
     @staticmethod
@@ -113,24 +153,32 @@ class _KernelVariantSession:
         )
 
     @staticmethod
-    def _eligible_range_task(report):
+    def _eligible_range_task(report, snapshot):
         if report.backend != "cuda" or report.status != "applied":
             raise RuntimeError("variant baseline did not apply on CUDA")
-        ranges = tuple(task for task in report.tasks if task.task_type == "range_for")
-        if len(ranges) != 1 or any(
-            task.task_type not in ("serial", "range_for") for task in report.tasks
-        ):
-            raise RuntimeError(
-                "variant tuning requires one range task plus safe serial setup"
-            )
-        task = ranges[0]
-        if task.range_mapping != "grid_stride":
-            raise RuntimeError("variant tuning requires proven grid-stride coverage")
-        if task.static_shared_bytes or task.dynamic_shared_bytes:
-            raise RuntimeError(
-                "shared-memory kernels require a resource-aware tuning stage"
-            )
-        return task
+        from taichi_forge.lang._gpu_semantics import _GpuAvailability
+        from taichi_forge.lang._gpu_semantics_tuning import (
+            _WORKGROUP_DIMENSION,
+            _derive_gpu_tuning_dimensions,
+            _dimension_by_name,
+        )
+
+        dimensions = _derive_gpu_tuning_dimensions(
+            snapshot,
+            max_threads=impl.current_cfg().max_block_dim,
+            canonical_workgroup_sizes=_BLOCK_DIMS,
+            residency_values=_GRID_RESIDENCY_WAVES,
+        )
+        workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
+        if workgroup.status.availability != _GpuAvailability.PROVEN:
+            raise RuntimeError(workgroup.status.reason)
+        task_by_id = {task.task_id: task for task in report.tasks}
+        range_dispatch = next(
+            dispatch
+            for dispatch in snapshot.dispatches
+            if dispatch.task_kind == "range_for"
+        )
+        return task_by_id[range_dispatch.physical_dispatch_id], dimensions
 
     @property
     def rejections(self):

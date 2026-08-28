@@ -14,6 +14,7 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuExtent3,
     _GpuBindingTime,
     _GpuOwnership,
+    _GpuPhysicalEffect,
     _GpuResourceAccess,
     _GpuResourceKind,
     _VulkanArtifactExtension,
@@ -23,6 +24,14 @@ from taichi_forge.lang._gpu_semantics import (
 )
 from taichi_forge.lang._gpu_semantics_snapshot import (
     _build_resident_gpu_semantics,
+)
+from taichi_forge.lang._gpu_semantics_tuning import (
+    _RESIDENCY_DIMENSION,
+    _TLS_DIMENSION,
+    _WORKGROUP_DIMENSION,
+    _derive_gpu_tuning_dimensions,
+    _dimension_by_name,
+    _gpu_physical_equivalence_key,
 )
 from tests import test_utils
 
@@ -197,6 +206,65 @@ def test_vulkan_resident_adapter_owns_spirv_abi_not_pipeline_objects():
     assert snapshot.dispatches[0].intrinsic_requirements[0].lowering_route == (
         "spirv_workgroup_storage"
     )
+
+
+def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
+    cuda_raw = deepcopy(_raw_snapshot("cuda"))
+    cuda_raw["tasks"][0]["static_shared_bytes"] = 0
+    cuda = _build_resident_gpu_semantics(cuda_raw)
+    cuda_dimensions = _derive_gpu_tuning_dimensions(
+        cuda, max_threads=256
+    )
+    cuda_workgroup = _dimension_by_name(
+        cuda_dimensions, _WORKGROUP_DIMENSION
+    )
+    assert cuda_workgroup.legal_values == (64, 128, 256)
+    assert cuda_workgroup.binding_time == _GpuBindingTime.CODEGEN
+    assert _dimension_by_name(
+        cuda_dimensions, _TLS_DIMENSION
+    ).legal_values == ("auto", "off")
+    assert _dimension_by_name(
+        cuda_dimensions, _RESIDENCY_DIMENSION
+    ).legal_values == (None, 1, 2, 4)
+
+    first = {
+        _WORKGROUP_DIMENSION: 128,
+        _TLS_DIMENSION: "auto",
+        _RESIDENCY_DIMENSION: 1,
+    }
+    second = dict(first, **{_RESIDENCY_DIMENSION: 4})
+    assert _gpu_physical_equivalence_key(
+        cuda_dimensions, first, _GpuPhysicalEffect.ARTIFACT
+    ) == _gpu_physical_equivalence_key(
+        cuda_dimensions, second, _GpuPhysicalEffect.ARTIFACT
+    )
+
+    vulkan_raw = deepcopy(_raw_snapshot("vulkan"))
+    vulkan_raw["tasks"][0]["static_shared_bytes"] = 0
+    vulkan = _build_resident_gpu_semantics(vulkan_raw)
+    vulkan_dimensions = _derive_gpu_tuning_dimensions(
+        vulkan, max_threads=256
+    )
+    assert _dimension_by_name(
+        vulkan_dimensions, _WORKGROUP_DIMENSION
+    ).binding_time == _GpuBindingTime.ARTIFACT
+    assert _dimension_by_name(
+        vulkan_dimensions, _TLS_DIMENSION
+    ).status.availability == _GpuAvailability.UNSUPPORTED
+    assert _dimension_by_name(
+        vulkan_dimensions, _RESIDENCY_DIMENSION
+    ).status.availability == _GpuAvailability.UNSUPPORTED
+
+
+def test_tuning_dimension_fails_closed_for_shared_memory():
+    snapshot = _build_resident_gpu_semantics(_raw_snapshot("cuda"))
+    workgroup = _dimension_by_name(
+        _derive_gpu_tuning_dimensions(snapshot, max_threads=512),
+        _WORKGROUP_DIMENSION,
+    )
+    assert workgroup.legal_values == ()
+    assert workgroup.status.availability == _GpuAvailability.UNSUPPORTED
+    assert "resource-aware" in workgroup.status.reason
 
 
 def test_resident_snapshot_rejects_cpu_and_unbound_derivative():
