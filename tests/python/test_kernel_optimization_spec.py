@@ -60,8 +60,14 @@ def test_kernel_optimization_spec_separates_all_bounded_axes():
             backend=_BackendCodegenOptions(workgroup_size=128),
             launch=_LaunchOptions(block_mode="hint", grid_residency_waves=2),
         ),
+        _KernelOptimizationSpec(
+            backend=_BackendCodegenOptions(workgroup_size=128),
+            launch=_LaunchOptions(
+                block_mode="hint", range_work_per_thread_target=4
+            ),
+        ),
     )
-    assert len({baseline.identity, *(variant.identity for variant in variants)}) == 6
+    assert len({baseline.identity, *(variant.identity for variant in variants)}) == 7
 
 
 def test_grid_residency_has_full_identity_but_shares_compilation_identity():
@@ -76,6 +82,20 @@ def test_grid_residency_has_full_identity_but_shares_compilation_identity():
     assert len({variant.compilation_identity for variant in variants}) == 1
     assert len({variant.compilation_specialization_key for variant in variants}) == 1
     assert all(variant.compilation_identity.startswith("kos1:") for variant in variants)
+
+
+def test_range_work_per_thread_has_launch_identity_only():
+    variants = tuple(
+        _KernelOptimizationSpec(
+            backend=_BackendCodegenOptions(workgroup_size=256),
+            launch=_LaunchOptions(
+                block_mode="require", range_work_per_thread_target=target
+            ),
+        )
+        for target in (1, 2, 4, 8)
+    )
+    assert len({variant.identity for variant in variants}) == 4
+    assert len({variant.compilation_identity for variant in variants}) == 1
 
 
 def test_private_binding_rejects_recursive_provider_tuning():
@@ -95,6 +115,7 @@ def test_private_binding_rejects_recursive_provider_tuning():
             backend=_BackendCodegenOptions(workgroup_size=128)
         ),
         lambda: _LaunchOptions(grid_residency_waves=3),
+        lambda: _LaunchOptions(range_work_per_thread_target=3),
         lambda: _IrOptimizationOptions(thread_local="sometimes"),
         lambda: _ArtifactOptions(provider_mode="recursive"),
         # A per-kernel register cap is intentionally unavailable until it has

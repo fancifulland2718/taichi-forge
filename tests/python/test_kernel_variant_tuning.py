@@ -18,9 +18,9 @@ def test_kernel_variant_session_bounds_and_deduplicates_launch_only_axes():
 
     session = _KernelVariantSession(reduce, (values,))
     assert not session.rejections
-    assert len(session.variant_ids()) == 32
+    assert len(session.variant_ids()) == 128
     assert len(session.compilation_variant_ids()) == 8
-    assert all(len(group.variant_ids) == 4 for group in session.compilation_groups)
+    assert all(len(group.variant_ids) == 16 for group in session.compilation_groups)
     assert (
         len(
             {
@@ -60,7 +60,7 @@ def test_kernel_variant_session_drops_ineffective_tls_axis():
 
     session = _KernelVariantSession(transform, (values,))
     assert not session.rejections
-    assert len(session.variant_ids()) == 16
+    assert len(session.variant_ids()) == 64
     assert len(session.compilation_variant_ids()) == 4
     assert all(
         session.variant(variant_id).spec.ir.thread_local == "auto"

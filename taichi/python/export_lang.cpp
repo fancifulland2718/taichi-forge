@@ -189,6 +189,11 @@ py::dict offloaded_task_manifest_to_python(
   item["actual_geometry_kind"] = task.actual_geometry_kind;
   item["actual_geometry_reason"] = task.actual_geometry_reason;
   item["range_mapping"] = task.range_mapping;
+  if (task.constant_range_size.has_value()) {
+    item["constant_range_size"] = *task.constant_range_size;
+  } else {
+    item["constant_range_size"] = py::none();
+  }
   item["static_shared_bytes"] = task.static_shared_bytes;
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
   item["thread_local_bytes"] = task.thread_local_bytes;
@@ -6328,6 +6333,8 @@ void export_lang(py::module &m) {
       .def("set_arg_rw_texture", &LaunchContextBuilder::set_arg_rw_texture)
       .def("_set_cuda_grid_residency_waves",
            &LaunchContextBuilder::set_cuda_grid_residency_waves)
+      .def("_set_cuda_range_work_per_thread_target",
+           &LaunchContextBuilder::set_cuda_range_work_per_thread_target)
       .def("get_struct_ret_int", &LaunchContextBuilder::get_struct_ret_int)
       .def("get_struct_ret_uint", &LaunchContextBuilder::get_struct_ret_uint)
       .def("get_struct_ret_float", &LaunchContextBuilder::get_struct_ret_float);
@@ -7233,6 +7240,41 @@ void export_lang(py::module &m) {
 #if defined(TI_WITH_CUDA)
       return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
                                       .last_multiprocessor_count);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_range_coarsening_resolution_calls") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .coarsening_resolution_calls);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_range_coarsening_resolution_failures") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .coarsening_resolution_failures);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_range_coarsening_last_work_per_thread_target") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_work_per_thread_target);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_range_coarsening_last_baseline_grid") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_coarsening_baseline_grid);
+#else
+      TI_NOT_IMPLEMENTED
+#endif
+    } else if (key == "cuda_range_coarsening_last_resolved_grid") {
+#if defined(TI_WITH_CUDA)
+      return static_cast<int64_t>(cuda::get_grid_residency_telemetry_snapshot()
+                                      .last_coarsened_grid);
 #else
       TI_NOT_IMPLEMENTED
 #endif

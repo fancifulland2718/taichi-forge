@@ -27,6 +27,7 @@ class OffloadedTask {
   int requested_grid_dim{0};
   int block_dim{0};
   int grid_dim{0};
+  std::int64_t constant_range_size{-1};
   int static_shared_array_bytes{0};
   int dynamic_shared_array_bytes{0};
   std::uint64_t thread_local_bytes{0};
@@ -51,6 +52,7 @@ class OffloadedTask {
             requested_grid_dim,
             block_dim,
             grid_dim,
+            constant_range_size,
             static_shared_array_bytes,
             dynamic_shared_array_bytes,
             thread_local_bytes,

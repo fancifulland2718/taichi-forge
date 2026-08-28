@@ -20,6 +20,7 @@ from taichi_forge.lang._gpu_semantics import (
 
 _WORKGROUP_DIMENSION = "workgroup_shape_x"
 _TLS_DIMENSION = "compiler_thread_local_strategy"
+_RANGE_WORK_PER_THREAD_DIMENSION = "range_work_per_thread_target"
 _RESIDENCY_DIMENSION = "cuda_grid_residency_waves"
 
 
@@ -289,12 +290,117 @@ def _residency_dimension(snapshot, legal_values):
     )
 
 
+def _range_work_per_thread_dimension(snapshot, legal_values):
+    ranges = tuple(
+        dispatch
+        for dispatch in snapshot.dispatches
+        if dispatch.task_kind == "range_for"
+    )
+    base = dict(
+        name=_RANGE_WORK_PER_THREAD_DIMENSION,
+        snapshot=snapshot,
+        locus=_GpuTuningLocus.LAUNCH,
+        controller="cuda_constant_range_grid_coarsening",
+        binding_time=_GpuBindingTime.LAUNCH,
+        physical_effect=_GpuPhysicalEffect.LAUNCH,
+        equivalence_key="launch:range_work_per_thread_target",
+        bottleneck_classes=(
+            _GpuBottleneckClass.DISPATCH,
+            _GpuBottleneckClass.REDUCTION_ATOMIC,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+    )
+    if snapshot.target.backend.value != "cuda":
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                "range work-per-thread control is implemented only by CUDA launch"
+            ),
+        )
+    if snapshot.program.autodiff_role != _GpuAutodiffRole.PRIMAL:
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                "range work-per-thread variants require an independent AD oracle"
+            ),
+        )
+    if len(ranges) != 1:
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported("requires exactly one range dispatch"),
+        )
+    dispatch = ranges[0]
+    if (
+        dispatch.logical_work_extent.availability != _GpuAvailability.PROVEN
+        or dispatch.range_mapping.availability != _GpuAvailability.PROVEN
+        or dispatch.range_mapping.value != "grid_stride"
+    ):
+        return _blocked_dimension(
+            **base,
+            status=_status_unknown(
+                "requires a proven constant range with grid-stride coverage"
+            ),
+        )
+    artifact_by_id = {
+        artifact.artifact_id: artifact for artifact in snapshot.artifacts
+    }
+    launch_by_id = {launch.launch_id: launch for launch in snapshot.launches}
+    artifact = artifact_by_id[dispatch.artifact_id]
+    launch = launch_by_id[dispatch.launch_id]
+    static_bytes = artifact.static_workgroup_memory_bytes
+    dynamic_bytes = launch.dynamic_workgroup_memory_bytes
+    if (
+        static_bytes.availability == _GpuAvailability.PROVEN
+        and int(static_bytes.value) != 0
+    ) or any(
+        fact.availability == _GpuAvailability.PROVEN and int(fact.value) != 0
+        for fact in (
+            dynamic_bytes.requested,
+            dynamic_bytes.selected,
+            dynamic_bytes.materialized,
+            dynamic_bytes.actual,
+        )
+    ):
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                "shared-memory kernels require a resource-aware coarsening stage"
+            ),
+        )
+    legal = tuple(legal_values)
+    if not legal or legal[0] != 1:
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                "range work-per-thread candidates must retain target 1 as baseline"
+            ),
+        )
+    return _GpuTuningDimension(
+        name=_RANGE_WORK_PER_THREAD_DIMENSION,
+        locus=_GpuTuningLocus.LAUNCH,
+        backend_applicability=(snapshot.target.backend,),
+        legal_values=legal,
+        required_capabilities=(),
+        controller="cuda_constant_range_grid_coarsening",
+        binding_time=_GpuBindingTime.LAUNCH,
+        physical_effect=_GpuPhysicalEffect.LAUNCH,
+        equivalence_key="launch:range_work_per_thread_target",
+        bottleneck_classes=(
+            _GpuBottleneckClass.DISPATCH,
+            _GpuBottleneckClass.REDUCTION_ATOMIC,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+        status=_status_proven("constant_range_grid_stride_semantics"),
+    )
+
+
 def _derive_gpu_tuning_dimensions(
     snapshot,
     *,
     max_threads,
     canonical_workgroup_sizes=(64, 128, 256, 512),
     residency_values=(None, 1, 2, 4),
+    range_work_per_thread_values=(1, 2, 4, 8),
     require_safe_serial_setup=True,
 ):
     return (
@@ -305,6 +411,9 @@ def _derive_gpu_tuning_dimensions(
             require_safe_serial_setup,
         ),
         _tls_dimension(snapshot),
+        _range_work_per_thread_dimension(
+            snapshot, range_work_per_thread_values
+        ),
         _residency_dimension(snapshot, residency_values),
     )
 
@@ -355,6 +464,7 @@ def _gpu_tuning_dimension_manifest(dimension):
 
 __all__ = [
     "_RESIDENCY_DIMENSION",
+    "_RANGE_WORK_PER_THREAD_DIMENSION",
     "_TLS_DIMENSION",
     "_WORKGROUP_DIMENSION",
     "_derive_gpu_tuning_dimensions",

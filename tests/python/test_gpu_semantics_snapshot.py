@@ -28,6 +28,7 @@ from taichi_forge.lang._gpu_semantics_snapshot import (
 )
 from taichi_forge.lang._gpu_semantics_tuning import (
     _RESIDENCY_DIMENSION,
+    _RANGE_WORK_PER_THREAD_DIMENSION,
     _TLS_DIMENSION,
     _WORKGROUP_DIMENSION,
     _derive_gpu_tuning_dimensions,
@@ -232,6 +233,15 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     assert _dimension_by_name(
         cuda_dimensions, _RESIDENCY_DIMENSION
     ).legal_values == (None, 1, 2, 4)
+    range_work = _dimension_by_name(
+        cuda_dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
+    )
+    assert range_work.legal_values == (1, 2, 4, 8)
+    assert range_work.binding_time == _GpuBindingTime.LAUNCH
+    assert range_work.bottleneck_classes == (
+        _GpuBottleneckClass.DISPATCH,
+        _GpuBottleneckClass.REDUCTION_ATOMIC,
+    )
 
     first = {
         _WORKGROUP_DIMENSION: 128,
@@ -263,6 +273,9 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     ).status.availability == _GpuAvailability.UNSUPPORTED
     assert _dimension_by_name(
         vulkan_dimensions, _RESIDENCY_DIMENSION
+    ).status.availability == _GpuAvailability.UNSUPPORTED
+    assert _dimension_by_name(
+        vulkan_dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
     ).status.availability == _GpuAvailability.UNSUPPORTED
 
 

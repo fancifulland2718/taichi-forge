@@ -1470,6 +1470,7 @@ class Kernel:
         _allocate_all_external_grad=False,
         _explicit_external_grad_args=frozenset(),
         _grid_residency_waves=None,
+        _range_work_per_thread_target=None,
     ):
         assert len(args) == len(self.arguments), f"{len(self.arguments)} arguments needed but {len(args)} provided"
 
@@ -1480,6 +1481,10 @@ class Kernel:
         launch_ctx = t_kernel.make_launch_context()
         if _grid_residency_waves is not None:
             launch_ctx._set_cuda_grid_residency_waves(_grid_residency_waves)
+        if _range_work_per_thread_target is not None:
+            launch_ctx._set_cuda_range_work_per_thread_target(
+                _range_work_per_thread_target
+            )
         max_arg_num = 64
         exceed_max_arg_num = False
 
@@ -2273,6 +2278,8 @@ class Kernel:
             _kernel_optimization_spec is not None
             and (
                 _kernel_optimization_spec.launch.grid_residency_waves is not None
+                or _kernel_optimization_spec.launch.range_work_per_thread_target
+                != 1
                 or _kernel_optimization_spec.ir.thread_local != "auto"
             )
             and backend != "cuda"
@@ -2310,8 +2317,16 @@ class Kernel:
             if _kernel_optimization_spec is None
             else _kernel_optimization_spec.launch.grid_residency_waves
         )
+        work_per_thread = (
+            None
+            if _kernel_optimization_spec is None
+            else _kernel_optimization_spec.launch.range_work_per_thread_target
+        )
         return self.launch_kernel(
-            kernel_cpp, *args, _grid_residency_waves=waves
+            kernel_cpp,
+            *args,
+            _grid_residency_waves=waves,
+            _range_work_per_thread_target=work_per_thread,
         )
 
     def _task_launch_report(
@@ -2327,6 +2342,8 @@ class Kernel:
             _kernel_optimization_spec is not None
             and (
                 _kernel_optimization_spec.launch.grid_residency_waves is not None
+                or _kernel_optimization_spec.launch.range_work_per_thread_target
+                != 1
                 or _kernel_optimization_spec.ir.thread_local != "auto"
             )
             and backend != "cuda"
@@ -2884,6 +2901,9 @@ class _TaskLaunchBinding:
                         _grid_residency_waves=(
                             self._optimization_spec.launch.grid_residency_waves
                         ),
+                        _range_work_per_thread_target=(
+                            self._optimization_spec.launch.range_work_per_thread_target
+                        ),
                     )
                 key = self._kernel._ensure_compiled_with_task_launch_policy(
                     self.policy,
@@ -2896,6 +2916,9 @@ class _TaskLaunchBinding:
                     *processed,
                     _grid_residency_waves=(
                         self._optimization_spec.launch.grid_residency_waves
+                    ),
+                    _range_work_per_thread_target=(
+                        self._optimization_spec.launch.range_work_per_thread_target
                     ),
                 )
             result = self._kernel._call_with_task_launch_policy(

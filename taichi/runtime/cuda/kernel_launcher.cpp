@@ -32,6 +32,11 @@ struct GridResidencyTelemetry {
   std::atomic<std::uint64_t> last_resolved_grid{0};
   std::atomic<std::uint64_t> last_active_blocks_per_multiprocessor{0};
   std::atomic<std::uint64_t> last_multiprocessor_count{0};
+  std::atomic<std::uint64_t> coarsening_resolution_calls{0};
+  std::atomic<std::uint64_t> coarsening_resolution_failures{0};
+  std::atomic<std::uint64_t> last_work_per_thread_target{0};
+  std::atomic<std::uint64_t> last_coarsening_baseline_grid{0};
+  std::atomic<std::uint64_t> last_coarsened_grid{0};
 };
 
 struct ArtifactQualificationTelemetry {
@@ -120,6 +125,12 @@ GridResidencyTelemetrySnapshot get_grid_residency_telemetry_snapshot() {
       telemetry.last_active_blocks_per_multiprocessor.load(
           std::memory_order_relaxed),
       telemetry.last_multiprocessor_count.load(std::memory_order_relaxed),
+      telemetry.coarsening_resolution_calls.load(std::memory_order_relaxed),
+      telemetry.coarsening_resolution_failures.load(
+          std::memory_order_relaxed),
+      telemetry.last_work_per_thread_target.load(std::memory_order_relaxed),
+      telemetry.last_coarsening_baseline_grid.load(std::memory_order_relaxed),
+      telemetry.last_coarsened_grid.load(std::memory_order_relaxed),
   };
 }
 
@@ -302,14 +313,37 @@ void KernelLauncher::ensure_root_binding(const Context &context) {
 }
 
 const std::vector<OffloadedTask> &
-KernelLauncher::resolve_grid_residency_tasks(const Context &context,
-                                             std::int32_t waves) {
-  TI_ERROR_IF(waves != 1 && waves != 2 && waves != 4,
-              "CUDA grid residency waves must be 1, 2, or 4");
-  const std::size_t slot = waves == 1 ? 0 : (waves == 2 ? 1 : 2);
-  std::call_once(context.grid_residency_once[slot], [&]() {
+KernelLauncher::resolve_grid_policy_tasks(
+    const Context &context,
+    std::int32_t waves,
+    std::int32_t range_work_per_thread_target) {
+  TI_ERROR_IF(waves != 0 && waves != 1 && waves != 2 && waves != 4,
+              "CUDA grid residency waves must be 0, 1, 2, or 4");
+  TI_ERROR_IF(range_work_per_thread_target != 1 &&
+                  range_work_per_thread_target != 2 &&
+                  range_work_per_thread_target != 4 &&
+                  range_work_per_thread_target != 8,
+              "CUDA range work-per-thread target must be 1, 2, 4, or 8");
+  TI_ERROR_IF(waves == 0 && range_work_per_thread_target == 1,
+              "baseline CUDA grid policy does not require resolution");
+  const std::size_t wave_slot =
+      waves == 0 ? 0 : (waves == 1 ? 1 : (waves == 2 ? 2 : 3));
+  const std::size_t work_slot =
+      range_work_per_thread_target == 1
+          ? 0
+          : (range_work_per_thread_target == 2
+                 ? 1
+                 : (range_work_per_thread_target == 4 ? 2 : 3));
+  const std::size_t slot = wave_slot * 4 + work_slot - 1;
+  std::call_once(context.grid_policy_once[slot], [&]() {
     auto &telemetry = grid_residency_telemetry();
-    telemetry.resolution_calls.fetch_add(1, std::memory_order_relaxed);
+    if (waves != 0) {
+      telemetry.resolution_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (range_work_per_thread_target != 1) {
+      telemetry.coarsening_resolution_calls.fetch_add(
+          1, std::memory_order_relaxed);
+    }
     try {
       auto resolved = context.offloaded_tasks;
       std::size_t range_tasks = 0;
@@ -323,53 +357,81 @@ KernelLauncher::resolve_grid_residency_tasks(const Context &context,
                 task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
                 task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
                 task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
-            "CUDA grid residency requires a dense grid-stride range task");
-        auto *cuda_module =
-            dynamic_cast<JITModuleCUDA *>(context.jit_module);
-        TI_ERROR_IF(cuda_module == nullptr,
-                    "CUDA grid residency requires a CUDA JIT module");
-        void *function = cuda_module->lookup_function(task.name);
-        int active_blocks_per_multiprocessor = 0;
-        CUDADriver::get_instance().kernel_get_occupancy(
-            &active_blocks_per_multiprocessor, function, task.block_dim,
-            static_cast<std::size_t>(task.dynamic_shared_array_bytes));
-        int multiprocessor_count = 0;
-        CUDADriver::get_instance().device_get_attribute(
-            &multiprocessor_count,
-            CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-            CUDAContext::get_instance().get_device());
-        TI_ERROR_IF(active_blocks_per_multiprocessor <= 0 ||
-                        multiprocessor_count <= 0,
-                    "CUDA occupancy did not produce a positive residency");
-        const std::int64_t cap =
-            static_cast<std::int64_t>(active_blocks_per_multiprocessor) *
-            multiprocessor_count * waves;
-        const int baseline_grid = task.grid_dim;
-        task.grid_dim = static_cast<int>(
-            std::max<std::int64_t>(1, std::min<std::int64_t>(task.grid_dim,
-                                                            cap)));
-        telemetry.last_requested_waves.store(waves,
+            "CUDA grid policy requires a dense grid-stride range task");
+        if (range_work_per_thread_target != 1) {
+          TI_ERROR_IF(
+              task.constant_range_size < 0,
+              "CUDA range work-per-thread control requires a constant range");
+          const int baseline_grid = task.grid_dim;
+          const std::int64_t workgroup_span =
+              static_cast<std::int64_t>(task.block_dim) *
+              range_work_per_thread_target;
+          const std::int64_t target_grid = std::max<std::int64_t>(
+              1, (task.constant_range_size + workgroup_span - 1) /
+                     workgroup_span);
+          task.grid_dim = static_cast<int>(std::min<std::int64_t>(
+              task.grid_dim, target_grid));
+          telemetry.last_work_per_thread_target.store(
+              range_work_per_thread_target, std::memory_order_relaxed);
+          telemetry.last_coarsening_baseline_grid.store(
+              baseline_grid, std::memory_order_relaxed);
+          telemetry.last_coarsened_grid.store(task.grid_dim,
+                                               std::memory_order_relaxed);
+        }
+        if (waves != 0) {
+          auto *cuda_module =
+              dynamic_cast<JITModuleCUDA *>(context.jit_module);
+          TI_ERROR_IF(cuda_module == nullptr,
+                      "CUDA grid residency requires a CUDA JIT module");
+          void *function = cuda_module->lookup_function(task.name);
+          int active_blocks_per_multiprocessor = 0;
+          CUDADriver::get_instance().kernel_get_occupancy(
+              &active_blocks_per_multiprocessor, function, task.block_dim,
+              static_cast<std::size_t>(task.dynamic_shared_array_bytes));
+          int multiprocessor_count = 0;
+          CUDADriver::get_instance().device_get_attribute(
+              &multiprocessor_count,
+              CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+              CUDAContext::get_instance().get_device());
+          TI_ERROR_IF(active_blocks_per_multiprocessor <= 0 ||
+                          multiprocessor_count <= 0,
+                      "CUDA occupancy did not produce a positive residency");
+          const std::int64_t cap =
+              static_cast<std::int64_t>(active_blocks_per_multiprocessor) *
+              multiprocessor_count * waves;
+          const int baseline_grid = task.grid_dim;
+          task.grid_dim = static_cast<int>(
+              std::max<std::int64_t>(1, std::min<std::int64_t>(task.grid_dim,
+                                                              cap)));
+          telemetry.last_requested_waves.store(waves,
+                                               std::memory_order_relaxed);
+          telemetry.last_baseline_grid.store(baseline_grid,
                                              std::memory_order_relaxed);
-        telemetry.last_baseline_grid.store(baseline_grid,
-                                           std::memory_order_relaxed);
-        telemetry.last_resolved_grid.store(task.grid_dim,
-                                           std::memory_order_relaxed);
-        telemetry.last_active_blocks_per_multiprocessor.store(
-            active_blocks_per_multiprocessor, std::memory_order_relaxed);
-        telemetry.last_multiprocessor_count.store(multiprocessor_count,
-                                                  std::memory_order_relaxed);
+          telemetry.last_resolved_grid.store(task.grid_dim,
+                                             std::memory_order_relaxed);
+          telemetry.last_active_blocks_per_multiprocessor.store(
+              active_blocks_per_multiprocessor, std::memory_order_relaxed);
+          telemetry.last_multiprocessor_count.store(multiprocessor_count,
+                                                    std::memory_order_relaxed);
+        }
       }
       TI_ERROR_IF(range_tasks != 1,
-                  "CUDA grid residency requires exactly one range task; got {}",
+                  "CUDA grid policy requires exactly one range task; got {}",
                   range_tasks);
-      context.grid_residency_tasks[slot] = std::move(resolved);
+      context.grid_policy_tasks[slot] = std::move(resolved);
     } catch (...) {
-      telemetry.resolution_failures.fetch_add(1,
-                                              std::memory_order_relaxed);
+      if (waves != 0) {
+        telemetry.resolution_failures.fetch_add(1,
+                                                std::memory_order_relaxed);
+      }
+      if (range_work_per_thread_target != 1) {
+        telemetry.coarsening_resolution_failures.fetch_add(
+            1, std::memory_order_relaxed);
+      }
       throw;
     }
   });
-  return context.grid_residency_tasks[slot];
+  return context.grid_policy_tasks[slot];
 }
 
 bool KernelLauncher::on_cuda_device(void *ptr) {
@@ -998,10 +1060,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
 
   CUDAContext::get_instance().make_current();
   const auto &offloaded_tasks =
-      ctx.cuda_grid_residency_waves() == 0
+      ctx.cuda_grid_residency_waves() == 0 &&
+              ctx.cuda_range_work_per_thread_target() == 1
           ? launcher_ctx->offloaded_tasks
-          : resolve_grid_residency_tasks(
-                *launcher_ctx, ctx.cuda_grid_residency_waves());
+          : resolve_grid_policy_tasks(
+                *launcher_ctx, ctx.cuda_grid_residency_waves(),
+                ctx.cuda_range_work_per_thread_target());
 
   // |transfers| is only used for external arrays whose data is originally on
   // host. They are first transferred onto device and that device pointer is

@@ -86,6 +86,16 @@ class LaunchContextBuilder {
     return cuda_grid_residency_waves_;
   }
 
+  void set_cuda_range_work_per_thread_target(std::int32_t target) {
+    TI_ERROR_IF(target != 1 && target != 2 && target != 4 && target != 8,
+                "CUDA range work-per-thread target must be 1, 2, 4, or 8");
+    cuda_range_work_per_thread_target_ = target;
+  }
+
+  std::int32_t cuda_range_work_per_thread_target() const noexcept {
+    return cuda_range_work_per_thread_target_;
+  }
+
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
   LaunchContextBuilder(const LaunchContextBuilder &) = delete;
@@ -221,6 +231,7 @@ class LaunchContextBuilder {
   std::vector<int> cuda_bounded_extent_arg_id_;
   std::int32_t cuda_bounded_capacity_{0};
   std::int32_t cuda_grid_residency_waves_{0};
+  std::int32_t cuda_range_work_per_thread_target_{1};
   std::string dispatch_label_;
 
  public:

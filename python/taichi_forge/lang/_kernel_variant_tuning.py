@@ -16,7 +16,8 @@ from taichi_forge.lang._kernel_optimization import (
 
 _BLOCK_DIMS = (64, 128, 256, 512)
 _GRID_RESIDENCY_WAVES = (None, 1, 2, 4)
-_MAX_VARIANTS = 32
+_RANGE_WORK_PER_THREAD_TARGETS = (1, 2, 4, 8)
+_MAX_VARIANTS = 128
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,14 @@ class _KernelVariantRejection:
 class _KernelVariantSession:
     """Materialize a bounded, explicit-only CUDA variant search space."""
 
-    def __init__(self, kernel, args, *, block_dims=_BLOCK_DIMS):
+    def __init__(
+        self,
+        kernel,
+        args,
+        *,
+        block_dims=_BLOCK_DIMS,
+        range_work_per_thread_targets=_RANGE_WORK_PER_THREAD_TARGETS,
+    ):
         if impl.current_cfg().arch != _ti_core.Arch.cuda:
             raise RuntimeError("kernel variant sessions require the CUDA backend")
         requested = tuple(block_dims)
@@ -56,6 +64,23 @@ class _KernelVariantSession:
             )
         if len(set(requested)) != len(requested):
             raise ValueError("block_dims must not contain duplicates")
+        requested_work = tuple(range_work_per_thread_targets)
+        if (
+            not requested_work
+            or requested_work[0] != 1
+            or any(
+                value not in _RANGE_WORK_PER_THREAD_TARGETS
+                for value in requested_work
+            )
+        ):
+            raise ValueError(
+                "range_work_per_thread_targets must start with 1 and be a "
+                "non-empty subset of (1, 2, 4, 8)"
+            )
+        if len(set(requested_work)) != len(requested_work):
+            raise ValueError(
+                "range_work_per_thread_targets must not contain duplicates"
+            )
 
         self._kernel = kernel
         self._args = tuple(args)
@@ -63,7 +88,7 @@ class _KernelVariantSession:
         rejections = []
         dimension_contract = None
         for block_dim in requested:
-            baseline_spec = self._spec(block_dim, "auto", None)
+            baseline_spec = self._spec(block_dim, "auto", 1, None)
             baseline_binding = _bind_kernel_optimization_spec(
                 kernel, baseline_spec
             )
@@ -85,6 +110,7 @@ class _KernelVariantSession:
             from taichi_forge.lang._gpu_semantics import _GpuPhysicalEffect
             from taichi_forge.lang._gpu_semantics_tuning import (
                 _RESIDENCY_DIMENSION,
+                _RANGE_WORK_PER_THREAD_DIMENSION,
                 _TLS_DIMENSION,
                 _WORKGROUP_DIMENSION,
                 _dimension_by_name,
@@ -102,31 +128,55 @@ class _KernelVariantSession:
             residency_values = _dimension_by_name(
                 dimensions, _RESIDENCY_DIMENSION
             ).legal_values
-            for thread_local in tls_modes:
-                for waves in residency_values:
-                    spec = self._spec(block_dim, thread_local, waves)
-                    selections = {
-                        _WORKGROUP_DIMENSION: block_dim,
-                        _TLS_DIMENSION: thread_local,
-                        _RESIDENCY_DIMENSION: waves,
-                    }
-                    variants.append(
-                        _KernelVariant(
-                            variant_id=spec.identity,
-                            compilation_id=spec.compilation_identity,
-                            spec=spec,
-                            logical_task_id=task.logical_task_id,
-                            baseline_thread_local_bytes=int(task.thread_local_bytes),
-                            physical_equivalence_key=(
-                                _gpu_physical_equivalence_key(
-                                    dimensions,
-                                    selections,
-                                    _GpuPhysicalEffect.ARTIFACT,
-                                )
-                            ),
-                            selections=tuple(selections.items()),
+            work_dimension = _dimension_by_name(
+                dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
+            )
+            work_values = tuple(
+                value
+                for value in work_dimension.legal_values
+                if value in requested_work
+            )
+            if not work_values:
+                if requested_work == (1,):
+                    work_values = (1,)
+                else:
+                    rejections.append(
+                        _KernelVariantRejection(
+                            block_dim, work_dimension.status.reason
                         )
                     )
+                    continue
+            for thread_local in tls_modes:
+                for work_per_thread in work_values:
+                    for waves in residency_values:
+                        spec = self._spec(
+                            block_dim, thread_local, work_per_thread, waves
+                        )
+                        selections = {
+                            _WORKGROUP_DIMENSION: block_dim,
+                            _TLS_DIMENSION: thread_local,
+                            _RANGE_WORK_PER_THREAD_DIMENSION: work_per_thread,
+                            _RESIDENCY_DIMENSION: waves,
+                        }
+                        variants.append(
+                            _KernelVariant(
+                                variant_id=spec.identity,
+                                compilation_id=spec.compilation_identity,
+                                spec=spec,
+                                logical_task_id=task.logical_task_id,
+                                baseline_thread_local_bytes=int(
+                                    task.thread_local_bytes
+                                ),
+                                physical_equivalence_key=(
+                                    _gpu_physical_equivalence_key(
+                                        dimensions,
+                                        selections,
+                                        _GpuPhysicalEffect.ARTIFACT,
+                                    )
+                                ),
+                                selections=tuple(selections.items()),
+                            )
+                        )
 
         if len(variants) > _MAX_VARIANTS:
             raise RuntimeError("kernel variant search exceeded its bounded budget")
@@ -156,11 +206,15 @@ class _KernelVariantSession:
         )
 
     @staticmethod
-    def _spec(block_dim, thread_local, waves):
+    def _spec(block_dim, thread_local, work_per_thread, waves):
         return _KernelOptimizationSpec(
             ir=_IrOptimizationOptions(thread_local=thread_local),
             backend=_BackendCodegenOptions(workgroup_size=block_dim),
-            launch=_LaunchOptions(block_mode="require", grid_residency_waves=waves),
+            launch=_LaunchOptions(
+                block_mode="require",
+                grid_residency_waves=waves,
+                range_work_per_thread_target=work_per_thread,
+            ),
         )
 
     @staticmethod
@@ -179,6 +233,7 @@ class _KernelVariantSession:
             max_threads=impl.current_cfg().max_block_dim,
             canonical_workgroup_sizes=_BLOCK_DIMS,
             residency_values=_GRID_RESIDENCY_WAVES,
+            range_work_per_thread_values=_RANGE_WORK_PER_THREAD_TARGETS,
         )
         workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
         if workgroup.status.availability != _GpuAvailability.PROVEN:

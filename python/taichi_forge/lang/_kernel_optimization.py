@@ -49,12 +49,20 @@ class _ArtifactOptions:
 class _LaunchOptions:
     block_mode: str = "auto"
     grid_residency_waves: Optional[int] = None
+    range_work_per_thread_target: int = 1
 
     def __post_init__(self):
         if self.block_mode not in ("auto", "hint", "require"):
             raise ValueError("block_mode must be 'auto', 'hint', or 'require'")
         if self.grid_residency_waves not in (None, 1, 2, 4):
             raise ValueError("grid_residency_waves must be None, 1, 2, or 4")
+        value = self.range_work_per_thread_target
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("range_work_per_thread_target must be an integer")
+        if value not in (1, 2, 4, 8):
+            raise ValueError(
+                "range_work_per_thread_target must be 1, 2, 4, or 8"
+            )
 
 
 @dataclass(frozen=True)
@@ -102,6 +110,7 @@ class _KernelOptimizationSpec:
         # launch registration. It must not manufacture a second IR/PTX cache
         # entry for the same block/TLS/artifact variant.
         payload["launch"]["grid_residency_waves"] = None
+        payload["launch"]["range_work_per_thread_target"] = 1
         return json.dumps(
             {"schema_version": 1, **payload},
             sort_keys=True,

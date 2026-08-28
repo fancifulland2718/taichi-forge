@@ -171,7 +171,6 @@ def _logical_extent(metadata, tasks):
     if (
         len(range_tasks) == 1
         and metadata["available"]
-        and not metadata["opaque"]
         and domain["kind"] == "constant_range"
     ):
         extent = max(0, int(domain["end"]) - int(domain["begin"]))

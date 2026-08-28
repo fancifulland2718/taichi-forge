@@ -87,6 +87,9 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
                                : (cpu_execution ? "cpu_scheduler"
                                                 : "grid_stride"))
             : "not_applicable";
+    if (task.constant_range_size >= 0) {
+      item.constant_range_size = task.constant_range_size;
+    }
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
     if (cpu_execution) {

@@ -47,6 +47,7 @@ struct OffloadedTaskManifest {
   // ``device_bounded_grid_stride`` instead keeps the saturation-capped CUDA
   // grid while loading the logical end from a device extent.
   std::string range_mapping;
+  std::optional<std::int64_t> constant_range_size;
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

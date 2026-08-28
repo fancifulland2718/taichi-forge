@@ -32,6 +32,11 @@ struct GridResidencyTelemetrySnapshot {
   std::uint64_t last_resolved_grid{0};
   std::uint64_t last_active_blocks_per_multiprocessor{0};
   std::uint64_t last_multiprocessor_count{0};
+  std::uint64_t coarsening_resolution_calls{0};
+  std::uint64_t coarsening_resolution_failures{0};
+  std::uint64_t last_work_per_thread_target{0};
+  std::uint64_t last_coarsening_baseline_grid{0};
+  std::uint64_t last_coarsened_grid{0};
 };
 
 struct ArtifactQualificationTelemetrySnapshot {
@@ -87,8 +92,12 @@ class KernelLauncher : public LLVM::KernelLauncher {
         ordinary_arg_buffers;
     mutable std::size_t ordinary_arg_buffer_cursor{0};
     mutable RetainedDeviceBuffer ordinary_result_buffer;
-    mutable std::array<std::once_flag, 3> grid_residency_once;
-    mutable std::array<std::vector<OffloadedTask>, 3> grid_residency_tasks;
+    // Every non-baseline pair of {waves=0,1,2,4} x {work=1,2,4,8}
+    // owns one immutable task vector. The bounded cache avoids allocation or
+    // occupancy-query cost on warm launches while allowing both launch-only
+    // controls to compose without manufacturing another PTX artifact.
+    mutable std::array<std::once_flag, 15> grid_policy_once;
+    mutable std::array<std::vector<OffloadedTask>, 15> grid_policy_tasks;
     bool uses_root_binding{false};
   };
 
@@ -194,9 +203,10 @@ class KernelLauncher : public LLVM::KernelLauncher {
   void configure_root_binding(const LLVM::CompiledKernelData &compiled,
                               Context &context);
   void ensure_root_binding(const Context &context);
-  const std::vector<OffloadedTask> &resolve_grid_residency_tasks(
+  const std::vector<OffloadedTask> &resolve_grid_policy_tasks(
       const Context &context,
-      std::int32_t waves);
+      std::int32_t waves,
+      std::int32_t range_work_per_thread_target);
 
   bool listgen_reuse_adaptive_{false};
   // Sparse-list reuse metadata describes one CUDA runtime, not one launch.
