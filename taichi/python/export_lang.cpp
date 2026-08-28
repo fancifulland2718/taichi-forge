@@ -68,6 +68,7 @@
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 #if defined(TI_WITH_VULKAN)
+#include "taichi/codegen/spirv/compiled_kernel_data.h"
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #endif
 
@@ -239,6 +240,91 @@ const char *autodiff_mode_name(AutodiffMode mode) {
   }
   return "unknown";
 }
+
+#if defined(TI_WITH_VULKAN)
+const char *spirv_buffer_type_name(
+    lang::spirv::TaskAttributes::BufferType type) {
+  using BufferType = lang::spirv::TaskAttributes::BufferType;
+  switch (type) {
+    case BufferType::Root:
+      return "root";
+    case BufferType::GlobalTmps:
+      return "global_tmps";
+    case BufferType::Args:
+      return "args";
+    case BufferType::Rets:
+      return "rets";
+    case BufferType::ListGen:
+      return "listgen";
+    case BufferType::ExtArr:
+      return "external_array";
+    case BufferType::ArgPack:
+      return "argpack";
+    case BufferType::NodeAllocatorPool:
+      return "node_allocator_pool";
+    case BufferType::HashOverflow:
+      return "hash_overflow";
+  }
+  return "unknown";
+}
+
+const char *spirv_buffer_access_name(std::uint32_t access) {
+  using BufferBind = lang::spirv::TaskAttributes::BufferBind;
+  if (access == BufferBind::kAccessRead) {
+    return "read";
+  }
+  if (access == BufferBind::kAccessWrite) {
+    return "write";
+  }
+  if (access == BufferBind::kAccessReadWrite) {
+    return "read_write";
+  }
+  return "opaque";
+}
+
+py::dict spirv_task_metadata_to_python(
+    const lang::spirv::TaskAttributes &task) {
+  py::dict metadata;
+  metadata["entry_point"] = task.name;
+  metadata["local_size"] =
+      py::make_tuple(task.advisory_num_threads_per_group, 1, 1);
+  py::list bindings;
+  for (const auto &binding : task.buffer_binds) {
+    py::dict encoded;
+    encoded["kind"] = "storage_buffer";
+    encoded["buffer_type"] = spirv_buffer_type_name(binding.buffer.type);
+    encoded["logical_path"] = binding.buffer.root_id;
+    encoded["binding"] = binding.binding;
+    encoded["chunk_count"] = binding.chunk_count;
+    encoded["access"] = spirv_buffer_access_name(binding.access);
+    bindings.append(std::move(encoded));
+  }
+  for (const auto &binding : task.texture_binds) {
+    py::dict encoded;
+    encoded["kind"] =
+        binding.is_storage ? "storage_image" : "sampled_image";
+    encoded["buffer_type"] =
+        binding.is_storage ? "storage_image" : "sampled_image";
+    encoded["logical_path"] = binding.arg_id;
+    encoded["binding"] = binding.binding;
+    encoded["chunk_count"] = 0;
+    encoded["access"] = binding.is_storage ? "read_write" : "read";
+    bindings.append(std::move(encoded));
+  }
+  for (const auto &binding : task.acceleration_structure_binds) {
+    py::dict encoded;
+    encoded["kind"] = "acceleration_structure";
+    encoded["buffer_type"] = "acceleration_structure";
+    encoded["logical_path"] = binding.arg_id;
+    encoded["binding"] = binding.binding;
+    encoded["chunk_count"] = 0;
+    encoded["access"] = "read";
+    bindings.append(std::move(encoded));
+  }
+  metadata["bindings"] = std::move(bindings);
+  return metadata;
+}
+#endif
 
 // Record native primitive telemetry inside the existing pybind call. Keeping
 // this at the binding boundary covers cold calls, cached plan descriptors and
@@ -999,9 +1085,32 @@ void export_lang(py::module &m) {
                  compiled.get_handle().has_value();
              result["graph_masked_handle_registered"] =
                  compiled.get_graph_masked_handle().has_value();
+#if defined(TI_WITH_VULKAN)
+             const lang::spirv::CompiledKernelData *spirv_compiled = nullptr;
+             if (backend == Arch::vulkan) {
+               spirv_compiled =
+                   dynamic_cast<const lang::spirv::CompiledKernelData *>(
+                       &compiled);
+               TI_ERROR_IF(spirv_compiled == nullptr,
+                           "Vulkan GPU semantics require SPIR-V compiled data");
+             }
+#endif
              py::list tasks;
-             for (const auto &task : compiled.task_manifest()) {
-               tasks.append(offloaded_task_manifest_to_python(task));
+             const auto manifest = compiled.task_manifest();
+             for (std::size_t index = 0; index < manifest.size(); ++index) {
+               auto encoded = offloaded_task_manifest_to_python(manifest[index]);
+#if defined(TI_WITH_VULKAN)
+               if (spirv_compiled != nullptr) {
+                 const auto &attributes =
+                     spirv_compiled->get_internal_data()
+                         .metadata.kernel_attribs.tasks_attribs;
+                 TI_ERROR_IF(attributes.size() != manifest.size(),
+                             "Vulkan task metadata count mismatch");
+                 encoded["backend_metadata"] =
+                     spirv_task_metadata_to_python(attributes[index]);
+               }
+#endif
+               tasks.append(std::move(encoded));
              }
              result["tasks"] = std::move(tasks);
              return result;

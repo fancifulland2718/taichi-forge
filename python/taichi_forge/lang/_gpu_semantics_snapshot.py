@@ -373,7 +373,11 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
         )
 
         return _adapt_cuda_resident_snapshot(snapshot)
-    return snapshot
+    from taichi_forge.lang._gpu_semantics_vulkan import (
+        _adapt_vulkan_resident_snapshot,
+    )
+
+    return _adapt_vulkan_resident_snapshot(snapshot, raw)
 
 
 __all__ = ["_build_resident_gpu_semantics"]

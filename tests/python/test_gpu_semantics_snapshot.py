@@ -12,6 +12,12 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuAvailability,
     _GpuBackend,
     _GpuExtent3,
+    _GpuBindingTime,
+    _GpuOwnership,
+    _GpuResourceAccess,
+    _GpuResourceKind,
+    _VulkanArtifactExtension,
+    _VulkanLaunchExtension,
     _dumps_gpu_semantics,
     _loads_gpu_semantics,
 )
@@ -24,8 +30,7 @@ from tests import test_utils
 def _raw_snapshot(backend="cuda", task_count=1):
     tasks = []
     for index in range(task_count):
-        tasks.append(
-            {
+        task = {
                 "task_id": f"tf:physical:{index}",
                 "logical_task_id": f"tfl:logical:{index}",
                 "optimization_spec_id": "",
@@ -46,7 +51,30 @@ def _raw_snapshot(backend="cuda", task_count=1):
                 "dynamic_shared_bytes": 0,
                 "thread_local_bytes": 32,
             }
-        )
+        if backend == "vulkan":
+            task["backend_metadata"] = {
+                "entry_point": f"spirv_kernel_{index}",
+                "local_size": (64, 1, 1),
+                "bindings": (
+                    {
+                        "kind": "storage_buffer",
+                        "buffer_type": "external_array",
+                        "logical_path": (0,),
+                        "binding": 3,
+                        "chunk_count": 0,
+                        "access": "write",
+                    },
+                    {
+                        "kind": "sampled_image",
+                        "buffer_type": "sampled_image",
+                        "logical_path": (1,),
+                        "binding": 5,
+                        "chunk_count": 0,
+                        "access": "read",
+                    },
+                ),
+            }
+        tasks.append(task)
     return {
         "backend": backend,
         "kernel_identity": f"kernel:{backend}:specialized",
@@ -142,6 +170,35 @@ def test_cuda_resident_adapter_separates_manifest_and_native_facts():
     )
 
 
+def test_vulkan_resident_adapter_owns_spirv_abi_not_pipeline_objects():
+    snapshot = _build_resident_gpu_semantics(_raw_snapshot("vulkan"))
+    artifact = snapshot.artifacts[0]
+    launch = snapshot.launches[0]
+    schema = snapshot.binding_schemas[0]
+
+    assert isinstance(artifact.extension, _VulkanArtifactExtension)
+    assert isinstance(launch.extension, _VulkanLaunchExtension)
+    assert artifact.entry_point_id == "spirv_kernel_0"
+    assert artifact.extension.local_size.value == _GpuExtent3(64, 1, 1)
+    assert artifact.workgroup_shape.materialized.binding_time == (
+        _GpuBindingTime.ARTIFACT
+    )
+    assert artifact.workgroup_shape.materialized.ownership == _GpuOwnership.ARTIFACT
+    assert artifact.extension.pipeline_identity.availability == (
+        _GpuAvailability.UNKNOWN
+    )
+    assert launch.dynamic_workgroup_memory_bytes.actual.availability == (
+        _GpuAvailability.UNSUPPORTED
+    )
+    assert schema.bindings[0].kind == _GpuResourceKind.STORAGE_BUFFER
+    assert schema.bindings[0].backend_slot == "set:0/binding:3"
+    assert schema.bindings[0].access == _GpuResourceAccess.WRITE
+    assert schema.bindings[1].kind == _GpuResourceKind.SAMPLED_IMAGE
+    assert snapshot.dispatches[0].intrinsic_requirements[0].lowering_route == (
+        "spirv_workgroup_storage"
+    )
+
+
 def test_resident_snapshot_rejects_cpu_and_unbound_derivative():
     with pytest.raises(RuntimeError, match="only on CUDA and Vulkan"):
         _build_resident_gpu_semantics(_raw_snapshot("x64"))
@@ -190,6 +247,17 @@ def test_kernel_resident_gpu_snapshot_is_no_submit_and_no_handle_registration():
     assert not raw_before["graph_masked_handle_registered"]
     assert not raw["regular_handle_registered"]
     assert not raw["graph_masked_handle_registered"]
+    if snapshot.target.backend == _GpuBackend.VULKAN:
+        assert isinstance(
+            snapshot.artifacts[0].extension, _VulkanArtifactExtension
+        )
+        assert snapshot.binding_schemas[0].bindings
+        assert snapshot.artifacts[0].workgroup_shape.materialized.value == (
+            _GpuExtent3(64, 1, 1)
+        )
+        assert snapshot.artifacts[0].extension.pipeline_identity.availability == (
+            _GpuAvailability.UNKNOWN
+        )
 
     before_cached = program._runtime_statistics_snapshot()
     for _ in range(100):
