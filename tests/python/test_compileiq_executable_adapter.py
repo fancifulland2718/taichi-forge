@@ -12,6 +12,7 @@ from taichi_forge.graph._optimization import (
     _ExecutableOptimizationSpace,
     _make_spec,
 )
+from taichi_forge.lang._compileiq_adapter import _CompileIQWinnerScope
 from tests import test_utils
 
 
@@ -170,6 +171,72 @@ def test_executable_adapter_balances_and_ranks_complete_evidence():
     ]
     assert ranked[0].worst_positive
     assert not ranked[2].worst_positive
+
+
+def _winner_scope(candidate_id, specialization_id, provider_id):
+    return _CompileIQWinnerScope(
+        final_candidate_id=candidate_id,
+        forge_specialization_id=specialization_id,
+        workload_profile_id="tlw1:map-chain",
+        shape_scope_id="elements=1048576",
+        replay_scope_id="graph-rebuild-fresh-process-v1",
+        runtime_scope_id="cuda:uuid:driver",
+        compiler_scope_id="llvm20:driver-jit",
+        provider_scope_id=provider_id,
+        variant_manifest_id="executable-space:sha256",
+    )
+
+
+def test_executable_adapter_qualifies_exact_recipe_and_provider_candidate():
+    adapter = _CompileIQExecutableAdapter(_space())
+    map2, map3 = adapter.spec_ids(include_baseline=False)[:2]
+    finalists = (
+        adapter.final_candidate(map2, "driver-baseline"),
+        adapter.final_candidate(map3, "acf-map3"),
+    )
+    candidate_ids = tuple(candidate.identity for candidate in finalists)
+    scopes = {
+        candidate.identity: _winner_scope(
+            candidate.identity,
+            adapter.select({"forge_executable_spec": candidate.forge_object_id})
+            .execution_identity,
+            candidate.provider_candidate_id,
+        )
+        for candidate in finalists
+    }
+
+    assert len(adapter.qualification_stage(finalists).schedule) == 20
+    decision = adapter.qualify(
+        {
+            candidate_ids[0]: (0.97,) * 10,
+            candidate_ids[1]: (0.94,) * 9 + (1.02,),
+        },
+        finalists,
+        scopes=scopes,
+        correctness={candidate_ids[0]: True, candidate_ids[1]: True},
+        memory_stable={candidate_ids[0]: True, candidate_ids[1]: True},
+    )
+
+    assert decision.admitted
+    assert decision.selected_candidate_id == candidate_ids[0]
+    assert decision.selected_forge_object_kind == "executable_spec"
+    assert decision.selected_forge_object_id == map2
+    assert decision.selected_forge_variant_id is None
+    assert decision.selected_provider_candidate_id == "driver-baseline"
+    assert decision.scope_id == scopes[candidate_ids[0]].identity
+
+    mismatched = dict(scopes)
+    mismatched[candidate_ids[0]] = _winner_scope(
+        candidate_ids[1], "wrong", "wrong"
+    )
+    with pytest.raises(ValueError, match="exact final candidate"):
+        adapter.qualify(
+            {candidate_id: (0.97,) * 10 for candidate_id in candidate_ids},
+            finalists,
+            scopes=mismatched,
+            correctness={candidate_id: True for candidate_id in candidate_ids},
+            memory_stable={candidate_id: True for candidate_id in candidate_ids},
+        )
 
 
 def test_executable_adapter_rejects_unknown_or_ambiguous_recipes():

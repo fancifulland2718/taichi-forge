@@ -260,7 +260,7 @@ def test_compileiq_adapter_rejects_incomplete_or_invalid_evidence():
 def _winner_scope(final_candidate_id, provider_scope_id="explicit-acf:sha256"):
     return _CompileIQWinnerScope(
         final_candidate_id=final_candidate_id,
-        kernel_specialization_id="kernel:contact-v3",
+        forge_specialization_id="kernel:contact-v3",
         workload_profile_id="tlw1:production-sap",
         shape_scope_id="dofs=32768/contacts=8192",
         replay_scope_id="fresh-process-reset-v2",
@@ -383,7 +383,7 @@ def test_compileiq_staged_contract_rejects_oversized_or_weak_final_stage():
     with pytest.raises(ValueError, match="non-empty single-line"):
         _CompileIQWinnerScope(
             final_candidate_id="candidate",
-            kernel_specialization_id="",
+            forge_specialization_id="",
             workload_profile_id="profile",
             shape_scope_id="shape",
             replay_scope_id="replay",

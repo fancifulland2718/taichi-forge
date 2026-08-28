@@ -124,7 +124,7 @@ def _canonical_json(value):
 @dataclass(frozen=True)
 class _CompileIQWinnerScope:
     final_candidate_id: str
-    kernel_specialization_id: str
+    forge_specialization_id: str
     workload_profile_id: str
     shape_scope_id: str
     replay_scope_id: str
@@ -152,10 +152,13 @@ class _CompileIQWinnerScope:
 
 @dataclass(frozen=True)
 class _CompileIQFinalCandidate:
-    forge_variant_id: str
+    forge_object_kind: str
+    forge_object_id: str
     provider_candidate_id: str = "baseline"
 
     def __post_init__(self):
+        if self.forge_object_kind not in ("kernel_variant", "executable_spec"):
+            raise ValueError("unsupported Forge final candidate object kind")
         for name, value in self.__dict__.items():
             if not isinstance(value, str) or not value or "\n" in value:
                 raise ValueError(f"{name} must be a non-empty single-line string")
@@ -167,13 +170,20 @@ class _CompileIQFinalCandidate:
         ).hexdigest()
         return f"ciqc1:{digest}"
 
+    @property
+    def forge_variant_id(self):
+        if self.forge_object_kind != "kernel_variant":
+            return None
+        return self.forge_object_id
+
 
 @dataclass(frozen=True)
 class _CompileIQQualificationDecision:
     status: str
     reason: str
     selected_candidate_id: str | None
-    selected_forge_variant_id: str | None
+    selected_forge_object_kind: str | None
+    selected_forge_object_id: str | None
     selected_provider_candidate_id: str | None
     scope_id: str
     evidence: tuple[_CompileIQCandidateEvidence, ...]
@@ -181,6 +191,12 @@ class _CompileIQQualificationDecision:
     @property
     def admitted(self):
         return self.status == "qualified"
+
+    @property
+    def selected_forge_variant_id(self):
+        if self.selected_forge_object_kind != "kernel_variant":
+            return None
+        return self.selected_forge_object_id
 
 
 def _balanced_paired_schedule(candidate_ids, *, blocks=2):
@@ -267,6 +283,95 @@ def _rank_complete_paired_evidence(
                 item.variant_id,
             ),
         )
+    )
+
+
+def _qualify_complete_paired_candidates(
+    measurements,
+    finalists,
+    *,
+    scopes,
+    correctness,
+    memory_stable,
+    blocks,
+):
+    finalists = tuple(finalists)
+    candidate_ids = tuple(finalist.identity for finalist in finalists)
+    evidence = _rank_complete_paired_evidence(
+        measurements,
+        candidate_ids,
+        blocks=blocks,
+        candidate_kind="qualification candidate",
+        collection_name="independent qualification",
+    )
+    expected = set(candidate_ids)
+    if not isinstance(scopes, dict) or set(scopes) != expected:
+        raise ValueError("scopes must exactly match qualification candidates")
+    if any(
+        not isinstance(scope, _CompileIQWinnerScope)
+        for scope in scopes.values()
+    ):
+        raise TypeError("scope values must be _CompileIQWinnerScope values")
+    if any(
+        scope.final_candidate_id != candidate_id
+        for candidate_id, scope in scopes.items()
+    ):
+        raise ValueError("each scope must bind its exact final candidate ID")
+    for name, gate in (
+        ("correctness", correctness),
+        ("memory_stable", memory_stable),
+    ):
+        if not isinstance(gate, dict) or set(gate) != expected:
+            raise ValueError(f"{name} must exactly match qualification candidates")
+        if any(type(value) is not bool for value in gate.values()):
+            raise TypeError(f"{name} values must be booleans")
+    eligible = tuple(
+        item
+        for item in evidence
+        if correctness[item.variant_id] and memory_stable[item.variant_id]
+    )
+    if not eligible:
+        return _CompileIQQualificationDecision(
+            status="keep_baseline",
+            reason="no candidate passed correctness and memory gates",
+            selected_candidate_id=None,
+            selected_forge_object_kind=None,
+            selected_forge_object_id=None,
+            selected_provider_candidate_id=None,
+            scope_id="",
+            evidence=evidence,
+        )
+    selected = eligible[0]
+    if not selected.worst_positive:
+        return _CompileIQQualificationDecision(
+            status="keep_baseline",
+            reason="best valid candidate failed the worst-positive gate",
+            selected_candidate_id=None,
+            selected_forge_object_kind=None,
+            selected_forge_object_id=None,
+            selected_provider_candidate_id=None,
+            scope_id="",
+            evidence=evidence,
+        )
+    selected_candidate = next(
+        finalist
+        for finalist in finalists
+        if finalist.identity == selected.variant_id
+    )
+    return _CompileIQQualificationDecision(
+        status="qualified",
+        reason=(
+            "exact candidate passed correctness, memory, and "
+            "worst-positive gates"
+        ),
+        selected_candidate_id=selected.variant_id,
+        selected_forge_object_kind=selected_candidate.forge_object_kind,
+        selected_forge_object_id=selected_candidate.forge_object_id,
+        selected_provider_candidate_id=(
+            selected_candidate.provider_candidate_id
+        ),
+        scope_id=scopes[selected.variant_id].identity,
+        evidence=evidence,
     )
 
 
@@ -573,7 +678,8 @@ class _CompileIQStagedSearchPlan:
                 "qualification finalists must be _CompileIQFinalCandidate values"
             )
         if any(
-            finalist.forge_variant_id not in self._adapter._variants
+            finalist.forge_object_kind != "kernel_variant"
+            or finalist.forge_object_id not in self._adapter._variants
             for finalist in finalists
         ):
             raise KeyError("qualification contains an unknown Forge variant")
@@ -588,7 +694,8 @@ class _CompileIQStagedSearchPlan:
         if forge_variant_id not in self._adapter._variants:
             raise KeyError(f"unknown Forge kernel variant {forge_variant_id!r}")
         return _CompileIQFinalCandidate(
-            forge_variant_id=forge_variant_id,
+            forge_object_kind="kernel_variant",
+            forge_object_id=forge_variant_id,
             provider_candidate_id=provider_candidate_id,
         )
 
@@ -603,78 +710,13 @@ class _CompileIQStagedSearchPlan:
     ):
         finalists = tuple(finalist_ids)
         stage = self.qualification_stage(finalists)
-        evidence = _rank_complete_paired_evidence(
+        return _qualify_complete_paired_candidates(
             measurements,
-            stage.candidate_ids,
+            finalists,
+            scopes=scopes,
+            correctness=correctness,
+            memory_stable=memory_stable,
             blocks=stage.blocks,
-            candidate_kind="qualification candidate",
-            collection_name="independent qualification",
-        )
-        expected = set(stage.candidate_ids)
-        if not isinstance(scopes, dict) or set(scopes) != expected:
-            raise ValueError("scopes must exactly match qualification candidates")
-        if any(
-            not isinstance(scope, _CompileIQWinnerScope)
-            for scope in scopes.values()
-        ):
-            raise TypeError("scope values must be _CompileIQWinnerScope values")
-        if any(
-            scope.final_candidate_id != candidate_id
-            for candidate_id, scope in scopes.items()
-        ):
-            raise ValueError("each scope must bind its exact final candidate ID")
-        for name, gate in (
-            ("correctness", correctness),
-            ("memory_stable", memory_stable),
-        ):
-            if not isinstance(gate, dict) or set(gate) != expected:
-                raise ValueError(f"{name} must exactly match qualification candidates")
-            if any(type(value) is not bool for value in gate.values()):
-                raise TypeError(f"{name} values must be booleans")
-        eligible = tuple(
-            item
-            for item in evidence
-            if correctness[item.variant_id] and memory_stable[item.variant_id]
-        )
-        if not eligible:
-            return _CompileIQQualificationDecision(
-                status="keep_baseline",
-                reason="no candidate passed correctness and memory gates",
-                selected_candidate_id=None,
-                selected_forge_variant_id=None,
-                selected_provider_candidate_id=None,
-                scope_id="",
-                evidence=evidence,
-            )
-        selected = eligible[0]
-        if not selected.worst_positive:
-            return _CompileIQQualificationDecision(
-                status="keep_baseline",
-                reason="best valid candidate failed the worst-positive gate",
-                selected_candidate_id=None,
-                selected_forge_variant_id=None,
-                selected_provider_candidate_id=None,
-                scope_id="",
-                evidence=evidence,
-            )
-        selected_candidate = next(
-            finalist
-            for finalist in finalists
-            if finalist.identity == selected.variant_id
-        )
-        return _CompileIQQualificationDecision(
-            status="qualified",
-            reason=(
-                "exact candidate passed correctness, memory, and "
-                "worst-positive gates"
-            ),
-            selected_candidate_id=selected.variant_id,
-            selected_forge_variant_id=selected_candidate.forge_variant_id,
-            selected_provider_candidate_id=(
-                selected_candidate.provider_candidate_id
-            ),
-            scope_id=scopes[selected.variant_id].identity,
-            evidence=evidence,
         )
 
     def manifest(self):
@@ -780,5 +822,6 @@ __all__ = [
     "_CompileIQVariantSelection",
     "_CompileIQWinnerScope",
     "_balanced_paired_schedule",
+    "_qualify_complete_paired_candidates",
     "_rank_complete_paired_evidence",
 ]

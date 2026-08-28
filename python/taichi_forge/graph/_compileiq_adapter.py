@@ -6,8 +6,11 @@ import re
 
 from taichi_forge.graph._optimization import _ExecutableOptimizationSpace
 from taichi_forge.lang._compileiq_adapter import (
+    _CompileIQFinalCandidate,
+    _CompileIQSearchStage,
     _balanced_paired_schedule,
     _compileiq_import_error,
+    _qualify_complete_paired_candidates,
     _rank_complete_paired_evidence,
 )
 
@@ -208,6 +211,58 @@ class _CompileIQExecutableAdapter:
             collection_name="executable candidates",
         )
 
+    def final_candidate(self, spec_id, provider_candidate_id="baseline"):
+        if spec_id not in self._specs:
+            raise KeyError(f"unknown Forge executable spec {spec_id!r}")
+        return _CompileIQFinalCandidate(
+            forge_object_kind="executable_spec",
+            forge_object_id=spec_id,
+            provider_candidate_id=provider_candidate_id,
+        )
+
+    def qualification_stage(self, finalists, *, blocks=10):
+        finalists = tuple(finalists)
+        if not finalists or any(
+            not isinstance(finalist, _CompileIQFinalCandidate)
+            for finalist in finalists
+        ):
+            raise TypeError(
+                "qualification finalists must be _CompileIQFinalCandidate values"
+            )
+        if any(
+            finalist.forge_object_kind != "executable_spec"
+            or finalist.forge_object_id not in self._specs
+            for finalist in finalists
+        ):
+            raise KeyError("qualification contains an unknown executable spec")
+        return _CompileIQSearchStage(
+            stage_id="executable-independent-qualification",
+            candidate_kind="qualification",
+            candidate_ids=tuple(finalist.identity for finalist in finalists),
+            blocks=blocks,
+        )
+
+    def qualify(
+        self,
+        measurements,
+        finalists,
+        *,
+        scopes,
+        correctness,
+        memory_stable,
+        blocks=10,
+    ):
+        finalists = tuple(finalists)
+        stage = self.qualification_stage(finalists, blocks=blocks)
+        return _qualify_complete_paired_candidates(
+            measurements,
+            finalists,
+            scopes=scopes,
+            correctness=correctness,
+            memory_stable=memory_stable,
+            blocks=stage.blocks,
+        )
+
     def manifest(self):
         return {
             "schema_version": 1,
@@ -216,6 +271,7 @@ class _CompileIQExecutableAdapter:
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
             "baseline_spec_id": self._space.baseline.spec_id,
+            "search_protocol": "exhaustive_then_independent_qualification",
             "specs": tuple(
                 {
                     **spec.to_dict(),
