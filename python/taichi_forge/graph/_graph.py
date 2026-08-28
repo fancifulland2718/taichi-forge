@@ -79,12 +79,19 @@ from taichi_forge.graph._submission import (
     _reserve_paced_submission,
 )
 from taichi_forge.graph._optimization import (
+    _GraphFusionQualificationCache,
     _build_executable_optimization_space,
 )
 
 ArgKind = _ti_core.ArgKind
 
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
+_INTERNAL_FUSION_QUALIFICATION_ENV = (
+    "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
+)
+_INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
+    "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
+)
 
 
 @kernel_impl.kernel
@@ -10618,7 +10625,7 @@ class _AOTGraphBuilderPlan:
         snapshot._has_internal_fixed_bindings = self._has_internal_fixed_bindings
         return snapshot
 
-    def compile(self):
+    def compile(self, *, map_composer_max_group_size=1):
         if self._has_internal_fixed_bindings:
             raise TaichiRuntimeError(
                 "Graph bounded dispatch uses JIT-only internal fixed bindings "
@@ -10629,7 +10636,20 @@ class _AOTGraphBuilderPlan:
                 "Graph indirect dispatch is currently JIT-only and cannot "
                 "be added to an AOT module"
             )
+        if (
+            isinstance(map_composer_max_group_size, bool)
+            or not isinstance(map_composer_max_group_size, int)
+            or map_composer_max_group_size < 1
+            or map_composer_max_group_size > 4
+        ):
+            raise TaichiRuntimeError(
+                "AOT Graph map composer group size must be in [1, 4]"
+            )
         builder = _ti_core.GraphBuilder()
+        if map_composer_max_group_size > 1:
+            builder._set_map_composer_max_group_size(
+                map_composer_max_group_size
+            )
         for item in self._items:
             if item[0] == "dispatch":
                 _, kernel_cpp, args, label, _ = item
@@ -12878,6 +12898,235 @@ def _workspace_lane_configuration(workspace_lanes, workspace_saturation):
     return workspace_lanes, workspace_saturation
 
 
+def _graph_fusion_runtime_scope(backend):
+    scope = {"core_commit": str(_ti_core.get_commit_hash()).lower()}
+    if backend != "cuda":
+        return scope
+    try:
+        from taichi_forge.interop import current_cuda_device_uuid
+
+        scope.update(
+            {
+                "cuda_compute_capability": int(
+                    impl.get_cuda_compute_capability()
+                ),
+                "cuda_device_uuid": current_cuda_device_uuid().hex(),
+                "cuda_driver_api_version": int(
+                    _ti_core.cuda_driver_api_version()
+                ),
+            }
+        )
+    except (AttributeError, RuntimeError, ValueError):
+        return None
+    return scope
+
+
+def _graph_fusion_binding_descriptor(value):
+    if isinstance(value, Ndarray):
+        if value.arr is None or value.shape is None or value.dtype is None:
+            return None
+        try:
+            shape = tuple(int(extent) for extent in value.shape)
+            element_shape = tuple(int(extent) for extent in value.element_shape)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "rank": len(shape),
+            "shape": shape,
+            "element_shape": element_shape,
+        }
+    if isinstance(value, DenseNdarrayView):
+        try:
+            shape = tuple(int(extent) for extent in value.shape)
+            element_shape = tuple(
+                int(extent) for extent in value.descriptor.element_shape
+            )
+            dtype = str(value.descriptor.scalar_type)
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return {
+            "kind": "ndarray",
+            "dtype": dtype,
+            "rank": len(shape),
+            "shape": shape,
+            "element_shape": element_shape,
+        }
+    if isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(
+        value, (bool, np.bool_)
+    ):
+        scalar = value.item() if hasattr(value, "item") else value
+        return {"kind": "scalar", "value": scalar}
+    return None
+
+
+def _graph_fusion_binding_descriptors(args):
+    if not isinstance(args, Mapping):
+        return {}
+    result = {}
+    for name, value in args.items():
+        descriptor = _graph_fusion_binding_descriptor(value)
+        if descriptor is not None:
+            result[str(name)] = descriptor
+    return result
+
+
+def _graph_fusion_group_size(spec):
+    if not spec.fusion_recipe_ids:
+        return 1
+    sizes = []
+    for recipe_id in spec.fusion_recipe_ids:
+        fields = recipe_id.split(":")
+        if (
+            len(fields) != 3
+            or fields[0] != "fusion"
+            or not fields[1].startswith("map")
+            or len(fields[2]) != 24
+            or any(character not in "0123456789abcdef" for character in fields[2])
+        ):
+            raise TaichiRuntimeError(
+                f"Unsupported qualified fusion recipe {recipe_id!r}"
+            )
+        try:
+            size = int(fields[1][3:])
+        except ValueError as exc:
+            raise TaichiRuntimeError(
+                f"Unsupported qualified fusion recipe {recipe_id!r}"
+            ) from exc
+        if size < 2 or size > 4:
+            raise TaichiRuntimeError(
+                f"Unsupported qualified fusion recipe {recipe_id!r}"
+            )
+        sizes.append(size)
+    return max(sizes)
+
+
+class _QualifiedFusionRuntimeSelector:
+    def __init__(self, cache, expected_replays, space, runtime_scope):
+        self._cache = cache
+        self._expected_replays = expected_replays
+        self._space = space
+        self._runtime_scope = dict(runtime_scope)
+        self._source_commit = str(_ti_core.get_commit_hash()).lower()
+        self._variants = {}
+        self._failed_entries = set()
+        self._attempts = 0
+        self._qualified_selections = 0
+        self._baseline_fallbacks = 0
+        self._materializations = 0
+        self._last_reason = "not_invoked"
+        self._last_entry_id = None
+
+    @classmethod
+    def from_environment(cls, space):
+        path = os.environ.get(_INTERNAL_FUSION_QUALIFICATION_ENV, "").strip()
+        if not path:
+            return None
+        # Runtime auto-selection currently has CUDA performance evidence only.
+        # CPU/Vulkan may still materialize recipes explicitly for correctness
+        # qualification, but must not consume CUDA admission records.
+        if space.baseline.backend != "cuda":
+            return None
+        raw_replays = os.environ.get(
+            _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV, ""
+        ).strip()
+        try:
+            expected_replays = int(raw_replays)
+        except ValueError as exc:
+            raise TaichiRuntimeError(
+                f"{_INTERNAL_FUSION_EXPECTED_REPLAYS_ENV} must be a positive integer"
+            ) from exc
+        if expected_replays < 1:
+            raise TaichiRuntimeError(
+                f"{_INTERNAL_FUSION_EXPECTED_REPLAYS_ENV} must be a positive integer"
+            )
+        try:
+            cache = _GraphFusionQualificationCache.load(path)
+        except ValueError as exc:
+            raise TaichiRuntimeError(str(exc)) from exc
+        runtime_scope = _graph_fusion_runtime_scope(space.baseline.backend)
+        if runtime_scope is None:
+            return None
+        return cls(cache, expected_replays, space, runtime_scope)
+
+    def select(self, graph, args):
+        self._attempts += 1
+        entry, reason = self._cache.select(
+            semantic_plan_id=self._space.semantic_plan_id,
+            backend=self._space.baseline.backend,
+            source_commit=self._source_commit,
+            runtime_scope=self._runtime_scope,
+            bindings=_graph_fusion_binding_descriptors(args),
+            expected_replays=self._expected_replays,
+        )
+        if entry is None:
+            self._baseline_fallbacks += 1
+            self._last_reason = reason
+            self._last_entry_id = None
+            return graph._instance
+        self._last_entry_id = entry.identity
+        if entry.identity in self._failed_entries:
+            self._baseline_fallbacks += 1
+            self._last_reason = "materialization_previously_failed"
+            return graph._instance
+        specs = {
+            spec.spec_id: spec
+            for spec in (self._space.baseline, *self._space.candidates)
+        }
+        spec = specs.get(entry.selected_spec_id)
+        if (
+            spec is None
+            or spec is self._space.baseline
+            or spec.execution_identity != entry.execution_identity
+            or self._space.baseline.execution_identity
+            != entry.baseline_execution_identity
+            or self._space.selected_spec_id != self._space.baseline.spec_id
+        ):
+            self._baseline_fallbacks += 1
+            self._last_reason = "executable_scope_mismatch"
+            return graph._instance
+        instance = self._variants.get(entry.identity)
+        if instance is None:
+            try:
+                instance = graph._materialize_qualified_fusion_instance(spec)
+            except (RuntimeError, ValueError) as exc:
+                self._failed_entries.add(entry.identity)
+                self._baseline_fallbacks += 1
+                self._last_reason = f"materialization_failed:{type(exc).__name__}"
+                return graph._instance
+            self._variants[entry.identity] = instance
+            self._materializations += 1
+        self._qualified_selections += 1
+        self._last_reason = "qualified"
+        return instance
+
+    def invalidate_runtime(self, preserve_executables=False):
+        for instance in self._variants.values():
+            instance.invalidate_runtime(
+                preserve_executables=preserve_executables
+            )
+        if not preserve_executables:
+            self._variants.clear()
+
+    @property
+    def stats(self):
+        return MappingProxyType(
+            {
+                "configured": True,
+                "cache_path": self._cache.source_path,
+                "expected_replays": self._expected_replays,
+                "attempts": self._attempts,
+                "qualified_selections": self._qualified_selections,
+                "baseline_fallbacks": self._baseline_fallbacks,
+                "materializations": self._materializations,
+                "retained_variants": len(self._variants),
+                "last_reason": self._last_reason,
+                "last_entry_id": self._last_entry_id,
+            }
+        )
+
+
 class Graph:
     def __init__(
         self,
@@ -12921,6 +13170,11 @@ class Graph:
         self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
+        self._qualified_fusion_selector = (
+            _QualifiedFusionRuntimeSelector.from_environment(
+                self._spec.executable_optimization_space
+            )
+        )
         self._instances = {}
         self._workspace_pool = self._workspace_pool_for_current_runtime()
         self._instance = self._workspace_pool.primary
@@ -12929,6 +13183,72 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+
+    def _materialize_qualified_fusion_instance(self, selected_spec):
+        if (
+            self._workspace_lane_capacity != 1
+            or self._spec.native_count
+            or self._spec.structured_control_count
+            or self._spec.observation_count
+            or self._spec.fixed_runtime_args
+            or self._spec.temporary_actions
+            or self._spec.lifetime_leases
+            or len(self._spec.nodes) != 1
+            or not isinstance(self._spec.nodes[0], _CompiledCGraphNode)
+            or self._spec._aot_graph_builder is None
+        ):
+            raise TaichiRuntimeError(
+                "Qualified fusion materialization requires one ordinary JIT "
+                "CGraph without provider, structured, temporary, or fixed state"
+            )
+        source = self._spec.nodes[0]
+        if not isinstance(source.ir_node, SequentialRegion):
+            raise TaichiRuntimeError(
+                "Qualified fusion materialization lost its logical source region"
+            )
+        group_size = _graph_fusion_group_size(selected_spec)
+        compiled_graph = self._spec._aot_graph_builder.compile(
+            map_composer_max_group_size=group_size
+        )
+        ir_nodes = _compiled_dispatch_ir_nodes(
+            compiled_graph, source.ir_node.children
+        )
+        variant_node = _CompiledCGraphNode(
+            compiled_graph,
+            source.dispatch_count,
+            source.recording_runtime_arg_names,
+            SequentialRegion(ir_nodes, name=source.ir_node.name),
+            recording_dispatches=source.recording_dispatches,
+            lifetime_leases=source.lifetime_leases,
+            source_native_count=source.source_native_count,
+            region_kind=source.region_kind,
+            fixed_runtime_args=source.fixed_runtime_args,
+            temporary_actions=source.temporary_actions,
+            native_action_manifests=source.native_action_manifests,
+        )
+        variant_spec = _GraphSpec(
+            [variant_node],
+            aot_graph_builder=self._spec._aot_graph_builder,
+        )
+        variant_space = variant_spec.executable_optimization_space
+        if (
+            variant_space.semantic_plan_id
+            != self._spec.executable_optimization_space.semantic_plan_id
+            or variant_space.selected_spec_id != selected_spec.spec_id
+            or variant_space.selected is None
+            or variant_space.selected.execution_identity
+            != selected_spec.execution_identity
+        ):
+            raise TaichiRuntimeError(
+                "Qualified fusion recipe did not materialize its exact "
+                "semantic and physical executable identity"
+            )
+        return variant_spec.instantiate()
+
+    def _qualified_execution_instance(self, args):
+        if self._qualified_fusion_selector is None:
+            return self._instance
+        return self._qualified_fusion_selector.select(self, args)
 
     def _supports_terminal_observation(self):
         with self._lifecycle_lock:
@@ -13330,24 +13650,36 @@ class Graph:
                     "forward AD and would omit dual propagation. Run the Graph "
                     "outside automatic AD."
                 )
+            if self._qualified_fusion_selector is None:
+                execution_instance = self._instance
+                execution_run = self._run_impl
+            else:
+                execution_instance = self._qualified_execution_instance(args)
+                execution_run = execution_instance.run_impl
             # Runtime AD state is process-global rather than thread-local. The
             # signed state closes the window where a native call releases the
             # GIL and another Python thread enters Tape/FwdMode. Publish the
             # increment before the first native call: otherwise two independent
             # Graphs can both snapshot zero, overwrite the count with one, and
             # drive it negative when their paired finally blocks run.
-            internal_storage_lease = self._instance.acquire_exclusive_internal_storage()
-            temporary_lease = self._instance.acquire_temporary_lease()
+            internal_storage_lease = (
+                execution_instance.acquire_exclusive_internal_storage()
+            )
+            temporary_lease = execution_instance.acquire_temporary_lease()
             observation_lease = None
             try:
-                observation_lease = self._instance.acquire_observation_lease()
+                observation_lease = (
+                    execution_instance.acquire_observation_lease()
+                )
                 temporary_bindings = (
                     temporary_lease.bindings if temporary_lease is not None else None
                 )
                 runtime._active_graph_submissions = submission_state + 1
                 try:
-                    self._instance.bind_temporary_buffers(temporary_bindings)
-                    self._instance.bind_observation_buffers(
+                    execution_instance.bind_temporary_buffers(
+                        temporary_bindings
+                    )
+                    execution_instance.bind_observation_buffers(
                         observation_lease.bindings
                         if observation_lease is not None
                         else None
@@ -13355,21 +13687,24 @@ class Graph:
                     prepared = self._spec.prepare_runtime_args(
                         args,
                         temporary_bindings,
-                        self._instance._fixed_runtime_args,
+                        execution_instance._fixed_runtime_args,
                     )
                     runtime.prog._record_runtime_graph_submission()
                     if trace_recorder is None:
-                        self._run_impl(prepared)
+                        execution_run(prepared)
                     else:
-                        self._instance.run_traced(prepared, trace_recorder)
+                        execution_instance.run_traced(
+                            prepared, trace_recorder
+                        )
                     if self._has_native_execution_observers:
                         self._spec.record_synchronous_native_execution()
                     self._latest_control_flow_was_async = False
                     if observation_lease is not None:
                         self._last_observations = observation_lease.materialize()
+                    self._latest_instance = execution_instance
                 finally:
-                    self._instance.clear_observation_buffers()
-                    self._instance.clear_temporary_buffers()
+                    execution_instance.clear_observation_buffers()
+                    execution_instance.clear_temporary_buffers()
                     runtime._active_graph_submissions -= 1
             finally:
                 if observation_lease is not None:
@@ -13484,9 +13819,25 @@ class Graph:
                 # Publish the AD exclusion count before transaction creation:
                 # the pybind call may release the GIL while waiting for another
                 # runtime submission reader/writer boundary.
-                workspace_lane_index, submission_instance = (
-                    self._workspace_pool.acquire(workspace_lane)
+                qualified_instance = (
+                    self._instance
+                    if self._qualified_fusion_selector is None
+                    else self._qualified_execution_instance(args)
                 )
+                if qualified_instance is self._instance:
+                    workspace_lane_index, submission_instance = (
+                        self._workspace_pool.acquire(workspace_lane)
+                    )
+                else:
+                    # Qualified materialization excludes Graph-owned mutable
+                    # storage, so the ordinary lane pool would also return its
+                    # primary instance. Preserve that exact lane contract.
+                    if workspace_lane not in (None, 0):
+                        raise TaichiRuntimeError(
+                            "Qualified fusion variants require workspace_lane 0"
+                        )
+                    workspace_lane_index = 0
+                    submission_instance = qualified_instance
                 internal_storage_lease = (
                     submission_instance.acquire_exclusive_internal_storage()
                 )
@@ -13723,6 +14074,10 @@ class Graph:
             self._stale_snode_tree_dependencies.add(dependency)
             for pool in self._instances.values():
                 pool.invalidate_runtime(preserve_executables=True)
+            if self._qualified_fusion_selector is not None:
+                self._qualified_fusion_selector.invalidate_runtime(
+                    preserve_executables=True
+                )
             self._spec.invalidate_runtime(preserve_executables=True)
             return True
 
@@ -13736,11 +14091,14 @@ class Graph:
             self._run_impl = None
             for pool in self._instances.values():
                 pool.invalidate_runtime()
+            if self._qualified_fusion_selector is not None:
+                self._qualified_fusion_selector.invalidate_runtime()
             if self._spec is not None:
                 self._spec.invalidate_runtime()
             self._instance = None
             self._latest_instance = None
             self._instances.clear()
+            self._qualified_fusion_selector = None
             # Definition nodes currently own mixed-graph JIT caches and native
             # executables. Release them before Program/backend teardown so
             # backend allocation leases cannot outlive their Device registry.
@@ -13764,6 +14122,25 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._spec.executable_optimization_space
+
+    @property
+    def _qualified_fusion_stats(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._qualified_fusion_selector is None:
+                return MappingProxyType(
+                    {
+                        "configured": False,
+                        "attempts": 0,
+                        "qualified_selections": 0,
+                        "baseline_fallbacks": 0,
+                        "materializations": 0,
+                        "retained_variants": 0,
+                        "last_reason": "not_configured",
+                        "last_entry_id": None,
+                    }
+                )
+            return self._qualified_fusion_selector.stats
 
     @property
     def _instance_debug_info(self):
