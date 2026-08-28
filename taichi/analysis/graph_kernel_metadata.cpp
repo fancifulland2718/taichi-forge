@@ -158,8 +158,8 @@ class MetadataVisitor final : public BasicStmtVisitor {
   }
 
   void visit(AtomicOpStmt *stmt) override {
-    record(stmt->dest, "atomic");
     block("atomic_effect", "atomic");
+    record(stmt->dest, "atomic");
   }
 
   bool blocked() const {

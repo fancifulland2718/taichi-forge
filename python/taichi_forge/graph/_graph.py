@@ -10855,6 +10855,12 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
             result.append(fallback)
             continue
         side_effects = tuple(str(item) for item in record.get("side_effects", ()))
+        raw_logical_dispatch_id = record.get("logical_dispatch_id")
+        logical_dispatch_id = (
+            fallback.logical_dispatch_id
+            if raw_logical_dispatch_id is None
+            else f"dispatch:{int(raw_logical_dispatch_id)}"
+        )
         iteration_domain = _metadata_iteration_domain(record)
         effects = tuple(
             _metadata_resource_effect(effect, record)
@@ -10878,6 +10884,10 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                     side_effects=side_effects,
                     bounded_domain=fallback.bounded_domain,
                     dispatch_label=fallback.dispatch_label,
+                    logical_dispatch_id=logical_dispatch_id,
+                    fusion_blocker=str(
+                        record.get("blocker") or "metadata_unavailable"
+                    ),
                 )
             )
             continue
@@ -10893,6 +10903,7 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 side_effects=side_effects,
                 bounded_domain=fallback.bounded_domain,
                 dispatch_label=fallback.dispatch_label,
+                logical_dispatch_id=logical_dispatch_id,
             )
         )
     return tuple(result)

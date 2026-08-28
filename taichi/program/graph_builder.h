@@ -34,12 +34,15 @@ class Dispatch : public Node {
       std::optional<aot::Arg> indirect_dispatch_arg = std::nullopt,
       std::optional<aot::CudaBoundedDispatchMetadata>
           cuda_bounded_dispatch = std::nullopt,
-      std::string dispatch_label = {})
+      std::string dispatch_label = {},
+      std::uint64_t logical_dispatch_id =
+          std::numeric_limits<std::uint64_t>::max())
       : kernel_(kernel),
         symbolic_args_(args),
         indirect_dispatch_arg_(std::move(indirect_dispatch_arg)),
         cuda_bounded_dispatch_(std::move(cuda_bounded_dispatch)),
-        dispatch_label_(std::move(dispatch_label)) {
+        dispatch_label_(std::move(dispatch_label)),
+        logical_dispatch_id_(logical_dispatch_id) {
   }
 
   void compile(
@@ -83,6 +86,7 @@ class Dispatch : public Node {
   std::optional<aot::CudaBoundedDispatchMetadata> cuda_bounded_dispatch_;
   std::optional<aot::CpuBoundedDispatchMetadata> cpu_bounded_dispatch_;
   std::string dispatch_label_;
+  std::uint64_t logical_dispatch_id_;
 };
 
 class Sequential : public Node {
@@ -239,6 +243,7 @@ class GraphBuilder {
   std::vector<std::unique_ptr<Node>> all_nodes_;
   std::vector<std::unique_ptr<Kernel>> composed_kernels_;
   bool enable_two_map_composer_{false};
+  std::uint64_t next_logical_dispatch_id_{0};
 };
 
 }  // namespace taichi::lang

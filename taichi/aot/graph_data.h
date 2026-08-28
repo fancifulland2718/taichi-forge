@@ -229,6 +229,11 @@ struct GraphSourceDispatchMetadata {
   std::string dispatch_label;
   std::vector<Arg> symbolic_args;
   GraphKernelMetadata graph_metadata;
+  // JIT-only creation-order identity inside one GraphBuilder. Region lineage
+  // is attached by the Forge Graph IR so independently compiled CGraph
+  // segments cannot accidentally share a tuning identity.
+  std::uint64_t logical_dispatch_id{
+      std::numeric_limits<std::uint64_t>::max()};
 };
 
 struct CudaBoundedDispatchMetadata {

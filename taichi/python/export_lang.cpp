@@ -5719,10 +5719,16 @@ void export_lang(py::module &m) {
             auto append = [&](const std::string &kernel_name,
                               const std::string &dispatch_label,
                               const std::vector<aot::Arg> &args,
-                              const GraphKernelMetadata &metadata) {
+                              const GraphKernelMetadata &metadata,
+                              std::uint64_t logical_dispatch_id) {
               py::dict item = graph_kernel_metadata_to_python(metadata);
               item["kernel_name"] = kernel_name;
               item["dispatch_label"] = dispatch_label;
+              item["logical_dispatch_id"] =
+                  logical_dispatch_id ==
+                          std::numeric_limits<std::uint64_t>::max()
+                      ? py::none()
+                      : py::cast(logical_dispatch_id);
               py::list symbolic_args;
               for (const auto &arg : args) {
                 py::dict encoded;
@@ -5737,13 +5743,14 @@ void export_lang(py::module &m) {
               if (dispatch.source_dispatches.empty()) {
                 append(dispatch.kernel_name, dispatch.dispatch_label,
                        dispatch.symbolic_args,
-                       dispatch.graph_metadata);
+                       dispatch.graph_metadata,
+                       std::numeric_limits<std::uint64_t>::max());
                 continue;
               }
               for (const auto &source : dispatch.source_dispatches) {
                 append(source.kernel_name, source.dispatch_label,
                        source.symbolic_args,
-                       source.graph_metadata);
+                       source.graph_metadata, source.logical_dispatch_id);
               }
             }
             return result;

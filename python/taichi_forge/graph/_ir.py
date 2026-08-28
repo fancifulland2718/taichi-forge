@@ -209,6 +209,8 @@ class DispatchNode:
     side_effects: Tuple[str, ...] = ()
     bounded_domain: Optional[BoundedDomain] = None
     dispatch_label: str = ""
+    logical_dispatch_id: str = ""
+    fusion_blocker: str = ""
 
     @property
     def kind(self):
@@ -941,7 +943,7 @@ def _fusion_blocker(node):
     if not isinstance(node, DispatchNode):
         return "not_dispatch"
     if node.opaque:
-        return "opaque_dispatch"
+        return node.fusion_blocker or "opaque_dispatch"
     if node.synchronization:
         return "synchronization_boundary"
     if not node.elementwise:
@@ -1259,6 +1261,8 @@ def graph_ir_to_dict(node, _structured_depth=0):
         result["elementwise"] = node.elementwise
         result["side_effects"] = node.side_effects
         result["dispatch_label"] = node.dispatch_label
+        result["logical_dispatch_id"] = node.logical_dispatch_id
+        result["fusion_blocker"] = node.fusion_blocker
         result["bounded_domain"] = (
             None
             if node.bounded_domain is None

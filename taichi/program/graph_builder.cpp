@@ -584,7 +584,7 @@ aot::CompiledDispatch Dispatch::compile_dispatch() const {
               dispatch.kernel_name, dispatch.compiled_task_count);
   dispatch.source_dispatches.push_back(
       {dispatch.kernel_name, dispatch.dispatch_label, dispatch.symbolic_args,
-       dispatch.graph_metadata});
+       dispatch.graph_metadata, logical_dispatch_id_});
   dispatch.snode_tree_dependencies =
       kernel_->program->snapshot_snode_tree_dependencies(
           compiled.snode_tree_ids());
@@ -702,7 +702,8 @@ Node *GraphBuilder::new_dispatch_node(Kernel *kernel,
   }
   all_nodes_.push_back(
       std::make_unique<Dispatch>(kernel, args, std::nullopt, std::nullopt,
-                                 dispatch_label));
+                                 dispatch_label,
+                                 next_logical_dispatch_id_++));
   return all_nodes_.back().get();
 }
 
@@ -725,7 +726,8 @@ Node *GraphBuilder::new_indirect_dispatch_node(
   register_arg(dispatch_packet);
   all_nodes_.push_back(
       std::make_unique<Dispatch>(kernel, args, dispatch_packet, std::nullopt,
-                                 dispatch_label));
+                                 dispatch_label,
+                                 next_logical_dispatch_id_++));
   return all_nodes_.back().get();
 }
 
@@ -759,7 +761,8 @@ Node *GraphBuilder::new_cuda_bounded_dispatch_node(
   aot::CudaBoundedDispatchMetadata metadata{
       extent, capacity, block_dim, adaptive_grid, grouped_update};
   all_nodes_.push_back(std::make_unique<Dispatch>(
-      kernel, args, std::nullopt, std::move(metadata), dispatch_label));
+      kernel, args, std::nullopt, std::move(metadata), dispatch_label,
+      next_logical_dispatch_id_++));
   return all_nodes_.back().get();
 }
 
@@ -785,7 +788,8 @@ Node *GraphBuilder::new_cpu_bounded_dispatch_node(
     register_arg(arg);
   }
   auto dispatch = std::make_unique<Dispatch>(
-      kernel, args, std::nullopt, std::nullopt, dispatch_label);
+      kernel, args, std::nullopt, std::nullopt, dispatch_label,
+      next_logical_dispatch_id_++);
   dispatch->set_cpu_bounded_dispatch({extent, capacity});
   all_nodes_.push_back(std::move(dispatch));
   return all_nodes_.back().get();

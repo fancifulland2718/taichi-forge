@@ -2443,6 +2443,11 @@ def test_compiler_metadata_enables_safe_elementwise_graph_candidates(monkeypatch
     assert len(dispatches) == 2
     assert all(not dispatch["opaque"] for dispatch in dispatches)
     assert all(dispatch["elementwise"] for dispatch in dispatches)
+    assert [dispatch["logical_dispatch_id"] for dispatch in dispatches] == [
+        "dispatch:0",
+        "dispatch:1",
+    ]
+    assert all(not dispatch["fusion_blocker"] for dispatch in dispatches)
     assert (
         dispatches[0]["iteration_domain"]
         == dispatches[1]["iteration_domain"]
@@ -2513,13 +2518,24 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     assert plan["candidate_groups"] == 0
     assert plan["eligible_dispatches"] == 0
     assert plan["blocked_dispatches"] == 2
-    assert plan["blockers"] == {"opaque_dispatch": 2}
+    assert plan["blockers"] == {
+        "atomic_effect": 1,
+        "non_pointwise_access": 1,
+    }
     assert plan["applied_groups"] == 0
     assert plan["lowering_available"]
     assert plan["decision"] == "no_safe_candidates"
     assert graph._debug_info["nodes"] == [{"kind": "cgraph", "dispatch_count": 2}]
     dispatches = ir["pre_optimization_root"]["children"][0]["children"]
     assert all(dispatch["opaque"] for dispatch in dispatches)
+    assert [dispatch["logical_dispatch_id"] for dispatch in dispatches] == [
+        "dispatch:0",
+        "dispatch:1",
+    ]
+    assert [dispatch["fusion_blocker"] for dispatch in dispatches] == [
+        "atomic_effect",
+        "non_pointwise_access",
+    ]
 
 
 @test_utils.test(arch=ti.cpu)
