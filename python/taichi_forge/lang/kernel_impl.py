@@ -2401,6 +2401,54 @@ class Kernel:
         raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
         return tuple(OffloadedTaskManifest._from_core(item) for item in raw)
 
+    def _gpu_semantics_resolve_primal_program_id(self, args, requested):
+        if self.autodiff_mode not in (
+            AutodiffMode.FORWARD,
+            AutodiffMode.REVERSE,
+        ):
+            if requested:
+                raise TaichiRuntimeError(
+                    "primal_program_id is valid only for a derivative kernel"
+                )
+            return ""
+
+        if self.autodiff_mode == AutodiffMode.FORWARD:
+            primal = self
+        else:
+            primal_ref = getattr(self, "_gpu_semantics_primal_ref", None)
+            primal = None if primal_ref is None else primal_ref()
+        if primal is None:
+            raise TaichiRuntimeError(
+                "Derivative GPU semantics have no live primal kernel relation"
+            )
+
+        instance_id, _ = primal.mapper.lookup(args)
+        primal_key = (primal.func, instance_id, AutodiffMode.NONE)
+        primal_cpp = primal.compiled_kernels.get(primal_key)
+        if primal_cpp is None:
+            if primal.autodiff_mode != AutodiffMode.NONE:
+                raise TaichiRuntimeError(
+                    "Forward GPU semantics require the matching primal "
+                    "specialization to be compiled before entering FwdMode"
+                )
+            primal_key = primal.ensure_compiled(*args)
+            primal_cpp = primal.compiled_kernels[primal_key]
+
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        primal_snapshot = _build_resident_gpu_semantics(
+            primal.runtime.prog._kernel_gpu_semantics_snapshot(primal_cpp)
+        )
+        resolved = primal_snapshot.program.specialization_id
+        if requested and requested != resolved:
+            raise TaichiRuntimeError(
+                "Derivative GPU semantics primal_program_id does not match "
+                "the exact primal specialization"
+            )
+        return resolved
+
     def _gpu_semantics_snapshot(
         self, *args, _primal_program_id="", **kwargs
     ):
@@ -2417,6 +2465,9 @@ class Kernel:
                 f"not {backend}"
             )
         args = _process_args(self, args, kwargs)
+        _primal_program_id = self._gpu_semantics_resolve_primal_program_id(
+            args, _primal_program_id
+        )
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
         raw = self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
@@ -2443,6 +2494,9 @@ class Kernel:
                 f"Vulkan, not {backend}"
             )
         args = _process_args(self, args, kwargs)
+        _primal_program_id = self._gpu_semantics_resolve_primal_program_id(
+            args, _primal_program_id
+        )
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
         snapshot = _build_resident_gpu_semantics(
@@ -2964,6 +3018,7 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
     adjoint = Kernel(_func, autodiff_mode=AutodiffMode.REVERSE, _classkernel=is_classkernel, opt_level=opt_level)
     # Having |primal| contains |grad| makes the tape work.
     primal.grad = adjoint
+    adjoint._gpu_semantics_primal_ref = weakref.ref(primal)
 
     if is_classkernel:
         # For class kernels, their primal/adjoint callables are constructed

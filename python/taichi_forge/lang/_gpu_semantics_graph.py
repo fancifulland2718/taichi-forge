@@ -436,6 +436,14 @@ def _build_gpu_executable_plan_semantics(definition):
                 binding_time=_GpuBindingTime.REPLAY,
             ),
         ),
+        _GpuNamedFact(
+            "logical_autodiff_relation",
+            _gpu_fact_unknown(
+                "Graph physical dispatch semantics do not prove a logical "
+                "primal/derivative composition relation",
+                binding_time=_GpuBindingTime.LOGICAL,
+            ),
+        ),
     )
     plan = _GpuExecutablePlanSemantics(
         plan_id=f"gpp:{plan_seed}",

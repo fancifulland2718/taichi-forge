@@ -569,6 +569,7 @@ class _GpuProgramSemantics:
     target_id: str
     autodiff_role: _GpuAutodiffRole
     primal_program_id: str = ""
+    differentiation_relation: _GpuFact = field(default_factory=_default_unknown_fact)
     iteration_domain: _GpuFact = field(default_factory=_default_unknown_fact)
     effects: Tuple[_GpuResourceEffect, ...] = ()
     side_effects: Tuple[str, ...] = ()
@@ -586,6 +587,8 @@ class _GpuProgramSemantics:
             raise TypeError("autodiff_role must be a _GpuAutodiffRole")
         if self.autodiff_role in (_GpuAutodiffRole.FORWARD, _GpuAutodiffRole.ADJOINT):
             _require_text(self.primal_program_id, "derivative primal_program_id")
+        if not isinstance(self.differentiation_relation, _GpuFact):
+            raise TypeError("differentiation_relation must be a _GpuFact")
         if not isinstance(self.iteration_domain, _GpuFact):
             raise TypeError("iteration_domain must be a _GpuFact")
         if not isinstance(self.synchronization, _GpuFact):

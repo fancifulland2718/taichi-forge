@@ -197,6 +197,28 @@ def _autodiff_role(value):
     raise RuntimeError(f"unsupported GPU semantics autodiff role {value}")
 
 
+def _differentiation_relation(role, primal_program_id):
+    if role == _GpuAutodiffRole.PRIMAL:
+        value = {
+            "kind": "primal",
+            "artifact_reuse": "not_implied",
+            "winner_reuse": "not_implied",
+        }
+    else:
+        value = {
+            "kind": role.value,
+            "primal_program_id": primal_program_id,
+            "artifact_reuse": "not_implied",
+            "winner_reuse": "not_implied",
+        }
+    return _proven(
+        value,
+        _GpuBindingTime.LOGICAL,
+        _GpuOwnership.COMPILER,
+        "taichi_autodiff_transform_identity",
+    )
+
+
 def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
     backend = _backend(raw["backend"])
     kernel_identity = raw["kernel_identity"]
@@ -337,6 +359,9 @@ def _build_resident_gpu_semantics(raw, *, primal_program_id=""):
         target_id=target_id,
         autodiff_role=role,
         primal_program_id=primal_program_id,
+        differentiation_relation=_differentiation_relation(
+            role, primal_program_id
+        ),
         iteration_domain=_iteration_domain(metadata),
         effects=program_effects,
         side_effects=tuple(metadata["side_effects"]),
