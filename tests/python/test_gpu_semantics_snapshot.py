@@ -27,6 +27,7 @@ from taichi_forge.lang._gpu_semantics_snapshot import (
     _build_resident_gpu_semantics,
 )
 from taichi_forge.lang._gpu_semantics_tuning import (
+    _INNER_LOOP_UNROLL_DIMENSION,
     _RESIDENCY_DIMENSION,
     _RANGE_WORK_PER_THREAD_DIMENSION,
     _TLS_DIMENSION,
@@ -242,6 +243,12 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
         _GpuBottleneckClass.DISPATCH,
         _GpuBottleneckClass.REDUCTION_ATOMIC,
     )
+    cuda_unroll = _dimension_by_name(
+        cuda_dimensions, _INNER_LOOP_UNROLL_DIMENSION
+    )
+    assert cuda_unroll.legal_values == ()
+    assert cuda_unroll.status.availability == _GpuAvailability.UNSUPPORTED
+    assert "no stable per-kernel unroll controller" in cuda_unroll.status.reason
 
     first = {
         _WORKGROUP_DIMENSION: 128,
@@ -277,6 +284,12 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     assert _dimension_by_name(
         vulkan_dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
     ).status.availability == _GpuAvailability.UNSUPPORTED
+    vulkan_unroll = _dimension_by_name(
+        vulkan_dimensions, _INNER_LOOP_UNROLL_DIMENSION
+    )
+    assert vulkan_unroll.legal_values == ()
+    assert vulkan_unroll.status.availability == _GpuAvailability.UNSUPPORTED
+    assert "runtime-global" in vulkan_unroll.status.reason
 
 
 def test_tuning_dimension_fails_closed_for_shared_memory():

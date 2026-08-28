@@ -20,6 +20,7 @@ from taichi_forge.lang._gpu_semantics import (
 
 _WORKGROUP_DIMENSION = "workgroup_shape_x"
 _TLS_DIMENSION = "compiler_thread_local_strategy"
+_INNER_LOOP_UNROLL_DIMENSION = "inner_loop_unroll_strategy"
 _RANGE_WORK_PER_THREAD_DIMENSION = "range_work_per_thread_target"
 _RESIDENCY_DIMENSION = "cuda_grid_residency_waves"
 
@@ -290,6 +291,36 @@ def _residency_dimension(snapshot, legal_values):
     )
 
 
+def _inner_loop_unroll_dimension(snapshot):
+    backend = snapshot.target.backend.value
+    if backend == "cuda":
+        reason = (
+            "LLVM NVPTX exposes no stable per-kernel unroll controller, and "
+            "the semantic snapshot has no proven inner-loop inventory"
+        )
+    else:
+        reason = (
+            "spirv_skip_loop_unroll is runtime-global rather than an immutable "
+            "per-kernel recipe; advertising it would violate specialization "
+            "and cache isolation"
+        )
+    return _blocked_dimension(
+        _INNER_LOOP_UNROLL_DIMENSION,
+        snapshot,
+        locus=_GpuTuningLocus.ARTIFACT_CODEGEN,
+        controller="unavailable_per_kernel_unroll_recipe",
+        binding_time=_GpuBindingTime.CODEGEN,
+        physical_effect=_GpuPhysicalEffect.ARTIFACT,
+        equivalence_key="artifact:inner_loop_unroll_strategy",
+        bottleneck_classes=(
+            _GpuBottleneckClass.COMPUTE,
+            _GpuBottleneckClass.OCCUPANCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.UNSUPPORTED,
+        status=_status_unsupported(reason),
+    )
+
+
 def _range_work_per_thread_dimension(snapshot, legal_values):
     ranges = tuple(
         dispatch
@@ -411,6 +442,7 @@ def _derive_gpu_tuning_dimensions(
             require_safe_serial_setup,
         ),
         _tls_dimension(snapshot),
+        _inner_loop_unroll_dimension(snapshot),
         _range_work_per_thread_dimension(
             snapshot, range_work_per_thread_values
         ),
@@ -463,6 +495,7 @@ def _gpu_tuning_dimension_manifest(dimension):
 
 
 __all__ = [
+    "_INNER_LOOP_UNROLL_DIMENSION",
     "_RESIDENCY_DIMENSION",
     "_RANGE_WORK_PER_THREAD_DIMENSION",
     "_TLS_DIMENSION",
