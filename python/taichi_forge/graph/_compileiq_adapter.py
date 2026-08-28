@@ -2,11 +2,17 @@
 
 from dataclasses import dataclass
 from types import MappingProxyType
+import json
 import re
 
-from taichi_forge.graph._optimization import _ExecutableOptimizationSpace
+from taichi_forge.graph._optimization import (
+    _GRAPH_FUSION_QUALIFICATION_SCHEMA,
+    _ExecutableOptimizationSpace,
+    _GraphFusionQualificationCache,
+)
 from taichi_forge.lang._compileiq_adapter import (
     _CompileIQFinalCandidate,
+    _CompileIQQualificationDecision,
     _CompileIQSearchStage,
     _balanced_paired_schedule,
     _compileiq_import_error,
@@ -28,9 +34,7 @@ def _materialization_recipe(spec):
     for recipe_id in spec.fusion_recipe_ids:
         match = _MAP_RECIPE_PATTERN.fullmatch(recipe_id)
         if match is None:
-            raise ValueError(
-                f"unsupported executable fusion recipe {recipe_id!r}"
-            )
+            raise ValueError(f"unsupported executable fusion recipe {recipe_id!r}")
         group_sizes.append(int(match.group(1)))
     return f"map{max(group_sizes)}"
 
@@ -49,9 +53,7 @@ class _CompileIQExecutableSelection:
     def worker_environment(self):
         """Return an environment overlay without mutating process state."""
 
-        return MappingProxyType(
-            {_INTERNAL_MAP_FUSION_ENV: self.materialization_recipe}
-        )
+        return MappingProxyType({_INTERNAL_MAP_FUSION_ENV: self.materialization_recipe})
 
 
 class _CompileIQExecutableAdapter:
@@ -99,9 +101,7 @@ class _CompileIQExecutableAdapter:
         self._space = space
         self._parameter = parameter
         self._specs = MappingProxyType({spec.spec_id: spec for spec in specs})
-        self._materialization_by_spec = MappingProxyType(
-            materialization_by_spec
-        )
+        self._materialization_by_spec = MappingProxyType(materialization_by_spec)
         self._candidate_ids = tuple(spec.spec_id for spec in space.candidates)
 
     @classmethod
@@ -149,9 +149,7 @@ class _CompileIQExecutableAdapter:
         try:
             spec = self._specs[spec_id]
         except KeyError as error:
-            raise KeyError(
-                f"unknown Forge executable spec {spec_id!r}"
-            ) from error
+            raise KeyError(f"unknown Forge executable spec {spec_id!r}") from error
         return _CompileIQExecutableSelection(
             spec_id=spec.spec_id,
             semantic_plan_id=spec.semantic_plan_id,
@@ -223,8 +221,7 @@ class _CompileIQExecutableAdapter:
     def qualification_stage(self, finalists, *, blocks=10):
         finalists = tuple(finalists)
         if not finalists or any(
-            not isinstance(finalist, _CompileIQFinalCandidate)
-            for finalist in finalists
+            not isinstance(finalist, _CompileIQFinalCandidate) for finalist in finalists
         ):
             raise TypeError(
                 "qualification finalists must be _CompileIQFinalCandidate values"
@@ -261,6 +258,98 @@ class _CompileIQExecutableAdapter:
             correctness=correctness,
             memory_stable=memory_stable,
             blocks=stage.blocks,
+        )
+
+    def qualification_cache(
+        self,
+        decision,
+        *,
+        source_commit,
+        runtime_scope,
+        binding_scope,
+        minimum_expected_replays,
+        evidence_id,
+        runtime_provider_candidate_id,
+    ):
+        """Emit one runtime-consumable cache entry after independent gates.
+
+        Search measurements are intentionally insufficient.  The caller must
+        pass an admitted decision from :meth:`qualify`, the exact runtime and
+        binding scopes used by the independent fresh-process qualification,
+        and the provider candidate that the ordinary runtime will reproduce.
+        The returned value is validated by the same strict parser used at
+        runtime, without importing CompileIQ.
+        """
+
+        if not isinstance(decision, _CompileIQQualificationDecision):
+            raise TypeError(
+                "qualification cache requires a CompileIQ qualification decision"
+            )
+        if not decision.admitted:
+            raise ValueError("qualification cache requires an admitted decision")
+        if decision.selected_forge_object_kind != "executable_spec":
+            raise ValueError("qualification decision did not select an executable spec")
+        try:
+            selected = self._specs[decision.selected_forge_object_id]
+        except KeyError as error:
+            raise ValueError(
+                "qualification decision selected an unknown executable spec"
+            ) from error
+        if selected is self._space.baseline or not selected.fusion_recipe_ids:
+            raise ValueError("qualification cache cannot select the baseline spec")
+        if (
+            not isinstance(runtime_provider_candidate_id, str)
+            or not runtime_provider_candidate_id
+        ):
+            raise ValueError("runtime provider candidate ID is required")
+        if decision.selected_provider_candidate_id != runtime_provider_candidate_id:
+            raise ValueError(
+                "qualified provider candidate does not match the runtime provider"
+            )
+        if not isinstance(runtime_scope, dict):
+            raise TypeError("runtime_scope must be a dictionary")
+        if not isinstance(binding_scope, (tuple, list)):
+            raise TypeError("binding_scope must be a tuple or list")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            raise ValueError("evidence_id is required")
+
+        value = {
+            "schema": _GRAPH_FUSION_QUALIFICATION_SCHEMA,
+            "entries": [
+                {
+                    "semantic_plan_id": self.semantic_plan_id,
+                    "backend": self.backend,
+                    "baseline_execution_identity": (
+                        self._space.baseline.execution_identity
+                    ),
+                    "selected_spec_id": selected.spec_id,
+                    "execution_identity": selected.execution_identity,
+                    "source_commit": source_commit,
+                    "runtime_scope": dict(runtime_scope),
+                    "binding_scope": list(binding_scope),
+                    "minimum_expected_replays": minimum_expected_replays,
+                    "evidence_id": (
+                        f"{evidence_id}|compileiq_scope={decision.scope_id}"
+                    ),
+                    "qualification": {
+                        "correctness": True,
+                        "memory_stable": True,
+                        "worst_positive": True,
+                    },
+                }
+            ],
+        }
+        validated = _GraphFusionQualificationCache.from_dict(value).to_dict()
+        # Cache.to_dict() uses immutable tuples internally.  Normalize through
+        # JSON so this method returns the exact list-based shape accepted by the
+        # runtime file parser and ready for direct serialization.
+        return json.loads(json.dumps(validated, sort_keys=True))
+
+    def qualification_cache_json(self, decision, **scope):
+        return json.dumps(
+            self.qualification_cache(decision, **scope),
+            indent=2,
+            sort_keys=True,
         )
 
     def manifest(self):

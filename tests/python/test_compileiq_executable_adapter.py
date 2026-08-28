@@ -1,3 +1,4 @@
+import json
 import sys
 from types import ModuleType
 
@@ -10,6 +11,7 @@ from taichi_forge.graph._compileiq_adapter import (
 )
 from taichi_forge.graph._optimization import (
     _ExecutableOptimizationSpace,
+    _GraphFusionQualificationCache,
     _make_spec,
 )
 from taichi_forge.lang._compileiq_adapter import _CompileIQWinnerScope
@@ -53,9 +55,7 @@ def _space(*, selected="baseline", semantic_plan_id=_SEMANTIC_PLAN_ID):
         candidates=(map2, map3, map4),
         selected_spec_id=specs[selected].spec_id,
         selection_status=(
-            "selected_baseline"
-            if selected == "baseline"
-            else "selected_map_recipe"
+            "selected_baseline" if selected == "baseline" else "selected_map_recipe"
         ),
     )
 
@@ -114,9 +114,7 @@ def test_executable_adapter_verifies_exact_materialization(recipe):
 
     mismatched_recipe = "map2" if recipe == "baseline" else "baseline"
     with pytest.raises(ValueError, match="did not select"):
-        adapter.verify_materialized(
-            parameters, _space(selected=mismatched_recipe)
-        )
+        adapter.verify_materialized(parameters, _space(selected=mismatched_recipe))
     with pytest.raises(ValueError, match="semantic plan"):
         adapter.verify_materialized(
             parameters,
@@ -198,8 +196,9 @@ def test_executable_adapter_qualifies_exact_recipe_and_provider_candidate():
     scopes = {
         candidate.identity: _winner_scope(
             candidate.identity,
-            adapter.select({"forge_executable_spec": candidate.forge_object_id})
-            .execution_identity,
+            adapter.select(
+                {"forge_executable_spec": candidate.forge_object_id}
+            ).execution_identity,
             candidate.provider_candidate_id,
         )
         for candidate in finalists
@@ -226,9 +225,7 @@ def test_executable_adapter_qualifies_exact_recipe_and_provider_candidate():
     assert decision.scope_id == scopes[candidate_ids[0]].identity
 
     mismatched = dict(scopes)
-    mismatched[candidate_ids[0]] = _winner_scope(
-        candidate_ids[1], "wrong", "wrong"
-    )
+    mismatched[candidate_ids[0]] = _winner_scope(candidate_ids[1], "wrong", "wrong")
     with pytest.raises(ValueError, match="exact final candidate"):
         adapter.qualify(
             {candidate_id: (0.97,) * 10 for candidate_id in candidate_ids},
@@ -237,6 +234,87 @@ def test_executable_adapter_qualifies_exact_recipe_and_provider_candidate():
             correctness={candidate_id: True for candidate_id in candidate_ids},
             memory_stable={candidate_id: True for candidate_id in candidate_ids},
         )
+
+
+def _single_candidate_decision(adapter, *, ratio=0.97, provider="baseline"):
+    spec_id = adapter.spec_ids(include_baseline=False)[0]
+    finalist = adapter.final_candidate(spec_id, provider)
+    candidate_id = finalist.identity
+    scope = _winner_scope(
+        candidate_id, adapter._specs[spec_id].execution_identity, provider
+    )
+    decision = adapter.qualify(
+        {candidate_id: (ratio,) * 10},
+        (finalist,),
+        scopes={candidate_id: scope},
+        correctness={candidate_id: True},
+        memory_stable={candidate_id: True},
+    )
+    return decision, spec_id
+
+
+def _qualification_scope():
+    return {
+        "source_commit": "a" * 40,
+        "runtime_scope": {
+            "core_commit": "a" * 40,
+            "device_uuid": "GPU-test",
+            "driver_version": "test-driver",
+        },
+        "binding_scope": [
+            {
+                "name": "values",
+                "kind": "ndarray",
+                "dtype": "f32",
+                "rank": 2,
+                "element_shape": [],
+                "shape_min": [1048576, 3],
+                "shape_max": [1048576, 3],
+            },
+            {
+                "name": "count",
+                "kind": "scalar",
+                "minimum": 1048576,
+                "maximum": 1048576,
+            },
+        ],
+        "minimum_expected_replays": 100,
+        "evidence_id": "fresh-process-abba:artifact-sha256",
+        "runtime_provider_candidate_id": "baseline",
+    }
+
+
+def test_executable_adapter_emits_runtime_cache_only_after_independent_gates():
+    adapter = _CompileIQExecutableAdapter(_space())
+    decision, spec_id = _single_candidate_decision(adapter)
+    cache = adapter.qualification_cache(decision, **_qualification_scope())
+    parsed = _GraphFusionQualificationCache.from_dict(cache)
+
+    assert len(parsed.entries) == 1
+    entry = parsed.entries[0]
+    assert entry.selected_spec_id == spec_id
+    assert entry.execution_identity == adapter._specs[spec_id].execution_identity
+    assert (
+        entry.baseline_execution_identity == adapter._space.baseline.execution_identity
+    )
+    assert entry.evidence_id.endswith(f"compileiq_scope={decision.scope_id}")
+
+    json_cache = json.loads(
+        adapter.qualification_cache_json(decision, **_qualification_scope())
+    )
+    reparsed = _GraphFusionQualificationCache.from_dict(json_cache)
+    assert reparsed.entries[0].identity == entry.identity
+
+
+def test_executable_adapter_cache_rejects_search_only_or_provider_mismatch():
+    adapter = _CompileIQExecutableAdapter(_space())
+    rejected, _ = _single_candidate_decision(adapter, ratio=1.01)
+    with pytest.raises(ValueError, match="admitted decision"):
+        adapter.qualification_cache(rejected, **_qualification_scope())
+
+    admitted, _ = _single_candidate_decision(adapter, provider="acf-provider")
+    with pytest.raises(ValueError, match="does not match the runtime provider"):
+        adapter.qualification_cache(admitted, **_qualification_scope())
 
 
 def test_executable_adapter_rejects_unknown_or_ambiguous_recipes():
