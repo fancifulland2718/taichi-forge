@@ -5073,7 +5073,9 @@ bool prepare_vulkan_graph_launch(
           dispatch, args, prog);
     }
     prepared.dispatches.push_back(
-        {handle, prepared.launch_contexts.back().get(), indirect_dispatch});
+        {handle, prepared.launch_contexts.back().get(), indirect_dispatch,
+         static_cast<std::uint32_t>(
+             std::max<std::size_t>(1, dispatch.source_dispatches.size()))});
   }
 
   if (gfx_launcher == nullptr) {
@@ -5137,8 +5139,11 @@ bool try_run_vulkan_graph(const CompiledGraph &graph,
     }
     return false;
   }
+  const bool composed_single_dispatch =
+      graph.dispatches.size() == 1 &&
+      graph.dispatches.front().source_dispatches.size() > 1;
   if (graph.dispatches.size() <= 1 &&
-      !graph.has_indirect_dispatches()) {
+      !graph.has_indirect_dispatches() && !composed_single_dispatch) {
     auto &stats = cache.vulkan_inline_stats;
     stats.backend = CompiledGraphBackend::vulkan;
     stats.last_path = CompiledGraphExecutionPath::ordinary_fallback;

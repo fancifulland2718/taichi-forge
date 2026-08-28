@@ -285,6 +285,7 @@ class TI_DLL_EXPORT GfxRuntime {
     KernelHandle handle;
     LaunchContextBuilder *host_ctx{nullptr};
     DevicePtr indirect_dispatch{kDeviceNullPtr};
+    std::uint32_t source_dispatch_count{1};
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {

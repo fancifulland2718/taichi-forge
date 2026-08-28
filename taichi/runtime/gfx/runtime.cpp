@@ -3209,7 +3209,12 @@ bool GfxRuntime::try_launch_graph(
         structure_key.end(),
         {0xC101u, static_cast<std::uint64_t>(encoded_actions)});
   }
-  if (total_tasks <= 1 && !has_indirect_dispatch) {
+  const bool composed_single_task =
+      total_tasks == 1 && dispatches.size() == 1 &&
+      dispatches.front().source_dispatch_count > 1;
+  if (total_tasks == 0 ||
+      (total_tasks == 1 && !has_indirect_dispatch &&
+       !composed_single_task)) {
     return reject(GraphReplayFallbackReason::insufficient_tasks);
   }
 
