@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.graph._graph import _graph_fusion_source_groups
 from taichi_forge.lang import impl
 from tests import test_utils
 
@@ -114,6 +115,106 @@ def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker(monkeypatch):
     np.testing.assert_array_equal(
         values.to_numpy(), np.full(257, 4, dtype=np.int32)
     )
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_barrier_preserving_phase_candidates_materialize_exact_groups(monkeypatch):
+    monkeypatch.setenv(_FUSION_ENV, "baseline")
+    count = 257
+
+    @ti.kernel
+    def pre_scale(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        first: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(count):
+            first[i] = source[i] * 2
+
+    @ti.kernel
+    def pre_bias(
+        first: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(count):
+            second[i] = first[i] + 1
+
+    @ti.kernel
+    def scatter_atomic(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(count):
+            second[i] += source[i]
+
+    @ti.kernel
+    def post_scale(
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        third: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(count):
+            third[i] = second[i] * 3
+
+    @ti.kernel
+    def post_bias(
+        third: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(count):
+            output[i] = third[i] - 4
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "first", "second", "third", "output")
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(pre_scale, symbolic["source"], symbolic["first"])
+    builder.dispatch(pre_bias, symbolic["first"], symbolic["second"])
+    builder.dispatch(scatter_atomic, symbolic["source"], symbolic["second"])
+    builder.dispatch(post_scale, symbolic["second"], symbolic["third"])
+    builder.dispatch(post_bias, symbolic["third"], symbolic["output"])
+    graph = builder.compile()
+
+    plan = graph._spec.fusion_plan
+    space = graph._executable_optimization_space
+    assert graph.physical_plan()["physical_dispatch_count"] == 5
+    assert len(plan.phases) == 2
+    assert plan.phases[0].boundary_after == "atomic_effect"
+    assert plan.phases[1].boundary_before == "atomic_effect"
+    assert sorted(len(spec.fusion_recipe_ids) for spec in space.candidates) == [
+        1,
+        1,
+        2,
+    ]
+
+    source_values = np.arange(count, dtype=np.int32) - 128
+    expected = (source_values * 3 + 1) * 3 - 4
+    for spec in space.candidates:
+        source_groups = _graph_fusion_source_groups(spec, plan)
+        assert all(2 not in group for group in source_groups)
+        instance = graph._materialize_qualified_fusion_instance(spec)
+        assert (
+            instance.spec.executable_optimization_space.selected_spec_id
+            == spec.spec_id
+        )
+        compiled = graph._spec._aot_graph_builder._compile_map_recipes(
+            source_groups
+        )
+        expected_dispatches = 3 if len(source_groups) == 2 else 4
+        assert compiled._composer_stats["physical_dispatches"] == (
+            expected_dispatches
+        )
+        arrays = {
+            name: ti.ndarray(ti.i32, shape=count) for name in symbolic
+        }
+        arrays["source"].from_numpy(source_values)
+        for name in ("first", "second", "third", "output"):
+            arrays[name].fill(0)
+        compiled.jit_run(
+            impl.current_cfg(),
+            {name: value.arr for name, value in arrays.items()},
+        )
+        ti.sync()
+        np.testing.assert_array_equal(arrays["output"].to_numpy(), expected)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

@@ -10625,7 +10625,7 @@ class _AOTGraphBuilderPlan:
         snapshot._has_internal_fixed_bindings = self._has_internal_fixed_bindings
         return snapshot
 
-    def compile(self, *, map_composer_max_group_size=1):
+    def _compile(self, map_composer_max_group_size, allowed_source_groups):
         if self._has_internal_fixed_bindings:
             raise TaichiRuntimeError(
                 "Graph bounded dispatch uses JIT-only internal fixed bindings "
@@ -10650,6 +10650,8 @@ class _AOTGraphBuilderPlan:
             builder._set_map_composer_max_group_size(
                 map_composer_max_group_size
             )
+        if allowed_source_groups:
+            builder._set_map_composer_allowed_groups(allowed_source_groups)
         for item in self._items:
             if item[0] == "dispatch":
                 _, kernel_cpp, args, label, _ = item
@@ -10663,6 +10665,34 @@ class _AOTGraphBuilderPlan:
             else:
                 raise TaichiRuntimeError(f"Unknown AOT graph item kind {item[0]}")
         return builder.compile()
+
+    def compile(self, *, map_composer_max_group_size=1):
+        return self._compile(map_composer_max_group_size, ())
+
+    def _compile_map_recipes(self, source_groups):
+        source_groups = tuple(
+            tuple(int(item) for item in group) for group in source_groups
+        )
+        if not source_groups:
+            raise TaichiRuntimeError("Map recipe compilation requires source groups")
+        claimed = set()
+        for group in source_groups:
+            if (
+                len(group) < 2
+                or len(group) > 4
+                or len(set(group)) != len(group)
+            ):
+                raise TaichiRuntimeError(
+                    "Map recipe source groups must contain two to four unique IDs"
+                )
+            if claimed.intersection(group):
+                raise TaichiRuntimeError(
+                    "Map recipe source groups must be disjoint"
+                )
+            claimed.update(group)
+        return self._compile(
+            max(len(group) for group in source_groups), source_groups
+        )
 
     @property
     def item_count(self):
@@ -13002,6 +13032,36 @@ def _graph_fusion_group_size(spec):
     return max(sizes)
 
 
+def _graph_fusion_source_groups(spec, fusion_plan):
+    recipes = {
+        recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes
+    }
+    groups = []
+    claimed = set()
+    for recipe_id in spec.fusion_recipe_ids:
+        recipe = recipes.get(recipe_id)
+        if recipe is None:
+            raise TaichiRuntimeError(
+                f"Qualified fusion recipe {recipe_id!r} is not in the semantic plan"
+            )
+        group = []
+        for source_id in recipe.source_dispatch_ids:
+            marker = source_id.rsplit("/dispatch:", 1)
+            if len(marker) != 2 or not marker[1].isdigit():
+                raise TaichiRuntimeError(
+                    "Qualified fusion recipe has no exact logical dispatch ID"
+                )
+            logical_id = int(marker[1])
+            if logical_id in claimed:
+                raise TaichiRuntimeError(
+                    "Qualified fusion recipes overlap one logical dispatch"
+                )
+            claimed.add(logical_id)
+            group.append(logical_id)
+        groups.append(tuple(group))
+    return tuple(groups)
+
+
 class _QualifiedFusionRuntimeSelector:
     def __init__(self, cache, expected_replays, space, runtime_scope):
         self._cache = cache
@@ -13206,9 +13266,12 @@ class Graph:
             raise TaichiRuntimeError(
                 "Qualified fusion materialization lost its logical source region"
             )
-        group_size = _graph_fusion_group_size(selected_spec)
-        compiled_graph = self._spec._aot_graph_builder.compile(
-            map_composer_max_group_size=group_size
+        _graph_fusion_group_size(selected_spec)
+        source_groups = _graph_fusion_source_groups(
+            selected_spec, self._spec.fusion_plan
+        )
+        compiled_graph = self._spec._aot_graph_builder._compile_map_recipes(
+            source_groups
         )
         ir_nodes = _compiled_dispatch_ir_nodes(
             compiled_graph, source.ir_node.children

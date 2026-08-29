@@ -5133,6 +5133,8 @@ void export_lang(py::module &m) {
            &GraphBuilder::enable_two_map_composer)
       .def("_set_map_composer_max_group_size",
            &GraphBuilder::set_map_composer_max_group_size)
+      .def("_set_map_composer_allowed_groups",
+           &GraphBuilder::set_map_composer_allowed_groups)
       .def("create_sequential", &GraphBuilder::new_sequential_node,
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);

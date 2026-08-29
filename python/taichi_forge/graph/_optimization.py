@@ -466,6 +466,22 @@ class _GraphFusionQualificationCache:
 
 def _make_spec(semantic_plan_id, backend, fusion_recipe_ids):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
+    dispatch_reduction = 0
+    for recipe_id in fusion_recipe_ids:
+        fields = recipe_id.split(":")
+        source_count = 2
+        if not (
+            len(fields) != 3
+            or fields[0] != "fusion"
+            or not fields[1].startswith("map")
+        ):
+            try:
+                parsed_count = int(fields[1][3:])
+            except ValueError:
+                parsed_count = 2
+            if 2 <= parsed_count <= 4:
+                source_count = parsed_count
+        dispatch_reduction += source_count - 1
     compilation_identity = _canonical_hash(
         {
             "semantic_plan_id": semantic_plan_id,
@@ -476,7 +492,7 @@ def _make_spec(semantic_plan_id, backend, fusion_recipe_ids):
     execution_identity = _canonical_hash(
         {
             "compilation_identity": compilation_identity,
-            "physical_dispatch_delta": -len(fusion_recipe_ids),
+            "physical_dispatch_delta": -dispatch_reduction,
         }
     )
     return _ExecutableOptimizationSpec(

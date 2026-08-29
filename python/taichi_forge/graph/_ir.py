@@ -577,11 +577,54 @@ class GraphIRAnalysis:
 
 
 @dataclass(frozen=True)
+class _BarrierPreservingFusionPhase:
+    phase_id: str
+    region_path: str
+    ordinal: int
+    source_dispatch_ids: Tuple[str, ...]
+    source_names: Tuple[str, ...]
+    iteration_domain: str
+    boundary_before: str
+    boundary_after: str
+    recipe_ids: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if not self.phase_id.startswith("phase:"):
+            raise ValueError("fusion phase ID is invalid")
+        if not self.region_path or self.ordinal < 0:
+            raise ValueError("fusion phase region and ordinal are required")
+        if not self.source_dispatch_ids or len(self.source_dispatch_ids) != len(
+            self.source_names
+        ):
+            raise ValueError("fusion phase dispatch identities are invalid")
+        if not self.iteration_domain:
+            raise ValueError("fusion phase iteration domain is required")
+        if not self.boundary_before or not self.boundary_after:
+            raise ValueError("fusion phase boundaries are required")
+        if len(set(self.recipe_ids)) != len(self.recipe_ids):
+            raise ValueError("fusion phase recipe IDs must be unique")
+
+    def to_dict(self):
+        return {
+            "phase_id": self.phase_id,
+            "region_path": self.region_path,
+            "ordinal": self.ordinal,
+            "source_dispatch_ids": self.source_dispatch_ids,
+            "source_names": self.source_names,
+            "iteration_domain": self.iteration_domain,
+            "boundary_before": self.boundary_before,
+            "boundary_after": self.boundary_after,
+            "recipe_ids": self.recipe_ids,
+        }
+
+
+@dataclass(frozen=True)
 class ElementwiseFusionPlan:
     candidate_groups: Tuple[Tuple[str, ...], ...]
     eligible_dispatches: int
     blocked_dispatches: int
     blocker_counts: Tuple[Tuple[str, int], ...]
+    phases: tuple = ()
     candidate_recipes: tuple = ()
     candidate_partitions: tuple = ()
     applied_recipe_ids: tuple = ()
@@ -596,6 +639,7 @@ class ElementwiseFusionPlan:
             "eligible_dispatches": self.eligible_dispatches,
             "blocked_dispatches": self.blocked_dispatches,
             "blockers": dict(self.blocker_counts),
+            "phases": tuple(phase.to_dict() for phase in self.phases),
             "recipes": tuple(
                 recipe.to_dict() for recipe in self.candidate_recipes
             ),
@@ -1087,6 +1131,8 @@ def analyze_elementwise_fusion(
     groups = []
     recipes = []
     partition_recipes = {2: [], 3: [], 4: []}
+    phases = []
+    phase_only_partitions = []
     blockers = {}
     eligible_dispatches = 0
     blocked_dispatches = 0
@@ -1099,10 +1145,22 @@ def analyze_elementwise_fusion(
         nonlocal blocked_dispatches
         pending = []
         domain = None
+        boundary_before = "region_start"
+        phase_ordinal = 0
 
-        def flush():
+        def flush(boundary_after):
             nonlocal pending
             nonlocal domain
+            nonlocal boundary_before
+            nonlocal phase_ordinal
+            if pending:
+                phase_source_ids = tuple(
+                    f"{path}/{node.logical_dispatch_id or f'node:{index}'}"
+                    for index, node in pending
+                )
+                source_names = tuple(node.name for _, node in pending)
+                phase_recipes = []
+                phase_partitions = {}
             if len(pending) >= 2:
                 groups.append(tuple(node.name for _, node in pending))
                 recipe_by_sources = {}
@@ -1114,11 +1172,12 @@ def analyze_elementwise_fusion(
                             domain,
                         )
                         recipes.append(recipe)
+                        phase_recipes.append(recipe.recipe_id)
                         recipe_by_sources[recipe.source_dispatch_ids] = (
                             recipe.recipe_id
                         )
                 for max_group_size in partition_recipes:
-                    partition = partition_recipes[max_group_size]
+                    partition = []
                     offset = 0
                     while offset < len(pending):
                         source_count = min(
@@ -1134,8 +1193,46 @@ def analyze_elementwise_fusion(
                         )
                         partition.append(recipe_by_sources[source_ids])
                         offset += source_count
+                    partition_recipes[max_group_size].extend(partition)
+                    if partition:
+                        phase_partitions[max_group_size] = tuple(partition)
+                strongest = phase_partitions.get(4)
+                if strongest:
+                    phase_only_partitions.append(strongest)
+            if pending:
+                phase_payload = json.dumps(
+                    {
+                        "region_path": path,
+                        "ordinal": phase_ordinal,
+                        "source_dispatch_ids": phase_source_ids,
+                        "iteration_domain": domain,
+                        "boundary_before": boundary_before,
+                        "boundary_after": boundary_after,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                phase_digest = hashlib.sha256(
+                    phase_payload.encode("utf-8")
+                ).hexdigest()[:24]
+                phases.append(
+                    _BarrierPreservingFusionPhase(
+                        phase_id=f"phase:{phase_digest}",
+                        region_path=path,
+                        ordinal=phase_ordinal,
+                        source_dispatch_ids=phase_source_ids,
+                        source_names=source_names,
+                        iteration_domain=domain,
+                        boundary_before=boundary_before,
+                        boundary_after=boundary_after,
+                        recipe_ids=tuple(phase_recipes),
+                    )
+                )
+                phase_ordinal += 1
             pending = []
             domain = None
+            boundary_before = boundary_after
 
         for child_index, node in enumerate(region.children):
             if isinstance(node, DispatchNode):
@@ -1143,17 +1240,17 @@ def analyze_elementwise_fusion(
                 if blocker is not None:
                     blocked_dispatches += 1
                     add_blocker(blocker)
-                    flush()
+                    flush(blocker)
                 else:
                     eligible_dispatches += 1
                     if pending and node.iteration_domain != domain:
                         add_blocker("iteration_domain_mismatch")
-                        flush()
+                        flush("iteration_domain_mismatch")
                     if not pending:
                         domain = node.iteration_domain
                     pending.append((child_index, node))
             else:
-                flush()
+                flush(f"region_node:{type(node).__name__}")
             if isinstance(node, SequentialRegion):
                 scan(node, f"{path}/{child_index}:{node.name}")
             else:
@@ -1164,13 +1261,21 @@ def analyze_elementwise_fusion(
                             f"{path}/{child_index}:{node.name}/"
                             f"{nested_index}:{child.name}",
                         )
-        flush()
+        flush("region_end")
 
     if isinstance(root, SequentialRegion):
         scan(root, root.name or "root")
     partitions = []
     for partition in partition_recipes.values():
         candidate = tuple(partition)
+        if candidate and candidate not in partitions:
+            partitions.append(candidate)
+    if len(phase_only_partitions) > 4:
+        phase_only_partitions = [
+            *phase_only_partitions[:2],
+            *phase_only_partitions[-2:],
+        ]
+    for candidate in phase_only_partitions:
         if candidate and candidate not in partitions:
             partitions.append(candidate)
     recipe_by_sources = {
@@ -1189,6 +1294,7 @@ def analyze_elementwise_fusion(
         eligible_dispatches=eligible_dispatches,
         blocked_dispatches=blocked_dispatches,
         blocker_counts=tuple(sorted(blockers.items())),
+        phases=tuple(phases),
         candidate_recipes=tuple(recipes),
         candidate_partitions=tuple(partitions),
         applied_recipe_ids=applied_recipe_ids,

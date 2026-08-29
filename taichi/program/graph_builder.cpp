@@ -961,12 +961,48 @@ void GraphBuilder::set_map_composer_max_group_size(
   map_composer_max_group_size_ = max_group_size;
 }
 
+void GraphBuilder::set_map_composer_allowed_groups(
+    const std::vector<std::vector<std::uint64_t>> &groups) {
+  std::set<std::uint64_t> claimed_dispatches;
+  std::set<std::vector<std::uint64_t>> accepted;
+  for (const auto &group : groups) {
+    TI_ERROR_IF(group.size() < 2 || group.size() > 4,
+                "Graph map composer allowed groups must contain two to four "
+                "logical dispatches");
+    TI_ERROR_IF(!accepted.insert(group).second,
+                "Graph map composer allowed groups must be unique");
+    for (const auto logical_id : group) {
+      TI_ERROR_IF(logical_id == std::numeric_limits<std::uint64_t>::max() ||
+                      !claimed_dispatches.insert(logical_id).second,
+                  "Graph map composer allowed groups must be disjoint and use "
+                  "valid logical dispatch IDs");
+    }
+  }
+  map_composer_allowed_groups_ = std::move(accepted);
+}
+
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(
     const std::vector<const Dispatch *> &sources,
     const std::vector<const aot::CompiledDispatch *> &compiled_sources) {
   if (sources.size() < 2 || sources.size() > 4 ||
       compiled_sources.size() != sources.size()) {
     return std::nullopt;
+  }
+  if (!map_composer_allowed_groups_.empty()) {
+    std::vector<std::uint64_t> logical_group;
+    logical_group.reserve(sources.size());
+    for (const auto *source : sources) {
+      if (source == nullptr ||
+          source->logical_dispatch_id() ==
+              std::numeric_limits<std::uint64_t>::max()) {
+        return std::nullopt;
+      }
+      logical_group.push_back(source->logical_dispatch_id());
+    }
+    if (map_composer_allowed_groups_.find(logical_group) ==
+        map_composer_allowed_groups_.end()) {
+      return std::nullopt;
+    }
   }
   std::vector<GraphMapSource> map_sources;
   map_sources.reserve(sources.size());

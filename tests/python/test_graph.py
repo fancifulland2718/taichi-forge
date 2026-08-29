@@ -1166,6 +1166,7 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
         "eligible_dispatches": 3,
         "blocked_dispatches": 2,
         "blockers": {"atomic_effect": 1, "side_effect": 1},
+        "phases": plan["phases"],
         "recipes": plan["recipes"],
         "candidate_partitions": plan["candidate_partitions"],
         "applied_recipe_ids": (),
@@ -1219,8 +1220,16 @@ def test_elementwise_fusion_partitions_cover_all_eligible_regions():
     plan = analyze_elementwise_fusion(root)
 
     assert len(plan.candidate_groups) == 2
-    assert len(plan.candidate_partitions) == 2
-    assert all(len(partition) == 2 for partition in plan.candidate_partitions)
+    assert len(plan.phases) == 2
+    assert plan.phases[0].boundary_after == "atomic_effect"
+    assert plan.phases[1].boundary_before == "atomic_effect"
+    assert len(plan.candidate_partitions) == 4
+    assert [len(partition) for partition in plan.candidate_partitions] == [
+        2,
+        2,
+        1,
+        1,
+    ]
     assert all(
         recipe_id.startswith("fusion:map2:")
         for recipe_id in plan.candidate_partitions[0]

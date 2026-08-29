@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -76,6 +77,10 @@ class Dispatch : public Node {
 
   const std::string &dispatch_label() const {
     return dispatch_label_;
+  }
+
+  std::uint64_t logical_dispatch_id() const {
+    return logical_dispatch_id_;
   }
 
  private:
@@ -231,6 +236,9 @@ class GraphBuilder {
 
   void set_map_composer_max_group_size(std::uint32_t max_group_size);
 
+  void set_map_composer_allowed_groups(
+      const std::vector<std::vector<std::uint64_t>> &groups);
+
   std::uint32_t map_composer_max_group_size() const {
     return map_composer_max_group_size_;
   }
@@ -247,6 +255,7 @@ class GraphBuilder {
   std::vector<std::unique_ptr<Node>> all_nodes_;
   std::vector<std::unique_ptr<Kernel>> composed_kernels_;
   std::uint32_t map_composer_max_group_size_{1};
+  std::set<std::vector<std::uint64_t>> map_composer_allowed_groups_;
   std::uint64_t next_logical_dispatch_id_{0};
 };
 
