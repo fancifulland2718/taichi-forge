@@ -523,6 +523,7 @@ class _CompileIQVariantAdapter:
 
         from taichi_forge.lang._gpu_semantics_tuning import (
             _gpu_tuning_dimension_manifest,
+            _gpu_workgroup_resource_manifest,
         )
 
         return {
@@ -539,6 +540,9 @@ class _CompileIQVariantAdapter:
                     "compilation_id": variant.compilation_id,
                     "spec": variant.spec.stable_payload,
                     "selections": tuple(getattr(variant, "selections", ())),
+                    "resource_envelope": _gpu_workgroup_resource_manifest(
+                        getattr(variant, "resource_envelope", None)
+                    ),
                 }
                 for variant in self._variants.values()
             ),

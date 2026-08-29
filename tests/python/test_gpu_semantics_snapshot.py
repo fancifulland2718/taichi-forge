@@ -33,9 +33,11 @@ from taichi_forge.lang._gpu_semantics_tuning import (
     _TLS_DIMENSION,
     _WORKGROUP_DIMENSION,
     _derive_gpu_tuning_dimensions,
+    _derive_workgroup_resource_envelope,
     _dimension_by_name,
     _gpu_physical_equivalence_key,
     _gpu_tuning_dimension_manifest,
+    _gpu_workgroup_resource_manifest,
 )
 from tests import test_utils
 
@@ -292,15 +294,30 @@ def test_tuning_dimensions_preserve_backend_binding_time_and_equivalence():
     assert "runtime-global" in vulkan_unroll.status.reason
 
 
-def test_tuning_dimension_fails_closed_for_shared_memory():
+def test_tuning_dimension_qualifies_only_exact_shared_memory_workgroup():
     snapshot = _build_resident_gpu_semantics(_raw_snapshot("cuda"))
-    workgroup = _dimension_by_name(
-        _derive_gpu_tuning_dimensions(snapshot, max_threads=512),
-        _WORKGROUP_DIMENSION,
+    dimensions = _derive_gpu_tuning_dimensions(snapshot, max_threads=512)
+    resources = _gpu_workgroup_resource_manifest(
+        _derive_workgroup_resource_envelope(snapshot, 512)
     )
-    assert workgroup.legal_values == ()
-    assert workgroup.status.availability == _GpuAvailability.UNSUPPORTED
-    assert "resource-aware" in workgroup.status.reason
+    assert resources["shape_scope"] == "exact_materialized"
+    assert resources["selected_workgroup_shape"]["value"] == (64, 1, 1)
+    assert resources["static_workgroup_memory_bytes"]["value"] == 256
+    workgroup = _dimension_by_name(
+        dimensions, _WORKGROUP_DIMENSION
+    )
+    assert workgroup.legal_values == (64,)
+    assert workgroup.status.availability == _GpuAvailability.PROVEN
+    assert workgroup.required_capabilities == ("workgroup_memory",)
+    assert "exact_materialized_workgroup_shape" in workgroup.dependencies
+    residency = _dimension_by_name(dimensions, _RESIDENCY_DIMENSION)
+    assert residency.legal_values == ()
+    assert "uniform block-round proof" in residency.status.reason
+    range_work = _dimension_by_name(
+        dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
+    )
+    assert range_work.legal_values == ()
+    assert "resource-aware coarsening" in range_work.status.reason
 
 
 def test_resident_snapshot_rejects_cpu_and_unbound_derivative():

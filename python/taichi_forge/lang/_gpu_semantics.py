@@ -447,6 +447,53 @@ class _VulkanLaunchExtension:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuWorkgroupResourceEnvelope:
+    """Proven resources for one already-materialized workgroup shape.
+
+    This deliberately does not claim that another workgroup shape is
+    equivalent.  Shared-memory indexing and block collectives may make the
+    exact shape part of the kernel semantics even when another shape fits the
+    device resource limits.
+    """
+
+    selected_workgroup_shape: _GpuFact
+    max_threads_per_block: _GpuFact
+    static_workgroup_memory_bytes: _GpuFact
+    dynamic_workgroup_memory_bytes: _GpuFact
+    registers_per_thread: _GpuFact = field(default_factory=_default_unknown_fact)
+    local_memory_bytes_per_thread: _GpuFact = field(
+        default_factory=_default_unknown_fact
+    )
+    shape_scope: str = "exact_materialized"
+    provenance: str = ""
+
+    def __post_init__(self):
+        for name, value in (
+            ("selected_workgroup_shape", self.selected_workgroup_shape),
+            ("max_threads_per_block", self.max_threads_per_block),
+            (
+                "static_workgroup_memory_bytes",
+                self.static_workgroup_memory_bytes,
+            ),
+            (
+                "dynamic_workgroup_memory_bytes",
+                self.dynamic_workgroup_memory_bytes,
+            ),
+            ("registers_per_thread", self.registers_per_thread),
+            (
+                "local_memory_bytes_per_thread",
+                self.local_memory_bytes_per_thread,
+            ),
+        ):
+            if not isinstance(value, _GpuFact):
+                raise TypeError(f"{name} must be a _GpuFact")
+        if self.shape_scope not in ("exact_materialized", "rematerializable"):
+            raise ValueError("invalid workgroup resource shape scope")
+        _require_text(self.provenance, "workgroup resource provenance")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuArtifactSemantics:
     artifact_id: str
     entry_point_id: str
@@ -1043,6 +1090,7 @@ __all__ = [
     "_GpuTuningDimension",
     "_GpuTuningAutodiffPolicy",
     "_GpuTuningLocus",
+    "_GpuWorkgroupResourceEnvelope",
     "_VulkanArtifactExtension",
     "_VulkanLaunchExtension",
     "_dumps_gpu_semantics",

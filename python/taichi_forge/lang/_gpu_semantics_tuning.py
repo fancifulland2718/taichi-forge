@@ -11,6 +11,7 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuTuningAutodiffPolicy,
     _GpuTuningDimension,
     _GpuTuningLocus,
+    _GpuWorkgroupResourceEnvelope,
     _VulkanArtifactExtension,
     _gpu_fact_proven,
     _gpu_fact_unknown,
@@ -23,6 +24,126 @@ _TLS_DIMENSION = "compiler_thread_local_strategy"
 _INNER_LOOP_UNROLL_DIMENSION = "inner_loop_unroll_strategy"
 _RANGE_WORK_PER_THREAD_DIMENSION = "range_work_per_thread_target"
 _RESIDENCY_DIMENSION = "cuda_grid_residency_waves"
+
+
+def _resolved_proven_fact(resolved, reason):
+    for fact in (
+        resolved.actual,
+        resolved.materialized,
+        resolved.selected,
+        resolved.requested,
+    ):
+        if fact.availability == _GpuAvailability.PROVEN:
+            return fact
+    return _gpu_fact_unknown(reason, binding_time=_GpuBindingTime.ARTIFACT)
+
+
+def _derive_workgroup_resource_envelope(snapshot, max_threads):
+    ranges = tuple(
+        dispatch
+        for dispatch in snapshot.dispatches
+        if dispatch.task_kind == "range_for"
+    )
+    if len(ranges) != 1:
+        return None
+    dispatch = ranges[0]
+    artifact_by_id = {
+        artifact.artifact_id: artifact for artifact in snapshot.artifacts
+    }
+    launch_by_id = {launch.launch_id: launch for launch in snapshot.launches}
+    artifact = artifact_by_id[dispatch.artifact_id]
+    launch = launch_by_id[dispatch.launch_id]
+    extension = artifact.extension
+    registers = getattr(extension, "registers_per_thread", None)
+    local_memory = getattr(extension, "local_memory_bytes_per_thread", None)
+    if registers is None:
+        registers = _gpu_fact_unknown(
+            "backend does not expose resident register allocation",
+            binding_time=_GpuBindingTime.ARTIFACT,
+        )
+    if local_memory is None:
+        local_memory = _gpu_fact_unknown(
+            "backend does not expose resident local-memory allocation",
+            binding_time=_GpuBindingTime.ARTIFACT,
+        )
+    if int(max_threads) > 0:
+        thread_limit = _gpu_fact_proven(
+            int(max_threads),
+            binding_time=_GpuBindingTime.ARTIFACT,
+            ownership=_GpuOwnership.DRIVER,
+            provenance="backend_compile_config_max_block_dim",
+        )
+    else:
+        thread_limit = _gpu_fact_unknown(
+            "backend workgroup thread limit is unavailable",
+            binding_time=_GpuBindingTime.ARTIFACT,
+        )
+    dynamic = _resolved_proven_fact(
+        launch.dynamic_workgroup_memory_bytes,
+        "materialized dynamic workgroup memory is unavailable",
+    )
+    if (
+        dynamic.availability != _GpuAvailability.PROVEN
+        and snapshot.target.backend.value == "vulkan"
+    ):
+        dynamic = _gpu_fact_proven(
+            0,
+            binding_time=_GpuBindingTime.ARTIFACT,
+            ownership=_GpuOwnership.COMPILER,
+            provenance="vulkan_abi_has_no_dynamic_workgroup_memory",
+        )
+    return _GpuWorkgroupResourceEnvelope(
+        selected_workgroup_shape=_resolved_proven_fact(
+            dispatch.workgroup_shape,
+            "materialized workgroup shape is unavailable",
+        ),
+        max_threads_per_block=thread_limit,
+        static_workgroup_memory_bytes=artifact.static_workgroup_memory_bytes,
+        dynamic_workgroup_memory_bytes=dynamic,
+        registers_per_thread=registers,
+        local_memory_bytes_per_thread=local_memory,
+        shape_scope="exact_materialized",
+        provenance="resident_task_manifest_resource_envelope",
+    )
+
+
+def _gpu_workgroup_resource_manifest(envelope):
+    if envelope is None:
+        return None
+
+    def fact_payload(fact):
+        value = fact.value
+        if value is not None and all(
+            hasattr(value, axis) for axis in ("x", "y", "z")
+        ):
+            value = (int(value.x), int(value.y), int(value.z))
+        return {
+            "availability": fact.availability.value,
+            "value": value,
+            "binding_time": fact.binding_time.value,
+            "ownership": fact.ownership.value,
+            "provenance": fact.provenance,
+            "reason": fact.reason,
+        }
+
+    return {
+        "shape_scope": envelope.shape_scope,
+        "provenance": envelope.provenance,
+        "selected_workgroup_shape": fact_payload(
+            envelope.selected_workgroup_shape
+        ),
+        "max_threads_per_block": fact_payload(envelope.max_threads_per_block),
+        "static_workgroup_memory_bytes": fact_payload(
+            envelope.static_workgroup_memory_bytes
+        ),
+        "dynamic_workgroup_memory_bytes": fact_payload(
+            envelope.dynamic_workgroup_memory_bytes
+        ),
+        "registers_per_thread": fact_payload(envelope.registers_per_thread),
+        "local_memory_bytes_per_thread": fact_payload(
+            envelope.local_memory_bytes_per_thread
+        ),
+    }
 
 
 def _status_proven(provenance):
@@ -145,28 +266,73 @@ def _workgroup_dimension(
                 "workgroup tuning requires proven grid-stride coverage"
             ),
         )
-    launch_by_id = {launch.launch_id: launch for launch in snapshot.launches}
-    launch = launch_by_id[ranges[0].launch_id]
-    static_bytes = range_artifact.static_workgroup_memory_bytes
-    dynamic_bytes = launch.dynamic_workgroup_memory_bytes
-    has_static = (
-        static_bytes.availability == _GpuAvailability.PROVEN
-        and int(static_bytes.value) != 0
-    )
-    has_dynamic = any(
-        fact.availability == _GpuAvailability.PROVEN and int(fact.value) != 0
-        for fact in (
-            dynamic_bytes.requested,
-            dynamic_bytes.selected,
-            dynamic_bytes.materialized,
-            dynamic_bytes.actual,
-        )
-    )
-    if has_static or has_dynamic:
+    envelope = _derive_workgroup_resource_envelope(snapshot, max_threads)
+    static_bytes = envelope.static_workgroup_memory_bytes
+    dynamic_bytes = envelope.dynamic_workgroup_memory_bytes
+    if (
+        static_bytes.availability != _GpuAvailability.PROVEN
+        or dynamic_bytes.availability != _GpuAvailability.PROVEN
+    ):
         return _blocked_dimension(
             **base,
-            status=_status_unsupported(
-                "shared-memory kernels require a resource-aware tuning stage"
+            status=_status_unknown(
+                "workgroup-memory resource usage is not fully proven"
+            ),
+        )
+    has_static = int(static_bytes.value) != 0
+    has_dynamic = int(dynamic_bytes.value) != 0
+    if has_static or has_dynamic:
+        shape = envelope.selected_workgroup_shape
+        limit_fact = envelope.max_threads_per_block
+        if (
+            shape.availability != _GpuAvailability.PROVEN
+            or limit_fact.availability != _GpuAvailability.PROVEN
+            or static_bytes.availability != _GpuAvailability.PROVEN
+            or dynamic_bytes.availability != _GpuAvailability.PROVEN
+        ):
+            return _blocked_dimension(
+                **base,
+                status=_status_unknown(
+                    "shared-memory workgroup resources are not fully proven"
+                ),
+            )
+        selected = shape.value
+        if selected.y != 1 or selected.z != 1:
+            return _blocked_dimension(
+                **base,
+                status=_status_unsupported(
+                    "current range variants require a one-dimensional workgroup"
+                ),
+            )
+        selected_x = int(selected.x)
+        if selected_x <= 0 or selected_x > min(1024, int(limit_fact.value)):
+            return _blocked_dimension(
+                **base,
+                status=_status_unsupported(
+                    "materialized shared-memory workgroup exceeds the thread limit"
+                ),
+            )
+        return _GpuTuningDimension(
+            name=_WORKGROUP_DIMENSION,
+            locus=_GpuTuningLocus.ARTIFACT_CODEGEN,
+            backend_applicability=(snapshot.target.backend,),
+            legal_values=(selected_x,),
+            required_capabilities=("workgroup_memory",),
+            controller=controller,
+            binding_time=binding_time,
+            physical_effect=_GpuPhysicalEffect.ARTIFACT,
+            equivalence_key="artifact:workgroup_shape_x",
+            dependencies=(
+                "workgroup_resource_envelope",
+                "exact_materialized_workgroup_shape",
+            ),
+            bottleneck_classes=(
+                _GpuBottleneckClass.DISPATCH,
+                _GpuBottleneckClass.OCCUPANCY,
+            ),
+            autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+            status=_status_proven(
+                "resident_shared_memory_exact_workgroup_envelope"
             ),
         )
     limit = min(1024, int(max_threads)) if int(max_threads) > 0 else 1024
@@ -272,6 +438,34 @@ def _residency_dimension(snapshot, legal_values):
                 "grid-residency waves have no Vulkan launch contract"
             ),
         )
+    envelope = _derive_workgroup_resource_envelope(snapshot, 1024)
+    if envelope is not None:
+        static_bytes = envelope.static_workgroup_memory_bytes
+        dynamic_bytes = envelope.dynamic_workgroup_memory_bytes
+        if (
+            static_bytes.availability == _GpuAvailability.PROVEN
+            and int(static_bytes.value) != 0
+        ) or (
+            dynamic_bytes.availability == _GpuAvailability.PROVEN
+            and int(dynamic_bytes.value) != 0
+        ):
+            return _blocked_dimension(
+                _RESIDENCY_DIMENSION,
+                snapshot,
+                locus=_GpuTuningLocus.LAUNCH,
+                controller="cuda_kernel_launcher_residency",
+                binding_time=_GpuBindingTime.LAUNCH,
+                physical_effect=_GpuPhysicalEffect.LAUNCH,
+                equivalence_key="launch:grid_residency_waves",
+                bottleneck_classes=(
+                    _GpuBottleneckClass.DISPATCH,
+                    _GpuBottleneckClass.OCCUPANCY,
+                ),
+                autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+                status=_status_unsupported(
+                    "shared-memory grid coarsening requires a uniform block-round proof"
+                ),
+            )
     return _GpuTuningDimension(
         name=_RESIDENCY_DIMENSION,
         locus=_GpuTuningLocus.LAUNCH,
@@ -501,7 +695,9 @@ __all__ = [
     "_TLS_DIMENSION",
     "_WORKGROUP_DIMENSION",
     "_derive_gpu_tuning_dimensions",
+    "_derive_workgroup_resource_envelope",
     "_dimension_by_name",
     "_gpu_physical_equivalence_key",
     "_gpu_tuning_dimension_manifest",
+    "_gpu_workgroup_resource_manifest",
 ]

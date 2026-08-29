@@ -22,6 +22,7 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuResourceAccess,
     _GpuResourceKind,
     _GpuTargetSemantics,
+    _GpuWorkgroupResourceEnvelope,
     _VulkanArtifactExtension,
     _dumps_gpu_semantics,
     _gpu_fact_proven,
@@ -156,6 +157,35 @@ def test_gpu_semantics_schema_is_frozen_canonical_and_round_trips():
     assert _loads_gpu_semantics(first) == value
     with pytest.raises(FrozenInstanceError):
         value[-1].backend = _GpuBackend.VULKAN
+
+
+def test_workgroup_resource_envelope_round_trips_without_native_objects():
+    extent = _proven(
+        _GpuExtent3(128),
+        _GpuBindingTime.ARTIFACT,
+        _GpuOwnership.ARTIFACT,
+        "compiled_task_manifest",
+    )
+    scalar = _proven(
+        0,
+        _GpuBindingTime.ARTIFACT,
+        _GpuOwnership.ARTIFACT,
+        "compiled_task_manifest",
+    )
+    envelope = _GpuWorkgroupResourceEnvelope(
+        selected_workgroup_shape=extent,
+        max_threads_per_block=_proven(
+            1024,
+            _GpuBindingTime.ARTIFACT,
+            _GpuOwnership.DRIVER,
+            "device_limit",
+        ),
+        static_workgroup_memory_bytes=scalar,
+        dynamic_workgroup_memory_bytes=scalar,
+        provenance="resident_task_manifest_resource_envelope",
+    )
+
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(envelope)) == envelope
 
 
 def test_gpu_semantics_rejects_cpu_and_backend_extension_mismatch():

@@ -120,6 +120,7 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
         "c1",
     ]
     assert all(item["selections"] == () for item in manifest["variants"])
+    assert all(item["resource_envelope"] is None for item in manifest["variants"])
 
 
 def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):

@@ -29,6 +29,7 @@ class _KernelVariant:
     baseline_thread_local_bytes: int
     physical_equivalence_key: tuple
     selections: tuple
+    resource_envelope: object
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,9 @@ class _KernelVariantSession:
             try:
                 report = baseline_binding.report(*self._args)
                 snapshot = baseline_binding._gpu_semantics_snapshot(*self._args)
-                task, dimensions = self._eligible_range_task(report, snapshot)
+                task, dimensions, resource_envelope = self._eligible_range_task(
+                    report, snapshot
+                )
             except (RuntimeError, TypeError, ValueError) as error:
                 rejections.append(_KernelVariantRejection(block_dim, str(error)))
                 continue
@@ -125,9 +128,12 @@ class _KernelVariantSession:
             tls_modes = _dimension_by_name(
                 dimensions, _TLS_DIMENSION
             ).legal_values
-            residency_values = _dimension_by_name(
+            residency_dimension = _dimension_by_name(
                 dimensions, _RESIDENCY_DIMENSION
-            ).legal_values
+            )
+            residency_values = residency_dimension.legal_values
+            if not residency_values:
+                residency_values = (None,)
             work_dimension = _dimension_by_name(
                 dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
             )
@@ -137,7 +143,7 @@ class _KernelVariantSession:
                 if value in requested_work
             )
             if not work_values:
-                if requested_work == (1,):
+                if 1 in requested_work:
                     work_values = (1,)
                 else:
                     rejections.append(
@@ -175,6 +181,7 @@ class _KernelVariantSession:
                                     )
                                 ),
                                 selections=tuple(selections.items()),
+                                resource_envelope=resource_envelope,
                             )
                         )
 
@@ -225,6 +232,7 @@ class _KernelVariantSession:
         from taichi_forge.lang._gpu_semantics_tuning import (
             _WORKGROUP_DIMENSION,
             _derive_gpu_tuning_dimensions,
+            _derive_workgroup_resource_envelope,
             _dimension_by_name,
         )
 
@@ -244,7 +252,13 @@ class _KernelVariantSession:
             for dispatch in snapshot.dispatches
             if dispatch.task_kind == "range_for"
         )
-        return task_by_id[range_dispatch.physical_dispatch_id], dimensions
+        return (
+            task_by_id[range_dispatch.physical_dispatch_id],
+            dimensions,
+            _derive_workgroup_resource_envelope(
+                snapshot, impl.current_cfg().max_block_dim
+            ),
+        )
 
     @property
     def rejections(self):
