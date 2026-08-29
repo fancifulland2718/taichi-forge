@@ -32,6 +32,7 @@ class _KernelVariant:
     compilation_id: str
     spec: _KernelOptimizationSpec
     logical_task_id: str
+    logical_task_ids: tuple
     baseline_thread_local_bytes: int
     physical_equivalence_key: tuple
     selections: tuple
@@ -149,6 +150,37 @@ class _KernelVariantSession:
         self._cuda_min_blocks_per_sm = requested_min_blocks
         self._cuda_max_registers = requested_registers
         self._structural_mode = structural_mode
+        self._kernel_wide = False
+        kernel_wide_baseline = self._kernel_wide_spec(
+            "auto", "inherit", 2, None
+        )
+        kernel_wide_binding = _bind_kernel_optimization_spec(
+            kernel, kernel_wide_baseline
+        )
+        try:
+            kernel_wide_report = kernel_wide_binding.report(*self._args)
+            kernel_wide_snapshot = kernel_wide_binding._gpu_semantics_snapshot(
+                *self._args
+            )
+        except (RuntimeError, TypeError, ValueError):
+            kernel_wide_report = None
+            kernel_wide_snapshot = None
+        if kernel_wide_snapshot is not None:
+            range_dispatches = tuple(
+                dispatch
+                for dispatch in kernel_wide_snapshot.dispatches
+                if dispatch.task_kind == "range_for"
+            )
+            if len(range_dispatches) != 1:
+                self._initialize_kernel_wide(
+                    kernel_wide_report,
+                    kernel_wide_snapshot,
+                    compile_tiers=requested_tiers,
+                    cuda_min_blocks_per_sm=requested_min_blocks,
+                    cuda_max_registers=requested_registers,
+                    structural_mode=structural_mode,
+                )
+                return
         variants = []
         rejections = []
         tiling_recipes = {}
@@ -337,6 +369,7 @@ class _KernelVariantSession:
                                 compilation_id=spec.compilation_identity,
                                 spec=spec,
                                 logical_task_id=task.logical_task_id,
+                                logical_task_ids=(task.logical_task_id,),
                                 baseline_thread_local_bytes=int(
                                     task.thread_local_bytes
                                 ),
@@ -381,6 +414,154 @@ class _KernelVariantSession:
             for compilation_id, variant_ids in members.values()
         )
 
+    def _initialize_kernel_wide(
+        self,
+        report,
+        snapshot,
+        *,
+        compile_tiers,
+        cuda_min_blocks_per_sm,
+        cuda_max_registers,
+        structural_mode,
+    ):
+        """Build artifact-only variants for kernels with multiple offloads."""
+
+        if (
+            report is None
+            or report.backend != "cuda"
+            or report.status != "applied"
+        ):
+            raise RuntimeError("kernel-wide variant baseline did not apply on CUDA")
+        from taichi_forge.lang._gpu_semantics import _GpuPhysicalEffect
+        from taichi_forge.lang._gpu_semantics_tuning import (
+            _COMPILE_TIER_DIMENSION,
+            _CUDA_MAX_REGISTERS_DIMENSION,
+            _CUDA_MIN_BLOCKS_DIMENSION,
+            _RESIDENCY_DIMENSION,
+            _RANGE_WORK_PER_THREAD_DIMENSION,
+            _TLS_DIMENSION,
+            _WORKGROUP_DIMENSION,
+            _derive_gpu_tuning_dimensions,
+            _dimension_by_name,
+            _gpu_physical_equivalence_key,
+        )
+
+        dimensions = _derive_gpu_tuning_dimensions(
+            snapshot,
+            max_threads=impl.current_cfg().max_block_dim,
+            canonical_workgroup_sizes=_BLOCK_DIMS,
+            residency_values=_GRID_RESIDENCY_WAVES,
+            range_work_per_thread_values=_RANGE_WORK_PER_THREAD_TARGETS,
+            compile_tier_values=compile_tiers,
+            cuda_min_blocks_values=cuda_min_blocks_per_sm,
+            cuda_max_register_values=cuda_max_registers,
+        )
+        tls_values = _dimension_by_name(dimensions, _TLS_DIMENSION).legal_values
+        tier_values = _dimension_by_name(
+            dimensions, _COMPILE_TIER_DIMENSION
+        ).legal_values
+        min_blocks_values = _dimension_by_name(
+            dimensions, _CUDA_MIN_BLOCKS_DIMENSION
+        ).legal_values
+        max_register_values = _dimension_by_name(
+            dimensions, _CUDA_MAX_REGISTERS_DIMENSION
+        ).legal_values
+        baseline = {
+            _WORKGROUP_DIMENSION: None,
+            _TLS_DIMENSION: "auto",
+            _COMPILE_TIER_DIMENSION: "inherit",
+            _CUDA_MIN_BLOCKS_DIMENSION: 2,
+            _CUDA_MAX_REGISTERS_DIMENSION: None,
+            _RANGE_WORK_PER_THREAD_DIMENSION: 1,
+            _RESIDENCY_DIMENSION: None,
+        }
+        if structural_mode == "cartesian":
+            selections = [
+                {
+                    **baseline,
+                    _TLS_DIMENSION: thread_local,
+                    _COMPILE_TIER_DIMENSION: compile_tier,
+                    _CUDA_MIN_BLOCKS_DIMENSION: min_blocks,
+                    _CUDA_MAX_REGISTERS_DIMENSION: max_registers,
+                }
+                for (
+                    thread_local,
+                    compile_tier,
+                    min_blocks,
+                    max_registers,
+                ) in product(
+                    tls_values,
+                    tier_values,
+                    min_blocks_values,
+                    max_register_values,
+                )
+            ]
+        else:
+            selections = [baseline]
+            for dimension_name, values in (
+                (_TLS_DIMENSION, tls_values),
+                (_COMPILE_TIER_DIMENSION, tier_values),
+                (_CUDA_MIN_BLOCKS_DIMENSION, min_blocks_values),
+                (_CUDA_MAX_REGISTERS_DIMENSION, max_register_values),
+            ):
+                for value in values:
+                    if value == baseline[dimension_name]:
+                        continue
+                    selection = dict(baseline)
+                    selection[dimension_name] = value
+                    selections.append(selection)
+
+        task_ids = tuple(
+            dispatch.logical_task_id for dispatch in snapshot.dispatches
+        )
+        variants = []
+        for selection in selections:
+            spec = self._kernel_wide_spec(
+                selection[_TLS_DIMENSION],
+                selection[_COMPILE_TIER_DIMENSION],
+                selection[_CUDA_MIN_BLOCKS_DIMENSION],
+                selection[_CUDA_MAX_REGISTERS_DIMENSION],
+            )
+            variant_id = spec.identity or "kos1:baseline"
+            compilation_id = spec.compilation_identity or "kos1:baseline"
+            variants.append(
+                _KernelVariant(
+                    variant_id=variant_id,
+                    compilation_id=compilation_id,
+                    spec=spec,
+                    logical_task_id=snapshot.program.specialization_id,
+                    logical_task_ids=task_ids,
+                    baseline_thread_local_bytes=sum(
+                        int(task.thread_local_bytes or 0) for task in report.tasks
+                    ),
+                    physical_equivalence_key=_gpu_physical_equivalence_key(
+                        dimensions,
+                        selection,
+                        _GpuPhysicalEffect.ARTIFACT,
+                    ),
+                    selections=tuple(selection.items()),
+                    resource_envelope=None,
+                    tiling_recipe_id=None,
+                )
+            )
+        if len(variants) > _MAX_VARIANTS:
+            raise RuntimeError("kernel variant search exceeded its bounded budget")
+        self._kernel_wide = True
+        self._variants = MappingProxyType(
+            {variant.variant_id: variant for variant in variants}
+        )
+        self._rejections = ()
+        self._dimensions = dimensions
+        self._tiling_recipes = MappingProxyType({})
+        self._compilation_groups = tuple(
+            _KernelCompilationGroup(
+                compilation_id=variant.compilation_id,
+                representative_variant_id=variant.variant_id,
+                variant_ids=(variant.variant_id,),
+            )
+            for variant in variants
+        )
+
     @staticmethod
     def _spec(
         block_dim,
@@ -406,6 +587,24 @@ class _KernelVariantSession:
                 grid_residency_waves=waves,
                 range_work_per_thread_target=work_per_thread,
             ),
+        )
+
+    @staticmethod
+    def _kernel_wide_spec(
+        thread_local,
+        compile_tier,
+        cuda_min_blocks_per_sm,
+        cuda_max_registers,
+    ):
+        return _KernelOptimizationSpec(
+            ir=_IrOptimizationOptions(
+                thread_local=thread_local,
+                compile_tier=compile_tier,
+            ),
+            backend=_BackendCodegenOptions(
+                cuda_min_blocks_per_sm=cuda_min_blocks_per_sm,
+            ),
+            artifact=_ArtifactOptions(cuda_max_registers=cuda_max_registers),
         )
 
     @staticmethod
@@ -473,6 +672,10 @@ class _KernelVariantSession:
     @property
     def structural_mode(self):
         return self._structural_mode
+
+    @property
+    def scope_kind(self):
+        return "kernel_artifact" if self._kernel_wide else "range_task"
 
     def refinement(self, block_dim):
         if block_dim not in self._block_dims:

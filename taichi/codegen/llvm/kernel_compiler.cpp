@@ -52,9 +52,9 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
     return codegen->compile_kernel_to_module();
   }();
-  if (const auto &policy = kernel_def.get_task_launch_policy();
-      policy.has_value()) {
-    data.compiled_data.cuda_max_registers = policy->cuda_max_registers;
+  if (const auto &spec = kernel_def.get_kernel_optimization_spec();
+      spec.has_value()) {
+    data.compiled_data.cuda_max_registers = spec->cuda_max_registers;
   }
   data.used_snode_tree_ids =
       irpass::analysis::gather_snode_tree_dependencies(chi_ir);

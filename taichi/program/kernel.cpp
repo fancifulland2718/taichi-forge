@@ -195,6 +195,9 @@ void Kernel::set_task_launch_policy(
               "identity");
   policy.optimization_spec_identity = optimization_spec_identity;
   task_launch_policy_ = policy;
+  set_kernel_optimization_spec(
+      optimization_spec_identity, thread_local_mode,
+      cuda_min_blocks_per_sm, cuda_max_registers);
   invalidate_kernel_key_for_cache();
 }
 
@@ -225,10 +228,71 @@ std::string Kernel::task_launch_policy_cache_key() const {
       task_launch_policy_->optimization_spec_identity);
 }
 
+void Kernel::set_kernel_optimization_spec(
+    const std::string &identity,
+    const std::string &thread_local_mode,
+    int cuda_min_blocks_per_sm,
+    int cuda_max_registers) {
+  TI_ERROR_IF(identity.empty(),
+              "kernel optimization spec requires a non-empty identity");
+  KernelOptimizationSpec spec;
+  if (thread_local_mode == "auto") {
+    spec.thread_local_mode = TaskLaunchThreadLocalMode::automatic;
+  } else if (thread_local_mode == "on") {
+    spec.thread_local_mode = TaskLaunchThreadLocalMode::enabled;
+  } else if (thread_local_mode == "off") {
+    spec.thread_local_mode = TaskLaunchThreadLocalMode::disabled;
+  } else {
+    TI_ERROR("kernel optimization thread-local mode must be 'auto', 'on', or "
+             "'off', got {}",
+             thread_local_mode);
+  }
+  TI_ERROR_IF(cuda_min_blocks_per_sm != 1 && cuda_min_blocks_per_sm != 2 &&
+                  cuda_min_blocks_per_sm != 4,
+              "CUDA min blocks per SM must be 1, 2, or 4, got {}",
+              cuda_min_blocks_per_sm);
+  TI_ERROR_IF(cuda_max_registers < -1 || cuda_max_registers > 255 ||
+                  (cuda_max_registers > 0 && cuda_max_registers < 16),
+              "CUDA max registers must be -1, 0, or in [16, 255], got {}",
+              cuda_max_registers);
+  spec.cuda_min_blocks_per_sm = cuda_min_blocks_per_sm;
+  spec.cuda_max_registers = cuda_max_registers;
+  spec.identity = identity;
+  kernel_optimization_spec_ = std::move(spec);
+  invalidate_kernel_key_for_cache();
+}
+
+const std::optional<Kernel::KernelOptimizationSpec> &
+Kernel::get_kernel_optimization_spec() const {
+  return kernel_optimization_spec_;
+}
+
+std::string Kernel::optimization_spec_cache_key() const {
+  if (!kernel_optimization_spec_.has_value()) {
+    return {};
+  }
+  if (task_launch_policy_.has_value()) {
+    return task_launch_policy_cache_key();
+  }
+  const char thread_local_mode =
+      kernel_optimization_spec_->thread_local_mode ==
+              TaskLaunchThreadLocalMode::enabled
+          ? 'e'
+          : (kernel_optimization_spec_->thread_local_mode ==
+                     TaskLaunchThreadLocalMode::disabled
+                 ? 'd'
+                 : 'a');
+  return fmt::format(
+      "k:{}:{}:{}:{}", thread_local_mode,
+      kernel_optimization_spec_->cuda_min_blocks_per_sm,
+      kernel_optimization_spec_->cuda_max_registers,
+      kernel_optimization_spec_->identity);
+}
+
 const std::string &Kernel::optimization_spec_identity() const {
   static const std::string kEmptyIdentity;
-  return task_launch_policy_.has_value()
-             ? task_launch_policy_->optimization_spec_identity
+  return kernel_optimization_spec_.has_value()
+             ? kernel_optimization_spec_->identity
              : kEmptyIdentity;
 }
 

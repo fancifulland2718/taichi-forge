@@ -175,10 +175,12 @@ def _bind_kernel_optimization_spec(kernel, spec):
         raise ValueError(
             "an outer optimization spec cannot recursively request provider tuning"
         )
-    if spec.backend.workgroup_size is None:
-        raise ValueError("P1 optimization specs require an explicit workgroup_size")
     from taichi_forge.lang.task_launch import TaskLaunchPolicy
 
+    if spec.backend.workgroup_size is None:
+        return kernel.with_launch_policy(TaskLaunchPolicy.auto())._with_optimization_spec(
+            spec
+        )
     policy = TaskLaunchPolicy.block(
         spec.backend.workgroup_size, mode=spec.launch.block_mode
     )

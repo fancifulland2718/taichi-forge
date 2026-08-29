@@ -545,6 +545,11 @@ def _cuda_max_registers_dimension(snapshot, legal_values):
 
 
 def _residency_dimension(snapshot, legal_values):
+    ranges = tuple(
+        dispatch
+        for dispatch in snapshot.dispatches
+        if dispatch.task_kind == "range_for"
+    )
     cuda_launch = any(
         isinstance(launch.extension, _CudaLaunchExtension)
         for launch in snapshot.launches
@@ -565,6 +570,24 @@ def _residency_dimension(snapshot, legal_values):
             autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
             status=_status_unsupported(
                 "grid-residency waves have no Vulkan launch contract"
+            ),
+        )
+    if len(ranges) != 1:
+        return _blocked_dimension(
+            _RESIDENCY_DIMENSION,
+            snapshot,
+            locus=_GpuTuningLocus.LAUNCH,
+            controller="cuda_kernel_launcher_residency",
+            binding_time=_GpuBindingTime.LAUNCH,
+            physical_effect=_GpuPhysicalEffect.LAUNCH,
+            equivalence_key="launch:grid_residency_waves",
+            bottleneck_classes=(
+                _GpuBottleneckClass.DISPATCH,
+                _GpuBottleneckClass.OCCUPANCY,
+            ),
+            autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+            status=_status_unsupported(
+                "grid-residency waves require exactly one range dispatch"
             ),
         )
     envelope = _derive_workgroup_resource_envelope(snapshot, 1024)

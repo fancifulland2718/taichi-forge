@@ -304,9 +304,9 @@ std::string get_hashed_offline_cache_key_impl(
   auto device_caps_key = get_offline_cache_key_of_device_caps(caps);
   std::string autodiff_mode =
       std::to_string(static_cast<std::size_t>(kernel->autodiff_mode));
-  const std::string task_launch_policy =
+  const std::string optimization_spec =
       include_optimization_spec && kernel
-          ? kernel->task_launch_policy_cache_key()
+          ? kernel->optimization_spec_cache_key()
           : "";
   picosha2::hash256_one_by_one hasher;
   std::string schema_tag =
@@ -319,7 +319,7 @@ std::string get_hashed_offline_cache_key_impl(
   hasher.process(kernel_rets_string.begin(), kernel_rets_string.end());
   hasher.process(kernel_body_string.begin(), kernel_body_string.end());
   hasher.process(autodiff_mode.begin(), autodiff_mode.end());
-  hasher.process(task_launch_policy.begin(), task_launch_policy.end());
+  hasher.process(optimization_spec.begin(), optimization_spec.end());
   hasher.finish();
 
   auto res = picosha2::get_hash_hex_string(hasher);
@@ -347,9 +347,9 @@ std::string get_hashed_offline_cache_key_context_impl(
   std::string autodiff_mode =
       kernel ? std::to_string(static_cast<std::size_t>(kernel->autodiff_mode))
              : "";
-  const std::string task_launch_policy =
+  const std::string optimization_spec =
       include_optimization_spec && kernel
-          ? kernel->task_launch_policy_cache_key()
+          ? kernel->optimization_spec_cache_key()
           : "";
 
   picosha2::hash256_one_by_one hasher;
@@ -363,7 +363,7 @@ std::string get_hashed_offline_cache_key_context_impl(
   hasher.process(kernel_params_string.begin(), kernel_params_string.end());
   hasher.process(kernel_rets_string.begin(), kernel_rets_string.end());
   hasher.process(autodiff_mode.begin(), autodiff_mode.end());
-  hasher.process(task_launch_policy.begin(), task_launch_policy.end());
+  hasher.process(optimization_spec.begin(), optimization_spec.end());
   hasher.finish();
 
   auto res = picosha2::get_hash_hex_string(hasher);

@@ -3267,12 +3267,12 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
       verbose = false;
     }
     bool make_thread_local = config.make_thread_local;
-    if (const auto &policy = kernel->get_task_launch_policy();
-        policy.has_value()) {
-      if (policy->thread_local_mode ==
+    if (const auto &spec = kernel->get_kernel_optimization_spec();
+        spec.has_value()) {
+      if (spec->thread_local_mode ==
           Kernel::TaskLaunchThreadLocalMode::enabled) {
         make_thread_local = true;
-      } else if (policy->thread_local_mode ==
+      } else if (spec->thread_local_mode ==
                  Kernel::TaskLaunchThreadLocalMode::disabled) {
         make_thread_local = false;
       }
@@ -3297,10 +3297,10 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
     // CUDA specific metadata
     int min_blocks_per_sm = 2;
     int max_registers = -1;
-    if (const auto &policy = kernel->get_task_launch_policy();
-        policy.has_value()) {
-      min_blocks_per_sm = policy->cuda_min_blocks_per_sm;
-      max_registers = policy->cuda_max_registers;
+    if (const auto &spec = kernel->get_kernel_optimization_spec();
+        spec.has_value()) {
+      min_blocks_per_sm = spec->cuda_min_blocks_per_sm;
+      max_registers = spec->cuda_max_registers;
     }
     for (const auto &task : offloaded_tasks) {
       llvm::Function *func = module->getFunction(task.name);

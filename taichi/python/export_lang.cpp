@@ -6302,6 +6302,8 @@ void export_lang(py::module &m) {
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)
       .def("set_task_launch_policy", &Kernel::set_task_launch_policy)
+      .def("set_kernel_optimization_spec",
+           &Kernel::set_kernel_optimization_spec)
       .def("clear_compile_tier_override",
            &Kernel::clear_compile_tier_override)
       .def("get_compile_tier_override",

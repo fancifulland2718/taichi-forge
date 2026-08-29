@@ -647,6 +647,9 @@ class _CompileIQVariantAdapter:
                     "compilation_id": variant.compilation_id,
                     "spec": variant.spec.stable_payload,
                     "selections": tuple(getattr(variant, "selections", ())),
+                    "logical_task_ids": tuple(
+                        getattr(variant, "logical_task_ids", ())
+                    ),
                     "resource_envelope": _gpu_workgroup_resource_manifest(
                         getattr(variant, "resource_envelope", None)
                     ),

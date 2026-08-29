@@ -1459,6 +1459,21 @@ class Kernel:
             effective_opt_level = kernel_optimization_spec.ir.compile_tier
         if effective_opt_level is not None:
             taichi_kernel.set_compile_tier_override(effective_opt_level)
+        if (
+            kernel_optimization_spec is not None
+            and kernel_optimization_spec.identity
+            and (task_launch_policy is None or task_launch_policy.mode == "auto")
+        ):
+            taichi_kernel.set_kernel_optimization_spec(
+                kernel_optimization_spec.compilation_identity,
+                kernel_optimization_spec.ir.thread_local,
+                kernel_optimization_spec.backend.cuda_min_blocks_per_sm,
+                (
+                    -1
+                    if kernel_optimization_spec.artifact.cuda_max_registers is None
+                    else kernel_optimization_spec.artifact.cuda_max_registers
+                ),
+            )
         if task_launch_policy is not None and task_launch_policy.mode != "auto":
             assert kernel_optimization_spec is not None
             assert kernel_optimization_spec.identity
@@ -2233,6 +2248,76 @@ class Kernel:
             )
             return key
 
+    def _ensure_compiled_with_kernel_optimization_spec(self, spec, *args):
+        from taichi_forge.lang._kernel_optimization import _KernelOptimizationSpec
+
+        if not isinstance(spec, _KernelOptimizationSpec):
+            raise TypeError("spec must be a _KernelOptimizationSpec")
+        if (
+            spec.backend.workgroup_size is not None
+            or spec.launch.block_mode != "auto"
+        ):
+            raise ValueError(
+                "kernel-wide optimization specs cannot override workgroup geometry"
+            )
+        if (
+            spec.launch.grid_residency_waves is not None
+            or spec.launch.range_work_per_thread_target != 1
+        ):
+            raise ValueError(
+                "kernel-wide optimization specs cannot override per-range launch geometry"
+            )
+        with python_compile_profile_event(
+            f"python.kernel.ensure_compiled_with_kernel_optimization_spec:{self.func.__name__}"
+        ):
+            instance_id, arg_features = self.mapper.lookup(args)
+            key = (
+                self.func,
+                instance_id,
+                self.autodiff_mode,
+                spec.compilation_specialization_key,
+                False,
+            )
+            if (
+                key not in self._task_launch_policy_manifests
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                raise TaichiRuntimeError(
+                    "A cold kernel optimization specialization must be prepared "
+                    "on the Python main thread; call bound.report(*args) once "
+                    "before concurrent launches"
+                )
+            self.materialize(
+                key=key,
+                args=args,
+                arg_features=arg_features,
+                kernel_optimization_spec=spec,
+            )
+            return key
+
+    def _validate_kernel_optimization_specialization(self, key):
+        """Return the exact artifact manifest without assuming one range task."""
+        from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+        cached = self._task_launch_policy_manifests.get(key)
+        if cached is not None:
+            return cached
+        if threading.current_thread() is not threading.main_thread():
+            raise TaichiRuntimeError(
+                "A cold kernel optimization specialization must be prepared "
+                "on the Python main thread; call bound.report(*args) once "
+                "before concurrent launches"
+            )
+        kernel_cpp = self.compiled_kernels[key]
+        raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
+        tasks = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+        if not tasks:
+            raise TaichiRuntimeError(
+                "kernel optimization specialization produced no executable tasks"
+            )
+        self._task_launch_policy_manifests[key] = tasks
+        return tasks
+
     def _validate_task_launch_policy_specialization(self, key, policy):
         """Compile and validate a cold policy specialization without enqueueing it."""
         from taichi_forge.lang.task_manifest import OffloadedTaskManifest
@@ -2732,7 +2817,12 @@ class _TaskLaunchBinding:
             or spec.launch.block_mode != policy_spec.launch.block_mode
         ):
             raise ValueError("optimization spec block contract does not match binding")
-        return _TaskLaunchBinding(
+        binding_type = (
+            _KernelOptimizationBinding
+            if spec.backend.workgroup_size is None
+            else _TaskLaunchBinding
+        )
+        return binding_type(
             self._kernel,
             self.policy,
             self._bound_args,
@@ -2803,7 +2893,10 @@ class _TaskLaunchBinding:
         runtime = self._kernel.runtime
         key = self._fast_key
         if (
-            self.policy.mode == "auto"
+            (
+                self.policy.mode == "auto"
+                and not getattr(self, "_exact_kernel_optimization", False)
+            )
             or self._fallback_auto
             or key is None
             or self._fast_runtime is not runtime
@@ -2880,7 +2973,9 @@ class _TaskLaunchBinding:
             self._fast_runtime = self._kernel.runtime
             self._clear_retained_plan()
             return
-        if self.policy.mode == "auto":
+        if self.policy.mode == "auto" and not getattr(
+            self, "_exact_kernel_optimization", False
+        ):
             return
         runtime = self._kernel.runtime
         self._fast_runtime = runtime
@@ -3155,6 +3250,160 @@ class _TaskLaunchBinding:
         """Return the policy specialization's physical task manifest."""
 
         return self.report(*args, **kwargs).tasks
+
+
+class _KernelOptimizationBinding(_TaskLaunchBinding):
+    """Exact kernel-wide artifact specialization with automatic launch geometry."""
+
+    def __init__(
+        self,
+        kernel,
+        policy,
+        bound_args=(),
+        workload_profile=None,
+        optimization_spec=None,
+    ):
+        super().__init__(
+            kernel,
+            policy,
+            bound_args,
+            workload_profile=workload_profile,
+            optimization_spec=optimization_spec,
+        )
+        self._exact_kernel_optimization = True
+        self._auto_coordinator = None
+
+    def _validate_backend(self):
+        backend, kind = self._kernel._task_launch_backend_kind()
+        if kind != "native":
+            raise TaichiRuntimeError(
+                f"kernel optimization specs are unavailable on backend {backend}"
+            )
+        spec = self._optimization_spec
+        if backend != "cuda" and (
+            spec.ir.thread_local != "auto"
+            or spec.backend.cuda_min_blocks_per_sm != 2
+            or spec.artifact.cuda_max_registers is not None
+        ):
+            raise TaichiRuntimeError(
+                "CUDA TLS, launch-bounds, and max-register artifact options "
+                "are unavailable on the Vulkan backend"
+            )
+        if self._kernel.autodiff_mode != AutodiffMode.NONE:
+            raise TaichiRuntimeError(
+                "kernel optimization specs support primal direct JIT kernels only"
+            )
+        return backend
+
+    def _prepare_exact(self, args, kwargs):
+        self._validate_backend()
+        combined = (*self._bound_args, *args)
+        processed = _process_args(self._kernel, combined, kwargs)
+        key = self._kernel._ensure_compiled_with_kernel_optimization_spec(
+            self._optimization_spec, *processed
+        )
+        tasks = self._kernel._validate_kernel_optimization_specialization(key)
+        return processed, key, tasks
+
+    def _gpu_semantics_snapshot(self, *args, **kwargs):
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        _, key, _ = self._prepare_exact(args, kwargs)
+        raw = self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(
+            self._kernel.compiled_kernels[key]
+        )
+        return _build_resident_gpu_semantics(raw)
+
+    def _gpu_semantics_qualification(self, *args, **kwargs):
+        from taichi_forge.lang._gpu_semantics_qualification import (
+            _build_gpu_artifact_qualification,
+        )
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        _, key, _ = self._prepare_exact(args, kwargs)
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        snapshot = _build_resident_gpu_semantics(
+            self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+        )
+        started = time.perf_counter_ns()
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
+            kernel_cpp
+        )
+        fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
+        return _build_gpu_artifact_qualification(
+            snapshot, raw, fixed_cost_seconds
+        )
+
+    def __call__(self, *args, **kwargs):
+        try:
+            runtime = self._kernel.runtime
+            if (
+                runtime.target_tape is not None
+                or runtime.fwd_mode_manager is not None
+                or runtime.grad_replaced
+            ):
+                raise TaichiRuntimeError(
+                    "kernel optimization specs cannot launch inside an "
+                    "automatic differentiation context"
+                )
+            combined = (*self._bound_args, *args)
+            processed = _process_args(self._kernel, combined, kwargs)
+            expected_key = self._specialization_key(processed)
+            if (
+                self._fast_runtime is runtime
+                and self._fast_key == expected_key
+                and self._fast_kernel_cpp is not None
+                and self._kernel.compiled_kernels.get(self._fast_key)
+                is self._fast_kernel_cpp
+            ):
+                retained_plan = self._prepare_retained_plan(processed)
+                if retained_plan is not None:
+                    return self._kernel._launch_with_ordinary_plan(
+                        retained_plan, processed
+                    )
+                result = self._kernel.launch_kernel(
+                    self._fast_kernel_cpp, *processed
+                )
+                self._prepare_retained_plan(processed)
+                return result
+            _, key, _ = self._prepare_exact(args, kwargs)
+            result = self._kernel.launch_kernel(
+                self._kernel.compiled_kernels[key], *processed
+            )
+            self._refresh_fast_path(processed_args=processed)
+            return result
+        except (TaichiCompilationError, TaichiRuntimeError) as exc:
+            if impl.get_runtime().print_full_traceback:
+                raise
+            raise type(exc)("\n" + str(exc)) from None
+
+    def report(self, *args, **kwargs):
+        from taichi_forge.lang.task_launch import (
+            TaskLaunchReport,
+            _task_launch_resource_reports,
+        )
+
+        backend = self._validate_backend()
+        processed, _, tasks = self._prepare_exact(args, kwargs)
+        report = TaskLaunchReport(
+            policy=self.policy,
+            backend=backend,
+            status="applied",
+            reason=(
+                "kernel-wide optimization spec materialized without "
+                "overriding per-task launch geometry"
+            ),
+            tasks=tasks,
+            resources=_task_launch_resource_reports(
+                tasks, self.policy, "auto", impl.current_cfg()
+            ),
+        )
+        self._refresh_fast_path(report, processed)
+        return report
 
 
 # For a Taichi class definition like below:

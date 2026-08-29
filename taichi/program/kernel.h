@@ -52,6 +52,16 @@ class TI_DLL_EXPORT Kernel : public Callable {
     std::string optimization_spec_identity;
   };
 
+  struct KernelOptimizationSpec {
+    TaskLaunchThreadLocalMode thread_local_mode{
+        TaskLaunchThreadLocalMode::automatic};
+    int cuda_min_blocks_per_sm{2};
+    // -1 inherits CompileConfig::gpu_max_reg. Zero requests the CUDA
+    // compiler/driver default, and a positive value is an explicit cap.
+    int cuda_max_registers{-1};
+    std::string identity;
+  };
+
   std::vector<SNode *> no_activate;
 
   bool is_accessor{false};
@@ -121,6 +131,19 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   std::string task_launch_policy_cache_key() const;
 
+  // Kernel-wide immutable optimization metadata. Unlike TaskLaunchPolicy,
+  // this does not assume that the frontend contains exactly one range-for.
+  void set_kernel_optimization_spec(
+      const std::string &identity,
+      const std::string &thread_local_mode,
+      int cuda_min_blocks_per_sm,
+      int cuda_max_registers);
+
+  const std::optional<KernelOptimizationSpec> &get_kernel_optimization_spec()
+      const;
+
+  std::string optimization_spec_cache_key() const;
+
   const std::string &optimization_spec_identity() const;
 
   const std::vector<int> &snode_tree_dependencies() const {
@@ -165,6 +188,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;
   std::optional<TaskLaunchPolicy> task_launch_policy_;
+  std::optional<KernelOptimizationSpec> kernel_optimization_spec_;
   mutable std::mutex snode_tree_dependencies_mutex_;
   mutable std::atomic<SNodeTreeDependencyState> snode_tree_dependency_state_{
       SNodeTreeDependencyState::unknown};
