@@ -28,6 +28,7 @@ def _compileiq_import_error():
 class _CompileIQVariantSelection:
     variant_id: str
     compilation_id: str
+    selections: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,10 @@ def _canonical_json(value):
         ensure_ascii=True,
         allow_nan=False,
     )
+
+
+def _compileiq_axis_value(value):
+    return "auto" if value is None else value
 
 
 @dataclass(frozen=True)
@@ -452,6 +457,99 @@ class _CompileIQVariantAdapter:
             )
         }
 
+    def _factorized_contract(self, *, parameter_prefix=""):
+        if getattr(self._session, "structural_mode", "one_axis") != "cartesian":
+            raise ValueError(
+                "factorized CompileIQ parameters require a cartesian refinement "
+                "session"
+            )
+        if not isinstance(parameter_prefix, str):
+            raise TypeError("factorized parameter_prefix must be a string")
+        variants = tuple(self._variants.values())
+        selection_rows = tuple(dict(variant.selections) for variant in variants)
+        if not selection_rows or any(not row for row in selection_rows):
+            raise ValueError("factorized variants require explicit selections")
+        dimension_names = tuple(selection_rows[0])
+        if any(tuple(row) != dimension_names for row in selection_rows):
+            raise RuntimeError("variant selection dimensions are inconsistent")
+        values_by_dimension = {}
+        for dimension_name in dimension_names:
+            values = tuple(dict.fromkeys(row[dimension_name] for row in selection_rows))
+            parameter = f"{parameter_prefix}{dimension_name}"
+            if not _PARAMETER_PATTERN.fullmatch(parameter):
+                raise ValueError(
+                    f"invalid factorized CompileIQ parameter {parameter!r}"
+                )
+            values_by_dimension[dimension_name] = (parameter, values)
+        exposed = {
+            dimension_name: payload
+            for dimension_name, payload in values_by_dimension.items()
+            if len(payload[1]) > 1
+        }
+        if not exposed:
+            raise ValueError("cartesian refinement has no varying dimensions")
+        return selection_rows, values_by_dimension, exposed
+
+    def factorized_search_space(self, *, parameter_prefix=""):
+        """Expose every legal refinement axis as a native CompileIQ choice."""
+
+        try:
+            from compileiq.search_spaces.base import choice
+        except ImportError as error:
+            raise _compileiq_import_error() from error
+        _, _, exposed = self._factorized_contract(parameter_prefix=parameter_prefix)
+        return {
+            parameter: choice(tuple(_compileiq_axis_value(value) for value in values))
+            for parameter, values in exposed.values()
+        }
+
+    def select_factorized(self, parameters, *, parameter_prefix=""):
+        if not isinstance(parameters, dict):
+            raise TypeError("CompileIQ parameters must be a dictionary")
+        selection_rows, dimensions, exposed = self._factorized_contract(
+            parameter_prefix=parameter_prefix
+        )
+        expected = {parameter for parameter, _ in exposed.values()}
+        if set(parameters) != expected:
+            raise ValueError(
+                "factorized CompileIQ parameters must exactly match the "
+                f"refinement axes; expected={tuple(sorted(expected))}"
+            )
+        requested = {}
+        for dimension_name, (parameter, legal_values) in dimensions.items():
+            if dimension_name not in exposed:
+                requested[dimension_name] = legal_values[0]
+                continue
+            encoded = parameters[parameter]
+            decoded = None if encoded == "auto" and None in legal_values else encoded
+            if decoded not in legal_values:
+                raise ValueError(
+                    f"invalid value {encoded!r} for CompileIQ axis {parameter!r}"
+                )
+            requested[dimension_name] = decoded
+        matches = tuple(
+            variant
+            for variant, row in zip(self._variants.values(), selection_rows)
+            if all(row[name] == value for name, value in requested.items())
+        )
+        if len(matches) != 1:
+            raise RuntimeError(
+                "factorized CompileIQ selection did not resolve one legal variant"
+            )
+        variant = matches[0]
+        return _CompileIQVariantSelection(
+            variant_id=variant.variant_id,
+            compilation_id=variant.compilation_id,
+            selections=tuple(variant.selections),
+        )
+
+    def bind_factorized(self, parameters, *, parameter_prefix=""):
+        return self._session.bind(
+            self.select_factorized(
+                parameters, parameter_prefix=parameter_prefix
+            ).variant_id
+        )
+
     def paired_schedule(
         self,
         stage="structural",
@@ -513,6 +611,7 @@ class _CompileIQVariantAdapter:
         return _CompileIQVariantSelection(
             variant_id=variant_id,
             compilation_id=variant.compilation_id,
+            selections=tuple(getattr(variant, "selections", ())),
         )
 
     def bind(self, parameters):
@@ -530,6 +629,9 @@ class _CompileIQVariantAdapter:
         return {
             "schema_version": 3,
             "parameter": self._parameter,
+            "factorized_refinement_available": (
+                getattr(self._session, "structural_mode", "one_axis") == "cartesian"
+            ),
             "structural_variant_ids": self._structural_ids,
             "dimensions": tuple(
                 _gpu_tuning_dimension_manifest(dimension)

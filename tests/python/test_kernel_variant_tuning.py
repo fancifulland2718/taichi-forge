@@ -18,8 +18,8 @@ def test_kernel_variant_session_bounds_and_deduplicates_launch_only_axes():
 
     session = _KernelVariantSession(reduce, (values,))
     assert not session.rejections
-    assert len(session.variant_ids()) == 128
-    assert len(session.compilation_variant_ids()) == 8
+    assert len(session.variant_ids()) == 384
+    assert len(session.compilation_variant_ids()) == 24
     assert all(len(group.variant_ids) == 16 for group in session.compilation_groups)
     assert (
         len(
@@ -60,12 +60,26 @@ def test_kernel_variant_session_drops_ineffective_tls_axis():
 
     session = _KernelVariantSession(transform, (values,))
     assert not session.rejections
-    assert len(session.variant_ids()) == 64
-    assert len(session.compilation_variant_ids()) == 4
+    assert len(session.variant_ids()) == 320
+    assert len(session.compilation_variant_ids()) == 20
     assert all(
         session.variant(variant_id).spec.ir.thread_local == "auto"
         for variant_id in session.variant_ids()
     )
+
+    refinement = session.refinement(128)
+    assert refinement.structural_mode == "cartesian"
+    assert len(refinement.compilation_groups) == 9
+    assert len(refinement.variant_ids()) == 144
+    combined = tuple(
+        variant_id
+        for variant_id in refinement.variant_ids()
+        if refinement.variant(variant_id).spec.backend.cuda_min_blocks_per_sm == 1
+        and refinement.variant(variant_id).spec.artifact.cuda_max_registers == 24
+        and refinement.variant(variant_id).spec.launch.range_work_per_thread_target == 4
+        and refinement.variant(variant_id).spec.launch.grid_residency_waves == 2
+    )
+    assert len(combined) == 1
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -99,7 +113,7 @@ def test_kernel_variant_session_reuses_compilation_and_native_memory():
         if len(key) == 5 and key[3] in compilation_keys
     }
     assert set(compiled_variants) == compilation_keys
-    assert len({id(kernel_cpp) for kernel_cpp in compiled_variants.values()}) == 8
+    assert len({id(kernel_cpp) for kernel_cpp in compiled_variants.values()}) == 24
     assert all(report.status == "applied" for report in reports)
 
     for binding in bindings:

@@ -56,6 +56,35 @@ class _FakeSession:
         return ("bound", variant_id)
 
 
+class _FakeCartesianSession(_FakeSession):
+    structural_mode = "cartesian"
+
+    def __init__(self):
+        self._variants = {}
+        groups = []
+        for min_blocks in (1, 2):
+            for max_registers in (None, 24):
+                variant_id = f"v-{min_blocks}-{max_registers}"
+                selections = (
+                    ("cuda_min_blocks_per_sm", min_blocks),
+                    ("cuda_max_registers", max_registers),
+                )
+                self._variants[variant_id] = SimpleNamespace(
+                    variant_id=variant_id,
+                    compilation_id=variant_id,
+                    spec=SimpleNamespace(stable_payload=variant_id),
+                    selections=selections,
+                )
+                groups.append(
+                    SimpleNamespace(
+                        compilation_id=variant_id,
+                        representative_variant_id=variant_id,
+                        variant_ids=(variant_id,),
+                    )
+                )
+        self.compilation_groups = tuple(groups)
+
+
 def _install_fake_compileiq(monkeypatch):
     package = ModuleType("compileiq")
     search_spaces = ModuleType("compileiq.search_spaces")
@@ -143,6 +172,29 @@ def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):
         "v1-auto"
     )
     assert adapter.manifest()["parameter"] == "forge_variant_composite"
+
+
+def test_compileiq_adapter_exposes_legal_cartesian_refinement_axes(monkeypatch):
+    _install_fake_compileiq(monkeypatch)
+    adapter = _CompileIQVariantAdapter(_FakeCartesianSession())
+
+    assert adapter.factorized_search_space() == {
+        "cuda_min_blocks_per_sm": ("choice", (1, 2)),
+        "cuda_max_registers": ("choice", ("auto", 24)),
+    }
+    selected = adapter.select_factorized(
+        {"cuda_min_blocks_per_sm": 1, "cuda_max_registers": 24}
+    )
+    assert selected.variant_id == "v-1-24"
+    assert adapter.bind_factorized(
+        {"cuda_min_blocks_per_sm": 2, "cuda_max_registers": "auto"}
+    ) == ("bound", "v-2-None")
+    assert adapter.manifest()["factorized_refinement_available"]
+
+    with pytest.raises(ValueError, match="exactly match"):
+        adapter.select_factorized({"cuda_min_blocks_per_sm": 1})
+    with pytest.raises(ValueError, match="cartesian refinement"):
+        _CompileIQVariantAdapter(_FakeSession()).factorized_search_space()
 
 
 @pytest.mark.parametrize("parameter", ["", "1variant", "forge.variant", None])
@@ -417,8 +469,8 @@ def test_compileiq_staged_plan_covers_real_bounded_cuda_variant_groups():
     }
     launch_stages = plan.launch_stages(measurements)
 
-    assert len(structural_ids) == 8
-    assert len(plan.structural_stage.schedule) == 32
+    assert len(structural_ids) == 24
+    assert len(plan.structural_stage.schedule) == 96
     assert len(launch_stages) == 2
     assert all(len(stage.candidate_ids) == 16 for stage in launch_stages)
     assert all(len(stage.schedule) == 64 for stage in launch_stages)

@@ -1,11 +1,13 @@
 """Private bounded Forge kernel-variant materialization."""
 
 from dataclasses import dataclass
+from itertools import product
 from types import MappingProxyType
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._kernel_optimization import (
+    _ArtifactOptions,
     _BackendCodegenOptions,
     _IrOptimizationOptions,
     _KernelOptimizationSpec,
@@ -17,7 +19,11 @@ from taichi_forge.lang._kernel_optimization import (
 _BLOCK_DIMS = (64, 128, 256, 512)
 _GRID_RESIDENCY_WAVES = (None, 1, 2, 4)
 _RANGE_WORK_PER_THREAD_TARGETS = (1, 2, 4, 8)
-_MAX_VARIANTS = 128
+_COMPILE_TIERS = ("inherit", "full")
+_DEFAULT_COMPILE_TIERS = ("inherit",)
+_CUDA_MIN_BLOCKS_PER_SM = (1, 2, 4)
+_CUDA_MAX_REGISTERS = (None, 24, 48)
+_MAX_VARIANTS = 512
 
 
 @dataclass(frozen=True)
@@ -56,9 +62,15 @@ class _KernelVariantSession:
         *,
         block_dims=_BLOCK_DIMS,
         range_work_per_thread_targets=_RANGE_WORK_PER_THREAD_TARGETS,
+        compile_tiers=_DEFAULT_COMPILE_TIERS,
+        cuda_min_blocks_per_sm=_CUDA_MIN_BLOCKS_PER_SM,
+        cuda_max_registers=_CUDA_MAX_REGISTERS,
+        structural_mode="one_axis",
     ):
         if impl.current_cfg().arch != _ti_core.Arch.cuda:
             raise RuntimeError("kernel variant sessions require the CUDA backend")
+        if structural_mode not in ("one_axis", "cartesian"):
+            raise ValueError("structural_mode must be 'one_axis' or 'cartesian'")
         requested = tuple(block_dims)
         if not requested or any(value not in _BLOCK_DIMS for value in requested):
             raise ValueError(
@@ -83,15 +95,74 @@ class _KernelVariantSession:
             raise ValueError(
                 "range_work_per_thread_targets must not contain duplicates"
             )
+        requested_tiers = tuple(compile_tiers)
+        if (
+            not requested_tiers
+            or requested_tiers[0] != "inherit"
+            or any(value not in _COMPILE_TIERS for value in requested_tiers)
+        ):
+            raise ValueError(
+                "compile_tiers must start with 'inherit' and be a non-empty "
+                "subset of ('inherit', 'full')"
+            )
+        requested_min_blocks = tuple(cuda_min_blocks_per_sm)
+        if (
+            not requested_min_blocks
+            or 2 not in requested_min_blocks
+            or any(
+                value not in _CUDA_MIN_BLOCKS_PER_SM for value in requested_min_blocks
+            )
+        ):
+            raise ValueError(
+                "cuda_min_blocks_per_sm must contain 2 and be a non-empty "
+                "subset of (1, 2, 4)"
+            )
+        requested_registers = tuple(cuda_max_registers)
+        if (
+            not requested_registers
+            or requested_registers[0] is not None
+            or any(value not in _CUDA_MAX_REGISTERS for value in requested_registers)
+        ):
+            raise ValueError(
+                "cuda_max_registers must start with None and be a non-empty "
+                "subset of (None, 24, 48)"
+            )
+        for name, values in (
+            ("compile_tiers", requested_tiers),
+            ("cuda_min_blocks_per_sm", requested_min_blocks),
+            ("cuda_max_registers", requested_registers),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"{name} must not contain duplicates")
+        if impl.current_cfg().compile_tier == "full":
+            requested_tiers = ("inherit",)
+        if structural_mode == "cartesian" and len(requested) != 1:
+            raise ValueError(
+                "cartesian structural refinement requires exactly one block_dim"
+            )
 
         self._kernel = kernel
         self._args = tuple(args)
+        self._block_dims = requested
+        self._range_work_per_thread_targets = requested_work
+        self._compile_tiers = requested_tiers
+        self._cuda_min_blocks_per_sm = requested_min_blocks
+        self._cuda_max_registers = requested_registers
+        self._structural_mode = structural_mode
         variants = []
         rejections = []
         tiling_recipes = {}
         dimension_contract = None
         for block_dim in requested:
-            baseline_spec = self._spec(block_dim, "auto", 1, None)
+            baseline_spec = self._spec(
+                block_dim,
+                "auto",
+                1,
+                None,
+                "inherit",
+                2,
+                None,
+            )
             baseline_binding = _bind_kernel_optimization_spec(
                 kernel, baseline_spec
             )
@@ -99,7 +170,11 @@ class _KernelVariantSession:
                 report = baseline_binding.report(*self._args)
                 snapshot = baseline_binding._gpu_semantics_snapshot(*self._args)
                 task, dimensions, resource_envelope = self._eligible_range_task(
-                    report, snapshot
+                    report,
+                    snapshot,
+                    compile_tiers=requested_tiers,
+                    cuda_min_blocks_per_sm=requested_min_blocks,
+                    cuda_max_registers=requested_registers,
                 )
             except (RuntimeError, TypeError, ValueError) as error:
                 rejections.append(_KernelVariantRejection(block_dim, str(error)))
@@ -118,6 +193,9 @@ class _KernelVariantSession:
                 _GpuTileStrategy,
             )
             from taichi_forge.lang._gpu_semantics_tuning import (
+                _COMPILE_TIER_DIMENSION,
+                _CUDA_MAX_REGISTERS_DIMENSION,
+                _CUDA_MIN_BLOCKS_DIMENSION,
                 _RESIDENCY_DIMENSION,
                 _RANGE_WORK_PER_THREAD_DIMENSION,
                 _TLS_DIMENSION,
@@ -151,8 +229,15 @@ class _KernelVariantSession:
                     _KernelVariantRejection(block_dim, workgroup.status.reason)
                 )
                 continue
-            tls_modes = _dimension_by_name(
-                dimensions, _TLS_DIMENSION
+            tls_modes = _dimension_by_name(dimensions, _TLS_DIMENSION).legal_values
+            compile_tier_values = _dimension_by_name(
+                dimensions, _COMPILE_TIER_DIMENSION
+            ).legal_values
+            min_blocks_values = _dimension_by_name(
+                dimensions, _CUDA_MIN_BLOCKS_DIMENSION
+            ).legal_values
+            max_register_values = _dimension_by_name(
+                dimensions, _CUDA_MAX_REGISTERS_DIMENSION
             ).legal_values
             residency_dimension = _dimension_by_name(
                 dimensions, _RESIDENCY_DIMENSION
@@ -178,7 +263,50 @@ class _KernelVariantSession:
                         )
                     )
                     continue
-            for thread_local in tls_modes:
+            baseline_structural = {
+                _WORKGROUP_DIMENSION: block_dim,
+                _TLS_DIMENSION: "auto",
+                _COMPILE_TIER_DIMENSION: "inherit",
+                _CUDA_MIN_BLOCKS_DIMENSION: 2,
+                _CUDA_MAX_REGISTERS_DIMENSION: None,
+            }
+            if structural_mode == "cartesian":
+                structural_selections = [
+                    {
+                        _WORKGROUP_DIMENSION: block_dim,
+                        _TLS_DIMENSION: thread_local,
+                        _COMPILE_TIER_DIMENSION: compile_tier,
+                        _CUDA_MIN_BLOCKS_DIMENSION: min_blocks,
+                        _CUDA_MAX_REGISTERS_DIMENSION: max_registers,
+                    }
+                    for (
+                        thread_local,
+                        compile_tier,
+                        min_blocks,
+                        max_registers,
+                    ) in product(
+                        tls_modes,
+                        compile_tier_values,
+                        min_blocks_values,
+                        max_register_values,
+                    )
+                ]
+            else:
+                structural_selections = [baseline_structural]
+                for dimension_name, values in (
+                    (_TLS_DIMENSION, tls_modes),
+                    (_COMPILE_TIER_DIMENSION, compile_tier_values),
+                    (_CUDA_MIN_BLOCKS_DIMENSION, min_blocks_values),
+                    (_CUDA_MAX_REGISTERS_DIMENSION, max_register_values),
+                ):
+                    for value in values:
+                        if value == baseline_structural[dimension_name]:
+                            continue
+                        selection = dict(baseline_structural)
+                        selection[dimension_name] = value
+                        structural_selections.append(selection)
+
+            for structural in structural_selections:
                 for work_per_thread in work_values:
                     tiling_recipe = executable_tiling_by_work.get(
                         work_per_thread
@@ -190,11 +318,16 @@ class _KernelVariantSession:
                         )
                     for waves in residency_values:
                         spec = self._spec(
-                            block_dim, thread_local, work_per_thread, waves
+                            block_dim,
+                            structural[_TLS_DIMENSION],
+                            work_per_thread,
+                            waves,
+                            structural[_COMPILE_TIER_DIMENSION],
+                            structural[_CUDA_MIN_BLOCKS_DIMENSION],
+                            structural[_CUDA_MAX_REGISTERS_DIMENSION],
                         )
                         selections = {
-                            _WORKGROUP_DIMENSION: block_dim,
-                            _TLS_DIMENSION: thread_local,
+                            **structural,
                             _RANGE_WORK_PER_THREAD_DIMENSION: work_per_thread,
                             _RESIDENCY_DIMENSION: waves,
                         }
@@ -249,10 +382,25 @@ class _KernelVariantSession:
         )
 
     @staticmethod
-    def _spec(block_dim, thread_local, work_per_thread, waves):
+    def _spec(
+        block_dim,
+        thread_local,
+        work_per_thread,
+        waves,
+        compile_tier,
+        cuda_min_blocks_per_sm,
+        cuda_max_registers,
+    ):
         return _KernelOptimizationSpec(
-            ir=_IrOptimizationOptions(thread_local=thread_local),
-            backend=_BackendCodegenOptions(workgroup_size=block_dim),
+            ir=_IrOptimizationOptions(
+                thread_local=thread_local,
+                compile_tier=compile_tier,
+            ),
+            backend=_BackendCodegenOptions(
+                workgroup_size=block_dim,
+                cuda_min_blocks_per_sm=cuda_min_blocks_per_sm,
+            ),
+            artifact=_ArtifactOptions(cuda_max_registers=cuda_max_registers),
             launch=_LaunchOptions(
                 block_mode="require",
                 grid_residency_waves=waves,
@@ -261,7 +409,14 @@ class _KernelVariantSession:
         )
 
     @staticmethod
-    def _eligible_range_task(report, snapshot):
+    def _eligible_range_task(
+        report,
+        snapshot,
+        *,
+        compile_tiers,
+        cuda_min_blocks_per_sm,
+        cuda_max_registers,
+    ):
         if report.backend != "cuda" or report.status != "applied":
             raise RuntimeError("variant baseline did not apply on CUDA")
         from taichi_forge.lang._gpu_semantics import _GpuAvailability
@@ -278,6 +433,9 @@ class _KernelVariantSession:
             canonical_workgroup_sizes=_BLOCK_DIMS,
             residency_values=_GRID_RESIDENCY_WAVES,
             range_work_per_thread_values=_RANGE_WORK_PER_THREAD_TARGETS,
+            compile_tier_values=compile_tiers,
+            cuda_min_blocks_values=cuda_min_blocks_per_sm,
+            cuda_max_register_values=cuda_max_registers,
         )
         workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
         if workgroup.status.availability != _GpuAvailability.PROVEN:
@@ -311,6 +469,24 @@ class _KernelVariantSession:
     @property
     def tiling_recipes(self):
         return tuple(self._tiling_recipes.values())
+
+    @property
+    def structural_mode(self):
+        return self._structural_mode
+
+    def refinement(self, block_dim):
+        if block_dim not in self._block_dims:
+            raise ValueError("refinement block_dim must belong to the parent session")
+        return _KernelVariantSession(
+            self._kernel,
+            self._args,
+            block_dims=(block_dim,),
+            range_work_per_thread_targets=self._range_work_per_thread_targets,
+            compile_tiers=self._compile_tiers,
+            cuda_min_blocks_per_sm=self._cuda_min_blocks_per_sm,
+            cuda_max_registers=self._cuda_max_registers,
+            structural_mode="cartesian",
+        )
 
     def variant_ids(self):
         return tuple(self._variants)
