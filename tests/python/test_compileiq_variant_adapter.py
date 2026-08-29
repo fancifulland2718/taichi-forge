@@ -360,10 +360,25 @@ def test_compileiq_staged_plan_exhausts_bounded_groups_before_qualification():
     )
     assert len(plan.qualification_stage(finalists).schedule) == 20
 
-    ptxas = plan.ptxas_stage("v0-one", ("acf-baseline", "acf-candidate"))
+    with pytest.raises(RuntimeError, match="disabled by default"):
+        plan.ptxas_stage("v0-one", ("acf-baseline", "acf-candidate"))
+    assert plan.manifest()["compileiq_stage"] == "forge_variants_only"
+    assert not plan.manifest()["ptxas_search_enabled"]
+
+    ptxas_plan = adapter.staged_plan(include_ptxas_search=True)
+    ptxas = ptxas_plan.ptxas_stage(
+        "v0-one", ("acf-baseline", "acf-candidate")
+    )
     assert ptxas.candidate_kind == "ptxas_control"
     assert ptxas.forge_variant_id == "v0-one"
-    assert plan.manifest()["compileiq_stage"] == "optional_ptxas_control_only"
+    assert ptxas_plan.manifest()["compileiq_stage"] == "optional_ptxas_control_only"
+    assert ptxas_plan.manifest()["ptxas_search_enabled"]
+
+
+def test_compileiq_staged_plan_requires_boolean_ptxas_opt_in():
+    adapter = _CompileIQVariantAdapter(_FakeSession())
+    with pytest.raises(TypeError, match="include_ptxas_search"):
+        adapter.staged_plan(include_ptxas_search="yes")
 
 
 def test_compileiq_final_qualification_binds_exact_scope_and_worst_gate():

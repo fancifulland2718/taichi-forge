@@ -665,6 +665,7 @@ class _CompileIQVariantAdapter:
         launch_blocks=4,
         qualification_blocks=_MIN_QUALIFICATION_BLOCKS,
         structural_shortlist=4,
+        include_ptxas_search=False,
     ):
         return _CompileIQStagedSearchPlan(
             self,
@@ -672,6 +673,7 @@ class _CompileIQVariantAdapter:
             launch_blocks=launch_blocks,
             qualification_blocks=qualification_blocks,
             structural_shortlist=structural_shortlist,
+            include_ptxas_search=include_ptxas_search,
         )
 
 
@@ -691,7 +693,10 @@ class _CompileIQStagedSearchPlan:
         launch_blocks,
         qualification_blocks,
         structural_shortlist,
+        include_ptxas_search,
     ):
+        if not isinstance(include_ptxas_search, bool):
+            raise TypeError("include_ptxas_search must be a bool")
         if (
             isinstance(structural_shortlist, bool)
             or not isinstance(structural_shortlist, int)
@@ -705,6 +710,7 @@ class _CompileIQStagedSearchPlan:
         self._launch_blocks = launch_blocks
         self._qualification_blocks = qualification_blocks
         self._structural_shortlist = structural_shortlist
+        self._include_ptxas_search = include_ptxas_search
         self._structural_stage = _CompileIQSearchStage(
             stage_id="forge-structural",
             candidate_kind="forge_structural",
@@ -772,6 +778,13 @@ class _CompileIQStagedSearchPlan:
         )
 
     def ptxas_stage(self, forge_variant_id, control_ids, *, blocks=4):
+        if not self._include_ptxas_search:
+            raise RuntimeError(
+                "PTXAS/ACF search is disabled by default because prior "
+                "qualification found no material benefit; pass "
+                "include_ptxas_search=True to staged_plan() for an explicit "
+                "provider experiment"
+            )
         if forge_variant_id not in self._adapter._variants:
             raise KeyError(f"unknown Forge kernel variant {forge_variant_id!r}")
         return _CompileIQSearchStage(
@@ -838,7 +851,12 @@ class _CompileIQStagedSearchPlan:
             "schema_version": 1,
             "execution": "windows_subprocess_serial",
             "forge_stages": ("structural", "launch"),
-            "compileiq_stage": "optional_ptxas_control_only",
+            "compileiq_stage": (
+                "optional_ptxas_control_only"
+                if self._include_ptxas_search
+                else "forge_variants_only"
+            ),
+            "ptxas_search_enabled": self._include_ptxas_search,
             "qualification": "independent_global_baseline",
             "structural_stage": self.structural_stage.manifest(),
             "structural_shortlist": self._structural_shortlist,
