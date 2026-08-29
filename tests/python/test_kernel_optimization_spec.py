@@ -66,8 +66,24 @@ def test_kernel_optimization_spec_separates_all_bounded_axes():
                 block_mode="hint", range_work_per_thread_target=4
             ),
         ),
+        _KernelOptimizationSpec(
+            ir=_IrOptimizationOptions(compile_tier="full"),
+            backend=_BackendCodegenOptions(workgroup_size=128),
+            launch=_LaunchOptions(block_mode="hint"),
+        ),
+        _KernelOptimizationSpec(
+            backend=_BackendCodegenOptions(
+                workgroup_size=128, cuda_min_blocks_per_sm=1
+            ),
+            launch=_LaunchOptions(block_mode="hint"),
+        ),
+        _KernelOptimizationSpec(
+            artifact=_ArtifactOptions(cuda_max_registers=64),
+            backend=_BackendCodegenOptions(workgroup_size=128),
+            launch=_LaunchOptions(block_mode="hint"),
+        ),
     )
-    assert len({baseline.identity, *(variant.identity for variant in variants)}) == 7
+    assert len({baseline.identity, *(variant.identity for variant in variants)}) == 10
 
 
 def test_grid_residency_has_full_identity_but_shares_compilation_identity():
@@ -117,9 +133,12 @@ def test_private_binding_rejects_recursive_provider_tuning():
         lambda: _LaunchOptions(grid_residency_waves=3),
         lambda: _LaunchOptions(range_work_per_thread_target=3),
         lambda: _IrOptimizationOptions(thread_local="sometimes"),
+        lambda: _IrOptimizationOptions(compile_tier="aggressive"),
+        lambda: _BackendCodegenOptions(cuda_min_blocks_per_sm=3),
+        lambda: _ArtifactOptions(cuda_max_registers=8),
         lambda: _ArtifactOptions(provider_mode="recursive"),
-        # A per-kernel register cap is intentionally unavailable until it has
-        # physical lowering; identity-only options must fail closed.
+        # The old backend-neutral spelling remains unavailable; CUDA uses the
+        # explicit cuda_max_registers artifact contract above.
         lambda: _ArtifactOptions(max_registers=64),
     ),
 )

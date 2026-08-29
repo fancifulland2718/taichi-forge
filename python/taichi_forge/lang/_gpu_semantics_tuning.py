@@ -28,7 +28,10 @@ from taichi_forge.lang._gpu_semantics import (
 
 _WORKGROUP_DIMENSION = "workgroup_shape_x"
 _TLS_DIMENSION = "compiler_thread_local_strategy"
+_COMPILE_TIER_DIMENSION = "compiler_compile_tier"
 _INNER_LOOP_UNROLL_DIMENSION = "inner_loop_unroll_strategy"
+_CUDA_MIN_BLOCKS_DIMENSION = "cuda_min_blocks_per_sm"
+_CUDA_MAX_REGISTERS_DIMENSION = "cuda_max_registers"
 _RANGE_WORK_PER_THREAD_DIMENSION = "range_work_per_thread_target"
 _RESIDENCY_DIMENSION = "cuda_grid_residency_waves"
 
@@ -419,6 +422,125 @@ def _tls_dimension(snapshot):
         ),
         autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
         status=_status_proven("cuda_task_manifest_thread_local_scratch"),
+    )
+
+
+def _compile_tier_dimension(snapshot, legal_values):
+    base = dict(
+        name=_COMPILE_TIER_DIMENSION,
+        snapshot=snapshot,
+        locus=_GpuTuningLocus.LOGICAL_TRANSFORM,
+        controller="kernel_compile_tier_override",
+        binding_time=_GpuBindingTime.CODEGEN,
+        physical_effect=_GpuPhysicalEffect.ARTIFACT,
+        equivalence_key="artifact:compiler_compile_tier",
+        bottleneck_classes=(
+            _GpuBottleneckClass.COMPUTE,
+            _GpuBottleneckClass.MEMORY_LATENCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+    )
+    if snapshot.program.autodiff_role != _GpuAutodiffRole.PRIMAL:
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                "compile-tier variants require an independent AD oracle"
+            ),
+        )
+    return _GpuTuningDimension(
+        name=_COMPILE_TIER_DIMENSION,
+        locus=_GpuTuningLocus.LOGICAL_TRANSFORM,
+        backend_applicability=(snapshot.target.backend,),
+        legal_values=tuple(legal_values),
+        required_capabilities=(),
+        controller="kernel_compile_tier_override",
+        binding_time=_GpuBindingTime.CODEGEN,
+        physical_effect=_GpuPhysicalEffect.ARTIFACT,
+        equivalence_key="artifact:compiler_compile_tier",
+        bottleneck_classes=(
+            _GpuBottleneckClass.COMPUTE,
+            _GpuBottleneckClass.MEMORY_LATENCY,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+        status=_status_proven("immutable_per_kernel_compile_tier"),
+    )
+
+
+def _cuda_artifact_dimension(
+    snapshot,
+    name,
+    legal_values,
+    *,
+    controller,
+    binding_time,
+    equivalence_key,
+):
+    base = dict(
+        name=name,
+        snapshot=snapshot,
+        locus=_GpuTuningLocus.ARTIFACT_CODEGEN,
+        controller=controller,
+        binding_time=binding_time,
+        physical_effect=_GpuPhysicalEffect.ARTIFACT,
+        equivalence_key=equivalence_key,
+        bottleneck_classes=(
+            _GpuBottleneckClass.OCCUPANCY,
+            _GpuBottleneckClass.COMPUTE,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+    )
+    if snapshot.target.backend.value != "cuda":
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                f"{name} is implemented only by CUDA artifact lowering"
+            ),
+        )
+    if snapshot.program.autodiff_role != _GpuAutodiffRole.PRIMAL:
+        return _blocked_dimension(
+            **base,
+            status=_status_unsupported(
+                f"{name} variants require an independent AD oracle"
+            ),
+        )
+    return _GpuTuningDimension(
+        name=name,
+        locus=_GpuTuningLocus.ARTIFACT_CODEGEN,
+        backend_applicability=(snapshot.target.backend,),
+        legal_values=tuple(legal_values),
+        required_capabilities=(),
+        controller=controller,
+        binding_time=binding_time,
+        physical_effect=_GpuPhysicalEffect.ARTIFACT,
+        equivalence_key=equivalence_key,
+        bottleneck_classes=(
+            _GpuBottleneckClass.OCCUPANCY,
+            _GpuBottleneckClass.COMPUTE,
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+        status=_status_proven(controller),
+    )
+
+
+def _cuda_min_blocks_dimension(snapshot, legal_values):
+    return _cuda_artifact_dimension(
+        snapshot,
+        _CUDA_MIN_BLOCKS_DIMENSION,
+        legal_values,
+        controller="nvvm_launch_bounds_minctasm",
+        binding_time=_GpuBindingTime.CODEGEN,
+        equivalence_key="artifact:cuda_min_blocks_per_sm",
+    )
+
+
+def _cuda_max_registers_dimension(snapshot, legal_values):
+    return _cuda_artifact_dimension(
+        snapshot,
+        _CUDA_MAX_REGISTERS_DIMENSION,
+        legal_values,
+        controller="cuda_artifact_max_registers",
+        binding_time=_GpuBindingTime.ARTIFACT,
+        equivalence_key="artifact:cuda_max_registers",
     )
 
 
@@ -833,6 +955,9 @@ def _derive_gpu_tuning_dimensions(
     canonical_workgroup_sizes=(64, 128, 256, 512),
     residency_values=(None, 1, 2, 4),
     range_work_per_thread_values=(1, 2, 4, 8),
+    compile_tier_values=("inherit", "full"),
+    cuda_min_blocks_values=(1, 2, 4),
+    cuda_max_register_values=(None, 64, 96),
     require_safe_serial_setup=True,
 ):
     return (
@@ -843,7 +968,10 @@ def _derive_gpu_tuning_dimensions(
             require_safe_serial_setup,
         ),
         _tls_dimension(snapshot),
+        _compile_tier_dimension(snapshot, compile_tier_values),
         _inner_loop_unroll_dimension(snapshot),
+        _cuda_min_blocks_dimension(snapshot, cuda_min_blocks_values),
+        _cuda_max_registers_dimension(snapshot, cuda_max_register_values),
         _range_work_per_thread_dimension(
             snapshot, range_work_per_thread_values
         ),
@@ -922,6 +1050,9 @@ def _gpu_tiling_recipe_manifest(recipe):
 
 
 __all__ = [
+    "_COMPILE_TIER_DIMENSION",
+    "_CUDA_MAX_REGISTERS_DIMENSION",
+    "_CUDA_MIN_BLOCKS_DIMENSION",
     "_INNER_LOOP_UNROLL_DIMENSION",
     "_RESIDENCY_DIMENSION",
     "_RANGE_WORK_PER_THREAD_DIMENSION",

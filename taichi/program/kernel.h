@@ -44,6 +44,10 @@ class TI_DLL_EXPORT Kernel : public Callable {
     TaskLaunchThreadLocalMode thread_local_mode{
         TaskLaunchThreadLocalMode::automatic};
     int block_dim{0};
+    int cuda_min_blocks_per_sm{2};
+    // -1 inherits CompileConfig::gpu_max_reg. Zero requests the CUDA
+    // compiler/driver default, and a positive value is an explicit cap.
+    int cuda_max_registers{-1};
     bool injected_block_dim{false};
     std::string optimization_spec_identity;
   };
@@ -109,7 +113,9 @@ class TI_DLL_EXPORT Kernel : public Callable {
       int block_dim,
       bool injected_block_dim,
       const std::string &optimization_spec_identity,
-      const std::string &thread_local_mode);
+      const std::string &thread_local_mode,
+      int cuda_min_blocks_per_sm,
+      int cuda_max_registers);
 
   const std::optional<TaskLaunchPolicy> &get_task_launch_policy() const;
 

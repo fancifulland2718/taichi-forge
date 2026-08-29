@@ -78,7 +78,8 @@ class LlvmRuntimeExecutor {
 
   TaichiLLVMContext *get_llvm_context();
 
-  JITModule *create_jit_module(std::unique_ptr<llvm::Module> module);
+  JITModule *create_jit_module(std::unique_ptr<llvm::Module> module,
+                               int cuda_max_registers = -1);
 
   bool remove_jit_module(JITModule *module);
 

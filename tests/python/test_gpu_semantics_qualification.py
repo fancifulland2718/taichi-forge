@@ -11,6 +11,13 @@ from taichi_forge.lang._gpu_semantics import (
     _dumps_gpu_semantics,
     _loads_gpu_semantics,
 )
+from taichi_forge.lang._kernel_optimization import (
+    _ArtifactOptions,
+    _BackendCodegenOptions,
+    _KernelOptimizationSpec,
+    _LaunchOptions,
+    _bind_kernel_optimization_spec,
+)
 from tests import test_utils
 
 
@@ -161,6 +168,60 @@ def test_artifact_qualification_targets_exact_policy_specialization():
     assert artifact.workgroup_shape.materialized.value.x == 64
     _assert_no_device_submission(runtime_before, runtime_after)
     assert values.to_numpy().sum() == 0
+
+
+@test_utils.test(arch=[ti.cuda], offline_cache=False, kernel_profiler=False)
+def test_cuda_entry_max_registers_materializes_in_function_resources():
+    count = 4096
+    deformation = ti.Matrix.field(3, 3, dtype=ti.f32, shape=count)
+    velocity_gradient = ti.Matrix.field(3, 3, dtype=ti.f32, shape=count)
+    stress = ti.Matrix.field(3, 3, dtype=ti.f32, shape=count)
+
+    @ti.kernel
+    def constitutive_step():
+        for i in range(count):
+            f = (
+                ti.Matrix.identity(ti.f32, 3) + 2e-4 * velocity_gradient[i]
+            ) @ deformation[i]
+            inverse_transpose = f.inverse().transpose()
+            log_j = ti.log(ti.max(f.determinant(), 1e-5))
+            stress[i] = (
+                18.0 * (f - inverse_transpose) + 32.0 * log_j * inverse_transpose
+            )
+            deformation[i] = f
+
+    def register_count(binding):
+        qualification = binding._gpu_semantics_qualification()
+        dispatch = next(
+            item
+            for item in qualification.semantics.dispatches
+            if item.task_kind == "range_for"
+        )
+        artifact = next(
+            item
+            for item in qualification.semantics.artifacts
+            if item.artifact_id == dispatch.artifact_id
+        )
+        return int(artifact.extension.registers_per_thread.value)
+
+    baseline = _bind_kernel_optimization_spec(
+        constitutive_step,
+        _KernelOptimizationSpec(
+            backend=_BackendCodegenOptions(workgroup_size=128),
+            launch=_LaunchOptions(block_mode="require"),
+        ),
+    )
+    capped = _bind_kernel_optimization_spec(
+        constitutive_step,
+        _KernelOptimizationSpec(
+            backend=_BackendCodegenOptions(workgroup_size=128),
+            artifact=_ArtifactOptions(cuda_max_registers=24),
+            launch=_LaunchOptions(block_mode="require"),
+        ),
+    )
+
+    assert register_count(baseline) > 24
+    assert register_count(capped) == 24
 
 
 @test_utils.test(arch=[ti.x64], offline_cache=False)

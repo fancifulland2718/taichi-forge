@@ -1357,7 +1357,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel(
 
     auto data = compiled.get_internal_data().compiled_data.clone();
     auto parameters = compiled.get_internal_data().args;
-    auto *jit_module = executor->create_jit_module(std::move(data.module));
+    auto *jit_module = executor->create_jit_module(std::move(data.module),
+                                                   data.cuda_max_registers);
 
     // Populate ctx
     ctx->jit_module = jit_module;
@@ -1387,7 +1388,8 @@ KernelLauncher::Handle KernelLauncher::register_llvm_kernel_graph_gated(
   auto data = compiled.get_internal_data().compiled_data.clone();
   add_cuda_graph_execution_gate(data);
   auto parameters = compiled.get_internal_data().args;
-  auto *jit_module = executor->create_jit_module(std::move(data.module));
+  auto *jit_module = executor->create_jit_module(std::move(data.module),
+                                                 data.cuda_max_registers);
 
   ctx->jit_module = jit_module;
   ctx->snode_tree_ids = compiled.snode_tree_ids();

@@ -149,7 +149,9 @@ void Kernel::set_task_launch_policy(
     int block_dim,
     bool injected_block_dim,
     const std::string &optimization_spec_identity,
-    const std::string &thread_local_mode) {
+    const std::string &thread_local_mode,
+    int cuda_min_blocks_per_sm,
+    int cuda_max_registers) {
   TI_ERROR_IF(block_dim <= 0 || block_dim > taichi_max_gpu_block_dim,
               "TaskLaunchPolicy block_dim must be in [1, {}], got {}",
               taichi_max_gpu_block_dim, block_dim);
@@ -177,6 +179,16 @@ void Kernel::set_task_launch_policy(
              thread_local_mode);
   }
   policy.block_dim = block_dim;
+  TI_ERROR_IF(cuda_min_blocks_per_sm != 1 && cuda_min_blocks_per_sm != 2 &&
+                  cuda_min_blocks_per_sm != 4,
+              "CUDA min blocks per SM must be 1, 2, or 4, got {}",
+              cuda_min_blocks_per_sm);
+  TI_ERROR_IF(cuda_max_registers < -1 || cuda_max_registers > 255 ||
+                  (cuda_max_registers > 0 && cuda_max_registers < 16),
+              "CUDA max registers must be -1, 0, or in [16, 255], got {}",
+              cuda_max_registers);
+  policy.cuda_min_blocks_per_sm = cuda_min_blocks_per_sm;
+  policy.cuda_max_registers = cuda_max_registers;
   policy.injected_block_dim = injected_block_dim;
   TI_ERROR_IF(optimization_spec_identity.empty(),
               "TaskLaunchPolicy requires a non-empty optimization spec "
@@ -205,10 +217,12 @@ std::string Kernel::task_launch_policy_cache_key() const {
                      TaskLaunchThreadLocalMode::disabled
                  ? 'd'
                  : 'a');
-  return fmt::format("{}:{}:{}:{}:{}", mode, task_launch_policy_->block_dim,
-                     task_launch_policy_->injected_block_dim ? 'i' : 's',
-                     thread_local_mode,
-                     task_launch_policy_->optimization_spec_identity);
+  return fmt::format(
+      "{}:{}:{}:{}:{}:{}:{}", mode, task_launch_policy_->block_dim,
+      task_launch_policy_->injected_block_dim ? 'i' : 's', thread_local_mode,
+      task_launch_policy_->cuda_min_blocks_per_sm,
+      task_launch_policy_->cuda_max_registers,
+      task_launch_policy_->optimization_spec_identity);
 }
 
 const std::string &Kernel::optimization_spec_identity() const {

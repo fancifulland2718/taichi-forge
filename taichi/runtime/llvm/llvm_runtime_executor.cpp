@@ -214,9 +214,12 @@ TaichiLLVMContext *LlvmRuntimeExecutor::get_llvm_context() {
 }
 
 JITModule *LlvmRuntimeExecutor::create_jit_module(
-    std::unique_ptr<llvm::Module> module) {
+    std::unique_ptr<llvm::Module> module,
+    int cuda_max_registers) {
   const int max_reg =
-      config_.arch == Arch::cuda ? config_.gpu_max_reg : 0;
+      config_.arch == Arch::cuda
+          ? (cuda_max_registers < 0 ? config_.gpu_max_reg : cuda_max_registers)
+          : 0;
   return jit_session_->add_module(std::move(module), max_reg,
                                   JITModuleRole::user_kernel);
 }

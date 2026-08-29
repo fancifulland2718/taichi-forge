@@ -1448,8 +1448,14 @@ class Kernel:
         # Program::compile_kernel by copying CompileConfig and overriding the
         # tier. Cache key already includes compile_tier so cache entries are
         # auto-segregated.
-        if self.opt_level is not None:
-            taichi_kernel.set_compile_tier_override(self.opt_level)
+        effective_opt_level = self.opt_level
+        if (
+            kernel_optimization_spec is not None
+            and kernel_optimization_spec.ir.compile_tier != "inherit"
+        ):
+            effective_opt_level = kernel_optimization_spec.ir.compile_tier
+        if effective_opt_level is not None:
+            taichi_kernel.set_compile_tier_override(effective_opt_level)
         if task_launch_policy is not None and task_launch_policy.mode != "auto":
             assert kernel_optimization_spec is not None
             assert kernel_optimization_spec.identity
@@ -1459,6 +1465,12 @@ class Kernel:
                 task_launch_policy_injected,
                 kernel_optimization_spec.compilation_identity,
                 kernel_optimization_spec.ir.thread_local,
+                kernel_optimization_spec.backend.cuda_min_blocks_per_sm,
+                (
+                    -1
+                    if kernel_optimization_spec.artifact.cuda_max_registers is None
+                    else kernel_optimization_spec.artifact.cuda_max_registers
+                ),
             )
         assert key not in self.compiled_kernels
         self.compiled_kernels[key] = taichi_kernel
@@ -2155,7 +2167,8 @@ class Kernel:
                 raise TypeError("optimization_spec must be a _KernelOptimizationSpec")
             policy_spec = _KernelOptimizationSpec.from_task_launch_policy(policy)
             if (
-                optimization_spec.backend != policy_spec.backend
+                optimization_spec.backend.workgroup_size
+                != policy_spec.backend.workgroup_size
                 or optimization_spec.launch.block_mode
                 != policy_spec.launch.block_mode
             ):
@@ -2672,7 +2685,7 @@ class _TaskLaunchBinding:
             raise TypeError("spec must be a _KernelOptimizationSpec")
         policy_spec = _KernelOptimizationSpec.from_task_launch_policy(self.policy)
         if (
-            spec.backend != policy_spec.backend
+            spec.backend.workgroup_size != policy_spec.backend.workgroup_size
             or spec.launch.block_mode != policy_spec.launch.block_mode
         ):
             raise ValueError("optimization spec block contract does not match binding")

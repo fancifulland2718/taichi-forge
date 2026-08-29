@@ -9,29 +9,42 @@ from typing import Optional
 @dataclass(frozen=True)
 class _IrOptimizationOptions:
     thread_local: str = "auto"
+    compile_tier: str = "inherit"
 
     def __post_init__(self):
         if self.thread_local not in ("auto", "on", "off"):
             raise ValueError("thread_local must be 'auto', 'on', or 'off'")
+        if self.compile_tier not in ("inherit", "fast", "balanced", "full"):
+            raise ValueError(
+                "compile_tier must be 'inherit', 'fast', 'balanced', or 'full'"
+            )
 
 
 @dataclass(frozen=True)
 class _BackendCodegenOptions:
     workgroup_size: Optional[int] = None
+    cuda_min_blocks_per_sm: int = 2
 
     def __post_init__(self):
         value = self.workgroup_size
         if value is None:
-            return
-        if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError("workgroup_size must be an integer")
-        if not 1 <= value <= 1024:
-            raise ValueError("workgroup_size must be in [1, 1024]")
+            pass
+        else:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError("workgroup_size must be an integer")
+            if not 1 <= value <= 1024:
+                raise ValueError("workgroup_size must be in [1, 1024]")
+        minimum = self.cuda_min_blocks_per_sm
+        if isinstance(minimum, bool) or not isinstance(minimum, int):
+            raise TypeError("cuda_min_blocks_per_sm must be an integer")
+        if minimum not in (1, 2, 4):
+            raise ValueError("cuda_min_blocks_per_sm must be 1, 2, or 4")
 
 
 @dataclass(frozen=True)
 class _ArtifactOptions:
     provider_mode: str = "baseline"
+    cuda_max_registers: Optional[int] = None
 
     def __post_init__(self):
         if self.provider_mode not in (
@@ -43,6 +56,13 @@ class _ArtifactOptions:
                 "provider_mode must be 'baseline', 'apply_explicit_acf', or "
                 "'request_tuning'"
             )
+        value = self.cuda_max_registers
+        if value is None:
+            return
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError("cuda_max_registers must be an integer")
+        if not 16 <= value <= 255:
+            raise ValueError("cuda_max_registers must be in [16, 255]")
 
 
 @dataclass(frozen=True)

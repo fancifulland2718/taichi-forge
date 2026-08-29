@@ -87,6 +87,10 @@ struct LLVMCompiledTask {
 
 struct LLVMCompiledKernel {
   std::vector<OffloadedTask> tasks;
+  // -1 inherits the Program-level CUDA register cap. This lives with the
+  // compiled kernel so an exact specialization keeps its artifact control
+  // through offline-cache load and delayed launcher registration.
+  int cuda_max_registers{-1};
   // Modules are tied to their LLVMContext. Parallel compilation can finish on
   // a short-lived worker thread, so retain that worker's context independently
   // of the thread-local registry until every module clone has been released.
@@ -100,13 +104,15 @@ struct LLVMCompiledKernel {
   LLVMCompiledKernel(std::vector<OffloadedTask> tasks,
                      std::unique_ptr<llvm::Module> module,
                      std::shared_ptr<llvm::LLVMContext> module_context_owner =
-                         nullptr)
+                         nullptr,
+                     int cuda_max_registers = -1)
       : tasks(std::move(tasks)),
+        cuda_max_registers(cuda_max_registers),
         module_context_owner(std::move(module_context_owner)),
         module(std::move(module)) {
   }
   LLVMCompiledKernel clone() const;
-  TI_IO_DEF(tasks);
+  TI_IO_DEF(tasks, cuda_max_registers);
 };
 
 }  // namespace taichi::lang

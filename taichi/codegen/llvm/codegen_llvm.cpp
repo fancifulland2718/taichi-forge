@@ -3295,10 +3295,18 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
 
   if (compile_config.arch == Arch::cuda) {
     // CUDA specific metadata
+    int min_blocks_per_sm = 2;
+    int max_registers = -1;
+    if (const auto &policy = kernel->get_task_launch_policy();
+        policy.has_value()) {
+      min_blocks_per_sm = policy->cuda_min_blocks_per_sm;
+      max_registers = policy->cuda_max_registers;
+    }
     for (const auto &task : offloaded_tasks) {
       llvm::Function *func = module->getFunction(task.name);
       TI_ASSERT(func);
-      tlctx->mark_function_as_cuda_kernel(func, task.block_dim);
+      tlctx->mark_function_as_cuda_kernel(func, task.block_dim,
+                                          min_blocks_per_sm, max_registers);
     }
   } else if (compile_config.arch == Arch::amdgpu) {
     for (const auto &task : offloaded_tasks) {
@@ -3565,7 +3573,8 @@ LLVMCompiledTask LLVMCompiledTask::clone() const {
 }
 
 LLVMCompiledKernel LLVMCompiledKernel::clone() const {
-  return {tasks, llvm::CloneModule(*module), module_context_owner};
+  return {tasks, llvm::CloneModule(*module), module_context_owner,
+          cuda_max_registers};
 }
 
 }  // namespace taichi::lang

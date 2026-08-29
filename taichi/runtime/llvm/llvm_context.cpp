@@ -854,14 +854,21 @@ void TaichiLLVMContext::insert_nvvm_annotation(llvm::Function *func,
 }
 
 void TaichiLLVMContext::mark_function_as_cuda_kernel(llvm::Function *func,
-                                                     int block_dim) {
+                                                     int block_dim,
+                                                     int min_blocks_per_sm,
+                                                     int max_registers) {
   // Mark kernel function as a CUDA __global__ function
   // Add the nvvm annotation that it is considered a kernel function.
   insert_nvvm_annotation(func, "kernel", 1);
   if (block_dim != 0) {
     // CUDA launch bounds
     insert_nvvm_annotation(func, "maxntidx", block_dim);
-    insert_nvvm_annotation(func, "minctasm", 2);
+    insert_nvvm_annotation(func, "minctasm", min_blocks_per_sm);
+  }
+  if (max_registers > 0) {
+    // Use an entry-specific directive. A module-wide CU_JIT_MAX_REGISTERS or
+    // ptxas --maxrregcount is overridden by launch-bounds metadata.
+    insert_nvvm_annotation(func, "maxnreg", max_registers);
   }
 }
 

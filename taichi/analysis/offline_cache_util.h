@@ -132,7 +132,10 @@ class Kernel;
 //  29 - Forge per-kernel thread-local variants (2026-08). LLVM cached task
 //       payloads now retain the effective TLS byte count, and task launch
 //       identities can explicitly enable or disable thread-local lowering.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 29;
+//  30 - Forge CUDA artifact controls (2026-08). LLVM compiled-kernel payloads
+//       now retain the exact per-kernel register cap and NVVM entry metadata
+//       can carry min-CTA and max-register tuning directives.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 30;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(
