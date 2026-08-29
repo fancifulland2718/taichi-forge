@@ -1074,12 +1074,25 @@ void export_lang(py::module &m) {
       .def("apply", &PythonScalarArgumentPatchPlan::apply, py::arg("context"),
            py::arg("args"));
 
+  py::class_<Program::RegisteredKernelExecutionPlanLaunchScope>(
+      m, "_RegisteredKernelExecutionPlanLaunchScope")
+      .def("launch",
+           &Program::RegisteredKernelExecutionPlanLaunchScope::launch,
+           py::arg("context"), py::call_guard<py::gil_scoped_release>());
+
   py::class_<Program::RegisteredKernelExecutionPlan>(
       m, "_RegisteredKernelExecutionPlan")
       .def(
           "launch", &Program::RegisteredKernelExecutionPlan::launch,
           py::arg("program"), py::arg("context"),
-          py::call_guard<py::gil_scoped_release>());
+          py::call_guard<py::gil_scoped_release>())
+      .def("_begin_launch",
+           &Program::RegisteredKernelExecutionPlan::begin_launch,
+           py::arg("program"), py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly(
+          "has_snode_tree_dependencies",
+          &Program::RegisteredKernelExecutionPlan::
+              has_snode_tree_dependencies);
 
   py::class_<VulkanRayInstanceInfo>(m, "VulkanRayInstanceInfo")
       .def(py::init<>())
@@ -4845,6 +4858,9 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>())
       .def("_register_kernel_execution_plan",
            &Program::register_kernel_execution_plan,
+           py::arg("compile_config"), py::arg("device_caps"),
+           py::arg("kernel"),
+           py::arg("allow_snode_tree_dependencies") = false,
            py::call_guard<py::gil_scoped_release>())
       .def("get_device_caps", &Program::get_device_caps);
 
@@ -4963,9 +4979,12 @@ void export_lang(py::module &m) {
   py::class_<SNodeTree>(m, "SNodeTree")
       .def("id", &SNodeTree::id)
       .def("generation", &SNodeTree::generation)
-      .def("destroy_snode_tree", [](SNodeTree *snode_tree, Program *program) {
-        program->destroy_snode_tree(snode_tree);
-      });
+      .def(
+          "destroy_snode_tree",
+          [](SNodeTree *snode_tree, Program *program) {
+            program->destroy_snode_tree(snode_tree);
+          },
+          py::arg("program"), py::call_guard<py::gil_scoped_release>());
 
   py::class_<DeviceAllocation>(m, "DeviceAllocation")
       .def(py::init([](uint64_t device, uint64_t alloc_id) -> DeviceAllocation {

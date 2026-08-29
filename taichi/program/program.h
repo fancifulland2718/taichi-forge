@@ -357,10 +357,14 @@ class TI_DLL_EXPORT Program {
     std::vector<std::size_t> active_gpu_region_timings_;
   };
 
-  // Immutable, dependency-free executable binding for repeated ordinary
-  // launches.  The caller still supplies a fresh LaunchContextBuilder for
-  // every invocation; the plan only removes compilation-cache and backend
-  // registration lookup from the steady path.
+  // Immutable executable binding for repeated ordinary launches.  The caller
+  // still supplies a fresh LaunchContextBuilder for every invocation; the plan
+  // only removes compilation-cache and backend registration lookup from the
+  // steady path. SNode-dependent plans are bound to exact tree generations
+  // and validate them under the lifecycle read transaction before touching
+  // compiled executable state.
+  class RegisteredKernelExecutionPlanLaunchScope;
+
   class RegisteredKernelExecutionPlan {
    public:
     RegisteredKernelExecutionPlan(const RegisteredKernelExecutionPlan &) =
@@ -370,17 +374,60 @@ class TI_DLL_EXPORT Program {
 
     void launch(Program &program, LaunchContextBuilder &ctx) const;
 
+    std::unique_ptr<RegisteredKernelExecutionPlanLaunchScope> begin_launch(
+        Program &program) const;
+
+    bool has_snode_tree_dependencies() const noexcept {
+      return !dependencies_.empty();
+    }
+
    private:
     friend class Program;
     RegisteredKernelExecutionPlan(Program *owner,
                                   const CompiledKernelData *compiled,
-                                  KernelLaunchHandle handle)
-        : owner_(owner), compiled_(compiled), handle_(handle) {
+                                  KernelLaunchHandle handle,
+                                  std::vector<SNodeTreeDependency> dependencies)
+        : owner_(owner),
+          compiled_(compiled),
+          handle_(handle),
+          dependencies_(std::move(dependencies)) {
     }
 
     Program *owner_{nullptr};
     const CompiledKernelData *compiled_{nullptr};
     KernelLaunchHandle handle_;
+    std::vector<SNodeTreeDependency> dependencies_;
+  };
+
+  // Holds the exact SNode lifecycle read transaction across Python launch
+  // context construction, argument binding, and backend submission.
+  class RegisteredKernelExecutionPlanLaunchScope {
+   public:
+    RegisteredKernelExecutionPlanLaunchScope(
+        const RegisteredKernelExecutionPlanLaunchScope &) = delete;
+    RegisteredKernelExecutionPlanLaunchScope &operator=(
+        const RegisteredKernelExecutionPlanLaunchScope &) = delete;
+
+    void launch(LaunchContextBuilder &ctx);
+
+   private:
+    friend class RegisteredKernelExecutionPlan;
+    RegisteredKernelExecutionPlanLaunchScope(
+        Program *program,
+        const CompiledKernelData *compiled,
+        KernelLaunchHandle handle,
+        std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard)
+        : program_(program),
+          compiled_(compiled),
+          handle_(handle),
+          lifecycle_guard_(std::move(lifecycle_guard)) {
+    }
+
+    Program *program_{nullptr};
+    const CompiledKernelData *compiled_{nullptr};
+    KernelLaunchHandle handle_;
+    std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard_;
+    bool launched_{false};
   };
 
   uint64 *result_buffer{nullptr};  // Note that this result_buffer is used
@@ -569,7 +616,8 @@ class TI_DLL_EXPORT Program {
   bool snode_executable_reuse_enabled() const noexcept;
 
   void validate_snode_tree_dependencies(
-      const std::vector<SNodeTreeDependency> &dependencies) const;
+      const std::vector<SNodeTreeDependency> &dependencies,
+      const char *consumer = "Graph") const;
 
   std::uint64_t snode_tree_mutation_epoch() const {
     return snode_tree_mutation_epoch_.load(std::memory_order_acquire);
@@ -642,7 +690,8 @@ class TI_DLL_EXPORT Program {
   std::unique_ptr<RegisteredKernelExecutionPlan>
   register_kernel_execution_plan(const CompileConfig &compile_config,
                                  const DeviceCapabilityConfig &caps,
-                                 const Kernel &kernel_def);
+                                 const Kernel &kernel_def,
+                                 bool allow_snode_tree_dependencies = false);
 
   void check_runtime_error_after_kernel_launch(
       const CompiledKernelData &compiled_kernel_data);

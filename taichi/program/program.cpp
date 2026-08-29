@@ -481,24 +481,43 @@ bool Program::snode_executable_reuse_enabled() const noexcept {
 }
 
 void Program::validate_snode_tree_dependencies(
-    const std::vector<SNodeTreeDependency> &dependencies) const {
+    const std::vector<SNodeTreeDependency> &dependencies,
+    const char *consumer) const {
   TI_ASSERT(active_snode_tree_lifecycle_program == this);
+  TI_ASSERT(consumer != nullptr);
+  const bool graph_consumer = std::strcmp(consumer, "Graph") == 0;
   for (const auto &dependency : dependencies) {
     const int tree_id = dependency.tree_id;
-    TI_ERROR_IF(tree_id < 0 ||
-                    static_cast<std::size_t>(tree_id) >=
-                        snode_tree_active_.size() ||
-                    !snode_tree_active_[tree_id],
-                "Graph references destroyed SNodeTree id={} generation={}; "
-                "rebuild the Graph.",
-                tree_id, dependency.generation);
+    const bool destroyed =
+        tree_id < 0 ||
+        static_cast<std::size_t>(tree_id) >= snode_tree_active_.size() ||
+        !snode_tree_active_[tree_id];
+    if (graph_consumer) {
+      TI_ERROR_IF(destroyed,
+                  "Graph references destroyed SNodeTree id={} generation={}; "
+                  "rebuild the Graph.",
+                  tree_id, dependency.generation);
+    } else {
+      TI_ERROR_IF(destroyed,
+                  "{} references destroyed SNodeTree id={} generation={}; "
+                  "rebuild it.",
+                  consumer, tree_id, dependency.generation);
+    }
     const std::uint64_t current_generation =
         snode_tree_generations_[tree_id];
-    TI_ERROR_IF(
-        current_generation != dependency.generation,
-        "Graph references stale SNodeTree id={} generation={}, but the "
-        "current generation is {}; rebuild the Graph.",
-        tree_id, dependency.generation, current_generation);
+    if (graph_consumer) {
+      TI_ERROR_IF(
+          current_generation != dependency.generation,
+          "Graph references stale SNodeTree id={} generation={}, but the "
+          "current generation is {}; rebuild the Graph.",
+          tree_id, dependency.generation, current_generation);
+    } else {
+      TI_ERROR_IF(
+          current_generation != dependency.generation,
+          "{} references stale SNodeTree id={} generation={}, but the current "
+          "generation is {}; rebuild it.",
+          consumer, tree_id, dependency.generation, current_generation);
+    }
   }
 }
 std::atomic<int> Program::num_instances_;
@@ -5758,6 +5777,11 @@ void Program::launch_kernel_impl(
 void Program::RegisteredKernelExecutionPlan::launch(
     Program &program,
     LaunchContextBuilder &ctx) const {
+  if (!dependencies_.empty()) {
+    auto scope = begin_launch(program);
+    scope->launch(ctx);
+    return;
+  }
   TI_ERROR_IF(&program != owner_,
               "Registered kernel execution plan belongs to another Program");
   TI_ASSERT(compiled_ != nullptr);
@@ -5768,22 +5792,69 @@ void Program::RegisteredKernelExecutionPlan::launch(
   program.launch_registered_kernel(*compiled_, handle_, ctx);
 }
 
+std::unique_ptr<Program::RegisteredKernelExecutionPlanLaunchScope>
+Program::RegisteredKernelExecutionPlan::begin_launch(Program &program) const {
+  TI_ERROR_IF(&program != owner_,
+              "Registered kernel execution plan belongs to another Program");
+  TI_ASSERT(compiled_ != nullptr);
+  std::optional<SNodeTreeLifecycleReadGuard> lifecycle_guard;
+  if (!dependencies_.empty()) {
+    const bool attribute = program.ordinary_launch_attribution_.enabled;
+    const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
+    lifecycle_guard.emplace(
+        program.acquire_snode_tree_lifecycle_read_guard());
+    if (attribute) {
+      program.ordinary_launch_attribution_.snode_guard_acquisitions.fetch_add(
+          1, std::memory_order_relaxed);
+      program.ordinary_launch_attribution_.snode_guard_wait_ns.fetch_add(
+          ordinary_launch_now_ns() - started, std::memory_order_relaxed);
+    }
+    // Validate before Python constructs a context from the retained Kernel
+    // ABI. The returned scope keeps this transaction live through submission.
+    program.validate_snode_tree_dependencies(
+        dependencies_, "Registered kernel execution plan");
+  }
+  return std::unique_ptr<RegisteredKernelExecutionPlanLaunchScope>(
+      new RegisteredKernelExecutionPlanLaunchScope(
+          &program, compiled_, handle_, std::move(lifecycle_guard)));
+}
+
+void Program::RegisteredKernelExecutionPlanLaunchScope::launch(
+    LaunchContextBuilder &ctx) {
+  TI_ERROR_IF(launched_,
+              "Registered kernel execution plan launch scope was already used");
+  TI_ASSERT(program_ != nullptr);
+  TI_ASSERT(compiled_ != nullptr);
+  launched_ = true;
+  if (program_->ordinary_launch_attribution_.enabled) {
+    program_->ordinary_launch_attribution_.registered_execution_plan_launches
+        .fetch_add(1, std::memory_order_relaxed);
+  }
+  program_->launch_registered_kernel(*compiled_, handle_, ctx);
+}
+
 std::unique_ptr<Program::RegisteredKernelExecutionPlan>
 Program::register_kernel_execution_plan(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
-    const Kernel &kernel_def) {
+    const Kernel &kernel_def,
+    bool allow_snode_tree_dependencies) {
   auto lifecycle_guard = acquire_snode_tree_lifecycle_read_guard();
   const auto &compiled = compile_kernel(compile_config, caps, kernel_def);
-  // A handle tied to an SNodeTree can be retired independently.  Keep those
-  // kernels on the existing generation-checked slow path until relocatable
-  // executable binding is separately qualified.
-  if (compiled.has_snode_tree_dependencies() || !compiled.get_handle()) {
+  if (!compiled.get_handle() ||
+      (compiled.has_snode_tree_dependencies() &&
+       !allow_snode_tree_dependencies)) {
     return nullptr;
+  }
+  std::vector<SNodeTreeDependency> dependencies;
+  if (compiled.has_snode_tree_dependencies()) {
+    dependencies =
+        snapshot_snode_tree_dependencies_unlocked(compiled.snode_tree_ids());
   }
   return std::unique_ptr<RegisteredKernelExecutionPlan>(
       new RegisteredKernelExecutionPlan(this, &compiled,
-                                        *compiled.get_handle()));
+                                        *compiled.get_handle(),
+                                        std::move(dependencies)));
 }
 
 void Program::compile_and_launch_kernel(
