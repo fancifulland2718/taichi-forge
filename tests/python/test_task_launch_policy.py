@@ -527,6 +527,187 @@ def test_task_launch_policy_supports_safe_dynamic_range_preamble():
     assert all(task.task_type in ("serial", "range_for") for task in report.tasks)
 
 
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_explicit_field_variant_uses_generation_bound_retained_plan(monkeypatch):
+    arch = impl.current_cfg().arch
+    ti.reset()
+    monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
+    ti.init(arch=arch, offline_cache=False)
+
+    count = 1024
+    values = ti.field(ti.i32, shape=count)
+
+    @ti.kernel
+    def increment(delta: ti.i32):
+        for i in range(count):
+            values[i] += delta
+
+    launch = increment.with_launch_policy(ti.TaskLaunchPolicy.block(128, mode="require"))
+    assert launch.report(1).status == "applied"
+    assert launch._retained_plan is None
+    launch(0)
+    ti.sync()
+    retained = launch._retained_plan
+    assert retained is not None
+    assert retained.launch_ctx is None
+
+    program = impl.get_runtime().prog
+    program._debug_reset_ordinary_launch_attribution()
+    launch(3)
+    ti.sync()
+    stats = dict(program._debug_ordinary_launch_attribution())
+
+    assert stats["registered_execution_plan_launches"] == 1
+    assert stats["compile_lookup_ns"] == 0
+    assert stats["snode_guard_acquisitions"] == 1
+    assert stats["snode_guard_elisions"] == 0
+    np.testing.assert_array_equal(values.to_numpy(), np.full(count, 3))
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_destroyed_field_rejects_retained_variant_before_backend_launch():
+    count = 128
+    values = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, count).place(values)
+    tree = builder.finalize()
+
+    @ti.kernel
+    def increment(delta: ti.i32):
+        for i in range(count):
+            values[i] += delta
+
+    launch = increment.with_launch_policy(ti.TaskLaunchPolicy.block(64, mode="require"))
+    launch.report(1)
+    launch(0)
+    ti.sync()
+    retained = launch._retained_plan
+    assert retained is not None
+    launch(1)
+    ti.sync()
+    retired_id = tree.id
+    retired_generation = tree.generation
+    tree.destroy()
+
+    with pytest.raises(
+        RuntimeError,
+        match="Registered kernel execution plan references destroyed SNodeTree",
+    ):
+        increment._primal._launch_with_ordinary_plan(retained, (1,))
+
+    replacement = ti.field(ti.i32)
+    replacement_builder = ti.FieldsBuilder()
+    replacement_builder.dense(ti.i, count).place(replacement)
+    replacement_tree = replacement_builder.finalize()
+    assert replacement_tree.id == retired_id
+    assert replacement_tree.generation != retired_generation
+    with pytest.raises(
+        RuntimeError,
+        match="Registered kernel execution plan references stale SNodeTree",
+    ):
+        increment._primal._launch_with_ordinary_plan(retained, (1,))
+    replacement_tree.destroy()
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_retained_field_launch_holds_lifecycle_guard_through_context_binding(
+    monkeypatch,
+):
+    count = 128
+    values = ti.field(ti.i32)
+    builder = ti.FieldsBuilder()
+    builder.dense(ti.i, count).place(values)
+    tree = builder.finalize()
+
+    @ti.kernel
+    def increment(delta: ti.i32):
+        for i in range(count):
+            values[i] += delta
+
+    launch = increment.with_launch_policy(ti.TaskLaunchPolicy.block(64, mode="require"))
+    launch.report(1)
+    launch(0)
+    ti.sync()
+    retained = launch._retained_plan
+    assert retained is not None
+
+    binding_started = threading.Event()
+    allow_binding = threading.Event()
+    destroy_returned = threading.Event()
+    errors = []
+    original_bind = increment._primal._bind_ordinary_launch_context
+
+    def blocked_bind(launch_ctx, bindings, args):
+        binding_started.set()
+        if not allow_binding.wait(5):
+            raise RuntimeError("timed out waiting to resume retained binding")
+        return original_bind(launch_ctx, bindings, args)
+
+    monkeypatch.setattr(increment._primal, "_bind_ordinary_launch_context", blocked_bind)
+
+    def launch_worker():
+        try:
+            increment._primal._launch_with_ordinary_plan(retained, (1,))
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+
+    def destroy_worker():
+        try:
+            tree.destroy()
+        except Exception as exc:  # pragma: no cover - reported below
+            errors.append(exc)
+        finally:
+            destroy_returned.set()
+
+    launch_thread = threading.Thread(target=launch_worker)
+    launch_thread.start()
+    assert binding_started.wait(5)
+    destroy_thread = threading.Thread(target=destroy_worker)
+    destroy_thread.start()
+    # destroy() needs the lifecycle write transaction and therefore cannot
+    # retire the tree while the retained launch is still binding its context.
+    assert not destroy_returned.wait(0.1)
+    allow_binding.set()
+    launch_thread.join(5)
+    destroy_thread.join(5)
+    assert not launch_thread.is_alive()
+    assert not destroy_thread.is_alive()
+    assert not errors
+
+    with pytest.raises(
+        RuntimeError,
+        match="Registered kernel execution plan references destroyed SNodeTree",
+    ):
+        increment._primal._launch_with_ordinary_plan(retained, (1,))
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_retained_field_variant_does_not_bypass_ad_context():
+    count = 64
+    values = ti.field(ti.f32, shape=count, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+
+    @ti.kernel
+    def accumulate(scale: ti.f32):
+        for i in range(count):
+            loss[None] += values[i] * scale
+
+    launch = accumulate.with_launch_policy(ti.TaskLaunchPolicy.block(64, mode="require"))
+    launch.report(2.0)
+    launch(0.0)
+    ti.sync()
+    retained = launch._retained_plan
+    assert retained is not None
+
+    with pytest.raises(RuntimeError, match="automatic differentiation context"):
+        with ti.ad.Tape(loss):
+            launch(2.0)
+    assert launch._retained_plan is retained
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_task_launch_policy_binds_data_oriented_methods():
     count = 257
@@ -686,6 +867,16 @@ def test_task_launch_policy_concurrency_reset_and_resource_stability():
     # Compilation remains a main-thread operation. Warm execution is the
     # concurrency contract and must not mutate the policy specialization.
     launch.report(values)
+    assert launch._retained_plan is None
+    launch(values)
+    ti.sync()
+    values.fill(0)
+    retained_before_reset = launch._retained_plan
+    if arch in (ti_core.Arch.cuda, ti_core.Arch.vulkan):
+        assert retained_before_reset is not None
+        assert retained_before_reset.launch_ctx is None
+    else:
+        assert retained_before_reset is None
     barrier = threading.Barrier(4)
     errors = []
 
@@ -732,6 +923,11 @@ def test_task_launch_policy_concurrency_reset_and_resource_stability():
         tuple(task.logical_task_id for task in reset_report.tasks)
         == logical_task_ids
     )
+    if arch in (ti_core.Arch.cuda, ti_core.Arch.vulkan):
+        assert launch._retained_plan is None
     launch(values)
     ti.sync()
+    if arch in (ti_core.Arch.cuda, ti_core.Arch.vulkan):
+        assert launch._retained_plan is not None
+        assert launch._retained_plan is not retained_before_reset
     assert np.all(values.to_numpy() == 1)

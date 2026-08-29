@@ -1000,6 +1000,7 @@ class _OrdinaryLaunchPlan:
         "scalar_patch_plan",
         "resource_guards",
         "launch_ctx",
+        "guard_context_lifecycle",
     )
 
     def __init__(
@@ -1013,6 +1014,7 @@ class _OrdinaryLaunchPlan:
         scalar_patch_plan,
         resource_guards,
         launch_ctx,
+        guard_context_lifecycle,
     ):
         self.runtime = runtime
         self.key = key
@@ -1023,6 +1025,7 @@ class _OrdinaryLaunchPlan:
         self.scalar_patch_plan = scalar_patch_plan
         self.resource_guards = resource_guards
         self.launch_ctx = launch_ctx
+        self.guard_context_lifecycle = guard_context_lifecycle
 
     def is_live(self, runtime):
         if self.runtime is not runtime:
@@ -1957,7 +1960,14 @@ class Kernel:
                 else:
                     launch_ctx.set_arg_ndarray_with_grad(indices, primal, grad)
 
-    def _build_ordinary_launch_plan(self, key, args):
+    def _build_ordinary_launch_plan(
+        self,
+        key,
+        args,
+        *,
+        allow_snode_tree_dependencies=False,
+        reuse_gpu_context=True,
+    ):
         """Return ``(plan, stable_failure)`` for one compiled specialization."""
 
         if self.autodiff_mode != AutodiffMode.NONE or self.template_slot_locations:
@@ -1997,19 +2007,29 @@ class Kernel:
             return None, True
         prog = self.runtime.prog
         native_plan = prog._register_kernel_execution_plan(
-            prog.config(), prog.get_device_caps(), self.compiled_kernels[key]
+            prog.config(),
+            prog.get_device_caps(),
+            self.compiled_kernels[key],
+            allow_snode_tree_dependencies,
         )
         if native_plan is None:
             # Registration depends on the compiled executable (for example,
             # captured SNode access), so retrying it for every launch cannot
             # become eligible until this specialization or runtime changes.
-            return None, True
+            # Explicit SNode variants are the exception: report()/manifest
+            # qualification deliberately does not create a backend handle.
+            # Their first real submission performs registration, after which
+            # retained-plan admission must be retried rather than poisoned.
+            return None, not allow_snode_tree_dependencies
         launch_ctx = None
         # CUDA/Vulkan copy the argument payload during submission, so a
         # resource-signature plan can safely reuse its validated host layout.
         # CPU has a different scheduler/return protocol and remains on fresh
         # contexts; it is not part of this GPU eager-ABI optimization.
-        if prog.config().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan):
+        if reuse_gpu_context and prog.config().arch in (
+            _ti_core.Arch.cuda,
+            _ti_core.Arch.vulkan,
+        ):
             launch_ctx = self.compiled_kernels[key].make_launch_context()
             self._bind_ordinary_launch_context(launch_ctx, bindings, args)
         scalar_bindings = tuple(
@@ -2039,6 +2059,7 @@ class Kernel:
                 scalar_patch_plan,
                 tuple(resource_guards),
                 launch_ctx,
+                native_plan.has_snode_tree_dependencies,
             ),
             False,
         )
@@ -2091,6 +2112,16 @@ class Kernel:
         self._ordinary_launch_plan = plan
 
     def _launch_with_ordinary_plan(self, plan, args):
+        prog = self.runtime.prog
+        launch_scope = None
+        if plan.guard_context_lifecycle:
+            try:
+                launch_scope = plan.native_plan._begin_launch(prog)
+            except Exception as exc:
+                exc = handle_exception_from_cpp(exc)
+                if self.runtime.print_full_traceback:
+                    raise exc
+                raise exc from None
         launch_ctx = plan.launch_ctx
         if launch_ctx is None:
             launch_ctx = plan.kernel_cpp.make_launch_context()
@@ -2120,8 +2151,10 @@ class Kernel:
                     )
         self._bind_ordinary_launch_context(launch_ctx, bindings, args)
         try:
-            prog = self.runtime.prog
-            plan.native_plan.launch(prog, launch_ctx)
+            if launch_scope is None:
+                plan.native_plan.launch(prog, launch_ctx)
+            else:
+                launch_scope.launch(launch_ctx)
         except Exception as exc:
             exc = handle_exception_from_cpp(exc)
             if self.runtime.print_full_traceback:
@@ -2650,6 +2683,16 @@ class _TaskLaunchBinding:
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
+        # Qualified variant replay owns an executable plan but deliberately
+        # not a reusable LaunchContextBuilder. A fresh context keeps warm
+        # multi-threaded calls from racing while still removing the dominant
+        # compile/cache and backend-registration lookup.
+        self._retained_plan = None
+        self._retained_plan_runtime = None
+        self._retained_plan_key = None
+        self._retained_plan_negative_runtime = None
+        self._retained_plan_negative_key = None
+        self._retained_plan_lock = threading.Lock()
         self._fallback_auto = False
         self._last_auto_decision = None
         self._auto_cache_runtime = None
@@ -2748,27 +2791,111 @@ class _TaskLaunchBinding:
             snapshot, raw, fixed_cost_seconds
         )
 
-    def _refresh_fast_path(self, report=None):
-        if report is not None and report.status == "fallback_auto":
-            self._fallback_auto = True
-            self._fast_runtime = self._kernel.runtime
-            return
-        if self.policy.mode == "auto":
-            return
-        self._fast_runtime = self._kernel.runtime
-        if self._kernel.mapper._dynamic_arg_extractors:
-            return
-        key = (
+    def _clear_retained_plan(self):
+        with self._retained_plan_lock:
+            self._retained_plan = None
+            self._retained_plan_runtime = None
+            self._retained_plan_key = None
+            self._retained_plan_negative_runtime = None
+            self._retained_plan_negative_key = None
+
+    def _prepare_retained_plan(self, processed_args):
+        runtime = self._kernel.runtime
+        key = self._fast_key
+        if (
+            self.policy.mode == "auto"
+            or self._fallback_auto
+            or key is None
+            or self._fast_runtime is not runtime
+            or self._kernel.autodiff_mode != AutodiffMode.NONE
+            or runtime.target_tape is not None
+            or runtime.fwd_mode_manager is not None
+            or runtime.grad_replaced
+        ):
+            return None
+        plan = self._retained_plan
+        if (
+            self._retained_plan_runtime is runtime
+            and self._retained_plan_key == key
+            and plan is not None
+            and plan.matches(runtime, processed_args)
+        ):
+            return plan
+        if (
+            self._retained_plan_negative_runtime is runtime
+            and self._retained_plan_negative_key == key
+        ):
+            return None
+        with self._retained_plan_lock:
+            plan = self._retained_plan
+            if (
+                self._retained_plan_runtime is runtime
+                and self._retained_plan_key == key
+                and plan is not None
+                and plan.matches(runtime, processed_args)
+            ):
+                return plan
+            if (
+                self._retained_plan_negative_runtime is runtime
+                and self._retained_plan_negative_key == key
+            ):
+                return None
+            plan, stable_failure = self._kernel._build_ordinary_launch_plan(
+                key,
+                processed_args,
+                allow_snode_tree_dependencies=True,
+                reuse_gpu_context=False,
+            )
+            if plan is not None:
+                self._retained_plan = plan
+                self._retained_plan_runtime = runtime
+                self._retained_plan_key = key
+                self._retained_plan_negative_runtime = None
+                self._retained_plan_negative_key = None
+                return plan
+            if stable_failure:
+                self._retained_plan_negative_runtime = runtime
+                self._retained_plan_negative_key = key
+            return None
+
+    def _specialization_key(self, processed_args):
+        if processed_args is None and self._kernel.mapper._dynamic_arg_extractors:
+            return None
+        instance_id = (
+            0
+            if processed_args is None
+            else self._kernel.mapper.lookup(processed_args)[0]
+        )
+        return (
             self._kernel.func,
-            0,
+            instance_id,
             self._kernel.autodiff_mode,
             self._optimization_spec.compilation_specialization_key,
             False,
         )
-        if key in self._kernel._task_launch_policy_manifests:
+
+    def _refresh_fast_path(self, report=None, processed_args=None):
+        if report is not None and report.status == "fallback_auto":
+            self._fallback_auto = True
             self._fast_runtime = self._kernel.runtime
+            self._clear_retained_plan()
+            return
+        if self.policy.mode == "auto":
+            return
+        runtime = self._kernel.runtime
+        self._fast_runtime = runtime
+        key = self._specialization_key(processed_args)
+        if key is None:
+            self._clear_retained_plan()
+            return
+        if key in self._kernel._task_launch_policy_manifests:
+            if self._fast_key != key or self._retained_plan_runtime is not runtime:
+                self._clear_retained_plan()
+            self._fast_runtime = runtime
             self._fast_key = key
             self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+            if processed_args is not None:
+                self._prepare_retained_plan(processed_args)
 
     def _auto_resolution(self, args, kwargs, *, observe):
         from taichi_forge.lang._task_launch_tuning import (
@@ -2904,11 +3031,19 @@ class _TaskLaunchBinding:
                 and not runtime.grad_replaced
             ):
                 processed = _process_args(self._kernel, (*self._bound_args, *args), kwargs)
+                expected_key = self._specialization_key(processed)
                 if (
-                    self._fast_kernel_cpp is not None
-                    and self._kernel.compiled_kernels.get(self._fast_key) is self._fast_kernel_cpp
+                    self._fast_key == expected_key
+                    and self._fast_kernel_cpp is not None
+                    and self._kernel.compiled_kernels.get(self._fast_key)
+                    is self._fast_kernel_cpp
                 ):
-                    return self._kernel.launch_kernel(
+                    retained_plan = self._prepare_retained_plan(processed)
+                    if retained_plan is not None:
+                        return self._kernel._launch_with_ordinary_plan(
+                            retained_plan, processed
+                        )
+                    result = self._kernel.launch_kernel(
                         self._fast_kernel_cpp,
                         *processed,
                         _grid_residency_waves=(
@@ -2918,13 +3053,18 @@ class _TaskLaunchBinding:
                             self._optimization_spec.launch.range_work_per_thread_target
                         ),
                     )
+                    # The first physical launch may have registered the backend
+                    # handle that report()-only preparation intentionally
+                    # lacked. Publish the immutable plan for subsequent calls.
+                    self._prepare_retained_plan(processed)
+                    return result
                 key = self._kernel._ensure_compiled_with_task_launch_policy(
                     self.policy,
                     *processed,
                     optimization_spec=self._optimization_spec,
                 )
                 self._kernel._validate_task_launch_policy_specialization(key, self.policy)
-                return self._kernel.launch_kernel(
+                result = self._kernel.launch_kernel(
                     self._kernel.compiled_kernels[key],
                     *processed,
                     _grid_residency_waves=(
@@ -2934,6 +3074,8 @@ class _TaskLaunchBinding:
                         self._optimization_spec.launch.range_work_per_thread_target
                     ),
                 )
+                self._refresh_fast_path(processed_args=processed)
+                return result
             result = self._kernel._call_with_task_launch_policy(
                 self.policy,
                 *self._bound_args,
@@ -2945,7 +3087,8 @@ class _TaskLaunchBinding:
                 self._fallback_auto = True
                 self._fast_runtime = runtime
             else:
-                self._refresh_fast_path()
+                processed = _process_args(self._kernel, combined_args, kwargs)
+                self._refresh_fast_path(processed_args=processed)
             return result
         except (TaichiCompilationError, TaichiRuntimeError) as exc:
             if impl.get_runtime().print_full_traceback:
@@ -3002,7 +3145,10 @@ class _TaskLaunchBinding:
                 _kernel_optimization_spec=self._optimization_spec,
                 **kwargs,
             )
-        self._refresh_fast_path(report)
+        processed_args = None
+        if self.policy.mode != "auto" and report.status != "fallback_auto":
+            processed_args = _process_args(self._kernel, combined_args, kwargs)
+        self._refresh_fast_path(report, processed_args)
         return report
 
     def task_manifest(self, *args, **kwargs):
