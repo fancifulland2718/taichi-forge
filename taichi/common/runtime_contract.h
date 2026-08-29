@@ -9,7 +9,7 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-inline constexpr int kForgeNativeAbiRevision = 1;
+inline constexpr int kForgeNativeAbiRevision = 2;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;
@@ -18,6 +18,22 @@ inline constexpr std::uint64_t kForgeFeatureCuda = 1ull << 2;
 inline constexpr std::uint64_t kForgeFeatureVulkan = 1ull << 3;
 inline constexpr std::uint64_t kForgeFeatureGgui = 1ull << 4;
 inline constexpr std::uint64_t kForgeFeatureOpenGl = 1ull << 5;
+
+// Stable C bootstrap used before the pybind module touches any C++ object
+// crossing the split-runtime boundary.  Never extend this v1 struct in place;
+// add a new bootstrap function if the bootstrap representation itself changes.
+struct ForgeRuntimeBootstrapV1 {
+  std::uint32_t struct_size{0};
+  std::uint32_t manifest_schema_version{0};
+  std::int32_t native_abi_revision{0};
+  std::uint32_t runtime_statistics_schema_version{0};
+  std::uint64_t feature_bitmap{0};
+  char compiler_abi[96]{};
+};
+
+extern "C" int taichi_forge_runtime_bootstrap_v1(
+    ForgeRuntimeBootstrapV1 *output,
+    std::uint32_t output_size);
 
 #define TI_FORGE_STRINGIFY_IMPL(x) #x
 #define TI_FORGE_STRINGIFY(x) TI_FORGE_STRINGIFY_IMPL(x)

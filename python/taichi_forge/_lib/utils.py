@@ -10,6 +10,11 @@ import json
 
 from colorama import Fore, Style
 
+from taichi_forge._contract_constants import (
+    FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION,
+    FORGE_NATIVE_ABI_REVISION,
+)
+
 _startup_profile_enabled = os.environ.get("TI_STARTUP_PROFILE", "").strip().lower() in (
     "1",
     "true",
@@ -97,6 +102,56 @@ _native_library_handles = []
 _native_runtime_loaded = False
 _loaded_native_runtime_path = None
 _CUDA_RUNTIME_MAJOR_MANIFEST = "cuda_runtime_major.txt"
+
+
+class _ForgeRuntimeBootstrapV1(ctypes.Structure):
+    _fields_ = (
+        ("struct_size", ctypes.c_uint32),
+        ("manifest_schema_version", ctypes.c_uint32),
+        ("native_abi_revision", ctypes.c_int32),
+        ("runtime_statistics_schema_version", ctypes.c_uint32),
+        ("feature_bitmap", ctypes.c_uint64),
+        ("compiler_abi", ctypes.c_char * 96),
+    )
+
+
+def _validate_native_runtime_bootstrap(handle, path):
+    try:
+        probe = handle.taichi_forge_runtime_bootstrap_v1
+    except AttributeError as error:
+        raise ImportError(
+            "Taichi Forge native runtime is too old or incompatible: "
+            f"{path} does not expose bootstrap contract v1; install the "
+            "matching taichi-forge-runtime package"
+        ) from error
+    probe.argtypes = (
+        ctypes.POINTER(_ForgeRuntimeBootstrapV1),
+        ctypes.c_uint32,
+    )
+    probe.restype = ctypes.c_int
+    contract = _ForgeRuntimeBootstrapV1()
+    status = int(probe(ctypes.byref(contract), ctypes.sizeof(contract)))
+    if status != 0 or contract.struct_size != ctypes.sizeof(contract):
+        raise ImportError(
+            "Taichi Forge native runtime bootstrap failed: "
+            f"path={path}, status={status}, "
+            f"runtime_struct_size={contract.struct_size}, "
+            f"required_struct_size={ctypes.sizeof(contract)}"
+        )
+    if (
+        contract.manifest_schema_version
+        != FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION
+        or contract.native_abi_revision != FORGE_NATIVE_ABI_REVISION
+    ):
+        raise ImportError(
+            "Taichi Forge native runtime contract mismatch: "
+            f"path={path}, required_manifest_schema="
+            f"{FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION}, "
+            f"runtime_manifest_schema={contract.manifest_schema_version}, "
+            f"required_native_abi={FORGE_NATIVE_ABI_REVISION}, "
+            f"runtime_native_abi={contract.native_abi_revision}"
+        )
+    return contract
 
 
 def _native_load_trace(message):
@@ -373,6 +428,7 @@ def _prepare_native_runtime():
                     os, "RTLD_NOW", 2
                 )
                 handle = ctypes.CDLL(lib_path, mode=flags)
+            _validate_native_runtime_bootstrap(handle, lib_path)
             # Keep the explicit loader reference alive for the complete Python
             # process lifetime. On POSIX the shim has a direct dependency edge
             # to this locally loaded runtime, so its private C++ ABI is

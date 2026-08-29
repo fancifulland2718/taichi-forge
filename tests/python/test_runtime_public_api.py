@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge import _contracts as runtime_contracts
 from taichi_forge import runtime as runtime_api
 from tests import test_utils
 
@@ -14,6 +15,7 @@ from tests import test_utils
 def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     assert manifest["schema_version"] == 1
+    assert manifest["native_abi_revision"] == 2
     assert manifest["native_abi_revision"] == manifest["required_native_abi_revision"]
     assert manifest["schemas"]["dynamic_work"] == 5
     assert manifest["schemas"]["structured_control"] == 5
@@ -34,6 +36,16 @@ def test_runtime_contract_manifest_is_safe_before_init():
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     assert manifest["schemas"]["dynamic_work"] == 5
     assert ti.lang.impl.get_runtime().prog is None
+
+
+def test_runtime_contract_rejects_compiler_abi_mismatch(monkeypatch):
+    native = runtime_contracts._native_contract_manifest()
+    native["shim_compiler_abi"] = "different-cxxabi"
+    monkeypatch.setattr(
+        runtime_contracts, "_native_contract_manifest", lambda: native
+    )
+    with pytest.raises(RuntimeError, match="compiler ABI is incompatible"):
+        runtime_contracts.validate_runtime_contract()
 
 
 def test_runtime_public_api_requires_an_initialized_program():

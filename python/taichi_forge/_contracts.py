@@ -1,19 +1,22 @@
 """Versioned compatibility contracts shared by Forge runtime surfaces.
 
 Build/source identities are provenance only.  A split Python shim and native
-runtime are compatible when the ABI revision and every required schema agree;
-they do not need to originate from the same commit.
+runtime are compatible when the ABI revision, bootstrap schema, compiler ABI,
+and every required schema agree; they do not need to originate from the same
+commit.
 """
 
 from __future__ import annotations
 
 from types import MappingProxyType
 
+from taichi_forge._contract_constants import (
+    FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION,
+    FORGE_NATIVE_ABI_REVISION,
+)
 from taichi_forge._lib import core as _ti_core
 
 
-FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION = 1
-FORGE_NATIVE_ABI_REVISION = 1
 DYNAMIC_WORK_SCHEMA_VERSION = 5
 STRUCTURED_CONTROL_SCHEMA_VERSION = 5
 GRAPH_PIPELINE_SCHEMA_VERSION = 2
@@ -104,6 +107,26 @@ def validate_runtime_contract(*, require_native_manifest=True):
             "installed native runtime ABI is incompatible with this shim: "
             f"required={required}, actual={actual}"
         )
+    if not runtime["legacy_runtime"]:
+        manifest_schema = runtime["manifest_schema_version"]
+        if manifest_schema != FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION:
+            raise RuntimeError(
+                "installed native runtime manifest schema is incompatible "
+                f"with this shim: required="
+                f"{FORGE_CONTRACT_MANIFEST_SCHEMA_VERSION}, "
+                f"actual={manifest_schema}"
+            )
+        compiler = manifest["compiler_compatibility"]
+        if (
+            not compiler["runtime"]
+            or not compiler["shim"]
+            or compiler["runtime"] != compiler["shim"]
+        ):
+            raise RuntimeError(
+                "installed native runtime compiler ABI is incompatible with "
+                f"this shim: runtime={compiler['runtime']!r}, "
+                f"shim={compiler['shim']!r}"
+            )
     return manifest
 
 

@@ -10,6 +10,7 @@
 
 #include <spdlog/fmt/fmt.h>
 #include <cstdlib>
+#include <cstring>
 #include "taichi/common/logging.h"
 
 #if defined(TI_PLATFORM_WINDOWS)
@@ -119,6 +120,28 @@ std::uint64_t get_forge_native_feature_bitmap() {
 
 std::string get_forge_native_compiler_abi() {
   return forge_compiler_abi_identity();
+}
+
+extern "C" int taichi_forge_runtime_bootstrap_v1(
+    ForgeRuntimeBootstrapV1 *output,
+    std::uint32_t output_size) {
+  if (output == nullptr || output_size < sizeof(ForgeRuntimeBootstrapV1)) {
+    return 1;
+  }
+  const auto compiler_abi = forge_compiler_abi_identity();
+  if (compiler_abi.size() >= sizeof(output->compiler_abi)) {
+    return 2;
+  }
+  *output = {};
+  output->struct_size = sizeof(ForgeRuntimeBootstrapV1);
+  output->manifest_schema_version = kForgeContractManifestSchemaVersion;
+  output->native_abi_revision = kForgeNativeAbiRevision;
+  output->runtime_statistics_schema_version =
+      kForgeRuntimeStatisticsSchemaVersion;
+  output->feature_bitmap = get_forge_native_feature_bitmap();
+  std::memcpy(output->compiler_abi, compiler_abi.c_str(),
+              compiler_abi.size() + 1);
+  return 0;
 }
 
 std::string get_cuda_version_string() {

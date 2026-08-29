@@ -49,6 +49,7 @@ def _write_runtime_wheel(
     duplicate_raw_cudart: bool = False,
     dependency_class: str = "toolkit-reference",
     include_export_manifest: bool = True,
+    include_bootstrap_export: bool = True,
     export_manifest_schema: int = 2,
     requirements: tuple[str, ...] = (),
     include_optix_providers: bool = True,
@@ -123,6 +124,7 @@ def _write_runtime_wheel(
             if platform == "windows":
                 requested = [
                     "?launch@Kernel@lang@taichi@@QEAAXXZ",
+                    "taichi_forge_runtime_bootstrap_v1",
                     "taichi_runtime_anchor",
                 ]
                 actual = [
@@ -134,6 +136,7 @@ def _write_runtime_wheel(
             elif platform == "macos":
                 requested = [
                     "__ZN6taichi4lang7Program4syncEv",
+                    "_taichi_forge_runtime_bootstrap_v1",
                     "_taichi_runtime_anchor",
                 ]
                 actual = list(requested)
@@ -142,6 +145,7 @@ def _write_runtime_wheel(
             else:
                 requested = [
                     "_ZN6taichi4lang7Program4syncEv",
+                    "taichi_forge_runtime_bootstrap_v1",
                     "taichi_runtime_anchor",
                 ]
                 actual = [
@@ -150,6 +154,17 @@ def _write_runtime_wheel(
                 ]
                 audit_kind = "elf-dynamic-symbol-table"
                 platform_name = "linux-elf"
+            if not include_bootstrap_export:
+                requested = [
+                    symbol
+                    for symbol in requested
+                    if "taichi_forge_runtime_bootstrap_v1" not in symbol
+                ]
+                actual = [
+                    symbol
+                    for symbol in actual
+                    if "taichi_forge_runtime_bootstrap_v1" not in symbol
+                ]
             requested.sort()
             actual.sort()
             requested_digest = hashlib.sha256("\n".join(requested).encode("utf-8")).hexdigest()
@@ -163,13 +178,19 @@ def _write_runtime_wheel(
                 "forbidden_export_families": [],
                 "private_abi_collision_probe_symbols": ["taichi_runtime_anchor"],
                 "raw_defined_symbol_count": 5,
-                "shim_direct_runtime_symbol_count": 1,
+                "shim_direct_runtime_symbol_count": (
+                    2 if include_bootstrap_export else 1
+                ),
                 "shim_shared_odr_symbol_count": 0,
-                "shim_required_runtime_symbol_count": 1,
-                "exported_symbol_count": 2,
+                "shim_required_runtime_symbol_count": (
+                    2 if include_bootstrap_export else 1
+                ),
+                "exported_symbol_count": len(requested),
                 "actual_exported_symbol_count": len(actual),
                 "implicit_exported_symbol_count": len(set(actual) - set(requested)),
-                "dropped_raw_symbol_count": 4,
+                "dropped_raw_symbol_count": (
+                    3 if include_bootstrap_export else 4
+                ),
                 "configured_export_limit": 32_768,
                 "exports": requested,
                 "actual_exports": actual,
@@ -504,6 +525,31 @@ def test_windows_runtime_wheel_requires_export_manifest(tmp_path):
     )
 
     with pytest.raises(RuntimeError, match="taichi_runtime.exports.json"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+@pytest.mark.parametrize(
+    ("platform", "tag"),
+    (
+        ("windows", "win_amd64"),
+        ("manylinux", "manylinux_2_35_x86_64"),
+        ("macos", "macosx_12_0_arm64"),
+    ),
+)
+def test_runtime_wheel_requires_bootstrap_contract_export(
+    tmp_path, platform, tag
+):
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(
+        wheel,
+        platform=platform,
+        version="0.6.3",
+        cuda_major=0,
+        dependency_class="driver-only",
+        include_bootstrap_export=False,
+    )
+
+    with pytest.raises(RuntimeError, match="bootstrap contract"):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
 
 
@@ -929,7 +975,26 @@ def test_shim_discovers_auditwheel_cudart_separate_from_manifest(monkeypatch, tm
 def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
     runtime = tmp_path / "libtaichi_runtime.so"
     runtime.write_bytes(b"")
-    handle = object()
+    class Probe:
+        def __call__(self, output, output_size):
+            contract = runtime_utils.ctypes.cast(
+                output,
+                runtime_utils.ctypes.POINTER(
+                    runtime_utils._ForgeRuntimeBootstrapV1
+                ),
+            ).contents
+            contract.struct_size = output_size
+            contract.manifest_schema_version = 1
+            contract.native_abi_revision = 2
+            contract.runtime_statistics_schema_version = 3
+            contract.feature_bitmap = 1
+            contract.compiler_abi = b"test-cxxabi"
+            return 0
+
+    class Handle:
+        taichi_forge_runtime_bootstrap_v1 = Probe()
+
+    handle = Handle()
     calls = []
 
     monkeypatch.setattr(runtime_utils, "get_os_name", lambda: "linux")
@@ -954,6 +1019,31 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
             getattr(os, "RTLD_LOCAL", 0) | getattr(os, "RTLD_NOW", 2),
         )
     ]
+
+
+def test_split_runtime_bootstrap_rejects_missing_or_mismatched_contract():
+    path = "/runtime/libtaichi_runtime.so"
+    with pytest.raises(ImportError, match="bootstrap contract v1"):
+        runtime_utils._validate_native_runtime_bootstrap(object(), path)
+
+    class Probe:
+        def __call__(self, output, output_size):
+            contract = runtime_utils.ctypes.cast(
+                output,
+                runtime_utils.ctypes.POINTER(
+                    runtime_utils._ForgeRuntimeBootstrapV1
+                ),
+            ).contents
+            contract.struct_size = output_size
+            contract.manifest_schema_version = 1
+            contract.native_abi_revision = 1
+            return 0
+
+    class Handle:
+        taichi_forge_runtime_bootstrap_v1 = Probe()
+
+    with pytest.raises(ImportError, match="required_native_abi=2"):
+        runtime_utils._validate_native_runtime_bootstrap(Handle(), path)
 
 
 def test_split_runtime_dlopen_flags_omit_deepbind(monkeypatch):

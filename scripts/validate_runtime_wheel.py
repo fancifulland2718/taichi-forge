@@ -245,6 +245,15 @@ def _validate_export_manifest(zf: ZipFile, names: list[str], platform: str) -> d
     expected_anchor = "_taichi_runtime_anchor" if platform == "macos" else "taichi_runtime_anchor"
     if expected_anchor not in requested_set:
         raise RuntimeError("Runtime export manifest is missing its ABI anchor")
+    expected_bootstrap = (
+        "_taichi_forge_runtime_bootstrap_v1"
+        if platform == "macos"
+        else "taichi_forge_runtime_bootstrap_v1"
+    )
+    if expected_bootstrap not in requested_set:
+        raise RuntimeError(
+            "Runtime export manifest is missing its bootstrap contract"
+        )
     if limit <= 0 or limit > 65_535 or len(actual) > limit:
         raise RuntimeError("Runtime export set exceeds its safety limit")
     if payload.get("export_set_sha256") != _export_digest(requested):
