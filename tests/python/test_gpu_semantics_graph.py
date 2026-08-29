@@ -9,6 +9,8 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuAvailability,
     _GpuBackend,
     _GpuLaunchKind,
+    _GpuMemoryVisibility,
+    _GpuSynchronizationScope,
     _VulkanLaunchExtension,
     _dumps_gpu_semantics,
     _loads_gpu_semantics,
@@ -76,6 +78,12 @@ def test_graph_gpu_semantics_is_physical_lazy_and_replay_safe():
         assert not plan.fusion_recipe_ids
     assert set(plan.ordered_node_ids) == set(plan.dispatch_ids)
     assert len(plan.dependencies) == max(0, len(plan.ordered_node_ids) - 1)
+    assert all(
+        dependency.execution_scope
+        == _GpuSynchronizationScope.DISPATCH_BOUNDARY
+        and dependency.memory_visibility == _GpuMemoryVisibility.DEVICE
+        for dependency in plan.dependencies
+    )
     assert plan.retained_replay.value is True
     lifecycle = _lifecycle(warm)
     assert lifecycle["topology_exact"].value is True

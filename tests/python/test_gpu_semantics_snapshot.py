@@ -143,6 +143,10 @@ def test_resident_snapshot_maps_program_and_physical_dispatches(backend, expecte
     )
     assert snapshot.dispatches[0].logical_work_extent.value == _GpuExtent3(257)
     assert snapshot.dispatches[0].effects == snapshot.program.effects
+    assert snapshot.program.effects[0].footprint.pattern.value == (
+        "exact_pointwise"
+    )
+    assert snapshot.program.effects[0].footprint.halo == ((0, 0),)
     assert snapshot.artifacts[0].compiler_thread_local_scratch_bytes.value == 32
     assert snapshot.artifacts[0].static_workgroup_memory_bytes.value == 256
     assert _loads_gpu_semantics(_dumps_gpu_semantics(snapshot)) == snapshot

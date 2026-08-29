@@ -5,6 +5,8 @@ import pytest
 from taichi_forge.lang._gpu_semantics import (
     _CudaArtifactExtension,
     _CudaLaunchExtension,
+    _GpuAccessFootprint,
+    _GpuAccessPattern,
     _GpuArtifactSemantics,
     _GpuAutodiffRole,
     _GpuAvailability,
@@ -16,12 +18,15 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuExtent3,
     _GpuLaunchKind,
     _GpuLaunchSemantics,
+    _GpuMemoryVisibility,
     _GpuOwnership,
+    _GpuPlanDependency,
     _GpuProgramSemantics,
     _GpuResolvedValue,
     _GpuResourceAccess,
     _GpuResourceKind,
     _GpuTargetSemantics,
+    _GpuSynchronizationScope,
     _GpuWorkgroupResourceEnvelope,
     _VulkanArtifactExtension,
     _dumps_gpu_semantics,
@@ -186,6 +191,40 @@ def test_workgroup_resource_envelope_round_trips_without_native_objects():
     )
 
     assert _loads_gpu_semantics(_dumps_gpu_semantics(envelope)) == envelope
+
+
+def test_access_footprints_and_dependency_scopes_round_trip():
+    footprint = _GpuAccessFootprint(
+        pattern=_GpuAccessPattern.EXACT_POINTWISE,
+        iteration_rank=1,
+        affine_coefficients=((1,),),
+        affine_offsets=(0,),
+        halo=((0, 0),),
+        reuse_class="none",
+        provenance="pre_offload_exact_pointwise_metadata",
+    )
+    dependency = _GpuPlanDependency(
+        "dispatch:0",
+        "dispatch:1",
+        "sequence",
+        execution_scope=_GpuSynchronizationScope.DISPATCH_BOUNDARY,
+        memory_visibility=_GpuMemoryVisibility.DEVICE,
+        resource_ids=("argument:0",),
+        provenance="compiled_graph_sequence",
+    )
+
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(footprint)) == footprint
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(dependency)) == dependency
+
+    with pytest.raises(ValueError, match="identity affine maps"):
+        _GpuAccessFootprint(
+            pattern=_GpuAccessPattern.EXACT_POINTWISE,
+            iteration_rank=1,
+            affine_coefficients=((1,),),
+            affine_offsets=(1,),
+            halo=((0, 0),),
+            provenance="invalid_test_footprint",
+        )
 
 
 def test_gpu_semantics_rejects_cpu_and_backend_extension_mismatch():

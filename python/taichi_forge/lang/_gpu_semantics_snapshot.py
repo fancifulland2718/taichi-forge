@@ -1,6 +1,8 @@
 """Explicit resident snapshot construction for CUDA/Vulkan kernels."""
 
 from taichi_forge.lang._gpu_semantics import (
+    _GpuAccessFootprint,
+    _GpuAccessPattern,
     _GpuArtifactSemantics,
     _GpuAutodiffRole,
     _GpuBackend,
@@ -139,6 +141,25 @@ def _program_effects(metadata):
             access=_ACCESS.get(effect["access"], _GpuResourceAccess.OPAQUE),
             is_gradient=bool(effect["is_grad"]),
             provenance="pre_offload_graph_metadata",
+            footprint=(
+                _GpuAccessFootprint(
+                    pattern=_GpuAccessPattern.EXACT_POINTWISE,
+                    iteration_rank=1,
+                    affine_coefficients=((1,),),
+                    affine_offsets=(0,),
+                    halo=((0, 0),),
+                    reuse_class="none",
+                    block_uniform_control=_gpu_fact_unknown(
+                        "pre-offload pointwise analysis does not prove "
+                        "workgroup-uniform control",
+                        binding_time=_GpuBindingTime.LOGICAL,
+                    ),
+                    provenance="pre_offload_exact_pointwise_metadata",
+                )
+                if metadata["elementwise"]
+                and effect["resource_kind"] in ("argument", "snode")
+                else None
+            ),
         )
         for ordinal, effect in enumerate(metadata["effects"])
     )

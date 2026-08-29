@@ -13,11 +13,13 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuExecutablePlanSemantics,
     _GpuExecutablePlanSnapshot,
     _GpuLaunchKind,
+    _GpuMemoryVisibility,
     _GpuNamedFact,
     _GpuOwnership,
     _GpuPlanDependency,
     _GpuResourceAccess,
     _GpuResourceKind,
+    _GpuSynchronizationScope,
     _GpuTargetSemantics,
     _VulkanLaunchExtension,
     _gpu_fact_proven,
@@ -369,7 +371,14 @@ def _build_gpu_executable_plan_semantics(definition):
     bindings = _deduplicate(bindings, lambda item: item.schema_id)
     artifacts = _deduplicate(artifacts, lambda item: item.artifact_id)
     dependencies = tuple(
-        _GpuPlanDependency(left, right, "sequence")
+        _GpuPlanDependency(
+            left,
+            right,
+            "sequence",
+            execution_scope=_GpuSynchronizationScope.DISPATCH_BOUNDARY,
+            memory_visibility=_GpuMemoryVisibility.DEVICE,
+            provenance="compiled_graph_sequence",
+        )
         for left, right in zip(ordered, ordered[1:])
     )
     lifecycle = (

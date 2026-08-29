@@ -82,6 +82,32 @@ class _GpuResourceAccess(str, Enum):
     OPAQUE = "opaque"
 
 
+class _GpuAccessPattern(str, Enum):
+    EXACT_POINTWISE = "exact_pointwise"
+    AFFINE = "affine"
+    STENCIL = "stencil"
+    GATHER = "gather"
+    SCATTER = "scatter"
+    OPAQUE = "opaque"
+
+
+class _GpuSynchronizationScope(str, Enum):
+    NONE = "none"
+    WORKGROUP = "workgroup"
+    DISPATCH_BOUNDARY = "dispatch_boundary"
+    DEVICE = "device"
+    HOST = "host"
+    OPAQUE = "opaque"
+
+
+class _GpuMemoryVisibility(str, Enum):
+    NONE = "none"
+    WORKGROUP = "workgroup"
+    DEVICE = "device"
+    HOST = "host"
+    OPAQUE = "opaque"
+
+
 class _GpuTuningLocus(str, Enum):
     LOGICAL_TRANSFORM = "logical_transform"
     ARTIFACT_CODEGEN = "artifact_codegen"
@@ -124,6 +150,9 @@ _ENUM_TYPES = {
         _GpuLaunchKind,
         _GpuResourceKind,
         _GpuResourceAccess,
+        _GpuAccessPattern,
+        _GpuSynchronizationScope,
+        _GpuMemoryVisibility,
         _GpuTuningLocus,
         _GpuPhysicalEffect,
         _GpuBottleneckClass,
@@ -320,16 +349,124 @@ class _GpuTargetSemantics:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuAccessFootprint:
+    """A proven logical access map, independent of backend pointer objects."""
+
+    pattern: _GpuAccessPattern
+    iteration_rank: int
+    affine_coefficients: Tuple[Tuple[int, ...], ...] = ()
+    affine_offsets: Tuple[int, ...] = ()
+    halo: Tuple[Tuple[int, int], ...] = ()
+    contiguous_axis: Optional[int] = None
+    byte_alignment: Optional[int] = None
+    reuse_class: str = "unknown"
+    layout_fingerprint: str = ""
+    block_uniform_control: _GpuFact = field(default_factory=_default_unknown_fact)
+    provenance: str = ""
+
+    def __post_init__(self):
+        if not isinstance(self.pattern, _GpuAccessPattern):
+            raise TypeError("access footprint pattern must be _GpuAccessPattern")
+        if (
+            isinstance(self.iteration_rank, bool)
+            or not isinstance(self.iteration_rank, int)
+            or self.iteration_rank < 0
+        ):
+            raise ValueError("access footprint iteration_rank must be non-negative")
+        if not isinstance(self.affine_coefficients, tuple) or any(
+            not isinstance(row, tuple)
+            or len(row) != self.iteration_rank
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in row
+            )
+            for row in self.affine_coefficients
+        ):
+            raise TypeError(
+                "affine coefficients must be integer tuples of iteration rank"
+            )
+        if not isinstance(self.affine_offsets, tuple) or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in self.affine_offsets
+        ):
+            raise TypeError("affine offsets must be an integer tuple")
+        if len(self.affine_offsets) != len(self.affine_coefficients):
+            raise ValueError("affine coefficient and offset ranks must match")
+        if not isinstance(self.halo, tuple) or any(
+            not isinstance(bounds, tuple)
+            or len(bounds) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in bounds
+            )
+            or bounds[0] > bounds[1]
+            for bounds in self.halo
+        ):
+            raise TypeError("halo must contain ordered integer bound pairs")
+        if self.halo and len(self.halo) != len(self.affine_coefficients):
+            raise ValueError("halo and affine access ranks must match")
+        if self.pattern == _GpuAccessPattern.EXACT_POINTWISE:
+            identity = tuple(
+                tuple(int(row == column) for column in range(self.iteration_rank))
+                for row in range(self.iteration_rank)
+            )
+            if (
+                self.affine_coefficients != identity
+                or self.affine_offsets != (0,) * self.iteration_rank
+                or any(bounds != (0, 0) for bounds in self.halo)
+            ):
+                raise ValueError(
+                    "exact-pointwise footprints require identity affine maps "
+                    "and a zero halo"
+                )
+        if self.contiguous_axis is not None and (
+            isinstance(self.contiguous_axis, bool)
+            or not isinstance(self.contiguous_axis, int)
+            or self.contiguous_axis < 0
+        ):
+            raise ValueError("contiguous_axis must be non-negative or None")
+        if (
+            self.contiguous_axis is not None
+            and self.contiguous_axis >= len(self.affine_coefficients)
+        ):
+            raise ValueError("contiguous_axis exceeds the access rank")
+        if self.byte_alignment is not None and (
+            isinstance(self.byte_alignment, bool)
+            or not isinstance(self.byte_alignment, int)
+            or self.byte_alignment <= 0
+            or self.byte_alignment & (self.byte_alignment - 1)
+        ):
+            raise ValueError("byte_alignment must be a positive power of two")
+        if self.reuse_class not in (
+            "none",
+            "neighbor",
+            "tile",
+            "broadcast",
+            "unknown",
+        ):
+            raise ValueError("invalid access footprint reuse class")
+        if not isinstance(self.block_uniform_control, _GpuFact):
+            raise TypeError("block_uniform_control must be a _GpuFact")
+        _require_text(self.provenance, "access footprint provenance")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuResourceEffect:
     resource_id: str
     access: _GpuResourceAccess
     is_gradient: bool = False
     provenance: str = ""
+    footprint: Optional[_GpuAccessFootprint] = None
 
     def __post_init__(self):
         _require_text(self.resource_id, "resource_id")
         if not isinstance(self.access, _GpuResourceAccess):
             raise TypeError("access must be a _GpuResourceAccess")
+        if self.footprint is not None and not isinstance(
+            self.footprint, _GpuAccessFootprint
+        ):
+            raise TypeError("resource effect footprint must be _GpuAccessFootprint")
 
 
 @_schema_type
@@ -701,11 +838,23 @@ class _GpuPlanDependency:
     source_node_id: str
     target_node_id: str
     kind: str
+    execution_scope: _GpuSynchronizationScope = (
+        _GpuSynchronizationScope.DEVICE
+    )
+    memory_visibility: _GpuMemoryVisibility = _GpuMemoryVisibility.DEVICE
+    resource_ids: Tuple[str, ...] = ()
+    provenance: str = "ordered_executable_plan"
 
     def __post_init__(self):
         _require_text(self.source_node_id, "dependency source_node_id")
         _require_text(self.target_node_id, "dependency target_node_id")
         _require_text(self.kind, "dependency kind")
+        if not isinstance(self.execution_scope, _GpuSynchronizationScope):
+            raise TypeError("dependency execution_scope is invalid")
+        if not isinstance(self.memory_visibility, _GpuMemoryVisibility):
+            raise TypeError("dependency memory_visibility is invalid")
+        _require_tuple_members(self.resource_ids, str, "dependency resource_ids")
+        _require_text(self.provenance, "dependency provenance")
 
 
 @_schema_type
@@ -1060,6 +1209,8 @@ __all__ = [
     "_CudaLaunchExtension",
     "_GPU_SEMANTICS_SCHEMA_VERSION",
     "_GpuArtifactQualificationSnapshot",
+    "_GpuAccessFootprint",
+    "_GpuAccessPattern",
     "_GpuArtifactSemantics",
     "_GpuAutodiffRole",
     "_GpuAvailability",
@@ -1075,6 +1226,7 @@ __all__ = [
     "_GpuIntrinsicRequirement",
     "_GpuLaunchKind",
     "_GpuLaunchSemantics",
+    "_GpuMemoryVisibility",
     "_GpuNamedFact",
     "_GpuOwnership",
     "_GpuPhysicalEffect",
@@ -1086,6 +1238,7 @@ __all__ = [
     "_GpuResourceKind",
     "_GpuRuntimeObservation",
     "_GpuSemanticSnapshot",
+    "_GpuSynchronizationScope",
     "_GpuTargetSemantics",
     "_GpuTuningDimension",
     "_GpuTuningAutodiffPolicy",
