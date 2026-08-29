@@ -111,9 +111,10 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
         adapter.select({"forge_variant": "missing"})
 
     manifest = adapter.manifest()
-    assert manifest["schema_version"] == 2
+    assert manifest["schema_version"] == 3
     assert manifest["structural_variant_ids"] == ("v0-auto", "v1-auto")
     assert manifest["dimensions"] == ()
+    assert manifest["tiling_recipes"] == ()
     assert [item["compilation_id"] for item in manifest["variants"]] == [
         "c0",
         "c0",
@@ -121,6 +122,7 @@ def test_compileiq_adapter_validates_samples_and_emits_plain_manifest():
     ]
     assert all(item["selections"] == () for item in manifest["variants"])
     assert all(item["resource_envelope"] is None for item in manifest["variants"])
+    assert all(item["tiling_recipe_id"] is None for item in manifest["variants"])
 
 
 def test_compileiq_adapter_supports_named_user_space_dimension(monkeypatch):
@@ -420,3 +422,22 @@ def test_compileiq_staged_plan_covers_real_bounded_cuda_variant_groups():
     assert len(launch_stages) == 2
     assert all(len(stage.candidate_ids) == 16 for stage in launch_stages)
     assert all(len(stage.schedule) == 64 for stage in launch_stages)
+    manifest = adapter.manifest()
+    recipes = {
+        recipe["recipe_id"]: recipe for recipe in manifest["tiling_recipes"]
+    }
+    assert recipes
+    assert all(
+        variant["tiling_recipe_id"] in recipes
+        for variant in manifest["variants"]
+    )
+    selected = {
+        recipes[variant["tiling_recipe_id"]]["strategy"]
+        for variant in manifest["variants"]
+    }
+    assert selected == {"baseline", "thread_coarsened"}
+    assert {
+        recipe["strategy"]
+        for recipe in recipes.values()
+        if recipe["availability"] == "unsupported"
+    } == {"shared_staged", "layout_specialized"}

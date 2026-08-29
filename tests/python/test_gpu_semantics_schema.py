@@ -27,6 +27,9 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuResourceKind,
     _GpuTargetSemantics,
     _GpuSynchronizationScope,
+    _GpuTileStrategy,
+    _GpuTilingRecipe,
+    _GpuTuningAutodiffPolicy,
     _GpuWorkgroupResourceEnvelope,
     _VulkanArtifactExtension,
     _dumps_gpu_semantics,
@@ -224,6 +227,40 @@ def test_access_footprints_and_dependency_scopes_round_trip():
             affine_offsets=(1,),
             halo=((0, 0),),
             provenance="invalid_test_footprint",
+        )
+
+
+def test_tiling_recipe_is_frozen_bounded_and_serializable():
+    recipe = _GpuTilingRecipe(
+        recipe_id="tile1:" + "1" * 24,
+        backend=_GpuBackend.CUDA,
+        strategy=_GpuTileStrategy.THREAD_COARSENED,
+        tile_shape=_GpuExtent3(128),
+        work_per_thread=4,
+        halo=((-1, 1),),
+        resource_ids=("argument:0", "argument:1"),
+        required_alignment=16,
+        controller="cuda_constant_range_grid_coarsening",
+        dependencies=("runtime_no_alias",),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRIMAL_ONLY,
+        status=_proven(
+            True,
+            _GpuBindingTime.LAUNCH,
+            _GpuOwnership.HOST_LAUNCH,
+            "test_recipe",
+        ),
+    )
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(recipe)) == recipe
+    with pytest.raises(ValueError, match="power of two"):
+        _GpuTilingRecipe(
+            **{
+                **{
+                    item.name: getattr(recipe, item.name)
+                    for item in fields(recipe)
+                    if item.name != "required_alignment"
+                },
+                "required_alignment": 12,
+            }
         )
 
 

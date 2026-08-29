@@ -31,6 +31,15 @@ _ACCESS = {
     "atomic": _GpuResourceAccess.ATOMIC,
 }
 
+_ACCESS_PATTERN = {
+    "exact_pointwise": _GpuAccessPattern.EXACT_POINTWISE,
+    "affine": _GpuAccessPattern.AFFINE,
+    "stencil": _GpuAccessPattern.STENCIL,
+    "gather": _GpuAccessPattern.GATHER,
+    "scatter": _GpuAccessPattern.SCATTER,
+    "opaque": _GpuAccessPattern.OPAQUE,
+}
+
 
 def _backend(value):
     try:
@@ -132,6 +141,51 @@ def _resource_id(effect, ordinal):
     return f"opaque:{ordinal}"
 
 
+def _access_footprint(effect, metadata):
+    raw = effect.get("footprint")
+    if raw is None:
+        if not metadata["elementwise"] or effect["resource_kind"] not in (
+            "argument",
+            "snode",
+        ):
+            return None
+        raw = {
+            "pattern": "exact_pointwise",
+            "iteration_rank": 1,
+            "affine_coefficients": ((1,),),
+            "affine_offsets": (0,),
+            "halo": ((0, 0),),
+            "contiguous_axis": -1,
+            "reuse_class": "none",
+        }
+    pattern = _ACCESS_PATTERN.get(str(raw.get("pattern", "opaque")))
+    if pattern in (None, _GpuAccessPattern.OPAQUE):
+        return None
+    contiguous_axis = int(raw.get("contiguous_axis", -1))
+    return _GpuAccessFootprint(
+        pattern=pattern,
+        iteration_rank=int(raw["iteration_rank"]),
+        affine_coefficients=tuple(
+            tuple(int(value) for value in row)
+            for row in raw["affine_coefficients"]
+        ),
+        affine_offsets=tuple(int(value) for value in raw["affine_offsets"]),
+        halo=tuple(
+            tuple(int(value) for value in bounds) for bounds in raw["halo"]
+        ),
+        contiguous_axis=(
+            None if contiguous_axis < 0 else contiguous_axis
+        ),
+        reuse_class=str(raw.get("reuse_class", "unknown")),
+        block_uniform_control=_gpu_fact_unknown(
+            "pre-offload affine analysis does not prove "
+            "workgroup-uniform control",
+            binding_time=_GpuBindingTime.LOGICAL,
+        ),
+        provenance="pre_offload_affine_access_metadata_v2",
+    )
+
+
 def _program_effects(metadata):
     if not metadata["available"] or metadata["opaque"]:
         return ()
@@ -141,25 +195,7 @@ def _program_effects(metadata):
             access=_ACCESS.get(effect["access"], _GpuResourceAccess.OPAQUE),
             is_gradient=bool(effect["is_grad"]),
             provenance="pre_offload_graph_metadata",
-            footprint=(
-                _GpuAccessFootprint(
-                    pattern=_GpuAccessPattern.EXACT_POINTWISE,
-                    iteration_rank=1,
-                    affine_coefficients=((1,),),
-                    affine_offsets=(0,),
-                    halo=((0, 0),),
-                    reuse_class="none",
-                    block_uniform_control=_gpu_fact_unknown(
-                        "pre-offload pointwise analysis does not prove "
-                        "workgroup-uniform control",
-                        binding_time=_GpuBindingTime.LOGICAL,
-                    ),
-                    provenance="pre_offload_exact_pointwise_metadata",
-                )
-                if metadata["elementwise"]
-                and effect["resource_kind"] in ("argument", "snode")
-                else None
-            ),
+            footprint=_access_footprint(effect, metadata),
         )
         for ordinal, effect in enumerate(metadata["effects"])
     )

@@ -30,6 +30,7 @@ class _KernelVariant:
     physical_equivalence_key: tuple
     selections: tuple
     resource_envelope: object
+    tiling_recipe_id: str
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class _KernelVariantSession:
         self._args = tuple(args)
         variants = []
         rejections = []
+        tiling_recipes = {}
         dimension_contract = None
         for block_dim in requested:
             baseline_spec = self._spec(block_dim, "auto", 1, None)
@@ -110,15 +112,39 @@ class _KernelVariantSession:
                     "GPU tuning dimension contract changed across block candidates"
                 )
 
-            from taichi_forge.lang._gpu_semantics import _GpuPhysicalEffect
+            from taichi_forge.lang._gpu_semantics import (
+                _GpuAvailability,
+                _GpuPhysicalEffect,
+                _GpuTileStrategy,
+            )
             from taichi_forge.lang._gpu_semantics_tuning import (
                 _RESIDENCY_DIMENSION,
                 _RANGE_WORK_PER_THREAD_DIMENSION,
                 _TLS_DIMENSION,
                 _WORKGROUP_DIMENSION,
+                _derive_gpu_tiling_recipes,
                 _dimension_by_name,
                 _gpu_physical_equivalence_key,
             )
+            block_tiling_recipes = _derive_gpu_tiling_recipes(
+                snapshot, dimensions
+            )
+            for recipe in block_tiling_recipes:
+                previous = tiling_recipes.setdefault(recipe.recipe_id, recipe)
+                if previous != recipe:
+                    raise RuntimeError(
+                        "tiling recipe identity changed across block candidates"
+                    )
+            executable_tiling_by_work = {
+                recipe.work_per_thread: recipe
+                for recipe in block_tiling_recipes
+                if recipe.status.availability == _GpuAvailability.PROVEN
+                and recipe.strategy
+                in (
+                    _GpuTileStrategy.BASELINE,
+                    _GpuTileStrategy.THREAD_COARSENED,
+                )
+            }
             workgroup = _dimension_by_name(dimensions, _WORKGROUP_DIMENSION)
             if block_dim not in workgroup.legal_values:
                 rejections.append(
@@ -154,6 +180,14 @@ class _KernelVariantSession:
                     continue
             for thread_local in tls_modes:
                 for work_per_thread in work_values:
+                    tiling_recipe = executable_tiling_by_work.get(
+                        work_per_thread
+                    )
+                    if tiling_recipe is None:
+                        raise RuntimeError(
+                            "executable work-per-thread variant has no proven "
+                            "tiling recipe"
+                        )
                     for waves in residency_values:
                         spec = self._spec(
                             block_dim, thread_local, work_per_thread, waves
@@ -182,6 +216,7 @@ class _KernelVariantSession:
                                 ),
                                 selections=tuple(selections.items()),
                                 resource_envelope=resource_envelope,
+                                tiling_recipe_id=tiling_recipe.recipe_id,
                             )
                         )
 
@@ -192,6 +227,7 @@ class _KernelVariantSession:
         )
         self._rejections = tuple(rejections)
         self._dimensions = () if dimension_contract is None else dimension_contract
+        self._tiling_recipes = MappingProxyType(tiling_recipes)
         members = {}
         for variant in variants:
             group = members.setdefault(
@@ -271,6 +307,10 @@ class _KernelVariantSession:
     @property
     def dimensions(self):
         return self._dimensions
+
+    @property
+    def tiling_recipes(self):
+        return tuple(self._tiling_recipes.values())
 
     def variant_ids(self):
         return tuple(self._variants)

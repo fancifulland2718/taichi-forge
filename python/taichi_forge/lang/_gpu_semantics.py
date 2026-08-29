@@ -139,6 +139,13 @@ class _GpuTuningAutodiffPolicy(str, Enum):
     UNSUPPORTED = "unsupported"
 
 
+class _GpuTileStrategy(str, Enum):
+    BASELINE = "baseline"
+    THREAD_COARSENED = "thread_coarsened"
+    SHARED_STAGED = "shared_staged"
+    LAYOUT_SPECIALIZED = "layout_specialized"
+
+
 _ENUM_TYPES = {
     enum_type.__name__: enum_type
     for enum_type in (
@@ -157,6 +164,7 @@ _ENUM_TYPES = {
         _GpuPhysicalEffect,
         _GpuBottleneckClass,
         _GpuTuningAutodiffPolicy,
+        _GpuTileStrategy,
     )
 }
 _SCHEMA_TYPES = {}
@@ -1080,6 +1088,73 @@ class _GpuExecutablePlanSnapshot:
 
 @_schema_type
 @dataclass(frozen=True)
+class _GpuTilingRecipe:
+    recipe_id: str
+    backend: _GpuBackend
+    strategy: _GpuTileStrategy
+    tile_shape: _GpuExtent3
+    work_per_thread: int
+    halo: Tuple[Tuple[int, int], ...] = ()
+    resource_ids: Tuple[str, ...] = ()
+    layout_fingerprints: Tuple[str, ...] = ()
+    required_alignment: Optional[int] = None
+    controller: str = ""
+    dependencies: Tuple[str, ...] = ()
+    autodiff_policy: _GpuTuningAutodiffPolicy = (
+        _GpuTuningAutodiffPolicy.INDEPENDENT_ORACLE
+    )
+    status: _GpuFact = field(default_factory=_default_unknown_fact)
+
+    def __post_init__(self):
+        if not self.recipe_id.startswith("tile1:"):
+            raise ValueError("tiling recipe ID is invalid")
+        _require_backend(self.backend)
+        if not isinstance(self.strategy, _GpuTileStrategy):
+            raise TypeError("strategy must be a _GpuTileStrategy")
+        if not isinstance(self.tile_shape, _GpuExtent3):
+            raise TypeError("tile_shape must be a _GpuExtent3")
+        if (
+            isinstance(self.work_per_thread, bool)
+            or not isinstance(self.work_per_thread, int)
+            or self.work_per_thread < 1
+        ):
+            raise ValueError("work_per_thread must be a positive integer")
+        if not isinstance(self.halo, tuple) or any(
+            not isinstance(bounds, tuple)
+            or len(bounds) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in bounds
+            )
+            or bounds[0] > bounds[1]
+            for bounds in self.halo
+        ):
+            raise TypeError("tiling halo must contain ordered integer pairs")
+        _require_tuple_members(self.resource_ids, str, "tiling resources")
+        _require_tuple_members(
+            self.layout_fingerprints, str, "tiling layout fingerprints"
+        )
+        if self.required_alignment is not None and (
+            isinstance(self.required_alignment, bool)
+            or not isinstance(self.required_alignment, int)
+            or self.required_alignment <= 0
+            or self.required_alignment & (self.required_alignment - 1)
+        ):
+            raise ValueError(
+                "tiling required_alignment must be a positive power of two"
+            )
+        _require_text(self.controller, "tiling recipe controller")
+        _require_tuple_members(self.dependencies, str, "tiling dependencies")
+        if not isinstance(self.autodiff_policy, _GpuTuningAutodiffPolicy):
+            raise TypeError(
+                "autodiff_policy must be a _GpuTuningAutodiffPolicy"
+            )
+        if not isinstance(self.status, _GpuFact):
+            raise TypeError("tiling recipe status must be a _GpuFact")
+
+
+@_schema_type
+@dataclass(frozen=True)
 class _GpuTuningDimension:
     name: str
     locus: _GpuTuningLocus
@@ -1240,6 +1315,8 @@ __all__ = [
     "_GpuSemanticSnapshot",
     "_GpuSynchronizationScope",
     "_GpuTargetSemantics",
+    "_GpuTileStrategy",
+    "_GpuTilingRecipe",
     "_GpuTuningDimension",
     "_GpuTuningAutodiffPolicy",
     "_GpuTuningLocus",

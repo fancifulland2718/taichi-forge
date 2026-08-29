@@ -226,6 +226,16 @@ py::dict graph_kernel_metadata_to_python(
     encoded["snode_id"] = effect.snode_id;
     encoded["is_grad"] = effect.is_grad;
     encoded["access"] = effect.access;
+    py::dict footprint;
+    footprint["pattern"] = effect.footprint.pattern;
+    footprint["iteration_rank"] = effect.footprint.iteration_rank;
+    footprint["affine_coefficients"] =
+        effect.footprint.affine_coefficients;
+    footprint["affine_offsets"] = effect.footprint.affine_offsets;
+    footprint["halo"] = effect.footprint.halo;
+    footprint["contiguous_axis"] = effect.footprint.contiguous_axis;
+    footprint["reuse_class"] = effect.footprint.reuse_class;
+    encoded["footprint"] = std::move(footprint);
     effects.append(std::move(encoded));
   }
   item["effects"] = std::move(effects);

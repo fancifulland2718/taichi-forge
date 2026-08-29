@@ -2733,6 +2733,92 @@ def test_compiler_metadata_fails_closed_for_atomic_and_stencil_access():
     ]
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_compiler_metadata_preserves_bounded_affine_stencil_without_fusing():
+    @ti.kernel
+    def shifted(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in source:
+            if i + 1 < source.shape[0]:
+                output[i] = source[i + 1]
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in source:
+            if 0 < i and i + 1 < source.shape[0]:
+                output[i] = (
+                    source[i - 1] + 2.0 * source[i] + source[i + 1]
+                )
+
+    sym_source = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1
+    )
+    sym_output = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, sym_source, sym_output)
+    graph = builder.compile()
+
+    metadata = graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
+    assert metadata["version"] == 2
+    assert metadata["available"]
+    assert not metadata["opaque"]
+    assert not metadata["elementwise"]
+    source_effect = next(
+        effect for effect in metadata["effects"] if effect["arg_id"] == [0]
+    )
+    output_effect = next(
+        effect for effect in metadata["effects"] if effect["arg_id"] == [1]
+    )
+    assert source_effect["footprint"]["pattern"] == "stencil"
+    assert source_effect["footprint"]["affine_coefficients"] == [[1]]
+    assert source_effect["footprint"]["affine_offsets"] == [0]
+    assert source_effect["footprint"]["halo"] == [[-1, 1]]
+    assert output_effect["footprint"]["pattern"] == "exact_pointwise"
+    fusion = graph._ir_debug_info["fusion_plan"]
+    assert fusion["candidate_groups"] == 0
+    assert fusion["blockers"] == {"not_elementwise": 1}
+
+    values = np.arange(257, dtype=np.float32)
+    source = ti.ndarray(ti.f32, shape=257)
+    output = ti.ndarray(ti.f32, shape=257)
+    source.from_numpy(values)
+    output.fill(-1.0)
+    graph.run({"source": source, "output": output})
+    expected = np.full(257, -1.0, dtype=np.float32)
+    expected[1:-1] = values[:-2] + 2.0 * values[1:-1] + values[2:]
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+
+    shifted_builder = ti.graph.GraphBuilder()
+    shifted_builder.dispatch(shifted, sym_source, sym_output)
+    shifted_graph = shifted_builder.compile()
+    shifted_metadata = (
+        shifted_graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
+    )
+    shifted_source_effect = next(
+        effect
+        for effect in shifted_metadata["effects"]
+        if effect["arg_id"] == [0]
+    )
+    assert shifted_source_effect["footprint"]["pattern"] == "affine"
+    assert shifted_source_effect["footprint"]["affine_offsets"] == [1]
+    assert shifted_source_effect["footprint"]["halo"] == [[0, 0]]
+    assert not shifted_metadata["opaque"]
+    assert not shifted_metadata["elementwise"]
+
+    output.fill(-1.0)
+    shifted_graph.run({"source": source, "output": output})
+    expected.fill(-1.0)
+    expected[:-1] = values[1:]
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
 @test_utils.test(arch=ti.cpu)
 def test_backend_command_action_has_explicit_execution_contract_and_replay():
     tracker = {"recordings": 0, "binding_names": [], "fallback_runs": 0}

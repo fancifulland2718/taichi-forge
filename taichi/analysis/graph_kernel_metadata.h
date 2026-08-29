@@ -11,6 +11,25 @@ namespace taichi::lang {
 class IRNode;
 class Kernel;
 
+struct GraphKernelAccessFootprint {
+  // "exact_pointwise", "affine", "stencil", or "opaque".
+  std::string pattern{"opaque"};
+  int iteration_rank{0};
+  std::vector<std::vector<std::int64_t>> affine_coefficients;
+  std::vector<std::int64_t> affine_offsets;
+  std::vector<std::vector<std::int64_t>> halo;
+  int contiguous_axis{-1};
+  std::string reuse_class{"unknown"};
+
+  TI_IO_DEF(pattern,
+            iteration_rank,
+            affine_coefficients,
+            affine_offsets,
+            halo,
+            contiguous_axis,
+            reuse_class);
+};
+
 struct GraphKernelResourceEffect {
   // "argument", "snode", or "opaque". Argument identities remain numeric
   // until a Graph dispatch maps them to its symbolic runtime names.
@@ -21,13 +40,15 @@ struct GraphKernelResourceEffect {
   bool is_grad{false};
   // "read", "write", "read_write", "atomic", or "opaque".
   std::string access{"opaque"};
+  GraphKernelAccessFootprint footprint;
 
   TI_IO_DEF(resource_kind,
             arg_id,
             snode_tree_id,
             snode_id,
             is_grad,
-            access);
+            access,
+            footprint);
 };
 
 struct GraphKernelIterationDomain {
@@ -42,7 +63,7 @@ struct GraphKernelIterationDomain {
 };
 
 struct GraphKernelMetadata {
-  static constexpr std::uint32_t kVersion = 1;
+  static constexpr std::uint32_t kVersion = 2;
 
   std::uint32_t version{kVersion};
   bool available{false};

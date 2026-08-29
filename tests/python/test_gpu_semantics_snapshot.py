@@ -18,6 +18,7 @@ from taichi_forge.lang._gpu_semantics import (
     _GpuPhysicalEffect,
     _GpuResourceAccess,
     _GpuResourceKind,
+    _GpuTileStrategy,
     _VulkanArtifactExtension,
     _VulkanLaunchExtension,
     _dumps_gpu_semantics,
@@ -33,10 +34,12 @@ from taichi_forge.lang._gpu_semantics_tuning import (
     _TLS_DIMENSION,
     _WORKGROUP_DIMENSION,
     _derive_gpu_tuning_dimensions,
+    _derive_gpu_tiling_recipes,
     _derive_workgroup_resource_envelope,
     _dimension_by_name,
     _gpu_physical_equivalence_key,
     _gpu_tuning_dimension_manifest,
+    _gpu_tiling_recipe_manifest,
     _gpu_workgroup_resource_manifest,
 )
 from tests import test_utils
@@ -150,6 +153,91 @@ def test_resident_snapshot_maps_program_and_physical_dispatches(backend, expecte
     assert snapshot.artifacts[0].compiler_thread_local_scratch_bytes.value == 32
     assert snapshot.artifacts[0].static_workgroup_memory_bytes.value == 256
     assert _loads_gpu_semantics(_dumps_gpu_semantics(snapshot)) == snapshot
+
+
+def test_resident_snapshot_preserves_proven_affine_stencil_footprints():
+    raw = deepcopy(_raw_snapshot("cuda"))
+    raw["graph_metadata"]["version"] = 2
+    raw["graph_metadata"]["elementwise"] = False
+    raw["graph_metadata"]["effects"][0]["footprint"] = {
+        "pattern": "stencil",
+        "iteration_rank": 1,
+        "affine_coefficients": ((1,),),
+        "affine_offsets": (0,),
+        "halo": ((-1, 1),),
+        "contiguous_axis": -1,
+        "reuse_class": "neighbor",
+    }
+
+    snapshot = _build_resident_gpu_semantics(raw)
+    footprint = snapshot.program.effects[0].footprint
+    assert footprint.pattern.value == "stencil"
+    assert footprint.affine_coefficients == ((1,),)
+    assert footprint.affine_offsets == (0,)
+    assert footprint.halo == ((-1, 1),)
+    assert footprint.contiguous_axis is None
+    assert footprint.reuse_class == "neighbor"
+    assert footprint.block_uniform_control.availability == (
+        _GpuAvailability.UNKNOWN
+    )
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(snapshot)) == snapshot
+
+
+def test_tiling_recipes_only_materialize_existing_cuda_launch_controls():
+    raw = deepcopy(_raw_snapshot("cuda"))
+    raw["tasks"][0]["static_shared_bytes"] = 0
+    raw["graph_metadata"]["version"] = 2
+    raw["graph_metadata"]["elementwise"] = False
+    raw["graph_metadata"]["effects"][0]["access"] = "read"
+    raw["graph_metadata"]["effects"][0]["footprint"] = {
+        "pattern": "stencil",
+        "iteration_rank": 1,
+        "affine_coefficients": ((1,),),
+        "affine_offsets": (0,),
+        "halo": ((-1, 1),),
+        "contiguous_axis": -1,
+        "reuse_class": "neighbor",
+    }
+    snapshot = _build_resident_gpu_semantics(raw)
+    dimensions = _derive_gpu_tuning_dimensions(snapshot, max_threads=256)
+
+    first = _derive_gpu_tiling_recipes(snapshot, dimensions)
+    second = _derive_gpu_tiling_recipes(snapshot, dimensions)
+    assert first == second
+    proven = tuple(
+        recipe
+        for recipe in first
+        if recipe.status.availability == _GpuAvailability.PROVEN
+    )
+    assert [recipe.strategy for recipe in proven] == [
+        _GpuTileStrategy.BASELINE,
+        _GpuTileStrategy.THREAD_COARSENED,
+        _GpuTileStrategy.THREAD_COARSENED,
+        _GpuTileStrategy.THREAD_COARSENED,
+    ]
+    assert [recipe.work_per_thread for recipe in proven] == [1, 2, 4, 8]
+    assert len({recipe.recipe_id for recipe in first}) == len(first)
+    shared = next(
+        recipe
+        for recipe in first
+        if recipe.strategy == _GpuTileStrategy.SHARED_STAGED
+    )
+    assert shared.status.availability == _GpuAvailability.UNSUPPORTED
+    assert "no ndarray compiler controller" in shared.status.reason
+    assert shared.halo == ((-1, 1),)
+    assert shared.layout_fingerprints == ()
+    assert "runtime_no_alias" in shared.dependencies
+    layout = next(
+        recipe
+        for recipe in first
+        if recipe.strategy == _GpuTileStrategy.LAYOUT_SPECIALIZED
+    )
+    assert layout.status.availability == _GpuAvailability.UNSUPPORTED
+    assert "AoS/SoA conversion is forbidden" in layout.status.reason
+    assert _loads_gpu_semantics(_dumps_gpu_semantics(first)) == first
+    assert _gpu_tiling_recipe_manifest(shared)["availability"] == (
+        "unsupported"
+    )
 
 
 def test_program_effects_do_not_leak_into_multiple_dispatches():

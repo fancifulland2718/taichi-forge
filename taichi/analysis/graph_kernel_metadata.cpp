@@ -1,7 +1,9 @@
 #include "taichi/analysis/graph_kernel_metadata.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
+#include <set>
 #include <tuple>
 
 #include "taichi/ir/ir.h"
@@ -105,6 +107,60 @@ bool is_loop_index(Stmt *stmt,
          same_external_shape(binary->rhs, domain);
 }
 
+bool checked_add(std::int64_t lhs,
+                 std::int64_t rhs,
+                 std::int64_t *result) {
+  if ((rhs > 0 && lhs > std::numeric_limits<std::int64_t>::max() - rhs) ||
+      (rhs < 0 && lhs < std::numeric_limits<std::int64_t>::min() - rhs)) {
+    return false;
+  }
+  *result = lhs + rhs;
+  return true;
+}
+
+bool checked_subtract(std::int64_t lhs,
+                      std::int64_t rhs,
+                      std::int64_t *result) {
+  if ((rhs > 0 && lhs < std::numeric_limits<std::int64_t>::min() + rhs) ||
+      (rhs < 0 && lhs > std::numeric_limits<std::int64_t>::max() + rhs)) {
+    return false;
+  }
+  *result = lhs - rhs;
+  return true;
+}
+
+bool affine_loop_offset(Stmt *stmt,
+                        RangeForStmt *loop,
+                        const GraphKernelIterationDomain &domain,
+                        std::int64_t *offset) {
+  if (is_loop_index(stmt, loop, domain)) {
+    *offset = 0;
+    return true;
+  }
+  auto *binary = stmt ? stmt->cast<BinaryOpStmt>() : nullptr;
+  if (binary == nullptr) {
+    return false;
+  }
+  std::int64_t base_offset = 0;
+  std::int64_t constant = 0;
+  if (binary->op_type == BinaryOpType::add) {
+    if (affine_loop_offset(binary->lhs, loop, domain, &base_offset) &&
+        constant_integer(binary->rhs, &constant)) {
+      return checked_add(base_offset, constant, offset);
+    }
+    if (constant_integer(binary->lhs, &constant) &&
+        affine_loop_offset(binary->rhs, loop, domain, &base_offset)) {
+      return checked_add(constant, base_offset, offset);
+    }
+  }
+  if (binary->op_type == BinaryOpType::sub &&
+      affine_loop_offset(binary->lhs, loop, domain, &base_offset) &&
+      constant_integer(binary->rhs, &constant)) {
+    return checked_subtract(base_offset, constant, offset);
+  }
+  return false;
+}
+
 Stmt *pointer_origin(Stmt *stmt) {
   while (auto *matrix = stmt ? stmt->cast<MatrixPtrStmt>() : nullptr) {
     stmt = matrix->origin;
@@ -124,6 +180,12 @@ std::string merge_access(const std::string &lhs, const std::string &rhs) {
   }
   return "read_write";
 }
+
+struct EffectSummary {
+  std::string access;
+  std::set<std::int64_t> affine_offsets;
+  bool affine{true};
+};
 
 class MetadataVisitor final : public BasicStmtVisitor {
  public:
@@ -188,17 +250,45 @@ class MetadataVisitor final : public BasicStmtVisitor {
   std::vector<GraphKernelResourceEffect> effects() const {
     std::vector<GraphKernelResourceEffect> result;
     result.reserve(effects_.size());
-    for (const auto &[key, access] : effects_) {
+    for (const auto &[key, summary] : effects_) {
       GraphKernelResourceEffect effect;
       effect.resource_kind = std::get<0>(key);
       effect.arg_id = std::get<1>(key);
       effect.snode_tree_id = std::get<2>(key);
       effect.snode_id = std::get<3>(key);
       effect.is_grad = std::get<4>(key);
-      effect.access = access;
+      effect.access = summary.access;
+      if (summary.affine && !summary.affine_offsets.empty()) {
+        effect.footprint.iteration_rank = 1;
+        effect.footprint.affine_coefficients = {{1}};
+        const auto minimum = *summary.affine_offsets.begin();
+        const auto maximum = *summary.affine_offsets.rbegin();
+        if (summary.affine_offsets.size() == 1) {
+          effect.footprint.pattern =
+              minimum == 0 ? "exact_pointwise" : "affine";
+          effect.footprint.affine_offsets = {minimum};
+          effect.footprint.halo = {{0, 0}};
+          effect.footprint.reuse_class =
+              minimum == 0 ? "none" : "neighbor";
+        } else {
+          effect.footprint.pattern = "stencil";
+          effect.footprint.affine_offsets = {0};
+          effect.footprint.halo = {{minimum, maximum}};
+          effect.footprint.reuse_class = "neighbor";
+        }
+      }
       result.push_back(std::move(effect));
     }
     return result;
+  }
+
+  bool elementwise() const {
+    return std::all_of(
+        effects_.begin(), effects_.end(), [](const auto &item) {
+          const auto &summary = item.second;
+          return summary.affine && summary.affine_offsets.size() == 1 &&
+                 *summary.affine_offsets.begin() == 0;
+        });
   }
 
  private:
@@ -213,24 +303,34 @@ class MetadataVisitor final : public BasicStmtVisitor {
     }
   }
 
-  void add_effect(const ResourceKey &key, const std::string &access) {
-    auto [it, inserted] = effects_.emplace(key, access);
+  void add_effect(const ResourceKey &key,
+                  const std::string &access,
+                  bool affine,
+                  std::int64_t offset = 0) {
+    auto [it, inserted] = effects_.emplace(
+        key, EffectSummary{access, {}, affine});
     if (!inserted) {
-      it->second = merge_access(it->second, access);
+      it->second.access = merge_access(it->second.access, access);
+      it->second.affine = it->second.affine && affine;
+    }
+    if (affine) {
+      it->second.affine_offsets.insert(offset);
     }
   }
 
-  bool pointwise_indices(const std::vector<Stmt *> &indices,
-                         int external_dimensions) const {
+  bool affine_indices(const std::vector<Stmt *> &indices,
+                      int external_dimensions,
+                      std::int64_t *offset) const {
     // A physics map commonly iterates records in the first dimension while
     // selecting a vector/matrix component dynamically. Runtime affine views
     // require positive-stride unique mappings, so trailing indices remain
     // inside record |i| and cannot introduce a cross-iteration dependency.
-    // The leading index stays exact: gathers, stencils, and permutations are
-    // rejected even when every trailing component is row-local.
+    // The leading index must remain an integer affine shift of |i|. Wrapped
+    // stencils, gathers, and permutations are rejected even when every
+    // trailing component is row-local.
     if (indices.empty() || external_dimensions < 1 ||
         indices.size() < static_cast<std::size_t>(external_dimensions) ||
-        !is_loop_index(indices.front(), loop_, domain_)) {
+        !affine_loop_offset(indices.front(), loop_, domain_, offset)) {
       return false;
     }
     return true;
@@ -241,23 +341,26 @@ class MetadataVisitor final : public BasicStmtVisitor {
     if (auto *external =
             pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
       auto *base = external->base_ptr->cast<ArgLoadStmt>();
+      std::int64_t offset = 0;
       if (base == nullptr ||
-          !pointwise_indices(external->indices, external->ndim)) {
-        add_effect({"opaque", {}, -1, -1, false}, "opaque");
+          !affine_indices(external->indices, external->ndim, &offset)) {
+        add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
         block("non_pointwise_access", "opaque_access");
         return;
       }
       add_effect({"argument", base->arg_id, -1, -1, external->is_grad},
-                 access);
+                 access, true, offset);
       return;
     }
     if (auto *global = pointer ? pointer->cast<GlobalPtrStmt>() : nullptr) {
       const bool sparse_activation =
           global->activate &&
           (global->snode == nullptr || !global->snode->is_path_all_dense);
+      std::int64_t offset = 0;
       if (sparse_activation || global->indices.size() != 1 ||
-          !is_loop_index(global->indices.front(), loop_, domain_)) {
-        add_effect({"opaque", {}, -1, -1, false}, "opaque");
+          !affine_loop_offset(global->indices.front(), loop_, domain_,
+                              &offset)) {
+        add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
         block(sparse_activation ? "sparse_activation" :
                                   "non_pointwise_access",
               "opaque_access");
@@ -265,16 +368,16 @@ class MetadataVisitor final : public BasicStmtVisitor {
       }
       add_effect({"snode", {}, global->snode->get_snode_tree_id(),
                   global->snode->id, false},
-                 access);
+                 access, true, offset);
       return;
     }
-    add_effect({"opaque", {}, -1, -1, false}, "opaque");
+    add_effect({"opaque", {}, -1, -1, false}, "opaque", false);
     block("unsupported_pointer", "opaque_access");
   }
 
   RangeForStmt *loop_{nullptr};
   const GraphKernelIterationDomain &domain_;
-  std::map<ResourceKey, std::string> effects_;
+  std::map<ResourceKey, EffectSummary> effects_;
   std::vector<std::string> side_effects_;
   std::string blocker_;
 };
@@ -336,7 +439,7 @@ GraphKernelMetadata analyze_graph_kernel_metadata(IRNode *root,
     return result;
   }
   result.opaque = false;
-  result.elementwise = true;
+  result.elementwise = visitor.elementwise();
   result.synchronization = false;
   result.blocker.clear();
   return result;

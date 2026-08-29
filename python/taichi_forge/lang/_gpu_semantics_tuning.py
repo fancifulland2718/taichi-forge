@@ -1,13 +1,20 @@
 """Derive bounded tuning legality from typed GPU execution semantics."""
 
+import hashlib
+import json
+
 from taichi_forge.lang._gpu_semantics import (
     _CudaLaunchExtension,
+    _GpuAccessPattern,
     _GpuAutodiffRole,
     _GpuAvailability,
     _GpuBindingTime,
     _GpuBottleneckClass,
     _GpuOwnership,
     _GpuPhysicalEffect,
+    _GpuResourceAccess,
+    _GpuTileStrategy,
+    _GpuTilingRecipe,
     _GpuTuningAutodiffPolicy,
     _GpuTuningDimension,
     _GpuTuningLocus,
@@ -619,6 +626,206 @@ def _range_work_per_thread_dimension(snapshot, legal_values):
     )
 
 
+def _tiling_recipe_id(
+    snapshot,
+    strategy,
+    tile_shape,
+    work_per_thread,
+    halo,
+    resource_ids,
+    layout_fingerprints,
+):
+    payload = json.dumps(
+        {
+            "backend": snapshot.target.backend.value,
+            "program": snapshot.program.specialization_id,
+            "strategy": strategy.value,
+            "tile_shape": (tile_shape.x, tile_shape.y, tile_shape.z),
+            "work_per_thread": int(work_per_thread),
+            "halo": tuple(halo),
+            "resource_ids": tuple(resource_ids),
+            "layout_fingerprints": tuple(layout_fingerprints),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return f"tile1:{digest}"
+
+
+def _derive_gpu_tiling_recipes(snapshot, dimensions):
+    """Describe executable and deliberately rejected bounded tile recipes."""
+
+    ranges = tuple(
+        dispatch
+        for dispatch in snapshot.dispatches
+        if dispatch.task_kind == "range_for"
+    )
+    if len(ranges) != 1:
+        return ()
+    dispatch = ranges[0]
+    shape = _resolved_proven_fact(
+        dispatch.workgroup_shape,
+        "materialized workgroup shape is unavailable",
+    )
+    if shape.availability != _GpuAvailability.PROVEN:
+        return ()
+    tile_shape = shape.value
+    work_dimension = _dimension_by_name(
+        dimensions, _RANGE_WORK_PER_THREAD_DIMENSION
+    )
+    effects = tuple(dispatch.effects)
+    resource_ids = tuple(effect.resource_id for effect in effects)
+    footprints = tuple(
+        effect.footprint for effect in effects if effect.footprint is not None
+    )
+    halo_rank = max((len(footprint.halo) for footprint in footprints), default=0)
+    halo = tuple(
+        (
+            min(
+                footprint.halo[axis][0]
+                for footprint in footprints
+                if axis < len(footprint.halo)
+            ),
+            max(
+                footprint.halo[axis][1]
+                for footprint in footprints
+                if axis < len(footprint.halo)
+            ),
+        )
+        for axis in range(halo_rank)
+    )
+    layout_fingerprints = tuple(
+        sorted(
+            {
+                footprint.layout_fingerprint
+                for footprint in footprints
+                if footprint.layout_fingerprint
+            }
+        )
+    )
+    alignments = tuple(
+        footprint.byte_alignment
+        for footprint in footprints
+        if footprint.byte_alignment is not None
+    )
+    required_alignment = min(alignments) if alignments else None
+
+    recipes = []
+
+    def append(
+        strategy,
+        work_per_thread,
+        *,
+        controller,
+        dependencies,
+        autodiff_policy,
+        status,
+    ):
+        recipes.append(
+            _GpuTilingRecipe(
+                recipe_id=_tiling_recipe_id(
+                    snapshot,
+                    strategy,
+                    tile_shape,
+                    work_per_thread,
+                    halo,
+                    resource_ids,
+                    layout_fingerprints,
+                ),
+                backend=snapshot.target.backend,
+                strategy=strategy,
+                tile_shape=tile_shape,
+                work_per_thread=int(work_per_thread),
+                halo=halo,
+                resource_ids=resource_ids,
+                layout_fingerprints=layout_fingerprints,
+                required_alignment=required_alignment,
+                controller=controller,
+                dependencies=tuple(dependencies),
+                autodiff_policy=autodiff_policy,
+                status=status,
+            )
+        )
+
+    append(
+        _GpuTileStrategy.BASELINE,
+        1,
+        controller="resident_range_launch",
+        dependencies=("proven_grid_stride_coverage",),
+        autodiff_policy=_GpuTuningAutodiffPolicy.PRESERVED,
+        status=_status_proven("resident_range_launch_baseline"),
+    )
+    for work_per_thread in work_dimension.legal_values:
+        if int(work_per_thread) <= 1:
+            continue
+        append(
+            _GpuTileStrategy.THREAD_COARSENED,
+            int(work_per_thread),
+            controller=work_dimension.controller,
+            dependencies=(
+                "proven_grid_stride_coverage",
+                "exact_runtime_shape_qualification",
+            ),
+            autodiff_policy=work_dimension.autodiff_policy,
+            status=work_dimension.status,
+        )
+
+    has_neighbor_reuse = any(
+        footprint.pattern in (
+            _GpuAccessPattern.AFFINE,
+            _GpuAccessPattern.STENCIL,
+        )
+        and footprint.reuse_class in ("neighbor", "tile")
+        for footprint in footprints
+    )
+    read_only_neighbors = has_neighbor_reuse and all(
+        effect.access == _GpuResourceAccess.READ
+        for effect in effects
+        if effect.footprint is not None
+        and effect.footprint.pattern
+        in (_GpuAccessPattern.AFFINE, _GpuAccessPattern.STENCIL)
+    )
+    shared_reason = (
+        "automatic shared staging has no ndarray compiler controller; runtime "
+        "alias, layout/alignment, and block-uniform control remain unproven"
+        if read_only_neighbors
+        else "shared staging requires a proven read-only affine stencil"
+    )
+    append(
+        _GpuTileStrategy.SHARED_STAGED,
+        1,
+        controller="unavailable_automatic_shared_stage_codegen",
+        dependencies=(
+            "runtime_no_alias",
+            "layout_fingerprint",
+            "byte_alignment",
+            "block_uniform_control",
+            "shared_stage_codegen",
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.UNSUPPORTED,
+        status=_status_unsupported(shared_reason),
+    )
+    append(
+        _GpuTileStrategy.LAYOUT_SPECIALIZED,
+        1,
+        controller="unavailable_zero_copy_layout_variant_codegen",
+        dependencies=(
+            "runtime_no_alias",
+            "layout_fingerprint",
+            "stride_contiguity",
+            "byte_alignment",
+        ),
+        autodiff_policy=_GpuTuningAutodiffPolicy.UNSUPPORTED,
+        status=_status_unsupported(
+            "layout specialization has no zero-copy variant generator; "
+            "transparent AoS/SoA conversion is forbidden"
+        ),
+    )
+    return tuple(recipes)
+
+
 def _derive_gpu_tuning_dimensions(
     snapshot,
     *,
@@ -688,6 +895,32 @@ def _gpu_tuning_dimension_manifest(dimension):
     }
 
 
+def _gpu_tiling_recipe_manifest(recipe):
+    if not isinstance(recipe, _GpuTilingRecipe):
+        raise TypeError("recipe must be a _GpuTilingRecipe")
+    return {
+        "recipe_id": recipe.recipe_id,
+        "backend": recipe.backend.value,
+        "strategy": recipe.strategy.value,
+        "tile_shape": (
+            recipe.tile_shape.x,
+            recipe.tile_shape.y,
+            recipe.tile_shape.z,
+        ),
+        "work_per_thread": recipe.work_per_thread,
+        "halo": recipe.halo,
+        "resource_ids": recipe.resource_ids,
+        "layout_fingerprints": recipe.layout_fingerprints,
+        "required_alignment": recipe.required_alignment,
+        "controller": recipe.controller,
+        "dependencies": recipe.dependencies,
+        "autodiff_policy": recipe.autodiff_policy.value,
+        "availability": recipe.status.availability.value,
+        "reason": recipe.status.reason,
+        "provenance": recipe.status.provenance,
+    }
+
+
 __all__ = [
     "_INNER_LOOP_UNROLL_DIMENSION",
     "_RESIDENCY_DIMENSION",
@@ -695,9 +928,11 @@ __all__ = [
     "_TLS_DIMENSION",
     "_WORKGROUP_DIMENSION",
     "_derive_gpu_tuning_dimensions",
+    "_derive_gpu_tiling_recipes",
     "_derive_workgroup_resource_envelope",
     "_dimension_by_name",
     "_gpu_physical_equivalence_key",
     "_gpu_tuning_dimension_manifest",
+    "_gpu_tiling_recipe_manifest",
     "_gpu_workgroup_resource_manifest",
 ]

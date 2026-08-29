@@ -522,17 +522,22 @@ class _CompileIQVariantAdapter:
         """Return a dependency-free, serializable worker/replay manifest."""
 
         from taichi_forge.lang._gpu_semantics_tuning import (
+            _gpu_tiling_recipe_manifest,
             _gpu_tuning_dimension_manifest,
             _gpu_workgroup_resource_manifest,
         )
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "parameter": self._parameter,
             "structural_variant_ids": self._structural_ids,
             "dimensions": tuple(
                 _gpu_tuning_dimension_manifest(dimension)
                 for dimension in getattr(self._session, "dimensions", ())
+            ),
+            "tiling_recipes": tuple(
+                _gpu_tiling_recipe_manifest(recipe)
+                for recipe in getattr(self._session, "tiling_recipes", ())
             ),
             "variants": tuple(
                 {
@@ -542,6 +547,9 @@ class _CompileIQVariantAdapter:
                     "selections": tuple(getattr(variant, "selections", ())),
                     "resource_envelope": _gpu_workgroup_resource_manifest(
                         getattr(variant, "resource_envelope", None)
+                    ),
+                    "tiling_recipe_id": getattr(
+                        variant, "tiling_recipe_id", None
                     ),
                 }
                 for variant in self._variants.values()
