@@ -43,6 +43,13 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
+- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的离线 recipe 搜索。
+  `ti.graph.compileiq_recipe_search()` 搜索既有受限 Graph map-fusion executable recipe，
+  运行时采纳仍由 Forge 独立的精确作用域 qualification cache 控制。刻意收窄的
+  `ti.algorithms.compileiq_reduce_provider_search()` 只搜索既有 CUDA dense-field i32 sum
+  provider，不修改 `method="auto"`，也不安装 runtime cache。两条路径都通过精确 capability、
+  bundled-core 与 Python-source lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的
+  离线依赖。
 - 新增精简且稳定的 `HardwareCapability`、`HardwareProviderStatus`、
   `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
   被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`

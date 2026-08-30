@@ -38,6 +38,7 @@ capability.
 | `ti.algorithms.experimental_segmented_reduce(values, layout, output, ...)` | Reduce each reusable dense segment without a host round trip. |
 | `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | Inclusive/exclusive scan inside each reusable dense segment. |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | Reduce values into `output[0]`. |
+| `ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` | Build the reviewed offline modified-CompileIQ provider domain for the supported reduce slice. |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | Histogram integer values into bins. |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | Elementwise affine transform and copy. |
 | `ti.algorithms.experimental_gather(src, indices, dst, ...)` | Indexed read. |
@@ -69,6 +70,31 @@ Common explicit method families include:
 
 Explicit native methods are useful for testing or controlled deployments. They
 should not be used as portability promises across all backends.
+
+## Offline modified-CompileIQ provider recipe search
+
+`ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")`
+exposes one deliberately narrow high-level provider choice. The current slice
+requires an initialized CUDA runtime, a dense one-dimensional `ti.i32` field,
+a scalar `ti.i32` field output, and exact sum. Its complete recipe domain is:
+
+- baseline `reduce-provider:cuda-device:v1` (`method="cuda_device"`); and
+- candidate `reduce-provider:field-atomic:v1` (`method="field_atomic"`).
+
+This is provider-plan search, not kernel launch tuning. The selected
+`field_atomic` recipe may resolve to the existing scalar-atomic or two-stage
+private-field plan according to the frozen exact scope. The search object
+exposes opaque search space and worker types, explicit `select()`/`execute()`
+materialization, complete-coverage auditing, and the existing independent
+paired qualification helpers. The baseline is a sentinel and cannot become a
+finalist.
+
+Only the reviewed modified CompileIQ capability/core/Python-source identity is
+accepted; upstream or different builds fail closed. Search and qualification
+are offline. They do not change `experimental_reduce(method="auto")`, install
+a runtime cache, or make a cross-device performance promise. Qualification is
+specific to the exact size, layout, runtime, device, and provider source.
+Compile/search build time is diagnostic only and is not an admission gate.
 
 ## Machine-readable capability contract
 

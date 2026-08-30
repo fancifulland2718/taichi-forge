@@ -677,6 +677,36 @@ manually outside automatic-AD contexts. Forge does not yet provide an immutable
 primal/adjoint Graph pair, reverse dispatch ordering, or native-node gradient
 executable contract.
 
+## Offline modified-CompileIQ Graph recipe search
+
+`ti.graph.compileiq_recipe_search(graph)` freezes the executable recipes that
+the Graph already owns into one baseline-inclusive offline search domain. The
+reviewed scope is the existing bounded ordinary-JIT CGraph map-fusion space:
+baseline plus the legal `map2`, `map3`, and `map4` recipes actually exposed by
+that Graph. This API does not invent fusion, cross reduction/atomic or
+structured-control boundaries, or expose block, workgroup, PTXAS, or other
+kernel launch parameters.
+
+The constructor accepts only the reviewed modified CompileIQ fork. It verifies
+the capability manifest, bundled-core commit and lock, and the complete Python
+source manifest. The current source identity pins
+[`fancifulland2718/CompileIQ@b36f2d2`](https://github.com/fancifulland2718/CompileIQ/commit/b36f2d2abcb8234f3f12818a38e14172d990b79a)
+from `forge/opaque-recipes-v1`; `manifest()` exposes the full reviewed identity.
+Upstream CompileIQ, a different fork, or source drift raises
+`CompileIQGraphUnavailableError`. CompileIQ remains an optional offline tool:
+the Forge wheel does not depend on it, and importing `ti.graph` does not import
+CompileIQ.
+
+CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs. Forge
+decodes the result, checks complete search coverage including the baseline, and
+materializes it through the same Graph execution identity used by explicit
+recipes. A search winner is not runtime admission. Correctness, exact route and
+binding identity, lifecycle, memory stability, and worst-positive performance
+must be qualified independently before an exact-scope qualification cache may
+affect runtime selection. Missing, stale, or mismatched evidence fails closed
+to the baseline. Compile/search build time is diagnostic only and is not an
+admission gate.
+
 ## Performance and memory trade-offs
 
 Graph is most useful when dispatch topology and resource structure stay stable

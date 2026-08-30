@@ -34,6 +34,7 @@
 | `ti.algorithms.experimental_segmented_reduce(values, layout, output, ...)` | 无 host round-trip 地 reduce 每个可复用 dense segment。 |
 | `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | 在每个可复用 dense segment 内做 inclusive/exclusive scan。 |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | 将 values reduce 到 `output[0]`。 |
+| `ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` | 为受支持的 reduce 纵切构造经审查的离线魔改 CompileIQ provider 域。 |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | 将整数 values 统计到 bins。 |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | 元素级 affine transform 和 copy。 |
 | `ti.algorithms.experimental_gather(src, indices, dst, ...)` | Indexed read。 |
@@ -62,6 +63,25 @@
 - sort 类操作的 `host_stable` 或 legacy fallback method
 
 显式 native method 适合测试或受控部署，不应被当成跨所有后端的可移植承诺。
+
+## 离线魔改 CompileIQ provider recipe 搜索
+
+`ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` 只开放一个刻意收窄的
+高层 provider 选择。当前纵切要求已初始化 CUDA runtime、dense 一维 `ti.i32` field、scalar
+`ti.i32` field output 和精确 sum。完整 recipe 域为：
+
+- baseline `reduce-provider:cuda-device:v1`（`method="cuda_device"`）；
+- candidate `reduce-provider:field-atomic:v1`（`method="field_atomic"`）。
+
+这里搜索的是 provider plan，不是 kernel launch 参数。根据冻结的精确作用域，所选
+`field_atomic` recipe 会落到既有 scalar-atomic 或 two-stage private-field plan。搜索对象公开
+不透明 search space/worker type、显式 `select()`/`execute()` 物化、完整覆盖审计，以及既有的
+独立 paired qualification helper。baseline 只是 sentinel，不能成为 finalist。
+
+只接受经审查的魔改 CompileIQ capability/core/Python-source 身份；上游或其他 build 会 fail
+closed。搜索与资格化只离线参与，不修改 `experimental_reduce(method="auto")`，不安装 runtime
+cache，也不承诺跨设备性能。资格只适用于精确 size、layout、runtime、device 和 provider source。
+compile/search build 时间只作诊断，不是准入门禁。
 
 ## 机器可读 capability 合同
 

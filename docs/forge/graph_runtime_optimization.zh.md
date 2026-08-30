@@ -527,6 +527,29 @@ Graph 当前是 primal-only。active 或正在进入的 `ti.ad.Tape()` / `ti.ad.
 `kernel.grad` 可 dispatch 到独立 Graph，并在自动 AD context 外手工运行。Forge 尚未提供
 immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node gradient 合同。
 
+## 离线魔改 CompileIQ Graph recipe 搜索
+
+`ti.graph.compileiq_recipe_search(graph)` 把 Graph 已经拥有的 executable recipe 冻结成一个
+包含 baseline 的离线搜索域。当前审查范围只覆盖现有受限 ordinary-JIT CGraph map-fusion
+空间：baseline，以及该 Graph 实际公开且合法的 `map2`、`map3`、`map4` recipe。这个 API
+不会发明新的 fusion，不会跨 reduction/atomic 或 structured-control 边界，也不公开 block、
+workgroup、PTXAS 等普通 kernel launch 参数。
+
+构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
+commit/lock 和完整 Python source manifest。当前源码身份固定为
+`forge/opaque-recipes-v1` 上的
+[`fancifulland2718/CompileIQ@b36f2d2`](https://github.com/fancifulland2718/CompileIQ/commit/b36f2d2abcb8234f3f12818a38e14172d990b79a)，
+`manifest()` 会公开完整审查身份。上游 CompileIQ、其他 fork 或源码漂移都会抛出
+`CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
+导入 `ti.graph` 也不会导入 CompileIQ。
+
+CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。Forge 会解码结果，
+检查搜索完整覆盖且包含 baseline，并通过显式 recipe 使用的同一 Graph execution identity
+完成物化。搜索 winner 不等于运行时准入；必须独立验证 correctness、精确 route/binding
+identity、lifecycle、memory stability 和 worst-positive 性能，之后精确作用域的 qualification
+cache 才能影响运行时选择。证据缺失、过期或作用域不匹配时一律 fail closed 到 baseline。
+compile/search build 时间只作诊断，不是准入门禁。
+
 ## 性能与显存权衡
 
 Graph 最适合 dispatch 拓扑与资源结构能在大量 replay 中保持稳定的场景，例如固定 shape

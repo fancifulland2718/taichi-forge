@@ -47,6 +47,15 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- Added baseline-inclusive offline recipe search for the reviewed modified
+  CompileIQ fork. `ti.graph.compileiq_recipe_search()` searches the existing
+  bounded Graph map-fusion executable recipes and retains Forge's independent,
+  exact-scope qualification-cache admission. The deliberately narrow
+  `ti.algorithms.compileiq_reduce_provider_search()` slice searches the existing
+  CUDA dense-field i32 sum providers without changing `method="auto"` or
+  installing a runtime cache. Both paths reject upstream/different CompileIQ
+  builds through exact capability, bundled-core, and Python-source locks;
+  CompileIQ remains an optional offline dependency.
 - Added the compact stable `HardwareCapability`, `HardwareProviderStatus`, and
   `HardwareExecutionReport` status layer plus schema-v4 diagnostic
   operation/provider contracts. Passive status/report calls do not load,
