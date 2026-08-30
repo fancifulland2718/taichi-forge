@@ -6,10 +6,13 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
 from taichi_forge.graph._compileiq_adapter import (
     _CompileIQExecutableAdapter,
 )
 from taichi_forge.graph._optimization import (
+    _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+    _CUDA_MASKED_CONTROL_RECIPE_ID,
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
     _make_spec,
@@ -99,7 +102,8 @@ def test_executable_adapter_is_lazy_and_maps_only_stable_specs(monkeypatch):
     selection = adapter.select(_parameters("map3"))
     assert selection.materialization_recipe == "map3"
     assert dict(selection.worker_environment) == {
-        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "map3"
+        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "map3",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": "auto",
     }
 
 
@@ -140,6 +144,84 @@ def test_executable_adapter_emits_plain_exact_scope_manifest():
     ]
     assert all(spec["compilation_identity"] for spec in manifest["specs"])
     assert all(spec["execution_identity"] for spec in manifest["specs"])
+    assert "recipe_kind" not in manifest
+    assert all("control_recipe_id" not in spec for spec in manifest["specs"])
+
+
+def _control_space(*, selected="conditional"):
+    baseline = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+    )
+    masked = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        _CUDA_MASKED_CONTROL_RECIPE_ID,
+    )
+    selected_spec = baseline if selected == "conditional" else masked
+    return _ExecutableOptimizationSpace(
+        semantic_plan_id=_SEMANTIC_PLAN_ID,
+        baseline=baseline,
+        candidates=(masked,),
+        selected_spec_id=selected_spec.spec_id,
+        selection_status=(
+            "selected_control_baseline"
+            if selected == "conditional"
+            else "selected_control_recipe"
+        ),
+    )
+
+
+def test_executable_adapter_materializes_exact_structured_control_recipe():
+    baseline = _control_space()
+    adapter = _CompileIQExecutableAdapter(baseline)
+    masked = baseline.candidates[0]
+    parameters = {"forge_executable_spec": masked.spec_id}
+
+    selection = adapter.select(parameters)
+    assert adapter.recipe_kind == "structured_control"
+    assert selection.control_recipe_id == _CUDA_MASKED_CONTROL_RECIPE_ID
+    assert dict(selection.worker_environment) == {
+        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "baseline",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": (
+            "cuda_masked_bounded_graph"
+        ),
+    }
+    assert adapter.verify_materialized(
+        parameters, _control_space(selected="masked")
+    ) == selection
+    with pytest.raises(ValueError, match="did not select"):
+        adapter.verify_materialized(parameters, _control_space())
+
+    manifest = adapter.manifest()
+    assert manifest["recipe_kind"] == "structured_control"
+    assert manifest["runtime_admission"] == (
+        "offline_explicit_reconstruction_only"
+    )
+    assert [spec["control_materialization_recipe"] for spec in manifest["specs"]] == [
+        "cuda_conditional_graph",
+        "cuda_masked_bounded_graph",
+    ]
+
+
+def test_structured_control_qualification_cannot_emit_runtime_cache():
+    adapter = _CompileIQExecutableAdapter(_control_space())
+    decision, _ = _single_candidate_decision(adapter)
+    with pytest.raises(ValueError, match="offline-only"):
+        adapter.qualification_cache(decision, **_qualification_scope())
+
+
+def test_structured_control_recipe_cannot_form_fusion_cartesian_product():
+    with pytest.raises(ValueError, match="cannot combine control and fusion"):
+        _make_spec(
+            _SEMANTIC_PLAN_ID,
+            _BACKEND,
+            (_recipe(2, "8"),),
+            _CUDA_MASKED_CONTROL_RECIPE_ID,
+        )
 
 
 def test_executable_adapter_balances_and_ranks_complete_evidence():
@@ -352,6 +434,113 @@ def test_executable_adapter_rejects_unknown_or_ambiguous_recipes():
                 selection_status="selected_baseline",
             )
         )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_executable_adapter_rebuilds_cuda_auto_while_routes(monkeypatch):
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not capabilities.get("general_graph_exact_control_available", False):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+    if not capabilities.get("internal_masked_graph_available", False):
+        pytest.skip("internal masked CUDA Graph control is unavailable")
+
+    @ti.kernel
+    def initialize(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        state[None] = 0
+        predicate[None] = 0
+        counter[None] = 0
+
+    @ti.kernel
+    def condition(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(state[None] < target)
+
+    @ti.kernel
+    def step(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            state[None] += 1
+            counter[None] += 1
+
+    def scalar(name):
+        return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+
+    state = scalar("state")
+    predicate = scalar("predicate")
+    counter = scalar("counter")
+    target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+
+    def build(lowering_mode="auto"):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(initialize, state, predicate, counter)
+        condition_region = builder.create_sequential()
+        condition_region.dispatch(condition, state, predicate, target)
+        body = builder.create_sequential()
+        body.dispatch(step, state, predicate, counter)
+        builder.while_loop(
+            condition_region,
+            body,
+            predicate=predicate,
+            control_inputs=(state, target),
+            carried_state=(state,),
+            counter=counter,
+            max_iterations=8,
+            lowering_mode=lowering_mode,
+            name="compileiq_control",
+        )
+        return builder.compile()
+
+    monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
+    monkeypatch.setenv(
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
+        "cuda_conditional_graph",
+    )
+    baseline = build()
+    adapter = _CompileIQExecutableAdapter.from_graph(baseline)
+    assert adapter.recipe_kind == "structured_control"
+    assert len(adapter.spec_ids()) == 2
+    assert baseline._executable_optimization_space.selected_spec_id == (
+        adapter.baseline_spec_id
+    )
+
+    masked_spec_id = adapter.spec_ids(include_baseline=False)[0]
+    parameters = {"forge_executable_spec": masked_spec_id}
+    selection = adapter.select(parameters)
+    for name, value in selection.worker_environment.items():
+        monkeypatch.setenv(name, value)
+    materialized = build()
+    adapter.verify_materialized_graph(parameters, materialized)
+
+    args = {
+        "state": ti.ndarray(ti.i32, shape=()),
+        "predicate": ti.ndarray(ti.i32, shape=()),
+        "counter": ti.ndarray(ti.i32, shape=()),
+        "target": 5,
+    }
+    materialized.run(args)
+    report = materialized.control_flow_stats()[0]
+    assert report.lowering == "cuda_masked_bounded_graph"
+    assert report.logical_iterations == 5
+    assert args["state"].to_numpy()[()] == 5
+    assert args["counter"].to_numpy()[()] == 5
+
+    # Public explicit policies remain outside the R5 search domain even when
+    # the private worker overlay is present.
+    for explicit_mode in ("portable", "native_required"):
+        explicit = build(explicit_mode)
+        explicit_space = explicit._executable_optimization_space
+        assert not explicit_space.baseline.control_recipe_id
+        assert all(not spec.control_recipe_id for spec in explicit_space.candidates)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

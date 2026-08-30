@@ -48,9 +48,19 @@ grouped under the behavior they shipped.
 ## Unreleased
 
 - Added baseline-inclusive offline recipe search for the reviewed modified
-  CompileIQ fork. `ti.graph.compileiq_recipe_search()` searches the existing
-  bounded Graph map-fusion executable recipes and retains Forge's independent,
-  exact-scope qualification-cache admission. The deliberately narrow
+  CompileIQ fork. `ti.graph.compileiq_recipe_search()` searches either the
+  existing bounded Graph map-fusion executable recipes or, for one eligible
+  flat CUDA `auto` while, the Forge-owned conditional-versus-masked structured
+  control recipes. Explicit lowering policies, portable control, multiple
+  regions, native/observation nodes, and fusion-by-control combinations remain
+  excluded. Map fusion retains Forge's independent exact-scope
+  qualification-cache admission; structured-control R5 is explicit offline
+  reconstruction only and neither emits a runtime cache nor changes `auto`.
+  A ten-process balanced AB/BA qualification at 4,096 items and 12 actual
+  iterations retained the masked route at max 20 (1.129x median, worst-positive)
+  and the conditional baseline at max 128 (masked/conditional 2.730x), with
+  exact results and stable memory in both scopes. Compile/build timing remained
+  diagnostic only. The deliberately narrow
   `ti.algorithms.compileiq_reduce_provider_search()` slice searches the existing
   CUDA dense-field i32 sum providers without changing `method="auto"` or
   installing a runtime cache. Both paths reject upstream/different CompileIQ

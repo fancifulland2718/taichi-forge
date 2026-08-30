@@ -6,7 +6,9 @@ import json
 import re
 
 from taichi_forge.graph._optimization import (
+    _CUDA_CONTROL_RECIPE_IDS,
     _GRAPH_FUSION_QUALIFICATION_SCHEMA,
+    _INTERNAL_STRUCTURED_CONTROL_ENV,
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
 )
@@ -25,6 +27,10 @@ _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _MAP_RECIPE_PATTERN = re.compile(r"^fusion:map([2-4]):[0-9a-f]{24}$")
+_CONTROL_MATERIALIZATION = {
+    _CUDA_CONTROL_RECIPE_IDS[0]: "cuda_conditional_graph",
+    _CUDA_CONTROL_RECIPE_IDS[1]: "cuda_masked_bounded_graph",
+}
 
 
 def _materialization_recipe(spec):
@@ -39,6 +45,17 @@ def _materialization_recipe(spec):
     return f"map{max(group_sizes)}"
 
 
+def _control_materialization_recipe(spec):
+    if not spec.control_recipe_id:
+        return "auto"
+    try:
+        return _CONTROL_MATERIALIZATION[spec.control_recipe_id]
+    except KeyError as error:
+        raise ValueError(
+            f"unsupported structured-control recipe {spec.control_recipe_id!r}"
+        ) from error
+
+
 @dataclass(frozen=True)
 class GraphExecutableRecipeSelection:
     spec_id: str
@@ -48,15 +65,24 @@ class GraphExecutableRecipeSelection:
     compilation_identity: str
     execution_identity: str
     materialization_recipe: str
+    control_recipe_id: str = ""
+    control_materialization_recipe: str = "auto"
 
     @property
     def worker_environment(self):
         """Return an environment overlay without mutating process state."""
 
-        return MappingProxyType({_INTERNAL_MAP_FUSION_ENV: self.materialization_recipe})
+        return MappingProxyType(
+            {
+                _INTERNAL_MAP_FUSION_ENV: self.materialization_recipe,
+                _INTERNAL_STRUCTURED_CONTROL_ENV: (
+                    self.control_materialization_recipe
+                ),
+            }
+        )
 
     def to_dict(self):
-        return {
+        value = {
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -65,6 +91,12 @@ class GraphExecutableRecipeSelection:
             "execution_identity": self.execution_identity,
             "materialization_recipe": self.materialization_recipe,
         }
+        if self.control_recipe_id:
+            value["control_recipe_id"] = self.control_recipe_id
+            value["control_materialization_recipe"] = (
+                self.control_materialization_recipe
+            )
+        return value
 
 
 _CompileIQExecutableSelection = GraphExecutableRecipeSelection
@@ -102,11 +134,32 @@ class _CompileIQExecutableAdapter:
             raise ValueError("executable specs must share one backend")
         if len({spec.spec_id for spec in specs}) != len(specs):
             raise ValueError("executable spec IDs must be unique")
+        control_recipe_ids = tuple(spec.control_recipe_id for spec in specs)
+        if space.baseline.control_recipe_id:
+            if control_recipe_ids != _CUDA_CONTROL_RECIPE_IDS or any(
+                spec.fusion_recipe_ids for spec in specs
+            ):
+                raise ValueError(
+                    "structured-control space must contain the exact R5 domain"
+                )
+        elif any(control_recipe_ids):
+            raise ValueError(
+                "map-fusion space cannot contain a control recipe candidate"
+            )
 
         materialization_by_spec = {
             spec.spec_id: _materialization_recipe(spec) for spec in specs
         }
-        materializations = tuple(materialization_by_spec.values())
+        control_materialization_by_spec = {
+            spec.spec_id: _control_materialization_recipe(spec) for spec in specs
+        }
+        materializations = tuple(
+            (
+                materialization_by_spec[spec.spec_id],
+                control_materialization_by_spec[spec.spec_id],
+            )
+            for spec in specs
+        )
         if len(set(materializations)) != len(materializations):
             raise ValueError(
                 "executable candidates must map to unique materialization recipes"
@@ -116,6 +169,9 @@ class _CompileIQExecutableAdapter:
         self._parameter = parameter
         self._specs = MappingProxyType({spec.spec_id: spec for spec in specs})
         self._materialization_by_spec = MappingProxyType(materialization_by_spec)
+        self._control_materialization_by_spec = MappingProxyType(
+            control_materialization_by_spec
+        )
         self._candidate_ids = tuple(spec.spec_id for spec in space.candidates)
 
     @classmethod
@@ -135,6 +191,14 @@ class _CompileIQExecutableAdapter:
     @property
     def backend(self):
         return self._space.baseline.backend
+
+    @property
+    def recipe_kind(self):
+        return (
+            "structured_control"
+            if self._space.baseline.control_recipe_id
+            else "map_fusion"
+        )
 
     @property
     def parameter(self):
@@ -180,6 +244,10 @@ class _CompileIQExecutableAdapter:
             compilation_identity=spec.compilation_identity,
             execution_identity=spec.execution_identity,
             materialization_recipe=self._materialization_by_spec[spec.spec_id],
+            control_recipe_id=spec.control_recipe_id,
+            control_materialization_recipe=(
+                self._control_materialization_by_spec[spec.spec_id]
+            ),
         )
 
     def verify_materialized(self, parameters, actual_space):
@@ -199,6 +267,7 @@ class _CompileIQExecutableAdapter:
             actual.compilation_identity != selection.compilation_identity
             or actual.execution_identity != selection.execution_identity
             or actual.fusion_recipe_ids != selection.fusion_recipe_ids
+            or actual.control_recipe_id != selection.control_recipe_id
         ):
             raise ValueError("materialized Graph identity does not match")
         return selection
@@ -318,7 +387,12 @@ class _CompileIQExecutableAdapter:
                 "qualification decision selected an unknown executable spec"
             ) from error
         if selected is self._space.baseline or not selected.fusion_recipe_ids:
-            raise ValueError("qualification cache cannot select the baseline spec")
+            if selected is self._space.baseline:
+                raise ValueError("qualification cache cannot select the baseline spec")
+            raise ValueError(
+                "structured-control qualification is offline-only in R5; "
+                "runtime cache admission is unavailable"
+            )
         if (
             not isinstance(runtime_provider_candidate_id, str)
             or not runtime_provider_candidate_id
@@ -375,7 +449,7 @@ class _CompileIQExecutableAdapter:
         )
 
     def manifest(self):
-        return {
+        value = {
             "schema_version": 1,
             "provider": "compileiq_user_space",
             "parameter": self._parameter,
@@ -383,16 +457,23 @@ class _CompileIQExecutableAdapter:
             "backend": self.backend,
             "baseline_spec_id": self._space.baseline.spec_id,
             "search_protocol": "exhaustive_then_independent_qualification",
-            "specs": tuple(
-                {
-                    **spec.to_dict(),
-                    "materialization_recipe": self._materialization_by_spec[
-                        spec.spec_id
-                    ],
-                }
-                for spec in self._specs.values()
-            ),
+            "specs": tuple(self._spec_manifest(spec) for spec in self._specs.values()),
         }
+        if self.recipe_kind == "structured_control":
+            value["recipe_kind"] = self.recipe_kind
+            value["runtime_admission"] = "offline_explicit_reconstruction_only"
+        return value
+
+    def _spec_manifest(self, spec):
+        value = {
+            **spec.to_dict(),
+            "materialization_recipe": self._materialization_by_spec[spec.spec_id],
+        }
+        if spec.control_recipe_id:
+            value["control_materialization_recipe"] = (
+                self._control_materialization_by_spec[spec.spec_id]
+            )
+        return value
 
 
 __all__ = [

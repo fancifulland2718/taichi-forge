@@ -35,7 +35,7 @@ class CompileIQGraphRecipeSearch:
     """One frozen Graph executable-recipe domain for modified CompileIQ.
 
     Forge owns the recipe table, materialization checks, qualification, and
-    runtime admission. CompileIQ sees only fixed ordinal tokens and returns a
+    admission boundary. CompileIQ sees only fixed ordinal tokens and returns a
     decoded recipe ID that Forge validates again through :meth:`select`.
     """
 
@@ -54,16 +54,30 @@ class CompileIQGraphRecipeSearch:
 
         adapter_manifest = adapter.manifest()
         semantic_payload = {
-            "schema": "taichi_forge.graph.compileiq-semantics.v1",
+            "schema": (
+                "taichi_forge.graph.compileiq-structured-control-semantics.v1"
+                if adapter.recipe_kind == "structured_control"
+                else "taichi_forge.graph.compileiq-semantics.v1"
+            ),
             "semantic_plan_id": adapter.semantic_plan_id,
             "backend": adapter.backend,
             "baseline_spec_id": adapter.baseline_spec_id,
             "specs": adapter_manifest["specs"],
         }
+        if adapter.recipe_kind == "structured_control":
+            semantic_payload["recipe_kind"] = adapter.recipe_kind
         semantic_fingerprint = _identity("forge-graph-semantics-v1:", semantic_payload)
         transport = _CompileIQOpaqueRecipeTransport(
-            provider_namespace="taichi_forge.graph.map_fusion",
-            domain_version="executable-spec.v1",
+            provider_namespace=(
+                "taichi_forge.graph.structured_control"
+                if adapter.recipe_kind == "structured_control"
+                else "taichi_forge.graph.map_fusion"
+            ),
+            domain_version=(
+                "structured-control-executable-spec.v1"
+                if adapter.recipe_kind == "structured_control"
+                else "executable-spec.v1"
+            ),
             provider_semantic_fingerprint=semantic_fingerprint,
             recipe_ids=recipe_ids,
             baseline_recipe_id=adapter.baseline_spec_id,
@@ -177,7 +191,7 @@ class CompileIQGraphRecipeSearch:
         return self._adapter.qualification_cache_json(decision, **scope)
 
     def manifest(self):
-        return {
+        value = {
             "schema": "taichi_forge.graph.compileiq-recipe-search.v1",
             **self._transport.manifest(),
             "semantic_plan_id": self.semantic_plan_id,
@@ -186,8 +200,15 @@ class CompileIQGraphRecipeSearch:
                 dict(self.recipe_manifest(recipe_id)) for recipe_id in self.recipe_ids
             ),
             "qualification": "independent_forge_worst_positive_v1",
-            "runtime_admission": "explicit_qualified_cache_only",
+            "runtime_admission": (
+                "offline_explicit_reconstruction_only"
+                if self._adapter.recipe_kind == "structured_control"
+                else "explicit_qualified_cache_only"
+            ),
         }
+        if self._adapter.recipe_kind == "structured_control":
+            value["recipe_kind"] = self._adapter.recipe_kind
+        return value
 
 
 def compileiq_recipe_search(graph):

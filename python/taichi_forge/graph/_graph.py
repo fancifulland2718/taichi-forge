@@ -79,7 +79,11 @@ from taichi_forge.graph._submission import (
     _reserve_paced_submission,
 )
 from taichi_forge.graph._optimization import (
+    _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+    _CUDA_CONTROL_RECIPE_IDS,
+    _CUDA_MASKED_CONTROL_RECIPE_ID,
     _GraphFusionQualificationCache,
+    _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
 
@@ -1981,7 +1985,11 @@ def _cuda_bounded_update_policy():
 
 
 def _cuda_nested_device_update_qualified():
-    if os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1":
+    requested = _internal_structured_control_recipe()
+    if requested == "cuda_masked_bounded_graph" or (
+        requested == "auto"
+        and os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+    ):
         return False
     capabilities = dict(_ti_core.cuda_bounded_dispatch_probe())
     return bool(capabilities.get("exact_device_grid_available", False))
@@ -3658,8 +3666,9 @@ def _backend_name(arch):
     return arch
 
 
-def _cuda_structured_control_lowering(capabilities=None):
-    """Select one stable CUDA control route for a compiled Graph node."""
+def _cuda_structured_control_routes(capabilities=None):
+    """Return available CUDA control routes in ordinary auto-policy order."""
+
     if capabilities is None:
         capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
     exact = bool(
@@ -3673,12 +3682,51 @@ def _cuda_structured_control_lowering(capabilities=None):
         )
     )
     masked = bool(capabilities.get("internal_masked_graph_available", False))
-    if os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1" and masked:
+    return (
+        *(("cuda_conditional_graph",) if exact else ()),
+        *(("cuda_masked_bounded_graph",) if masked else ()),
+    )
+
+
+def _internal_structured_control_recipe():
+    requested = os.environ.get(_INTERNAL_STRUCTURED_CONTROL_ENV, "auto")
+    if not isinstance(requested, str):
+        raise TaichiRuntimeError("internal structured-control recipe must be a string")
+    requested = requested.strip().lower()
+    aliases = {
+        "auto": "auto",
+        "conditional": "cuda_conditional_graph",
+        "cuda_conditional_graph": "cuda_conditional_graph",
+        "masked": "cuda_masked_bounded_graph",
+        "cuda_masked_bounded_graph": "cuda_masked_bounded_graph",
+    }
+    if requested not in aliases:
+        raise TaichiRuntimeError(
+            f"{_INTERNAL_STRUCTURED_CONTROL_ENV} must be auto, "
+            "cuda_conditional_graph, or cuda_masked_bounded_graph"
+        )
+    return aliases[requested]
+
+
+def _cuda_structured_control_lowering(capabilities=None):
+    """Select one stable CUDA control route for a compiled Graph node."""
+
+    routes = _cuda_structured_control_routes(capabilities)
+    requested = _internal_structured_control_recipe()
+    if requested != "auto":
+        if requested not in routes:
+            raise TaichiRuntimeError(
+                f"requested internal structured-control recipe {requested!r} "
+                "is unavailable on this CUDA runtime"
+            )
+        return requested
+    if (
+        os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+        and "cuda_masked_bounded_graph" in routes
+    ):
         return "cuda_masked_bounded_graph"
-    if exact:
-        return "cuda_conditional_graph"
-    if masked:
-        return "cuda_masked_bounded_graph"
+    if routes:
+        return routes[0]
     return None
 
 
@@ -9243,6 +9291,48 @@ class _PreparedGraphInvocation:
     submission_owners: tuple
 
 
+def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend):
+    """Describe the bounded R5 domain without changing the logical Graph IR."""
+
+    source_nodes = tuple(source_nodes)
+    control_nodes = tuple(control_nodes)
+    if backend != "cuda" or len(control_nodes) != 1:
+        return (), ""
+    node = control_nodes[0]
+    if (
+        not isinstance(node, _CompiledWhileGraphNode)
+        or node.control_depth != 1
+        or node.structured_depth != 1
+        or node._has_nested_control
+        or node.lowering_mode != "auto"
+        or node.counter is None
+        or not node._native_upgrade_eligible
+        or not node._native_submission_eligible
+    ):
+        return (), ""
+    if any(
+        isinstance(source, (_CompiledNativeGraphNode, _CompiledObservationGraphNode))
+        or getattr(source, "source_native_count", 0)
+        for source in source_nodes
+    ):
+        return (), ""
+
+    routes = _cuda_structured_control_routes()
+    if routes != (
+        "cuda_conditional_graph",
+        "cuda_masked_bounded_graph",
+    ):
+        return (), ""
+    selected_by_route = {
+        "cuda_conditional_graph": _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+        "cuda_masked_bounded_graph": _CUDA_MASKED_CONTROL_RECIPE_ID,
+    }
+    selected = selected_by_route.get(node._cuda_control_lowering, "")
+    if not selected:
+        return (), ""
+    return _CUDA_CONTROL_RECIPE_IDS, selected
+
+
 class _GraphSpec:
     def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
         source_nodes = tuple(nodes)
@@ -9280,11 +9370,21 @@ class _GraphSpec:
             applied_source_groups=applied_source_groups,
             lowering_available=lowering_available,
         )
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        control_recipe_ids, selected_control_recipe_id = (
+            _cuda_structured_control_recipe_domain(
+                source_nodes,
+                structured_control_nodes,
+                backend,
+            )
+        )
         self.executable_optimization_space = (
             _build_executable_optimization_space(
                 self.pre_optimization_ir_root,
                 self.fusion_plan,
-                _backend_name(_ti_core.arch_name(impl.current_cfg().arch)),
+                backend,
+                control_recipe_ids=control_recipe_ids,
+                selected_control_recipe_id=selected_control_recipe_id,
             )
         )
         self._aot_graph_builder = aot_graph_builder

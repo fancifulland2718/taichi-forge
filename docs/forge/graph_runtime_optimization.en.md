@@ -680,12 +680,23 @@ executable contract.
 ## Offline modified-CompileIQ Graph recipe search
 
 `ti.graph.compileiq_recipe_search(graph)` freezes the executable recipes that
-the Graph already owns into one baseline-inclusive offline search domain. The
-reviewed scope is the existing bounded ordinary-JIT CGraph map-fusion space:
-baseline plus the legal `map2`, `map3`, and `map4` recipes actually exposed by
-that Graph. This API does not invent fusion, cross reduction/atomic or
-structured-control boundaries, or expose block, workgroup, PTXAS, or other
-kernel launch parameters.
+the Graph already owns into one baseline-inclusive offline search domain. An
+ordinary-JIT CGraph exposes the existing bounded map-fusion space: baseline
+plus the legal `map2`, `map3`, and `map4` recipes actually owned by that Graph.
+An eligible CUDA Graph instead exposes one bounded structured-control space:
+`control:cuda_conditional_graph:v1` as baseline and
+`control:cuda_masked_bounded_graph:v1` as candidate. Eligibility requires
+exactly one flat source `while` with `lowering_mode="auto"`, an exact counter,
+both physical routes available, and no nested control, observation, or native
+provider node. Ordinary CGraph prefix and suffix dispatches remain in the same
+semantic plan.
+
+The two domains are deliberately not combined. Explicit `portable` and
+`native_required` source policies, multiple structured regions, and the
+portable host-controlled route are outside this first control space. CompileIQ
+cannot form a map-fusion by control Cartesian product. This API also does not
+invent fusion across reduction or atomic boundaries, or expose block,
+workgroup, PTXAS, or other kernel launch parameters.
 
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python
@@ -702,10 +713,26 @@ decodes the result, checks complete search coverage including the baseline, and
 materializes it through the same Graph execution identity used by explicit
 recipes. A search winner is not runtime admission. Correctness, exact route and
 binding identity, lifecycle, memory stability, and worst-positive performance
-must be qualified independently before an exact-scope qualification cache may
-affect runtime selection. Missing, stale, or mismatched evidence fails closed
-to the baseline. Compile/search build time is diagnostic only and is not an
-admission gate.
+must be qualified independently. Map-fusion may then use an exact-scope
+qualification cache; missing, stale, or mismatched evidence fails closed to
+its baseline. Structured-control R5 cannot emit that runtime cache: its winner
+is available only through explicit offline reconstruction and does not mutate
+the runtime `auto` policy. Compile/search build time is diagnostic only and is
+not an admission gate.
+
+The 2026-08-31 local Windows RTX 5090 qualification used the exact reviewed
+modified CompileIQ capability, ten fresh processes per scope, ten balanced
+AB/BA blocks per process, and at least 250 ms per final route block. With 4,096
+items, 12 actual iterations, and one body action, masked/conditional median
+time was 0.88569 for a maximum of 20 iterations (1.129x for masked, positive in
+all ten processes) but 2.72953 for a maximum of 128 iterations (conditional
+retained). Both scopes passed exact state/result and memory-stability checks.
+This is a workload-profile crossover, not a new default or a general speedup
+claim. The full local artifact is
+`.agent/experiments/structured-control-compileiq-r5/qualification.json`,
+SHA-256
+`efd53010a68bb896ca6de3b63a83a4a40b1379c9e7817596123ffb8be1a37db7`;
+the negative scope remains recorded rather than rolled back.
 
 ## Performance and memory trade-offs
 

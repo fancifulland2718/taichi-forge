@@ -45,7 +45,14 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 - 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的离线 recipe 搜索。
   `ti.graph.compileiq_recipe_search()` 搜索既有受限 Graph map-fusion executable recipe，
-  运行时采纳仍由 Forge 独立的精确作用域 qualification cache 控制。刻意收窄的
+  或为一个符合条件的 flat CUDA `auto while` 搜索 Forge 自有的 conditional/masked
+  structured-control recipe。显式 lowering policy、portable control、多个 region、
+  native/observation node 和 fusion × control 组合仍被排除。map-fusion 的运行时采纳仍由
+  Forge 独立的精确作用域 qualification cache 控制；structured-control R5 只能离线显式
+  重建，不生成 runtime cache，也不修改 `auto`。在 4,096 项、实际 12 次迭代的 10-process
+  平衡 AB/BA 资格测试中，max 20 保留 masked（中位 1.129x，worst-positive），max 128 保留
+  conditional baseline（masked/conditional 为 2.730x），两个 scope 都保持精确结果和稳定
+  memory；compile/build 时间只作诊断。刻意收窄的
   `ti.algorithms.compileiq_reduce_provider_search()` 只搜索既有 CUDA dense-field i32 sum
   provider，不修改 `method="auto"`，也不安装 runtime cache。两条路径都通过精确 capability、
   bundled-core 与 Python-source lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的

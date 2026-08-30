@@ -11,6 +11,15 @@ from taichi_forge.graph._ir import graph_ir_to_dict
 
 _GRAPH_FUSION_QUALIFICATION_SCHEMA = "taichi_forge.graph_fusion_qualification.v1"
 _GRAPH_FUSION_QUALIFICATION_MAX_BYTES = 4 * 1024 * 1024
+_INTERNAL_STRUCTURED_CONTROL_ENV = (
+    "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"
+)
+_CUDA_CONDITIONAL_CONTROL_RECIPE_ID = "control:cuda_conditional_graph:v1"
+_CUDA_MASKED_CONTROL_RECIPE_ID = "control:cuda_masked_bounded_graph:v1"
+_CUDA_CONTROL_RECIPE_IDS = (
+    _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+    _CUDA_MASKED_CONTROL_RECIPE_ID,
+)
 
 
 def _canonical_hash(value):
@@ -32,6 +41,7 @@ class _ExecutableOptimizationSpec:
     fusion_recipe_ids: tuple
     compilation_identity: str
     execution_identity: str
+    control_recipe_id: str = ""
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -42,11 +52,21 @@ class _ExecutableOptimizationSpec:
             raise ValueError("executable optimization backend is invalid")
         if len(set(self.fusion_recipe_ids)) != len(self.fusion_recipe_ids):
             raise ValueError("fusion recipe IDs must be unique")
+        if not isinstance(self.control_recipe_id, str):
+            raise ValueError("control recipe ID must be a string")
+        if self.control_recipe_id and self.control_recipe_id not in (
+            _CUDA_CONTROL_RECIPE_IDS
+        ):
+            raise ValueError("control recipe ID is unsupported")
+        if self.control_recipe_id and self.fusion_recipe_ids:
+            raise ValueError(
+                "R5 executable specs cannot combine control and fusion recipes"
+            )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
-        return {
+        value = {
             "schema_version": 1,
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
@@ -55,6 +75,11 @@ class _ExecutableOptimizationSpec:
             "compilation_identity": self.compilation_identity,
             "execution_identity": self.execution_identity,
         }
+        # Preserve the exact v1 map-fusion manifest and identities when this
+        # optional physical axis is absent.
+        if self.control_recipe_id:
+            value["control_recipe_id"] = self.control_recipe_id
+        return value
 
 
 @dataclass(frozen=True)
@@ -464,7 +489,12 @@ class _GraphFusionQualificationCache:
         }
 
 
-def _make_spec(semantic_plan_id, backend, fusion_recipe_ids):
+def _make_spec(
+    semantic_plan_id,
+    backend,
+    fusion_recipe_ids,
+    control_recipe_id="",
+):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     dispatch_reduction = 0
     for recipe_id in fusion_recipe_ids:
@@ -482,13 +512,14 @@ def _make_spec(semantic_plan_id, backend, fusion_recipe_ids):
             if 2 <= parsed_count <= 4:
                 source_count = parsed_count
         dispatch_reduction += source_count - 1
-    compilation_identity = _canonical_hash(
-        {
-            "semantic_plan_id": semantic_plan_id,
-            "backend": backend,
-            "fusion_recipe_ids": fusion_recipe_ids,
-        }
-    )
+    compilation_payload = {
+        "semantic_plan_id": semantic_plan_id,
+        "backend": backend,
+        "fusion_recipe_ids": fusion_recipe_ids,
+    }
+    if control_recipe_id:
+        compilation_payload["control_recipe_id"] = control_recipe_id
+    compilation_identity = _canonical_hash(compilation_payload)
     execution_identity = _canonical_hash(
         {
             "compilation_identity": compilation_identity,
@@ -502,12 +533,65 @@ def _make_spec(semantic_plan_id, backend, fusion_recipe_ids):
         fusion_recipe_ids=fusion_recipe_ids,
         compilation_identity=compilation_identity,
         execution_identity=execution_identity,
+        control_recipe_id=control_recipe_id,
     )
 
 
-def _build_executable_optimization_space(root, fusion_plan, backend):
+def _build_executable_optimization_space(
+    root,
+    fusion_plan,
+    backend,
+    *,
+    control_recipe_ids=(),
+    selected_control_recipe_id="",
+):
     semantic_digest = _canonical_hash(graph_ir_to_dict(root))
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
+    control_recipe_ids = tuple(control_recipe_ids)
+    if control_recipe_ids:
+        if control_recipe_ids != _CUDA_CONTROL_RECIPE_IDS:
+            raise ValueError("structured-control recipe domain is not the R5 domain")
+        baseline = _make_spec(
+            semantic_plan_id,
+            backend,
+            (),
+            control_recipe_ids[0],
+        )
+        candidates = tuple(
+            _make_spec(semantic_plan_id, backend, (), recipe_id)
+            for recipe_id in control_recipe_ids[1:]
+        )
+        specs = (baseline, *candidates)
+        if fusion_plan.applied_groups:
+            selected_spec_id = None
+            selection_status = "control_recipe_requires_unfused_source"
+        else:
+            selected = next(
+                (
+                    spec
+                    for spec in specs
+                    if spec.control_recipe_id == selected_control_recipe_id
+                ),
+                None,
+            )
+            selected_spec_id = None if selected is None else selected.spec_id
+            selection_status = (
+                "control_recipe_not_materialized"
+                if selected is None
+                else (
+                    "selected_control_baseline"
+                    if selected is baseline
+                    else "selected_control_recipe"
+                )
+            )
+        return _ExecutableOptimizationSpace(
+            semantic_plan_id=semantic_plan_id,
+            baseline=baseline,
+            candidates=candidates,
+            selected_spec_id=selected_spec_id,
+            selection_status=selection_status,
+        )
+
     baseline = _make_spec(semantic_plan_id, backend, ())
     candidate_recipe_sets = []
     for partition in fusion_plan.candidate_partitions:
@@ -548,7 +632,11 @@ def _build_executable_optimization_space(root, fusion_plan, backend):
 
 
 __all__ = [
+    "_CUDA_CONDITIONAL_CONTROL_RECIPE_ID",
+    "_CUDA_CONTROL_RECIPE_IDS",
+    "_CUDA_MASKED_CONTROL_RECIPE_ID",
     "_GRAPH_FUSION_QUALIFICATION_SCHEMA",
+    "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",
     "_ExecutableOptimizationSpec",
     "_GraphFusionBindingScope",

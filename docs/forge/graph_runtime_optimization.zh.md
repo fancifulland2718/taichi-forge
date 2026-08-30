@@ -530,10 +530,18 @@ immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node grad
 ## 离线魔改 CompileIQ Graph recipe 搜索
 
 `ti.graph.compileiq_recipe_search(graph)` 把 Graph 已经拥有的 executable recipe 冻结成一个
-包含 baseline 的离线搜索域。当前审查范围只覆盖现有受限 ordinary-JIT CGraph map-fusion
-空间：baseline，以及该 Graph 实际公开且合法的 `map2`、`map3`、`map4` recipe。这个 API
-不会发明新的 fusion，不会跨 reduction/atomic 或 structured-control 边界，也不公开 block、
-workgroup、PTXAS 等普通 kernel launch 参数。
+包含 baseline 的离线搜索域。ordinary-JIT CGraph 会公开现有受限 map-fusion 空间：baseline，
+以及该 Graph 实际拥有且合法的 `map2`、`map3`、`map4` recipe。符合条件的 CUDA Graph 则
+公开一个有限 structured-control 空间：以 `control:cuda_conditional_graph:v1` 为 baseline，
+以 `control:cuda_masked_bounded_graph:v1` 为 candidate。资格条件是源码中恰好一个 flat、
+`lowering_mode="auto"` 的 `while`，存在精确 counter，两条物理路线都可用，并且没有 nested
+control、observation 或 native provider node；普通 CGraph prefix/suffix dispatch 仍属于同一
+semantic plan。
+
+两个搜索域刻意不组合。显式 `portable`/`native_required` 源策略、多个 structured region 和
+portable host-controlled route 都不进入第一版 control 空间；CompileIQ 也不能构造
+map-fusion × control 的笛卡尔积。这个 API 同样不会跨 reduction/atomic 边界发明 fusion，
+也不公开 block、workgroup、PTXAS 等普通 kernel launch 参数。
 
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为
@@ -546,9 +554,21 @@ commit/lock 和完整 Python source manifest。当前源码身份固定为
 CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。Forge 会解码结果，
 检查搜索完整覆盖且包含 baseline，并通过显式 recipe 使用的同一 Graph execution identity
 完成物化。搜索 winner 不等于运行时准入；必须独立验证 correctness、精确 route/binding
-identity、lifecycle、memory stability 和 worst-positive 性能，之后精确作用域的 qualification
-cache 才能影响运行时选择。证据缺失、过期或作用域不匹配时一律 fail closed 到 baseline。
-compile/search build 时间只作诊断，不是准入门禁。
+identity、lifecycle、memory stability 和 worst-positive 性能。map-fusion 之后可以使用精确
+作用域的 qualification cache，证据缺失、过期或作用域不匹配时 fail closed 到 baseline。
+structured-control R5 不允许生成这类 runtime cache：winner 只能由离线流程显式重建，不会
+修改 runtime `auto` 策略。compile/search build 时间只作诊断，不是准入门禁。
+
+2026-08-31 的本地 Windows RTX 5090 资格测试使用精确的经审查魔改 CompileIQ capability；
+每个 scope 有 10 个 fresh process，每个 process 有 10 个平衡 AB/BA block，并且每条路线的
+最终 block 至少累计 250 ms。在 4,096 项、实际 12 次迭代、一个 body action 下，最大迭代
+数为 20 时 masked/conditional 中位时间比为 0.88569（masked 为 1.129x，10/10 process
+均为正）；最大迭代数为 128 时该比值为 2.72953，因此保留 conditional。两个 scope 都通过
+精确 state/result 与 memory-stability 检查。这证明 workload profile 存在 crossover，不会
+据此改变默认路线或声称普遍加速。完整本地 artifact 位于
+`.agent/experiments/structured-control-compileiq-r5/qualification.json`，SHA-256 为
+`efd53010a68bb896ca6de3b63a83a4a40b1379c9e7817596123ffb8be1a37db7`；负面 scope 被保留记录，
+没有回退实现。
 
 ## 性能与显存权衡
 
