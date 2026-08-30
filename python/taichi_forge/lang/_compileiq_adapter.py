@@ -162,7 +162,11 @@ class _CompileIQFinalCandidate:
     provider_candidate_id: str = "baseline"
 
     def __post_init__(self):
-        if self.forge_object_kind not in ("kernel_variant", "executable_spec"):
+        if self.forge_object_kind not in (
+            "kernel_variant",
+            "executable_spec",
+            "primitive_provider_recipe",
+        ):
             raise ValueError("unsupported Forge final candidate object kind")
         for name, value in self.__dict__.items():
             if not isinstance(value, str) or not value or "\n" in value:

@@ -40,7 +40,7 @@ def _materialization_recipe(spec):
 
 
 @dataclass(frozen=True)
-class _CompileIQExecutableSelection:
+class GraphExecutableRecipeSelection:
     spec_id: str
     semantic_plan_id: str
     backend: str
@@ -54,6 +54,20 @@ class _CompileIQExecutableSelection:
         """Return an environment overlay without mutating process state."""
 
         return MappingProxyType({_INTERNAL_MAP_FUSION_ENV: self.materialization_recipe})
+
+    def to_dict(self):
+        return {
+            "spec_id": self.spec_id,
+            "semantic_plan_id": self.semantic_plan_id,
+            "backend": self.backend,
+            "fusion_recipe_ids": self.fusion_recipe_ids,
+            "compilation_identity": self.compilation_identity,
+            "execution_identity": self.execution_identity,
+            "materialization_recipe": self.materialization_recipe,
+        }
+
+
+_CompileIQExecutableSelection = GraphExecutableRecipeSelection
 
 
 class _CompileIQExecutableAdapter:
@@ -122,6 +136,14 @@ class _CompileIQExecutableAdapter:
     def backend(self):
         return self._space.baseline.backend
 
+    @property
+    def parameter(self):
+        return self._parameter
+
+    @property
+    def baseline_spec_id(self):
+        return self._space.baseline.spec_id
+
     def spec_ids(self, *, include_baseline=True):
         if not isinstance(include_baseline, bool):
             raise TypeError("include_baseline must be a bool")
@@ -150,7 +172,7 @@ class _CompileIQExecutableAdapter:
             spec = self._specs[spec_id]
         except KeyError as error:
             raise KeyError(f"unknown Forge executable spec {spec_id!r}") from error
-        return _CompileIQExecutableSelection(
+        return GraphExecutableRecipeSelection(
             spec_id=spec.spec_id,
             semantic_plan_id=spec.semantic_plan_id,
             backend=spec.backend,
@@ -374,6 +396,7 @@ class _CompileIQExecutableAdapter:
 
 
 __all__ = [
+    "GraphExecutableRecipeSelection",
     "_CompileIQExecutableAdapter",
     "_CompileIQExecutableSelection",
 ]
