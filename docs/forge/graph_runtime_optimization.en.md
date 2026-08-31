@@ -683,20 +683,26 @@ executable contract.
 the Graph already owns into one baseline-inclusive offline search domain. An
 ordinary-JIT CGraph exposes the existing bounded map-fusion space: baseline
 plus the legal `map2`, `map3`, and `map4` recipes actually owned by that Graph.
-An eligible CUDA Graph instead exposes one bounded structured-control space:
+An eligible CUDA Graph instead exposes exactly one bounded structured-control
+space. A flat source `while` uses
 `control:cuda_conditional_graph:v1` as baseline and
-`control:cuda_masked_bounded_graph:v1` as candidate. Eligibility requires
-exactly one flat source `while` with `lowering_mode="auto"`, an exact counter,
-both physical routes available, and no nested control, observation, or native
-provider node. Ordinary CGraph prefix and suffix dispatches remain in the same
-semantic plan.
+`control:cuda_masked_bounded_graph:v1` as candidate. A depth-2 source uses
+`control:cuda_nested_device_update:v1` as baseline and
+`control:cuda_nested_masked_bounded:v1` as candidate. The nested domain
+requires exactly one root outer `while` whose body owns one through eight
+ordered leaf inner `while` regions. Every region must use
+`lowering_mode="auto"`, have an exact counter, and qualify for native
+submission; both physical routes must be independently available. Observation
+and native-provider nodes remain excluded. Ordinary CGraph prefix, suffix, and
+eligible gaps between inner regions remain in the same semantic plan.
 
-The two domains are deliberately not combined. Explicit `portable` and
-`native_required` source policies, multiple structured regions, and the
-portable host-controlled route are outside this first control space. CompileIQ
-cannot form a map-fusion by control Cartesian product. This API also does not
-invent fusion across reduction or atomic boundaries, or expose block,
-workgroup, PTXAS, or other kernel launch parameters.
+The map-fusion, flat-control, and nested-control domains are deliberately not
+combined. Explicit `portable` and `native_required` source policies, multiple
+root structured regions, and portable host-controlled routes are outside the
+control spaces. CompileIQ cannot form fusion-by-control or flat-by-nested
+Cartesian products. This API also does not invent fusion across reduction or
+atomic boundaries, or expose block, workgroup, PTXAS, or other kernel launch
+parameters.
 
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python
@@ -708,17 +714,20 @@ Upstream CompileIQ, a different fork, or source drift raises
 the Forge wheel does not depend on it, and importing `ti.graph` does not import
 CompileIQ.
 
-CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs. Forge
-decodes the result, checks complete search coverage including the baseline, and
-materializes it through the same Graph execution identity used by explicit
-recipes. A search winner is not runtime admission. Correctness, exact route and
-binding identity, lifecycle, memory stability, and worst-positive performance
-must be qualified independently. Map-fusion may then use an exact-scope
-qualification cache; missing, stale, or mismatched evidence fails closed to
-its baseline. Structured-control R5 cannot emit that runtime cache: its winner
-is available only through explicit offline reconstruction and does not mutate
-the runtime `auto` policy. Compile/search build time is diagnostic only and is
-not an admission gate.
+CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs. Flat
+and nested control use distinct provider namespaces, domain versions, and
+semantic identities. Forge decodes the result, checks complete search coverage
+including the baseline, and materializes it through the same Graph execution
+identity used by explicit recipes. The selected physical control route is
+frozen when that Graph is constructed; later internal-selector changes cannot
+mutate the compiled identity. A search winner is not runtime admission.
+Correctness, exact route and binding identity, lifecycle, memory stability, and
+worst-positive performance must be qualified independently. Map-fusion may
+then use an exact-scope qualification cache; missing, stale, or mismatched
+evidence fails closed to its baseline. Structured-control searches cannot emit
+that runtime cache: a winner is available only through explicit offline
+reconstruction and does not mutate the runtime `auto` policy. Compile/search
+build time is diagnostic only and is not an admission gate.
 
 The 2026-08-31 local Windows RTX 5090 qualification used the exact reviewed
 modified CompileIQ capability, ten fresh processes per scope, ten balanced
@@ -733,6 +742,23 @@ claim. The full local artifact is
 SHA-256
 `efd53010a68bb896ca6de3b63a83a4a40b1379c9e7817596123ffb8be1a37db7`;
 the negative scope remains recorded rather than rolled back.
+
+The same protocol qualified the R6 depth-2 domain with one and two ordered
+inner regions. All scopes preserved exact i32 results, reported the requested
+physical route, covered both opaque tokens through the exact modified fork,
+and remained memory-stable. For steady replay, masked/device-update median
+ratios were 2.12995 and 2.13856, so the device-update baseline was retained and
+the masked route remains an explicit recorded negative. Cold first-submit
+medians nevertheless favored masked at 65.61 versus 74.79 ms and 71.30 versus
+83.06 ms; the two-inner scope favored masked in all ten fresh processes.
+Persistent allocation also fell from 30,884 to 532 bytes and from 59,996 to
+796 bytes. These cold and memory crossovers establish a real second physical
+plan, but do not override the steady-performance gate or change runtime
+`auto`. Ratio CV reached 0.0744 and one unrelated idle `GameViewer.exe` process
+held 16 MiB of GPU memory, so the evidence is deliberately local rather than a
+general speedup claim. The artifact is
+`.agent/experiments/nested-control-compileiq-r6/qualification-v1.json`, SHA-256
+`9514354378bc14562ec000b8a8ac3d5bc8d07acbd7ce19ff7ed184f0da904fca`.
 
 ## Performance and memory trade-offs
 

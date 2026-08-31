@@ -82,6 +82,9 @@ from taichi_forge.graph._optimization import (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_CONTROL_RECIPE_IDS,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_CONTROL_RECIPE_IDS,
+    _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     _GraphFusionQualificationCache,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
@@ -96,6 +99,8 @@ _INTERNAL_FUSION_QUALIFICATION_ENV = (
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
 )
+_CUDA_NESTED_DEVICE_UPDATE_ROUTE = "cuda_device_node_update"
+_CUDA_NESTED_MASKED_ROUTE = "cuda_masked_bounded_graph"
 
 
 @kernel_impl.kernel
@@ -1984,13 +1989,7 @@ def _cuda_bounded_update_policy():
     return requested, aliases[requested]
 
 
-def _cuda_nested_device_update_qualified():
-    requested = _internal_structured_control_recipe()
-    if requested == "cuda_masked_bounded_graph" or (
-        requested == "auto"
-        and os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
-    ):
-        return False
+def _cuda_nested_device_update_available():
     capabilities = dict(_ti_core.cuda_bounded_dispatch_probe())
     return bool(capabilities.get("exact_device_grid_available", False))
 
@@ -3699,11 +3698,14 @@ def _internal_structured_control_recipe():
         "cuda_conditional_graph": "cuda_conditional_graph",
         "masked": "cuda_masked_bounded_graph",
         "cuda_masked_bounded_graph": "cuda_masked_bounded_graph",
+        "cuda_nested_device_update": "cuda_nested_device_update",
+        "cuda_nested_masked_bounded": "cuda_nested_masked_bounded",
     }
     if requested not in aliases:
         raise TaichiRuntimeError(
             f"{_INTERNAL_STRUCTURED_CONTROL_ENV} must be auto, "
-            "cuda_conditional_graph, or cuda_masked_bounded_graph"
+            "cuda_conditional_graph, cuda_masked_bounded_graph, "
+            "cuda_nested_device_update, or cuda_nested_masked_bounded"
         )
     return aliases[requested]
 
@@ -3713,6 +3715,11 @@ def _cuda_structured_control_lowering(capabilities=None):
 
     routes = _cuda_structured_control_routes(capabilities)
     requested = _internal_structured_control_recipe()
+    if requested in (
+        "cuda_nested_device_update",
+        "cuda_nested_masked_bounded",
+    ):
+        requested = "auto"
     if requested != "auto":
         if requested not in routes:
             raise TaichiRuntimeError(
@@ -3728,6 +3735,51 @@ def _cuda_structured_control_lowering(capabilities=None):
     if routes:
         return routes[0]
     return None
+
+
+def _cuda_nested_structured_control_routes():
+    """Return the two independently deployable depth-2 CUDA routes."""
+
+    device_update = _cuda_nested_device_update_available()
+    flat_capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
+    masked = bool(flat_capabilities.get("internal_masked_graph_available", False))
+    return (
+        *((_CUDA_NESTED_DEVICE_UPDATE_ROUTE,) if device_update else ()),
+        *((_CUDA_NESTED_MASKED_ROUTE,) if masked else ()),
+    )
+
+
+def _cuda_nested_structured_control_lowering():
+    """Freeze one depth-2 CUDA physical route during Graph construction."""
+
+    routes = _cuda_nested_structured_control_routes()
+    requested = _internal_structured_control_recipe()
+    explicit = {
+        "cuda_nested_device_update": _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
+        "cuda_nested_masked_bounded": _CUDA_NESTED_MASKED_ROUTE,
+        # Preserve the older internal masked override for nested Graphs built
+        # under the flat-control worker overlay.
+        "cuda_masked_bounded_graph": _CUDA_NESTED_MASKED_ROUTE,
+    }.get(requested)
+    if explicit is not None:
+        if explicit not in routes:
+            raise TaichiRuntimeError(
+                f"requested internal nested structured-control recipe "
+                f"{requested!r} is unavailable on this CUDA runtime"
+            )
+        return explicit
+    if (
+        os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+        and _CUDA_NESTED_MASKED_ROUTE in routes
+    ):
+        return _CUDA_NESTED_MASKED_ROUTE
+    if routes:
+        return routes[0]
+    # The legacy nested runtime always attempted its masked fallback when the
+    # setup probe could not establish exact device update. Keep that runtime
+    # behavior for ordinary auto Graphs; strict CompileIQ eligibility below
+    # still requires both independently reported routes.
+    return _CUDA_NESTED_MASKED_ROUTE
 
 
 def bounded_dispatch_capabilities(physical_grid="auto"):
@@ -6392,6 +6444,7 @@ class _CompiledWhileGraphNode:
         self._cuda_nested_inner = None
         self._cuda_nested_boundaries = None
         self._cuda_nested_reason = "not_nested"
+        self._cuda_nested_control_lowering = None
         if self._has_nested_control and lowering_mode != "portable":
             nested = _compile_native_nested_while_runtime_node(
                 condition,
@@ -6416,6 +6469,10 @@ class _CompiledWhileGraphNode:
                     self._cuda_nested_boundaries,
                     self._cuda_nested_reason,
                 ) = nested
+                if self._cuda_nested is not None:
+                    self._cuda_nested_control_lowering = (
+                        _cuda_nested_structured_control_lowering()
+                    )
         elif self._has_nested_control:
             self._vulkan_nested_reason = "outer_portable_lowering_requested"
             self._cuda_nested_reason = "outer_portable_lowering_requested"
@@ -6647,7 +6704,8 @@ class _CompiledWhileGraphNode:
                         tuple(inner.max_iterations for inner in inners),
                         outer_status,
                         inner_statuses,
-                        _cuda_nested_device_update_qualified(),
+                        self._cuda_nested_control_lowering
+                        == _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
                     )
                 )
             if not submitted:
@@ -7616,6 +7674,9 @@ class _CompiledWhileGraphNode:
                 self._vulkan_nested_reason
                 if impl.current_cfg().arch == _ti_core.Arch.vulkan
                 else self._cuda_nested_reason
+            ),
+            "cuda_nested_control_lowering": (
+                self._cuda_nested_control_lowering
             ),
             "condition_dispatch_count": self.condition_dispatch_count,
             "body_dispatch_count": self.body_dispatch_count,
@@ -9292,23 +9353,11 @@ class _PreparedGraphInvocation:
 
 
 def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend):
-    """Describe the bounded R5 domain without changing the logical Graph IR."""
+    """Describe one exact CUDA control domain without changing Graph IR."""
 
     source_nodes = tuple(source_nodes)
     control_nodes = tuple(control_nodes)
-    if backend != "cuda" or len(control_nodes) != 1:
-        return (), ""
-    node = control_nodes[0]
-    if (
-        not isinstance(node, _CompiledWhileGraphNode)
-        or node.control_depth != 1
-        or node.structured_depth != 1
-        or node._has_nested_control
-        or node.lowering_mode != "auto"
-        or node.counter is None
-        or not node._native_upgrade_eligible
-        or not node._native_submission_eligible
-    ):
+    if backend != "cuda":
         return (), ""
     if any(
         isinstance(source, (_CompiledNativeGraphNode, _CompiledObservationGraphNode))
@@ -9317,20 +9366,88 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
     ):
         return (), ""
 
-    routes = _cuda_structured_control_routes()
+    if len(control_nodes) == 1:
+        node = control_nodes[0]
+        if (
+            not isinstance(node, _CompiledWhileGraphNode)
+            or node.control_depth != 1
+            or node.structured_depth != 1
+            or node._has_nested_control
+            or node.lowering_mode != "auto"
+            or node.counter is None
+            or not node._native_upgrade_eligible
+            or not node._native_submission_eligible
+        ):
+            return (), ""
+        routes = _cuda_structured_control_routes()
+        if routes != (
+            "cuda_conditional_graph",
+            "cuda_masked_bounded_graph",
+        ):
+            return (), ""
+        selected_by_route = {
+            "cuda_conditional_graph": _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
+            "cuda_masked_bounded_graph": _CUDA_MASKED_CONTROL_RECIPE_ID,
+        }
+        selected = selected_by_route.get(node._cuda_control_lowering, "")
+        if not selected:
+            return (), ""
+        return _CUDA_CONTROL_RECIPE_IDS, selected
+
+    roots = tuple(node for node in control_nodes if node.control_depth == 1)
+    if len(roots) != 1 or not 2 <= len(control_nodes) <= 9:
+        return (), ""
+    outer = roots[0]
+    if (
+        not isinstance(outer, _CompiledWhileGraphNode)
+        or outer.structured_depth != 2
+        or not outer._has_nested_control
+        or outer.lowering_mode != "auto"
+        or outer.counter is None
+        or outer._cuda_nested is None
+        or outer._cuda_nested_reason != "eligible"
+        or not outer._native_upgrade_eligible
+        or not outer._native_submission_eligible
+    ):
+        return (), ""
+    body_children = ()
+    for role, children in outer._definition_children:
+        if role == "body":
+            body_children = tuple(children)
+        elif children:
+            return (), ""
+    inners = tuple(control_nodes[1:])
+    if body_children != inners or not 1 <= len(inners) <= 8:
+        return (), ""
+    if any(
+        not isinstance(inner, _CompiledWhileGraphNode)
+        or inner.control_depth != 2
+        or inner.structured_depth != 1
+        or inner._has_nested_control
+        or inner.lowering_mode != "auto"
+        or inner.counter is None
+        or not inner._native_upgrade_eligible
+        or not inner._native_submission_eligible
+        for inner in inners
+    ):
+        return (), ""
+
+    routes = _cuda_nested_structured_control_routes()
     if routes != (
-        "cuda_conditional_graph",
-        "cuda_masked_bounded_graph",
+        _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
+        _CUDA_NESTED_MASKED_ROUTE,
     ):
         return (), ""
     selected_by_route = {
-        "cuda_conditional_graph": _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
-        "cuda_masked_bounded_graph": _CUDA_MASKED_CONTROL_RECIPE_ID,
+        _CUDA_NESTED_DEVICE_UPDATE_ROUTE: (
+            _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID
+        ),
+        _CUDA_NESTED_MASKED_ROUTE: _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     }
-    selected = selected_by_route.get(node._cuda_control_lowering, "")
+    selected = selected_by_route.get(outer._cuda_nested_control_lowering, "")
     if not selected:
         return (), ""
-    return _CUDA_CONTROL_RECIPE_IDS, selected
+    return _CUDA_NESTED_CONTROL_RECIPE_IDS, selected
 
 
 class _GraphSpec:

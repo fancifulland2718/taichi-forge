@@ -49,18 +49,29 @@ grouped under the behavior they shipped.
 
 - Added baseline-inclusive offline recipe search for the reviewed modified
   CompileIQ fork. `ti.graph.compileiq_recipe_search()` searches either the
-  existing bounded Graph map-fusion executable recipes or, for one eligible
-  flat CUDA `auto` while, the Forge-owned conditional-versus-masked structured
-  control recipes. Explicit lowering policies, portable control, multiple
-  regions, native/observation nodes, and fusion-by-control combinations remain
-  excluded. Map fusion retains Forge's independent exact-scope
-  qualification-cache admission; structured-control R5 is explicit offline
-  reconstruction only and neither emits a runtime cache nor changes `auto`.
+  existing bounded Graph map-fusion executable recipes or one exact CUDA
+  structured-control domain. In addition to the flat `auto` while
+  conditional-versus-masked domain, R6 adds a separate depth-2 domain for one
+  root outer `auto` while with one through eight ordered leaf inner `auto`
+  whiles, searching device-update versus masked-bounded physical plans. The
+  nested domain has its own opaque namespace, semantic identity, and exact
+  explicit reconstruction. Explicit lowering policies, portable control,
+  multiple root regions, native/observation nodes, and fusion-by-control or
+  flat-by-nested combinations remain excluded. Map fusion retains Forge's
+  independent exact-scope qualification-cache admission; structured-control
+  R5/R6 is explicit offline
+  reconstruction only and neither emits a runtime cache nor changes `auto`;
+  physical control selection is frozen when each Graph is constructed.
   A ten-process balanced AB/BA qualification at 4,096 items and 12 actual
   iterations retained the masked route at max 20 (1.129x median, worst-positive)
   and the conditional baseline at max 128 (masked/conditional 2.730x), with
-  exact results and stable memory in both scopes. Compile/build timing remained
-  diagnostic only. The deliberately narrow
+  exact results and stable memory in both scopes. R6 depth-2 qualification
+  retained device-update for steady replay: masked/device-update was 2.130x
+  for one inner region and 2.139x for two. The masked negatives remain recorded
+  because cold medians favored masked (65.61 vs 74.79 ms and 71.30 vs 83.06 ms)
+  while persistent allocation fell from 30,884 to 532 bytes and from 59,996 to
+  796 bytes. These local crossovers do not change runtime `auto`. Compile/build
+  timing remained diagnostic only. The deliberately narrow
   `ti.algorithms.compileiq_reduce_provider_search()` slice searches the existing
   CUDA dense-field i32 sum providers without changing `method="auto"` or
   installing a runtime cache. Both paths reject upstream/different CompileIQ

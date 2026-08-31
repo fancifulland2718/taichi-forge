@@ -53,12 +53,27 @@ class CompileIQGraphRecipeSearch:
             raise ValueError("Graph recipe domain must contain its executable baseline")
 
         adapter_manifest = adapter.manifest()
-        semantic_payload = {
-            "schema": (
+        nested_structured_control = (
+            adapter.structured_control_domain == "cuda_nested_while_while"
+        )
+        if nested_structured_control:
+            semantic_schema = (
+                "taichi_forge.graph.compileiq-nested-structured-control-semantics.v1"
+            )
+            provider_namespace = "taichi_forge.graph.nested_structured_control"
+            domain_version = "nested-structured-control-executable-spec.v1"
+        elif adapter.recipe_kind == "structured_control":
+            semantic_schema = (
                 "taichi_forge.graph.compileiq-structured-control-semantics.v1"
-                if adapter.recipe_kind == "structured_control"
-                else "taichi_forge.graph.compileiq-semantics.v1"
-            ),
+            )
+            provider_namespace = "taichi_forge.graph.structured_control"
+            domain_version = "structured-control-executable-spec.v1"
+        else:
+            semantic_schema = "taichi_forge.graph.compileiq-semantics.v1"
+            provider_namespace = "taichi_forge.graph.map_fusion"
+            domain_version = "executable-spec.v1"
+        semantic_payload = {
+            "schema": semantic_schema,
             "semantic_plan_id": adapter.semantic_plan_id,
             "backend": adapter.backend,
             "baseline_spec_id": adapter.baseline_spec_id,
@@ -66,18 +81,14 @@ class CompileIQGraphRecipeSearch:
         }
         if adapter.recipe_kind == "structured_control":
             semantic_payload["recipe_kind"] = adapter.recipe_kind
+        if nested_structured_control:
+            semantic_payload["structured_control_domain"] = (
+                adapter.structured_control_domain
+            )
         semantic_fingerprint = _identity("forge-graph-semantics-v1:", semantic_payload)
         transport = _CompileIQOpaqueRecipeTransport(
-            provider_namespace=(
-                "taichi_forge.graph.structured_control"
-                if adapter.recipe_kind == "structured_control"
-                else "taichi_forge.graph.map_fusion"
-            ),
-            domain_version=(
-                "structured-control-executable-spec.v1"
-                if adapter.recipe_kind == "structured_control"
-                else "executable-spec.v1"
-            ),
+            provider_namespace=provider_namespace,
+            domain_version=domain_version,
             provider_semantic_fingerprint=semantic_fingerprint,
             recipe_ids=recipe_ids,
             baseline_recipe_id=adapter.baseline_spec_id,
@@ -208,6 +219,10 @@ class CompileIQGraphRecipeSearch:
         }
         if self._adapter.recipe_kind == "structured_control":
             value["recipe_kind"] = self._adapter.recipe_kind
+        if self._adapter.structured_control_domain == "cuda_nested_while_while":
+            value["structured_control_domain"] = (
+                self._adapter.structured_control_domain
+            )
         return value
 
 

@@ -532,16 +532,21 @@ immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node grad
 `ti.graph.compileiq_recipe_search(graph)` 把 Graph 已经拥有的 executable recipe 冻结成一个
 包含 baseline 的离线搜索域。ordinary-JIT CGraph 会公开现有受限 map-fusion 空间：baseline，
 以及该 Graph 实际拥有且合法的 `map2`、`map3`、`map4` recipe。符合条件的 CUDA Graph 则
-公开一个有限 structured-control 空间：以 `control:cuda_conditional_graph:v1` 为 baseline，
-以 `control:cuda_masked_bounded_graph:v1` 为 candidate。资格条件是源码中恰好一个 flat、
-`lowering_mode="auto"` 的 `while`，存在精确 counter，两条物理路线都可用，并且没有 nested
-control、observation 或 native provider node；普通 CGraph prefix/suffix dispatch 仍属于同一
-semantic plan。
+只公开一个有限 structured-control 空间。flat 源 `while` 以
+`control:cuda_conditional_graph:v1` 为 baseline，以
+`control:cuda_masked_bounded_graph:v1` 为 candidate。depth-2 源结构以
+`control:cuda_nested_device_update:v1` 为 baseline，以
+`control:cuda_nested_masked_bounded:v1` 为 candidate。nested 域要求源码中恰好一个 root
+outer `while`，其 body 按序直接拥有 1 至 8 个 leaf inner `while`。每个 region 都必须使用
+`lowering_mode="auto"`、具有精确 counter、满足 native submission 资格，而且两条物理路线
+必须各自可用；observation 与 native-provider node 仍被排除。普通 CGraph prefix/suffix
+dispatch，以及 inner region 之间符合条件的 gap，仍属于同一 semantic plan。
 
-两个搜索域刻意不组合。显式 `portable`/`native_required` 源策略、多个 structured region 和
-portable host-controlled route 都不进入第一版 control 空间；CompileIQ 也不能构造
-map-fusion × control 的笛卡尔积。这个 API 同样不会跨 reduction/atomic 边界发明 fusion，
-也不公开 block、workgroup、PTXAS 等普通 kernel launch 参数。
+map-fusion、flat-control 与 nested-control 三个搜索域刻意不组合。显式
+`portable`/`native_required` 源策略、多个 root structured region 和 portable host-controlled
+route 都不进入 control 空间；CompileIQ 不能构造 fusion × control 或 flat × nested 的
+笛卡尔积。这个 API 同样不会跨 reduction/atomic 边界发明 fusion，也不公开 block、
+workgroup、PTXAS 等普通 kernel launch 参数。
 
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为
@@ -551,13 +556,15 @@ commit/lock 和完整 Python source manifest。当前源码身份固定为
 `CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
 导入 `ti.graph` 也不会导入 CompileIQ。
 
-CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。Forge 会解码结果，
-检查搜索完整覆盖且包含 baseline，并通过显式 recipe 使用的同一 Graph execution identity
-完成物化。搜索 winner 不等于运行时准入；必须独立验证 correctness、精确 route/binding
-identity、lifecycle、memory stability 和 worst-positive 性能。map-fusion 之后可以使用精确
-作用域的 qualification cache，证据缺失、过期或作用域不匹配时 fail closed 到 baseline。
-structured-control R5 不允许生成这类 runtime cache：winner 只能由离线流程显式重建，不会
-修改 runtime `auto` 策略。compile/search build 时间只作诊断，不是准入门禁。
+CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。flat 与 nested control
+使用不同的 provider namespace、domain version 与 semantic identity。Forge 会解码结果，检查
+搜索完整覆盖且包含 baseline，并通过显式 recipe 使用的同一 Graph execution identity 完成
+物化。所选物理控制路线在该 Graph 构造时冻结；之后改变内部 selector 不能修改已编译身份。
+搜索 winner 不等于运行时准入；必须独立验证 correctness、精确 route/binding identity、
+lifecycle、memory stability 和 worst-positive 性能。map-fusion 之后可以使用精确作用域的
+qualification cache，证据缺失、过期或作用域不匹配时 fail closed 到 baseline。
+structured-control 搜索不允许生成这类 runtime cache：winner 只能由离线流程显式重建，
+不会修改 runtime `auto` 策略。compile/search build 时间只作诊断，不是准入门禁。
 
 2026-08-31 的本地 Windows RTX 5090 资格测试使用精确的经审查魔改 CompileIQ capability；
 每个 scope 有 10 个 fresh process，每个 process 有 10 个平衡 AB/BA block，并且每条路线的
@@ -569,6 +576,19 @@ structured-control R5 不允许生成这类 runtime cache：winner 只能由离�
 `.agent/experiments/structured-control-compileiq-r5/qualification.json`，SHA-256 为
 `efd53010a68bb896ca6de3b63a83a4a40b1379c9e7817596123ffb8be1a37db7`；负面 scope 被保留记录，
 没有回退实现。
+
+同一协议还资格化了 R6 depth-2 域的一条与两条有序 inner region。全部 scope 都保持精确 i32
+结果、报告所请求的物理路线、通过精确魔改 fork 覆盖两个不透明 token，并保持 memory stable。
+稳态 replay 的 masked/device-update 中位比值分别为 2.12995 与 2.13856，因此保留
+device-update baseline，并把 masked 路线作为明确负面项继续记录。cold first-submit 中位数则
+分别为 masked 65.61 ms 对 device-update 74.79 ms，以及 71.30 ms 对 83.06 ms；双 inner
+scope 的 10 个 fresh process 全部由 masked 占优。persistent allocation 也分别从 30,884
+降至 532 bytes、从 59,996 降至 796 bytes。这些 cold 与 memory crossover 证明第二条物理
+plan 确实有意义，但不会推翻稳态门禁或改变 runtime `auto`。ratio CV 最高为 0.0744，并且
+测试时一个无负载的外部 `GameViewer.exe` 进程占有 16 MiB GPU memory，因此这些结果只作为
+本机证据，不推广为普遍加速。完整 artifact 位于
+`.agent/experiments/nested-control-compileiq-r6/qualification-v1.json`，SHA-256 为
+`9514354378bc14562ec000b8a8ac3d5bc8d07acbd7ce19ff7ed184f0da904fca`。
 
 ## 性能与显存权衡
 

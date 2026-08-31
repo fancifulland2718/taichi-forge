@@ -4437,8 +4437,13 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
                 assert replay_stats["known_bounded_control_bytes"] == control_bytes
                 assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
 
-            # A current driver can force the pre-12.4-compatible route, which
-            # qualifies the legacy double-gate fallback without old hardware.
+            # The physical route is frozen into this compiled Graph. A later
+            # legacy environment change cannot mutate its execution identity.
+            frozen_nested_route = next(
+                node
+                for node in graph._spec.structured_control_nodes
+                if node.control_depth == 1
+            )._cuda_nested_control_lowering
             monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
             for value in args.values():
                 value.fill(0)
@@ -4447,11 +4452,17 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
             assert args["outer_state"].to_numpy()[()] == 3
             assert args["inner_total"].to_numpy()[()] == 9
             assert tuple(args["inner_stops"].to_numpy()[:3]) == (2, 3, 4)
-            assert graph._graph_stats[0]["last_path"] in (
-                "cuda_masked_capture",
-                "cuda_masked_replay",
-                "cuda_masked_patched_replay",
-            )
+            if frozen_nested_route == "cuda_device_node_update":
+                assert graph._graph_stats[0]["last_path"] in (
+                    "cuda_device_update_nested_replay",
+                    "cuda_device_update_nested_patched_replay",
+                )
+            else:
+                assert graph._graph_stats[0]["last_path"] in (
+                    "cuda_masked_capture",
+                    "cuda_masked_replay",
+                    "cuda_masked_patched_replay",
+                )
 
     debug = graph._debug_info
     assert debug["structured_control_count"] == 2
@@ -4460,6 +4471,11 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
         outer_debug = debug["nodes"][0]
         assert outer_debug["nested_native_upgrade_eligible"]
         assert outer_debug["nested_native_upgrade_reason"] == "eligible"
+        if ti.lang.impl.current_cfg().arch == ti.cuda:
+            assert outer_debug["cuda_nested_control_lowering"] in (
+                "cuda_device_node_update",
+                "cuda_masked_bounded_graph",
+            )
     ir = graph._ir_debug_info
     assert ir["analysis"]["while_regions"] == 2
     assert ir["analysis"]["max_structured_depth"] == 2
@@ -4722,6 +4738,19 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
     if ti.lang.impl.current_cfg().arch != ti.cpu:
         assert graph._debug_info["nodes"][0]["nested_native_upgrade_eligible"]
     if ti.lang.impl.current_cfg().arch == ti.cuda:
+        optimization = graph._executable_optimization_space
+        if dict(ti_core.cuda_bounded_dispatch_probe()).get(
+            "exact_device_grid_available", False
+        ):
+            assert tuple(
+                spec.control_recipe_id
+                for spec in (optimization.baseline, *optimization.candidates)
+            ) == (
+                "control:cuda_nested_device_update:v1",
+                "control:cuda_nested_masked_bounded:v1",
+            )
+        else:
+            assert not optimization.baseline.control_recipe_id
         assert graph._graph_stats[0]["last_path"] in (
             "cuda_device_update_nested_capture",
             "cuda_device_update_nested_replay",
@@ -4730,6 +4759,11 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
             "cuda_masked_replay",
             "cuda_masked_patched_replay",
         )
+        frozen_nested_route = next(
+            node
+            for node in graph._spec.structured_control_nodes
+            if node.control_depth == 1
+        )._cuda_nested_control_lowering
         monkeypatch.setenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "1")
         for value in args.values():
             value.fill(0)
@@ -4738,11 +4772,17 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
         assert tuple(args["a_stops"].to_numpy()[:3]) == (1, 2, 3)
         assert tuple(args["b_stops"].to_numpy()[:3]) == (2, 2, 2)
         assert tuple(args["phases"].to_numpy()[:3]) == (121, 122, 123)
-        assert graph._graph_stats[0]["last_path"] in (
-            "cuda_masked_capture",
-            "cuda_masked_replay",
-            "cuda_masked_patched_replay",
-        )
+        if frozen_nested_route == "cuda_device_node_update":
+            assert graph._graph_stats[0]["last_path"] in (
+                "cuda_device_update_nested_replay",
+                "cuda_device_update_nested_patched_replay",
+            )
+        else:
+            assert graph._graph_stats[0]["last_path"] in (
+                "cuda_masked_capture",
+                "cuda_masked_replay",
+                "cuda_masked_patched_replay",
+            )
 
 
 @test_utils.test(arch=ti.vulkan)

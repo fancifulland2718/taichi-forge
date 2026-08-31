@@ -13,6 +13,8 @@ from taichi_forge.graph._compileiq_adapter import (
 from taichi_forge.graph._optimization import (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
     _make_spec,
@@ -175,6 +177,33 @@ def _control_space(*, selected="conditional"):
     )
 
 
+def _nested_control_space(*, selected="device_update"):
+    baseline = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    )
+    masked = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
+    )
+    selected_spec = baseline if selected == "device_update" else masked
+    return _ExecutableOptimizationSpace(
+        semantic_plan_id=_SEMANTIC_PLAN_ID,
+        baseline=baseline,
+        candidates=(masked,),
+        selected_spec_id=selected_spec.spec_id,
+        selection_status=(
+            "selected_control_baseline"
+            if selected == "device_update"
+            else "selected_control_recipe"
+        ),
+    )
+
+
 def test_executable_adapter_materializes_exact_structured_control_recipe():
     baseline = _control_space()
     adapter = _CompileIQExecutableAdapter(baseline)
@@ -204,6 +233,40 @@ def test_executable_adapter_materializes_exact_structured_control_recipe():
     assert [spec["control_materialization_recipe"] for spec in manifest["specs"]] == [
         "cuda_conditional_graph",
         "cuda_masked_bounded_graph",
+    ]
+
+
+def test_executable_adapter_materializes_exact_nested_control_recipe():
+    baseline = _nested_control_space()
+    adapter = _CompileIQExecutableAdapter(baseline)
+    masked = baseline.candidates[0]
+    parameters = {"forge_executable_spec": masked.spec_id}
+
+    selection = adapter.select(parameters)
+    assert adapter.recipe_kind == "structured_control"
+    assert adapter.structured_control_domain == "cuda_nested_while_while"
+    assert selection.control_recipe_id == (
+        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID
+    )
+    assert dict(selection.worker_environment) == {
+        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "baseline",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": (
+            "cuda_nested_masked_bounded"
+        ),
+    }
+    assert adapter.verify_materialized(
+        parameters,
+        _nested_control_space(selected="masked"),
+    ) == selection
+
+    manifest = adapter.manifest()
+    assert manifest["recipe_kind"] == "structured_control"
+    assert manifest["structured_control_domain"] == (
+        "cuda_nested_while_while"
+    )
+    assert [spec["control_materialization_recipe"] for spec in manifest["specs"]] == [
+        "cuda_nested_device_update",
+        "cuda_nested_masked_bounded",
     ]
 
 
@@ -541,6 +604,178 @@ def test_executable_adapter_rebuilds_cuda_auto_while_routes(monkeypatch):
         explicit_space = explicit._executable_optimization_space
         assert not explicit_space.baseline.control_recipe_id
         assert all(not spec.control_recipe_id for spec in explicit_space.candidates)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_executable_adapter_rebuilds_cuda_nested_while_routes(monkeypatch):
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not capabilities.get("internal_masked_graph_available", False):
+        pytest.skip("internal masked CUDA Graph control is unavailable")
+    nested_probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not nested_probe.get("exact_device_grid_available", False):
+        pytest.skip("exact CUDA nested device update is unavailable")
+
+    @ti.kernel
+    def evaluate_outer(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(counter[None] < target)
+
+    @ti.kernel
+    def reset_inner(counter: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        counter[None] = 0
+
+    @ti.kernel
+    def evaluate_inner(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        target: ti.i32,
+    ):
+        predicate[None] = int(counter[None] < target)
+
+    @ti.kernel
+    def inner_step(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        total: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            counter[None] += 1
+            total[None] += 1
+
+    @ti.kernel
+    def outer_step(
+        counter: ti.types.ndarray(dtype=ti.i32, ndim=0),
+        predicate: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        if predicate[None] != 0:
+            counter[None] += 1
+
+    def scalar(name):
+        return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+
+    outer_counter = scalar("outer_counter")
+    outer_predicate = scalar("outer_predicate")
+    inner_counter = scalar("inner_counter")
+    inner_predicate = scalar("inner_predicate")
+    total = scalar("total")
+    outer_target = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "outer_target", ti.i32
+    )
+    inner_target = ti.graph.Arg(
+        ti.graph.ArgKind.SCALAR, "inner_target", ti.i32
+    )
+
+    def build(lowering_mode="auto"):
+        builder = ti.graph.GraphBuilder()
+        outer_condition = builder.create_sequential()
+        outer_condition.dispatch(
+            evaluate_outer,
+            outer_counter,
+            outer_predicate,
+            outer_target,
+        )
+        inner_condition = builder.create_sequential()
+        inner_condition.dispatch(
+            evaluate_inner,
+            inner_counter,
+            inner_predicate,
+            inner_target,
+        )
+        inner_body = builder.create_sequential()
+        inner_body.dispatch(inner_step, inner_counter, inner_predicate, total)
+        outer_body = builder.create_sequential()
+        outer_body.dispatch(reset_inner, inner_counter)
+        outer_body.while_loop(
+            inner_condition,
+            inner_body,
+            predicate=inner_predicate,
+            control_inputs=(inner_counter, inner_target),
+            carried_state=(inner_counter, total),
+            counter=inner_counter,
+            max_iterations=8,
+            name="compileiq_inner",
+        )
+        outer_body.dispatch(outer_step, outer_counter, outer_predicate)
+        builder.while_loop(
+            outer_condition,
+            outer_body,
+            predicate=outer_predicate,
+            control_inputs=(outer_counter, outer_target),
+            carried_state=(outer_counter, inner_counter, total),
+            counter=outer_counter,
+            max_iterations=8,
+            lowering_mode=lowering_mode,
+            name="compileiq_outer",
+        )
+        return builder.compile()
+
+    monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
+    monkeypatch.setenv(
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
+        "cuda_nested_device_update",
+    )
+    baseline = build()
+    adapter = _CompileIQExecutableAdapter.from_graph(baseline)
+    assert adapter.structured_control_domain == "cuda_nested_while_while"
+    assert len(adapter.spec_ids()) == 2
+
+    masked_spec_id = adapter.spec_ids(include_baseline=False)[0]
+    parameters = {"forge_executable_spec": masked_spec_id}
+    selection = adapter.select(parameters)
+    for name, value in selection.worker_environment.items():
+        monkeypatch.setenv(name, value)
+    materialized = build()
+    adapter.verify_materialized_graph(parameters, materialized)
+    outer = next(
+        node
+        for node in materialized._spec.structured_control_nodes
+        if node.control_depth == 1
+    )
+    assert outer._cuda_nested_control_lowering == "cuda_masked_bounded_graph"
+
+    # Physical selection is part of the compiled identity. A later process
+    # environment change must not silently mutate this Graph's route.
+    monkeypatch.setenv(
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
+        "cuda_nested_device_update",
+    )
+    args = {
+        name: ti.ndarray(ti.i32, shape=())
+        for name in (
+            "outer_counter",
+            "outer_predicate",
+            "inner_counter",
+            "inner_predicate",
+            "total",
+        )
+    }
+    for value in args.values():
+        value.fill(0)
+    ticket = materialized.submit(
+        {**args, "outer_target": 2, "inner_target": 3}
+    )
+    ticket.wait()
+    assert args["outer_counter"].to_numpy()[()] == 2
+    assert args["inner_counter"].to_numpy()[()] == 3
+    assert args["total"].to_numpy()[()] == 6
+    assert materialized._graph_stats[0]["last_path"] in (
+        "cuda_masked_capture",
+        "cuda_masked_replay",
+        "cuda_masked_patched_replay",
+    )
+
+    # Public explicit policies remain outside the nested search domain even
+    # when the private reconstruction selector is present.
+    for explicit_mode in ("portable", "native_required"):
+        explicit = build(explicit_mode)
+        explicit_space = explicit._executable_optimization_space
+        assert not explicit_space.baseline.control_recipe_id
+        assert all(
+            not spec.control_recipe_id for spec in explicit_space.candidates
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

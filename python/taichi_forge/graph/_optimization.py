@@ -20,6 +20,25 @@ _CUDA_CONTROL_RECIPE_IDS = (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
 )
+_CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID = (
+    "control:cuda_nested_device_update:v1"
+)
+_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID = (
+    "control:cuda_nested_masked_bounded:v1"
+)
+_CUDA_NESTED_CONTROL_RECIPE_IDS = (
+    _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
+)
+_CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS = (
+    _CUDA_CONTROL_RECIPE_IDS,
+    _CUDA_NESTED_CONTROL_RECIPE_IDS,
+)
+_CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
+    recipe_id
+    for domain in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS
+    for recipe_id in domain
+)
 
 
 def _canonical_hash(value):
@@ -54,13 +73,14 @@ class _ExecutableOptimizationSpec:
             raise ValueError("fusion recipe IDs must be unique")
         if not isinstance(self.control_recipe_id, str):
             raise ValueError("control recipe ID must be a string")
-        if self.control_recipe_id and self.control_recipe_id not in (
-            _CUDA_CONTROL_RECIPE_IDS
+        if (
+            self.control_recipe_id
+            and self.control_recipe_id not in _CUDA_STRUCTURED_CONTROL_RECIPE_IDS
         ):
             raise ValueError("control recipe ID is unsupported")
         if self.control_recipe_id and self.fusion_recipe_ids:
             raise ValueError(
-                "R5 executable specs cannot combine control and fusion recipes"
+                "executable specs cannot combine control and fusion recipes"
             )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
@@ -549,8 +569,8 @@ def _build_executable_optimization_space(
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
     control_recipe_ids = tuple(control_recipe_ids)
     if control_recipe_ids:
-        if control_recipe_ids != _CUDA_CONTROL_RECIPE_IDS:
-            raise ValueError("structured-control recipe domain is not the R5 domain")
+        if control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS:
+            raise ValueError("structured-control recipe domain is unsupported")
         baseline = _make_spec(
             semantic_plan_id,
             backend,
@@ -635,6 +655,11 @@ __all__ = [
     "_CUDA_CONDITIONAL_CONTROL_RECIPE_ID",
     "_CUDA_CONTROL_RECIPE_IDS",
     "_CUDA_MASKED_CONTROL_RECIPE_ID",
+    "_CUDA_NESTED_CONTROL_RECIPE_IDS",
+    "_CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID",
+    "_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID",
+    "_CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS",
+    "_CUDA_STRUCTURED_CONTROL_RECIPE_IDS",
     "_GRAPH_FUSION_QUALIFICATION_SCHEMA",
     "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",

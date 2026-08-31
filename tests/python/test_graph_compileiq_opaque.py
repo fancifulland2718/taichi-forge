@@ -17,6 +17,8 @@ from taichi_forge.graph import _compileiq_opaque
 from taichi_forge.graph._optimization import (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
     _make_spec,
@@ -171,6 +173,33 @@ def _control_space(*, selected="conditional"):
         selection_status=(
             "selected_control_baseline"
             if selected == "conditional"
+            else "selected_control_recipe"
+        ),
+    )
+
+
+def _nested_control_space(*, selected="device_update"):
+    baseline = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        "cuda",
+        (),
+        _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
+    )
+    masked = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        "cuda",
+        (),
+        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
+    )
+    selected_spec = baseline if selected == "device_update" else masked
+    return _ExecutableOptimizationSpace(
+        semantic_plan_id=_SEMANTIC_PLAN_ID,
+        baseline=baseline,
+        candidates=(masked,),
+        selected_spec_id=selected_spec.spec_id,
+        selection_status=(
+            "selected_control_baseline"
+            if selected == "device_update"
             else "selected_control_recipe"
         ),
     )
@@ -355,6 +384,48 @@ def test_structured_control_uses_its_own_opaque_domain_and_exact_route(monkeypat
         _Graph(_control_space(selected="masked")),
     )
     assert verified.control_recipe_id == _CUDA_MASKED_CONTROL_RECIPE_ID
+
+
+def test_nested_control_uses_distinct_opaque_domain_and_exact_route(monkeypatch):
+    _install_reviewed_fork(monkeypatch)
+    search = CompileIQGraphRecipeSearch(_Graph(_nested_control_space()))
+
+    assert len(search.recipe_ids) == 2
+    assert search.search_space.provider_namespace == (
+        "taichi_forge.graph.nested_structured_control"
+    )
+    assert search.search_space.domain_version == (
+        "nested-structured-control-executable-spec.v1"
+    )
+    manifest = search.manifest()
+    assert manifest["recipe_kind"] == "structured_control"
+    assert manifest["structured_control_domain"] == (
+        "cuda_nested_while_while"
+    )
+    assert manifest["runtime_admission"] == (
+        "offline_explicit_reconstruction_only"
+    )
+
+    masked_id = next(
+        recipe_id
+        for recipe_id in search.recipe_ids
+        if search.recipe_manifest(recipe_id).get("control_recipe_id")
+        == _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID
+    )
+    parameters = _parameters(search, masked_id)
+    assert dict(search.worker_environment(parameters)) == {
+        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "baseline",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": (
+            "cuda_nested_masked_bounded"
+        ),
+    }
+    verified = search.verify_materialized_graph(
+        parameters,
+        _Graph(_nested_control_space(selected="masked")),
+    )
+    assert verified.control_recipe_id == (
+        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID
+    )
 
 
 def test_decoded_selection_fails_closed_on_any_domain_drift(monkeypatch):

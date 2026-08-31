@@ -7,6 +7,8 @@ import re
 
 from taichi_forge.graph._optimization import (
     _CUDA_CONTROL_RECIPE_IDS,
+    _CUDA_NESTED_CONTROL_RECIPE_IDS,
+    _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS,
     _GRAPH_FUSION_QUALIFICATION_SCHEMA,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _ExecutableOptimizationSpace,
@@ -30,6 +32,12 @@ _MAP_RECIPE_PATTERN = re.compile(r"^fusion:map([2-4]):[0-9a-f]{24}$")
 _CONTROL_MATERIALIZATION = {
     _CUDA_CONTROL_RECIPE_IDS[0]: "cuda_conditional_graph",
     _CUDA_CONTROL_RECIPE_IDS[1]: "cuda_masked_bounded_graph",
+    _CUDA_NESTED_CONTROL_RECIPE_IDS[0]: "cuda_nested_device_update",
+    _CUDA_NESTED_CONTROL_RECIPE_IDS[1]: "cuda_nested_masked_bounded",
+}
+_CONTROL_DOMAIN_NAMES = {
+    _CUDA_CONTROL_RECIPE_IDS: "cuda_flat",
+    _CUDA_NESTED_CONTROL_RECIPE_IDS: "cuda_nested_while_while",
 }
 
 
@@ -136,11 +144,12 @@ class _CompileIQExecutableAdapter:
             raise ValueError("executable spec IDs must be unique")
         control_recipe_ids = tuple(spec.control_recipe_id for spec in specs)
         if space.baseline.control_recipe_id:
-            if control_recipe_ids != _CUDA_CONTROL_RECIPE_IDS or any(
-                spec.fusion_recipe_ids for spec in specs
+            if (
+                control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS
+                or any(spec.fusion_recipe_ids for spec in specs)
             ):
                 raise ValueError(
-                    "structured-control space must contain the exact R5 domain"
+                    "structured-control space must contain one exact Forge domain"
                 )
         elif any(control_recipe_ids):
             raise ValueError(
@@ -173,6 +182,10 @@ class _CompileIQExecutableAdapter:
             control_materialization_by_spec
         )
         self._candidate_ids = tuple(spec.spec_id for spec in space.candidates)
+        self._structured_control_domain = _CONTROL_DOMAIN_NAMES.get(
+            control_recipe_ids,
+            "",
+        )
 
     @classmethod
     def from_graph(cls, graph, *, parameter=_EXECUTABLE_PARAMETER):
@@ -199,6 +212,10 @@ class _CompileIQExecutableAdapter:
             if self._space.baseline.control_recipe_id
             else "map_fusion"
         )
+
+    @property
+    def structured_control_domain(self):
+        return self._structured_control_domain
 
     @property
     def parameter(self):
@@ -462,6 +479,10 @@ class _CompileIQExecutableAdapter:
         if self.recipe_kind == "structured_control":
             value["recipe_kind"] = self.recipe_kind
             value["runtime_admission"] = "offline_explicit_reconstruction_only"
+            if self.structured_control_domain == "cuda_nested_while_while":
+                value["structured_control_domain"] = (
+                    self.structured_control_domain
+                )
         return value
 
     def _spec_manifest(self, spec):
