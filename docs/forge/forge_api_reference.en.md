@@ -892,6 +892,29 @@ native path, they call CUDA device APIs, native Vulkan code/shaders, or native
 CPU/C++ implementations directly. Otherwise, supported routes fall back to
 Taichi helper kernels.
 
+### Offline modified-CompileIQ recipe search (0.6.3 in development)
+
+| API | Exact search slice |
+| --- | --- |
+| `compileiq_reduce_provider_search(values, output, *, op="sum")` | CUDA dense 1D i32 field sum: `cuda_device` versus `field_atomic`. |
+| `compileiq_segmented_scan_search(values, layout, output, *, inclusive=True, op="sum")` | CUDA disjoint plain 1D i32/u32 ndarray segmented sum: `serial` versus `global_scan`, with immutable topology and inclusive mode frozen into the domain. |
+
+The builders return `CompileIQReduceProviderSearch` and
+`CompileIQSegmentedScanSearch`. Their matching frozen selection types are
+`CompileIQReduceProviderSelection` and `CompileIQSegmentedScanSelection`;
+capability, source, backend, or scope failures raise the corresponding
+`CompileIQ*UnavailableError`. Search objects expose the opaque
+`search_space`/`worker_type`, baseline-inclusive recipe manifests,
+`select()`/`execute()`, complete-search auditing, and paired qualification.
+
+These functions require the reviewed modified CompileIQ distribution and fail
+closed for upstream or different builds. They are optional offline tools.
+Ordinary package and primitive use does not import CompileIQ; the tools do not
+change `method="auto"`, emit a runtime cache, or turn a qualified exact
+workload into a general performance promise. See
+[Native algorithms](native_algorithms.en.md) for recipe IDs and the full
+eligibility boundary.
+
 ### Primitive capability queries
 
 | API | Return | Contract |

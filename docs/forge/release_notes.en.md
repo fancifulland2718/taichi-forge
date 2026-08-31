@@ -74,9 +74,24 @@ grouped under the behavior they shipped.
   timing remained diagnostic only. The deliberately narrow
   `ti.algorithms.compileiq_reduce_provider_search()` slice searches the existing
   CUDA dense-field i32 sum providers without changing `method="auto"` or
-  installing a runtime cache. Both paths reject upstream/different CompileIQ
-  builds through exact capability, bundled-core, and Python-source locks;
-  CompileIQ remains an optional offline dependency.
+  installing a runtime cache. Added the equally bounded
+  `ti.algorithms.compileiq_segmented_scan_search()` domain for disjoint CUDA
+  plain 1D i32/u32 ndarray sum over an immutable `SegmentedLayout`. It searches
+  complete `segmented-scan:serial:v1` and
+  `segmented-scan:cuda-global-scan:v1` recipes, dynamically includes the current
+  `auto` route as baseline, freezes dtype/inclusive/topology identity, and
+  excludes float, field, in-place, AD, and non-CUDA requests. On the current
+  RTX 5090/driver 610.62 host, independent 10-process x 10-block balanced AB/BA
+  qualification admitted global scan for one 32,768-item inclusive i32 segment:
+  candidate/baseline median was 0.31792 and worst process was 0.31802. Negative
+  controls retained serial for 4,096 items in 64-item segments (global/serial
+  1.819x median) and retained global scan for 262,144 items in 65,536-item
+  segments (serial/global 3.161x). All routes were exact, memory-stable, and
+  covered by the real modified CompileIQ core; an external GameViewer compute
+  process remained a performance caveat. This evidence is exact-scope and does
+  not change the runtime default. All offline recipe paths reject
+  upstream/different CompileIQ builds through exact capability, bundled-core,
+  and Python-source locks; CompileIQ remains an optional offline dependency.
 - Added the compact stable `HardwareCapability`, `HardwareProviderStatus`, and
   `HardwareExecutionReport` status layer plus schema-v4 diagnostic
   operation/provider contracts. Passive status/report calls do not load,

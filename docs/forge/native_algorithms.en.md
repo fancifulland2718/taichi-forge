@@ -39,6 +39,7 @@ capability.
 | `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | Inclusive/exclusive scan inside each reusable dense segment. |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | Reduce values into `output[0]`. |
 | `ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` | Build the reviewed offline modified-CompileIQ provider domain for the supported reduce slice. |
+| `ti.algorithms.compileiq_segmented_scan_search(values, layout, output, ...)` | Build the reviewed offline modified-CompileIQ physical-plan domain for the supported segmented-scan slice. |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | Histogram integer values into bins. |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | Elementwise affine transform and copy. |
 | `ti.algorithms.experimental_gather(src, indices, dst, ...)` | Indexed read. |
@@ -71,7 +72,13 @@ Common explicit method families include:
 Explicit native methods are useful for testing or controlled deployments. They
 should not be used as portability promises across all backends.
 
-## Offline modified-CompileIQ provider recipe search
+## Offline modified-CompileIQ recipe searches
+
+These APIs search complete Forge-owned physical recipes. They do not expose
+block size, workgroup shape, PTXAS flags, or segment offsets as independent
+CompileIQ factors.
+
+### Reduce provider
 
 `ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")`
 exposes one deliberately narrow high-level provider choice. The current slice
@@ -89,12 +96,38 @@ materialization, complete-coverage auditing, and the existing independent
 paired qualification helpers. The baseline is a sentinel and cannot become a
 finalist.
 
+### Integer segmented scan
+
+`ti.algorithms.compileiq_segmented_scan_search(values, layout, output,
+inclusive=True, op="sum")` exposes two complete physical plans:
+
+- `segmented-scan:serial:v1` (`method="serial"`); and
+- `segmented-scan:cuda-global-scan:v1` (`method="global_scan"`).
+
+The exact domain requires an initialized CUDA runtime, disjoint plain 1D
+`ti.i32` or `ti.u32` ndarrays, exact sum, and an immutable
+`SegmentedLayout`. Inclusive/exclusive mode and a private topology fingerprint
+are frozen into the scope; float, fields, StructNdarray, in-place operation,
+automatic differentiation, other backends, and topology drift fail closed.
+The baseline recipe is selected dynamically to match the current
+`method="auto"` threshold for that exact scope. Layout offsets remain Forge
+state and never cross the CompileIQ boundary as configurable axes.
+
+The returned `CompileIQSegmentedScanSearch` provides opaque `search_space` and
+`worker_type`, `select()` and exact `execute()` materialization,
+`recipe_manifest()`, complete-search auditing, and independent paired
+qualification. A qualification applies only to its exact topology, dtype,
+inclusive mode, runtime, device, and provider-source identity. The current
+RTX 5090 qualification admitted global scan for one 32,768-item i32 segment;
+small many-segment and large already-global scopes retained their baselines.
+This is evidence for a workload-dependent search domain, not a new universal
+segmented-scan default.
+
 Only the reviewed modified CompileIQ capability/core/Python-source identity is
 accepted; upstream or different builds fail closed. Search and qualification
-are offline. They do not change `experimental_reduce(method="auto")`, install
-a runtime cache, or make a cross-device performance promise. Qualification is
-specific to the exact size, layout, runtime, device, and provider source.
-Compile/search build time is diagnostic only and is not an admission gate.
+are offline. They do not change either primitive's `method="auto"`, install a
+runtime cache, or make a cross-device performance promise. Compile/search
+build time is diagnostic only and is not an admission gate.
 
 ## Machine-readable capability contract
 

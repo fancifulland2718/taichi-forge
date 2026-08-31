@@ -756,6 +756,25 @@ ti.algorithms.experimental_reduce(...)
 CUDA device API、native Vulkan 代码 / shader 或 native CPU/C++ 实现；否则，
 已支持的路线会回退到 Taichi helper kernel。
 
+### 离线魔改 CompileIQ recipe 搜索（0.6.3 开发中）
+
+| API | 精确搜索纵切 |
+| --- | --- |
+| `compileiq_reduce_provider_search(values, output, *, op="sum")` | CUDA dense 1D i32 field sum：`cuda_device` 对 `field_atomic`。 |
+| `compileiq_segmented_scan_search(values, layout, output, *, inclusive=True, op="sum")` | CUDA 互不 alias 的 plain 1D i32/u32 ndarray segmented sum：`serial` 对 `global_scan`；immutable topology 与 inclusive mode 冻结进域。 |
+
+builder 分别返回 `CompileIQReduceProviderSearch` 与
+`CompileIQSegmentedScanSearch`；对应的 frozen selection 类型为
+`CompileIQReduceProviderSelection` 与 `CompileIQSegmentedScanSelection`。capability、source、
+backend 或 scope 不满足时会抛出对应的 `CompileIQ*UnavailableError`。搜索对象公开 opaque
+`search_space` / `worker_type`、包含 baseline 的 recipe manifest、`select()` / `execute()`、
+完整搜索覆盖审计与 paired qualification。
+
+这些函数要求经审查的魔改 CompileIQ distribution；上游或不同 build 会 fail closed。它们只是
+可选离线工具：普通 primitive 调用不会导入 CompileIQ，也不会改变 `method="auto"`、生成 runtime
+cache，或把某个精确 workload 的资格结果变成通用性能承诺。recipe ID 与完整 eligibility 边界见
+[Native 算法](native_algorithms.zh.md)。
+
 ### Primitive capability 查询
 
 | API | 返回 | 合同 |

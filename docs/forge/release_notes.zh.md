@@ -62,9 +62,19 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   分别从 30,884 降至 532 bytes、从 59,996 降至 796 bytes。这些本机 crossover 不改变
   runtime `auto`；compile/build 时间只作诊断。刻意收窄的
   `ti.algorithms.compileiq_reduce_provider_search()` 只搜索既有 CUDA dense-field i32 sum
-  provider，不修改 `method="auto"`，也不安装 runtime cache。两条路径都通过精确 capability、
-  bundled-core 与 Python-source lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的
-  离线依赖。
+  provider，不修改 `method="auto"`，也不安装 runtime cache。另新增同样有界的
+  `ti.algorithms.compileiq_segmented_scan_search()` 域：只覆盖 immutable
+  `SegmentedLayout` 上互不 alias 的 CUDA plain 1D i32/u32 ndarray sum，搜索完整的 `serial`
+  与 `global_scan` 物理路线 recipe，动态把当前 `auto` 路线纳入 baseline，并冻结 dtype、
+  inclusive 与 topology identity；float、field、in-place、AD 和非 CUDA 请求全部排除。在当前 RTX 5090 /
+  driver 610.62 主机上，独立 10-process x 10-block 平衡 AB/BA 资格测试为单个 32,768-item
+  inclusive i32 segment 采纳 global scan：candidate/baseline 中位数为 0.31792，最差进程为
+  0.31802。负面对照在 4,096 items / 64-item segment 保留 serial（global/serial 中位
+  1.819x），并在 262,144 items / 65,536-item segment 保留 global scan（serial/global 中位
+  3.161x）。所有路线都保持精确结果、memory stable，并由真实魔改 CompileIQ core 完整覆盖；
+  测试期间存在外部 GameViewer compute process，属于性能 caveat。该证据只适用于精确 scope，
+  不改变 runtime 默认值。所有离线 recipe 路径都通过精确 capability、bundled-core 与 Python-source
+  lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的离线依赖。
 - 新增精简且稳定的 `HardwareCapability`、`HardwareProviderStatus`、
   `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
   被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`

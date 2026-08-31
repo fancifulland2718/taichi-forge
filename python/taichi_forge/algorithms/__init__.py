@@ -5,6 +5,12 @@ from ._compileiq_opaque import (
     CompileIQReduceProviderUnavailableError as CompileIQReduceProviderUnavailableError,
     compileiq_reduce_provider_search as compileiq_reduce_provider_search,
 )
+from ._compileiq_segmented_scan import (
+    CompileIQSegmentedScanSearch as CompileIQSegmentedScanSearch,
+    CompileIQSegmentedScanSelection as CompileIQSegmentedScanSelection,
+    CompileIQSegmentedScanUnavailableError as CompileIQSegmentedScanUnavailableError,
+    compileiq_segmented_scan_search as compileiq_segmented_scan_search,
+)
 from ._deterministic_reduce import *
 from ._device_prefix import *
 from ._device_worklist import *
