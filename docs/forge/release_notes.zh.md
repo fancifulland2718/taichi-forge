@@ -43,9 +43,27 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的离线 recipe 搜索。
-  `ti.graph.compileiq_recipe_search()` 搜索既有受限 Graph map-fusion executable recipe，
-  或一个精确 CUDA structured-control 域。除 flat `auto while` 的 conditional/masked 域外，
+- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的离线 recipe 搜索。当前审查身份更新为
+  `forge/opaque-recipes-v1.2` 的 `579b572`，支持 Forge Python 3.10 与确定性的
+  bounded-exhaustive opaque 搜索。新增 `ti.compileiq_offload_execution_plan_search()`，搜索
+  完整、有序、按 task 索引的 CUDA kernel plan：只要每个 candidate 都代表完整内部策略，
+  单 kernel 搜索就继续保留；无调用方的 fixed-axis kernel-wide adapter 已删除，raw
+  `TaskLaunchPolicy` 也不作为 CompileIQ 搜索面。第一阶段覆盖每个合法 single-task
+  perturbation，已观测 frontier 的细化会形成所有合法 pair，不静默截断；编译 identity 与
+  launch-only identity 分离，launch request 不会从共享 compiled artifact 泄漏。
+
+  `ti.graph.compileiq_recipe_search()` 现在搜索精确、保持 barrier 的连续 map partition，或一个
+  精确 CUDA structured-control 域；位置不同但宽度相同的 source group 仍保持独立。2 至 8
+  map chain 的非 baseline partition 数分别为 1、3、7、14、28、55、107；跨 phase 乘积不
+  超过 4,095 个 candidate 时完整枚举，更大的积明确进入 staged domain。精确 map 物化要求
+  一个 ordinary JIT CGraph 与一个 Forge-owned 源 builder，因此 composed 与 multi-builder
+  Graph 会 fail closed。R11/R12 的 10-process 平衡 AB/BA 资格测试中，小调度与
+  bandwidth Graph candidate 以中位比值 0.97800、0.97232 通过 worst-positive；compute-heavy
+  Graph（中位 0.98703、最差 1.01958）和完整 two-task kernel plan（中位 1.00021、最差
+  1.01134）作为负面项保留。四个 scope 都通过 correctness、精确 route 与 memory stability；
+  两个负面项未触发三个 scope 的扎堆复审阈值。
+
+  除 flat `auto while` 的 conditional/masked 域外，
   R6 新增独立 depth-2 域：一个 root outer `auto while` 按序直接拥有 1 至 8 个 leaf inner
   `auto while`，搜索 device-update 与 masked-bounded 两种物理 plan。nested 域使用独立的
   opaque namespace、semantic identity 与精确显式重建。显式 lowering policy、portable

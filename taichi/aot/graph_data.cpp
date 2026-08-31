@@ -2145,7 +2145,7 @@ bool patch_cuda_graph_arguments(
       return false;
     }
 
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -2484,7 +2484,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
 
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -2867,7 +2867,7 @@ bool try_run_cuda_masked_control_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel_graph_gated(llvm_ckd);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -3335,7 +3335,7 @@ bool try_run_cuda_device_update_nested_control_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -3843,7 +3843,7 @@ bool try_run_cuda_masked_nested_control_graph(
     auto handle = initial_outer_condition
                       ? launcher->register_llvm_kernel(llvm_ckd)
                       : launcher->register_llvm_kernel_graph_gated(llvm_ckd);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -4157,7 +4157,7 @@ bool try_run_cuda_bounded_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -4573,7 +4573,7 @@ bool try_run_cuda_conditional_graph(
     const auto &llvm_ckd =
         dynamic_cast<const LLVM::CompiledKernelData &>(*compiled_kernel_data);
     auto handle = launcher->register_llvm_kernel(llvm_ckd);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     prog->resolve_ndarray_launch_context_under_guard(launch_ctx);
@@ -5056,7 +5056,8 @@ bool prepare_vulkan_graph_launch(
                                      /*cache_compiled_kernel_data=*/false);
     auto handle = launcher->get_or_register_kernel(*compiled_kernel_data);
     prepared.launch_contexts.push_back(
-        std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
+        std::make_unique<LaunchContextBuilder>(
+            dispatch.ti_kernel->make_launch_context()));
     prepared.launch_contexts.back()->append_dispatch_label(
         dispatch.dispatch_label);
     graph.init_runtime_context(dispatch.symbolic_args, args,
@@ -5708,7 +5709,7 @@ void CompiledGraph::jit_run(
 #endif
     }
     TI_ASSERT(dispatch.ti_kernel);
-    LaunchContextBuilder launch_ctx(dispatch.ti_kernel);
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context();
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
     // Compile & Run (JIT): The compilation result will be cached, so don't

@@ -203,6 +203,56 @@ void validate_task_launch_policy_offloads(
       tasks.size(), task_types);
 }
 
+void apply_offload_execution_plan(IRNode *ir,
+                                  const CompileConfig &config,
+                                  const Kernel *kernel,
+                                  bool start_from_ast) {
+  const auto &plan = kernel->get_offload_execution_plan();
+  if (!plan.has_value()) {
+    return;
+  }
+  TI_ERROR_IF(!start_from_ast,
+              "offload execution plans support direct JIT kernels only");
+  TI_ERROR_IF(config.arch != Arch::cuda,
+              "offload execution plans require the CUDA backend, got {}",
+              arch_name(config.arch));
+  TI_ERROR_IF(!ir->is<Block>(),
+              "offload execution plan expected an offloaded kernel block");
+
+  std::vector<OffloadedStmt *> tasks;
+  for (const auto &stmt : ir->as<Block>()->statements) {
+    if (auto *task = stmt->cast<OffloadedStmt>(); task != nullptr) {
+      tasks.push_back(task);
+    }
+  }
+  TI_ERROR_IF(tasks.size() != plan->tasks.size(),
+              "offload execution plan topology mismatch: expected {} task(s), "
+              "lowering produced {}",
+              plan->tasks.size(), tasks.size());
+  for (std::size_t index = 0; index < tasks.size(); ++index) {
+    auto *task = tasks[index];
+    const auto &spec =
+        kernel->offload_task_optimization_spec(index, task->task_type);
+    if (spec.workgroup_size == 0 ||
+        spec.workgroup_size == task->block_dim) {
+      continue;
+    }
+    TI_ERROR_IF(task->task_type != OffloadedStmt::TaskType::range_for,
+                "offload execution plan workgroup control applies only to "
+                "range_for tasks");
+    TI_ERROR_IF(task->source_block_dim_explicit,
+                "offload execution plan cannot replace the source-owned "
+                "block_dim={} contract on task {} with {}",
+                task->block_dim, index, spec.workgroup_size);
+    const std::string reason = BlockSensitiveOperationFinder::run(task);
+    TI_ERROR_IF(!reason.empty(),
+                "offload execution plan cannot change block_dim for task {} "
+                "containing {}",
+                index, reason);
+    task->block_dim = spec.workgroup_size;
+  }
+}
+
 }  // namespace
 
 void compile_to_offloads(IRNode *ir,
@@ -443,6 +493,16 @@ void compile_to_offloads(IRNode *ir,
         {false, /*autodiff_enabled*/ false, kernel->get_name(), verbose});
   }
   print("Simplified III");
+  irpass::analysis::verify(ir);
+
+  // The execution-plan topology is defined over physical tasks that survive
+  // post-offload simplification.  Offloading may emit an empty serial bound
+  // preamble which Simplified III removes; binding before this point would
+  // make a plan reconstructed from the compiled task manifest stale by
+  // construction.  Applying the plan here is still before TLS/BLS and LLVM
+  // lowering, so task-owned compilation controls remain effective.
+  apply_offload_execution_plan(ir, config, kernel, start_from_ast);
+  print("Offload execution plan applied");
   irpass::analysis::verify(ir);
 }
 

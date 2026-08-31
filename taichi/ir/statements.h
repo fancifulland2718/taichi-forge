@@ -1446,6 +1446,9 @@ class OffloadedStmt : public Stmt {
   int32 end_value{0};
   int grid_dim{1};
   int block_dim{1};
+  // Records whether the frontend loop owned the block contract before the
+  // offloader selected any backend default.
+  bool source_block_dim_explicit{false};
   bool one_to_one{false};
   bool reversed{false};
   bool is_bit_vectorized{false};
@@ -1513,6 +1516,7 @@ class OffloadedStmt : public Stmt {
                      end_value,
                      grid_dim,
                      block_dim,
+                     source_block_dim_explicit,
                      one_to_one,
                      reversed,
                      num_cpu_threads,

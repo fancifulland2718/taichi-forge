@@ -9,6 +9,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from enum import Enum
+from itertools import product
 from math import gcd
 from typing import Optional, Tuple
 
@@ -587,6 +588,9 @@ class _BarrierPreservingFusionPhase:
     boundary_before: str
     boundary_after: str
     recipe_ids: Tuple[str, ...] = ()
+    candidate_partitions: tuple = ()
+    partition_count: int = 0
+    partitions_complete: bool = True
 
     def __post_init__(self):
         if not self.phase_id.startswith("phase:"):
@@ -603,6 +607,16 @@ class _BarrierPreservingFusionPhase:
             raise ValueError("fusion phase boundaries are required")
         if len(set(self.recipe_ids)) != len(self.recipe_ids):
             raise ValueError("fusion phase recipe IDs must be unique")
+        if len(set(self.candidate_partitions)) != len(
+            self.candidate_partitions
+        ):
+            raise ValueError("fusion phase partitions must be unique")
+        if self.partition_count < len(self.candidate_partitions):
+            raise ValueError("fusion phase partition count is inconsistent")
+        if self.partitions_complete and self.partition_count != len(
+            self.candidate_partitions
+        ):
+            raise ValueError("complete fusion phase omitted a partition")
 
     def to_dict(self):
         return {
@@ -615,6 +629,9 @@ class _BarrierPreservingFusionPhase:
             "boundary_before": self.boundary_before,
             "boundary_after": self.boundary_after,
             "recipe_ids": self.recipe_ids,
+            "candidate_partitions": self.candidate_partitions,
+            "partition_count": self.partition_count,
+            "partitions_complete": self.partitions_complete,
         }
 
 
@@ -627,6 +644,10 @@ class ElementwiseFusionPlan:
     phases: tuple = ()
     candidate_recipes: tuple = ()
     candidate_partitions: tuple = ()
+    partition_stage: str = "exact_contiguous_v1"
+    partitions_complete: bool = True
+    partition_combination_count: int = 1
+    partition_candidate_limit: int = 4095
     applied_recipe_ids: tuple = ()
     unmatched_applied_groups: int = 0
     applied_groups: int = 0
@@ -644,6 +665,10 @@ class ElementwiseFusionPlan:
                 recipe.to_dict() for recipe in self.candidate_recipes
             ),
             "candidate_partitions": self.candidate_partitions,
+            "partition_stage": self.partition_stage,
+            "partitions_complete": self.partitions_complete,
+            "partition_combination_count": self.partition_combination_count,
+            "partition_candidate_limit": self.partition_candidate_limit,
             "applied_recipe_ids": self.applied_recipe_ids,
             "unmatched_applied_groups": self.unmatched_applied_groups,
             "applied_groups": self.applied_groups,
@@ -1119,6 +1144,60 @@ def _map_fusion_recipe(region_path, indexed_nodes, iteration_domain):
     )
 
 
+_EXACT_PARTITION_CANDIDATE_LIMIT = 4095
+
+
+def _contiguous_partition_count(source_count):
+    counts = [1]
+    for extent in range(1, source_count + 1):
+        counts.append(
+            sum(counts[extent - size] for size in range(1, min(4, extent) + 1))
+        )
+    # The all-singleton composition is the executable baseline.
+    return counts[source_count] - 1
+
+
+def _bounded_contiguous_partitions(
+    source_ids,
+    recipe_by_sources,
+    *,
+    limit=_EXACT_PARTITION_CANDIDATE_LIMIT,
+):
+    """Enumerate canonical contiguous partitions with explicit overflow.
+
+    A singleton segment is represented by the absence of a fusion recipe.
+    Every returned tuple therefore remains a complete partition plan when
+    interpreted together with the ordered source dispatch list.
+    """
+
+    source_ids = tuple(source_ids)
+    partition_count = _contiguous_partition_count(len(source_ids))
+    partitions = []
+
+    def visit(offset, selected):
+        if len(partitions) >= limit:
+            return
+        if offset == len(source_ids):
+            if selected:
+                partitions.append(tuple(selected))
+            return
+        # Singleton first gives a stable lexicographic staging order.
+        visit(offset + 1, selected)
+        for group_size in range(2, min(4, len(source_ids) - offset) + 1):
+            source_group = source_ids[offset : offset + group_size]
+            recipe_id = recipe_by_sources.get(source_group)
+            if recipe_id is None:
+                continue
+            visit(offset + group_size, (*selected, recipe_id))
+
+    visit(0, ())
+    return (
+        tuple(partitions),
+        partition_count,
+        len(partitions) == partition_count,
+    )
+
+
 def analyze_elementwise_fusion(
     root,
     *,
@@ -1130,9 +1209,7 @@ def analyze_elementwise_fusion(
 
     groups = []
     recipes = []
-    partition_recipes = {2: [], 3: [], 4: []}
     phases = []
-    phase_only_partitions = []
     blockers = {}
     eligible_dispatches = 0
     blocked_dispatches = 0
@@ -1160,7 +1237,9 @@ def analyze_elementwise_fusion(
                 )
                 source_names = tuple(node.name for _, node in pending)
                 phase_recipes = []
-                phase_partitions = {}
+                phase_partitions = ()
+                phase_partition_count = 0
+                phase_partitions_complete = True
             if len(pending) >= 2:
                 groups.append(tuple(node.name for _, node in pending))
                 recipe_by_sources = {}
@@ -1176,29 +1255,14 @@ def analyze_elementwise_fusion(
                         recipe_by_sources[recipe.source_dispatch_ids] = (
                             recipe.recipe_id
                         )
-                for max_group_size in partition_recipes:
-                    partition = []
-                    offset = 0
-                    while offset < len(pending):
-                        source_count = min(
-                            max_group_size, len(pending) - offset
-                        )
-                        if source_count < 2:
-                            break
-                        source_ids = tuple(
-                            f"{path}/{node.logical_dispatch_id or f'node:{index}'}"
-                            for index, node in pending[
-                                offset : offset + source_count
-                            ]
-                        )
-                        partition.append(recipe_by_sources[source_ids])
-                        offset += source_count
-                    partition_recipes[max_group_size].extend(partition)
-                    if partition:
-                        phase_partitions[max_group_size] = tuple(partition)
-                strongest = phase_partitions.get(4)
-                if strongest:
-                    phase_only_partitions.append(strongest)
+                (
+                    phase_partitions,
+                    phase_partition_count,
+                    phase_partitions_complete,
+                ) = _bounded_contiguous_partitions(
+                    phase_source_ids,
+                    recipe_by_sources,
+                )
             if pending:
                 phase_payload = json.dumps(
                     {
@@ -1227,6 +1291,9 @@ def analyze_elementwise_fusion(
                         boundary_before=boundary_before,
                         boundary_after=boundary_after,
                         recipe_ids=tuple(phase_recipes),
+                        candidate_partitions=phase_partitions,
+                        partition_count=phase_partition_count,
+                        partitions_complete=phase_partitions_complete,
                     )
                 )
                 phase_ordinal += 1
@@ -1265,19 +1332,42 @@ def analyze_elementwise_fusion(
 
     if isinstance(root, SequentialRegion):
         scan(root, root.name or "root")
-    partitions = []
-    for partition in partition_recipes.values():
-        candidate = tuple(partition)
-        if candidate and candidate not in partitions:
-            partitions.append(candidate)
-    if len(phase_only_partitions) > 4:
-        phase_only_partitions = [
-            *phase_only_partitions[:2],
-            *phase_only_partitions[-2:],
-        ]
-    for candidate in phase_only_partitions:
-        if candidate and candidate not in partitions:
-            partitions.append(candidate)
+    partition_combination_count = 1
+    for phase in phases:
+        partition_combination_count *= phase.partition_count + 1
+    partitions_complete = bool(
+        all(phase.partitions_complete for phase in phases)
+        and partition_combination_count - 1
+        <= _EXACT_PARTITION_CANDIDATE_LIMIT
+    )
+    if partitions_complete:
+        partitions = tuple(
+            tuple(
+                recipe_id
+                for phase_partition in phase_choice
+                for recipe_id in phase_partition
+            )
+            for phase_choice in product(
+                *(((), *phase.candidate_partitions) for phase in phases)
+            )
+            if any(phase_choice)
+        )
+        partition_stage = "exact_contiguous_v1"
+    else:
+        # The first bounded stage changes exactly one barrier-preserving phase.
+        # The manifest exposes both the full Cartesian count and the explicit
+        # candidate cap; callers may construct a later observed-frontier stage
+        # without mistaking this domain for complete coverage.
+        staged = []
+        for phase in phases:
+            for phase_partition in phase.candidate_partitions:
+                if len(staged) >= _EXACT_PARTITION_CANDIDATE_LIMIT:
+                    break
+                staged.append(tuple(phase_partition))
+            if len(staged) >= _EXACT_PARTITION_CANDIDATE_LIMIT:
+                break
+        partitions = tuple(dict.fromkeys(staged))
+        partition_stage = "single_phase_perturbation_v1"
     recipe_by_sources = {
         recipe.source_dispatch_ids: recipe.recipe_id for recipe in recipes
     }
@@ -1297,6 +1387,10 @@ def analyze_elementwise_fusion(
         phases=tuple(phases),
         candidate_recipes=tuple(recipes),
         candidate_partitions=tuple(partitions),
+        partition_stage=partition_stage,
+        partitions_complete=partitions_complete,
+        partition_combination_count=partition_combination_count,
+        partition_candidate_limit=_EXACT_PARTITION_CANDIDATE_LIMIT,
         applied_recipe_ids=applied_recipe_ids,
         unmatched_applied_groups=unmatched_applied_groups,
         applied_groups=int(applied_groups),

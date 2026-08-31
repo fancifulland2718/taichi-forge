@@ -5,8 +5,10 @@ import subprocess
 import sys
 from types import MappingProxyType, SimpleNamespace
 
+import numpy as np
 import pytest
 
+import taichi_forge as ti
 from taichi_forge.graph import (
     CompileIQGraphRecipeSearch,
     CompileIQGraphUnavailableError,
@@ -23,7 +25,8 @@ from taichi_forge.graph._optimization import (
     _GraphFusionQualificationCache,
     _make_spec,
 )
-from taichi_forge.lang._compileiq_adapter import _CompileIQWinnerScope
+from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
+from tests import test_utils
 
 
 _SEMANTIC_PLAN_ID = "semantic-plan:" + "a" * 24
@@ -94,9 +97,14 @@ class _Worker:
     PROTOCOL = "forge_main_thread_serial_v1"
 
 
+class _ExhaustiveSearch:
+    PROTOCOL = "bounded_exhaustive_main_thread_v1"
+
+
 class _Graph:
-    def __init__(self, space):
+    def __init__(self, space, *, map_materialization_available=None):
         self._space = space
+        self._compileiq_map_materialization_available = map_materialization_available
 
     @property
     def _executable_optimization_space(self):
@@ -107,9 +115,9 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 1,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1",
-            "package_version": "1.0.0dev1+taichiforge.opaque1",
+            "protocol_revision": 2,
+            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.2",
+            "package_version": "1.0.0dev3+taichiforge.opaque1",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
             "max_recipe_ids": 4096,
@@ -121,6 +129,7 @@ def _capability():
             ),
             "opaque_domain_binding": "capability_id_core_commit_core_lock",
             "objective_worker": "forge_main_thread_serial_v1",
+            "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
             "core_manifest_schema_version": 1,
             "core_commit": _compileiq_opaque._EXPECTED_CORE_COMMIT,
             "core_lock": _compileiq_opaque._EXPECTED_CORE_LOCK,
@@ -176,6 +185,14 @@ def _control_space(*, selected="conditional"):
             else "selected_control_recipe"
         ),
     )
+
+
+def test_map_partition_search_rejects_ambiguous_native_builder_scope(monkeypatch):
+    monkeypatch.setattr(_compileiq_opaque, "_validated_compileiq_capability", _capability)
+    graph = _Graph(_space(), map_materialization_available=False)
+
+    with pytest.raises(ValueError, match="one Forge-owned source GraphBuilder"):
+        CompileIQGraphRecipeSearch(graph)
 
 
 def _nested_control_space(*, selected="device_update"):
@@ -313,11 +330,9 @@ def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
     assert manifest["fallback"] == "disabled"
     assert manifest["reviewed_compileiq_distribution"] == {
         "repository": "https://github.com/fancifulland2718/CompileIQ",
-        "ref": "refs/heads/forge/opaque-recipes-v1",
-        "commit": "b36f2d2abcb8234f3f12818a38e14172d990b79a",
-        "wheel_sha256": (
-            "04b550cc12d7ef652c479db63447717d4b071ab7e21ee58ab50133e962d70470"
-        ),
+        "ref": "refs/heads/forge/opaque-recipes-v1.2",
+        "commit": "579b572d0e68165bea215f5a43c8ac09daadeb5e",
+        "wheel_sha256": ("d6155a96857070684ba66bc02105adeb300a2ea7de4ae7bb5bba5d2101d7656a"),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
     json.dumps(manifest)
@@ -481,6 +496,48 @@ def test_best_result_requires_complete_exact_fork_coverage(monkeypatch):
         search.search_coverage(complete)
 
 
+def test_incomplete_partition_domain_refines_only_observed_disjoint_frontier(
+    monkeypatch,
+):
+    _install_reviewed_fork(monkeypatch)
+    baseline = _make_spec(_SEMANTIC_PLAN_ID, "cuda", ())
+    left = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        "cuda",
+        ("fusion:map2:" + "1" * 24,),
+        fusion_source_groups=((0, 1),),
+    )
+    right = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        "cuda",
+        ("fusion:map2:" + "2" * 24,),
+        fusion_source_groups=((3, 4),),
+    )
+    space = _ExecutableOptimizationSpace(
+        semantic_plan_id=_SEMANTIC_PLAN_ID,
+        baseline=baseline,
+        candidates=(left, right),
+        selected_spec_id=baseline.spec_id,
+        selection_status="selected_baseline",
+        partition_stage="single_phase_perturbation_v1",
+        partitions_complete=False,
+        partition_combination_count=16,
+        partition_candidate_limit=4095,
+    )
+    search = CompileIQGraphRecipeSearch(_Graph(space))
+    observed = _compileiq_search_audit(search, search.recipe_ids)
+
+    refined = search.refine(observed, (left.spec_id, right.spec_id))
+
+    assert len(refined.recipe_ids) == 4
+    manifest = refined.manifest()
+    assert manifest["partition_stage"] == "observed_frontier_pairwise_v1"
+    assert manifest["partition_parent_domain_fingerprint"] == (search.domain_fingerprint)
+    assert manifest["partition_frontier_spec_ids"] == tuple(sorted((left.spec_id, right.spec_id)))
+    combined = next(recipe for recipe in manifest["recipes"] if recipe["fusion_source_groups"] == ((0, 1), (3, 4)))
+    assert combined["materialization_recipe"] == "exact-v1:0,1;3,4"
+
+
 def test_search_schedule_and_qualification_keep_baseline_as_sentinel(monkeypatch):
     _install_reviewed_fork(monkeypatch)
     search = CompileIQGraphRecipeSearch(_Graph(_space()))
@@ -590,6 +647,7 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
             as_dict=lambda: capability
         ),
         ForgeMainThreadWorker=_Worker,
+        ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
     )
     recipes = SimpleNamespace(OpaqueRecipeDomainV1=_OpaqueRecipeDomain)
     modules = {
@@ -600,3 +658,99 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
 
     with pytest.raises(CompileIQGraphUnavailableError, match="exact reviewed"):
         _compileiq_opaque._validated_compileiq_capability()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
+    count = 257
+
+    @ti.kernel
+    def first(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            temporary[i] = source[i] * 2
+
+    @ti.kernel
+    def second(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        middle: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            middle[i] = temporary[i] + 3
+
+    @ti.kernel
+    def third(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        middle: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = middle[i] * 4
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "temporary", "middle", "output")
+    }
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(first, symbolic["source"], symbolic["temporary"])
+        builder.dispatch(
+            second,
+            symbolic["source"],
+            symbolic["temporary"],
+            symbolic["middle"],
+        )
+        builder.dispatch(
+            third,
+            symbolic["source"],
+            symbolic["middle"],
+            symbolic["output"],
+        )
+        return builder.compile()
+
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
+    baseline = build()
+    plans = compileiq_recipe_search(baseline)
+    assert len(plans.recipe_ids) == 4
+
+    source = ti.ndarray(ti.i32, shape=count)
+    temporary = ti.ndarray(ti.i32, shape=count)
+    middle = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=count)
+    source_np = np.arange(count, dtype=np.int32)
+    source.from_numpy(source_np)
+    arguments = {
+        "source": source,
+        "temporary": temporary,
+        "middle": middle,
+        "output": output,
+    }
+    materialized = []
+
+    def objective(parameters):
+        selection = plans.select(parameters)
+        with monkeypatch.context() as environment:
+            for name, value in selection.worker_environment.items():
+                environment.setenv(name, value)
+            graph = build()
+        plans.verify_materialized_graph(parameters, graph)
+        graph.run(arguments)
+        ti.sync()
+        materialized.append((selection.spec_id, graph.physical_plan()["physical_dispatch_count"]))
+        return float(plans.recipe_ids.index(selection.spec_id))
+
+    compileiq_search = plans.compileiq_search(objective)
+    result = compileiq_search.start()
+    coverage = plans.require_complete_search(compileiq_search)
+    selected = plans.select_best_result(compileiq_search, result)
+
+    assert coverage["complete"]
+    assert coverage["evaluation_count"] == len(plans.recipe_ids)
+    assert {recipe_id for recipe_id, _ in materialized} == set(plans.recipe_ids)
+    assert {dispatches for _, dispatches in materialized} == {1, 2, 3}
+    assert selected.spec_id == plans.recipe_ids[0]
+    np.testing.assert_array_equal(output.to_numpy(), (source_np * 2 + 3) * 4)

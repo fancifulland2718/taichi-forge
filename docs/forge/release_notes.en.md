@@ -48,9 +48,35 @@ grouped under the behavior they shipped.
 ## Unreleased
 
 - Added baseline-inclusive offline recipe search for the reviewed modified
-  CompileIQ fork. `ti.graph.compileiq_recipe_search()` searches either the
-  existing bounded Graph map-fusion executable recipes or one exact CUDA
-  structured-control domain. In addition to the flat `auto` while
+  CompileIQ fork. The reviewed identity is now `579b572` on
+  `forge/opaque-recipes-v1.2`, supporting Forge Python 3.10 and deterministic
+  bounded-exhaustive opaque search. Added
+  `ti.compileiq_offload_execution_plan_search()` for complete ordered,
+  task-indexed CUDA kernel plans. Single-kernel search is retained when every
+  candidate represents a complete internal strategy; the unused fixed-axis
+  kernel-wide adapter was removed, and raw `TaskLaunchPolicy` controls are not
+  a CompileIQ search surface. First-stage coverage contains every legal
+  single-task perturbation, while observed-frontier refinement forms every
+  legal pair without silent truncation. Compilation and launch-only identities
+  are separate, preventing launch requests from leaking through shared
+  compiled artifacts.
+
+  `ti.graph.compileiq_recipe_search()` now searches exact barrier-preserving
+  contiguous map partitions or one exact CUDA structured-control domain.
+  Equal-width groups at different source positions remain distinct. Chains of
+  2 through 8 maps have 1, 3, 7, 14, 28, 55, and 107 nonbaseline partitions;
+  cross-phase products up to 4,095 candidates are exhaustive, while larger
+  products enter an explicit staged domain. Exact map materialization requires
+  one ordinary JIT CGraph and one Forge-owned source builder, so composed and
+  multi-builder Graphs fail closed. In R11/R12 ten-process balanced AB/BA
+  qualification, small-dispatch and bandwidth Graph candidates passed
+  worst-positive at median ratios 0.97800 and 0.97232. The compute-heavy Graph
+  (median 0.98703, worst 1.01958) and complete two-task kernel plan (median
+  1.00021, worst 1.01134) were retained as negatives. All four scopes passed
+  correctness, exact-route, and memory-stability checks; two negatives did not
+  trigger the three-scope cluster-review threshold.
+
+  In addition to the flat `auto` while
   conditional-versus-masked domain, R6 adds a separate depth-2 domain for one
   root outer `auto` while with one through eight ordered leaf inner `auto`
   whiles, searching device-update versus masked-bounded physical plans. The

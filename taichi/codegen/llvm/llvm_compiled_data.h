@@ -25,6 +25,14 @@ class OffloadedTask {
   OffloadedTaskType task_type{OffloadedTaskType::serial};
   int requested_block_dim{0};
   int requested_grid_dim{0};
+  bool source_block_dim_explicit{false};
+  // Exact Forge task-plan requests. Defaults describe the ordinary compiler
+  // path and keep old offline-cache payloads semantically unchanged.
+  int requested_thread_local_mode{0};  // 0 auto, 1 on, 2 off
+  int requested_cuda_min_blocks_per_sm{2};
+  int requested_cuda_max_registers{-1};
+  int requested_grid_residency_waves{0};
+  int requested_range_work_per_thread_target{1};
   int block_dim{0};
   int grid_dim{0};
   std::int64_t constant_range_size{-1};
@@ -50,6 +58,12 @@ class OffloadedTask {
             task_type,
             requested_block_dim,
             requested_grid_dim,
+            source_block_dim_explicit,
+            requested_thread_local_mode,
+            requested_cuda_min_blocks_per_sm,
+            requested_cuda_max_registers,
+            requested_grid_residency_waves,
+            requested_range_work_per_thread_target,
             block_dim,
             grid_dim,
             constant_range_size,

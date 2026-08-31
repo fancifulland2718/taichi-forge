@@ -681,10 +681,25 @@ executable contract.
 
 `ti.graph.compileiq_recipe_search(graph)` freezes the executable recipes that
 the Graph already owns into one baseline-inclusive offline search domain. An
-ordinary-JIT CGraph exposes the existing bounded map-fusion space: baseline
-plus the legal `map2`, `map3`, and `map4` recipes actually owned by that Graph.
-An eligible CUDA Graph instead exposes exactly one bounded structured-control
-space. A flat source `while` uses
+ordinary JIT CGraph with one Forge-owned source `GraphBuilder` exposes exact
+barrier-preserving contiguous partitions of its eligible map phases. A
+singleton segment means no fusion; segments of two through four maps are
+complete Forge-owned fusion plans. For one uninterrupted chain of two through
+eight maps, the numbers of nonbaseline candidates are respectively 1, 3, 7,
+14, 28, 55, and 107. Atomic, reduction, labeled, and other legality barriers
+split the chain into independent phases. Their exact Cartesian product is
+enumerated while it fits the 4,095-candidate limit. Larger products enter an
+explicit single-phase-perturbation stage and may be refined only from a fully
+observed, bounded frontier; Forge never truncates a domain while claiming it
+is complete. Exact source groups are part of compilation and execution
+identity, so equal-size partitions at different positions remain distinct.
+
+Map-partition materialization fails closed for composed root Graphs, multiple
+native CGraph builders, workspace lanes, provider/structured/observation
+nodes, temporary or fixed state, and AOT-only Graphs. This prevents local
+dispatch indices from being applied to the wrong builder. An eligible CUDA
+Graph instead exposes exactly one bounded structured-control space. A flat
+source `while` uses
 `control:cuda_conditional_graph:v1` as baseline and
 `control:cuda_masked_bounded_graph:v1` as candidate. A depth-2 source uses
 `control:cuda_nested_device_update:v1` as baseline and
@@ -707,8 +722,8 @@ parameters.
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python
 source manifest. The current source identity pins
-[`fancifulland2718/CompileIQ@b36f2d2`](https://github.com/fancifulland2718/CompileIQ/commit/b36f2d2abcb8234f3f12818a38e14172d990b79a)
-from `forge/opaque-recipes-v1`; `manifest()` exposes the full reviewed identity.
+[`fancifulland2718/CompileIQ@579b572`](https://github.com/fancifulland2718/CompileIQ/commit/579b572d0e68165bea215f5a43c8ac09daadeb5e)
+from `forge/opaque-recipes-v1.2`; this revision makes the main-thread worker importable on Forge's Python 3.10 wheels and adds deterministic bounded-exhaustive opaque-domain search. `manifest()` exposes the full reviewed identity.
 Upstream CompileIQ, a different fork, or source drift raises
 `CompileIQGraphUnavailableError`. CompileIQ remains an optional offline tool:
 the Forge wheel does not depend on it, and importing `ti.graph` does not import
@@ -728,6 +743,21 @@ evidence fails closed to its baseline. Structured-control searches cannot emit
 that runtime cache: a winner is available only through explicit offline
 reconstruction and does not mutate the runtime `auto` policy. Compile/search
 build time is diagnostic only and is not an admission gate.
+
+The R12 exact-partition qualification used the same reviewed fork and a
+ten-fresh-process balanced AB/BA protocol, with every final route block at
+least 250 ms. Candidate/baseline medians were 0.97800 for the 4,096-item
+dispatch-sensitive Graph and 0.97232 for the 1,048,576-item bandwidth Graph;
+their worst-process ratios were 0.98863 and 0.99153, so both exact scopes
+passed the worst-positive gate. The 65,536-item compute-heavy Graph had a
+0.98703 median but a 1.01958 worst process and was therefore retained as a
+negative rather than admitted. The complete two-task kernel plan was also
+retained as a negative at 1.00021 median and 1.01134 worst. All four scopes
+passed result, exact-route, and device-memory-pool stability checks. With two
+negative scopes, the run did not trigger the three-scope negative-cluster
+review threshold. The artifact is
+`.agent/experiments/forge-compileiq-r11-r12/qualification.json`, SHA-256
+`4674e0774c3ec6574b0a8f6586fdde6412b408290f32302a74af8d978b5c34e5`.
 
 The 2026-08-31 local Windows RTX 5090 qualification used the exact reviewed
 modified CompileIQ capability, ten fresh processes per scope, ten balanced

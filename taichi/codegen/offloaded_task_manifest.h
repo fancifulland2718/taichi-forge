@@ -28,6 +28,12 @@ struct OffloadedTaskManifest {
   // execution model does not expose the corresponding GPU-shaped request.
   std::optional<std::int64_t> requested_grid_size;
   std::optional<std::int64_t> requested_block_size;
+  bool source_block_size_explicit{false};
+  std::string requested_thread_local_mode{"auto"};
+  int requested_cuda_min_blocks_per_sm{2};
+  std::optional<int> requested_cuda_max_registers;
+  std::optional<int> requested_grid_residency_waves;
+  int requested_range_work_per_thread_target{1};
 
   // Values selected by backend code generation. CPU execution intentionally
   // leaves these empty instead of pretending that its worker scheduler is a

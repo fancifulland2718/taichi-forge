@@ -25,7 +25,7 @@ from taichi_forge.algorithms._algorithms import (
     resolve_primitive_capability,
 )
 from taichi_forge.algorithms._autodiff import is_fwd_mode_active, is_tape_active
-from taichi_forge.lang._compileiq_adapter import (
+from taichi_forge.lang._compileiq_qualification import (
     _CompileIQFinalCandidate,
     _CompileIQSearchStage,
     _balanced_paired_schedule,
@@ -51,7 +51,7 @@ _PROVIDER_SOURCE_FILES = (
     "algorithms/_algorithms.py",
     "algorithms/_compileiq_opaque.py",
     "algorithms/_primitive_capabilities.py",
-    "lang/_compileiq_adapter.py",
+    "lang/_compileiq_qualification.py",
 )
 
 

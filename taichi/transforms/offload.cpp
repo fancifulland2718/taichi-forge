@@ -139,6 +139,7 @@ class Offloader {
         } else {
           offloaded->block_dim = s->block_dim;
         }
+        offloaded->source_block_dim_explicit = s->block_dim != 0;
         if (auto val = s->begin->cast<ConstStmt>()) {
           offloaded->const_begin = true;
           offloaded->begin_value = val->val.val_int32();
@@ -186,6 +187,7 @@ class Offloader {
         } else {
           offloaded->block_dim = st->block_dim;
         }
+        offloaded->source_block_dim_explicit = st->block_dim != 0;
         offloaded->num_cpu_threads =
             std::min(st->num_cpu_threads, config.cpu_max_num_threads);
         replace_all_usages_with(st, st, offloaded.get());
@@ -314,6 +316,8 @@ class Offloader {
     offloaded_struct_for->grid_dim = config.saturating_grid_dim;
 
     const auto snode_num_elements = for_stmt->snode->max_num_elements();
+    offloaded_struct_for->source_block_dim_explicit =
+        for_stmt->block_dim != 0;
     if (for_stmt->block_dim == 0) {
       // adaptive
       offloaded_struct_for->block_dim =

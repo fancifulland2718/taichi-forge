@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 #include "taichi/runtime/llvm/kernel_launcher.h"
@@ -80,6 +82,13 @@ class KernelLauncher : public LLVM::KernelLauncher {
   };
 
   struct Context {
+    struct ResolvedTaskExecutionPlan {
+      std::vector<std::string> task_kinds;
+      std::vector<int> grid_residency_waves;
+      std::vector<int> range_work_per_thread_targets;
+      std::vector<OffloadedTask> tasks;
+    };
+
     JITModule *jit_module{nullptr};
     std::vector<int> snode_tree_ids;
     std::vector<std::pair<std::vector<int>, Callable::Parameter>> parameters;
@@ -98,6 +107,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
     // controls to compose without manufacturing another PTX artifact.
     mutable std::array<std::once_flag, 15> grid_policy_once;
     mutable std::array<std::vector<OffloadedTask>, 15> grid_policy_tasks;
+    mutable std::mutex task_execution_plan_mutex;
+    mutable std::unordered_map<
+        std::string,
+        std::shared_ptr<const ResolvedTaskExecutionPlan>>
+        task_execution_plans;
     bool uses_root_binding{false};
   };
 
@@ -134,6 +148,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
     std::uint32_t bounded_capacity{0};
     bool bounded_range{false};
     std::string dispatch_label;
+    std::string task_execution_plan_identity;
+    std::vector<OffloadedTask> offloaded_tasks;
   };
 
   void launch_llvm_kernel(Handle handle, LaunchContextBuilder &ctx) override;
@@ -192,7 +208,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
  private:
   bool prepare_cuda_graph_context(Handle handle,
                                   LaunchContextBuilder &ctx,
-                                  RuntimeContext &context);
+                                  RuntimeContext &context,
+                                  std::vector<OffloadedTask> *offloaded_tasks =
+                                      nullptr,
+                                  std::string *task_execution_plan_identity =
+                                      nullptr);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,
@@ -207,6 +227,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const Context &context,
       std::int32_t waves,
       std::int32_t range_work_per_thread_target);
+  std::shared_ptr<const Context::ResolvedTaskExecutionPlan>
+  resolve_task_execution_plan(const Context &context,
+                              const LaunchContextBuilder &launch_context);
 
   bool listgen_reuse_adaptive_{false};
   // Sparse-list reuse metadata describes one CUDA runtime, not one launch.

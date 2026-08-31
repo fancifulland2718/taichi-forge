@@ -15,6 +15,7 @@ from taichi_forge.lang import impl
 from taichi_forge.graph._graph import (
     _GraphTemporaryArena,
     _cuda_structured_control_lowering,
+    _decode_exact_map_partition,
     _new_runtime_graph_builder,
     gen_cpp_kernel,
 )
@@ -1169,6 +1170,10 @@ def test_elementwise_fusion_analysis_requires_explicit_safe_metadata():
         "phases": plan["phases"],
         "recipes": plan["recipes"],
         "candidate_partitions": plan["candidate_partitions"],
+        "partition_stage": "exact_contiguous_v1",
+        "partitions_complete": True,
+        "partition_combination_count": 2,
+        "partition_candidate_limit": 4095,
         "applied_recipe_ids": (),
         "unmatched_applied_groups": 0,
         "applied_groups": 0,
@@ -1223,21 +1228,100 @@ def test_elementwise_fusion_partitions_cover_all_eligible_regions():
     assert len(plan.phases) == 2
     assert plan.phases[0].boundary_after == "atomic_effect"
     assert plan.phases[1].boundary_before == "atomic_effect"
-    assert len(plan.candidate_partitions) == 4
-    assert [len(partition) for partition in plan.candidate_partitions] == [
-        2,
-        2,
-        1,
-        1,
-    ]
-    assert all(
-        recipe_id.startswith("fusion:map2:")
-        for recipe_id in plan.candidate_partitions[0]
+    assert plan.partitions_complete
+    assert plan.partition_stage == "exact_contiguous_v1"
+    assert plan.partition_combination_count == 16
+    assert len(plan.candidate_partitions) == 15
+    assert all(phase.partition_count == 3 for phase in plan.phases)
+    assert all(phase.partitions_complete for phase in plan.phases)
+    assert len(set(plan.candidate_partitions)) == 15
+    assert any(len(partition) == 2 for partition in plan.candidate_partitions)
+
+
+@pytest.mark.parametrize(
+    ("dispatch_count", "partition_count"),
+    ((2, 1), (3, 3), (4, 7), (5, 14), (6, 28), (7, 55), (8, 107)),
+)
+def test_elementwise_fusion_enumerates_exact_contiguous_partitions(dispatch_count, partition_count):
+    effects = (
+        ResourceEffect("source", GraphAccess.READ),
+        ResourceEffect("destination", GraphAccess.WRITE),
     )
-    assert all(
-        recipe_id.startswith("fusion:map3:")
-        for recipe_id in plan.candidate_partitions[1]
+    root = SequentialRegion(
+        tuple(
+            DispatchNode(
+                f"map_{index}",
+                effects=effects,
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+                logical_kernel_identity=f"kernel:map_{index}",
+            )
+            for index in range(dispatch_count)
+        )
     )
+
+    plan = analyze_elementwise_fusion(root)
+
+    assert plan.partitions_complete
+    assert plan.partition_combination_count == partition_count + 1
+    assert len(plan.candidate_partitions) == partition_count
+    assert len(set(plan.candidate_partitions)) == partition_count
+    assert plan.phases[0].candidate_partitions == plan.candidate_partitions
+
+
+def test_exact_map_partition_parser_requires_canonical_disjoint_groups():
+    assert _decode_exact_map_partition("exact-v1:0,1;3,4,5") == (
+        (0, 1),
+        (3, 4, 5),
+    )
+    for invalid in (
+        "exact-v1:",
+        "exact-v1:0",
+        "exact-v1:0,2",
+        "exact-v1:2,3;1,2",
+        "exact-v1:00,01",
+    ):
+        with pytest.raises(TaichiRuntimeError):
+            _decode_exact_map_partition(invalid)
+
+
+def test_elementwise_fusion_overflow_uses_explicit_single_phase_stage():
+    effects = (
+        ResourceEffect("source", GraphAccess.READ),
+        ResourceEffect("destination", GraphAccess.WRITE),
+    )
+    nodes = []
+    for phase in range(5):
+        nodes.extend(
+            DispatchNode(
+                f"map_{phase}_{index}",
+                effects=effects,
+                iteration_domain="range:n",
+                opaque=False,
+                elementwise=True,
+                logical_kernel_identity=f"kernel:{phase}:{index}",
+            )
+            for index in range(4)
+        )
+        if phase != 4:
+            nodes.append(
+                DispatchNode(
+                    f"barrier_{phase}",
+                    effects=(ResourceEffect("sum", GraphAccess.ATOMIC),),
+                    iteration_domain="range:n",
+                    opaque=False,
+                    elementwise=True,
+                )
+            )
+
+    plan = analyze_elementwise_fusion(SequentialRegion(tuple(nodes)))
+
+    assert not plan.partitions_complete
+    assert plan.partition_stage == "single_phase_perturbation_v1"
+    assert plan.partition_combination_count == 8**5
+    assert len(plan.candidate_partitions) == 5 * 7
+    assert len(set(plan.candidate_partitions)) == 5 * 7
 
 
 def test_structured_control_ir_validates_and_serializes_fixed_schema():

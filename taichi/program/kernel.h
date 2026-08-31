@@ -5,10 +5,12 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "taichi/util/lang_util.h"
 #include "taichi/ir/snode.h"
 #include "taichi/ir/ir.h"
+#include "taichi/ir/offloaded_task_type.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/program/callable.h"
 #include "taichi/program/ndarray.h"
@@ -60,6 +62,30 @@ class TI_DLL_EXPORT Kernel : public Callable {
     // compiler/driver default, and a positive value is an explicit cap.
     int cuda_max_registers{-1};
     std::string identity;
+  };
+
+  // Private Forge execution-plan metadata.  Unlike KernelOptimizationSpec,
+  // this is complete and indexed by the physical offload ordinal.  The
+  // compilation identity deliberately excludes launch-only controls so CUDA
+  // code can be shared by multiple immutable launch plans.
+  struct OffloadTaskOptimizationSpec {
+    std::uint32_t task_index{0};
+    std::string task_kind;
+    int workgroup_size{0};  // zero inherits the compiler-selected value
+    TaskLaunchThreadLocalMode thread_local_mode{
+        TaskLaunchThreadLocalMode::automatic};
+    int cuda_min_blocks_per_sm{2};
+    // -1 inherits CompileConfig::gpu_max_reg. Zero requests the CUDA
+    // compiler/driver default, and a positive value is an entry-specific cap.
+    int cuda_max_registers{-1};
+    int grid_residency_waves{0};  // zero is automatic
+    int range_work_per_thread_target{1};
+  };
+
+  struct OffloadExecutionPlan {
+    std::string compilation_identity;
+    std::string execution_identity;
+    std::vector<OffloadTaskOptimizationSpec> tasks;
   };
 
   std::vector<SNode *> no_activate;
@@ -146,6 +172,25 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   const std::string &optimization_spec_identity() const;
 
+  void set_offload_execution_plan(
+      const std::string &compilation_identity,
+      const std::string &execution_identity,
+      const std::vector<int> &task_indices,
+      const std::vector<std::string> &task_kinds,
+      const std::vector<int> &workgroup_sizes,
+      const std::vector<std::string> &thread_local_modes,
+      const std::vector<int> &cuda_min_blocks_per_sm,
+      const std::vector<int> &cuda_max_registers,
+      const std::vector<int> &grid_residency_waves,
+      const std::vector<int> &range_work_per_thread_targets);
+
+  const std::optional<OffloadExecutionPlan> &get_offload_execution_plan()
+      const;
+
+  const OffloadTaskOptimizationSpec &offload_task_optimization_spec(
+      std::size_t task_index,
+      OffloadedTaskType task_type) const;
+
   const std::vector<int> &snode_tree_dependencies() const {
     return snode_tree_dependencies_;
   }
@@ -189,6 +234,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
   std::optional<std::string> compile_tier_override_;
   std::optional<TaskLaunchPolicy> task_launch_policy_;
   std::optional<KernelOptimizationSpec> kernel_optimization_spec_;
+  std::optional<OffloadExecutionPlan> offload_execution_plan_;
   mutable std::mutex snode_tree_dependencies_mutex_;
   mutable std::atomic<SNodeTreeDependencyState> snode_tree_dependency_state_{
       SNodeTreeDependencyState::unknown};

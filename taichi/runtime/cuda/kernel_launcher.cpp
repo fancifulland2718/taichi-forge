@@ -4,6 +4,7 @@
 #include "taichi/system/profiler_annotation.h"
 #include "taichi/util/environ_config.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstring>
 #include <cstdint>
@@ -434,6 +435,153 @@ KernelLauncher::resolve_grid_policy_tasks(
   return context.grid_policy_tasks[slot];
 }
 
+std::shared_ptr<const KernelLauncher::Context::ResolvedTaskExecutionPlan>
+KernelLauncher::resolve_task_execution_plan(
+    const Context &context,
+    const LaunchContextBuilder &launch_context) {
+  const auto &identity =
+      launch_context.cuda_task_execution_plan_identity();
+  const auto &task_kinds =
+      launch_context.cuda_task_execution_plan_kinds();
+  const auto &waves = launch_context.cuda_task_grid_residency_waves();
+  const auto &work =
+      launch_context.cuda_task_range_work_per_thread_targets();
+  TI_ERROR_IF(identity.empty(),
+              "CUDA task execution plan requires a non-empty identity");
+  TI_ERROR_IF(task_kinds.size() != context.offloaded_tasks.size() ||
+                  waves.size() != context.offloaded_tasks.size() ||
+                  work.size() != context.offloaded_tasks.size(),
+              "CUDA task execution plan topology mismatch: plan has {} "
+              "task(s), artifact has {}",
+              task_kinds.size(), context.offloaded_tasks.size());
+
+  std::lock_guard<std::mutex> lock(context.task_execution_plan_mutex);
+  if (auto found = context.task_execution_plans.find(identity);
+      found != context.task_execution_plans.end()) {
+    const auto &cached = *found->second;
+    TI_ERROR_IF(cached.task_kinds != task_kinds ||
+                    cached.grid_residency_waves != waves ||
+                    cached.range_work_per_thread_targets != work,
+                "CUDA task execution plan identity was reused with different "
+                "contents");
+    return found->second;
+  }
+  TI_ERROR_IF(context.task_execution_plans.size() >= 4096,
+              "CUDA task execution plan cache reached its bounded 4096-plan "
+              "capacity");
+
+  auto resolved =
+      std::make_shared<Context::ResolvedTaskExecutionPlan>();
+  resolved->task_kinds = task_kinds;
+  resolved->grid_residency_waves = waves;
+  resolved->range_work_per_thread_targets = work;
+  resolved->tasks = context.offloaded_tasks;
+  auto &telemetry = grid_residency_telemetry();
+  const bool uses_waves =
+      std::any_of(waves.begin(), waves.end(), [](int value) {
+        return value != 0;
+      });
+  const bool uses_work = std::any_of(work.begin(), work.end(), [](int value) {
+    return value != 1;
+  });
+  if (uses_waves) {
+    telemetry.resolution_calls.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (uses_work) {
+    telemetry.coarsening_resolution_calls.fetch_add(
+        1, std::memory_order_relaxed);
+  }
+  try {
+    for (std::size_t index = 0; index < resolved->tasks.size(); ++index) {
+      auto &task = resolved->tasks[index];
+      const auto actual_kind = offloaded_task_type_name(task.task_type);
+      TI_ERROR_IF(task_kinds[index] != actual_kind,
+                  "CUDA task execution plan topology mismatch at task {}: "
+                  "expected {}, got {}",
+                  index, task_kinds[index], actual_kind);
+      if (waves[index] == 0 && work[index] == 1) {
+        continue;
+      }
+      TI_ERROR_IF(
+          task.task_type != OffloadedTaskType::range_for || task.one_to_one ||
+              task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
+              task.may_mutate_sparse_topology || task.grid_dim <= 0 ||
+              task.block_dim <= 0 || task.dynamic_shared_array_bytes < 0,
+          "CUDA task execution plan requires an eligible dense grid-stride "
+          "range task at ordinal {}",
+          index);
+      if (work[index] != 1) {
+        TI_ERROR_IF(task.constant_range_size < 0,
+                    "CUDA task execution plan work-per-thread control "
+                    "requires a constant range at task {}",
+                    index);
+        const int baseline_grid = task.grid_dim;
+        const std::int64_t workgroup_span =
+            static_cast<std::int64_t>(task.block_dim) * work[index];
+        const std::int64_t target_grid = std::max<std::int64_t>(
+            1, (task.constant_range_size + workgroup_span - 1) /
+                   workgroup_span);
+        task.grid_dim = static_cast<int>(std::min<std::int64_t>(
+            task.grid_dim, target_grid));
+        telemetry.last_work_per_thread_target.store(
+            work[index], std::memory_order_relaxed);
+        telemetry.last_coarsening_baseline_grid.store(
+            baseline_grid, std::memory_order_relaxed);
+        telemetry.last_coarsened_grid.store(task.grid_dim,
+                                             std::memory_order_relaxed);
+      }
+      if (waves[index] != 0) {
+        auto *cuda_module = dynamic_cast<JITModuleCUDA *>(context.jit_module);
+        TI_ERROR_IF(cuda_module == nullptr,
+                    "CUDA task execution plan requires a CUDA JIT module");
+        void *function = cuda_module->lookup_function(task.name);
+        int active_blocks_per_multiprocessor = 0;
+        CUDADriver::get_instance().kernel_get_occupancy(
+            &active_blocks_per_multiprocessor, function, task.block_dim,
+            static_cast<std::size_t>(task.dynamic_shared_array_bytes));
+        int multiprocessor_count = 0;
+        CUDADriver::get_instance().device_get_attribute(
+            &multiprocessor_count,
+            CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            CUDAContext::get_instance().get_device());
+        TI_ERROR_IF(active_blocks_per_multiprocessor <= 0 ||
+                        multiprocessor_count <= 0,
+                    "CUDA occupancy did not produce a positive residency for "
+                    "task {}",
+                    index);
+        const std::int64_t cap =
+            static_cast<std::int64_t>(active_blocks_per_multiprocessor) *
+            multiprocessor_count * waves[index];
+        const int baseline_grid = task.grid_dim;
+        task.grid_dim = static_cast<int>(std::max<std::int64_t>(
+            1, std::min<std::int64_t>(task.grid_dim, cap)));
+        telemetry.last_requested_waves.store(waves[index],
+                                             std::memory_order_relaxed);
+        telemetry.last_baseline_grid.store(baseline_grid,
+                                           std::memory_order_relaxed);
+        telemetry.last_resolved_grid.store(task.grid_dim,
+                                           std::memory_order_relaxed);
+        telemetry.last_active_blocks_per_multiprocessor.store(
+            active_blocks_per_multiprocessor, std::memory_order_relaxed);
+        telemetry.last_multiprocessor_count.store(
+            multiprocessor_count, std::memory_order_relaxed);
+      }
+    }
+  } catch (...) {
+    if (uses_waves) {
+      telemetry.resolution_failures.fetch_add(1,
+                                              std::memory_order_relaxed);
+    }
+    if (uses_work) {
+      telemetry.coarsening_resolution_failures.fetch_add(
+          1, std::memory_order_relaxed);
+    }
+    throw;
+  }
+  context.task_execution_plans.emplace(identity, resolved);
+  return resolved;
+}
+
 bool KernelLauncher::on_cuda_device(void *ptr) {
   unsigned int attr_val = 0;
   uint32_t ret_code = CUDADriver::get_instance().mem_get_attribute.call(
@@ -577,7 +725,11 @@ void KernelLauncher::invalidate_sparse_list_cache(
 
 bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                                                 LaunchContextBuilder &ctx,
-                                                RuntimeContext &context) {
+                                                RuntimeContext &context,
+                                                std::vector<OffloadedTask>
+                                                    *resolved_tasks,
+                                                std::string
+                                                    *task_plan_identity) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
@@ -585,7 +737,22 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
   launcher_ctx = iter->second;
   ensure_root_binding(*launcher_ctx);
   const auto &parameters = launcher_ctx->parameters;
-  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
+  std::shared_ptr<const Context::ResolvedTaskExecutionPlan> plan;
+  const std::vector<OffloadedTask> *offloaded_tasks_ptr =
+      &launcher_ctx->offloaded_tasks;
+  if (!ctx.cuda_task_execution_plan_identity().empty()) {
+    TI_ERROR_IF(ctx.cuda_grid_residency_waves() != 0 ||
+                    ctx.cuda_range_work_per_thread_target() != 1,
+                "task-indexed and call-wide CUDA launch controls cannot be "
+                "combined during Graph capture");
+    plan = resolve_task_execution_plan(*launcher_ctx, ctx);
+    offloaded_tasks_ptr = &plan->tasks;
+  } else if (ctx.cuda_grid_residency_waves() != 0 ||
+             ctx.cuda_range_work_per_thread_target() != 1) {
+    // The legacy call-wide policy is intentionally not a Graph contract.
+    return false;
+  }
+  const auto &offloaded_tasks = *offloaded_tasks_ptr;
   for (const auto &task : offloaded_tasks) {
     if (task.sparse_list_op != OffloadedTask::kSparseListOpNone ||
         task.may_mutate_sparse_topology) {
@@ -673,6 +840,12 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                               ? static_cast<uint64_t *>(
                                     launcher_ctx->root_binding)
                               : nullptr;
+  if (resolved_tasks != nullptr) {
+    *resolved_tasks = offloaded_tasks;
+  }
+  if (task_plan_identity != nullptr) {
+    *task_plan_identity = ctx.cuda_task_execution_plan_identity();
+  }
   return true;
 }
 
@@ -681,7 +854,9 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
                                                GraphLaunchPacket &packet,
                                                void *stream) {
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+  if (!prepare_cuda_graph_context(handle, ctx, context,
+                                  &packet.offloaded_tasks,
+                                  &packet.task_execution_plan_identity)) {
     return false;
   }
   packet.handle = handle;
@@ -721,7 +896,9 @@ bool KernelLauncher::prepare_cuda_graph_bounded_range(
     return false;
   }
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+  if (!prepare_cuda_graph_context(handle, ctx, context,
+                                  &packet.offloaded_tasks,
+                                  &packet.task_execution_plan_identity)) {
     return false;
   }
 
@@ -762,7 +939,9 @@ bool KernelLauncher::prepare_cuda_graph_gated_launch(Handle handle,
     return false;
   }
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context)) {
+  if (!prepare_cuda_graph_context(handle, ctx, context,
+                                  &packet.offloaded_tasks,
+                                  &packet.task_execution_plan_identity)) {
     return false;
   }
 
@@ -799,7 +978,14 @@ bool KernelLauncher::update_cuda_graph_launch(
     return false;
   }
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(packet.handle, ctx, context)) {
+  std::vector<OffloadedTask> resolved_tasks;
+  std::string task_plan_identity;
+  if (!prepare_cuda_graph_context(packet.handle, ctx, context,
+                                  &resolved_tasks, &task_plan_identity)) {
+    return false;
+  }
+  if (task_plan_identity != packet.task_execution_plan_identity ||
+      resolved_tasks.size() != packet.offloaded_tasks.size()) {
     return false;
   }
   if (context.runtime != packet.context.runtime ||
@@ -875,7 +1061,8 @@ void KernelLauncher::capture_cuda_graph_launch(
   auto *cuda_module = launcher_ctx->jit_module;
   auto *cuda_jit_module = dynamic_cast<JITModuleCUDA *>(cuda_module);
   TI_ASSERT(cuda_jit_module != nullptr);
-  const auto &offloaded_tasks = launcher_ctx->offloaded_tasks;
+  const auto &offloaded_tasks = packet.offloaded_tasks;
+  TI_ASSERT(!offloaded_tasks.empty());
   for (auto task : offloaded_tasks) {
     std::string trace_name;
     std::unique_ptr<ScopedExternalProfilerAnnotation> annotation;
@@ -913,10 +1100,10 @@ bool KernelLauncher::capture_cuda_graph_bounded_launch(
   const auto &launcher_ctx = iter->second;
   auto *cuda_jit_module =
       dynamic_cast<JITModuleCUDA *>(launcher_ctx->jit_module);
-  if (cuda_jit_module == nullptr || launcher_ctx->offloaded_tasks.size() != 1) {
+  if (cuda_jit_module == nullptr || packet.offloaded_tasks.size() != 1) {
     return false;
   }
-  const auto &task = launcher_ctx->offloaded_tasks.front();
+  const auto &task = packet.offloaded_tasks.front();
   if (!task.one_to_one || task.grid_dim <= 0 || task.block_dim <= 0 ||
       task.dynamic_shared_array_bytes < 0) {
     return false;
@@ -981,10 +1168,10 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
   const auto &launcher_ctx = iter->second;
   auto *cuda_jit_module =
       dynamic_cast<JITModuleCUDA *>(launcher_ctx->jit_module);
-  if (cuda_jit_module == nullptr || launcher_ctx->offloaded_tasks.empty()) {
+  if (cuda_jit_module == nullptr || packet.offloaded_tasks.empty()) {
     return false;
   }
-  for (const auto &task : launcher_ctx->offloaded_tasks) {
+  for (const auto &task : packet.offloaded_tasks) {
     if (task.grid_dim <= 0 || task.block_dim <= 0 ||
         task.dynamic_shared_array_bytes < 0 ||
         cuda_jit_module->lookup_function(task.name) == nullptr) {
@@ -992,8 +1179,8 @@ bool KernelLauncher::capture_cuda_graph_updatable_launch(
     }
   }
 
-  device_nodes->reserve(launcher_ctx->offloaded_tasks.size());
-  for (const auto &task : launcher_ctx->offloaded_tasks) {
+  device_nodes->reserve(packet.offloaded_tasks.size());
+  for (const auto &task : packet.offloaded_tasks) {
     void *function = cuda_jit_module->lookup_function(task.name);
     TaichiCudaLaunchAttribute attribute{};
     attribute.id = TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
@@ -1059,13 +1246,25 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   const auto &parameters = launcher_ctx->parameters;
 
   CUDAContext::get_instance().make_current();
-  const auto &offloaded_tasks =
-      ctx.cuda_grid_residency_waves() == 0 &&
-              ctx.cuda_range_work_per_thread_target() == 1
-          ? launcher_ctx->offloaded_tasks
-          : resolve_grid_policy_tasks(
-                *launcher_ctx, ctx.cuda_grid_residency_waves(),
-                ctx.cuda_range_work_per_thread_target());
+  std::shared_ptr<const Context::ResolvedTaskExecutionPlan>
+      task_execution_plan;
+  const std::vector<OffloadedTask> *offloaded_tasks_ptr =
+      &launcher_ctx->offloaded_tasks;
+  if (!ctx.cuda_task_execution_plan_identity().empty()) {
+    TI_ERROR_IF(ctx.cuda_grid_residency_waves() != 0 ||
+                    ctx.cuda_range_work_per_thread_target() != 1,
+                "task-indexed and call-wide CUDA launch controls cannot be "
+                "combined");
+    task_execution_plan =
+        resolve_task_execution_plan(*launcher_ctx, ctx);
+    offloaded_tasks_ptr = &task_execution_plan->tasks;
+  } else if (ctx.cuda_grid_residency_waves() != 0 ||
+             ctx.cuda_range_work_per_thread_target() != 1) {
+    offloaded_tasks_ptr = &resolve_grid_policy_tasks(
+        *launcher_ctx, ctx.cuda_grid_residency_waves(),
+        ctx.cuda_range_work_per_thread_target());
+  }
+  const auto &offloaded_tasks = *offloaded_tasks_ptr;
 
   // |transfers| is only used for external arrays whose data is originally on
   // host. They are first transferred onto device and that device pointer is

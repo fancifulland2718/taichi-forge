@@ -14,7 +14,7 @@ from taichi_forge.algorithms import (
     compileiq_segmented_scan_search,
 )
 from taichi_forge.algorithms import _compileiq_segmented_scan
-from taichi_forge.lang._compileiq_adapter import _CompileIQWinnerScope
+from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
 from tests import test_utils
 
 
@@ -78,9 +78,9 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 1,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1",
-            "package_version": "1.0.0dev1+taichiforge.opaque1",
+            "protocol_revision": 2,
+            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.2",
+            "package_version": "1.0.0dev3+taichiforge.opaque1",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
             "max_recipe_ids": 4096,
@@ -90,6 +90,7 @@ def _capability():
             "core_verification": ("bundled_manifest_lock_and_platform_hashes_at_search_start_no_override"),
             "opaque_domain_binding": "capability_id_core_commit_core_lock",
             "objective_worker": "forge_main_thread_serial_v1",
+            "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
             "core_manifest_schema_version": 1,
             "core_commit": _opaque_transport._EXPECTED_CORE_COMMIT,
             "core_lock": _opaque_transport._EXPECTED_CORE_LOCK,

@@ -16,6 +16,10 @@ from taichi_forge._compileiq_opaque import (
     _validated_compileiq_capability as _validate_shared_compileiq_capability,
 )
 from taichi_forge.graph._compileiq_adapter import _CompileIQExecutableAdapter
+from taichi_forge.graph._optimization import (
+    _ExecutableOptimizationSpace,
+    _make_spec,
+)
 
 
 class CompileIQGraphUnavailableError(CompileIQOpaqueUnavailableError):
@@ -41,6 +45,7 @@ class CompileIQGraphRecipeSearch:
 
     __slots__ = (
         "_adapter",
+        "_capability_components",
         "_semantic_fingerprint",
         "_transport",
     )
@@ -48,6 +53,9 @@ class CompileIQGraphRecipeSearch:
     def __init__(self, graph):
         capability_components = _validated_compileiq_capability()
         adapter = _CompileIQExecutableAdapter.from_graph(graph)
+        self._initialize(adapter, capability_components)
+
+    def _initialize(self, adapter, capability_components):
         recipe_ids = adapter.spec_ids()
         if not recipe_ids or adapter.baseline_spec_id not in recipe_ids:
             raise ValueError("Graph recipe domain must contain its executable baseline")
@@ -69,9 +77,11 @@ class CompileIQGraphRecipeSearch:
             provider_namespace = "taichi_forge.graph.structured_control"
             domain_version = "structured-control-executable-spec.v1"
         else:
-            semantic_schema = "taichi_forge.graph.compileiq-semantics.v1"
+            semantic_schema = (
+                "taichi_forge.graph.compileiq-partition-semantics.v2"
+            )
             provider_namespace = "taichi_forge.graph.map_fusion"
-            domain_version = "executable-spec.v1"
+            domain_version = "graph-partition-plan.v2"
         semantic_payload = {
             "schema": semantic_schema,
             "semantic_plan_id": adapter.semantic_plan_id,
@@ -79,6 +89,27 @@ class CompileIQGraphRecipeSearch:
             "baseline_spec_id": adapter.baseline_spec_id,
             "specs": adapter_manifest["specs"],
         }
+        if adapter.recipe_kind == "map_fusion":
+            semantic_payload.update(
+                {
+                    "partition_stage": adapter_manifest["partition_stage"],
+                    "partitions_complete": adapter_manifest[
+                        "partitions_complete"
+                    ],
+                    "partition_combination_count": adapter_manifest[
+                        "partition_combination_count"
+                    ],
+                    "partition_candidate_limit": adapter_manifest[
+                        "partition_candidate_limit"
+                    ],
+                    "partition_parent_domain_fingerprint": adapter_manifest[
+                        "partition_parent_domain_fingerprint"
+                    ],
+                    "partition_frontier_spec_ids": adapter_manifest[
+                        "partition_frontier_spec_ids"
+                    ],
+                }
+            )
         if adapter.recipe_kind == "structured_control":
             semantic_payload["recipe_kind"] = adapter.recipe_kind
         if nested_structured_control:
@@ -98,6 +129,7 @@ class CompileIQGraphRecipeSearch:
         )
 
         self._adapter = adapter
+        self._capability_components = capability_components
         self._semantic_fingerprint = semantic_fingerprint
         self._transport = transport
 
@@ -145,6 +177,98 @@ class CompileIQGraphRecipeSearch:
     def select(self, parameters):
         recipe_id = self._decoded_recipe_id(parameters)
         return self._adapter.select({self._adapter.parameter: recipe_id})
+
+    def compileiq_search(self, objective_function, *, problem_type="min"):
+        """Create the reviewed fork's complete bounded opaque search."""
+
+        return self._transport.exhaustive_search(
+            objective_function, problem_type=problem_type
+        )
+
+    def refine(self, compileiq_search, frontier_recipe_ids):
+        """Build the next exact-partition stage from an observed frontier."""
+
+        self.require_complete_search(compileiq_search)
+        manifest = self._adapter.manifest()
+        if self._adapter.recipe_kind != "map_fusion":
+            raise RuntimeError("structured-control recipe domains cannot be refined")
+        if manifest["partitions_complete"]:
+            raise RuntimeError("the Graph partition domain is already complete")
+        frontier_recipe_ids = tuple(dict.fromkeys(frontier_recipe_ids))
+        frontier_recipe_ids = tuple(
+            recipe_id
+            for recipe_id in frontier_recipe_ids
+            if recipe_id != self.baseline_recipe_id
+        )
+        if not frontier_recipe_ids:
+            raise ValueError("partition refinement requires a nonbaseline frontier")
+        if len(frontier_recipe_ids) > 32:
+            raise ValueError("partition refinement frontier exceeds 32 recipes")
+        known = set(self.recipe_ids)
+        unknown = tuple(
+            recipe_id for recipe_id in frontier_recipe_ids if recipe_id not in known
+        )
+        if unknown:
+            raise KeyError(f"partition refinement contains unknown recipes {unknown}")
+
+        source_space = self._adapter._space
+        source_specs = {
+            spec.spec_id: spec
+            for spec in (source_space.baseline, *source_space.candidates)
+        }
+        frontier = tuple(source_specs[recipe_id] for recipe_id in frontier_recipe_ids)
+        generated = {spec.spec_id: spec for spec in frontier}
+        for left_index, left in enumerate(frontier):
+            for right in frontier[left_index + 1 :]:
+                left_dispatches = {
+                    item for group in left.fusion_source_groups for item in group
+                }
+                right_dispatches = {
+                    item for group in right.fusion_source_groups for item in group
+                }
+                if left_dispatches.intersection(right_dispatches):
+                    continue
+                paired = sorted(
+                    (
+                        *zip(left.fusion_recipe_ids, left.fusion_source_groups),
+                        *zip(right.fusion_recipe_ids, right.fusion_source_groups),
+                    ),
+                    key=lambda item: item[1][0],
+                )
+                spec = _make_spec(
+                    source_space.semantic_plan_id,
+                    source_space.baseline.backend,
+                    tuple(item[0] for item in paired),
+                    fusion_source_groups=tuple(item[1] for item in paired),
+                )
+                generated.setdefault(spec.spec_id, spec)
+        if len(generated) + 1 > source_space.partition_candidate_limit + 1:
+            raise ValueError(
+                "observed-frontier partition domain exceeds its explicit limit"
+            )
+        refined_space = _ExecutableOptimizationSpace(
+            semantic_plan_id=source_space.semantic_plan_id,
+            baseline=source_space.baseline,
+            candidates=tuple(
+                generated[spec_id] for spec_id in sorted(generated)
+            ),
+            selected_spec_id=source_space.baseline.spec_id,
+            selection_status="selected_baseline",
+            partition_stage="observed_frontier_pairwise_v1",
+            partitions_complete=False,
+            partition_combination_count=(
+                source_space.partition_combination_count
+            ),
+            partition_candidate_limit=source_space.partition_candidate_limit,
+            partition_parent_domain_fingerprint=self.domain_fingerprint,
+            partition_frontier_spec_ids=tuple(sorted(frontier_recipe_ids)),
+        )
+        refined = object.__new__(type(self))
+        refined._initialize(
+            _CompileIQExecutableAdapter(refined_space),
+            self._capability_components,
+        )
+        return refined
 
     def search_coverage(self, compileiq_search):
         """Validate exact-fork audit records and report recipe coverage."""
@@ -203,7 +327,7 @@ class CompileIQGraphRecipeSearch:
 
     def manifest(self):
         value = {
-            "schema": "taichi_forge.graph.compileiq-recipe-search.v1",
+            "schema": "taichi_forge.graph.compileiq-recipe-search.v2",
             **self._transport.manifest(),
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -217,6 +341,28 @@ class CompileIQGraphRecipeSearch:
                 else "explicit_qualified_cache_only"
             ),
         }
+        if self._adapter.recipe_kind == "map_fusion":
+            adapter_manifest = self._adapter.manifest()
+            value.update(
+                {
+                    "partition_stage": adapter_manifest["partition_stage"],
+                    "partitions_complete": adapter_manifest[
+                        "partitions_complete"
+                    ],
+                    "partition_combination_count": adapter_manifest[
+                        "partition_combination_count"
+                    ],
+                    "partition_candidate_limit": adapter_manifest[
+                        "partition_candidate_limit"
+                    ],
+                    "partition_parent_domain_fingerprint": adapter_manifest[
+                        "partition_parent_domain_fingerprint"
+                    ],
+                    "partition_frontier_spec_ids": adapter_manifest[
+                        "partition_frontier_spec_ids"
+                    ],
+                }
+            )
         if self._adapter.recipe_kind == "structured_control":
             value["recipe_kind"] = self._adapter.recipe_kind
         if self._adapter.structured_control_domain == "cuda_nested_while_while":

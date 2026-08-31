@@ -530,8 +530,18 @@ immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node grad
 ## 离线魔改 CompileIQ Graph recipe 搜索
 
 `ti.graph.compileiq_recipe_search(graph)` 把 Graph 已经拥有的 executable recipe 冻结成一个
-包含 baseline 的离线搜索域。ordinary-JIT CGraph 会公开现有受限 map-fusion 空间：baseline，
-以及该 Graph 实际拥有且合法的 `map2`、`map3`、`map4` recipe。符合条件的 CUDA Graph 则
+包含 baseline 的离线搜索域。只有一个 Forge-owned 源 `GraphBuilder` 的 ordinary JIT CGraph
+会公开各个合法 map phase 的精确、保持 barrier 的连续分区。单元素 segment 表示不融合，
+2 至 4 个 map 的 segment 表示 Forge 拥有的完整融合方案。一条不间断的 2 至 8 map chain
+分别有 1、3、7、14、28、55、107 个非 baseline candidate。atomic、reduction、label 等
+合法性 barrier 会把 chain 切为独立 phase；各 phase 的精确笛卡尔积只在不超过 4,095 个
+candidate 时完整枚举。更大的积会明确进入 single-phase-perturbation stage，且只能从已经
+完整观测的有界 frontier 继续细化；Forge 不会静默截断后仍声称搜索完整。精确 source group
+属于 compilation/execution identity，因此位置不同但 group size 相同的分区不会混同。
+
+对于 composed root Graph、多个 native CGraph builder、多个 workspace lane、provider/
+structured/observation node、temporary/fixed state 与 AOT-only Graph，map-partition 物化会
+fail closed，避免把局部 dispatch index 应用到错误的 builder。符合条件的 CUDA Graph 则
 只公开一个有限 structured-control 空间。flat 源 `while` 以
 `control:cuda_conditional_graph:v1` 为 baseline，以
 `control:cuda_masked_bounded_graph:v1` 为 candidate。depth-2 源结构以
@@ -550,8 +560,8 @@ workgroup、PTXAS 等普通 kernel launch 参数。
 
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为
-`forge/opaque-recipes-v1` 上的
-[`fancifulland2718/CompileIQ@b36f2d2`](https://github.com/fancifulland2718/CompileIQ/commit/b36f2d2abcb8234f3f12818a38e14172d990b79a)，
+`forge/opaque-recipes-v1.2` 上的
+[`fancifulland2718/CompileIQ@579b572`](https://github.com/fancifulland2718/CompileIQ/commit/579b572d0e68165bea215f5a43c8ac09daadeb5e)，该版本让主线程 worker 可在 Forge 的 Python 3.10 wheel 中导入，并增加确定性的有界 exhaustive opaque-domain 搜索；
 `manifest()` 会公开完整审查身份。上游 CompileIQ、其他 fork 或源码漂移都会抛出
 `CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
 导入 `ti.graph` 也不会导入 CompileIQ。
@@ -565,6 +575,17 @@ lifecycle、memory stability 和 worst-positive 性能。map-fusion 之后可以
 qualification cache，证据缺失、过期或作用域不匹配时 fail closed 到 baseline。
 structured-control 搜索不允许生成这类 runtime cache：winner 只能由离线流程显式重建，
 不会修改 runtime `auto` 策略。compile/search build 时间只作诊断，不是准入门禁。
+
+R12 精确分区资格测试使用同一个经审查 fork 和 10 个 fresh process 的平衡 AB/BA 协议，
+每条最终路线的 block 都至少 250 ms。4,096-item dispatch-sensitive Graph 与
+1,048,576-item bandwidth Graph 的 candidate/baseline 中位数分别为 0.97800 与 0.97232，
+最差 process 分别为 0.98863 与 0.99153，因此两个精确 scope 都通过 worst-positive 门禁。
+65,536-item compute-heavy Graph 虽然中位数为 0.98703，但最差 process 为 1.01958，因此作为
+负面项保留而不准入；完整的 two-task kernel plan 也以中位 1.00021、最差 1.01134 保留为
+负面项。四个 scope 都通过结果、精确 route 与 device-memory-pool stability 检查。负面 scope
+共两个，没有触发三个 scope 的负面扎堆复审阈值。artifact 位于
+`.agent/experiments/forge-compileiq-r11-r12/qualification.json`，SHA-256 为
+`4674e0774c3ec6574b0a8f6586fdde6412b408290f32302a74af8d978b5c34e5`。
 
 2026-08-31 的本地 Windows RTX 5090 资格测试使用精确的经审查魔改 CompileIQ capability；
 每个 scope 有 10 个 fresh process，每个 process 有 10 个平衡 AB/BA block，并且每条路线的

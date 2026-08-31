@@ -61,6 +61,7 @@ class _ExecutableOptimizationSpec:
     compilation_identity: str
     execution_identity: str
     control_recipe_id: str = ""
+    fusion_source_groups: tuple = ()
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -71,6 +72,32 @@ class _ExecutableOptimizationSpec:
             raise ValueError("executable optimization backend is invalid")
         if len(set(self.fusion_recipe_ids)) != len(self.fusion_recipe_ids):
             raise ValueError("fusion recipe IDs must be unique")
+        if self.fusion_source_groups and len(self.fusion_source_groups) != len(
+            self.fusion_recipe_ids
+        ):
+            raise ValueError(
+                "fusion source groups must correspond to every fusion recipe"
+            )
+        claimed_dispatches = set()
+        for group in self.fusion_source_groups:
+            if (
+                not isinstance(group, tuple)
+                or len(group) < 2
+                or len(group) > 4
+                or any(
+                    isinstance(item, bool)
+                    or not isinstance(item, int)
+                    or item < 0
+                    for item in group
+                )
+                or tuple(range(group[0], group[0] + len(group))) != group
+            ):
+                raise ValueError(
+                    "fusion source groups must be contiguous logical dispatch IDs"
+                )
+            if claimed_dispatches.intersection(group):
+                raise ValueError("fusion source groups must be disjoint")
+            claimed_dispatches.update(group)
         if not isinstance(self.control_recipe_id, str):
             raise ValueError("control recipe ID must be a string")
         if (
@@ -82,18 +109,23 @@ class _ExecutableOptimizationSpec:
             raise ValueError(
                 "executable specs cannot combine control and fusion recipes"
             )
+        if self.control_recipe_id and self.fusion_source_groups:
+            raise ValueError(
+                "structured-control specs cannot contain fusion source groups"
+            )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
             "fusion_recipe_ids": self.fusion_recipe_ids,
             "compilation_identity": self.compilation_identity,
             "execution_identity": self.execution_identity,
+            "fusion_source_groups": self.fusion_source_groups,
         }
         # Preserve the exact v1 map-fusion manifest and identities when this
         # optional physical axis is absent.
@@ -109,6 +141,12 @@ class _ExecutableOptimizationSpace:
     candidates: tuple
     selected_spec_id: object
     selection_status: str
+    partition_stage: str = "exact_contiguous_v1"
+    partitions_complete: bool = True
+    partition_combination_count: int = 1
+    partition_candidate_limit: int = 4095
+    partition_parent_domain_fingerprint: str = ""
+    partition_frontier_spec_ids: tuple = ()
 
     @property
     def selected(self):
@@ -119,13 +157,21 @@ class _ExecutableOptimizationSpace:
 
     def to_dict(self):
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "semantic_plan_id": self.semantic_plan_id,
             "baseline": self.baseline.to_dict(),
             "candidates": tuple(spec.to_dict() for spec in self.candidates),
             "selected_spec_id": self.selected_spec_id,
             "selected": None if self.selected is None else self.selected.to_dict(),
             "selection_status": self.selection_status,
+            "partition_stage": self.partition_stage,
+            "partitions_complete": self.partitions_complete,
+            "partition_combination_count": self.partition_combination_count,
+            "partition_candidate_limit": self.partition_candidate_limit,
+            "partition_parent_domain_fingerprint": (
+                self.partition_parent_domain_fingerprint or None
+            ),
+            "partition_frontier_spec_ids": self.partition_frontier_spec_ids,
         }
 
 
@@ -514,8 +560,11 @@ def _make_spec(
     backend,
     fusion_recipe_ids,
     control_recipe_id="",
+    *,
+    fusion_source_groups=(),
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
+    fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
     dispatch_reduction = 0
     for recipe_id in fusion_recipe_ids:
         fields = recipe_id.split(":")
@@ -536,6 +585,7 @@ def _make_spec(
         "semantic_plan_id": semantic_plan_id,
         "backend": backend,
         "fusion_recipe_ids": fusion_recipe_ids,
+        "fusion_source_groups": fusion_source_groups,
     }
     if control_recipe_id:
         compilation_payload["control_recipe_id"] = control_recipe_id
@@ -544,6 +594,7 @@ def _make_spec(
         {
             "compilation_identity": compilation_identity,
             "physical_dispatch_delta": -dispatch_reduction,
+            "fusion_source_groups": fusion_source_groups,
         }
     )
     return _ExecutableOptimizationSpec(
@@ -554,7 +605,37 @@ def _make_spec(
         compilation_identity=compilation_identity,
         execution_identity=execution_identity,
         control_recipe_id=control_recipe_id,
+        fusion_source_groups=fusion_source_groups,
     )
+
+
+def _fusion_source_groups(fusion_plan, fusion_recipe_ids):
+    recipes = {
+        recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes
+    }
+    groups = []
+    claimed = set()
+    for recipe_id in fusion_recipe_ids:
+        try:
+            recipe = recipes[recipe_id]
+        except KeyError as error:
+            raise ValueError(
+                f"fusion recipe {recipe_id!r} is absent from the semantic plan"
+            ) from error
+        group = []
+        for source_id in recipe.source_dispatch_ids:
+            marker = source_id.rsplit("/dispatch:", 1)
+            if len(marker) != 2 or not marker[1].isdigit():
+                raise ValueError(
+                    "fusion recipe has no exact logical dispatch lineage"
+                )
+            logical_id = int(marker[1])
+            if logical_id in claimed:
+                raise ValueError("fusion partition recipes overlap a dispatch")
+            claimed.add(logical_id)
+            group.append(logical_id)
+        groups.append(tuple(group))
+    return tuple(groups)
 
 
 def _build_executable_optimization_space(
@@ -610,6 +691,9 @@ def _build_executable_optimization_space(
             candidates=candidates,
             selected_spec_id=selected_spec_id,
             selection_status=selection_status,
+            partition_stage="structured_control",
+            partitions_complete=True,
+            partition_combination_count=len(specs),
         )
 
     baseline = _make_spec(semantic_plan_id, backend, ())
@@ -622,7 +706,14 @@ def _build_executable_optimization_space(
     if applied_recipe_ids and applied_recipe_ids not in candidate_recipe_sets:
         candidate_recipe_sets.append(applied_recipe_ids)
     candidates = tuple(
-        _make_spec(semantic_plan_id, backend, candidate)
+        _make_spec(
+            semantic_plan_id,
+            backend,
+            candidate,
+            fusion_source_groups=_fusion_source_groups(
+                fusion_plan, candidate
+            ),
+        )
         for candidate in candidate_recipe_sets
     )
     if fusion_plan.applied_groups == 0:
@@ -648,6 +739,12 @@ def _build_executable_optimization_space(
         candidates=candidates,
         selected_spec_id=selected_spec_id,
         selection_status=selection_status,
+        partition_stage=fusion_plan.partition_stage,
+        partitions_complete=fusion_plan.partitions_complete,
+        partition_combination_count=(
+            fusion_plan.partition_combination_count
+        ),
+        partition_candidate_limit=fusion_plan.partition_candidate_limit,
     )
 
 

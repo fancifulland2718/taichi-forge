@@ -7,6 +7,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.graph._compileiq_adapter import (
     _CompileIQExecutableAdapter,
 )
@@ -19,7 +20,7 @@ from taichi_forge.graph._optimization import (
     _GraphFusionQualificationCache,
     _make_spec,
 )
-from taichi_forge.lang._compileiq_adapter import _CompileIQWinnerScope
+from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
 from tests import test_utils
 
 
@@ -365,7 +366,6 @@ def test_executable_adapter_qualifies_exact_recipe_and_provider_candidate():
     assert decision.selected_candidate_id == candidate_ids[0]
     assert decision.selected_forge_object_kind == "executable_spec"
     assert decision.selected_forge_object_id == map2
-    assert decision.selected_forge_variant_id is None
     assert decision.selected_provider_candidate_id == "driver-baseline"
     assert decision.scope_id == scopes[candidate_ids[0]].identity
 
@@ -846,13 +846,26 @@ def test_executable_adapter_rebuilds_and_verifies_selected_graph(monkeypatch):
     monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
     baseline = build()
     adapter = _CompileIQExecutableAdapter.from_graph(baseline)
-    map4 = next(
-        item
-        for item in adapter.manifest()["specs"]
-        if item["materialization_recipe"] == "map4"
-    )
-    parameters = {"forge_executable_spec": map4["spec_id"]}
+    specs = adapter.manifest()["specs"]
+    assert len(specs) == 8
+    left_pair = next(item for item in specs if item["fusion_source_groups"] == ((0, 1),))
+    right_pair = next(item for item in specs if item["fusion_source_groups"] == ((2, 3),))
+    assert left_pair["materialization_recipe"] == "exact-v1:0,1"
+    assert right_pair["materialization_recipe"] == "exact-v1:2,3"
+    assert left_pair["materialization_recipe"] != right_pair["materialization_recipe"]
+
+    partial_parameters = {"forge_executable_spec": right_pair["spec_id"]}
+    for name, value in adapter.select(partial_parameters).worker_environment.items():
+        monkeypatch.setenv(name, value)
+    partial = build()
+    adapter.verify_materialized_graph(partial_parameters, partial)
+    assert partial.physical_plan()["physical_dispatch_count"] == 3
+
+    full_partition = next(item for item in specs if item["fusion_source_groups"] == ((0, 1, 2, 3),))
+    assert full_partition["materialization_recipe"] == "exact-v1:0,1,2,3"
+    parameters = {"forge_executable_spec": full_partition["spec_id"]}
     selection = adapter.select(parameters)
+    assert selection.fusion_source_groups == ((0, 1, 2, 3),)
     for name, value in selection.worker_environment.items():
         monkeypatch.setenv(name, value)
 
@@ -864,7 +877,81 @@ def test_executable_adapter_rebuilds_and_verifies_selected_graph(monkeypatch):
     arrays = {name: ti.ndarray(ti.i32, shape=count) for name in symbolic}
     source_np = np.arange(count, dtype=np.int32)
     arrays["source"].from_numpy(source_np)
+    partial.run(arrays)
+    np.testing.assert_array_equal(arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5)
     materialized.run(arrays)
-    np.testing.assert_array_equal(
-        arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5
-    )
+    np.testing.assert_array_equal(arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5)
+
+
+@test_utils.test(arch=ti.cuda)
+def test_exact_partition_replay_memory_plateaus_and_reset_is_fail_closed(
+    monkeypatch,
+):
+    @ti.kernel
+    def first(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            temporary[i] = source[i] + 1
+
+    @ti.kernel
+    def second(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in source:
+            output[i] = temporary[i] * 2
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1) for name in ("source", "temporary", "output")
+    }
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(first, symbolic["source"], symbolic["temporary"])
+        builder.dispatch(
+            second,
+            symbolic["source"],
+            symbolic["temporary"],
+            symbolic["output"],
+        )
+        return builder.compile()
+
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
+    baseline = build()
+    adapter = _CompileIQExecutableAdapter.from_graph(baseline)
+    selected = adapter.spec_ids(include_baseline=False)[0]
+    parameters = {"forge_executable_spec": selected}
+    for name, value in adapter.select(parameters).worker_environment.items():
+        monkeypatch.setenv(name, value)
+    graph = build()
+    adapter.verify_materialized_graph(parameters, graph)
+
+    count = 64
+    source = ti.ndarray(ti.i32, shape=count)
+    temporary = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=count)
+    source_np = np.arange(count, dtype=np.int32)
+    source.from_numpy(source_np)
+    arguments = {
+        "source": source,
+        "temporary": temporary,
+        "output": output,
+    }
+    for _ in range(8):
+        graph.run(arguments)
+    ti.sync()
+    memory_after_warmup = dict(ti_core.get_device_memory_pool_stats())
+    for _ in range(10_000):
+        graph.run(arguments)
+    ti.sync()
+
+    assert dict(ti_core.get_device_memory_pool_stats()) == memory_after_warmup
+    np.testing.assert_array_equal(output.to_numpy(), (source_np + 1) * 2)
+
+    ti.reset()
+    assert graph._spec is None
+    with pytest.raises(TaichiRuntimeError, match="compiled before ti.reset"):
+        graph.run(arguments)

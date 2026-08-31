@@ -2469,6 +2469,22 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->task_type = stmt->task_type;
   current_task->requested_grid_dim = stmt->grid_dim;
   current_task->requested_block_dim = stmt->block_dim;
+  current_task->source_block_dim_explicit =
+      stmt->source_block_dim_explicit;
+  if (kernel->get_offload_execution_plan().has_value()) {
+    const auto &spec = kernel->offload_task_optimization_spec(
+        task_codegen_id, stmt->task_type);
+    current_task->requested_thread_local_mode =
+        spec.thread_local_mode == Kernel::TaskLaunchThreadLocalMode::enabled
+            ? 1
+            : (spec.thread_local_mode ==
+                       Kernel::TaskLaunchThreadLocalMode::disabled
+                   ? 2
+                   : 0);
+    current_task->requested_cuda_min_blocks_per_sm =
+        spec.cuda_min_blocks_per_sm;
+    current_task->requested_cuda_max_registers = spec.cuda_max_registers;
+  }
   if (stmt->task_type == OffloadedStmt::TaskType::range_for &&
       stmt->const_begin && stmt->const_end) {
     current_task->constant_range_size = std::max<std::int64_t>(
@@ -3260,15 +3276,30 @@ void TaskCodeGenLLVM::emit_to_module() {
 
 LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
   // Final lowering
-  auto offload_to_executable = [](IRNode *ir, const CompileConfig &config,
-                                  const Kernel *kernel) {
+  auto offload_to_executable = [this](IRNode *ir,
+                                      const CompileConfig &config,
+                                      const Kernel *kernel) {
     bool verbose = config.print_ir;
     if (kernel->is_accessor && !config.print_accessor_ir) {
       verbose = false;
     }
     bool make_thread_local = config.make_thread_local;
-    if (const auto &spec = kernel->get_kernel_optimization_spec();
-        spec.has_value()) {
+    if (kernel->get_offload_execution_plan().has_value()) {
+      TI_ERROR_IF(!ir->is<Block>() || ir->as<Block>()->statements.size() != 1,
+                  "offload execution plan codegen expected one physical task");
+      const auto *task =
+          ir->as<Block>()->statements.front()->as<OffloadedStmt>();
+      const auto &spec = kernel->offload_task_optimization_spec(
+          task_codegen_id, task->task_type);
+      if (spec.thread_local_mode ==
+          Kernel::TaskLaunchThreadLocalMode::enabled) {
+        make_thread_local = true;
+      } else if (spec.thread_local_mode ==
+                 Kernel::TaskLaunchThreadLocalMode::disabled) {
+        make_thread_local = false;
+      }
+    } else if (const auto &spec = kernel->get_kernel_optimization_spec();
+               spec.has_value()) {
       if (spec->thread_local_mode ==
           Kernel::TaskLaunchThreadLocalMode::enabled) {
         make_thread_local = true;
@@ -3297,8 +3328,17 @@ LLVMCompiledTask TaskCodeGenLLVM::run_compilation() {
     // CUDA specific metadata
     int min_blocks_per_sm = 2;
     int max_registers = -1;
-    if (const auto &spec = kernel->get_kernel_optimization_spec();
-        spec.has_value()) {
+    if (kernel->get_offload_execution_plan().has_value()) {
+      TI_ERROR_IF(offloaded_tasks.size() != 1,
+                  "offload execution plan codegen expected one emitted task");
+      const auto &spec = kernel->offload_task_optimization_spec(
+          task_codegen_id, offloaded_tasks.front().task_type);
+      min_blocks_per_sm = spec.cuda_min_blocks_per_sm;
+      max_registers =
+          spec.cuda_max_registers < 0 ? compile_config.gpu_max_reg
+                                      : spec.cuda_max_registers;
+    } else if (const auto &spec = kernel->get_kernel_optimization_spec();
+               spec.has_value()) {
       min_blocks_per_sm = spec->cuda_min_blocks_per_sm;
       max_registers = spec->cuda_max_registers;
     }

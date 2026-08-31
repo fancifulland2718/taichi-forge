@@ -249,11 +249,58 @@ def segmented_dispatch_count(state: template()):
     return state[1] - state[0]
 
 
+def _decode_exact_map_partition(value):
+    prefix = "exact-v1:"
+    if not value.startswith(prefix):
+        return None
+    if len(value) > 4096:
+        raise TaichiRuntimeError("Exact map partition payload is too large")
+    payload = value[len(prefix) :]
+    if not payload:
+        raise TaichiRuntimeError("Exact map partition requires source groups")
+    groups = []
+    previous_end = -1
+    for encoded_group in payload.split(";"):
+        fields = encoded_group.split(",")
+        if (
+            len(fields) < 2
+            or len(fields) > 4
+            or any(not field.isdigit() for field in fields)
+        ):
+            raise TaichiRuntimeError(
+                "Exact map partition groups require two to four logical IDs"
+            )
+        group = tuple(int(field) for field in fields)
+        if tuple(range(group[0], group[0] + len(group))) != group:
+            raise TaichiRuntimeError(
+                "Exact map partition groups must be contiguous"
+            )
+        if group[0] <= previous_end:
+            raise TaichiRuntimeError(
+                "Exact map partition groups must be ordered and disjoint"
+            )
+        previous_end = group[-1]
+        groups.append(group)
+    canonical = prefix + ";".join(
+        ",".join(str(item) for item in group) for group in groups
+    )
+    if canonical != value:
+        raise TaichiRuntimeError("Exact map partition encoding is not canonical")
+    return tuple(groups)
+
+
 def _new_runtime_graph_builder():
     builder = _ti_core.GraphBuilder()
     internal_recipe = os.environ.get(_INTERNAL_MAP_FUSION_ENV)
     if internal_recipe is not None:
         internal_recipe = internal_recipe.strip().lower()
+        exact_groups = _decode_exact_map_partition(internal_recipe)
+        if exact_groups is not None:
+            builder._set_map_composer_max_group_size(
+                max(len(group) for group in exact_groups)
+            )
+            builder._set_map_composer_allowed_groups(exact_groups)
+            return builder
         recipe_sizes = {
             "baseline": 1,
             "pair": 2,
@@ -263,7 +310,8 @@ def _new_runtime_graph_builder():
         }
         if internal_recipe not in recipe_sizes:
             raise TaichiRuntimeError(
-                f"{_INTERNAL_MAP_FUSION_ENV} must be baseline, pair, map3, or map4"
+                f"{_INTERNAL_MAP_FUSION_ENV} must be baseline, pair, map3, "
+                "map4, or a canonical exact-v1 partition"
             )
         max_group_size = recipe_sizes[internal_recipe]
         if max_group_size == 2:
@@ -10924,11 +10972,21 @@ def gen_cpp_kernel(
     task_launch_policy=None,
     range_one_to_one=False,
 ):
-    kernel = (
-        kernel_fn
-        if isinstance(kernel_fn, kernel_impl.Kernel)
-        else getattr(kernel_fn, "_primal", None)
-    )
+    execution_plan = None
+    if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
+        if kernel_fn._bound_args:
+            raise TaichiCompilationError(
+                "Graph task-indexed execution plans do not support bound "
+                "class-kernel instances"
+            )
+        kernel = kernel_fn._kernel
+        execution_plan = kernel_fn.plan
+    else:
+        kernel = (
+            kernel_fn
+            if isinstance(kernel_fn, kernel_impl.Kernel)
+            else getattr(kernel_fn, "_primal", None)
+        )
     if not isinstance(kernel, kernel_impl.Kernel):
         raise TaichiCompilationError(
             "Graph dispatch expects a decorated Taichi kernel or an explicit "
@@ -10938,7 +10996,19 @@ def gen_cpp_kernel(
     injected_args = produce_injected_args_for_graph(
         kernel, symbolic_args=args, template_args=template_args
     )
-    if (task_launch_policy is None or task_launch_policy.mode == "auto") and not (
+    if execution_plan is not None:
+        if task_launch_policy is not None or range_one_to_one:
+            raise TaichiCompilationError(
+                "Graph task-indexed execution plans cannot be combined with "
+                "legacy launch-policy or one-to-one lowering controls"
+            )
+        key = kernel._ensure_compiled_with_offload_execution_plan(
+            execution_plan, *injected_args
+        )
+        kernel._validate_offload_execution_plan_specialization(
+            key, execution_plan
+        )
+    elif (task_launch_policy is None or task_launch_policy.mode == "auto") and not (
         range_one_to_one
     ):
         key = kernel.ensure_compiled(*injected_args)
@@ -14402,6 +14472,26 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._spec.executable_optimization_space
+
+    @property
+    def _compileiq_map_materialization_available(self):
+        """Whether exact source groups have one unambiguous native builder."""
+
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            return bool(
+                self._workspace_lane_capacity == 1
+                and not self._spec.native_count
+                and not self._spec.structured_control_count
+                and not self._spec.observation_count
+                and not self._spec.fixed_runtime_args
+                and not self._spec.temporary_actions
+                and not self._spec.lifetime_leases
+                and len(self._spec.nodes) == 1
+                and isinstance(self._spec.nodes[0], _CompiledCGraphNode)
+                and isinstance(self._spec.nodes[0].ir_node, SequentialRegion)
+                and self._spec._aot_graph_builder is not None
+            )
 
     @property
     def _qualified_fusion_stats(self):

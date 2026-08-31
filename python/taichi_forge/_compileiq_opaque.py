@@ -10,13 +10,13 @@ from types import MappingProxyType
 
 
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v1"
-_FORK_BUILD_ID = "compileiq-taichi-forge-opaque-recipes.v1"
-_PACKAGE_VERSION = "1.0.0dev1+taichiforge.opaque1"
+_FORK_BUILD_ID = "compileiq-taichi-forge-opaque-recipes.v1.2"
+_PACKAGE_VERSION = "1.0.0dev3+taichiforge.opaque1"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
-_REVIEWED_FORK_REF = "refs/heads/forge/opaque-recipes-v1"
-_REVIEWED_FORK_COMMIT = "b36f2d2abcb8234f3f12818a38e14172d990b79a"
+_REVIEWED_FORK_REF = "refs/heads/forge/opaque-recipes-v1.2"
+_REVIEWED_FORK_COMMIT = "579b572d0e68165bea215f5a43c8ac09daadeb5e"
 _REVIEWED_WHEEL_SHA256 = (
-    "04b550cc12d7ef652c479db63447717d4b071ab7e21ee58ab50133e962d70470"
+    "d6155a96857070684ba66bc02105adeb300a2ea7de4ae7bb5bba5d2101d7656a"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _AUDIT_SCHEMA = "compileiq.opaque-recipe-selection.v1"
@@ -35,12 +35,12 @@ _EXPECTED_CORE_LOCK = (
     "sha256:0bc59bcd0864ce77dcae75aa00af3f7d641737e9abd0bd3cdb21c78425f127aa"
 )
 _EXPECTED_CAPABILITY_ID = (
-    "ciq-forge-cap-v1:700dbe6a0238178248dadc0d51f7f1de606ed8dc5926e36fe36ba9e278790547"
+    "ciq-forge-cap-v1:5992d8b8182fbe49d87efeb72f90756c1a97ce48055f6cd93823445b54463bfa"
 )
 _OBJECTIVE_WORKER = "forge_main_thread_serial_v1"
 _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
-    "e4cfefde39a4e9154d7dc22f3360c0436f232f3fbbe2b4dcd42bf77c86513fa5"
+    "6cee04de70e71397fa075067a7b6be7a265fde41209458e86ad4b1f66a502f03"
 )
 _SOURCE_LOCK_FILES = (
     "ciq.py",
@@ -79,6 +79,7 @@ _CAPABILITY_KEYS = frozenset(
         "core_verification",
         "opaque_domain_binding",
         "objective_worker",
+        "opaque_recipe_search",
         "core_manifest_schema_version",
         "core_commit",
         "core_lock",
@@ -177,12 +178,18 @@ def _validated_compileiq_capability(
 
     capability_factory = getattr(support, "forge_recipe_search_capability", None)
     worker_type = getattr(support, "ForgeMainThreadWorker", None)
+    exhaustive_search_type = getattr(
+        support, "ForgeOpaqueRecipeExhaustiveSearchV1", None
+    )
     domain_type = getattr(recipes, "OpaqueRecipeDomainV1", None)
     if (
         not callable(capability_factory)
         or domain_type is None
         or not isinstance(worker_type, type)
         or getattr(worker_type, "PROTOCOL", None) != _OBJECTIVE_WORKER
+        or not isinstance(exhaustive_search_type, type)
+        or getattr(exhaustive_search_type, "PROTOCOL", None)
+        != "bounded_exhaustive_main_thread_v1"
     ):
         raise error_type(
             "installed CompileIQ does not publish the complete Forge opaque-recipe "
@@ -199,7 +206,7 @@ def _validated_compileiq_capability(
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 1,
+        "protocol_revision": 2,
         "fork_build_id": _FORK_BUILD_ID,
         "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
@@ -211,6 +218,7 @@ def _validated_compileiq_capability(
         "core_verification": _CORE_VERIFICATION,
         "opaque_domain_binding": _OPAQUE_DOMAIN_BINDING,
         "objective_worker": _OBJECTIVE_WORKER,
+        "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
         "core_commit": _EXPECTED_CORE_COMMIT,
         "core_lock": _EXPECTED_CORE_LOCK,
         "capability_id": _EXPECTED_CAPABILITY_ID,
@@ -270,6 +278,7 @@ class _CompileIQOpaqueRecipeTransport:
         "_domain_owner",
         "_python_source_lock",
         "_recipe_description",
+        "_exhaustive_search_type",
         "_worker_type",
     )
 
@@ -364,6 +373,9 @@ class _CompileIQOpaqueRecipeTransport:
         self._domain_owner = domain_owner
         self._python_source_lock = python_source_lock
         self._recipe_description = recipe_description
+        self._exhaustive_search_type = getattr(
+            worker_type, "OPAQUE_EXHAUSTIVE_SEARCH_TYPE", None
+        )
         self._worker_type = worker_type
 
     @property
@@ -377,6 +389,28 @@ class _CompileIQOpaqueRecipeTransport:
     @property
     def worker_type(self):
         return self._worker_type
+
+    def exhaustive_search(self, objective_function, *, problem_type="min"):
+        """Create the exact fork's complete finite-domain search."""
+
+        exhaustive_search_type = self._exhaustive_search_type
+        if exhaustive_search_type is None:
+            try:
+                support = import_module("compileiq.forge_support")
+                exhaustive_search_type = getattr(
+                    support, "ForgeOpaqueRecipeExhaustiveSearchV1"
+                )
+            except (ImportError, AttributeError) as error:
+                raise CompileIQOpaqueUnavailableError(
+                    "modified CompileIQ does not expose bounded exhaustive "
+                    "opaque search"
+                ) from error
+        return exhaustive_search_type(
+            objective_function=objective_function,
+            search_space=self._domain,
+            baseline_recipe_id=self.baseline_recipe_id,
+            problem_type=problem_type,
+        )
 
     @property
     def python_source_lock(self):
@@ -536,6 +570,7 @@ class _CompileIQOpaqueRecipeTransport:
             "baseline_recipe_id": self.baseline_recipe_id,
             "recipe_count": len(self.recipe_ids),
             "search_coverage": "complete_exact_fork_audit_required",
+            "search_mode": "bounded_exhaustive_main_thread_v1",
             "fallback": "disabled",
         }
 

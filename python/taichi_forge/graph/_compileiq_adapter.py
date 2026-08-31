@@ -14,7 +14,7 @@ from taichi_forge.graph._optimization import (
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
 )
-from taichi_forge.lang._compileiq_adapter import (
+from taichi_forge.lang._compileiq_qualification import (
     _CompileIQFinalCandidate,
     _CompileIQQualificationDecision,
     _CompileIQSearchStage,
@@ -29,6 +29,7 @@ _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _MAP_RECIPE_PATTERN = re.compile(r"^fusion:map([2-4]):[0-9a-f]{24}$")
+_EXACT_MAP_PARTITION_PREFIX = "exact-v1:"
 _CONTROL_MATERIALIZATION = {
     _CUDA_CONTROL_RECIPE_IDS[0]: "cuda_conditional_graph",
     _CUDA_CONTROL_RECIPE_IDS[1]: "cuda_masked_bounded_graph",
@@ -50,6 +51,19 @@ def _materialization_recipe(spec):
         if match is None:
             raise ValueError(f"unsupported executable fusion recipe {recipe_id!r}")
         group_sizes.append(int(match.group(1)))
+    if spec.fusion_source_groups:
+        if len(spec.fusion_source_groups) != len(group_sizes) or any(
+            len(group) != size
+            for group, size in zip(spec.fusion_source_groups, group_sizes)
+        ):
+            raise ValueError(
+                "fusion recipes and exact source groups have different topology"
+            )
+        encoded = ";".join(
+            ",".join(str(item) for item in group)
+            for group in spec.fusion_source_groups
+        )
+        return _EXACT_MAP_PARTITION_PREFIX + encoded
     return f"map{max(group_sizes)}"
 
 
@@ -73,6 +87,7 @@ class GraphExecutableRecipeSelection:
     compilation_identity: str
     execution_identity: str
     materialization_recipe: str
+    fusion_source_groups: tuple = ()
     control_recipe_id: str = ""
     control_materialization_recipe: str = "auto"
 
@@ -98,6 +113,7 @@ class GraphExecutableRecipeSelection:
             "compilation_identity": self.compilation_identity,
             "execution_identity": self.execution_identity,
             "materialization_recipe": self.materialization_recipe,
+            "fusion_source_groups": self.fusion_source_groups,
         }
         if self.control_recipe_id:
             value["control_recipe_id"] = self.control_recipe_id
@@ -195,7 +211,18 @@ class _CompileIQExecutableAdapter:
             raise TypeError(
                 "CompileIQ executable adapter requires a compiled Forge Graph"
             ) from error
-        return cls(space, parameter=parameter)
+        adapter = cls(space, parameter=parameter)
+        materialization_available = getattr(
+            graph,
+            "_compileiq_map_materialization_available",
+            None,
+        )
+        if adapter.recipe_kind == "map_fusion" and materialization_available is False:
+            raise ValueError(
+                "CompileIQ exact map-partition search requires one ordinary JIT "
+                "CGraph with one Forge-owned source GraphBuilder"
+            )
+        return adapter
 
     @property
     def semantic_plan_id(self):
@@ -261,6 +288,7 @@ class _CompileIQExecutableAdapter:
             compilation_identity=spec.compilation_identity,
             execution_identity=spec.execution_identity,
             materialization_recipe=self._materialization_by_spec[spec.spec_id],
+            fusion_source_groups=spec.fusion_source_groups,
             control_recipe_id=spec.control_recipe_id,
             control_materialization_recipe=(
                 self._control_materialization_by_spec[spec.spec_id]
@@ -284,6 +312,7 @@ class _CompileIQExecutableAdapter:
             actual.compilation_identity != selection.compilation_identity
             or actual.execution_identity != selection.execution_identity
             or actual.fusion_recipe_ids != selection.fusion_recipe_ids
+            or actual.fusion_source_groups != selection.fusion_source_groups
             or actual.control_recipe_id != selection.control_recipe_id
         ):
             raise ValueError("materialized Graph identity does not match")
@@ -467,13 +496,25 @@ class _CompileIQExecutableAdapter:
 
     def manifest(self):
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "provider": "compileiq_user_space",
             "parameter": self._parameter,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
             "baseline_spec_id": self._space.baseline.spec_id,
             "search_protocol": "exhaustive_then_independent_qualification",
+            "partition_stage": self._space.partition_stage,
+            "partitions_complete": self._space.partitions_complete,
+            "partition_combination_count": (
+                self._space.partition_combination_count
+            ),
+            "partition_candidate_limit": self._space.partition_candidate_limit,
+            "partition_parent_domain_fingerprint": (
+                self._space.partition_parent_domain_fingerprint or None
+            ),
+            "partition_frontier_spec_ids": (
+                self._space.partition_frontier_spec_ids
+            ),
             "specs": tuple(self._spec_manifest(spec) for spec in self._specs.values()),
         }
         if self.recipe_kind == "structured_control":

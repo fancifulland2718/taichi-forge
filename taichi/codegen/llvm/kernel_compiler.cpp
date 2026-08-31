@@ -52,8 +52,12 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
     return codegen->compile_kernel_to_module();
   }();
-  if (const auto &spec = kernel_def.get_kernel_optimization_spec();
-      spec.has_value()) {
+  if (kernel_def.get_offload_execution_plan().has_value()) {
+    // Entry-specific maxnreg annotations own task-plan caps. Do not add a
+    // module-wide CU_JIT_MAX_REGISTERS limit that would collapse them.
+    data.compiled_data.cuda_max_registers = 0;
+  } else if (const auto &spec = kernel_def.get_kernel_optimization_spec();
+             spec.has_value()) {
     data.compiled_data.cuda_max_registers = spec->cuda_max_registers;
   }
   data.used_snode_tree_ids =

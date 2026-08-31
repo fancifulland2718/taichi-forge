@@ -1743,6 +1743,43 @@ Block tuning is backend- and workload-specific, so always compare against
 `auto` with end-of-work synchronization. The reproducible paired harness is
 `benchmarks/task_launch_policy_bench.py`.
 
+### Complete kernel execution-plan search with modified CompileIQ
+
+`ti.compileiq_offload_execution_plan_search(kernel, *sample_args)` builds a
+baseline-inclusive offline domain for one materialized CUDA kernel. The unit of
+selection is a complete, ordered, task-indexed offload execution plan, not one
+kernel-wide block size or provider switch. Non-range tasks remain explicit in
+every candidate. Range-task edits are generated only when the task manifest
+proves them legal, and source-owned block/shared-memory contracts remain
+authoritative. Compilation-affecting and launch-only identities are separate,
+so launch requests do not contaminate a shared compiled artifact.
+
+The first stage contains the baseline plus every legal single-task
+perturbation. After complete modified-CompileIQ coverage, `refine(search,
+frontier_recipe_ids)` creates the baseline, the observed frontier, and every
+legal pair without silent truncation; frontiers over 32 or domains over 4,096
+fail closed. `compileiq_search(objective)` uses the reviewed fork's bounded
+exhaustive worker. `select()`, `bind()`, `materialize()`, `recipe_manifest()`,
+coverage auditing, paired ranking, and independent `qualify()` preserve exact
+plan and parent identities.
+
+This retains single-kernel search when candidates describe different complete
+internal execution strategies. It does not restore the removed fixed-axis
+kernel-wide adapter, expose raw flags as a stable public tuning surface, or
+change an ordinary kernel call. `TaskLaunchPolicy` above remains an explicit
+manual control and is not itself a CompileIQ dimension. Only the reviewed
+modified CompileIQ capability/source identity is accepted; compile time is
+diagnostic, while correctness, exact route, memory stability, and
+worst-positive runtime are admission gates.
+
+`ti.graph.compileiq_recipe_search(graph)` is the corresponding Graph-owned
+recipe search. Its map domain uses exact barrier-preserving source partitions,
+not only a maximum `map2`/`map3`/`map4` width. It exhausts products up to 4,095
+candidates and explicitly stages larger products. Exact map search requires
+one ordinary JIT CGraph and one Forge-owned source builder; composed or
+multi-builder Graphs fail closed. Structured-control domains remain separate,
+and fusion-by-control Cartesian products are not exposed.
+
 ### Device-resident bounded workloads with `DeviceExtent`
 
 `ti.DeviceExtent(capacity)` owns one stable two-element `i32` device state: a

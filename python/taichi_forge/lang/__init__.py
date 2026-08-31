@@ -19,6 +19,14 @@ from taichi_forge.lang.argpack import *
 from taichi_forge.lang.task_manifest import *
 from taichi_forge.lang.task_launch import *
 from taichi_forge.lang.device_extent import *
+from taichi_forge.lang._compileiq_offload_execution_plan import (
+    CompileIQOffloadExecutionPlanSearch,
+    CompileIQOffloadPlanUnavailableError,
+    OffloadExecutionPlanCandidateEvidence,
+    OffloadExecutionPlanQualificationDecision,
+    OffloadExecutionPlanRecipeSelection,
+    compileiq_offload_execution_plan_search,
+)
 
 __all__ = [
     s

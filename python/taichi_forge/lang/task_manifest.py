@@ -26,6 +26,12 @@ class OffloadedTaskManifest:
     task_type: str
     requested_grid_size: Optional[int]
     requested_block_size: Optional[int]
+    source_block_size_explicit: bool
+    requested_thread_local_mode: str
+    requested_cuda_min_blocks_per_sm: int
+    requested_cuda_max_registers: Optional[int]
+    requested_grid_residency_waves: Optional[int]
+    requested_range_work_per_thread_target: int
     selected_grid_size: Optional[int]
     selected_block_size: Optional[int]
     actual_grid_size: Optional[int]

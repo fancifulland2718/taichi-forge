@@ -114,8 +114,8 @@ CUDA Advanced Controls File 通过 `ptxas --apply-controls` 应用，因此要�
 control，应用必须保留数值 oracle、compile timeout、目标 GPU 和 `ptxas` 版本，并在任何
 compile/校验失败时停用该配置；Forge 不会在失败后静默执行另一个显式 provider。
 
-CompileIQ 不作为 in-process Forge 依赖导入。用户可以在独立、受支持的 Python 环境中安装
-它，并提供一个 workload-specific worker：
+对于本节的 external PTXAS/ACF process 路线，CompileIQ 不导入 Forge application；用户应在
+独立、受支持的 Python 环境中安装选定的上游 release，并提供 workload-specific worker：
 
 ```powershell
 py -3.11 -m venv C:\venvs\compileiq
@@ -125,9 +125,15 @@ $env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
 $env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
 ```
 
-CompileIQ 当前发布线声明支持 Python 3.11--3.13；部署时仍应按所选 CompileIQ release
-重新核对其 Python 与 CUDA/`ptxas` support table。这个独立解释器约束不会改变 Forge wheel
-自身的 Python 支持矩阵。
+所选上游 CompileIQ release 的 Python 支持范围可能窄于 Forge；部署时必须重新核对其 Python
+与 CUDA/`ptxas` support table。这个独立解释器约束不会改变 Forge wheel 自身的 Python
+支持矩阵。
+
+这个 process worker 与 `ti.compileiq_offload_execution_plan_search()`、
+`ti.graph.compileiq_recipe_search()` 不同。后两者是可选离线 recipe API，只接受固定在
+`579b572` 的经审查 Forge fork，并校验完整 capability、bundled-core 与 Python-source lock。
+该 fork 支持在 Forge Python 3.10 wheel 上运行 main-thread bounded-exhaustive worker；普通上游
+安装或上述 external JSON worker 都不能替代它。
 
 Forge 使用 versioned JSON v1 process protocol 调用：
 

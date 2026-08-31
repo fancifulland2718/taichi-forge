@@ -96,6 +96,30 @@ class LaunchContextBuilder {
     return cuda_range_work_per_thread_target_;
   }
 
+  void set_cuda_task_execution_plan(
+      const std::string &identity,
+      const std::vector<std::string> &task_kinds,
+      const std::vector<int> &grid_residency_waves,
+      const std::vector<int> &range_work_per_thread_targets);
+
+  const std::string &cuda_task_execution_plan_identity() const noexcept {
+    return cuda_task_execution_plan_identity_;
+  }
+
+  const std::vector<std::string> &cuda_task_execution_plan_kinds()
+      const noexcept {
+    return cuda_task_execution_plan_kinds_;
+  }
+
+  const std::vector<int> &cuda_task_grid_residency_waves() const noexcept {
+    return cuda_task_grid_residency_waves_;
+  }
+
+  const std::vector<int> &cuda_task_range_work_per_thread_targets()
+      const noexcept {
+    return cuda_task_range_work_per_thread_targets_;
+  }
+
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
   LaunchContextBuilder(const LaunchContextBuilder &) = delete;
@@ -232,6 +256,10 @@ class LaunchContextBuilder {
   std::int32_t cuda_bounded_capacity_{0};
   std::int32_t cuda_grid_residency_waves_{0};
   std::int32_t cuda_range_work_per_thread_target_{1};
+  std::string cuda_task_execution_plan_identity_;
+  std::vector<std::string> cuda_task_execution_plan_kinds_;
+  std::vector<int> cuda_task_grid_residency_waves_;
+  std::vector<int> cuda_task_range_work_per_thread_targets_;
   std::string dispatch_label_;
 
  public:

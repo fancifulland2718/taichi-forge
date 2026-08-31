@@ -46,6 +46,39 @@ LaunchContextBuilder::LaunchContextBuilder(CallableBase *kernel,
   }
 }
 
+void LaunchContextBuilder::set_cuda_task_execution_plan(
+    const std::string &identity,
+    const std::vector<std::string> &task_kinds,
+    const std::vector<int> &grid_residency_waves,
+    const std::vector<int> &range_work_per_thread_targets) {
+  TI_ERROR_IF(identity.empty(),
+              "CUDA task execution plan requires a non-empty identity");
+  const std::size_t task_count = task_kinds.size();
+  TI_ERROR_IF(task_count == 0 || grid_residency_waves.size() != task_count ||
+                  range_work_per_thread_targets.size() != task_count,
+              "CUDA task execution plan vectors must have one entry per "
+              "physical task");
+  for (std::size_t index = 0; index < task_count; ++index) {
+    const int waves = grid_residency_waves[index];
+    const int work = range_work_per_thread_targets[index];
+    TI_ERROR_IF(task_kinds[index].empty(),
+                "CUDA task execution plan task {} has no task kind", index);
+    TI_ERROR_IF(waves != 0 && waves != 1 && waves != 2 && waves != 4,
+                "CUDA task execution plan waves must be 0, 1, 2, or 4");
+    TI_ERROR_IF(work != 1 && work != 2 && work != 4 && work != 8,
+                "CUDA task execution plan work-per-thread must be 1, 2, 4, "
+                "or 8");
+    TI_ERROR_IF(task_kinds[index] != "range_for" &&
+                    (waves != 0 || work != 1),
+                "CUDA task launch controls apply only to range_for tasks");
+  }
+  cuda_task_execution_plan_identity_ = identity;
+  cuda_task_execution_plan_kinds_ = task_kinds;
+  cuda_task_grid_residency_waves_ = grid_residency_waves;
+  cuda_task_range_work_per_thread_targets_ =
+      range_work_per_thread_targets;
+}
+
 void LaunchContextBuilder::set_cpu_bounded_range(void *extent,
                                                  std::int32_t capacity) {
   TI_ASSERT(has_cpu_bounded_range_binding_);

@@ -141,8 +141,10 @@ target GPU, and `ptxas` version, and disable the configuration after any
 compile or validation failure. Forge does not silently execute another
 explicit provider after a failure.
 
-CompileIQ is never imported as an in-process Forge dependency. Install it in a
-separate supported Python environment and supply a workload-specific worker:
+For the external PTXAS/ACF process route described in this section, CompileIQ
+is not imported into the Forge application. Install the selected upstream
+release in a separate supported Python environment and supply a
+workload-specific worker:
 
 ```powershell
 py -3.11 -m venv C:\venvs\compileiq
@@ -152,10 +154,19 @@ $env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
 $env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
 ```
 
-The current CompileIQ release line declares Python 3.11--3.13 support. Recheck
-the selected CompileIQ release's Python and CUDA/`ptxas` support table during
+The selected upstream CompileIQ release may have a narrower Python support
+range than Forge. Recheck its Python and CUDA/`ptxas` support table during
 deployment. This separate-interpreter constraint does not change the Python
 support matrix of the Forge wheel itself.
+
+This process worker is distinct from
+`ti.compileiq_offload_execution_plan_search()` and
+`ti.graph.compileiq_recipe_search()`. Those optional offline recipe APIs accept
+only the reviewed Forge fork at `579b572`, including its complete capability,
+bundled-core, and Python-source locks. That fork supports the main-thread
+bounded-exhaustive worker on Forge's Python 3.10 wheel. A generic upstream
+installation or the external JSON worker above is not accepted as a substitute
+for those APIs.
 
 Forge invokes the versioned JSON v1 process protocol as:
 

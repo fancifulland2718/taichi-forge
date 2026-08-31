@@ -1314,6 +1314,7 @@ class Kernel:
         task_launch_policy=None,
         kernel_optimization_spec=None,
         range_one_to_one=False,
+        offload_execution_plan=None,
     ):
         if key is None:
             key = (self.func, 0, self.autodiff_mode)
@@ -1329,7 +1330,12 @@ class Kernel:
         with self.runtime._kernel_compilation_lock:
             if key in self.compiled_kernels:
                 return
-            if self._try_relocatable_template(key, args, task_launch_policy, range_one_to_one):
+            if (
+                offload_execution_plan is None
+                and self._try_relocatable_template(
+                    key, args, task_launch_policy, range_one_to_one
+                )
+            ):
                 return
             limit = self.runtime.kernel_specialization_limit
             native_archives = 0
@@ -1368,10 +1374,14 @@ class Kernel:
                 task_launch_policy,
                 kernel_optimization_spec,
                 range_one_to_one,
+                offload_execution_plan,
             )
             self.runtime._compiled_specialization_count += 1
             self.runtime._resident_specialization_count += 1
-            self._publish_relocatable_candidate(key, args, task_launch_policy, range_one_to_one)
+            if offload_execution_plan is None:
+                self._publish_relocatable_candidate(
+                    key, args, task_launch_policy, range_one_to_one
+                )
 
     def _materialize_uncached(
         self,
@@ -1381,6 +1391,7 @@ class Kernel:
         task_launch_policy=None,
         kernel_optimization_spec=None,
         range_one_to_one=False,
+        offload_execution_plan=None,
     ):
         kernel_name = f"{self.func.__name__}_c{self.kernel_counter}_{key[1]}"
         _logging.trace(f"Compiling kernel {kernel_name} in {self.autodiff_mode}...")
@@ -1459,6 +1470,15 @@ class Kernel:
             effective_opt_level = kernel_optimization_spec.ir.compile_tier
         if effective_opt_level is not None:
             taichi_kernel.set_compile_tier_override(effective_opt_level)
+        if offload_execution_plan is not None:
+            if task_launch_policy is not None or kernel_optimization_spec is not None:
+                raise TaichiRuntimeError(
+                    "offload execution plans cannot be combined with legacy "
+                    "kernel optimization or launch-policy metadata"
+                )
+            taichi_kernel.set_offload_execution_plan(
+                *offload_execution_plan.native_arguments
+            )
         if (
             kernel_optimization_spec is not None
             and kernel_optimization_spec.identity
@@ -2126,7 +2146,14 @@ class Kernel:
         del plans[_ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY:]
         self._ordinary_launch_plan = plan
 
-    def _launch_with_ordinary_plan(self, plan, args):
+    def _launch_with_ordinary_plan(
+        self,
+        plan,
+        args,
+        *,
+        _grid_residency_waves=None,
+        _range_work_per_thread_target=None,
+    ):
         prog = self.runtime.prog
         launch_scope = None
         if plan.guard_context_lifecycle:
@@ -2164,6 +2191,12 @@ class Kernel:
                         binding[2].to_string(),
                         type(args[invalid_index]),
                     )
+        if _grid_residency_waves is not None:
+            launch_ctx._set_cuda_grid_residency_waves(_grid_residency_waves)
+        if _range_work_per_thread_target is not None:
+            launch_ctx._set_cuda_range_work_per_thread_target(
+                _range_work_per_thread_target
+            )
         self._bind_ordinary_launch_context(launch_ctx, bindings, args)
         try:
             if launch_scope is None:
@@ -2294,6 +2327,61 @@ class Kernel:
                 kernel_optimization_spec=spec,
             )
             return key
+
+    def _ensure_compiled_with_offload_execution_plan(self, plan, *args):
+        from taichi_forge.lang._offload_execution_plan import (
+            _OffloadExecutionPlan,
+        )
+
+        if not isinstance(plan, _OffloadExecutionPlan):
+            raise TypeError("plan must be an _OffloadExecutionPlan")
+        with python_compile_profile_event(
+            f"python.kernel.ensure_compiled_with_offload_execution_plan:{self.func.__name__}"
+        ):
+            instance_id, arg_features = self.mapper.lookup(args)
+            key = (
+                self.func,
+                instance_id,
+                self.autodiff_mode,
+                ("offload_execution_plan", plan.identity),
+                False,
+            )
+            if (
+                key not in self._task_launch_policy_manifests
+                and threading.current_thread() is not threading.main_thread()
+            ):
+                raise TaichiRuntimeError(
+                    "A cold offload execution-plan specialization must be "
+                    "prepared on the Python main thread; call "
+                    "bound.report(*args) once before concurrent launches"
+                )
+            self.materialize(
+                key=key,
+                args=args,
+                arg_features=arg_features,
+                offload_execution_plan=plan,
+            )
+            return key
+
+    def _validate_offload_execution_plan_specialization(self, key, plan):
+        """Validate exact task topology and all requested task controls."""
+        from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+        cached = self._task_launch_policy_manifests.get(key)
+        if cached is None:
+            if threading.current_thread() is not threading.main_thread():
+                raise TaichiRuntimeError(
+                    "A cold offload execution-plan specialization must be "
+                    "prepared on the Python main thread"
+                )
+            kernel_cpp = self.compiled_kernels[key]
+            raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
+            cached = tuple(
+                OffloadedTaskManifest._from_core(item) for item in raw
+            )
+            self._task_launch_policy_manifests[key] = cached
+        plan.validate_materialization(cached)
+        return cached
 
     def _validate_kernel_optimization_specialization(self, key):
         """Return the exact artifact manifest without assuming one range task."""
@@ -3136,7 +3224,14 @@ class _TaskLaunchBinding:
                     retained_plan = self._prepare_retained_plan(processed)
                     if retained_plan is not None:
                         return self._kernel._launch_with_ordinary_plan(
-                            retained_plan, processed
+                            retained_plan,
+                            processed,
+                            _grid_residency_waves=(
+                                self._optimization_spec.launch.grid_residency_waves
+                            ),
+                            _range_work_per_thread_target=(
+                                self._optimization_spec.launch.range_work_per_thread_target
+                            ),
                         )
                     result = self._kernel.launch_kernel(
                         self._fast_kernel_cpp,
@@ -3404,6 +3499,127 @@ class _KernelOptimizationBinding(_TaskLaunchBinding):
         )
         self._refresh_fast_path(report, processed)
         return report
+
+
+class _OffloadExecutionPlanBinding:
+    """Private exact view of one complete task-indexed kernel plan."""
+
+    def __init__(self, kernel, plan, bound_args=()):
+        from taichi_forge.lang._offload_execution_plan import (
+            _OffloadExecutionPlan,
+        )
+
+        if not isinstance(plan, _OffloadExecutionPlan):
+            raise TypeError("plan must be an _OffloadExecutionPlan")
+        self._kernel = kernel
+        self.plan = plan
+        self._bound_args = tuple(bound_args)
+        self.__name__ = kernel.func.__name__
+
+    def _validate_backend(self):
+        backend, kind = self._kernel._task_launch_backend_kind()
+        if backend != "cuda" or kind != "native":
+            raise TaichiRuntimeError(
+                "offload execution plans require the native CUDA backend"
+            )
+        if self._kernel.autodiff_mode != AutodiffMode.NONE:
+            raise TaichiRuntimeError(
+                "offload execution plans support primal direct JIT kernels only"
+            )
+        return backend
+
+    def _prepare_exact(self, args, kwargs):
+        self._validate_backend()
+        combined = (*self._bound_args, *args)
+        processed = _process_args(self._kernel, combined, kwargs)
+        key = self._kernel._ensure_compiled_with_offload_execution_plan(
+            self.plan, *processed
+        )
+        tasks = self._kernel._validate_offload_execution_plan_specialization(
+            key, self.plan
+        )
+        return processed, key, tasks
+
+    def __call__(self, *args, **kwargs):
+        try:
+            runtime = self._kernel.runtime
+            if (
+                runtime.target_tape is not None
+                or runtime.fwd_mode_manager is not None
+                or runtime.grad_replaced
+            ):
+                raise TaichiRuntimeError(
+                    "offload execution plans cannot launch inside an "
+                    "automatic differentiation context"
+                )
+            processed, key, _ = self._prepare_exact(args, kwargs)
+            return self._kernel.launch_kernel(
+                self._kernel.compiled_kernels[key], *processed
+            )
+        except (TaichiCompilationError, TaichiRuntimeError) as exc:
+            if impl.get_runtime().print_full_traceback:
+                raise
+            raise type(exc)("\n" + str(exc)) from None
+
+    def report(self, *args, **kwargs):
+        from taichi_forge.lang.task_launch import (
+            TaskLaunchPolicy,
+            TaskLaunchReport,
+            _task_launch_resource_reports,
+        )
+
+        backend = self._validate_backend()
+        _, _, tasks = self._prepare_exact(args, kwargs)
+        policy = TaskLaunchPolicy.auto()
+        return TaskLaunchReport(
+            policy=policy,
+            backend=backend,
+            status="applied",
+            reason=(
+                "complete task-indexed offload execution plan materialized "
+                "with exact topology and identity validation"
+            ),
+            tasks=tasks,
+            resources=_task_launch_resource_reports(
+                tasks, policy, "auto", impl.current_cfg()
+            ),
+        )
+
+    def task_manifest(self, *args, **kwargs):
+        return self.report(*args, **kwargs).tasks
+
+    def _gpu_semantics_snapshot(self, *args, **kwargs):
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        _, key, _ = self._prepare_exact(args, kwargs)
+        raw = self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(
+            self._kernel.compiled_kernels[key]
+        )
+        return _build_resident_gpu_semantics(raw)
+
+    def _gpu_semantics_qualification(self, *args, **kwargs):
+        from taichi_forge.lang._gpu_semantics_qualification import (
+            _build_gpu_artifact_qualification,
+        )
+        from taichi_forge.lang._gpu_semantics_snapshot import (
+            _build_resident_gpu_semantics,
+        )
+
+        _, key, _ = self._prepare_exact(args, kwargs)
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        snapshot = _build_resident_gpu_semantics(
+            self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+        )
+        started = time.perf_counter_ns()
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
+            kernel_cpp
+        )
+        fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
+        return _build_gpu_artifact_qualification(
+            snapshot, raw, fixed_cost_seconds
+        )
 
 
 # For a Taichi class definition like below:

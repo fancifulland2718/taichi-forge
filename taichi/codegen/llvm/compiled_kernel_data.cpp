@@ -92,6 +92,23 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     }
     item.requested_grid_size = positive_geometry(task.requested_grid_dim);
     item.requested_block_size = positive_geometry(task.requested_block_dim);
+    item.source_block_size_explicit = task.source_block_dim_explicit;
+    item.requested_thread_local_mode =
+        task.requested_thread_local_mode == 1
+            ? "on"
+            : (task.requested_thread_local_mode == 2 ? "off" : "auto");
+    item.requested_cuda_min_blocks_per_sm =
+        task.requested_cuda_min_blocks_per_sm;
+    if (task.requested_cuda_max_registers >= 0) {
+      item.requested_cuda_max_registers =
+          task.requested_cuda_max_registers;
+    }
+    if (task.requested_grid_residency_waves > 0) {
+      item.requested_grid_residency_waves =
+          task.requested_grid_residency_waves;
+    }
+    item.requested_range_work_per_thread_target =
+        task.requested_range_work_per_thread_target;
     if (cpu_execution) {
       item.actual_geometry_kind = "cpu_runtime_scheduler";
       item.actual_geometry_reason =

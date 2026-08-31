@@ -182,6 +182,16 @@ py::dict offloaded_task_manifest_to_python(
   };
   set_optional("requested_grid_size", task.requested_grid_size);
   set_optional("requested_block_size", task.requested_block_size);
+  item["source_block_size_explicit"] = task.source_block_size_explicit;
+  item["requested_thread_local_mode"] = task.requested_thread_local_mode;
+  item["requested_cuda_min_blocks_per_sm"] =
+      task.requested_cuda_min_blocks_per_sm;
+  set_optional("requested_cuda_max_registers",
+               task.requested_cuda_max_registers);
+  set_optional("requested_grid_residency_waves",
+               task.requested_grid_residency_waves);
+  item["requested_range_work_per_thread_target"] =
+      task.requested_range_work_per_thread_target;
   set_optional("selected_grid_size", task.selected_grid_size);
   set_optional("selected_block_size", task.selected_block_size);
   set_optional("actual_grid_size", task.actual_grid_size);
@@ -198,6 +208,26 @@ py::dict offloaded_task_manifest_to_python(
   item["dynamic_shared_bytes"] = task.dynamic_shared_bytes;
   item["thread_local_bytes"] = task.thread_local_bytes;
   return item;
+}
+
+lang::OffloadedTaskManifest overlay_execution_plan_launch_requests(
+    const lang::OffloadedTaskManifest &compiled_task,
+    const lang::Kernel *kernel) {
+  auto task = compiled_task;
+  if (kernel == nullptr ||
+      !kernel->get_offload_execution_plan().has_value()) {
+    return task;
+  }
+  const auto &spec = kernel->offload_task_optimization_spec(
+      task.task_index, task.task_type);
+  if (spec.grid_residency_waves > 0) {
+    task.requested_grid_residency_waves = spec.grid_residency_waves;
+  } else {
+    task.requested_grid_residency_waves.reset();
+  }
+  task.requested_range_work_per_thread_target =
+      spec.range_work_per_thread_target;
+  return task;
 }
 
 py::dict graph_kernel_metadata_to_python(
@@ -344,6 +374,7 @@ py::dict spirv_task_metadata_to_python(
 py::dict compiled_kernel_gpu_semantics_to_python(
     const lang::CompiledKernelData &compiled,
     AutodiffMode autodiff_mode,
+    const lang::Kernel *kernel,
     const lang::aot::CompiledDispatch *graph_dispatch = nullptr,
     std::size_t graph_dispatch_index = 0) {
   const auto backend = compiled.arch();
@@ -380,7 +411,9 @@ py::dict compiled_kernel_gpu_semantics_to_python(
   py::list tasks;
   const auto manifest = compiled.task_manifest();
   for (std::size_t index = 0; index < manifest.size(); ++index) {
-    auto encoded = offloaded_task_manifest_to_python(manifest[index]);
+    const auto task =
+        overlay_execution_plan_launch_requests(manifest[index], kernel);
+    auto encoded = offloaded_task_manifest_to_python(task);
     if (graph_dispatch != nullptr) {
       encoded["graph_dispatch_index"] = graph_dispatch_index;
       encoded["graph_kernel_name"] = graph_dispatch->kernel_name;
@@ -1153,7 +1186,8 @@ void export_lang(py::module &m) {
                  *kernel);
              py::list result;
              for (const auto &task : compiled.task_manifest()) {
-               result.append(offloaded_task_manifest_to_python(task));
+               result.append(offloaded_task_manifest_to_python(
+                   overlay_execution_plan_launch_requests(task, kernel)));
              }
              return result;
            })
@@ -1172,7 +1206,7 @@ void export_lang(py::module &m) {
                  program.compile_config(), program.get_device_caps(),
                  *kernel);
              return compiled_kernel_gpu_semantics_to_python(
-                 compiled, kernel->autodiff_mode);
+                 compiled, kernel->autodiff_mode, kernel);
            })
       .def("_kernel_gpu_artifact_qualification",
            [](Program &program, Kernel *kernel) {
@@ -1406,7 +1440,9 @@ void export_lang(py::module &m) {
                    program.compile_config(), program.get_device_caps(),
                    *dispatch.ti_kernel);
                for (const auto &task : compiled.task_manifest()) {
-                 auto item = offloaded_task_manifest_to_python(task);
+                 auto item = offloaded_task_manifest_to_python(
+                     overlay_execution_plan_launch_requests(
+                         task, dispatch.ti_kernel));
                  item["dispatch_index"] = dispatch_index;
                  item["kernel_name"] = dispatch.kernel_name;
                  item["dispatch_label"] = dispatch.dispatch_label;
@@ -1452,8 +1488,8 @@ void export_lang(py::module &m) {
                    program.compile_config(), program.get_device_caps(),
                    *dispatch.ti_kernel);
                segments.append(compiled_kernel_gpu_semantics_to_python(
-                   compiled, dispatch.ti_kernel->autodiff_mode, &dispatch,
-                   dispatch_index));
+                   compiled, dispatch.ti_kernel->autodiff_mode,
+                   dispatch.ti_kernel, &dispatch, dispatch_index));
              }
              result["segments"] = std::move(segments);
              return result;
@@ -6304,6 +6340,8 @@ void export_lang(py::module &m) {
       .def("set_task_launch_policy", &Kernel::set_task_launch_policy)
       .def("set_kernel_optimization_spec",
            &Kernel::set_kernel_optimization_spec)
+      .def("set_offload_execution_plan",
+           &Kernel::set_offload_execution_plan)
       .def("clear_compile_tier_override",
            &Kernel::clear_compile_tier_override)
       .def("get_compile_tier_override",

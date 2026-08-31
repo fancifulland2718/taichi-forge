@@ -427,6 +427,7 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->end_value = end_value;
   new_stmt->grid_dim = grid_dim;
   new_stmt->block_dim = block_dim;
+  new_stmt->source_block_dim_explicit = source_block_dim_explicit;
   new_stmt->one_to_one = one_to_one;
   new_stmt->reversed = reversed;
   new_stmt->is_bit_vectorized = is_bit_vectorized;
