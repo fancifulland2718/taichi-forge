@@ -5,6 +5,7 @@ from taichi_forge.graph._native import (
     BackendCommandGraphAction,
     NativeGraphExecutable,
     NativeGraphNode,
+    _GraphValidatedBindings,
 )
 from taichi_forge.hardware._retained import validate_retained_execution_contract
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -29,6 +30,12 @@ def validate_exact_bindings(recording, bindings, operation):
         f"{operation} bindings do not match the recording: "
         + "; ".join(details)
     )
+
+
+def graph_bindings_are_validated(bindings):
+    """Whether bindings carry the owning Graph's validation certificate."""
+
+    return isinstance(bindings, _GraphValidatedBindings)
 
 
 def runtime_generation_matches(owner):
@@ -66,11 +73,24 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         runtime_bindings,
         lifetime_leases,
         debug_info,
+        publish_time_binding_validation_stable=False,
     ):
+        if not isinstance(publish_time_binding_validation_stable, bool):
+            raise TypeError("publish_time_binding_validation_stable must be a bool")
+        if publish_time_binding_validation_stable and not callable(
+            getattr(recording, "validate_graph_bindings", None)
+        ):
+            raise ValueError(
+                "stable publish-time Graph binding validation requires a "
+                "validate_graph_bindings() implementation"
+            )
         self._recording = recording
         self._runtime_bindings = runtime_bindings
         self._lifetime_leases = lifetime_leases
         self._debug_info = debug_info
+        self.graph_publish_time_binding_validation_stable = (
+            publish_time_binding_validation_stable
+        )
         validate_retained_execution_contract(
             recording, tuple(_resolve(lifetime_leases, recording))
         )
@@ -78,6 +98,11 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
 
     def run(self, runtime_args):
         return self._recording.execute(runtime_args)
+
+    def validate_graph_bindings(self, runtime_args):
+        validate = getattr(self._recording, "validate_graph_bindings", None)
+        if validate is not None:
+            validate(runtime_args)
 
     @property
     def runtime_arg_schema(self):
@@ -109,12 +134,16 @@ class HardwareRecordingNode(NativeGraphNode):
         runtime_bindings,
         lifetime_leases,
         debug_info,
+        publish_time_binding_validation_stable=False,
     ):
         self._recording = recording
         self._options = {
             "runtime_bindings": runtime_bindings,
             "lifetime_leases": lifetime_leases,
             "debug_info": debug_info,
+            "publish_time_binding_validation_stable": (
+                publish_time_binding_validation_stable
+            ),
         }
 
     def compile(self):
@@ -127,8 +156,17 @@ def native_recording_node(
     runtime_bindings=None,
     lifetime_leases=(),
     debug_info=None,
+    publish_time_binding_validation_stable=False,
 ):
-    """Builds the common recordable-action Graph adapter."""
+    """Builds the common recordable-action Graph adapter.
+
+    ``publish_time_binding_validation_stable`` is an internal certificate for
+    validation that depends only on identities/types retained by one immutable
+    Graph BindingVersion. It must remain false for dynamic generation, shape,
+    replacement, or submission-owner checks. The Vulkan graphics recordings
+    are currently the only certified users: native pipeline-handle lookup is
+    their separate fail-closed lifetime boundary.
+    """
 
     if runtime_bindings is None:
         runtime_bindings = lambda item: tuple(
@@ -141,6 +179,7 @@ def native_recording_node(
         runtime_bindings=runtime_bindings,
         lifetime_leases=lifetime_leases,
         debug_info=debug_info,
+        publish_time_binding_validation_stable=publish_time_binding_validation_stable,
     )
 
 
@@ -150,6 +189,7 @@ __all__ = [
     "native_recording_node",
     "runtime_generation_matches",
     "static_resource_effect",
+    "graph_bindings_are_validated",
     "validate_exact_bindings",
     "validate_runtime_generation",
 ]

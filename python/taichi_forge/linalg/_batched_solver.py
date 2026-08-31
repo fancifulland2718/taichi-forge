@@ -1756,6 +1756,28 @@ class BatchedSolvePlan:
             ),
         )
 
+    def _collect_pending_submission(self, runtime):
+        pending_ref = self._pending_submission
+        if pending_ref is None:
+            return None
+        pending = pending_ref()
+        if pending is None:
+            self._pending_submission = None
+            return None
+        completion = (
+            pending._graph_ticket._completion
+            if pending._graph_ticket is not None
+            else pending._completion
+        )
+        runtime.collect_ready_runtime_submission_owner(completion)
+        # The exact registry entry may have been the final strong owner. Drop
+        # this local reference before re-reading the plan's weak slot.
+        pending = None
+        pending = pending_ref()
+        if pending is None:
+            self._pending_submission = None
+        return pending
+
     def submit(
         self,
         rhs,
@@ -1810,12 +1832,7 @@ class BatchedSolvePlan:
             )
         with self._lifecycle_lock:
             runtime = get_runtime()
-            runtime.collect_ready_runtime_submission_owners()
-            pending = (
-                self._pending_submission()
-                if self._pending_submission is not None
-                else None
-            )
+            pending = self._collect_pending_submission(runtime)
             if pending is not None:
                 self._submission_rejections += 1
                 raise TaichiRuntimeError(
@@ -1840,12 +1857,7 @@ class BatchedSolvePlan:
                     raise TaichiRuntimeError(
                         "BatchedSolvePlan cannot be used after ti.reset()"
                     )
-                runtime.collect_ready_runtime_submission_owners()
-                pending = (
-                    self._pending_submission()
-                    if self._pending_submission is not None
-                    else None
-                )
+                pending = self._collect_pending_submission(runtime)
                 if pending is not None:
                     self._submission_rejections += 1
                     raise TaichiRuntimeError(
@@ -1976,12 +1988,7 @@ class BatchedSolvePlan:
     ):
         with self._lifecycle_lock:
             runtime = get_runtime()
-            runtime.collect_ready_runtime_submission_owners()
-            pending = (
-                self._pending_submission()
-                if self._pending_submission is not None
-                else None
-            )
+            pending = self._collect_pending_submission(runtime)
             if pending is not None:
                 self._submission_rejections += 1
                 raise TaichiRuntimeError(
@@ -2579,11 +2586,7 @@ class BatchedSolveWorkspacePool:
     @staticmethod
     def _pending(plan):
         with plan._lifecycle_lock:
-            return (
-                plan._pending_submission()
-                if plan._pending_submission is not None
-                else None
-            )
+            return plan._collect_pending_submission(get_runtime())
 
     def _materialize_through(self, lane):
         while len(self._plans) <= lane:

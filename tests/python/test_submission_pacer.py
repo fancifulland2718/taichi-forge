@@ -5,6 +5,7 @@ import pytest
 
 from taichi_forge.graph._submission import (
     SubmissionPacer,
+    _COMPLETION_POLL_BATCH_SIZE,
     _new_submission_lane,
 )
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -44,6 +45,16 @@ class _FailingCompletion(_FakeCompletion):
         raise RuntimeError("backend completion failed")
 
 
+class _CountingCompletion(_FakeCompletion):
+    def __init__(self):
+        super().__init__()
+        self.done_calls = 0
+
+    def done(self):
+        self.done_calls += 1
+        return super().done()
+
+
 def _wait_until(predicate):
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
@@ -51,6 +62,31 @@ def _wait_until(predicate):
             return
         time.sleep(0.001)
     raise AssertionError("condition did not become true")
+
+
+def _fill_counted_active_submissions(pacer, runtime, default_lane, count):
+    active = []
+    for index in range(count):
+        lease = pacer._reserve(
+            runtime,
+            default_lane,
+            lane=f"active-{index}",
+            on_saturation="wait",
+        )
+        completion = _CountingCompletion()
+        lease._attach(completion)
+        active.append((lease, completion))
+    for _, completion in active:
+        completion.done_calls = 0
+    return active
+
+
+def _finish_counted_active_submissions(active):
+    for lease, completion in active:
+        if lease._released:
+            continue
+        completion.complete()
+        lease._completion_wait(completion)
 
 
 def test_submission_pacer_reports_count_based_resource_contract():
@@ -319,6 +355,120 @@ def test_submission_pacer_avoids_global_completion_head_of_line_blocking():
     slow_completion.complete()
     slow._completion_wait(slow_completion)
     assert pacer.statistics()["completed"] == 3
+
+
+def test_submission_pacer_bounds_completion_queries_per_reserve():
+    runtime = _FakeRuntime()
+    active_count = _COMPLETION_POLL_BATCH_SIZE * 3
+    pacer = SubmissionPacer(active_count)
+    default_lane = _new_submission_lane("test")
+    active = _fill_counted_active_submissions(
+        pacer,
+        runtime,
+        default_lane,
+        active_count,
+    )
+
+    with pytest.raises(TaichiRuntimeError, match="saturated"):
+        pacer._reserve(
+            runtime,
+            default_lane,
+            lane="blocked",
+            on_saturation="raise",
+        )
+
+    done_calls = [completion.done_calls for _, completion in active]
+    assert sum(done_calls) == _COMPLETION_POLL_BATCH_SIZE
+    assert max(done_calls) == 1
+
+    for _, completion in active:
+        completion.complete()
+    stats = pacer.statistics()
+    assert stats["in_flight"] == 0
+    assert stats["completed"] == active_count
+
+
+def test_submission_pacer_reaps_out_of_order_completion_after_rotation():
+    runtime = _FakeRuntime()
+    active_count = _COMPLETION_POLL_BATCH_SIZE + 1
+    pacer = SubmissionPacer(active_count)
+    default_lane = _new_submission_lane("test")
+    active = _fill_counted_active_submissions(
+        pacer,
+        runtime,
+        default_lane,
+        active_count,
+    )
+
+    with pytest.raises(TaichiRuntimeError, match="saturated"):
+        pacer._reserve(
+            runtime,
+            default_lane,
+            lane="first-pass",
+            on_saturation="raise",
+        )
+    unqueried = [item for item in active if item[1].done_calls == 0]
+    assert len(unqueried) == 1
+
+    completed_lease, completed = unqueried[0]
+    completed.complete()
+    replacement = pacer._reserve(
+        runtime,
+        default_lane,
+        lane="replacement",
+        on_saturation="raise",
+    )
+
+    assert completed_lease._released
+    assert all(
+        not completion._ready.is_set()
+        for lease, completion in active
+        if lease is not completed_lease
+    )
+    replacement._attach(_FakeCompletion(backend_work=False))
+    _finish_counted_active_submissions(active)
+
+
+def test_submission_pacer_reclaims_within_one_full_poll_rotation():
+    runtime = _FakeRuntime()
+    active_count = _COMPLETION_POLL_BATCH_SIZE * 3 + 1
+    pacer = SubmissionPacer(active_count)
+    default_lane = _new_submission_lane("test")
+    active = _fill_counted_active_submissions(
+        pacer,
+        runtime,
+        default_lane,
+        active_count,
+    )
+    last_lease, last_completion = active[-1]
+    last_completion.complete()
+
+    # Preferred-lane sorting is confined to each rotating slice. A completion
+    # at the back of the current backlog is therefore discovered within one
+    # full ceil(backlog / batch size) rotation, rather than in a constant tick.
+    maximum_passes = (
+        active_count + _COMPLETION_POLL_BATCH_SIZE - 1
+    ) // _COMPLETION_POLL_BATCH_SIZE
+    replacement = None
+    for pass_index in range(1, maximum_passes + 1):
+        try:
+            replacement = pacer._reserve(
+                runtime,
+                default_lane,
+                lane=f"pass-{pass_index}",
+                on_saturation="raise",
+            )
+        except TaichiRuntimeError as exc:
+            assert "saturated" in str(exc)
+        else:
+            break
+
+    assert replacement is not None
+    assert pass_index == maximum_passes
+    assert last_lease._released
+    assert last_completion.done_calls == 1
+    replacement._attach(_FakeCompletion(backend_work=False))
+    _finish_counted_active_submissions(active)
 
 
 def test_submission_pacer_fails_closed_after_backend_completion_failure():

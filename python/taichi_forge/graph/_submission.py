@@ -9,7 +9,7 @@ import itertools
 import operator
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -24,6 +24,11 @@ _lane_ids = itertools.count(1)
 # completion and an unbounded driver-query loop.
 _PROGRESS_POLL_INITIAL_SECONDS = 0.0005
 _PROGRESS_POLL_MAX_SECONDS = 0.005
+
+# Keep opportunistic ``done()`` queries independent of the number of active
+# submissions. Rotating the queried slice ensures that a completion which
+# finishes out of order is observed within a bounded number of progress passes.
+_COMPLETION_POLL_BATCH_SIZE = 8
 
 
 @dataclass(frozen=True)
@@ -158,6 +163,7 @@ class SubmissionPacer:
         self._failure = None
         self._active = {}
         self._active_by_lane = {}
+        self._completion_poll_order = OrderedDict()
         self._waiters = {}
         self._last_granted_lane = None
         self._launching_sequence = None
@@ -306,14 +312,26 @@ class SubmissionPacer:
             return lane
         return None
 
-    def _poll_ready_completions(self, preferred_lane=None):
+    def _poll_ready_completions(
+        self,
+        preferred_lane=None,
+        *,
+        max_polls=_COMPLETION_POLL_BATCH_SIZE,
+    ):
         with self._condition:
-            snapshot = list(
-                (lease, lease._completion)
-                for lease in self._active.values()
-                if lease._completion is not None and not lease._released
-            )
+            snapshot = []
+            if max_polls is None:
+                poll_count = len(self._completion_poll_order)
+            else:
+                poll_count = min(len(self._completion_poll_order), max_polls)
+            for _ in range(poll_count):
+                sequence, lease = self._completion_poll_order.popitem(last=False)
+                self._completion_poll_order[sequence] = lease
+                snapshot.append((lease, lease._completion))
         if preferred_lane is not None:
+            # A preferred lane only leads this rotating slice. It cannot skip
+            # the cursor ahead, so every completion remains discoverable within
+            # at most ceil(pollable backlog / batch size) progress passes.
             snapshot.sort(key=lambda item: item[0]._lane != preferred_lane)
         observed_ready = False
         for lease, completion in snapshot:
@@ -391,9 +409,7 @@ class SubmissionPacer:
                     if not owns_progress:
                         self._condition.wait()
                         continue
-                    preferred_lane = self._preferred_progress_lane_locked(
-                        request.lane
-                    )
+                    preferred_lane = self._preferred_progress_lane_locked(request.lane)
 
                 observed_ready = self._poll_ready_completions(preferred_lane)
                 with self._condition:
@@ -401,13 +417,9 @@ class SubmissionPacer:
                         progress_poll_seconds = _PROGRESS_POLL_INITIAL_SECONDS
                         self._condition.notify_all()
                     else:
-                        notified = self._condition.wait(
-                            timeout=progress_poll_seconds
-                        )
+                        notified = self._condition.wait(timeout=progress_poll_seconds)
                         if notified:
-                            progress_poll_seconds = (
-                                _PROGRESS_POLL_INITIAL_SECONDS
-                            )
+                            progress_poll_seconds = _PROGRESS_POLL_INITIAL_SECONDS
                         else:
                             progress_poll_seconds = min(
                                 progress_poll_seconds * 2.0,
@@ -439,6 +451,7 @@ class SubmissionPacer:
             lease._completion = completion
             self._launching_sequence = None
             if completion.has_backend_work:
+                self._completion_poll_order[lease._sequence] = lease
                 self._grant_next_locked()
             else:
                 self._finish_lease_locked(lease, completed=True)
@@ -449,6 +462,7 @@ class SubmissionPacer:
         if current is not lease:
             return False
         self._active.pop(lease._sequence)
+        self._completion_poll_order.pop(lease._sequence, None)
         lane = lease._lane
         lane_active = self._active_by_lane[lane] - 1
         if lane_active:
@@ -494,13 +508,14 @@ class SubmissionPacer:
                 lease._released = True
             self._active.clear()
             self._active_by_lane.clear()
+            self._completion_poll_order.clear()
             self._launching_sequence = None
             self._runtime = None
             self._condition.notify_all()
 
     def statistics(self):
-        """Returns bounded-admission, fairness, and per-lane telemetry."""
-        self._poll_ready_completions()
+        """Returns telemetry after a full nonblocking completion poll."""
+        self._poll_ready_completions(max_polls=None)
         with self._condition:
             lanes = {}
             for lane, counters in self._lane_counters.items():

@@ -80,6 +80,100 @@ def test_solve_submission_releases_retained_owner_after_wait():
     assert plan._pending_submission is None
 
 
+class _PendingCompletion:
+    program_domain = -17
+
+    def __init__(self, sequence):
+        self.sequence = sequence
+        self.ready = False
+        self.polls = 0
+
+    def done(self):
+        self.polls += 1
+        return self.ready
+
+
+class _PendingSubmission:
+    def __init__(self, completion):
+        self._completion = completion
+        self._graph_ticket = None
+
+
+def _bare_batched_plan(pending):
+    plan = object.__new__(ti.linalg.experimental.BatchedSolvePlan)
+    plan._pending_submission = weakref.ref(pending)
+    return plan
+
+
+def test_batched_plan_collects_exact_pending_owner_beyond_poll_budget():
+    runtime = impl.PyTaichi()
+    backlog = [_PendingCompletion(sequence) for sequence in range(24)]
+    for completion in backlog:
+        runtime.retain_runtime_submission_owner(completion, object())
+
+    completion = _PendingCompletion(24)
+    pending = _PendingSubmission(completion)
+    runtime.retain_runtime_submission_owner(completion, pending)
+    key = runtime._runtime_submission_key(completion)
+    runtime._runtime_submission_owners.move_to_end(key)
+    for item in (*backlog, completion):
+        item.polls = 0
+    assert key not in tuple(runtime._runtime_submission_owners)[:8]
+
+    plan = _bare_batched_plan(pending)
+    pending_ref = weakref.ref(pending)
+    del pending
+    completion.ready = True
+
+    assert plan._collect_pending_submission(runtime) is None
+    assert plan._pending_submission is None
+    assert pending_ref() is None
+    assert key not in runtime._runtime_submission_owners
+    assert completion.polls == 1
+    assert all(item.polls == 0 for item in backlog)
+
+
+def test_batched_plan_pending_collection_preserves_noncollectable_owners():
+    runtime = impl.PyTaichi()
+
+    missing_completion = _PendingCompletion(1)
+    missing = _PendingSubmission(missing_completion)
+    missing_plan = _bare_batched_plan(missing)
+    assert missing_plan._collect_pending_submission(runtime) is missing
+    assert missing_plan._pending_submission() is missing
+    assert missing_completion.polls == 0
+
+    unfinished_completion = _PendingCompletion(2)
+    unfinished = _PendingSubmission(unfinished_completion)
+    unfinished_plan = _bare_batched_plan(unfinished)
+    runtime.retain_runtime_submission_owner(unfinished_completion, unfinished)
+    unfinished_completion.polls = 0
+    assert unfinished_plan._collect_pending_submission(runtime) is unfinished
+    assert unfinished_plan._pending_submission() is unfinished
+    unfinished_key = runtime._runtime_submission_key(unfinished_completion)
+    assert runtime._runtime_submission_owners[unfinished_key][0] is (
+        unfinished_completion
+    )
+    assert unfinished_completion.polls == 1
+
+    original_completion = _PendingCompletion(3)
+    original = _PendingSubmission(original_completion)
+    original_plan = _bare_batched_plan(original)
+    replacement_completion = _PendingCompletion(3)
+    replacement = _PendingSubmission(replacement_completion)
+    runtime.retain_runtime_submission_owner(replacement_completion, replacement)
+    replacement_key = runtime._runtime_submission_key(replacement_completion)
+
+    with pytest.raises(RuntimeError, match="completion key was reused"):
+        original_plan._collect_pending_submission(runtime)
+    assert original_plan._pending_submission() is original
+    assert runtime._runtime_submission_owners[replacement_key] == (
+        replacement_completion,
+        replacement,
+    )
+    assert original_completion.polls == 0
+
+
 @test_utils.test(
     arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False
 )

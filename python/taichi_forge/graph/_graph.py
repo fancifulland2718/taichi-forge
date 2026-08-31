@@ -3,6 +3,7 @@ import os
 import threading
 import time
 import warnings
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
@@ -4842,7 +4843,18 @@ class _GraphRunContext:
         self._last_flattened = None
         self._trace_recorder = None
 
-    def begin(self, args, fixed_args=None, trace_recorder=None):
+    def begin(
+        self,
+        args,
+        fixed_args=None,
+        trace_recorder=None,
+        *,
+        flattened_args=None,
+    ):
+        if flattened_args is not None and fixed_args:
+            raise TaichiRuntimeError(
+                "A preflattened Graph binding frame cannot be merged with fixed bindings"
+            )
         if fixed_args:
             overlap = fixed_args.keys() & args.keys()
             if overlap:
@@ -4855,7 +4867,7 @@ class _GraphRunContext:
             self._args = merged
         else:
             self._args = args
-        self._flattened_args = None
+        self._flattened_args = flattened_args
         self._trace_recorder = trace_recorder
 
     def end(self):
@@ -5306,7 +5318,7 @@ class _CompiledNativeGraphNode:
             all_args = context.runtime_args()
             names = self.recordable_action.backend_command_recording.binding_names
             bindings = {name: all_args[name] for name in names}
-            return self.recordable_action.execute(bindings)
+            return self.recordable_action.execute_graph_validated(bindings)
         runtime_args = None
         if self.needs_runtime_args:
             all_args = context.runtime_args()
@@ -6551,10 +6563,56 @@ class _CompiledWhileGraphNode:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "exact_counter_required"
 
+        # Everything below describes the materialized control topology. A
+        # Graph is invalidated across runtime reinitialization, so none of
+        # these facts can change during replay. Keep the replay path focused
+        # on the predicate/counter/status resources that are genuinely
+        # invocation-dependent.
+        self._supports_native_submission = (
+            self.lowering_mode in ("auto", "portable")
+            if arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64)
+            else (
+                self.lowering_mode in ("auto", "native_required")
+                and self._native_upgrade_eligible
+                and self.counter is not None
+                and self._native_submission_eligible
+            )
+        )
+        self._portable_max_chunk = max(self._chunks, default=1)
+        nested_inners = self._vulkan_nested_inner or self._cuda_nested_inner or ()
+        self._nested_inner_max_iterations = tuple(
+            inner.max_iterations for inner in nested_inners
+        )
+        self._nested_inner_compound_chunk_limits = tuple(
+            inner.compound_chunk_limit for inner in nested_inners
+        )
+        # Only the native flat Vulkan route consumes this tuple, and that
+        # route already has a <=512-iteration eligibility bound. Keeping it
+        # empty elsewhere avoids turning an intentionally large portable or
+        # CUDA iteration budget into persistent host memory at Graph build.
+        self._vulkan_chunk_iterations = (
+            tuple(
+                min(
+                    self.compound_chunk_limit,
+                    self.max_iterations - offset,
+                )
+                for offset in range(
+                    0,
+                    self.max_iterations,
+                    self.compound_chunk_limit,
+                )
+            )
+            if arch == _ti_core.Arch.vulkan
+            and self._supports_native_submission
+            and not self._has_nested_control
+            else ()
+        )
+
     def _select_chunk(self, remaining):
         if self._portable_exact_nested:
             return 1
-        return max(size for size in self._chunks if size <= remaining)
+        bounded = min(int(remaining), self._portable_max_chunk)
+        return 1 << (bounded.bit_length() - 1)
 
     def _mark_nested_portable(self):
         # The enclosing control node owns native depth-2 lowering. Mark the
@@ -6564,14 +6622,7 @@ class _CompiledWhileGraphNode:
 
     @property
     def supports_native_submission(self):
-        if impl.current_cfg().arch in (_ti_core.Arch.x64, _ti_core.Arch.arm64):
-            return self.lowering_mode in ("auto", "portable")
-        return (
-            self.lowering_mode in ("auto", "native_required")
-            and self._native_upgrade_eligible
-            and self.counter is not None
-            and self._native_submission_eligible
-        )
+        return self._supports_native_submission
 
     def run_for_submission(self, context, temporaries=None):
         if not self.supports_native_submission:
@@ -6654,8 +6705,8 @@ class _CompiledWhileGraphNode:
                         outer_condition_count,
                         inner_boundaries,
                         self.max_iterations,
-                        tuple(inner.max_iterations for inner in inners),
-                        tuple(inner.compound_chunk_limit for inner in inners),
+                        self._nested_inner_max_iterations,
+                        self._nested_inner_compound_chunk_limits,
                         outer_status,
                         inner_statuses,
                         False,
@@ -6675,7 +6726,7 @@ class _CompiledWhileGraphNode:
                         outer_condition_count,
                         inner_boundaries,
                         self.max_iterations,
-                        tuple(inner.max_iterations for inner in inners),
+                        self._nested_inner_max_iterations,
                         outer_status,
                         inner_statuses,
                         self._cuda_nested_control_lowering
@@ -6716,7 +6767,6 @@ class _CompiledWhileGraphNode:
                     "ndarray status resource"
                 )
 
-            chunk_limit = self.compound_chunk_limit
             chunk_count = self.compound_chunk_count
             if chunk_count > 8:
                 raise TaichiRuntimeError(
@@ -6726,10 +6776,6 @@ class _CompiledWhileGraphNode:
             flattened_args = context.flattened_args(
                 self._vulkan_structured.recording_runtime_arg_names
             )
-            chunk_iterations = tuple(
-                min(chunk_limit, self.max_iterations - offset)
-                for offset in range(0, self.max_iterations, chunk_limit)
-            )
             submitted = self._vulkan_structured.compiled_graph.jit_submit_bounded_vulkan_compound_cached(
                 context.compile_config(),
                 flattened_args,
@@ -6737,7 +6783,7 @@ class _CompiledWhileGraphNode:
                 predicate_ndarray,
                 counter_ndarray,
                 self.condition_dispatch_count,
-                chunk_iterations,
+                self._vulkan_chunk_iterations,
                 status_ndarray,
                 _vulkan_compound_strategy_codes(
                     chunk_count, self.vulkan_first_chunk_strategy
@@ -9299,6 +9345,134 @@ def _parallel_storage_description(resource, value):
 class _PreparedGraphInvocation:
     arguments: object
     submission_owners: tuple
+    flattened_args: object = None
+    binding_version: object = None
+
+
+@dataclass(frozen=True)
+class _GraphBindingPlan:
+    """Immutable Python slot plan compiled with one Graph definition."""
+
+    public_names: tuple
+    public_name_set: frozenset
+    slot_by_name: object
+    fixed_names: tuple
+    derived_names: tuple
+    temporary_names: tuple
+    static_fast_path_blockers: tuple
+
+    def to_dict(self):
+        return MappingProxyType(
+            {
+                "slot_order": self.public_names,
+                "slot_by_name": self.slot_by_name,
+                "fixed_names": self.fixed_names,
+                "derived_names": self.derived_names,
+                "temporary_names": self.temporary_names,
+                "static_fast_path_qualified": not self.static_fast_path_blockers,
+                "static_fast_path_blockers": self.static_fast_path_blockers,
+            }
+        )
+
+
+@dataclass(frozen=True, eq=False)
+class _GraphBindingVersion:
+    """One immutable, generation-qualified public binding snapshot."""
+
+    revision: int
+    runtime_generation: int
+    slot_values: tuple
+    arguments: object
+    flattened_args: object
+    fast_path_qualified: bool
+    volatile_reasons: tuple
+
+
+def _snapshot_graph_binding_value(value):
+    # Scalars and matrices are invocation values, not resource identities.
+    # Snapshot them at publish time so mutating a caller-owned Matrix cannot
+    # silently change an already published BindingVersion. Device allocations
+    # remain shared intentionally: their contents are dynamic kernel inputs.
+    if isinstance(value, Matrix) and not value.is_host_access:
+        return Matrix(np.array(value.entries, copy=True))
+    return value
+
+
+class GraphBindingSet:
+    """Versioned runtime arguments for repeat Graph invocation.
+
+    Construct through :meth:`Graph.bind`. ``update()`` atomically publishes a
+    copy-on-write version. Python scalars and matrices are snapshotted by value;
+    device resource objects are retained by identity, so their device contents
+    remain dynamic. A Graph only takes the version snapshot after pacer waits.
+    """
+
+    def __init__(self, graph, arguments):
+        self._graph = graph
+        self._lock = threading.RLock()
+        self._retired_versions = {}
+        self._version = None
+        graph._initialize_binding_set(self, arguments)
+
+    @property
+    def revision(self):
+        with self._lock:
+            return self._version.revision
+
+    @property
+    def fast_path_qualified(self):
+        with self._lock:
+            return self._version.fast_path_qualified
+
+    def snapshot(self):
+        """Return the current immutable public argument mapping."""
+
+        with self._lock:
+            return MappingProxyType(
+                {
+                    name: _snapshot_graph_binding_value(value)
+                    for name, value in self._version.arguments.items()
+                }
+            )
+
+    def update(self, values=None, /, **changes):
+        """Atomically publish a partial copy-on-write binding update."""
+
+        patch = {}
+        if values is not None:
+            if not isinstance(values, Mapping):
+                raise TypeError("GraphBindingSet.update() values must be a mapping")
+            patch.update(values)
+        overlap = patch.keys() & changes.keys()
+        if overlap:
+            raise TypeError(
+                "GraphBindingSet.update() received duplicate bindings: "
+                + ", ".join(sorted(overlap))
+            )
+        patch.update(changes)
+        if not patch:
+            return self
+        self._graph._update_binding_set(self, patch, replace_all=False)
+        return self
+
+    def replace(self, arguments):
+        """Atomically replace every public binding."""
+
+        self._graph._update_binding_set(self, arguments, replace_all=True)
+        return self
+
+    def statistics(self):
+        with self._lock:
+            version = self._version
+            return MappingProxyType(
+                {
+                    "revision": version.revision,
+                    "slot_count": len(version.slot_values),
+                    "fast_path_qualified": version.fast_path_qualified,
+                    "volatile_reasons": version.volatile_reasons,
+                    "live_retired_versions": len(self._retired_versions),
+                }
+            )
 
 
 def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend):
@@ -9462,6 +9636,19 @@ class _GraphSpec:
             getattr(n, "source_native_count", 0) for n in self.nodes
         )
         self.structured_control_nodes = structured_control_nodes
+        self.structured_control_roots = tuple(
+            node for node in structured_control_nodes if node.control_depth == 1
+        )
+        self.structured_while_roots = tuple(
+            node
+            for node in self.structured_control_roots
+            if isinstance(node, _CompiledWhileGraphNode)
+        )
+        self.supports_native_structured_submission = bool(
+            self.structured_control_roots
+        ) and all(
+            node.supports_native_submission for node in self.structured_control_roots
+        )
         self.nested_control_resource_pairs = _nested_control_resource_pairs(
             self.structured_control_nodes
         )
@@ -9500,6 +9687,15 @@ class _GraphSpec:
                     seen_lifetime_leases.add(identity)
                     lifetime_leases.append(lease)
         self.lifetime_leases = tuple(lifetime_leases)
+        # Some providers already fail stale handles closed under the native
+        # submission/resource lock. They still remain strong lifetime owners,
+        # but do not need a Python validation call before every replay.
+        self.runtime_lifetime_leases = tuple(
+            lease
+            for lease in self.lifetime_leases
+            if getattr(lease, "validate_graph_lifetime", None) is not None
+            and getattr(lease, "graph_runtime_lifetime_check_required", True)
+        )
         self.exclusive_provider_submission = any(
             bool(getattr(lease, "exclusive_graph_submission", False))
             for lease in self.lifetime_leases
@@ -9539,6 +9735,59 @@ class _GraphSpec:
         self.snode_tree_dependency_info = frozenset().union(
             *(n.snode_tree_dependency_info for n in self.nodes)
         )
+        public_names = tuple(sorted(self.runtime_arg_names))
+        static_fast_path_blockers = []
+        if self.runtime_lifetime_leases:
+            static_fast_path_blockers.append("volatile_lifetime_provider")
+        has_uncertified_binding_validation = any(
+            callable(getattr(lease, "validate_graph_bindings", None))
+            and getattr(
+                lease,
+                "graph_publish_time_binding_validation_stable",
+                False,
+            )
+            is not True
+            for lease in self.lifetime_leases
+        )
+        has_dynamic_binding_hook = any(
+            callable(getattr(lease, hook, None))
+            for lease in self.lifetime_leases
+            for hook in ("bind_graph_arguments", "graph_submission_owners")
+        )
+        if has_uncertified_binding_validation or has_dynamic_binding_hook:
+            # A certified type/shape check can be discharged when publishing
+            # an immutable BindingVersion. Resource replacement and exact
+            # per-submission owners are dynamic by definition and therefore
+            # always keep replay on the validated slow path.
+            static_fast_path_blockers.append("volatile_runtime_provider")
+        if self.fixed_runtime_args:
+            static_fast_path_blockers.append("lane_fixed_bindings")
+        if self.derived_runtime_arg_names:
+            static_fast_path_blockers.append("provider_derived_bindings")
+        if self.temporary_actions:
+            static_fast_path_blockers.append("lane_temporary_bindings")
+        if self.nested_control_resource_pairs:
+            static_fast_path_blockers.append("dynamic_control_aliases")
+        if self.memory_layout_requirements or self.memory_disjoint_pairs:
+            static_fast_path_blockers.append("dynamic_memory_recipe")
+        self.binding_plan = _GraphBindingPlan(
+            public_names=public_names,
+            public_name_set=self.runtime_arg_names,
+            slot_by_name=MappingProxyType(
+                {name: index for index, name in enumerate(public_names)}
+            ),
+            fixed_names=tuple(sorted(self.fixed_runtime_args)),
+            derived_names=tuple(sorted(self.derived_runtime_arg_names)),
+            temporary_names=tuple(sorted(self.temporary_runtime_arg_names)),
+            static_fast_path_blockers=tuple(static_fast_path_blockers),
+        )
+        self._binding_statistics = {
+            "version_builds": 0,
+            "flattened_frame_builds": 0,
+            "raw_replay_validations": 0,
+            "version_fast_replays": 0,
+            "version_volatile_replays": 0,
+        }
         self.repeat_count = 0
         self.ir_root = SequentialRegion(
             tuple(node.ir_node for node in self.nodes), name="graph"
@@ -9547,23 +9796,10 @@ class _GraphSpec:
         for node in self.structured_control_nodes:
             node._graph_owner_token = structured_owner_token
 
-    @property
-    def supports_native_structured_submission(self):
-        structured_roots = tuple(
-            node for node in self.structured_control_nodes if node.control_depth == 1
-        )
-        return bool(structured_roots) and all(
-            node.supports_native_submission for node in structured_roots
-        )
-
     def terminal_control_report(self, logical_iterations):
         """Synthesize the control report for one terminal-only submission."""
 
-        roots = tuple(
-            node
-            for node in self.structured_control_nodes
-            if node.control_depth == 1 and isinstance(node, _CompiledWhileGraphNode)
-        )
+        roots = self.structured_while_roots
         if len(roots) != 1 or not self.supports_native_structured_submission:
             raise TaichiRuntimeError(
                 "Terminal-only Graph observation requires exactly one "
@@ -9613,7 +9849,7 @@ class _GraphSpec:
         return self._pipeline_definition_cache
 
     def validate_lifetime_leases(self):
-        for lease in self.lifetime_leases:
+        for lease in self.runtime_lifetime_leases:
             validate = getattr(lease, "validate_graph_lifetime", None)
             if validate is not None:
                 validate()
@@ -9670,6 +9906,128 @@ class _GraphSpec:
                 observation._observe_graph_completion()
             return ()
         return tuple(observations)
+
+    @staticmethod
+    def _binding_value_volatile_reason(name, value):
+        from taichi_forge.lang.device_extent import DeviceExtent
+
+        if isinstance(value, DeviceExtent):
+            return f"volatile_device_extent:{name}"
+        if isinstance(value, ProviderOwnedNdarrayBinding):
+            return f"volatile_provider_binding:{name}"
+        if isinstance(value, (DenseNdarrayView, ScalarField, MatrixField)):
+            return f"volatile_dense_storage:{name}"
+        if isinstance(value, Matrix) and value.is_host_access:
+            return f"volatile_host_matrix:{name}"
+        if isinstance(value, (int, float, Matrix, Ndarray, Texture)):
+            return None
+        raise TaichiRuntimeError(
+            "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "
+            "canonical dense Field, DenseNdarrayView, and Texture are supported "
+            "as Graph runtime arguments but got "
+            f"{type(value)} for {name!r}"
+        )
+
+    def build_binding_version(
+        self,
+        args,
+        revision,
+        *,
+        fixed_runtime_args=None,
+        allow_fast_path=True,
+        entrypoint="Graph.bind",
+    ):
+        self.validate_runtime_args(args, entrypoint, fixed_runtime_args)
+        slot_values = tuple(
+            _snapshot_graph_binding_value(args[name])
+            for name in self.binding_plan.public_names
+        )
+        snapshot = MappingProxyType(
+            dict(zip(self.binding_plan.public_names, slot_values))
+        )
+        blockers = list(self.binding_plan.static_fast_path_blockers)
+        if not allow_fast_path:
+            blockers.append("qualified_fusion_selector")
+        for name, value in zip(self.binding_plan.public_names, slot_values):
+            reason = self._binding_value_volatile_reason(name, value)
+            if reason is not None:
+                blockers.append(reason)
+
+        flattened = None
+        if not blockers:
+            context = _GraphRunContext()
+            context.begin(snapshot)
+            try:
+                # This private dict is never exposed for mutation. It owns the
+                # exact scalar/matrix snapshot and generation-qualified runtime
+                # storage arguments consumed by the compiled CGraph.
+                flattened = dict(context.flattened_args())
+            finally:
+                context.end()
+            self._binding_statistics["flattened_frame_builds"] += 1
+        self._binding_statistics["version_builds"] += 1
+        return _GraphBindingVersion(
+            revision=int(revision),
+            runtime_generation=int(impl.runtime_generation()),
+            slot_values=slot_values,
+            arguments=snapshot,
+            flattened_args=flattened,
+            fast_path_qualified=not blockers,
+            volatile_reasons=tuple(blockers),
+        )
+
+    def prepare_invocation(
+        self,
+        args,
+        temporaries=None,
+        fixed_runtime_args=None,
+        *,
+        entrypoint,
+        binding_version=None,
+    ):
+        if binding_version is not None and binding_version.fast_path_qualified:
+            if temporaries or fixed_runtime_args:
+                raise TaichiRuntimeError(
+                    "Fast Graph BindingVersion unexpectedly requires a lane overlay"
+                )
+            self._binding_statistics["version_fast_replays"] += 1
+            return _PreparedGraphInvocation(
+                binding_version.arguments,
+                (binding_version,),
+                binding_version.flattened_args,
+                binding_version,
+            )
+
+        if binding_version is None:
+            self._binding_statistics["raw_replay_validations"] += 1
+        else:
+            self._binding_statistics["version_volatile_replays"] += 1
+            args = binding_version.arguments
+        self.validate_runtime_args(args, entrypoint, fixed_runtime_args)
+        prepared = self.prepare_runtime_args(args, temporaries, fixed_runtime_args)
+        if binding_version is None:
+            return prepared
+        return _PreparedGraphInvocation(
+            prepared.arguments,
+            (*prepared.submission_owners, binding_version),
+            None,
+            binding_version,
+        )
+
+    def binding_statistics(self):
+        return MappingProxyType(
+            {
+                "schema_version": 1,
+                **self._binding_statistics,
+                "slot_order": self.binding_plan.public_names,
+                "static_fast_path_qualified": (
+                    not self.binding_plan.static_fast_path_blockers
+                ),
+                "static_fast_path_blockers": (
+                    self.binding_plan.static_fast_path_blockers
+                ),
+            }
+        )
 
     def prepare_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
         if isinstance(args, _PreparedGraphInvocation):
@@ -9841,7 +10199,7 @@ class _GraphSpec:
         entrypoint="Graph.run",
         fixed_runtime_args=None,
     ):
-        if not isinstance(args, dict):
+        if not isinstance(args, (dict, MappingProxyType)):
             raise TaichiRuntimeError(
                 f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
@@ -10262,53 +10620,59 @@ class _GraphExecutable:
             for index, node in enumerate(self.spec.structured_control_nodes)
             if isinstance(node, _CompiledWhileGraphNode)
         }
+        self._submission_steps = self._build_submission_steps(self.spec.nodes)
 
-    def _run_node_for_submission(self, node, context, temporaries, telemetry):
-        if isinstance(node, _CompiledSequentialRegionNode):
-            if not node.supports_native_submission:
-                raise TaichiRuntimeError(
-                    "Structured sequence submission requires every control "
-                    "region to provide submission-capable native lowering"
-                )
-            for child in node.nodes:
-                self._run_node_for_submission(child, context, temporaries, telemetry)
-            return
+    def _build_submission_steps(self, nodes):
+        steps = []
 
-        if isinstance(
-            node,
-            (
-                _CompiledWhileGraphNode,
-                _CompiledIfGraphNode,
-                _CompiledSwitchGraphNode,
-            ),
-        ):
-            telemetry_nodes = ()
-            telemetry_indices = ()
-            if telemetry is not None and isinstance(node, _CompiledWhileGraphNode):
-                telemetry_nodes = _submission_telemetry_region_nodes(node)
-                try:
-                    telemetry_indices = tuple(
-                        self._telemetry_region_indices[item.region_path]
-                        for item in telemetry_nodes
-                    )
-                except KeyError as exc:
+        def append(node):
+            if isinstance(node, _CompiledSequentialRegionNode):
+                if not node.supports_native_submission:
                     raise TaichiRuntimeError(
-                        "Graph submission telemetry region is absent from the "
-                        "structured definition"
-                    ) from exc
-                for index, telemetry_node in zip(telemetry_indices, telemetry_nodes):
-                    telemetry.begin_region(index, telemetry_node, context)
-            try:
-                node.run_for_submission(context, temporaries)
-            finally:
-                if telemetry is not None and telemetry_nodes:
-                    for index, telemetry_node in reversed(
-                        tuple(zip(telemetry_indices, telemetry_nodes))
-                    ):
-                        telemetry.end_region(index, telemetry_node, context)
-            return
+                        "Structured sequence submission requires every control "
+                        "region to provide submission-capable native lowering"
+                    )
+                for child in node.nodes:
+                    append(child)
+                return
 
-        node.run(context, temporaries)
+            if isinstance(
+                node,
+                (
+                    _CompiledWhileGraphNode,
+                    _CompiledIfGraphNode,
+                    _CompiledSwitchGraphNode,
+                ),
+            ):
+                telemetry_entries = ()
+                if isinstance(node, _CompiledWhileGraphNode):
+                    try:
+                        telemetry_entries = tuple(
+                            (
+                                self._telemetry_region_indices[item.region_path],
+                                item,
+                            )
+                            for item in _submission_telemetry_region_nodes(node)
+                        )
+                    except KeyError as exc:
+                        raise TaichiRuntimeError(
+                            "Graph submission telemetry region is absent from the "
+                            "structured definition"
+                        ) from exc
+                steps.append(
+                    (
+                        node.run_for_submission,
+                        telemetry_entries,
+                        tuple(reversed(telemetry_entries)),
+                    )
+                )
+                return
+
+            steps.append((node.run, (), ()))
+
+        for node in nodes:
+            append(node)
+        return tuple(steps)
 
     def run(self, args, temporaries=None, trace_recorder=None):
         # Graph.run() holds a per-Graph lock, so this context can safely reuse
@@ -10316,10 +10680,14 @@ class _GraphExecutable:
         _reset_control_flow_reports(self.spec.structured_control_nodes)
         context = self._context
         if context is not None:
+            prepared = self.spec.prepare_runtime_args(
+                args, temporaries, self.fixed_runtime_args
+            )
             context.begin(
-                self.spec.bind_runtime_args(args, temporaries, self.fixed_runtime_args),
+                prepared.arguments,
                 None,
                 trace_recorder,
+                flattened_args=prepared.flattened_args,
             )
         try:
             for node in self.spec.nodes:
@@ -10331,12 +10699,27 @@ class _GraphExecutable:
     def run_for_submission(self, args, temporaries=None, telemetry=None):
         context = self._context
         if context is not None:
+            prepared = self.spec.prepare_runtime_args(
+                args, temporaries, self.fixed_runtime_args
+            )
             context.begin(
-                self.spec.bind_runtime_args(args, temporaries, self.fixed_runtime_args),
+                prepared.arguments,
+                flattened_args=prepared.flattened_args,
             )
         try:
-            for node in self.spec.nodes:
-                self._run_node_for_submission(node, context, temporaries, telemetry)
+            for run, telemetry_entries, reversed_telemetry_entries in (
+                self._submission_steps
+            ):
+                if telemetry is None or not telemetry_entries:
+                    run(context, temporaries)
+                    continue
+                for index, telemetry_node in telemetry_entries:
+                    telemetry.begin_region(index, telemetry_node, context)
+                try:
+                    run(context, temporaries)
+                finally:
+                    for index, telemetry_node in reversed_telemetry_entries:
+                        telemetry.end_region(index, telemetry_node, context)
         finally:
             if context is not None:
                 context.end()
@@ -10571,10 +10954,12 @@ class _GraphInstance:
             return self._run_general(args, temporaries)
         context = self._run_context
         if context is not None:
+            prepared = self.spec.prepare_runtime_args(
+                args, temporaries, self._fixed_runtime_args
+            )
             context.begin(
-                self.spec.bind_runtime_args(
-                    args, temporaries, self._fixed_runtime_args
-                ),
+                prepared.arguments,
+                flattened_args=prepared.flattened_args,
             )
         try:
             self._backend_executable.run(context, temporaries)
@@ -13593,6 +13978,128 @@ class Graph:
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
 
+    def bind(self, arguments):
+        """Create a versioned runtime binding source for repeat invocation.
+
+        Raw dictionaries remain supported and are fully validated on every
+        replay. A returned :class:`GraphBindingSet` can reuse an unchanged,
+        preflattened frame only when every resource has a provably stable
+        identity; ``statistics()`` reports conservative qualification blockers.
+        """
+
+        return GraphBindingSet(self, arguments)
+
+    def binding_plan(self):
+        """Return the immutable compiled public binding slot plan."""
+
+        return self._spec.binding_plan.to_dict()
+
+    def binding_statistics(self):
+        """Return host binding preparation counters for this Graph."""
+
+        with self._lifecycle_lock:
+            return self._spec.binding_statistics()
+
+    def _initialize_binding_set(self, binding_set, arguments):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            version = self._spec.build_binding_version(
+                arguments,
+                1,
+                fixed_runtime_args=self._instance._fixed_runtime_args,
+                allow_fast_path=self._qualified_fusion_selector is None,
+            )
+            with binding_set._lock:
+                binding_set._version = version
+
+    def _update_binding_set(self, binding_set, values, *, replace_all):
+        if not isinstance(values, Mapping):
+            raise TypeError("GraphBindingSet bindings must be a mapping")
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if binding_set._graph is not self:
+                raise TaichiRuntimeError(
+                    "GraphBindingSet belongs to a different compiled Graph"
+                )
+            with binding_set._lock:
+                current = binding_set._version
+                if current.runtime_generation != int(impl.runtime_generation()):
+                    raise TaichiRuntimeError(
+                        "GraphBindingSet was published before ti.reset() or a "
+                        "runtime reinitialization"
+                    )
+                if replace_all:
+                    candidate = dict(values)
+                else:
+                    unexpected = values.keys() - self._spec.runtime_arg_names
+                    if unexpected:
+                        raise TaichiRuntimeError(
+                            "Unexpected graph runtime arguments: "
+                            + ", ".join(sorted(unexpected))
+                        )
+                    candidate = dict(current.arguments)
+                    candidate.update(values)
+                revision = current.revision + 1
+                if revision > 0x7FFFFFFFFFFFFFFF:
+                    raise TaichiRuntimeError(
+                        "GraphBindingSet revision space is exhausted"
+                    )
+                version = self._spec.build_binding_version(
+                    candidate,
+                    revision,
+                    fixed_runtime_args=self._instance._fixed_runtime_args,
+                    allow_fast_path=self._qualified_fusion_selector is None,
+                    entrypoint="GraphBindingSet.update",
+                )
+                binding_set_ref = weakref.ref(binding_set)
+                retired_revision = current.revision
+
+                def discard_retired_version(retired_ref):
+                    owner = binding_set_ref()
+                    if owner is None:
+                        return
+                    # Cyclic GC can invoke this callback on the thread already
+                    # publishing an update, hence the binding lock is
+                    # re-entrant. The monotonic revision plus identity check
+                    # keeps removal exact even after a container replacement.
+                    with owner._lock:
+                        retired_versions = owner._retired_versions
+                        if retired_versions.get(retired_revision) is retired_ref:
+                            retired_versions.pop(retired_revision, None)
+                            if not retired_versions:
+                                # Drop the potentially high-water dict table
+                                # after the last ticket/in-flight owner exits.
+                                owner._retired_versions = {}
+
+                retired_ref = weakref.ref(current, discard_retired_version)
+                binding_set._retired_versions[retired_revision] = retired_ref
+                binding_set._version = version
+
+    def _snapshot_binding_source(self, source):
+        if not isinstance(source, GraphBindingSet):
+            if not isinstance(source, dict):
+                return source, None
+            # A mutable compatibility dict has no revision notification. Copy
+            # it once after admission so later caller mutation cannot change the
+            # frame while validation or a pybind launch releases the GIL. Use a
+            # GraphBindingSet when rebinding must be atomic across threads.
+            return {
+                name: _snapshot_graph_binding_value(value)
+                for name, value in source.items()
+            }, None
+        if source._graph is not self:
+            raise TaichiRuntimeError(
+                "GraphBindingSet belongs to a different compiled Graph"
+            )
+        with source._lock:
+            version = source._version
+        if version.runtime_generation != int(impl.runtime_generation()):
+            raise TaichiRuntimeError(
+                "GraphBindingSet was published before ti.reset() or a runtime "
+                "reinitialization"
+            )
+        return version.arguments, version
+
     def _materialize_qualified_fusion_instance(self, selected_spec):
         if (
             self._workspace_lane_capacity != 1
@@ -14023,11 +14530,8 @@ class Graph:
         # GPU completion, so independent graphs remain independently submitable.
         with self._lifecycle_lock:
             self._check_runtime_valid()
+            runtime_args, binding_version = self._snapshot_binding_source(args)
             runtime = impl.pytaichi
-            self._spec.validate_runtime_args(
-                args,
-                fixed_runtime_args=self._instance._fixed_runtime_args,
-            )
             submission_state = runtime._active_graph_submissions
             if submission_state < 0:
                 raise TaichiRuntimeError(
@@ -14054,7 +14558,7 @@ class Graph:
                 execution_instance = self._instance
                 execution_run = self._run_impl
             else:
-                execution_instance = self._qualified_execution_instance(args)
+                execution_instance = self._qualified_execution_instance(runtime_args)
                 execution_run = execution_instance.run_impl
             # Runtime AD state is process-global rather than thread-local. The
             # signed state closes the window where a native call releases the
@@ -14080,10 +14584,12 @@ class Graph:
                         if observation_lease is not None
                         else None
                     )
-                    prepared = self._spec.prepare_runtime_args(
-                        args,
+                    prepared = self._spec.prepare_invocation(
+                        runtime_args,
                         temporary_bindings,
                         execution_instance._fixed_runtime_args,
+                        entrypoint="Graph.run",
+                        binding_version=binding_version,
                     )
                     runtime.prog._record_runtime_graph_submission()
                     if trace_recorder is None:
@@ -14148,19 +14654,10 @@ class Graph:
                 "region has a submission-capable backend lowering"
             )
         runtime = impl.pytaichi
-        # A pacer may release this thread while waiting for an admission slot,
-        # so validate before entering that wait and again immediately before
-        # submission. The unpaced path cannot wait between admission and the
-        # lifecycle-locked submission section; validating it twice only
-        # repeats provider binding, alias, and lifetime checks on the hot path.
-        if pacer is not None:
-            with self._lifecycle_lock:
-                self._check_runtime_valid()
-                self._spec.validate_runtime_args(
-                    args,
-                    "Graph.submit",
-                    self._instance._fixed_runtime_args,
-                )
+        # Admission may wait. Runtime arguments are intentionally snapshotted
+        # and validated only after that wait: the post-admission transaction is
+        # the safety boundary for reset, rebind, and alias changes. A cheap
+        # pacer generation check still wakes/rejects reset waiters.
         admission = _reserve_paced_submission(
             pacer,
             runtime,
@@ -14188,11 +14685,7 @@ class Graph:
                         "runtime reinitialization. Please rebuild the graph "
                         "after ti.init()."
                     )
-                self._spec.validate_runtime_args(
-                    args,
-                    "Graph.submit",
-                    self._instance._fixed_runtime_args,
-                )
+                runtime_args, binding_version = self._snapshot_binding_source(args)
                 submission_state = runtime._active_graph_submissions
                 if submission_state < 0:
                     raise TaichiRuntimeError(
@@ -14216,7 +14709,7 @@ class Graph:
                 qualified_instance = (
                     self._instance
                     if self._qualified_fusion_selector is None
-                    else self._qualified_execution_instance(args)
+                    else self._qualified_execution_instance(runtime_args)
                 )
                 if qualified_instance is self._instance:
                     workspace_lane_index, submission_instance = (
@@ -14266,10 +14759,12 @@ class Graph:
                         if telemetry_lease is not None
                         else None
                     )
-                    prepared = self._spec.prepare_runtime_args(
-                        args,
+                    prepared = self._spec.prepare_invocation(
+                        runtime_args,
                         temporary_bindings,
                         submission_instance._fixed_runtime_args,
+                        entrypoint="Graph.submit",
+                        binding_version=binding_version,
                     )
                     if self._contains_structured_control_value:
                         if telemetry_recorder is not None:
@@ -14294,7 +14789,7 @@ class Graph:
                         transaction._mark_submission()
                     if telemetry_recorder is not None:
                         telemetry_recorder.capture_bounded(
-                            prepared.arguments, public_args=args
+                            prepared.arguments, public_args=runtime_args
                         )
                     if observation_lease is not None:
                         observation_lease.enqueue_tail_readback()
@@ -14648,6 +15143,11 @@ class Graph:
                         "persistent_bytes"
                     ]
                 )
+            provider_memory = (
+                self._spec.provider_memory_reports()
+                if self._spec is not None
+                else ()
+            )
             return _execution_report(
                 self._execution_definition,
                 self._execution_arch,
@@ -14662,7 +15162,7 @@ class Graph:
                 observation_arena_stats=observation_arena_stats,
                 telemetry_arena_stats=telemetry_arena_stats,
                 internal_storage_stats=internal_storage_stats,
-                provider_memory=self._spec.provider_memory_reports(),
+                provider_memory=provider_memory,
             )
 
     @property
@@ -14891,6 +15391,7 @@ def Arg(*args, **kwargs):
 __all__ = [
     "GraphBuilder",
     "Graph",
+    "GraphBindingSet",
     "SubmissionTicket",
     "SubmissionPacer",
     "NativeActionManifest",

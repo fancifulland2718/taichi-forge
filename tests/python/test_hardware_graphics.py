@@ -944,7 +944,12 @@ def test_vulkan_graphics_pass_batches_multiple_draws_and_graph_nodes():
         builder.append_native(recording, admission="auto")
         graph = builder.compile()
         graph_color = ti.Texture(ti.Format.rgba8, (64, 64))
-        graph.run({"target": graph_color, "vertices": vertices, "indices": indices})
+        graph_bindings = graph.bind(
+            {"target": graph_color, "vertices": vertices, "indices": indices}
+        )
+        assert graph_bindings.fast_path_qualified
+        graph.run(graph_bindings)
+        assert graph.binding_statistics()["version_fast_replays"] == 1
         ti.sync()
         graph_image = _texture_rgb(graph_color)
         assert graph_image[32, 52, 0] > 32

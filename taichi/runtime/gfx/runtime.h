@@ -498,6 +498,7 @@ class TI_DLL_EXPORT GfxRuntime {
         GraphReplayFallbackReason::none};
     bool diagnostics_enabled{false};
     bool retirement_requested{false};
+    uint64_t retirement_next{0};
 
     void reset();
   };
@@ -673,7 +674,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void retire_graph_replay(uint64_t replay_token);
   GraphReplayStats debug_graph_replay_stats(uint64_t replay_token);
   GraphReplayStats snapshot_graph_replay_stats(uint64_t replay_token);
-  void collect_ready_graph_replays();
+  void collect_ready_graph_replays(std::size_t max_polls);
 
   struct HashOverflowWatch {
     int root_id{-1};
@@ -734,6 +735,11 @@ class TI_DLL_EXPORT GfxRuntime {
   std::vector<HashOverflowWatch> hash_overflow_watches_;
   bool hash_overflow_error_reported_{false};
   std::unordered_map<uint64_t, GraphReplayState> graph_replay_states_;
+  // Intrusive retirement queue: registration destruction must not allocate or
+  // impose a synthetic cap while releasing potentially large replay state.
+  uint64_t graph_replay_retirement_head_{0};
+  uint64_t graph_replay_retirement_tail_{0};
+  std::size_t graph_replay_retirement_count_{0};
   std::shared_ptr<GraphReplayRegistry> graph_replay_registry_;
   uint64_t next_graph_replay_registration_id_{1};
   bool pending_dispatch_global_barrier_{false};

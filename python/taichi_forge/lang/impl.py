@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import weakref
+from collections import OrderedDict
 from types import FunctionType, MethodType
 from typing import Any, Iterable, Sequence
 
@@ -67,6 +68,9 @@ from taichi_forge.types.primitive_types import (
     u32,
     u64,
 )
+
+
+_RUNTIME_SUBMISSION_OWNER_POLL_BUDGET = 8
 
 
 _sync_diagnostics_enabled = bool(
@@ -586,7 +590,10 @@ class PyTaichi:
         # the C++ ndarray/texture completion batch. Keep those owners alive in
         # a bounded registry even if the user drops a SubmissionTicket early.
         self._runtime_submission_owner_lock = threading.Lock()
-        self._runtime_submission_owners = {}
+        self._runtime_submission_owners = OrderedDict()
+        self._runtime_submission_owner_poll_budget = (
+            _RUNTIME_SUBMISSION_OWNER_POLL_BUDGET
+        )
 
     def register_runtime_object(self, obj):
         self._runtime_object_refs[id(obj)] = obj
@@ -598,11 +605,19 @@ class PyTaichi:
     def retain_runtime_submission_owner(self, completion, owner):
         key = self._runtime_submission_key(completion)
         with self._runtime_submission_owner_lock:
+            current = self._runtime_submission_owners.get(key)
+            if current is not None and current[0] is not completion:
+                raise RuntimeError(
+                    "runtime submission completion key was reused before the "
+                    "previous completion retired"
+                )
             self._runtime_submission_owners[key] = (completion, owner)
         # Publish the new owner before driver polling. If an older completion
         # reports an error, the just-submitted native Graph remains retained
         # even though its caller observes that sticky backend failure.
-        self.collect_ready_runtime_submission_owners()
+        self.collect_ready_runtime_submission_owners(
+            _limit=self._runtime_submission_owner_poll_budget
+        )
 
     def transfer_runtime_submission_owner(self, completion, owner):
         """Replace an already-published owner without a second driver poll."""
@@ -626,13 +641,48 @@ class PyTaichi:
             if current is not None and current[0] is completion:
                 self._runtime_submission_owners.pop(key, None)
 
-    def collect_ready_runtime_submission_owners(self):
+    def collect_ready_runtime_submission_owner(self, completion):
+        """Poll and release one exact completion without scanning the backlog."""
+
+        key = self._runtime_submission_key(completion)
+        with self._runtime_submission_owner_lock:
+            current = self._runtime_submission_owners.get(key)
+            if current is None:
+                return False
+            if current[0] is not completion:
+                raise RuntimeError(
+                    "runtime submission completion key was reused before the "
+                    "previous completion retired"
+                )
+        if not completion.done():
+            return False
+        with self._runtime_submission_owner_lock:
+            current = self._runtime_submission_owners.get(key)
+            if current is not None and current[0] is completion:
+                self._runtime_submission_owners.pop(key, None)
+                return True
+        return False
+
+    def collect_ready_runtime_submission_owners(
+        self, *, _limit=_RUNTIME_SUBMISSION_OWNER_POLL_BUDGET
+    ):
         # Poll outside the registry lock: CUDA/Vulkan completion queries are
         # driver calls and pybind releases the GIL around them.
         with self._runtime_submission_owner_lock:
-            snapshot = tuple(self._runtime_submission_owners.items())
+            owner_count = len(self._runtime_submission_owners)
+            poll_count = owner_count if _limit is None else min(owner_count, _limit)
+            snapshot = []
+            # OrderedDict is both the owner registry and its rotating work
+            # queue. Moving selected entries to the tail gives incremental
+            # collection without accumulating stale queue records after an
+            # explicit release or a runtime reset.
+            for _ in range(poll_count):
+                key = next(iter(self._runtime_submission_owners))
+                completion = self._runtime_submission_owners[key][0]
+                snapshot.append((key, completion))
+                self._runtime_submission_owners.move_to_end(key)
         ready = []
-        for key, (completion, _owner) in snapshot:
+        for key, completion in snapshot:
             if completion.done():
                 ready.append((key, completion))
         if not ready:

@@ -797,8 +797,50 @@ def test_unpaced_graph_submit_validates_provider_once():
     lifetime_before = lease.validations
     bindings_before = lease.binding_validations
     graph.submit(args, pacer=pacer).wait()
-    assert lease.validations == lifetime_before + 2
-    assert lease.binding_validations == bindings_before + 2
+    assert lease.validations == lifetime_before + 1
+    assert lease.binding_validations == bindings_before + 1
+
+    bindings = graph.bind(args)
+    assert not bindings.fast_path_qualified
+    volatile_reasons = bindings.statistics()["volatile_reasons"]
+    assert "volatile_lifetime_provider" in volatile_reasons
+    assert "volatile_runtime_provider" in volatile_reasons
+    lifetime_before = lease.validations
+    bindings_before = lease.binding_validations
+    graph.submit(bindings).wait()
+    assert lease.validations == lifetime_before + 1
+    assert lease.binding_validations == bindings_before + 1
+    assert graph.binding_statistics()["version_volatile_replays"] == 1
+
+    certified_lease = _ValidatingLease()
+    certified_lease.graph_runtime_lifetime_check_required = False
+    certified_lease.graph_publish_time_binding_validation_stable = True
+    owner_calls = []
+    submission_owner = object()
+
+    def acquire_submission_owner():
+        owner_calls.append(True)
+        return (submission_owner,)
+
+    certified_lease.bind_graph_arguments = lambda runtime_args: {}
+    certified_lease.graph_submission_owners = acquire_submission_owner
+    certified_builder = ti.graph.GraphBuilder()
+    certified_builder.append_native(
+        _RecordedDispatchNode(
+            copy_value,
+            (source_arg, output_arg),
+            {"fallback_runs": 0},
+            certified_lease,
+        )
+    )
+    certified_graph = certified_builder.compile()
+    certified_bindings = certified_graph.bind(args)
+    assert not certified_bindings.fast_path_qualified
+    assert "volatile_runtime_provider" in certified_bindings.statistics()[
+        "volatile_reasons"
+    ]
+    certified_graph.submit(certified_bindings).wait()
+    assert len(owner_calls) == 1
 
     lease.valid = False
     with pytest.raises(TaichiRuntimeError, match="generation changed"):

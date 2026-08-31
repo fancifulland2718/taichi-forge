@@ -18,6 +18,7 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
+    graph_bindings_are_validated,
     native_recording_node,
     runtime_generation_matches,
     validate_exact_bindings,
@@ -376,8 +377,19 @@ class GraphicsPassDraw:
             )
 
         object.__setattr__(self, "vertex_buffers", MappingProxyType(vertices))
+        object.__setattr__(
+            self, "_ordered_vertex_buffers", tuple(sorted(vertices.items()))
+        )
         object.__setattr__(self, "index_buffer", index_buffer)
         object.__setattr__(self, "shader_buffers", MappingProxyType(normalized_shader))
+        object.__setattr__(
+            self,
+            "_ordered_shader_buffers",
+            tuple(
+                (key, name, self.pipeline._shader_buffer_by_key[key])
+                for key, name in sorted(normalized_shader.items())
+            ),
+        )
         object.__setattr__(self, "indirect_buffer", indirect_buffer)
         object.__setattr__(self, "count_buffer", count_buffer)
 
@@ -402,6 +414,8 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             raise TypeError(
                 "Vulkan graphics recordings require a VulkanGraphicsPipeline"
             )
+        pipeline._validate_lifetime()
+        pipeline_handle = int(pipeline._handle)
         if not isinstance(draw, Draw):
             raise TypeError("draw must be a ti.hardware.graphics.Draw value")
         if pipeline.shader_buffer_bindings:
@@ -480,11 +494,21 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             self, "_experimental_retained_replay", experimental_retained_replay
         )
         object.__setattr__(self, "pipeline", pipeline)
+        # The immutable native handle is the Graph definition's lifetime
+        # identity. Graph replay sends it to the native registry, whose
+        # submission lock makes close-vs-submit fail closed without rescanning
+        # the Python pipeline object on every invocation.
+        object.__setattr__(self, "_pipeline_handle", pipeline_handle)
         object.__setattr__(self, "draw", draw)
         object.__setattr__(self, "color", color)
         object.__setattr__(self, "depth", depth)
         object.__setattr__(
             self, "vertex_buffers", MappingProxyType(normalized_vertices)
+        )
+        object.__setattr__(
+            self,
+            "_ordered_vertex_buffers",
+            tuple(sorted(normalized_vertices.items())),
         )
         object.__setattr__(self, "index_buffer", index_buffer)
         object.__setattr__(self, "clear_color", clear_color)
@@ -497,15 +521,13 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             effects.append(ResourceEffect(self.depth, GraphAccess.WRITE))
         effects.extend(
             ResourceEffect(name, GraphAccess.READ)
-            for _, name in sorted(self.vertex_buffers.items())
+            for _, name in self._ordered_vertex_buffers
         )
         if self.index_buffer is not None:
             effects.append(ResourceEffect(self.index_buffer, GraphAccess.READ))
         return tuple(effects)
 
-    def execute(self, bindings):
-        validate_exact_bindings(self, bindings, "Vulkan graphics")
-        self.validate_graph_lifetime()
+    def validate_graph_bindings(self, bindings):
         color = bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
         if not isinstance(color, Texture):
@@ -517,19 +539,28 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
             for name in self.vertex_buffers.values()
         ):
             raise TaichiRuntimeError("graphics vertex bindings must be Taichi ndarrays")
-        vertices = tuple(
-            (binding, bindings[name].arr)
-            for binding, name in sorted(self.vertex_buffers.items())
-        )
         index = None if self.index_buffer is None else bindings[self.index_buffer]
         if index is not None and not isinstance(index, Ndarray):
             raise TaichiRuntimeError("graphics index binding must be a Taichi ndarray")
+
+    def execute(self, bindings):
+        if not graph_bindings_are_validated(bindings):
+            validate_exact_bindings(self, bindings, "Vulkan graphics")
+            self.validate_graph_lifetime()
+            self.validate_graph_bindings(bindings)
+        color = bindings[self.color]
+        depth = None if self.depth is None else bindings[self.depth]
+        vertices = tuple(
+            (binding, bindings[name].arr)
+            for binding, name in self._ordered_vertex_buffers
+        )
+        index = None if self.index_buffer is None else bindings[self.index_buffer]
         draw = self.draw
         index_min, index_max = (
             (0, 0) if draw.index_bounds is None else draw.index_bounds
         )
         raw_draw = (
-            self.pipeline._handle,
+            self._pipeline_handle,
             vertices,
             None if index is None else index.arr,
             (),
@@ -579,6 +610,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
                 "indexed": item.index_buffer is not None,
                 "vertex_binding_count": len(item.vertex_buffers),
             },
+            publish_time_binding_validation_stable=True,
         )
 
 
@@ -614,6 +646,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             raise TypeError("draws must contain GraphicsPassDraw values")
         for item in draws:
             item.pipeline._validate_lifetime()
+        pipeline_handles = tuple(int(item.pipeline._handle) for item in draws)
 
         color = _name(color, "color binding")
         if depth is not None:
@@ -706,6 +739,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                     )
 
         ndarray_names = frozenset(effects).difference(attachment_names)
+        runtime_prog = pipelines[0]._runtime_prog
+        if any(pipeline._runtime_prog is not runtime_prog for pipeline in pipelines[1:]):
+            raise ValueError("all graphics-pass pipelines must belong to one runtime")
 
         experimental_retained_replay = (
             os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1"
@@ -727,7 +763,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             self, "_experimental_retained_replay", experimental_retained_replay
         )
         object.__setattr__(self, "draws", draws)
+        object.__setattr__(self, "_pipeline_handles", pipeline_handles)
         object.__setattr__(self, "pipelines", tuple(pipelines))
+        object.__setattr__(self, "_runtime_prog", runtime_prog)
         object.__setattr__(self, "color", color)
         object.__setattr__(self, "depth", depth)
         object.__setattr__(self, "color_load_op", color_load_op)
@@ -747,9 +785,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
     def resource_effects(self):
         return self._resource_effects
 
-    def execute(self, bindings):
-        validate_exact_bindings(self, bindings, "Vulkan graphics pass")
-        self.validate_graph_lifetime()
+    def validate_graph_bindings(self, bindings):
         color = bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
         if not isinstance(color, Texture):
@@ -762,18 +798,25 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "Taichi ndarrays"
             )
 
+    def execute(self, bindings):
+        if not graph_bindings_are_validated(bindings):
+            validate_exact_bindings(self, bindings, "Vulkan graphics pass")
+            self.validate_graph_lifetime()
+            self.validate_graph_bindings(bindings)
+        color = bindings[self.color]
+        depth = None if self.depth is None else bindings[self.depth]
+
         raw_draws = []
-        for item in self.draws:
+        for item, pipeline_handle in zip(self.draws, self._pipeline_handles):
             vertices = tuple(
                 (binding, bindings[name].arr)
-                for binding, name in sorted(item.vertex_buffers.items())
+                for binding, name in item._ordered_vertex_buffers
             )
             index = (
                 None if item.index_buffer is None else bindings[item.index_buffer].arr
             )
             shader_buffers = []
-            for key, name in sorted(item.shader_buffers.items()):
-                declaration = item.pipeline._shader_buffer_by_key[key]
+            for key, name, declaration in item._ordered_shader_buffers:
                 if isinstance(declaration, ShaderBufferArrayBinding):
                     shader_buffers.append(
                         (
@@ -797,7 +840,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             if isinstance(draw, MeshDraw):
                 raw_draws.append(
                     (
-                        item.pipeline._handle,
+                        pipeline_handle,
                         (),
                         None,
                         tuple(shader_buffers),
@@ -816,7 +859,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 )
                 raw_draws.append(
                     (
-                        item.pipeline._handle,
+                        pipeline_handle,
                         vertices,
                         index,
                         tuple(shader_buffers),
@@ -839,7 +882,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 )
                 raw_draws.append(
                     (
-                        item.pipeline._handle,
+                        pipeline_handle,
                         vertices,
                         index,
                         tuple(shader_buffers),
@@ -856,7 +899,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 )
 
         with hardware_failure_phase("provider_execution_failure"):
-            self.pipelines[0]._runtime_prog._vulkan_graphics_pass(
+            self._runtime_prog._vulkan_graphics_pass(
                 color.tex,
                 None if depth is None else depth.tex,
                 tuple(raw_draws),
@@ -872,11 +915,6 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         for pipeline in self.pipelines:
             pipeline._validate_lifetime()
-        programs = {id(pipeline._runtime_prog) for pipeline in self.pipelines}
-        if len(programs) != 1:
-            raise TaichiRuntimeError(
-                "all graphics-pass pipelines must belong to one runtime"
-            )
 
     def memory_report(self):
         reports = tuple(pipeline.memory_report() for pipeline in self.pipelines)
@@ -937,6 +975,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "color_load_op": item.color_load_op,
                 "depth_load_op": item.depth_load_op,
             },
+            publish_time_binding_validation_stable=True,
         )
 
 
@@ -953,6 +992,12 @@ class VulkanMeshPassRecording(VulkanGraphicsPassRecording):
 
 class VulkanGraphicsPipeline:
     """A caller-defined Vulkan raster pipeline, without renderer semantics."""
+
+    # Native graphics lookup copies a shared pipeline handle while holding the
+    # runtime submission/resource boundary. A concurrent close therefore
+    # either retains that handle for the submission or fails stale lookup
+    # closed; Graph replay does not need to rescan Python pipeline objects.
+    graph_runtime_lifetime_check_required = False
 
     def __init__(
         self,

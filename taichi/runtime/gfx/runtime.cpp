@@ -48,6 +48,7 @@ constexpr std::size_t kStructuredChainedMaximumControlBytes = 64 * 1024;
 constexpr std::size_t kNestedStructuredHeaderWords = 8;
 constexpr std::size_t kNestedStructuredTraceWords = 6;
 constexpr std::size_t kNestedStructuredMaximumOuterIterations = 64;
+constexpr std::size_t kGraphReplayRetirementPollBudget = 8;
 
 std::vector<uint32_t> make_compact_controller_spirv(
     const DeviceCapabilityConfig &caps,
@@ -1211,6 +1212,9 @@ GfxRuntime::~GfxRuntime() {
     }
   }
   graph_replay_states_.clear();
+  graph_replay_retirement_head_ = 0;
+  graph_replay_retirement_tail_ = 0;
+  graph_replay_retirement_count_ = 0;
 
   // Write pipeline cache back to disk.
   if (backend_cache_) {
@@ -1733,6 +1737,9 @@ void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   // so dropping every replay recording is safe. Registrations remain alive;
   // unrelated graphs simply record again on their next run.
   graph_replay_states_.clear();
+  graph_replay_retirement_head_ = 0;
+  graph_replay_retirement_tail_ = 0;
+  graph_replay_retirement_count_ = 0;
   TI_ASSERT(ti_kernel_snode_tree_ids_.size() == ti_kernels_.size());
   bool retired_any = false;
   std::vector<int> retired_sparse_snode_ids;
@@ -2450,6 +2457,7 @@ void GfxRuntime::GraphReplayState::reset() {
   last_fallback_reason = GraphReplayFallbackReason::none;
   diagnostics_enabled = false;
   retirement_requested = false;
+  retirement_next = 0;
 }
 
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::register_graph_replay(
@@ -2467,15 +2475,41 @@ bool GfxRuntime::owns_graph_replay_registration(
   return registration.registry_.get() == graph_replay_registry_.get();
 }
 
-void GfxRuntime::collect_ready_graph_replays() {
-  for (auto it = graph_replay_states_.begin();
-       it != graph_replay_states_.end();) {
-    if (it->second.retirement_requested &&
-        it->second.executable.ready_for_retirement()) {
-      it = graph_replay_states_.erase(it);
-    } else {
-      ++it;
+void GfxRuntime::collect_ready_graph_replays(std::size_t max_polls) {
+  const std::size_t poll_count =
+      std::min(max_polls, graph_replay_retirement_count_);
+  for (std::size_t i = 0; i < poll_count; ++i) {
+    const uint64_t replay_token = graph_replay_retirement_head_;
+    TI_ASSERT(replay_token != 0);
+    auto state = graph_replay_states_.find(replay_token);
+    TI_ASSERT(state != graph_replay_states_.end());
+    TI_ASSERT(state->second.retirement_requested);
+    const uint64_t next = state->second.retirement_next;
+    // Query before mutating the queue. If a backend readiness check throws,
+    // the retirement remains discoverable and can be retried or released by
+    // synchronize/reset instead of becoming a permanently orphaned state.
+    if (!state->second.executable.ready_for_retirement()) {
+      if (graph_replay_retirement_count_ > 1) {
+        TI_ASSERT(next != 0 && graph_replay_retirement_tail_ != replay_token);
+        auto tail = graph_replay_states_.find(graph_replay_retirement_tail_);
+        TI_ASSERT(tail != graph_replay_states_.end());
+        TI_ASSERT(tail->second.retirement_next == 0);
+        tail->second.retirement_next = replay_token;
+        graph_replay_retirement_head_ = next;
+        graph_replay_retirement_tail_ = replay_token;
+        state->second.retirement_next = 0;
+      }
+      continue;
     }
+    graph_replay_retirement_head_ = next;
+    --graph_replay_retirement_count_;
+    if (graph_replay_retirement_count_ == 0) {
+      graph_replay_retirement_head_ = 0;
+      graph_replay_retirement_tail_ = 0;
+    } else {
+      TI_ASSERT(graph_replay_retirement_head_ != 0);
+    }
+    graph_replay_states_.erase(state);
   }
 }
 
@@ -2485,8 +2519,27 @@ void GfxRuntime::retire_graph_replay(uint64_t replay_token) {
   if (active == graph_replay_states_.end()) {
     return;
   }
+  if (active->second.retirement_requested) {
+    collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
+    return;
+  }
+  // Registration destruction reaches this path. Linking the state itself
+  // avoids allocation and therefore remains safe under host-memory pressure.
   active->second.retirement_requested = true;
-  collect_ready_graph_replays();
+  active->second.retirement_next = 0;
+  if (graph_replay_retirement_tail_ == 0) {
+    TI_ASSERT(graph_replay_retirement_head_ == 0 &&
+              graph_replay_retirement_count_ == 0);
+    graph_replay_retirement_head_ = replay_token;
+  } else {
+    auto tail = graph_replay_states_.find(graph_replay_retirement_tail_);
+    TI_ASSERT(tail != graph_replay_states_.end());
+    TI_ASSERT(tail->second.retirement_next == 0);
+    tail->second.retirement_next = replay_token;
+  }
+  graph_replay_retirement_tail_ = replay_token;
+  ++graph_replay_retirement_count_;
+  collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
 }
 
 GraphReplayStats GfxRuntime::debug_graph_replay_stats(
@@ -2559,7 +2612,7 @@ bool GfxRuntime::try_launch_graph(
     const GraphNestedStructuredControl *nested_control,
     GraphNestedStructuredResult *nested_result) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  collect_ready_graph_replays();
+  collect_ready_graph_replays(kGraphReplayRetirementPollBudget);
   TI_ASSERT(replay_key != 0);
   GraphReplayState &state = graph_replay_states_[replay_key];
   TI_ASSERT(!state.retirement_requested);
@@ -5104,7 +5157,7 @@ void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   }
   // The stream is idle, so every retirement-requested state can now release
   // its graph-owned command/resource objects.
-  collect_ready_graph_replays();
+  collect_ready_graph_replays(graph_replay_retirement_count_);
   // Profiler support
   if (profiler_) {
     device_->profiler_sync();

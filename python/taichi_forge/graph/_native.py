@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -321,6 +322,24 @@ class BackendCommandRecording:
             "replay_mode": self.replay_mode,
             "no_host_readback": self.no_host_readback,
         }
+
+
+class _GraphValidatedBindings(Mapping):
+    """Internal zero-copy marker for a Graph-validated binding frame."""
+
+    __slots__ = ("_bindings",)
+
+    def __init__(self, bindings):
+        self._bindings = bindings
+
+    def __getitem__(self, key):
+        return self._bindings[key]
+
+    def __iter__(self):
+        return iter(self._bindings)
+
+    def __len__(self):
+        return len(self._bindings)
 
 
 class _CudaGraphCaptureRecipe:
@@ -827,6 +846,11 @@ class BackendCommandGraphAction(RecordableGraphAction):
                 f"{self._recording.backend}, not the active {backend} backend"
             )
         return self._recording.execute(MappingProxyType(dict(bindings)))
+
+    def execute_graph_validated(self, bindings):
+        """Execute a frame already certified by the owning compiled Graph."""
+
+        return self._recording.execute(_GraphValidatedBindings(bindings))
 
 
 class NativeGraphExecutable:
