@@ -24,6 +24,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   void visit(FrontendSNodeOpStmt *stmt) override {
     record(stmt->snode);
+    if (stmt->op_type == SNodeOpType::activate) {
+      record_hash_activation_path(stmt->snode);
+    }
   }
 
   void visit(FrontendForStmt *stmt) override {
@@ -33,16 +36,25 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   void visit(GlobalPtrStmt *stmt) override {
     record(stmt->snode);
+    if (stmt->activate) {
+      record_hash_activation_path(stmt->snode);
+    }
   }
 
   void visit(MatrixOfGlobalPtrStmt *stmt) override {
     for (SNode *snode : stmt->snodes) {
       record(snode);
+      if (stmt->activate) {
+        record_hash_activation_path(snode);
+      }
     }
   }
 
   void visit(SNodeOpStmt *stmt) override {
     record(stmt->snode);
+    if (stmt->op_type == SNodeOpType::activate) {
+      record_hash_activation_path(stmt->snode);
+    }
   }
 
   void visit(StructForStmt *stmt) override {
@@ -56,6 +68,9 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
 
   void visit(SNodeLookupStmt *stmt) override {
     record(stmt->snode);
+    if (stmt->activate) {
+      record_hash_activation_path(stmt->snode);
+    }
   }
 
   void visit(GetChStmt *stmt) override {
@@ -82,7 +97,20 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
     return relocation_structures_;
   }
 
+  bool may_trigger_hash_overflow() const {
+    return may_trigger_hash_overflow_;
+  }
+
  private:
+  void record_hash_activation_path(const SNode *snode) {
+    for (const SNode *node = snode; node != nullptr; node = node->parent) {
+      if (node->type == SNodeType::hash) {
+        may_trigger_hash_overflow_ = true;
+        return;
+      }
+    }
+  }
+
   void record(const SNode *snode) {
     if (snode != nullptr) {
       tree_ids_.insert(snode->get_snode_tree_id());
@@ -110,6 +138,7 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   std::unordered_set<int> tree_ids_;
   SNodeRelocationStructure relocation_structures_{
       SNodeRelocationStructure::none};
+  bool may_trigger_hash_overflow_{false};
 };
 
 bool tree_contains_non_dense_snode(const SNode &node) {
@@ -139,6 +168,12 @@ SNodeRelocationStructure gather_snode_relocation_structures(IRNode &ir) {
   SNodeTreeDependencyCollector collector;
   ir.accept(&collector);
   return collector.relocation_structures();
+}
+
+bool may_trigger_hash_overflow(IRNode &ir) {
+  SNodeTreeDependencyCollector collector;
+  ir.accept(&collector);
+  return collector.may_trigger_hash_overflow();
 }
 
 bool has_non_dense_snode_tree_dependency(

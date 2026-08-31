@@ -357,12 +357,13 @@ class TI_DLL_EXPORT Program {
     std::vector<std::size_t> active_gpu_region_timings_;
   };
 
-  // Immutable executable binding for repeated ordinary launches.  The caller
-  // still supplies a fresh LaunchContextBuilder for every invocation; the plan
-  // only removes compilation-cache and backend registration lookup from the
-  // steady path. SNode-dependent plans are bound to exact tree generations
-  // and validate them under the lifecycle read transaction before touching
-  // compiled executable state.
+  // Immutable executable binding for repeated ordinary launches. Each
+  // invocation owns an exclusive LaunchContextBuilder while arguments are
+  // prepared and submitted; callers may pool and reuse builders after backend
+  // submission has copied their host-side packet. The plan removes
+  // compilation-cache and backend registration lookup from the steady path.
+  // SNode-dependent plans are bound to exact tree generations and validate
+  // them under the lifecycle read transaction before touching compiled state.
   class RegisteredKernelExecutionPlanLaunchScope;
 
   class RegisteredKernelExecutionPlan {
@@ -4060,7 +4061,7 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<RuntimeCompletionResourceBatch>
   detach_runtime_completion_resources();
   void track_runtime_completion(const RuntimeCompletion &completion);
-  void collect_ready_runtime_completions();
+  void collect_ready_runtime_completions(std::size_t max_polls);
   void complete_all_runtime_completions() noexcept;
   void fail_all_runtime_completions(const std::string &reason) noexcept;
   void initialize_runtime_backend_telemetry_baseline();
@@ -4190,7 +4191,11 @@ class TI_DLL_EXPORT Program {
   std::atomic<std::uint64_t> next_runtime_completion_sequence_{1};
   mutable std::mutex runtime_completion_mutex_;
   std::deque<RuntimeCompletion> runtime_completions_;
-  static constexpr std::size_t kMaxTrackedRuntimeCompletions = 64;
+  static constexpr std::size_t kRuntimeCompletionPollBudget = 8;
+  // Bounds only the cache of already completed CUDA events. It does not cap
+  // in-flight submissions: pending completions are retired incrementally and
+  // fully drained by synchronize/reset/finalize.
+  static constexpr std::size_t kRuntimeCompletionCudaEventCacheCapacity = 64;
   DenseFieldStagingRegistry dense_field_staging_resources_;
   DenseFieldStagingHandle dense_field_staging_handle_;
   DenseFieldStagingLease dense_field_staging_lease_;
@@ -4239,6 +4244,8 @@ class TI_DLL_EXPORT Program {
     std::atomic<std::uint64_t> ndarray_lease_clones{0};
     std::atomic<std::uint64_t> ndarray_inflight_reuses{0};
     std::atomic<std::uint64_t> ndarray_pins{0};
+    std::atomic<std::uint64_t> runtime_error_checks{0};
+    std::atomic<std::uint64_t> runtime_error_check_elisions{0};
     std::atomic<std::uint64_t> total_host_ns{0};
     std::atomic<std::uint64_t> compile_lookup_ns{0};
     std::atomic<std::uint64_t> compile_and_launch_total_ns{0};
@@ -4256,7 +4263,6 @@ class TI_DLL_EXPORT Program {
       relocatable_kernel_candidates_;
   static std::atomic<int> num_instances_;
   bool finalized_{false};
-  int hash_snode_tree_count_{0};
 
   ArgPackResourceRegistry argpack_resources_;
   mutable std::mutex argpack_lifecycle_mutex_;

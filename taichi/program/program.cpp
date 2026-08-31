@@ -4733,20 +4733,6 @@ uint8_t *map_cpu_dense_field_packed(Program *program,
   return reinterpret_cast<uint8_t *>(mapped);
 }
 
-bool snode_tree_contains_hash(const SNode *snode) {
-  if (snode == nullptr) {
-    return false;
-  }
-  if (snode->type == SNodeType::hash) {
-    return true;
-  }
-  for (const auto &child : snode->ch) {
-    if (snode_tree_contains_hash(child.get())) {
-      return true;
-    }
-  }
-  return false;
-}
 }  // namespace
 
 DevicePtr Program::get_dense_field_device_ptr(SNode *snode) {
@@ -4813,7 +4799,8 @@ Program::Program(Arch desired_arch)
   if (desired_arch == Arch::cuda) {
     runtime_completion_cuda_event_pool_ =
         std::make_shared<RuntimeCompletionCudaEventPool>(
-            runtime_fault_domain_, kMaxTrackedRuntimeCompletions);
+            runtime_fault_domain_,
+            kRuntimeCompletionCudaEventCacheCapacity);
   }
 #endif
 
@@ -5923,9 +5910,20 @@ void Program::compile_and_launch_kernel(
 
 void Program::check_runtime_error_after_kernel_launch(
     const CompiledKernelData &compiled_kernel_data) {
+  if (!arch_uses_llvm(compiled_kernel_data.arch())) {
+    return;
+  }
   const bool check_runtime_error =
-      compile_config().debug || hash_snode_tree_count_ > 0;
-  if (check_runtime_error && arch_uses_llvm(compiled_kernel_data.arch())) {
+      compile_config().debug ||
+      compiled_kernel_data.may_trigger_hash_overflow();
+  if (ordinary_launch_attribution_.enabled) {
+    auto &counter = check_runtime_error
+                        ? ordinary_launch_attribution_.runtime_error_checks
+                        : ordinary_launch_attribution_
+                              .runtime_error_check_elisions;
+    counter.fetch_add(1, std::memory_order_relaxed);
+  }
+  if (check_runtime_error) {
     program_impl_->check_runtime_error(result_buffer);
   }
 }
@@ -6060,7 +6058,6 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
   // place-SNode's address gets reused by another SNode. We have to remove all
   // cached kernels upon SNodeTree destruction.
   SNode *root = snode_tree->root();
-  const bool contains_hash = snode_tree_contains_hash(root);
   std::vector<int> active_tree_ids;
   active_tree_ids.reserve(snode_tree_active_.size());
   for (std::size_t i = 0; i < snode_tree_active_.size(); ++i) {
@@ -6165,9 +6162,6 @@ void Program::destroy_snode_tree(SNodeTree *snode_tree) {
     }
   }
   TI_ASSERT(retired_accessor_kernels.empty());
-  if (contains_hash) {
-    --hash_snode_tree_count_;
-  }
   snode_tree_active_[tree_id] = 0;
   free_snode_tree_ids_.push(tree_id);
   advance_snode_tree_epoch(snode_tree_mutation_epoch_);
@@ -6198,7 +6192,6 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   auto tree =
       std::make_unique<SNodeTree>(id, generation, std::move(root));
   tree->root()->set_snode_tree_id(id);
-  const bool contains_hash = snode_tree_contains_hash(tree->root());
   try {
     {
       TI_COMPILE_PROFILER("cpp.snode.add.backend_materialize");
@@ -6218,9 +6211,6 @@ SNodeTree *Program::add_snode_tree(std::unique_ptr<SNode> root,
   } catch (...) {
     free_snode_tree_ids_.push(id);
     throw;
-  }
-  if (contains_hash) {
-    ++hash_snode_tree_count_;
   }
   if (id < snode_trees_.size()) {
     snode_trees_[id] = std::move(tree);
@@ -7808,14 +7798,20 @@ void Program::track_runtime_completion(
   runtime_completions_.push_back(completion);
 }
 
-void Program::collect_ready_runtime_completions() {
+void Program::collect_ready_runtime_completions(std::size_t max_polls) {
   std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
-  for (auto it = runtime_completions_.begin();
-       it != runtime_completions_.end();) {
-    if (it->done()) {
-      it = runtime_completions_.erase(it);
+  const std::size_t poll_count =
+      std::min(max_polls, runtime_completions_.size());
+  for (std::size_t i = 0; i < poll_count; ++i) {
+    RuntimeCompletion completion = runtime_completions_.front();
+    // Query before mutating the registry. A backend exception therefore keeps
+    // the completion tracked for reset/synchronize, and appending before
+    // popping gives the same guarantee if deque growth reports OOM.
+    if (completion.done()) {
+      runtime_completions_.pop_front();
     } else {
-      ++it;
+      runtime_completions_.push_back(std::move(completion));
+      runtime_completions_.pop_front();
     }
   }
 }
@@ -7895,7 +7891,10 @@ RuntimeCompletion Program::record_runtime_completion(
     StreamGpuTiming gpu_timing,
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings) {
   ensure_runtime_submission_allowed("runtime completion recording");
-  collect_ready_runtime_completions();
+  // Bound host polling work, not the number of valid in-flight submissions.
+  // Synchronize/reset/finalize fully drain the registry; until then the
+  // backend and available device memory define the natural backlog limit.
+  collect_ready_runtime_completions(kRuntimeCompletionPollBudget);
 
   RuntimeCompletion result;
   {
@@ -8033,19 +8032,6 @@ RuntimeCompletion Program::record_runtime_completion(
     }
   }
 
-  RuntimeCompletion oldest;
-  {
-    std::lock_guard<std::mutex> lock(runtime_completion_mutex_);
-    if (runtime_completions_.size() > kMaxTrackedRuntimeCompletions) {
-      oldest = runtime_completions_.front();
-    }
-  }
-  if (oldest.valid()) {
-    // Bounded backpressure applies only to the opt-in completion path. No
-    // Program/resource or Vulkan queue mutex is held while waiting.
-    oldest.wait();
-    collect_ready_runtime_completions();
-  }
   return result;
 }
 
@@ -8911,6 +8897,8 @@ void Program::debug_reset_ordinary_launch_attribution() noexcept {
   TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_lease_clones);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_inflight_reuses);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_pins);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(runtime_error_checks);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(runtime_error_check_elisions);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(total_host_ns);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(compile_lookup_ns);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(compile_and_launch_total_ns);
@@ -8958,6 +8946,9 @@ Program::debug_ordinary_launch_attribution() const {
       {"ndarray_lease_clones", load(stats.ndarray_lease_clones)},
       {"ndarray_inflight_reuses", load(stats.ndarray_inflight_reuses)},
       {"ndarray_pins", load(stats.ndarray_pins)},
+      {"runtime_error_checks", load(stats.runtime_error_checks)},
+      {"runtime_error_check_elisions",
+       load(stats.runtime_error_check_elisions)},
       {"total_host_ns", load(stats.total_host_ns)},
       {"compile_lookup_ns", load(stats.compile_lookup_ns)},
       {"compile_and_launch_total_ns",

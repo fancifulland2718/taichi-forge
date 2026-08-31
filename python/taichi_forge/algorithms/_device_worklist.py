@@ -2593,6 +2593,12 @@ class DeviceWorklist:
             ):
                 raise TaichiRuntimeError("DeviceWorklist unique storage is no longer valid")
 
+    def _current_storage(self):
+        return self._values[self._front], self._extents[self._front]
+
+    def _next_storage(self):
+        return self._values[1 - self._front], self._extents[1 - self._front]
+
     def clear(self):
         """Clear both fronts and all counters without reallocating storage."""
 
@@ -2623,15 +2629,17 @@ class DeviceWorklist:
         """
 
         self._validate_current()
+        _, current_extent = self._current_storage()
+        _, next_extent = self._next_storage()
         if target == "next":
-            extent = self.next_extent
+            extent = next_extent
         elif target == "current":
-            extent = self.extent
+            extent = current_extent
         else:
             raise ValueError("DeviceWorklist prepare target must be current or next")
         if self._transition_mode == "direct":
             if self._unique_epoch is not None:
-                source_extent = self.extent if target == "next" else self.next_extent
+                source_extent = current_extent if target == "next" else next_extent
                 _begin_unique_direct_worklist_transition(
                     extent.state,
                     source_extent.state,
@@ -2670,8 +2678,9 @@ class DeviceWorklist:
                 "dispatch packet; use the next DeviceExtent directly"
             )
         if self._next_requires_finalize:
+            _, next_extent = self._next_storage()
             _finalize_atomic_target(
-                self.next_extent,
+                next_extent,
                 self._stats,
                 self._capacity,
                 dispatch_state,
@@ -2696,8 +2705,9 @@ class DeviceWorklist:
                 "unique DeviceWorklist recycling requires "
                 "unique_recycle_arguments()"
             )
+        _, current_extent = self._current_storage()
         return (
-            self.extent.state,
+            current_extent.state,
             self._stats["overflow"],
             self._stats["generation"],
         )
@@ -2717,9 +2727,11 @@ class DeviceWorklist:
                 "unique fused recycling requires a direct DeviceWorklist "
                 "with unique_key_capacity"
             )
+        _, current_extent = self._current_storage()
+        _, next_extent = self._next_storage()
         return (
-            self.extent.state,
-            self.next_extent.state,
+            current_extent.state,
+            next_extent.state,
             self._stats["overflow"],
             self._stats["generation"],
             self._unique_epoch,
@@ -2758,10 +2770,12 @@ class DeviceWorklist:
         """Return arguments consumed by :func:`device_worklist_append`."""
 
         self._validate_current()
+        current = self._current_storage()
+        next_storage = self._next_storage()
         if target == "next":
-            values, extent = self.next_values, self.next_extent
+            values, extent = next_storage
         elif target == "current":
-            values, extent = self.values, self.extent
+            values, extent = current
         else:
             raise ValueError("DeviceWorklist append target must be current or next")
         if self._transition_mode == "direct":
@@ -2780,10 +2794,12 @@ class DeviceWorklist:
         self._validate_current()
         if self._unique_tags is None:
             raise TaichiRuntimeError("DeviceWorklist was created without unique_key_capacity")
+        current = self._current_storage()
+        next_storage = self._next_storage()
         if target == "next":
-            values, extent = self.next_values, self.next_extent
+            values, extent = next_storage
         elif target == "current":
-            values, extent = self.values, self.extent
+            values, extent = current
         else:
             raise ValueError("DeviceWorklist append target must be current or next")
         return (
@@ -2797,7 +2813,9 @@ class DeviceWorklist:
         )
 
     def prefix(self):
-        return DevicePrefix(self.values, self.extent, workspace=self._workspace)
+        self._validate_current()
+        values, extent = self._current_storage()
+        return DevicePrefix(values, extent, workspace=self._workspace)
 
     def select(self, flags, *, method="auto", dispatch_state=None):
         """Stable-select the current front into the back and commit it."""
@@ -2811,13 +2829,14 @@ class DeviceWorklist:
                 "dispatch packet; use the next DeviceExtent directly"
             )
         _require_worklist_array(flags, "selection flags", self._capacity, i32)
-        source_extent = self.extent
+        values, source_extent = self._current_storage()
+        next_values, next_extent = self._next_storage()
         _select_impl(
-            self.values,
+            values,
             source_extent,
             flags,
-            self.next_values,
-            self.next_extent,
+            next_values,
+            next_extent,
             self._stats,
             self._workspace,
             method=method,
@@ -2861,7 +2880,7 @@ class DeviceWorklist:
             )
         sort_method = _normalize_conflict_sort_method(method, sort_method)
         output_shape = _normalize_conflict_output_shape(output_shape)
-        source_extent = self.extent
+        values, source_extent = self._current_storage()
         if output_shape == "dense_winner_table":
             selected_strategy, key_capacity, _ = _choose_conflict_strategy(strategy, key_capacity, self._capacity)
             if selected_strategy != "dense_atomic":
@@ -2885,12 +2904,13 @@ class DeviceWorklist:
         output_keys = self._workspace._buffer("conflict_output_keys", keys.dtype, self._capacity)
         output_priorities = self._workspace._buffer("conflict_output_priorities", i32, self._capacity)
         output_ordinals = self._workspace._buffer("conflict_output_ordinals", i32, self._capacity)
+        next_values, next_extent = self._next_storage()
         result = _resolve_impl(
-            self.values,
+            values,
             source_extent,
             keys,
-            self.next_values,
-            self.next_extent,
+            next_values,
+            next_extent,
             self._stats,
             self._workspace,
             priorities=priorities,
@@ -2906,12 +2926,13 @@ class DeviceWorklist:
         )
         self._next_requires_finalize = False
         self.commit_next()
+        values, extent = self._current_storage()
         return DeviceConflictResult(
             keys=result.keys,
-            values=self.values,
+            values=values,
             priorities=result.priorities,
             ordinals=result.ordinals,
-            extent=self.extent,
+            extent=extent,
             statistics=result.statistics,
             policy=result.policy,
             strategy=result.strategy,
@@ -3105,11 +3126,13 @@ class DeviceWorklist:
         """Bind this worklist to :func:`device_worklist_graph_args`."""
 
         self._validate_current()
+        current_values, current_extent = self._current_storage()
+        next_values, next_extent = self._next_storage()
         result = {
-            f"{name}_current_values": self.values,
-            f"{name}_current_extent": self.extent,
-            f"{name}_next_values": self.next_values,
-            f"{name}_next_extent": self.next_extent,
+            f"{name}_current_values": current_values,
+            f"{name}_current_extent": current_extent,
+            f"{name}_next_values": next_values,
+            f"{name}_next_extent": next_extent,
         }
         if include_capacity:
             result[f"{name}_capacity"] = self._capacity

@@ -17,6 +17,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
     std::vector<Callable::Ret> rets;
     LLVMCompiledKernel compiled_data;
     std::vector<int> used_snode_tree_ids;
+    bool may_trigger_hash_overflow{false};
     GraphKernelMetadata graph_metadata;
 
     const StructType *ret_type = nullptr;
@@ -29,6 +30,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
               rets,
               compiled_data,
               used_snode_tree_ids,
+              may_trigger_hash_overflow,
               graph_metadata,
               ret_type,
               ret_size,
@@ -42,6 +44,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
           rets(o.rets),
           compiled_data(o.compiled_data.clone()),
           used_snode_tree_ids(o.used_snode_tree_ids),
+          may_trigger_hash_overflow(o.may_trigger_hash_overflow),
           graph_metadata(o.graph_metadata),
           ret_type(o.ret_type),
           ret_size(o.ret_size),
@@ -59,6 +62,7 @@ class CompiledKernelData : public lang::CompiledKernelData {
   std::unique_ptr<lang::CompiledKernelData> clone() const override;
   std::vector<int> snode_tree_ids() const override;
   bool has_snode_tree_dependencies() const noexcept override;
+  bool may_trigger_hash_overflow() const noexcept override;
   std::size_t task_count() const override;
   std::vector<OffloadedTaskManifest> task_manifest() const override;
   const GraphKernelMetadata &graph_metadata() const override {

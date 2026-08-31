@@ -128,7 +128,7 @@ def test_callable_template_mapper_template_hit_skips_dead_key_scan():
     assert mapper.lookup((field,))[0] == 0
 
 
-@test_utils.test()
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_callable_template_mapper_separates_canonical_and_affine_ndarrays():
     arr = ti.ndarray(ti.f32, shape=(4, 4))
     affine = ti.experimental.ndarray_view(arr, slices=(slice(0, 4, 2), slice(1, 4, 2)))
@@ -157,6 +157,36 @@ def test_callable_template_mapper_separates_canonical_and_affine_ndarrays():
     operator_id, operator_features = mapper.lookup((operator_exemplar,))
     assert operator_id == affine_id
     assert operator_features[0][4] == "runtime_affine_ndarray"
+
+
+@test_utils.test()
+def test_callable_template_mapper_invalidates_ndarray_layout_feature_cache():
+    arr = ti.ndarray(ti.f32, shape=(4, 4))
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.types.ndarray(dtype=ti.f32, ndim=2), "arr"),),
+        (),
+    )
+
+    canonical_id, canonical_features = mapper.lookup((arr,))
+    assert canonical_features[0][4] == "canonical_ndarray"
+
+    # Operator and Graph preparation attach these markers after constructing
+    # otherwise canonical ndarrays. A prior weak-cache hit must not preserve
+    # the canonical pointer/shape ABI for the now runtime-affine exemplar.
+    arr._runtime_affine_exemplar = True
+    affine_id, affine_features = mapper.lookup((arr,))
+    assert affine_id != canonical_id
+    assert affine_features[0][4] == "runtime_affine_ndarray"
+
+    arr._runtime_affine_exemplar = False
+    restored_id, restored_features = mapper.lookup((arr,))
+    assert restored_id == canonical_id
+    assert restored_features[0][4] == "canonical_ndarray"
+
+    arr._graph_runtime_affine_exemplar = True
+    graph_id, graph_features = mapper.lookup((arr,))
+    assert graph_id == affine_id
+    assert graph_features[0][4] == "runtime_affine_ndarray"
 
 
 @test_utils.test()

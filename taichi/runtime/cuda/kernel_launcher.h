@@ -217,7 +217,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                   std::vector<OffloadedTask> *offloaded_tasks =
                                       nullptr,
                                   std::string *task_execution_plan_identity =
-                                      nullptr);
+                                      nullptr,
+                                  std::size_t *offloaded_task_count = nullptr);
   bool on_cuda_device(void *ptr);
   int64 get_sparse_list_version(int snode_id) const;
   void record_sparse_list_reuse_sample(SparseListState &state,

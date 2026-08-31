@@ -245,6 +245,33 @@ class Ndarray:
         self._runtime_prog = None
         self._runtime_allocation_identity = None
         self._runtime_storage_arguments = {}
+        self._runtime_affine_exemplar_value = False
+        self._graph_runtime_affine_exemplar_value = False
+        self._runtime_affine_exemplar_token = 0
+
+    @property
+    def _runtime_affine_exemplar(self):
+        return self._runtime_affine_exemplar_value
+
+    @_runtime_affine_exemplar.setter
+    def _runtime_affine_exemplar(self, value):
+        self._runtime_affine_exemplar_value = bool(value)
+        self._runtime_affine_exemplar_token = int(
+            self._runtime_affine_exemplar_value
+            or self._graph_runtime_affine_exemplar_value
+        )
+
+    @property
+    def _graph_runtime_affine_exemplar(self):
+        return self._graph_runtime_affine_exemplar_value
+
+    @_graph_runtime_affine_exemplar.setter
+    def _graph_runtime_affine_exemplar(self, value):
+        self._graph_runtime_affine_exemplar_value = bool(value)
+        self._runtime_affine_exemplar_token = int(
+            self._runtime_affine_exemplar_value
+            or self._graph_runtime_affine_exemplar_value
+        )
 
     def _register_runtime_object(self):
         runtime = impl.get_runtime()

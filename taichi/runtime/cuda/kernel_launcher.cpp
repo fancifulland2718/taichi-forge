@@ -752,7 +752,9 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                                                 std::vector<OffloadedTask>
                                                     *resolved_tasks,
                                                 std::string
-                                                    *task_plan_identity) {
+                                                    *task_plan_identity,
+                                                std::size_t
+                                                    *resolved_task_count) {
   std::shared_lock<std::shared_mutex> launch_lock(registration_mutex());
   std::shared_ptr<const Context> launcher_ctx;
   auto iter = contexts_.find(handle.get_launch_id());
@@ -865,6 +867,9 @@ bool KernelLauncher::prepare_cuda_graph_context(Handle handle,
                               : nullptr;
   if (resolved_tasks != nullptr) {
     *resolved_tasks = offloaded_tasks;
+  }
+  if (resolved_task_count != nullptr) {
+    *resolved_task_count = offloaded_tasks.size();
   }
   if (task_plan_identity != nullptr) {
     *task_plan_identity = ctx.cuda_task_execution_plan_identity();
@@ -1001,14 +1006,15 @@ bool KernelLauncher::update_cuda_graph_launch(
     return false;
   }
   RuntimeContext context;
-  std::vector<OffloadedTask> resolved_tasks;
+  std::size_t resolved_task_count = 0;
   std::string task_plan_identity;
   if (!prepare_cuda_graph_context(packet.handle, ctx, context,
-                                  &resolved_tasks, &task_plan_identity)) {
+                                  nullptr, &task_plan_identity,
+                                  &resolved_task_count)) {
     return false;
   }
   if (task_plan_identity != packet.task_execution_plan_identity ||
-      resolved_tasks.size() != packet.offloaded_tasks.size()) {
+      resolved_task_count != packet.offloaded_tasks.size()) {
     return false;
   }
   if (context.runtime != packet.context.runtime ||

@@ -202,6 +202,89 @@ def test_task_launch_auto_does_not_publish_fast_path_after_invalidation():
     assert binding._fast_runtime is None
 
 
+def test_task_launch_fast_snapshot_survives_interleaved_publication():
+    launched = []
+
+    def fake_kernel_body():
+        pass
+
+    runtime = SimpleNamespace(
+        target_tape=None,
+        fwd_mode_manager=None,
+        grad_replaced=False,
+    )
+    key_a = (fake_kernel_body, 7, kernel_impl.AutodiffMode.NONE)
+    key_b = (fake_kernel_body, 8, kernel_impl.AutodiffMode.NONE)
+    kernel_cpp_a = object()
+    kernel_cpp_b = object()
+    generation = launch_tuning._coordinator.generation
+
+    class InterleavingCompiledKernels(dict):
+        binding = None
+        interleaved = False
+
+        def get(self, key, default=None):
+            value = super().get(key, default)
+            if key == key_a and not self.interleaved:
+                self.interleaved = True
+                self.binding._publish_fast_specialization(
+                    runtime,
+                    key_b,
+                    kernel_cpp_b,
+                    auto_generation=generation,
+                )
+            return value
+
+    compiled_kernels = InterleavingCompiledKernels(
+        {key_a: kernel_cpp_a, key_b: kernel_cpp_b}
+    )
+
+    class FakeKernel:
+        func = staticmethod(fake_kernel_body)
+        arguments = (SimpleNamespace(default=None),)
+        autodiff_mode = kernel_impl.AutodiffMode.NONE
+        mapper = SimpleNamespace(
+            _dynamic_arg_extractors=((0, object(), "value"),),
+            lookup=lambda args: (7, ("dynamic",)),
+        )
+
+        def __init__(self):
+            self.runtime = runtime
+            self.compiled_kernels = compiled_kernels
+
+        def __call__(self, *args, **kwargs):
+            raise AssertionError((args, kwargs))
+
+        @staticmethod
+        def launch_kernel(kernel_cpp, *args):
+            launched.append((kernel_cpp, args))
+            return "launched-a"
+
+    kernel = FakeKernel()
+    binding = kernel_impl._TaskLaunchBinding(
+        kernel,
+        ti.TaskLaunchPolicy.auto(),
+        workload_profile=_workload_profile(),
+    )
+    compiled_kernels.binding = binding
+    binding._publish_fast_specialization(
+        runtime,
+        key_a,
+        kernel_cpp_a,
+        auto_generation=generation,
+    )
+
+    assert binding._call_auto((123,), {}) == "launched-a"
+    assert compiled_kernels.interleaved
+    assert launched == [(kernel_cpp_a, (123,))]
+    assert binding._fast_specialization == (
+        runtime,
+        key_b,
+        kernel_cpp_b,
+        generation,
+    )
+
+
 def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
     task = SimpleNamespace(
         task_type="range_for",

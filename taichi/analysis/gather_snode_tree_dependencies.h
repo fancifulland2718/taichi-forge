@@ -24,6 +24,12 @@ std::vector<int> gather_snode_tree_dependencies(IRNode &ir);
 // used by codegen to classify state embedded in one executable.
 SNodeRelocationStructure gather_snode_relocation_structures(IRNode &ir);
 
+// Returns true when the lowered IR can execute a hash insertion or allocate a
+// compact hash child payload. These are the only hash operations that can set
+// the LLVM runtime error slot through table/pool overflow. The result is
+// persisted with CompiledKernelData so launch does not rediscover it.
+bool may_trigger_hash_overflow(IRNode &ir);
+
 // Returns true when any listed SNodeTree contains an activating (sparse or
 // dynamic) node. This deliberately qualifies the complete tree because
 // compiled Graph dependency metadata and lifecycle ownership are

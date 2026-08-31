@@ -129,7 +129,11 @@ def _fake_offload_kernel(plan):
         if kernel_cpp not in registered:
             return None, False
         return (
-            SimpleNamespace(matches=lambda active_runtime, values: True),
+            SimpleNamespace(
+                key=key,
+                kernel_cpp=kernel_cpp,
+                matches=lambda active_runtime, values: True,
+            ),
             False,
         )
 
@@ -217,6 +221,46 @@ def test_offload_binding_validates_once_and_reuses_retained_launch_plan(
     assert binding(1) == ("raw", (1,))
     assert counters["ensure"] == 3
     assert counters["validate"] == 3
+
+
+def test_offload_binding_fast_snapshot_survives_interleaved_publication(
+    monkeypatch,
+):
+    plan = _OffloadExecutionPlan.from_task_manifests(_manifests())
+    kernel, _, _ = _fake_offload_kernel(plan)
+    monkeypatch.setattr(
+        kernel_impl,
+        "_process_args",
+        lambda unused_kernel, args, kwargs: tuple(args),
+    )
+    binding = kernel_impl._OffloadExecutionPlanBinding(kernel, plan)
+    key_a = binding._specialization_key((0,))
+    key_b = binding._specialization_key((1,))
+    kernel_cpp_a = object()
+    kernel_cpp_b = object()
+    kernel.compiled_kernels.update({key_a: kernel_cpp_a, key_b: kernel_cpp_b})
+    binding._install_fast_specialization(kernel.runtime, key_a, kernel_cpp_a)
+    launched = []
+
+    def interleave(processed, fast_specialization=None):
+        del processed, fast_specialization
+        binding._install_fast_specialization(kernel.runtime, key_b, kernel_cpp_b)
+        return None
+
+    def launch(kernel_cpp, *args):
+        launched.append((kernel_cpp, args))
+        return "launched-a"
+
+    binding._prepare_retained_plan = interleave
+    kernel.launch_kernel = launch
+
+    assert binding(0) == "launched-a"
+    assert launched == [(kernel_cpp_a, (0,))]
+    assert binding._fast_specialization == (
+        kernel.runtime,
+        key_b,
+        kernel_cpp_b,
+    )
 
 
 def test_offload_binding_rejects_malformed_manifest_before_launch(monkeypatch):

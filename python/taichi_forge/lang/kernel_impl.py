@@ -695,9 +695,20 @@ class TaichiCallableTemplateMapper:
 
     @staticmethod
     def _arg_feature_cache_token(arg, anno):
-        if anno.needs_grad is None and getattr(arg, "grad", None) is not None:
-            return id(arg.grad)
-        return 0
+        grad = getattr(arg, "grad", None) if anno.needs_grad is None else None
+        # These exemplar flags change the generated ndarray ABI from the
+        # canonical pointer/shape contract to the runtime-affine descriptor
+        # contract. They may be attached after an object has already passed
+        # through the weak feature cache, so they are part of its generation
+        # token rather than a one-time object property.
+        affine = getattr(arg, "_runtime_affine_exemplar_token", None)
+        if affine is None:
+            affine = int(
+                bool(getattr(arg, "_runtime_affine_exemplar", False))
+                or bool(getattr(arg, "_graph_runtime_affine_exemplar", False))
+            )
+        grad_token = 0 if grad is None else id(grad)
+        return (grad_token, 1) if affine else grad_token
 
     @staticmethod
     def extract_arg(arg, anno, arg_name):
@@ -946,6 +957,7 @@ class TaichiCallableTemplateMapper:
                 len(shape) - len(element_shape),
                 needs_grad,
                 anno.boundary,
+                "canonical_ndarray",
             )
         if isinstance(anno, sparse_matrix_builder):
             return arg.dtype
@@ -1093,6 +1105,7 @@ def _get_global_vars(_func):
 
 
 _ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY = 4
+_ORDINARY_LAUNCH_CONTEXT_POOL_CAPACITY = 4
 _TASK_LAUNCH_AUTO_DECISION_CACHE_CAPACITY = 16
 
 
@@ -1140,6 +1153,8 @@ class _OrdinaryLaunchPlan:
         "scalar_patch_plan",
         "resource_guards",
         "launch_ctx",
+        "_launch_ctx_pool",
+        "_launch_ctx_pool_lock",
         "guard_context_lifecycle",
     )
 
@@ -1165,7 +1180,45 @@ class _OrdinaryLaunchPlan:
         self.scalar_patch_plan = scalar_patch_plan
         self.resource_guards = resource_guards
         self.launch_ctx = launch_ctx
+        self._launch_ctx_pool = [] if launch_ctx is None else [launch_ctx]
+        self._launch_ctx_pool_lock = threading.Lock()
         self.guard_context_lifecycle = guard_context_lifecycle
+
+    def acquire_launch_context(self):
+        """Return one exclusively-owned reusable context, if available."""
+
+        if self.launch_ctx is None:
+            return None
+        with self._launch_ctx_pool_lock:
+            if self._launch_ctx_pool:
+                return self._launch_ctx_pool.pop()
+        return None
+
+    def release_launch_context(self, launch_ctx):
+        """Retain a bounded number of contexts after submission copied them."""
+
+        if self.launch_ctx is None or launch_ctx is None:
+            return
+        with self._launch_ctx_pool_lock:
+            if any(item is launch_ctx for item in self._launch_ctx_pool):
+                return
+            primary_is_pooled = any(
+                item is self.launch_ctx for item in self._launch_ctx_pool
+            )
+            retained_capacity = _ORDINARY_LAUNCH_CONTEXT_POOL_CAPACITY
+            if launch_ctx is not self.launch_ctx and not primary_is_pooled:
+                # ``self.launch_ctx`` is still retained as the plan's primary
+                # diagnostic context even if a failed launch kept it out of
+                # the reusable pool. Reserve one slot for that reference so a
+                # failure cannot leave capacity+1 persistent builders.
+                retained_capacity -= 1
+            if len(self._launch_ctx_pool) < retained_capacity:
+                self._launch_ctx_pool.append(launch_ctx)
+                return
+            # Keep the original diagnostic/primary context inside the bound
+            # even if shorter calls filled the pool while it was in flight.
+            if launch_ctx is self.launch_ctx and not primary_is_pooled:
+                self._launch_ctx_pool[-1] = launch_ctx
 
     def is_live(self, runtime):
         if self.runtime is not runtime:
@@ -2410,7 +2463,11 @@ class Kernel:
                 if self.runtime.print_full_traceback:
                     raise exc
                 raise exc from None
-        launch_ctx = plan.launch_ctx
+        # A LaunchContextBuilder is mutable. Reuse its pre-bound resource
+        # layout only with per-call exclusive ownership; concurrent callers
+        # take another pooled context or create an ephemeral one instead of
+        # serializing native submission behind a global lock.
+        launch_ctx = plan.acquire_launch_context()
         if launch_ctx is None:
             launch_ctx = plan.kernel_cpp.make_launch_context()
             bindings = plan.bindings
@@ -2449,12 +2506,14 @@ class Kernel:
                 plan.native_plan.launch(prog, launch_ctx)
             else:
                 launch_scope.launch(launch_ctx)
+            result = self._finish_launch(launch_ctx)
         except Exception as exc:
             exc = handle_exception_from_cpp(exc)
             if self.runtime.print_full_traceback:
                 raise exc
             raise exc from None
-        return self._finish_launch(launch_ctx)
+        plan.release_launch_context(launch_ctx)
+        return result
 
     def construct_kernel_ret(self, launch_ctx, ret_type, index=()):
         if isinstance(ret_type, CompoundType):
@@ -3112,6 +3171,11 @@ class _TaskLaunchBinding:
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
+        # Correctness readers consume this single-reference snapshot. The
+        # legacy scalar fields remain for diagnostics, but concurrent variant
+        # publication must never combine a key from one specialization with a
+        # native handle from another.
+        self._fast_specialization = (None, None, None, -1)
         # Qualified variant replay owns an executable plan but deliberately
         # not a reusable LaunchContextBuilder. A fresh context keeps warm
         # multi-threaded calls from racing while still removing the dominant
@@ -3137,6 +3201,20 @@ class _TaskLaunchBinding:
         else:
             self._auto_coordinator = None
         self.__name__ = kernel.func.__name__
+
+    def _publish_fast_specialization(
+        self, runtime, key, kernel_cpp, *, auto_generation=-1
+    ):
+        self._fast_runtime = runtime
+        self._fast_key = key
+        self._fast_kernel_cpp = kernel_cpp
+        self._fast_auto_generation = auto_generation
+        self._fast_specialization = (
+            runtime,
+            key,
+            kernel_cpp,
+            auto_generation,
+        )
 
     def _with_workload_profile(self, profile):
         if self.policy.mode != "auto":
@@ -3228,9 +3306,11 @@ class _TaskLaunchBinding:
             self._retained_plan_negative_runtime = None
             self._retained_plan_negative_key = None
 
-    def _prepare_retained_plan(self, processed_args):
+    def _prepare_retained_plan(self, processed_args, fast_specialization=None):
         runtime = self._kernel.runtime
-        key = self._fast_key
+        if fast_specialization is None:
+            fast_specialization = self._fast_specialization
+        fast_runtime, key, kernel_cpp, _ = fast_specialization
         if (
             (
                 self.policy.mode == "auto"
@@ -3238,7 +3318,9 @@ class _TaskLaunchBinding:
             )
             or self._fallback_auto
             or key is None
-            or self._fast_runtime is not runtime
+            or kernel_cpp is None
+            or fast_runtime is not runtime
+            or self._kernel.compiled_kernels.get(key) is not kernel_cpp
             or self._kernel.autodiff_mode != AutodiffMode.NONE
             or runtime.target_tape is not None
             or runtime.fwd_mode_manager is not None
@@ -3250,6 +3332,8 @@ class _TaskLaunchBinding:
             self._retained_plan_runtime is runtime
             and self._retained_plan_key == key
             and plan is not None
+            and plan.key == key
+            and plan.kernel_cpp is kernel_cpp
             and plan.matches(runtime, processed_args)
         ):
             return plan
@@ -3264,6 +3348,8 @@ class _TaskLaunchBinding:
                 self._retained_plan_runtime is runtime
                 and self._retained_plan_key == key
                 and plan is not None
+                and plan.key == key
+                and plan.kernel_cpp is kernel_cpp
                 and plan.matches(runtime, processed_args)
             ):
                 return plan
@@ -3278,6 +3364,12 @@ class _TaskLaunchBinding:
                 allow_snode_tree_dependencies=True,
                 reuse_gpu_context=False,
             )
+            if (
+                self._kernel.runtime is not runtime
+                or self._kernel.compiled_kernels.get(key) is not kernel_cpp
+                or self._fast_specialization != fast_specialization
+            ):
+                return None
             if plan is not None:
                 self._retained_plan = plan
                 self._retained_plan_runtime = runtime
@@ -3309,27 +3401,29 @@ class _TaskLaunchBinding:
     def _refresh_fast_path(self, report=None, processed_args=None):
         if report is not None and report.status == "fallback_auto":
             self._fallback_auto = True
-            self._fast_runtime = self._kernel.runtime
             self._clear_retained_plan()
+            self._publish_fast_specialization(self._kernel.runtime, None, None)
             return
         if self.policy.mode == "auto" and not getattr(
             self, "_exact_kernel_optimization", False
         ):
             return
         runtime = self._kernel.runtime
-        self._fast_runtime = runtime
         key = self._specialization_key(processed_args)
         if key is None:
             self._clear_retained_plan()
+            self._publish_fast_specialization(runtime, None, None)
             return
         if key in self._kernel._task_launch_policy_manifests:
-            if self._fast_key != key or self._retained_plan_runtime is not runtime:
+            previous = self._fast_specialization
+            if previous[1] != key or self._retained_plan_runtime is not runtime:
                 self._clear_retained_plan()
-            self._fast_runtime = runtime
-            self._fast_key = key
-            self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+            kernel_cpp = self._kernel.compiled_kernels[key]
+            self._publish_fast_specialization(runtime, key, kernel_cpp)
             if processed_args is not None:
-                self._prepare_retained_plan(processed_args)
+                self._prepare_retained_plan(
+                    processed_args, (runtime, key, kernel_cpp, -1)
+                )
 
     def _auto_resolution(self, args, kwargs, *, observe):
         from taichi_forge.lang._task_launch_tuning import (
@@ -3442,9 +3536,12 @@ class _TaskLaunchBinding:
 
     def _call_auto(self, args, kwargs):
         runtime = self._kernel.runtime
+        fast_runtime, fast_key, fast_kernel_cpp, fast_generation = (
+            self._fast_specialization
+        )
         if (
-            self._fast_runtime is runtime
-            and self._fast_auto_generation == self._auto_coordinator.generation
+            fast_runtime is runtime
+            and fast_generation == self._auto_coordinator.generation
             and runtime.target_tape is None
             and runtime.fwd_mode_manager is None
             and not runtime.grad_replaced
@@ -3452,13 +3549,12 @@ class _TaskLaunchBinding:
             processed = _process_args(self._kernel, args, kwargs)
             instance_id = self._kernel.mapper.lookup(processed)[0]
             if (
-                self._fast_kernel_cpp is not None
-                and self._fast_key is not None
-                and self._fast_key[1] == instance_id
-                and self._kernel.compiled_kernels.get(self._fast_key)
-                is self._fast_kernel_cpp
+                fast_kernel_cpp is not None
+                and fast_key is not None
+                and fast_key[1] == instance_id
+                and self._kernel.compiled_kernels.get(fast_key) is fast_kernel_cpp
             ):
-                return self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
+                return self._kernel.launch_kernel(fast_kernel_cpp, *processed)
 
         processed, resolved, resolution_generation = self._auto_resolution(
             args, kwargs, observe=True
@@ -3480,13 +3576,14 @@ class _TaskLaunchBinding:
             return self._kernel(*args, **kwargs)
         if resolution_generation != self._auto_coordinator.generation:
             return self._kernel(*args, **kwargs)
-        self._fast_runtime = runtime
-        self._fast_key = key
-        self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
-        self._fast_auto_generation = resolution_generation
-        return self._kernel.launch_kernel(
-            self._kernel.compiled_kernels[key], *processed
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        self._publish_fast_specialization(
+            runtime,
+            key,
+            kernel_cpp,
+            auto_generation=resolution_generation,
         )
+        return self._kernel.launch_kernel(kernel_cpp, *processed)
 
     def __call__(self, *args, **kwargs):
         try:
@@ -3501,10 +3598,12 @@ class _TaskLaunchBinding:
                         return self._kernel(*combined_args, **kwargs)
                     self._auto_default_runtime = None
                 return self._call_auto(combined_args, kwargs)
-            if self._fallback_auto and self._fast_runtime is runtime:
+            fast_specialization = self._fast_specialization
+            fast_runtime, fast_key, fast_kernel_cpp, _ = fast_specialization
+            if self._fallback_auto and fast_runtime is runtime:
                 return self._kernel(*self._bound_args, *args, **kwargs)
             if (
-                self._fast_runtime is runtime
+                fast_runtime is runtime
                 and runtime.target_tape is None
                 and runtime.fwd_mode_manager is None
                 and not runtime.grad_replaced
@@ -3514,12 +3613,13 @@ class _TaskLaunchBinding:
                 )
                 expected_key = self._specialization_key(processed)
                 if (
-                    self._fast_key == expected_key
-                    and self._fast_kernel_cpp is not None
-                    and self._kernel.compiled_kernels.get(self._fast_key)
-                    is self._fast_kernel_cpp
+                    fast_key == expected_key
+                    and fast_kernel_cpp is not None
+                    and self._kernel.compiled_kernels.get(fast_key) is fast_kernel_cpp
                 ):
-                    retained_plan = self._prepare_retained_plan(processed)
+                    retained_plan = self._prepare_retained_plan(
+                        processed, fast_specialization
+                    )
                     if retained_plan is not None:
                         return self._kernel._launch_with_ordinary_plan(
                             retained_plan,
@@ -3532,7 +3632,7 @@ class _TaskLaunchBinding:
                             ),
                         )
                     result = self._kernel.launch_kernel(
-                        self._fast_kernel_cpp,
+                        fast_kernel_cpp,
                         *processed,
                         _grid_residency_waves=(
                             self._optimization_spec.launch.grid_residency_waves
@@ -3544,7 +3644,7 @@ class _TaskLaunchBinding:
                     # The first physical launch may have registered the backend
                     # handle that report()-only preparation intentionally
                     # lacked. Publish the immutable plan for subsequent calls.
-                    self._prepare_retained_plan(processed)
+                    self._prepare_retained_plan(processed, fast_specialization)
                     return result
                 key = self._kernel._ensure_compiled_with_task_launch_policy(
                     self.policy,
@@ -3578,7 +3678,8 @@ class _TaskLaunchBinding:
                 and self._kernel._task_launch_backend_kind()[1] == "cpu"
             ):
                 self._fallback_auto = True
-                self._fast_runtime = runtime
+                self._clear_retained_plan()
+                self._publish_fast_specialization(runtime, None, None)
             else:
                 processed = _process_args(self._kernel, combined_args, kwargs)
                 self._refresh_fast_path(processed_args=processed)
@@ -3619,10 +3720,12 @@ class _TaskLaunchBinding:
                             status="auto_qualified",
                             reason=self._last_auto_decision.reason,
                         )
-                        self._fast_runtime = self._kernel.runtime
-                        self._fast_key = key
-                        self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
-                        self._fast_auto_generation = resolution_generation
+                        self._publish_fast_specialization(
+                            self._kernel.runtime,
+                            key,
+                            self._kernel.compiled_kernels[key],
+                            auto_generation=resolution_generation,
+                        )
                         return report
             report = self._kernel._task_launch_report(
                 self.policy, *combined_args, **kwargs
@@ -3745,20 +3848,23 @@ class _KernelOptimizationBinding(_TaskLaunchBinding):
             combined = (*self._bound_args, *args)
             processed = _process_args(self._kernel, combined, kwargs)
             expected_key = self._specialization_key(processed)
+            fast_specialization = self._fast_specialization
+            fast_runtime, fast_key, fast_kernel_cpp, _ = fast_specialization
             if (
-                self._fast_runtime is runtime
-                and self._fast_key == expected_key
-                and self._fast_kernel_cpp is not None
-                and self._kernel.compiled_kernels.get(self._fast_key)
-                is self._fast_kernel_cpp
+                fast_runtime is runtime
+                and fast_key == expected_key
+                and fast_kernel_cpp is not None
+                and self._kernel.compiled_kernels.get(fast_key) is fast_kernel_cpp
             ):
-                retained_plan = self._prepare_retained_plan(processed)
+                retained_plan = self._prepare_retained_plan(
+                    processed, fast_specialization
+                )
                 if retained_plan is not None:
                     return self._kernel._launch_with_ordinary_plan(
                         retained_plan, processed
                     )
-                result = self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
-                self._prepare_retained_plan(processed)
+                result = self._kernel.launch_kernel(fast_kernel_cpp, *processed)
+                self._prepare_retained_plan(processed, fast_specialization)
                 return result
             _, key, _ = self._prepare_exact(args, kwargs)
             result = self._kernel.launch_kernel(
@@ -3812,10 +3918,12 @@ class _OffloadExecutionPlanBinding:
         self._fast_runtime = None
         self._fast_key = None
         self._fast_kernel_cpp = None
+        self._fast_specialization = (None, None, None)
         self._validated_runtime = None
         self._validated_key = None
         self._validated_kernel_cpp = None
         self._validated_tasks = None
+        self._validated_specialization_state = (None, None, None, None)
         self._validation_lock = threading.Lock()
         # Match the exact kernel-optimization path: retain the native
         # executable plan, but not a mutable LaunchContextBuilder, so warm
@@ -3851,21 +3959,27 @@ class _OffloadExecutionPlanBinding:
         )
 
     def _validated_specialization(self, runtime, key, kernel_cpp):
+        validated_runtime, validated_key, validated_kernel_cpp, tasks = (
+            self._validated_specialization_state
+        )
         if (
-            self._validated_runtime is runtime
-            and self._validated_key == key
-            and self._validated_kernel_cpp is kernel_cpp
-            and self._validated_tasks is not None
+            validated_runtime is runtime
+            and validated_key == key
+            and validated_kernel_cpp is kernel_cpp
+            and tasks is not None
         ):
-            return self._validated_tasks
+            return tasks
         with self._validation_lock:
+            validated_runtime, validated_key, validated_kernel_cpp, tasks = (
+                self._validated_specialization_state
+            )
             if (
-                self._validated_runtime is runtime
-                and self._validated_key == key
-                and self._validated_kernel_cpp is kernel_cpp
-                and self._validated_tasks is not None
+                validated_runtime is runtime
+                and validated_key == key
+                and validated_kernel_cpp is kernel_cpp
+                and tasks is not None
             ):
-                return self._validated_tasks
+                return tasks
             tasks = self._kernel._validate_offload_execution_plan_specialization(
                 key, self.plan
             )
@@ -3880,6 +3994,12 @@ class _OffloadExecutionPlanBinding:
                 self._validated_key = key
                 self._validated_kernel_cpp = kernel_cpp
                 self._validated_tasks = tasks
+                self._validated_specialization_state = (
+                    runtime,
+                    key,
+                    kernel_cpp,
+                    tasks,
+                )
             return tasks
 
     def _clear_retained_plan(self):
@@ -3891,24 +4011,23 @@ class _OffloadExecutionPlanBinding:
             self._retained_plan_negative_key = None
 
     def _install_fast_specialization(self, runtime, key, kernel_cpp):
-        if (
-            self._fast_runtime is not runtime
-            or self._fast_key != key
-            or self._fast_kernel_cpp is not kernel_cpp
-        ):
+        fast_specialization = (runtime, key, kernel_cpp)
+        if self._fast_specialization != fast_specialization:
             self._clear_retained_plan()
         self._fast_runtime = runtime
         self._fast_key = key
         self._fast_kernel_cpp = kernel_cpp
+        self._fast_specialization = fast_specialization
 
-    def _prepare_retained_plan(self, processed_args):
+    def _prepare_retained_plan(self, processed_args, fast_specialization=None):
         runtime = self._kernel.runtime
-        key = self._fast_key
-        kernel_cpp = self._fast_kernel_cpp
+        if fast_specialization is None:
+            fast_specialization = self._fast_specialization
+        fast_runtime, key, kernel_cpp = fast_specialization
         if (
             key is None
             or kernel_cpp is None
-            or self._fast_runtime is not runtime
+            or fast_runtime is not runtime
             or self._kernel.compiled_kernels.get(key) is not kernel_cpp
             or self._kernel.autodiff_mode != AutodiffMode.NONE
             or runtime.target_tape is not None
@@ -3921,6 +4040,8 @@ class _OffloadExecutionPlanBinding:
             self._retained_plan_runtime is runtime
             and self._retained_plan_key == key
             and retained is not None
+            and retained.key == key
+            and retained.kernel_cpp is kernel_cpp
             and retained.matches(runtime, processed_args)
         ):
             return retained
@@ -3935,6 +4056,8 @@ class _OffloadExecutionPlanBinding:
                 self._retained_plan_runtime is runtime
                 and self._retained_plan_key == key
                 and retained is not None
+                and retained.key == key
+                and retained.kernel_cpp is kernel_cpp
                 and retained.matches(runtime, processed_args)
             ):
                 return retained
@@ -3952,6 +4075,7 @@ class _OffloadExecutionPlanBinding:
             if (
                 self._kernel.runtime is not runtime
                 or self._kernel.compiled_kernels.get(key) is not kernel_cpp
+                or self._fast_specialization != fast_specialization
             ):
                 return None
             if retained is not None:
@@ -4006,24 +4130,25 @@ class _OffloadExecutionPlanBinding:
             combined = (*self._bound_args, *args)
             processed = _process_args(self._kernel, combined, kwargs)
             expected_key = self._specialization_key(processed)
+            fast_specialization = self._fast_specialization
+            fast_runtime, fast_key, fast_kernel_cpp = fast_specialization
             if (
-                self._fast_runtime is runtime
-                and self._fast_key == expected_key
-                and self._fast_kernel_cpp is not None
-                and self._kernel.compiled_kernels.get(expected_key)
-                is self._fast_kernel_cpp
+                fast_runtime is runtime
+                and fast_key == expected_key
+                and fast_kernel_cpp is not None
+                and self._kernel.compiled_kernels.get(fast_key) is fast_kernel_cpp
             ):
-                retained = self._prepare_retained_plan(processed)
+                retained = self._prepare_retained_plan(processed, fast_specialization)
                 if retained is not None:
                     return self._kernel._launch_with_ordinary_plan(retained, processed)
-                result = self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
-                self._prepare_retained_plan(processed)
+                result = self._kernel.launch_kernel(fast_kernel_cpp, *processed)
+                self._prepare_retained_plan(processed, fast_specialization)
                 return result
             _, key, _ = self._prepare_processed_exact(processed)
-            result = self._kernel.launch_kernel(
-                self._kernel.compiled_kernels[key], *processed
-            )
-            self._prepare_retained_plan(processed)
+            kernel_cpp = self._kernel.compiled_kernels[key]
+            fast_specialization = (runtime, key, kernel_cpp)
+            result = self._kernel.launch_kernel(kernel_cpp, *processed)
+            self._prepare_retained_plan(processed, fast_specialization)
             return result
         except (TaichiCompilationError, TaichiRuntimeError) as exc:
             if impl.get_runtime().print_full_traceback:
@@ -4038,8 +4163,9 @@ class _OffloadExecutionPlanBinding:
         )
 
         backend = self._validate_backend()
-        processed, _, tasks = self._prepare_exact(args, kwargs)
-        self._prepare_retained_plan(processed)
+        processed, key, tasks = self._prepare_exact(args, kwargs)
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        self._prepare_retained_plan(processed, (self._kernel.runtime, key, kernel_cpp))
         policy = TaskLaunchPolicy.auto()
         return TaskLaunchReport(
             policy=policy,

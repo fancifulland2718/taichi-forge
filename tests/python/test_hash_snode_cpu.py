@@ -1,6 +1,7 @@
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.snode import _select_hash_snode_capacity
 from tests import test_utils
@@ -1057,6 +1058,71 @@ def test_hash_snode_cpu_overflow_raises():
 
     with pytest.raises(Exception, match="Hash SNode table overflow"):
         write_too_many()
+
+
+@pytest.mark.run_in_serial
+@test_utils.test(
+    arch=[ti.cpu, ti.cuda],
+    require=ti.extension.sparse,
+    hash_snode_experimental=True,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+)
+def test_hash_snode_runtime_error_checks_are_per_kernel(monkeypatch):
+    arch = impl.current_cfg().arch
+    ti.reset()
+    monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
+    ti.init(
+        arch=arch,
+        hash_snode_experimental=True,
+        offline_cache=False,
+        cuda_sparse_pool_auto_size=True,
+    )
+
+    dense = ti.field(ti.i32, shape=2)
+    hashed = ti.field(ti.i32)
+    ti.root.hash(ti.i, 16, capacity=8).place(hashed)
+
+    @ti.kernel
+    def activate_hash():
+        hashed[3] = 7
+
+    @ti.kernel
+    def dense_only():
+        dense[0] += 1
+
+    @ti.kernel
+    def read_hash_only():
+        dense[1] = hashed[3]
+
+    # Compile all three capability classes before measuring launch decisions.
+    activate_hash()
+    dense_only()
+    read_hash_only()
+    ti.sync()
+
+    program = impl.get_runtime().prog
+    program._debug_reset_ordinary_launch_attribution()
+    for _ in range(8):
+        dense_only()
+    ti.sync()
+    stats = dict(program._debug_ordinary_launch_attribution())
+    assert stats["runtime_error_checks"] == 0
+    assert stats["runtime_error_check_elisions"] == 8
+
+    program._debug_reset_ordinary_launch_attribution()
+    read_hash_only()
+    ti.sync()
+    stats = dict(program._debug_ordinary_launch_attribution())
+    assert stats["runtime_error_checks"] == 0
+    assert stats["runtime_error_check_elisions"] == 1
+    assert dense[1] == 7
+
+    program._debug_reset_ordinary_launch_attribution()
+    activate_hash()
+    stats = dict(program._debug_ordinary_launch_attribution())
+    assert stats["runtime_error_checks"] == 1
+    assert stats["runtime_error_check_elisions"] == 0
 
 
 @test_utils.test(

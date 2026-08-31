@@ -1,11 +1,13 @@
 import copy
 import gc
 import threading
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang import kernel_impl
 from taichi_forge.lang.exception import TaichiIndexError, TaichiRuntimeError, TaichiSyntaxError, TaichiTypeError
 from taichi_forge.lang.misc import get_host_arch_list
 from taichi_forge.lang.util import has_pytorch
@@ -1711,6 +1713,128 @@ def test_owned_ndarray_launch_uses_stable_slot_and_elides_snode_guard(monkeypatc
         assert stats["backend_task_invocations"] >= 1
         assert stats["backend_task_execution_ns"] > 0
     assert value.to_numpy()[0] == 6
+
+
+def test_ordinary_launch_plan_contexts_have_call_level_ownership():
+    context_lock = threading.Lock()
+    next_context_id = 0
+    scalar_patch_calls = 0
+    full_bind_calls = 0
+
+    class FakeLaunchContext:
+        def __init__(self, context_id):
+            self.context_id = context_id
+            self.value = None
+
+    def make_context():
+        nonlocal next_context_id
+        with context_lock:
+            context_id = next_context_id
+            next_context_id += 1
+        return FakeLaunchContext(context_id)
+
+    class FakeKernelCpp:
+        @staticmethod
+        def make_launch_context():
+            return make_context()
+
+    class FakeScalarPatchPlan:
+        @staticmethod
+        def apply(launch_ctx, args):
+            nonlocal scalar_patch_calls
+            with context_lock:
+                scalar_patch_calls += 1
+            launch_ctx.value = args[0]
+            return -1
+
+    caller_count = 4
+    all_submitted = threading.Barrier(caller_count)
+    synchronize_submissions = [True]
+    submitted = []
+    submitted_lock = threading.Lock()
+
+    class FakeNativePlan:
+        @staticmethod
+        def launch(prog, launch_ctx):
+            del prog
+            if synchronize_submissions[0]:
+                all_submitted.wait(timeout=5)
+            with submitted_lock:
+                submitted.append((launch_ctx.context_id, launch_ctx.value))
+
+    runtime = SimpleNamespace(prog=object(), print_full_traceback=True)
+
+    class FakeKernel:
+        def __init__(self):
+            self.runtime = runtime
+
+        @staticmethod
+        def _bind_ordinary_launch_context(launch_ctx, bindings, args):
+            nonlocal full_bind_calls
+            assert bindings in ((), ((0, "signed", None),))
+            if bindings:
+                with context_lock:
+                    full_bind_calls += 1
+                launch_ctx.value = args[0]
+
+        @staticmethod
+        def _finish_launch(launch_ctx):
+            return launch_ctx.value
+
+    plan = kernel_impl._OrdinaryLaunchPlan(
+        runtime=runtime,
+        key=("fake-specialization",),
+        kernel_cpp=FakeKernelCpp(),
+        native_plan=FakeNativePlan(),
+        bindings=((0, "signed", None),),
+        scalar_bindings=((0, "signed", None),),
+        scalar_patch_plan=FakeScalarPatchPlan(),
+        resource_guards=(),
+        launch_ctx=make_context(),
+        guard_context_lifecycle=False,
+    )
+    kernel = FakeKernel()
+    results = []
+    failures = []
+    results_lock = threading.Lock()
+
+    def launch(value):
+        try:
+            result = kernel_impl.Kernel._launch_with_ordinary_plan(
+                kernel, plan, (value,)
+            )
+            with results_lock:
+                results.append((value, result))
+        except BaseException as exc:  # keep thread failures observable
+            with results_lock:
+                failures.append(exc)
+
+    threads = [threading.Thread(target=launch, args=(value,)) for value in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert failures == []
+    assert sorted(results) == [(value, value) for value in range(4)]
+    assert len({context_id for context_id, _ in submitted}) == caller_count
+    assert sorted(value for _, value in submitted) == list(range(caller_count))
+    assert len(plan._launch_ctx_pool) <= (
+        kernel_impl._ORDINARY_LAUNCH_CONTEXT_POOL_CAPACITY
+    )
+
+    # Once the overlap burst has populated the bounded pool, sequential warm
+    # calls allocate no additional contexts and only patch scalar bytes.
+    synchronize_submissions[0] = False
+    assert next_context_id == caller_count
+    assert scalar_patch_calls == 1
+    assert full_bind_calls == caller_count - 1
+    assert kernel_impl.Kernel._launch_with_ordinary_plan(kernel, plan, (10,)) == 10
+    assert kernel_impl.Kernel._launch_with_ordinary_plan(kernel, plan, (11,)) == 11
+    assert next_context_id == caller_count
+    assert scalar_patch_calls == 3
+    assert full_bind_calls == caller_count - 1
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])

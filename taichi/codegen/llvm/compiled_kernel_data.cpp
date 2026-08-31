@@ -40,6 +40,10 @@ bool CompiledKernelData::has_snode_tree_dependencies() const noexcept {
   return !data_.used_snode_tree_ids.empty();
 }
 
+bool CompiledKernelData::may_trigger_hash_overflow() const noexcept {
+  return data_.may_trigger_hash_overflow;
+}
+
 std::size_t CompiledKernelData::task_count() const {
   return data_.compiled_data.tasks.size();
 }

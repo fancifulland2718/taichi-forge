@@ -62,6 +62,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
   }
   data.used_snode_tree_ids =
       irpass::analysis::gather_snode_tree_dependencies(chi_ir);
+  data.may_trigger_hash_overflow =
+      irpass::analysis::may_trigger_hash_overflow(chi_ir);
   data.args.reserve(kernel_def.nested_parameters.size());
   for (const auto &p : kernel_def.nested_parameters)
     data.args.push_back(p);

@@ -306,22 +306,25 @@ class DeterministicScatterReduceBinding:
     def prewarm(self, repeat=1):
         """Compile and cache the fused fixed-topology reduction."""
 
-        self.plan._validate_current()
         self.run(repeat=repeat)
         return self
 
     def run(self, repeat=1):
         """Gather by stable source ordinal and reduce each group serially."""
 
-        self.plan._validate_current()
         repeat = max(1, int(repeat))
+        # The topology is immutable for this binding, so validate its runtime
+        # generation once per API invocation. Every physical launch still
+        # passes all four ndarray views through the native argument binder,
+        # which rejects a reset or retired allocation before device use.
+        self.plan._validate_current()
         for _ in range(repeat):
             _deterministic_indexed_reduce_ndarray(
                 self._values_view,
-                self.plan.permutation,
-                self.plan.layout._offsets,
+                self.plan._permutation,
+                self.plan._layout._offsets,
                 self._output_view,
-                self.plan.num_groups,
+                self.plan._num_groups,
             )
         return self
 

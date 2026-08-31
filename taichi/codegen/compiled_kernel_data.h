@@ -122,6 +122,13 @@ class CompiledKernelData {
   // kernels that cannot observe an SNodeTree.
   virtual bool has_snode_tree_dependencies() const noexcept = 0;
 
+  // LLVM hash insertion/compact-child allocation can set the runtime error
+  // slot even in non-debug builds. Backends that do not use this slot retain
+  // the default false capability.
+  virtual bool may_trigger_hash_overflow() const noexcept {
+    return false;
+  }
+
   // Number of backend tasks generated for this kernel. Graph diagnostics use
   // this metadata after compilation; it does not trigger compilation itself.
   virtual std::size_t task_count() const = 0;
