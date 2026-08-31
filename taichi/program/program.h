@@ -386,17 +386,24 @@ class TI_DLL_EXPORT Program {
     RegisteredKernelExecutionPlan(Program *owner,
                                   const CompiledKernelData *compiled,
                                   KernelLaunchHandle handle,
-                                  std::vector<SNodeTreeDependency> dependencies)
+                                  std::vector<SNodeTreeDependency> dependencies,
+                                  std::uint64_t validated_snode_tree_epoch)
         : owner_(owner),
           compiled_(compiled),
           handle_(handle),
-          dependencies_(std::move(dependencies)) {
+          dependencies_(std::move(dependencies)),
+          validated_snode_tree_epoch_(validated_snode_tree_epoch) {
     }
 
     Program *owner_{nullptr};
     const CompiledKernelData *compiled_{nullptr};
     KernelLaunchHandle handle_;
     std::vector<SNodeTreeDependency> dependencies_;
+    // A lifecycle mutation takes the exclusive side of the same mutex held by
+    // RegisteredKernelExecutionPlanLaunchScope. Therefore an unchanged epoch
+    // proves that a dependency set validated by an earlier reader is still
+    // current, without rescanning it on every launch.
+    mutable std::atomic<std::uint64_t> validated_snode_tree_epoch_{0};
   };
 
   // Holds the exact SNode lifecycle read transaction across Python launch
@@ -4223,6 +4230,9 @@ class TI_DLL_EXPORT Program {
     std::atomic<std::uint64_t> owned_ndarray_only_launches{0};
     std::atomic<std::uint64_t> snode_guard_acquisitions{0};
     std::atomic<std::uint64_t> snode_guard_elisions{0};
+    std::atomic<std::uint64_t> registered_plan_snode_validation_scans{0};
+    std::atomic<std::uint64_t>
+        registered_plan_snode_validation_epoch_fast_hits{0};
     std::atomic<std::uint64_t> resource_lock_acquisitions{0};
     std::atomic<std::uint64_t> ndarray_slot_validations{0};
     std::atomic<std::uint64_t> ndarray_map_lookups{0};

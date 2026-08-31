@@ -22,6 +22,10 @@ class OffloadedTask {
   // Host-only. The compilation manager reconstructs it from the stable cache
   // identity, so it must not become part of the offline-cache payload.
   std::string task_id;
+  // Host-only CUDA entry point resolved once when the owning JIT module is
+  // registered. It is deliberately excluded from TI_IO_DEF; deserialized
+  // tasks are rebound after their module is loaded.
+  void *native_function{nullptr};
   OffloadedTaskType task_type{OffloadedTaskType::serial};
   int requested_block_dim{0};
   int requested_grid_dim{0};

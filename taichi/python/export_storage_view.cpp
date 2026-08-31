@@ -157,6 +157,7 @@ void export_storage_view(py::module &m) {
                              &DenseStorageDescriptor::byte_offset)
       .def_property_readonly("fingerprint",
                              &DenseStorageDescriptor::fingerprint)
+      .def("exactly_matches", &DenseStorageDescriptor::exactly_matches)
       .def_property_readonly("program_domain",
                              [](const DenseStorageDescriptor &descriptor) {
                                return descriptor.owner().program_domain;

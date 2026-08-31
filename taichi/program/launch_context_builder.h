@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <taichi/program/callable.h>
 #include "taichi/program/ndarray.h"
 #include "taichi/program/argpack.h"
@@ -13,6 +14,8 @@ struct RuntimeContext;
 
 class LaunchContextBuilder {
  public:
+  using CudaTaskExecutionPlanDigest = std::array<std::uint8_t, 32>;
+
   enum class DevAllocType : int8_t {
     kNone = 0,
     kNdarray = 1,
@@ -96,28 +99,46 @@ class LaunchContextBuilder {
     return cuda_range_work_per_thread_target_;
   }
 
-  void set_cuda_task_execution_plan(
-      const std::string &identity,
-      const std::vector<std::string> &task_kinds,
-      const std::vector<int> &grid_residency_waves,
-      const std::vector<int> &range_work_per_thread_targets);
-
   const std::string &cuda_task_execution_plan_identity() const noexcept {
-    return cuda_task_execution_plan_identity_;
+    static const std::string kEmpty;
+    return cuda_task_execution_plan_identity_ != nullptr
+               ? *cuda_task_execution_plan_identity_
+               : kEmpty;
+  }
+
+  bool has_cuda_task_execution_plan() const noexcept {
+    return cuda_task_execution_plan_identity_ != nullptr;
+  }
+
+  const CudaTaskExecutionPlanDigest &cuda_task_execution_plan_content_digest()
+      const noexcept {
+    static const CudaTaskExecutionPlanDigest kEmpty{};
+    return cuda_task_execution_plan_content_digest_ != nullptr
+               ? *cuda_task_execution_plan_content_digest_
+               : kEmpty;
   }
 
   const std::vector<std::string> &cuda_task_execution_plan_kinds()
       const noexcept {
-    return cuda_task_execution_plan_kinds_;
+    static const std::vector<std::string> kEmpty;
+    return cuda_task_execution_plan_kinds_ != nullptr
+               ? *cuda_task_execution_plan_kinds_
+               : kEmpty;
   }
 
   const std::vector<int> &cuda_task_grid_residency_waves() const noexcept {
-    return cuda_task_grid_residency_waves_;
+    static const std::vector<int> kEmpty;
+    return cuda_task_grid_residency_waves_ != nullptr
+               ? *cuda_task_grid_residency_waves_
+               : kEmpty;
   }
 
   const std::vector<int> &cuda_task_range_work_per_thread_targets()
       const noexcept {
-    return cuda_task_range_work_per_thread_targets_;
+    static const std::vector<int> kEmpty;
+    return cuda_task_range_work_per_thread_targets_ != nullptr
+               ? *cuda_task_range_work_per_thread_targets_
+               : kEmpty;
   }
 
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
@@ -233,6 +254,18 @@ class LaunchContextBuilder {
   }
 
  private:
+  friend class Kernel;
+
+  // Bind launch-only projections owned by an immutable Kernel execution plan.
+  // Keeping this private prevents callers from supplying temporary or forged
+  // references; Kernel owns every referenced object for the launch lifetime.
+  void bind_cuda_task_execution_plan(
+      const std::string &identity,
+      const CudaTaskExecutionPlanDigest &content_digest,
+      const std::vector<std::string> &task_kinds,
+      const std::vector<int> &grid_residency_waves,
+      const std::vector<int> &range_work_per_thread_targets);
+
   void set_array_shape_and_strides(
       const std::vector<int> &arg_id,
       const std::vector<std::int64_t> &shape,
@@ -256,10 +289,12 @@ class LaunchContextBuilder {
   std::int32_t cuda_bounded_capacity_{0};
   std::int32_t cuda_grid_residency_waves_{0};
   std::int32_t cuda_range_work_per_thread_target_{1};
-  std::string cuda_task_execution_plan_identity_;
-  std::vector<std::string> cuda_task_execution_plan_kinds_;
-  std::vector<int> cuda_task_grid_residency_waves_;
-  std::vector<int> cuda_task_range_work_per_thread_targets_;
+  const std::string *cuda_task_execution_plan_identity_{nullptr};
+  const CudaTaskExecutionPlanDigest
+      *cuda_task_execution_plan_content_digest_{nullptr};
+  const std::vector<std::string> *cuda_task_execution_plan_kinds_{nullptr};
+  const std::vector<int> *cuda_task_grid_residency_waves_{nullptr};
+  const std::vector<int> *cuda_task_range_work_per_thread_targets_{nullptr};
   std::string dispatch_label_;
 
  public:

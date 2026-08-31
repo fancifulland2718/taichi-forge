@@ -11,21 +11,15 @@ from taichi_forge.graph._ir import graph_ir_to_dict
 
 _GRAPH_FUSION_QUALIFICATION_SCHEMA = "taichi_forge.graph_fusion_qualification.v1"
 _GRAPH_FUSION_QUALIFICATION_MAX_BYTES = 4 * 1024 * 1024
-_INTERNAL_STRUCTURED_CONTROL_ENV = (
-    "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"
-)
+_INTERNAL_STRUCTURED_CONTROL_ENV = "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"
 _CUDA_CONDITIONAL_CONTROL_RECIPE_ID = "control:cuda_conditional_graph:v1"
 _CUDA_MASKED_CONTROL_RECIPE_ID = "control:cuda_masked_bounded_graph:v1"
 _CUDA_CONTROL_RECIPE_IDS = (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
 )
-_CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID = (
-    "control:cuda_nested_device_update:v1"
-)
-_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID = (
-    "control:cuda_nested_masked_bounded:v1"
-)
+_CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID = "control:cuda_nested_device_update:v1"
+_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID = "control:cuda_nested_masked_bounded:v1"
 _CUDA_NESTED_CONTROL_RECIPE_IDS = (
     _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
     _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
@@ -85,9 +79,7 @@ class _ExecutableOptimizationSpec:
                 or len(group) < 2
                 or len(group) > 4
                 or any(
-                    isinstance(item, bool)
-                    or not isinstance(item, int)
-                    or item < 0
+                    isinstance(item, bool) or not isinstance(item, int) or item < 0
                     for item in group
                 )
                 or tuple(range(group[0], group[0] + len(group))) != group
@@ -391,6 +383,9 @@ class _GraphFusionQualificationEntry:
                 "fusion qualification minimum_expected_replays must be positive"
             )
         _required_string(self.evidence_id, "fusion qualification evidence ID")
+        # Qualification entries are immutable. Their canonical identity is an
+        # admission-time fact, not work to repeat on every Graph replay.
+        object.__setattr__(self, "_identity", _canonical_hash(self.to_dict()))
 
     @classmethod
     def from_dict(cls, value):
@@ -460,7 +455,7 @@ class _GraphFusionQualificationEntry:
 
     @property
     def identity(self):
-        return _canonical_hash(self.to_dict())
+        return self._identity
 
     def matches(
         self,
@@ -570,9 +565,7 @@ def _make_spec(
         fields = recipe_id.split(":")
         source_count = 2
         if not (
-            len(fields) != 3
-            or fields[0] != "fusion"
-            or not fields[1].startswith("map")
+            len(fields) != 3 or fields[0] != "fusion" or not fields[1].startswith("map")
         ):
             try:
                 parsed_count = int(fields[1][3:])
@@ -610,9 +603,7 @@ def _make_spec(
 
 
 def _fusion_source_groups(fusion_plan, fusion_recipe_ids):
-    recipes = {
-        recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes
-    }
+    recipes = {recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes}
     groups = []
     claimed = set()
     for recipe_id in fusion_recipe_ids:
@@ -626,9 +617,7 @@ def _fusion_source_groups(fusion_plan, fusion_recipe_ids):
         for source_id in recipe.source_dispatch_ids:
             marker = source_id.rsplit("/dispatch:", 1)
             if len(marker) != 2 or not marker[1].isdigit():
-                raise ValueError(
-                    "fusion recipe has no exact logical dispatch lineage"
-                )
+                raise ValueError("fusion recipe has no exact logical dispatch lineage")
             logical_id = int(marker[1])
             if logical_id in claimed:
                 raise ValueError("fusion partition recipes overlap a dispatch")
@@ -710,9 +699,7 @@ def _build_executable_optimization_space(
             semantic_plan_id,
             backend,
             candidate,
-            fusion_source_groups=_fusion_source_groups(
-                fusion_plan, candidate
-            ),
+            fusion_source_groups=_fusion_source_groups(fusion_plan, candidate),
         )
         for candidate in candidate_recipe_sets
     )
@@ -741,9 +728,7 @@ def _build_executable_optimization_space(
         selection_status=selection_status,
         partition_stage=fusion_plan.partition_stage,
         partitions_complete=fusion_plan.partitions_complete,
-        partition_combination_count=(
-            fusion_plan.partition_combination_count
-        ),
+        partition_combination_count=(fusion_plan.partition_combination_count),
         partition_candidate_limit=fusion_plan.partition_candidate_limit,
     )
 

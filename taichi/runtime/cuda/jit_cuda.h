@@ -138,9 +138,30 @@ class JITModuleCUDA : public JITModule {
                           void *stream,
                           const std::string *profiler_name = nullptr) {
     auto func = lookup_function(name);
+    launch_function_with_stream(func, name, grid_dim, block_dim,
+                                dynamic_shared_mem_bytes, arg_pointers,
+                                arg_sizes, stream, profiler_name);
+  }
+
+  void launch_function_with_stream(
+      void *function,
+      const std::string &name,
+      std::size_t grid_dim,
+      std::size_t block_dim,
+      std::size_t dynamic_shared_mem_bytes,
+      const std::vector<void *> &arg_pointers,
+      const std::vector<int> &arg_sizes,
+      void *stream,
+      const std::string *profiler_name = nullptr) {
+    TI_ASSERT(function != nullptr);
+    // lookup_function() used to activate the CUDA context before entering
+    // CUDAContext::launch(). Preserve that ordering because profiler setup in
+    // launch() may query driver state before its internal launch guard.
+    CUDAContext::get_instance().make_current();
     CUDAContext::get_instance().launch(
-        func, profiler_name != nullptr ? *profiler_name : name, arg_pointers,
-        arg_sizes, grid_dim, block_dim, dynamic_shared_mem_bytes, stream);
+        function, profiler_name != nullptr ? *profiler_name : name,
+        arg_pointers, arg_sizes, grid_dim, block_dim,
+        dynamic_shared_mem_bytes, stream);
   }
 
   bool direct_dispatch() const override {

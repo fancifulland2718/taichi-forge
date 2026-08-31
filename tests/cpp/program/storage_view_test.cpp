@@ -208,6 +208,10 @@ TEST(StorageViewTest, FingerprintContainsStableOwnerAndLogicalMapping) {
             different_offset.descriptor->fingerprint());
   EXPECT_NE(first.descriptor->fingerprint(),
             different_owner.descriptor->fingerprint());
+  EXPECT_TRUE(first.descriptor->exactly_matches(*same.descriptor));
+  EXPECT_FALSE(
+      first.descriptor->exactly_matches(*different_offset.descriptor));
+  EXPECT_FALSE(first.descriptor->exactly_matches(*different_owner.descriptor));
 }
 
 TEST(StorageViewTest, SNodePayloadWindowIsPartOfLogicalOwnerIdentity) {

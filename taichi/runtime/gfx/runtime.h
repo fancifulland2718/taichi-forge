@@ -189,6 +189,14 @@ class CompiledTaichiKernel {
     return buffer_binding_plans_[i];
   }
 
+  size_t required_listgen_capacity_entries() const noexcept {
+    return required_listgen_capacity_entries_;
+  }
+
+  bool task_uses_listgen_buffer(int i) const noexcept {
+    return task_uses_listgen_buffer_[i];
+  }
+
   void set_listgen_buffer(DeviceAllocation *listgen_buffer) {
     input_buffers_[BufferInfo(BufferType::ListGen)] = listgen_buffer;
   }
@@ -226,6 +234,8 @@ class CompiledTaichiKernel {
   std::vector<RuntimeArrayArg> runtime_array_args_;
   std::vector<std::vector<int>> runtime_argpack_args_;
   std::vector<std::vector<BufferBindingPlan>> buffer_binding_plans_;
+  size_t required_listgen_capacity_entries_{0};
+  std::vector<bool> task_uses_listgen_buffer_;
   std::vector<std::unique_ptr<Pipeline>> pipelines_;
   std::vector<std::unique_ptr<ShaderResourceSet>> cached_resource_sets_;
 };
@@ -647,7 +657,6 @@ class TI_DLL_EXPORT GfxRuntime {
   void insert_pending_dispatch_barriers();
   void add_pending_dispatch_barrier(DeviceAllocation alloc);
   void clear_pending_dispatch_barriers();
-  bool task_uses_listgen_buffer(const TaskAttributes &attribs) const;
   int64 get_sparse_list_version(int snode_id) const;
   struct SparseListState;
   void record_sparse_list_reuse_sample(SparseListState &state,

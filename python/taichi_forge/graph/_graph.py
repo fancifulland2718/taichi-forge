@@ -93,9 +93,7 @@ from taichi_forge.graph._optimization import (
 ArgKind = _ti_core.ArgKind
 
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
-_INTERNAL_FUSION_QUALIFICATION_ENV = (
-    "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
-)
+_INTERNAL_FUSION_QUALIFICATION_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
 )
@@ -272,9 +270,7 @@ def _decode_exact_map_partition(value):
             )
         group = tuple(int(field) for field in fields)
         if tuple(range(group[0], group[0] + len(group))) != group:
-            raise TaichiRuntimeError(
-                "Exact map partition groups must be contiguous"
-            )
+            raise TaichiRuntimeError("Exact map partition groups must be contiguous")
         if group[0] <= previous_end:
             raise TaichiRuntimeError(
                 "Exact map partition groups must be ordered and disjoint"
@@ -481,7 +477,11 @@ class _GraphTemporaryArena:
         }
         bindings = {
             allocation.name: GraphTemporaryBuffer(
-                storage=(typed_storage[allocation.slot] if allocation.storage_kind == "f32" else raw_storage),
+                storage=(
+                    typed_storage[allocation.slot]
+                    if allocation.storage_kind == "f32"
+                    else raw_storage
+                ),
                 offset=(0 if allocation.storage_kind == "f32" else allocation.offset),
                 bytes=allocation.bytes,
                 alignment=allocation.alignment,
@@ -1405,8 +1405,7 @@ class _GraphStructuredTelemetryArena:
                 source, source, source, destination, 0
             )
         if destination is not None and any(
-            item["count_source"] == "device_extent"
-            for item in bounded_sources
+            item["count_source"] == "device_extent" for item in bounded_sources
         ):
             extent_state = ScalarNdarray(i32, (2,))
             _pack_bounded_pipeline_telemetry._primal.ensure_compiled(
@@ -1568,9 +1567,7 @@ class _GraphStructuredTelemetryArena:
                 "stream_id": 0,
                 "driver_owned_bytes": 0,
                 "driver_owned_bytes_known": False,
-                "status": (
-                    "unavailable" if timing_requested else "disabled_by_mode"
-                ),
+                "status": ("unavailable" if timing_requested else "disabled_by_mode"),
             }
         )
         pipeline = _materialize_graph_pipeline_report(
@@ -1599,16 +1596,10 @@ class _GraphStructuredTelemetryArena:
             host_submit_ns=int(host_submit_ns),
             device_snapshot_bytes=int(host.nbytes),
             host_readback_bytes=int(host.nbytes),
-            gpu_duration_ns=(
-                int(gpu_timing["duration_ns"]) if gpu_available else None
-            ),
-            gpu_timestamp_scope=(
-                "whole_ticket" if timing_requested else "unavailable"
-            ),
+            gpu_duration_ns=(int(gpu_timing["duration_ns"]) if gpu_available else None),
+            gpu_timestamp_scope=("whole_ticket" if timing_requested else "unavailable"),
             gpu_timestamp_exact=bool(gpu_timing["exact"]),
-            gpu_measurement_path_changed=bool(
-                gpu_timing["measurement_path_changed"]
-            ),
+            gpu_measurement_path_changed=bool(gpu_timing["measurement_path_changed"]),
             gpu_queue_or_stream_id=f"{backend}:{int(gpu_timing['stream_id'])}",
             gpu_timestamp_resource_bytes=int(gpu_timing["driver_owned_bytes"]),
             gpu_timestamp_resource_bytes_known=bool(
@@ -1634,9 +1625,7 @@ class _GraphStructuredTelemetryArena:
                 "materialized": bool(self._slots),
                 "capacity": self.capacity if self._slots else 0,
                 "slots": len(self._slots),
-                "reserved_bytes": sum(
-                    slot["payload_bytes"] for slot in self._slots
-                ),
+                "reserved_bytes": sum(slot["payload_bytes"] for slot in self._slots),
                 "allocations": self._allocations,
                 "reuses": self._reuses,
                 "waits": self._waits,
@@ -2021,9 +2010,9 @@ def _bounded_route_request(backend, physical_grid="auto"):
 
 
 def _cuda_bounded_update_policy():
-    requested = os.environ.get(
-        "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto"
-    ).strip().lower()
+    requested = (
+        os.environ.get("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto").strip().lower()
+    )
     aliases = {
         "auto": "grouped_stateful",
         "per_node": "per_node",
@@ -2043,9 +2032,9 @@ def _cuda_nested_device_update_available():
 
 
 def _vulkan_bounded_packet_policy():
-    requested = os.environ.get(
-        "TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY", "auto"
-    ).strip().lower()
+    requested = (
+        os.environ.get("TI_GRAPH_VULKAN_BOUNDED_PACKET_POLICY", "auto").strip().lower()
+    )
     aliases = {
         "auto": "reuse_consecutive",
         "reuse_consecutive": "reuse_consecutive",
@@ -2143,18 +2132,10 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
             )
         )
         driver_api_version = cuda_capabilities["driver_api_version"]
-        driver_version_eligible = bool(
-            cuda_capabilities["driver_version_eligible"]
-        )
-        required_symbols_loaded = bool(
-            cuda_capabilities["required_symbols_loaded"]
-        )
-        device_update_ptx_linked = bool(
-            cuda_capabilities["device_update_ptx_linked"]
-        )
-        setup_probe_passed = bool(
-            cuda_capabilities["setup_probe_passed"]
-        )
+        driver_version_eligible = bool(cuda_capabilities["driver_version_eligible"])
+        required_symbols_loaded = bool(cuda_capabilities["required_symbols_loaded"])
+        device_update_ptx_linked = bool(cuda_capabilities["device_update_ptx_linked"])
+        setup_probe_passed = bool(cuda_capabilities["setup_probe_passed"])
         if requested_route == "device_update":
             if not cuda_capabilities["exact_device_grid_available"]:
                 raise TaichiRuntimeError(
@@ -2441,9 +2422,7 @@ class _OrderedOffsetsGraphContract:
             raise TaichiRuntimeError(
                 "Ordered segmented dispatch offsets must be a scalar i32 ndarray"
             )
-        if offsets.dtype != i32 or tuple(offsets.shape) != (
-            self.segment_count + 1,
-        ):
+        if offsets.dtype != i32 or tuple(offsets.shape) != (self.segment_count + 1,):
             raise TaichiRuntimeError(
                 "Ordered segmented dispatch offsets must contain "
                 f"{self.segment_count + 1} i32 values"
@@ -2615,9 +2594,7 @@ class BoundedDispatchHandle:
             raise TaichiRuntimeError(
                 "Ordered segmented dispatch offsets must be a scalar i32 ndarray"
             )
-        if offsets.dtype != i32 or tuple(offsets.shape) != (
-            self.segment_count + 1,
-        ):
+        if offsets.dtype != i32 or tuple(offsets.shape) != (self.segment_count + 1,):
             raise TaichiRuntimeError(
                 "Ordered segmented dispatch offsets must contain "
                 f"{self.segment_count + 1} i32 values"
@@ -2642,8 +2619,7 @@ class BoundedDispatchHandle:
             encoded = (
                 0
                 if useful == 0
-                else ((useful + self.block_dim - 1) // self.block_dim)
-                * self.block_dim
+                else ((useful + self.block_dim - 1) // self.block_dim) * self.block_dim
             )
             executed = min(self.capacity, encoded)
         else:
@@ -2743,9 +2719,7 @@ class HostBoundedDispatchHandle:
             route="exact_host_range",
             minimum_driver_api_version=None,
             driver_api_version=(
-                _ti_core.cuda_driver_api_version()
-                if backend == "cuda"
-                else None
+                _ti_core.cuda_driver_api_version() if backend == "cuda" else None
             ),
             driver_version_eligible=True,
             required_symbols_loaded=True,
@@ -2759,9 +2733,7 @@ class HostBoundedDispatchHandle:
             ),
             exact_grid=True,
             execution_semantics="exact_host_range",
-            range_mapping=(
-                "cpu_scheduler" if backend == "cpu" else "grid_stride"
-            ),
+            range_mapping=("cpu_scheduler" if backend == "cpu" else "grid_stride"),
             masked_capacity=False,
             zero_count_command_skip=False,
             ordered_segments=False,
@@ -2832,9 +2804,7 @@ class HostBoundedDispatchHandle:
         useful = min(max(raw, 0), self.capacity)
         encoded = useful
         if self.block_dim is not None and useful:
-            encoded = (
-                (useful + self.block_dim - 1) // self.block_dim
-            ) * self.block_dim
+            encoded = ((useful + self.block_dim - 1) // self.block_dim) * self.block_dim
         return BoundedDispatchSnapshot(
             capabilities=self._capabilities,
             useful_count=useful,
@@ -2997,16 +2967,12 @@ class _ControlFlowTraceRecorder:
                 if role == "body" and parent.iteration is not None:
                     parent_iteration = parent.iteration
                     prefix = f"{parent.invocation_path}[{parent.iteration}]/body"
-                    invocation_path = (
-                        f"{prefix}/{remainder}" if separator else prefix
-                    )
+                    invocation_path = f"{prefix}/{remainder}" if separator else prefix
                 elif role == "condition":
                     call_index = parent.role_invocations.get(relative, 0)
                     parent.role_invocations[relative] = call_index + 1
                     prefix = f"{parent.invocation_path}/condition[{call_index}]"
-                    invocation_path = (
-                        f"{prefix}/{remainder}" if separator else prefix
-                    )
+                    invocation_path = f"{prefix}/{remainder}" if separator else prefix
                 else:
                     invocation_path = f"{parent.invocation_path}/{relative}"
             else:
@@ -3355,9 +3321,7 @@ def _bounded_pipeline_route(domain, backend):
         return (
             "exact_host_range",
             "exact_host_range",
-            "cpu_dynamic_range"
-            if backend == "cpu"
-            else "host_sized_grid_stride",
+            "cpu_dynamic_range" if backend == "cpu" else "host_sized_grid_stride",
             True,
         )
     requirement = domain.physical_grid_requirement
@@ -3493,9 +3457,7 @@ def _materialize_graph_pipeline_report(
         region = regions.get(str(item["path_id"]))
         region_available = bool(region is not None and region["available"])
         declared_temporary_bytes = sum(
-            temporary.bytes
-            for action in actions
-            for temporary in action.temporaries
+            temporary.bytes for action in actions for temporary in action.temporaries
         )
         stages.append(
             GraphPipelineStageReport(
@@ -3564,13 +3526,9 @@ def _materialize_graph_pipeline_report(
         sequence=int(sequence),
         stage_count=len(stages),
         dispatch_count=sum(stage.dispatch_count for stage in stages),
-        physical_dispatch_count=sum(
-            stage.physical_dispatch_count for stage in stages
-        ),
+        physical_dispatch_count=sum(stage.physical_dispatch_count for stage in stages),
         task_count=sum(len(stage.tasks) for stage in stages),
-        bounded_dispatch_count=sum(
-            len(stage.bounded_dispatches) for stage in stages
-        ),
+        bounded_dispatch_count=sum(len(stage.bounded_dispatches) for stage in stages),
         native_action_count=sum(stage.native_action_count for stage in stages),
         recordable_native_action_count=sum(
             stage.recordable_native_action_count for stage in stages
@@ -3582,18 +3540,14 @@ def _materialize_graph_pipeline_report(
             stage.declared_temporary_bytes for stage in stages
         ),
         host_submit_ns=int(host_submit_ns),
-        gpu_duration_ns=(
-            int(gpu_timing["duration_ns"]) if gpu_available else None
-        ),
+        gpu_duration_ns=(int(gpu_timing["duration_ns"]) if gpu_available else None),
         gpu_timestamp_scope=(
             "unavailable"
             if gpu_timing["status"] == "disabled_by_mode"
             else "whole_ticket"
         ),
         gpu_timestamp_exact=bool(gpu_timing["exact"]),
-        gpu_measurement_path_changed=bool(
-            gpu_timing["measurement_path_changed"]
-        ),
+        gpu_measurement_path_changed=bool(gpu_timing["measurement_path_changed"]),
         gpu_queue_or_stream_id=f"{backend}:{int(gpu_timing['stream_id'])}",
         gpu_timestamp_status=str(gpu_timing["status"]),
         stages=tuple(stages),
@@ -3723,9 +3677,7 @@ def _cuda_structured_control_routes(capabilities=None):
             "general_graph_exact_control_available",
             capabilities.get("driver_version_eligible", False)
             and capabilities.get("conditional_graph_symbols_loaded", False)
-            and capabilities.get(
-                "general_device_setter_lowering_compiled", False
-            ),
+            and capabilities.get("general_device_setter_lowering_compiled", False),
         )
     )
     masked = bool(capabilities.get("internal_masked_graph_available", False))
@@ -3884,9 +3836,7 @@ def bounded_dispatch_capabilities(physical_grid="auto"):
     # Report the default single bounded-dispatch route. Ordered segmented
     # dispatch has its own per-operation lowering and may conservatively fall
     # back when that selected exact route cannot preserve global segment order.
-    capabilities = _bounded_route(
-        backend, False, physical_grid=physical_grid
-    )
+    capabilities = _bounded_route(backend, False, physical_grid=physical_grid)
     if backend == "cuda":
         update_policy_requested, update_policy = _cuda_bounded_update_policy()
     else:
@@ -3905,8 +3855,7 @@ def bounded_dispatch_capabilities(physical_grid="auto"):
         if backend == "vulkan"
         else (
             update_policy
-            if backend == "cuda"
-            and capabilities.route == "adaptive_device_grid_update"
+            if backend == "cuda" and capabilities.route == "adaptive_device_grid_update"
             else "per_consumer"
         )
     )
@@ -3956,9 +3905,7 @@ def bounded_dispatch_capabilities(physical_grid="auto"):
         "static_admission": static_admission,
         "static_admission_reason": static_admission_reason,
         "physical_observation": (
-            "execution_stats_opt_in"
-            if backend == "cuda"
-            else "handle_snapshot_opt_in"
+            "execution_stats_opt_in" if backend == "cuda" else "handle_snapshot_opt_in"
         ),
         "physical_grid_policy": capabilities.physical_grid_policy,
         "supported_physical_grid_policies": (
@@ -4060,9 +4007,7 @@ def structured_control_capabilities():
         masked_native = bool(cuda.get("internal_masked_graph_available", False))
         native = exact_native or masked_native
         primitive = (
-            _cuda_structured_control_lowering(cuda) or "none"
-            if native
-            else "none"
+            _cuda_structured_control_lowering(cuda) or "none" if native else "none"
         )
         using_exact = primitive == "cuda_conditional_graph"
         rhi_primitive_compiled = exact_compiled or masked_compiled
@@ -4085,7 +4030,9 @@ def structured_control_capabilities():
         exact_dynamic_termination = using_exact
         max_encoded_dispatches = 4096 if primitive == "cuda_masked_bounded_graph" else 0
         nested_native = bool(native and nested_native_compiled)
-        nested_cuda_device_update_forced_off = os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+        nested_cuda_device_update_forced_off = (
+            os.environ.get("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", "0") == "1"
+        )
         nested_update = dict(_ti_core.cuda_bounded_dispatch_capabilities())
         nested_cuda_device_update_candidate = bool(
             not nested_cuda_device_update_forced_off
@@ -4094,13 +4041,16 @@ def structured_control_capabilities():
             and nested_update.get("device_update_ptx_compiled", False)
         )
         nested_cuda_device_update_qualified = bool(
-            nested_cuda_device_update_candidate and nested_update.get("setup_probe_passed", False)
+            nested_cuda_device_update_candidate
+            and nested_update.get("setup_probe_passed", False)
         )
         if nested_native:
             if nested_cuda_device_update_qualified:
                 nested_async_route = "cuda_device_node_update"
             elif nested_cuda_device_update_candidate:
-                nested_async_route = "cuda_device_node_update_probe_then_masked_fallback"
+                nested_async_route = (
+                    "cuda_device_node_update_probe_then_masked_fallback"
+                )
             else:
                 nested_async_route = "cuda_masked_bounded_graph"
         if native:
@@ -4146,9 +4096,7 @@ def structured_control_capabilities():
         compound_terminal_observation = "submission_ticket" if native else "unavailable"
         submission_ticket_region_telemetry = native
         submission_ticket_gpu_timestamps = (
-            "opt_in_whole_ticket_and_region_runtime_probe"
-            if native
-            else "unavailable"
+            "opt_in_whole_ticket_and_region_runtime_probe" if native else "unavailable"
         )
         submission_ticket_queue_telemetry = (
             "device_transaction_window" if native else "unavailable"
@@ -4169,20 +4117,14 @@ def structured_control_capabilities():
         )
         parallel_indirect_dispatch = native
         parallel_indirect_dispatch_reason = (
-            "none"
-            if native
-            else "vulkan_runtime_mode_disables_graph_replay"
+            "none" if native else "vulkan_runtime_mode_disables_graph_replay"
         )
         compound_single_preparation = native
         structured_barrier_policy = (
-            "effect_planned_with_controller_boundaries"
-            if native
-            else "unavailable"
+            "effect_planned_with_controller_boundaries" if native else "unavailable"
         )
         nested_native = bool(
-            native
-            and conditional_rendering_available
-            and nested_native_compiled
+            native and conditional_rendering_available and nested_native_compiled
         )
         if nested_native:
             nested_async_route = "vulkan_conditional_replay"
@@ -4222,22 +4164,32 @@ def structured_control_capabilities():
             "nested_native_kinds": (("while_while",) if nested_native else ()),
             "nested_native_outer_iteration_limit": (64 if nested_native else 0),
             "nested_native_inner_iteration_limit": (64 if nested_native else 0),
-            "nested_native_max_ordered_inner_regions": (
-                8 if nested_native else 0
-            ),
+            "nested_native_max_ordered_inner_regions": (8 if nested_native else 0),
             "nested_native_max_encoded_actions": (4096 if nested_native else 0),
             "nested_native_stop_telemetry": nested_native,
-            "nested_async_route": (nested_async_route if nested_native else "unavailable"),
-            "nested_cuda_device_update_candidate": (nested_cuda_device_update_candidate),
-            "nested_cuda_device_update_qualified": (nested_cuda_device_update_qualified),
-            "nested_cuda_device_update_forced_off": (nested_cuda_device_update_forced_off),
+            "nested_async_route": (
+                nested_async_route if nested_native else "unavailable"
+            ),
+            "nested_cuda_device_update_candidate": (
+                nested_cuda_device_update_candidate
+            ),
+            "nested_cuda_device_update_qualified": (
+                nested_cuda_device_update_qualified
+            ),
+            "nested_cuda_device_update_forced_off": (
+                nested_cuda_device_update_forced_off
+            ),
             "nested_cuda_fallback_route": (
-                "cuda_masked_bounded_graph" if nested_native and arch == _ti_core.Arch.cuda else "unavailable"
+                "cuda_masked_bounded_graph"
+                if nested_native and arch == _ti_core.Arch.cuda
+                else "unavailable"
             ),
             "nested_exact_dynamic_termination": False,
             "nested_no_host_readback": nested_native,
             "nested_submit_stop_observation": (
-                "device_terminal_packet_or_outer_suffix_trace" if nested_native else "unavailable"
+                "device_terminal_packet_or_outer_suffix_trace"
+                if nested_native
+                else "unavailable"
             ),
             "nested_trace_uses_portable_execution": True,
             "nested_leaf_native_upgrade": native,
@@ -4246,7 +4198,9 @@ def structured_control_capabilities():
                 if arch == _ti_core.Arch.cuda and native
                 else (("while",) if arch == _ti_core.Arch.vulkan and native else ())
             ),
-            "native_max_structured_depth": (2 if nested_native else (1 if native else 0)),
+            "native_max_structured_depth": (
+                2 if nested_native else (1 if native else 0)
+            ),
             "nested_async_submit": nested_native,
             "structured_submit": structured_submit,
             "structured_submit_reason": structured_submit_reason,
@@ -4264,7 +4218,9 @@ def structured_control_capabilities():
             "compound_per_region_chunk_size": compound_per_region_chunk_size,
             "compound_chunk_size_limit": compound_chunk_size_limit,
             "compound_first_chunk_strategies": compound_first_chunk_strategies,
-            "compound_default_first_chunk_strategy": (compound_default_first_chunk_strategy),
+            "compound_default_first_chunk_strategy": (
+                compound_default_first_chunk_strategy
+            ),
             "submission_ticket_region_telemetry": (submission_ticket_region_telemetry),
             "submission_ticket_queue_telemetry": (submission_ticket_queue_telemetry),
             "submission_ticket_gpu_timestamps": (submission_ticket_gpu_timestamps),
@@ -4273,8 +4229,12 @@ def structured_control_capabilities():
             "per_iteration_host_observation": False,
             "stops_command_issue_after_exit": stops_command_issue_after_exit,
             "exact_dynamic_termination": exact_dynamic_termination,
-            "exact_conditional_graph": (arch == _ti_core.Arch.cuda and primitive == "cuda_conditional_graph"),
-            "bounded_masked_graph": (arch == _ti_core.Arch.cuda and primitive == "cuda_masked_bounded_graph"),
+            "exact_conditional_graph": (
+                arch == _ti_core.Arch.cuda and primitive == "cuda_conditional_graph"
+            ),
+            "bounded_masked_graph": (
+                arch == _ti_core.Arch.cuda and primitive == "cuda_masked_bounded_graph"
+            ),
             "primitive": primitive,
             "skip_strategy": skip_strategy,
             "rhi_primitive_compiled": rhi_primitive_compiled,
@@ -4308,8 +4268,12 @@ def structured_control_capabilities():
                 else ()
             ),
             "chained_runtime_qualified": False,
-            "chained_max_encoded_dispatches": (256 if arch == _ti_core.Arch.vulkan else 0),
-            "max_control_bytes_per_slot": (64 * 1024 if arch == _ti_core.Arch.vulkan else 0),
+            "chained_max_encoded_dispatches": (
+                256 if arch == _ti_core.Arch.vulkan else 0
+            ),
+            "max_control_bytes_per_slot": (
+                64 * 1024 if arch == _ti_core.Arch.vulkan else 0
+            ),
             "unsupported_reason": reason,
         },
         "cuda_conditional_graph": cuda,
@@ -4337,9 +4301,7 @@ def dynamic_work_capabilities():
         iteration_semantics = "portable_host_control"
     ticket_observation = structured["backend"] in ("cpu", "cuda", "vulkan")
     observation_readback_mode = _observation_readback_mode()
-    completion_attached = observation_readback_mode.startswith(
-        "completion_attached_"
-    )
+    completion_attached = observation_readback_mode.startswith("completion_attached_")
     return {
         "schema_version": DYNAMIC_WORK_SCHEMA_VERSION,
         "backend": structured["backend"],
@@ -4357,15 +4319,11 @@ def dynamic_work_capabilities():
             "requested_route": bounded["requested_route"],
             "selected_route": bounded["selected_route"],
             "route": bounded["route"],
-            "minimum_driver_api_version": bounded[
-                "minimum_driver_api_version"
-            ],
+            "minimum_driver_api_version": bounded["minimum_driver_api_version"],
             "driver_api_version": bounded["driver_api_version"],
             "driver_version_eligible": bounded["driver_version_eligible"],
             "required_symbols_loaded": bounded["required_symbols_loaded"],
-            "device_update_ptx_linked": bounded[
-                "device_update_ptx_linked"
-            ],
+            "device_update_ptx_linked": bounded["device_update_ptx_linked"],
             "setup_probe_passed": bounded["setup_probe_passed"],
             "execution_semantics": bounded["execution_semantics"],
             "range_mapping": bounded["range_mapping"],
@@ -4388,18 +4346,14 @@ def dynamic_work_capabilities():
             "forge_producer_fusion_supported": bounded[
                 "forge_producer_fusion_supported"
             ],
-            "default_preparation_dispatches": bounded[
-                "default_preparation_dispatches"
-            ],
+            "default_preparation_dispatches": bounded["default_preparation_dispatches"],
             "updater_dispatches": bounded["updater_dispatches"],
             "baseline_capacity_grid": bounded["baseline_capacity_grid"],
             "fallback_reason": bounded["fallback_reason"],
             "publication_contract": bounded["publication_contract"],
             "publication_reuse": bounded["publication_reuse"],
             "static_admission": bounded["static_admission"],
-            "static_admission_reason": bounded[
-                "static_admission_reason"
-            ],
+            "static_admission_reason": bounded["static_admission_reason"],
             "physical_observation": bounded["physical_observation"],
             "accounting_fields": (
                 "useful_count",
@@ -4418,13 +4372,10 @@ def dynamic_work_capabilities():
             "execution_semantics": iteration_semantics,
             "logical_termination_exact": control["logical_termination_exact"],
             "command_termination_exact": control["exact_dynamic_termination"],
-            "stops_command_issue_after_exit": control[
-                "stops_command_issue_after_exit"
-            ],
+            "stops_command_issue_after_exit": control["stops_command_issue_after_exit"],
             "bounded_masked_encoding": control["bounded_masked_graph"]
             or (
-                structured["backend"] == "vulkan"
-                and control["runtime_path_qualified"]
+                structured["backend"] == "vulkan" and control["runtime_path_qualified"]
             ),
             "max_encoded_dispatches": control["max_encoded_dispatches"],
         },
@@ -4462,9 +4413,7 @@ def dynamic_work_capabilities():
             "per_iteration_host_observation": False,
             "worklist_counters": ticket_observation,
             "fallback_reason": (
-                "none"
-                if completion_attached
-                else "disabled_or_backend_unqualified"
+                "none" if completion_attached else "disabled_or_backend_unqualified"
             ),
         },
     }
@@ -4608,9 +4557,7 @@ def _execution_report(
                 persistent_bounded_control_bytes=int(
                     stats.get("known_bounded_control_bytes", 0)
                 ),
-                bounded_update_groups=int(
-                    stats.get("known_bounded_update_groups", 0)
-                ),
+                bounded_update_groups=int(stats.get("known_bounded_update_groups", 0)),
                 bounded_updater_dispatches=int(
                     stats.get("known_bounded_updater_dispatches", 0)
                 ),
@@ -4620,9 +4567,7 @@ def _execution_report(
                 bounded_producer_fused_groups=int(
                     stats.get("known_bounded_producer_fused_groups", 0)
                 ),
-                bounded_payloads=int(
-                    stats.get("known_bounded_payloads", 0)
-                ),
+                bounded_payloads=int(stats.get("known_bounded_payloads", 0)),
                 bounded_last_useful_lanes=int(
                     stats.get("last_bounded_useful_lanes", 0)
                 ),
@@ -4641,18 +4586,14 @@ def _execution_report(
                 bounded_physical_observation_available=bool(
                     stats.get("bounded_physical_observation_available", False)
                 ),
-                bounded_update_replays=int(
-                    stats.get("bounded_update_replays", 0)
-                ),
+                bounded_update_replays=int(stats.get("bounded_update_replays", 0)),
                 bounded_update_state_changes=int(
                     stats.get("bounded_update_state_changes", 0)
                 ),
                 bounded_update_cache_hits=int(
                     stats.get("bounded_update_cache_hits", 0)
                 ),
-                bounded_node_api_calls=int(
-                    stats.get("bounded_node_api_calls", 0)
-                ),
+                bounded_node_api_calls=int(stats.get("bounded_node_api_calls", 0)),
                 bounded_max_group_size=int(
                     stats.get("known_bounded_max_group_size", 0)
                 ),
@@ -4993,9 +4934,7 @@ class _GraphRunContext:
         for k, v in args.items():
             if isinstance(v, DeviceExtent):
                 v._validate_current()
-                signature.append(
-                    (k, "device_extent", v.binding.allocation_identity)
-                )
+                signature.append((k, "device_extent", v.binding.allocation_identity))
             elif isinstance(v, (Ndarray, ProviderOwnedNdarrayBinding)):
                 if v.arr is None:
                     raise TaichiRuntimeError(
@@ -5101,10 +5040,7 @@ class _CompiledCGraphNode:
         )
         self.composer_applied_groups = int(composer_stats.get("applied_groups", 0))
         self.composer_source_groups = tuple(
-            tuple(
-                None if item is None else f"dispatch:{int(item)}"
-                for item in group
-            )
+            tuple(None if item is None else f"dispatch:{int(item)}" for item in group)
             for group in composer_stats.get("source_groups", ())
         )
         self.composer_lowering_available = bool(
@@ -5156,8 +5092,7 @@ class _CompiledCGraphNode:
             )
         )
         self.recording_dispatches = tuple(
-            _normalize_recording_dispatch(dispatch)
-            for dispatch in recording_dispatches
+            _normalize_recording_dispatch(dispatch) for dispatch in recording_dispatches
         )
         self.lifetime_leases = tuple(lifetime_leases)
         self.source_native_count = int(source_native_count)
@@ -5803,9 +5738,7 @@ def _is_structured_control_node(node):
 
 
 def _sequence_structured_nodes(sequence):
-    return tuple(
-        item[1] for item in sequence._items if item[0] == "structured"
-    )
+    return tuple(item[1] for item in sequence._items if item[0] == "structured")
 
 
 class _CompiledSequentialRegionNode:
@@ -5835,8 +5768,7 @@ class _CompiledSequentialRegionNode:
         self.name = name
         self.ir_node = ir_node
         self.definition_children = tuple(
-            _sequence_structured_nodes(sequence)
-            for sequence in definition_sequences
+            _sequence_structured_nodes(sequence) for sequence in definition_sequences
         )
         self.dispatch_count = sum(
             getattr(node, "dispatch_count", 0) for node in self.nodes
@@ -5865,8 +5797,7 @@ class _CompiledSequentialRegionNode:
             getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
         self.composer_lowering_available = any(
-            getattr(node, "composer_lowering_available", False)
-            for node in self.nodes
+            getattr(node, "composer_lowering_available", False) for node in self.nodes
         )
         self.temporary_actions = _merge_temporary_actions(self.nodes)
         self.temporary_runtime_arg_names = frozenset().union(
@@ -5901,9 +5832,7 @@ class _CompiledSequentialRegionNode:
                 for node in self.nodes
             )
         )
-        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(
-            self.nodes
-        )
+        self.derived_runtime_arg_names = _merge_derived_runtime_arg_names(self.nodes)
         self.runtime_arg_names = self.recording_runtime_arg_names.difference(
             (
                 *self.fixed_runtime_args,
@@ -5955,10 +5884,7 @@ class _CompiledSequentialRegionNode:
 
     @property
     def supports_native_submission(self):
-        return all(
-            node.supports_native_submission
-            for node in self.control_nodes
-        )
+        return all(node.supports_native_submission for node in self.control_nodes)
 
     def run_for_submission(self, context, temporaries=None):
         if not self.supports_native_submission:
@@ -6758,7 +6684,8 @@ class _CompiledWhileGraphNode:
                 )
             if not submitted:
                 raise TaichiRuntimeError(
-                    "Native nested Graph while submission became unavailable; " "synchronous fallback is disabled"
+                    "Native nested Graph while submission became unavailable; "
+                    "synchronous fallback is disabled"
                 )
             return
         if impl.current_cfg().arch == _ti_core.Arch.vulkan:
@@ -6903,15 +6830,13 @@ class _CompiledWhileGraphNode:
             return False
 
         outer_condition_count, inner_boundaries = self._vulkan_nested_boundaries
-        inner_condition_begin, inner_body_begin, outer_suffix_begin = (
-            inner_boundaries[0]
-        )
+        inner_condition_begin, inner_body_begin, outer_suffix_begin = inner_boundaries[
+            0
+        ]
         result = dict(
             native_run(
                 context.compile_config(),
-                context.flattened_args(
-                    self._vulkan_nested.recording_runtime_arg_names
-                ),
+                context.flattened_args(self._vulkan_nested.recording_runtime_arg_names),
                 self._native_jit_cache,
                 outer_predicate,
                 outer_counter,
@@ -7107,8 +7032,7 @@ class _CompiledWhileGraphNode:
             chunk_sizes=((outer_encoded,) if outer_encoded else ()),
             observation_batches=1,
             observation_scalar_count=(
-                4
-                + len(inner_logical) * (5 if inner.status is not None else 3)
+                4 + len(inner_logical) * (5 if inner.status is not None else 3)
             ),
             device_to_host_bytes=observation_bytes,
             initial_counter=outer_initial_counter,
@@ -7228,9 +7152,9 @@ class _CompiledWhileGraphNode:
                         "became unavailable"
                     )
                 return False
-            self._vulkan_chunk_limits[
-                (strategy_code, requested_chunk_limit)
-            ] = chunk_limit
+            self._vulkan_chunk_limits[(strategy_code, requested_chunk_limit)] = (
+                chunk_limit
+            )
 
         results = []
         remaining = self.max_iterations
@@ -7493,11 +7417,8 @@ class _CompiledWhileGraphNode:
                 native_reason = "predicate_ndarray_required"
             else:
                 native_run = (
-                    self._chunks[
-                        1
-                    ].compiled_graph.jit_run_bounded_cuda_masked_cached
-                    if self._cuda_control_lowering
-                    == "cuda_masked_bounded_graph"
+                    self._chunks[1].compiled_graph.jit_run_bounded_cuda_masked_cached
+                    if self._cuda_control_lowering == "cuda_masked_bounded_graph"
                     else self._chunks[1].compiled_graph.jit_run_bounded_cuda_cached
                 )
                 native_selected = native_run(
@@ -7629,9 +7550,7 @@ class _CompiledWhileGraphNode:
                 else 0
             ),
             logical_body_dispatch_count=logical * self.body_dispatch_count,
-            encoded_iterations=(
-                encoded_iterations if native_selected else executed
-            ),
+            encoded_iterations=(encoded_iterations if native_selected else executed),
             masked_iterations=masked_iterations,
         )
 
@@ -7640,9 +7559,7 @@ class _CompiledWhileGraphNode:
             self._native_jit_cache.retire_snode_tree_runtime_state()
         else:
             self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime(
-            preserve_executables=preserve_executables
-        )
+        self._condition.invalidate_runtime(preserve_executables=preserve_executables)
         for node in self._chunks.values():
             node.invalidate_runtime(preserve_executables=preserve_executables)
         if self._vulkan_structured is not None:
@@ -7684,9 +7601,7 @@ class _CompiledWhileGraphNode:
 
     @property
     def snapshot_graph_stats(self):
-        chunk_stats = tuple(
-            node.snapshot_graph_stats for node in self._chunks.values()
-        )
+        chunk_stats = tuple(node.snapshot_graph_stats for node in self._chunks.values())
         condition_stats = (self._condition.snapshot_graph_stats,)
         if self._vulkan_nested is not None or self._cuda_nested is not None:
             return (
@@ -7716,16 +7631,18 @@ class _CompiledWhileGraphNode:
             "max_nested_depth": self.structured_depth,
             "nested_portable_exact": self._portable_exact_nested,
             "nested_subregion": self._nested_subregion,
-            "nested_leaf_native_upgrade_eligible": (self._nested_subregion and self._native_upgrade_eligible),
-            "nested_native_upgrade_eligible": (self._vulkan_nested is not None or self._cuda_nested is not None),
+            "nested_leaf_native_upgrade_eligible": (
+                self._nested_subregion and self._native_upgrade_eligible
+            ),
+            "nested_native_upgrade_eligible": (
+                self._vulkan_nested is not None or self._cuda_nested is not None
+            ),
             "nested_native_upgrade_reason": (
                 self._vulkan_nested_reason
                 if impl.current_cfg().arch == _ti_core.Arch.vulkan
                 else self._cuda_nested_reason
             ),
-            "cuda_nested_control_lowering": (
-                self._cuda_nested_control_lowering
-            ),
+            "cuda_nested_control_lowering": (self._cuda_nested_control_lowering),
             "condition_dispatch_count": self.condition_dispatch_count,
             "body_dispatch_count": self.body_dispatch_count,
             "max_iterations": self.max_iterations,
@@ -7843,9 +7760,7 @@ class _CompiledIfGraphNode:
             _cuda_branch_upgrade_status(arch, lowering_mode, "if")
         )
         self._cuda_control_lowering = (
-            _cuda_structured_control_lowering()
-            if arch == _ti_core.Arch.cuda
-            else None
+            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
         )
         if self._has_nested_control:
             self._native_upgrade_eligible = False
@@ -8092,9 +8007,7 @@ class _CompiledIfGraphNode:
             self._native_jit_cache.retire_snode_tree_runtime_state()
         else:
             self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime(
-            preserve_executables=preserve_executables
-        )
+        self._condition.invalidate_runtime(preserve_executables=preserve_executables)
         self._then.invalidate_runtime(preserve_executables=preserve_executables)
         if self._else is not None:
             self._else.invalidate_runtime(preserve_executables=preserve_executables)
@@ -8261,9 +8174,7 @@ class _CompiledSwitchGraphNode:
             _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
         )
         self._cuda_control_lowering = (
-            _cuda_structured_control_lowering()
-            if arch == _ti_core.Arch.cuda
-            else None
+            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
         )
         if self._has_nested_control:
             self._native_upgrade_eligible = False
@@ -8513,15 +8424,11 @@ class _CompiledSwitchGraphNode:
             self._native_jit_cache.retire_snode_tree_runtime_state()
         else:
             self._native_jit_cache.clear_runtime_state()
-        self._condition.invalidate_runtime(
-            preserve_executables=preserve_executables
-        )
+        self._condition.invalidate_runtime(preserve_executables=preserve_executables)
         for branch in self._branches:
             branch.invalidate_runtime(preserve_executables=preserve_executables)
         if self._default is not None:
-            self._default.invalidate_runtime(
-                preserve_executables=preserve_executables
-            )
+            self._default.invalidate_runtime(preserve_executables=preserve_executables)
 
     @property
     def debug_graph_stats(self):
@@ -8701,8 +8608,7 @@ def _recordable_backend_dispatches(node, backend):
     if recorder is None or not recorder.supports_backend(backend):
         return None
     dispatches = tuple(
-        _normalize_recording_dispatch(dispatch)
-        for dispatch in recorder.dispatches
+        _normalize_recording_dispatch(dispatch) for dispatch in recorder.dispatches
     )
     return dispatches or None
 
@@ -8722,11 +8628,7 @@ def _record_backend_dispatch(builder, backend, dispatch, ir_node):
     dispatch = _normalize_recording_dispatch(dispatch)
     kernel = dispatch.kernel
     args = dispatch.args
-    label = (
-        ir_node.dispatch_label
-        if isinstance(ir_node, DispatchNode)
-        else ""
-    )
+    label = ir_node.dispatch_label if isinstance(ir_node, DispatchNode) else ""
     if dispatch.dispatch_packet is not None:
         builder.dispatch_indirect(
             kernel,
@@ -8735,11 +8637,7 @@ def _record_backend_dispatch(builder, backend, dispatch, ir_node):
             label,
         )
         return
-    domain = (
-        ir_node.bounded_domain
-        if isinstance(ir_node, DispatchNode)
-        else None
-    )
+    domain = ir_node.bounded_domain if isinstance(ir_node, DispatchNode) else None
     if domain is None:
         builder.dispatch(kernel, args, label)
         return
@@ -8899,8 +8797,7 @@ def _pipeline_physical_dispatch_map(tasks, logical_count):
     mapping = []
     for physical_index in sorted(by_index):
         source_count = max(
-            max(1, int(task.source_dispatch_count))
-            for task in by_index[physical_index]
+            max(1, int(task.source_dispatch_count)) for task in by_index[physical_index]
         )
         mapping.extend((physical_index,) * source_count)
     if len(mapping) != logical_count:
@@ -8928,9 +8825,7 @@ def _advance_publication_epochs(ir_node, publication_epochs, ignored_resources=(
     children = tuple(getattr(ir_node, "children", ()))
     if children:
         for child in children:
-            _advance_publication_epochs(
-                child, publication_epochs, ignored_resources
-            )
+            _advance_publication_epochs(child, publication_epochs, ignored_resources)
         return
     for effect in getattr(ir_node, "effects", ()):
         if (
@@ -8997,18 +8892,13 @@ def _pipeline_bounded_dispatches_with_publications(
         # dispatch metadata conservatively labels every ndarray read_write;
         # allowing that fallback label to manufacture a new publication would
         # defeat reuse between adjacent consumers.
-        _advance_publication_epochs(
-            ir_node, publication_epochs, (domain.extent,)
-        )
+        _advance_publication_epochs(ir_node, publication_epochs, (domain.extent,))
     return tuple(result)
 
 
 def _merge_derived_runtime_arg_names(nodes):
     return frozenset().union(
-        *(
-            getattr(node, "derived_runtime_arg_names", frozenset())
-            for node in nodes
-        )
+        *(getattr(node, "derived_runtime_arg_names", frozenset()) for node in nodes)
     )
 
 
@@ -9042,14 +8932,10 @@ def _graph_pipeline_definition(nodes):
             if _is_structured_control_node(node)
             else f"root/{index}"
         )
-        name = str(
-            getattr(node, "name", getattr(ir_node, "name", f"stage_{index}"))
-        )
+        name = str(getattr(node, "name", getattr(ir_node, "name", f"stage_{index}")))
         dispatch_count = int(getattr(node, "dispatch_count", 0))
         tasks = _pipeline_task_manifests(node)
-        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(
-            node
-        )
+        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(node)
         bounded_dispatches = _pipeline_bounded_dispatches_with_publications(
             node, tasks, dispatch_count, publication_epochs
         )
@@ -9075,9 +8961,7 @@ def _graph_pipeline_definition(nodes):
                 "bounded_mapping_status": bounded_mapping_status,
                 "tasks": tasks,
                 "bounded_dispatches": bounded_dispatches,
-                "synchronization": _ir_contains_flag(
-                    ir_node, "synchronization"
-                ),
+                "synchronization": _ir_contains_flag(ir_node, "synchronization"),
                 "opaque": _ir_contains_flag(ir_node, "opaque"),
             }
         )
@@ -9125,12 +9009,8 @@ def _lower_mixed_backend_regions(nodes):
         native_action_manifests = []
         temporary_actions = []
         for node, dispatches in region:
-            dispatch_ir_nodes = _recording_dispatch_ir_nodes(
-                node, len(dispatches)
-            )
-            for dispatch, dispatch_ir_node in zip(
-                dispatches, dispatch_ir_nodes
-            ):
+            dispatch_ir_nodes = _recording_dispatch_ir_nodes(node, len(dispatches))
+            for dispatch, dispatch_ir_node in zip(dispatches, dispatch_ir_nodes):
                 _record_backend_dispatch(
                     builder,
                     backend,
@@ -9152,9 +9032,7 @@ def _lower_mixed_backend_regions(nodes):
             lifetime_leases.extend(getattr(node, "lifetime_leases", ()))
             temporary_actions.extend(getattr(node, "temporary_actions", ()))
             region_native_count += getattr(node, "source_native_count", 0)
-            native_action_manifests.extend(
-                _native_action_manifests_for_node(node)
-            )
+            native_action_manifests.extend(_native_action_manifests_for_node(node))
 
         lowered.append(
             _CompiledCGraphNode(
@@ -9191,8 +9069,7 @@ def _lower_mixed_backend_regions(nodes):
         for node in nodes
     )
     opaque_native_nodes = sum(
-        isinstance(node, _CompiledNativeGraphNode)
-        and node.recordable_action is None
+        isinstance(node, _CompiledNativeGraphNode) and node.recordable_action is None
         for node in nodes
     )
     statistics = {
@@ -9265,15 +9142,13 @@ def _normalize_parallel_branch_indices(branches, child_count):
                 f"parallel candidate branch {branch_index} must not be empty"
             )
         if not all(
-            isinstance(index, int) and not isinstance(index, bool)
-            for index in indices
+            isinstance(index, int) and not isinstance(index, bool) for index in indices
         ):
-            raise TaichiRuntimeError(
-                "parallel candidate node indices must be integers"
-            )
-        if tuple(sorted(indices)) != indices or tuple(
-            range(indices[0], indices[-1] + 1)
-        ) != indices:
+            raise TaichiRuntimeError("parallel candidate node indices must be integers")
+        if (
+            tuple(sorted(indices)) != indices
+            or tuple(range(indices[0], indices[-1] + 1)) != indices
+        ):
             raise TaichiRuntimeError(
                 f"parallel candidate branch {branch_index} must select one "
                 "ordered contiguous node range"
@@ -9550,10 +9425,7 @@ class _GraphSpec:
             getattr(node, "composer_applied_groups", 0) for node in self.nodes
         )
         applied_source_groups = tuple(
-            tuple(
-                f"graph/{source_index}:{node.ir_node.name}/{item}"
-                for item in group
-            )
+            tuple(f"graph/{source_index}:{node.ir_node.name}/{item}" for item in group)
             for source_index, node in enumerate(source_nodes)
             for group in getattr(node, "composer_source_groups", ())
             if all(item is not None for item in group)
@@ -9575,14 +9447,12 @@ class _GraphSpec:
                 backend,
             )
         )
-        self.executable_optimization_space = (
-            _build_executable_optimization_space(
-                self.pre_optimization_ir_root,
-                self.fusion_plan,
-                backend,
-                control_recipe_ids=control_recipe_ids,
-                selected_control_recipe_id=selected_control_recipe_id,
-            )
+        self.executable_optimization_space = _build_executable_optimization_space(
+            self.pre_optimization_ir_root,
+            self.fusion_plan,
+            backend,
+            control_recipe_ids=control_recipe_ids,
+            selected_control_recipe_id=selected_control_recipe_id,
         )
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
@@ -9609,6 +9479,11 @@ class _GraphSpec:
         )
         self.temporary_actions = _merge_temporary_actions(self.nodes)
         self._temporary_binding_cache = {}
+        # Runtime argument contracts are dynamic, but a validated storage
+        # certificate is stable for an exact runtime generation and storage
+        # descriptor set. Keep this deliberately small and revalidate owner
+        # liveness before every memory-recipe cache hit.
+        self._memory_recipe_binding_cache = {}
         self.temporary_runtime_arg_names = frozenset().union(
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
@@ -9632,10 +9507,8 @@ class _GraphSpec:
         self.native_execution_observer_leases = tuple(
             lease
             for lease in self.lifetime_leases
-            if getattr(lease, "_record_synchronous_graph_execution", None)
-            is not None
-            or getattr(lease, "_begin_graph_submission_observation", None)
-            is not None
+            if getattr(lease, "_record_synchronous_graph_execution", None) is not None
+            or getattr(lease, "_begin_graph_submission_observation", None) is not None
         )
         self.derived_runtime_arg_names = frozenset().union(
             *(
@@ -9676,8 +9549,12 @@ class _GraphSpec:
 
     @property
     def supports_native_structured_submission(self):
-        structured_roots = tuple(node for node in self.structured_control_nodes if node.control_depth == 1)
-        return bool(structured_roots) and all(node.supports_native_submission for node in structured_roots)
+        structured_roots = tuple(
+            node for node in self.structured_control_nodes if node.control_depth == 1
+        )
+        return bool(structured_roots) and all(
+            node.supports_native_submission for node in structured_roots
+        )
 
     def terminal_control_report(self, logical_iterations):
         """Synthesize the control report for one terminal-only submission."""
@@ -9794,9 +9671,7 @@ class _GraphSpec:
             return ()
         return tuple(observations)
 
-    def prepare_runtime_args(
-        self, args, temporaries=None, fixed_runtime_args=None
-    ):
+    def prepare_runtime_args(self, args, temporaries=None, fixed_runtime_args=None):
         if isinstance(args, _PreparedGraphInvocation):
             return args
         if fixed_runtime_args:
@@ -9825,9 +9700,7 @@ class _GraphSpec:
             else:
                 replacements = prepared
                 acquire = getattr(lease, "graph_submission_owners", None)
-                lease_submission_owners = (
-                    () if acquire is None else tuple(acquire())
-                )
+                lease_submission_owners = () if acquire is None else tuple(acquire())
             for owner in lease_submission_owners:
                 identity = id(owner)
                 if identity not in submission_owner_ids:
@@ -9852,9 +9725,7 @@ class _GraphSpec:
                     )
                 previous = binding_owners.get(name)
                 if previous is not None and bound[name] is not value:
-                    previous_descriptor = getattr(
-                        bound[name], "descriptor", None
-                    )
+                    previous_descriptor = getattr(bound[name], "descriptor", None)
                     value_descriptor = getattr(value, "descriptor", None)
                     equivalent = (
                         previous_descriptor is not None
@@ -9999,9 +9870,7 @@ class _GraphSpec:
         raise TaichiRuntimeError("; ".join(details))
 
     def parallel_candidate_report(self, branches, args=None):
-        root_children = _parallel_logical_root_children(
-            self.pre_optimization_ir_root
-        )
+        root_children = _parallel_logical_root_children(self.pre_optimization_ir_root)
         branch_indices = _normalize_parallel_branch_indices(
             branches, len(root_children)
         )
@@ -10055,9 +9924,7 @@ class _GraphSpec:
                     )
                     result = (fact, None)
                 else:
-                    result = _parallel_storage_description(
-                        resource, values[resource]
-                    )
+                    result = _parallel_storage_description(resource, values[resource])
                 descriptions[resource] = result
                 storage_facts.append(result[0])
                 return result
@@ -10092,9 +9959,7 @@ class _GraphSpec:
                     )
                 )
                 if alias == "kProvenOverlap":
-                    conflicts.append(
-                        replace(dependency, alias="proven_overlap")
-                    )
+                    conflicts.append(replace(dependency, alias="proven_overlap"))
                 elif alias != "kProvenDisjoint":
                     unresolved_after_binding.append(
                         replace(dependency, alias="unknown")
@@ -10132,30 +9997,25 @@ class _GraphSpec:
             runtime_aliases=tuple(runtime_aliases),
             storage=tuple(sorted(storage_facts, key=lambda fact: fact.resource)),
             blockers=tuple(sorted(set(blockers))),
-            sequential_fallback_peak_bytes=(
-                plan.sequential_fallback_peak_bytes
-            ),
-            parallel_branch_temporary_bytes=(
-                plan.parallel_branch_temporary_bytes
-            ),
+            sequential_fallback_peak_bytes=(plan.sequential_fallback_peak_bytes),
+            parallel_branch_temporary_bytes=(plan.parallel_branch_temporary_bytes),
             parallel_peak_bytes=plan.parallel_peak_bytes,
-            memory_overhead_vs_sequential=(
-                plan.memory_overhead_vs_sequential
-            ),
+            memory_overhead_vs_sequential=(plan.memory_overhead_vs_sequential),
             partial_output_bytes=0,
         )
 
     def _validate_nested_control_aliases(self, args):
-        for parent_path, parent_names, child_path, child_names in (
-            self.nested_control_resource_pairs
-        ):
+        for (
+            parent_path,
+            parent_names,
+            child_path,
+            child_names,
+        ) in self.nested_control_resource_pairs:
             parent_resources = {
-                id(getattr(args[name], "arr", args[name]))
-                for name in parent_names
+                id(getattr(args[name], "arr", args[name])) for name in parent_names
             }
             child_resources = {
-                id(getattr(args[name], "arr", args[name]))
-                for name in child_names
+                id(getattr(args[name], "arr", args[name])) for name in child_names
             }
             if parent_resources & child_resources:
                 raise TaichiRuntimeError(
@@ -10164,6 +10024,49 @@ class _GraphSpec:
                 )
 
     def _validate_memory_recipe_contracts(self, args):
+        if not self.memory_layout_requirements and not self.memory_disjoint_pairs:
+            return
+
+        # Descriptor fingerprints cover owner generation, allocation identity,
+        # layout, shape, strides, and byte offset. Owner liveness can change
+        # without changing a retained descriptor (for example a destroyed
+        # SNode tree), so retain that inexpensive dynamic check on every call;
+        # the exhaustive layout and pairwise alias proof is needed only once
+        # per exact fingerprint tuple.
+        required_names = sorted(
+            {
+                *(item[0] for item in self.memory_layout_requirements),
+                *(name for pair in self.memory_disjoint_pairs for name in pair),
+            }
+        )
+        binding_fingerprints = []
+        binding_descriptions = []
+        cacheable = True
+        for name in required_names:
+            try:
+                description = describe_storage(args[name], access="readwrite")
+                descriptor = description.descriptor
+                if descriptor is None or validate_storage_owner(description) != "kNone":
+                    cacheable = False
+                    break
+                binding_fingerprints.append((name, int(descriptor.fingerprint)))
+                binding_descriptions.append(description)
+            except Exception:
+                cacheable = False
+                break
+        cache_key = None
+        if cacheable:
+            cache_key = (
+                int(impl.runtime_generation()),
+                tuple(binding_fingerprints),
+            )
+            cached_descriptions = self._memory_recipe_binding_cache.get(cache_key)
+            if cached_descriptions is not None and all(
+                current.descriptor.exactly_matches(cached.descriptor)
+                for current, cached in zip(binding_descriptions, cached_descriptions)
+            ):
+                return
+
         storage = {}
 
         def describe(name):
@@ -10171,9 +10074,12 @@ class _GraphSpec:
                 storage[name] = _parallel_storage_description(name, args[name])
             return storage[name]
 
-        for name, minimum_elements, record_stride, alignment in (
-            self.memory_layout_requirements
-        ):
+        for (
+            name,
+            minimum_elements,
+            record_stride,
+            alignment,
+        ) in self.memory_layout_requirements:
             fact, _ = describe(name)
             if (
                 not fact.supported
@@ -10214,6 +10120,12 @@ class _GraphSpec:
                     "Graph shared-staged memory recipe requires proven "
                     f"disjoint storage for {left!r} and {right!r}; got {alias}"
                 )
+        if cache_key is not None:
+            self._memory_recipe_binding_cache[cache_key] = tuple(binding_descriptions)
+            while len(self._memory_recipe_binding_cache) > 16:
+                del self._memory_recipe_binding_cache[
+                    next(iter(self._memory_recipe_binding_cache))
+                ]
 
     def instantiate(self, key=None):
         if key is None:
@@ -10222,6 +10134,7 @@ class _GraphSpec:
 
     def invalidate_runtime(self, preserve_executables=False):
         self._temporary_binding_cache.clear()
+        self._memory_recipe_binding_cache.clear()
         for node in self.nodes:
             invalidate = getattr(node, "invalidate_runtime", None)
             if invalidate is not None:
@@ -10271,9 +10184,7 @@ class _GraphSpec:
             "pre_optimization_root": graph_ir_to_dict(self.pre_optimization_ir_root),
             "optimization": dict(self.optimization),
             "fusion_plan": self.fusion_plan.to_dict(),
-            "executable_optimization": (
-                self.executable_optimization_space.to_dict()
-            ),
+            "executable_optimization": (self.executable_optimization_space.to_dict()),
             "temporary_memory_plan": self.temporary_memory_plan.to_dict(),
         }
 
@@ -10290,23 +10201,24 @@ class _GraphSpec:
                             "structured_sequence"
                             if isinstance(node, _CompiledSequentialRegionNode)
                             else (
-                            "while"
-                            if isinstance(node, _CompiledWhileGraphNode)
-                            else (
-                                "if"
-                                if isinstance(node, _CompiledIfGraphNode)
+                                "while"
+                                if isinstance(node, _CompiledWhileGraphNode)
                                 else (
-                                    "switch"
-                                    if isinstance(node, _CompiledSwitchGraphNode)
+                                    "if"
+                                    if isinstance(node, _CompiledIfGraphNode)
                                     else (
-                                        "observation"
-                                        if isinstance(
-                                            node, _CompiledObservationGraphNode
+                                        "switch"
+                                        if isinstance(node, _CompiledSwitchGraphNode)
+                                        else (
+                                            "observation"
+                                            if isinstance(
+                                                node, _CompiledObservationGraphNode
+                                            )
+                                            else "native"
                                         )
-                                        else "native"
                                     )
                                 )
-                            ))
+                            )
                         )
                     ),
                     "dispatch_count": getattr(node, "dispatch_count", 0),
@@ -10359,9 +10271,7 @@ class _GraphExecutable:
                     "region to provide submission-capable native lowering"
                 )
             for child in node.nodes:
-                self._run_node_for_submission(
-                    child, context, temporaries, telemetry
-                )
+                self._run_node_for_submission(child, context, temporaries, telemetry)
             return
 
         if isinstance(
@@ -10386,9 +10296,7 @@ class _GraphExecutable:
                         "Graph submission telemetry region is absent from the "
                         "structured definition"
                     ) from exc
-                for index, telemetry_node in zip(
-                    telemetry_indices, telemetry_nodes
-                ):
+                for index, telemetry_node in zip(telemetry_indices, telemetry_nodes):
                     telemetry.begin_region(index, telemetry_node, context)
             try:
                 node.run_for_submission(context, temporaries)
@@ -10428,9 +10336,7 @@ class _GraphExecutable:
             )
         try:
             for node in self.spec.nodes:
-                self._run_node_for_submission(
-                    node, context, temporaries, telemetry
-                )
+                self._run_node_for_submission(node, context, temporaries, telemetry)
         finally:
             if context is not None:
                 context.end()
@@ -10444,10 +10350,14 @@ class _GraphInstance:
             self._fixed_runtime_args,
             self._internal_storages,
         ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args)
-        self._exclusive_internal_storage = any(
-            isinstance(value, _GraphInternalNdarraySpec) and value.exclusive_submission
-            for value in spec.fixed_runtime_args.values()
-        ) or spec.exclusive_provider_submission
+        self._exclusive_internal_storage = (
+            any(
+                isinstance(value, _GraphInternalNdarraySpec)
+                and value.exclusive_submission
+                for value in spec.fixed_runtime_args.values()
+            )
+            or spec.exclusive_provider_submission
+        )
         self._exclusive_internal_completion = None
         self._exclusive_internal_reserved = False
         self._exclusive_internal_waits = 0
@@ -10908,9 +10818,7 @@ class _AOTGraphBuilderPlan:
         self._items.append(
             (
                 "append",
-                _AOTSequentialSnapshot(
-                    node._dispatches, node._dispatch_labels
-                ),
+                _AOTSequentialSnapshot(node._dispatches, node._dispatch_labels),
                 1,
                 runtime_arg_names,
             )
@@ -10958,9 +10866,7 @@ class _AOTGraphBuilderPlan:
                 items.append(
                     (
                         "append",
-                        _AOTSequentialSnapshot(
-                            node._dispatches, node._dispatch_labels
-                        ),
+                        _AOTSequentialSnapshot(node._dispatches, node._dispatch_labels),
                         count,
                         runtime_arg_names,
                     )
@@ -10997,9 +10903,7 @@ class _AOTGraphBuilderPlan:
             )
         builder = _ti_core.GraphBuilder()
         if map_composer_max_group_size > 1:
-            builder._set_map_composer_max_group_size(
-                map_composer_max_group_size
-            )
+            builder._set_map_composer_max_group_size(map_composer_max_group_size)
         if allowed_source_groups:
             builder._set_map_composer_allowed_groups(allowed_source_groups)
         for item in self._items:
@@ -11027,22 +10931,14 @@ class _AOTGraphBuilderPlan:
             raise TaichiRuntimeError("Map recipe compilation requires source groups")
         claimed = set()
         for group in source_groups:
-            if (
-                len(group) < 2
-                or len(group) > 4
-                or len(set(group)) != len(group)
-            ):
+            if len(group) < 2 or len(group) > 4 or len(set(group)) != len(group):
                 raise TaichiRuntimeError(
                     "Map recipe source groups must contain two to four unique IDs"
                 )
             if claimed.intersection(group):
-                raise TaichiRuntimeError(
-                    "Map recipe source groups must be disjoint"
-                )
+                raise TaichiRuntimeError("Map recipe source groups must be disjoint")
             claimed.update(group)
-        return self._compile(
-            max(len(group) for group in source_groups), source_groups
-        )
+        return self._compile(max(len(group) for group in source_groups), source_groups)
 
     @property
     def item_count(self):
@@ -11096,9 +10992,7 @@ def gen_cpp_kernel(
         key = kernel._ensure_compiled_with_offload_execution_plan(
             execution_plan, *injected_args
         )
-        kernel._validate_offload_execution_plan_specialization(
-            key, execution_plan
-        )
+        kernel._validate_offload_execution_plan_specialization(key, execution_plan)
     elif (task_launch_policy is None or task_launch_policy.mode == "auto") and not (
         range_one_to_one
     ):
@@ -11113,9 +11007,7 @@ def gen_cpp_kernel(
             *injected_args,
             range_one_to_one=range_one_to_one,
         )
-        kernel._validate_task_launch_policy_specialization(
-            key, task_launch_policy
-        )
+        kernel._validate_task_launch_policy_specialization(key, task_launch_policy)
     return kernel.compiled_kernels[key]
 
 
@@ -11276,9 +11168,7 @@ def _bounded_kernel_geometry(
     require_one_to_one=False,
 ):
     raw = tuple(impl.get_runtime().prog._kernel_task_manifest(kernel_cpp))
-    range_tasks = tuple(
-        item for item in raw if item["task_type"] == "range_for"
-    )
+    range_tasks = tuple(item for item in raw if item["task_type"] == "range_for")
     setup_tasks = tuple(item for item in raw if item["task_type"] == "serial")
     valid_setup = allow_range_setup and len(setup_tasks) == len(raw) - 1
     if len(range_tasks) != 1 or not (len(raw) == 1 or valid_setup):
@@ -11478,8 +11368,7 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
             else f"dispatch:{int(raw_logical_dispatch_id)}"
         )
         logical_kernel_identity = str(
-            record.get("logical_kernel_identity")
-            or fallback.logical_kernel_identity
+            record.get("logical_kernel_identity") or fallback.logical_kernel_identity
         )
         iteration_domain = _metadata_iteration_domain(record)
         effects = tuple(
@@ -11547,9 +11436,7 @@ class _AOTSequentialSnapshot:
         self._dispatch_labels = tuple(dispatch_labels)
 
     def _dispatch_to(self, builder):
-        for (kernel_cpp, args), label in zip(
-            self._dispatches, self._dispatch_labels
-        ):
+        for (kernel_cpp, args), label in zip(self._dispatches, self._dispatch_labels):
             builder.dispatch(kernel_cpp, args, label)
 
 
@@ -11635,9 +11522,7 @@ class Sequential:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
-        ir_node = _dispatch_ir_node(
-            kernel_cpp, unzipped_args, dispatch_label=label
-        )
+        ir_node = _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         self._dispatches.append((kernel_cpp, unzipped_args))
         self._dispatch_labels.append(label)
         self._items.append(("dispatch", kernel_cpp, unzipped_args, label))
@@ -11688,9 +11573,7 @@ class Sequential:
                 "CUDA structured bounded dispatch requires a device-known, "
                 "no-readback route"
             )
-        policy = GraphBuilder._bounded_launch_policy(
-            block_dim, "require", backend
-        )
+        policy = GraphBuilder._bounded_launch_policy(block_dim, "require", backend)
         kernel_cpp = gen_cpp_kernel(
             kernel_fn,
             args,
@@ -11698,14 +11581,10 @@ class Sequential:
             task_launch_policy=policy,
             range_one_to_one=False,
         )
-        selected_block = _bounded_kernel_geometry(
-            kernel_cpp, backend
-        )
+        selected_block = _bounded_kernel_geometry(kernel_cpp, backend)
         label = _normalize_dispatch_label(label)
         ir_node = replace(
-            _dispatch_ir_node(
-                kernel_cpp, unzipped_args, dispatch_label=label
-            ),
+            _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label),
             bounded_domain=BoundedDomain(
                 extent=extent.name,
                 capacity=capacity,
@@ -11810,9 +11689,7 @@ class Sequential:
         self._ir_nodes.append(compiled.ir_node)
         self._runtime_arg_names.update(compiled.runtime_arg_names)
         self._recording_runtime_arg_names.update(compiled.recording_runtime_arg_names)
-        self._derived_runtime_arg_names.update(
-            compiled.derived_runtime_arg_names
-        )
+        self._derived_runtime_arg_names.update(compiled.derived_runtime_arg_names)
         self._lifetime_leases.extend(compiled.lifetime_leases)
         self._temporary_actions.extend(compiled.temporary_actions)
         self._source_native_count += compiled.source_native_count
@@ -11873,24 +11750,16 @@ class Sequential:
         self._items.extend(sequence._items)
         self._ir_nodes.extend(sequence._ir_nodes)
         self._runtime_arg_names.update(sequence._runtime_arg_names)
-        self._recording_runtime_arg_names.update(
-            sequence._recording_runtime_arg_names
-        )
-        self._derived_runtime_arg_names.update(
-            sequence._derived_runtime_arg_names
-        )
+        self._recording_runtime_arg_names.update(sequence._recording_runtime_arg_names)
+        self._derived_runtime_arg_names.update(sequence._derived_runtime_arg_names)
         self._lifetime_leases.extend(sequence._lifetime_leases)
         self._lifetime_leases.append(executable)
         self._temporary_actions.extend(sequence._temporary_actions)
         self._source_native_count += sequence._source_native_count
-        self._native_action_manifests.extend(
-            sequence._native_action_manifests
-        )
+        self._native_action_manifests.extend(sequence._native_action_manifests)
         self._dispatch_count += sequence._dispatch_count
         self._has_indirect_dispatch |= sequence._has_indirect_dispatch
-        self._structured_depth = max(
-            self._structured_depth, sequence._structured_depth
-        )
+        self._structured_depth = max(self._structured_depth, sequence._structured_depth)
         return self
 
     def _plain_view(self, item_pairs):
@@ -11933,9 +11802,7 @@ class Sequential:
                 view._lifetime_leases.extend(compiled.lifetime_leases)
                 view._temporary_actions.extend(compiled.temporary_actions)
                 view._source_native_count += compiled.source_native_count
-                view._native_action_manifests.extend(
-                    compiled.native_action_manifests
-                )
+                view._native_action_manifests.extend(compiled.native_action_manifests)
                 view._dispatch_count += len(compiled.recordable_action.dispatches)
         return view
 
@@ -11965,9 +11832,7 @@ class Sequential:
         self._lifetime_leases.extend(node.lifetime_leases)
         self._temporary_actions.extend(node.temporary_actions)
         self._source_native_count += node.source_native_count
-        self._native_action_manifests.extend(
-            _native_action_manifests_for_node(node)
-        )
+        self._native_action_manifests.extend(_native_action_manifests_for_node(node))
         self._dispatch_count += node.dispatch_count
         self._structured_depth = max(self._structured_depth, node.structured_depth)
         return self
@@ -12084,15 +11949,11 @@ class Sequential:
                     _RecordingDispatch(kernel_cpp, tuple(args)),
                     ir_node,
                 )
-                recording_dispatches.append(
-                    _RecordingDispatch(kernel_cpp, tuple(args))
-                )
+                recording_dispatches.append(_RecordingDispatch(kernel_cpp, tuple(args)))
                 continue
             elif item[0] == "indirect":
                 _, kernel_cpp, args, dispatch_packet, label = item
-                builder.dispatch_indirect(
-                    kernel_cpp, args, dispatch_packet, label
-                )
+                builder.dispatch_indirect(kernel_cpp, args, dispatch_packet, label)
                 recording_dispatches.append(
                     _RecordingDispatch(
                         kernel_cpp,
@@ -12122,9 +11983,7 @@ class Sequential:
                 )
             for kernel_cpp, args in dispatches:
                 builder.dispatch(kernel_cpp, args, label)
-                recording_dispatches.append(
-                    _RecordingDispatch(kernel_cpp, tuple(args))
-                )
+                recording_dispatches.append(_RecordingDispatch(kernel_cpp, tuple(args)))
         return tuple(recording_dispatches)
 
 
@@ -12260,9 +12119,7 @@ class GraphBuilder:
         *,
         preserve_bounded_publication=False,
     ):
-        self._bind_declared_private_args(
-            (*unzipped_args, dispatch_packet)
-        )
+        self._bind_declared_private_args((*unzipped_args, dispatch_packet))
         if not preserve_bounded_publication:
             self._active_bounded_publication = None
         self._aot_graph_plan.dispatch_indirect(
@@ -12293,10 +12150,14 @@ class GraphBuilder:
     def _bind_internal_runtime_arg(self, symbolic, value):
         name = symbolic.name
         previous = self._runtime_graph_fixed_args.get(name)
-        if previous is not None and previous is not value and not (
-            isinstance(previous, (int, float))
-            and isinstance(value, (int, float))
-            and previous == value
+        if (
+            previous is not None
+            and previous is not value
+            and not (
+                isinstance(previous, (int, float))
+                and isinstance(value, (int, float))
+                and previous == value
+            )
         ):
             raise TaichiRuntimeError(
                 f"Graph internal fixed binding {name!r} is already defined"
@@ -12307,8 +12168,7 @@ class GraphBuilder:
 
     def _retain_runtime_graph_lease(self, lease):
         if all(
-            existing is not lease
-            for existing in self._runtime_graph_lifetime_leases
+            existing is not lease for existing in self._runtime_graph_lifetime_leases
         ):
             self._runtime_graph_lifetime_leases.append(lease)
         self._aot_graph_plan.mark_internal_fixed_bindings()
@@ -12370,9 +12230,7 @@ class GraphBuilder:
         )
         return packet_arg, packet, True
 
-    def _bounded_extent_contract(
-        self, extent_name, capacity, *, expected_extent=None
-    ):
+    def _bounded_extent_contract(self, extent_name, capacity, *, expected_extent=None):
         contract = self._bounded_extent_contracts.get(extent_name)
         if contract is None:
             contract = _DeviceExtentGraphContract(extent_name, capacity)
@@ -12443,9 +12301,7 @@ class GraphBuilder:
         if capacity <= 0 or capacity > 0x7FFFFFFF:
             raise ValueError("bounded dispatch capacity must be in [1, 2^31-1]")
         if (extent is None) == (count is None):
-            raise ValueError(
-                "bounded dispatch requires exactly one of extent or count"
-            )
+            raise ValueError("bounded dispatch requires exactly one of extent or count")
         if count is not None and physical_grid != "auto":
             raise ValueError(
                 "host-known bounded dispatch already uses an exact launch; "
@@ -12494,9 +12350,7 @@ class GraphBuilder:
         selected_route = (
             None
             if count is not None
-            else _bounded_route(
-                backend, False, physical_grid=physical_grid
-            )
+            else _bounded_route(backend, False, physical_grid=physical_grid)
         )
         exact_device_grid = bool(
             selected_route is not None and selected_route.exact_grid
@@ -12524,10 +12378,7 @@ class GraphBuilder:
         label = _normalize_dispatch_label(label)
 
         if count is not None:
-            if (
-                getattr(count, "tag", None) != ArgKind.SCALAR
-                or count.dtype() != i32
-            ):
+            if getattr(count, "tag", None) != ArgKind.SCALAR or count.dtype() != i32:
                 raise TaichiRuntimeError(
                     "host-known bounded dispatch count must be a symbolic i32 scalar"
                 )
@@ -12574,16 +12425,12 @@ class GraphBuilder:
                 "bounded dispatch selected block dimension does not match "
                 "the producer-owned launch state"
             )
-        effective_launch_state = (
-            launch_state
-            if backend == "vulkan"
-            else None
-        )
+        effective_launch_state = launch_state if backend == "vulkan" else None
         extent = _require_bounded_symbolic_ndarray(extent, "extent", i32)
         if extent.name not in _runtime_arg_names(unzipped_args):
             raise TaichiRuntimeError(
                 "bounded dispatch payload arguments must include the extent argument"
-        )
+            )
         packet = None
         packet_allocation_owner = True
         preparation_dispatches = None
@@ -12595,9 +12442,7 @@ class GraphBuilder:
             publication = (
                 None
                 if effective_launch_state is not None
-                else self._vulkan_bounded_publication(
-                    extent, capacity, selected_block
-                )
+                else self._vulkan_bounded_publication(extent, capacity, selected_block)
             )
             if publication is not None:
                 packet_arg, packet, packet_allocation_owner = publication
@@ -12620,9 +12465,7 @@ class GraphBuilder:
                 capacity_arg = Arg(
                     ArgKind.SCALAR, f"__ti_bounded_capacity_{unique}", i32
                 )
-                block_arg = Arg(
-                    ArgKind.SCALAR, f"__ti_bounded_block_{unique}", i32
-                )
+                block_arg = Arg(ArgKind.SCALAR, f"__ti_bounded_block_{unique}", i32)
                 prepare_args = (extent, packet_arg, capacity_arg, block_arg)
                 prepare_cpp = gen_cpp_kernel(
                     _prepare_bounded_dispatch_packet, prepare_args
@@ -12690,9 +12533,7 @@ class GraphBuilder:
                         "require_exact"
                         if exact_device_grid
                         else (
-                            "fixed_capacity"
-                            if physical_grid == "capacity"
-                            else "auto"
+                            "fixed_capacity" if physical_grid == "capacity" else "auto"
                         )
                     )
                 )
@@ -12774,31 +12615,21 @@ class GraphBuilder:
             )
         unique = next(_bounded_dispatch_ids)
         packet = (
-            _GraphInternalNdarraySpec(u32, (3,), 4)
-            if backend == "vulkan"
-            else None
+            _GraphInternalNdarraySpec(u32, (3,), 4) if backend == "vulkan" else None
         )
         segment_state = _GraphInternalNdarraySpec(
             i32, (BoundedDispatchHandle._SEGMENT_STATE_SIZE,), 4
         )
-        state_arg = Arg(
-            ArgKind.NDARRAY, f"__ti_segment_state_{unique}", i32, ndim=1
-        )
-        capacity_arg = Arg(
-            ArgKind.SCALAR, f"__ti_segment_capacity_{unique}", i32
-        )
-        count_arg = Arg(
-            ArgKind.SCALAR, f"__ti_segment_count_{unique}", i32
-        )
+        state_arg = Arg(ArgKind.NDARRAY, f"__ti_segment_state_{unique}", i32, ndim=1)
+        capacity_arg = Arg(ArgKind.SCALAR, f"__ti_segment_capacity_{unique}", i32)
+        count_arg = Arg(ArgKind.SCALAR, f"__ti_segment_count_{unique}", i32)
         packet_arg = None
         block_arg = None
         if backend == "vulkan":
             packet_arg = Arg(
                 ArgKind.NDARRAY, f"__ti_segment_packet_{unique}", u32, ndim=1
             )
-            block_arg = Arg(
-                ArgKind.SCALAR, f"__ti_segment_block_{unique}", i32
-            )
+            block_arg = Arg(ArgKind.SCALAR, f"__ti_segment_block_{unique}", i32)
         payload_args = (*args, state_arg)
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
         payload_cpp = gen_cpp_kernel(
@@ -12847,15 +12678,9 @@ class GraphBuilder:
                 )
                 prepare_kernel = _prepare_ordered_segment_state
             prepare_cpp = gen_cpp_kernel(prepare_kernel, prepare_args)
-            prepare_label = (
-                f"{base_label}/prepare:{segment}" if base_label else ""
-            )
-            payload_label = (
-                f"{base_label}/segment:{segment}" if base_label else ""
-            )
-            self._record_dispatch(
-                prepare_cpp, list(prepare_args), prepare_label
-            )
+            prepare_label = f"{base_label}/prepare:{segment}" if base_label else ""
+            payload_label = f"{base_label}/segment:{segment}" if base_label else ""
+            self._record_dispatch(prepare_cpp, list(prepare_args), prepare_label)
             if backend == "vulkan":
                 self._record_indirect_dispatch(
                     payload_cpp,
@@ -12864,9 +12689,7 @@ class GraphBuilder:
                     payload_label,
                 )
             else:
-                self._record_dispatch(
-                    payload_cpp, payload_flattened, payload_label
-                )
+                self._record_dispatch(payload_cpp, payload_flattened, payload_label)
             self._pending_ir_nodes[-1] = replace(
                 self._pending_ir_nodes[-1],
                 bounded_domain=BoundedDomain(
@@ -12905,17 +12728,13 @@ class GraphBuilder:
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
         self._aot_graph_plan.dispatch(kernel_cpp, unzipped_args, label)
-        self._ensure_runtime_graph_builder().dispatch(
-            kernel_cpp, unzipped_args, label
-        )
+        self._ensure_runtime_graph_builder().dispatch(kernel_cpp, unzipped_args, label)
         self._runtime_graph_dispatches.append(
             _RecordingDispatch(kernel_cpp, tuple(unzipped_args))
         )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
-            _dispatch_ir_node(
-                kernel_cpp, unzipped_args, dispatch_label=label
-            )
+            _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         )
         self._dispatch_count += 1
 
@@ -12950,9 +12769,7 @@ class GraphBuilder:
         )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
-            _dispatch_ir_node(
-                kernel_cpp, unzipped_args, dispatch_label=label
-            )
+            _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         )
         self._dispatch_count += 1
 
@@ -12979,9 +12796,7 @@ class GraphBuilder:
         )
         self._runtime_graph_arg_names.update(_runtime_arg_names(unzipped_args))
         self._pending_ir_nodes.append(
-            _dispatch_ir_node(
-                kernel_cpp, unzipped_args, dispatch_label=label
-            )
+            _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         )
         self._dispatch_count += 1
 
@@ -13051,9 +12866,7 @@ class GraphBuilder:
                 fixed_runtime_args=self._runtime_graph_fixed_args,
                 lifetime_leases=self._runtime_graph_lifetime_leases,
                 source_native_count=self._runtime_graph_source_native_count,
-                native_action_manifests=(
-                    self._runtime_graph_native_action_manifests
-                ),
+                native_action_manifests=(self._runtime_graph_native_action_manifests),
             )
         )
         self._runtime_graph_builder = _new_runtime_graph_builder()
@@ -13082,9 +12895,7 @@ class GraphBuilder:
             return self.append(sequence)
         action = executable.recordable_action
         if action is not None and action.backend_command_recording is not None:
-            backend = _backend_name(
-                _ti_core.arch_name(impl.current_cfg().arch)
-            )
+            backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
             if not action.supports_backend(backend):
                 raise TaichiRuntimeError(
                     "Backend command action is compiled for "
@@ -13107,12 +12918,8 @@ class GraphBuilder:
                 self._runtime_graph_arg_names.update(
                     compiled.recording_runtime_arg_names
                 )
-                self._runtime_graph_lifetime_leases.extend(
-                    compiled.lifetime_leases
-                )
-                self._runtime_graph_source_native_count += (
-                    compiled.source_native_count
-                )
+                self._runtime_graph_lifetime_leases.extend(compiled.lifetime_leases)
+                self._runtime_graph_source_native_count += compiled.source_native_count
                 self._runtime_graph_native_action_manifests.extend(
                     compiled.native_action_manifests
                 )
@@ -13122,9 +12929,7 @@ class GraphBuilder:
                 self._aot_graph_plan.mark_internal_fixed_bindings()
                 return self
         if admission == "auto":
-            backend = _backend_name(
-                _ti_core.arch_name(impl.current_cfg().arch)
-            )
+            backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
             action = executable.recordable_action
             if action is None or not action.supports_backend(backend):
                 manifest = native_action_manifest(executable, action)
@@ -13285,9 +13090,7 @@ class GraphBuilder:
         diagnostic segmented route for providers whose backend command plan
         is not yet integrated.
         """
-        return self._append_native(
-            node, prewarm=prewarm, admission=admission
-        )
+        return self._append_native(node, prewarm=prewarm, admission=admission)
 
     def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
         self._flush_graph_builder()
@@ -13490,13 +13293,9 @@ def _graph_fusion_runtime_scope(backend):
 
         scope.update(
             {
-                "cuda_compute_capability": int(
-                    impl.get_cuda_compute_capability()
-                ),
+                "cuda_compute_capability": int(impl.get_cuda_compute_capability()),
                 "cuda_device_uuid": current_cuda_device_uuid().hex(),
-                "cuda_driver_api_version": int(
-                    _ti_core.cuda_driver_api_version()
-                ),
+                "cuda_driver_api_version": int(_ti_core.cuda_driver_api_version()),
             }
         )
     except (AttributeError, RuntimeError, ValueError):
@@ -13586,9 +13385,7 @@ def _graph_fusion_group_size(spec):
 
 
 def _graph_fusion_source_groups(spec, fusion_plan):
-    recipes = {
-        recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes
-    }
+    recipes = {recipe.recipe_id: recipe for recipe in fusion_plan.candidate_recipes}
     groups = []
     claimed = set()
     for recipe_id in spec.fusion_recipe_ids:
@@ -13622,6 +13419,10 @@ class _QualifiedFusionRuntimeSelector:
         self._space = space
         self._runtime_scope = dict(runtime_scope)
         self._source_commit = str(_ti_core.get_commit_hash()).lower()
+        self._specs = {
+            spec.spec_id: spec
+            for spec in (self._space.baseline, *self._space.candidates)
+        }
         self._variants = {}
         self._failed_entries = set()
         self._attempts = 0
@@ -13641,9 +13442,7 @@ class _QualifiedFusionRuntimeSelector:
         # qualification, but must not consume CUDA admission records.
         if space.baseline.backend != "cuda":
             return None
-        raw_replays = os.environ.get(
-            _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV, ""
-        ).strip()
+        raw_replays = os.environ.get(_INTERNAL_FUSION_EXPECTED_REPLAYS_ENV, "").strip()
         try:
             expected_replays = int(raw_replays)
         except ValueError as exc:
@@ -13683,11 +13482,7 @@ class _QualifiedFusionRuntimeSelector:
             self._baseline_fallbacks += 1
             self._last_reason = "materialization_previously_failed"
             return graph._instance
-        specs = {
-            spec.spec_id: spec
-            for spec in (self._space.baseline, *self._space.candidates)
-        }
-        spec = specs.get(entry.selected_spec_id)
+        spec = self._specs.get(entry.selected_spec_id)
         if (
             spec is None
             or spec is self._space.baseline
@@ -13716,9 +13511,7 @@ class _QualifiedFusionRuntimeSelector:
 
     def invalidate_runtime(self, preserve_executables=False):
         for instance in self._variants.values():
-            instance.invalidate_runtime(
-                preserve_executables=preserve_executables
-            )
+            instance.invalidate_runtime(preserve_executables=preserve_executables)
         if not preserve_executables:
             self._variants.clear()
 
@@ -13764,7 +13557,10 @@ class Graph:
         else:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
-        if self._spec.exclusive_provider_submission and self._workspace_lane_capacity != 1:
+        if (
+            self._spec.exclusive_provider_submission
+            and self._workspace_lane_capacity != 1
+        ):
             raise TaichiRuntimeError(
                 "Graphs with exclusive provider-owned fixed storage require "
                 "workspace_lanes=1; use independent providers for concurrency"
@@ -13826,9 +13622,7 @@ class Graph:
         compiled_graph = self._spec._aot_graph_builder._compile_map_recipes(
             source_groups
         )
-        ir_nodes = _compiled_dispatch_ir_nodes(
-            compiled_graph, source.ir_node.children
-        )
+        ir_nodes = _compiled_dispatch_ir_nodes(compiled_graph, source.ir_node.children)
         variant_node = _CompiledCGraphNode(
             compiled_graph,
             source.dispatch_count,
@@ -13872,8 +13666,7 @@ class Graph:
             roots = tuple(
                 node
                 for node in self._spec.structured_control_nodes
-                if node.control_depth == 1
-                and isinstance(node, _CompiledWhileGraphNode)
+                if node.control_depth == 1 and isinstance(node, _CompiledWhileGraphNode)
             )
             return bool(
                 len(roots) == 1
@@ -13982,9 +13775,7 @@ class Graph:
                         "Graph GPU semantics backend changed after compilation"
                     )
                 logical_order = _gpu_plan_logical_order(node.ir_node)
-                actions = tuple(
-                    action.to_dict() for action in stage["native_actions"]
-                )
+                actions = tuple(action.to_dict() for action in stage["native_actions"])
                 topology_static = "structured" not in logical_order
                 if not topology_static:
                     logical_order = tuple(
@@ -14077,9 +13868,7 @@ class Graph:
                                 f"{action.name}:backend_not_recordable:{backend}"
                             )
                         if action.loose_helper_count_exact:
-                            loose_helper_count += int(
-                                action.loose_helper_count
-                            )
+                            loose_helper_count += int(action.loose_helper_count)
                         else:
                             loose_helper_count_exact = False
                 rejection_reasons.extend(stage_reasons)
@@ -14123,8 +13912,7 @@ class Graph:
                                 if action.backend_command_count_exact
                             ),
                             "backend_command_count_exact": all(
-                                action.backend_command_count_exact
-                                for action in actions
+                                action.backend_command_count_exact for action in actions
                             ),
                             "host_observation": stage["kind"] == "observation",
                             "rejection_reasons": tuple(stage_reasons),
@@ -14172,9 +13960,7 @@ class Graph:
                     "backend_graph_launches": None,
                     "backend_graph_launches_exact": False,
                     "physical_queue_submissions": None,
-                    "physical_queue_submission_source": (
-                        "SubmissionTicket.telemetry"
-                    ),
+                    "physical_queue_submission_source": ("SubmissionTicket.telemetry"),
                     "rejection_reasons": tuple(sorted(set(rejection_reasons))),
                     "workspace_topology": MappingProxyType(
                         {
@@ -14187,9 +13973,7 @@ class Graph:
                             "temporary_peak_bytes": int(
                                 temporary_plan.planned_peak_bytes
                             ),
-                            "temporary_slot_count": int(
-                                temporary_plan.slot_count
-                            ),
+                            "temporary_slot_count": int(temporary_plan.slot_count),
                         }
                     ),
                     "dynamic_publication_count": len(publication_plan),
@@ -14284,17 +14068,13 @@ class Graph:
             temporary_lease = execution_instance.acquire_temporary_lease()
             observation_lease = None
             try:
-                observation_lease = (
-                    execution_instance.acquire_observation_lease()
-                )
+                observation_lease = execution_instance.acquire_observation_lease()
                 temporary_bindings = (
                     temporary_lease.bindings if temporary_lease is not None else None
                 )
                 runtime._active_graph_submissions = submission_state + 1
                 try:
-                    execution_instance.bind_temporary_buffers(
-                        temporary_bindings
-                    )
+                    execution_instance.bind_temporary_buffers(temporary_bindings)
                     execution_instance.bind_observation_buffers(
                         observation_lease.bindings
                         if observation_lease is not None
@@ -14309,9 +14089,7 @@ class Graph:
                     if trace_recorder is None:
                         execution_run(prepared)
                     else:
-                        execution_instance.run_traced(
-                            prepared, trace_recorder
-                        )
+                        execution_instance.run_traced(prepared, trace_recorder)
                     if self._has_native_execution_observers:
                         self._spec.record_synchronous_native_execution()
                     self._latest_control_flow_was_async = False
@@ -14460,9 +14238,7 @@ class Graph:
                 temporary_lease = submission_instance.acquire_temporary_lease()
                 observation_lease = submission_instance.acquire_observation_lease()
                 telemetry_lease = (
-                    submission_instance.acquire_structured_telemetry_lease(
-                        telemetry
-                    )
+                    submission_instance.acquire_structured_telemetry_lease(telemetry)
                     if telemetry_enabled
                     else None
                 )
@@ -14587,8 +14363,8 @@ class Graph:
         if admission is not None:
             admission._attach(completion)
         if self._has_native_execution_observers:
-            completion_observations = (
-                self._spec.begin_native_submission_observations(completion)
+            completion_observations = self._spec.begin_native_submission_observations(
+                completion
             )
         return SubmissionTicket(
             completion,
@@ -14613,9 +14389,7 @@ class Graph:
         this explicit boundary rather than inside the first measured submit.
         """
 
-        mode = _normalize_submission_telemetry_mode(
-            mode, "Graph.prepare_telemetry()"
-        )
+        mode = _normalize_submission_telemetry_mode(mode, "Graph.prepare_telemetry()")
         if mode is False:
             return self
         with self._lifecycle_lock:
@@ -14628,9 +14402,7 @@ class Graph:
                 and "timestamps" not in self._prepared_telemetry_modes
             ):
                 transaction = (
-                    impl.get_runtime().prog._begin_runtime_submission_transaction(
-                        True
-                    )
+                    impl.get_runtime().prog._begin_runtime_submission_transaction(True)
                 )
                 for node in self._instance._structured_telemetry_nodes:
                     transaction._begin_gpu_region_timing(node.region_path)

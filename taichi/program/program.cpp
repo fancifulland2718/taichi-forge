@@ -5811,8 +5811,23 @@ Program::RegisteredKernelExecutionPlan::begin_launch(Program &program) const {
     }
     // Validate before Python constructs a context from the retained Kernel
     // ABI. The returned scope keeps this transaction live through submission.
-    program.validate_snode_tree_dependencies(
-        dependencies_, "Registered kernel execution plan");
+    const std::uint64_t current_epoch = lifecycle_guard->epoch();
+    if (validated_snode_tree_epoch_.load(std::memory_order_acquire) !=
+        current_epoch) {
+      if (attribute) {
+        program.ordinary_launch_attribution_
+            .registered_plan_snode_validation_scans.fetch_add(
+                1, std::memory_order_relaxed);
+      }
+      program.validate_snode_tree_dependencies(
+          dependencies_, "Registered kernel execution plan");
+      validated_snode_tree_epoch_.store(current_epoch,
+                                        std::memory_order_release);
+    } else if (attribute) {
+      program.ordinary_launch_attribution_
+          .registered_plan_snode_validation_epoch_fast_hits.fetch_add(
+              1, std::memory_order_relaxed);
+    }
   }
   return std::unique_ptr<RegisteredKernelExecutionPlanLaunchScope>(
       new RegisteredKernelExecutionPlanLaunchScope(
@@ -5851,10 +5866,13 @@ Program::register_kernel_execution_plan(
     dependencies =
         snapshot_snode_tree_dependencies_unlocked(compiled.snode_tree_ids());
   }
+  const std::uint64_t validated_snode_tree_epoch =
+      dependencies.empty() ? 0 : lifecycle_guard.epoch();
   return std::unique_ptr<RegisteredKernelExecutionPlan>(
       new RegisteredKernelExecutionPlan(this, &compiled,
                                         *compiled.get_handle(),
-                                        std::move(dependencies)));
+                                        std::move(dependencies),
+                                        validated_snode_tree_epoch));
 }
 
 void Program::compile_and_launch_kernel(
@@ -8884,6 +8902,9 @@ void Program::debug_reset_ordinary_launch_attribution() noexcept {
   TI_RESET_ORDINARY_LAUNCH_COUNTER(owned_ndarray_only_launches);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(snode_guard_acquisitions);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(snode_guard_elisions);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(registered_plan_snode_validation_scans);
+  TI_RESET_ORDINARY_LAUNCH_COUNTER(
+      registered_plan_snode_validation_epoch_fast_hits);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(resource_lock_acquisitions);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_slot_validations);
   TI_RESET_ORDINARY_LAUNCH_COUNTER(ndarray_map_lookups);
@@ -8927,6 +8948,10 @@ Program::debug_ordinary_launch_attribution() const {
        load(stats.owned_ndarray_only_launches)},
       {"snode_guard_acquisitions", load(stats.snode_guard_acquisitions)},
       {"snode_guard_elisions", load(stats.snode_guard_elisions)},
+      {"registered_plan_snode_validation_scans",
+       load(stats.registered_plan_snode_validation_scans)},
+      {"registered_plan_snode_validation_epoch_fast_hits",
+       load(stats.registered_plan_snode_validation_epoch_fast_hits)},
       {"resource_lock_acquisitions", load(stats.resource_lock_acquisitions)},
       {"ndarray_slot_validations", load(stats.ndarray_slot_validations)},
       {"ndarray_map_lookups", load(stats.ndarray_map_lookups)},

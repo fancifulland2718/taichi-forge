@@ -492,6 +492,18 @@ DenseStorageDescriptor::DenseStorageDescriptor(
       fingerprint_(fingerprint) {
 }
 
+bool DenseStorageDescriptor::exactly_matches(
+    const DenseStorageDescriptor &other) const noexcept {
+  return owner_.same_logical_owner(other.owner_) &&
+         owner_.program_domain == other.owner_.program_domain &&
+         owner_.tree.layout_fingerprint == other.owner_.tree.layout_fingerprint &&
+         source_kind_ == other.source_kind_ && scalar_type_ == other.scalar_type_ &&
+         access_ == other.access_ && index_rank_ == other.index_rank_ &&
+         element_rank_ == other.element_rank_ && extents_ == other.extents_ &&
+         strides_bytes_ == other.strides_bytes_ &&
+         byte_offset_ == other.byte_offset_;
+}
+
 std::int64_t DenseStorageDescriptor::index_extent(std::size_t axis) const {
   if (axis >= index_rank_) {
     throw std::out_of_range("dense storage index axis is out of range");

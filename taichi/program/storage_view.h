@@ -242,6 +242,10 @@ class TI_DLL_EXPORT DenseStorageDescriptor {
   std::uint64_t fingerprint() const noexcept {
     return fingerprint_;
   }
+  // Collision-free equality for runtime validation certificates. The public
+  // fingerprint remains useful as a bounded-cache index, but must never be
+  // the sole proof that two descriptors have the same owner and layout.
+  bool exactly_matches(const DenseStorageDescriptor &other) const noexcept;
   const DenseStorageProperties &properties() const noexcept {
     return properties_;
   }

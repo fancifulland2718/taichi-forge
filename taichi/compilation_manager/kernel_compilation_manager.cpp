@@ -165,8 +165,6 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
     const Kernel &kernel_def) {
   auto cache_mode = get_cache_mode(compile_config, kernel_def);
   const auto kernel_key = make_kernel_key(compile_config, caps, kernel_def);
-  const auto logical_kernel_key =
-      make_kernel_semantic_key(compile_config, caps, kernel_def);
 
   // P5.a — serialize all cache-map mutation with cache_mutex_. Heavy
   // compile work happens OUTSIDE the lock inside
@@ -209,6 +207,7 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
   lock.unlock();
 
   std::unique_ptr<CompiledKernelData> compiled;
+  std::string logical_kernel_key;
   bool from_disk = false;
   try {
     if (disk_metadata_hit) {
@@ -226,6 +225,11 @@ const CompiledKernelData &KernelCompilationManager::load_or_compile(
                         executable_lifecycle_telemetry_.compiler_invocations);
       compiled = compile_kernel(compile_config, caps, kernel_def);
     }
+    // Logical identity is needed only when this thread installs a cache miss.
+    // Keep its serialization and SHA-256 work off the memory-cache hit path,
+    // and outside cache_mutex_ so unrelated cache traffic remains concurrent.
+    logical_kernel_key =
+        make_kernel_semantic_key(compile_config, caps, kernel_def);
   } catch (...) {
     lock.lock();
     in_progress_keys_.erase(kernel_key);

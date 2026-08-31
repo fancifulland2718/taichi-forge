@@ -97,6 +97,38 @@ def test_callable_template_mapper_ndarray_cache_tracks_grad_state():
 
 
 @test_utils.test()
+def test_callable_template_mapper_ndarray_lookup_skips_dead_template_scan():
+    arr = ti.ndarray(ti.f32, shape=4)
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.types.ndarray(), "arr"),),
+        (),
+    )
+    mapper.lookup((arr,))
+
+    def unexpected_scan(_):
+        raise AssertionError("ndarray specialization lookup scanned template keys")
+
+    mapper._cache_key_is_dead = unexpected_scan
+    assert mapper.lookup((arr,))[0] == 0
+
+
+@test_utils.test()
+def test_callable_template_mapper_template_hit_skips_dead_key_scan():
+    field = ti.field(ti.i32, shape=4)
+    mapper = TaichiCallableTemplateMapper(
+        (KernelArgument(ti.template(), "field"),),
+        (0,),
+    )
+    mapper.lookup((field,))
+
+    def unexpected_scan(_):
+        raise AssertionError("template specialization hit scanned every key")
+
+    mapper._cache_key_is_dead = unexpected_scan
+    assert mapper.lookup((field,))[0] == 0
+
+
+@test_utils.test()
 def test_callable_template_mapper_separates_canonical_and_affine_ndarrays():
     arr = ti.ndarray(ti.f32, shape=(4, 4))
     affine = ti.experimental.ndarray_view(arr, slices=(slice(0, 4, 2), slice(1, 4, 2)))

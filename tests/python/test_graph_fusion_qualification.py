@@ -12,6 +12,7 @@ from taichi_forge.graph._optimization import (
     _GRAPH_FUSION_QUALIFICATION_SCHEMA,
     _GraphFusionQualificationCache,
 )
+from taichi_forge.graph import _optimization as graph_optimization
 from tests import test_utils
 
 
@@ -74,6 +75,17 @@ def _cache(*entries):
         "schema": _GRAPH_FUSION_QUALIFICATION_SCHEMA,
         "entries": list(entries),
     }
+
+
+def test_fusion_qualification_identity_is_precomputed(monkeypatch):
+    cache = _GraphFusionQualificationCache.from_dict(_cache(_entry()))
+    entry = cache.entries[0]
+
+    def unexpected_hash(_):
+        raise AssertionError("immutable qualification identity was recomputed")
+
+    monkeypatch.setattr(graph_optimization, "_canonical_hash", unexpected_hash)
+    assert entry.identity == entry.identity
 
 
 def test_fusion_qualification_matches_exact_runtime_and_binding_scope():

@@ -3,11 +3,14 @@
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/codegen/codegen.h"
 #include "taichi/common/logging.h"
+#include "taichi/common/serialization.h"
 #include "taichi/common/task.h"
 #include "taichi/inc/constants.h"
 #include "taichi/ir/statements.h"
 #include "taichi/program/program.h"
 #include "taichi/util/bit.h"
+
+#include "picosha2.h"
 
 #include <utility>
 
@@ -63,23 +66,24 @@ Kernel::Kernel(Program &program,
 
 LaunchContextBuilder Kernel::make_launch_context() {
   LaunchContextBuilder builder(this);
-  if (offload_execution_plan_.has_value()) {
-    std::vector<std::string> task_kinds;
-    std::vector<int> grid_residency_waves;
-    std::vector<int> range_work_per_thread_targets;
-    task_kinds.reserve(offload_execution_plan_->tasks.size());
-    grid_residency_waves.reserve(offload_execution_plan_->tasks.size());
-    range_work_per_thread_targets.reserve(
-        offload_execution_plan_->tasks.size());
-    for (const auto &task : offload_execution_plan_->tasks) {
-      task_kinds.push_back(task.task_kind);
-      grid_residency_waves.push_back(task.grid_residency_waves);
-      range_work_per_thread_targets.push_back(
-          task.range_work_per_thread_target);
+  const OffloadExecutionPlan *plan = nullptr;
+  if (offload_execution_plan_frozen_.load(std::memory_order_acquire)) {
+    TI_ASSERT(offload_execution_plan_.has_value());
+    plan = &*offload_execution_plan_;
+  } else {
+    std::lock_guard<std::mutex> lock(offload_execution_plan_mutex_);
+    if (offload_execution_plan_.has_value()) {
+      plan = &*offload_execution_plan_;
+      // Publish the immutable plan before later launches take the lock-free
+      // path. Once published, the setter fails closed instead of invalidating
+      // any LaunchContextBuilder's borrowed references.
+      offload_execution_plan_frozen_.store(true, std::memory_order_release);
     }
-    builder.set_cuda_task_execution_plan(
-        offload_execution_plan_->execution_identity, task_kinds,
-        grid_residency_waves, range_work_per_thread_targets);
+  }
+  if (plan != nullptr) {
+    builder.bind_cuda_task_execution_plan(
+        plan->execution_identity, plan->launch_content_digest, plan->task_kinds,
+        plan->grid_residency_waves, plan->range_work_per_thread_targets);
   }
   return builder;
 }
@@ -337,6 +341,10 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &grid_residency_waves,
     const std::vector<int> &range_work_per_thread_targets,
     const std::vector<std::string> &memory_strategies) {
+  TI_ERROR_IF(
+      offload_execution_plan_frozen_.load(std::memory_order_acquire),
+      "offload execution plan cannot be replaced after launch-context "
+      "materialization");
   TI_ERROR_IF(compilation_identity.empty() || execution_identity.empty(),
               "offload execution plan requires non-empty compilation and "
               "execution identities");
@@ -360,6 +368,9 @@ void Kernel::set_offload_execution_plan(
   plan.compilation_identity = compilation_identity;
   plan.execution_identity = execution_identity;
   plan.tasks.reserve(task_count);
+  plan.task_kinds.reserve(task_count);
+  plan.grid_residency_waves.reserve(task_count);
+  plan.range_work_per_thread_targets.reserve(task_count);
   for (std::size_t index = 0; index < task_count; ++index) {
     TI_ERROR_IF(task_indices[index] != static_cast<int>(index),
                 "offload execution plan task indices must be contiguous; "
@@ -441,10 +452,32 @@ void Kernel::set_offload_execution_plan(
                 "offload execution plan v1 can tune only range_for tasks; "
                 "task {} is {}",
                 index, task.task_kind);
+    plan.task_kinds.push_back(task.task_kind);
+    plan.grid_residency_waves.push_back(task.grid_residency_waves);
+    plan.range_work_per_thread_targets.push_back(
+        task.range_work_per_thread_target);
     plan.tasks.push_back(std::move(task));
   }
-  offload_execution_plan_ = std::move(plan);
-  invalidate_kernel_key_for_cache();
+  // A content-derived native digest prevents a caller from forging an
+  // existing public execution identity with different launch vectors. CUDA's
+  // steady MRU compares this fixed-size value; exact vectors remain a cold
+  // validation under the context cache lock.
+  BinaryOutputSerializer serializer;
+  serializer.initialize();
+  serializer(plan.task_kinds);
+  serializer(plan.grid_residency_waves);
+  serializer(plan.range_work_per_thread_targets);
+  serializer.finalize();
+  picosha2::hash256(serializer.data, plan.launch_content_digest);
+  {
+    std::lock_guard<std::mutex> lock(offload_execution_plan_mutex_);
+    TI_ERROR_IF(
+        offload_execution_plan_frozen_.load(std::memory_order_relaxed),
+        "offload execution plan cannot be replaced after launch-context "
+        "materialization");
+    offload_execution_plan_ = std::move(plan);
+    invalidate_kernel_key_for_cache();
+  }
 }
 
 const std::optional<Kernel::OffloadExecutionPlan> &

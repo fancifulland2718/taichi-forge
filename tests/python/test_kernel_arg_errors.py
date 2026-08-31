@@ -1,9 +1,18 @@
 import platform
+from types import SimpleNamespace
 
 import pytest
 
 import taichi_forge as ti
+from taichi_forge.lang.kernel_impl import _process_args
 from tests import test_utils
+
+
+def test_exact_positional_argument_binding_is_already_validated():
+    callable_stub = SimpleNamespace(arguments=(object(), object()))
+    args = (17, 23)
+
+    assert _process_args(callable_stub, args, {}) is args
 
 
 @test_utils.test(arch=ti.cpu)
@@ -67,7 +76,9 @@ def test_argument_redefinition():
     def foo(a: ti.i32):
         a = 1
 
-    with pytest.raises(ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel') as e:
+    with pytest.raises(
+        ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel'
+    ) as e:
         foo(5)
 
 
@@ -77,7 +88,9 @@ def test_argument_augassign():
     def foo(a: ti.i32):
         a += 1
 
-    with pytest.raises(ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel') as e:
+    with pytest.raises(
+        ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel'
+    ) as e:
         foo(5)
 
 
@@ -87,7 +100,9 @@ def test_argument_annassign():
     def foo(a: ti.i32):
         a: ti.i32 = 1
 
-    with pytest.raises(ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel') as e:
+    with pytest.raises(
+        ti.TaichiSyntaxError, match='Kernel argument "a" is immutable in the kernel'
+    ) as e:
         foo(5)
 
 

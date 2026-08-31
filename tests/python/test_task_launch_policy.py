@@ -9,6 +9,7 @@ import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.lang import impl
+from taichi_forge.lang import kernel_impl
 from taichi_forge.lang import _task_launch_tuning as launch_tuning
 from tests import test_utils
 
@@ -55,6 +56,150 @@ def test_task_launch_policy_value_validation():
         _workload_profile(graph_capacity=1024)
     with pytest.raises(ValueError, match="sparse_active_ratio_bucket"):
         _workload_profile(sparse_active_ratio_bucket="unknown")
+
+
+def test_task_launch_workload_profile_identity_is_precomputed(monkeypatch):
+    profile = _workload_profile()
+
+    def unexpected_canonicalization(_):
+        raise AssertionError("immutable workload identity was recomputed")
+
+    monkeypatch.setattr(launch_tuning, "_canonical_json", unexpected_canonicalization)
+    assert profile.identity == profile.identity
+    assert profile.stable_scope["workload_id"] == "test:particle-update"
+
+
+def test_task_launch_auto_discards_decision_invalidated_during_resolution():
+    def fake_kernel():
+        pass
+
+    runtime = SimpleNamespace(
+        target_tape=None,
+        fwd_mode_manager=None,
+        grad_replaced=False,
+    )
+    kernel = SimpleNamespace(
+        func=fake_kernel,
+        arguments=(SimpleNamespace(default=None),),
+        runtime=runtime,
+        autodiff_mode=kernel_impl.AutodiffMode.NONE,
+        mapper=SimpleNamespace(
+            _dynamic_arg_extractors=((0, object(), "value"),),
+            lookup=lambda args: (7, ("dynamic",)),
+        ),
+        _task_launch_backend_kind=lambda: ("cuda", "native"),
+    )
+
+    def invalidate_during_resolution(args, **kwargs):
+        del args, kwargs
+        launch_tuning._coordinator.invalidate("test:concurrent-invalidation")
+        decision = launch_tuning._TaskLaunchTuningDecision(
+            status="qualified",
+            reason="test",
+            record_id="test:record",
+            kernel_key="test:kernel",
+            hardware_scope=(),
+            candidates=(128,),
+            block_dim=128,
+        )
+        return (fake_kernel, 7, kernel_impl.AutodiffMode.NONE), (), decision
+
+    kernel._task_launch_auto_decision = invalidate_during_resolution
+    binding = kernel_impl._TaskLaunchBinding(
+        kernel,
+        ti.TaskLaunchPolicy.auto(),
+        workload_profile=_workload_profile(),
+    )
+
+    processed, resolved, resolution_generation = binding._auto_resolution(
+        (object(),), {}, observe=True
+    )
+
+    assert len(processed) == 1
+    assert resolved is None
+    assert resolution_generation == -1
+    assert binding._last_auto_decision is None
+    assert binding._auto_cache_decisions == {}
+
+
+def test_task_launch_auto_does_not_publish_fast_path_after_invalidation():
+    calls = {"ordinary": 0, "optimized": 0}
+
+    def fake_kernel_body():
+        pass
+
+    class FakeKernel:
+        func = staticmethod(fake_kernel_body)
+        arguments = (SimpleNamespace(default=None),)
+        autodiff_mode = kernel_impl.AutodiffMode.NONE
+
+        def __init__(self):
+            self.runtime = SimpleNamespace(
+                target_tape=None,
+                fwd_mode_manager=None,
+                grad_replaced=False,
+            )
+            self.mapper = SimpleNamespace(
+                _dynamic_arg_extractors=((0, object(), "value"),),
+                lookup=lambda args: (9, ("dynamic",)),
+            )
+            self.compiled_kernels = {}
+            self._task_launch_auto_failed_records = set()
+
+        def __call__(self, *args, **kwargs):
+            del args, kwargs
+            calls["ordinary"] += 1
+            return "ordinary"
+
+        @staticmethod
+        def _task_launch_backend_kind():
+            return "cuda", "native"
+
+        def _task_launch_auto_decision(self, args, **kwargs):
+            del args, kwargs
+            decision = launch_tuning._TaskLaunchTuningDecision(
+                status="qualified",
+                reason="test",
+                record_id="test:record:publish-window",
+                kernel_key="test:kernel:publish-window",
+                hardware_scope=(),
+                candidates=(128,),
+                block_dim=128,
+            )
+            return (
+                (fake_kernel_body, 9, kernel_impl.AutodiffMode.NONE),
+                (),
+                decision,
+            )
+
+        def _ensure_compiled_with_task_launch_policy(self, policy, *args):
+            del policy, args
+            launch_tuning._coordinator.invalidate("test:publish-window-invalidation")
+            key = (fake_kernel_body, 9, kernel_impl.AutodiffMode.NONE)
+            self.compiled_kernels[key] = object()
+            return key
+
+        @staticmethod
+        def _validate_task_launch_policy_specialization(key, policy):
+            del key, policy
+            return ()
+
+        @staticmethod
+        def launch_kernel(kernel_cpp, *args):
+            del kernel_cpp, args
+            calls["optimized"] += 1
+            return "optimized"
+
+    kernel = FakeKernel()
+    binding = kernel_impl._TaskLaunchBinding(
+        kernel,
+        ti.TaskLaunchPolicy.auto(),
+        workload_profile=_workload_profile(),
+    )
+
+    assert binding._call_auto((object(),), {}) == "ordinary"
+    assert calls == {"ordinary": 1, "optimized": 0}
+    assert binding._fast_runtime is None
 
 
 def test_task_launch_tuning_records_are_exact_and_qualification_gated(tmp_path):
@@ -340,11 +485,23 @@ def test_task_launch_auto_consumes_only_exact_qualified_record(tmp_path, monkeyp
     runtime_memory = program._runtime_statistics_snapshot()["memory"]
     host_memory = dict(ti_core.get_host_memory_pool_stats())
     device_memory = dict(ti_core.get_device_memory_pool_stats())
+    auto_resolution_calls = 0
+    original_auto_decision = profiled._kernel._task_launch_auto_decision
+
+    def counted_auto_decision(*args, **kwargs):
+        nonlocal auto_resolution_calls
+        auto_resolution_calls += 1
+        return original_auto_decision(*args, **kwargs)
+
+    monkeypatch.setattr(
+        profiled._kernel, "_task_launch_auto_decision", counted_auto_decision
+    )
     for _ in range(500):
         assert profiled.report(values) == qualified
     for _ in range(64):
         profiled(values)
     ti.sync()
+    assert auto_resolution_calls == 0
     assert program._runtime_statistics_snapshot()["memory"] == runtime_memory
     assert dict(ti_core.get_host_memory_pool_stats()) == host_memory
     assert dict(ti_core.get_device_memory_pool_stats()) == device_memory
@@ -382,9 +539,7 @@ def test_task_launch_auto_remains_default_on_non_cuda_backends():
     automatic = fill.with_launch_policy(ti.TaskLaunchPolicy.auto())
     assert automatic.report(values).status == "auto"
     automatic(values)
-    np.testing.assert_array_equal(
-        values.to_numpy(), np.arange(257, dtype=np.int32) + 7
-    )
+    np.testing.assert_array_equal(values.to_numpy(), np.arange(257, dtype=np.int32) + 7)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
@@ -500,10 +655,8 @@ def test_task_launch_policy_cross_backend_correctness_and_report():
             != task.optimization_spec_id
         )
         assert (
-            _range_task(required_report.tasks).logical_task_id
-            == task.logical_task_id
+            _range_task(required_report.tasks).logical_task_id == task.logical_task_id
         )
-
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
@@ -543,7 +696,9 @@ def test_explicit_field_variant_uses_generation_bound_retained_plan(monkeypatch)
         for i in range(count):
             values[i] += delta
 
-    launch = increment.with_launch_policy(ti.TaskLaunchPolicy.block(128, mode="require"))
+    launch = increment.with_launch_policy(
+        ti.TaskLaunchPolicy.block(128, mode="require")
+    )
     assert launch.report(1).status == "applied"
     assert launch._retained_plan is None
     launch(0)
@@ -562,12 +717,21 @@ def test_explicit_field_variant_uses_generation_bound_retained_plan(monkeypatch)
     assert stats["compile_lookup_ns"] == 0
     assert stats["snode_guard_acquisitions"] == 1
     assert stats["snode_guard_elisions"] == 0
+    assert stats["registered_plan_snode_validation_scans"] == 0
+    assert stats["registered_plan_snode_validation_epoch_fast_hits"] == 1
     np.testing.assert_array_equal(values.to_numpy(), np.full(count, 3))
 
 
 @pytest.mark.run_in_serial
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
-def test_destroyed_field_rejects_retained_variant_before_backend_launch():
+def test_destroyed_field_rejects_retained_variant_before_backend_launch(
+    monkeypatch,
+):
+    arch = impl.current_cfg().arch
+    ti.reset()
+    monkeypatch.setenv("TI_DEBUG_ORDINARY_LAUNCH_ATTRIBUTION", "1")
+    ti.init(arch=arch, offline_cache=False)
+
     count = 128
     values = ti.field(ti.i32)
     builder = ti.FieldsBuilder()
@@ -587,6 +751,8 @@ def test_destroyed_field_rejects_retained_variant_before_backend_launch():
     assert retained is not None
     launch(1)
     ti.sync()
+    program = impl.get_runtime().prog
+    program._debug_reset_ordinary_launch_attribution()
     retired_id = tree.id
     retired_generation = tree.generation
     tree.destroy()
@@ -596,6 +762,9 @@ def test_destroyed_field_rejects_retained_variant_before_backend_launch():
         match="Registered kernel execution plan references destroyed SNodeTree",
     ):
         increment._primal._launch_with_ordinary_plan(retained, (1,))
+    stats = dict(program._debug_ordinary_launch_attribution())
+    assert stats["registered_plan_snode_validation_scans"] == 1
+    assert stats["registered_plan_snode_validation_epoch_fast_hits"] == 0
 
     replacement = ti.field(ti.i32)
     replacement_builder = ti.FieldsBuilder()
@@ -646,7 +815,9 @@ def test_retained_field_launch_holds_lifecycle_guard_through_context_binding(
             raise RuntimeError("timed out waiting to resume retained binding")
         return original_bind(launch_ctx, bindings, args)
 
-    monkeypatch.setattr(increment._primal, "_bind_ordinary_launch_context", blocked_bind)
+    monkeypatch.setattr(
+        increment._primal, "_bind_ordinary_launch_context", blocked_bind
+    )
 
     def launch_worker():
         try:
@@ -695,7 +866,9 @@ def test_retained_field_variant_does_not_bypass_ad_context():
         for i in range(count):
             loss[None] += values[i] * scale
 
-    launch = accumulate.with_launch_policy(ti.TaskLaunchPolicy.block(64, mode="require"))
+    launch = accumulate.with_launch_policy(
+        ti.TaskLaunchPolicy.block(64, mode="require")
+    )
     launch.report(2.0)
     launch(0.0)
     ti.sync()
@@ -814,9 +987,9 @@ def test_task_launch_policy_preserves_source_block_and_rejects_unsafe_changes():
 
     before = program._runtime_statistics_snapshot()["submission"]
     with pytest.raises(RuntimeError, match="block-sensitive intrinsic"):
-        block_intrinsic.with_launch_policy(
-            ti.TaskLaunchPolicy.block(256)
-        ).report(values)
+        block_intrinsic.with_launch_policy(ti.TaskLaunchPolicy.block(256)).report(
+            values
+        )
     assert program._runtime_statistics_snapshot()["submission"] == before
 
     @ti.kernel
@@ -920,8 +1093,7 @@ def test_task_launch_policy_concurrency_reset_and_resource_stability():
     values = ti.ndarray(ti.i32, shape=count)
     reset_report = launch.report(values)
     assert (
-        tuple(task.logical_task_id for task in reset_report.tasks)
-        == logical_task_ids
+        tuple(task.logical_task_id for task in reset_report.tasks) == logical_task_ids
     )
     if arch in (ti_core.Arch.cuda, ti_core.Arch.vulkan):
         assert launch._retained_plan is None

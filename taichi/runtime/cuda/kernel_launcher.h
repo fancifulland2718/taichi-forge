@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <array>
 #include <cstdint>
 #include <memory>
@@ -83,6 +84,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
 
   struct Context {
     struct ResolvedTaskExecutionPlan {
+      std::string identity;
+      LaunchContextBuilder::CudaTaskExecutionPlanDigest content_digest{};
       std::vector<std::string> task_kinds;
       std::vector<int> grid_residency_waves;
       std::vector<int> range_work_per_thread_targets;
@@ -112,6 +115,8 @@ class KernelLauncher : public LLVM::KernelLauncher {
         std::string,
         std::shared_ptr<const ResolvedTaskExecutionPlan>>
         task_execution_plans;
+    mutable std::atomic<const ResolvedTaskExecutionPlan *>
+        task_execution_plan_mru{nullptr};
     bool uses_root_binding{false};
   };
 
@@ -227,9 +232,9 @@ class KernelLauncher : public LLVM::KernelLauncher {
       const Context &context,
       std::int32_t waves,
       std::int32_t range_work_per_thread_target);
-  std::shared_ptr<const Context::ResolvedTaskExecutionPlan>
-  resolve_task_execution_plan(const Context &context,
-                              const LaunchContextBuilder &launch_context);
+  const Context::ResolvedTaskExecutionPlan *resolve_task_execution_plan(
+      const Context &context,
+      const LaunchContextBuilder &launch_context);
 
   bool listgen_reuse_adaptive_{false};
   // Sparse-list reuse metadata describes one CUDA runtime, not one launch.

@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
+from taichi_forge.lang import _kernel_optimization as kernel_optimization
 from taichi_forge.lang._kernel_optimization import (
     _ArtifactOptions,
     _BackendCodegenOptions,
@@ -33,6 +34,39 @@ def test_kernel_optimization_spec_is_immutable_and_deterministic():
         first.launch = _LaunchOptions()
 
 
+def test_kernel_optimization_spec_caches_immutable_payloads_and_identities(
+    monkeypatch,
+):
+    spec = _KernelOptimizationSpec(
+        ir=_IrOptimizationOptions(thread_local="off", compile_tier="full"),
+        backend=_BackendCodegenOptions(workgroup_size=256, cuda_min_blocks_per_sm=1),
+        artifact=_ArtifactOptions(cuda_max_registers=64),
+        launch=_LaunchOptions(
+            block_mode="require",
+            grid_residency_waves=2,
+            range_work_per_thread_target=4,
+        ),
+    )
+    expected = (
+        spec.stable_payload,
+        spec.compilation_payload,
+        spec.identity,
+        spec.compilation_identity,
+    )
+
+    def unexpected_asdict(_):
+        raise AssertionError("immutable optimization payload was recomputed")
+
+    monkeypatch.setattr(kernel_optimization, "asdict", unexpected_asdict)
+    for _ in range(100):
+        assert (
+            spec.stable_payload,
+            spec.compilation_payload,
+            spec.identity,
+            spec.compilation_identity,
+        ) == expected
+
+
 def test_kernel_optimization_spec_separates_all_bounded_axes():
     baseline = _KernelOptimizationSpec.from_task_launch_policy(
         TaskLaunchPolicy.block(128)
@@ -62,9 +96,7 @@ def test_kernel_optimization_spec_separates_all_bounded_axes():
         ),
         _KernelOptimizationSpec(
             backend=_BackendCodegenOptions(workgroup_size=128),
-            launch=_LaunchOptions(
-                block_mode="hint", range_work_per_thread_target=4
-            ),
+            launch=_LaunchOptions(block_mode="hint", range_work_per_thread_target=4),
         ),
         _KernelOptimizationSpec(
             ir=_IrOptimizationOptions(compile_tier="full"),

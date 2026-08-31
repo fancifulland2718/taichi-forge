@@ -9,6 +9,7 @@ from taichi_forge.lang._offload_execution_plan import (
     _OffloadExecutionPlan,
     _bind_offload_execution_plan,
 )
+from taichi_forge.graph import _graph as graph_impl
 from tests import test_utils
 
 
@@ -26,7 +27,9 @@ def _shared_staged_plan(kernel, *probe_args, block_dim=128):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly():
+def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly(
+    monkeypatch,
+):
     count = 1027
 
     @ti.kernel
@@ -64,6 +67,16 @@ def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly():
     graph = builder.compile()
     graph._graph_stats
 
+    alias_checks = 0
+    original_alias_check = graph_impl.analyze_storage_alias
+
+    def counted_alias_check(*args, **kwargs):
+        nonlocal alias_checks
+        alias_checks += 1
+        return original_alias_check(*args, **kwargs)
+
+    monkeypatch.setattr(graph_impl, "analyze_storage_alias", counted_alias_check)
+
     graph.run({"source": source, "output": output})
     ti.sync()
     expected = np.zeros(count, dtype=np.float32)
@@ -90,6 +103,7 @@ def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly():
     for _ in range(10_000):
         graph.run({"source": source, "output": output})
     ti.sync()
+    assert alias_checks == 1
     assert graph._instance_debug_info == graph_identity
     assert graph._graph_stats[0]["exact_replays"] >= 10_001
     runtime_after = program._runtime_statistics_snapshot()["memory"]

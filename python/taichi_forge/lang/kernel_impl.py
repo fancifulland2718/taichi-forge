@@ -155,7 +155,13 @@ def _get_tree_and_ctx(
             if tree_template is None:
                 tree_template = ast.parse(source)
                 tree_template.body[0].decorator_list = []
-                self._source_template_cache = (file, src, start_lineno, source, tree_template)
+                self._source_template_cache = (
+                    file,
+                    src,
+                    start_lineno,
+                    source,
+                    tree_template,
+                )
             tree = copy.deepcopy(tree_template)
     else:
         with python_compile_profile_event(f"{profile_prefix}.source"):
@@ -203,18 +209,29 @@ def _has_explicit_loop_block_dim(tree):
             name = node.func.attr
         elif isinstance(node.func, ast.Name):
             name = node.func.id
-        if name == "loop_config" and any(keyword.arg == "block_dim" for keyword in node.keywords):
+        if name == "loop_config" and any(
+            keyword.arg == "block_dim" for keyword in node.keywords
+        ):
             return True
     return False
 
 
 def _process_args(self, args, kwargs):
+    # The overwhelmingly common launch form already has an exact positional
+    # binding.  In that case arity itself proves that no default is missing,
+    # no argument is duplicated, and no keyword is unexpected.  Avoid
+    # rebuilding and rescanning the complete signature on every launch.
+    if not kwargs and len(args) == len(self.arguments):
+        return args
+
     ret = [argument.default for argument in self.arguments]
     len_args = len(args)
 
     if len_args > len(ret):
         arg_str = ", ".join([str(arg) for arg in args])
-        expected_str = ", ".join([f"{arg.name} : {arg.annotation}" for arg in self.arguments])
+        expected_str = ", ".join(
+            [f"{arg.name} : {arg.annotation}" for arg in self.arguments]
+        )
         msg = f"Too many arguments. Expected ({expected_str}), got ({arg_str})."
         raise TaichiSyntaxError(msg)
 
@@ -236,7 +253,9 @@ def _process_args(self, args, kwargs):
     for i, arg in enumerate(ret):
         if arg is inspect.Parameter.empty:
             if self.arguments[i].annotation is inspect._empty:
-                raise TaichiSyntaxError(f"Parameter `{self.arguments[i].name}` missing.")
+                raise TaichiSyntaxError(
+                    f"Parameter `{self.arguments[i].name}` missing."
+                )
             else:
                 raise TaichiSyntaxError(
                     f"Parameter `{self.arguments[i].name} : {self.arguments[i].annotation}` missing."
@@ -263,7 +282,9 @@ class Func:
         for i, arg in enumerate(self.arguments):
             if isinstance(arg.annotation, template):
                 self.template_slot_locations.append(i)
-        self.mapper = TaichiCallableTemplateMapper(self.arguments, self.template_slot_locations)
+        self.mapper = TaichiCallableTemplateMapper(
+            self.arguments, self.template_slot_locations
+        )
         self.taichi_functions = {}  # The |Function| class in C++
         self.has_print = False
         self._compiled_program = None
@@ -361,7 +382,9 @@ class Func:
 
         if not impl.inside_kernel():
             if not self.pyfunc:
-                raise TaichiSyntaxError("Taichi functions cannot be called from Python-scope.")
+                raise TaichiSyntaxError(
+                    "Taichi functions cannot be called from Python-scope."
+                )
             return self.func(*args)
 
         # P9.A-2 (F2) — auto_real_function: one-shot promotion check before
@@ -376,7 +399,9 @@ class Func:
 
         if self.is_real_function:
             if impl.get_runtime().current_kernel.autodiff_mode != AutodiffMode.NONE:
-                raise TaichiSyntaxError("Real function in gradient kernels unsupported.")
+                raise TaichiSyntaxError(
+                    "Real function in gradient kernels unsupported."
+                )
             self._ensure_real_function_cache_current_program()
             instance_id, arg_features = self.mapper.lookup(args)
             variant_id = self._real_function_variant_id(instance_id)
@@ -412,8 +437,13 @@ class Func:
             # P9.A-1 (F1) — measure AST inline expansion wall time.
             # Active when profile flag is set or auto_real_function is on
             # (the latter needs the data to drive the F2 heuristic).
-            measure = runtime._ti_func_expansion_profile or impl.default_cfg().auto_real_function
-            with python_compile_profile_event(f"python.func.inline_transform:{self.func.__name__}"):
+            measure = (
+                runtime._ti_func_expansion_profile
+                or impl.default_cfg().auto_real_function
+            )
+            with python_compile_profile_event(
+                f"python.func.inline_transform:{self.func.__name__}"
+            ):
                 if measure:
                     t0 = time.perf_counter_ns()
                     ret = transform_tree(tree, ctx)
@@ -438,7 +468,9 @@ class Func:
             runtime.func_inline_depth -= 1
         if not self.is_real_function:
             if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
-                raise TaichiSyntaxError("Function has a return type but does not have a return statement")
+                raise TaichiSyntaxError(
+                    "Function has a return type but does not have a return statement"
+                )
         return ret
 
     def func_call_rvalue(self, key, args):
@@ -452,20 +484,26 @@ class Func:
                 if id(anno) in primitive_types.type_ids:
                     non_template_args.append(ops.cast(args[i], anno))
                 elif isinstance(anno, primitive_types.RefType):
-                    non_template_args.append(_ti_core.make_reference(args[i].ptr, dbg_info))
+                    non_template_args.append(
+                        _ti_core.make_reference(args[i].ptr, dbg_info)
+                    )
                 elif isinstance(anno, ndarray_type.NdarrayType):
                     if not isinstance(args[i], AnyArray):
                         raise TaichiTypeError(
                             f"Expected ndarray in the kernel argument for argument {kernel_arg.name}, got {args[i]}"
                         )
-                    non_template_args += _ti_core.get_external_tensor_real_func_args(args[i].ptr, dbg_info)
+                    non_template_args += _ti_core.get_external_tensor_real_func_args(
+                        args[i].ptr, dbg_info
+                    )
                 else:
                     non_template_args.append(args[i])
         non_template_args = impl.make_expr_group(non_template_args)
         func_call = (
             impl.get_runtime()
             .compiling_callable.ast_builder()
-            .insert_func_call(self.taichi_functions[key.instance_id], non_template_args, dbg_info)
+            .insert_func_call(
+                self.taichi_functions[key.instance_id], non_template_args, dbg_info
+            )
         )
         if self.return_type is None:
             return None
@@ -477,21 +515,31 @@ class Func:
                 ret.append(
                     Expr(
                         _ti_core.make_get_element_expr(
-                            func_call.ptr, (i,), _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+                            func_call.ptr,
+                            (i,),
+                            _ti_core.DebugInfo(
+                                impl.get_runtime().get_current_src_info()
+                            ),
                         )
                     )
                 )
             elif isinstance(return_type, (StructType, MatrixType)):
                 ret.append(return_type.from_taichi_object(func_call, (i,)))
             else:
-                raise TaichiTypeError(f"Unsupported return type for return value {i}: {return_type}")
+                raise TaichiTypeError(
+                    f"Unsupported return type for return value {i}: {return_type}"
+                )
         if len(ret) == 1:
             return ret[0]
         return tuple(ret)
 
     def do_compile(self, key, args, arg_features):
         tree, ctx = _get_tree_and_ctx(
-            self, is_kernel=False, args=args, arg_features=arg_features, is_real_function=self.is_real_function
+            self,
+            is_kernel=False,
+            args=args,
+            arg_features=arg_features,
+            is_real_function=self.is_real_function,
         )
         fn = impl.get_runtime().prog.create_function(key)
 
@@ -499,7 +547,9 @@ class Func:
             old_callable = impl.get_runtime().compiling_callable
             impl.get_runtime().compiling_callable = fn
             ctx.ast_builder = fn.ast_builder()
-            with python_compile_profile_event(f"python.func.real_transform:{self.func.__name__}"):
+            with python_compile_profile_event(
+                f"python.func.real_transform:{self.func.__name__}"
+            ):
                 transform_tree(tree, ctx)
             impl.get_runtime().compiling_callable = old_callable
 
@@ -513,30 +563,45 @@ class Func:
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
                 if (
-                    isinstance(self.return_type, (types.GenericAlias, typing._GenericAlias))
+                    isinstance(
+                        self.return_type, (types.GenericAlias, typing._GenericAlias)
+                    )
                     and self.return_type.__origin__ is tuple
                 ):
                     self.return_type = self.return_type.__args__
             else:
-                if isinstance(self.return_type, typing._GenericAlias) and self.return_type.__origin__ is tuple:
+                if (
+                    isinstance(self.return_type, typing._GenericAlias)
+                    and self.return_type.__origin__ is tuple
+                ):
                     self.return_type = self.return_type.__args__
             if not isinstance(self.return_type, (list, tuple)):
                 self.return_type = (self.return_type,)
             for i, return_type in enumerate(self.return_type):
                 if return_type is Ellipsis:
-                    raise TaichiSyntaxError("Ellipsis is not supported in return type annotations")
+                    raise TaichiSyntaxError(
+                        "Ellipsis is not supported in return type annotations"
+                    )
         params = sig.parameters
         arg_names = params.keys()
         for i, arg_name in enumerate(arg_names):
             param = params[arg_name]
             if param.kind == inspect.Parameter.VAR_KEYWORD:
-                raise TaichiSyntaxError("Taichi functions do not support variable keyword parameters (i.e., **kwargs)")
+                raise TaichiSyntaxError(
+                    "Taichi functions do not support variable keyword parameters (i.e., **kwargs)"
+                )
             if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                raise TaichiSyntaxError("Taichi functions do not support variable positional parameters (i.e., *args)")
+                raise TaichiSyntaxError(
+                    "Taichi functions do not support variable positional parameters (i.e., *args)"
+                )
             if param.kind == inspect.Parameter.KEYWORD_ONLY:
-                raise TaichiSyntaxError("Taichi functions do not support keyword parameters")
+                raise TaichiSyntaxError(
+                    "Taichi functions do not support keyword parameters"
+                )
             if param.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
-                raise TaichiSyntaxError('Taichi functions only support "positional or keyword" parameters')
+                raise TaichiSyntaxError(
+                    'Taichi functions only support "positional or keyword" parameters'
+                )
             annotation = param.annotation
             if annotation is inspect.Parameter.empty:
                 if i == 0 and self.classfunc:
@@ -561,7 +626,9 @@ class Func:
                 elif isinstance(annotation, primitive_types.RefType):
                     pass
                 else:
-                    raise TaichiSyntaxError(f"Invalid type annotation (argument {i}) of Taichi function: {annotation}")
+                    raise TaichiSyntaxError(
+                        f"Invalid type annotation (argument {i}) of Taichi function: {annotation}"
+                    )
             self.arguments.append(KernelArgument(annotation, param.name, param.default))
 
 
@@ -577,6 +644,14 @@ class TaichiCallableTemplateMapper:
             (i, arg.annotation, arg.name)
             for i, arg in enumerate(arguments)
             if self._annotation_needs_arg_feature(arg.annotation)
+        )
+        # Ndarray/texture specialization keys cannot contain weak references.
+        # Avoid scanning the entire specialization map for dead template keys
+        # on every ordinary ndarray launch. Arg packs remain conservative
+        # because their recursively extracted members may be templates.
+        self._mapping_keys_may_contain_weakrefs = any(
+            isinstance(annotation, (template, ArgPackType))
+            for _, annotation, _ in self._dynamic_arg_extractors
         )
         self._arg_feature_caches = {
             i: weakref.WeakKeyDictionary()
@@ -638,13 +713,20 @@ class TaichiCallableTemplateMapper:
             if isinstance(arg, _ti_core.Expr):
                 return arg.get_underlying_ptr_address()
             if isinstance(arg, tuple):
-                return tuple(TaichiCallableTemplateMapper.extract_arg(item, anno, arg_name) for item in arg)
+                return tuple(
+                    TaichiCallableTemplateMapper.extract_arg(item, anno, arg_name)
+                    for item in arg
+                )
             if isinstance(arg, taichi_forge.lang._ndarray.Ndarray):
                 raise TaichiRuntimeTypeError(
                     "Ndarray shouldn't be passed in via `ti.template()`, please annotate your kernel using `ti.types.ndarray(...)` instead"
                 )
 
-            if isinstance(arg, Field) or isinstance(arg, (list, tuple, dict, set)) or hasattr(arg, "_data_oriented"):
+            if (
+                isinstance(arg, Field)
+                or isinstance(arg, (list, tuple, dict, set))
+                or hasattr(arg, "_data_oriented")
+            ):
                 # [Composite arguments] Return weak reference to the object
                 # Taichi kernel will cache the extracted arguments, thus we can't simply return the original argument.
                 # Instead, a weak reference to the original value is returned to avoid memory leak.
@@ -659,7 +741,9 @@ class TaichiCallableTemplateMapper:
             return arg
         if isinstance(anno, ArgPackType):
             if not isinstance(arg, ArgPack):
-                raise TaichiRuntimeTypeError(f"Argument {arg_name} must be a argument pack, got {type(arg)}")
+                raise TaichiRuntimeTypeError(
+                    f"Argument {arg_name} must be a argument pack, got {type(arg)}"
+                )
             return tuple(
                 TaichiCallableTemplateMapper.extract_arg(arg[name], dtype, arg_name)
                 for index, (name, dtype) in enumerate(anno.members.items())
@@ -667,7 +751,9 @@ class TaichiCallableTemplateMapper:
         if isinstance(anno, texture_type.TextureType):
             descriptor = describe_annotation(anno)
             if not isinstance(arg, taichi_forge.lang._texture.Texture):
-                raise TaichiRuntimeTypeError(f"Argument {arg_name} must be a texture, got {type(arg)}")
+                raise TaichiRuntimeTypeError(
+                    f"Argument {arg_name} must be a texture, got {type(arg)}"
+                )
             if arg.num_dims != descriptor.ndim:
                 raise TaichiRuntimeTypeError(
                     f"TextureType dimension mismatch for argument {arg_name}: expected {descriptor.ndim}, got {arg.num_dims}"
@@ -681,7 +767,9 @@ class TaichiCallableTemplateMapper:
         if isinstance(anno, texture_type.RWTextureType):
             descriptor = describe_annotation(anno)
             if not isinstance(arg, taichi_forge.lang._texture.Texture):
-                raise TaichiRuntimeTypeError(f"Argument {arg_name} must be a texture, got {type(arg)}")
+                raise TaichiRuntimeTypeError(
+                    f"Argument {arg_name} must be a texture, got {type(arg)}"
+                )
             if arg.num_dims != descriptor.ndim:
                 raise TaichiRuntimeTypeError(
                     f"RWTextureType dimension mismatch for argument {arg_name}: expected {descriptor.ndim}, got {arg.num_dims}"
@@ -694,14 +782,18 @@ class TaichiCallableTemplateMapper:
             # support mip-mapping.
             return arg.num_dims, arg.fmt, 0
         if isinstance(anno, ndarray_type.NdarrayType):
-            from taichi_forge.lang._storage_view import DenseNdarrayView  # pylint: disable=C0415
+            from taichi_forge.lang._storage_view import (
+                DenseNdarrayView,
+            )  # pylint: disable=C0415
 
             if isinstance(arg, DenseNdarrayView):
                 arg_type = arg.get_type()
                 anno.check_matched(arg_type, arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
-                    raise TaichiRuntimeTypeError(f"Dense storage view argument {arg_name} does not support gradients")
+                    raise TaichiRuntimeTypeError(
+                        f"Dense storage view argument {arg_name} does not support gradients"
+                    )
                 layout = (
                     "canonical_ndarray"
                     if arg.description.properties.get("ndarray_abi_compatible", False)
@@ -714,7 +806,9 @@ class TaichiCallableTemplateMapper:
                     anno.boundary,
                     layout,
                 )
-            if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView):
+            if isinstance(
+                arg, taichi_forge.lang._ndarray.StructNdarrayTensorMemberView
+            ):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
@@ -731,7 +825,9 @@ class TaichiCallableTemplateMapper:
                     arg.stride,
                     arg.dtype,
                 )
-            if isinstance(arg, taichi_forge.lang._ndarray.StructNdarrayScalarMemberView):
+            if isinstance(
+                arg, taichi_forge.lang._ndarray.StructNdarrayScalarMemberView
+            ):
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
@@ -751,7 +847,9 @@ class TaichiCallableTemplateMapper:
                 anno.check_matched(arg.get_type(), arg_name)
                 needs_grad = False if anno.needs_grad is None else anno.needs_grad
                 if needs_grad:
-                    raise TaichiRuntimeTypeError(f"StructNdarray argument {arg_name} does not support gradients")
+                    raise TaichiRuntimeTypeError(
+                        f"StructNdarray argument {arg_name} does not support gradients"
+                    )
                 return (
                     arg.element_type,
                     len(arg.shape),
@@ -762,14 +860,16 @@ class TaichiCallableTemplateMapper:
                 )
             if isinstance(arg, taichi_forge.lang._ndarray.Ndarray):
                 anno.check_matched(arg.get_type(), arg_name)
-                needs_grad = (arg.grad is not None) if anno.needs_grad is None else anno.needs_grad
+                needs_grad = (
+                    (arg.grad is not None)
+                    if anno.needs_grad is None
+                    else anno.needs_grad
+                )
                 layout = (
                     "runtime_affine_ndarray"
                     if (
                         getattr(arg, "_runtime_affine_exemplar", False)
-                        or getattr(
-                            arg, "_graph_runtime_affine_exemplar", False
-                        )
+                        or getattr(arg, "_graph_runtime_affine_exemplar", False)
                     )
                     else "canonical_ndarray"
                 )
@@ -787,7 +887,9 @@ class TaichiCallableTemplateMapper:
             # external arrays
             shape = getattr(arg, "shape", None)
             if shape is None:
-                raise TaichiRuntimeTypeError(f"Invalid type for argument {arg_name}, got {arg}")
+                raise TaichiRuntimeTypeError(
+                    f"Invalid type for argument {arg_name}, got {arg}"
+                )
             shape = tuple(shape)
             element_shape = ()
             dtype = to_taichi_type(arg.dtype)
@@ -806,7 +908,10 @@ class TaichiCallableTemplateMapper:
                         )
                 element_shape = shape[-anno.dtype.ndim :]
                 anno_element_shape = anno.dtype.get_shape()
-                if None not in anno_element_shape and element_shape != anno_element_shape:
+                if (
+                    None not in anno_element_shape
+                    and element_shape != anno_element_shape
+                ):
                     raise ValueError(
                         f"Invalid value for argument {arg_name} - required element_shape={anno_element_shape}, "
                         f"array with element shape of {element_shape} is provided"
@@ -824,13 +929,24 @@ class TaichiCallableTemplateMapper:
                         f"Invalid value for argument {arg_name} - required array has ndim={anno.ndim}, "
                         f"array with {len(shape)} dimensions is provided"
                     )
-            needs_grad = getattr(arg, "requires_grad", False) if anno.needs_grad is None else anno.needs_grad
+            needs_grad = (
+                getattr(arg, "requires_grad", False)
+                if anno.needs_grad is None
+                else anno.needs_grad
+            )
             element_type = (
-                _ti_core.get_type_factory_instance().get_tensor_type(element_shape, dtype)
+                _ti_core.get_type_factory_instance().get_tensor_type(
+                    element_shape, dtype
+                )
                 if len(element_shape) != 0
                 else arg.dtype
             )
-            return element_type, len(shape) - len(element_shape), needs_grad, anno.boundary
+            return (
+                element_type,
+                len(shape) - len(element_shape),
+                needs_grad,
+                anno.boundary,
+            )
         if isinstance(anno, sparse_matrix_builder):
             return arg.dtype
         # Use '#' as a placeholder because other kinds of arguments are not involved in template instantiation
@@ -868,9 +984,13 @@ class TaichiCallableTemplateMapper:
     @staticmethod
     def _make_cache_key(value):
         if isinstance(value, tuple):
-            return tuple(TaichiCallableTemplateMapper._make_cache_key(item) for item in value)
+            return tuple(
+                TaichiCallableTemplateMapper._make_cache_key(item) for item in value
+            )
         if isinstance(value, list):
-            return tuple(TaichiCallableTemplateMapper._make_cache_key(item) for item in value)
+            return tuple(
+                TaichiCallableTemplateMapper._make_cache_key(item) for item in value
+            )
         if isinstance(value, _ti_core.DataType):
             try:
                 hash(value)
@@ -889,30 +1009,49 @@ class TaichiCallableTemplateMapper:
 
         if not instance_ids:
             return 0
-        retired = [key for key, instance_id in self.mapping.items() if instance_id in instance_ids]
+        retired = [
+            key
+            for key, instance_id in self.mapping.items()
+            if instance_id in instance_ids
+        ]
         for key in retired:
             del self.mapping[key]
         if _executable_lifecycle_telemetry_enabled and retired:
-            _executable_lifecycle_telemetry["mapper_retired_keys_pruned"] += len(retired)
+            _executable_lifecycle_telemetry["mapper_retired_keys_pruned"] += len(
+                retired
+            )
         return len(retired)
 
     def lookup(self, args):
         if len(args) != self.num_args:
-            raise TypeError(f"{self.num_args} argument(s) needed but {len(args)} provided.")
+            raise TypeError(
+                f"{self.num_args} argument(s) needed but {len(args)} provided."
+            )
 
         if not self._dynamic_arg_extractors:
             return 0, self._static_arg_features
 
+        arg_features, key = self._extract_features_and_key(args)
+        instance_id = self.mapping.get(key)
+        if instance_id is not None:
+            if _executable_lifecycle_telemetry_enabled:
+                _executable_lifecycle_telemetry["mapper_hits"] += 1
+            return instance_id, arg_features
+
         # Template object identities remain weak. Explicit SNode retirement
         # prunes the corresponding instance id; this fallback handles ordinary
-        # Python wrapper death outside a tree-destroy transaction.
-        dead_keys = [key for key in self.mapping if self._cache_key_is_dead(key)]
-        for key in dead_keys:
-            del self.mapping[key]
-        if _executable_lifecycle_telemetry_enabled and dead_keys:
-            _executable_lifecycle_telemetry["mapper_dead_keys_pruned"] += len(dead_keys)
+        # Python wrapper death outside a tree-destroy transaction. Cleanup is
+        # needed only under specialization pressure from a cache miss, never
+        # on the steady-state hit path.
+        if self._mapping_keys_may_contain_weakrefs:
+            dead_keys = [item for item in self.mapping if self._cache_key_is_dead(item)]
+            for item in dead_keys:
+                del self.mapping[item]
+            if _executable_lifecycle_telemetry_enabled and dead_keys:
+                _executable_lifecycle_telemetry["mapper_dead_keys_pruned"] += len(
+                    dead_keys
+                )
 
-        arg_features, key = self._extract_features_and_key(args)
         if key not in self.mapping:
             if _executable_lifecycle_telemetry_enabled:
                 _executable_lifecycle_telemetry["mapper_misses"] += 1
@@ -926,8 +1065,6 @@ class TaichiCallableTemplateMapper:
                 )
             self.mapping[key] = self._next_mapping_id
             self._next_mapping_id += 1
-        elif _executable_lifecycle_telemetry_enabled:
-            _executable_lifecycle_telemetry["mapper_hits"] += 1
         return self.mapping[key], arg_features
 
     @staticmethod
@@ -935,7 +1072,9 @@ class TaichiCallableTemplateMapper:
         if isinstance(value, weakref.ReferenceType):
             return value() is None
         if isinstance(value, tuple):
-            return any(TaichiCallableTemplateMapper._cache_key_is_dead(item) for item in value)
+            return any(
+                TaichiCallableTemplateMapper._cache_key_is_dead(item) for item in value
+            )
         return False
 
 
@@ -954,6 +1093,7 @@ def _get_global_vars(_func):
 
 
 _ORDINARY_LAUNCH_PLAN_CACHE_CAPACITY = 4
+_TASK_LAUNCH_AUTO_DECISION_CACHE_CAPACITY = 16
 
 
 _executable_lifecycle_telemetry_enabled = False
@@ -1040,11 +1180,7 @@ class _OrdinaryLaunchPlan:
                     return False
             else:
                 guarded_grad = grad_ref()
-                if (
-                    guarded_grad is None
-                    or guarded_grad is not grad
-                    or grad.arr is None
-                ):
+                if guarded_grad is None or guarded_grad is not grad or grad.arr is None:
                     return False
         return True
 
@@ -1053,11 +1189,7 @@ class _OrdinaryLaunchPlan:
             return False
         for index, resource_ref, grad_ref in self.resource_guards:
             resource = resource_ref()
-            if (
-                resource is None
-                or resource is not args[index]
-                or resource.arr is None
-            ):
+            if resource is None or resource is not args[index] or resource.arr is None:
                 return False
             grad = resource.grad
             if grad_ref is None:
@@ -1065,11 +1197,7 @@ class _OrdinaryLaunchPlan:
                     return False
             else:
                 guarded_grad = grad_ref()
-                if (
-                    guarded_grad is None
-                    or guarded_grad is not grad
-                    or grad.arr is None
-                ):
+                if guarded_grad is None or guarded_grad is not grad or grad.arr is None:
                     return False
         return True
 
@@ -1101,7 +1229,8 @@ class Kernel:
         # invocation.
         if opt_level is not None and opt_level not in Kernel._VALID_OPT_LEVELS:
             raise ValueError(
-                f"@ti.kernel(opt_level=...) must be one of {Kernel._VALID_OPT_LEVELS} " f"or None, got {opt_level!r}."
+                f"@ti.kernel(opt_level=...) must be one of {Kernel._VALID_OPT_LEVELS} "
+                f"or None, got {opt_level!r}."
             )
         self.opt_level = opt_level
         self.extract_arguments()
@@ -1109,7 +1238,9 @@ class Kernel:
         for i, arg in enumerate(self.arguments):
             if isinstance(arg.annotation, template):
                 self.template_slot_locations.append(i)
-        self.mapper = TaichiCallableTemplateMapper(self.arguments, self.template_slot_locations)
+        self.mapper = TaichiCallableTemplateMapper(
+            self.arguments, self.template_slot_locations
+        )
         impl.get_runtime().kernels.add(self)
         self.reset()
         self.kernel_cpp = None
@@ -1141,7 +1272,9 @@ class Kernel:
         self._relocatable_candidates = {}
         self._relocatable_alias_keys = set()
 
-    def _relocatable_field_template_descriptor(self, args, task_launch_policy, range_one_to_one):
+    def _relocatable_field_template_descriptor(
+        self, args, task_launch_policy, range_one_to_one
+    ):
         """Describe the conservative first product slice for template reuse.
 
         Only direct ``Field`` template arguments qualify. Captured fields,
@@ -1174,7 +1307,9 @@ class Kernel:
                 tree_id = int(snode.get_snode_tree_id())
                 tree_ids.add(tree_id)
                 if tree_id not in fingerprints:
-                    fingerprints[tree_id] = int(prog._snode_tree_layout_fingerprint(tree_id))
+                    fingerprints[tree_id] = int(
+                        prog._snode_tree_layout_fingerprint(tree_id)
+                    )
                 members.append(
                     (
                         tree_id,
@@ -1192,7 +1327,11 @@ class Kernel:
                     tuple(members),
                 )
             )
-        policy_key = None if task_launch_policy is None else task_launch_policy._specialization_key
+        policy_key = (
+            None
+            if task_launch_policy is None
+            else task_launch_policy._specialization_key
+        )
         descriptor = (
             self.autodiff_mode,
             self.opt_level,
@@ -1202,20 +1341,30 @@ class Kernel:
         )
         return descriptor, tuple(sorted(tree_ids))
 
-    def _try_relocatable_template(self, key, args, task_launch_policy, range_one_to_one):
-        described = self._relocatable_field_template_descriptor(args, task_launch_policy, range_one_to_one)
+    def _try_relocatable_template(
+        self, key, args, task_launch_policy, range_one_to_one
+    ):
+        described = self._relocatable_field_template_descriptor(
+            args, task_launch_policy, range_one_to_one
+        )
         if described is None:
             return False
         descriptor, tree_ids = described
         candidate = self._relocatable_candidates.get(descriptor)
         if candidate is None or not candidate.definition_retired():
             if _executable_lifecycle_telemetry_enabled:
-                _executable_lifecycle_telemetry["frontend_relocatable_candidate_misses"] += 1
+                _executable_lifecycle_telemetry[
+                    "frontend_relocatable_candidate_misses"
+                ] += 1
             return False
-        if not self.runtime.prog._prepare_relocatable_kernel_template(candidate, tree_ids):
+        if not self.runtime.prog._prepare_relocatable_kernel_template(
+            candidate, tree_ids
+        ):
             self._relocatable_candidates.pop(descriptor, None)
             if _executable_lifecycle_telemetry_enabled:
-                _executable_lifecycle_telemetry["frontend_relocatable_candidate_misses"] += 1
+                _executable_lifecycle_telemetry[
+                    "frontend_relocatable_candidate_misses"
+                ] += 1
             return False
         self.compiled_kernels[key] = candidate
         self._relocatable_alias_keys.add(key)
@@ -1223,13 +1372,19 @@ class Kernel:
             _executable_lifecycle_telemetry["frontend_relocatable_candidate_hits"] += 1
         return True
 
-    def _publish_relocatable_candidate(self, key, args, task_launch_policy, range_one_to_one):
-        described = self._relocatable_field_template_descriptor(args, task_launch_policy, range_one_to_one)
+    def _publish_relocatable_candidate(
+        self, key, args, task_launch_policy, range_one_to_one
+    ):
+        described = self._relocatable_field_template_descriptor(
+            args, task_launch_policy, range_one_to_one
+        )
         if described is None:
             return
         descriptor, tree_ids = described
         candidate = self.compiled_kernels[key]
-        if not self.runtime.prog._register_relocatable_kernel_template_candidate(candidate, tree_ids):
+        if not self.runtime.prog._register_relocatable_kernel_template_candidate(
+            candidate, tree_ids
+        ):
             return
         self._relocatable_candidates[descriptor] = candidate
         limit = self.runtime.kernel_specialization_limit
@@ -1248,38 +1403,57 @@ class Kernel:
             self.return_type = sig.return_annotation
             if sys.version_info >= (3, 9):
                 if (
-                    isinstance(self.return_type, (types.GenericAlias, typing._GenericAlias))
+                    isinstance(
+                        self.return_type, (types.GenericAlias, typing._GenericAlias)
+                    )
                     and self.return_type.__origin__ is tuple
                 ):
                     self.return_type = self.return_type.__args__
             else:
-                if isinstance(self.return_type, typing._GenericAlias) and self.return_type.__origin__ is tuple:
+                if (
+                    isinstance(self.return_type, typing._GenericAlias)
+                    and self.return_type.__origin__ is tuple
+                ):
                     self.return_type = self.return_type.__args__
             if not isinstance(self.return_type, (list, tuple)):
                 self.return_type = (self.return_type,)
             for return_type in self.return_type:
                 if return_type is Ellipsis:
-                    raise TaichiSyntaxError("Ellipsis is not supported in return type annotations")
+                    raise TaichiSyntaxError(
+                        "Ellipsis is not supported in return type annotations"
+                    )
         params = sig.parameters
         arg_names = params.keys()
         for i, arg_name in enumerate(arg_names):
             param = params[arg_name]
             if param.kind == inspect.Parameter.VAR_KEYWORD:
-                raise TaichiSyntaxError("Taichi kernels do not support variable keyword parameters (i.e., **kwargs)")
+                raise TaichiSyntaxError(
+                    "Taichi kernels do not support variable keyword parameters (i.e., **kwargs)"
+                )
             if param.kind == inspect.Parameter.VAR_POSITIONAL:
-                raise TaichiSyntaxError("Taichi kernels do not support variable positional parameters (i.e., *args)")
+                raise TaichiSyntaxError(
+                    "Taichi kernels do not support variable positional parameters (i.e., *args)"
+                )
             if param.default is not inspect.Parameter.empty:
-                raise TaichiSyntaxError("Taichi kernels do not support default values for arguments")
+                raise TaichiSyntaxError(
+                    "Taichi kernels do not support default values for arguments"
+                )
             if param.kind == inspect.Parameter.KEYWORD_ONLY:
-                raise TaichiSyntaxError("Taichi kernels do not support keyword parameters")
+                raise TaichiSyntaxError(
+                    "Taichi kernels do not support keyword parameters"
+                )
             if param.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD:
-                raise TaichiSyntaxError('Taichi kernels only support "positional or keyword" parameters')
+                raise TaichiSyntaxError(
+                    'Taichi kernels only support "positional or keyword" parameters'
+                )
             annotation = param.annotation
             if param.annotation is inspect.Parameter.empty:
                 if i == 0 and self.classkernel:  # The |self| parameter
                     annotation = template()
                 else:
-                    raise TaichiSyntaxError("Taichi kernels parameters must be type annotated")
+                    raise TaichiSyntaxError(
+                        "Taichi kernels parameters must be type annotated"
+                    )
             else:
                 if isinstance(
                     annotation,
@@ -1303,7 +1477,9 @@ class Kernel:
                 elif isinstance(annotation, ArgPackType):
                     pass
                 else:
-                    raise TaichiSyntaxError(f"Invalid type annotation (argument {i}) of Taichi kernel: {annotation}")
+                    raise TaichiSyntaxError(
+                        f"Invalid type annotation (argument {i}) of Taichi kernel: {annotation}"
+                    )
             self.arguments.append(KernelArgument(annotation, param.name, param.default))
 
     def materialize(
@@ -1330,29 +1506,43 @@ class Kernel:
         with self.runtime._kernel_compilation_lock:
             if key in self.compiled_kernels:
                 return
-            if (
-                offload_execution_plan is None
-                and self._try_relocatable_template(
-                    key, args, task_launch_policy, range_one_to_one
-                )
+            if offload_execution_plan is None and self._try_relocatable_template(
+                key, args, task_launch_policy, range_one_to_one
             ):
                 return
             limit = self.runtime.kernel_specialization_limit
             native_archives = 0
             native_retired_pins = 0
             if self.runtime.prog is not None:
-                native_stats = self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                native_stats = (
+                    self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                )
                 native_archives = int(native_stats["relocatable_templates"])
-                native_retired_pins = int(native_stats["retired_generation_bound_handles"])
-            resident = self.runtime._resident_specialization_count + native_archives + native_retired_pins
+                native_retired_pins = int(
+                    native_stats["retired_generation_bound_handles"]
+                )
+            resident = (
+                self.runtime._resident_specialization_count
+                + native_archives
+                + native_retired_pins
+            )
             if resident >= limit:
                 allowed_archives = max(
                     0,
-                    limit - self.runtime._resident_specialization_count - native_retired_pins - 1,
+                    limit
+                    - self.runtime._resident_specialization_count
+                    - native_retired_pins
+                    - 1,
                 )
-                reclaimed = int(self.runtime.prog._reclaim_relocatable_kernel_templates(allowed_archives))
+                reclaimed = int(
+                    self.runtime.prog._reclaim_relocatable_kernel_templates(
+                        allowed_archives
+                    )
+                )
                 self.runtime._specialization_reclaims += reclaimed
-                native_stats = self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                native_stats = (
+                    self.runtime.prog._debug_kernel_executable_lifecycle_stats()
+                )
                 resident = (
                     self.runtime._resident_specialization_count
                     + int(native_stats["relocatable_templates"])
@@ -1428,21 +1618,20 @@ class Kernel:
                 ctx.ast_builder = kernel_cxx.ast_builder()
                 if range_one_to_one:
                     ctx.ast_builder.one_to_one()
-                if (
-                    task_launch_policy is not None
-                    and task_launch_policy.mode != "auto"
-                ):
+                if task_launch_policy is not None and task_launch_policy.mode != "auto":
                     # Preserve the pre-tuning frontend IR. The C++ pre-offload
                     # pass applies the requested block only when the source did
                     # not own an explicit loop_config block contract.
-                    task_launch_policy_injected = not _has_explicit_loop_block_dim(
-                        tree
-                    )
-                with python_compile_profile_event(f"python.kernel.ast_transform:{self.func.__name__}"):
+                    task_launch_policy_injected = not _has_explicit_loop_block_dim(tree)
+                with python_compile_profile_event(
+                    f"python.kernel.ast_transform:{self.func.__name__}"
+                ):
                     transform_tree(tree, ctx)
                 if not ctx.is_real_function:
                     if self.return_type and ctx.returned != ReturnStatus.ReturnedValue:
-                        raise TaichiSyntaxError("Kernel has a return type but does not have a return statement")
+                        raise TaichiSyntaxError(
+                            "Kernel has a return type but does not have a return statement"
+                        )
             finally:
                 self.runtime.inside_kernel = False
                 self.runtime.current_kernel = None
@@ -1450,12 +1639,16 @@ class Kernel:
 
         self._materializing_external_grad_accesses.clear()
         try:
-            taichi_kernel = impl.get_runtime().prog.create_kernel(taichi_ast_generator, kernel_name, self.autodiff_mode)
+            taichi_kernel = impl.get_runtime().prog.create_kernel(
+                taichi_ast_generator, kernel_name, self.autodiff_mode
+            )
         except Exception:
             self._materializing_external_grad_accesses.clear()
             raise
         if self._materializing_external_grad_accesses:
-            self._external_grad_accesses[key] = frozenset(self._materializing_external_grad_accesses)
+            self._external_grad_accesses[key] = frozenset(
+                self._materializing_external_grad_accesses
+            )
         self._materializing_external_grad_accesses.clear()
         # P-Compile-6: apply per-kernel compile_tier override (if set on the
         # decorator). Stored on the C++ Kernel; consumed in
@@ -1522,7 +1715,9 @@ class Kernel:
         _grid_residency_waves=None,
         _range_work_per_thread_target=None,
     ):
-        assert len(args) == len(self.arguments), f"{len(self.arguments)} arguments needed but {len(args)} provided"
+        assert len(args) == len(
+            self.arguments
+        ), f"{len(self.arguments)} arguments needed but {len(args)} provided"
 
         tmps = []
         callbacks = []
@@ -1542,9 +1737,13 @@ class Kernel:
             v_primal = v.arr
             v_grad = v.grad.arr if v.grad else None
             if v_primal is None:
-                raise TaichiRuntimeError("Cannot submit an Ndarray after its Taichi runtime has been reset")
+                raise TaichiRuntimeError(
+                    "Cannot submit an Ndarray after its Taichi runtime has been reset"
+                )
             if v.grad is not None and v_grad is None:
-                raise TaichiRuntimeError("Cannot submit an Ndarray gradient after its Taichi runtime has been reset")
+                raise TaichiRuntimeError(
+                    "Cannot submit an Ndarray gradient after its Taichi runtime has been reset"
+                )
             if v_grad is None:
                 launch_ctx.set_arg_ndarray(indices, v_primal)
             else:
@@ -1552,12 +1751,16 @@ class Kernel:
 
         def set_arg_texture(indices, v):
             if v.tex is None:
-                raise TaichiRuntimeError("Cannot submit a Texture after its Taichi runtime has been reset")
+                raise TaichiRuntimeError(
+                    "Cannot submit a Texture after its Taichi runtime has been reset"
+                )
             launch_ctx.set_arg_texture(indices, v.tex)
 
         def set_arg_rw_texture(indices, v):
             if v.tex is None:
-                raise TaichiRuntimeError("Cannot submit a Texture after its Taichi runtime has been reset")
+                raise TaichiRuntimeError(
+                    "Cannot submit a Texture after its Taichi runtime has been reset"
+                )
             launch_ctx.set_arg_rw_texture(indices, v.tex)
 
         def set_arg_acceleration_structure(indices, v):
@@ -1578,12 +1781,16 @@ class Kernel:
             is_soa = needed.layout == Layout.SOA
             array_shape = v.shape
             if functools.reduce(operator.mul, array_shape, 1) > np.iinfo(np.int32).max:
-                warnings.warn("Ndarray index might be out of int32 boundary but int64 indexing is not supported yet.")
+                warnings.warn(
+                    "Ndarray index might be out of int32 boundary but int64 indexing is not supported yet."
+                )
             if needed.dtype is None or id(needed.dtype) in primitive_types.type_ids:
                 element_dim = 0
             else:
                 element_dim = needed.dtype.ndim
-                array_shape = v.shape[element_dim:] if is_soa else v.shape[:-element_dim]
+                array_shape = (
+                    v.shape[element_dim:] if is_soa else v.shape[:-element_dim]
+                )
             needs_grad_pointer = (
                 _allocate_all_external_grad and getattr(v, "requires_grad", False)
             ) or indices in _explicit_external_grad_args
@@ -1602,11 +1809,15 @@ class Kernel:
                 )
                 if external_view is not None:
                     tmps.append(external_view)
-                    launch_ctx.set_arg_runtime_storage(indices, external_view.runtime_argument)
+                    launch_ctx.set_arg_runtime_storage(
+                        indices, external_view.runtime_argument
+                    )
                     return
             if isinstance(v, np.ndarray):
                 if v.flags.c_contiguous:
-                    launch_ctx.set_arg_external_array_with_shape(indices, int(v.ctypes.data), v.nbytes, array_shape, 0)
+                    launch_ctx.set_arg_external_array_with_shape(
+                        indices, int(v.ctypes.data), v.nbytes, array_shape, 0
+                    )
                 elif v.flags.f_contiguous:
                     # TODO: A better way that avoids copying is saving strides info.
                     tmp = np.ascontiguousarray(v)
@@ -1682,7 +1893,8 @@ class Kernel:
                     tmp = v
                     tmp_grad = v.grad
                     if (str(v.device) != "cpu") and not (
-                        str(v.device).startswith("cuda") and taichi_arch == _ti_core.Arch.cuda
+                        str(v.device).startswith("cuda")
+                        and taichi_arch == _ti_core.Arch.cuda
                     ):
                         # Getting a torch CUDA tensor on Taichi non-cuda arch:
                         # We just replace it with a CPU tensor and by the end of kernel execution we'll use the
@@ -1733,9 +1945,15 @@ class Kernel:
                             callbacks.append(get_call_back(v, gpu_v))
                     else:
                         # Paddle do support many other backends like XPU, NPU, MLU, IPU
-                        raise TaichiRuntimeTypeError(f"Taichi do not support backend {v.place} that Paddle support")
+                        raise TaichiRuntimeTypeError(
+                            f"Taichi do not support backend {v.place} that Paddle support"
+                        )
                     launch_ctx.set_arg_external_array_with_shape(
-                        indices, int(tmp._ptr()), v.element_size() * v.size, array_shape, 0
+                        indices,
+                        int(tmp._ptr()),
+                        v.element_size() * v.size,
+                        array_shape,
+                        0,
                     )
                 else:
                     raise TaichiRuntimeTypeError(
@@ -1766,10 +1984,14 @@ class Kernel:
                     return int(x)
 
             else:
-                raise ValueError(f"Matrix dtype {needed.dtype} is not integer type or real type.")
+                raise ValueError(
+                    f"Matrix dtype {needed.dtype} is not integer type or real type."
+                )
 
             if needed.ndim == 2:
-                v = [cast_func(v[i, j]) for i in range(needed.n) for j in range(needed.m)]
+                v = [
+                    cast_func(v[i, j]) for i in range(needed.n) for j in range(needed.m)
+                ]
             else:
                 v = [cast_func(v[i]) for i in range(needed.n)]
             v = needed(*v)
@@ -1799,27 +2021,37 @@ class Kernel:
             actual_argument_slot += 1
             if isinstance(needed, ArgPackType):
                 if not isinstance(v, ArgPack):
-                    raise TaichiRuntimeTypeError.get(indices, str(needed), str(provided))
+                    raise TaichiRuntimeTypeError.get(
+                        indices, str(needed), str(provided)
+                    )
                 tmps.append(v)
                 idx_new = 0
                 for j, (name, anno) in enumerate(needed.members.items()):
-                    idx_new += recursive_set_args(anno, type(v[name]), v[name], indices + (idx_new,))
+                    idx_new += recursive_set_args(
+                        anno, type(v[name]), v[name], indices + (idx_new,)
+                    )
                 native_argpack = v._ArgPack__argpack
                 if native_argpack is None:
-                    raise TaichiRuntimeError("Cannot submit an ArgPack after its Taichi runtime has been reset")
+                    raise TaichiRuntimeError(
+                        "Cannot submit an ArgPack after its Taichi runtime has been reset"
+                    )
                 launch_ctx.set_arg_argpack(indices, native_argpack)
                 return 1
             # Note: do not use sth like "needed == f32". That would be slow.
             if id(needed) in primitive_types.real_type_ids:
                 if not isinstance(v, (float, int, np.floating, np.integer)):
-                    raise TaichiRuntimeTypeError.get(indices, needed.to_string(), provided)
+                    raise TaichiRuntimeTypeError.get(
+                        indices, needed.to_string(), provided
+                    )
                 if in_argpack:
                     return 1
                 launch_ctx.set_arg_float(indices, float(v))
                 return 1
             if id(needed) in primitive_types.integer_type_ids:
                 if not isinstance(v, (int, np.integer)):
-                    raise TaichiRuntimeTypeError.get(indices, needed.to_string(), provided)
+                    raise TaichiRuntimeTypeError.get(
+                        indices, needed.to_string(), provided
+                    )
                 if in_argpack:
                     return 1
                 if is_signed(cook_dtype(needed)):
@@ -1850,33 +2082,45 @@ class Kernel:
                 set_arg_struct_member_ndarray(indices, v)
                 return 1
             if isinstance(needed, ndarray_type.NdarrayType):
-                from taichi_forge.lang._storage_view import DenseNdarrayView  # pylint: disable=C0415
+                from taichi_forge.lang._storage_view import (
+                    DenseNdarrayView,
+                )  # pylint: disable=C0415
 
                 if isinstance(v, DenseNdarrayView):
                     if in_argpack:
-                        raise TaichiRuntimeTypeError("Dense storage views are not supported inside ArgPack")
+                        raise TaichiRuntimeTypeError(
+                            "Dense storage views are not supported inside ArgPack"
+                        )
                     set_arg_dense_storage(indices, v)
                     return 1
-            if isinstance(needed, ndarray_type.NdarrayType) and isinstance(v, taichi_forge.lang._ndarray.Ndarray):
+            if isinstance(needed, ndarray_type.NdarrayType) and isinstance(
+                v, taichi_forge.lang._ndarray.Ndarray
+            ):
                 if in_argpack:
                     set_later_list.append((set_arg_ndarray, (v,)))
                     return 0
                 set_arg_ndarray(indices, v)
                 return 1
-            if isinstance(needed, texture_type.TextureType) and isinstance(v, taichi_forge.lang._texture.Texture):
+            if isinstance(needed, texture_type.TextureType) and isinstance(
+                v, taichi_forge.lang._texture.Texture
+            ):
                 if in_argpack:
                     set_later_list.append((set_arg_texture, (v,)))
                     return 0
                 set_arg_texture(indices, v)
                 return 1
-            if isinstance(needed, texture_type.RWTextureType) and isinstance(v, taichi_forge.lang._texture.Texture):
+            if isinstance(needed, texture_type.RWTextureType) and isinstance(
+                v, taichi_forge.lang._texture.Texture
+            ):
                 if in_argpack:
                     set_later_list.append((set_arg_rw_texture, (v,)))
                     return 0
                 set_arg_rw_texture(indices, v)
                 return 1
             if isinstance(needed, ray_type.AccelerationStructureType):
-                from taichi_forge.hardware._ray import InstanceTLAS  # pylint: disable=C0415
+                from taichi_forge.hardware._ray import (
+                    InstanceTLAS,
+                )  # pylint: disable=C0415
 
                 if not isinstance(v, InstanceTLAS):
                     raise TaichiRuntimeTypeError(
@@ -1903,10 +2147,14 @@ class Kernel:
                 if in_argpack:
                     return 1
                 if not isinstance(v, needed):
-                    raise TaichiRuntimeTypeError(f"Argument {provided} cannot be converted into required type {needed}")
+                    raise TaichiRuntimeTypeError(
+                        f"Argument {provided} cannot be converted into required type {needed}"
+                    )
                 needed.set_kernel_struct_args(v, launch_ctx, indices)
                 return 1
-            raise ValueError(f"Argument type mismatch. Expecting {needed}, got {type(v)}.")
+            raise ValueError(
+                f"Argument type mismatch. Expecting {needed}, got {type(v)}."
+            )
 
         template_num = 0
         for i, val in enumerate(args):
@@ -1930,7 +2178,9 @@ class Kernel:
             # lifecycle transaction. This also removes a cross-language call
             # from the steady path while preventing explicit tree destruction
             # from retiring the compiled handle between the two operations.
-            prog.compile_and_launch_kernel(prog.config(), prog.get_device_caps(), t_kernel, launch_ctx)
+            prog.compile_and_launch_kernel(
+                prog.config(), prog.get_device_caps(), t_kernel, launch_ctx
+            )
         except Exception as e:
             e = handle_exception_from_cpp(e)
             if impl.get_runtime().print_full_traceback:
@@ -2118,9 +2368,7 @@ class Kernel:
                 plans.insert(0, candidate)
                 if stale:
                     plans[:] = [candidate] + [
-                        item
-                        for item in plans[1:]
-                        if item.is_live(self.runtime)
+                        item for item in plans[1:] if item.is_live(self.runtime)
                     ]
                 self._ordinary_launch_plan = candidate
                 return candidate
@@ -2128,9 +2376,7 @@ class Kernel:
 
         if stale:
             plans[:] = [
-                candidate
-                for candidate in plans
-                if candidate.is_live(self.runtime)
+                candidate for candidate in plans if candidate.is_live(self.runtime)
             ]
         self._ordinary_launch_plan = plans[0] if plans else None
         return None
@@ -2222,7 +2468,9 @@ class Kernel:
         raise TaichiRuntimeTypeError(f"Invalid return type on index={index}")
 
     def ensure_compiled(self, *args):
-        with python_compile_profile_event(f"python.kernel.ensure_compiled:{self.func.__name__}"):
+        with python_compile_profile_event(
+            f"python.kernel.ensure_compiled:{self.func.__name__}"
+        ):
             instance_id, arg_features = self.mapper.lookup(args)
             key = (self.func, instance_id, self.autodiff_mode)
             self.materialize(key=key, args=args, arg_features=arg_features)
@@ -2250,10 +2498,11 @@ class Kernel:
             if (
                 optimization_spec.backend.workgroup_size
                 != policy_spec.backend.workgroup_size
-                or optimization_spec.launch.block_mode
-                != policy_spec.launch.block_mode
+                or optimization_spec.launch.block_mode != policy_spec.launch.block_mode
             ):
-                raise ValueError("optimization_spec block contract does not match policy")
+                raise ValueError(
+                    "optimization_spec block contract does not match policy"
+                )
             instance_id, arg_features = self.mapper.lookup(args)
             key = (
                 self.func,
@@ -2286,10 +2535,7 @@ class Kernel:
 
         if not isinstance(spec, _KernelOptimizationSpec):
             raise TypeError("spec must be a _KernelOptimizationSpec")
-        if (
-            spec.backend.workgroup_size is not None
-            or spec.launch.block_mode != "auto"
-        ):
+        if spec.backend.workgroup_size is not None or spec.launch.block_mode != "auto":
             raise ValueError(
                 "kernel-wide optimization specs cannot override workgroup geometry"
             )
@@ -2376,9 +2622,7 @@ class Kernel:
                 )
             kernel_cpp = self.compiled_kernels[key]
             raw = self.runtime.prog._kernel_task_manifest(kernel_cpp)
-            cached = tuple(
-                OffloadedTaskManifest._from_core(item) for item in raw
-            )
+            cached = tuple(OffloadedTaskManifest._from_core(item) for item in raw)
             self._task_launch_policy_manifests[key] = cached
         plan.validate_materialization(cached)
         return cached
@@ -2426,13 +2670,16 @@ class Kernel:
         range_tasks = tuple(task for task in tasks if task.task_type == "range_for")
         if len(range_tasks) != 1:
             raise TaichiRuntimeError(
-                "TaskLaunchPolicy specialization did not produce exactly one " "parallel range task"
+                "TaskLaunchPolicy specialization did not produce exactly one "
+                "parallel range task"
             )
         selected = range_tasks[0].selected_block_size
         if selected is None:
             _, backend_kind = self._task_launch_backend_kind()
             if backend_kind != "cpu" or policy.mode != "auto":
-                raise TaichiRuntimeError("TaskLaunchPolicy backend did not expose a selected block size")
+                raise TaichiRuntimeError(
+                    "TaskLaunchPolicy backend did not expose a selected block size"
+                )
         if policy.mode == "require" and selected != policy.block_dim:
             raise TaichiRuntimeError(
                 f"TaskLaunchPolicy require(block_dim={policy.block_dim}) was not "
@@ -2497,8 +2744,7 @@ class Kernel:
             _kernel_optimization_spec is not None
             and (
                 _kernel_optimization_spec.launch.grid_residency_waves is not None
-                or _kernel_optimization_spec.launch.range_work_per_thread_target
-                != 1
+                or _kernel_optimization_spec.launch.range_work_per_thread_target != 1
                 or _kernel_optimization_spec.ir.thread_local != "auto"
             )
             and backend != "cuda"
@@ -2515,15 +2761,22 @@ class Kernel:
                 "uses a worker scheduler rather than a GPU block"
             )
         if kind != "native":
-            raise TaichiRuntimeError(f"TaskLaunchPolicy is unavailable on backend {backend}")
+            raise TaichiRuntimeError(
+                f"TaskLaunchPolicy is unavailable on backend {backend}"
+            )
         if self.autodiff_mode != AutodiffMode.NONE:
-            raise TaichiRuntimeError("TaskLaunchPolicy supports primal direct JIT kernels only")
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy supports primal direct JIT kernels only"
+            )
         if (
             self.runtime.target_tape is not None
             or self.runtime.fwd_mode_manager is not None
             or self.runtime.grad_replaced
         ):
-            raise TaichiRuntimeError("TaskLaunchPolicy cannot be used inside an automatic " "differentiation context")
+            raise TaichiRuntimeError(
+                "TaskLaunchPolicy cannot be used inside an automatic "
+                "differentiation context"
+            )
 
         args = _process_args(self, args, kwargs)
         key = self._ensure_compiled_with_task_launch_policy(
@@ -2561,8 +2814,7 @@ class Kernel:
             _kernel_optimization_spec is not None
             and (
                 _kernel_optimization_spec.launch.grid_residency_waves is not None
-                or _kernel_optimization_spec.launch.range_work_per_thread_target
-                != 1
+                or _kernel_optimization_spec.launch.range_work_per_thread_target != 1
                 or _kernel_optimization_spec.ir.thread_local != "auto"
             )
             and backend != "cuda"
@@ -2579,7 +2831,9 @@ class Kernel:
                 status="auto",
                 reason="compiler/backend default geometry",
                 tasks=tasks,
-                resources=_task_launch_resource_reports(tasks, policy, "auto", impl.current_cfg()),
+                resources=_task_launch_resource_reports(
+                    tasks, policy, "auto", impl.current_cfg()
+                ),
             )
         if kind == "cpu":
             if policy.mode == "require":
@@ -2594,10 +2848,14 @@ class Kernel:
                 status="fallback_auto",
                 reason="CPU has no GPU block geometry; hint preserved auto scheduling",
                 tasks=tasks,
-                resources=_task_launch_resource_reports(tasks, policy, "fallback_auto", impl.current_cfg()),
+                resources=_task_launch_resource_reports(
+                    tasks, policy, "fallback_auto", impl.current_cfg()
+                ),
             )
         if kind != "native":
-            raise TaichiRuntimeError(f"TaskLaunchPolicy is unavailable on backend {backend}")
+            raise TaichiRuntimeError(
+                f"TaskLaunchPolicy is unavailable on backend {backend}"
+            )
 
         processed = _process_args(self, args, kwargs)
         key = self._ensure_compiled_with_task_launch_policy(
@@ -2620,7 +2878,9 @@ class Kernel:
                 else "an explicit source-level loop_config or backend constraint won"
             ),
             tasks=tasks,
-            resources=_task_launch_resource_reports(tasks, policy, status, impl.current_cfg()),
+            resources=_task_launch_resource_reports(
+                tasks, policy, status, impl.current_cfg()
+            ),
         )
 
     def task_manifest(self, *args, **kwargs):
@@ -2685,9 +2945,7 @@ class Kernel:
             )
         return resolved
 
-    def _gpu_semantics_snapshot(
-        self, *args, _primal_program_id="", **kwargs
-    ):
+    def _gpu_semantics_snapshot(self, *args, _primal_program_id="", **kwargs):
         """Build an explicit, no-submit CUDA/Vulkan resident snapshot."""
 
         from taichi_forge.lang._gpu_semantics_snapshot import (
@@ -2697,8 +2955,7 @@ class Kernel:
         backend, kind = self._task_launch_backend_kind()
         if kind != "native":
             raise TaichiRuntimeError(
-                "GPU semantics are supported only on CUDA and Vulkan, "
-                f"not {backend}"
+                "GPU semantics are supported only on CUDA and Vulkan, " f"not {backend}"
             )
         args = _process_args(self, args, kwargs)
         _primal_program_id = self._gpu_semantics_resolve_primal_program_id(
@@ -2707,13 +2964,9 @@ class Kernel:
         key = self.ensure_compiled(*args)
         kernel_cpp = self.compiled_kernels[key]
         raw = self.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
-        return _build_resident_gpu_semantics(
-            raw, primal_program_id=_primal_program_id
-        )
+        return _build_resident_gpu_semantics(raw, primal_program_id=_primal_program_id)
 
-    def _gpu_semantics_qualification(
-        self, *args, _primal_program_id="", **kwargs
-    ):
+    def _gpu_semantics_qualification(self, *args, _primal_program_id="", **kwargs):
         """Explicitly materialize/query backend artifact facts without launch."""
 
         from taichi_forge.lang._gpu_semantics_qualification import (
@@ -2742,9 +2995,7 @@ class Kernel:
         started = time.perf_counter_ns()
         raw = self.runtime.prog._kernel_gpu_artifact_qualification(kernel_cpp)
         fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
-        return _build_gpu_artifact_qualification(
-            snapshot, raw, fixed_cost_seconds
-        )
+        return _build_gpu_artifact_qualification(snapshot, raw, fixed_cost_seconds)
 
     # For small kernels (< 3us), the performance can be pretty sensitive to overhead in __call__
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
@@ -2788,8 +3039,13 @@ class Kernel:
         ):
             self.runtime.target_tape.insert(self, args)
 
-        if self.autodiff_mode != AutodiffMode.NONE and impl.current_cfg().opt_level == 0:
-            _logging.warn("""opt_level = 1 is enforced to enable gradient computation.""")
+        if (
+            self.autodiff_mode != AutodiffMode.NONE
+            and impl.current_cfg().opt_level == 0
+        ):
+            _logging.warn(
+                """opt_level = 1 is enforced to enable gradient computation."""
+            )
             impl.current_cfg().opt_level = 1
         ordinary_fast_eligible = (
             self.autodiff_mode == AutodiffMode.NONE
@@ -2799,9 +3055,7 @@ class Kernel:
         )
         if ordinary_fast_eligible:
             ordinary_plan = self._ordinary_launch_plan
-            if ordinary_plan is not None and ordinary_plan.matches(
-                self.runtime, args
-            ):
+            if ordinary_plan is not None and ordinary_plan.matches(self.runtime, args):
                 return self._launch_with_ordinary_plan(ordinary_plan, args)
             ordinary_plan = self._find_ordinary_launch_plan_after_mru_miss(args)
             if ordinary_plan is not None:
@@ -2817,7 +3071,9 @@ class Kernel:
             kernel_cpp,
             *args,
             _allocate_all_external_grad=allocate_all_external_grad,
-            _explicit_external_grad_args=self._external_grad_accesses.get(key, frozenset()),
+            _explicit_external_grad_args=self._external_grad_accesses.get(
+                key, frozenset()
+            ),
         )
         if (
             ordinary_fast_eligible
@@ -2870,9 +3126,10 @@ class _TaskLaunchBinding:
         self._last_auto_decision = None
         self._auto_cache_runtime = None
         self._auto_cache_generation = -1
-        self._auto_cache_decision = None
+        self._auto_cache_decisions = {}
         self._auto_default_runtime = None
         self._auto_default_generation = -1
+        self._fast_auto_generation = -1
         if policy.mode == "auto":
             from taichi_forge.lang._task_launch_tuning import _coordinator
 
@@ -2883,9 +3140,7 @@ class _TaskLaunchBinding:
 
     def _with_workload_profile(self, profile):
         if self.policy.mode != "auto":
-            raise ValueError(
-                "workload profiles may only bind TaskLaunchPolicy.auto()"
-            )
+            raise ValueError("workload profiles may only bind TaskLaunchPolicy.auto()")
         return _TaskLaunchBinding(
             self._kernel,
             self.policy,
@@ -2961,13 +3216,9 @@ class _TaskLaunchBinding:
             self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
         )
         started = time.perf_counter_ns()
-        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
-            kernel_cpp
-        )
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(kernel_cpp)
         fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
-        return _build_gpu_artifact_qualification(
-            snapshot, raw, fixed_cost_seconds
-        )
+        return _build_gpu_artifact_qualification(snapshot, raw, fixed_cost_seconds)
 
     def _clear_retained_plan(self):
         with self._retained_plan_lock:
@@ -3089,7 +3340,7 @@ class _TaskLaunchBinding:
         runtime = self._kernel.runtime
         if self._workload_profile is None:
             self._last_auto_decision = None
-            return None, None
+            return None, None, -1
         if (
             self._kernel._task_launch_backend_kind()[0] != "cuda"
             or self._kernel.autodiff_mode != AutodiffMode.NONE
@@ -3097,97 +3348,142 @@ class _TaskLaunchBinding:
             or runtime.fwd_mode_manager is not None
             or runtime.grad_replaced
         ):
-            return None, None
+            return None, None, -1
+        dynamic_specialization = bool(self._kernel.mapper._dynamic_arg_extractors)
+        processed = None
+        instance_id = 0
+        if dynamic_specialization:
+            processed = _process_args(self._kernel, args, kwargs)
+            instance_id = self._kernel.mapper.lookup(processed)[0]
+
+        generation = _coordinator.generation
         if (
-            not self._kernel.mapper._dynamic_arg_extractors
-            and self._auto_cache_runtime is runtime
-            and self._auto_cache_generation == _coordinator.generation
-            and self._auto_cache_decision is not None
+            self._auto_cache_runtime is not runtime
+            or self._auto_cache_generation != generation
         ):
-            decision = self._auto_cache_decision
-            if (
-                observe
-                and decision.observed_calls
-                < _HOT_CALL_THRESHOLD
-            ):
+            self._auto_cache_runtime = runtime
+            self._auto_cache_generation = generation
+            self._auto_cache_decisions.clear()
+        decision = self._auto_cache_decisions.get(instance_id)
+        if decision is not None:
+            if observe and decision.observed_calls < _HOT_CALL_THRESHOLD:
                 decision = _coordinator.observe_cached(decision)
-                self._auto_cache_decision = decision
+                if _coordinator.generation != generation:
+                    self._auto_cache_generation = _coordinator.generation
+                    self._auto_cache_decisions.clear()
+                    decision = None
+                else:
+                    self._auto_cache_decisions[instance_id] = decision
+        if decision is not None:
             self._last_auto_decision = decision
-            if decision.status == "qualification_required":
+            if (
+                not dynamic_specialization
+                and decision.status == "qualification_required"
+            ):
                 self._auto_default_runtime = runtime
-                self._auto_default_generation = _coordinator.generation
+                self._auto_default_generation = generation
             if (
                 decision.status != "qualified"
-                or decision.record_id
-                in self._kernel._task_launch_auto_failed_records
+                or decision.record_id in self._kernel._task_launch_auto_failed_records
             ):
-                return None, None
+                return None, None, -1
             from taichi_forge.lang.task_launch import TaskLaunchPolicy
 
-            return _process_args(self._kernel, args, kwargs), TaskLaunchPolicy.block(
-                decision.block_dim, mode="require"
+            if processed is None:
+                processed = _process_args(self._kernel, args, kwargs)
+            if _coordinator.generation != generation:
+                self._last_auto_decision = None
+                self._auto_cache_generation = _coordinator.generation
+                self._auto_cache_decisions.clear()
+                return processed, None, -1
+            return (
+                processed,
+                TaskLaunchPolicy.block(decision.block_dim, mode="require"),
+                generation,
             )
-        processed = _process_args(self._kernel, args, kwargs)
-        _, _, decision = self._kernel._task_launch_auto_decision(
+        if processed is None:
+            processed = _process_args(self._kernel, args, kwargs)
+        key, _, decision = self._kernel._task_launch_auto_decision(
             processed,
             observe=observe,
             workload_profile=self._workload_profile,
         )
         self._last_auto_decision = decision
-        if not self._kernel.mapper._dynamic_arg_extractors:
+        resolved_generation = _coordinator.generation
+        if resolved_generation != generation:
+            # A qualification record was invalidated while the cold decision
+            # was being assembled. Never return that stale decision and then
+            # certify it with the newer generation in the fast path.
+            self._last_auto_decision = None
             self._auto_cache_runtime = runtime
-            self._auto_cache_generation = _coordinator.generation
-            self._auto_cache_decision = decision
+            self._auto_cache_generation = resolved_generation
+            self._auto_cache_decisions.clear()
+            return processed, None, -1
+        self._auto_cache_runtime = runtime
+        self._auto_cache_generation = generation
+        self._auto_cache_decisions[key[1]] = decision
+        while (
+            len(self._auto_cache_decisions) > _TASK_LAUNCH_AUTO_DECISION_CACHE_CAPACITY
+        ):
+            del self._auto_cache_decisions[next(iter(self._auto_cache_decisions))]
         if (
             decision is None
             or decision.status != "qualified"
-            or decision.record_id
-            in self._kernel._task_launch_auto_failed_records
+            or decision.record_id in self._kernel._task_launch_auto_failed_records
         ):
-            return processed, None
+            return processed, None, -1
         from taichi_forge.lang.task_launch import TaskLaunchPolicy
 
-        return processed, TaskLaunchPolicy.block(
-            decision.block_dim, mode="require"
+        return (
+            processed,
+            TaskLaunchPolicy.block(decision.block_dim, mode="require"),
+            generation,
         )
 
     def _call_auto(self, args, kwargs):
         runtime = self._kernel.runtime
         if (
             self._fast_runtime is runtime
+            and self._fast_auto_generation == self._auto_coordinator.generation
             and runtime.target_tape is None
             and runtime.fwd_mode_manager is None
             and not runtime.grad_replaced
         ):
             processed = _process_args(self._kernel, args, kwargs)
+            instance_id = self._kernel.mapper.lookup(processed)[0]
             if (
                 self._fast_kernel_cpp is not None
+                and self._fast_key is not None
+                and self._fast_key[1] == instance_id
                 and self._kernel.compiled_kernels.get(self._fast_key)
                 is self._fast_kernel_cpp
             ):
-                return self._kernel.launch_kernel(
-                    self._fast_kernel_cpp, *processed
-                )
+                return self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
 
-        processed, resolved = self._auto_resolution(args, kwargs, observe=True)
-        if resolved is None:
+        processed, resolved, resolution_generation = self._auto_resolution(
+            args, kwargs, observe=True
+        )
+        if (
+            resolved is None
+            or resolution_generation != self._auto_coordinator.generation
+        ):
             return self._kernel(*args, **kwargs)
         try:
             key = self._kernel._ensure_compiled_with_task_launch_policy(
                 resolved, *processed
             )
-            self._kernel._validate_task_launch_policy_specialization(
-                key, resolved
-            )
+            self._kernel._validate_task_launch_policy_specialization(key, resolved)
         except (TaichiCompilationError, TaichiRuntimeError):
             self._kernel._task_launch_auto_failed_records.add(
                 self._last_auto_decision.record_id
             )
             return self._kernel(*args, **kwargs)
-        if not self._kernel.mapper._dynamic_arg_extractors:
-            self._fast_runtime = runtime
-            self._fast_key = key
-            self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+        if resolution_generation != self._auto_coordinator.generation:
+            return self._kernel(*args, **kwargs)
+        self._fast_runtime = runtime
+        self._fast_key = key
+        self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+        self._fast_auto_generation = resolution_generation
         return self._kernel.launch_kernel(
             self._kernel.compiled_kernels[key], *processed
         )
@@ -3213,7 +3509,9 @@ class _TaskLaunchBinding:
                 and runtime.fwd_mode_manager is None
                 and not runtime.grad_replaced
             ):
-                processed = _process_args(self._kernel, (*self._bound_args, *args), kwargs)
+                processed = _process_args(
+                    self._kernel, (*self._bound_args, *args), kwargs
+                )
                 expected_key = self._specialization_key(processed)
                 if (
                     self._fast_key == expected_key
@@ -3253,7 +3551,9 @@ class _TaskLaunchBinding:
                     *processed,
                     optimization_spec=self._optimization_spec,
                 )
-                self._kernel._validate_task_launch_policy_specialization(key, self.policy)
+                self._kernel._validate_task_launch_policy_specialization(
+                    key, self.policy
+                )
                 result = self._kernel.launch_kernel(
                     self._kernel.compiled_kernels[key],
                     *processed,
@@ -3273,7 +3573,10 @@ class _TaskLaunchBinding:
                 _kernel_optimization_spec=self._optimization_spec,
                 **kwargs,
             )
-            if self.policy.mode == "hint" and self._kernel._task_launch_backend_kind()[1] == "cpu":
+            if (
+                self.policy.mode == "hint"
+                and self._kernel._task_launch_backend_kind()[1] == "cpu"
+            ):
                 self._fallback_auto = True
                 self._fast_runtime = runtime
             else:
@@ -3289,10 +3592,13 @@ class _TaskLaunchBinding:
         """Compile if needed and report resolution without submitting work."""
         combined_args = (*self._bound_args, *args)
         if self.policy.mode == "auto":
-            _, resolved = self._auto_resolution(
+            _, resolved, resolution_generation = self._auto_resolution(
                 combined_args, kwargs, observe=False
             )
-            if resolved is not None:
+            if (
+                resolved is not None
+                and resolution_generation == self._auto_coordinator.generation
+            ):
                 try:
                     report = self._kernel._task_launch_report(
                         resolved, *combined_args, **kwargs
@@ -3302,32 +3608,27 @@ class _TaskLaunchBinding:
                         self._last_auto_decision.record_id
                     )
                 else:
-                    report = replace(
-                        report,
-                        policy=self.policy,
-                        status="auto_qualified",
-                        reason=self._last_auto_decision.reason,
+                    processed = _process_args(self._kernel, combined_args, kwargs)
+                    key = self._kernel._ensure_compiled_with_task_launch_policy(
+                        resolved, *processed
                     )
-                    if not self._kernel.mapper._dynamic_arg_extractors:
-                        processed = _process_args(
-                            self._kernel, combined_args, kwargs
-                        )
-                        key = self._kernel._ensure_compiled_with_task_launch_policy(
-                            resolved, *processed
+                    if resolution_generation == self._auto_coordinator.generation:
+                        report = replace(
+                            report,
+                            policy=self.policy,
+                            status="auto_qualified",
+                            reason=self._last_auto_decision.reason,
                         )
                         self._fast_runtime = self._kernel.runtime
                         self._fast_key = key
-                        self._fast_kernel_cpp = self._kernel.compiled_kernels[
-                            key
-                        ]
-                    return report
+                        self._fast_kernel_cpp = self._kernel.compiled_kernels[key]
+                        self._fast_auto_generation = resolution_generation
+                        return report
             report = self._kernel._task_launch_report(
                 self.policy, *combined_args, **kwargs
             )
             if self._last_auto_decision is not None:
-                report = replace(
-                    report, reason=self._last_auto_decision.reason
-                )
+                report = replace(report, reason=self._last_auto_decision.reason)
         else:
             report = self._kernel._task_launch_report(
                 self.policy,
@@ -3425,13 +3726,9 @@ class _KernelOptimizationBinding(_TaskLaunchBinding):
             self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
         )
         started = time.perf_counter_ns()
-        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
-            kernel_cpp
-        )
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(kernel_cpp)
         fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
-        return _build_gpu_artifact_qualification(
-            snapshot, raw, fixed_cost_seconds
-        )
+        return _build_gpu_artifact_qualification(snapshot, raw, fixed_cost_seconds)
 
     def __call__(self, *args, **kwargs):
         try:
@@ -3460,9 +3757,7 @@ class _KernelOptimizationBinding(_TaskLaunchBinding):
                     return self._kernel._launch_with_ordinary_plan(
                         retained_plan, processed
                     )
-                result = self._kernel.launch_kernel(
-                    self._fast_kernel_cpp, *processed
-                )
+                result = self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
                 self._prepare_retained_plan(processed)
                 return result
             _, key, _ = self._prepare_exact(args, kwargs)
@@ -3514,6 +3809,23 @@ class _OffloadExecutionPlanBinding:
         self._kernel = kernel
         self.plan = plan
         self._bound_args = tuple(bound_args)
+        self._fast_runtime = None
+        self._fast_key = None
+        self._fast_kernel_cpp = None
+        self._validated_runtime = None
+        self._validated_key = None
+        self._validated_kernel_cpp = None
+        self._validated_tasks = None
+        self._validation_lock = threading.Lock()
+        # Match the exact kernel-optimization path: retain the native
+        # executable plan, but not a mutable LaunchContextBuilder, so warm
+        # calls remain safe across Python threads.
+        self._retained_plan = None
+        self._retained_plan_runtime = None
+        self._retained_plan_key = None
+        self._retained_plan_negative_runtime = None
+        self._retained_plan_negative_key = None
+        self._retained_plan_lock = threading.Lock()
         self.__name__ = kernel.func.__name__
 
     def _validate_backend(self):
@@ -3528,17 +3840,151 @@ class _OffloadExecutionPlanBinding:
             )
         return backend
 
-    def _prepare_exact(self, args, kwargs):
+    def _specialization_key(self, processed_args):
+        instance_id = self._kernel.mapper.lookup(processed_args)[0]
+        return (
+            self._kernel.func,
+            instance_id,
+            self._kernel.autodiff_mode,
+            ("offload_execution_plan", self.plan.identity),
+            False,
+        )
+
+    def _validated_specialization(self, runtime, key, kernel_cpp):
+        if (
+            self._validated_runtime is runtime
+            and self._validated_key == key
+            and self._validated_kernel_cpp is kernel_cpp
+            and self._validated_tasks is not None
+        ):
+            return self._validated_tasks
+        with self._validation_lock:
+            if (
+                self._validated_runtime is runtime
+                and self._validated_key == key
+                and self._validated_kernel_cpp is kernel_cpp
+                and self._validated_tasks is not None
+            ):
+                return self._validated_tasks
+            tasks = self._kernel._validate_offload_execution_plan_specialization(
+                key, self.plan
+            )
+            # A concurrent reset or executable retirement must not publish a
+            # certificate for a different runtime/handle. The caller will
+            # naturally miss the fast path and prepare the new specialization.
+            if (
+                self._kernel.runtime is runtime
+                and self._kernel.compiled_kernels.get(key) is kernel_cpp
+            ):
+                self._validated_runtime = runtime
+                self._validated_key = key
+                self._validated_kernel_cpp = kernel_cpp
+                self._validated_tasks = tasks
+            return tasks
+
+    def _clear_retained_plan(self):
+        with self._retained_plan_lock:
+            self._retained_plan = None
+            self._retained_plan_runtime = None
+            self._retained_plan_key = None
+            self._retained_plan_negative_runtime = None
+            self._retained_plan_negative_key = None
+
+    def _install_fast_specialization(self, runtime, key, kernel_cpp):
+        if (
+            self._fast_runtime is not runtime
+            or self._fast_key != key
+            or self._fast_kernel_cpp is not kernel_cpp
+        ):
+            self._clear_retained_plan()
+        self._fast_runtime = runtime
+        self._fast_key = key
+        self._fast_kernel_cpp = kernel_cpp
+
+    def _prepare_retained_plan(self, processed_args):
+        runtime = self._kernel.runtime
+        key = self._fast_key
+        kernel_cpp = self._fast_kernel_cpp
+        if (
+            key is None
+            or kernel_cpp is None
+            or self._fast_runtime is not runtime
+            or self._kernel.compiled_kernels.get(key) is not kernel_cpp
+            or self._kernel.autodiff_mode != AutodiffMode.NONE
+            or runtime.target_tape is not None
+            or runtime.fwd_mode_manager is not None
+            or runtime.grad_replaced
+        ):
+            return None
+        retained = self._retained_plan
+        if (
+            self._retained_plan_runtime is runtime
+            and self._retained_plan_key == key
+            and retained is not None
+            and retained.matches(runtime, processed_args)
+        ):
+            return retained
+        if (
+            self._retained_plan_negative_runtime is runtime
+            and self._retained_plan_negative_key == key
+        ):
+            return None
+        with self._retained_plan_lock:
+            retained = self._retained_plan
+            if (
+                self._retained_plan_runtime is runtime
+                and self._retained_plan_key == key
+                and retained is not None
+                and retained.matches(runtime, processed_args)
+            ):
+                return retained
+            if (
+                self._retained_plan_negative_runtime is runtime
+                and self._retained_plan_negative_key == key
+            ):
+                return None
+            retained, stable_failure = self._kernel._build_ordinary_launch_plan(
+                key,
+                processed_args,
+                allow_snode_tree_dependencies=True,
+                reuse_gpu_context=False,
+            )
+            if (
+                self._kernel.runtime is not runtime
+                or self._kernel.compiled_kernels.get(key) is not kernel_cpp
+            ):
+                return None
+            if retained is not None:
+                self._retained_plan = retained
+                self._retained_plan_runtime = runtime
+                self._retained_plan_key = key
+                self._retained_plan_negative_runtime = None
+                self._retained_plan_negative_key = None
+                return retained
+            if stable_failure:
+                self._retained_plan_negative_runtime = runtime
+                self._retained_plan_negative_key = key
+            return None
+
+    def _prepare_processed_exact(self, processed):
         self._validate_backend()
-        combined = (*self._bound_args, *args)
-        processed = _process_args(self._kernel, combined, kwargs)
+        runtime = self._kernel.runtime
         key = self._kernel._ensure_compiled_with_offload_execution_plan(
             self.plan, *processed
         )
-        tasks = self._kernel._validate_offload_execution_plan_specialization(
-            key, self.plan
-        )
+        kernel_cpp = self._kernel.compiled_kernels[key]
+        tasks = self._validated_specialization(runtime, key, kernel_cpp)
+        if (
+            self._kernel.runtime is runtime
+            and self._kernel.compiled_kernels.get(key) is kernel_cpp
+        ):
+            self._install_fast_specialization(runtime, key, kernel_cpp)
         return processed, key, tasks
+
+    def _prepare_exact(self, args, kwargs):
+        combined = (*self._bound_args, *args)
+        processed = _process_args(self._kernel, combined, kwargs)
+        return self._prepare_processed_exact(processed)
 
     def __call__(self, *args, **kwargs):
         try:
@@ -3557,10 +4003,28 @@ class _OffloadExecutionPlanBinding:
                     "offload execution plans cannot launch inside an "
                     "automatic differentiation context"
                 )
-            processed, key, _ = self._prepare_exact(args, kwargs)
-            return self._kernel.launch_kernel(
+            combined = (*self._bound_args, *args)
+            processed = _process_args(self._kernel, combined, kwargs)
+            expected_key = self._specialization_key(processed)
+            if (
+                self._fast_runtime is runtime
+                and self._fast_key == expected_key
+                and self._fast_kernel_cpp is not None
+                and self._kernel.compiled_kernels.get(expected_key)
+                is self._fast_kernel_cpp
+            ):
+                retained = self._prepare_retained_plan(processed)
+                if retained is not None:
+                    return self._kernel._launch_with_ordinary_plan(retained, processed)
+                result = self._kernel.launch_kernel(self._fast_kernel_cpp, *processed)
+                self._prepare_retained_plan(processed)
+                return result
+            _, key, _ = self._prepare_processed_exact(processed)
+            result = self._kernel.launch_kernel(
                 self._kernel.compiled_kernels[key], *processed
             )
+            self._prepare_retained_plan(processed)
+            return result
         except (TaichiCompilationError, TaichiRuntimeError) as exc:
             if impl.get_runtime().print_full_traceback:
                 raise
@@ -3574,7 +4038,8 @@ class _OffloadExecutionPlanBinding:
         )
 
         backend = self._validate_backend()
-        _, _, tasks = self._prepare_exact(args, kwargs)
+        processed, _, tasks = self._prepare_exact(args, kwargs)
+        self._prepare_retained_plan(processed)
         policy = TaskLaunchPolicy.auto()
         return TaskLaunchReport(
             policy=policy,
@@ -3618,13 +4083,9 @@ class _OffloadExecutionPlanBinding:
             self._kernel.runtime.prog._kernel_gpu_semantics_snapshot(kernel_cpp)
         )
         started = time.perf_counter_ns()
-        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(
-            kernel_cpp
-        )
+        raw = self._kernel.runtime.prog._kernel_gpu_artifact_qualification(kernel_cpp)
         fixed_cost_seconds = (time.perf_counter_ns() - started) * 1.0e-9
-        return _build_gpu_artifact_qualification(
-            snapshot, raw, fixed_cost_seconds
-        )
+        return _build_gpu_artifact_qualification(snapshot, raw, fixed_cost_seconds)
 
 
 # For a Taichi class definition like below:
@@ -3666,8 +4127,18 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
 
     if verbose:
         print(f"kernel={_func.__name__} is_classkernel={is_classkernel}")
-    primal = Kernel(_func, autodiff_mode=AutodiffMode.NONE, _classkernel=is_classkernel, opt_level=opt_level)
-    adjoint = Kernel(_func, autodiff_mode=AutodiffMode.REVERSE, _classkernel=is_classkernel, opt_level=opt_level)
+    primal = Kernel(
+        _func,
+        autodiff_mode=AutodiffMode.NONE,
+        _classkernel=is_classkernel,
+        opt_level=opt_level,
+    )
+    adjoint = Kernel(
+        _func,
+        autodiff_mode=AutodiffMode.REVERSE,
+        _classkernel=is_classkernel,
+        opt_level=opt_level,
+    )
     # Having |primal| contains |grad| makes the tape work.
     primal.grad = adjoint
     adjoint._gpu_semantics_primal_ref = weakref.ref(primal)
@@ -3686,7 +4157,9 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
             # with @ti.data_oriented, otherwise getattr would have intercepted the call.
             clsobj = type(args[0])
             assert not hasattr(clsobj, "_data_oriented")
-            raise TaichiSyntaxError(f"Please decorate class {clsobj.__name__} with @ti.data_oriented")
+            raise TaichiSyntaxError(
+                f"Please decorate class {clsobj.__name__} with @ti.data_oriented"
+            )
 
     else:
 
@@ -3766,7 +4239,9 @@ class _BoundedDifferentiableMethod:
     def __init__(self, kernel_owner, wrapped_kernel_func):
         clsobj = type(kernel_owner)
         if not getattr(clsobj, "_data_oriented", False):
-            raise TaichiSyntaxError(f"Please decorate class {clsobj.__name__} with @ti.data_oriented")
+            raise TaichiSyntaxError(
+                f"Please decorate class {clsobj.__name__} with @ti.data_oriented"
+            )
         self._kernel_owner = kernel_owner
         self._primal = wrapped_kernel_func._primal
         self._adjoint = wrapped_kernel_func._adjoint

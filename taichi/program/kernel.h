@@ -87,6 +87,13 @@ class TI_DLL_EXPORT Kernel : public Callable {
     std::string compilation_identity;
     std::string execution_identity;
     std::vector<OffloadTaskOptimizationSpec> tasks;
+    // Launch-only projections are materialized once with the immutable plan.
+    // LaunchContextBuilder borrows these vectors instead of rebuilding and
+    // validating them for every kernel invocation.
+    std::vector<std::string> task_kinds;
+    std::vector<int> grid_residency_waves;
+    std::vector<int> range_work_per_thread_targets;
+    LaunchContextBuilder::CudaTaskExecutionPlanDigest launch_content_digest{};
   };
 
   std::vector<SNode *> no_activate;
@@ -237,6 +244,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
   std::optional<TaskLaunchPolicy> task_launch_policy_;
   std::optional<KernelOptimizationSpec> kernel_optimization_spec_;
   std::optional<OffloadExecutionPlan> offload_execution_plan_;
+  std::mutex offload_execution_plan_mutex_;
+  std::atomic<bool> offload_execution_plan_frozen_{false};
   mutable std::mutex snode_tree_dependencies_mutex_;
   mutable std::atomic<SNodeTreeDependencyState> snode_tree_dependency_state_{
       SNodeTreeDependencyState::unknown};

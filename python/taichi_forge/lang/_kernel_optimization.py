@@ -80,9 +80,7 @@ class _LaunchOptions:
         if isinstance(value, bool) or not isinstance(value, int):
             raise TypeError("range_work_per_thread_target must be an integer")
         if value not in (1, 2, 4, 8):
-            raise ValueError(
-                "range_work_per_thread_target must be 1, 2, 4, or 8"
-            )
+            raise ValueError("range_work_per_thread_target must be 1, 2, 4, or 8")
 
 
 @dataclass(frozen=True)
@@ -102,6 +100,51 @@ class _KernelOptimizationSpec:
                 "requires one"
             )
 
+        payload = asdict(self)
+        stable_payload = json.dumps(
+            {"schema_version": 1, **payload},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload["launch"]["grid_residency_waves"] = None
+        payload["launch"]["range_work_per_thread_target"] = 1
+        compilation_payload = json.dumps(
+            {"schema_version": 1, **payload},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        is_baseline = (
+            self.ir == _IrOptimizationOptions()
+            and self.backend == _BackendCodegenOptions()
+            and self.artifact == _ArtifactOptions()
+            and self.launch == _LaunchOptions()
+        )
+        compilation_is_baseline = (
+            self.ir == _IrOptimizationOptions()
+            and self.backend == _BackendCodegenOptions()
+            and self.artifact == _ArtifactOptions()
+            and self.launch.block_mode == "auto"
+        )
+        identity = (
+            ""
+            if is_baseline
+            else "kos1:" + hashlib.sha256(stable_payload.encode("utf-8")).hexdigest()
+        )
+        compilation_identity = (
+            ""
+            if compilation_is_baseline
+            else "kos1:"
+            + hashlib.sha256(compilation_payload.encode("utf-8")).hexdigest()
+        )
+        # These values are pure functions of frozen dataclass fields. Compute
+        # them once at construction instead of rebuilding dictionaries, JSON,
+        # and SHA-256 digests on every specialization lookup and launch.
+        object.__setattr__(self, "_is_baseline", is_baseline)
+        object.__setattr__(self, "_stable_payload", stable_payload)
+        object.__setattr__(self, "_compilation_payload", compilation_payload)
+        object.__setattr__(self, "_identity", identity)
+        object.__setattr__(self, "_compilation_identity", compilation_identity)
+
     @classmethod
     def from_task_launch_policy(cls, policy):
         if policy.mode == "auto":
@@ -113,49 +156,23 @@ class _KernelOptimizationSpec:
 
     @property
     def is_baseline(self):
-        return self == type(self)()
+        return self._is_baseline
 
     @property
     def stable_payload(self):
-        return json.dumps(
-            {"schema_version": 1, **asdict(self)},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        return self._stable_payload
 
     @property
     def compilation_payload(self):
-        payload = asdict(self)
-        # Grid residency is resolved from the materialized CUfunction at
-        # launch registration. It must not manufacture a second IR/PTX cache
-        # entry for the same block/TLS/artifact variant.
-        payload["launch"]["grid_residency_waves"] = None
-        payload["launch"]["range_work_per_thread_target"] = 1
-        return json.dumps(
-            {"schema_version": 1, **payload},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        return self._compilation_payload
 
     @property
     def identity(self):
-        if self.is_baseline:
-            return ""
-        digest = hashlib.sha256(self.stable_payload.encode("utf-8")).hexdigest()
-        return f"kos1:{digest}"
+        return self._identity
 
     @property
     def compilation_identity(self):
-        baseline = type(self)(
-            ir=self.ir,
-            backend=self.backend,
-            artifact=self.artifact,
-            launch=_LaunchOptions(block_mode=self.launch.block_mode),
-        )
-        if baseline.is_baseline:
-            return ""
-        digest = hashlib.sha256(self.compilation_payload.encode("utf-8")).hexdigest()
-        return f"kos1:{digest}"
+        return self._compilation_identity
 
     @property
     def specialization_key(self):
@@ -178,9 +195,9 @@ def _bind_kernel_optimization_spec(kernel, spec):
     from taichi_forge.lang.task_launch import TaskLaunchPolicy
 
     if spec.backend.workgroup_size is None:
-        return kernel.with_launch_policy(TaskLaunchPolicy.auto())._with_optimization_spec(
-            spec
-        )
+        return kernel.with_launch_policy(
+            TaskLaunchPolicy.auto()
+        )._with_optimization_spec(spec)
     policy = TaskLaunchPolicy.block(
         spec.backend.workgroup_size, mode=spec.launch.block_mode
     )

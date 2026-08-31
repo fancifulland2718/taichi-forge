@@ -107,14 +107,21 @@ class _TaskLaunchWorkloadProfile:
             "dynamic",
         ):
             raise ValueError("unsupported topology_stability")
+        stable_scope_json = _canonical_json(asdict(self))
+        object.__setattr__(self, "_stable_scope_json", stable_scope_json)
+        object.__setattr__(
+            self,
+            "_identity",
+            f"tlw1:{hashlib.sha256(stable_scope_json.encode('utf-8')).hexdigest()}",
+        )
 
     @property
     def stable_scope(self):
-        return json.loads(_canonical_json(asdict(self)))
+        return json.loads(self._stable_scope_json)
 
     @property
     def identity(self):
-        return f"tlw1:{_sha256_json(self.stable_scope)}"
+        return self._identity
 
 
 def _canonical_json(value):
@@ -305,9 +312,12 @@ def _validated_record(path, scope, record_id):
     if record.get("scope") != scope or record.get("record_id") != record_id:
         return None
     candidates = record.get("candidates")
-    if not candidates or not isinstance(candidates, list) or not all(
-        type(item) is int and item in _CANDIDATE_BLOCK_DIMS
-        for item in candidates
+    if (
+        not candidates
+        or not isinstance(candidates, list)
+        or not all(
+            type(item) is int and item in _CANDIDATE_BLOCK_DIMS for item in candidates
+        )
     ):
         return None
     evidence = record.get("evidence")

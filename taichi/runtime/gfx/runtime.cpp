@@ -1019,11 +1019,21 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
   TI_ASSERT(task_attribs.size() == spirv_bins.size());
   cached_resource_sets_.resize(task_attribs.size());
   buffer_binding_plans_.resize(task_attribs.size());
+  task_uses_listgen_buffer_.resize(task_attribs.size(), false);
 
   for (int i = 0; i < task_attribs.size(); ++i) {
+    if (task_attribs[i].task_type == OffloadedTaskType::listgen) {
+      required_listgen_capacity_entries_ = std::max(
+          required_listgen_capacity_entries_,
+          static_cast<size_t>(
+              std::max(task_attribs[i].advisory_total_num_threads, 0)));
+    }
     auto &binding_plans = buffer_binding_plans_[i];
     binding_plans.reserve(task_attribs[i].buffer_binds.size());
     for (const auto &bind : task_attribs[i].buffer_binds) {
+      if (bind.buffer.type == BufferType::ListGen) {
+        task_uses_listgen_buffer_[i] = true;
+      }
       BufferBindingPlan plan;
       plan.buffer = bind.buffer;
       plan.binding = bind.binding;
@@ -2045,7 +2055,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       TI_TRACE("Skipping current Vulkan sparse list kernel {}", attribs.name);
       continue;
     }
-    if (task_uses_listgen_buffer(attribs)) {
+    if (ti_kernel->task_uses_listgen_buffer(i)) {
       // VS-1.3 hardening: any dispatched task that binds the shared listgen
       // buffer (writer listgen or reader struct_for) makes a later grow/replace
       // require synchronization. This is deliberately more conservative than
@@ -2981,7 +2991,7 @@ bool GfxRuntime::try_launch_graph(
           !attribs.acceleration_structure_binds.empty() ||
           attribs.task_type == OffloadedTaskType::listgen ||
           attribs.may_mutate_sparse_topology ||
-          task_uses_listgen_buffer(attribs)) {
+          ti_kernel->task_uses_listgen_buffer(task_index)) {
         return reject();
       }
       key.push_back(0xB000u);
@@ -5364,16 +5374,6 @@ void GfxRuntime::clear_pending_dispatch_barriers() {
   pending_dispatch_barrier_buffer_ids_.clear();
 }
 
-bool GfxRuntime::task_uses_listgen_buffer(
-    const TaskAttributes &attribs) const {
-  for (const auto &bind : attribs.buffer_binds) {
-    if (bind.buffer.type == BufferType::ListGen) {
-      return true;
-    }
-  }
-  return false;
-}
-
 void GfxRuntime::add_pending_dispatch_barrier(DeviceAllocation alloc) {
   if (!dispatch_cache_ || alloc == kDeviceNullAllocation) {
     return;
@@ -5515,14 +5515,8 @@ void GfxRuntime::ensure_listgen_capacity_entries(size_t requested_entries,
 
 void GfxRuntime::ensure_listgen_capacity_for_kernel(
     const CompiledTaichiKernel &kernel) {
-  size_t requested_entries = 0;
-  for (const auto &attribs : kernel.ti_kernel_attribs().tasks_attribs) {
-    if (attribs.task_type == OffloadedTaskType::listgen) {
-      requested_entries = std::max(
-          requested_entries,
-          static_cast<size_t>(std::max(attribs.advisory_total_num_threads, 0)));
-    }
-  }
+  const size_t requested_entries =
+      kernel.required_listgen_capacity_entries();
   if (requested_entries > 0) {
     ensure_listgen_capacity_entries(requested_entries, "kernel launch");
   }

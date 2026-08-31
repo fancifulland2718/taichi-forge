@@ -44,6 +44,34 @@ def _validate_workgroup_size(value):
         raise ValueError("workgroup_size must be a power of two or a multiple of 32")
 
 
+def _validated_manifest_topology(manifests):
+    manifests = tuple(manifests)
+    if not manifests:
+        raise ValueError("cannot build an execution plan without task manifests")
+    semantic_identity = None
+    topology = []
+    for expected_index, manifest in enumerate(manifests):
+        task_index = manifest.task_index
+        task_kind = manifest.task_type
+        logical_task_id = manifest.logical_task_id
+        if task_index != expected_index:
+            raise ValueError("task manifests are not in physical ordinal order")
+        suffix = f":{task_index}:{task_kind}"
+        if not logical_task_id.startswith("tfl:") or not logical_task_id.endswith(
+            suffix
+        ):
+            raise ValueError("task manifest has no stable logical task identity")
+        current_semantic_identity = logical_task_id[4 : -len(suffix)]
+        if not current_semantic_identity:
+            raise ValueError("task manifest has an empty semantic kernel identity")
+        if semantic_identity is None:
+            semantic_identity = current_semantic_identity
+        elif semantic_identity != current_semantic_identity:
+            raise ValueError("task manifests do not belong to one semantic kernel")
+        topology.append((logical_task_id, task_index, task_kind))
+    return manifests, semantic_identity, tuple(topology)
+
+
 @dataclass(frozen=True)
 class _TaskOptimizationSpec:
     """One complete topology-preserving policy for one physical task."""
@@ -62,7 +90,11 @@ class _TaskOptimizationSpec:
     def __post_init__(self):
         if not isinstance(self.logical_task_id, str) or not self.logical_task_id:
             raise ValueError("logical_task_id must be a nonempty string")
-        if isinstance(self.task_index, bool) or not isinstance(self.task_index, int) or self.task_index < 0:
+        if (
+            isinstance(self.task_index, bool)
+            or not isinstance(self.task_index, int)
+            or self.task_index < 0
+        ):
             raise ValueError("task_index must be a nonnegative integer")
         if not isinstance(self.task_kind, str) or not self.task_kind:
             raise ValueError("task_kind must be a nonempty string")
@@ -98,7 +130,9 @@ class _TaskOptimizationSpec:
             or self.range_work_per_thread_target != 1
             or self.memory_strategy != "direct"
         ):
-            raise ValueError("the v1 execution plan only tunes physical range_for tasks")
+            raise ValueError(
+                "the v1 execution plan only tunes physical range_for tasks"
+            )
 
     @property
     def is_baseline(self):
@@ -133,7 +167,10 @@ class _OffloadExecutionPlan:
     tasks: tuple
 
     def __post_init__(self):
-        if not isinstance(self.semantic_kernel_identity, str) or not self.semantic_kernel_identity:
+        if (
+            not isinstance(self.semantic_kernel_identity, str)
+            or not self.semantic_kernel_identity
+        ):
             raise ValueError("semantic_kernel_identity must be a nonempty string")
         tasks = tuple(self.tasks)
         object.__setattr__(self, "tasks", tasks)
@@ -144,53 +181,78 @@ class _OffloadExecutionPlan:
         logical_ids = set()
         for expected_index, task in enumerate(tasks):
             if task.task_index != expected_index:
-                raise ValueError("task specs must be ordered by contiguous physical ordinal")
-            expected_id = f"tfl:{self.semantic_kernel_identity}:{expected_index}:" f"{task.task_kind}"
+                raise ValueError(
+                    "task specs must be ordered by contiguous physical ordinal"
+                )
+            expected_id = (
+                f"tfl:{self.semantic_kernel_identity}:{expected_index}:"
+                f"{task.task_kind}"
+            )
             if task.logical_task_id != expected_id:
-                raise ValueError("logical task identity does not match kernel, ordinal, and kind")
+                raise ValueError(
+                    "logical task identity does not match kernel, ordinal, and kind"
+                )
             if task.logical_task_id in logical_ids:
                 raise ValueError("logical task identities must be unique")
             logical_ids.add(task.logical_task_id)
 
+        stable_payload = {
+            "schema": _TASK_PLAN_SCHEMA,
+            "semantic_kernel_identity": self.semantic_kernel_identity,
+            "tasks": tuple(asdict(task) for task in tasks),
+        }
+        compilation_payload = {
+            "schema": _TASK_PLAN_SCHEMA,
+            "semantic_kernel_identity": self.semantic_kernel_identity,
+            "tasks": tuple(task.compilation_payload for task in tasks),
+        }
+        # The plan and every task are frozen, so all derived launch identities
+        # and topology facts are immutable for the plan's lifetime.
+        object.__setattr__(
+            self, "_is_baseline", all(task.is_baseline for task in tasks)
+        )
+        object.__setattr__(
+            self,
+            "_requires_graph_memory",
+            any(task.memory_strategy != "direct" for task in tasks),
+        )
+        object.__setattr__(
+            self,
+            "_topology_signature",
+            tuple(
+                (task.logical_task_id, task.task_index, task.task_kind)
+                for task in tasks
+            ),
+        )
+        object.__setattr__(self, "_identity", _identity("oep1:", stable_payload))
+        object.__setattr__(
+            self,
+            "_compilation_identity",
+            _identity("oep1c:", compilation_payload),
+        )
+
     @classmethod
     def from_task_manifests(cls, manifests):
-        manifests = tuple(manifests)
-        if not manifests:
-            raise ValueError("cannot build an execution plan without task manifests")
-        semantic_identity = None
-        tasks = []
-        for expected_index, manifest in enumerate(manifests):
-            task_index = manifest.task_index
-            task_kind = manifest.task_type
-            logical_task_id = manifest.logical_task_id
-            if task_index != expected_index:
-                raise ValueError("task manifests are not in physical ordinal order")
-            suffix = f":{task_index}:{task_kind}"
-            if not logical_task_id.startswith("tfl:") or not logical_task_id.endswith(suffix):
-                raise ValueError("task manifest has no stable logical task identity")
-            current_semantic_identity = logical_task_id[4 : -len(suffix)]
-            if not current_semantic_identity:
-                raise ValueError("task manifest has an empty semantic kernel identity")
-            if semantic_identity is None:
-                semantic_identity = current_semantic_identity
-            elif semantic_identity != current_semantic_identity:
-                raise ValueError("task manifests do not belong to one semantic kernel")
-            tasks.append(
+        _, semantic_identity, topology = _validated_manifest_topology(manifests)
+        return cls(
+            semantic_identity,
+            tuple(
                 _TaskOptimizationSpec(
                     logical_task_id=logical_task_id,
                     task_index=task_index,
                     task_kind=task_kind,
                 )
-            )
-        return cls(semantic_identity, tuple(tasks))
+                for logical_task_id, task_index, task_kind in topology
+            ),
+        )
 
     @property
     def is_baseline(self):
-        return all(task.is_baseline for task in self.tasks)
+        return self._is_baseline
 
     @property
     def requires_graph_memory(self):
-        return any(task.memory_strategy != "direct" for task in self.tasks)
+        return self._requires_graph_memory
 
     @property
     def stable_payload(self):
@@ -210,28 +272,33 @@ class _OffloadExecutionPlan:
 
     @property
     def identity(self):
-        return _identity("oep1:", self.stable_payload)
+        return self._identity
 
     @property
     def compilation_identity(self):
-        return _identity("oep1c:", self.compilation_payload)
+        return self._compilation_identity
 
     @property
     def recipe_id(self):
         return _TASK_PLAN_RECIPE_PREFIX + self.identity.removeprefix("oep1:")
 
     def replace_task(self, task_index, **changes):
-        if isinstance(task_index, bool) or not isinstance(task_index, int) or not 0 <= task_index < len(self.tasks):
+        if (
+            isinstance(task_index, bool)
+            or not isinstance(task_index, int)
+            or not 0 <= task_index < len(self.tasks)
+        ):
             raise IndexError("task_index is outside this execution plan")
         tasks = list(self.tasks)
         tasks[task_index] = replace(tasks[task_index], **changes)
         return type(self)(self.semantic_kernel_identity, tuple(tasks))
 
     def validate_topology(self, manifests):
-        baseline = type(self).from_task_manifests(manifests)
-        if baseline.semantic_kernel_identity != self.semantic_kernel_identity or tuple(
-            (task.logical_task_id, task.task_index, task.task_kind) for task in baseline.tasks
-        ) != tuple((task.logical_task_id, task.task_index, task.task_kind) for task in self.tasks):
+        _, semantic_identity, topology = _validated_manifest_topology(manifests)
+        if (
+            semantic_identity != self.semantic_kernel_identity
+            or topology != self._topology_signature
+        ):
             raise ValueError("materialized offload topology does not match the plan")
         return True
 
@@ -240,21 +307,33 @@ class _OffloadExecutionPlan:
         self.validate_topology(manifests)
         if len(manifests) != len(self.tasks):
             raise ValueError("materialized task count does not match the plan")
+        compilation_identity = self.compilation_identity
         for spec, manifest in zip(self.tasks, manifests):
-            if manifest.optimization_spec_id != self.compilation_identity:
-                raise ValueError("materialized compilation identity does not match the plan")
-            if spec.workgroup_size is not None and manifest.selected_block_size != spec.workgroup_size:
-                raise ValueError(f"task {spec.task_index} did not materialize workgroup_size")
+            if manifest.optimization_spec_id != compilation_identity:
+                raise ValueError(
+                    "materialized compilation identity does not match the plan"
+                )
+            if (
+                spec.workgroup_size is not None
+                and manifest.selected_block_size != spec.workgroup_size
+            ):
+                raise ValueError(
+                    f"task {spec.task_index} did not materialize workgroup_size"
+                )
             expected_max_registers = spec.cuda_max_registers
             if (
                 manifest.requested_thread_local_mode != spec.thread_local
-                or manifest.requested_cuda_min_blocks_per_sm != spec.cuda_min_blocks_per_sm
+                or manifest.requested_cuda_min_blocks_per_sm
+                != spec.cuda_min_blocks_per_sm
                 or manifest.requested_cuda_max_registers != expected_max_registers
                 or manifest.requested_grid_residency_waves != spec.grid_residency_waves
-                or manifest.requested_range_work_per_thread_target != spec.range_work_per_thread_target
+                or manifest.requested_range_work_per_thread_target
+                != spec.range_work_per_thread_target
                 or manifest.requested_memory_strategy != spec.memory_strategy
             ):
-                raise ValueError(f"task {spec.task_index} materialized different controls")
+                raise ValueError(
+                    f"task {spec.task_index} materialized different controls"
+                )
         return True
 
     @property
@@ -266,11 +345,20 @@ class _OffloadExecutionPlan:
             self.identity,
             [task.task_index for task in self.tasks],
             [task.task_kind for task in self.tasks],
-            [0 if task.workgroup_size is None else task.workgroup_size for task in self.tasks],
+            [
+                0 if task.workgroup_size is None else task.workgroup_size
+                for task in self.tasks
+            ],
             [task.thread_local for task in self.tasks],
             [task.cuda_min_blocks_per_sm for task in self.tasks],
-            [-1 if task.cuda_max_registers is None else task.cuda_max_registers for task in self.tasks],
-            [0 if task.grid_residency_waves is None else task.grid_residency_waves for task in self.tasks],
+            [
+                -1 if task.cuda_max_registers is None else task.cuda_max_registers
+                for task in self.tasks
+            ],
+            [
+                0 if task.grid_residency_waves is None else task.grid_residency_waves
+                for task in self.tasks
+            ],
             [task.range_work_per_thread_target for task in self.tasks],
             [task.memory_strategy for task in self.tasks],
         )
