@@ -159,14 +159,14 @@ range than Forge. Recheck its Python and CUDA/`ptxas` support table during
 deployment. This separate-interpreter constraint does not change the Python
 support matrix of the Forge wheel itself.
 
-This process worker is distinct from
-`ti.compileiq_offload_execution_plan_search()` and
-`ti.graph.compileiq_recipe_search()`. Those optional offline recipe APIs accept
-only the reviewed Forge fork at `579b572`, including its complete capability,
+This process worker is distinct from `ti.graph.compileiq_recipe_search()`.
+That optional offline Graph-recipe API accepts only the reviewed Forge fork at
+`579b572`, including its complete capability,
 bundled-core, and Python-source locks. That fork supports the main-thread
 bounded-exhaustive worker on Forge's Python 3.10 wheel. A generic upstream
 installation or the external JSON worker above is not accepted as a substitute
-for those APIs.
+for that API. Task-indexed kernel/offload search remains private qualification
+infrastructure and is not a public API.
 
 Forge invokes the versioned JSON v1 process protocol as:
 

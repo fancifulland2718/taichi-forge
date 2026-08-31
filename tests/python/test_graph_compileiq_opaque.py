@@ -36,6 +36,18 @@ _MAP4_RECIPE_ID = "fusion:map4:" + "d" * 24
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_compileiq_public_search_surface_is_graph_owned():
+    assert ti.graph.compileiq_recipe_search is compileiq_recipe_search
+    assert not hasattr(ti, "compileiq_offload_execution_plan_search")
+    assert not hasattr(ti.lang, "compileiq_offload_execution_plan_search")
+    assert not hasattr(ti, "CompileIQOffloadExecutionPlanSearch")
+    assert not hasattr(ti.lang, "CompileIQOffloadExecutionPlanSearch")
+    assert not hasattr(ti.algorithms, "compileiq_reduce_provider_search")
+    assert not hasattr(ti.algorithms, "compileiq_segmented_scan_search")
+    assert not hasattr(ti.algorithms, "CompileIQReduceProviderSearch")
+    assert not hasattr(ti.algorithms, "CompileIQSegmentedScanSearch")
+
+
 class _Literal:
     def __init__(self, value):
         self.value = value

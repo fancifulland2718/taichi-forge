@@ -3,7 +3,9 @@ from types import SimpleNamespace
 import numpy as np
 
 import taichi_forge as ti
-from taichi_forge.lang import compileiq_offload_execution_plan_search
+from taichi_forge.lang._compileiq_offload_execution_plan import (
+    compileiq_offload_execution_plan_search,
+)
 from tests import test_utils
 
 

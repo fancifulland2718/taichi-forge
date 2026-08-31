@@ -43,14 +43,13 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的离线 recipe 搜索。当前审查身份更新为
+- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的 Graph-owned 离线 recipe 搜索。当前审查身份更新为
   `forge/opaque-recipes-v1.2` 的 `579b572`，支持 Forge Python 3.10 与确定性的
-  bounded-exhaustive opaque 搜索。新增 `ti.compileiq_offload_execution_plan_search()`，搜索
-  完整、有序、按 task 索引的 CUDA kernel plan：只要每个 candidate 都代表完整内部策略，
-  单 kernel 搜索就继续保留；无调用方的 fixed-axis kernel-wide adapter 已删除，raw
-  `TaskLaunchPolicy` 也不作为 CompileIQ 搜索面。第一阶段覆盖每个合法 single-task
-  perturbation，已观测 frontier 的细化会形成所有合法 pair，不静默截断；编译 identity 与
-  launch-only identity 分离，launch request 不会从共享 compiled artifact 泄漏。
+  bounded-exhaustive opaque 搜索。完整、有序、按 task 索引的 CUDA kernel plan、覆盖审计和
+  qualification 仍作为私有诊断基础保留；它们不再导出
+  `ti.compileiq_offload_execution_plan_search()` 公共入口。无调用方的 fixed-axis kernel-wide
+  adapter 已删除，raw `TaskLaunchPolicy` 也不作为 CompileIQ 搜索面。编译 identity 与
+  launch-only identity 继续分离，launch request 不会从共享 compiled artifact 泄漏。
 
   `ti.graph.compileiq_recipe_search()` 现在搜索精确、保持 barrier 的连续 map partition，或一个
   精确 CUDA structured-control 域；位置不同但宽度相同的 source group 仍保持独立。2 至 8
@@ -78,21 +77,25 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   masked/device-update 分别为 2.130x 与 2.139x。masked 负面项继续保留，因为 cold 中位数
   反而由 masked 占优（65.61 对 74.79 ms、71.30 对 83.06 ms），persistent allocation 也
   分别从 30,884 降至 532 bytes、从 59,996 降至 796 bytes。这些本机 crossover 不改变
-  runtime `auto`；compile/build 时间只作诊断。刻意收窄的
-  `ti.algorithms.compileiq_reduce_provider_search()` 只搜索既有 CUDA dense-field i32 sum
-  provider，不修改 `method="auto"`，也不安装 runtime cache。另新增同样有界的
-  `ti.algorithms.compileiq_segmented_scan_search()` 域：只覆盖 immutable
-  `SegmentedLayout` 上互不 alias 的 CUDA plain 1D i32/u32 ndarray sum，搜索完整的 `serial`
-  与 `global_scan` 物理路线 recipe，动态把当前 `auto` 路线纳入 baseline，并冻结 dtype、
-  inclusive 与 topology identity；float、field、in-place、AD 和非 CUDA 请求全部排除。在当前 RTX 5090 /
+  runtime `auto`；compile/build 时间只作诊断。此前刻意收窄的 reduce-provider 与
+  segmented-scan CompileIQ 搜索器仅保留为私有资格化工具，不再从 `ti.algorithms` 导出，也不形成
+  provider 路由层。算法实现、显式 `method=` 和既有 `method="auto"` 保持不变。历史
+  segmented-scan 域只覆盖 immutable `SegmentedLayout` 上互不 alias 的 CUDA plain 1D i32/u32
+  ndarray sum，并比较完整的 `serial` 与 `global_scan` 物理路线。在当前 RTX 5090 /
   driver 610.62 主机上，独立 10-process x 10-block 平衡 AB/BA 资格测试为单个 32,768-item
   inclusive i32 segment 采纳 global scan：candidate/baseline 中位数为 0.31792，最差进程为
   0.31802。负面对照在 4,096 items / 64-item segment 保留 serial（global/serial 中位
   1.819x），并在 262,144 items / 65,536-item segment 保留 global scan（serial/global 中位
   3.161x）。所有路线都保持精确结果、memory stable，并由真实魔改 CompileIQ core 完整覆盖；
   测试期间存在外部 GameViewer compute process，属于性能 caveat。该证据只适用于精确 scope，
-  不改变 runtime 默认值。所有离线 recipe 路径都通过精确 capability、bundled-core 与 Python-source
+  不改变 runtime 默认值。公开的 Graph recipe 路径通过精确 capability、bundled-core 与 Python-source
   lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的离线依赖。
+
+  Graph memory feasibility 在接入 CompileIQ 前保持 fail closed。当前真实 affine/stencil 元数据描述的是
+  `range_for` dispatch，而现有 BLS controller 只改写 `struct_for` 上的 SNode `GlobalPtrStmt`；它不支持
+  ndarray `ExternalPtrStmt`，也无法从已编译 Graph 精确重建 layout/alignment、uniform barrier 和边界处理。
+  因此 `shared_staged` 继续报告 `unavailable_automatic_shared_stage_codegen`，不生成 memory recipe，不把
+  全局 `CompileConfig.make_block_local` 或私有 per-kernel task 轴加入 Graph CompileIQ 域。
 - 新增精简且稳定的 `HardwareCapability`、`HardwareProviderStatus`、
   `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
   被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`

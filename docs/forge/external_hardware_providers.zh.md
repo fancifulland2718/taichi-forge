@@ -129,11 +129,12 @@ $env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
 与 CUDA/`ptxas` support table。这个独立解释器约束不会改变 Forge wheel 自身的 Python
 支持矩阵。
 
-这个 process worker 与 `ti.compileiq_offload_execution_plan_search()`、
-`ti.graph.compileiq_recipe_search()` 不同。后两者是可选离线 recipe API，只接受固定在
+这个 process worker 与 `ti.graph.compileiq_recipe_search()` 不同。后者是可选离线 Graph recipe
+API，只接受固定在
 `579b572` 的经审查 Forge fork，并校验完整 capability、bundled-core 与 Python-source lock。
 该 fork 支持在 Forge Python 3.10 wheel 上运行 main-thread bounded-exhaustive worker；普通上游
-安装或上述 external JSON worker 都不能替代它。
+安装或上述 external JSON worker 都不能替代它。按 task 索引的 kernel/offload 搜索仅保留为私有
+资格化基础，不属于公共 API。
 
 Forge 使用 versioned JSON v1 process protocol 调用：
 

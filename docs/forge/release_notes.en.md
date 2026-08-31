@@ -47,19 +47,17 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-- Added baseline-inclusive offline recipe search for the reviewed modified
+- Added baseline-inclusive Graph-owned offline recipe search for the reviewed modified
   CompileIQ fork. The reviewed identity is now `579b572` on
   `forge/opaque-recipes-v1.2`, supporting Forge Python 3.10 and deterministic
-  bounded-exhaustive opaque search. Added
-  `ti.compileiq_offload_execution_plan_search()` for complete ordered,
-  task-indexed CUDA kernel plans. Single-kernel search is retained when every
-  candidate represents a complete internal strategy; the unused fixed-axis
-  kernel-wide adapter was removed, and raw `TaskLaunchPolicy` controls are not
-  a CompileIQ search surface. First-stage coverage contains every legal
-  single-task perturbation, while observed-frontier refinement forms every
-  legal pair without silent truncation. Compilation and launch-only identities
-  are separate, preventing launch requests from leaking through shared
-  compiled artifacts.
+  bounded-exhaustive opaque search. Complete ordered task-indexed CUDA kernel
+  plans, coverage auditing, and qualification remain private diagnostic
+  infrastructure; Forge no longer exports a public
+  `ti.compileiq_offload_execution_plan_search()` entry point. The unused
+  fixed-axis kernel-wide adapter remains removed, and raw `TaskLaunchPolicy`
+  controls are not a CompileIQ search surface. Compilation and launch-only
+  identities remain separate, preventing launch requests from leaking through
+  shared compiled artifacts.
 
   `ti.graph.compileiq_recipe_search()` now searches exact barrier-preserving
   contiguous map partitions or one exact CUDA structured-control domain.
@@ -97,16 +95,13 @@ grouped under the behavior they shipped.
   because cold medians favored masked (65.61 vs 74.79 ms and 71.30 vs 83.06 ms)
   while persistent allocation fell from 30,884 to 532 bytes and from 59,996 to
   796 bytes. These local crossovers do not change runtime `auto`. Compile/build
-  timing remained diagnostic only. The deliberately narrow
-  `ti.algorithms.compileiq_reduce_provider_search()` slice searches the existing
-  CUDA dense-field i32 sum providers without changing `method="auto"` or
-  installing a runtime cache. Added the equally bounded
-  `ti.algorithms.compileiq_segmented_scan_search()` domain for disjoint CUDA
-  plain 1D i32/u32 ndarray sum over an immutable `SegmentedLayout`. It searches
-  complete `segmented-scan:serial:v1` and
-  `segmented-scan:cuda-global-scan:v1` recipes, dynamically includes the current
-  `auto` route as baseline, freezes dtype/inclusive/topology identity, and
-  excludes float, field, in-place, AD, and non-CUDA requests. On the current
+  timing remained diagnostic only. The deliberately narrow reduce-provider and
+  segmented-scan CompileIQ searchers now remain private qualification tools;
+  they are no longer exported from `ti.algorithms` and do not form a provider
+  routing layer. Algorithm implementations, explicit `method=`, and existing
+  `method="auto"` behavior remain unchanged. The historical segmented-scan
+  domain covered disjoint CUDA plain 1D i32/u32 ndarray sum over an immutable
+  `SegmentedLayout` and compared complete serial and global-scan routes. On the current
   RTX 5090/driver 610.62 host, independent 10-process x 10-block balanced AB/BA
   qualification admitted global scan for one 32,768-item inclusive i32 segment:
   candidate/baseline median was 0.31792 and worst process was 0.31802. Negative
@@ -115,9 +110,19 @@ grouped under the behavior they shipped.
   segments (serial/global 3.161x). All routes were exact, memory-stable, and
   covered by the real modified CompileIQ core; an external GameViewer compute
   process remained a performance caveat. This evidence is exact-scope and does
-  not change the runtime default. All offline recipe paths reject
+  not change the runtime default. The public Graph recipe path rejects
   upstream/different CompileIQ builds through exact capability, bundled-core,
   and Python-source locks; CompileIQ remains an optional offline dependency.
+
+  Graph-memory feasibility remains fail-closed before CompileIQ integration.
+  The real affine/stencil metadata currently describes `range_for` dispatches,
+  while the existing BLS controller only rewrites SNode `GlobalPtrStmt` access
+  in `struct_for`; it does not support ndarray `ExternalPtrStmt` access or
+  reconstruct layout/alignment, uniform barriers, and boundary handling from
+  an already compiled Graph. Consequently `shared_staged` still reports
+  `unavailable_automatic_shared_stage_codegen`: Forge generates no memory
+  recipe and does not turn global `CompileConfig.make_block_local` or private
+  per-kernel task axes into a Graph CompileIQ domain.
 - Added the compact stable `HardwareCapability`, `HardwareProviderStatus`, and
   `HardwareExecutionReport` status layer plus schema-v4 diagnostic
   operation/provider contracts. Passive status/report calls do not load,

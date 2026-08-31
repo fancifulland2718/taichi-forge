@@ -10,7 +10,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge import _compileiq_opaque as _opaque_transport
-from taichi_forge.algorithms import (
+from taichi_forge.algorithms._compileiq_opaque import (
     CompileIQReduceProviderSearch,
     CompileIQReduceProviderSelection,
     compileiq_reduce_provider_search,

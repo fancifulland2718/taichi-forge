@@ -892,28 +892,14 @@ native path, they call CUDA device APIs, native Vulkan code/shaders, or native
 CPU/C++ implementations directly. Otherwise, supported routes fall back to
 Taichi helper kernels.
 
-### Offline modified-CompileIQ recipe search (0.6.3 in development)
+### CompileIQ boundary (0.6.3 in development)
 
-| API | Exact search slice |
-| --- | --- |
-| `compileiq_reduce_provider_search(values, output, *, op="sum")` | CUDA dense 1D i32 field sum: `cuda_device` versus `field_atomic`. |
-| `compileiq_segmented_scan_search(values, layout, output, *, inclusive=True, op="sum")` | CUDA disjoint plain 1D i32/u32 ndarray segmented sum: `serial` versus `global_scan`, with immutable topology and inclusive mode frozen into the domain. |
-
-The builders return `CompileIQReduceProviderSearch` and
-`CompileIQSegmentedScanSearch`. Their matching frozen selection types are
-`CompileIQReduceProviderSelection` and `CompileIQSegmentedScanSelection`;
-capability, source, backend, or scope failures raise the corresponding
-`CompileIQ*UnavailableError`. Search objects expose the opaque
-`search_space`/`worker_type`, baseline-inclusive recipe manifests,
-`select()`/`execute()`, complete-search auditing, and paired qualification.
-
-These functions require the reviewed modified CompileIQ distribution and fail
-closed for upstream or different builds. They are optional offline tools.
-Ordinary package and primitive use does not import CompileIQ; the tools do not
-change `method="auto"`, emit a runtime cache, or turn a qualified exact
-workload into a general performance promise. See
-[Native algorithms](native_algorithms.en.md) for recipe IDs and the full
-eligibility boundary.
+The algorithms module exposes no independent CompileIQ search builders. The
+historical reduce-provider and segmented-scan search implementations remain
+private qualification tools; ordinary primitives, explicit `method=`, and
+`method="auto"` keep their existing contracts. The public search entry point is
+`ti.graph.compileiq_recipe_search(graph)`, and it accepts only complete
+Forge-owned Graph recipes.
 
 ### Primitive capability queries
 
@@ -1743,42 +1729,21 @@ Block tuning is backend- and workload-specific, so always compare against
 `auto` with end-of-work synchronization. The reproducible paired harness is
 `benchmarks/task_launch_policy_bench.py`.
 
-### Complete kernel execution-plan search with modified CompileIQ
+### Complete Graph execution-recipe search with modified CompileIQ
 
-`ti.compileiq_offload_execution_plan_search(kernel, *sample_args)` builds a
-baseline-inclusive offline domain for one materialized CUDA kernel. The unit of
-selection is a complete, ordered, task-indexed offload execution plan, not one
-kernel-wide block size or provider switch. Non-range tasks remain explicit in
-every candidate. Range-task edits are generated only when the task manifest
-proves them legal, and source-owned block/shared-memory contracts remain
-authoritative. Compilation-affecting and launch-only identities are separate,
-so launch requests do not contaminate a shared compiled artifact.
-
-The first stage contains the baseline plus every legal single-task
-perturbation. After complete modified-CompileIQ coverage, `refine(search,
-frontier_recipe_ids)` creates the baseline, the observed frontier, and every
-legal pair without silent truncation; frontiers over 32 or domains over 4,096
-fail closed. `compileiq_search(objective)` uses the reviewed fork's bounded
-exhaustive worker. `select()`, `bind()`, `materialize()`, `recipe_manifest()`,
-coverage auditing, paired ranking, and independent `qualify()` preserve exact
-plan and parent identities.
-
-This retains single-kernel search when candidates describe different complete
-internal execution strategies. It does not restore the removed fixed-axis
-kernel-wide adapter, expose raw flags as a stable public tuning surface, or
-change an ordinary kernel call. `TaskLaunchPolicy` above remains an explicit
-manual control and is not itself a CompileIQ dimension. Only the reviewed
-modified CompileIQ capability/source identity is accepted; compile time is
-diagnostic, while correctness, exact route, memory stability, and
-worst-positive runtime are admission gates.
-
-`ti.graph.compileiq_recipe_search(graph)` is the corresponding Graph-owned
-recipe search. Its map domain uses exact barrier-preserving source partitions,
+`ti.graph.compileiq_recipe_search(graph)` is the only public CompileIQ recipe
+search. Its map domain uses exact barrier-preserving source partitions,
 not only a maximum `map2`/`map3`/`map4` width. It exhausts products up to 4,095
 candidates and explicitly stages larger products. Exact map search requires
 one ordinary JIT CGraph and one Forge-owned source builder; composed or
 multi-builder Graphs fail closed. Structured-control domains remain separate,
 and fusion-by-control Cartesian products are not exposed.
+
+Task-indexed offload identities, materialization, and qualification remain
+private diagnostic infrastructure rather than a public
+`ti.compileiq_offload_execution_plan_search` API. Ordinary kernels continue to
+use source-owned contracts and explicit `TaskLaunchPolicy`; CompileIQ does not
+receive raw workgroup, TLS, register, or PTXAS axes.
 
 ### Device-resident bounded workloads with `DeviceExtent`
 

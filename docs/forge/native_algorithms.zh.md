@@ -34,8 +34,6 @@
 | `ti.algorithms.experimental_segmented_reduce(values, layout, output, ...)` | 无 host round-trip 地 reduce 每个可复用 dense segment。 |
 | `ti.algorithms.experimental_segmented_scan(values, layout, output, ...)` | 在每个可复用 dense segment 内做 inclusive/exclusive scan。 |
 | `ti.algorithms.experimental_reduce(values, output, op="sum", ...)` | 将 values reduce 到 `output[0]`。 |
-| `ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` | 为受支持的 reduce 纵切构造经审查的离线魔改 CompileIQ provider 域。 |
-| `ti.algorithms.compileiq_segmented_scan_search(values, layout, output, ...)` | 为受支持的 segmented-scan 纵切构造经审查的离线魔改 CompileIQ 物理方案域。 |
 | `ti.algorithms.experimental_histogram(values, bins, ...)` | 将整数 values 统计到 bins。 |
 | `ti.algorithms.experimental_transform(src, dst, scale=..., bias=..., ...)` | 元素级 affine transform 和 copy。 |
 | `ti.algorithms.experimental_gather(src, indices, dst, ...)` | Indexed read。 |
@@ -65,50 +63,16 @@
 
 显式 native method 适合测试或受控部署，不应被当成跨所有后端的可移植承诺。
 
-## 离线魔改 CompileIQ recipe 搜索
+## CompileIQ 边界
 
-这些 API 搜索 Forge 拥有的完整物理 recipe，不把 block size、workgroup shape、PTXAS flag
-或 segment offset 作为可由 CompileIQ 自由组合的独立因子。
+`0.6.3` 不公开算法级 CompileIQ 搜索入口。reduce provider 与 segmented-scan 的历史离线搜索器
+保留为私有资格化工具，用于审计既有正负证据；它们不是算法公共合同，也不会成为新的 provider
+路由层。应用应继续使用上面的普通 primitive、显式 `method=` 或现有 `method="auto"`。
 
-### Reduce provider
-
-`ti.algorithms.compileiq_reduce_provider_search(values, output, op="sum")` 只开放一个刻意收窄的
-高层 provider 选择。当前纵切要求已初始化 CUDA runtime、dense 一维 `ti.i32` field、scalar
-`ti.i32` field output 和精确 sum。完整 recipe 域为：
-
-- baseline `reduce-provider:cuda-device:v1`（`method="cuda_device"`）；
-- candidate `reduce-provider:field-atomic:v1`（`method="field_atomic"`）。
-
-这里搜索的是 provider plan，不是 kernel launch 参数。根据冻结的精确作用域，所选
-`field_atomic` recipe 会落到既有 scalar-atomic 或 two-stage private-field plan。搜索对象公开
-不透明 search space/worker type、显式 `select()`/`execute()` 物化、完整覆盖审计，以及既有的
-独立 paired qualification helper。baseline 只是 sentinel，不能成为 finalist。
-
-### Integer segmented scan
-
-`ti.algorithms.compileiq_segmented_scan_search(values, layout, output,
-inclusive=True, op="sum")` 开放两条完整物理方案：
-
-- `segmented-scan:serial:v1`（`method="serial"`）；
-- `segmented-scan:cuda-global-scan:v1`（`method="global_scan"`）。
-
-精确域要求已初始化 CUDA runtime、互不 alias 的 plain 1D `ti.i32` / `ti.u32`
-ndarray、精确 sum 和 immutable `SegmentedLayout`。inclusive/exclusive 模式与私有 topology
-fingerprint 都冻结进 scope；float、field、StructNdarray、in-place、automatic AD、其他 backend
-以及 topology drift 均 fail closed。baseline recipe 会动态匹配该精确 scope 当前
-`method="auto"` 的阈值选择。layout offset 始终由 Forge 持有，不会作为可配置轴跨过
-CompileIQ 边界。
-
-返回的 `CompileIQSegmentedScanSearch` 提供 opaque `search_space` / `worker_type`、
-`select()`、精确 `execute()` 物化、`recipe_manifest()`、完整搜索覆盖审计和独立 paired
-qualification。资格只适用于精确 topology、dtype、inclusive mode、runtime、device 与 provider
-source identity。当前 RTX 5090 资格测试只在 32,768-item 单 i32 segment 上采纳 global scan；
-小规模多段和现有 auto 已选 global 的大规模 scope 都保留各自 baseline。这证明搜索域具有
-workload-dependent 价值，不表示出现了新的 segmented-scan 通用默认值。
-
-只接受经审查的魔改 CompileIQ capability/core/Python-source 身份；上游或其他 build 会 fail
-closed。搜索与资格化只离线参与，不修改任一 primitive 的 `method="auto"`，不安装 runtime
-cache，也不承诺跨设备性能。compile/search build 时间只作诊断，不是准入门禁。
+公开的 CompileIQ 入口归 Graph 所有：`ti.graph.compileiq_recipe_search(graph)` 只搜索 Forge 已证明
+合法且可精确物化的完整 Graph execution recipe。CompileIQ 不接收 provider、block size、workgroup
+shape、PTXAS flag 或 segment offset 等裸轴。搜索和资格化保持离线，不修改 primitive 默认值；
+compile/search build 时间只作诊断，不是准入门禁。
 
 ## 机器可读 capability 合同
 

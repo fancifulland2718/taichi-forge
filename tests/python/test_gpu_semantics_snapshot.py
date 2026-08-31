@@ -223,10 +223,13 @@ def test_tiling_recipes_only_materialize_existing_cuda_launch_controls():
         if recipe.strategy == _GpuTileStrategy.SHARED_STAGED
     )
     assert shared.status.availability == _GpuAvailability.UNSUPPORTED
+    assert shared.controller == "unavailable_automatic_shared_stage_codegen"
     assert "no ndarray compiler controller" in shared.status.reason
     assert shared.halo == ((-1, 1),)
     assert shared.layout_fingerprints == ()
     assert "runtime_no_alias" in shared.dependencies
+    assert "block_uniform_control" in shared.dependencies
+    assert "shared_stage_codegen" in shared.dependencies
     layout = next(
         recipe
         for recipe in first

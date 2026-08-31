@@ -756,24 +756,11 @@ ti.algorithms.experimental_reduce(...)
 CUDA device API、native Vulkan 代码 / shader 或 native CPU/C++ 实现；否则，
 已支持的路线会回退到 Taichi helper kernel。
 
-### 离线魔改 CompileIQ recipe 搜索（0.6.3 开发中）
+### CompileIQ 边界（0.6.3 开发中）
 
-| API | 精确搜索纵切 |
-| --- | --- |
-| `compileiq_reduce_provider_search(values, output, *, op="sum")` | CUDA dense 1D i32 field sum：`cuda_device` 对 `field_atomic`。 |
-| `compileiq_segmented_scan_search(values, layout, output, *, inclusive=True, op="sum")` | CUDA 互不 alias 的 plain 1D i32/u32 ndarray segmented sum：`serial` 对 `global_scan`；immutable topology 与 inclusive mode 冻结进域。 |
-
-builder 分别返回 `CompileIQReduceProviderSearch` 与
-`CompileIQSegmentedScanSearch`；对应的 frozen selection 类型为
-`CompileIQReduceProviderSelection` 与 `CompileIQSegmentedScanSelection`。capability、source、
-backend 或 scope 不满足时会抛出对应的 `CompileIQ*UnavailableError`。搜索对象公开 opaque
-`search_space` / `worker_type`、包含 baseline 的 recipe manifest、`select()` / `execute()`、
-完整搜索覆盖审计与 paired qualification。
-
-这些函数要求经审查的魔改 CompileIQ distribution；上游或不同 build 会 fail closed。它们只是
-可选离线工具：普通 primitive 调用不会导入 CompileIQ，也不会改变 `method="auto"`、生成 runtime
-cache，或把某个精确 workload 的资格结果变成通用性能承诺。recipe ID 与完整 eligibility 边界见
-[Native 算法](native_algorithms.zh.md)。
+算法模块不公开独立 CompileIQ 搜索 builder。reduce provider 与 segmented-scan 的历史搜索实现只保留为
+私有资格化工具；普通 primitive、显式 `method=` 和 `method="auto"` 的合同不变。公开搜索入口为
+`ti.graph.compileiq_recipe_search(graph)`，并且只接受 Forge-owned 完整 Graph recipe。
 
 ### Primitive capability 查询
 
@@ -1468,33 +1455,17 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 准备。block 调优取决于 backend 和 workload，应始终用执行末端同步的 `auto` 对照测量。
 可复现的成对基准脚本是 `benchmarks/task_launch_policy_bench.py`。
 
-### 使用魔改 CompileIQ 搜索完整 kernel execution plan
+### 使用魔改 CompileIQ 搜索完整 Graph execution recipe
 
-`ti.compileiq_offload_execution_plan_search(kernel, *sample_args)` 为一个已物化的 CUDA
-kernel 构造包含 baseline 的离线域。搜索单位是完整、有序、按 task 索引的 offload execution
-plan，不是一个 kernel-wide block size 或 provider switch。每个 candidate 都显式保留非 range
-task；只有 task manifest 能证明合法时才生成 range-task edit，并始终尊重源码拥有的 block/
-shared-memory 合同。影响编译的 identity 与只影响 launch 的 identity 分离，launch request
-不会污染共享 compiled artifact。
-
-第一阶段包含 baseline 与每一个合法的 single-task perturbation。魔改 CompileIQ 完整覆盖该
-阶段后，`refine(search, frontier_recipe_ids)` 会构造 baseline、已观测 frontier 与所有合法
-pair，不做静默截断；frontier 超过 32 或域超过 4,096 时 fail closed。
-`compileiq_search(objective)` 使用经审查 fork 的 bounded exhaustive worker；`select()`、
-`bind()`、`materialize()`、`recipe_manifest()`、覆盖审计、paired ranking 与独立 `qualify()`
-都保留精确 plan 与 parent identity。
-
-因此，只要 candidate 表示不同的完整 kernel 内部执行策略，单 kernel 搜索仍会保留；这里不会
-恢复已经删除的 fixed-axis kernel-wide adapter，不把 raw flag 当成稳定的公共调优面，也不改变
-普通 kernel 调用。上面的 `TaskLaunchPolicy` 仍是显式手工控制，本身不是 CompileIQ 搜索轴。
-只有经审查的魔改 CompileIQ capability/source identity 才会被接受；compile time 只作诊断，
-correctness、精确 route、memory stability 与 worst-positive runtime 才是准入门禁。
-
-`ti.graph.compileiq_recipe_search(graph)` 是相应的 Graph-owned recipe 搜索。其 map 域搜索精确、
+`ti.graph.compileiq_recipe_search(graph)` 是唯一公开的 CompileIQ recipe 搜索。其 map 域搜索精确、
 保持 barrier 的 source partition，而不是只看最大 `map2`/`map3`/`map4` width；不超过 4,095
 个 candidate 的乘积会完整枚举，更大的乘积会明确分阶段。精确 map 搜索要求一个 ordinary JIT
 CGraph 和一个 Forge-owned 源 builder；composed 或 multi-builder Graph 会 fail closed。
 structured-control 域继续独立，也不开放 fusion × control 的笛卡尔积。
+
+按 task 索引的 offload identity、物化和资格化实现保留为私有诊断基础，但不作为
+`ti.compileiq_offload_execution_plan_search` 公共 API。普通 kernel 继续使用源码合同和显式
+`TaskLaunchPolicy`；CompileIQ 不接收 workgroup、TLS、register 或 PTXAS 裸轴。
 
 ### 使用 `DeviceExtent` 表达设备端有界工作量
 
