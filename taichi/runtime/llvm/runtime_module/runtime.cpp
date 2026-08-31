@@ -2955,6 +2955,27 @@ void gpu_parallel_range_for_one_to_one(RuntimeContext *context,
     epilogue(context, tls_ptr);
 }
 
+void gpu_parallel_range_for_shared_staged(RuntimeContext *context,
+                                          int begin,
+                                          int end,
+                                          range_for_xlogue prologue,
+                                          range_for_xlogue bls_prologue,
+                                          RangeForTaskFunc *func,
+                                          range_for_xlogue epilogue,
+                                          const std::size_t tls_size) {
+  int idx = thread_idx() + block_dim() * block_idx() + begin;
+  alignas(8) char tls_buffer[tls_size];
+  auto tls_ptr = &tls_buffer[0];
+  if (prologue)
+    prologue(context, tls_ptr);
+  bls_prologue(context, tls_ptr);
+  block_barrier();
+  if (idx < end)
+    func(context, tls_ptr, idx);
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
+
 struct mesh_task_helper_context {
   RuntimeContext *context;
   mesh_for_xlogue prologue{nullptr};

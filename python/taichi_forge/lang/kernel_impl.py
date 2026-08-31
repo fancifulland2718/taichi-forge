@@ -3542,6 +3542,11 @@ class _OffloadExecutionPlanBinding:
 
     def __call__(self, *args, **kwargs):
         try:
+            if self.plan.requires_graph_memory:
+                raise TaichiRuntimeError(
+                    "shared-staged offload plans are Graph-owned and cannot "
+                    "be launched as direct kernel calls"
+                )
             runtime = self._kernel.runtime
             if (
                 runtime.target_tape is not None

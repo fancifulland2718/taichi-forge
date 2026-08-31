@@ -215,6 +215,11 @@ class DispatchNode:
     logical_dispatch_id: str = ""
     logical_kernel_identity: str = ""
     fusion_blocker: str = ""
+    # Private runtime legality contracts installed by Graph-owned memory
+    # recipes. Each pair must be proven storage-disjoint before submission.
+    memory_disjoint_pairs: Tuple[Tuple[str, str], ...] = ()
+    # name, minimum scalar elements, record stride, and byte alignment.
+    memory_layout_requirements: Tuple[Tuple[str, int, int, int], ...] = ()
 
     @property
     def kind(self):
@@ -1645,6 +1650,8 @@ def graph_ir_to_dict(node, _structured_depth=0):
             if node.bounded_domain is None
             else node.bounded_domain.to_dict()
         )
+        result["memory_disjoint_pairs"] = node.memory_disjoint_pairs
+        result["memory_layout_requirements"] = node.memory_layout_requirements
     if isinstance(node, ObservationNode):
         result["batch"] = node.batch
     return result

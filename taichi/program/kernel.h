@@ -80,6 +80,7 @@ class TI_DLL_EXPORT Kernel : public Callable {
     int cuda_max_registers{-1};
     int grid_residency_waves{0};  // zero is automatic
     int range_work_per_thread_target{1};
+    std::string memory_strategy{"direct"};
   };
 
   struct OffloadExecutionPlan {
@@ -182,7 +183,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
       const std::vector<int> &cuda_min_blocks_per_sm,
       const std::vector<int> &cuda_max_registers,
       const std::vector<int> &grid_residency_waves,
-      const std::vector<int> &range_work_per_thread_targets);
+      const std::vector<int> &range_work_per_thread_targets,
+      const std::vector<std::string> &memory_strategies);
 
   const std::optional<OffloadExecutionPlan> &get_offload_execution_plan()
       const;

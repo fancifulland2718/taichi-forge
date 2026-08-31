@@ -9305,6 +9305,32 @@ def _parallel_logical_root_children(root):
     return tuple(children)
 
 
+def _graph_memory_disjoint_pairs(root):
+    pairs = set()
+
+    def visit(node):
+        if isinstance(node, DispatchNode):
+            pairs.update(tuple(pair) for pair in node.memory_disjoint_pairs)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return tuple(sorted(pairs))
+
+
+def _graph_memory_layout_requirements(root):
+    requirements = set()
+
+    def visit(node):
+        if isinstance(node, DispatchNode):
+            requirements.update(tuple(item) for item in node.memory_layout_requirements)
+        for child in node.children:
+            visit(child)
+
+    visit(root)
+    return tuple(sorted(requirements))
+
+
 def _parallel_identity_tuple(value):
     if value is None:
         return None
@@ -9507,6 +9533,12 @@ class _GraphSpec:
             tuple(node.ir_node for node in source_nodes), name="graph"
         )
         self.pre_optimization_ir_analysis = analyze_graph_ir(
+            self.pre_optimization_ir_root
+        )
+        self.memory_disjoint_pairs = _graph_memory_disjoint_pairs(
+            self.pre_optimization_ir_root
+        )
+        self.memory_layout_requirements = _graph_memory_layout_requirements(
             self.pre_optimization_ir_root
         )
         self.temporary_memory_plan = plan_temporary_memory(
@@ -9948,6 +9980,7 @@ class _GraphSpec:
                 validation_args = dict(fixed_runtime_args)
                 validation_args.update(args)
             self._validate_nested_control_aliases(validation_args)
+            self._validate_memory_recipe_contracts(validation_args)
             for lease in self.lifetime_leases:
                 validate = getattr(lease, "validate_graph_bindings", None)
                 if validate is not None:
@@ -10128,6 +10161,58 @@ class _GraphSpec:
                 raise TaichiRuntimeError(
                     "Nested Graph control resources must not alias at "
                     f"runtime: {parent_path!r} and {child_path!r}"
+                )
+
+    def _validate_memory_recipe_contracts(self, args):
+        storage = {}
+
+        def describe(name):
+            if name not in storage:
+                storage[name] = _parallel_storage_description(name, args[name])
+            return storage[name]
+
+        for name, minimum_elements, record_stride, alignment in (
+            self.memory_layout_requirements
+        ):
+            fact, _ = describe(name)
+            if (
+                not fact.supported
+                or fact.owner_status != "kNone"
+                or not fact.compact_contiguous
+                or len(fact.index_shape) != 1
+                or fact.element_shape
+                or fact.scalar_count is None
+                or fact.scalar_count < minimum_elements
+                or fact.record_stride != record_stride
+                or fact.byte_offset is None
+                or fact.byte_offset % alignment != 0
+            ):
+                raise TaichiRuntimeError(
+                    "Graph shared-staged memory recipe requires a compact "
+                    f"one-dimensional {record_stride}-byte layout for {name!r}, "
+                    f"aligned to {alignment} bytes with at least "
+                    f"{minimum_elements} scalar elements"
+                )
+        for left, right in self.memory_disjoint_pairs:
+            left_fact, left_description = describe(left)
+            right_fact, right_description = describe(right)
+            alias = "kUnknown"
+            if (
+                left_description is not None
+                and right_description is not None
+                and left_fact.supported
+                and right_fact.supported
+                and left_fact.owner_status == "kNone"
+                and right_fact.owner_status == "kNone"
+            ):
+                try:
+                    alias = analyze_storage_alias(left_description, right_description)
+                except Exception:
+                    alias = "kUnknown"
+            if alias != "kProvenDisjoint":
+                raise TaichiRuntimeError(
+                    "Graph shared-staged memory recipe requires proven "
+                    f"disjoint storage for {left!r} and {right!r}; got {alias}"
                 )
 
     def instantiate(self, key=None):
@@ -10971,6 +11056,7 @@ def gen_cpp_kernel(
     template_args=None,
     task_launch_policy=None,
     range_one_to_one=False,
+    allow_graph_memory_recipe=False,
 ):
     execution_plan = None
     if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
@@ -10981,6 +11067,11 @@ def gen_cpp_kernel(
             )
         kernel = kernel_fn._kernel
         execution_plan = kernel_fn.plan
+        if execution_plan.requires_graph_memory and not allow_graph_memory_recipe:
+            raise TaichiCompilationError(
+                "shared-staged execution plans require the private "
+                "Graph-owned memory recipe materializer"
+            )
     else:
         kernel = (
             kernel_fn
@@ -11026,6 +11117,142 @@ def gen_cpp_kernel(
             key, task_launch_policy
         )
     return kernel.compiled_kernels[key]
+
+
+def _graph_shared_staged_contract(kernel_cpp, args):
+    raw = impl.get_runtime().prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+    if _backend_name(raw["backend"]) != "cuda":
+        raise TaichiRuntimeError(
+            "Graph shared-staged memory recipes require the CUDA backend"
+        )
+    staged_tasks = tuple(
+        task
+        for task in raw["tasks"]
+        if task.get("requested_memory_strategy") == "shared_staged_1d"
+    )
+    if len(staged_tasks) != 1:
+        raise TaichiRuntimeError(
+            "Graph shared-staged recipe must materialize exactly one staged task"
+        )
+    task = staged_tasks[0]
+    if (
+        task.get("task_type") != "range_for"
+        or task.get("range_mapping") != "shared_tiled_one_to_one"
+        or not isinstance(task.get("static_shared_bytes"), int)
+        or task["static_shared_bytes"] <= 0
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged task did not materialize its exact BLS mapping"
+        )
+    staged_index = task.get("staged_external_arg_index")
+    halo_low = task.get("staged_halo_low")
+    halo_high = task.get("staged_halo_high")
+    if (
+        isinstance(staged_index, bool)
+        or not isinstance(staged_index, int)
+        or not 0 <= staged_index < len(args)
+        or not isinstance(halo_low, int)
+        or not isinstance(halo_high, int)
+        or halo_low >= halo_high
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged task has incomplete input or halo metadata"
+        )
+
+    metadata = raw["graph_metadata"]
+    if (
+        not metadata.get("available", False)
+        or metadata.get("opaque", True)
+        or metadata.get("blocker")
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged recipe requires proven pre-offload effects"
+        )
+    domain = metadata.get("iteration_domain", {})
+    domain_begin = domain.get("begin")
+    domain_end = domain.get("end")
+    if (
+        domain.get("kind") != "constant_range"
+        or isinstance(domain_begin, bool)
+        or not isinstance(domain_begin, int)
+        or isinstance(domain_end, bool)
+        or not isinstance(domain_end, int)
+        or domain_begin < 0
+        or domain_begin >= domain_end
+        or task.get("constant_range_size") != domain_end - domain_begin
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged recipe requires one exact non-empty constant domain"
+        )
+    effects = {}
+    for effect in metadata.get("effects", ()):
+        path = tuple(int(index) for index in effect.get("arg_id", ()))
+        if effect.get("resource_kind") != "argument" or len(path) != 1:
+            raise TaichiRuntimeError(
+                "Graph shared-staged recipe supports top-level ndarray effects only"
+            )
+        index = path[0]
+        if not 0 <= index < len(args):
+            raise TaichiRuntimeError(
+                "Graph shared-staged effect argument is outside the symbolic ABI"
+            )
+        symbolic = args[index]
+        if (
+            getattr(symbolic, "tag", None) != ArgKind.NDARRAY
+            or symbolic.field_dim != 1
+            or symbolic.element_shape
+        ):
+            raise TaichiRuntimeError(
+                "Graph shared-staged effects require scalar one-dimensional ndarrays"
+            )
+        effects[index] = effect
+
+    staged_effect = effects.get(staged_index)
+    footprint = None if staged_effect is None else staged_effect.get("footprint", {})
+    try:
+        halo = tuple(
+            tuple(int(value) for value in axis)
+            for axis in (() if footprint is None else footprint.get("halo", ()))
+        )
+    except (TypeError, ValueError):
+        halo = ()
+    if (
+        staged_effect is None
+        or staged_effect.get("access") != "read"
+        or footprint.get("pattern") != "stencil"
+        or halo != ((halo_low, halo_high),)
+        or domain_begin + halo_low < 0
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged input does not match the proven stencil footprint"
+        )
+
+    staged_name = args[staged_index].name
+    output_names = []
+    layout_requirements = [(staged_name, domain_end + halo_high, 4, 4)]
+    for index, effect in effects.items():
+        if index == staged_index:
+            continue
+        output_footprint = effect.get("footprint", {})
+        if (
+            effect.get("access") != "write"
+            or output_footprint.get("pattern") != "exact_pointwise"
+            or tuple(output_footprint.get("affine_offsets", ())) != (0,)
+        ):
+            raise TaichiRuntimeError(
+                "Graph shared-staged outputs must be proven write-only and pointwise"
+            )
+        output_name = args[index].name
+        output_names.append(output_name)
+        layout_requirements.append((output_name, domain_end, 4, 4))
+    if not output_names or staged_name in output_names:
+        raise TaichiRuntimeError(
+            "Graph shared-staged recipe requires a distinct write-only output"
+        )
+    return (
+        tuple(sorted((staged_name, name) for name in output_names)),
+        tuple(sorted(layout_requirements)),
+    )
 
 
 def _require_bounded_symbolic_ndarray(value, role, dtype):
@@ -11279,9 +11506,9 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                     dispatch_label=fallback.dispatch_label,
                     logical_dispatch_id=logical_dispatch_id,
                     logical_kernel_identity=logical_kernel_identity,
-                    fusion_blocker=str(
-                        record.get("blocker") or "metadata_unavailable"
-                    ),
+                    fusion_blocker=str(record.get("blocker") or "metadata_unavailable"),
+                    memory_disjoint_pairs=fallback.memory_disjoint_pairs,
+                    memory_layout_requirements=fallback.memory_layout_requirements,
                 )
             )
             continue
@@ -11299,6 +11526,8 @@ def _compiled_dispatch_ir_nodes(compiled_graph, fallback_nodes):
                 dispatch_label=fallback.dispatch_label,
                 logical_dispatch_id=logical_dispatch_id,
                 logical_kernel_identity=logical_kernel_identity,
+                memory_disjoint_pairs=fallback.memory_disjoint_pairs,
+                memory_layout_requirements=fallback.memory_layout_requirements,
             )
         )
     return tuple(result)
@@ -11969,6 +12198,43 @@ class GraphBuilder:
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
         self._record_dispatch(kernel_cpp, unzipped_args, label)
+
+    def _dispatch_shared_staged_1d(
+        self, kernel_fn, *args, template_args=None, label=None
+    ):
+        """Materialize one private Graph-owned external shared-stage recipe."""
+
+        if not isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
+            raise TaichiRuntimeError(
+                "Graph shared-staged dispatch requires an exact offload plan binding"
+            )
+        if (
+            sum(
+                task.memory_strategy == "shared_staged_1d"
+                for task in kernel_fn.plan.tasks
+            )
+            != 1
+        ):
+            raise TaichiRuntimeError(
+                "Graph shared-staged dispatch requires exactly one staged task"
+            )
+        label = _normalize_dispatch_label(label)
+        kernel_cpp = gen_cpp_kernel(
+            kernel_fn,
+            args,
+            template_args=template_args,
+            allow_graph_memory_recipe=True,
+        )
+        unzipped_args = flatten_args(args)
+        contracts, layout_requirements = _graph_shared_staged_contract(
+            kernel_cpp, unzipped_args
+        )
+        self._record_dispatch(kernel_cpp, unzipped_args, label)
+        self._pending_ir_nodes[-1] = replace(
+            self._pending_ir_nodes[-1],
+            memory_disjoint_pairs=contracts,
+            memory_layout_requirements=layout_requirements,
+        )
 
     def dispatch_indirect(
         self,

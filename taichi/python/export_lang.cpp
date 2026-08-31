@@ -192,6 +192,7 @@ py::dict offloaded_task_manifest_to_python(
                task.requested_grid_residency_waves);
   item["requested_range_work_per_thread_target"] =
       task.requested_range_work_per_thread_target;
+  item["requested_memory_strategy"] = task.requested_memory_strategy;
   set_optional("selected_grid_size", task.selected_grid_size);
   set_optional("selected_block_size", task.selected_block_size);
   set_optional("actual_grid_size", task.actual_grid_size);
@@ -199,6 +200,9 @@ py::dict offloaded_task_manifest_to_python(
   item["actual_geometry_kind"] = task.actual_geometry_kind;
   item["actual_geometry_reason"] = task.actual_geometry_reason;
   item["range_mapping"] = task.range_mapping;
+  set_optional("staged_external_arg_index", task.staged_external_arg_index);
+  set_optional("staged_halo_low", task.staged_halo_low);
+  set_optional("staged_halo_high", task.staged_halo_high);
   if (task.constant_range_size.has_value()) {
     item["constant_range_size"] = *task.constant_range_size;
   } else {
@@ -227,6 +231,7 @@ lang::OffloadedTaskManifest overlay_execution_plan_launch_requests(
   }
   task.requested_range_work_per_thread_target =
       spec.range_work_per_thread_target;
+  task.requested_memory_strategy = spec.memory_strategy;
   return task;
 }
 

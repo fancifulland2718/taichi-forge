@@ -81,11 +81,13 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.task_type = task.task_type;
     item.range_mapping =
         task.task_type == OffloadedTaskType::range_for
-            ? (task.one_to_one ? (cuda_execution
-                                      ? "device_bounded_grid_stride"
-                                      : "one_to_one")
-                               : (cpu_execution ? "cpu_scheduler"
-                                                : "grid_stride"))
+            ? (task.external_shared_staged
+                   ? "shared_tiled_one_to_one"
+                   : (task.one_to_one
+                          ? (cuda_execution ? "device_bounded_grid_stride"
+                                            : "one_to_one")
+                          : (cpu_execution ? "cpu_scheduler"
+                                           : "grid_stride")))
             : "not_applicable";
     if (task.constant_range_size >= 0) {
       item.constant_range_size = task.constant_range_size;
@@ -109,6 +111,12 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     }
     item.requested_range_work_per_thread_target =
         task.requested_range_work_per_thread_target;
+    item.requested_memory_strategy = task.requested_memory_strategy;
+    if (task.external_shared_staged) {
+      item.staged_external_arg_index = task.external_shared_arg_index;
+      item.staged_halo_low = task.external_shared_halo_low;
+      item.staged_halo_high = task.external_shared_halo_high;
+    }
     if (cpu_execution) {
       item.actual_geometry_kind = "cpu_runtime_scheduler";
       item.actual_geometry_reason =

@@ -719,6 +719,15 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
   void create_offload_range_for(OffloadedStmt *stmt) override {
     auto tls_prologue = create_xlogue(stmt->tls_prologue);
 
+    llvm::Value *bls_prologue = nullptr;
+    if (stmt->bls_prologue) {
+      auto guard = get_function_creation_guard(get_xlogue_argument_types());
+      begin_bls_prologue(stmt);
+      stmt->bls_prologue->accept(this);
+      end_bls_prologue(stmt);
+      bls_prologue = guard.body;
+    }
+
     llvm::Function *body;
     {
       auto guard = get_function_creation_guard(
@@ -736,7 +745,12 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto epilogue = create_xlogue(stmt->tls_epilogue);
 
     auto [begin, end] = get_range_for_bounds(stmt);
-    if (stmt->one_to_one) {
+    if (stmt->external_shared_staged) {
+      TI_ASSERT(bls_prologue != nullptr);
+      call("gpu_parallel_range_for_shared_staged", get_arg(0), begin, end,
+           tls_prologue, bls_prologue, body, epilogue,
+           tlctx->get_constant(stmt->tls_size));
+    } else if (stmt->one_to_one) {
       // CUDA bounded Graph payloads keep the backend's ordinary
       // saturation-capped grid-stride scheduler. Only the logical range end
       // is loaded from the device extent; CUDA 12.4 node updates may trim the

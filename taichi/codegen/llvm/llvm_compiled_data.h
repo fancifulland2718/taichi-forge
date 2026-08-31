@@ -33,6 +33,7 @@ class OffloadedTask {
   int requested_cuda_max_registers{-1};
   int requested_grid_residency_waves{0};
   int requested_range_work_per_thread_target{1};
+  std::string requested_memory_strategy{"direct"};
   int block_dim{0};
   int grid_dim{0};
   std::int64_t constant_range_size{-1};
@@ -40,6 +41,10 @@ class OffloadedTask {
   int dynamic_shared_array_bytes{0};
   std::uint64_t thread_local_bytes{0};
   bool one_to_one{false};
+  bool external_shared_staged{false};
+  int external_shared_arg_index{-1};
+  int external_shared_halo_low{0};
+  int external_shared_halo_high{0};
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
@@ -64,6 +69,7 @@ class OffloadedTask {
             requested_cuda_max_registers,
             requested_grid_residency_waves,
             requested_range_work_per_thread_target,
+            requested_memory_strategy,
             block_dim,
             grid_dim,
             constant_range_size,
@@ -71,6 +77,10 @@ class OffloadedTask {
             dynamic_shared_array_bytes,
             thread_local_bytes,
             one_to_one,
+            external_shared_staged,
+            external_shared_arg_index,
+            external_shared_halo_low,
+            external_shared_halo_high,
             sparse_list_op,
             sparse_list_snode_id,
             sparse_list_parent_snode_id,

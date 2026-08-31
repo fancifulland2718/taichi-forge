@@ -335,7 +335,8 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &cuda_min_blocks_per_sm,
     const std::vector<int> &cuda_max_registers,
     const std::vector<int> &grid_residency_waves,
-    const std::vector<int> &range_work_per_thread_targets) {
+    const std::vector<int> &range_work_per_thread_targets,
+    const std::vector<std::string> &memory_strategies) {
   TI_ERROR_IF(compilation_identity.empty() || execution_identity.empty(),
               "offload execution plan requires non-empty compilation and "
               "execution identities");
@@ -351,7 +352,8 @@ void Kernel::set_offload_execution_plan(
           cuda_min_blocks_per_sm.size() != task_count ||
           cuda_max_registers.size() != task_count ||
           grid_residency_waves.size() != task_count ||
-          range_work_per_thread_targets.size() != task_count,
+          range_work_per_thread_targets.size() != task_count ||
+          memory_strategies.size() != task_count,
       "offload execution plan vectors must have one entry per physical task");
 
   OffloadExecutionPlan plan;
@@ -414,12 +416,27 @@ void Kernel::set_offload_execution_plan(
     task.grid_residency_waves = grid_residency_waves[index];
     task.range_work_per_thread_target =
         range_work_per_thread_targets[index];
+    TI_ERROR_IF(memory_strategies[index] != "direct" &&
+                    memory_strategies[index] != "shared_staged_1d",
+                "offload task memory strategy must be 'direct' or "
+                "'shared_staged_1d', got {}",
+                memory_strategies[index]);
+    task.memory_strategy = memory_strategies[index];
+    TI_ERROR_IF(
+        task.memory_strategy == "shared_staged_1d" &&
+            (task.task_kind != "range_for" || task.workgroup_size == 0 ||
+             task.grid_residency_waves != 0 ||
+             task.range_work_per_thread_target != 1),
+        "shared_staged_1d requires a range_for task, an exact "
+        "workgroup size, automatic grid residency, and one item per "
+        "thread");
     const bool nonbaseline =
         task.workgroup_size != 0 ||
         task.thread_local_mode != TaskLaunchThreadLocalMode::automatic ||
         task.cuda_min_blocks_per_sm != 2 || task.cuda_max_registers != -1 ||
         task.grid_residency_waves != 0 ||
-        task.range_work_per_thread_target != 1;
+        task.range_work_per_thread_target != 1 ||
+        task.memory_strategy != "direct";
     TI_ERROR_IF(task.task_kind != "range_for" && nonbaseline,
                 "offload execution plan v1 can tune only range_for tasks; "
                 "task {} is {}",

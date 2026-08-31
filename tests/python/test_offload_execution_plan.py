@@ -43,10 +43,19 @@ def test_launch_only_task_policy_does_not_manufacture_compilation_identity():
         range_work_per_thread_target=4,
     )
     compiled = baseline.replace_task(1, workgroup_size=128, thread_local="off")
+    shared_staged = baseline.replace_task(
+        1,
+        workgroup_size=128,
+        memory_strategy="shared_staged_1d",
+    )
 
     assert launch.identity != baseline.identity
     assert launch.compilation_identity == baseline.compilation_identity
     assert compiled.compilation_identity != baseline.compilation_identity
+    assert shared_staged.compilation_identity != baseline.compilation_identity
+    assert shared_staged.compilation_identity != compiled.compilation_identity
+    assert shared_staged.requires_graph_memory
+    assert not baseline.requires_graph_memory
 
 
 def test_task_plan_rejects_topology_drift_and_non_range_controls():

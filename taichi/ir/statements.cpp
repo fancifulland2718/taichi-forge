@@ -429,6 +429,10 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->block_dim = block_dim;
   new_stmt->source_block_dim_explicit = source_block_dim_explicit;
   new_stmt->one_to_one = one_to_one;
+  new_stmt->external_shared_staged = external_shared_staged;
+  new_stmt->external_shared_arg_index = external_shared_arg_index;
+  new_stmt->external_shared_halo_low = external_shared_halo_low;
+  new_stmt->external_shared_halo_high = external_shared_halo_high;
   new_stmt->reversed = reversed;
   new_stmt->is_bit_vectorized = is_bit_vectorized;
   new_stmt->num_cpu_threads = num_cpu_threads;

@@ -2484,6 +2484,7 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
     current_task->requested_cuda_min_blocks_per_sm =
         spec.cuda_min_blocks_per_sm;
     current_task->requested_cuda_max_registers = spec.cuda_max_registers;
+    current_task->requested_memory_strategy = spec.memory_strategy;
   }
   if (stmt->task_type == OffloadedStmt::TaskType::range_for &&
       stmt->const_begin && stmt->const_end) {
@@ -2494,6 +2495,10 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->thread_local_bytes =
       stmt->tls_size > 1 ? static_cast<std::uint64_t>(stmt->tls_size) : 0;
   current_task->one_to_one = stmt->one_to_one;
+  current_task->external_shared_staged = stmt->external_shared_staged;
+  current_task->external_shared_arg_index = stmt->external_shared_arg_index;
+  current_task->external_shared_halo_low = stmt->external_shared_halo_low;
+  current_task->external_shared_halo_high = stmt->external_shared_halo_high;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;
@@ -2854,7 +2859,10 @@ void TaskCodeGenLLVM::visit(LoopLinearIndexStmt *stmt) {
       (stmt->loop->as<OffloadedStmt>()->task_type ==
            OffloadedStmt::TaskType::struct_for ||
        stmt->loop->as<OffloadedStmt>()->task_type ==
-           OffloadedStmt::TaskType::mesh_for)) {
+           OffloadedStmt::TaskType::mesh_for ||
+       (stmt->loop->as<OffloadedStmt>()->task_type ==
+            OffloadedStmt::TaskType::range_for &&
+        stmt->loop->as<OffloadedStmt>()->external_shared_staged))) {
     llvm_val[stmt] = call("thread_idx");
   } else {
     TI_NOT_IMPLEMENTED;
@@ -2883,6 +2891,16 @@ void TaskCodeGenLLVM::visit(BlockCornerIndexStmt *stmt) {
         builder->CreateGEP(physical_coordinate_ty, block_corner_coordinates,
                            {tlctx->get_constant(0), tlctx->get_constant(0),
                             tlctx->get_constant(stmt->index)}));
+  } else if (stmt->loop->is<OffloadedStmt>() &&
+             stmt->loop->as<OffloadedStmt>()->task_type ==
+                 OffloadedStmt::TaskType::range_for &&
+             stmt->loop->as<OffloadedStmt>()->external_shared_staged &&
+             stmt->index == 0) {
+    auto *offload = stmt->loop->as<OffloadedStmt>();
+    auto *block_corner =
+        builder->CreateMul(call("block_idx"), call("block_dim"));
+    llvm_val[stmt] = builder->CreateAdd(
+        block_corner, tlctx->get_constant(offload->begin_value));
   } else {
     TI_NOT_IMPLEMENTED;
   }

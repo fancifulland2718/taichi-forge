@@ -32,6 +32,7 @@ class OffloadedTaskManifest:
     requested_cuda_max_registers: Optional[int]
     requested_grid_residency_waves: Optional[int]
     requested_range_work_per_thread_target: int
+    requested_memory_strategy: str
     selected_grid_size: Optional[int]
     selected_block_size: Optional[int]
     actual_grid_size: Optional[int]
@@ -40,6 +41,9 @@ class OffloadedTaskManifest:
     actual_geometry_reason: str
     range_mapping: str
     constant_range_size: Optional[int]
+    staged_external_arg_index: Optional[int]
+    staged_halo_low: Optional[int]
+    staged_halo_high: Optional[int]
     static_shared_bytes: int
     dynamic_shared_bytes: int
     thread_local_bytes: int

@@ -1450,6 +1450,12 @@ class OffloadedStmt : public Stmt {
   // offloader selected any backend default.
   bool source_block_dim_explicit{false};
   bool one_to_one{false};
+  // Private Forge Graph recipe marker. It is set only after exact post-offload
+  // legality checks have rewritten a 1-D external read tile into BLS.
+  bool external_shared_staged{false};
+  int external_shared_arg_index{-1};
+  int external_shared_halo_low{0};
+  int external_shared_halo_high{0};
   bool reversed{false};
   bool is_bit_vectorized{false};
   int num_cpu_threads{1};
@@ -1518,6 +1524,10 @@ class OffloadedStmt : public Stmt {
                      block_dim,
                      source_block_dim_explicit,
                      one_to_one,
+                     external_shared_staged,
+                     external_shared_arg_index,
+                     external_shared_halo_low,
+                     external_shared_halo_high,
                      reversed,
                      num_cpu_threads,
                      index_offsets,

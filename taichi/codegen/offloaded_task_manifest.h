@@ -34,6 +34,7 @@ struct OffloadedTaskManifest {
   std::optional<int> requested_cuda_max_registers;
   std::optional<int> requested_grid_residency_waves;
   int requested_range_work_per_thread_target{1};
+  std::string requested_memory_strategy{"direct"};
 
   // Values selected by backend code generation. CPU execution intentionally
   // leaves these empty instead of pretending that its worker scheduler is a
@@ -54,6 +55,11 @@ struct OffloadedTaskManifest {
   // grid while loading the logical end from a device extent.
   std::string range_mapping;
   std::optional<std::int64_t> constant_range_size;
+
+  // Present only for the private Graph-owned external shared-stage recipe.
+  std::optional<int> staged_external_arg_index;
+  std::optional<int> staged_halo_low;
+  std::optional<int> staged_halo_high;
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

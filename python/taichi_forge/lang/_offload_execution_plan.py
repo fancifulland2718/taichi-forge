@@ -15,6 +15,7 @@ _CUDA_MIN_BLOCKS_PER_SM = (1, 2, 4)
 _CUDA_MAX_REGISTERS = (None, 0, 24, 48)
 _CUDA_GRID_RESIDENCY_WAVES = (None, 1, 2, 4)
 _RANGE_WORK_PER_THREAD_TARGETS = (1, 2, 4, 8)
+_MEMORY_STRATEGIES = ("direct", "shared_staged_1d")
 
 
 def _canonical_json(value):
@@ -56,6 +57,7 @@ class _TaskOptimizationSpec:
     cuda_max_registers: Optional[int] = None
     grid_residency_waves: Optional[int] = None
     range_work_per_thread_target: int = 1
+    memory_strategy: str = "direct"
 
     def __post_init__(self):
         if not isinstance(self.logical_task_id, str) or not self.logical_task_id:
@@ -75,6 +77,18 @@ class _TaskOptimizationSpec:
             raise ValueError("grid_residency_waves must be None, 1, 2, or 4")
         if self.range_work_per_thread_target not in (_RANGE_WORK_PER_THREAD_TARGETS):
             raise ValueError("range_work_per_thread_target must be 1, 2, 4, or 8")
+        if self.memory_strategy not in _MEMORY_STRATEGIES:
+            raise ValueError("memory_strategy must be 'direct' or 'shared_staged_1d'")
+        if self.memory_strategy == "shared_staged_1d" and (
+            self.task_kind != "range_for"
+            or self.workgroup_size is None
+            or self.grid_residency_waves is not None
+            or self.range_work_per_thread_target != 1
+        ):
+            raise ValueError(
+                "shared_staged_1d requires a range_for task, an exact "
+                "workgroup_size, automatic grid residency, and one item per thread"
+            )
         if self.task_kind != "range_for" and (
             self.workgroup_size is not None
             or self.thread_local != "auto"
@@ -82,6 +96,7 @@ class _TaskOptimizationSpec:
             or self.cuda_max_registers is not None
             or self.grid_residency_waves is not None
             or self.range_work_per_thread_target != 1
+            or self.memory_strategy != "direct"
         ):
             raise ValueError("the v1 execution plan only tunes physical range_for tasks")
 
@@ -94,6 +109,7 @@ class _TaskOptimizationSpec:
             and self.cuda_max_registers is None
             and self.grid_residency_waves is None
             and self.range_work_per_thread_target == 1
+            and self.memory_strategy == "direct"
         )
 
     @property
@@ -173,6 +189,10 @@ class _OffloadExecutionPlan:
         return all(task.is_baseline for task in self.tasks)
 
     @property
+    def requires_graph_memory(self):
+        return any(task.memory_strategy != "direct" for task in self.tasks)
+
+    @property
     def stable_payload(self):
         return {
             "schema": _TASK_PLAN_SCHEMA,
@@ -232,6 +252,7 @@ class _OffloadExecutionPlan:
                 or manifest.requested_cuda_max_registers != expected_max_registers
                 or manifest.requested_grid_residency_waves != spec.grid_residency_waves
                 or manifest.requested_range_work_per_thread_target != spec.range_work_per_thread_target
+                or manifest.requested_memory_strategy != spec.memory_strategy
             ):
                 raise ValueError(f"task {spec.task_index} materialized different controls")
         return True
@@ -251,6 +272,7 @@ class _OffloadExecutionPlan:
             [-1 if task.cuda_max_registers is None else task.cuda_max_registers for task in self.tasks],
             [0 if task.grid_residency_waves is None else task.grid_residency_waves for task in self.tasks],
             [task.range_work_per_thread_target for task in self.tasks],
+            [task.memory_strategy for task in self.tasks],
         )
 
 

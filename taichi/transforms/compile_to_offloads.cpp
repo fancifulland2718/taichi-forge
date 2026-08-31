@@ -10,7 +10,12 @@
 #include "taichi/program/extension.h"
 #include "taichi/program/function.h"
 #include "taichi/program/kernel.h"
+#include "taichi/transforms/make_external_shared_staged.h"
 #include "taichi/util/lang_util.h"
+
+// Keep the private M0 recipe in one reviewable unit while compiling it from
+// the established split-runtime link-closure root.
+#include "taichi/transforms/make_external_shared_staged.inc"
 
 #include <string>
 #include <vector>
@@ -550,6 +555,21 @@ void offload_to_executable(IRNode *ir,
   }
   print("Atomics demoted I");
   irpass::analysis::verify(ir);
+
+  const auto &offload_plan = kernel->get_offload_execution_plan();
+  const bool has_shared_staged_task =
+      offload_plan.has_value() &&
+      std::any_of(offload_plan->tasks.begin(), offload_plan->tasks.end(),
+                  [](const auto &task) {
+                    return task.memory_strategy == "shared_staged_1d";
+                  });
+  if (has_shared_staged_task) {
+    TI_COMPILE_PROFILER("cpp.ir.exec.make_external_shared_staged");
+    irpass::make_external_shared_staged(ir, config, kernel);
+    irpass::type_check(ir, config);
+    print("Make external shared-staged range");
+    irpass::analysis::verify(ir);
+  }
 
   if (config.cache_loop_invariant_global_vars) {
     TI_COMPILE_PROFILER("cpp.ir.exec.cache_loop_invariant");
