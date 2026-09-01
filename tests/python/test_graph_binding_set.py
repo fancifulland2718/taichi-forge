@@ -239,7 +239,7 @@ def test_graph_binding_set_rejects_alias_update_without_publishing_it():
             "inner_counter": ti.ndarray(ti.i32, shape=()),
         }
     )
-    assert not bindings.fast_path_qualified
+    assert bindings.fast_path_qualified
     revision = bindings.revision
 
     with pytest.raises(TaichiRuntimeError, match="must not alias"):
@@ -248,8 +248,10 @@ def test_graph_binding_set_rejects_alias_update_without_publishing_it():
     assert bindings.revision == revision
     graph.run(bindings)
     stats = graph.binding_statistics()
-    assert stats["version_volatile_replays"] == 1
-    assert stats["version_fast_replays"] == 0
+    assert stats["version_volatile_replays"] == 0
+    assert stats["version_fast_replays"] == 1
+    assert stats["control_publish_validations"] == 2
+    assert stats["control_replay_validations"] == 0
 
 
 @test_utils.test(arch=ti.cpu)

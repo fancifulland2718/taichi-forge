@@ -1537,6 +1537,21 @@ void export_lang(py::module &m) {
         Device *device = program.get_graphics_device();
         return device != nullptr && device->supports_conditional_commands();
       })
+      .def("_vulkan_max_compute_work_group_count_x", [](Program &program) {
+#if defined(TI_WITH_VULKAN)
+        auto *device = dynamic_cast<vulkan::VulkanDevice *>(
+            program.get_graphics_device());
+        TI_ERROR_IF(device == nullptr,
+                    "Vulkan compute dispatch limits require an active Vulkan "
+                    "device");
+        return static_cast<std::uint64_t>(
+            device->get_vk_physical_device_props()
+                .limits.maxComputeWorkGroupCount[0]);
+#else
+        TI_ERROR("Vulkan compute dispatch limits are unavailable in this build");
+        return std::uint64_t{0};
+#endif
+      })
       .def("_debug_vulkan_queue_submission_stats", [](Program &program) {
         py::dict result;
 #if defined(TI_WITH_VULKAN)

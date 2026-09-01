@@ -6,6 +6,7 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+from taichi_forge.graph import _graph as graph_impl
 from taichi_forge.graph._ir import InternalNdarrayRequirement
 from taichi_forge.lang import impl
 from tests import test_utils
@@ -94,6 +95,111 @@ def test_dynamic_work_capabilities_separate_launch_and_iteration_semantics():
         assert bounded["exact_physical_grid"]
         assert bounded["fallback_reason"] == "none"
         assert iteration["execution_semantics"] == "portable_host_control"
+
+
+@test_utils.test(arch=[ti.cpu, ti.vulkan], offline_cache=False)
+def test_bounded_packet_ceil_division_handles_i32_maximum():
+    capacity = 0x7FFFFFFF
+    block_dim = 128
+    expected_grid = capacity // block_dim + int(capacity % block_dim != 0)
+
+    extent = ti.ndarray(ti.i32, shape=2)
+    packet = ti.ndarray(ti.u32, shape=4)
+    extent.from_numpy(np.array([capacity, 0], dtype=np.int32))
+    graph_impl._prepare_bounded_dispatch_packet(extent, packet, capacity, block_dim)
+    assert int(packet.to_numpy()[0]) == expected_grid
+
+    offsets = ti.ndarray(ti.i32, shape=2)
+    segment_state = ti.ndarray(ti.i32, shape=5)
+    offsets.from_numpy(np.array([0, capacity], dtype=np.int32))
+    graph_impl._prepare_ordered_segment_dispatch(
+        offsets,
+        extent,
+        packet,
+        segment_state,
+        0,
+        1,
+        capacity,
+        block_dim,
+    )
+    assert int(packet.to_numpy()[0]) == expected_grid
+
+    @ti.kernel
+    def publish_device_packet(
+        state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        launch_packet: ti.types.ndarray(dtype=ti.u32, ndim=1),
+    ):
+        launch_packet[3] = block_dim
+        ti.device_dispatch_state_publish(state, launch_packet, capacity, capacity)
+
+    publish_device_packet(extent, packet)
+    assert int(packet.to_numpy()[0]) == expected_grid
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_indirect_dispatch_rejects_capacity_above_device_grid_limit(
+    monkeypatch,
+):
+    capacity = 65
+    block_dim = 32
+    monkeypatch.setattr(graph_impl, "_vulkan_max_compute_work_group_count_x", lambda: 2)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] = i
+
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "limit_extent", ti.i32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "limit_output", ti.i32, ndim=1)
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="requires 3 work groups on x.*device limit of 2",
+    ):
+        ti.graph.GraphBuilder().dispatch_bounded(
+            consume,
+            extent_arg,
+            output_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+        )
+
+    offsets_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "limit_offsets", ti.i32, ndim=1
+    )
+
+    @ti.kernel
+    def consume_segment(
+        offsets: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        segment_state: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for local in range(capacity):
+            if local < ti.graph.segmented_dispatch_count(segment_state):
+                output[local] = offsets[0] + extent[0]
+
+    with pytest.raises(
+        ti.TaichiRuntimeError,
+        match="requires 3 work groups on x.*device limit of 2",
+    ):
+        ti.graph.GraphBuilder().dispatch_ordered_segments(
+            consume_segment,
+            offsets_arg,
+            extent_arg,
+            output_arg,
+            offsets=offsets_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            segment_count=1,
+            block_dim=block_dim,
+        )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)

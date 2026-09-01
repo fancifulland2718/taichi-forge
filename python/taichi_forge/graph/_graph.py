@@ -122,9 +122,45 @@ def _prepare_bounded_dispatch_packet(
             count = capacity
             extent_state[1] = 1
         extent_state[0] = count
-        packet[0] = ops.cast((count + block_dim - 1) // block_dim, u32)
+        packet[0] = ops.cast(count // block_dim, u32) + ops.cast(
+            count % block_dim != 0, u32
+        )
         packet[1] = 1
         packet[2] = 1
+
+
+def _vulkan_max_compute_work_group_count_x():
+    program = impl.get_runtime().prog
+    query = getattr(program, "_vulkan_max_compute_work_group_count_x", None)
+    if not callable(query):
+        raise TaichiRuntimeError(
+            "Vulkan indirect dispatch cannot prove the active device compute "
+            "work-group limit"
+        )
+    try:
+        maximum = int(query())
+    except Exception as exc:
+        raise TaichiRuntimeError(
+            "Vulkan indirect dispatch could not query the active device compute "
+            "work-group limit"
+        ) from exc
+    if maximum <= 0:
+        raise TaichiRuntimeError(
+            "Vulkan indirect dispatch received an invalid active-device "
+            "compute work-group limit"
+        )
+    return maximum
+
+
+def _validate_vulkan_indirect_grid_capacity(capacity, block_dim):
+    grid_x = capacity // block_dim + int(capacity % block_dim != 0)
+    maximum = _vulkan_max_compute_work_group_count_x()
+    if grid_x > maximum:
+        raise TaichiRuntimeError(
+            "Vulkan indirect dispatch capacity requires "
+            f"{grid_x} work groups on x, exceeding the active device limit "
+            f"of {maximum}"
+        )
 
 
 @kernel_impl.func
@@ -196,7 +232,10 @@ def _prepare_ordered_segment_dispatch(
         )
         begin = segment_state[0]
         end = segment_state[1]
-        packet[0] = ops.cast((end - begin + block_dim - 1) // block_dim, u32)
+        segment_length = end - begin
+        packet[0] = ops.cast(segment_length // block_dim, u32) + ops.cast(
+            segment_length % block_dim != 0, u32
+        )
         packet[1] = 1
         packet[2] = 1
 
@@ -5488,24 +5527,12 @@ class _CompiledObservationGraphNode:
 
 
 def _control_scalar_values(values, names, *, use_transfer_planner):
-    if len(values) != len(names):
-        raise TaichiRuntimeError("Structured Graph control names do not match values")
-    sources = []
-    hosts = []
-    for value, name in zip(values, names):
-        ndarray = getattr(value, "arr", None)
-        dtype = getattr(value, "dtype", None)
-        if ndarray is None or dtype is None:
-            raise TaichiRuntimeError(
-                f"Structured Graph control {name} must be a device ndarray scalar"
-            )
-        host = np.empty(shape=ndarray.total_shape(), dtype=to_numpy_type(dtype))
-        if host.size != 1:
-            raise TaichiRuntimeError(
-                f"Structured Graph control {name} must contain exactly one scalar"
-            )
-        sources.append(ndarray)
-        hosts.append(host)
+    # The final prepared-frame preflight proves every source is one canonical
+    # scalar i32 ndarray before any condition dispatch. Portable observation
+    # therefore only performs the dynamic device read; repeating owner, dtype,
+    # and shape validation in every loop/branch observation is redundant.
+    sources = [value.arr for value in values]
+    hosts = [np.empty(shape=(), dtype=np.int32) for _ in values]
     program = impl.get_runtime().prog
     if use_transfer_planner:
         program.copy_graph_observations_to_host(sources, hosts)
@@ -9132,43 +9159,94 @@ def _lower_mixed_backend_regions(nodes):
     return tuple(lowered), statistics
 
 
-def _structured_control_resource_names(node):
+def _structured_control_roles(node):
     if isinstance(node, _CompiledWhileGraphNode):
-        return frozenset(
-            name
-            for name in (node.predicate, node.counter, node.status)
+        return tuple(
+            (role, name)
+            for role, name in (
+                ("predicate", node.predicate),
+                ("counter", node.counter),
+                ("status", node.status),
+            )
             if name is not None
         )
     if isinstance(node, _CompiledIfGraphNode):
-        return frozenset((node.predicate,))
+        return (("predicate", node.predicate),)
     if isinstance(node, _CompiledSwitchGraphNode):
-        return frozenset((node.selector,))
-    return frozenset()
+        return (("selector", node.selector),)
+    return ()
 
 
-def _nested_control_resource_pairs(control_nodes):
-    pairs = []
-    for parent in control_nodes:
-        parent_names = _structured_control_resource_names(parent)
-        for _, children in parent._definition_children:
-            for child in children:
-                child_names = _structured_control_resource_names(child)
-                overlap = parent_names & child_names
-                if overlap:
-                    raise TaichiRuntimeError(
-                        "Nested Graph control resources must be independent; "
-                        f"{parent.region_path!r} and {child.region_path!r} "
-                        "share " + ", ".join(sorted(overlap))
-                    )
-                pairs.append(
-                    (
-                        parent.region_path,
-                        parent_names,
-                        child.region_path,
-                        child_names,
-                    )
+@dataclass(frozen=True)
+class _StructuredControlBindingPlan:
+    """Static control slots and the allocation identities that must differ."""
+
+    bindings: tuple
+    distinct_groups: tuple
+    names: tuple
+
+
+def _structured_control_binding_plan(control_nodes):
+    bindings = tuple(
+        (node.region_path, role, name)
+        for node in control_nodes
+        for role, name in _structured_control_roles(node)
+    )
+    root_subtrees = []
+    current = []
+    for node in control_nodes:
+        if node.control_depth == 1:
+            if current:
+                root_subtrees.append(tuple(current))
+            current = [node]
+        else:
+            current.append(node)
+    if current:
+        root_subtrees.append(tuple(current))
+
+    distinct_groups = []
+    for subtree in root_subtrees:
+        root = subtree[0]
+        if len(subtree) > 1:
+            group_bindings = tuple(
+                (node.region_path, role, name)
+                for node in subtree
+                for role, name in _structured_control_roles(node)
+            )
+            scope = f"nested root {root.region_path!r}"
+        elif isinstance(root, _CompiledWhileGraphNode):
+            group_bindings = tuple(
+                (root.region_path, role, name)
+                for role, name in _structured_control_roles(root)
+            )
+            scope = f"while region {root.region_path!r}"
+        else:
+            continue
+
+        symbolic_owners = {}
+        for path, role, name in group_bindings:
+            previous = symbolic_owners.get(name)
+            if previous is not None:
+                previous_path, previous_role = previous
+                raise TaichiRuntimeError(
+                    "Structured Graph control resources must be independent "
+                    f"within {scope}; {name!r} is used by "
+                    f"{previous_path!r} {previous_role} and {path!r} {role}"
                 )
-    return tuple(pairs)
+            symbolic_owners[name] = (path, role)
+        if len(group_bindings) > 1:
+            distinct_groups.append(
+                (
+                    scope,
+                    tuple((path, role, name) for path, role, name in group_bindings),
+                )
+            )
+
+    return _StructuredControlBindingPlan(
+        bindings=bindings,
+        distinct_groups=tuple(distinct_groups),
+        names=tuple(sorted({name for _, _, name in bindings})),
+    )
 
 
 def _normalize_parallel_branch_indices(branches, child_count):
@@ -9362,6 +9440,8 @@ class _GraphBindingPlan:
     fixed_names: tuple
     derived_names: tuple
     temporary_names: tuple
+    control_names: tuple
+    control_publish_frame_stable: bool
     memory_recipe_names: tuple
     memory_recipe_publish_frame_stable: bool
     static_fast_path_blockers: tuple
@@ -9374,6 +9454,9 @@ class _GraphBindingPlan:
                 "fixed_names": self.fixed_names,
                 "derived_names": self.derived_names,
                 "temporary_names": self.temporary_names,
+                "control_names": self.control_names,
+                "control_publish_certificate_required": bool(self.control_names),
+                "control_publish_frame_stable": self.control_publish_frame_stable,
                 "memory_recipe_names": self.memory_recipe_names,
                 "memory_recipe_publish_certificate_required": bool(
                     self.memory_recipe_names
@@ -9398,6 +9481,15 @@ class _GraphMemoryRecipeCertificate:
     runtime_bindings: tuple = ()
 
 
+@dataclass(frozen=True)
+class _GraphControlBindingCertificate:
+    """Publish-time proof for immutable structured-control resources."""
+
+    runtime_generation: int
+    bindings: tuple
+    distinct_groups: tuple
+
+
 @dataclass(frozen=True, eq=False)
 class _GraphBindingVersion:
     """One immutable, generation-qualified public binding snapshot."""
@@ -9408,6 +9500,7 @@ class _GraphBindingVersion:
     arguments: object
     flattened_args: object
     memory_recipe_certificate: object
+    control_binding_certificate: object
     fast_path_qualified: bool
     volatile_reasons: tuple
 
@@ -9489,6 +9582,7 @@ class GraphBindingSet:
         with self._lock:
             version = self._version
             memory_recipe_certificate = version.memory_recipe_certificate
+            control_binding_certificate = version.control_binding_certificate
             return MappingProxyType(
                 {
                     "revision": version.revision,
@@ -9505,6 +9599,10 @@ class GraphBindingSet:
                     "memory_recipe_names": (
                         self._graph._spec.memory_recipe_binding_names
                     ),
+                    "control_publish_validated": (
+                        control_binding_certificate is not None
+                    ),
+                    "control_names": self._graph._spec.control_binding_plan.names,
                     "live_retired_versions": len(self._retired_versions),
                 }
             )
@@ -9692,7 +9790,7 @@ class _GraphSpec:
         ) and all(
             node.supports_native_submission for node in self.structured_control_roots
         )
-        self.nested_control_resource_pairs = _nested_control_resource_pairs(
+        self.control_binding_plan = _structured_control_binding_plan(
             self.structured_control_nodes
         )
         self.structured_control_count = len(self.structured_control_nodes)
@@ -9816,18 +9914,20 @@ class _GraphSpec:
             static_fast_path_blockers.append("provider_derived_bindings")
         if self.temporary_actions:
             static_fast_path_blockers.append("lane_temporary_bindings")
-        if self.nested_control_resource_pairs:
-            static_fast_path_blockers.append("dynamic_control_aliases")
-        memory_recipe_dynamic_names = frozenset(
+        dynamic_overlay_names = frozenset(
             (
                 *self.fixed_runtime_args,
                 *self.derived_runtime_arg_names,
                 *self.temporary_runtime_arg_names,
             )
         )
+        self.control_publish_frame_stable = (
+            not has_dynamic_argument_binding
+            and not dynamic_overlay_names.intersection(self.control_binding_plan.names)
+        )
         self.memory_recipe_publish_frame_stable = (
             not has_dynamic_argument_binding
-            and not memory_recipe_dynamic_names.intersection(
+            and not dynamic_overlay_names.intersection(
                 self.memory_recipe_binding_names
             )
         )
@@ -9840,6 +9940,8 @@ class _GraphSpec:
             fixed_names=tuple(sorted(self.fixed_runtime_args)),
             derived_names=tuple(sorted(self.derived_runtime_arg_names)),
             temporary_names=tuple(sorted(self.temporary_runtime_arg_names)),
+            control_names=self.control_binding_plan.names,
+            control_publish_frame_stable=self.control_publish_frame_stable,
             memory_recipe_names=self.memory_recipe_binding_names,
             memory_recipe_publish_frame_stable=(
                 self.memory_recipe_publish_frame_stable
@@ -9852,6 +9954,8 @@ class _GraphSpec:
             "raw_replay_validations": 0,
             "version_fast_replays": 0,
             "version_volatile_replays": 0,
+            "control_publish_validations": 0,
+            "control_replay_validations": 0,
         }
         self.repeat_count = 0
         self.ir_root = SequentialRegion(
@@ -10044,13 +10148,20 @@ class _GraphSpec:
         if fixed_runtime_args:
             validation_args = dict(fixed_runtime_args)
             validation_args.update(snapshot)
-        # Validate at publication whenever the recipe bindings are already the
-        # final frame, even if an unrelated blocker keeps replay on the slow
-        # path. A provider that can replace recipe bindings defers this proof
-        # until its prepared invocation frame exists.
+        # Validate at publication whenever the relevant bindings already form
+        # the final frame, even if an unrelated blocker keeps replay on the
+        # slow path. A provider that can replace resources defers its proof
+        # until the prepared invocation frame exists.
+        control_binding_certificate = None
+        if self.control_binding_plan.bindings and self.control_publish_frame_stable:
+            self._binding_statistics["control_publish_validations"] += 1
+            control_binding_certificate = self._validate_structured_control_bindings(
+                validation_args, build_certificate=True
+            )
         memory_recipe_certificate = self._validate_bound_runtime_args(
             validation_args,
             validate_memory_recipe=self.memory_recipe_publish_frame_stable,
+            validate_control_bindings=False,
         )
         if (
             not blockers
@@ -10058,6 +10169,12 @@ class _GraphSpec:
             and memory_recipe_certificate is None
         ):
             blockers.append("uncertified_memory_recipe")
+        if (
+            not blockers
+            and self.control_binding_plan.bindings
+            and control_binding_certificate is None
+        ):
+            blockers.append("uncertified_control_bindings")
 
         flattened = None
         if not blockers:
@@ -10083,6 +10200,7 @@ class _GraphSpec:
             arguments=snapshot,
             flattened_args=flattened,
             memory_recipe_certificate=memory_recipe_certificate,
+            control_binding_certificate=control_binding_certificate,
             fast_path_qualified=not blockers,
             volatile_reasons=tuple(blockers),
         )
@@ -10116,6 +10234,8 @@ class _GraphSpec:
             args = binding_version.arguments
         self._validate_runtime_arg_names(args, entrypoint)
         prepared = self.prepare_runtime_args(args, temporaries, fixed_runtime_args)
+        if self.control_binding_plan.bindings:
+            self._binding_statistics["control_replay_validations"] += 1
         self._validate_bound_runtime_args(prepared.arguments)
         if binding_version is None:
             return prepared
@@ -10337,8 +10457,10 @@ class _GraphSpec:
         validation_args,
         *,
         validate_memory_recipe=True,
+        validate_control_bindings=True,
     ):
-        self._validate_nested_control_aliases(validation_args)
+        if validate_control_bindings:
+            self._validate_structured_control_bindings(validation_args)
         memory_recipe_certificate = (
             self._validate_memory_recipe_contracts(validation_args)
             if validate_memory_recipe
@@ -10498,24 +10620,101 @@ class _GraphSpec:
             partial_output_bytes=0,
         )
 
-    def _validate_nested_control_aliases(self, args):
-        for (
-            parent_path,
-            parent_names,
-            child_path,
-            child_names,
-        ) in self.nested_control_resource_pairs:
-            parent_resources = {
-                id(getattr(args[name], "arr", args[name])) for name in parent_names
-            }
-            child_resources = {
-                id(getattr(args[name], "arr", args[name])) for name in child_names
-            }
-            if parent_resources & child_resources:
+    def _validate_structured_control_bindings(self, args, *, build_certificate=False):
+        plan = self.control_binding_plan
+        if not plan.bindings:
+            return None
+
+        descriptions = {}
+        allocation_keys = {}
+        for path, role, name in plan.bindings:
+            if name in descriptions:
+                continue
+            value = args.get(name)
+            if not isinstance(value, (Ndarray, ProviderOwnedNdarrayBinding)):
                 raise TaichiRuntimeError(
-                    "Nested Graph control resources must not alias at "
-                    f"runtime: {parent_path!r} and {child_path!r}"
+                    f"Structured Graph control {name!r} at {path!r} must be "
+                    "a canonical device ndarray scalar"
                 )
+            if value.arr is None:
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} belongs "
+                    "to a reset or retired runtime"
+                )
+            try:
+                description = _describe_parallel_storage(value)
+                owner_status = validate_storage_owner(description)
+            except Exception as exc:
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} could not "
+                    "be validated for the current Program"
+                ) from exc
+            descriptor = description.descriptor
+            if descriptor is None:
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} is not "
+                    f"describable: {description.failure_reason}"
+                )
+            if owner_status != "kNone":
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} does not "
+                    f"belong to the current Program: {owner_status}"
+                )
+            if (
+                descriptor.scalar_type != i32
+                or tuple(descriptor.element_shape)
+                or any(int(extent) != 1 for extent in descriptor.index_shape)
+            ):
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} must "
+                    "contain exactly one scalar i32 value"
+                )
+            resource_identity = descriptor.resource_identity
+            if resource_identity is None:
+                raise TaichiRuntimeError(
+                    f"Structured Graph control {name!r} at {path!r} has no "
+                    "stable device allocation identity"
+                )
+            descriptions[name] = description
+            allocation_keys[name] = (
+                int(descriptor.program_domain),
+                tuple(resource_identity),
+                int(descriptor.byte_offset),
+            )
+
+        certified_groups = [] if build_certificate else None
+        for scope, group_bindings in plan.distinct_groups:
+            owners = {}
+            certified = [] if build_certificate else None
+            for path, role, name in group_bindings:
+                key = allocation_keys[name]
+                previous = owners.get(key)
+                if previous is not None:
+                    previous_path, previous_role, previous_name = previous
+                    raise TaichiRuntimeError(
+                        "Structured Graph engine-control resources must not "
+                        f"alias within {scope}; {previous_name!r} "
+                        f"({previous_path!r} {previous_role}) and {name!r} "
+                        f"({path!r} {role}) resolve to the same allocation "
+                        "and byte offset"
+                    )
+                owners[key] = (path, role, name)
+                if build_certificate:
+                    certified.append((path, role, name, key))
+            if build_certificate:
+                certified_groups.append((scope, tuple(certified)))
+
+        if not build_certificate:
+            return None
+
+        return _GraphControlBindingCertificate(
+            runtime_generation=int(impl.runtime_generation()),
+            bindings=tuple(
+                (name, descriptions[name], allocation_keys[name])
+                for name in plan.names
+            ),
+            distinct_groups=tuple(certified_groups),
+        )
 
     def _validate_memory_recipe_contracts(self, args):
         if not self.memory_layout_requirements and not self.memory_disjoint_pairs:
@@ -12999,6 +13198,7 @@ class GraphBuilder:
             backend == "vulkan" and selected_route.route == "exact_indirect"
         )
         if vulkan_indirect:
+            _validate_vulkan_indirect_grid_capacity(capacity, selected_block)
             publication = (
                 None
                 if effective_launch_state is not None
@@ -13200,6 +13400,8 @@ class GraphBuilder:
             range_one_to_one=backend == "vulkan",
         )
         selected_block = _bounded_kernel_geometry(payload_cpp, backend)
+        if backend == "vulkan":
+            _validate_vulkan_indirect_grid_capacity(capacity, selected_block)
         payload_flattened = flatten_args(payload_args)
         base_label = _normalize_dispatch_label(label)
 

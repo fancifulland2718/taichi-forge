@@ -79,9 +79,10 @@ def device_dispatch_state_publish(
 
     bounded = device_extent_publish(extent_state, capacity, count)
     block_dim = dispatch_packet[_DISPATCH_BLOCK_DIM_INDEX]
+    block = ops.cast(block_dim, i32)
     dispatch_packet[_DISPATCH_GRID_X_INDEX] = ops.cast(
-        (bounded + ops.cast(block_dim, i32) - 1) // ops.cast(block_dim, i32), u32
-    )
+        bounded // block, u32
+    ) + ops.cast(bounded % block != 0, u32)
     dispatch_packet[_DISPATCH_GRID_Y_INDEX] = 1
     dispatch_packet[_DISPATCH_GRID_Z_INDEX] = 1
     return bounded
