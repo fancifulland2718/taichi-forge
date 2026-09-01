@@ -1456,6 +1456,14 @@ class OffloadedStmt : public Stmt {
   int external_shared_arg_index{-1};
   int external_shared_halo_low{0};
   int external_shared_halo_high{0};
+  // Ordered physical tile layout for the GraphMemory shared-stage recipe.
+  // The scalar fields above retain the first source for compatibility with
+  // existing diagnostics; these vectors are the complete compiler proof.
+  std::vector<int> external_shared_arg_indices;
+  std::vector<int> external_shared_halo_lows;
+  std::vector<int> external_shared_halo_highs;
+  std::vector<int> external_shared_byte_offsets;
+  std::vector<int> external_shared_element_bytes;
   bool reversed{false};
   bool is_bit_vectorized{false};
   int num_cpu_threads{1};
@@ -1528,6 +1536,11 @@ class OffloadedStmt : public Stmt {
                      external_shared_arg_index,
                      external_shared_halo_low,
                      external_shared_halo_high,
+                     external_shared_arg_indices,
+                     external_shared_halo_lows,
+                     external_shared_halo_highs,
+                     external_shared_byte_offsets,
+                     external_shared_element_bytes,
                      reversed,
                      num_cpu_threads,
                      index_offsets,

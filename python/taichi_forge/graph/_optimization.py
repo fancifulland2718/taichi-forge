@@ -34,7 +34,7 @@ _CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
     for recipe_id in domain
 )
 
-_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 2
 _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "direct": "graph-memory:direct:",
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
@@ -109,11 +109,94 @@ class _GraphMemoryRecipeManifest:
             raise ValueError("GraphMemory recipe payload is not canonical")
         if payload.get("schema_version") != _GRAPH_MEMORY_RECIPE_SCHEMA_VERSION:
             raise ValueError("GraphMemory recipe schema is unsupported")
+        if frozenset(payload) != {
+            "schema_version",
+            "strategy",
+            "dispatch_label",
+            "symbolic_abi",
+            "semantic_kernel_identity",
+            "offload_plan_identity",
+            "offload_compilation_identity",
+            "offload_plan",
+            "materialized_tasks",
+            "memory_disjoint_pairs",
+            "memory_layout_requirements",
+            "staged_sources",
+        }:
+            raise ValueError("GraphMemory recipe payload fields are invalid")
         strategy = payload.get("strategy")
         try:
             prefix = _GRAPH_MEMORY_RECIPE_PREFIXES[strategy]
         except (KeyError, TypeError) as error:
             raise ValueError("GraphMemory recipe strategy is unsupported") from error
+        sources = payload.get("staged_sources")
+        pairs = payload.get("memory_disjoint_pairs")
+        layouts = payload.get("memory_layout_requirements")
+        if not isinstance(sources, list) or not isinstance(pairs, list) or not isinstance(
+            layouts, list
+        ):
+            raise ValueError("GraphMemory physical memory contract is invalid")
+        if strategy == "direct":
+            if sources or pairs or layouts:
+                raise ValueError("direct GraphMemory recipe must not own staged layout")
+        else:
+            expected_source_fields = {
+                "arg_index",
+                "arg_name",
+                "halo_low",
+                "halo_high",
+                "element_bytes",
+                "alignment",
+                "byte_offset",
+                "tile_elements",
+                "tile_bytes",
+            }
+            if not 1 <= len(sources) <= 2 or any(
+                not isinstance(source, dict)
+                or frozenset(source) != expected_source_fields
+                for source in sources
+            ):
+                raise ValueError("staged GraphMemory recipe has invalid sources")
+            indices = tuple(source["arg_index"] for source in sources)
+            if indices != tuple(sorted(set(indices))):
+                raise ValueError("staged GraphMemory source order is not canonical")
+            tile_end = 0
+            source_names = set()
+            for source in sources:
+                integer_fields = (
+                    "arg_index",
+                    "halo_low",
+                    "halo_high",
+                    "element_bytes",
+                    "alignment",
+                    "byte_offset",
+                    "tile_elements",
+                    "tile_bytes",
+                )
+                if (
+                    not isinstance(source["arg_name"], str)
+                    or not source["arg_name"]
+                    or source["arg_name"] in source_names
+                    or any(
+                        isinstance(source[name], bool)
+                        or not isinstance(source[name], int)
+                        for name in integer_fields
+                    )
+                    or source["arg_index"] < 0
+                    or source["halo_low"] >= source["halo_high"]
+                    or source["element_bytes"] not in (2, 4, 8)
+                    or source["alignment"] not in (2, 4, 8)
+                    or source["byte_offset"] < tile_end
+                    or source["byte_offset"] % source["alignment"]
+                    or source["tile_elements"] <= 0
+                    or source["tile_bytes"]
+                    != source["tile_elements"] * source["element_bytes"]
+                ):
+                    raise ValueError("staged GraphMemory tile layout is invalid")
+                source_names.add(source["arg_name"])
+                tile_end = source["byte_offset"] + source["tile_bytes"]
+            if tile_end > 32 * 1024 or not pairs or not layouts:
+                raise ValueError("staged GraphMemory memory contract is incomplete")
         expected = prefix + _canonical_hash(payload)[:24]
         if self.recipe_id != expected:
             raise ValueError("GraphMemory recipe ID does not match its payload")

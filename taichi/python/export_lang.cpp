@@ -203,6 +203,11 @@ py::dict offloaded_task_manifest_to_python(
   set_optional("staged_external_arg_index", task.staged_external_arg_index);
   set_optional("staged_halo_low", task.staged_halo_low);
   set_optional("staged_halo_high", task.staged_halo_high);
+  item["staged_external_arg_indices"] = task.staged_external_arg_indices;
+  item["staged_halo_lows"] = task.staged_halo_lows;
+  item["staged_halo_highs"] = task.staged_halo_highs;
+  item["staged_byte_offsets"] = task.staged_byte_offsets;
+  item["staged_element_bytes"] = task.staged_element_bytes;
   if (task.constant_range_size.has_value()) {
     item["constant_range_size"] = *task.constant_range_size;
   } else {

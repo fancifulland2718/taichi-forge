@@ -2499,6 +2499,15 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
   current_task->external_shared_arg_index = stmt->external_shared_arg_index;
   current_task->external_shared_halo_low = stmt->external_shared_halo_low;
   current_task->external_shared_halo_high = stmt->external_shared_halo_high;
+  current_task->external_shared_arg_indices =
+      stmt->external_shared_arg_indices;
+  current_task->external_shared_halo_lows = stmt->external_shared_halo_lows;
+  current_task->external_shared_halo_highs =
+      stmt->external_shared_halo_highs;
+  current_task->external_shared_byte_offsets =
+      stmt->external_shared_byte_offsets;
+  current_task->external_shared_element_bytes =
+      stmt->external_shared_element_bytes;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;

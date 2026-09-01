@@ -12198,25 +12198,49 @@ def _graph_shared_staged_contract(kernel_cpp, args):
     if (
         task.get("task_type") != "range_for"
         or task.get("range_mapping") != "shared_tiled_one_to_one"
+        or isinstance(task.get("selected_block_size"), bool)
+        or not isinstance(task.get("selected_block_size"), int)
+        or task["selected_block_size"] <= 0
         or not isinstance(task.get("static_shared_bytes"), int)
         or task["static_shared_bytes"] <= 0
+        or task["static_shared_bytes"] > 32 * 1024
     ):
         raise TaichiRuntimeError(
             "Graph shared-staged task did not materialize its exact BLS mapping"
         )
-    staged_index = task.get("staged_external_arg_index")
-    halo_low = task.get("staged_halo_low")
-    halo_high = task.get("staged_halo_high")
+
+    staged_indices = tuple(task.get("staged_external_arg_indices", ()))
+    halo_lows = tuple(task.get("staged_halo_lows", ()))
+    halo_highs = tuple(task.get("staged_halo_highs", ()))
+    byte_offsets = tuple(task.get("staged_byte_offsets", ()))
+    element_bytes = tuple(task.get("staged_element_bytes", ()))
     if (
-        isinstance(staged_index, bool)
-        or not isinstance(staged_index, int)
-        or not 0 <= staged_index < len(args)
-        or not isinstance(halo_low, int)
-        or not isinstance(halo_high, int)
-        or halo_low >= halo_high
+        not 1 <= len(staged_indices) <= 2
+        or any(
+            len(values) != len(staged_indices)
+            for values in (halo_lows, halo_highs, byte_offsets, element_bytes)
+        )
+        or any(isinstance(value, bool) or not isinstance(value, int) for values in (
+            staged_indices,
+            halo_lows,
+            halo_highs,
+            byte_offsets,
+            element_bytes,
+        ) for value in values)
+        or staged_indices != tuple(sorted(set(staged_indices)))
+        or any(not 0 <= index < len(args) for index in staged_indices)
+        or any(low >= high for low, high in zip(halo_lows, halo_highs))
     ):
         raise TaichiRuntimeError(
-            "Graph shared-staged task has incomplete input or halo metadata"
+            "Graph shared-staged task has incomplete ordered tile metadata"
+        )
+    if (
+        task.get("staged_external_arg_index") != staged_indices[0]
+        or task.get("staged_halo_low") != halo_lows[0]
+        or task.get("staged_halo_high") != halo_highs[0]
+    ):
+        raise TaichiRuntimeError(
+            "Graph shared-staged compatibility metadata disagrees with its layout"
         )
 
     metadata = raw["graph_metadata"]
@@ -12267,46 +12291,95 @@ def _graph_shared_staged_contract(kernel_cpp, args):
             )
         effects[index] = effect
 
-    staged_effect = effects.get(staged_index)
-    footprint = None if staged_effect is None else staged_effect.get("footprint", {})
-    try:
-        halo = tuple(
-            tuple(int(value) for value in axis)
-            for axis in (() if footprint is None else footprint.get("halo", ()))
-        )
-    except (TypeError, ValueError):
-        halo = ()
-    if (
-        staged_effect is None
-        or staged_effect.get("access") != "read"
-        or footprint.get("pattern") != "stencil"
-        or halo != ((halo_low, halo_high),)
-        or domain_begin + halo_low < 0
+    staged_sources = []
+    source_names = []
+    tile_end = 0
+    for index, halo_low, halo_high, byte_offset, reported_element_bytes in zip(
+        staged_indices,
+        halo_lows,
+        halo_highs,
+        byte_offsets,
+        element_bytes,
     ):
+        staged_effect = effects.get(index)
+        footprint = (
+            None if staged_effect is None else staged_effect.get("footprint", {})
+        )
+        try:
+            halo = tuple(
+                tuple(int(value) for value in axis)
+                for axis in (
+                    () if footprint is None else footprint.get("halo", ())
+                )
+            )
+        except (TypeError, ValueError):
+            halo = ()
+        if (
+            staged_effect is None
+            or staged_effect.get("access") != "read"
+            or footprint.get("pattern") != "stencil"
+            or halo != ((halo_low, halo_high),)
+            or domain_begin + halo_low < 0
+        ):
+            raise TaichiRuntimeError(
+                "Graph shared-staged input does not match its proven stencil "
+                "footprint"
+            )
+
+        symbolic = args[index]
+        source_name = symbolic.name
+        source_dtype = symbolic.dtype()
+        stride = _ti_core.data_type_size(source_dtype)
+        alignment = _ti_core.data_type_alignment(source_dtype)
+        if stride not in (2, 4, 8) or reported_element_bytes != stride:
+            raise TaichiRuntimeError(
+                "Graph shared-staged input must publish its exact two-, four-, "
+                "or eight-byte scalar layout"
+            )
+        expected_offset = (tile_end + alignment - 1) // alignment * alignment
+        tile_elements = task["selected_block_size"] + halo_high - halo_low
+        tile_bytes = tile_elements * stride
+        if (
+            byte_offset != expected_offset
+            or byte_offset % alignment
+            or tile_elements <= 0
+            or byte_offset + tile_bytes > task["static_shared_bytes"]
+        ):
+            raise TaichiRuntimeError(
+                "Graph shared-staged ordered tile layout is not exact"
+            )
+        tile_end = byte_offset + tile_bytes
+        source_names.append(source_name)
+        staged_sources.append(
+            {
+                "arg_index": index,
+                "arg_name": source_name,
+                "halo_low": halo_low,
+                "halo_high": halo_high,
+                "element_bytes": stride,
+                "alignment": alignment,
+                "byte_offset": byte_offset,
+                "tile_elements": tile_elements,
+                "tile_bytes": tile_bytes,
+            }
+        )
+    if tile_end != task["static_shared_bytes"]:
         raise TaichiRuntimeError(
-            "Graph shared-staged input does not match the proven stencil footprint"
+            "Graph shared-staged aggregate shared-memory budget is not exact"
         )
 
-    staged_name = args[staged_index].name
-    staged_dtype = args[staged_index].dtype()
-    staged_stride = _ti_core.data_type_size(staged_dtype)
-    staged_alignment = _ti_core.data_type_alignment(staged_dtype)
-    if staged_stride not in (2, 4, 8):
-        raise TaichiRuntimeError(
-            "Graph shared-staged input must use a two-, four-, or eight-byte "
-            "scalar dtype"
-        )
     output_names = []
     layout_requirements = [
         (
-            staged_name,
-            domain_end + halo_high,
-            staged_stride,
-            staged_alignment,
+            source["arg_name"],
+            domain_end + source["halo_high"],
+            source["element_bytes"],
+            source["alignment"],
         )
+        for source in staged_sources
     ]
     for index, effect in effects.items():
-        if index == staged_index:
+        if index in staged_indices:
             continue
         output_footprint = effect.get("footprint", {})
         if (
@@ -12330,13 +12403,20 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         layout_requirements.append(
             (output_name, domain_end, output_stride, output_alignment)
         )
-    if not output_names or staged_name in output_names:
+    if not output_names or set(source_names) & set(output_names):
         raise TaichiRuntimeError(
-            "Graph shared-staged recipe requires a distinct write-only output"
+            "Graph shared-staged recipe requires distinct write-only outputs"
         )
     return (
-        tuple(sorted((staged_name, name) for name in output_names)),
+        tuple(
+            sorted(
+                (source_name, output_name)
+                for source_name in source_names
+                for output_name in output_names
+            )
+        ),
         tuple(sorted(layout_requirements)),
+        tuple(staged_sources),
     )
 
 
@@ -12369,6 +12449,7 @@ def _graph_memory_recipe_manifest(
     strategy,
     memory_disjoint_pairs=(),
     memory_layout_requirements=(),
+    staged_sources=(),
 ):
     return _GraphMemoryRecipeManifest.from_payload(
         {
@@ -12382,6 +12463,7 @@ def _graph_memory_recipe_manifest(
             "materialized_tasks": tuple(asdict(task) for task in manifests),
             "memory_disjoint_pairs": tuple(memory_disjoint_pairs),
             "memory_layout_requirements": tuple(memory_layout_requirements),
+            "staged_sources": tuple(staged_sources),
         }
     )
 
@@ -12462,7 +12544,7 @@ class _GraphMemoryRecipeSource:
             self.args,
             allow_graph_memory_recipe=True,
         )
-        contracts, layout_requirements = _graph_shared_staged_contract(
+        contracts, layout_requirements, staged_sources = _graph_shared_staged_contract(
             staged_kernel_cpp,
             self.args,
         )
@@ -12476,6 +12558,7 @@ class _GraphMemoryRecipeSource:
             strategy="shared_staged_1d",
             memory_disjoint_pairs=contracts,
             memory_layout_requirements=layout_requirements,
+            staged_sources=staged_sources,
         )
         return (
             manifest,
@@ -13611,7 +13694,7 @@ class GraphBuilder:
             allow_graph_memory_recipe=True,
         )
         unzipped_args = flatten_args(args)
-        contracts, layout_requirements = _graph_shared_staged_contract(
+        contracts, layout_requirements, _ = _graph_shared_staged_contract(
             kernel_cpp, unzipped_args
         )
         self._record_dispatch(kernel_cpp, unzipped_args, label)

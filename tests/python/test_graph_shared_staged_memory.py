@@ -246,6 +246,234 @@ def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypatch):
+    count = 4099
+
+    @ti.kernel
+    def two_source_stencil(
+        left: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        right: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(2, count - 2):
+            output[i] = (
+                left[i - 2]
+                + left[i]
+                + left[i + 1]
+                + right[i - 1] * 0.5
+                + right[i + 2]
+            )
+
+    left_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "left", ti.f32, ndim=1)
+    right_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "right", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(two_source_stencil, left_arg, right_arg, output_arg)
+        return builder.compile()
+
+    source_graph = build()
+    search = compileiq_recipe_search(source_graph)
+    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    assert len(manifests) == 2
+    staged_id, staged = next(
+        (recipe_id, manifest["memory_recipe_manifest"])
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+    )
+    assert staged["schema_version"] == 2
+    assert staged["staged_sources"] == [
+        {
+            "alignment": 4,
+            "arg_index": 0,
+            "arg_name": "left",
+            "byte_offset": 0,
+            "element_bytes": 4,
+            "halo_high": 1,
+            "halo_low": -2,
+            "tile_bytes": 524,
+            "tile_elements": 131,
+        },
+        {
+            "alignment": 4,
+            "arg_index": 1,
+            "arg_name": "right",
+            "byte_offset": 524,
+            "element_bytes": 4,
+            "halo_high": 2,
+            "halo_low": -1,
+            "tile_bytes": 524,
+            "tile_elements": 131,
+        },
+    ]
+    assert {tuple(pair) for pair in staged["memory_disjoint_pairs"]} == {
+        ("left", "output"),
+        ("right", "output"),
+    }
+    assert {tuple(item) for item in staged["memory_layout_requirements"]} == {
+        ("left", count - 1, 4, 4),
+        ("right", count, 4, 4),
+        ("output", count - 2, 4, 4),
+    }
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with monkeypatch.context() as reconstruction:
+        for name, value in search.worker_environment(parameters).items():
+            reconstruction.setenv(name, value)
+        staged_graph = build()
+    search.verify_materialized_graph(parameters, staged_graph)
+    task = next(
+        item for item in staged_graph.task_manifest() if item.task_type == "range_for"
+    )
+    assert task.staged_external_arg_indices == (0, 1)
+    assert task.staged_halo_lows == (-2, -1)
+    assert task.staged_halo_highs == (1, 2)
+    assert task.staged_byte_offsets == (0, 524)
+    assert task.staged_element_bytes == (4, 4)
+    assert task.static_shared_bytes == 1048
+
+    left = ti.ndarray(ti.f32, shape=count)
+    right = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=count)
+    left_values = np.arange(count, dtype=np.float32) * 0.25
+    right_values = (np.arange(count, dtype=np.float32) % 23) * 0.5
+    left.from_numpy(left_values)
+    right.from_numpy(right_values)
+    output.fill(0)
+    bindings = staged_graph.bind(
+        {"left": left, "right": right, "output": output}
+    )
+    assert bindings.fast_path_qualified
+    assert staged_graph.bind(
+        {"left": left, "right": left, "output": output}
+    ).fast_path_qualified
+    with pytest.raises(RuntimeError, match="requires proven disjoint storage"):
+        staged_graph.bind({"left": left, "right": right, "output": left})
+    with monkeypatch.context() as stable_replay:
+        stable_replay.setattr(
+            graph_impl,
+            "analyze_storage_alias",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stable replay repeated alias analysis")
+            ),
+        )
+        stable_replay.setattr(
+            graph_impl,
+            "describe_storage",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stable replay repeated storage description")
+            ),
+        )
+        stable_replay.setattr(
+            graph_impl,
+            "validate_storage_owner",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("stable replay repeated owner validation")
+            ),
+        )
+        staged_graph.run(bindings)
+        staged_graph.run(bindings)
+    ti.sync()
+    expected = np.zeros(count, dtype=np.float32)
+    expected[2:-2] = (
+        left_values[:-4]
+        + left_values[2:-2]
+        + left_values[3:-1]
+        + right_values[1:-3] * 0.5
+        + right_values[4:]
+    )
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles(monkeypatch):
+    count = 259
+
+    @ti.kernel
+    def mixed_stencil(
+        narrow: ti.types.ndarray(dtype=ti.f16, ndim=1),
+        wide: ti.types.ndarray(dtype=ti.f64, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f64, ndim=1),
+    ):
+        for i in range(1, count - 1):
+            output[i] = (
+                ti.cast(narrow[i - 1], ti.f64)
+                + ti.cast(narrow[i + 1], ti.f64)
+                + wide[i - 1]
+                + wide[i + 1]
+            )
+
+    narrow_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "narrow", ti.f16, ndim=1)
+    wide_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "wide", ti.f64, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f64, ndim=1)
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(mixed_stencil, narrow_arg, wide_arg, output_arg)
+        return builder.compile()
+
+    graph = build()
+    search = compileiq_recipe_search(graph)
+    staged_id, staged = next(
+        (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
+        for recipe_id in search.recipe_ids
+        if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
+        == "shared_staged_1d"
+    )
+    assert [source["byte_offset"] for source in staged["staged_sources"]] == [
+        0,
+        264,
+    ]
+    assert [source["alignment"] for source in staged["staged_sources"]] == [2, 8]
+    assert [source["tile_bytes"] for source in staged["staged_sources"]] == [
+        260,
+        1040,
+    ]
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with monkeypatch.context() as reconstruction:
+        for name, value in search.worker_environment(parameters).items():
+            reconstruction.setenv(name, value)
+        staged_graph = build()
+    search.verify_materialized_graph(parameters, staged_graph)
+    task = next(
+        item for item in staged_graph.task_manifest() if item.task_type == "range_for"
+    )
+    assert task.staged_byte_offsets == (0, 264)
+    assert task.staged_element_bytes == (2, 8)
+    assert task.static_shared_bytes == 1304
+
+    narrow = ti.ndarray(ti.f16, shape=count)
+    wide = ti.ndarray(ti.f64, shape=count)
+    output = ti.ndarray(ti.f64, shape=count)
+    narrow_values = (np.arange(count, dtype=np.int64) % 11).astype(np.float16)
+    wide_values = (np.arange(count, dtype=np.int64) % 17).astype(np.float64)
+    narrow.from_numpy(narrow_values)
+    wide.from_numpy(wide_values)
+    output.fill(0)
+    staged_graph.run({"narrow": narrow, "wide": wide, "output": output})
+    ti.sync()
+    expected = np.zeros(count, dtype=np.float64)
+    expected[1:-1] = (
+        narrow_values[:-2].astype(np.float64)
+        + narrow_values[2:].astype(np.float64)
+        + wide_values[:-2]
+        + wide_values[2:]
+    )
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_memory_compileiq_keeps_one_byte_scalar_stencils_out_of_domain():
     count = 257
 

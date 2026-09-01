@@ -433,6 +433,11 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->external_shared_arg_index = external_shared_arg_index;
   new_stmt->external_shared_halo_low = external_shared_halo_low;
   new_stmt->external_shared_halo_high = external_shared_halo_high;
+  new_stmt->external_shared_arg_indices = external_shared_arg_indices;
+  new_stmt->external_shared_halo_lows = external_shared_halo_lows;
+  new_stmt->external_shared_halo_highs = external_shared_halo_highs;
+  new_stmt->external_shared_byte_offsets = external_shared_byte_offsets;
+  new_stmt->external_shared_element_bytes = external_shared_element_bytes;
   new_stmt->reversed = reversed;
   new_stmt->is_bit_vectorized = is_bit_vectorized;
   new_stmt->num_cpu_threads = num_cpu_threads;

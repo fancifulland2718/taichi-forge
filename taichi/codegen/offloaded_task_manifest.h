@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/rhi/arch.h"
@@ -60,6 +61,15 @@ struct OffloadedTaskManifest {
   std::optional<int> staged_external_arg_index;
   std::optional<int> staged_halo_low;
   std::optional<int> staged_halo_high;
+
+  // Complete ordered shared-tile layout. One entry describes the historical
+  // single-source recipe; two entries describe the bounded multi-source
+  // GraphMemory materializer.
+  std::vector<int> staged_external_arg_indices;
+  std::vector<int> staged_halo_lows;
+  std::vector<int> staged_halo_highs;
+  std::vector<int> staged_byte_offsets;
+  std::vector<int> staged_element_bytes;
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

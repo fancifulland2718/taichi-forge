@@ -79,17 +79,42 @@ def _parameters(name):
 
 
 def _memory_manifest(strategy, digit):
+    staged = strategy == "shared_staged_1d"
     return _GraphMemoryRecipeManifest.from_payload(
         {
             "strategy": strategy,
+            "dispatch_label": "",
             "semantic_kernel_identity": digit * 64,
             "offload_plan_identity": "oep:" + digit * 24,
             "offload_compilation_identity": "oepc:" + digit * 24,
             "offload_plan": {"tasks": ()},
             "materialized_tasks": (),
             "symbolic_abi": (),
-            "memory_disjoint_pairs": (),
-            "memory_layout_requirements": (),
+            "memory_disjoint_pairs": (
+                (("source", "output"),) if staged else ()
+            ),
+            "memory_layout_requirements": (
+                (("source", 130, 4, 4), ("output", 128, 4, 4))
+                if staged
+                else ()
+            ),
+            "staged_sources": (
+                (
+                    {
+                        "arg_index": 0,
+                        "arg_name": "source",
+                        "halo_low": -1,
+                        "halo_high": 1,
+                        "element_bytes": 4,
+                        "alignment": 4,
+                        "byte_offset": 0,
+                        "tile_elements": 130,
+                        "tile_bytes": 520,
+                    },
+                )
+                if staged
+                else ()
+            ),
         }
     )
 

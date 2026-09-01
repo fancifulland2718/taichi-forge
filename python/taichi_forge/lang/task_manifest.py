@@ -47,10 +47,25 @@ class OffloadedTaskManifest:
     static_shared_bytes: int
     dynamic_shared_bytes: int
     thread_local_bytes: int
+    staged_external_arg_indices: tuple
+    staged_halo_lows: tuple
+    staged_halo_highs: tuple
+    staged_byte_offsets: tuple
+    staged_element_bytes: tuple
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):
-        return cls(**{name: value[name] for name in cls.__dataclass_fields__})
+        fields = cls.__dataclass_fields__
+        payload = {name: value[name] for name in fields if name in value}
+        for name in (
+            "staged_external_arg_indices",
+            "staged_halo_lows",
+            "staged_halo_highs",
+            "staged_byte_offsets",
+            "staged_element_bytes",
+        ):
+            payload[name] = tuple(payload.get(name, ()))
+        return cls(**payload)
 
 
 @dataclass(frozen=True)

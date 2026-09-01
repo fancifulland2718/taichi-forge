@@ -120,6 +120,11 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.staged_external_arg_index = task.external_shared_arg_index;
       item.staged_halo_low = task.external_shared_halo_low;
       item.staged_halo_high = task.external_shared_halo_high;
+      item.staged_external_arg_indices = task.external_shared_arg_indices;
+      item.staged_halo_lows = task.external_shared_halo_lows;
+      item.staged_halo_highs = task.external_shared_halo_highs;
+      item.staged_byte_offsets = task.external_shared_byte_offsets;
+      item.staged_element_bytes = task.external_shared_element_bytes;
     }
     if (cpu_execution) {
       item.actual_geometry_kind = "cpu_runtime_scheduler";
