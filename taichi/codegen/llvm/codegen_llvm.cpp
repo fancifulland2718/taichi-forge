@@ -2508,6 +2508,10 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
       stmt->external_shared_byte_offsets;
   current_task->external_shared_element_bytes =
       stmt->external_shared_element_bytes;
+  current_task->external_shared_scalar_bytes =
+      stmt->external_shared_scalar_bytes;
+  current_task->external_shared_element_shapes =
+      stmt->external_shared_element_shapes;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;

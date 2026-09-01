@@ -11192,30 +11192,49 @@ class _GraphSpec:
                 )
             storage[name] = (fact, description)
 
-        for (
-            name,
-            minimum_elements,
-            record_stride,
-            alignment,
-        ) in self.memory_layout_requirements:
+        for requirement in self.memory_layout_requirements:
+            if len(requirement) == 4:
+                name, minimum_records, record_stride, alignment = requirement
+                expected_element_shape = ()
+                expected_layout = "scalar"
+            elif len(requirement) == 6:
+                (
+                    name,
+                    minimum_records,
+                    record_stride,
+                    alignment,
+                    expected_element_shape,
+                    expected_layout,
+                ) = requirement
+                expected_element_shape = tuple(expected_element_shape)
+            else:
+                raise TaichiRuntimeError(
+                    "Graph memory recipe has an invalid layout certificate"
+                )
+            minimum_description = (
+                f"{minimum_records} scalar elements"
+                if not expected_element_shape
+                else f"{minimum_records} records and element shape "
+                f"{expected_element_shape}"
+            )
             fact, _ = storage[name]
             if (
                 not fact.supported
                 or fact.owner_status != "kNone"
                 or not fact.compact_contiguous
                 or len(fact.index_shape) != 1
-                or fact.element_shape
-                or fact.scalar_count is None
-                or fact.scalar_count < minimum_elements
+                or fact.index_shape[0] < minimum_records
+                or fact.element_shape != expected_element_shape
                 or fact.record_stride != record_stride
                 or fact.byte_offset is None
                 or fact.byte_offset % alignment != 0
+                or expected_layout not in ("scalar", "aos")
             ):
                 raise TaichiRuntimeError(
                     "Graph memory recipe requires a compact "
                     f"one-dimensional {record_stride}-byte layout for {name!r}, "
                     f"aligned to {alignment} bytes with at least "
-                    f"{minimum_elements} scalar elements"
+                    f"{minimum_description}"
                 )
         for left, right in self.memory_disjoint_pairs:
             left_fact, left_description = storage[left]
@@ -12214,11 +12233,22 @@ def _graph_shared_staged_contract(kernel_cpp, args):
     halo_highs = tuple(task.get("staged_halo_highs", ()))
     byte_offsets = tuple(task.get("staged_byte_offsets", ()))
     element_bytes = tuple(task.get("staged_element_bytes", ()))
+    scalar_bytes = tuple(task.get("staged_scalar_bytes", ()))
+    element_shapes = tuple(
+        tuple(shape) for shape in task.get("staged_element_shapes", ())
+    )
     if (
         not 1 <= len(staged_indices) <= 2
         or any(
             len(values) != len(staged_indices)
-            for values in (halo_lows, halo_highs, byte_offsets, element_bytes)
+            for values in (
+                halo_lows,
+                halo_highs,
+                byte_offsets,
+                element_bytes,
+                scalar_bytes,
+                element_shapes,
+            )
         )
         or any(isinstance(value, bool) or not isinstance(value, int) for values in (
             staged_indices,
@@ -12226,7 +12256,18 @@ def _graph_shared_staged_contract(kernel_cpp, args):
             halo_highs,
             byte_offsets,
             element_bytes,
+            scalar_bytes,
         ) for value in values)
+        or any(
+            len(shape) > 2
+            or any(
+                isinstance(extent, bool)
+                or not isinstance(extent, int)
+                or extent <= 0
+                for extent in shape
+            )
+            for shape in element_shapes
+        )
         or staged_indices != tuple(sorted(set(staged_indices)))
         or any(not 0 <= index < len(args) for index in staged_indices)
         or any(low >= high for low, high in zip(halo_lows, halo_highs))
@@ -12281,25 +12322,38 @@ def _graph_shared_staged_contract(kernel_cpp, args):
                 "Graph shared-staged effect argument is outside the symbolic ABI"
             )
         symbolic = args[index]
+        symbolic_element_shape = tuple(symbolic.element_shape)
         if (
             getattr(symbolic, "tag", None) != ArgKind.NDARRAY
             or symbolic.field_dim != 1
-            or symbolic.element_shape
+            or len(symbolic_element_shape) > 2
+            or any(extent <= 0 for extent in symbolic_element_shape)
         ):
             raise TaichiRuntimeError(
-                "Graph shared-staged effects require scalar one-dimensional ndarrays"
+                "Graph shared-staged effects require one-dimensional scalar, "
+                "vector, or matrix ndarrays"
             )
         effects[index] = effect
 
     staged_sources = []
     source_names = []
     tile_end = 0
-    for index, halo_low, halo_high, byte_offset, reported_element_bytes in zip(
+    for (
+        index,
+        halo_low,
+        halo_high,
+        byte_offset,
+        reported_element_bytes,
+        reported_scalar_bytes,
+        reported_element_shape,
+    ) in zip(
         staged_indices,
         halo_lows,
         halo_highs,
         byte_offsets,
         element_bytes,
+        scalar_bytes,
+        element_shapes,
     ):
         staged_effect = effects.get(index)
         footprint = (
@@ -12329,16 +12383,27 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         symbolic = args[index]
         source_name = symbolic.name
         source_dtype = symbolic.dtype()
-        stride = _ti_core.data_type_size(source_dtype)
+        scalar_stride = _ti_core.data_type_size(source_dtype)
         alignment = _ti_core.data_type_alignment(source_dtype)
-        if stride not in (2, 4, 8) or reported_element_bytes != stride:
+        source_element_shape = tuple(symbolic.element_shape)
+        lane_count = 1
+        for extent in source_element_shape:
+            lane_count *= extent
+        record_stride = scalar_stride * lane_count
+        if (
+            scalar_stride not in (2, 4, 8)
+            or lane_count > 16
+            or reported_scalar_bytes != scalar_stride
+            or reported_element_shape != source_element_shape
+            or reported_element_bytes != record_stride
+        ):
             raise TaichiRuntimeError(
-                "Graph shared-staged input must publish its exact two-, four-, "
-                "or eight-byte scalar layout"
+                "Graph shared-staged input must publish its exact primitive-lane "
+                "and packed-record layout"
             )
         expected_offset = (tile_end + alignment - 1) // alignment * alignment
         tile_elements = task["selected_block_size"] + halo_high - halo_low
-        tile_bytes = tile_elements * stride
+        tile_bytes = tile_elements * record_stride
         if (
             byte_offset != expected_offset
             or byte_offset % alignment
@@ -12356,7 +12421,10 @@ def _graph_shared_staged_contract(kernel_cpp, args):
                 "arg_name": source_name,
                 "halo_low": halo_low,
                 "halo_high": halo_high,
-                "element_bytes": stride,
+                "element_bytes": record_stride,
+                "scalar_bytes": scalar_stride,
+                "element_shape": source_element_shape,
+                "lane_count": lane_count,
                 "alignment": alignment,
                 "byte_offset": byte_offset,
                 "tile_elements": tile_elements,
@@ -12369,12 +12437,25 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         )
 
     output_names = []
+    def layout_requirement(name, minimum_records, record_stride, alignment, shape):
+        if shape:
+            return (
+                name,
+                minimum_records,
+                record_stride,
+                alignment,
+                tuple(shape),
+                "aos",
+            )
+        return (name, minimum_records, record_stride, alignment)
+
     layout_requirements = [
-        (
+        layout_requirement(
             source["arg_name"],
             domain_end + source["halo_high"],
             source["element_bytes"],
             source["alignment"],
+            source["element_shape"],
         )
         for source in staged_sources
     ]
@@ -12393,15 +12474,26 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         output_name = args[index].name
         output_names.append(output_name)
         output_dtype = args[index].dtype()
-        output_stride = _ti_core.data_type_size(output_dtype)
+        output_scalar_stride = _ti_core.data_type_size(output_dtype)
         output_alignment = _ti_core.data_type_alignment(output_dtype)
-        if output_stride not in (2, 4, 8):
+        output_element_shape = tuple(args[index].element_shape)
+        output_lane_count = 1
+        for extent in output_element_shape:
+            output_lane_count *= extent
+        output_stride = output_scalar_stride * output_lane_count
+        if output_scalar_stride not in (2, 4, 8) or output_lane_count > 16:
             raise TaichiRuntimeError(
-                "Graph shared-staged outputs must use two-, four-, or "
-                "eight-byte scalar dtypes"
+                "Graph shared-staged outputs must use bounded two-, four-, or "
+                "eight-byte primitive-lane records"
             )
         layout_requirements.append(
-            (output_name, domain_end, output_stride, output_alignment)
+            layout_requirement(
+                output_name,
+                domain_end,
+                output_stride,
+                output_alignment,
+                output_element_shape,
+            )
         )
     if not output_names or set(source_names) & set(output_names):
         raise TaichiRuntimeError(

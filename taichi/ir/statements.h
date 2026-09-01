@@ -1464,6 +1464,8 @@ class OffloadedStmt : public Stmt {
   std::vector<int> external_shared_halo_highs;
   std::vector<int> external_shared_byte_offsets;
   std::vector<int> external_shared_element_bytes;
+  std::vector<int> external_shared_scalar_bytes;
+  std::vector<std::vector<int>> external_shared_element_shapes;
   bool reversed{false};
   bool is_bit_vectorized{false};
   int num_cpu_threads{1};
@@ -1541,6 +1543,8 @@ class OffloadedStmt : public Stmt {
                      external_shared_halo_highs,
                      external_shared_byte_offsets,
                      external_shared_element_bytes,
+                     external_shared_scalar_bytes,
+                     external_shared_element_shapes,
                      reversed,
                      num_cpu_threads,
                      index_offsets,

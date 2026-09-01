@@ -34,7 +34,7 @@ _CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
     for recipe_id in domain
 )
 
-_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 2
+_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 3
 _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "direct": "graph-memory:direct:",
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
@@ -146,6 +146,9 @@ class _GraphMemoryRecipeManifest:
                 "halo_low",
                 "halo_high",
                 "element_bytes",
+                "scalar_bytes",
+                "element_shape",
+                "lane_count",
                 "alignment",
                 "byte_offset",
                 "tile_elements",
@@ -168,6 +171,8 @@ class _GraphMemoryRecipeManifest:
                     "halo_low",
                     "halo_high",
                     "element_bytes",
+                    "scalar_bytes",
+                    "lane_count",
                     "alignment",
                     "byte_offset",
                     "tile_elements",
@@ -184,7 +189,20 @@ class _GraphMemoryRecipeManifest:
                     )
                     or source["arg_index"] < 0
                     or source["halo_low"] >= source["halo_high"]
-                    or source["element_bytes"] not in (2, 4, 8)
+                    or source["scalar_bytes"] not in (2, 4, 8)
+                    or not isinstance(source["element_shape"], list)
+                    or len(source["element_shape"]) > 2
+                    or any(
+                        isinstance(extent, bool)
+                        or not isinstance(extent, int)
+                        or extent <= 0
+                        for extent in source["element_shape"]
+                    )
+                    or not 1 <= source["lane_count"] <= 16
+                    or source["lane_count"]
+                    != math.prod(source["element_shape"] or (1,))
+                    or source["element_bytes"]
+                    != source["scalar_bytes"] * source["lane_count"]
                     or source["alignment"] not in (2, 4, 8)
                     or source["byte_offset"] < tile_end
                     or source["byte_offset"] % source["alignment"]
@@ -197,6 +215,32 @@ class _GraphMemoryRecipeManifest:
                 tile_end = source["byte_offset"] + source["tile_bytes"]
             if tile_end > 32 * 1024 or not pairs or not layouts:
                 raise ValueError("staged GraphMemory memory contract is incomplete")
+            if any(
+                not isinstance(layout, list)
+                or len(layout) not in (4, 6)
+                or not isinstance(layout[0], str)
+                or not layout[0]
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                    for value in layout[1:4]
+                )
+                or (
+                    len(layout) == 6
+                    and (
+                        not isinstance(layout[4], list)
+                        or not 1 <= len(layout[4]) <= 2
+                        or any(
+                            isinstance(extent, bool)
+                            or not isinstance(extent, int)
+                            or extent <= 0
+                            for extent in layout[4]
+                        )
+                        or layout[5] != "aos"
+                    )
+                )
+                for layout in layouts
+            ):
+                raise ValueError("staged GraphMemory binding layout is invalid")
         expected = prefix + _canonical_hash(payload)[:24]
         if self.recipe_id != expected:
             raise ValueError("GraphMemory recipe ID does not match its payload")

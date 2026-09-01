@@ -52,6 +52,8 @@ class OffloadedTaskManifest:
     staged_halo_highs: tuple
     staged_byte_offsets: tuple
     staged_element_bytes: tuple
+    staged_scalar_bytes: tuple
+    staged_element_shapes: tuple
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):
@@ -63,8 +65,12 @@ class OffloadedTaskManifest:
             "staged_halo_highs",
             "staged_byte_offsets",
             "staged_element_bytes",
+            "staged_scalar_bytes",
         ):
             payload[name] = tuple(payload.get(name, ()))
+        payload["staged_element_shapes"] = tuple(
+            tuple(shape) for shape in payload.get("staged_element_shapes", ())
+        )
         return cls(**payload)
 
 

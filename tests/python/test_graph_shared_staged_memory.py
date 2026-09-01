@@ -285,7 +285,7 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
         for recipe_id, manifest in manifests.items()
         if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
     )
-    assert staged["schema_version"] == 2
+    assert staged["schema_version"] == 3
     assert staged["staged_sources"] == [
         {
             "alignment": 4,
@@ -293,8 +293,11 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
             "arg_name": "left",
             "byte_offset": 0,
             "element_bytes": 4,
+            "element_shape": [],
             "halo_high": 1,
             "halo_low": -2,
+            "lane_count": 1,
+            "scalar_bytes": 4,
             "tile_bytes": 524,
             "tile_elements": 131,
         },
@@ -304,8 +307,11 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
             "arg_name": "right",
             "byte_offset": 524,
             "element_bytes": 4,
+            "element_shape": [],
             "halo_high": 2,
             "halo_low": -1,
+            "lane_count": 1,
+            "scalar_bytes": 4,
             "tile_bytes": 524,
             "tile_elements": 131,
         },
@@ -337,6 +343,8 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
     assert task.staged_halo_highs == (1, 2)
     assert task.staged_byte_offsets == (0, 524)
     assert task.staged_element_bytes == (4, 4)
+    assert task.staged_scalar_bytes == (4, 4)
+    assert task.staged_element_shapes == ((), ())
     assert task.static_shared_bytes == 1048
 
     left = ti.ndarray(ti.f32, shape=count)
@@ -493,7 +501,7 @@ def test_graph_memory_compileiq_keeps_one_byte_scalar_stencils_out_of_domain():
     search = compileiq_recipe_search(graph)
 
     assert len(search.recipe_ids) == 1
-    assert "only two-, four-, or eight-byte scalar elements are supported" in (
+    assert "only two-, four-, or eight-byte primitive lanes are supported" in (
         graph._compileiq_graph_memory_status
     )
 
@@ -925,3 +933,143 @@ def test_private_graph_shared_staged_recipe_rejects_pointwise_input():
     plan = _shared_staged_plan(pointwise, source, output)
     with pytest.raises(RuntimeError, match="at least two distinct affine offsets"):
         _bind_offload_execution_plan(pointwise, plan).task_manifest(source, output)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compound_records_materialize_complete_lane_layout(monkeypatch):
+    count = 259
+
+    for element_shape, scalar_dtype, numpy_dtype in (
+        ((3,), ti.f32, np.float32),
+        ((2, 2), ti.f64, np.float64),
+    ):
+        element_type = (
+            ti.types.vector(element_shape[0], scalar_dtype)
+            if len(element_shape) == 1
+            else ti.types.matrix(element_shape[0], element_shape[1], scalar_dtype)
+        )
+
+        @ti.kernel
+        def compound_stencil(
+            source: ti.types.ndarray(dtype=element_type, ndim=1),
+            output: ti.types.ndarray(dtype=element_type, ndim=1),
+        ):
+            for i in range(1, count - 1):
+                output[i] = source[i - 1] + source[i] * 2 + source[i + 1]
+
+        source_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "source", element_type, ndim=1
+        )
+        output_arg = ti.graph.Arg(
+            ti.graph.ArgKind.NDARRAY, "output", element_type, ndim=1
+        )
+
+        def build():
+            builder = ti.graph.GraphBuilder()
+            builder.dispatch(compound_stencil, source_arg, output_arg)
+            return builder.compile()
+
+        graph = build()
+        search = compileiq_recipe_search(graph)
+        assert graph._compileiq_graph_memory_status == "complete_recipe_domain"
+        staged_id, staged = next(
+            (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
+            for recipe_id in search.recipe_ids
+            if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
+            == "shared_staged_1d"
+        )
+        scalar_bytes = np.dtype(numpy_dtype).itemsize
+        lane_count = int(np.prod(element_shape))
+        record_bytes = scalar_bytes * lane_count
+        assert staged["schema_version"] == 3
+        assert staged["staged_sources"] == [
+            {
+                "alignment": scalar_bytes,
+                "arg_index": 0,
+                "arg_name": "source",
+                "byte_offset": 0,
+                "element_bytes": record_bytes,
+                "element_shape": list(element_shape),
+                "halo_high": 1,
+                "halo_low": -1,
+                "lane_count": lane_count,
+                "scalar_bytes": scalar_bytes,
+                "tile_bytes": (128 + 2) * record_bytes,
+                "tile_elements": 128 + 2,
+            }
+        ]
+        assert staged["memory_layout_requirements"] == [
+            ["output", count - 1, record_bytes, scalar_bytes, list(element_shape), "aos"],
+            ["source", count, record_bytes, scalar_bytes, list(element_shape), "aos"],
+        ]
+
+        parameters = {
+            "domain_fingerprint": search.domain_fingerprint,
+            "recipe_id": staged_id,
+        }
+        with monkeypatch.context() as reconstruction:
+            for name, value in search.worker_environment(parameters).items():
+                reconstruction.setenv(name, value)
+            staged_graph = build()
+        search.verify_materialized_graph(parameters, staged_graph)
+        task = next(
+            item
+            for item in staged_graph.task_manifest()
+            if item.task_type == "range_for"
+        )
+        assert task.staged_element_bytes == (record_bytes,)
+        assert task.staged_scalar_bytes == (scalar_bytes,)
+        assert task.staged_element_shapes == (element_shape,)
+        assert task.static_shared_bytes == (128 + 2) * record_bytes
+
+        source = (
+            ti.Vector.ndarray(element_shape[0], scalar_dtype, shape=count)
+            if len(element_shape) == 1
+            else ti.Matrix.ndarray(
+                element_shape[0], element_shape[1], scalar_dtype, shape=count
+            )
+        )
+        output = (
+            ti.Vector.ndarray(element_shape[0], scalar_dtype, shape=count)
+            if len(element_shape) == 1
+            else ti.Matrix.ndarray(
+                element_shape[0], element_shape[1], scalar_dtype, shape=count
+            )
+        )
+        values = np.arange(count * lane_count, dtype=numpy_dtype).reshape(
+            (count, *element_shape)
+        )
+        source.from_numpy(values)
+        output.fill(0)
+        bindings = staged_graph.bind({"source": source, "output": output})
+        assert bindings.fast_path_qualified
+        staged_graph.run(bindings)
+        ti.sync()
+        expected = np.zeros_like(values)
+        expected[1:-1] = values[:-2] + values[1:-1] * 2 + values[2:]
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compound_recipe_rejects_partial_lane_policy():
+    count = 259
+    vec3 = ti.types.vector(3, ti.f32)
+
+    @ti.kernel
+    def partial_lane_stencil(
+        source: ti.types.ndarray(dtype=vec3, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(1, count - 1):
+            output[i] = source[i - 1][0] + source[i + 1][0]
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", vec3, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(partial_lane_stencil, source_arg, output_arg)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+    assert len(search.recipe_ids) == 1
+    assert "compound staged inputs must read every lane" in (
+        graph._compileiq_graph_memory_status
+    )

@@ -70,6 +70,8 @@ struct OffloadedTaskManifest {
   std::vector<int> staged_halo_highs;
   std::vector<int> staged_byte_offsets;
   std::vector<int> staged_element_bytes;
+  std::vector<int> staged_scalar_bytes;
+  std::vector<std::vector<int>> staged_element_shapes;
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

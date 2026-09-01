@@ -125,6 +125,8 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.staged_halo_highs = task.external_shared_halo_highs;
       item.staged_byte_offsets = task.external_shared_byte_offsets;
       item.staged_element_bytes = task.external_shared_element_bytes;
+      item.staged_scalar_bytes = task.external_shared_scalar_bytes;
+      item.staged_element_shapes = task.external_shared_element_shapes;
     }
     if (cpu_execution) {
       item.actual_geometry_kind = "cpu_runtime_scheduler";

@@ -208,6 +208,8 @@ py::dict offloaded_task_manifest_to_python(
   item["staged_halo_highs"] = task.staged_halo_highs;
   item["staged_byte_offsets"] = task.staged_byte_offsets;
   item["staged_element_bytes"] = task.staged_element_bytes;
+  item["staged_scalar_bytes"] = task.staged_scalar_bytes;
+  item["staged_element_shapes"] = task.staged_element_shapes;
   if (task.constant_range_size.has_value()) {
     item["constant_range_size"] = *task.constant_range_size;
   } else {
