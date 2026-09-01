@@ -69,6 +69,7 @@ SCHEMA = "taichi_forge.graph-memory-compileiq-qualification.v1"
 RESULT_PREFIX = "GRAPH_MEMORY_COMPILEIQ_RESULT="
 ROUTES = ("direct", "staged")
 SCOPES = ("radius1", "radius4", "small_radius1")
+DTYPES = ("f16", "f32", "f64")
 PRIMARY_BINDING_MODE = "stable_graph_binding_set"
 RAW_BINDING_MODE = "raw_dict_compatibility"
 REQUIRED_FRESH_PROCESSES = 10
@@ -128,6 +129,8 @@ def _balanced_orders(processes: int) -> tuple[tuple[str, str], ...]:
 
 def qualification_policy_errors(args: Any) -> list[str]:
     errors: list[str] = []
+    if str(getattr(args, "dtype", "f32")) not in DTYPES:
+        errors.append("dtype must be one of f16, f32, or f64")
     if int(args.processes) != REQUIRED_FRESH_PROCESSES:
         errors.append(f"processes must equal {REQUIRED_FRESH_PROCESSES} for formal S4")
     if int(args.blocks) != REQUIRED_BLOCKS:
@@ -717,6 +720,14 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
     repo_root = Path(args.repo_root).resolve()
     radius = _scope_radius(args.scope)
     count = _scope_count(args.scope, int(args.count))
+    dtype_name = str(args.dtype)
+    dtype = {"f16": ti.f16, "f32": ti.f32, "f64": ti.f64}[dtype_name]
+    numpy_dtype = {
+        "f16": np.float16,
+        "f32": np.float32,
+        "f64": np.float64,
+    }[dtype_name]
+    element_bytes = {"f16": 2, "f32": 4, "f64": 8}[dtype_name]
     process_order = tuple(args.order.split(","))
     if process_order not in (ROUTES, tuple(reversed(ROUTES))):
         raise ValueError("worker order must be direct,staged or staged,direct")
@@ -735,8 +746,8 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
 
     @ti.kernel
     def stencil(
-        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
-        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        source: ti.types.ndarray(dtype=dtype, ndim=1),
+        output: ti.types.ndarray(dtype=dtype, ndim=1),
     ):
         for i in range(radius, count - radius):
             if ti.static(radius == 1):
@@ -754,19 +765,19 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
                     + source[i + 4]
                 )
 
-    source = ti.ndarray(ti.f32, shape=count)
-    direct_output = ti.ndarray(ti.f32, shape=count)
-    staged_output = ti.ndarray(ti.f32, shape=count)
-    alternate_source = ti.ndarray(ti.f32, shape=count)
-    alternate_output = ti.ndarray(ti.f32, shape=count)
+    source = ti.ndarray(dtype, shape=count)
+    direct_output = ti.ndarray(dtype, shape=count)
+    staged_output = ti.ndarray(dtype, shape=count)
+    alternate_source = ti.ndarray(dtype, shape=count)
+    alternate_output = ti.ndarray(dtype, shape=count)
     source.fill(1.0)
     alternate_source.fill(2.0)
     direct_output.fill(0.0)
     staged_output.fill(0.0)
     alternate_output.fill(0.0)
 
-    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
-    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", dtype, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", dtype, ndim=1)
     build_ms: dict[str, float] = {}
     build_memory_diagnostic: dict[str, Any] = {}
     compileiq_evidence: dict[str, Any] = {
@@ -954,7 +965,8 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
             and staged_range.staged_external_arg_index == 0
             and (staged_range.staged_halo_low, staged_range.staged_halo_high)
             == (-radius, radius)
-            and staged_range.static_shared_bytes == (128 + 2 * radius) * 4
+            and staged_range.static_shared_bytes
+            == (128 + 2 * radius) * element_bytes
         ),
         "staged_graph_manifest_materialized": (
             staged_graph_range.requested_memory_strategy == "shared_staged_1d"
@@ -1029,9 +1041,9 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
         "direct": lambda: direct_graph.run(direct_binding),
         "staged": lambda: staged_graph.run(staged_binding),
     }
-    expected = np.zeros(count, dtype=np.float32)
+    expected = np.zeros(count, dtype=numpy_dtype)
     expected[radius : count - radius] = float(2 * radius + 1)
-    alternate_expected = np.zeros(count, dtype=np.float32)
+    alternate_expected = np.zeros(count, dtype=numpy_dtype)
     alternate_expected[radius : count - radius] = float(2 * (2 * radius + 1))
 
     for route in ROUTES:
@@ -1156,6 +1168,7 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
         "schema": SCHEMA,
         "evidence_kind": "fresh_process_graph_memory_worker",
         "scope": args.scope,
+        "dtype": dtype_name,
         "recipe_source": args.recipe_source,
         "radius": radius,
         "count": count,
@@ -1432,6 +1445,8 @@ def _parent(args: Any) -> int:
                 str(repo_root),
                 "--count",
                 str(args.count),
+                "--dtype",
+                str(args.dtype),
                 "--blocks",
                 str(args.blocks),
                 "--minimum-block-ms",
@@ -1550,7 +1565,7 @@ def _parent(args: Any) -> int:
             "one_common_replay_count_per_worker": True,
             "primary_binding_mode": PRIMARY_BINDING_MODE,
             "raw_dict_admission_eligible": False,
-            "correctness_required": "exact full-array f32",
+            "correctness_required": f"exact full-array {args.dtype}",
             "route_materialization_required": True,
             "stable_forbidden_call_delta_required": 0,
             "memory_policy": (
@@ -1562,6 +1577,7 @@ def _parent(args: Any) -> int:
         },
         "configuration": {
             "count": int(args.count),
+            "dtype": str(args.dtype),
             "scope_counts": {
                 scope: _scope_count(scope, int(args.count)) for scope in SCOPES
             },
@@ -1623,6 +1639,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--blocks", type=int, default=REQUIRED_BLOCKS)
     parser.add_argument("--minimum-block-ms", type=float, default=MINIMUM_BLOCK_MS)
     parser.add_argument("--count", type=int, default=1 << 24)
+    parser.add_argument(
+        "--dtype",
+        choices=DTYPES,
+        default="f32",
+        help="scalar dtype for the complete direct/shared-stage recipe domain",
+    )
     parser.add_argument(
         "--stability-replays", type=int, default=MINIMUM_STABILITY_REPLAYS
     )

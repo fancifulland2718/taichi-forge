@@ -30,6 +30,7 @@ def _args(**changes):
         "minimum_block_ms": MINIMUM_BLOCK_MS,
         "stability_replays": 10_000,
         "count": 1 << 24,
+        "dtype": "f32",
         "raw_diagnostic_replays": 32,
     }
     values.update(changes)
@@ -129,6 +130,9 @@ def test_formal_policy_is_exact_and_orders_are_balanced():
     assert any("blocks" in error for error in errors)
     assert any("minimum_block_ms" in error for error in errors)
     assert any("stability_replays" in error for error in errors)
+    assert qualification_policy_errors(_args(dtype="i8")) == [
+        "dtype must be one of f16, f32, or f64"
+    ]
 
 
 def test_worker_policy_accepts_only_common_long_stable_binding_blocks():
