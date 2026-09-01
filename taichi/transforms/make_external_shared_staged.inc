@@ -123,9 +123,12 @@ ExternalAccess describe_external_access(ExternalPtrStmt *pointer,
   require(affine_loop_offset(pointer->indices.front(), offload, &result.offset),
           task_index, "external index is not loop_index plus a constant");
   result.data_type = pointer->ret_type.ptr_removed();
-  require(result.data_type->is<PrimitiveType>() &&
-              data_type_size(result.data_type) == 4,
-          task_index, "only four-byte scalar elements are supported");
+  require(result.data_type->is<PrimitiveType>(), task_index,
+          "only primitive scalar elements are supported");
+  const auto element_bytes = data_type_size(result.data_type);
+  require(element_bytes == 2 || element_bytes == 4 || element_bytes == 8,
+          task_index,
+          "only two-, four-, or eight-byte scalar elements are supported");
   return result;
 }
 
@@ -252,8 +255,9 @@ void materialize_shared_task(OffloadedStmt *offload,
 
   const std::int64_t tile_elements =
       static_cast<std::int64_t>(offload->block_dim) + halo_high - halo_low;
-  const std::int64_t tile_bytes = tile_elements * 4;
   auto input_data_type = input->data_type;
+  const std::int64_t element_bytes = data_type_size(input_data_type);
+  const std::int64_t tile_bytes = tile_elements * element_bytes;
   require(tile_elements > 0 && tile_bytes <= 32 * 1024, task_index,
           "shared tile exceeds the 32 KiB prototype budget");
 
@@ -306,7 +310,8 @@ void materialize_shared_task(OffloadedStmt *offload,
     auto *value = body->push_back<GlobalLoadStmt>(pointer);
     auto *byte_offset = body->push_back<BinaryOpStmt>(
         BinaryOpType::mul, tile_index,
-        body->push_back<ConstStmt>(TypedConstant(4)));
+        body->push_back<ConstStmt>(
+            TypedConstant(static_cast<int32>(element_bytes))));
     auto *local_pointer = body->push_back<BlockLocalPtrStmt>(
         byte_offset,
         TypeFactory::get_instance().get_pointer_type(input_data_type));
@@ -325,7 +330,8 @@ void materialize_shared_task(OffloadedStmt *offload,
             TypedConstant(static_cast<int32>(access.offset - halo_low))));
     auto *byte_offset = replacement.push_back<BinaryOpStmt>(
         BinaryOpType::mul, local_index,
-        replacement.push_back<ConstStmt>(TypedConstant(4)));
+        replacement.push_back<ConstStmt>(
+            TypedConstant(static_cast<int32>(element_bytes))));
     replacement.push_back<BlockLocalPtrStmt>(
         byte_offset,
         TypeFactory::get_instance().get_pointer_type(input_data_type));

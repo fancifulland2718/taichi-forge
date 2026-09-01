@@ -163,6 +163,113 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
             rejected.dispatch(stencil, source_arg, output_arg)
 
 
+@pytest.mark.parametrize(
+    ("dtype", "numpy_dtype", "element_bytes"),
+    ((ti.f16, np.float16, 2), (ti.f64, np.float64, 8)),
+)
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
+    monkeypatch,
+    dtype,
+    numpy_dtype,
+    element_bytes,
+):
+    count = 1027
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=dtype, ndim=1),
+        output: ti.types.ndarray(dtype=dtype, ndim=1),
+    ):
+        for i in range(1, count - 1):
+            output[i] = source[i - 1] + source[i] * 2 + source[i + 1]
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", dtype, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", dtype, ndim=1)
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(stencil, source_arg, output_arg)
+        return builder.compile()
+
+    source_graph = build()
+    search = compileiq_recipe_search(source_graph)
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    assert len(manifests) == 2, source_graph._compileiq_graph_memory_status
+    staged_id, staged_manifest = next(
+        (recipe_id, manifest)
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+    )
+    layout_requirements = {
+        tuple(requirement)
+        for requirement in staged_manifest["memory_recipe_manifest"][
+            "memory_layout_requirements"
+        ]
+    }
+    assert layout_requirements == {
+        ("source", count, element_bytes, element_bytes),
+        ("output", count - 1, element_bytes, element_bytes),
+    }
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    selection = search.select(parameters)
+    with monkeypatch.context() as reconstruction:
+        for name, value in selection.worker_environment.items():
+            reconstruction.setenv(name, value)
+        staged_graph = build()
+    search.verify_materialized_graph(parameters, staged_graph)
+    staged_task = next(
+        task for task in staged_graph.task_manifest() if task.task_type == "range_for"
+    )
+    assert staged_task.requested_memory_strategy == "shared_staged_1d"
+    assert staged_task.range_mapping == "shared_tiled_one_to_one"
+    assert staged_task.static_shared_bytes == (128 + 2) * element_bytes
+
+    source = ti.ndarray(dtype, shape=count)
+    output = ti.ndarray(dtype, shape=count)
+    values = (np.arange(count, dtype=np.int64) % 17).astype(numpy_dtype)
+    source.from_numpy(values)
+    output.fill(0)
+    bindings = staged_graph.bind({"source": source, "output": output})
+    assert bindings.fast_path_qualified
+    staged_graph.run(bindings)
+    ti.sync()
+    expected = np.zeros(count, dtype=numpy_dtype)
+    expected[1:-1] = values[:-2] + values[1:-1] * 2 + values[2:]
+    np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compileiq_keeps_one_byte_scalar_stencils_out_of_domain():
+    count = 257
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.i8, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i8, ndim=1),
+    ):
+        for i in range(1, count - 1):
+            output[i] = source[i - 1] + source[i + 1]
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.i8, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i8, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+
+    assert len(search.recipe_ids) == 1
+    assert "only two-, four-, or eight-byte scalar elements are supported" in (
+        graph._compileiq_graph_memory_status
+    )
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_memory_compileiq_rejects_unsupported_and_multi_dispatch_domains(
     monkeypatch,

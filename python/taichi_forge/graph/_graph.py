@@ -12157,8 +12157,23 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         )
 
     staged_name = args[staged_index].name
+    staged_dtype = args[staged_index].dtype()
+    staged_stride = _ti_core.data_type_size(staged_dtype)
+    staged_alignment = _ti_core.data_type_alignment(staged_dtype)
+    if staged_stride not in (2, 4, 8):
+        raise TaichiRuntimeError(
+            "Graph shared-staged input must use a two-, four-, or eight-byte "
+            "scalar dtype"
+        )
     output_names = []
-    layout_requirements = [(staged_name, domain_end + halo_high, 4, 4)]
+    layout_requirements = [
+        (
+            staged_name,
+            domain_end + halo_high,
+            staged_stride,
+            staged_alignment,
+        )
+    ]
     for index, effect in effects.items():
         if index == staged_index:
             continue
@@ -12173,7 +12188,17 @@ def _graph_shared_staged_contract(kernel_cpp, args):
             )
         output_name = args[index].name
         output_names.append(output_name)
-        layout_requirements.append((output_name, domain_end, 4, 4))
+        output_dtype = args[index].dtype()
+        output_stride = _ti_core.data_type_size(output_dtype)
+        output_alignment = _ti_core.data_type_alignment(output_dtype)
+        if output_stride not in (2, 4, 8):
+            raise TaichiRuntimeError(
+                "Graph shared-staged outputs must use two-, four-, or "
+                "eight-byte scalar dtypes"
+            )
+        layout_requirements.append(
+            (output_name, domain_end, output_stride, output_alignment)
+        )
     if not output_names or staged_name in output_names:
         raise TaichiRuntimeError(
             "Graph shared-staged recipe requires a distinct write-only output"
