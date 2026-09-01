@@ -626,6 +626,24 @@ qualification cache，证据缺失、过期或作用域不匹配时 fail closed 
 structured-control 搜索不允许生成这类 runtime cache：winner 只能由离线流程显式重建，
 不会修改 runtime `auto` 策略。compile/search build 时间只作诊断，不是准入门禁。
 
+完整 `graph_memory` 域已在 RTX 5090、driver 610.62、matching source/shim/native commit
+`835eea2cb18c49ef66470ae4a378493fb97a0db2` 上完成正式资格化。三个 scope 各使用 10 个
+fresh process、均衡 AB/BA、每进程 5 个每路线至少 250 ms 的 paired block；每个 worker 都由
+经审查的 CompileIQ fork 完整覆盖并精确重建 2/2 opaque recipe。16,777,216-item radius-1
+与 radius-4 的 staged/direct 中位比值为 0.947679 与 0.965961，最差进程为 0.948109 与
+0.967921，两个精确 scope 均通过 worst-positive。16,384-item radius-1 的中位与最差比值为
+1.007171 与 1.035936，因此作为负面保留，不进入准入。
+
+全部 30 个 worker 的 exact correctness、route/binding identity、source/native provenance、
+噪声与显存平台门均通过。两轮各 10,000 replay 之间，Forge device pool 均保持
+168,173,696 bytes/2 raw chunks，进程 GPU 显存波次增量为 0；大规模 scope 为 1061.66 MiB，
+小规模 scope 为 741.660--741.664 MiB。staged 的每 block 静态 shared memory 为 radius-1
+的 520 bytes 与 radius-4 的 544 bytes。这是完整双路线 worker 的平台观测，不把进程显存
+误算成单 recipe 独占量。工件状态为 `partially_qualified`、strict gate 通过，位于
+`.agent/experiments/graph-memory-compileiq-835eea2c/qualification.json`，SHA-256 为
+`7d97c2c2bce00b8d42a4e7e9f47888b088fefc77b0d4a91ef9207e7d4bc2e6d6`。该证据只允许离线
+显式重建上述大规模精确 scope，不为负面小规模 scope 建立准入，也不改变 runtime `auto`。
+
 R12 精确分区资格测试使用同一个经审查 fork 和 10 个 fresh process 的平衡 AB/BA 协议，
 每条最终路线的 block 都至少 250 ms。4,096-item dispatch-sensitive Graph 与
 1,048,576-item bandwidth Graph 的 candidate/baseline 中位数分别为 0.97800 与 0.97232，

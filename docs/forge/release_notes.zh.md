@@ -114,6 +114,23 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   精确 recipe scope，不等同于当前完整 CompileIQ 重建的性能准入；后者继续使用 matching-commit、
   fresh-process AB/BA、worst-positive 与进程显存平台 Gate。Forge 仍不把全局
   `CompileConfig.make_block_local` 或私有 per-kernel task 轴暴露为 Graph 搜索域。
+
+  当前完整 CompileIQ 域随后在 RTX 5090、driver 610.62、matching source/shim/native commit
+  `835eea2cb18c49ef66470ae4a378493fb97a0db2` 上完成独立正式资格化。每个 scope 使用 10 个
+  fresh process、均衡 AB/BA、每进程 5 个每路线至少 250 ms 的 paired block，并且每个 worker
+  都由经审查的 CompileIQ fork 完整穷举并精确重建 2/2 个 opaque recipe。16,777,216-item
+  radius-1 与 radius-4 的 staged/direct 中位比值分别为 0.947679 与 0.965961，最差进程分别为
+  0.948109 与 0.967921，因此两个精确 scope 通过 worst-positive；16,384-item radius-1
+  中位为 1.007171、最差为 1.035936，作为负面 scope 保留。全部 30 个 worker 的正确性、
+  route/binding identity、source/native provenance、噪声与显存平台门均通过。两轮各 10,000
+  replay 之间，Forge device pool 固定为 168,173,696 bytes/2 raw chunks，进程级 GPU 显存的
+  波次增量为 0；大规模 scope 为 1061.66 MiB，小规模 scope 为 741.660--741.664 MiB。
+  staged route 的每 block 静态 shared memory 为 radius-1 的 520 bytes 与 radius-4 的
+  544 bytes；这些数字是完整双路线 worker 的平台观测，不是单 recipe 独占显存声明。
+  工件状态为 `partially_qualified` 且 strict gate 通过，位于
+  `.agent/experiments/graph-memory-compileiq-835eea2c/qualification.json`（SHA-256
+  `7d97c2c2bce00b8d42a4e7e9f47888b088fefc77b0d4a91ef9207e7d4bc2e6d6`）。结果只资格化上述
+  大规模精确 scope，负面小规模 scope 不准入，且不改变 runtime `auto`。
 - 新增稳定公开的 `Graph.bind(arguments)` 与 `ti.graph.GraphBindingSet`。发布时会按值快照
   scalar/matrix、按 identity 保留 device resource，并在版本可见前完成 owner、layout、
   structured-control 与 alias 资格化；失败的 `update()`/`replace()` 不替换旧版本。同一已发布且

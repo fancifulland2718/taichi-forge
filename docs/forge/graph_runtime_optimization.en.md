@@ -810,6 +810,31 @@ that runtime cache: a winner is available only through explicit offline
 reconstruction and does not mutate the runtime `auto` policy. Compile/search
 build time is diagnostic only and is not an admission gate.
 
+The complete `graph_memory` domain has been formally qualified on an RTX 5090
+with driver 610.62 at matching source, shim, and native commit
+`835eea2cb18c49ef66470ae4a378493fb97a0db2`. Each of three scopes used ten fresh
+processes, balanced AB/BA order, and five paired blocks of at least 250 ms per
+route in every process. Every worker used the reviewed CompileIQ fork to cover
+and exactly reconstruct both opaque recipes. For the 16,777,216-item radius-1
+and radius-4 scopes, staged/direct median ratios were 0.947679 and 0.965961 and
+worst-process ratios were 0.948109 and 0.967921, so both exact scopes passed
+worst-positive. The 16,384-item radius-1 scope had a 1.007171 median and a
+1.035936 worst process, so it remains a negative and is not admitted.
+
+All 30 workers passed exact correctness, route and binding identity,
+source/native provenance, noise, and VRAM-plateau gates. Across two 10,000-replay
+waves, the Forge device pool remained at 168,173,696 bytes in two raw chunks and
+process-level GPU-memory delta was zero. Large scopes used 1061.66 MiB and the
+small scope used 741.660--741.664 MiB. Per-block static shared memory was 520
+bytes for radius 1 and 544 bytes for radius 4. These are whole dual-route worker
+plateau observations rather than exclusive-VRAM claims for one recipe. The
+artifact status is `partially_qualified` with its strict gate passed at
+`.agent/experiments/graph-memory-compileiq-835eea2c/qualification.json`, SHA-256
+`7d97c2c2bce00b8d42a4e7e9f47888b088fefc77b0d4a91ef9207e7d4bc2e6d6`.
+This evidence permits only explicit offline reconstruction of the exact large
+scopes above; it does not admit the negative small scope or change runtime
+`auto`.
+
 The R12 exact-partition qualification used the same reviewed fork and a
 ten-fresh-process balanced AB/BA protocol, with every final route block at
 least 250 ms. Candidate/baseline medians were 0.97800 for the 4,096-item

@@ -147,6 +147,29 @@ grouped under the behavior they shipped.
   worst-positive, and process-VRAM plateau gates. Forge still exposes neither global
   `CompileConfig.make_block_local` nor private per-kernel task axes as a Graph
   search domain.
+
+  The current complete CompileIQ domain was subsequently qualified independently
+  on an RTX 5090 with driver 610.62 at matching source, shim, and native commit
+  `835eea2cb18c49ef66470ae4a378493fb97a0db2`. Each scope used ten fresh processes,
+  balanced AB/BA order, five paired blocks of at least 250 ms per route in every
+  process, and complete 2/2 opaque-recipe enumeration and exact reconstruction by
+  the reviewed CompileIQ fork in every worker. For the 16,777,216-item radius-1
+  and radius-4 scopes, staged/direct median ratios were 0.947679 and 0.965961 and
+  worst-process ratios were 0.948109 and 0.967921, so both exact scopes passed
+  worst-positive. The 16,384-item radius-1 scope had a 1.007171 median and a
+  1.035936 worst process and was retained as a negative. All 30 workers passed
+  correctness, route and binding identity, source/native provenance, noise, and
+  VRAM-plateau gates. Across two 10,000-replay waves, the Forge device pool stayed
+  at 168,173,696 bytes in two raw chunks and process-level GPU-memory delta was
+  zero; large scopes used 1061.66 MiB and the small scope used 741.660--741.664
+  MiB. Per-block static shared memory was 520 bytes for radius 1 and 544 bytes for
+  radius 4. These are whole dual-route worker plateau observations, not claims of
+  exclusive VRAM owned by one recipe. The artifact status is
+  `partially_qualified` with the strict gate passed at
+  `.agent/experiments/graph-memory-compileiq-835eea2c/qualification.json`
+  (SHA-256 `7d97c2c2bce00b8d42a4e7e9f47888b088fefc77b0d4a91ef9207e7d4bc2e6d6`).
+  Admission is limited to the exact large scopes above; the negative small scope
+  is not admitted, and runtime `auto` remains unchanged.
 - Added the stable public `Graph.bind(arguments)` and
   `ti.graph.GraphBindingSet` APIs. Publication snapshots scalar/matrix values,
   retains device resources by identity, and completes owner, layout,
