@@ -113,6 +113,10 @@ class _ExhaustiveSearch:
     PROTOCOL = "bounded_exhaustive_main_thread_v1"
 
 
+class _TargetContract:
+    SCHEMA = "compileiq.taichi-forge-opaque-target-contract.v1"
+
+
 class _Graph:
     def __init__(self, space, *, map_materialization_available=None):
         self._space = space
@@ -127,11 +131,17 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 2,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.2",
-            "package_version": "1.0.0dev3+taichiforge.opaque1",
+            "protocol_revision": 3,
+            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.3",
+            "package_version": "1.0.0dev3+taichiforge.opaque2",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
+            "opaque_target_contract_schema": (
+                "compileiq.taichi-forge-opaque-target-contract.v1"
+            ),
+            "opaque_target_selection": (
+                "explicit_objectives_constraints_pareto_no_scalarization_v1"
+            ),
             "max_recipe_ids": 4096,
             "max_field_utf8_bytes": 4096,
             "max_canonical_bytes": 4 * 1024 * 1024,
@@ -342,12 +352,38 @@ def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
     assert manifest["fallback"] == "disabled"
     assert manifest["reviewed_compileiq_distribution"] == {
         "repository": "https://github.com/fancifulland2718/CompileIQ",
-        "ref": "refs/heads/forge/opaque-recipes-v1.2",
-        "commit": "579b572d0e68165bea215f5a43c8ac09daadeb5e",
-        "wheel_sha256": ("d6155a96857070684ba66bc02105adeb300a2ea7de4ae7bb5bba5d2101d7656a"),
+        "ref": "refs/heads/forge/opaque-objectives-v1.3",
+        "commit": "300c426cf8bef288e926a06ab11431797d4942fa",
+        "wheel_sha256": ("1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
     json.dumps(manifest)
+
+
+def test_graph_search_forwards_explicit_opaque_target_contract(monkeypatch):
+    _install_reviewed_fork(monkeypatch)
+    search = compileiq_recipe_search(_Graph(_space()))
+    target_contract = object()
+    captured = {}
+
+    class _CapturingExhaustiveSearch:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    search._transport._exhaustive_search_type = _CapturingExhaustiveSearch
+    objective = lambda _: {"steady_ms": 1.0}
+
+    created = search.compileiq_search(
+        objective,
+        target_contract=target_contract,
+    )
+
+    assert isinstance(created, _CapturingExhaustiveSearch)
+    assert captured["objective_function"] is objective
+    assert captured["search_space"] is search.search_space
+    assert captured["baseline_recipe_id"] == search.baseline_recipe_id
+    assert captured["problem_type"] == "min"
+    assert captured["target_contract"] is target_contract
 
 
 def test_decoded_selection_reuses_graph_materialization_identity(monkeypatch):
@@ -660,6 +696,7 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
         ),
         ForgeMainThreadWorker=_Worker,
         ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
+        ForgeOpaqueTargetContractV1=_TargetContract,
     )
     recipes = SimpleNamespace(OpaqueRecipeDomainV1=_OpaqueRecipeDomain)
     modules = {

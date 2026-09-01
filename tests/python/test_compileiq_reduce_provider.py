@@ -88,11 +88,17 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 2,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.2",
-            "package_version": "1.0.0dev3+taichiforge.opaque1",
+            "protocol_revision": 3,
+            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.3",
+            "package_version": "1.0.0dev3+taichiforge.opaque2",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
+            "opaque_target_contract_schema": (
+                "compileiq.taichi-forge-opaque-target-contract.v1"
+            ),
+            "opaque_target_selection": (
+                "explicit_objectives_constraints_pareto_no_scalarization_v1"
+            ),
             "max_recipe_ids": 4096,
             "max_field_utf8_bytes": 4096,
             "max_canonical_bytes": 4 * 1024 * 1024,

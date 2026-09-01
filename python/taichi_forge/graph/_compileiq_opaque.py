@@ -178,11 +178,19 @@ class CompileIQGraphRecipeSearch:
         recipe_id = self._decoded_recipe_id(parameters)
         return self._adapter.select({self._adapter.parameter: recipe_id})
 
-    def compileiq_search(self, objective_function, *, problem_type="min"):
+    def compileiq_search(
+        self,
+        objective_function,
+        *,
+        problem_type="min",
+        target_contract=None,
+    ):
         """Create the reviewed fork's complete bounded opaque search."""
 
         return self._transport.exhaustive_search(
-            objective_function, problem_type=problem_type
+            objective_function,
+            problem_type=problem_type,
+            target_contract=target_contract,
         )
 
     def refine(self, compileiq_search, frontier_recipe_ids):

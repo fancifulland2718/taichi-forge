@@ -10,13 +10,13 @@ from types import MappingProxyType
 
 
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v1"
-_FORK_BUILD_ID = "compileiq-taichi-forge-opaque-recipes.v1.2"
-_PACKAGE_VERSION = "1.0.0dev3+taichiforge.opaque1"
+_FORK_BUILD_ID = "compileiq-taichi-forge-opaque-recipes.v1.3"
+_PACKAGE_VERSION = "1.0.0dev3+taichiforge.opaque2"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
-_REVIEWED_FORK_REF = "refs/heads/forge/opaque-recipes-v1.2"
-_REVIEWED_FORK_COMMIT = "579b572d0e68165bea215f5a43c8ac09daadeb5e"
+_REVIEWED_FORK_REF = "refs/heads/forge/opaque-objectives-v1.3"
+_REVIEWED_FORK_COMMIT = "300c426cf8bef288e926a06ab11431797d4942fa"
 _REVIEWED_WHEEL_SHA256 = (
-    "d6155a96857070684ba66bc02105adeb300a2ea7de4ae7bb5bba5d2101d7656a"
+    "1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _AUDIT_SCHEMA = "compileiq.opaque-recipe-selection.v1"
@@ -35,12 +35,12 @@ _EXPECTED_CORE_LOCK = (
     "sha256:0bc59bcd0864ce77dcae75aa00af3f7d641737e9abd0bd3cdb21c78425f127aa"
 )
 _EXPECTED_CAPABILITY_ID = (
-    "ciq-forge-cap-v1:5992d8b8182fbe49d87efeb72f90756c1a97ce48055f6cd93823445b54463bfa"
+    "ciq-forge-cap-v1:63f85504bd3a9f1a9c65ed232d15ec4d9fe2690b2bf6e245046e13a9e91f502a"
 )
 _OBJECTIVE_WORKER = "forge_main_thread_serial_v1"
 _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
-    "6cee04de70e71397fa075067a7b6be7a265fde41209458e86ad4b1f66a502f03"
+    "b69746d40430355b0a388cb0b9bb748d94c6af872a75938d3d266ae34e4343b9"
 )
 _SOURCE_LOCK_FILES = (
     "ciq.py",
@@ -72,6 +72,8 @@ _CAPABILITY_KEYS = frozenset(
         "package_version",
         "opaque_recipe_domain_schema",
         "selection_audit_schema",
+        "opaque_target_contract_schema",
+        "opaque_target_selection",
         "max_recipe_ids",
         "max_field_utf8_bytes",
         "max_canonical_bytes",
@@ -181,6 +183,7 @@ def _validated_compileiq_capability(
     exhaustive_search_type = getattr(
         support, "ForgeOpaqueRecipeExhaustiveSearchV1", None
     )
+    target_contract_type = getattr(support, "ForgeOpaqueTargetContractV1", None)
     domain_type = getattr(recipes, "OpaqueRecipeDomainV1", None)
     if (
         not callable(capability_factory)
@@ -190,6 +193,9 @@ def _validated_compileiq_capability(
         or not isinstance(exhaustive_search_type, type)
         or getattr(exhaustive_search_type, "PROTOCOL", None)
         != "bounded_exhaustive_main_thread_v1"
+        or not isinstance(target_contract_type, type)
+        or getattr(target_contract_type, "SCHEMA", None)
+        != "compileiq.taichi-forge-opaque-target-contract.v1"
     ):
         raise error_type(
             "installed CompileIQ does not publish the complete Forge opaque-recipe "
@@ -206,11 +212,17 @@ def _validated_compileiq_capability(
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 2,
+        "protocol_revision": 3,
         "fork_build_id": _FORK_BUILD_ID,
         "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
         "selection_audit_schema": _AUDIT_SCHEMA,
+        "opaque_target_contract_schema": (
+            "compileiq.taichi-forge-opaque-target-contract.v1"
+        ),
+        "opaque_target_selection": (
+            "explicit_objectives_constraints_pareto_no_scalarization_v1"
+        ),
         "max_recipe_ids": _MAX_RECIPES,
         "max_field_utf8_bytes": _MAX_FIELD_UTF8_BYTES,
         "max_canonical_bytes": _MAX_CANONICAL_BYTES,
@@ -390,7 +402,13 @@ class _CompileIQOpaqueRecipeTransport:
     def worker_type(self):
         return self._worker_type
 
-    def exhaustive_search(self, objective_function, *, problem_type="min"):
+    def exhaustive_search(
+        self,
+        objective_function,
+        *,
+        problem_type="min",
+        target_contract=None,
+    ):
         """Create the exact fork's complete finite-domain search."""
 
         exhaustive_search_type = self._exhaustive_search_type
@@ -410,6 +428,7 @@ class _CompileIQOpaqueRecipeTransport:
             search_space=self._domain,
             baseline_recipe_id=self.baseline_recipe_id,
             problem_type=problem_type,
+            target_contract=target_contract,
         )
 
     @property
