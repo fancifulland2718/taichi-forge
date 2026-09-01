@@ -5,7 +5,7 @@ import time
 import warnings
 import weakref
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from types import MappingProxyType
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -88,6 +88,7 @@ from taichi_forge.graph._optimization import (
     _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
     _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     _GraphFusionQualificationCache,
+    _GraphMemoryRecipeManifest,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
@@ -95,6 +96,7 @@ from taichi_forge.graph._optimization import (
 ArgKind = _ti_core.ArgKind
 
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
+_INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
 _INTERNAL_FUSION_QUALIFICATION_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
@@ -9331,6 +9333,34 @@ def _graph_memory_layout_requirements(root):
     return tuple(sorted(requirements))
 
 
+def _graph_memory_semantic_root(root):
+    """Remove only physical binding requirements from the first memory slice."""
+
+    dispatch_count = 0
+
+    def strip(node):
+        nonlocal dispatch_count
+        if isinstance(node, DispatchNode):
+            dispatch_count += 1
+            return replace(
+                node,
+                memory_disjoint_pairs=(),
+                memory_layout_requirements=(),
+            )
+        if isinstance(node, SequentialRegion):
+            return replace(
+                node, children=tuple(strip(child) for child in node.children)
+            )
+        raise ValueError(
+            "the initial GraphMemory recipe accepts sequential dispatch regions only"
+        )
+
+    semantic = strip(root)
+    if dispatch_count != 1:
+        raise ValueError("the initial GraphMemory recipe requires one logical dispatch")
+    return semantic
+
+
 def _parallel_identity_tuple(value):
     if value is None:
         return None
@@ -9707,7 +9737,13 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
 
 
 class _GraphSpec:
-    def __init__(self, nodes, aot_graph_builder=None, aot_compiled_graph=None):
+    def __init__(
+        self,
+        nodes,
+        aot_graph_builder=None,
+        aot_compiled_graph=None,
+        graph_memory_sources=(),
+    ):
         source_nodes = tuple(nodes)
         structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
         structured_owner_token = object()
@@ -9769,6 +9805,9 @@ class _GraphSpec:
             control_recipe_ids=control_recipe_ids,
             selected_control_recipe_id=selected_control_recipe_id,
         )
+        self._graph_memory_sources = tuple(graph_memory_sources)
+        self._compileiq_executable_space_cache = None
+        self._compileiq_graph_memory_status = "not_evaluated"
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -9927,9 +9966,7 @@ class _GraphSpec:
         )
         self.memory_recipe_publish_frame_stable = (
             not has_dynamic_argument_binding
-            and not dynamic_overlay_names.intersection(
-                self.memory_recipe_binding_names
-            )
+            and not dynamic_overlay_names.intersection(self.memory_recipe_binding_names)
         )
         self.binding_plan = _GraphBindingPlan(
             public_names=public_names,
@@ -9964,6 +10001,58 @@ class _GraphSpec:
         self.ir_analysis = analyze_graph_ir(self.ir_root)
         for node in self.structured_control_nodes:
             node._graph_owner_token = structured_owner_token
+
+    def compileiq_executable_optimization_space(self):
+        cached = self._compileiq_executable_space_cache
+        if cached is not None:
+            return cached
+
+        base = self.executable_optimization_space
+        eligible_shape = bool(
+            len(self._graph_memory_sources) == 1
+            and self.dispatch_count == 1
+            and self.native_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and not self.fixed_runtime_args
+            and not self.temporary_actions
+            and not self.lifetime_leases
+            and len(self.nodes) == 1
+            and isinstance(self.nodes[0], _CompiledCGraphNode)
+            and isinstance(self.nodes[0].ir_node, SequentialRegion)
+            and not base.baseline.control_recipe_id
+            and not base.candidates
+        )
+        if not eligible_shape:
+            self._compileiq_graph_memory_status = "definition_out_of_scope"
+            self._compileiq_executable_space_cache = base
+            return base
+
+        source = self._graph_memory_sources[0]
+        manifests = source.manifests()
+        if not manifests:
+            self._compileiq_graph_memory_status = (
+                "candidate_rejected:" + source.candidate_failure
+            )
+            self._compileiq_executable_space_cache = base
+            return base
+        try:
+            semantic_root = _graph_memory_semantic_root(self.pre_optimization_ir_root)
+            space = _build_executable_optimization_space(
+                self.pre_optimization_ir_root,
+                self.fusion_plan,
+                base.baseline.backend,
+                memory_recipe_manifests=manifests,
+                selected_memory_recipe_id=source.selected_recipe_id,
+                semantic_root=semantic_root,
+            )
+        except ValueError as error:
+            self._compileiq_graph_memory_status = "domain_rejected:" + str(error)
+            self._compileiq_executable_space_cache = base
+            return base
+        self._compileiq_graph_memory_status = "complete_recipe_domain"
+        self._compileiq_executable_space_cache = space
+        return space
 
     def terminal_control_report(self, logical_iterations):
         """Synthesize the control report for one terminal-only submission."""
@@ -10710,8 +10799,7 @@ class _GraphSpec:
         return _GraphControlBindingCertificate(
             runtime_generation=int(impl.runtime_generation()),
             bindings=tuple(
-                (name, descriptions[name], allocation_keys[name])
-                for name in plan.names
+                (name, descriptions[name], allocation_keys[name]) for name in plan.names
             ),
             distinct_groups=tuple(certified_groups),
         )
@@ -10845,8 +10933,7 @@ class _GraphSpec:
         certificate = _GraphMemoryRecipeCertificate(
             runtime_generation=int(impl.runtime_generation()),
             bindings=tuple(
-                (name, storage[name][1])
-                for name in self.memory_recipe_binding_names
+                (name, storage[name][1]) for name in self.memory_recipe_binding_names
             ),
             layout_requirements=self.memory_layout_requirements,
             disjoint_pairs=self.memory_disjoint_pairs,
@@ -11081,9 +11168,11 @@ class _GraphExecutable:
                 flattened_args=prepared.flattened_args,
             )
         try:
-            for run, telemetry_entries, reversed_telemetry_entries in (
-                self._submission_steps
-            ):
+            for (
+                run,
+                telemetry_entries,
+                reversed_telemetry_entries,
+            ) in self._submission_steps:
                 if telemetry is None or not telemetry_entries:
                     run(context, temporaries)
                     continue
@@ -11904,6 +11993,213 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         tuple(sorted((staged_name, name) for name in output_names)),
         tuple(sorted(layout_requirements)),
     )
+
+
+def _kernel_task_manifests(kernel_cpp):
+    from taichi_forge.lang.task_manifest import OffloadedTaskManifest
+
+    raw = impl.get_runtime().prog._kernel_task_manifest(kernel_cpp)
+    return tuple(OffloadedTaskManifest._from_core(item) for item in raw)
+
+
+def _graph_memory_symbolic_abi(args):
+    return tuple(
+        {
+            "name": str(arg.name),
+            "kind": str(getattr(arg, "tag", "")),
+            "dtype": str(arg.dtype()),
+            "rank": int(getattr(arg, "field_dim", 0)),
+            "element_shape": tuple(getattr(arg, "element_shape", ())),
+        }
+        for arg in args
+    )
+
+
+def _graph_memory_recipe_manifest(
+    plan,
+    manifests,
+    args,
+    label,
+    *,
+    strategy,
+    memory_disjoint_pairs=(),
+    memory_layout_requirements=(),
+):
+    return _GraphMemoryRecipeManifest.from_payload(
+        {
+            "strategy": strategy,
+            "dispatch_label": label,
+            "symbolic_abi": _graph_memory_symbolic_abi(args),
+            "semantic_kernel_identity": plan.semantic_kernel_identity,
+            "offload_plan_identity": plan.identity,
+            "offload_compilation_identity": plan.compilation_identity,
+            "offload_plan": plan.stable_payload,
+            "materialized_tasks": tuple(asdict(task) for task in manifests),
+            "memory_disjoint_pairs": tuple(memory_disjoint_pairs),
+            "memory_layout_requirements": tuple(memory_layout_requirements),
+        }
+    )
+
+
+class _GraphMemoryRecipeSource:
+    """Frozen Graph-definition lineage with a lazy physical candidate cache."""
+
+    def __init__(self, kernel_fn, args, label, baseline_kernel_cpp):
+        self.kernel_fn = kernel_fn
+        self.args = tuple(args)
+        self.label = label
+        self.baseline_kernel_cpp = baseline_kernel_cpp
+        self.baseline_manifests = None
+        self.baseline_plan = None
+        self.direct_manifest = None
+        self.selected_recipe_id = ""
+        self._definition_lock = threading.Lock()
+        self._candidate = None
+        self._candidate_failure = ""
+        self._candidate_attempted = False
+        self._candidate_lock = threading.Lock()
+
+    @classmethod
+    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+        if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
+            return None
+        if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
+            return None
+        if not hasattr(kernel_fn, "with_launch_policy"):
+            return None
+        return cls(kernel_fn, args, label, baseline_kernel_cpp)
+
+    def _prepare_definition(self):
+        if self.direct_manifest is not None:
+            return
+        with self._definition_lock:
+            if self.direct_manifest is not None:
+                return
+            from taichi_forge.lang._offload_execution_plan import (
+                _OffloadExecutionPlan,
+            )
+
+            manifests = _kernel_task_manifests(self.baseline_kernel_cpp)
+            plan = _OffloadExecutionPlan.from_task_manifests(manifests)
+            ranges = tuple(task for task in plan.tasks if task.task_kind == "range_for")
+            if len(ranges) != 1:
+                raise ValueError("GraphMemory requires exactly one range-for task")
+            direct_manifest = _graph_memory_recipe_manifest(
+                plan,
+                manifests,
+                self.args,
+                self.label,
+                strategy="direct",
+            )
+            self.baseline_manifests = manifests
+            self.baseline_plan = plan
+            self.direct_manifest = direct_manifest
+            if not self.selected_recipe_id:
+                self.selected_recipe_id = direct_manifest.recipe_id
+
+    def _build_candidate(self):
+        from taichi_forge.lang._offload_execution_plan import (
+            _bind_offload_execution_plan,
+        )
+
+        self._prepare_definition()
+        range_task = next(
+            task for task in self.baseline_plan.tasks if task.task_kind == "range_for"
+        )
+        staged_plan = self.baseline_plan.replace_task(
+            range_task.task_index,
+            workgroup_size=128,
+            memory_strategy="shared_staged_1d",
+        )
+        staged_binding = _bind_offload_execution_plan(self.kernel_fn, staged_plan)
+        staged_kernel_cpp = gen_cpp_kernel(
+            staged_binding,
+            self.args,
+            allow_graph_memory_recipe=True,
+        )
+        contracts, layout_requirements = _graph_shared_staged_contract(
+            staged_kernel_cpp,
+            self.args,
+        )
+        manifests = _kernel_task_manifests(staged_kernel_cpp)
+        staged_plan.validate_materialization(manifests)
+        manifest = _graph_memory_recipe_manifest(
+            staged_plan,
+            manifests,
+            self.args,
+            self.label,
+            strategy="shared_staged_1d",
+            memory_disjoint_pairs=contracts,
+            memory_layout_requirements=layout_requirements,
+        )
+        return (
+            manifest,
+            staged_kernel_cpp,
+            contracts,
+            layout_requirements,
+        )
+
+    def candidate(self):
+        if self._candidate_attempted:
+            return self._candidate
+        with self._candidate_lock:
+            if self._candidate_attempted:
+                return self._candidate
+            try:
+                self._prepare_definition()
+                self._candidate = self._build_candidate()
+            except (
+                ValueError,
+                RuntimeError,
+                TaichiCompilationError,
+                TaichiRuntimeError,
+            ) as error:
+                self._candidate_failure = str(error).strip() or type(error).__name__
+                self._candidate = None
+            self._candidate_attempted = True
+            return self._candidate
+
+    @property
+    def candidate_failure(self):
+        self.candidate()
+        return self._candidate_failure
+
+    def manifests(self):
+        candidate = self.candidate()
+        if candidate is None:
+            return ()
+        return (self.direct_manifest, candidate[0])
+
+    def materialize(self, requested_recipe_id):
+        try:
+            self._prepare_definition()
+        except (
+            TypeError,
+            ValueError,
+            RuntimeError,
+            TaichiCompilationError,
+            TaichiRuntimeError,
+        ) as error:
+            raise TaichiRuntimeError(
+                "requested GraphMemory recipe cannot prepare its source plan: "
+                + (str(error).strip() or type(error).__name__)
+            ) from None
+        if requested_recipe_id == self.direct_manifest.recipe_id:
+            self.selected_recipe_id = requested_recipe_id
+            return self.baseline_kernel_cpp, (), ()
+        candidate = self.candidate()
+        if candidate is None:
+            reason = self._candidate_failure or "candidate is unsupported"
+            raise TaichiRuntimeError(
+                "requested GraphMemory recipe cannot be materialized: " + reason
+            )
+        manifest, kernel_cpp, contracts, layout_requirements = candidate
+        if requested_recipe_id != manifest.recipe_id:
+            raise TaichiRuntimeError(
+                "requested GraphMemory recipe is absent from this Graph definition"
+            )
+        self.selected_recipe_id = requested_recipe_id
+        return kernel_cpp, contracts, layout_requirements
 
 
 def _require_bounded_symbolic_ndarray(value, role, dtype):
@@ -12765,6 +13061,7 @@ class GraphBuilder:
         self._runtime_graph_native_action_manifests = []
         self._active_bounded_publication = None
         self._declared_private_bindings = {}
+        self._graph_memory_sources = []
 
     def private_ndarray(
         self,
@@ -12815,7 +13112,40 @@ class GraphBuilder:
         label = _normalize_dispatch_label(label)
         kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
         unzipped_args = flatten_args(args)
+        source = _GraphMemoryRecipeSource.try_create(
+            kernel_fn,
+            unzipped_args,
+            label,
+            kernel_cpp,
+            template_args,
+        )
+        requested_memory_recipe = os.environ.get(_INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
+        if requested_memory_recipe is not None:
+            requested_memory_recipe = requested_memory_recipe.strip()
+            if not requested_memory_recipe:
+                raise TaichiRuntimeError(
+                    f"{_INTERNAL_GRAPH_MEMORY_RECIPE_ENV} must be a complete "
+                    "GraphMemory recipe ID"
+                )
+            if source is None:
+                raise TaichiRuntimeError(
+                    "requested GraphMemory recipe has no eligible ordinary "
+                    "CUDA Graph dispatch source"
+                )
+            kernel_cpp, contracts, layout_requirements = source.materialize(
+                requested_memory_recipe
+            )
+        else:
+            contracts, layout_requirements = (), ()
         self._record_dispatch(kernel_cpp, unzipped_args, label)
+        if contracts or layout_requirements:
+            self._pending_ir_nodes[-1] = replace(
+                self._pending_ir_nodes[-1],
+                memory_disjoint_pairs=contracts,
+                memory_layout_requirements=layout_requirements,
+            )
+        if source is not None:
+            self._graph_memory_sources.append(source)
 
     def _dispatch_shared_staged_1d(
         self, kernel_fn, *args, template_args=None, label=None
@@ -13871,6 +14201,7 @@ class GraphBuilder:
             _GraphSpec(
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
+                graph_memory_sources=tuple(self._graph_memory_sources),
             ),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
@@ -15386,6 +15717,25 @@ class Graph:
             return self._spec.executable_optimization_space
 
     @property
+    def _compileiq_executable_optimization_space(self):
+        """Return the lazily expanded, Forge-owned offline recipe domain."""
+
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._workspace_lane_capacity != 1:
+                return self._spec.executable_optimization_space
+            return self._spec.compileiq_executable_optimization_space()
+
+    @property
+    def _compileiq_graph_memory_status(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._workspace_lane_capacity != 1:
+                return "workspace_lane_scope_rejected"
+            self._spec.compileiq_executable_optimization_space()
+            return self._spec._compileiq_graph_memory_status
+
+    @property
     def _compileiq_map_materialization_available(self):
         """Whether exact source groups have one unambiguous native builder."""
 
@@ -15523,9 +15873,7 @@ class Graph:
                     ]
                 )
             provider_memory = (
-                self._spec.provider_memory_reports()
-                if self._spec is not None
-                else ()
+                self._spec.provider_memory_reports() if self._spec is not None else ()
             )
             return _execution_report(
                 self._execution_definition,

@@ -114,12 +114,20 @@ grouped under the behavior they shipped.
   upstream/different CompileIQ builds through exact capability, bundled-core,
   and Python-source locks; CompileIQ remains an optional offline dependency.
 
-  Graph memory remains fail-closed for CompileIQ integration. Forge now has one
-  private exact CUDA f32 one-dimensional `shared_staged_1d` lowering for
-  reviewed affine stencil offloads. It can only be reconstructed from an exact
-  offload-plan binding through the private Graph-owned builder path; binding
-  publication proves owner, extent, layout, and alias requirements once, while
-  stable qualified replay reuses that certificate. Formal S4 qualification is
+  Graph memory is now integrated with the reviewed modified CompileIQ fork as
+  a separate Forge-owned complete-recipe domain. A strict single-dispatch CUDA
+  f32 affine-stencil Graph exposes a direct baseline and one complete
+  `shared_staged_1d` candidate. Forge retains source lineage lazily and freezes
+  the offload plan, materialized task manifest, halo, shared bytes, and binding
+  requirements. CompileIQ searches only opaque spec tokens: it sees no raw
+  `memory_strategy`, block, tile, or halo axes, and the domain is not combined
+  with map fusion or structured control. The worker reconstructs only while
+  building the Graph definition, after which Forge verifies semantic and
+  physical identity again. Binding publication proves owner, extent, layout,
+  and alias requirements once, while stable replay reuses the certificate. A
+  winner neither changes runtime `auto` nor emits a runtime qualification cache.
+
+  Before this complete domain was implemented, formal S4 mechanism qualification was
   positive for the exact radius-1 and radius-4 recipes on the local RTX 5090
   with driver 610.62 at source/native commit `ada3e9eba912a5368c5cd1a21f1b8f5d12c08b7e`.
   With stable `GraphBindingSet` replay, ten fresh processes per scope, balanced
@@ -133,10 +141,10 @@ grouped under the behavior they shipped.
   remains an ineligible diagnostic. The ignored local machine-readable artifact
   is `.agent/experiments/graph-memory-s4-ada3e9eb/qualification.json` (SHA-256
   `f788b4d109ef0b1817807fab5ef51100cea9703cb5eda8cd5de6cae471a3fa1e`). This
-  qualifies only those exact private recipe scopes: the route remains private
-  and unsupported until complete direct/shared-Graph reconstruction, fallback,
-  and stable-binding product contracts are approved. CompileIQ does not see
-  `memory_strategy`, and Forge still exposes neither global
+  historical result qualifies only those exact recipe scopes and is not
+  performance admission for the current complete CompileIQ reconstruction.
+  The latter continues to require matching-commit fresh-process AB/BA,
+  worst-positive, and process-VRAM plateau gates. Forge still exposes neither global
   `CompileConfig.make_block_local` nor private per-kernel task axes as a Graph
   search domain.
 - Added the stable public `Graph.bind(arguments)` and

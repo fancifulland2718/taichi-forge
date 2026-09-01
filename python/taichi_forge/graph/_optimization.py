@@ -34,6 +34,12 @@ _CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
     for recipe_id in domain
 )
 
+_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_MEMORY_RECIPE_PREFIXES = {
+    "direct": "graph-memory:direct:",
+    "shared_staged_1d": "graph-memory:shared-staged-1d:",
+}
+
 
 def _canonical_hash(value):
     payload = json.dumps(
@@ -46,6 +52,73 @@ def _canonical_hash(value):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _canonical_json(value):
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+@dataclass(frozen=True)
+class _GraphMemoryRecipeManifest:
+    """Immutable complete physical recipe retained and verified by Forge."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("GraphMemory recipe ID must be a nonempty string")
+        if not isinstance(self.payload_json, str) or not self.payload_json:
+            raise ValueError("GraphMemory recipe payload must be canonical JSON")
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("GraphMemory recipe payload is invalid") from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical_json(payload) != self.payload_json
+        ):
+            raise ValueError("GraphMemory recipe payload is not canonical")
+        if payload.get("schema_version") != _GRAPH_MEMORY_RECIPE_SCHEMA_VERSION:
+            raise ValueError("GraphMemory recipe schema is unsupported")
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_MEMORY_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("GraphMemory recipe strategy is unsupported") from error
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError("GraphMemory recipe ID does not match its payload")
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("GraphMemory recipe payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_MEMORY_RECIPE_SCHEMA_VERSION
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_MEMORY_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("GraphMemory recipe strategy is unsupported") from error
+        payload_json = _canonical_json(payload)
+        return cls(
+            recipe_id=prefix + _canonical_hash(payload)[:24],
+            payload_json=payload_json,
+        )
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
 @dataclass(frozen=True)
 class _ExecutableOptimizationSpec:
     spec_id: str
@@ -56,6 +129,8 @@ class _ExecutableOptimizationSpec:
     execution_identity: str
     control_recipe_id: str = ""
     fusion_source_groups: tuple = ()
+    memory_recipe_id: str = ""
+    memory_recipe_manifest: object = None
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -105,12 +180,31 @@ class _ExecutableOptimizationSpec:
             raise ValueError(
                 "structured-control specs cannot contain fusion source groups"
             )
+        if bool(self.memory_recipe_id) != bool(self.memory_recipe_manifest):
+            raise ValueError(
+                "memory recipe ID and complete manifest must be provided together"
+            )
+        if self.memory_recipe_manifest is not None:
+            if not isinstance(self.memory_recipe_manifest, _GraphMemoryRecipeManifest):
+                raise TypeError(
+                    "memory recipe manifest must be a _GraphMemoryRecipeManifest"
+                )
+            if self.memory_recipe_id != self.memory_recipe_manifest.recipe_id:
+                raise ValueError("memory recipe ID does not match its manifest")
+            if self.control_recipe_id or self.fusion_recipe_ids:
+                raise ValueError(
+                    "executable specs cannot combine memory with control or fusion"
+                )
+            if self.fusion_source_groups:
+                raise ValueError(
+                    "GraphMemory specs cannot contain fusion source groups"
+                )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
         value = {
-            "schema_version": 2,
+            "schema_version": 3 if self.memory_recipe_id else 2,
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -123,6 +217,9 @@ class _ExecutableOptimizationSpec:
         # optional physical axis is absent.
         if self.control_recipe_id:
             value["control_recipe_id"] = self.control_recipe_id
+        if self.memory_recipe_id:
+            value["memory_recipe_id"] = self.memory_recipe_id
+            value["memory_recipe_manifest"] = self.memory_recipe_manifest.to_dict()
         return value
 
 
@@ -557,6 +654,7 @@ def _make_spec(
     control_recipe_id="",
     *,
     fusion_source_groups=(),
+    memory_recipe_manifest=None,
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
@@ -582,12 +680,21 @@ def _make_spec(
     }
     if control_recipe_id:
         compilation_payload["control_recipe_id"] = control_recipe_id
+    memory_recipe_id = ""
+    if memory_recipe_manifest is not None:
+        if not isinstance(memory_recipe_manifest, _GraphMemoryRecipeManifest):
+            raise TypeError(
+                "memory_recipe_manifest must be a _GraphMemoryRecipeManifest"
+            )
+        memory_recipe_id = memory_recipe_manifest.recipe_id
+        compilation_payload["memory_recipe"] = memory_recipe_manifest.to_dict()
     compilation_identity = _canonical_hash(compilation_payload)
     execution_identity = _canonical_hash(
         {
             "compilation_identity": compilation_identity,
             "physical_dispatch_delta": -dispatch_reduction,
             "fusion_source_groups": fusion_source_groups,
+            "memory_recipe_id": memory_recipe_id,
         }
     )
     return _ExecutableOptimizationSpec(
@@ -599,6 +706,8 @@ def _make_spec(
         execution_identity=execution_identity,
         control_recipe_id=control_recipe_id,
         fusion_source_groups=fusion_source_groups,
+        memory_recipe_id=memory_recipe_id,
+        memory_recipe_manifest=memory_recipe_manifest,
     )
 
 
@@ -634,10 +743,65 @@ def _build_executable_optimization_space(
     *,
     control_recipe_ids=(),
     selected_control_recipe_id="",
+    memory_recipe_manifests=(),
+    selected_memory_recipe_id="",
+    semantic_root=None,
 ):
-    semantic_digest = _canonical_hash(graph_ir_to_dict(root))
+    semantic_digest = _canonical_hash(
+        graph_ir_to_dict(root if semantic_root is None else semantic_root)
+    )
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
     control_recipe_ids = tuple(control_recipe_ids)
+    memory_recipe_manifests = tuple(memory_recipe_manifests)
+    if memory_recipe_manifests:
+        if control_recipe_ids:
+            raise ValueError("GraphMemory recipes cannot combine with control")
+        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
+            raise ValueError("GraphMemory recipes cannot combine with fusion")
+        if len(memory_recipe_manifests) != 2:
+            raise ValueError(
+                "the initial GraphMemory domain requires direct and one candidate"
+            )
+        if (
+            memory_recipe_manifests[0].strategy != "direct"
+            or memory_recipe_manifests[1].strategy != "shared_staged_1d"
+        ):
+            raise ValueError("GraphMemory domain must order direct before shared-stage")
+        specs = tuple(
+            _make_spec(
+                semantic_plan_id,
+                backend,
+                (),
+                memory_recipe_manifest=manifest,
+            )
+            for manifest in memory_recipe_manifests
+        )
+        selected = next(
+            (
+                spec
+                for spec in specs
+                if spec.memory_recipe_id == selected_memory_recipe_id
+            ),
+            None,
+        )
+        return _ExecutableOptimizationSpace(
+            semantic_plan_id=semantic_plan_id,
+            baseline=specs[0],
+            candidates=(specs[1],),
+            selected_spec_id=None if selected is None else selected.spec_id,
+            selection_status=(
+                "memory_recipe_not_materialized"
+                if selected is None
+                else (
+                    "selected_memory_baseline"
+                    if selected is specs[0]
+                    else "selected_memory_recipe"
+                )
+            ),
+            partition_stage="graph_memory_complete_recipe",
+            partitions_complete=True,
+            partition_combination_count=2,
+        )
     if control_recipe_ids:
         if control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS:
             raise ValueError("structured-control recipe domain is unsupported")
@@ -743,6 +907,7 @@ __all__ = [
     "_CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS",
     "_CUDA_STRUCTURED_CONTROL_RECIPE_IDS",
     "_GRAPH_FUSION_QUALIFICATION_SCHEMA",
+    "_GraphMemoryRecipeManifest",
     "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",
     "_ExecutableOptimizationSpec",

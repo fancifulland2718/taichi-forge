@@ -157,11 +157,13 @@ def test_worker_policy_rejects_provenance_forbidden_memory_and_raw_admission():
 def test_memory_plateau_uses_nonincrease_without_a_hard_byte_cap():
     first = {
         "available": True,
+        "process_gpu_memory_mib_diagnostic": 512.0,
         "runtime": {"memory": {"device_raw_bytes": 1024}},
         "pools": {"host": {"raw_bytes": 256}, "device": {"raw_bytes": 1024}},
     }
     second = {
         "available": True,
+        "process_gpu_memory_mib_diagnostic": 512.0,
         "runtime": {"memory": {"device_raw_bytes": 1024}},
         "pools": {"host": {"raw_bytes": 128}, "device": {"raw_bytes": 1024}},
     }
@@ -211,6 +213,10 @@ def test_report_policy_allows_one_negative_scope_but_never_raw_admission():
                 "status": "qualified_positive",
             },
             "radius4": {
+                "structural_gates_passed": True,
+                "status": "negative_retained",
+            },
+            "small_radius1": {
                 "structural_gates_passed": True,
                 "status": "negative_retained",
             },

@@ -1463,6 +1463,12 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 CGraph 和一个 Forge-owned 源 builder；composed 或 multi-builder Graph 会 fail closed。
 structured-control 域继续独立，也不开放 fusion × control 的笛卡尔积。
 
+满足严格单 dispatch CUDA stencil 合同的 Graph 会改为公开一个独立的 `graph_memory` 完整域：
+direct baseline 与一个 Forge-owned `shared_staged_1d` candidate。完整 recipe 冻结 offload plan、
+task manifest、halo、shared bytes 和 binding requirements；CompileIQ 仍只选择 opaque spec ID。
+该域不与 map/control 组合，winner 只用于离线显式重建，不改变 runtime `auto`。实际资源的
+layout/alias 仍由 `Graph.bind()` 在发布时 fail closed 地资格化，稳定 replay 不重复重型证明。
+
 按 task 索引的 offload identity、物化和资格化实现保留为私有诊断基础，但不作为
 `ti.compileiq_offload_execution_plan_search` 公共 API。普通 kernel 继续使用源码合同和显式
 `TaskLaunchPolicy`；CompileIQ 不接收 workgroup、TLS、register 或 PTXAS 裸轴。

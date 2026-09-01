@@ -1,4 +1,4 @@
-"""Strict local S4 qualification for the private GraphMemory recipe.
+"""Strict qualification for the complete GraphMemory CompileIQ recipe.
 
 This driver compares two explicitly reconstructed Graph recipes for the same
 CUDA stencil: the direct offload plan and ``shared_staged_1d``.  Its primary
@@ -12,12 +12,15 @@ five paired blocks of at least 250 ms.  Compilation, binding publication,
 submit/pacer, A-B-A switching, and raw-dict measurements are outside the main
 timing blocks.
 
-This is evidence for a private recipe only.  It neither exposes the recipe nor
-admits it to CompileIQ.
+The default mode obtains both complete Graph recipes through the reviewed
+CompileIQ fork's opaque exhaustive domain, then times the exact reconstructed
+Graphs.  ``--recipe-source private`` remains only for reproducing the earlier
+S4 mechanism evidence.
 """
 
 import argparse
 from collections.abc import Mapping
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import math
@@ -62,15 +65,16 @@ except ImportError:  # Direct script execution.
     )
 
 
-SCHEMA = "taichi_forge.graph-memory-s4-qualification.v1"
-RESULT_PREFIX = "GRAPH_MEMORY_S4_RESULT="
+SCHEMA = "taichi_forge.graph-memory-compileiq-qualification.v1"
+RESULT_PREFIX = "GRAPH_MEMORY_COMPILEIQ_RESULT="
 ROUTES = ("direct", "staged")
-SCOPES = ("radius1", "radius4")
+SCOPES = ("radius1", "radius4", "small_radius1")
 PRIMARY_BINDING_MODE = "stable_graph_binding_set"
 RAW_BINDING_MODE = "raw_dict_compatibility"
 REQUIRED_FRESH_PROCESSES = 10
 REQUIRED_BLOCKS = 5
 MINIMUM_BLOCK_MS = 250.0
+CALIBRATION_TARGET_MULTIPLIER = 1.5
 MINIMUM_STABILITY_REPLAYS = 10_000
 MAX_COMMON_REPLAYS = 2_000_000
 MEMORY_RUNTIME_KEYS = (
@@ -143,9 +147,30 @@ def qualification_policy_errors(args: Any) -> list[str]:
 
 def _scope_radius(scope: str) -> int:
     try:
-        return {"radius1": 1, "radius4": 4}[scope]
+        return {"radius1": 1, "radius4": 4, "small_radius1": 1}[scope]
     except KeyError as exc:
         raise ValueError(f"unknown GraphMemory S4 scope: {scope!r}") from exc
+
+
+def _scope_count(scope: str, configured_count: int) -> int:
+    if scope == "small_radius1":
+        return min(int(configured_count), 1 << 14)
+    return int(configured_count)
+
+
+@contextmanager
+def _environment_overlay(values: Mapping[str, str]):
+    previous = {name: os.environ.get(name) for name in values}
+    try:
+        for name, value in values.items():
+            os.environ[name] = value
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
@@ -194,17 +219,41 @@ def _plateau_comparison(
             }
         )
     available = bool(first.get("available") and second.get("available"))
+    first_vram = first.get("process_gpu_memory_mib_diagnostic")
+    second_vram = second.get("process_gpu_memory_mib_diagnostic")
+    external_vram_available = bool(
+        not isinstance(first_vram, bool)
+        and isinstance(first_vram, (int, float))
+        and not isinstance(second_vram, bool)
+        and isinstance(second_vram, (int, float))
+    )
+    external_vram_nonincreasing = bool(
+        external_vram_available and second_vram <= first_vram
+    )
     passed = (
         available
         and bool(comparisons)
         and all(item["nonincreasing"] for item in comparisons)
+        and external_vram_nonincreasing
     )
     return {
         "available": available,
         "comparable_fields": len(comparisons),
         "passed": passed,
         "comparison": comparisons,
-        "policy": "second_wave_must_not_exceed_first_wave; no fixed byte cap",
+        "external_process_vram": {
+            "available": external_vram_available,
+            "first_mib": first_vram,
+            "second_mib": second_vram,
+            "delta_mib": (
+                second_vram - first_vram if external_vram_available else None
+            ),
+            "nonincreasing": external_vram_nonincreasing,
+        },
+        "policy": (
+            "runtime_pool_and_process_vram_second_wave_must_not_exceed_first_wave; "
+            "no fixed byte cap"
+        ),
     }
 
 
@@ -410,19 +459,20 @@ def _calibrate_common_replays(
     minimum_block_ms: float,
 ) -> tuple[int, dict[str, Any]]:
     replays = 32
+    target_ms = minimum_block_ms * CALIBRATION_TARGET_MULTIPLIER
     while True:
         observations = {
             route: _timed_route(ti, routes[route], replays, minimum_block_ms)
             for route in ROUTES
         }
         shortest = min(item["elapsed_ms"] for item in observations.values())
-        if shortest >= minimum_block_ms:
+        if shortest >= target_ms:
             return replays, observations
         if replays >= MAX_COMMON_REPLAYS:
             raise RuntimeError("common timing replay count could not reach 250 ms")
         scale = max(
             2,
-            math.ceil(minimum_block_ms / max(shortest, 0.001) * 1.08),
+            math.ceil(target_ms / max(shortest, 0.001) * 1.08),
         )
         replays = min(MAX_COMMON_REPLAYS, replays * scale)
 
@@ -666,7 +716,7 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
 
     repo_root = Path(args.repo_root).resolve()
     radius = _scope_radius(args.scope)
-    count = int(args.count)
+    count = _scope_count(args.scope, int(args.count))
     process_order = tuple(args.order.split(","))
     if process_order not in (ROUTES, tuple(reversed(ROUTES))):
         raise ValueError("worker order must be direct,staged or staged,direct")
@@ -715,45 +765,133 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
     staged_output.fill(0.0)
     alternate_output.fill(0.0)
 
-    baseline_plan = _OffloadExecutionPlan.from_task_manifests(
-        stencil.task_manifest(source, direct_output)
-    )
-    ranges = tuple(
-        task for task in baseline_plan.tasks if task.task_kind == "range_for"
-    )
-    if len(ranges) != 1:
-        raise RuntimeError("GraphMemory qualification requires one range_for task")
-    staged_plan = baseline_plan.replace_task(
-        ranges[0].task_index,
-        workgroup_size=128,
-        memory_strategy="shared_staged_1d",
-    )
-    direct_kernel = _bind_offload_execution_plan(stencil, baseline_plan)
-    staged_kernel = _bind_offload_execution_plan(stencil, staged_plan)
-    direct_manifest = tuple(direct_kernel.task_manifest(source, direct_output))
-    staged_manifest = tuple(staged_kernel.task_manifest(source, staged_output))
-    baseline_plan.validate_materialization(direct_manifest)
-    staged_plan.validate_materialization(staged_manifest)
-    direct_range = next(
-        task for task in direct_manifest if task.task_type == "range_for"
-    )
-    staged_range = next(
-        task for task in staged_manifest if task.task_type == "range_for"
-    )
-
     source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
     build_ms: dict[str, float] = {}
-    started = time.perf_counter_ns()
-    direct_builder = ti.graph.GraphBuilder()
-    direct_builder.dispatch(direct_kernel, source_arg, output_arg)
-    direct_graph = direct_builder.compile()
-    build_ms["direct"] = (time.perf_counter_ns() - started) / 1.0e6
-    started = time.perf_counter_ns()
-    staged_builder = ti.graph.GraphBuilder()
-    staged_builder._dispatch_shared_staged_1d(staged_kernel, source_arg, output_arg)
-    staged_graph = staged_builder.compile()
-    build_ms["staged"] = (time.perf_counter_ns() - started) / 1.0e6
+    build_memory_diagnostic: dict[str, Any] = {}
+    compileiq_evidence: dict[str, Any] = {
+        "mode": args.recipe_source,
+        "fork_used": args.recipe_source == "compileiq",
+    }
+    if args.recipe_source == "compileiq":
+        source_builder = ti.graph.GraphBuilder()
+        source_builder.dispatch(stencil, source_arg, output_arg)
+        source_graph = source_builder.compile()
+        search = ti.graph.compileiq_recipe_search(source_graph)
+        recipe_rows = {
+            recipe_id: dict(search.recipe_manifest(recipe_id))
+            for recipe_id in search.recipe_ids
+        }
+        strategy_to_recipe_id = {
+            row["memory_recipe_manifest"]["strategy"]: recipe_id
+            for recipe_id, row in recipe_rows.items()
+        }
+        if set(strategy_to_recipe_id) != {"direct", "shared_staged_1d"}:
+            raise RuntimeError(
+                "CompileIQ GraphMemory domain is not exactly direct/shared-stage"
+            )
+        materialized: dict[str, Any] = {}
+        opaque_observed: list[dict[str, Any]] = []
+
+        def objective(parameters: Mapping[str, Any]) -> float:
+            selection = search.select(dict(parameters))
+            recipe = selection.memory_recipe_manifest.to_dict()
+            route = "direct" if recipe["strategy"] == "direct" else "staged"
+            started = time.perf_counter_ns()
+            with _environment_overlay(selection.worker_environment):
+                selected_builder = ti.graph.GraphBuilder()
+                selected_builder.dispatch(stencil, source_arg, output_arg)
+                selected_graph = selected_builder.compile()
+            build_ms[route] = (time.perf_counter_ns() - started) / 1.0e6
+            search.verify_materialized_graph(dict(parameters), selected_graph)
+            materialized[route] = selected_graph
+            build_memory_diagnostic[route] = _memory_observation(ti)
+            opaque_observed.append(
+                {
+                    "route": route,
+                    "spec_id": selection.spec_id,
+                    "memory_recipe_id": selection.memory_recipe_id,
+                    "selected_spec_id": (
+                        selected_graph._compileiq_executable_optimization_space.selected_spec_id
+                    ),
+                }
+            )
+            return float(route == "staged")
+
+        exhaustive = search.compileiq_search(objective)
+        search_result = exhaustive.start()
+        coverage = search.require_complete_search(exhaustive)
+        selected = search.select_best_result(exhaustive, search_result)
+        direct_graph = materialized["direct"]
+        staged_graph = materialized["staged"]
+        direct_recipe = recipe_rows[strategy_to_recipe_id["direct"]][
+            "memory_recipe_manifest"
+        ]
+        staged_recipe = recipe_rows[strategy_to_recipe_id["shared_staged_1d"]][
+            "memory_recipe_manifest"
+        ]
+        baseline_semantic_identity = direct_recipe["semantic_kernel_identity"]
+        staged_semantic_identity = staged_recipe["semantic_kernel_identity"]
+        baseline_plan_identity = direct_recipe["offload_plan_identity"]
+        staged_plan_identity = staged_recipe["offload_plan_identity"]
+        baseline_compilation_identity = direct_recipe["offload_compilation_identity"]
+        staged_compilation_identity = staged_recipe["offload_compilation_identity"]
+        direct_kernel_manifest_rows = direct_recipe["materialized_tasks"]
+        staged_kernel_manifest_rows = staged_recipe["materialized_tasks"]
+        compileiq_evidence.update(
+            {
+                "graph_memory_status": source_graph._compileiq_graph_memory_status,
+                "provider_namespace": search.search_space.provider_namespace,
+                "domain_version": search.search_space.domain_version,
+                "domain_fingerprint": search.domain_fingerprint,
+                "recipe_ids": list(search.recipe_ids),
+                "baseline_recipe_id": search.baseline_recipe_id,
+                "coverage": _jsonable(coverage),
+                "opaque_observed": opaque_observed,
+                "selected_best_spec_id": selected.spec_id,
+                "manifest": _jsonable(search.manifest()),
+            }
+        )
+    else:
+        baseline_plan = _OffloadExecutionPlan.from_task_manifests(
+            stencil.task_manifest(source, direct_output)
+        )
+        ranges = tuple(
+            task for task in baseline_plan.tasks if task.task_kind == "range_for"
+        )
+        if len(ranges) != 1:
+            raise RuntimeError("GraphMemory qualification requires one range_for task")
+        staged_plan = baseline_plan.replace_task(
+            ranges[0].task_index,
+            workgroup_size=128,
+            memory_strategy="shared_staged_1d",
+        )
+        direct_kernel = _bind_offload_execution_plan(stencil, baseline_plan)
+        staged_kernel = _bind_offload_execution_plan(stencil, staged_plan)
+        direct_manifest = tuple(direct_kernel.task_manifest(source, direct_output))
+        staged_manifest = tuple(staged_kernel.task_manifest(source, staged_output))
+        baseline_plan.validate_materialization(direct_manifest)
+        staged_plan.validate_materialization(staged_manifest)
+        baseline_semantic_identity = baseline_plan.semantic_kernel_identity
+        staged_semantic_identity = staged_plan.semantic_kernel_identity
+        baseline_plan_identity = baseline_plan.identity
+        staged_plan_identity = staged_plan.identity
+        baseline_compilation_identity = baseline_plan.compilation_identity
+        staged_compilation_identity = staged_plan.compilation_identity
+        direct_kernel_manifest_rows = [_manifest_row(item) for item in direct_manifest]
+        staged_kernel_manifest_rows = [_manifest_row(item) for item in staged_manifest]
+        started = time.perf_counter_ns()
+        direct_builder = ti.graph.GraphBuilder()
+        direct_builder.dispatch(direct_kernel, source_arg, output_arg)
+        direct_graph = direct_builder.compile()
+        build_ms["direct"] = (time.perf_counter_ns() - started) / 1.0e6
+        build_memory_diagnostic["direct"] = _memory_observation(ti)
+        started = time.perf_counter_ns()
+        staged_builder = ti.graph.GraphBuilder()
+        staged_builder._dispatch_shared_staged_1d(staged_kernel, source_arg, output_arg)
+        staged_graph = staged_builder.compile()
+        build_ms["staged"] = (time.perf_counter_ns() - started) / 1.0e6
+        build_memory_diagnostic["staged"] = _memory_observation(ti)
 
     graph_manifests = {
         "direct": tuple(direct_graph.task_manifest()),
@@ -762,6 +900,10 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
     staged_graph_range = next(
         task for task in graph_manifests["staged"] if task.task_type == "range_for"
     )
+    direct_range = next(
+        task for task in graph_manifests["direct"] if task.task_type == "range_for"
+    )
+    staged_range = staged_graph_range
 
     counter_names = (
         "describe_storage",
@@ -798,11 +940,10 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
     expected_grid = (count - 2 * radius + 127) // 128
     route_checks = {
         "shared_semantic_kernel_identity": (
-            baseline_plan.semantic_kernel_identity
-            == staged_plan.semantic_kernel_identity
+            baseline_semantic_identity == staged_semantic_identity
         ),
         "distinct_compilation_identity": (
-            baseline_plan.compilation_identity != staged_plan.compilation_identity
+            baseline_compilation_identity != staged_compilation_identity
         ),
         "direct_plan_materialized": direct_range.requested_memory_strategy == "direct",
         "staged_plan_materialized": (
@@ -845,16 +986,27 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
             and set(staged_binding_plan.get("memory_recipe_names", ()))
             == {"source", "output"}
         ),
+        "compileiq_complete_opaque_coverage": bool(
+            args.recipe_source != "compileiq"
+            or (
+                compileiq_evidence.get("coverage", {}).get("complete") is True
+                and len(compileiq_evidence.get("opaque_observed", ())) == 2
+                and all(
+                    item.get("spec_id") == item.get("selected_spec_id")
+                    for item in compileiq_evidence.get("opaque_observed", ())
+                )
+            )
+        ),
     }
     route_evidence = {
         "passed": all(route_checks.values()),
         "checks": route_checks,
-        "baseline_plan_identity": baseline_plan.identity,
-        "staged_plan_identity": staged_plan.identity,
-        "baseline_compilation_identity": baseline_plan.compilation_identity,
-        "staged_compilation_identity": staged_plan.compilation_identity,
-        "direct_kernel_manifest": [_manifest_row(item) for item in direct_manifest],
-        "staged_kernel_manifest": [_manifest_row(item) for item in staged_manifest],
+        "baseline_plan_identity": baseline_plan_identity,
+        "staged_plan_identity": staged_plan_identity,
+        "baseline_compilation_identity": baseline_compilation_identity,
+        "staged_compilation_identity": staged_compilation_identity,
+        "direct_kernel_manifest": direct_kernel_manifest_rows,
+        "staged_kernel_manifest": staged_kernel_manifest_rows,
         "direct_graph_manifest": [
             _manifest_row(item) for item in graph_manifests["direct"]
         ],
@@ -869,6 +1021,8 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
             "staged": staged_binding_stats,
             "alternate": alternate_binding_stats,
         },
+        "compileiq": compileiq_evidence,
+        "build_memory_diagnostic": build_memory_diagnostic,
     }
 
     routes = {
@@ -1002,6 +1156,7 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
         "schema": SCHEMA,
         "evidence_kind": "fresh_process_graph_memory_worker",
         "scope": args.scope,
+        "recipe_source": args.recipe_source,
         "radius": radius,
         "count": count,
         "worker_index": int(args.worker_index),
@@ -1043,21 +1198,28 @@ def _extract_worker_result(stdout: str) -> dict[str, Any]:
         None,
     )
     if encoded is None:
-        raise RuntimeError("worker did not emit machine-readable S4 evidence")
+        raise RuntimeError(
+            "worker did not emit machine-readable GraphMemory CompileIQ evidence"
+        )
     value = json.loads(encoded)
     if not isinstance(value, dict):
-        raise RuntimeError("worker S4 evidence is not a JSON object")
+        raise RuntimeError("worker GraphMemory evidence is not a JSON object")
     return value
 
 
-def _worker_environment(repo_root: Path) -> dict[str, str]:
+def _worker_environment(
+    repo_root: Path, compileiq_root: Path | None = None
+) -> dict[str, str]:
     environment = os.environ.copy()
     python_root = str((repo_root / "python").resolve())
     previous_pythonpath = environment.get("PYTHONPATH")
+    roots = [python_root]
+    if compileiq_root is not None:
+        roots.append(str(compileiq_root.resolve()))
     environment["PYTHONPATH"] = (
-        python_root
+        os.pathsep.join(roots)
         if not previous_pythonpath
-        else os.pathsep.join((python_root, previous_pythonpath))
+        else os.pathsep.join((*roots, previous_pythonpath))
     )
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -1067,6 +1229,8 @@ def _worker_environment(repo_root: Path) -> dict[str, str]:
         "TAICHI_FORGE_INTERNAL_MAP_FUSION",
         "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION",
         "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
+        "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
     ):
         environment.pop(name, None)
     return environment
@@ -1144,7 +1308,7 @@ def _default_output(repo_root: Path, head: str | None) -> Path:
         repo_root
         / ".agent"
         / "experiments"
-        / f"graph-memory-s4-{revision}"
+        / f"graph-memory-compileiq-{revision}"
         / "qualification.json"
     )
 
@@ -1155,6 +1319,15 @@ def _parent(args: Any) -> int:
         raise ValueError("; ".join(policy_errors))
     script = Path(__file__).resolve()
     repo_root = Path(args.repo_root or script.parents[2]).resolve()
+    compileiq_root = Path(args.compileiq_root).resolve()
+    if (
+        args.recipe_source == "compileiq"
+        and not (compileiq_root / "compileiq").is_dir()
+    ):
+        raise RuntimeError(
+            "CompileIQ recipe qualification requires a built fork root: "
+            + str(compileiq_root)
+        )
     repository = _repository_provenance(repo_root, script, tuple(args.allow_dirty_path))
     if not repository["passed"]:
         raise RuntimeError(
@@ -1179,7 +1352,10 @@ def _parent(args: Any) -> int:
     if not pre_gpu:
         raise RuntimeError("formal S4 could not capture an NVIDIA GPU snapshot")
 
-    environment = _worker_environment(repo_root)
+    environment = _worker_environment(
+        repo_root,
+        compileiq_root if args.recipe_source == "compileiq" else None,
+    )
     all_workers: dict[str, list[dict[str, Any]]] = {}
     for scope in SCOPES:
         workers: list[dict[str, Any]] = []
@@ -1209,6 +1385,10 @@ def _parent(args: Any) -> int:
                 str(args.stability_replays),
                 "--raw-diagnostic-replays",
                 str(args.raw_diagnostic_replays),
+                "--recipe-source",
+                args.recipe_source,
+                "--compileiq-root",
+                str(compileiq_root),
             ]
             completed = subprocess.run(
                 command,
@@ -1267,14 +1447,58 @@ def _parent(args: Any) -> int:
             if worker.get("provenance", {}).get("native_core_sha256")
         }
     )
+    compileiq_domain_fingerprints = sorted(
+        {
+            worker.get("route_evidence", {})
+            .get("compileiq", {})
+            .get("domain_fingerprint")
+            for workers in all_workers.values()
+            for worker in workers
+            if worker.get("route_evidence", {})
+            .get("compileiq", {})
+            .get("domain_fingerprint")
+        }
+    )
+    compileiq_recipe_sets = sorted(
+        {
+            json.dumps(
+                worker.get("route_evidence", {})
+                .get("compileiq", {})
+                .get("recipe_ids", ()),
+                sort_keys=True,
+            )
+            for workers in all_workers.values()
+            for worker in workers
+            if worker.get("route_evidence", {})
+            .get("compileiq", {})
+            .get("recipe_ids")
+        }
+    )
+    compileiq_identity_consistent = bool(
+        args.recipe_source != "compileiq"
+        or (
+            len(compileiq_domain_fingerprints) == 1
+            and len(compileiq_recipe_sets) == 1
+        )
+    )
     provenance = {
         "passed": bool(
-            repository["passed"] and worker_provenance_passed and len(core_hashes) == 1
+            repository["passed"]
+            and worker_provenance_passed
+            and len(core_hashes) == 1
+            and compileiq_identity_consistent
         ),
         "repository": repository,
         "all_workers_match_source_and_native": worker_provenance_passed,
         "native_core_sha256_values": core_hashes,
         "one_native_binary_across_workers": len(core_hashes) == 1,
+        "compileiq_identity_consistent_across_workers": (
+            compileiq_identity_consistent
+        ),
+        "compileiq_domain_fingerprint_values": compileiq_domain_fingerprints,
+        "compileiq_recipe_set_values": [
+            json.loads(value) for value in compileiq_recipe_sets
+        ],
     }
     noise = {
         "passed": bool(not pre_conflicts and not post_conflicts),
@@ -1319,6 +1543,11 @@ def _parent(args: Any) -> int:
         },
         "configuration": {
             "count": int(args.count),
+            "scope_counts": {
+                scope: _scope_count(scope, int(args.count)) for scope in SCOPES
+            },
+            "recipe_source": args.recipe_source,
+            "compileiq_root": str(compileiq_root),
             "minimum_block_ms": float(args.minimum_block_ms),
             "stability_replays_per_wave": int(args.stability_replays),
             "raw_diagnostic_replays": int(args.raw_diagnostic_replays),
@@ -1328,9 +1557,9 @@ def _parent(args: Any) -> int:
         "host": host_metadata(),
         "scopes": summaries,
         "admission": {
-            "compileiq_changed": False,
-            "recipe_visibility_changed": False,
-            "eligible_private_recipe_scopes": eligible_scopes,
+            "compileiq_fork_used": args.recipe_source == "compileiq",
+            "recipe_visibility_changed": args.recipe_source == "compileiq",
+            "eligible_complete_recipe_scopes": eligible_scopes,
             "negative_scopes_retained": negative_scopes,
             "raw_dict_eligible": False,
         },
@@ -1354,7 +1583,7 @@ def _parent(args: Any) -> int:
                 "output": str(output),
                 "status": report["status"],
                 "strict_gate_passed": report["strict_gate_passed"],
-                "eligible_private_recipe_scopes": eligible_scopes,
+                "eligible_complete_recipe_scopes": eligible_scopes,
                 "negative_scopes_retained": negative_scopes,
             },
             indent=2,
@@ -1367,8 +1596,8 @@ def _parent(args: Any) -> int:
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Qualify private Graph shared_staged_1d against an exact direct "
-            "recipe using stable GraphBindingSet replay."
+            "Qualify complete direct/shared-stage GraphMemory recipes from the "
+            "reviewed CompileIQ fork using stable GraphBindingSet replay."
         )
     )
     parser.add_argument("--processes", type=int, default=REQUIRED_FRESH_PROCESSES)
@@ -1379,6 +1608,21 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
         "--stability-replays", type=int, default=MINIMUM_STABILITY_REPLAYS
     )
     parser.add_argument("--raw-diagnostic-replays", type=int, default=32)
+    parser.add_argument(
+        "--recipe-source",
+        choices=("compileiq", "private"),
+        default="compileiq",
+        help=(
+            "materialize complete recipes through modified CompileIQ (default), "
+            "or reproduce the earlier private S4 route"
+        ),
+    )
+    parser.add_argument(
+        "--compileiq-root",
+        type=Path,
+        default=Path(".agent/runtime/compileiq-579-py310"),
+        help="built reviewed CompileIQ fork import root",
+    )
     parser.add_argument(
         "--output",
         type=Path,

@@ -18,6 +18,7 @@ from taichi_forge.graph._optimization import (
     _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
     _ExecutableOptimizationSpace,
     _GraphFusionQualificationCache,
+    _GraphMemoryRecipeManifest,
     _make_spec,
 )
 from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
@@ -77,6 +78,53 @@ def _parameters(name):
     return {"forge_executable_spec": spec.spec_id}
 
 
+def _memory_manifest(strategy, digit):
+    return _GraphMemoryRecipeManifest.from_payload(
+        {
+            "strategy": strategy,
+            "semantic_kernel_identity": digit * 64,
+            "offload_plan_identity": "oep:" + digit * 24,
+            "offload_compilation_identity": "oepc:" + digit * 24,
+            "offload_plan": {"tasks": ()},
+            "materialized_tasks": (),
+            "symbolic_abi": (),
+            "memory_disjoint_pairs": (),
+            "memory_layout_requirements": (),
+        }
+    )
+
+
+def _memory_space(*, selected="direct"):
+    direct_manifest = _memory_manifest("direct", "1")
+    staged_manifest = _memory_manifest("shared_staged_1d", "2")
+    direct = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        memory_recipe_manifest=direct_manifest,
+    )
+    staged = _make_spec(
+        _SEMANTIC_PLAN_ID,
+        _BACKEND,
+        (),
+        memory_recipe_manifest=staged_manifest,
+    )
+    selected_spec = direct if selected == "direct" else staged
+    return _ExecutableOptimizationSpace(
+        semantic_plan_id=_SEMANTIC_PLAN_ID,
+        baseline=direct,
+        candidates=(staged,),
+        selected_spec_id=selected_spec.spec_id,
+        selection_status=(
+            "selected_memory_baseline"
+            if selected == "direct"
+            else "selected_memory_recipe"
+        ),
+        partition_stage="graph_memory_complete_recipe",
+        partition_combination_count=2,
+    )
+
+
 def _install_fake_compileiq(monkeypatch):
     package = ModuleType("compileiq")
     search_spaces = ModuleType("compileiq.search_spaces")
@@ -108,6 +156,35 @@ def test_executable_adapter_is_lazy_and_maps_only_stable_specs(monkeypatch):
         "TAICHI_FORGE_INTERNAL_MAP_FUSION": "map3",
         "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": "auto",
     }
+
+
+def test_executable_adapter_maps_complete_graph_memory_recipes_exclusively():
+    space = _memory_space(selected="staged")
+    adapter = _CompileIQExecutableAdapter(space)
+    staged = space.candidates[0]
+    parameters = {"forge_executable_spec": staged.spec_id}
+
+    assert adapter.recipe_kind == "graph_memory"
+    assert adapter.spec_ids() == (space.baseline.spec_id, staged.spec_id)
+    selection = adapter.verify_materialized(parameters, space)
+    assert selection.memory_recipe_id == staged.memory_recipe_id
+    assert selection.memory_recipe_manifest.to_dict()["strategy"] == "shared_staged_1d"
+    assert dict(selection.worker_environment) == {
+        "TAICHI_FORGE_INTERNAL_MAP_FUSION": "baseline",
+        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": "auto",
+        "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE": staged.memory_recipe_id,
+    }
+    manifest = adapter.manifest()
+    assert manifest["recipe_kind"] == "graph_memory"
+    assert manifest["runtime_admission"] == ("offline_explicit_reconstruction_only")
+
+    with pytest.raises(ValueError, match="cannot combine memory"):
+        _make_spec(
+            _SEMANTIC_PLAN_ID,
+            _BACKEND,
+            (_recipe(2, "9"),),
+            memory_recipe_manifest=_memory_manifest("shared_staged_1d", "8"),
+        )
 
 
 @pytest.mark.parametrize("recipe", ["baseline", "map2", "map3", "map4"])
@@ -220,17 +297,16 @@ def test_executable_adapter_materializes_exact_structured_control_recipe():
             "cuda_masked_bounded_graph"
         ),
     }
-    assert adapter.verify_materialized(
-        parameters, _control_space(selected="masked")
-    ) == selection
+    assert (
+        adapter.verify_materialized(parameters, _control_space(selected="masked"))
+        == selection
+    )
     with pytest.raises(ValueError, match="did not select"):
         adapter.verify_materialized(parameters, _control_space())
 
     manifest = adapter.manifest()
     assert manifest["recipe_kind"] == "structured_control"
-    assert manifest["runtime_admission"] == (
-        "offline_explicit_reconstruction_only"
-    )
+    assert manifest["runtime_admission"] == ("offline_explicit_reconstruction_only")
     assert [spec["control_materialization_recipe"] for spec in manifest["specs"]] == [
         "cuda_conditional_graph",
         "cuda_masked_bounded_graph",
@@ -246,25 +322,24 @@ def test_executable_adapter_materializes_exact_nested_control_recipe():
     selection = adapter.select(parameters)
     assert adapter.recipe_kind == "structured_control"
     assert adapter.structured_control_domain == "cuda_nested_while_while"
-    assert selection.control_recipe_id == (
-        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID
-    )
+    assert selection.control_recipe_id == (_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID)
     assert dict(selection.worker_environment) == {
         "TAICHI_FORGE_INTERNAL_MAP_FUSION": "baseline",
         "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE": (
             "cuda_nested_masked_bounded"
         ),
     }
-    assert adapter.verify_materialized(
-        parameters,
-        _nested_control_space(selected="masked"),
-    ) == selection
+    assert (
+        adapter.verify_materialized(
+            parameters,
+            _nested_control_space(selected="masked"),
+        )
+        == selection
+    )
 
     manifest = adapter.manifest()
     assert manifest["recipe_kind"] == "structured_control"
-    assert manifest["structured_control_domain"] == (
-        "cuda_nested_while_while"
-    )
+    assert manifest["structured_control_domain"] == ("cuda_nested_while_while")
     assert [spec["control_materialization_recipe"] for spec in manifest["specs"]] == [
         "cuda_nested_device_update",
         "cuda_nested_masked_bounded",
@@ -661,12 +736,8 @@ def test_executable_adapter_rebuilds_cuda_nested_while_routes(monkeypatch):
     inner_counter = scalar("inner_counter")
     inner_predicate = scalar("inner_predicate")
     total = scalar("total")
-    outer_target = ti.graph.Arg(
-        ti.graph.ArgKind.SCALAR, "outer_target", ti.i32
-    )
-    inner_target = ti.graph.Arg(
-        ti.graph.ArgKind.SCALAR, "inner_target", ti.i32
-    )
+    outer_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "outer_target", ti.i32)
+    inner_target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "inner_target", ti.i32)
 
     def build(lowering_mode="auto"):
         builder = ti.graph.GraphBuilder()
@@ -754,9 +825,7 @@ def test_executable_adapter_rebuilds_cuda_nested_while_routes(monkeypatch):
     }
     for value in args.values():
         value.fill(0)
-    ticket = materialized.submit(
-        {**args, "outer_target": 2, "inner_target": 3}
-    )
+    ticket = materialized.submit({**args, "outer_target": 2, "inner_target": 3})
     ticket.wait()
     assert args["outer_counter"].to_numpy()[()] == 2
     assert args["inner_counter"].to_numpy()[()] == 3
@@ -773,9 +842,7 @@ def test_executable_adapter_rebuilds_cuda_nested_while_routes(monkeypatch):
         explicit = build(explicit_mode)
         explicit_space = explicit._executable_optimization_space
         assert not explicit_space.baseline.control_recipe_id
-        assert all(
-            not spec.control_recipe_id for spec in explicit_space.candidates
-        )
+        assert all(not spec.control_recipe_id for spec in explicit_space.candidates)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
@@ -848,8 +915,12 @@ def test_executable_adapter_rebuilds_and_verifies_selected_graph(monkeypatch):
     adapter = _CompileIQExecutableAdapter.from_graph(baseline)
     specs = adapter.manifest()["specs"]
     assert len(specs) == 8
-    left_pair = next(item for item in specs if item["fusion_source_groups"] == ((0, 1),))
-    right_pair = next(item for item in specs if item["fusion_source_groups"] == ((2, 3),))
+    left_pair = next(
+        item for item in specs if item["fusion_source_groups"] == ((0, 1),)
+    )
+    right_pair = next(
+        item for item in specs if item["fusion_source_groups"] == ((2, 3),)
+    )
     assert left_pair["materialization_recipe"] == "exact-v1:0,1"
     assert right_pair["materialization_recipe"] == "exact-v1:2,3"
     assert left_pair["materialization_recipe"] != right_pair["materialization_recipe"]
@@ -861,7 +932,9 @@ def test_executable_adapter_rebuilds_and_verifies_selected_graph(monkeypatch):
     adapter.verify_materialized_graph(partial_parameters, partial)
     assert partial.physical_plan()["physical_dispatch_count"] == 3
 
-    full_partition = next(item for item in specs if item["fusion_source_groups"] == ((0, 1, 2, 3),))
+    full_partition = next(
+        item for item in specs if item["fusion_source_groups"] == ((0, 1, 2, 3),)
+    )
     assert full_partition["materialization_recipe"] == "exact-v1:0,1,2,3"
     parameters = {"forge_executable_spec": full_partition["spec_id"]}
     selection = adapter.select(parameters)
@@ -878,9 +951,13 @@ def test_executable_adapter_rebuilds_and_verifies_selected_graph(monkeypatch):
     source_np = np.arange(count, dtype=np.int32)
     arrays["source"].from_numpy(source_np)
     partial.run(arrays)
-    np.testing.assert_array_equal(arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5)
+    np.testing.assert_array_equal(
+        arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5
+    )
     materialized.run(arrays)
-    np.testing.assert_array_equal(arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5)
+    np.testing.assert_array_equal(
+        arrays["output"].to_numpy(), (source_np * 2 + 3) * 4 - 5
+    )
 
 
 @test_utils.test(arch=ti.cuda)
@@ -905,7 +982,8 @@ def test_exact_partition_replay_memory_plateaus_and_reset_is_fail_closed(
             output[i] = temporary[i] * 2
 
     symbolic = {
-        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1) for name in ("source", "temporary", "output")
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "temporary", "output")
     }
 
     def build():

@@ -1739,6 +1739,16 @@ one ordinary JIT CGraph and one Forge-owned source builder; composed or
 multi-builder Graphs fail closed. Structured-control domains remain separate,
 and fusion-by-control Cartesian products are not exposed.
 
+A Graph satisfying the strict single-dispatch CUDA stencil contract instead
+exposes a separate complete `graph_memory` domain: a direct baseline and one
+Forge-owned `shared_staged_1d` candidate. The complete recipe freezes its
+offload plan, task manifest, halo, shared bytes, and binding requirements;
+CompileIQ still selects only an opaque spec ID. This domain is not combined
+with map or control, and a winner is available only through explicit offline
+reconstruction without changing runtime `auto`. `Graph.bind()` still
+qualifies concrete layout and alias requirements fail closed at publication,
+with no repeated heavy proof on stable replay.
+
 Task-indexed offload identities, materialization, and qualification remain
 private diagnostic infrastructure rather than a public
 `ti.compileiq_offload_execution_plan_search` API. Ordinary kernels continue to

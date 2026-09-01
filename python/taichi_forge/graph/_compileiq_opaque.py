@@ -70,6 +70,10 @@ class CompileIQGraphRecipeSearch:
             )
             provider_namespace = "taichi_forge.graph.nested_structured_control"
             domain_version = "nested-structured-control-executable-spec.v1"
+        elif adapter.recipe_kind == "graph_memory":
+            semantic_schema = "taichi_forge.graph.compileiq-graph-memory-semantics.v1"
+            provider_namespace = "taichi_forge.graph.memory"
+            domain_version = "graph-memory-complete-recipe"
         elif adapter.recipe_kind == "structured_control":
             semantic_schema = (
                 "taichi_forge.graph.compileiq-structured-control-semantics.v1"
@@ -77,9 +81,7 @@ class CompileIQGraphRecipeSearch:
             provider_namespace = "taichi_forge.graph.structured_control"
             domain_version = "structured-control-executable-spec.v1"
         else:
-            semantic_schema = (
-                "taichi_forge.graph.compileiq-partition-semantics.v2"
-            )
+            semantic_schema = "taichi_forge.graph.compileiq-partition-semantics.v2"
             provider_namespace = "taichi_forge.graph.map_fusion"
             domain_version = "graph-partition-plan.v2"
         semantic_payload = {
@@ -93,9 +95,7 @@ class CompileIQGraphRecipeSearch:
             semantic_payload.update(
                 {
                     "partition_stage": adapter_manifest["partition_stage"],
-                    "partitions_complete": adapter_manifest[
-                        "partitions_complete"
-                    ],
+                    "partitions_complete": adapter_manifest["partitions_complete"],
                     "partition_combination_count": adapter_manifest[
                         "partition_combination_count"
                     ],
@@ -110,7 +110,7 @@ class CompileIQGraphRecipeSearch:
                     ],
                 }
             )
-        if adapter.recipe_kind == "structured_control":
+        if adapter.recipe_kind in ("structured_control", "graph_memory"):
             semantic_payload["recipe_kind"] = adapter.recipe_kind
         if nested_structured_control:
             semantic_payload["structured_control_domain"] = (
@@ -249,16 +249,12 @@ class CompileIQGraphRecipeSearch:
         refined_space = _ExecutableOptimizationSpace(
             semantic_plan_id=source_space.semantic_plan_id,
             baseline=source_space.baseline,
-            candidates=tuple(
-                generated[spec_id] for spec_id in sorted(generated)
-            ),
+            candidates=tuple(generated[spec_id] for spec_id in sorted(generated)),
             selected_spec_id=source_space.baseline.spec_id,
             selection_status="selected_baseline",
             partition_stage="observed_frontier_pairwise_v1",
             partitions_complete=False,
-            partition_combination_count=(
-                source_space.partition_combination_count
-            ),
+            partition_combination_count=(source_space.partition_combination_count),
             partition_candidate_limit=source_space.partition_candidate_limit,
             partition_parent_domain_fingerprint=self.domain_fingerprint,
             partition_frontier_spec_ids=tuple(sorted(frontier_recipe_ids)),
@@ -337,7 +333,7 @@ class CompileIQGraphRecipeSearch:
             "qualification": "independent_forge_worst_positive_v1",
             "runtime_admission": (
                 "offline_explicit_reconstruction_only"
-                if self._adapter.recipe_kind == "structured_control"
+                if self._adapter.recipe_kind in ("structured_control", "graph_memory")
                 else "explicit_qualified_cache_only"
             ),
         }
@@ -346,9 +342,7 @@ class CompileIQGraphRecipeSearch:
             value.update(
                 {
                     "partition_stage": adapter_manifest["partition_stage"],
-                    "partitions_complete": adapter_manifest[
-                        "partitions_complete"
-                    ],
+                    "partitions_complete": adapter_manifest["partitions_complete"],
                     "partition_combination_count": adapter_manifest[
                         "partition_combination_count"
                     ],
@@ -363,12 +357,10 @@ class CompileIQGraphRecipeSearch:
                     ],
                 }
             )
-        if self._adapter.recipe_kind == "structured_control":
+        if self._adapter.recipe_kind in ("structured_control", "graph_memory"):
             value["recipe_kind"] = self._adapter.recipe_kind
         if self._adapter.structured_control_domain == "cuda_nested_while_while":
-            value["structured_control_domain"] = (
-                self._adapter.structured_control_domain
-            )
+            value["structured_control_domain"] = self._adapter.structured_control_domain
         return value
 
 

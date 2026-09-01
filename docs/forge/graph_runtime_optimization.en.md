@@ -760,6 +760,31 @@ Cartesian products. This API also does not invent fusion across reduction or
 atomic boundaries, or expose block, workgroup, PTXAS, or other kernel launch
 parameters.
 
+An ordinary CUDA Graph in a strict initial scope may now expose a separate
+`graph_memory` domain. Its source must be one Forge-owned `GraphBuilder` with
+one ordinary JIT CGraph, one dispatch, and exactly one range-for task. The
+compiler artifact must prove a one-dimensional f32 affine stencil, a read-only
+input, pointwise output, exact halo, and uniform shared-memory barrier. This
+domain contains exactly two complete recipes: a direct baseline and one fixed
+`shared_staged_1d` candidate. Forge retains source lineage lazily at explicit
+search time and freezes the complete offload plan, materialized task manifest,
+grid/workgroup, halo, shared bytes, source/output, layout/disjoint requirements,
+and compiler identity into the recipe manifest. CompileIQ sees only opaque spec
+tokens, never raw block, tile, halo, or `memory_strategy` axes.
+
+The `graph_memory` domain is mutually exclusive with map fusion and flat or
+nested control. Multi-dispatch, pointwise, non-CUDA, template-dispatch,
+provider/temporary/fixed-state, and multiple-workspace-lane definitions retain
+only their existing domain or baseline. A worker may apply a private complete
+recipe ID only while rebuilding the Graph definition. Forge then verifies the
+semantic plan, complete manifest, compilation and execution identities, and
+Graph task manifest again. The staged route still proves the concrete ndarray
+owner, extent, layout, alignment, and alias requirements once at `Graph.bind()`
+publication. An ineligible binding fails before submission, and stable replay
+adds no storage-description or alias analysis. A GraphMemory winner is available
+only through explicit offline reconstruction: it emits no runtime qualification
+cache, does not change runtime `auto`, and adds no per-replay direct fallback.
+
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python
 source manifest. The current source identity pins
@@ -770,8 +795,8 @@ Upstream CompileIQ, a different fork, or source drift raises
 the Forge wheel does not depend on it, and importing `ti.graph` does not import
 CompileIQ.
 
-CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs. Flat
-and nested control use distinct provider namespaces, domain versions, and
+CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs.
+GraphMemory, flat control, and nested control use distinct provider namespaces, domain versions, and
 semantic identities. Forge decodes the result, checks complete search coverage
 including the baseline, and materializes it through the same Graph execution
 identity used by explicit recipes. The selected physical control route is

@@ -91,10 +91,16 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   不改变 runtime 默认值。公开的 Graph recipe 路径通过精确 capability、bundled-core 与 Python-source
   lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的离线依赖。
 
-  Graph memory 在接入 CompileIQ 前继续 fail closed。Forge 现在具有一条私有、精确的 CUDA f32
-  一维 `shared_staged_1d` lowering，仅覆盖已审查的 affine stencil offload。它只能通过私有
-  Graph-owned builder 从精确 offload-plan binding 重建；binding 发布一次性证明 owner、extent、layout
-  和 alias requirement，稳定合格 replay 复用该证书。正式 S4 资格化已在本机 RTX 5090、driver
+  Graph memory 现在以一个独立的 Forge-owned 完整 recipe 域接入经审查的魔改 CompileIQ fork。
+  严格单 dispatch CUDA f32 affine-stencil Graph 会公开 direct baseline 与一个完整
+  `shared_staged_1d` candidate；Forge 惰性保留 source lineage，并冻结 offload plan、materialized
+  task manifest、halo、shared bytes 与 binding requirements。CompileIQ 只搜索 opaque spec token，
+  看不到 `memory_strategy`、block、tile 或 halo 裸轴；该域也不与 map fusion 或 structured control
+  组合。worker 只能在 Graph definition 构造期精确重建，之后 Forge 再验证 semantic/physical identity。
+  binding 发布一次性证明 owner、extent、layout 和 alias requirement，稳定合格 replay 复用该证书；
+  winner 不改变 runtime `auto`，也不生成 runtime qualification cache。
+
+  在此完整域实现之前，正式 S4 机制资格化已在本机 RTX 5090、driver
   610.62、source/native commit `ada3e9eba912a5368c5cd1a21f1b8f5d12c08b7e` 上对精确的 radius-1
   与 radius-4 recipe 得到正项。主计时使用稳定 `GraphBindingSet`；每个 scope 包含 10 个 fresh
   process、均衡 AB/BA 顺序，以及每进程 5 组、每路线至少 250 ms 的 paired block。
@@ -104,9 +110,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   以及两轮各 10,000 replay、无固定内存上限的 memory plateau。raw dict replay 仍只是不可晋级的
   诊断项。被 Git 忽略的本机机器可读 artifact 位于
   `.agent/experiments/graph-memory-s4-ada3e9eb/qualification.json`（SHA-256
-  `f788b4d109ef0b1817807fab5ef51100cea9703cb5eda8cd5de6cae471a3fa1e`）。该结果只资格化这两个
-  精确的私有 recipe scope；在完整 direct/shared Graph 重建、fallback 与稳定绑定产品合同单独获批前，
-  路线仍为 private/unsupported。CompileIQ 看不到 `memory_strategy`；Forge 也仍不把全局
+  `f788b4d109ef0b1817807fab5ef51100cea9703cb5eda8cd5de6cae471a3fa1e`）。该历史结果只资格化这两个
+  精确 recipe scope，不等同于当前完整 CompileIQ 重建的性能准入；后者继续使用 matching-commit、
+  fresh-process AB/BA、worst-positive 与进程显存平台 Gate。Forge 仍不把全局
   `CompileConfig.make_block_local` 或私有 per-kernel task 轴暴露为 Graph 搜索域。
 - 新增稳定公开的 `Graph.bind(arguments)` 与 `ti.graph.GraphBindingSet`。发布时会按值快照
   scalar/matrix、按 identity 保留 device resource，并在版本可见前完成 owner、layout、

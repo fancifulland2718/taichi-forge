@@ -27,6 +27,7 @@ from taichi_forge.lang._compileiq_qualification import (
 
 _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
+_INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
 _PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _MAP_RECIPE_PATTERN = re.compile(r"^fusion:map([2-4]):[0-9a-f]{24}$")
 _EXACT_MAP_PARTITION_PREFIX = "exact-v1:"
@@ -60,8 +61,7 @@ def _materialization_recipe(spec):
                 "fusion recipes and exact source groups have different topology"
             )
         encoded = ";".join(
-            ",".join(str(item) for item in group)
-            for group in spec.fusion_source_groups
+            ",".join(str(item) for item in group) for group in spec.fusion_source_groups
         )
         return _EXACT_MAP_PARTITION_PREFIX + encoded
     return f"map{max(group_sizes)}"
@@ -78,6 +78,10 @@ def _control_materialization_recipe(spec):
         ) from error
 
 
+def _memory_materialization_recipe(spec):
+    return spec.memory_recipe_id
+
+
 @dataclass(frozen=True)
 class GraphExecutableRecipeSelection:
     spec_id: str
@@ -90,19 +94,20 @@ class GraphExecutableRecipeSelection:
     fusion_source_groups: tuple = ()
     control_recipe_id: str = ""
     control_materialization_recipe: str = "auto"
+    memory_recipe_id: str = ""
+    memory_recipe_manifest: object = None
 
     @property
     def worker_environment(self):
         """Return an environment overlay without mutating process state."""
 
-        return MappingProxyType(
-            {
-                _INTERNAL_MAP_FUSION_ENV: self.materialization_recipe,
-                _INTERNAL_STRUCTURED_CONTROL_ENV: (
-                    self.control_materialization_recipe
-                ),
-            }
-        )
+        environment = {
+            _INTERNAL_MAP_FUSION_ENV: self.materialization_recipe,
+            _INTERNAL_STRUCTURED_CONTROL_ENV: (self.control_materialization_recipe),
+        }
+        if self.memory_recipe_id:
+            environment[_INTERNAL_GRAPH_MEMORY_RECIPE_ENV] = self.memory_recipe_id
+        return MappingProxyType(environment)
 
     def to_dict(self):
         value = {
@@ -120,6 +125,9 @@ class GraphExecutableRecipeSelection:
             value["control_materialization_recipe"] = (
                 self.control_materialization_recipe
             )
+        if self.memory_recipe_id:
+            value["memory_recipe_id"] = self.memory_recipe_id
+            value["memory_recipe_manifest"] = self.memory_recipe_manifest.to_dict()
         return value
 
 
@@ -159,6 +167,7 @@ class _CompileIQExecutableAdapter:
         if len({spec.spec_id for spec in specs}) != len(specs):
             raise ValueError("executable spec IDs must be unique")
         control_recipe_ids = tuple(spec.control_recipe_id for spec in specs)
+        memory_recipe_ids = tuple(spec.memory_recipe_id for spec in specs)
         if space.baseline.control_recipe_id:
             if (
                 control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS
@@ -171,6 +180,22 @@ class _CompileIQExecutableAdapter:
             raise ValueError(
                 "map-fusion space cannot contain a control recipe candidate"
             )
+        if space.baseline.memory_recipe_id:
+            if (
+                any(not recipe_id for recipe_id in memory_recipe_ids)
+                or any(spec.fusion_recipe_ids for spec in specs)
+                or any(control_recipe_ids)
+                or len(specs) != 2
+                or space.baseline.memory_recipe_manifest.strategy != "direct"
+                or specs[1].memory_recipe_manifest.strategy != "shared_staged_1d"
+            ):
+                raise ValueError(
+                    "GraphMemory space must contain one exact direct/staged domain"
+                )
+        elif any(memory_recipe_ids):
+            raise ValueError(
+                "map/control space cannot contain a memory recipe candidate"
+            )
 
         materialization_by_spec = {
             spec.spec_id: _materialization_recipe(spec) for spec in specs
@@ -178,10 +203,14 @@ class _CompileIQExecutableAdapter:
         control_materialization_by_spec = {
             spec.spec_id: _control_materialization_recipe(spec) for spec in specs
         }
+        memory_materialization_by_spec = {
+            spec.spec_id: _memory_materialization_recipe(spec) for spec in specs
+        }
         materializations = tuple(
             (
                 materialization_by_spec[spec.spec_id],
                 control_materialization_by_spec[spec.spec_id],
+                memory_materialization_by_spec[spec.spec_id],
             )
             for spec in specs
         )
@@ -197,6 +226,9 @@ class _CompileIQExecutableAdapter:
         self._control_materialization_by_spec = MappingProxyType(
             control_materialization_by_spec
         )
+        self._memory_materialization_by_spec = MappingProxyType(
+            memory_materialization_by_spec
+        )
         self._candidate_ids = tuple(spec.spec_id for spec in space.candidates)
         self._structured_control_domain = _CONTROL_DOMAIN_NAMES.get(
             control_recipe_ids,
@@ -206,7 +238,11 @@ class _CompileIQExecutableAdapter:
     @classmethod
     def from_graph(cls, graph, *, parameter=_EXECUTABLE_PARAMETER):
         try:
-            space = graph._executable_optimization_space
+            space = getattr(
+                graph,
+                "_compileiq_executable_optimization_space",
+                graph._executable_optimization_space,
+            )
         except AttributeError as error:
             raise TypeError(
                 "CompileIQ executable adapter requires a compiled Forge Graph"
@@ -234,11 +270,11 @@ class _CompileIQExecutableAdapter:
 
     @property
     def recipe_kind(self):
-        return (
-            "structured_control"
-            if self._space.baseline.control_recipe_id
-            else "map_fusion"
-        )
+        if self._space.baseline.memory_recipe_id:
+            return "graph_memory"
+        if self._space.baseline.control_recipe_id:
+            return "structured_control"
+        return "map_fusion"
 
     @property
     def structured_control_domain(self):
@@ -293,6 +329,8 @@ class _CompileIQExecutableAdapter:
             control_materialization_recipe=(
                 self._control_materialization_by_spec[spec.spec_id]
             ),
+            memory_recipe_id=spec.memory_recipe_id,
+            memory_recipe_manifest=(spec.memory_recipe_manifest),
         )
 
     def verify_materialized(self, parameters, actual_space):
@@ -314,13 +352,28 @@ class _CompileIQExecutableAdapter:
             or actual.fusion_recipe_ids != selection.fusion_recipe_ids
             or actual.fusion_source_groups != selection.fusion_source_groups
             or actual.control_recipe_id != selection.control_recipe_id
+            or actual.memory_recipe_id != selection.memory_recipe_id
+            or (
+                None
+                if actual.memory_recipe_manifest is None
+                else actual.memory_recipe_manifest.to_dict()
+            )
+            != (
+                None
+                if selection.memory_recipe_manifest is None
+                else selection.memory_recipe_manifest.to_dict()
+            )
         ):
             raise ValueError("materialized Graph identity does not match")
         return selection
 
     def verify_materialized_graph(self, parameters, graph):
         try:
-            actual_space = graph._executable_optimization_space
+            actual_space = getattr(
+                graph,
+                "_compileiq_executable_optimization_space",
+                graph._executable_optimization_space,
+            )
         except AttributeError as error:
             raise TypeError(
                 "materialized result must be a compiled Forge Graph"
@@ -436,7 +489,7 @@ class _CompileIQExecutableAdapter:
             if selected is self._space.baseline:
                 raise ValueError("qualification cache cannot select the baseline spec")
             raise ValueError(
-                "structured-control qualification is offline-only in R5; "
+                "control and GraphMemory qualification are offline-only; "
                 "runtime cache admission is unavailable"
             )
         if (
@@ -505,25 +558,19 @@ class _CompileIQExecutableAdapter:
             "search_protocol": "exhaustive_then_independent_qualification",
             "partition_stage": self._space.partition_stage,
             "partitions_complete": self._space.partitions_complete,
-            "partition_combination_count": (
-                self._space.partition_combination_count
-            ),
+            "partition_combination_count": (self._space.partition_combination_count),
             "partition_candidate_limit": self._space.partition_candidate_limit,
             "partition_parent_domain_fingerprint": (
                 self._space.partition_parent_domain_fingerprint or None
             ),
-            "partition_frontier_spec_ids": (
-                self._space.partition_frontier_spec_ids
-            ),
+            "partition_frontier_spec_ids": (self._space.partition_frontier_spec_ids),
             "specs": tuple(self._spec_manifest(spec) for spec in self._specs.values()),
         }
-        if self.recipe_kind == "structured_control":
+        if self.recipe_kind in ("structured_control", "graph_memory"):
             value["recipe_kind"] = self.recipe_kind
             value["runtime_admission"] = "offline_explicit_reconstruction_only"
             if self.structured_control_domain == "cuda_nested_while_while":
-                value["structured_control_domain"] = (
-                    self.structured_control_domain
-                )
+                value["structured_control_domain"] = self.structured_control_domain
         return value
 
     def _spec_manifest(self, spec):
@@ -534,6 +581,10 @@ class _CompileIQExecutableAdapter:
         if spec.control_recipe_id:
             value["control_materialization_recipe"] = (
                 self._control_materialization_by_spec[spec.spec_id]
+            )
+        if spec.memory_recipe_id:
+            value["memory_materialization_recipe"] = (
+                self._memory_materialization_by_spec[spec.spec_id]
             )
         return value
 

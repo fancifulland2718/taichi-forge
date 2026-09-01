@@ -590,6 +590,24 @@ route 都不进入 control 空间；CompileIQ 不能构造 fusion × control 或
 笛卡尔积。这个 API 同样不会跨 reduction/atomic 边界发明 fusion，也不公开 block、
 workgroup、PTXAS 等普通 kernel launch 参数。
 
+一个满足严格范围的普通 CUDA Graph 现在还可以公开独立的 `graph_memory` 域：源码必须来自
+一个 Forge-owned `GraphBuilder`，只含一个 ordinary JIT CGraph、一个 dispatch 和恰好一个
+range-for task；compiler artifact 必须证明一维 f32 affine stencil、只读输入、pointwise 输出、
+精确 halo 与 uniform shared-memory barrier。该域只有两个完整 recipe：direct baseline 与一个
+固定的 `shared_staged_1d` candidate。Forge 在显式搜索前惰性保留 source lineage，并把完整
+offload plan、materialized task manifest、grid/workgroup、halo、shared bytes、source/output、
+layout/disjoint requirements 和 compiler identity 冻结进 recipe manifest。CompileIQ 只看到
+不透明 spec token，不会看到或组合 block、tile、halo、`memory_strategy` 等裸轴。
+
+`graph_memory` 与 map-fusion、flat/nested control 严格互斥；multi-dispatch、pointwise、非 CUDA、
+template dispatch、provider/temporary/fixed state、多个 workspace lane 等范围只保留原有域或
+baseline。worker 只能在 Graph definition 重建时应用私有完整 recipe ID，物化后 Forge 会再次
+核对 semantic plan、完整 manifest、compilation/execution identity 和 Graph task manifest。
+staged route 的实际 ndarray owner、extent、layout、alignment 与 alias requirement 仍在
+`Graph.bind()` 发布阶段一次性证明；无资格 binding 在 submission 前失败，稳定 replay 不新增
+storage descriptor 或 alias 分析。GraphMemory winner 只能离线显式重建，不生成 runtime
+qualification cache、不改变 runtime `auto`，也不引入逐 replay direct fallback。
+
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为
 `forge/opaque-recipes-v1.2` 上的
@@ -598,7 +616,7 @@ commit/lock 和完整 Python source manifest。当前源码身份固定为
 `CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
 导入 `ti.graph` 也不会导入 CompileIQ。
 
-CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。flat 与 nested control
+CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。GraphMemory、flat 与 nested control
 使用不同的 provider namespace、domain version 与 semantic identity。Forge 会解码结果，检查
 搜索完整覆盖且包含 baseline，并通过显式 recipe 使用的同一 Graph execution identity 完成
 物化。所选物理控制路线在该 Graph 构造时冻结；之后改变内部 selector 不能修改已编译身份。

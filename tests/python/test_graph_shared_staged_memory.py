@@ -12,6 +12,7 @@ from taichi_forge.lang._offload_execution_plan import (
     _bind_offload_execution_plan,
 )
 from taichi_forge.graph import _graph as graph_impl
+from taichi_forge.graph import compileiq_recipe_search
 from tests import test_utils
 
 
@@ -25,6 +26,189 @@ def _shared_staged_plan(kernel, *probe_args, block_dim=128):
         ranges[0].task_index,
         workgroup_size=block_dim,
         memory_strategy="shared_staged_1d",
+    )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
+    monkeypatch,
+):
+    count = 1027
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(1, count - 1):
+            output[i] = source[i - 1] + source[i] * 2.0 + source[i + 1]
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    source_graph = builder.compile()
+
+    search = compileiq_recipe_search(source_graph)
+    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
+    assert len(search.recipe_ids) == 2
+    assert search.search_space.provider_namespace == "taichi_forge.graph.memory"
+    assert search.search_space.domain_version == "graph-memory-complete-recipe"
+    assert search.manifest()["recipe_kind"] == "graph_memory"
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    direct_id = next(
+        recipe_id
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "direct"
+    )
+    staged_id = next(
+        recipe_id
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+    )
+    assert direct_id == search.baseline_recipe_id
+    assert not manifests[direct_id]["fusion_recipe_ids"]
+    assert not manifests[staged_id]["fusion_recipe_ids"]
+    assert not manifests[direct_id].get("control_recipe_id")
+    assert not manifests[staged_id].get("control_recipe_id")
+
+    def parameters(recipe_id):
+        return {
+            "domain_fingerprint": search.domain_fingerprint,
+            "recipe_id": recipe_id,
+        }
+
+    def rebuild(recipe_id):
+        environment = search.worker_environment(parameters(recipe_id))
+        assert environment["TAICHI_FORGE_INTERNAL_MAP_FUSION"] == "baseline"
+        assert environment["TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"] == "auto"
+        assert (
+            environment["TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"]
+            == manifests[recipe_id]["memory_recipe_id"]
+        )
+        with monkeypatch.context() as reconstruction:
+            for name, value in environment.items():
+                reconstruction.setenv(name, value)
+            rebuilt_builder = ti.graph.GraphBuilder()
+            rebuilt_builder.dispatch(stencil, source_arg, output_arg)
+            rebuilt = rebuilt_builder.compile()
+        search.verify_materialized_graph(parameters(recipe_id), rebuilt)
+        return rebuilt
+
+    observed = []
+
+    def objective(opaque_parameters):
+        selection = search.select(opaque_parameters)
+        rebuilt = rebuild(selection.spec_id)
+        observed.append(
+            (
+                selection.spec_id,
+                rebuilt._compileiq_executable_optimization_space.selected_spec_id,
+            )
+        )
+        return float(search.recipe_ids.index(selection.spec_id))
+
+    exhaustive = search.compileiq_search(objective)
+    result = exhaustive.start()
+    coverage = search.require_complete_search(exhaustive)
+    selected = search.select_best_result(exhaustive, result)
+    assert coverage["complete"]
+    assert coverage["evaluation_count"] == 2
+    assert {item[0] for item in observed} == set(search.recipe_ids)
+    assert all(requested == actual for requested, actual in observed)
+    assert selected.spec_id == search.recipe_ids[0]
+
+    direct_graph = rebuild(direct_id)
+    staged_graph = rebuild(staged_id)
+    assert (
+        direct_graph._compileiq_executable_optimization_space.semantic_plan_id
+        == staged_graph._compileiq_executable_optimization_space.semantic_plan_id
+    )
+    staged_task = next(
+        task for task in staged_graph.task_manifest() if task.task_type == "range_for"
+    )
+    assert staged_task.requested_memory_strategy == "shared_staged_1d"
+    assert staged_task.range_mapping == "shared_tiled_one_to_one"
+    assert staged_task.selected_block_size == 128
+
+    source = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=count)
+    values = np.arange(count, dtype=np.float32) * 0.25
+    source.from_numpy(values)
+    output.fill(0)
+    bindings = staged_graph.bind({"source": source, "output": output})
+    assert bindings.fast_path_qualified
+    staged_graph.run(bindings)
+    ti.sync()
+    expected = np.zeros(count, dtype=np.float32)
+    expected[1:-1] = values[:-2] + values[1:-1] * 2.0 + values[2:]
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=0, atol=0)
+
+    with pytest.raises(RuntimeError, match="requires proven disjoint storage"):
+        staged_graph.bind({"source": source, "output": source})
+    short_source = ti.ndarray(ti.f32, shape=count - 1)
+    short_output = ti.ndarray(ti.f32, shape=count - 1)
+    with pytest.raises(RuntimeError, match="at least 1027 scalar elements"):
+        staged_graph.bind({"source": short_source, "output": short_output})
+
+    with monkeypatch.context() as reconstruction:
+        reconstruction.setenv(
+            "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
+            "graph-memory:shared-staged-1d:" + "0" * 24,
+        )
+        with pytest.raises(RuntimeError, match="absent from this Graph definition"):
+            rejected = ti.graph.GraphBuilder()
+            rejected.dispatch(stencil, source_arg, output_arg)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_compileiq_rejects_unsupported_and_multi_dispatch_domains(
+    monkeypatch,
+):
+    count = 256
+
+    @ti.kernel
+    def pointwise(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(count):
+            output[i] = source[i] * 2.0
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(pointwise, source_arg, output_arg)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+
+    assert graph._compileiq_graph_memory_status.startswith("candidate_rejected:")
+    assert len(search.recipe_ids) == 1
+    assert all(
+        "memory_recipe_id" not in search.recipe_manifest(recipe_id)
+        for recipe_id in search.recipe_ids
+    )
+
+    with monkeypatch.context() as reconstruction:
+        reconstruction.setenv(
+            "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
+            "graph-memory:shared-staged-1d:" + "0" * 24,
+        )
+        with pytest.raises(RuntimeError, match="cannot be materialized"):
+            rejected = ti.graph.GraphBuilder()
+            rejected.dispatch(pointwise, source_arg, output_arg)
+
+    multi = ti.graph.GraphBuilder()
+    multi.dispatch(pointwise, source_arg, output_arg)
+    multi.dispatch(pointwise, source_arg, output_arg)
+    multi_graph = multi.compile()
+    multi_search = compileiq_recipe_search(multi_graph)
+    assert multi_graph._compileiq_graph_memory_status == "definition_out_of_scope"
+    assert all(
+        "memory_recipe_id" not in multi_search.recipe_manifest(recipe_id)
+        for recipe_id in multi_search.recipe_ids
     )
 
 
@@ -201,9 +385,7 @@ def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly(
     np.testing.assert_allclose(output.to_numpy(), expected, rtol=0, atol=0)
     alternate_expected = np.zeros(count, dtype=np.float32)
     alternate_expected[1:-1] = (
-        alternate_values[:-2]
-        + alternate_values[1:-1] * 2.0
-        + alternate_values[2:]
+        alternate_values[:-2] + alternate_values[1:-1] * 2.0 + alternate_values[2:]
     )
     np.testing.assert_allclose(
         alternate_output.to_numpy(), alternate_expected, rtol=0, atol=0
