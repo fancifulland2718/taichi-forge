@@ -1,22 +1,21 @@
 import hashlib
 import json
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pytest
-
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.graph import (
     CompileIQGraphRecipeSearch,
     CompileIQGraphUnavailableError,
     GraphExecutableRecipeSelection,
+    _compileiq_opaque,
     compileiq_recipe_search,
 )
-from taichi_forge.graph import _compileiq_opaque
 from taichi_forge.graph._optimization import (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
     _CUDA_MASKED_CONTROL_RECIPE_ID,
@@ -27,8 +26,8 @@ from taichi_forge.graph._optimization import (
     _make_spec,
 )
 from taichi_forge.lang._compileiq_qualification import _CompileIQWinnerScope
-from tests import test_utils
 
+from tests import test_utils
 
 _SEMANTIC_PLAN_ID = "semantic-plan:" + "a" * 24
 _MAP2_RECIPE_ID = "fusion:map2:" + "b" * 24
@@ -804,6 +803,84 @@ def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
     assert {dispatches for _, dispatches in materialized} == {1, 2, 3}
     assert selected.spec_id == plans.recipe_ids[0]
     np.testing.assert_array_equal(output.to_numpy(), (source_np * 2 + 3) * 4)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_modified_compileiq_materializes_eight_stage_exact_partitions(monkeypatch):
+    count = 257
+
+    @ti.kernel
+    def stage(
+        domain: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        destination: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in domain:
+            destination[i] = source[i] + 1
+
+    symbolic_domain = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "domain", ti.i32, ndim=1
+    )
+    symbolic = tuple(
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, f"value_{index}", ti.i32, ndim=1)
+        for index in range(9)
+    )
+
+    def build():
+        builder = ti.graph.GraphBuilder()
+        for index in range(8):
+            builder.dispatch(
+                stage,
+                symbolic_domain,
+                symbolic[index],
+                symbolic[index + 1],
+            )
+        return builder.compile()
+
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
+    baseline = build()
+    plans = compileiq_recipe_search(baseline)
+    manifest = plans.manifest()
+
+    assert manifest["partitions_complete"]
+    assert manifest["partition_stage"] == "exact_contiguous_v1"
+    assert manifest["partition_combination_count"] == 108, baseline._ir_debug_info[
+        "fusion_plan"
+    ]
+    assert len(plans.recipe_ids) == 108
+
+    recipes_by_groups = {
+        tuple(tuple(group) for group in recipe["fusion_source_groups"]): recipe
+        for recipe in manifest["recipes"]
+    }
+    expected_physical = {
+        ((0, 1, 2, 3), (4, 5, 6, 7)): 2,
+        ((0, 1), (3, 4, 5), (6, 7)): 4,
+    }
+    domain = ti.ndarray(ti.i32, shape=count)
+    arrays = tuple(ti.ndarray(ti.i32, shape=count) for _ in symbolic)
+    source_np = np.arange(count, dtype=np.int32)
+    arrays[0].from_numpy(source_np)
+    arguments = {
+        "domain": domain,
+        **{f"value_{index}": array for index, array in enumerate(arrays)},
+    }
+
+    for source_groups, physical_dispatches in expected_physical.items():
+        recipe = recipes_by_groups[source_groups]
+        parameters = _parameters(plans, recipe["spec_id"])
+        selection = plans.select(parameters)
+        assert selection.materialization_recipe.startswith("exact-v1:")
+        with monkeypatch.context() as environment:
+            for name, value in selection.worker_environment.items():
+                environment.setenv(name, value)
+            graph = build()
+        plans.verify_materialized_graph(parameters, graph)
+        assert graph.physical_plan()["logical_dispatch_count"] == 8
+        assert graph.physical_plan()["physical_dispatch_count"] == physical_dispatches
+        graph.run(arguments)
+        ti.sync()
+        np.testing.assert_array_equal(arrays[-1].to_numpy(), source_np + 8)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
