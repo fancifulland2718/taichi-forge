@@ -46,6 +46,67 @@ def test_small_block_inverse_builder_matches_numpy_and_graph(block_size):
     assert graph._debug_info["nodes"][0]["dispatch_count"] == 1
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_small_block_inverse_graph_action_snapshots_builder_configuration():
+    builder = ti.linalg.SmallBlockInverseBuilder(
+        1, 2, regularization=0.0, pivot_tolerance=1.0e-6
+    )
+    blocks_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "blocks", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "inverse", ti.f32, ndim=1)
+    status_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "status", ti.i32, ndim=1)
+    node = builder.graph_action(blocks_arg, output_arg, status_arg)
+    executable = node.compile()
+    graph_builder = ti.graph.GraphBuilder()
+    graph_builder.append_native(node)
+    graph = graph_builder.compile()
+
+    source = _array(ti.f32, [2.0, 4.0])
+    output = ti.ndarray(ti.f32, shape=2)
+    status = ti.ndarray(ti.i32, shape=2)
+    runtime_args = {"blocks": source, "inverse": output, "status": status}
+
+    replacement = ti.linalg.SmallBlockInverseBuilder(2, 1)
+    builder.block_size = replacement.block_size
+    builder.block_count = replacement.block_count
+    builder.coefficient_count = replacement.coefficient_count
+    builder.regularization = 0.5
+    builder.pivot_tolerance = 0.25
+    builder._kernel = replacement._kernel
+
+    def reject_mutable_builder_fallback(*_args, **_kwargs):
+        pytest.fail("compiled Graph action consulted its mutable builder")
+
+    builder.build = reject_mutable_builder_fallback
+
+    assert executable.debug_info["block_size"] == 1
+    assert executable.debug_info["block_count"] == 2
+    executable.validate_graph_bindings(runtime_args)
+    with pytest.raises(RuntimeError, match="exactly 2 scalar"):
+        executable.validate_graph_bindings(
+            {
+                "blocks": ti.ndarray(ti.f32, shape=4),
+                "inverse": ti.ndarray(ti.f32, shape=4),
+                "status": ti.ndarray(ti.i32, shape=1),
+            }
+        )
+
+    graph.run(runtime_args)
+    np.testing.assert_allclose(output.to_numpy(), [0.5, 0.25])
+    np.testing.assert_array_equal(status.to_numpy(), [0, 0])
+
+    fallback_output = ti.ndarray(ti.f32, shape=2)
+    fallback_status = ti.ndarray(ti.i32, shape=2)
+    executable.run(
+        {
+            "blocks": source,
+            "inverse": fallback_output,
+            "status": fallback_status,
+        }
+    )
+    np.testing.assert_allclose(fallback_output.to_numpy(), [0.5, 0.25])
+    np.testing.assert_array_equal(fallback_status.to_numpy(), [0, 0])
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_small_block_inverse_builder_status_and_regularization():
     singular = np.asarray(

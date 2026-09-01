@@ -3206,6 +3206,18 @@ class _SmallBlockInverseGraphExecutable(NativeGraphExecutable):
         count_arg = Arg(ArgKind.SCALAR, count_name, i32)
         regularization_arg = Arg(ArgKind.SCALAR, regularization_name, f32)
         tolerance_arg = Arg(ArgKind.SCALAR, tolerance_name, f32)
+        # A Graph action is an immutable executable snapshot. Keep every fact
+        # consumed by its compiled dispatch together instead of consulting the
+        # publicly inspectable builder again during replay. Otherwise a later
+        # Python attribute assignment could make validation accept one extent
+        # while the already compiled kernel still launches with another.
+        self._kernel = builder._kernel
+        self._program = builder._program
+        self._block_size = int(builder.block_size)
+        self._block_count = int(builder.block_count)
+        self._coefficient_count = int(builder.coefficient_count)
+        self._regularization = float(builder.regularization)
+        self._pivot_tolerance = float(builder.pivot_tolerance)
         dispatch_args = (
             count_arg,
             regularization_arg,
@@ -3214,16 +3226,15 @@ class _SmallBlockInverseGraphExecutable(NativeGraphExecutable):
             output_arg,
             status_arg,
         )
-        self._builder = builder
         self._names = names
         self._action = DispatchGraphAction(
-            ((gen_cpp_kernel(builder._kernel, dispatch_args), dispatch_args),),
+            ((gen_cpp_kernel(self._kernel, dispatch_args), dispatch_args),),
             backends=("cpu", "cuda", "vulkan"),
             conditional_body_safe=True,
             fixed_bindings={
-                count_name: builder.block_count,
-                regularization_name: builder.regularization,
-                tolerance_name: builder.pivot_tolerance,
+                count_name: self._block_count,
+                regularization_name: self._regularization,
+                tolerance_name: self._pivot_tolerance,
             },
             update_policy="rebind",
             synchronization_domain="runtime_ordered",
@@ -3260,24 +3271,32 @@ class _SmallBlockInverseGraphExecutable(NativeGraphExecutable):
     def debug_info(self):
         return {
             "kind": "small_block_inverse_build",
-            "block_size": self._builder.block_size,
-            "block_count": self._builder.block_count,
+            "block_size": self._block_size,
+            "block_count": self._block_count,
             "dispatch_count": 1,
             "status": "device_resident_per_block",
         }
 
     def run(self, runtime_args):
-        self._builder.build(
+        if self._program is not _current_program():
+            raise TaichiRuntimeError(
+                "SmallBlockInverseBuilder Graph action belongs to an inactive "
+                "or different runtime"
+            )
+        self._kernel(
+            self._block_count,
+            self._regularization,
+            self._pivot_tolerance,
             runtime_args[self._names[0]],
-            out=runtime_args[self._names[1]],
-            status=runtime_args[self._names[2]],
+            runtime_args[self._names[1]],
+            runtime_args[self._names[2]],
         )
 
     def validate_graph_bindings(self, runtime_args):
         expected = (
-            (self._names[0], f32, self._builder.coefficient_count),
-            (self._names[1], f32, self._builder.coefficient_count),
-            (self._names[2], i32, self._builder.block_count),
+            (self._names[0], f32, self._coefficient_count),
+            (self._names[1], f32, self._coefficient_count),
+            (self._names[2], i32, self._block_count),
         )
         descriptions = []
         for name, dtype, extent in expected:
@@ -4849,9 +4868,14 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         self._terminal = terminal
         self._action_record = action_record
         self._name = name
-        self._expected_operator_stamp = tuple(
-            plan.operator._handle._resource_stamp()
-        )
+        # GraphKrylovSolver owns the exact operator used to materialize the
+        # recorded dispatch sequence. Snapshot that provider and its schema so
+        # later assignments to the parent plan cannot splice a different
+        # operator into lifetime or public-binding validation.
+        self._operator = solver._operator
+        self._validate_operator_identity()
+        self._operator_shape = tuple(self._operator.shape)
+        self._expected_operator_stamp = tuple(self._operator._handle._resource_stamp())
         schema_names = [self._rhs_name, self._output_name]
         if self._initial_name not in (None, self._output_name):
             schema_names.append(self._initial_name)
@@ -4920,13 +4944,21 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
             "terminal_metrics": self._terminal.metrics.name,
         }
 
+    def _validate_operator_identity(self):
+        if self._plan.operator is not self._operator:
+            raise TaichiRuntimeError(
+                "SolvePlan operator changed after its Graph action was created; "
+                "rebuild the SolvePlan and Graph"
+            )
+
     def validate_graph_lifetime(self):
         if self._plan._program is not _current_program():
             raise TaichiRuntimeError(
                 "SolvePlan Graph action belongs to another runtime"
             )
-        self._plan.operator._ensure_valid()
-        if tuple(self._plan.operator._handle._resource_stamp())[:4] != (
+        self._validate_operator_identity()
+        self._operator._ensure_valid()
+        if tuple(self._operator._handle._resource_stamp())[:4] != (
             self._expected_operator_stamp[:4]
         ):
             raise TaichiRuntimeError(
@@ -4950,7 +4982,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
                 self._graph_binding_views,
                 name,
                 runtime_args[name],
-                self._plan.operator.shape[0],
+                self._operator_shape[0],
             )
             if view is not None:
                 replacements[name] = view
@@ -4966,7 +4998,7 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
                 self._graph_binding_views,
                 name,
                 runtime_args[name],
-                self._plan.operator.shape[0],
+                self._operator_shape[0],
             )
             descriptions[name] = description
         _validate_graph_dense_vector_disjoint(
@@ -5011,6 +5043,10 @@ class _SolvePlanGraphExecutable(NativeGraphExecutable):
         )
 
     def run(self, runtime_args):
+        # Direct executable fallback does not pass through Graph's lifecycle
+        # boundary. Keep it on the same exact-operator contract as the
+        # recorded sequence before delegating to the parent plan.
+        self._validate_operator_identity()
         result = self._plan.solve(
             runtime_args[self._rhs_name],
             initial_guess=(

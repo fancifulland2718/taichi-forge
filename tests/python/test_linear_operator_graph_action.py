@@ -357,6 +357,77 @@ def test_solve_plan_submit_rebinds_operator_and_preconditioner_generations():
     assert next(iter(plan._submission_graphs.values()))["graph"] is cached_graph
 
 
+@test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_solve_plan_graph_action_snapshots_exact_operator_and_shape():
+    traits = ti.linalg.OperatorTraits.spd()
+    diagonal = np.asarray([2.0, 4.0], dtype=np.float32)
+    operator = _diagonal_operator(diagonal, traits=traits)
+    plan = ti.linalg.experimental.SolvePlan(
+        operator,
+        method="cg",
+        max_iterations=4,
+        atol=1.0e-6,
+    )
+    rhs_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "solve_rhs", ti.f32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "solve_output", ti.f32, ndim=1
+    )
+    action = plan.graph_action(rhs_arg, output_arg, name="operator_snapshot")
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(action)
+    graph = builder.compile()
+
+    exact = np.asarray([1.5, -0.75], dtype=np.float32)
+    rhs = ti.ndarray(ti.f32, shape=2)
+    rhs.from_numpy(diagonal * exact)
+    output = ti.ndarray(ti.f32, shape=2)
+    packet = action.allocate_terminal()
+    runtime_args = {
+        "solve_rhs": rhs,
+        "solve_output": output,
+        **packet.arguments,
+    }
+    executable = action.compile()
+
+    replacement = _diagonal_operator([9.0], traits=traits)
+    assert (
+        tuple(operator._handle._resource_stamp())[:4]
+        == tuple(replacement._handle._resource_stamp())[:4]
+    )
+    plan.operator = replacement
+
+    # Public binding validation remains tied to the compiled shape even though
+    # a same-generation replacement advertises another extent.
+    executable.validate_graph_bindings(runtime_args)
+    with pytest.raises(RuntimeError, match="operator changed.*rebuild"):
+        executable.validate_graph_lifetime()
+    with pytest.raises(RuntimeError, match="operator changed.*rebuild"):
+        executable.run(runtime_args)
+    with pytest.raises(RuntimeError, match="operator changed.*rebuild"):
+        graph.run(runtime_args)
+
+    compile_operator = _diagonal_operator(diagonal, traits=traits)
+    compile_plan = ti.linalg.experimental.SolvePlan(
+        compile_operator,
+        method="cg",
+        max_iterations=4,
+        atol=1.0e-6,
+    )
+    compile_action = compile_plan.graph_action(
+        rhs_arg, output_arg, name="operator_snapshot_before_compile"
+    )
+    compile_replacement = _diagonal_operator([7.0], traits=traits)
+    assert (
+        tuple(compile_operator._handle._resource_stamp())[:4]
+        == tuple(compile_replacement._handle._resource_stamp())[:4]
+    )
+    compile_plan.operator = compile_replacement
+    with pytest.raises(RuntimeError, match="operator changed.*rebuild"):
+        compile_action.compile()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_shifted_operator_graph_action_fuses_identity_term_and_rebinds():
     base = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
