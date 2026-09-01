@@ -22,6 +22,7 @@ from taichi_forge.lang import enums, impl, kernel_impl, ops
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
 from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
+    StorageDescription,
     analyze_storage_alias,
     describe_storage,
     ndarray_view,
@@ -9264,62 +9265,38 @@ def _parallel_identity_tuple(value):
     return tuple(result)
 
 
-def _parallel_storage_description(resource, value):
-    try:
-        description = describe_storage(value, access="readwrite")
-    except Exception as exc:
-        return (
-            ParallelStorageFact(
-                resource=resource,
-                supported=False,
-                owner_status="kUnknown",
-                failure_reason=f"{type(exc).__name__}:{exc}",
-                source_kind="",
-                owner_kind="",
-                program_domain=None,
-                resource_identity=None,
-                tree_identity=None,
-                byte_offset=None,
-                byte_begin=None,
-                byte_end=None,
-                compact_contiguous=None,
-                index_shape=(),
-                element_shape=(),
-                scalar_count=None,
-                record_stride=None,
-            ),
-            None,
-        )
+def _unsupported_parallel_storage_fact(resource, failure_reason, owner_status):
+    return ParallelStorageFact(
+        resource=resource,
+        supported=False,
+        owner_status=owner_status,
+        failure_reason=failure_reason,
+        source_kind="",
+        owner_kind="",
+        program_domain=None,
+        resource_identity=None,
+        tree_identity=None,
+        byte_offset=None,
+        byte_begin=None,
+        byte_end=None,
+        compact_contiguous=None,
+        index_shape=(),
+        element_shape=(),
+        scalar_count=None,
+        record_stride=None,
+    )
+
+
+def _parallel_storage_fact(resource, description, owner_status):
     descriptor = description.descriptor
     if descriptor is None:
-        return (
-            ParallelStorageFact(
-                resource=resource,
-                supported=False,
-                owner_status=description.failure_reason,
-                failure_reason=description.failure_reason,
-                source_kind="",
-                owner_kind="",
-                program_domain=None,
-                resource_identity=None,
-                tree_identity=None,
-                byte_offset=None,
-                byte_begin=None,
-                byte_end=None,
-                compact_contiguous=None,
-                index_shape=(),
-                element_shape=(),
-                scalar_count=None,
-                record_stride=None,
-            ),
-            description,
+        return _unsupported_parallel_storage_fact(
+            resource,
+            description.failure_reason,
+            description.failure_reason,
         )
-    try:
-        owner_status = validate_storage_owner(description)
-    except Exception as exc:
-        owner_status = f"{type(exc).__name__}:{exc}"
     properties = description.properties
-    fact = ParallelStorageFact(
+    return ParallelStorageFact(
         resource=resource,
         supported=True,
         owner_status=owner_status,
@@ -9338,7 +9315,33 @@ def _parallel_storage_description(resource, value):
         scalar_count=int(properties.get("scalar_count", 0)),
         record_stride=int(properties.get("record_stride", 0)),
     )
-    return fact, description
+
+
+def _describe_parallel_storage(value):
+    if isinstance(value, ProviderOwnedNdarrayBinding):
+        return StorageDescription(
+            _ti_core._describe_ndarray_storage(value.arr, "readwrite")
+        )
+    return describe_storage(value, access="readwrite")
+
+
+def _parallel_storage_description(resource, value):
+    try:
+        description = _describe_parallel_storage(value)
+    except Exception as exc:
+        return (
+            _unsupported_parallel_storage_fact(
+                resource,
+                f"{type(exc).__name__}:{exc}",
+                "kUnknown",
+            ),
+            None,
+        )
+    try:
+        owner_status = validate_storage_owner(description)
+    except Exception as exc:
+        owner_status = f"{type(exc).__name__}:{exc}"
+    return _parallel_storage_fact(resource, description, owner_status), description
 
 
 @dataclass(frozen=True)
@@ -9359,6 +9362,8 @@ class _GraphBindingPlan:
     fixed_names: tuple
     derived_names: tuple
     temporary_names: tuple
+    memory_recipe_names: tuple
+    memory_recipe_publish_frame_stable: bool
     static_fast_path_blockers: tuple
 
     def to_dict(self):
@@ -9369,10 +9374,28 @@ class _GraphBindingPlan:
                 "fixed_names": self.fixed_names,
                 "derived_names": self.derived_names,
                 "temporary_names": self.temporary_names,
+                "memory_recipe_names": self.memory_recipe_names,
+                "memory_recipe_publish_certificate_required": bool(
+                    self.memory_recipe_names
+                ),
+                "memory_recipe_publish_frame_stable": (
+                    self.memory_recipe_publish_frame_stable
+                ),
                 "static_fast_path_qualified": not self.static_fast_path_blockers,
                 "static_fast_path_blockers": self.static_fast_path_blockers,
             }
         )
+
+
+@dataclass(frozen=True)
+class _GraphMemoryRecipeCertificate:
+    """Publish-time proof for one immutable set of storage bindings."""
+
+    runtime_generation: int
+    bindings: tuple
+    layout_requirements: tuple
+    disjoint_pairs: tuple
+    runtime_bindings: tuple = ()
 
 
 @dataclass(frozen=True, eq=False)
@@ -9384,6 +9407,7 @@ class _GraphBindingVersion:
     slot_values: tuple
     arguments: object
     flattened_args: object
+    memory_recipe_certificate: object
     fast_path_qualified: bool
     volatile_reasons: tuple
 
@@ -9464,12 +9488,23 @@ class GraphBindingSet:
     def statistics(self):
         with self._lock:
             version = self._version
+            memory_recipe_certificate = version.memory_recipe_certificate
             return MappingProxyType(
                 {
                     "revision": version.revision,
                     "slot_count": len(version.slot_values),
                     "fast_path_qualified": version.fast_path_qualified,
                     "volatile_reasons": version.volatile_reasons,
+                    "memory_recipe_publish_validated": (
+                        memory_recipe_certificate is not None
+                    ),
+                    "memory_recipe_certified": bool(
+                        memory_recipe_certificate is not None
+                        and memory_recipe_certificate.runtime_bindings
+                    ),
+                    "memory_recipe_names": (
+                        self._graph._spec.memory_recipe_binding_names
+                    ),
                     "live_retired_versions": len(self._retired_versions),
                 }
             )
@@ -9590,6 +9625,14 @@ class _GraphSpec:
         self.memory_layout_requirements = _graph_memory_layout_requirements(
             self.pre_optimization_ir_root
         )
+        self.memory_recipe_binding_names = tuple(
+            sorted(
+                {
+                    *(item[0] for item in self.memory_layout_requirements),
+                    *(name for pair in self.memory_disjoint_pairs for name in pair),
+                }
+            )
+        )
         self.temporary_memory_plan = plan_temporary_memory(
             self.pre_optimization_ir_root
         )
@@ -9666,10 +9709,11 @@ class _GraphSpec:
         )
         self.temporary_actions = _merge_temporary_actions(self.nodes)
         self._temporary_binding_cache = {}
-        # Runtime argument contracts are dynamic, but a validated storage
-        # certificate is stable for an exact runtime generation and storage
-        # descriptor set. Keep this deliberately small and revalidate owner
-        # liveness before every memory-recipe cache hit.
+        # Mutable compatibility dictionaries still need a fresh owner check on
+        # every replay. The cache skips only the exhaustive layout/alias proof
+        # after collision-free descriptor equality. Fast-qualified
+        # GraphBindingSet versions retain the returned certificate and do not
+        # revisit this cache.
         self._memory_recipe_binding_cache = {}
         self.temporary_runtime_arg_names = frozenset().union(
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
@@ -9749,10 +9793,16 @@ class _GraphSpec:
             is not True
             for lease in self.lifetime_leases
         )
-        has_dynamic_binding_hook = any(
-            callable(getattr(lease, hook, None))
+        has_dynamic_argument_binding = any(
+            callable(getattr(lease, "bind_graph_arguments", None))
             for lease in self.lifetime_leases
-            for hook in ("bind_graph_arguments", "graph_submission_owners")
+        )
+        has_dynamic_submission_owners = any(
+            callable(getattr(lease, "graph_submission_owners", None))
+            for lease in self.lifetime_leases
+        )
+        has_dynamic_binding_hook = (
+            has_dynamic_argument_binding or has_dynamic_submission_owners
         )
         if has_uncertified_binding_validation or has_dynamic_binding_hook:
             # A certified type/shape check can be discharged when publishing
@@ -9768,8 +9818,19 @@ class _GraphSpec:
             static_fast_path_blockers.append("lane_temporary_bindings")
         if self.nested_control_resource_pairs:
             static_fast_path_blockers.append("dynamic_control_aliases")
-        if self.memory_layout_requirements or self.memory_disjoint_pairs:
-            static_fast_path_blockers.append("dynamic_memory_recipe")
+        memory_recipe_dynamic_names = frozenset(
+            (
+                *self.fixed_runtime_args,
+                *self.derived_runtime_arg_names,
+                *self.temporary_runtime_arg_names,
+            )
+        )
+        self.memory_recipe_publish_frame_stable = (
+            not has_dynamic_argument_binding
+            and not memory_recipe_dynamic_names.intersection(
+                self.memory_recipe_binding_names
+            )
+        )
         self.binding_plan = _GraphBindingPlan(
             public_names=public_names,
             public_name_set=self.runtime_arg_names,
@@ -9779,6 +9840,10 @@ class _GraphSpec:
             fixed_names=tuple(sorted(self.fixed_runtime_args)),
             derived_names=tuple(sorted(self.derived_runtime_arg_names)),
             temporary_names=tuple(sorted(self.temporary_runtime_arg_names)),
+            memory_recipe_names=self.memory_recipe_binding_names,
+            memory_recipe_publish_frame_stable=(
+                self.memory_recipe_publish_frame_stable
+            ),
             static_fast_path_blockers=tuple(static_fast_path_blockers),
         )
         self._binding_statistics = {
@@ -9928,6 +9993,28 @@ class _GraphSpec:
             f"{type(value)} for {name!r}"
         )
 
+    @staticmethod
+    def _bind_memory_recipe_certificate(certificate, flattened_args):
+        runtime_bindings = []
+        for name, description in certificate.bindings:
+            flattened = flattened_args.get(name)
+            if not isinstance(flattened, tuple) or len(flattened) != 2:
+                raise TaichiRuntimeError(
+                    "Graph memory-recipe fast binding requires a canonical "
+                    f"runtime storage argument for {name!r}"
+                )
+            runtime_argument = flattened[1]
+            runtime_descriptor = getattr(runtime_argument, "descriptor", None)
+            if runtime_descriptor is None or not runtime_descriptor.exactly_matches(
+                description.descriptor
+            ):
+                raise TaichiRuntimeError(
+                    "Graph memory-recipe runtime storage changed while its "
+                    f"BindingVersion was being published for {name!r}"
+                )
+            runtime_bindings.append((name, runtime_argument))
+        return replace(certificate, runtime_bindings=tuple(runtime_bindings))
+
     def build_binding_version(
         self,
         args,
@@ -9937,7 +10024,7 @@ class _GraphSpec:
         allow_fast_path=True,
         entrypoint="Graph.bind",
     ):
-        self.validate_runtime_args(args, entrypoint, fixed_runtime_args)
+        self._validate_runtime_arg_names(args, entrypoint)
         slot_values = tuple(
             _snapshot_graph_binding_value(args[name])
             for name in self.binding_plan.public_names
@@ -9953,6 +10040,25 @@ class _GraphSpec:
             if reason is not None:
                 blockers.append(reason)
 
+        validation_args = snapshot
+        if fixed_runtime_args:
+            validation_args = dict(fixed_runtime_args)
+            validation_args.update(snapshot)
+        # Validate at publication whenever the recipe bindings are already the
+        # final frame, even if an unrelated blocker keeps replay on the slow
+        # path. A provider that can replace recipe bindings defers this proof
+        # until its prepared invocation frame exists.
+        memory_recipe_certificate = self._validate_bound_runtime_args(
+            validation_args,
+            validate_memory_recipe=self.memory_recipe_publish_frame_stable,
+        )
+        if (
+            not blockers
+            and self.memory_recipe_binding_names
+            and memory_recipe_certificate is None
+        ):
+            blockers.append("uncertified_memory_recipe")
+
         flattened = None
         if not blockers:
             context = _GraphRunContext()
@@ -9964,6 +10070,10 @@ class _GraphSpec:
                 flattened = dict(context.flattened_args())
             finally:
                 context.end()
+            if memory_recipe_certificate is not None:
+                memory_recipe_certificate = self._bind_memory_recipe_certificate(
+                    memory_recipe_certificate, flattened
+                )
             self._binding_statistics["flattened_frame_builds"] += 1
         self._binding_statistics["version_builds"] += 1
         return _GraphBindingVersion(
@@ -9972,6 +10082,7 @@ class _GraphSpec:
             slot_values=slot_values,
             arguments=snapshot,
             flattened_args=flattened,
+            memory_recipe_certificate=memory_recipe_certificate,
             fast_path_qualified=not blockers,
             volatile_reasons=tuple(blockers),
         )
@@ -10003,8 +10114,9 @@ class _GraphSpec:
         else:
             self._binding_statistics["version_volatile_replays"] += 1
             args = binding_version.arguments
-        self.validate_runtime_args(args, entrypoint, fixed_runtime_args)
+        self._validate_runtime_arg_names(args, entrypoint)
         prepared = self.prepare_runtime_args(args, temporaries, fixed_runtime_args)
+        self._validate_bound_runtime_args(prepared.arguments)
         if binding_version is None:
             return prepared
         return _PreparedGraphInvocation(
@@ -10059,6 +10171,18 @@ class _GraphSpec:
                 replacements = prepared
                 acquire = getattr(lease, "graph_submission_owners", None)
                 lease_submission_owners = () if acquire is None else tuple(acquire())
+            if replacements is None:
+                replacements = {}
+            elif not isinstance(replacements, Mapping):
+                raise TaichiRuntimeError(
+                    "Graph provider argument bindings must be a mapping"
+                )
+            else:
+                # Bindings and owners describe one provider generation.
+                # Snapshot the mapping at this boundary so a mutable/custom
+                # Mapping cannot splice values from another generation into
+                # the prepared frame.
+                replacements = dict(replacements)
             for owner in lease_submission_owners:
                 identity = id(owner)
                 if identity not in submission_owner_ids:
@@ -10066,10 +10190,6 @@ class _GraphSpec:
                     submission_owners.append(owner)
             if not replacements:
                 continue
-            if not isinstance(replacements, dict):
-                raise TaichiRuntimeError(
-                    "Graph provider argument bindings must be a dict"
-                )
             if bound is args:
                 bound = dict(args)
             for name, value in replacements.items():
@@ -10193,27 +10313,12 @@ class _GraphSpec:
         self._temporary_binding_cache[cache_key] = resolved
         return resolved
 
-    def validate_runtime_args(
-        self,
-        args,
-        entrypoint="Graph.run",
-        fixed_runtime_args=None,
-    ):
+    def _validate_runtime_arg_names(self, args, entrypoint):
         if not isinstance(args, (dict, MappingProxyType)):
             raise TaichiRuntimeError(
                 f"{entrypoint}() expects a dict of runtime arguments, got {type(args)}"
             )
         if args.keys() == self.runtime_arg_names:
-            validation_args = args
-            if fixed_runtime_args:
-                validation_args = dict(fixed_runtime_args)
-                validation_args.update(args)
-            self._validate_nested_control_aliases(validation_args)
-            self._validate_memory_recipe_contracts(validation_args)
-            for lease in self.lifetime_leases:
-                validate = getattr(lease, "validate_graph_bindings", None)
-                if validate is not None:
-                    validate(validation_args)
             return
 
         missing = sorted(self.runtime_arg_names.difference(args.keys()))
@@ -10226,6 +10331,37 @@ class _GraphSpec:
                 f"Unexpected graph runtime arguments: {', '.join(unexpected)}"
             )
         raise TaichiRuntimeError("; ".join(details))
+
+    def _validate_bound_runtime_args(
+        self,
+        validation_args,
+        *,
+        validate_memory_recipe=True,
+    ):
+        self._validate_nested_control_aliases(validation_args)
+        memory_recipe_certificate = (
+            self._validate_memory_recipe_contracts(validation_args)
+            if validate_memory_recipe
+            else None
+        )
+        for lease in self.lifetime_leases:
+            validate = getattr(lease, "validate_graph_bindings", None)
+            if validate is not None:
+                validate(validation_args)
+        return memory_recipe_certificate
+
+    def validate_runtime_args(
+        self,
+        args,
+        entrypoint="Graph.run",
+        fixed_runtime_args=None,
+    ):
+        self._validate_runtime_arg_names(args, entrypoint)
+        validation_args = args
+        if fixed_runtime_args:
+            validation_args = dict(fixed_runtime_args)
+            validation_args.update(args)
+        return self._validate_bound_runtime_args(validation_args)
 
     def parallel_candidate_report(self, branches, args=None):
         root_children = _parallel_logical_root_children(self.pre_optimization_ir_root)
@@ -10383,54 +10519,83 @@ class _GraphSpec:
 
     def _validate_memory_recipe_contracts(self, args):
         if not self.memory_layout_requirements and not self.memory_disjoint_pairs:
-            return
+            return None
 
         # Descriptor fingerprints cover owner generation, allocation identity,
-        # layout, shape, strides, and byte offset. Owner liveness can change
-        # without changing a retained descriptor (for example a destroyed
-        # SNode tree), so retain that inexpensive dynamic check on every call;
-        # the exhaustive layout and pairwise alias proof is needed only once
-        # per exact fingerprint tuple.
-        required_names = sorted(
-            {
-                *(item[0] for item in self.memory_layout_requirements),
-                *(name for pair in self.memory_disjoint_pairs for name in pair),
-            }
-        )
-        binding_fingerprints = []
-        binding_descriptions = []
+        # layout, shape, strides, and byte offset. Mutable raw dictionaries
+        # reconstruct these facts and revalidate owner liveness on every call.
+        # A fast-qualified immutable GraphBindingVersion retains the successful
+        # certificate, its canonical Ndarray owners, and the native
+        # RuntimeStorageArguments; runtime-generation invalidation then makes
+        # replay-time reconstruction redundant.
+        # Keep the compatibility cache-hit path deliberately thin: descriptor
+        # construction, owner liveness, fingerprint lookup, and collision-proof
+        # exact equality only. Layout properties and ParallelStorageFact objects
+        # are materialized only for a new descriptor tuple.
+        descriptions = {}
+        owner_statuses = {}
+        failure_reasons = {}
         cacheable = True
-        for name in required_names:
+        for name in self.memory_recipe_binding_names:
             try:
-                description = describe_storage(args[name], access="readwrite")
-                descriptor = description.descriptor
-                if descriptor is None or validate_storage_owner(description) != "kNone":
-                    cacheable = False
-                    break
-                binding_fingerprints.append((name, int(descriptor.fingerprint)))
-                binding_descriptions.append(description)
-            except Exception:
+                description = _describe_parallel_storage(args[name])
+            except Exception as exc:
+                descriptions[name] = None
+                owner_statuses[name] = "kUnknown"
+                failure_reasons[name] = f"{type(exc).__name__}:{exc}"
                 cacheable = False
-                break
+                continue
+            descriptions[name] = description
+            descriptor = description.descriptor
+            if descriptor is None:
+                owner_statuses[name] = description.failure_reason
+                failure_reasons[name] = description.failure_reason
+                cacheable = False
+                continue
+            try:
+                owner_status = validate_storage_owner(description)
+            except Exception as exc:
+                owner_status = f"{type(exc).__name__}:{exc}"
+            owner_statuses[name] = owner_status
+            failure_reasons[name] = "kNone"
+            if owner_status != "kNone":
+                cacheable = False
+
         cache_key = None
         if cacheable:
+            binding_fingerprints = tuple(
+                (name, int(descriptions[name].descriptor.fingerprint))
+                for name in self.memory_recipe_binding_names
+            )
             cache_key = (
                 int(impl.runtime_generation()),
-                tuple(binding_fingerprints),
+                binding_fingerprints,
             )
-            cached_descriptions = self._memory_recipe_binding_cache.get(cache_key)
-            if cached_descriptions is not None and all(
-                current.descriptor.exactly_matches(cached.descriptor)
-                for current, cached in zip(binding_descriptions, cached_descriptions)
+            cached_certificate = self._memory_recipe_binding_cache.get(cache_key)
+            if cached_certificate is not None and all(
+                descriptions[name].descriptor.exactly_matches(
+                    cached_description.descriptor
+                )
+                for name, cached_description in cached_certificate.bindings
             ):
-                return
+                return cached_certificate
 
         storage = {}
-
-        def describe(name):
-            if name not in storage:
-                storage[name] = _parallel_storage_description(name, args[name])
-            return storage[name]
+        for name in self.memory_recipe_binding_names:
+            description = descriptions[name]
+            if description is None:
+                fact = _unsupported_parallel_storage_fact(
+                    name,
+                    failure_reasons[name],
+                    owner_statuses[name],
+                )
+            else:
+                fact = _parallel_storage_fact(
+                    name,
+                    description,
+                    owner_statuses[name],
+                )
+            storage[name] = (fact, description)
 
         for (
             name,
@@ -10438,7 +10603,7 @@ class _GraphSpec:
             record_stride,
             alignment,
         ) in self.memory_layout_requirements:
-            fact, _ = describe(name)
+            fact, _ = storage[name]
             if (
                 not fact.supported
                 or fact.owner_status != "kNone"
@@ -10458,8 +10623,8 @@ class _GraphSpec:
                     f"{minimum_elements} scalar elements"
                 )
         for left, right in self.memory_disjoint_pairs:
-            left_fact, left_description = describe(left)
-            right_fact, right_description = describe(right)
+            left_fact, left_description = storage[left]
+            right_fact, right_description = storage[right]
             alias = "kUnknown"
             if (
                 left_description is not None
@@ -10478,12 +10643,22 @@ class _GraphSpec:
                     "Graph shared-staged memory recipe requires proven "
                     f"disjoint storage for {left!r} and {right!r}; got {alias}"
                 )
+        certificate = _GraphMemoryRecipeCertificate(
+            runtime_generation=int(impl.runtime_generation()),
+            bindings=tuple(
+                (name, storage[name][1])
+                for name in self.memory_recipe_binding_names
+            ),
+            layout_requirements=self.memory_layout_requirements,
+            disjoint_pairs=self.memory_disjoint_pairs,
+        )
         if cache_key is not None:
-            self._memory_recipe_binding_cache[cache_key] = tuple(binding_descriptions)
+            self._memory_recipe_binding_cache[cache_key] = certificate
             while len(self._memory_recipe_binding_cache) > 16:
                 del self._memory_recipe_binding_cache[
                     next(iter(self._memory_recipe_binding_cache))
                 ]
+        return certificate
 
     def instantiate(self, key=None):
         if key is None:
@@ -14077,12 +14252,14 @@ class Graph:
 
     def _snapshot_binding_source(self, source):
         if not isinstance(source, GraphBindingSet):
-            if not isinstance(source, dict):
+            if not isinstance(source, (dict, MappingProxyType)):
                 return source, None
-            # A mutable compatibility dict has no revision notification. Copy
-            # it once after admission so later caller mutation cannot change the
-            # frame while validation or a pybind launch releases the GIL. Use a
-            # GraphBindingSet when rebinding must be atomic across threads.
+            # Compatibility mappings have no revision notification. A
+            # MappingProxyType can still wrap a caller-owned mutable dict, so
+            # copy both accepted mapping forms after admission. Later caller
+            # mutation then cannot change the frame between validation and a
+            # pybind launch that releases the GIL. Use a GraphBindingSet when
+            # rebinding must be atomic across threads.
             return {
                 name: _snapshot_graph_binding_value(value)
                 for name, value in source.items()

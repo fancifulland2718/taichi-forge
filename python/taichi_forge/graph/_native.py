@@ -21,16 +21,30 @@ from taichi_forge.graph._ir import (
 class ProviderOwnedNdarrayBinding:
     """A non-owning Graph binding backed by a provider generation lease."""
 
+    __slots__ = (
+        "_arr",
+        "_owner",
+        "_runtime_prog",
+        "_runtime_allocation_identity",
+        "_runtime_storage_arguments",
+    )
+
     def __init__(self, native_array, owner):
         if native_array is None or owner is None:
             raise ValueError(
                 "Provider-owned ndarray bindings require storage and an owner"
             )
-        self.arr = native_array
+        self._arr = native_array
         self._owner = owner
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_allocation_identity = native_array.device_allocation().alloc_id
         self._runtime_storage_arguments = {}
+
+    @property
+    def arr(self):
+        """The immutable native allocation published with this owner lease."""
+
+        return self._arr
 
     def _runtime_storage_argument(self, consumer, mode):
         program = impl.get_runtime().prog
