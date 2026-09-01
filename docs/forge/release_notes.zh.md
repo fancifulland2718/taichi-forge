@@ -91,11 +91,22 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   不改变 runtime 默认值。公开的 Graph recipe 路径通过精确 capability、bundled-core 与 Python-source
   lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的离线依赖。
 
-  Graph memory feasibility 在接入 CompileIQ 前保持 fail closed。当前真实 affine/stencil 元数据描述的是
-  `range_for` dispatch，而现有 BLS controller 只改写 `struct_for` 上的 SNode `GlobalPtrStmt`；它不支持
-  ndarray `ExternalPtrStmt`，也无法从已编译 Graph 精确重建 layout/alignment、uniform barrier 和边界处理。
-  因此 `shared_staged` 继续报告 `unavailable_automatic_shared_stage_codegen`，不生成 memory recipe，不把
-  全局 `CompileConfig.make_block_local` 或私有 per-kernel task 轴加入 Graph CompileIQ 域。
+  Graph memory 在接入 CompileIQ 前继续 fail closed。Forge 现在具有一条私有、精确的 CUDA f32
+  一维 `shared_staged_1d` lowering，仅覆盖已审查的 affine stencil offload。它只能通过私有
+  Graph-owned builder 从精确 offload-plan binding 重建；binding 发布一次性证明 owner、extent、layout
+  和 alias requirement，稳定合格 replay 复用该证书。在正式 S4 资格化以及完整 direct/shared
+  Graph 重建、fallback 和稳定绑定产品合同单独获批前，该路线仍是 private/unsupported。
+  CompileIQ 看不到 `memory_strategy`；Forge 也仍不把全局 `CompileConfig.make_block_local` 或私有
+  per-kernel task 轴暴露为 Graph 搜索域。
+- 新增稳定公开的 `Graph.bind(arguments)` 与 `ti.graph.GraphBindingSet`。发布时会按值快照
+  scalar/matrix、按 identity 保留 device resource，并在版本可见前完成 owner、layout、
+  structured-control 与 alias 资格化；失败的 `update()`/`replace()` 不替换旧版本。同一已发布且
+  满足资格的版本在后续 `Graph.run()`/`Graph.submit()` 中复用预扁平化 frame，不再逐 replay
+  构造 Python storage descriptor。有限的 ping-pong/ring 资源应各自预发布一个 BindingSet，
+  使 A→B→A 同时复用 Python 证书与原生 CGraph MRU plan。原生层仍在每次提交核对带
+  generation 的 resource identity 并取得异步 lease；动态 provider、replacement、temporary 与
+  逐提交 owner 保持保守 slow path。paced submit 在 admission 等待后选取当前完整版本，
+  `ti.reset()` 会使旧 Graph 及其 BindingSet 失效。
 - 新增精简且稳定的 `HardwareCapability`、`HardwareProviderStatus`、
   `HardwareExecutionReport` 状态层，以及 schema-v4 diagnostic operation/provider 合同。
   被动 status/report 不加载、benchmark、启用或选择可选 provider。`graph_integration`

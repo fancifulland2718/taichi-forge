@@ -2141,23 +2141,67 @@ For nested sequences, every inner definition has its own stop snapshot;
 `logical_invocations` reports how many outer iterations invoked it, while
 `logical_iterations` remains the final invocation's stop position.
 
-### `GraphBuilder.compile()`, `Graph.run(args, *, trace=False)`, and `Graph.submit(args)`
+### `GraphBuilder.compile()`, `Graph.bind(arguments)`, `Graph.run(args, *, trace=False)`, and `Graph.submit(args)`
 
 `compile()` freezes the dispatch/sequential definition at the call and returns
 a runtime-bound `Graph`. `run(args)` submits one complete graph invocation and
 keeps the established fire-and-continue return contract. `submit(args)` uses
-the same execution path and returns a completion ticket.
+the same execution path and returns a completion ticket. Both `run()` and
+`submit()` accept either an exact argument dictionary or a `GraphBindingSet`
+published by the same Graph's `bind()` method.
 
 | API | Contract |
 | --- | --- |
 | `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | Later changes to the builder or original `Sequential` do not modify the compiled graph. Additional workspace lanes are materialized lazily and only affect Graphs with eligible exclusive Graph-owned internal storage, such as a recorded SolvePlan. Provider-fixed worklist storage deliberately requires one lane and rejects a larger value. `workspace_saturation='raise'` fails instead of waiting when every eligible lane is busy. |
-| `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys; missing or extra keys raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. Qualified depth-two CUDA/Vulkan structured Graphs use the same native single-submission path as `submit()` and wait once at terminal completion; they do not retain synchronous control-flow reports. |
+| `Graph.bind(arguments)` | Publish a `GraphBindingSet` from a dictionary whose keys exactly match the declarations. Publication snapshots Python scalar/matrix values and qualifies the current device-resource identities; failure publishes no visible version. Construct BindingSets through this factory rather than by calling their constructor directly. |
+| `Graph.run(args, *, trace=False)` | `args` must be a dictionary with exactly the declared keys or a `GraphBindingSet` owned by this Graph; missing or extra keys and cross-Graph BindingSets raise `TaichiRuntimeError`. The default returns `None` and does not allocate a dynamic control-flow trace. Qualified depth-two CUDA/Vulkan structured Graphs use the same native single-submission path as `submit()` and wait once at terminal completion; they do not retain synchronous control-flow reports. |
 | `Graph.run(args, *, trace=True)` | Run synchronously and return an immutable `GraphControlFlowTrace`. Its ordered invocations contain a `sequence`, static `definition_path`, dynamic `invocation_path`, optional `parent_iteration`, and the invocation's while/branch report. Unlike `control_flow_stats()`, it preserves every repeated nested invocation. Tracing bypasses strict Vulkan nested replay and uses exact portable-parent execution so each invocation is observable. |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | Uses the same exact argument, lifecycle, concurrency, and AD contract as `run()`, returns one `SubmissionTicket`, and can opt into shared admission pacing. `lane` remains the pacer lane; `workspace_lane` optionally pins a Graph-owned execution/workspace lane. `telemetry="summary"` adds per-while and bounded-extent snapshots, queue/submission accounting, and the lazy post-optimization pipeline definition without backend timestamp markers. `telemetry="timestamps"` adds whole-ticket/region GPU timestamps; `True` is its compatibility alias. The default adds no telemetry buffers or report. Structured submission accepts qualified CUDA `native_required` while/if/switch regions and qualified Vulkan `native_required` while regions, including multiple ordered regions and qualified depth-two multi-inner sequences. Portable control and unsupported native combinations fail explicitly. |
 | `Graph.prepare_telemetry(mode, *, slots=1)` | Explicitly allocate one to the configured maximum bounded telemetry slots and compile required packed snapshot kernels without executing the Graph or reading user resources. `mode="timestamps"` additionally performs one empty instrumented transaction to move backend event/query initialization outside the first measured submission. Preparation covers currently materialized workspace lanes; later lanes reuse compiled kernels but materialize their own bounded storage. `False` is a no-op. |
 | `SubmissionTicket.telemetry()` | Wait if needed and return an immutable schema-v5 `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters, stop positions, nested invocation counts, and `pipeline` is the ticket-owned `GraphPipelineReport`. Nullable GPU duration fields are never inferred from host wall time. |
 | `SubmissionTicket.pipeline_report()` | Return the same immutable pipeline object as `ticket.telemetry().pipeline`, waiting if needed. Returns `None` when telemetry was not requested. |
 | `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
+
+#### `GraphBindingSet`
+
+Location: `taichi_forge.graph`. This is a stable public API constructed by
+`Graph.bind()`. It publishes successfully qualified runtime arguments as an
+immutable version for production paths that replay one binding set repeatedly:
+
+```python
+bindings_a = graph.bind({"source": source_a, "output": output_a})
+bindings_b = graph.bind({"source": source_b, "output": output_b})
+
+graph.run(bindings_a)
+graph.run(bindings_b)
+graph.run(bindings_a)
+```
+
+The A-to-B-to-A sequence above does not reconstruct Python storage descriptors,
+owners, layouts, or alias proofs on every replay. The native CGraph still does
+a generation-qualified resource-identity lookup and reacquires asynchronous
+owners/leases for every submission. `fast_path_qualified` is therefore a
+performance diagnostic, not a promise that all native safety boundaries have
+been removed. Prepublish one BindingSet per set for a bounded collection of
+recurring resources as above; `update()` is an explicit publication boundary
+and does not promise replay-level cost.
+
+| API | Contract |
+| --- | --- |
+| `bindings.revision` | Monotonic revision of the currently published version. A failed update does not change it. |
+| `bindings.fast_path_qualified` | Diagnostic indicating whether the current version can reuse a preflattened frame. `False` remains correct and uses the conservative slow path for dynamic providers, temporaries, or other per-submission state. |
+| `bindings.snapshot()` | Return an immutable mapping of the current public arguments. Python scalars/matrices are snapshotted by value. Device resources such as ndarrays/textures retain object identity, so their device contents may still change between invocations. |
+| `bindings.update(values=None, /, **changes)` | Atomically publish a partial copy-on-write update. The candidate is fully qualified before publication; a dtype/layout/alias/owner failure leaves the old version usable. |
+| `bindings.replace(arguments)` | Atomically replace the current version from one complete exact mapping, using the same publication checks as `Graph.bind()`. |
+| `bindings.statistics()` | Return current qualification and lifetime diagnostics. Fields may be added; applications must not select correctness routes from blocker strings. |
+
+One BindingSet may be read and updated concurrently; an invocation observes
+exactly one complete version. A paced `Graph.submit()` takes its version only
+after admission waiting, so an update published during that wait may supply the
+submitted version. An older version and its resources remain retained while an
+asynchronous submission is in flight and are reclaimed after completion.
+`ti.reset()` or runtime reinitialization invalidates both the old Graph and all
+of its BindingSets.
 
 Concurrent host calls on one graph queue at the complete-invocation boundary;
 independent graphs do not share that lock. This guard does not wait for GPU

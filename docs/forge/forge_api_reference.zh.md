@@ -1785,22 +1785,58 @@ measurement-path changed，不能当作正常执行 wall time 发布。
 `logical_invocations` 表示它被多少次 outer iteration 调用，`logical_iterations` 则仍表示
 最后一次调用的停止位置。
 
-### `GraphBuilder.compile()`、`Graph.run(args, *, trace=False)` 与 `Graph.submit(args)`
+### `GraphBuilder.compile()`、`Graph.bind(arguments)`、`Graph.run(args, *, trace=False)` 与 `Graph.submit(args)`
 
 `compile()` 冻结调用时的 dispatch/sequential 定义并返回 runtime-bound `Graph`。
 `run(args)` 提交一次完整 graph invocation，并保持既有的提交后继续执行返回合同；
-`submit(args)` 使用同一执行路径并返回完成票据。
+`submit(args)` 使用同一执行路径并返回完成票据。`run()` 与 `submit()` 都接受精确参数字典，
+或由同一个 Graph 的 `bind()` 发布的 `GraphBindingSet`。
 
 | API | 合同 |
 | --- | --- |
 | `GraphBuilder.compile(*, workspace_lanes=1, workspace_saturation='wait')` | 后续修改 builder 或原 `Sequential` 不改变已编译 graph。额外 workspace lane 惰性物化，并且只对含合格独占 Graph-owned internal storage 的 Graph（例如已记录的 SolvePlan）产生作用；provider-fixed worklist storage 明确只允许一个 lane，传入更大值会被拒绝。`workspace_saturation='raise'` 会在所有合格 lane 都忙时直接失败而不是等待。 |
-| `Graph.run(args, *, trace=False)` | `args` 必须是字典，key 与声明参数完全一致；missing/extra key 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。满足资格的 depth=2 CUDA/Vulkan structured Graph 与 `submit()` 共用 native 单提交路径，并只在 terminal completion 等待一次；它不保留同步 control-flow report。 |
+| `Graph.bind(arguments)` | 从 key 与声明完全一致的字典发布一个 `GraphBindingSet`。发布会快照 Python scalar/matrix 值并资格化当前 device resource identity；失败不会产生可见版本。应通过该工厂构造 BindingSet，而不是直接调用其构造器。 |
+| `Graph.run(args, *, trace=False)` | `args` 必须是 key 与声明参数完全一致的字典，或属于同一个 Graph 的 `GraphBindingSet`；missing/extra key、跨 Graph BindingSet 会抛 `TaichiRuntimeError`。默认返回 `None`，也不分配 dynamic control-flow trace。满足资格的 depth=2 CUDA/Vulkan structured Graph 与 `submit()` 共用 native 单提交路径，并只在 terminal completion 等待一次；它不保留同步 control-flow report。 |
 | `Graph.run(args, *, trace=True)` | 同步运行并返回 immutable `GraphControlFlowTrace`。其中有序 invocation 包含 `sequence`、静态 `definition_path`、动态 `invocation_path`、可选 `parent_iteration` 和本次调用的 while/branch report。与 `control_flow_stats()` 不同，它会保留每一次重复 nested invocation。trace 会绕过严格 Vulkan nested replay，改用精确 portable-parent 执行，使每次 invocation 都可观测。 |
 | `Graph.submit(args, *, pacer=None, lane=None, on_saturation='wait', telemetry=False, workspace_lane=None)` | 与 `run()` 使用相同的精确参数、生命周期、并发和 AD 合同，返回一个 `SubmissionTicket`，并可选择加入共享准入节奏。`lane` 仍表示 pacer lane；`workspace_lane` 可把提交固定到一个 Graph-owned execution/workspace lane。`telemetry="summary"` 增加 while/bounded snapshot、queue/submission accounting 与 lazy pipeline definition，但不插入 backend timestamp marker；`telemetry="timestamps"` 追加 whole-ticket/region GPU timestamp，`True` 是其兼容别名。默认不增加 telemetry buffer/report。结构化提交接受满足资格的 CUDA `native_required` while/if/switch、Vulkan `native_required` while，以及满足资格的 depth=2 multi-inner sequence。portable 控制与不支持的原生组合会明确失败。 |
 | `Graph.prepare_telemetry(mode, *, slots=1)` | 在不执行 Graph、也不读取用户资源的前提下，显式分配一个到配置上限数量的有界 telemetry slot，并编译所需 packed snapshot kernel。`mode="timestamps"` 还会执行一次空 instrumented transaction，把 backend event/query 初始化移出首次测量提交。准备覆盖当前已物化 workspace lane；后续 lane 复用 compiled kernel，但自行物化有界 storage。`False` 不执行操作。 |
 | `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v5 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter、停止位置和 nested invocation count，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
 | `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
 | `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
+
+#### `GraphBindingSet`
+
+位置：`taichi_forge.graph`；这是由 `Graph.bind()` 构造的稳定公开 API。它把一次资格化成功的
+runtime 参数发布为不可变版本，适合一个绑定集合被重复 replay 的生产路径：
+
+```python
+bindings_a = graph.bind({"source": source_a, "output": output_a})
+bindings_b = graph.bind({"source": source_b, "output": output_b})
+
+graph.run(bindings_a)
+graph.run(bindings_b)
+graph.run(bindings_a)
+```
+
+上面的 A→B→A 不需要在每次 replay 重建 Python storage descriptor、owner、layout 或 alias
+证明。原生 CGraph 仍会执行 generation-qualified resource identity 查找，并在每次提交重新取得
+异步 owner/lease；`fast_path_qualified` 因此是性能诊断，不是“完全没有原生安全边界”的承诺。
+对于有界的重复资源集合，应像上例一样预发布一个 BindingSet/集合；`update()` 是显式发布
+边界，不承诺与 replay 相同的成本。
+
+| API | 合同 |
+| --- | --- |
+| `bindings.revision` | 当前已发布版本的单调 revision。失败的更新不会改变它。 |
+| `bindings.fast_path_qualified` | 当前版本能否复用预扁平化 frame 的诊断值。`False` 仍保持正确执行，并通过保守 slow path 处理动态 provider、temporary 或其他逐提交状态。 |
+| `bindings.snapshot()` | 返回当前公开参数的 immutable mapping。Python scalar/matrix 按值快照；ndarray/texture 等 device resource 保留对象 identity，因此其设备内容仍可在 invocation 之间变化。 |
+| `bindings.update(values=None, /, **changes)` | 原子发布 partial copy-on-write 更新。更新先完整资格化 candidate；dtype/layout/alias/owner 等检查失败时旧版本继续可用。 |
+| `bindings.replace(arguments)` | 用完整精确参数 mapping 原子替换当前版本，采用与 `Graph.bind()` 相同的发布检查。 |
+| `bindings.statistics()` | 返回当前资格与生命周期诊断。字段可增加；应用不应根据 blocker 字符串改变 correctness 路线。 |
+
+同一个 BindingSet 可被并发读取和更新；一次 invocation 只观察一个完整版本。paced
+`Graph.submit()` 在 admission 等待结束后才取得版本，因此等待期间成功发布的更新可成为该次
+提交所用版本。已经进入异步提交的旧版本及其资源会保留到 completion，之后自动回收。
+`ti.reset()` 或 runtime reinitialization 会使旧 Graph 及其 BindingSet 一并失效。
 
 同一个 graph 的并发 host 调用以完整 invocation 为单位排队；不同 graph 不共享该锁。
 该边界不隐含 `ti.sync()`。单 workspace lane 保留旧的 completion-fence 复用规则；多 lane

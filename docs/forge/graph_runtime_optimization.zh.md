@@ -15,7 +15,8 @@ Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。
 Forge 保留 Taichi 的公开 graph builder 模型。后端优化不得改变以下合同：
 
 - `GraphBuilder.compile()` 冻结 dispatch 与 sequential 定义；
-- `Graph.run(args)` 只接受与声明完全一致的 runtime 参数 key；
+- `Graph.run(args)` 只接受与声明完全一致的 runtime 参数字典，或由同一个 Graph 发布的
+  `GraphBindingSet`；
 - 同一个 `Graph` 的一次 run 是完整 host transaction，其他 caller 不能在其 CGraph
   与 native node 之间插入操作；
 - 不同 graph 仍可独立提交；runtime guard 在 host submission 后结束，不增加默认
@@ -32,8 +33,9 @@ Runtime 同步只保护 Forge 自己的 launch、replay 与资源状态，不会
 
 ## Runtime 参数发现与模板适配器
 
-公开应用应通过 `GraphBuilder.dispatch()` 声明 graph 参数，并向 `Graph.run()` 传入完全
-一致的 key。物理/渲染引擎可使用 keyword-only `template_args=` 在构图期固定
+公开应用应通过 `GraphBuilder.dispatch()` 声明 graph 参数，并向 `Graph.run()` 传入 key
+完全一致的字典或同一个 Graph 的 `GraphBindingSet`。物理/渲染引擎可使用 keyword-only
+`template_args=` 在构图期固定
 data-oriented `self`、Field 或其他 `ti.template()` 参数：
 
 ```python
@@ -65,6 +67,36 @@ resource signature 与容器。CompiledGraph binding 按当前 segment 自己的
 C++ `IValue` map；不会在 Python 为每个 segment 复制字典。这样同时保持 segment-local
 后端语义和 zero-copy host path。直接读取下划线对象的旧适配器仍可工作，但只恢复上次
 segment flush 后新增的 AOT items。
+
+## 已发布不可变绑定与两层缓存
+
+`Graph.bind(arguments)` 将精确参数字典发布为稳定公开的 `GraphBindingSet`。每个版本会在
+发布时快照 Python scalar/matrix，并保留 device resource identity；资源内容仍可动态变化。
+满足资格的同一已发布版本在 replay 时直接复用预扁平化 frame，不再重建 Python storage
+descriptor，也不重复 owner、layout、structured-control 或 alias 资格检查。动态 provider、
+replacement、derived/fixed binding、temporary lane 或逐提交 owner 会明确阻止该快路径，继续
+使用保守的最终 frame 验证。
+
+这与原生 CGraph 的四槽 runtime binding plan 是互补的两层缓存：
+
+- Python BindingVersion 负责 Forge-level layout/alias 合法性、不可变 invocation snapshot、
+  并发原子发布以及 paced wait 之后的版本选择；
+- 原生 plan 只比较 generation-qualified resource object/handle，复用 backend ABI/launch
+  state，并在每次提交重新取得异步 resource lease。它不证明 Forge memory recipe。
+
+对于有限个反复出现的资源集合，应分别预发布 BindingSet，再直接交替 replay：
+
+```python
+bindings_a = graph.bind({"source": source_a, "output": output_a})
+bindings_b = graph.bind({"source": source_b, "output": output_b})
+for bindings in (bindings_a, bindings_b, bindings_a):
+    graph.run(bindings)
+```
+
+这样 A→B→A 同时复用 Python 资格证书与原生 MRU slot。`update()`/`replace()` 则是显式
+发布边界：candidate 在可见前完整资格化，失败不替换旧版本；其成本不属于 replay 性能合同。
+`fast_path_qualified` 与 blocker/statistics 只用于性能诊断，不能替代 correctness admission。
+`ti.reset()` 会同时使 Graph 及其全部 BindingSet 失效。
 
 ## Dense Field 生命周期与异构 block
 

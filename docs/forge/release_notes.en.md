@@ -114,15 +114,32 @@ grouped under the behavior they shipped.
   upstream/different CompileIQ builds through exact capability, bundled-core,
   and Python-source locks; CompileIQ remains an optional offline dependency.
 
-  Graph-memory feasibility remains fail-closed before CompileIQ integration.
-  The real affine/stencil metadata currently describes `range_for` dispatches,
-  while the existing BLS controller only rewrites SNode `GlobalPtrStmt` access
-  in `struct_for`; it does not support ndarray `ExternalPtrStmt` access or
-  reconstruct layout/alignment, uniform barriers, and boundary handling from
-  an already compiled Graph. Consequently `shared_staged` still reports
-  `unavailable_automatic_shared_stage_codegen`: Forge generates no memory
-  recipe and does not turn global `CompileConfig.make_block_local` or private
-  per-kernel task axes into a Graph CompileIQ domain.
+  Graph memory remains fail-closed for CompileIQ integration. Forge now has one
+  private exact CUDA f32 one-dimensional `shared_staged_1d` lowering for
+  reviewed affine stencil offloads. It can only be reconstructed from an exact
+  offload-plan binding through the private Graph-owned builder path; binding
+  publication proves owner, extent, layout, and alias requirements once, while
+  stable qualified replay reuses that certificate. This route remains private
+  and unsupported until formal S4 qualification and the complete
+  direct/shared-Graph reconstruction, fallback, and stable-binding product
+  contracts are approved. CompileIQ does not see `memory_strategy`, and Forge
+  still exposes neither global `CompileConfig.make_block_local` nor private
+  per-kernel task axes as a Graph search domain.
+- Added the stable public `Graph.bind(arguments)` and
+  `ti.graph.GraphBindingSet` APIs. Publication snapshots scalar/matrix values,
+  retains device resources by identity, and completes owner, layout,
+  structured-control, and alias qualification before a version becomes
+  visible; a failed `update()` or `replace()` leaves the previous version
+  current. Later `Graph.run()`/`Graph.submit()` calls reuse the preflattened
+  frame of the same qualified published version without reconstructing Python
+  storage descriptors on every replay. Bounded ping-pong/ring resource sets
+  should prepublish one BindingSet each, allowing an A-to-B-to-A sequence to
+  reuse both Python certificates and native CGraph MRU plans. The native layer
+  still checks generation-qualified resource identity and reacquires
+  asynchronous leases per submission; dynamic providers, replacement,
+  temporaries, and per-submission owners retain the conservative slow path. A
+  paced submit selects the current complete version after admission waiting,
+  and `ti.reset()` invalidates the old Graph and its BindingSets.
 - Added the compact stable `HardwareCapability`, `HardwareProviderStatus`, and
   `HardwareExecutionReport` status layer plus schema-v4 diagnostic
   operation/provider contracts. Passive status/report calls do not load,

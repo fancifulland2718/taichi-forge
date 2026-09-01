@@ -71,6 +71,7 @@ def test_graph_binding_set_reuses_preflattened_frame_and_keeps_device_data_dynam
     source.fill(3)
 
     bindings = graph.bind({"scale": 2, "source": source, "out": out})
+    assert isinstance(bindings, ti.graph.GraphBindingSet)
     assert bindings.fast_path_qualified
     assert graph.binding_plan()["slot_order"] == ("out", "scale", "source")
 

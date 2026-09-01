@@ -20,7 +20,8 @@ Forge keeps Taichi's public graph-builder model. Backend optimization must not
 change these contracts:
 
 - `GraphBuilder.compile()` freezes the dispatch and sequential definition.
-- `Graph.run(args)` accepts exactly the declared runtime argument keys.
+- `Graph.run(args)` accepts either an exact runtime-argument dictionary or a
+  `GraphBindingSet` published by the same Graph.
 - One run of one `Graph` is a complete host transaction. Its CGraph and native
   nodes cannot be interleaved by another caller.
 - Independent graphs remain independently submitable. Runtime guards end after
@@ -41,8 +42,9 @@ buffering, or another explicit ownership protocol.
 ## Runtime argument discovery and template adapters
 
 Public applications should declare graph arguments through
-`GraphBuilder.dispatch()` and pass exactly matching keys to `Graph.run()`. A
-physics or rendering engine can use the keyword-only `template_args=` parameter
+`GraphBuilder.dispatch()` and pass either an exact-key dictionary or a
+`GraphBindingSet` from the same Graph to `Graph.run()`. A physics or rendering
+engine can use the keyword-only `template_args=` parameter
 to bind a data-oriented `self`, a Field, or another `ti.template()` argument at
 definition time:
 
@@ -82,6 +84,45 @@ declarations; Python does not copy another dictionary per segment. This keeps
 the backend semantics segment-local while preserving a zero-copy host path.
 Legacy adapters that access underscored objects still work, but recovery reads
 only AOT items added since the previous segment flush.
+
+## Published immutable bindings and the two cache layers
+
+`Graph.bind(arguments)` publishes an exact argument dictionary as the stable
+public `GraphBindingSet` API. Each version snapshots Python scalar/matrix
+values and retains device-resource identities; resource contents remain
+dynamic. Replay of the same qualified published version reuses a preflattened
+frame. It does not reconstruct Python storage descriptors or repeat owner,
+layout, structured-control, or alias qualification. Dynamic providers,
+replacement, derived/fixed bindings, temporary lanes, and per-submission owners
+explicitly block this fast path and retain conservative final-frame validation.
+
+This is complementary to the native CGraph's four-slot runtime binding-plan
+cache:
+
+- A Python BindingVersion owns Forge-level layout/alias legality, the immutable
+  invocation snapshot, atomic concurrent publication, and version selection
+  after a paced wait.
+- A native plan compares generation-qualified resource objects/handles, reuses
+  backend ABI/launch state, and reacquires asynchronous resource leases for
+  every submission. It does not certify a Forge memory recipe.
+
+Prepublish one BindingSet per set for a bounded collection of recurring
+resources, then alternate them directly:
+
+```python
+bindings_a = graph.bind({"source": source_a, "output": output_a})
+bindings_b = graph.bind({"source": source_b, "output": output_b})
+for bindings in (bindings_a, bindings_b, bindings_a):
+    graph.run(bindings)
+```
+
+This A-to-B-to-A sequence reuses both the Python qualification certificates
+and native MRU slots. `update()` and `replace()` are explicit publication
+boundaries: a candidate is fully qualified before it becomes visible, and
+failure leaves the old version current. Their cost is outside the replay
+performance contract. `fast_path_qualified`, blocker strings, and statistics
+are performance diagnostics rather than correctness admission. `ti.reset()`
+invalidates the Graph and all of its BindingSets.
 
 ## Dense Field lifetime and heterogeneous blocks
 

@@ -173,6 +173,42 @@ def test_private_graph_shared_staged_recipe_materializes_and_replays_exactly(
             if key in before and key in after:
                 assert after[key] <= before[key]
 
+    # Recurring resource sets can each be published once. Switching A -> B -> A
+    # then reuses both immutable Python certificates; the native CGraph cache
+    # independently reuses its generation-qualified resource plans.
+    alternate_values = values[::-1].copy()
+    alternate_source = ti.ndarray(ti.f32, shape=count)
+    alternate_output = ti.ndarray(ti.f32, shape=count)
+    alternate_source.from_numpy(alternate_values)
+    alternate_bindings = graph.bind(
+        {"source": alternate_source, "output": alternate_output}
+    )
+    assert alternate_bindings.fast_path_qualified
+    recurring_description_calls = description_calls
+    recurring_owner_validation_calls = owner_validation_calls
+    recurring_alias_checks = alias_checks
+
+    output.fill(0)
+    alternate_output.fill(0)
+    graph.run(bindings)
+    graph.run(alternate_bindings)
+    graph.run(bindings)
+    ti.sync()
+
+    assert description_calls == recurring_description_calls
+    assert owner_validation_calls == recurring_owner_validation_calls
+    assert alias_checks == recurring_alias_checks
+    np.testing.assert_allclose(output.to_numpy(), expected, rtol=0, atol=0)
+    alternate_expected = np.zeros(count, dtype=np.float32)
+    alternate_expected[1:-1] = (
+        alternate_values[:-2]
+        + alternate_values[1:-1] * 2.0
+        + alternate_values[2:]
+    )
+    np.testing.assert_allclose(
+        alternate_output.to_numpy(), alternate_expected, rtol=0, atol=0
+    )
+
     # Mutable compatibility dictionaries deliberately keep one exact owner
     # scan per replay. A new descriptor tuple proves aliasing once, then the
     # collision-free cache skips only the exhaustive alias/layout analysis.
