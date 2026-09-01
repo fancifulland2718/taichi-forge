@@ -40,7 +40,19 @@ def test_small_block_inverse_builder_matches_numpy_and_graph(block_size):
     graph = graph_builder.compile()
     output = ti.ndarray(ti.f32, shape=blocks.size)
     status = ti.ndarray(ti.i32, shape=block_count)
-    graph.run({"blocks": source, "inverse": output, "status": status})
+    bindings = graph.bind(
+        {"blocks": source, "inverse": output, "status": status}
+    )
+    assert bindings.fast_path_qualified, bindings.statistics()
+    graph.run(bindings)
+    graph.run(bindings)
+    assert graph.binding_statistics()["version_fast_replays"] == 2
+    revision = bindings.revision
+    with pytest.raises(RuntimeError, match="must be proven disjoint"):
+        bindings.update(inverse=source)
+    assert bindings.revision == revision
+    graph.run(bindings)
+    assert graph.binding_statistics()["version_fast_replays"] == 3
     assert np.all(status.to_numpy() == 0)
     np.testing.assert_allclose(output.to_numpy().reshape(blocks.shape), expected, rtol=2e-5, atol=2e-5)
     assert graph._debug_info["nodes"][0]["dispatch_count"] == 1

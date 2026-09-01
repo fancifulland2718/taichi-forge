@@ -1722,7 +1722,9 @@ def test_graph_device_prefix_sequence_publishes_bounded_launch_state():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_graph_ordered_segmented_dispatch_reuses_payload_and_orders_ranges():
+def test_graph_ordered_segmented_dispatch_reuses_payload_and_orders_ranges(
+    monkeypatch,
+):
     capacity = 24
     block_dim = 32
     offsets_host = np.array([0, 5, 5, 11, 17], dtype=np.int32)
@@ -1771,7 +1773,37 @@ def test_graph_ordered_segmented_dispatch_reuses_payload_and_orders_ranges():
     extent.set(int(offsets_host[-1]))
     output.fill(-1)
 
-    graph.run({"offsets": offsets, "extent": extent, "output": output})
+    runtime_args = {"offsets": offsets, "extent": extent, "output": output}
+    offsets_contract = next(
+        lease
+        for lease in graph._spec.lifetime_leases
+        if type(lease).__name__ == "_OrderedOffsetsGraphContract"
+    )
+    validation_calls = 0
+    validate = offsets_contract.validate_graph_bindings
+
+    def count_validation(args):
+        nonlocal validation_calls
+        validation_calls += 1
+        return validate(args)
+
+    monkeypatch.setattr(
+        offsets_contract, "validate_graph_bindings", count_validation
+    )
+    bindings = graph.bind(runtime_args)
+    assert bindings.fast_path_qualified, bindings.statistics()
+    assert validation_calls == 1
+    graph.run(bindings)
+    graph.run(bindings)
+    assert validation_calls == 1
+    assert graph.binding_statistics()["version_fast_replays"] == 2
+    revision = bindings.revision
+    with pytest.raises(RuntimeError, match=f"contain {segment_count + 1} i32"):
+        bindings.update(offsets=ti.ndarray(ti.i32, shape=segment_count))
+    assert bindings.revision == revision
+    assert validation_calls == 2
+    graph.run(bindings)
+    assert validation_calls == 2
     expected = np.full(capacity, -1, dtype=np.int32)
     for segment in range(segment_count):
         expected[offsets_host[segment] : offsets_host[segment + 1]] = segment + 1

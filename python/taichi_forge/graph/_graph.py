@@ -2472,6 +2472,13 @@ class _DeviceExtentGraphContract:
 class _OrderedOffsetsGraphContract:
     """Deduplicated shape/type contract for ordered-segment offsets."""
 
+    # A BindingVersion snapshots the exact offsets ndarray. Its allocation,
+    # dtype, and shape cannot change before that version is replaced, while
+    # the offset contents intentionally remain dynamic device data. Validate
+    # the immutable ABI once when publishing the version instead of scanning
+    # it again before every replay.
+    graph_publish_time_binding_validation_stable = True
+
     def __init__(self, offsets_name, segment_count):
         self.offsets_name = offsets_name
         self.segment_count = int(segment_count)

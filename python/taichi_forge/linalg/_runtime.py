@@ -3178,6 +3178,12 @@ class SmallBlockInverseResult:
 
 
 class _SmallBlockInverseGraphExecutable(NativeGraphExecutable):
+    # The executable snapshots every builder scalar and the BindingVersion
+    # retains the exact three public storage objects. Their dtype, extent, and
+    # disjointness are therefore immutable publication facts; no provider
+    # generation or replacement hook participates in replay.
+    graph_publish_time_binding_validation_stable = True
+
     def __init__(self, builder, blocks_arg, output_arg, status_arg):
         from taichi_forge.graph._graph import Arg, ArgKind, gen_cpp_kernel
 
