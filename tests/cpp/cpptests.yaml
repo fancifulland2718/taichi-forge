@@ -125,10 +125,16 @@
   - test: CapiTest.AotTestCpuField
     script: aot/python_scripts/field_aot_test_.py
     args: --arch=cpu
+  - test: CapiTest.AotWaitReportsCpuRuntimeError
+    script: aot/python_scripts/field_aot_test_.py
+    args: --arch=cpu
   - test: CapiTest.AotTestCudaField
     script: aot/python_scripts/field_aot_test_.py
     args: --arch=cuda
   - test: CapiTest.GraphTestCpuGraph
+    script: aot/python_scripts/graph_aot_test_.py
+    args: --arch=cpu
+  - test: CapiTest.GraphArgumentBoundsCpu
     script: aot/python_scripts/graph_aot_test_.py
     args: --arch=cpu
   - test: CapiTest.GraphTestCudaGraph
@@ -162,6 +168,9 @@
     script: aot/python_scripts/matrix_aot_test_.py
     args: --arch=opengl
   - test: CapiTest.AotTestCpuKernel
+    script: aot/python_scripts/kernel_aot_test1.py
+    args: --arch=cpu
+  - test: CapiTest.AotKernelArgumentBoundsCpu
     script: aot/python_scripts/kernel_aot_test1.py
     args: --arch=cpu
   - test: CapiTest.AotTestCudaKernel

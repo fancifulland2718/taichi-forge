@@ -1,5 +1,4 @@
 #include "gtest/gtest.h"
-#include "c_api_test_utils.h"
 #include "taichi/cpp/taichi.hpp"
 #include "c_api/tests/gtest_fixture.h"
 
@@ -74,9 +73,6 @@ static void field_aot_test(TiArch arch) {
   k_activate_pointer_fields.launch();
   k_check_activate_pointer_fields.launch();
   runtime.wait();
-
-  // Check Results
-  capi::utils::check_runtime_error(runtime);
 }
 
 void texture_aot_kernel_test(TiArch arch) {
@@ -172,6 +168,90 @@ TEST_F(CapiTest, AotTestCudaField) {
 TEST_F(CapiTest, AotTestCpuKernel) {
   TiArch arch = TiArch::TI_ARCH_X64;
   kernel_aot_test(arch);
+}
+
+TEST_F(CapiTest, AotKernelArgumentBoundsCpu) {
+  constexpr uint32_t kArrLen = 16;
+  const auto folder_dir = getenv("TAICHI_AOT_FOLDER_PATH");
+
+  ti::Runtime runtime(TI_ARCH_X64);
+  ti::AotModule aot_mod = runtime.load_aot_module(folder_dir);
+  ti::Kernel k_run = aot_mod.get_kernel("run");
+  ti::NdArray<int32_t> array =
+      runtime.allocate_ndarray<int32_t>({kArrLen}, {1}, true);
+  array.write(std::vector<int32_t>(kArrLen, 0));
+
+  TiArgument args[3]{};
+  args[0].type = TI_ARGUMENT_TYPE_I32;
+  args[0].value.i32 = 0;
+  args[1].type = TI_ARGUMENT_TYPE_NDARRAY;
+  args[1].value.ndarray = array.ndarray();
+  args[2].type = TI_ARGUMENT_TYPE_TENSOR;
+  args[2].value.tensor.type = TI_DATA_TYPE_I32;
+  args[2].value.tensor.contents.length = 3;
+  args[2].value.tensor.contents.data.x32[0] = 1;
+  args[2].value.tensor.contents.data.x32[1] = 2;
+  args[2].value.tensor.contents.data.x32[2] = 3;
+
+  args[1].value.ndarray.shape.dim_count = 17;
+  ti_launch_kernel(runtime, k_run, 3, args);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "shape.dim_count");
+  args[1].value.ndarray.shape = array.shape();
+
+  args[1].value.ndarray.elem_shape.dim_count = 17;
+  ti_launch_kernel(runtime, k_run, 3, args);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "elem_shape.dim_count");
+  args[1].value.ndarray.elem_shape = array.elem_shape();
+
+  struct TensorLengthCase {
+    TiDataType type;
+    uint32_t invalid_length;
+  };
+  const TensorLengthCase tensor_length_cases[] = {
+      {TI_DATA_TYPE_I8, 129},
+      {TI_DATA_TYPE_I16, 65},
+      {TI_DATA_TYPE_I32, 33},
+      {TI_DATA_TYPE_I64, 17},
+  };
+  for (const auto &test_case : tensor_length_cases) {
+    args[2].value.tensor.type = test_case.type;
+    args[2].value.tensor.contents.length = test_case.invalid_length;
+    ti_launch_kernel(runtime, k_run, 3, args);
+    EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+                        "tensor.contents.length");
+  }
+
+  args[2].value.tensor.type = TI_DATA_TYPE_I64;
+  args[2].value.tensor.contents.length = 3;
+  ti_launch_kernel(runtime, k_run, 3, args);
+  EXPECT_TAICHI_ERROR(TI_ERROR_NOT_SUPPORTED);
+
+  runtime.wait();
+  ASSERT_TAICHI_SUCCESS();
+  std::vector<int32_t> output(kArrLen, -1);
+  array.read(output);
+  EXPECT_EQ(output, std::vector<int32_t>(kArrLen, 0));
+}
+
+TEST_F(CapiTest, AotWaitReportsCpuRuntimeError) {
+  const auto folder_dir = getenv("TAICHI_AOT_FOLDER_PATH");
+
+  ti::Runtime runtime(TI_ARCH_X64);
+  ti::AotModule aot_mod = runtime.load_aot_module(folder_dir);
+  ti::Kernel k_init_fields = aot_mod.get_kernel("init_fields");
+  ti::Kernel k_check_init_x = aot_mod.get_kernel("check_init_x");
+
+  k_init_fields[0] = 10;
+  k_init_fields.launch();
+  k_check_init_x[0] = 11;
+  k_check_init_x.launch();
+  runtime.wait();
+  EXPECT_TAICHI_ERROR(TI_ERROR_INVALID_STATE);
+
+  k_check_init_x[0] = 10;
+  k_check_init_x.launch();
+  runtime.wait();
+  ASSERT_TAICHI_SUCCESS();
 }
 
 TEST_F(CapiTest, AotTestCudaKernel) {

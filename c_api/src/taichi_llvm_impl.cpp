@@ -132,7 +132,7 @@ void LlvmRuntime::flush() {
 }
 
 void LlvmRuntime::wait() {
-  executor_->synchronize();
+  check_runtime_error();
 }
 
 }  // namespace capi

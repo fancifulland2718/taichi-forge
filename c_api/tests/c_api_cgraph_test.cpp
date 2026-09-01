@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
-#include "c_api_test_utils.h"
+#include <limits>
+
 #include "taichi/cpp/taichi.hpp"
 #include "c_api/tests/gtest_fixture.h"
 
@@ -128,6 +129,63 @@ void texture_aot_test(TiArch arch) {
 TEST_F(CapiTest, GraphTestCpuGraph) {
   TiArch arch = TiArch::TI_ARCH_X64;
   graph_aot_test(arch);
+}
+
+TEST_F(CapiTest, GraphArgumentBoundsCpu) {
+  constexpr uint32_t kArrLen = 16;
+  const auto folder_dir = getenv("TAICHI_AOT_FOLDER_PATH");
+
+  ti::Runtime runtime(TI_ARCH_X64);
+  ti::AotModule aot_mod = runtime.load_aot_module(folder_dir);
+  ti::ComputeGraph run_graph = aot_mod.get_compute_graph("run_graph");
+  ti::NdArray<int32_t> array =
+      runtime.allocate_ndarray<int32_t>({kArrLen}, {}, true);
+  array.write(std::vector<int32_t>(kArrLen, 0));
+
+  TiNamedArgument arg{};
+  arg.name = "arr0";
+  arg.argument.type = TI_ARGUMENT_TYPE_NDARRAY;
+  arg.argument.value.ndarray = array.ndarray();
+
+  ti_launch_compute_graph(runtime, run_graph,
+                          std::numeric_limits<uint32_t>::max(), &arg);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
+
+  arg.argument.value.ndarray.shape.dim_count = 17;
+  ti_launch_compute_graph(runtime, run_graph, 1, &arg);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "shape.dim_count");
+  arg.argument.value.ndarray.shape = array.shape();
+
+  arg.argument.value.ndarray.elem_shape.dim_count = 17;
+  ti_launch_compute_graph(runtime, run_graph, 1, &arg);
+  EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+                      "elem_shape.dim_count");
+
+  arg.name = "unused";
+  arg.argument.type = TI_ARGUMENT_TYPE_TENSOR;
+  struct TensorLengthCase {
+    TiDataType type;
+    uint32_t invalid_length;
+  };
+  const TensorLengthCase tensor_length_cases[] = {
+      {TI_DATA_TYPE_I8, 129},
+      {TI_DATA_TYPE_I16, 65},
+      {TI_DATA_TYPE_I32, 33},
+      {TI_DATA_TYPE_I64, 17},
+  };
+  for (const auto &test_case : tensor_length_cases) {
+    arg.argument.value.tensor.type = test_case.type;
+    arg.argument.value.tensor.contents.length = test_case.invalid_length;
+    ti_launch_compute_graph(runtime, run_graph, 1, &arg);
+    EXPECT_TAICHI_ERROR(TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+                        "tensor.contents.length");
+  }
+
+  runtime.wait();
+  ASSERT_TAICHI_SUCCESS();
+  std::vector<int32_t> output(kArrLen, -1);
+  array.read(output);
+  EXPECT_EQ(output, std::vector<int32_t>(kArrLen, 0));
 }
 
 TEST_F(CapiTest, GraphTestCudaGraph) {

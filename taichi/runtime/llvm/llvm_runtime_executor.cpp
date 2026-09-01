@@ -503,7 +503,10 @@ std::vector<int64> LlvmRuntimeExecutor::get_hash_snode_probe_stats(
 }
 
 void LlvmRuntimeExecutor::check_runtime_error(uint64 *result_buffer) {
-  synchronize();
+  // LLVM work and runtime queries share the legacy default/null stream. Queue
+  // the error-code exchange after prior work, then let fetch_result() perform
+  // the single stream synchronization before reading it back. Synchronizing
+  // here as well would make the successful explicit-wait path wait twice.
   auto *runtime_jit_module = get_runtime_jit_module();
   runtime_jit_module->call<void *>("runtime_retrieve_and_reset_error_code",
                                    llvm_runtime_);

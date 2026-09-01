@@ -69,6 +69,31 @@ namespace {
 // Error is recorded on a per-thread basis.
 thread_local ErrorCache thread_error_cache;
 
+constexpr uint32_t kTiNdShapeDimensionCapacity =
+    sizeof(((TiNdShape *)nullptr)->dims) / sizeof(uint32_t);
+
+uint32_t ti_tensor_value_capacity(TiDataType type) {
+  switch (type) {
+    case TI_DATA_TYPE_I8:
+    case TI_DATA_TYPE_U8:
+      return sizeof(((TiTensorValue *)nullptr)->x8) / sizeof(uint8_t);
+    case TI_DATA_TYPE_I16:
+    case TI_DATA_TYPE_U16:
+    case TI_DATA_TYPE_F16:
+      return sizeof(((TiTensorValue *)nullptr)->x16) / sizeof(uint16_t);
+    case TI_DATA_TYPE_I32:
+    case TI_DATA_TYPE_U32:
+    case TI_DATA_TYPE_F32:
+      return sizeof(((TiTensorValue *)nullptr)->x32) / sizeof(uint32_t);
+    case TI_DATA_TYPE_I64:
+    case TI_DATA_TYPE_U64:
+    case TI_DATA_TYPE_F64:
+      return sizeof(((TiTensorValue *)nullptr)->x64) / sizeof(uint64_t);
+    default:
+      return 0;
+  }
+}
+
 const char *describe_error(TiError error) {
   switch (error) {
     case TI_ERROR_SUCCESS:
@@ -777,6 +802,22 @@ void ti_launch_kernel(TiRuntime runtime,
                 devmem2devalloc(runtime2, arg.value.ndarray.memory));
         const TiNdArray &ndarray = arg.value.ndarray;
 
+        if (ndarray.shape.dim_count > kTiNdShapeDimensionCapacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) + "].value.ndarray.shape.dim_count")
+                  .c_str());
+          return;
+        }
+        if (ndarray.elem_shape.dim_count > kTiNdShapeDimensionCapacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) +
+               "].value.ndarray.elem_shape.dim_count")
+                  .c_str());
+          return;
+        }
+
         std::vector<int> shape(ndarray.shape.dims,
                                ndarray.shape.dims + ndarray.shape.dim_count);
 
@@ -800,6 +841,15 @@ void ti_launch_kernel(TiRuntime runtime,
       }
       case TI_ARGUMENT_TYPE_TENSOR: {
         auto &tensor = arg.value.tensor;
+        const uint32_t capacity = ti_tensor_value_capacity(tensor.type);
+        if (capacity != 0 && tensor.contents.length > capacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) +
+               "].value.tensor.contents.length")
+                  .c_str());
+          return;
+        }
         if (tensor.type == TI_DATA_TYPE_I16 ||
             tensor.type == TI_DATA_TYPE_U16 ||
             tensor.type == TI_DATA_TYPE_F16) {
@@ -817,6 +867,7 @@ void ti_launch_kernel(TiRuntime runtime,
         } else {
           ti_set_last_error(TI_ERROR_NOT_SUPPORTED,
                             ("args[" + std::to_string(i) + "].type").c_str());
+          return;
         }
         break;
       }
@@ -840,6 +891,10 @@ void ti_launch_compute_graph(TiRuntime runtime,
   TI_CAPI_ARGUMENT_NULL(compute_graph);
   if (arg_count > 0) {
     TI_CAPI_ARGUMENT_NULL(args);
+  }
+  if (arg_count > taichi_max_num_args_total) {
+    ti_set_last_error(TI_ERROR_ARGUMENT_OUT_OF_RANGE, "arg_count");
+    return;
   }
 
   Runtime &runtime2 = *((Runtime *)runtime);
@@ -908,6 +963,23 @@ void ti_launch_compute_graph(TiRuntime runtime,
         taichi::lang::DeviceAllocation devalloc =
             devmem2devalloc(runtime2, arg.argument.value.ndarray.memory);
         const TiNdArray &ndarray = arg.argument.value.ndarray;
+
+        if (ndarray.shape.dim_count > kTiNdShapeDimensionCapacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) +
+               "].argument.value.ndarray.shape.dim_count")
+                  .c_str());
+          return;
+        }
+        if (ndarray.elem_shape.dim_count > kTiNdShapeDimensionCapacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) +
+               "].argument.value.ndarray.elem_shape.dim_count")
+                  .c_str());
+          return;
+        }
 
         std::vector<int> shape(ndarray.shape.dims,
                                ndarray.shape.dims + ndarray.shape.dim_count);
@@ -994,6 +1066,16 @@ void ti_launch_compute_graph(TiRuntime runtime,
         TI_CAPI_ARGUMENT_NULL(args[i].argument.value.tensor.contents.data.x8);
 
         uint32_t length = arg.argument.value.tensor.contents.length;
+        const uint32_t capacity =
+            ti_tensor_value_capacity(arg.argument.value.tensor.type);
+        if (capacity != 0 && length > capacity) {
+          ti_set_last_error(
+              TI_ERROR_ARGUMENT_OUT_OF_RANGE,
+              ("args[" + std::to_string(i) +
+               "].argument.value.tensor.contents.length")
+                  .c_str());
+          return;
+        }
         const taichi::lang::DataType *prim_ty;
         switch (arg.argument.value.tensor.type) {
           case TI_DATA_TYPE_F16:
