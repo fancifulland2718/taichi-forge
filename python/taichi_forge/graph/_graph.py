@@ -101,6 +101,9 @@ _INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
 _INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
 )
+_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV = (
+    "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE"
+)
 _INTERNAL_FUSION_QUALIFICATION_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
@@ -9869,6 +9872,7 @@ class _GraphSpec:
         aot_compiled_graph=None,
         graph_memory_sources=(),
         graph_reduction_sources=(),
+        graph_native_algorithm_sources=(),
     ):
         source_nodes = tuple(nodes)
         structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
@@ -9933,10 +9937,14 @@ class _GraphSpec:
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._graph_reduction_sources = tuple(graph_reduction_sources)
+        self._graph_native_algorithm_sources = tuple(
+            graph_native_algorithm_sources
+        )
         self._compileiq_executable_space_cache = None
         self._compileiq_graph_bounded_status = "not_evaluated"
         self._compileiq_graph_memory_status = "not_evaluated"
         self._compileiq_graph_reduction_status = "not_evaluated"
+        self._compileiq_graph_native_algorithm_status = "not_evaluated"
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -10191,6 +10199,52 @@ class _GraphSpec:
             return base
         else:
             self._compileiq_graph_bounded_status = "not_applicable"
+
+        native_algorithm_eligible_shape = bool(
+            len(self._graph_native_algorithm_sources) == 1
+            and not self._graph_reduction_sources
+            and not self._graph_memory_sources
+            and self.native_count == 1
+            and self.dispatch_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and len(self.nodes) == 1
+            and isinstance(self.nodes[0], _CompiledNativeGraphNode)
+            and not base.baseline.control_recipe_id
+            and not base.candidates
+        )
+        if native_algorithm_eligible_shape:
+            source = self._graph_native_algorithm_sources[0]
+            manifests = source.manifests()
+            try:
+                space = _build_executable_optimization_space(
+                    self.pre_optimization_ir_root,
+                    self.fusion_plan,
+                    base.baseline.backend,
+                    native_algorithm_recipe_manifests=manifests,
+                    selected_native_algorithm_recipe_id=(
+                        source.selected_recipe_id
+                    ),
+                    semantic_root=source.semantic_root,
+                )
+            except ValueError as error:
+                self._compileiq_graph_native_algorithm_status = (
+                    "domain_rejected:" + str(error)
+                )
+                self._compileiq_executable_space_cache = base
+                return base
+            self._compileiq_graph_native_algorithm_status = (
+                "complete_recipe_domain"
+            )
+            self._compileiq_executable_space_cache = space
+            return space
+        if self._graph_native_algorithm_sources:
+            self._compileiq_graph_native_algorithm_status = (
+                "definition_out_of_scope"
+            )
+            self._compileiq_executable_space_cache = base
+            return base
+        self._compileiq_graph_native_algorithm_status = "not_applicable"
 
         reduction_eligible_shape = bool(
             len(self._graph_reduction_sources) == 1
@@ -13354,6 +13408,7 @@ class GraphBuilder:
         self._declared_private_bindings = {}
         self._graph_memory_sources = []
         self._graph_reduction_sources = []
+        self._graph_native_algorithm_sources = []
 
     def private_ndarray(
         self,
@@ -13484,6 +13539,49 @@ class GraphBuilder:
             requested_recipe_id=requested_recipe,
         )
         self._graph_reduction_sources.append(source)
+        return self
+
+    def segmented_scan(
+        self,
+        values,
+        layout,
+        output,
+        *,
+        inclusive=True,
+        op="sum",
+    ):
+        """Append one typed Graph-native segmented-scan action.
+
+        Forge freezes the immutable layout and fixed resource ABI at Graph
+        construction. Modified CompileIQ can then select between the complete
+        segment-local and global-scan/correction strategies during explicit
+        reconstruction; no provider or launch-parameter axis is exposed.
+        """
+
+        from taichi_forge.graph._native_algorithm import (
+            append_graph_segmented_scan,
+        )
+
+        requested_recipe = os.environ.get(
+            _INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV
+        )
+        if requested_recipe is not None:
+            requested_recipe = requested_recipe.strip()
+            if not requested_recipe:
+                raise TaichiRuntimeError(
+                    f"{_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV} must be a "
+                    "complete Graph native-algorithm recipe ID"
+                )
+        source = append_graph_segmented_scan(
+            self,
+            values,
+            layout,
+            output,
+            inclusive=inclusive,
+            op=op,
+            requested_recipe_id=requested_recipe,
+        )
+        self._graph_native_algorithm_sources.append(source)
         return self
 
     def _dispatch_shared_staged_1d(
@@ -14559,6 +14657,9 @@ class GraphBuilder:
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
+                graph_native_algorithm_sources=tuple(
+                    self._graph_native_algorithm_sources
+                ),
             ),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
@@ -16106,6 +16207,15 @@ class Graph:
                 return "workspace_lane_scope_rejected"
             self._spec.compileiq_executable_optimization_space()
             return self._spec._compileiq_graph_reduction_status
+
+    @property
+    def _compileiq_graph_native_algorithm_status(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._workspace_lane_capacity != 1:
+                return "workspace_lane_scope_rejected"
+            self._spec.compileiq_executable_optimization_space()
+            return self._spec._compileiq_graph_native_algorithm_status
 
     @property
     def _compileiq_graph_bounded_status(self):

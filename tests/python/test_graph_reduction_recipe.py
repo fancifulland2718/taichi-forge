@@ -51,13 +51,25 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
-    strategies = tuple(
+    strategies = {
         manifest["reduction_recipe_manifest"]["strategy"]
         for manifest in manifests.values()
+    }
+    assert strategies == {"direct_atomic_tls", "block_partial_finalize"}
+    direct_id = search.baseline_recipe_id
+    phased_id = next(
+        recipe_id
+        for recipe_id, manifest in manifests.items()
+        if manifest["reduction_recipe_manifest"]["strategy"]
+        == "block_partial_finalize"
     )
-    assert strategies == ("direct_atomic_tls", "block_partial_finalize")
-    direct_id, phased_id = search.recipe_ids
     assert direct_id == search.baseline_recipe_id
+    for manifest in manifests.values():
+        for stage in manifest["reduction_recipe_manifest"]["physical_stages"]:
+            for task in stage["tasks"]:
+                assert not {"task_id", "logical_task_id", "task_name"}.intersection(
+                    task
+                )
 
     expected_semantics = {
         "operation": "sum",

@@ -338,10 +338,24 @@ class _GraphReductionRecipeSource:
     def _stage(self, name, kernel_cpp):
         from taichi_forge.graph._graph import _kernel_task_manifests
 
+        tasks = []
+        for task in _kernel_task_manifests(kernel_cpp):
+            stable = asdict(task)
+            # These three identifiers intentionally include the Python kernel
+            # counter and therefore depend on unrelated import/definition
+            # order. They remain available through the raw compiler task
+            # manifest, but cannot participate in a reconstructible recipe ID.
+            for volatile_name in (
+                "task_id",
+                "logical_task_id",
+                "task_name",
+            ):
+                stable.pop(volatile_name, None)
+            tasks.append(stable)
         return {
             "name": name,
             "dispatch_count": 1,
-            "tasks": [asdict(task) for task in _kernel_task_manifests(kernel_cpp)],
+            "tasks": tasks,
         }
 
     def _prepare_manifests(self):

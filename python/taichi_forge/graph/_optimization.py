@@ -54,6 +54,16 @@ _GRAPH_REDUCTION_RECIPE_PREFIXES = {
     "block_partial_finalize": "graph-reduction:block-partial-finalize:",
 }
 
+_GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_NATIVE_ALGORITHM_RECIPE_PREFIXES = {
+    ("segmented_scan", "segment_local_serial"): (
+        "graph-native-algorithm:segmented-scan:serial:"
+    ),
+    ("segmented_scan", "global_scan_segment_correction"): (
+        "graph-native-algorithm:segmented-scan:global-scan:"
+    ),
+}
+
 
 def _canonical_hash(value):
     payload = json.dumps(
@@ -414,6 +424,232 @@ class _GraphReductionRecipeManifest:
 
 
 @dataclass(frozen=True)
+class _GraphNativeAlgorithmRecipeManifest:
+    """One complete internal strategy for a typed Graph-native algorithm."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("Graph native-algorithm recipe ID must be nonempty")
+        if not isinstance(self.payload_json, str) or not self.payload_json:
+            raise ValueError("Graph native-algorithm payload must be canonical JSON")
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("Graph native-algorithm payload is invalid") from error
+        if not isinstance(payload, dict) or _canonical_json(payload) != self.payload_json:
+            raise ValueError("Graph native-algorithm payload is not canonical")
+        if (
+            payload.get("schema_version")
+            != _GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION
+        ):
+            raise ValueError("Graph native-algorithm schema is unsupported")
+        if frozenset(payload) != {
+            "schema_version",
+            "algorithm",
+            "strategy",
+            "semantics",
+            "physical_stages",
+            "workspace",
+            "submission",
+            "source_lock",
+        }:
+            raise ValueError("Graph native-algorithm payload fields are invalid")
+        key = (payload.get("algorithm"), payload.get("strategy"))
+        try:
+            prefix = _GRAPH_NATIVE_ALGORITHM_RECIPE_PREFIXES[key]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "Graph native-algorithm strategy is unsupported"
+            ) from error
+        semantics = payload.get("semantics")
+        if not isinstance(semantics, dict) or frozenset(semantics) != {
+            "operation",
+            "dtype",
+            "inclusive",
+            "capacity",
+            "num_items",
+            "num_segments",
+            "max_segment_length",
+            "topology_fingerprint",
+            "input",
+            "output",
+        }:
+            raise ValueError("Graph native-algorithm semantics are incomplete")
+        if semantics.get("operation") != "sum" or semantics.get("dtype") not in (
+            "i32",
+            "u32",
+        ):
+            raise ValueError("Graph segmented scan typed semantics are unsupported")
+        if not isinstance(semantics.get("inclusive"), bool):
+            raise ValueError("Graph segmented scan inclusive mode must be bool")
+        for name in ("capacity", "num_items", "num_segments", "max_segment_length"):
+            value = semantics.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("Graph segmented scan extent is invalid")
+        if (
+            semantics["capacity"] <= 0
+            or semantics["num_segments"] <= 0
+            or semantics["num_items"] > semantics["capacity"]
+            or not isinstance(semantics.get("topology_fingerprint"), str)
+            or not semantics["topology_fingerprint"].startswith(
+                "segmented-layout:"
+            )
+        ):
+            raise ValueError("Graph segmented scan topology is invalid")
+        for role in ("input", "output"):
+            resource = semantics.get(role)
+            if (
+                not isinstance(resource, dict)
+                or frozenset(resource) != {"storage", "shape", "fixed_resource"}
+                or resource.get("storage") != "plain_ndarray"
+                or resource.get("shape") != [semantics["capacity"]]
+                or resource.get("fixed_resource") is not True
+            ):
+                raise ValueError("Graph segmented scan resource ABI is invalid")
+        stages = payload.get("physical_stages")
+        if not isinstance(stages, list) or not stages or any(
+            not isinstance(stage, dict)
+            or frozenset(stage) != {"name", "execution_kind", "call_count"}
+            or not isinstance(stage.get("name"), str)
+            or not stage["name"]
+            or stage.get("execution_kind") not in (
+                "taichi_dispatch",
+                "cuda_program_call",
+            )
+            or isinstance(stage.get("call_count"), bool)
+            or not isinstance(stage.get("call_count"), int)
+            or stage["call_count"] <= 0
+            for stage in stages
+        ):
+            raise ValueError("Graph native-algorithm physical stages are invalid")
+        workspace = payload.get("workspace")
+        if not isinstance(workspace, dict) or frozenset(workspace) != {
+            "ownership",
+            "action_owned_bytes",
+            "provider_shared_scope",
+        }:
+            raise ValueError("Graph native-algorithm workspace is incomplete")
+        if (
+            workspace.get("ownership") not in ("none", "graph_native_action")
+            or isinstance(workspace.get("action_owned_bytes"), bool)
+            or not isinstance(workspace.get("action_owned_bytes"), int)
+            or workspace["action_owned_bytes"] < 0
+            or workspace.get("provider_shared_scope") not in (
+                "none",
+                "program_scan_arena",
+            )
+        ):
+            raise ValueError("Graph native-algorithm workspace is invalid")
+        expected_stages = {
+            "segment_local_serial": [
+                {
+                    "name": "segment_local_serial",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                }
+            ],
+            "global_scan_segment_correction": [
+                {
+                    "name": "copy_input",
+                    "execution_kind": "cuda_program_call",
+                    "call_count": 1,
+                },
+                {
+                    "name": "global_inclusive_scan",
+                    "execution_kind": "cuda_program_call",
+                    "call_count": 1,
+                },
+                {
+                    "name": "gather_segment_bases",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                },
+                {
+                    "name": "apply_segment_correction",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                },
+            ],
+        }[key[1]]
+        if stages != expected_stages:
+            raise ValueError(
+                "Graph native-algorithm physical topology does not match strategy"
+            )
+        submission = payload.get("submission")
+        if submission != {
+            "resource_binding": "fixed_graph_action",
+            "exclusive": True,
+        }:
+            raise ValueError("Graph native-algorithm submission contract is invalid")
+        source_lock = payload.get("source_lock")
+        if (
+            not isinstance(source_lock, str)
+            or not source_lock.startswith("sha256:")
+            or len(source_lock) != 71
+        ):
+            raise ValueError("Graph native-algorithm source lock is invalid")
+        if key[1] == "segment_local_serial":
+            if (
+                len(stages) != 1
+                or workspace
+                != {
+                    "ownership": "none",
+                    "action_owned_bytes": 0,
+                    "provider_shared_scope": "none",
+                }
+            ):
+                raise ValueError("serial segmented scan recipe is not complete")
+        elif (
+            workspace["ownership"] != "graph_native_action"
+            or workspace["action_owned_bytes"] != semantics["num_segments"] * 4
+            or workspace["provider_shared_scope"] != "program_scan_arena"
+        ):
+            raise ValueError("global segmented scan recipe is not complete")
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError(
+                "Graph native-algorithm recipe ID does not match its payload"
+            )
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("Graph native-algorithm payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION
+        key = (payload.get("algorithm"), payload.get("strategy"))
+        try:
+            prefix = _GRAPH_NATIVE_ALGORITHM_RECIPE_PREFIXES[key]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "Graph native-algorithm strategy is unsupported"
+            ) from error
+        payload_json = _canonical_json(payload)
+        return cls(
+            recipe_id=prefix + _canonical_hash(payload)[:24],
+            payload_json=payload_json,
+        )
+
+    @property
+    def algorithm(self):
+        return json.loads(self.payload_json)["algorithm"]
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    @property
+    def semantics(self):
+        return json.loads(self.payload_json)["semantics"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
+@dataclass(frozen=True)
 class _ExecutableOptimizationSpec:
     spec_id: str
     semantic_plan_id: str
@@ -429,6 +665,8 @@ class _ExecutableOptimizationSpec:
     bounded_recipe_manifest: object = None
     reduction_recipe_id: str = ""
     reduction_recipe_manifest: object = None
+    native_algorithm_recipe_id: str = ""
+    native_algorithm_recipe_manifest: object = None
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -548,18 +786,56 @@ class _ExecutableOptimizationSpec:
                     "executable specs cannot combine Graph reduction with control, "
                     "fusion, GraphMemory, or bounded execution"
                 )
+        if bool(self.native_algorithm_recipe_id) != bool(
+            self.native_algorithm_recipe_manifest
+        ):
+            raise ValueError(
+                "native-algorithm recipe ID and manifest must be provided together"
+            )
+        if self.native_algorithm_recipe_manifest is not None:
+            if not isinstance(
+                self.native_algorithm_recipe_manifest,
+                _GraphNativeAlgorithmRecipeManifest,
+            ):
+                raise TypeError(
+                    "native-algorithm recipe manifest must be a "
+                    "_GraphNativeAlgorithmRecipeManifest"
+                )
+            if (
+                self.native_algorithm_recipe_id
+                != self.native_algorithm_recipe_manifest.recipe_id
+            ):
+                raise ValueError(
+                    "native-algorithm recipe ID does not match its manifest"
+                )
+            if (
+                self.control_recipe_id
+                or self.fusion_recipe_ids
+                or self.memory_recipe_id
+                or self.bounded_recipe_id
+                or self.reduction_recipe_id
+                or self.fusion_source_groups
+            ):
+                raise ValueError(
+                    "executable specs cannot combine a Graph native algorithm "
+                    "with another recipe axis"
+                )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
         value = {
             "schema_version": (
-                5
-                if self.reduction_recipe_id
+                6
+                if self.native_algorithm_recipe_id
                 else (
-                    4
-                    if self.bounded_recipe_id
-                    else (3 if self.memory_recipe_id else 2)
+                    5
+                    if self.reduction_recipe_id
+                    else (
+                        4
+                        if self.bounded_recipe_id
+                        else (3 if self.memory_recipe_id else 2)
+                    )
                 )
             ),
             "spec_id": self.spec_id,
@@ -584,6 +860,11 @@ class _ExecutableOptimizationSpec:
             value["reduction_recipe_id"] = self.reduction_recipe_id
             value["reduction_recipe_manifest"] = (
                 self.reduction_recipe_manifest.to_dict()
+            )
+        if self.native_algorithm_recipe_id:
+            value["native_algorithm_recipe_id"] = self.native_algorithm_recipe_id
+            value["native_algorithm_recipe_manifest"] = (
+                self.native_algorithm_recipe_manifest.to_dict()
             )
         return value
 
@@ -1022,6 +1303,7 @@ def _make_spec(
     memory_recipe_manifest=None,
     bounded_recipe_manifest=None,
     reduction_recipe_manifest=None,
+    native_algorithm_recipe_manifest=None,
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
@@ -1081,17 +1363,36 @@ def _make_spec(
         compilation_payload["reduction_recipe"] = (
             reduction_recipe_manifest.to_dict()
         )
+    native_algorithm_recipe_id = ""
+    if native_algorithm_recipe_manifest is not None:
+        if not isinstance(
+            native_algorithm_recipe_manifest,
+            _GraphNativeAlgorithmRecipeManifest,
+        ):
+            raise TypeError(
+                "native_algorithm_recipe_manifest must be a "
+                "_GraphNativeAlgorithmRecipeManifest"
+            )
+        native_algorithm_recipe_id = native_algorithm_recipe_manifest.recipe_id
+        compilation_payload["native_algorithm_recipe"] = (
+            native_algorithm_recipe_manifest.to_dict()
+        )
     compilation_identity = _canonical_hash(compilation_payload)
-    execution_identity = _canonical_hash(
-        {
-            "compilation_identity": compilation_identity,
-            "physical_dispatch_delta": -dispatch_reduction,
-            "fusion_source_groups": fusion_source_groups,
-            "memory_recipe_id": memory_recipe_id,
-            "bounded_recipe_id": bounded_recipe_id,
-            "reduction_recipe_id": reduction_recipe_id,
-        }
-    )
+    execution_payload = {
+        "compilation_identity": compilation_identity,
+        "physical_dispatch_delta": -dispatch_reduction,
+        "fusion_source_groups": fusion_source_groups,
+        "memory_recipe_id": memory_recipe_id,
+        "bounded_recipe_id": bounded_recipe_id,
+        "reduction_recipe_id": reduction_recipe_id,
+    }
+    # Keep every established Graph recipe identity byte-for-byte stable when
+    # the optional native-algorithm axis is absent.
+    if native_algorithm_recipe_id:
+        execution_payload["native_algorithm_recipe_id"] = (
+            native_algorithm_recipe_id
+        )
+    execution_identity = _canonical_hash(execution_payload)
     return _ExecutableOptimizationSpec(
         spec_id=f"executable:{compilation_identity[:24]}",
         semantic_plan_id=semantic_plan_id,
@@ -1107,6 +1408,8 @@ def _make_spec(
         bounded_recipe_manifest=bounded_recipe_manifest,
         reduction_recipe_id=reduction_recipe_id,
         reduction_recipe_manifest=reduction_recipe_manifest,
+        native_algorithm_recipe_id=native_algorithm_recipe_id,
+        native_algorithm_recipe_manifest=native_algorithm_recipe_manifest,
     )
 
 
@@ -1148,6 +1451,8 @@ def _build_executable_optimization_space(
     selected_bounded_recipe_id="",
     reduction_recipe_manifests=(),
     selected_reduction_recipe_id="",
+    native_algorithm_recipe_manifests=(),
+    selected_native_algorithm_recipe_id="",
     semantic_root=None,
 ):
     semantic_digest = _canonical_hash(
@@ -1158,8 +1463,87 @@ def _build_executable_optimization_space(
     memory_recipe_manifests = tuple(memory_recipe_manifests)
     bounded_recipe_manifests = tuple(bounded_recipe_manifests)
     reduction_recipe_manifests = tuple(reduction_recipe_manifests)
+    native_algorithm_recipe_manifests = tuple(native_algorithm_recipe_manifests)
+    if native_algorithm_recipe_manifests:
+        if (
+            control_recipe_ids
+            or memory_recipe_manifests
+            or bounded_recipe_manifests
+            or reduction_recipe_manifests
+        ):
+            raise ValueError(
+                "Graph native-algorithm recipes cannot combine with another axis"
+            )
+        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
+            raise ValueError(
+                "Graph native-algorithm recipes cannot combine with fusion"
+            )
+        if len(native_algorithm_recipe_manifests) != 2:
+            raise ValueError(
+                "the initial Graph native-algorithm domain requires two recipes"
+            )
+        algorithms = {
+            manifest.algorithm for manifest in native_algorithm_recipe_manifests
+        }
+        strategies = {
+            manifest.strategy for manifest in native_algorithm_recipe_manifests
+        }
+        scopes = {
+            _canonical_json(manifest.semantics)
+            for manifest in native_algorithm_recipe_manifests
+        }
+        if (
+            algorithms != {"segmented_scan"}
+            or strategies
+            != {"segment_local_serial", "global_scan_segment_correction"}
+            or len(scopes) != 1
+        ):
+            raise ValueError(
+                "Graph native-algorithm domain is incomplete or semantically mixed"
+            )
+        specs = tuple(
+            _make_spec(
+                semantic_plan_id,
+                backend,
+                (),
+                native_algorithm_recipe_manifest=manifest,
+            )
+            for manifest in native_algorithm_recipe_manifests
+        )
+        selected = next(
+            (
+                spec
+                for spec in specs
+                if spec.native_algorithm_recipe_id
+                == selected_native_algorithm_recipe_id
+            ),
+            None,
+        )
+        return _ExecutableOptimizationSpace(
+            semantic_plan_id=semantic_plan_id,
+            baseline=specs[0],
+            candidates=specs[1:],
+            selected_spec_id=None if selected is None else selected.spec_id,
+            selection_status=(
+                "native_algorithm_recipe_not_materialized"
+                if selected is None
+                else (
+                    "selected_native_algorithm_baseline"
+                    if selected is specs[0]
+                    else "selected_native_algorithm_recipe"
+                )
+            ),
+            partition_stage="graph_native_algorithm_complete_recipe",
+            partitions_complete=True,
+            partition_combination_count=len(specs),
+        )
     if reduction_recipe_manifests:
-        if control_recipe_ids or memory_recipe_manifests or bounded_recipe_manifests:
+        if (
+            control_recipe_ids
+            or memory_recipe_manifests
+            or bounded_recipe_manifests
+            or native_algorithm_recipe_manifests
+        ):
             raise ValueError(
                 "Graph reduction recipes cannot combine with control, GraphMemory, "
                 "or bounded execution"
