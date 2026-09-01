@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge._lib import core as ti_core
 from taichi_forge.graph import (
     CompileIQGraphRecipeSearch,
     CompileIQGraphUnavailableError,
@@ -803,3 +804,143 @@ def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
     assert {dispatches for _, dispatches in materialized} == {1, 2, 3}
     assert selected.spec_id == plans.recipe_ids[0]
     np.testing.assert_array_equal(output.to_numpy(), (source_np * 2 + 3) * 4)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch):
+    probe = dict(ti_core.cuda_bounded_dispatch_probe())
+    if not probe["exact_device_grid_available"]:
+        pytest.skip(probe["unavailable_reason"])
+
+    capacity = 257
+    block_dim = 32
+
+    @ti.kernel
+    def publish(
+        requested: ti.i32,
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.device_extent_publish(extent, capacity, requested)
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        observed: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                ti.atomic_add(observed[0], i + 1)
+
+    requested_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "requested", ti.i32)
+    extent_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1)
+    first_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "first", ti.i32, ndim=1)
+    second_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "second", ti.i32, ndim=1)
+
+    def build(*, physical_grid="auto", consumer_count=2):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(publish, requested_arg, extent_arg)
+        builder.dispatch_bounded(
+            consume,
+            extent_arg,
+            first_arg,
+            extent=extent_arg,
+            capacity=capacity,
+            block_dim=block_dim,
+            physical_grid=physical_grid,
+        )
+        if consumer_count == 2:
+            builder.dispatch_bounded(
+                consume,
+                extent_arg,
+                second_arg,
+                extent=extent_arg,
+                capacity=capacity,
+                block_dim=block_dim,
+                physical_grid=physical_grid,
+            )
+        return builder.compile()
+
+    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "auto")
+    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto")
+    baseline = build()
+    plans = compileiq_recipe_search(baseline)
+    manifest = plans.manifest()
+    assert (
+        plans.search_space.provider_namespace
+        == "taichi_forge.graph.bounded_execution"
+    )
+    assert plans.search_space.domain_version == "graph-bounded-complete-recipe.v1"
+    assert manifest["recipe_kind"] == "graph_bounded_execution"
+    assert manifest["runtime_admission"] == "offline_explicit_reconstruction_only"
+    assert baseline._compileiq_graph_bounded_status == "complete_recipe_domain"
+
+    expected_strategies = (
+        "logical_exact",
+        "adaptive_per_node",
+        "adaptive_grouped",
+        "masked_capacity",
+    )
+    assert {
+        recipe["bounded_recipe_manifest"]["strategy"]
+        for recipe in manifest["recipes"]
+    } == set(expected_strategies)
+
+    extent = ti.DeviceExtent(capacity)
+    first = ti.ndarray(ti.i32, shape=1)
+    second = ti.ndarray(ti.i32, shape=1)
+    arguments = {
+        "requested": 17,
+        "extent": extent,
+        "first": first,
+        "second": second,
+    }
+    materialized = {}
+
+    def objective(parameters):
+        selection = plans.select(parameters)
+        strategy = selection.bounded_recipe_manifest.strategy
+        with monkeypatch.context() as environment:
+            for name, value in selection.worker_environment.items():
+                environment.setenv(name, value)
+            graph = build()
+        plans.verify_materialized_graph(parameters, graph)
+        first.fill(0)
+        second.fill(0)
+        graph.run(arguments)
+        ti.sync()
+        expected = 17 * 18 // 2
+        assert int(first.to_numpy()[0]) == expected
+        assert int(second.to_numpy()[0]) == expected
+        selected = graph._compileiq_executable_optimization_space.selected
+        assert selected.bounded_recipe_manifest.strategy == strategy
+        materialized[strategy] = (
+            graph.execution_stats().memory.persistent_bounded_control_bytes
+        )
+        return float(expected_strategies.index(strategy))
+
+    compileiq_search = plans.compileiq_search(objective)
+    result = compileiq_search.start()
+    coverage = plans.require_complete_search(compileiq_search)
+    selected = plans.select_best_result(compileiq_search, result)
+
+    assert coverage["complete"]
+    assert coverage["evaluation_count"] == 4
+    assert set(materialized) == set(expected_strategies)
+    assert materialized["logical_exact"] == 0
+    assert materialized["masked_capacity"] == 0
+    assert materialized["adaptive_per_node"] > 0
+    assert materialized["adaptive_grouped"] > 0
+    assert selected.bounded_recipe_manifest.strategy == "logical_exact"
+
+    forced = build(physical_grid="capacity")
+    with pytest.raises(ValueError, match="exact map-partition search requires"):
+        compileiq_recipe_search(forced)
+    assert forced._compileiq_graph_bounded_status == "source_policy_out_of_scope"
+
+    single = build(consumer_count=1)
+    single_plans = compileiq_recipe_search(single)
+    assert {
+        recipe["bounded_recipe_manifest"]["strategy"]
+        for recipe in single_plans.manifest()["recipes"]
+    } == {"logical_exact", "adaptive_per_node", "masked_capacity"}

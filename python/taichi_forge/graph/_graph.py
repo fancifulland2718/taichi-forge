@@ -87,6 +87,7 @@ from taichi_forge.graph._optimization import (
     _CUDA_NESTED_CONTROL_RECIPE_IDS,
     _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID,
     _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID,
+    _GraphBoundedExecutionRecipeManifest,
     _GraphFusionQualificationCache,
     _GraphMemoryRecipeManifest,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
@@ -8754,7 +8755,7 @@ def _record_backend_dispatch(builder, backend, dispatch, ir_node):
             requirement in ("adaptive_grid", "require_exact"),
             (
                 requirement in ("adaptive_grid", "require_exact")
-                and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+                and domain.update_policy == "grouped_stateful"
             ),
             label,
         )
@@ -9371,6 +9372,113 @@ def _graph_memory_semantic_root(root):
     return semantic
 
 
+def _graph_bounded_semantic_root(root):
+    """Strip physical bounded choices while retaining the semantic domain."""
+
+    def strip(node):
+        if isinstance(node, DispatchNode):
+            domain = node.bounded_domain
+            if domain is None:
+                return node
+            return replace(
+                node,
+                logical_kernel_identity=domain.semantic_kernel_identity,
+                bounded_domain=replace(
+                    domain,
+                    physical_grid_requirement="auto",
+                    update_policy="",
+                ),
+            )
+        if isinstance(node, SequentialRegion):
+            return replace(
+                node,
+                children=tuple(strip(child) for child in node.children),
+            )
+        raise ValueError(
+            "the initial GraphBounded recipe accepts sequential dispatch regions only"
+        )
+
+    return strip(root)
+
+
+def _graph_bounded_recipe_scope(pipeline):
+    bounded = tuple(
+        dispatch
+        for stage in pipeline
+        for dispatch in stage["bounded_dispatches"]
+    )
+    if not bounded:
+        return (), "", "no_bounded_dispatch"
+    domains = tuple(dispatch["domain"] for dispatch in bounded)
+    if any(
+        domain.count_source != "device_extent"
+        or domain.ordered
+        or domain.physical_grid_policy != "auto"
+        or not domain.semantic_kernel_identity
+        for domain in domains
+    ):
+        return (), "", "source_policy_out_of_scope"
+
+    requirements = {domain.physical_grid_requirement for domain in domains}
+    update_policies = {domain.update_policy for domain in domains}
+    if requirements == {"logical_exact"} and update_policies == {""}:
+        selected_strategy = "logical_exact"
+    elif requirements == {"adaptive_grid"} and update_policies == {"per_node"}:
+        selected_strategy = "adaptive_per_node"
+    elif requirements == {"adaptive_grid"} and update_policies == {
+        "grouped_stateful"
+    }:
+        selected_strategy = "adaptive_grouped"
+    elif requirements == {"auto"} and update_policies == {""}:
+        selected_strategy = "masked_capacity"
+    else:
+        return (), "", "mixed_or_unknown_materialization"
+
+    grouped = {}
+    for dispatch in bounded:
+        key = dispatch["publication_key"]
+        item = grouped.setdefault(
+            key,
+            {
+                "count_name": dispatch["count_name"],
+                "capacity": dispatch["capacity"],
+                "block_dim": dispatch["domain"].block_dim,
+                "publication_epoch": dispatch["domain"].publication_epoch,
+                "consumer_count": 0,
+            },
+        )
+        item["consumer_count"] += 1
+    groups = tuple(grouped.values())
+    strategies = ["logical_exact"]
+    if _cuda_nested_device_update_available():
+        strategies.append("adaptive_per_node")
+        if any(group["consumer_count"] >= 2 for group in groups):
+            strategies.append("adaptive_grouped")
+    strategies.append("masked_capacity")
+    manifests = tuple(
+        _GraphBoundedExecutionRecipeManifest.from_payload(
+            {
+                "strategy": strategy,
+                "source_physical_grid_policy": "auto",
+                "bounded_dispatch_count": len(bounded),
+                "publication_groups": groups,
+            }
+        )
+        for strategy in strategies
+    )
+    selected = next(
+        (
+            manifest.recipe_id
+            for manifest in manifests
+            if manifest.strategy == selected_strategy
+        ),
+        "",
+    )
+    if not selected:
+        return (), "", "materialization_outside_recipe_domain"
+    return manifests, selected, "complete_recipe_domain"
+
+
 def _parallel_identity_tuple(value):
     if value is None:
         return None
@@ -9817,6 +9925,7 @@ class _GraphSpec:
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._compileiq_executable_space_cache = None
+        self._compileiq_graph_bounded_status = "not_evaluated"
         self._compileiq_graph_memory_status = "not_evaluated"
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
@@ -10018,6 +10127,52 @@ class _GraphSpec:
             return cached
 
         base = self.executable_optimization_space
+        bounded_dispatch_count = sum(
+            len(stage["bounded_dispatches"]) for stage in self.pipeline_definition
+        )
+        bounded_eligible_shape = bool(
+            base.baseline.backend == "cuda"
+            and bounded_dispatch_count
+            and self.native_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and len(self.nodes) == 1
+            and isinstance(self.nodes[0], _CompiledCGraphNode)
+            and isinstance(self.nodes[0].ir_node, SequentialRegion)
+            and not base.baseline.control_recipe_id
+            and not base.candidates
+        )
+        if bounded_eligible_shape:
+            manifests, selected_recipe_id, status = _graph_bounded_recipe_scope(
+                self.pipeline_definition
+            )
+            self._compileiq_graph_bounded_status = status
+            if manifests:
+                try:
+                    space = _build_executable_optimization_space(
+                        self.pre_optimization_ir_root,
+                        self.fusion_plan,
+                        base.baseline.backend,
+                        bounded_recipe_manifests=manifests,
+                        selected_bounded_recipe_id=selected_recipe_id,
+                        semantic_root=_graph_bounded_semantic_root(
+                            self.pre_optimization_ir_root
+                        ),
+                    )
+                except ValueError as error:
+                    self._compileiq_graph_bounded_status = (
+                        "domain_rejected:" + str(error)
+                    )
+                else:
+                    self._compileiq_executable_space_cache = space
+                    return space
+        elif bounded_dispatch_count:
+            self._compileiq_graph_bounded_status = "definition_out_of_scope"
+            self._compileiq_executable_space_cache = base
+            return base
+        else:
+            self._compileiq_graph_bounded_status = "not_applicable"
+
         eligible_shape = bool(
             len(self._graph_memory_sources) == 1
             and self.dispatch_count == 1
@@ -11881,6 +12036,18 @@ def gen_cpp_kernel(
     return kernel.compiled_kernels[key]
 
 
+def _bounded_semantic_kernel_identity(kernel_cpp):
+    raw = impl.get_runtime().prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+    identity = str(
+        raw.get("logical_kernel_identity") or raw.get("kernel_identity") or ""
+    )
+    if not identity:
+        raise TaichiRuntimeError(
+            "Graph bounded recipe source has no stable compiler identity"
+        )
+    return identity
+
+
 def _graph_shared_staged_contract(kernel_cpp, args):
     raw = impl.get_runtime().prog._kernel_gpu_semantics_snapshot(kernel_cpp)
     if _backend_name(raw["backend"]) != "cuda":
@@ -13473,10 +13640,10 @@ class GraphBuilder:
         cuda_adaptive_grid = bool(
             cuda_bounded_range and selected_route.route == "adaptive_device_grid_update"
         )
-        cuda_grouped_update = bool(
-            cuda_adaptive_grid
-            and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+        cuda_update_policy = (
+            _cuda_bounded_update_policy()[1] if cuda_adaptive_grid else ""
         )
+        cuda_grouped_update = cuda_update_policy == "grouped_stateful"
         specialized_range = exact_device_grid or cuda_bounded_range
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
         kernel_cpp = gen_cpp_kernel(
@@ -13486,6 +13653,20 @@ class GraphBuilder:
             task_launch_policy=policy,
             range_one_to_one=specialized_range,
         )
+        bounded_semantic_kernel_identity = ""
+        if backend == "cuda" and physical_grid == "auto":
+            semantic_kernel_cpp = kernel_cpp
+            if not specialized_range:
+                semantic_kernel_cpp = gen_cpp_kernel(
+                    kernel_fn,
+                    args,
+                    template_args=template_args,
+                    task_launch_policy=policy,
+                    range_one_to_one=True,
+                )
+            bounded_semantic_kernel_identity = _bounded_semantic_kernel_identity(
+                semantic_kernel_cpp
+            )
         label = _normalize_dispatch_label(label)
 
         if count is not None:
@@ -13635,6 +13816,7 @@ class GraphBuilder:
             capacity=capacity,
             block_dim=selected_block,
             block_mode=policy.mode,
+            physical_grid_policy=physical_grid,
             physical_grid_requirement=(
                 "adaptive_grid"
                 if cuda_adaptive_grid
@@ -13650,6 +13832,8 @@ class GraphBuilder:
                     )
                 )
             ),
+            update_policy=cuda_update_policy,
+            semantic_kernel_identity=bounded_semantic_kernel_identity,
         )
         self._pending_ir_nodes[-1] = replace(
             self._pending_ir_nodes[-1], bounded_domain=bounded_domain
@@ -15756,6 +15940,15 @@ class Graph:
                 return "workspace_lane_scope_rejected"
             self._spec.compileiq_executable_optimization_space()
             return self._spec._compileiq_graph_memory_status
+
+    @property
+    def _compileiq_graph_bounded_status(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._workspace_lane_capacity != 1:
+                return "workspace_lane_scope_rejected"
+            self._spec.compileiq_executable_optimization_space()
+            return self._spec._compileiq_graph_bounded_status
 
     @property
     def _compileiq_map_materialization_available(self):

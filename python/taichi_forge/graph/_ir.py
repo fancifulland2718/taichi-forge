@@ -136,7 +136,10 @@ class BoundedDomain:
     capacity: int
     block_dim: Optional[int] = None
     block_mode: str = "auto"
+    physical_grid_policy: str = "auto"
     physical_grid_requirement: str = "auto"
+    update_policy: str = ""
+    semantic_kernel_identity: str = ""
     publication_epoch: Optional[int] = None
     count_source: str = "device_extent"
     ordered: bool = False
@@ -158,6 +161,8 @@ class BoundedDomain:
             raise ValueError("Bounded domain block_dim must be in [1, 1024]")
         if self.block_mode not in ("auto", "hint", "require"):
             raise ValueError("Bounded domain block_mode is invalid")
+        if self.physical_grid_policy not in ("auto", "extent", "capacity"):
+            raise ValueError("Bounded domain physical grid policy is invalid")
         if self.physical_grid_requirement not in (
             "auto",
             "fixed_capacity",
@@ -166,6 +171,16 @@ class BoundedDomain:
             "require_exact",
         ):
             raise ValueError("Bounded domain physical grid requirement is invalid")
+        if self.update_policy not in ("", "per_node", "grouped_stateful"):
+            raise ValueError("Bounded domain update policy is invalid")
+        if bool(self.update_policy) != (
+            self.physical_grid_requirement == "adaptive_grid"
+        ):
+            raise ValueError(
+                "Bounded domain update policy is required only for adaptive grids"
+            )
+        if not isinstance(self.semantic_kernel_identity, str):
+            raise ValueError("Bounded domain semantic kernel identity is invalid")
         if self.publication_epoch is not None and self.publication_epoch < 0:
             raise ValueError("Bounded domain publication epoch must be non-negative")
         if self.count_source not in ("device_extent", "host_scalar"):
@@ -190,7 +205,10 @@ class BoundedDomain:
             "capacity": self.capacity,
             "block_dim": self.block_dim,
             "block_mode": self.block_mode,
+            "physical_grid_policy": self.physical_grid_policy,
             "physical_grid_requirement": self.physical_grid_requirement,
+            "update_policy": self.update_policy,
+            "semantic_kernel_identity": self.semantic_kernel_identity,
             "publication_epoch": self.publication_epoch,
             "count_source": self.count_source,
             "ordered": self.ordered,

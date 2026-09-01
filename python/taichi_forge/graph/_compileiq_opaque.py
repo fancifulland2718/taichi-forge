@@ -74,6 +74,12 @@ class CompileIQGraphRecipeSearch:
             semantic_schema = "taichi_forge.graph.compileiq-graph-memory-semantics.v1"
             provider_namespace = "taichi_forge.graph.memory"
             domain_version = "graph-memory-complete-recipe"
+        elif adapter.recipe_kind == "graph_bounded_execution":
+            semantic_schema = (
+                "taichi_forge.graph.compileiq-bounded-execution-semantics.v1"
+            )
+            provider_namespace = "taichi_forge.graph.bounded_execution"
+            domain_version = "graph-bounded-complete-recipe.v1"
         elif adapter.recipe_kind == "structured_control":
             semantic_schema = (
                 "taichi_forge.graph.compileiq-structured-control-semantics.v1"
@@ -110,7 +116,11 @@ class CompileIQGraphRecipeSearch:
                     ],
                 }
             )
-        if adapter.recipe_kind in ("structured_control", "graph_memory"):
+        if adapter.recipe_kind in (
+            "structured_control",
+            "graph_memory",
+            "graph_bounded_execution",
+        ):
             semantic_payload["recipe_kind"] = adapter.recipe_kind
         if nested_structured_control:
             semantic_payload["structured_control_domain"] = (
@@ -199,7 +209,7 @@ class CompileIQGraphRecipeSearch:
         self.require_complete_search(compileiq_search)
         manifest = self._adapter.manifest()
         if self._adapter.recipe_kind != "map_fusion":
-            raise RuntimeError("structured-control recipe domains cannot be refined")
+            raise RuntimeError("complete Graph recipe domains cannot be refined")
         if manifest["partitions_complete"]:
             raise RuntimeError("the Graph partition domain is already complete")
         frontier_recipe_ids = tuple(dict.fromkeys(frontier_recipe_ids))
@@ -341,7 +351,12 @@ class CompileIQGraphRecipeSearch:
             "qualification": "independent_forge_worst_positive_v1",
             "runtime_admission": (
                 "offline_explicit_reconstruction_only"
-                if self._adapter.recipe_kind in ("structured_control", "graph_memory")
+                if self._adapter.recipe_kind
+                in (
+                    "structured_control",
+                    "graph_memory",
+                    "graph_bounded_execution",
+                )
                 else "explicit_qualified_cache_only"
             ),
         }
@@ -365,7 +380,11 @@ class CompileIQGraphRecipeSearch:
                     ],
                 }
             )
-        if self._adapter.recipe_kind in ("structured_control", "graph_memory"):
+        if self._adapter.recipe_kind in (
+            "structured_control",
+            "graph_memory",
+            "graph_bounded_execution",
+        ):
             value["recipe_kind"] = self._adapter.recipe_kind
         if self._adapter.structured_control_domain == "cuda_nested_while_while":
             value["structured_control_domain"] = self._adapter.structured_control_domain

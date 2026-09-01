@@ -40,6 +40,14 @@ _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
 }
 
+_GRAPH_BOUNDED_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_BOUNDED_RECIPE_PREFIXES = {
+    "logical_exact": "graph-bounded:logical-exact:",
+    "adaptive_per_node": "graph-bounded:adaptive-per-node:",
+    "adaptive_grouped": "graph-bounded:adaptive-grouped:",
+    "masked_capacity": "graph-bounded:masked-capacity:",
+}
+
 
 def _canonical_hash(value):
     payload = json.dumps(
@@ -120,6 +128,115 @@ class _GraphMemoryRecipeManifest:
 
 
 @dataclass(frozen=True)
+class _GraphBoundedExecutionRecipeManifest:
+    """One complete CUDA bounded-execution strategy over an immutable scope."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("GraphBounded recipe ID must be a nonempty string")
+        if not isinstance(self.payload_json, str) or not self.payload_json:
+            raise ValueError("GraphBounded recipe payload must be canonical JSON")
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("GraphBounded recipe payload is invalid") from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical_json(payload) != self.payload_json
+        ):
+            raise ValueError("GraphBounded recipe payload is not canonical")
+        if payload.get("schema_version") != _GRAPH_BOUNDED_RECIPE_SCHEMA_VERSION:
+            raise ValueError("GraphBounded recipe schema is unsupported")
+        if frozenset(payload) != {
+            "schema_version",
+            "strategy",
+            "source_physical_grid_policy",
+            "bounded_dispatch_count",
+            "publication_groups",
+        }:
+            raise ValueError("GraphBounded recipe payload fields are invalid")
+        if payload.get("source_physical_grid_policy") != "auto":
+            raise ValueError("GraphBounded recipe source policy must be auto")
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_BOUNDED_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("GraphBounded recipe strategy is unsupported") from error
+        groups = payload.get("publication_groups")
+        if not isinstance(groups, list) or not groups:
+            raise ValueError("GraphBounded recipe requires publication groups")
+        if any(
+            not isinstance(group, dict)
+            or not isinstance(group.get("count_name"), str)
+            or not group["count_name"]
+            or isinstance(group.get("capacity"), bool)
+            or not isinstance(group.get("capacity"), int)
+            or group["capacity"] <= 0
+            or (
+                group.get("block_dim") is not None
+                and (
+                    isinstance(group["block_dim"], bool)
+                    or not isinstance(group["block_dim"], int)
+                    or not 1 <= group["block_dim"] <= 1024
+                )
+            )
+            or isinstance(group.get("publication_epoch"), bool)
+            or not isinstance(group.get("publication_epoch"), int)
+            or group["publication_epoch"] < 0
+            or isinstance(group.get("consumer_count"), bool)
+            or not isinstance(group.get("consumer_count"), int)
+            or group["consumer_count"] <= 0
+            for group in groups
+        ):
+            raise ValueError("GraphBounded publication group is invalid")
+        dispatch_count = payload.get("bounded_dispatch_count")
+        if (
+            isinstance(dispatch_count, bool)
+            or not isinstance(dispatch_count, int)
+            or dispatch_count <= 0
+            or dispatch_count
+            != sum(group["consumer_count"] for group in groups)
+        ):
+            raise ValueError("GraphBounded dispatch count does not match its groups")
+        if strategy == "adaptive_grouped" and not any(
+            group["consumer_count"] >= 2 for group in groups
+        ):
+            raise ValueError(
+                "GraphBounded grouped recipe requires a shared publication"
+            )
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError("GraphBounded recipe ID does not match its payload")
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("GraphBounded recipe payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_BOUNDED_RECIPE_SCHEMA_VERSION
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_BOUNDED_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("GraphBounded recipe strategy is unsupported") from error
+        payload_json = _canonical_json(payload)
+        return cls(
+            recipe_id=prefix + _canonical_hash(payload)[:24],
+            payload_json=payload_json,
+        )
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
+@dataclass(frozen=True)
 class _ExecutableOptimizationSpec:
     spec_id: str
     semantic_plan_id: str
@@ -131,6 +248,8 @@ class _ExecutableOptimizationSpec:
     fusion_source_groups: tuple = ()
     memory_recipe_id: str = ""
     memory_recipe_manifest: object = None
+    bounded_recipe_id: str = ""
+    bounded_recipe_manifest: object = None
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -199,12 +318,41 @@ class _ExecutableOptimizationSpec:
                 raise ValueError(
                     "GraphMemory specs cannot contain fusion source groups"
                 )
+        if bool(self.bounded_recipe_id) != bool(self.bounded_recipe_manifest):
+            raise ValueError(
+                "bounded recipe ID and complete manifest must be provided together"
+            )
+        if self.bounded_recipe_manifest is not None:
+            if not isinstance(
+                self.bounded_recipe_manifest,
+                _GraphBoundedExecutionRecipeManifest,
+            ):
+                raise TypeError(
+                    "bounded recipe manifest must be a "
+                    "_GraphBoundedExecutionRecipeManifest"
+                )
+            if self.bounded_recipe_id != self.bounded_recipe_manifest.recipe_id:
+                raise ValueError("bounded recipe ID does not match its manifest")
+            if (
+                self.control_recipe_id
+                or self.fusion_recipe_ids
+                or self.memory_recipe_id
+                or self.fusion_source_groups
+            ):
+                raise ValueError(
+                    "executable specs cannot combine bounded execution with "
+                    "control, fusion, or GraphMemory"
+                )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
         value = {
-            "schema_version": 3 if self.memory_recipe_id else 2,
+            "schema_version": (
+                4
+                if self.bounded_recipe_id
+                else (3 if self.memory_recipe_id else 2)
+            ),
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -220,6 +368,9 @@ class _ExecutableOptimizationSpec:
         if self.memory_recipe_id:
             value["memory_recipe_id"] = self.memory_recipe_id
             value["memory_recipe_manifest"] = self.memory_recipe_manifest.to_dict()
+        if self.bounded_recipe_id:
+            value["bounded_recipe_id"] = self.bounded_recipe_id
+            value["bounded_recipe_manifest"] = self.bounded_recipe_manifest.to_dict()
         return value
 
 
@@ -655,6 +806,7 @@ def _make_spec(
     *,
     fusion_source_groups=(),
     memory_recipe_manifest=None,
+    bounded_recipe_manifest=None,
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
@@ -688,6 +840,18 @@ def _make_spec(
             )
         memory_recipe_id = memory_recipe_manifest.recipe_id
         compilation_payload["memory_recipe"] = memory_recipe_manifest.to_dict()
+    bounded_recipe_id = ""
+    if bounded_recipe_manifest is not None:
+        if not isinstance(
+            bounded_recipe_manifest,
+            _GraphBoundedExecutionRecipeManifest,
+        ):
+            raise TypeError(
+                "bounded_recipe_manifest must be a "
+                "_GraphBoundedExecutionRecipeManifest"
+            )
+        bounded_recipe_id = bounded_recipe_manifest.recipe_id
+        compilation_payload["bounded_recipe"] = bounded_recipe_manifest.to_dict()
     compilation_identity = _canonical_hash(compilation_payload)
     execution_identity = _canonical_hash(
         {
@@ -695,6 +859,7 @@ def _make_spec(
             "physical_dispatch_delta": -dispatch_reduction,
             "fusion_source_groups": fusion_source_groups,
             "memory_recipe_id": memory_recipe_id,
+            "bounded_recipe_id": bounded_recipe_id,
         }
     )
     return _ExecutableOptimizationSpec(
@@ -708,6 +873,8 @@ def _make_spec(
         fusion_source_groups=fusion_source_groups,
         memory_recipe_id=memory_recipe_id,
         memory_recipe_manifest=memory_recipe_manifest,
+        bounded_recipe_id=bounded_recipe_id,
+        bounded_recipe_manifest=bounded_recipe_manifest,
     )
 
 
@@ -745,6 +912,8 @@ def _build_executable_optimization_space(
     selected_control_recipe_id="",
     memory_recipe_manifests=(),
     selected_memory_recipe_id="",
+    bounded_recipe_manifests=(),
+    selected_bounded_recipe_id="",
     semantic_root=None,
 ):
     semantic_digest = _canonical_hash(
@@ -753,6 +922,76 @@ def _build_executable_optimization_space(
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
     control_recipe_ids = tuple(control_recipe_ids)
     memory_recipe_manifests = tuple(memory_recipe_manifests)
+    bounded_recipe_manifests = tuple(bounded_recipe_manifests)
+    if bounded_recipe_manifests:
+        if control_recipe_ids or memory_recipe_manifests:
+            raise ValueError(
+                "GraphBounded recipes cannot combine with control or GraphMemory"
+            )
+        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
+            raise ValueError("GraphBounded recipes cannot combine with fusion")
+        strategies = tuple(
+            manifest.strategy for manifest in bounded_recipe_manifests
+        )
+        scopes = {
+            _canonical_json(
+                {
+                    key: value
+                    for key, value in manifest.to_dict().items()
+                    if key not in ("recipe_id", "strategy")
+                }
+            )
+            for manifest in bounded_recipe_manifests
+        }
+        if len(scopes) != 1:
+            raise ValueError("GraphBounded recipes must share one exact scope")
+        allowed_domains = (
+            ("logical_exact", "masked_capacity"),
+            ("logical_exact", "adaptive_per_node", "masked_capacity"),
+            (
+                "logical_exact",
+                "adaptive_per_node",
+                "adaptive_grouped",
+                "masked_capacity",
+            ),
+        )
+        if strategies not in allowed_domains:
+            raise ValueError("GraphBounded recipe domain is incomplete or unordered")
+        specs = tuple(
+            _make_spec(
+                semantic_plan_id,
+                backend,
+                (),
+                bounded_recipe_manifest=manifest,
+            )
+            for manifest in bounded_recipe_manifests
+        )
+        selected = next(
+            (
+                spec
+                for spec in specs
+                if spec.bounded_recipe_id == selected_bounded_recipe_id
+            ),
+            None,
+        )
+        return _ExecutableOptimizationSpace(
+            semantic_plan_id=semantic_plan_id,
+            baseline=specs[0],
+            candidates=specs[1:],
+            selected_spec_id=None if selected is None else selected.spec_id,
+            selection_status=(
+                "bounded_recipe_not_materialized"
+                if selected is None
+                else (
+                    "selected_bounded_baseline"
+                    if selected is specs[0]
+                    else "selected_bounded_recipe"
+                )
+            ),
+            partition_stage="graph_bounded_complete_recipe",
+            partitions_complete=True,
+            partition_combination_count=len(specs),
+        )
     if memory_recipe_manifests:
         if control_recipe_ids:
             raise ValueError("GraphMemory recipes cannot combine with control")
@@ -907,6 +1146,7 @@ __all__ = [
     "_CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS",
     "_CUDA_STRUCTURED_CONTROL_RECIPE_IDS",
     "_GRAPH_FUSION_QUALIFICATION_SCHEMA",
+    "_GraphBoundedExecutionRecipeManifest",
     "_GraphMemoryRecipeManifest",
     "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",

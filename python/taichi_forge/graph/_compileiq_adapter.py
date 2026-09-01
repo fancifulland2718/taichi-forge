@@ -28,6 +28,8 @@ from taichi_forge.lang._compileiq_qualification import (
 _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
+_CUDA_BOUNDED_DISPATCH_MODE_ENV = "TI_CUDA_BOUNDED_DISPATCH_MODE"
+_CUDA_BOUNDED_UPDATE_POLICY_ENV = "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"
 _PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _MAP_RECIPE_PATTERN = re.compile(r"^fusion:map([2-4]):[0-9a-f]{24}$")
 _EXACT_MAP_PARTITION_PREFIX = "exact-v1:"
@@ -41,6 +43,22 @@ _CONTROL_DOMAIN_NAMES = {
     _CUDA_CONTROL_RECIPE_IDS: "cuda_flat",
     _CUDA_NESTED_CONTROL_RECIPE_IDS: "cuda_nested_while_while",
 }
+_BOUNDED_MATERIALIZATION = {
+    "logical_exact": ("auto", "auto"),
+    "adaptive_per_node": ("device_update", "per_node"),
+    "adaptive_grouped": ("device_update", "grouped_stateful"),
+    "masked_capacity": ("masked_capacity", "auto"),
+}
+_BOUNDED_STRATEGY_DOMAINS = (
+    ("logical_exact", "masked_capacity"),
+    ("logical_exact", "adaptive_per_node", "masked_capacity"),
+    (
+        "logical_exact",
+        "adaptive_per_node",
+        "adaptive_grouped",
+        "masked_capacity",
+    ),
+)
 
 
 def _materialization_recipe(spec):
@@ -96,6 +114,8 @@ class GraphExecutableRecipeSelection:
     control_materialization_recipe: str = "auto"
     memory_recipe_id: str = ""
     memory_recipe_manifest: object = None
+    bounded_recipe_id: str = ""
+    bounded_recipe_manifest: object = None
 
     @property
     def worker_environment(self):
@@ -107,6 +127,12 @@ class GraphExecutableRecipeSelection:
         }
         if self.memory_recipe_id:
             environment[_INTERNAL_GRAPH_MEMORY_RECIPE_ENV] = self.memory_recipe_id
+        if self.bounded_recipe_manifest is not None:
+            dispatch_mode, update_policy = _BOUNDED_MATERIALIZATION[
+                self.bounded_recipe_manifest.strategy
+            ]
+            environment[_CUDA_BOUNDED_DISPATCH_MODE_ENV] = dispatch_mode
+            environment[_CUDA_BOUNDED_UPDATE_POLICY_ENV] = update_policy
         return MappingProxyType(environment)
 
     def to_dict(self):
@@ -128,6 +154,9 @@ class GraphExecutableRecipeSelection:
         if self.memory_recipe_id:
             value["memory_recipe_id"] = self.memory_recipe_id
             value["memory_recipe_manifest"] = self.memory_recipe_manifest.to_dict()
+        if self.bounded_recipe_id:
+            value["bounded_recipe_id"] = self.bounded_recipe_id
+            value["bounded_recipe_manifest"] = self.bounded_recipe_manifest.to_dict()
         return value
 
 
@@ -168,6 +197,7 @@ class _CompileIQExecutableAdapter:
             raise ValueError("executable spec IDs must be unique")
         control_recipe_ids = tuple(spec.control_recipe_id for spec in specs)
         memory_recipe_ids = tuple(spec.memory_recipe_id for spec in specs)
+        bounded_recipe_ids = tuple(spec.bounded_recipe_id for spec in specs)
         if space.baseline.control_recipe_id:
             if (
                 control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS
@@ -196,6 +226,37 @@ class _CompileIQExecutableAdapter:
             raise ValueError(
                 "map/control space cannot contain a memory recipe candidate"
             )
+        if space.baseline.bounded_recipe_id:
+            strategies = tuple(
+                spec.bounded_recipe_manifest.strategy for spec in specs
+            )
+            bounded_scopes = {
+                json.dumps(
+                    {
+                        key: value
+                        for key, value in spec.bounded_recipe_manifest.to_dict().items()
+                        if key not in ("recipe_id", "strategy")
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for spec in specs
+            }
+            if (
+                strategies not in _BOUNDED_STRATEGY_DOMAINS
+                or len(bounded_scopes) != 1
+                or any(not recipe_id for recipe_id in bounded_recipe_ids)
+                or any(spec.fusion_recipe_ids for spec in specs)
+                or any(control_recipe_ids)
+                or any(memory_recipe_ids)
+            ):
+                raise ValueError(
+                    "GraphBounded space must contain one complete Forge domain"
+                )
+        elif any(bounded_recipe_ids):
+            raise ValueError(
+                "map/control/GraphMemory space cannot contain a bounded recipe"
+            )
 
         materialization_by_spec = {
             spec.spec_id: _materialization_recipe(spec) for spec in specs
@@ -211,6 +272,7 @@ class _CompileIQExecutableAdapter:
                 materialization_by_spec[spec.spec_id],
                 control_materialization_by_spec[spec.spec_id],
                 memory_materialization_by_spec[spec.spec_id],
+                spec.bounded_recipe_id,
             )
             for spec in specs
         )
@@ -272,6 +334,8 @@ class _CompileIQExecutableAdapter:
     def recipe_kind(self):
         if self._space.baseline.memory_recipe_id:
             return "graph_memory"
+        if self._space.baseline.bounded_recipe_id:
+            return "graph_bounded_execution"
         if self._space.baseline.control_recipe_id:
             return "structured_control"
         return "map_fusion"
@@ -331,6 +395,8 @@ class _CompileIQExecutableAdapter:
             ),
             memory_recipe_id=spec.memory_recipe_id,
             memory_recipe_manifest=(spec.memory_recipe_manifest),
+            bounded_recipe_id=spec.bounded_recipe_id,
+            bounded_recipe_manifest=(spec.bounded_recipe_manifest),
         )
 
     def verify_materialized(self, parameters, actual_space):
@@ -353,6 +419,7 @@ class _CompileIQExecutableAdapter:
             or actual.fusion_source_groups != selection.fusion_source_groups
             or actual.control_recipe_id != selection.control_recipe_id
             or actual.memory_recipe_id != selection.memory_recipe_id
+            or actual.bounded_recipe_id != selection.bounded_recipe_id
             or (
                 None
                 if actual.memory_recipe_manifest is None
@@ -362,6 +429,16 @@ class _CompileIQExecutableAdapter:
                 None
                 if selection.memory_recipe_manifest is None
                 else selection.memory_recipe_manifest.to_dict()
+            )
+            or (
+                None
+                if actual.bounded_recipe_manifest is None
+                else actual.bounded_recipe_manifest.to_dict()
+            )
+            != (
+                None
+                if selection.bounded_recipe_manifest is None
+                else selection.bounded_recipe_manifest.to_dict()
             )
         ):
             raise ValueError("materialized Graph identity does not match")
@@ -489,7 +566,8 @@ class _CompileIQExecutableAdapter:
             if selected is self._space.baseline:
                 raise ValueError("qualification cache cannot select the baseline spec")
             raise ValueError(
-                "control and GraphMemory qualification are offline-only; "
+                "control, GraphMemory, and GraphBounded qualification are "
+                "offline-only; "
                 "runtime cache admission is unavailable"
             )
         if (
@@ -566,7 +644,11 @@ class _CompileIQExecutableAdapter:
             "partition_frontier_spec_ids": (self._space.partition_frontier_spec_ids),
             "specs": tuple(self._spec_manifest(spec) for spec in self._specs.values()),
         }
-        if self.recipe_kind in ("structured_control", "graph_memory"):
+        if self.recipe_kind in (
+            "structured_control",
+            "graph_memory",
+            "graph_bounded_execution",
+        ):
             value["recipe_kind"] = self.recipe_kind
             value["runtime_admission"] = "offline_explicit_reconstruction_only"
             if self.structured_control_domain == "cuda_nested_while_while":
@@ -586,6 +668,15 @@ class _CompileIQExecutableAdapter:
             value["memory_materialization_recipe"] = (
                 self._memory_materialization_by_spec[spec.spec_id]
             )
+        if spec.bounded_recipe_id:
+            value["bounded_materialization"] = {
+                "dispatch_mode": _BOUNDED_MATERIALIZATION[
+                    spec.bounded_recipe_manifest.strategy
+                ][0],
+                "update_policy": _BOUNDED_MATERIALIZATION[
+                    spec.bounded_recipe_manifest.strategy
+                ][1],
+            }
         return value
 
 
