@@ -48,6 +48,12 @@ _GRAPH_BOUNDED_RECIPE_PREFIXES = {
     "masked_capacity": "graph-bounded:masked-capacity:",
 }
 
+_GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_REDUCTION_RECIPE_PREFIXES = {
+    "direct_atomic_tls": "graph-reduction:direct-atomic-tls:",
+    "block_partial_finalize": "graph-reduction:block-partial-finalize:",
+}
+
 
 def _canonical_hash(value):
     payload = json.dumps(
@@ -237,6 +243,177 @@ class _GraphBoundedExecutionRecipeManifest:
 
 
 @dataclass(frozen=True)
+class _GraphReductionRecipeManifest:
+    """One complete typed reduction phase over an immutable Graph scope."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("Graph reduction recipe ID must be a nonempty string")
+        if not isinstance(self.payload_json, str) or not self.payload_json:
+            raise ValueError("Graph reduction recipe payload must be canonical JSON")
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError("Graph reduction recipe payload is invalid") from error
+        if not isinstance(payload, dict) or _canonical_json(payload) != self.payload_json:
+            raise ValueError("Graph reduction recipe payload is not canonical")
+        if payload.get("schema_version") != _GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION:
+            raise ValueError("Graph reduction recipe schema is unsupported")
+        if frozenset(payload) != {
+            "schema_version",
+            "strategy",
+            "semantics",
+            "symbolic_abi",
+            "physical_stages",
+            "workspace",
+        }:
+            raise ValueError("Graph reduction recipe payload fields are invalid")
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_REDUCTION_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("Graph reduction recipe strategy is unsupported") from error
+        semantics = payload.get("semantics")
+        if not isinstance(semantics, dict) or frozenset(semantics) != {
+            "operation",
+            "dtype",
+            "count",
+            "identity",
+            "associativity",
+            "reduction_order",
+            "determinism",
+            "absolute_tolerance",
+            "relative_tolerance",
+            "input",
+            "output",
+        }:
+            raise ValueError("Graph reduction typed semantics are incomplete")
+        if semantics.get("operation") != "sum":
+            raise ValueError("Graph reduction currently supports only sum")
+        if semantics.get("dtype") not in ("f32", "i32"):
+            raise ValueError("Graph reduction dtype is unsupported")
+        count = semantics.get("count")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise ValueError("Graph reduction count must be positive")
+        for name in ("input", "output"):
+            if not isinstance(semantics.get(name), str) or not semantics[name]:
+                raise ValueError("Graph reduction resource names must be nonempty")
+        if semantics["input"] == semantics["output"]:
+            raise ValueError("Graph reduction input and output must be distinct")
+        if semantics["dtype"] == "f32":
+            if (
+                semantics.get("determinism") != "within_tolerance"
+                or semantics.get("reduction_order") != "relaxed"
+                or semantics.get("associativity") != "floating_point_declared_tolerance"
+            ):
+                raise ValueError("f32 Graph reduction requires relaxed typed semantics")
+            tolerances = (
+                semantics.get("absolute_tolerance"),
+                semantics.get("relative_tolerance"),
+            )
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                or float(value) < 0.0
+                for value in tolerances
+            ) or not any(float(value) > 0.0 for value in tolerances):
+                raise ValueError("f32 Graph reduction requires a positive tolerance")
+        elif (
+            semantics.get("determinism") != "exact"
+            or semantics.get("reduction_order") != "unspecified_integer"
+            or semantics.get("associativity") != "modular_integer_sum"
+            or semantics.get("absolute_tolerance") != 0.0
+            or semantics.get("relative_tolerance") != 0.0
+        ):
+            raise ValueError("i32 Graph reduction requires exact modular semantics")
+        abi = payload.get("symbolic_abi")
+        if not isinstance(abi, list) or len(abi) != 2:
+            raise ValueError("Graph reduction requires input/output symbolic ABI")
+        stages = payload.get("physical_stages")
+        if not isinstance(stages, list) or not stages:
+            raise ValueError("Graph reduction recipe requires physical stages")
+        if any(
+            not isinstance(stage, dict)
+            or not isinstance(stage.get("name"), str)
+            or not stage["name"]
+            or isinstance(stage.get("dispatch_count"), bool)
+            or not isinstance(stage.get("dispatch_count"), int)
+            or stage["dispatch_count"] <= 0
+            or not isinstance(stage.get("tasks"), list)
+            for stage in stages
+        ):
+            raise ValueError("Graph reduction physical stage is invalid")
+        workspace = payload.get("workspace")
+        if not isinstance(workspace, dict) or frozenset(workspace) != {
+            "ownership",
+            "exclusive_submission",
+            "elements",
+            "bytes",
+        }:
+            raise ValueError("Graph reduction workspace contract is incomplete")
+        if workspace["ownership"] not in ("none", "graph_instance"):
+            raise ValueError("Graph reduction workspace ownership is invalid")
+        for name in ("elements", "bytes"):
+            value = workspace[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError("Graph reduction workspace size is invalid")
+        if strategy == "direct_atomic_tls":
+            if (
+                workspace != {
+                    "ownership": "none",
+                    "exclusive_submission": False,
+                    "elements": 0,
+                    "bytes": 0,
+                }
+                or len(stages) != 1
+            ):
+                raise ValueError("direct Graph reduction must not own a workspace")
+        elif (
+            workspace["ownership"] != "graph_instance"
+            or not workspace["exclusive_submission"]
+            or workspace["elements"] <= 0
+            or workspace["bytes"] <= 0
+            or len(stages) != 2
+        ):
+            raise ValueError("partial Graph reduction requires an exclusive workspace")
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError("Graph reduction recipe ID does not match its payload")
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("Graph reduction recipe payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_REDUCTION_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("Graph reduction recipe strategy is unsupported") from error
+        payload_json = _canonical_json(payload)
+        return cls(
+            recipe_id=prefix + _canonical_hash(payload)[:24],
+            payload_json=payload_json,
+        )
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    @property
+    def semantics(self):
+        return json.loads(self.payload_json)["semantics"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
+@dataclass(frozen=True)
 class _ExecutableOptimizationSpec:
     spec_id: str
     semantic_plan_id: str
@@ -250,6 +427,8 @@ class _ExecutableOptimizationSpec:
     memory_recipe_manifest: object = None
     bounded_recipe_id: str = ""
     bounded_recipe_manifest: object = None
+    reduction_recipe_id: str = ""
+    reduction_recipe_manifest: object = None
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -343,15 +522,45 @@ class _ExecutableOptimizationSpec:
                     "executable specs cannot combine bounded execution with "
                     "control, fusion, or GraphMemory"
                 )
+        if bool(self.reduction_recipe_id) != bool(self.reduction_recipe_manifest):
+            raise ValueError(
+                "reduction recipe ID and complete manifest must be provided together"
+            )
+        if self.reduction_recipe_manifest is not None:
+            if not isinstance(
+                self.reduction_recipe_manifest,
+                _GraphReductionRecipeManifest,
+            ):
+                raise TypeError(
+                    "reduction recipe manifest must be a "
+                    "_GraphReductionRecipeManifest"
+                )
+            if self.reduction_recipe_id != self.reduction_recipe_manifest.recipe_id:
+                raise ValueError("reduction recipe ID does not match its manifest")
+            if (
+                self.control_recipe_id
+                or self.fusion_recipe_ids
+                or self.memory_recipe_id
+                or self.bounded_recipe_id
+                or self.fusion_source_groups
+            ):
+                raise ValueError(
+                    "executable specs cannot combine Graph reduction with control, "
+                    "fusion, GraphMemory, or bounded execution"
+                )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
         value = {
             "schema_version": (
-                4
-                if self.bounded_recipe_id
-                else (3 if self.memory_recipe_id else 2)
+                5
+                if self.reduction_recipe_id
+                else (
+                    4
+                    if self.bounded_recipe_id
+                    else (3 if self.memory_recipe_id else 2)
+                )
             ),
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
@@ -371,6 +580,11 @@ class _ExecutableOptimizationSpec:
         if self.bounded_recipe_id:
             value["bounded_recipe_id"] = self.bounded_recipe_id
             value["bounded_recipe_manifest"] = self.bounded_recipe_manifest.to_dict()
+        if self.reduction_recipe_id:
+            value["reduction_recipe_id"] = self.reduction_recipe_id
+            value["reduction_recipe_manifest"] = (
+                self.reduction_recipe_manifest.to_dict()
+            )
         return value
 
 
@@ -807,6 +1021,7 @@ def _make_spec(
     fusion_source_groups=(),
     memory_recipe_manifest=None,
     bounded_recipe_manifest=None,
+    reduction_recipe_manifest=None,
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
@@ -852,6 +1067,20 @@ def _make_spec(
             )
         bounded_recipe_id = bounded_recipe_manifest.recipe_id
         compilation_payload["bounded_recipe"] = bounded_recipe_manifest.to_dict()
+    reduction_recipe_id = ""
+    if reduction_recipe_manifest is not None:
+        if not isinstance(
+            reduction_recipe_manifest,
+            _GraphReductionRecipeManifest,
+        ):
+            raise TypeError(
+                "reduction_recipe_manifest must be a "
+                "_GraphReductionRecipeManifest"
+            )
+        reduction_recipe_id = reduction_recipe_manifest.recipe_id
+        compilation_payload["reduction_recipe"] = (
+            reduction_recipe_manifest.to_dict()
+        )
     compilation_identity = _canonical_hash(compilation_payload)
     execution_identity = _canonical_hash(
         {
@@ -860,6 +1089,7 @@ def _make_spec(
             "fusion_source_groups": fusion_source_groups,
             "memory_recipe_id": memory_recipe_id,
             "bounded_recipe_id": bounded_recipe_id,
+            "reduction_recipe_id": reduction_recipe_id,
         }
     )
     return _ExecutableOptimizationSpec(
@@ -875,6 +1105,8 @@ def _make_spec(
         memory_recipe_manifest=memory_recipe_manifest,
         bounded_recipe_id=bounded_recipe_id,
         bounded_recipe_manifest=bounded_recipe_manifest,
+        reduction_recipe_id=reduction_recipe_id,
+        reduction_recipe_manifest=reduction_recipe_manifest,
     )
 
 
@@ -914,6 +1146,8 @@ def _build_executable_optimization_space(
     selected_memory_recipe_id="",
     bounded_recipe_manifests=(),
     selected_bounded_recipe_id="",
+    reduction_recipe_manifests=(),
+    selected_reduction_recipe_id="",
     semantic_root=None,
 ):
     semantic_digest = _canonical_hash(
@@ -923,8 +1157,69 @@ def _build_executable_optimization_space(
     control_recipe_ids = tuple(control_recipe_ids)
     memory_recipe_manifests = tuple(memory_recipe_manifests)
     bounded_recipe_manifests = tuple(bounded_recipe_manifests)
+    reduction_recipe_manifests = tuple(reduction_recipe_manifests)
+    if reduction_recipe_manifests:
+        if control_recipe_ids or memory_recipe_manifests or bounded_recipe_manifests:
+            raise ValueError(
+                "Graph reduction recipes cannot combine with control, GraphMemory, "
+                "or bounded execution"
+            )
+        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
+            raise ValueError("Graph reduction recipes cannot combine with fusion")
+        if len(reduction_recipe_manifests) != 2:
+            raise ValueError(
+                "the initial Graph reduction domain requires direct and one "
+                "partial/finalize candidate"
+            )
+        if tuple(
+            manifest.strategy for manifest in reduction_recipe_manifests
+        ) != ("direct_atomic_tls", "block_partial_finalize"):
+            raise ValueError(
+                "Graph reduction domain must order direct before partial/finalize"
+            )
+        scopes = {
+            _canonical_json(manifest.semantics)
+            for manifest in reduction_recipe_manifests
+        }
+        if len(scopes) != 1:
+            raise ValueError("Graph reduction recipes must share typed semantics")
+        specs = tuple(
+            _make_spec(
+                semantic_plan_id,
+                backend,
+                (),
+                reduction_recipe_manifest=manifest,
+            )
+            for manifest in reduction_recipe_manifests
+        )
+        selected = next(
+            (
+                spec
+                for spec in specs
+                if spec.reduction_recipe_id == selected_reduction_recipe_id
+            ),
+            None,
+        )
+        return _ExecutableOptimizationSpace(
+            semantic_plan_id=semantic_plan_id,
+            baseline=specs[0],
+            candidates=(specs[1],),
+            selected_spec_id=None if selected is None else selected.spec_id,
+            selection_status=(
+                "reduction_recipe_not_materialized"
+                if selected is None
+                else (
+                    "selected_reduction_baseline"
+                    if selected is specs[0]
+                    else "selected_reduction_recipe"
+                )
+            ),
+            partition_stage="graph_reduction_complete_recipe",
+            partitions_complete=True,
+            partition_combination_count=2,
+        )
     if bounded_recipe_manifests:
-        if control_recipe_ids or memory_recipe_manifests:
+        if control_recipe_ids or memory_recipe_manifests or reduction_recipe_manifests:
             raise ValueError(
                 "GraphBounded recipes cannot combine with control or GraphMemory"
             )
@@ -1148,6 +1443,7 @@ __all__ = [
     "_GRAPH_FUSION_QUALIFICATION_SCHEMA",
     "_GraphBoundedExecutionRecipeManifest",
     "_GraphMemoryRecipeManifest",
+    "_GraphReductionRecipeManifest",
     "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",
     "_ExecutableOptimizationSpec",

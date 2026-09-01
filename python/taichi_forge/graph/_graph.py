@@ -98,6 +98,9 @@ ArgKind = _ti_core.ArgKind
 
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
+_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = (
+    "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
+)
 _INTERNAL_FUSION_QUALIFICATION_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
@@ -9649,6 +9652,7 @@ class _GraphBindingVersion:
     flattened_args: object
     memory_recipe_certificate: object
     control_binding_certificate: object
+    fixed_bindings_flattened: bool
     fast_path_qualified: bool
     volatile_reasons: tuple
 
@@ -9736,6 +9740,9 @@ class GraphBindingSet:
                     "revision": version.revision,
                     "slot_count": len(version.slot_values),
                     "fast_path_qualified": version.fast_path_qualified,
+                    "fixed_bindings_flattened": (
+                        version.fixed_bindings_flattened
+                    ),
                     "volatile_reasons": version.volatile_reasons,
                     "memory_recipe_publish_validated": (
                         memory_recipe_certificate is not None
@@ -9861,6 +9868,7 @@ class _GraphSpec:
         aot_graph_builder=None,
         aot_compiled_graph=None,
         graph_memory_sources=(),
+        graph_reduction_sources=(),
     ):
         source_nodes = tuple(nodes)
         structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
@@ -9924,9 +9932,11 @@ class _GraphSpec:
             selected_control_recipe_id=selected_control_recipe_id,
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
+        self._graph_reduction_sources = tuple(graph_reduction_sources)
         self._compileiq_executable_space_cache = None
         self._compileiq_graph_bounded_status = "not_evaluated"
         self._compileiq_graph_memory_status = "not_evaluated"
+        self._compileiq_graph_reduction_status = "not_evaluated"
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -9975,6 +9985,15 @@ class _GraphSpec:
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
         self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
+        # These values are either immutable scalars or Graph-instance-owned
+        # allocations whose identity cannot change before runtime teardown.
+        # A single workspace lane may therefore flatten them once together
+        # with a published BindingVersion. Provider-controlled or otherwise
+        # replaceable fixed values remain on the validated replay path.
+        self._stable_fixed_binding_frame = bool(self.fixed_runtime_args) and all(
+            isinstance(value, (InternalNdarrayRequirement, int, float))
+            for value in self.fixed_runtime_args.values()
+        )
         self.internal_storage_bytes = _graph_internal_storage_bytes(
             self.fixed_runtime_args
         )
@@ -10172,6 +10191,47 @@ class _GraphSpec:
             return base
         else:
             self._compileiq_graph_bounded_status = "not_applicable"
+
+        reduction_eligible_shape = bool(
+            len(self._graph_reduction_sources) == 1
+            and not self._graph_memory_sources
+            and self.native_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and len(self.nodes) == 1
+            and isinstance(self.nodes[0], _CompiledCGraphNode)
+            and isinstance(self.nodes[0].ir_node, SequentialRegion)
+            and not base.baseline.control_recipe_id
+            and not base.candidates
+            and self.dispatch_count
+            == self._graph_reduction_sources[0].selected_physical_dispatches
+        )
+        if reduction_eligible_shape:
+            source = self._graph_reduction_sources[0]
+            manifests = source.manifests()
+            try:
+                space = _build_executable_optimization_space(
+                    self.pre_optimization_ir_root,
+                    self.fusion_plan,
+                    base.baseline.backend,
+                    reduction_recipe_manifests=manifests,
+                    selected_reduction_recipe_id=source.selected_recipe_id,
+                    semantic_root=source.semantic_root,
+                )
+            except ValueError as error:
+                self._compileiq_graph_reduction_status = (
+                    "domain_rejected:" + str(error)
+                )
+                self._compileiq_executable_space_cache = base
+                return base
+            self._compileiq_graph_reduction_status = "complete_recipe_domain"
+            self._compileiq_executable_space_cache = space
+            return space
+        if self._graph_reduction_sources:
+            self._compileiq_graph_reduction_status = "definition_out_of_scope"
+            self._compileiq_executable_space_cache = base
+            return base
+        self._compileiq_graph_reduction_status = "not_applicable"
 
         eligible_shape = bool(
             len(self._graph_memory_sources) == 1
@@ -10391,6 +10451,7 @@ class _GraphSpec:
         revision,
         *,
         fixed_runtime_args=None,
+        allow_fixed_binding_fast_path=False,
         allow_fast_path=True,
         entrypoint="Graph.bind",
     ):
@@ -10405,6 +10466,14 @@ class _GraphSpec:
         blockers = list(self.binding_plan.static_fast_path_blockers)
         if not allow_fast_path:
             blockers.append("qualified_fusion_selector")
+        fixed_binding_fast_path = bool(
+            fixed_runtime_args
+            and allow_fixed_binding_fast_path
+            and self._stable_fixed_binding_frame
+            and frozenset(fixed_runtime_args) == frozenset(self.fixed_runtime_args)
+        )
+        if fixed_binding_fast_path:
+            blockers.remove("lane_fixed_bindings")
         for name, value in zip(self.binding_plan.public_names, slot_values):
             reason = self._binding_value_volatile_reason(name, value)
             if reason is not None:
@@ -10445,7 +10514,9 @@ class _GraphSpec:
         flattened = None
         if not blockers:
             context = _GraphRunContext()
-            context.begin(snapshot)
+            context.begin(
+                validation_args if fixed_binding_fast_path else snapshot
+            )
             try:
                 # This private dict is never exposed for mutation. It owns the
                 # exact scalar/matrix snapshot and generation-qualified runtime
@@ -10467,6 +10538,9 @@ class _GraphSpec:
             flattened_args=flattened,
             memory_recipe_certificate=memory_recipe_certificate,
             control_binding_certificate=control_binding_certificate,
+            fixed_bindings_flattened=bool(
+                fixed_binding_fast_path and flattened is not None
+            ),
             fast_path_qualified=not blockers,
             volatile_reasons=tuple(blockers),
         )
@@ -10481,7 +10555,10 @@ class _GraphSpec:
         binding_version=None,
     ):
         if binding_version is not None and binding_version.fast_path_qualified:
-            if temporaries or fixed_runtime_args:
+            if temporaries or (
+                fixed_runtime_args
+                and not binding_version.fixed_bindings_flattened
+            ):
                 raise TaichiRuntimeError(
                     "Fast Graph BindingVersion unexpectedly requires a lane overlay"
                 )
@@ -11081,7 +11158,7 @@ class _GraphSpec:
                 or fact.byte_offset % alignment != 0
             ):
                 raise TaichiRuntimeError(
-                    "Graph shared-staged memory recipe requires a compact "
+                    "Graph memory recipe requires a compact "
                     f"one-dimensional {record_stride}-byte layout for {name!r}, "
                     f"aligned to {alignment} bytes with at least "
                     f"{minimum_elements} scalar elements"
@@ -11104,7 +11181,7 @@ class _GraphSpec:
                     alias = "kUnknown"
             if alias != "kProvenDisjoint":
                 raise TaichiRuntimeError(
-                    "Graph shared-staged memory recipe requires proven "
+                    "Graph memory recipe requires proven "
                     f"disjoint storage for {left!r} and {right!r}; got {alias}"
                 )
         certificate = _GraphMemoryRecipeCertificate(
@@ -13276,6 +13353,7 @@ class GraphBuilder:
         self._active_bounded_publication = None
         self._declared_private_bindings = {}
         self._graph_memory_sources = []
+        self._graph_reduction_sources = []
 
     def private_ndarray(
         self,
@@ -13360,6 +13438,53 @@ class GraphBuilder:
             )
         if source is not None:
             self._graph_memory_sources.append(source)
+
+    def reduce(
+        self,
+        values,
+        output,
+        *,
+        count,
+        op="sum",
+        absolute_tolerance=None,
+        relative_tolerance=None,
+        label=None,
+    ):
+        """Append one typed, complete Graph reduction phase.
+
+        The semantic API exposes operation, dtype, exact item count, and the
+        floating-point equivalence contract.  Physical direct/TLS versus
+        block-partial/finalize selection remains a private complete recipe
+        chosen only through the reviewed CompileIQ reconstruction path.
+        """
+
+        from taichi_forge.graph._reduction import (
+            append_typed_graph_reduction,
+        )
+
+        requested_recipe = os.environ.get(
+            _INTERNAL_GRAPH_REDUCTION_RECIPE_ENV
+        )
+        if requested_recipe is not None:
+            requested_recipe = requested_recipe.strip()
+            if not requested_recipe:
+                raise TaichiRuntimeError(
+                    f"{_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV} must be a complete "
+                    "Graph reduction recipe ID"
+                )
+        source = append_typed_graph_reduction(
+            self,
+            values,
+            output,
+            count=count,
+            op=op,
+            absolute_tolerance=absolute_tolerance,
+            relative_tolerance=relative_tolerance,
+            label=label,
+            requested_recipe_id=requested_recipe,
+        )
+        self._graph_reduction_sources.append(source)
+        return self
 
     def _dispatch_shared_staged_1d(
         self, kernel_fn, *args, template_args=None, label=None
@@ -14433,6 +14558,7 @@ class GraphBuilder:
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
+                graph_reduction_sources=tuple(self._graph_reduction_sources),
             ),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
@@ -14946,6 +15072,9 @@ class Graph:
                 arguments,
                 1,
                 fixed_runtime_args=self._instance._fixed_runtime_args,
+                allow_fixed_binding_fast_path=(
+                    self._workspace_lane_capacity == 1
+                ),
                 allow_fast_path=self._qualified_fusion_selector is None,
             )
             with binding_set._lock:
@@ -14987,6 +15116,9 @@ class Graph:
                     candidate,
                     revision,
                     fixed_runtime_args=self._instance._fixed_runtime_args,
+                    allow_fixed_binding_fast_path=(
+                        self._workspace_lane_capacity == 1
+                    ),
                     allow_fast_path=self._qualified_fusion_selector is None,
                     entrypoint="GraphBindingSet.update",
                 )
@@ -15965,6 +16097,15 @@ class Graph:
                 return "workspace_lane_scope_rejected"
             self._spec.compileiq_executable_optimization_space()
             return self._spec._compileiq_graph_memory_status
+
+    @property
+    def _compileiq_graph_reduction_status(self):
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if self._workspace_lane_capacity != 1:
+                return "workspace_lane_scope_rejected"
+            self._spec.compileiq_executable_optimization_space()
+            return self._spec._compileiq_graph_reduction_status
 
     @property
     def _compileiq_graph_bounded_status(self):

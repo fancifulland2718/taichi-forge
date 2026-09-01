@@ -10,7 +10,7 @@ import json
 from dataclasses import dataclass
 from enum import Enum
 from itertools import product
-from math import gcd
+from math import gcd, isfinite
 from typing import Optional, Tuple
 
 
@@ -120,6 +120,83 @@ class InternalNdarrayRequirement:
         for value in self.shape:
             elements *= value
         return elements * self.element_bytes
+
+
+@dataclass(frozen=True)
+class ReductionSemantics:
+    """Typed semantic contract shared by complete reduction recipes."""
+
+    operation: str
+    dtype: str
+    count: int
+    identity: object
+    associativity: str
+    reduction_order: str
+    determinism: str
+    absolute_tolerance: float
+    relative_tolerance: float
+    input: str
+    output: str
+
+    def __post_init__(self):
+        if self.operation != "sum":
+            raise ValueError("Graph reduction currently supports only sum")
+        if self.dtype not in ("f32", "i32"):
+            raise ValueError("Graph reduction dtype is unsupported")
+        if isinstance(self.count, bool) or not isinstance(self.count, int):
+            raise TypeError("Graph reduction count must be an integer")
+        if self.count <= 0:
+            raise ValueError("Graph reduction count must be positive")
+        if not isinstance(self.input, str) or not self.input:
+            raise ValueError("Graph reduction input must be a nonempty resource")
+        if not isinstance(self.output, str) or not self.output:
+            raise ValueError("Graph reduction output must be a nonempty resource")
+        if self.input == self.output:
+            raise ValueError("Graph reduction input and output must be distinct")
+        tolerances = (self.absolute_tolerance, self.relative_tolerance)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(float(value))
+            or float(value) < 0.0
+            for value in tolerances
+        ):
+            raise ValueError("Graph reduction tolerances must be finite and nonnegative")
+        if self.dtype == "f32":
+            if (
+                self.identity != 0.0
+                or self.associativity != "floating_point_declared_tolerance"
+                or self.reduction_order != "relaxed"
+                or self.determinism != "within_tolerance"
+                or not any(float(value) > 0.0 for value in tolerances)
+            ):
+                raise ValueError(
+                    "f32 Graph reduction requires relaxed, positive-tolerance "
+                    "semantics"
+                )
+        elif (
+            self.identity != 0
+            or self.associativity != "modular_integer_sum"
+            or self.reduction_order != "unspecified_integer"
+            or self.determinism != "exact"
+            or any(float(value) != 0.0 for value in tolerances)
+        ):
+            raise ValueError("i32 Graph reduction requires exact modular semantics")
+
+    def to_dict(self):
+        return {
+            "operation": self.operation,
+            "dtype": self.dtype,
+            "count": self.count,
+            "identity": self.identity,
+            "associativity": self.associativity,
+            "reduction_order": self.reduction_order,
+            "determinism": self.determinism,
+            "absolute_tolerance": float(self.absolute_tolerance),
+            "relative_tolerance": float(self.relative_tolerance),
+            "input": self.input,
+            "output": self.output,
+        }
 
 
 @dataclass(frozen=True)
@@ -257,6 +334,7 @@ class NativeCallNode:
     iteration_domain: Optional[str] = None
     synchronization: bool = False
     opaque: bool = True
+    reduction_semantics: Optional[ReductionSemantics] = None
 
     @property
     def kind(self):
@@ -1670,6 +1748,8 @@ def graph_ir_to_dict(node, _structured_depth=0):
         )
         result["memory_disjoint_pairs"] = node.memory_disjoint_pairs
         result["memory_layout_requirements"] = node.memory_layout_requirements
+    if isinstance(node, NativeCallNode) and node.reduction_semantics is not None:
+        result["reduction_semantics"] = node.reduction_semantics.to_dict()
     if isinstance(node, ObservationNode):
         result["batch"] = node.batch
     return result

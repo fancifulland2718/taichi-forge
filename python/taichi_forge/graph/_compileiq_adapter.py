@@ -28,6 +28,9 @@ from taichi_forge.lang._compileiq_qualification import (
 _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
+_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = (
+    "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
+)
 _CUDA_BOUNDED_DISPATCH_MODE_ENV = "TI_CUDA_BOUNDED_DISPATCH_MODE"
 _CUDA_BOUNDED_UPDATE_POLICY_ENV = "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY"
 _PARAMETER_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
@@ -116,6 +119,8 @@ class GraphExecutableRecipeSelection:
     memory_recipe_manifest: object = None
     bounded_recipe_id: str = ""
     bounded_recipe_manifest: object = None
+    reduction_recipe_id: str = ""
+    reduction_recipe_manifest: object = None
 
     @property
     def worker_environment(self):
@@ -133,6 +138,10 @@ class GraphExecutableRecipeSelection:
             ]
             environment[_CUDA_BOUNDED_DISPATCH_MODE_ENV] = dispatch_mode
             environment[_CUDA_BOUNDED_UPDATE_POLICY_ENV] = update_policy
+        if self.reduction_recipe_id:
+            environment[_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV] = (
+                self.reduction_recipe_id
+            )
         return MappingProxyType(environment)
 
     def to_dict(self):
@@ -157,6 +166,11 @@ class GraphExecutableRecipeSelection:
         if self.bounded_recipe_id:
             value["bounded_recipe_id"] = self.bounded_recipe_id
             value["bounded_recipe_manifest"] = self.bounded_recipe_manifest.to_dict()
+        if self.reduction_recipe_id:
+            value["reduction_recipe_id"] = self.reduction_recipe_id
+            value["reduction_recipe_manifest"] = (
+                self.reduction_recipe_manifest.to_dict()
+            )
         return value
 
 
@@ -198,6 +212,7 @@ class _CompileIQExecutableAdapter:
         control_recipe_ids = tuple(spec.control_recipe_id for spec in specs)
         memory_recipe_ids = tuple(spec.memory_recipe_id for spec in specs)
         bounded_recipe_ids = tuple(spec.bounded_recipe_id for spec in specs)
+        reduction_recipe_ids = tuple(spec.reduction_recipe_id for spec in specs)
         if space.baseline.control_recipe_id:
             if (
                 control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS
@@ -257,6 +272,38 @@ class _CompileIQExecutableAdapter:
             raise ValueError(
                 "map/control/GraphMemory space cannot contain a bounded recipe"
             )
+        if space.baseline.reduction_recipe_id:
+            strategies = tuple(
+                spec.reduction_recipe_manifest.strategy for spec in specs
+            )
+            semantic_scopes = {
+                json.dumps(
+                    spec.reduction_recipe_manifest.semantics,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                for spec in specs
+            }
+            if (
+                strategies != (
+                    "direct_atomic_tls",
+                    "block_partial_finalize",
+                )
+                or len(semantic_scopes) != 1
+                or any(not recipe_id for recipe_id in reduction_recipe_ids)
+                or any(spec.fusion_recipe_ids for spec in specs)
+                or any(control_recipe_ids)
+                or any(memory_recipe_ids)
+                or any(bounded_recipe_ids)
+            ):
+                raise ValueError(
+                    "Graph reduction space must contain one complete typed domain"
+                )
+        elif any(reduction_recipe_ids):
+            raise ValueError(
+                "map/control/GraphMemory/GraphBounded space cannot contain a "
+                "reduction recipe"
+            )
 
         materialization_by_spec = {
             spec.spec_id: _materialization_recipe(spec) for spec in specs
@@ -273,6 +320,7 @@ class _CompileIQExecutableAdapter:
                 control_materialization_by_spec[spec.spec_id],
                 memory_materialization_by_spec[spec.spec_id],
                 spec.bounded_recipe_id,
+                spec.reduction_recipe_id,
             )
             for spec in specs
         )
@@ -332,6 +380,8 @@ class _CompileIQExecutableAdapter:
 
     @property
     def recipe_kind(self):
+        if self._space.baseline.reduction_recipe_id:
+            return "graph_reduction"
         if self._space.baseline.memory_recipe_id:
             return "graph_memory"
         if self._space.baseline.bounded_recipe_id:
@@ -397,6 +447,8 @@ class _CompileIQExecutableAdapter:
             memory_recipe_manifest=(spec.memory_recipe_manifest),
             bounded_recipe_id=spec.bounded_recipe_id,
             bounded_recipe_manifest=(spec.bounded_recipe_manifest),
+            reduction_recipe_id=spec.reduction_recipe_id,
+            reduction_recipe_manifest=(spec.reduction_recipe_manifest),
         )
 
     def verify_materialized(self, parameters, actual_space):
@@ -420,6 +472,7 @@ class _CompileIQExecutableAdapter:
             or actual.control_recipe_id != selection.control_recipe_id
             or actual.memory_recipe_id != selection.memory_recipe_id
             or actual.bounded_recipe_id != selection.bounded_recipe_id
+            or actual.reduction_recipe_id != selection.reduction_recipe_id
             or (
                 None
                 if actual.memory_recipe_manifest is None
@@ -439,6 +492,16 @@ class _CompileIQExecutableAdapter:
                 None
                 if selection.bounded_recipe_manifest is None
                 else selection.bounded_recipe_manifest.to_dict()
+            )
+            or (
+                None
+                if actual.reduction_recipe_manifest is None
+                else actual.reduction_recipe_manifest.to_dict()
+            )
+            != (
+                None
+                if selection.reduction_recipe_manifest is None
+                else selection.reduction_recipe_manifest.to_dict()
             )
         ):
             raise ValueError("materialized Graph identity does not match")
@@ -566,8 +629,8 @@ class _CompileIQExecutableAdapter:
             if selected is self._space.baseline:
                 raise ValueError("qualification cache cannot select the baseline spec")
             raise ValueError(
-                "control, GraphMemory, and GraphBounded qualification are "
-                "offline-only; "
+                "control, GraphMemory, GraphBounded, and Graph reduction "
+                "qualification are offline-only; "
                 "runtime cache admission is unavailable"
             )
         if (
@@ -648,6 +711,7 @@ class _CompileIQExecutableAdapter:
             "structured_control",
             "graph_memory",
             "graph_bounded_execution",
+            "graph_reduction",
         ):
             value["recipe_kind"] = self.recipe_kind
             value["runtime_admission"] = "offline_explicit_reconstruction_only"
@@ -677,6 +741,10 @@ class _CompileIQExecutableAdapter:
                     spec.bounded_recipe_manifest.strategy
                 ][1],
             }
+        if spec.reduction_recipe_id:
+            value["reduction_materialization_recipe"] = (
+                spec.reduction_recipe_id
+            )
         return value
 
 

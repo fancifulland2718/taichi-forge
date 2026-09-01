@@ -80,6 +80,12 @@ class CompileIQGraphRecipeSearch:
             )
             provider_namespace = "taichi_forge.graph.bounded_execution"
             domain_version = "graph-bounded-complete-recipe.v1"
+        elif adapter.recipe_kind == "graph_reduction":
+            semantic_schema = (
+                "taichi_forge.graph.compileiq-reduction-semantics.v1"
+            )
+            provider_namespace = "taichi_forge.graph.reduction"
+            domain_version = "graph-reduction-complete-recipe.v1"
         elif adapter.recipe_kind == "structured_control":
             semantic_schema = (
                 "taichi_forge.graph.compileiq-structured-control-semantics.v1"
@@ -120,6 +126,7 @@ class CompileIQGraphRecipeSearch:
             "structured_control",
             "graph_memory",
             "graph_bounded_execution",
+            "graph_reduction",
         ):
             semantic_payload["recipe_kind"] = adapter.recipe_kind
         if nested_structured_control:
@@ -356,6 +363,7 @@ class CompileIQGraphRecipeSearch:
                     "structured_control",
                     "graph_memory",
                     "graph_bounded_execution",
+                    "graph_reduction",
                 )
                 else "explicit_qualified_cache_only"
             ),
@@ -384,6 +392,7 @@ class CompileIQGraphRecipeSearch:
             "structured_control",
             "graph_memory",
             "graph_bounded_execution",
+            "graph_reduction",
         ):
             value["recipe_kind"] = self._adapter.recipe_kind
         if self._adapter.structured_control_domain == "cuda_nested_while_while":
