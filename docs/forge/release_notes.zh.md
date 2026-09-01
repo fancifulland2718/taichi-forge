@@ -94,10 +94,20 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   Graph memory 在接入 CompileIQ 前继续 fail closed。Forge 现在具有一条私有、精确的 CUDA f32
   一维 `shared_staged_1d` lowering，仅覆盖已审查的 affine stencil offload。它只能通过私有
   Graph-owned builder 从精确 offload-plan binding 重建；binding 发布一次性证明 owner、extent、layout
-  和 alias requirement，稳定合格 replay 复用该证书。在正式 S4 资格化以及完整 direct/shared
-  Graph 重建、fallback 和稳定绑定产品合同单独获批前，该路线仍是 private/unsupported。
-  CompileIQ 看不到 `memory_strategy`；Forge 也仍不把全局 `CompileConfig.make_block_local` 或私有
-  per-kernel task 轴暴露为 Graph 搜索域。
+  和 alias requirement，稳定合格 replay 复用该证书。正式 S4 资格化已在本机 RTX 5090、driver
+  610.62、source/native commit `ada3e9eba912a5368c5cd1a21f1b8f5d12c08b7e` 上对精确的 radius-1
+  与 radius-4 recipe 得到正项。主计时使用稳定 `GraphBindingSet`；每个 scope 包含 10 个 fresh
+  process、均衡 AB/BA 顺序，以及每进程 5 组、每路线至少 250 ms 的 paired block。
+  staged/direct 中位比值分别为 0.946262 和 0.953218，最差进程比值分别为 0.947035 和
+  0.953970。全部 worker 均通过全数组 exact correctness、route/materialization 与 source/native
+  provenance、稳定 replay 的 storage 描述/owner 校验/alias 分析零增量、submit/paced/A-B-A smoke，
+  以及两轮各 10,000 replay、无固定内存上限的 memory plateau。raw dict replay 仍只是不可晋级的
+  诊断项。被 Git 忽略的本机机器可读 artifact 位于
+  `.agent/experiments/graph-memory-s4-ada3e9eb/qualification.json`（SHA-256
+  `f788b4d109ef0b1817807fab5ef51100cea9703cb5eda8cd5de6cae471a3fa1e`）。该结果只资格化这两个
+  精确的私有 recipe scope；在完整 direct/shared Graph 重建、fallback 与稳定绑定产品合同单独获批前，
+  路线仍为 private/unsupported。CompileIQ 看不到 `memory_strategy`；Forge 也仍不把全局
+  `CompileConfig.make_block_local` 或私有 per-kernel task 轴暴露为 Graph 搜索域。
 - 新增稳定公开的 `Graph.bind(arguments)` 与 `ti.graph.GraphBindingSet`。发布时会按值快照
   scalar/matrix、按 identity 保留 device resource，并在版本可见前完成 owner、layout、
   structured-control 与 alias 资格化；失败的 `update()`/`replace()` 不替换旧版本。同一已发布且

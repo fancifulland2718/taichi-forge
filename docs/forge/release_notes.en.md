@@ -119,12 +119,26 @@ grouped under the behavior they shipped.
   reviewed affine stencil offloads. It can only be reconstructed from an exact
   offload-plan binding through the private Graph-owned builder path; binding
   publication proves owner, extent, layout, and alias requirements once, while
-  stable qualified replay reuses that certificate. This route remains private
-  and unsupported until formal S4 qualification and the complete
-  direct/shared-Graph reconstruction, fallback, and stable-binding product
-  contracts are approved. CompileIQ does not see `memory_strategy`, and Forge
-  still exposes neither global `CompileConfig.make_block_local` nor private
-  per-kernel task axes as a Graph search domain.
+  stable qualified replay reuses that certificate. Formal S4 qualification is
+  positive for the exact radius-1 and radius-4 recipes on the local RTX 5090
+  with driver 610.62 at source/native commit `ada3e9eba912a5368c5cd1a21f1b8f5d12c08b7e`.
+  With stable `GraphBindingSet` replay, ten fresh processes per scope, balanced
+  AB/BA order, and five paired blocks of at least 250 ms per process, the
+  staged/direct median ratios were 0.946262 and 0.953218; the worst process
+  ratios were 0.947035 and 0.953970. Every worker passed exact full-array
+  correctness, route/materialization and source/native provenance gates, zero
+  stable-replay increments for storage description, owner validation, and
+  alias analysis, submit/paced/A-B-A smoke, and memory plateau across two
+  10,000-replay waves without a fixed memory ceiling. Raw-dictionary replay
+  remains an ineligible diagnostic. The ignored local machine-readable artifact
+  is `.agent/experiments/graph-memory-s4-ada3e9eb/qualification.json` (SHA-256
+  `f788b4d109ef0b1817807fab5ef51100cea9703cb5eda8cd5de6cae471a3fa1e`). This
+  qualifies only those exact private recipe scopes: the route remains private
+  and unsupported until complete direct/shared-Graph reconstruction, fallback,
+  and stable-binding product contracts are approved. CompileIQ does not see
+  `memory_strategy`, and Forge still exposes neither global
+  `CompileConfig.make_block_local` nor private per-kernel task axes as a Graph
+  search domain.
 - Added the stable public `Graph.bind(arguments)` and
   `ti.graph.GraphBindingSet` APIs. Publication snapshots scalar/matrix values,
   retains device resources by identity, and completes owner, layout,
