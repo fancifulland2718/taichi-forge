@@ -111,6 +111,37 @@ def _stage(name, execution_kind):
     }
 
 
+class _FrozenKernelCall:
+    """Publish one fixed-resource ordinary launch plan, then invoke it directly."""
+
+    def __init__(self, function, *args):
+        self._function = function
+        self._args = tuple(args)
+        self._kernel = None
+        self._plan = None
+        self.preparations = 0
+
+    def run(self):
+        if self._plan is None:
+            self._function(*self._args)
+            kernel = self._function._primal
+            plan = kernel._ordinary_launch_plan
+            runtime = impl.get_runtime()
+            if plan is None or not plan.matches(runtime, self._args):
+                raise TaichiRuntimeError(
+                    "Graph-native fixed kernel did not publish a stable launch plan"
+                )
+            self._kernel = kernel
+            self._plan = plan
+            self.preparations += 1
+            return
+        # The Graph action owns fixed Python resources and Graph.run() rejects
+        # runtime-generation drift before reaching this call. Repeating the
+        # ordinary plan's resource-identity proof here would put immutable
+        # construction facts back on every replay.
+        self._kernel._launch_with_ordinary_plan(self._plan, self._args)
+
+
 class _GraphSegmentedScanExecutable(NativeGraphExecutable):
     """Fixed-resource action whose steady replay invokes only frozen stages."""
 
@@ -132,6 +163,18 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         self._scan_plan = None
         self._program = None
         self._provider_preparations = 0
+        self._serial_call = None
+        self._gather_call = None
+        self._apply_call = None
+        if strategy == _SERIAL_STRATEGY:
+            self._serial_call = _FrozenKernelCall(
+                segmented_scan_sum_serial_ndarray,
+                source.values,
+                source.layout._offsets,
+                source.output,
+                source.layout.num_segments,
+                int(source.inclusive),
+            )
         if strategy == _GLOBAL_STRATEGY:
             self._transform_workspace = self._workspace._get_transform_workspace(
                 source.layout
@@ -141,15 +184,24 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 source.values.dtype,
                 source.layout,
             )
+            self._gather_call = _FrozenKernelCall(
+                segmented_scan_gather_bases_ndarray,
+                source.output,
+                source.layout._offsets,
+                self._bases,
+                source.layout.num_segments,
+            )
+            self._apply_call = _FrozenKernelCall(
+                segmented_scan_apply_bases_ndarray,
+                source.output,
+                source.layout._offsets,
+                self._bases,
+                source.layout.num_segments,
+                int(source.inclusive),
+            )
 
     def _run_serial(self):
-        segmented_scan_sum_serial_ndarray(
-            self._source.values,
-            self._source.layout._offsets,
-            self._source.output,
-            self._source.layout.num_segments,
-            int(self._source.inclusive),
-        )
+        self._serial_call.run()
 
     def _prepare_global_provider_plans(self, prog):
         value_type = _transform_value_type(self._source.values.dtype)
@@ -205,19 +257,8 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             self._prepare_global_provider_plans(impl.get_runtime().prog)
         else:
             self._invoke_global_provider_plans()
-        segmented_scan_gather_bases_ndarray(
-            self._source.output,
-            self._source.layout._offsets,
-            self._bases,
-            self._source.layout.num_segments,
-        )
-        segmented_scan_apply_bases_ndarray(
-            self._source.output,
-            self._source.layout._offsets,
-            self._bases,
-            self._source.layout.num_segments,
-            int(self._source.inclusive),
-        )
+        self._gather_call.run()
+        self._apply_call.run()
 
     @property
     def graph_ir_node(self):
@@ -239,6 +280,11 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             "strategy": self._strategy,
             "method": self._method,
             "provider_preparations": self._provider_preparations,
+            "kernel_plan_preparations": sum(
+                call.preparations
+                for call in (self._serial_call, self._gather_call, self._apply_call)
+                if call is not None
+            ),
             "action_owned_bytes": self._source.action_owned_bytes(self._strategy),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
         }

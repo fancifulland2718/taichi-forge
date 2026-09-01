@@ -123,6 +123,18 @@ def test_graph_native_segmented_scan_reconstructs_complete_domain(
         rebuilt.run({})
         executable = rebuilt._spec.nodes[0].executable
         strategy = recipes[recipe_id]["native_algorithm_recipe_manifest"]["strategy"]
+        frozen_kernel_call = (
+            executable._serial_call
+            if strategy == "segment_local_serial"
+            else executable._gather_call
+        )
+        kernel_plan_type = type(frozen_kernel_call._plan)
+
+        def reject_repeated_kernel_resource_proof(*_args, **_kwargs):
+            raise AssertionError(
+                "stable Graph replay repeated a fixed-kernel resource proof"
+            )
+
         if strategy == "global_scan_segment_correction":
             plan_type = type(executable._scan_plan)
 
@@ -137,13 +149,27 @@ def test_graph_native_segmented_scan_reconstructs_complete_domain(
                     "matches_program",
                     reject_repeated_program_proof,
                 )
+                stable_replay.setattr(
+                    kernel_plan_type,
+                    "matches",
+                    reject_repeated_kernel_resource_proof,
+                )
                 rebuilt.run({})
         else:
-            rebuilt.run({})
+            with monkeypatch.context() as stable_replay:
+                stable_replay.setattr(
+                    kernel_plan_type,
+                    "matches",
+                    reject_repeated_kernel_resource_proof,
+                )
+                rebuilt.run({})
         ti.sync()
         np.testing.assert_array_equal(output.to_numpy(), expected)
         assert executable.debug_info["provider_preparations"] == (
             1 if strategy == "global_scan_segment_correction" else 0
+        )
+        assert executable.debug_info["kernel_plan_preparations"] == (
+            2 if strategy == "global_scan_segment_correction" else 1
         )
         execution_report = rebuilt.execution_stats()
         assert execution_report.memory.provider_generation_report_count == 1
