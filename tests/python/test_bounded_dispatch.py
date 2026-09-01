@@ -1963,6 +1963,95 @@ def test_graph_bounded_consumers_share_one_extent_contract():
     assert handles[0].snapshot(extent).useful_count == 7
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda], offline_cache=False)
+def test_graph_bounded_binding_set_certifies_extent_once_at_publication(monkeypatch):
+    capacity = 16
+
+    @ti.kernel
+    def consume(
+        extent: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in range(capacity):
+            if i < ti.device_extent_count(extent):
+                output[i] += 1
+
+    extent_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "extent", ti.i32, ndim=1
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch_bounded(
+        consume,
+        extent_arg,
+        output_arg,
+        extent=extent_arg,
+        capacity=capacity,
+    )
+    graph = builder.compile()
+    contract = next(
+        lease
+        for lease in graph._spec.lifetime_leases
+        if type(lease).__name__ == "_DeviceExtentGraphContract"
+    )
+    calls = {"binding": 0, "lifetime": 0}
+    validate_binding = contract.validate_graph_bindings
+    validate_lifetime = contract.validate_graph_lifetime
+
+    def count_binding(args):
+        calls["binding"] += 1
+        return validate_binding(args)
+
+    def count_lifetime():
+        calls["lifetime"] += 1
+        return validate_lifetime()
+
+    monkeypatch.setattr(contract, "validate_graph_bindings", count_binding)
+    monkeypatch.setattr(contract, "validate_graph_lifetime", count_lifetime)
+
+    extent = ti.DeviceExtent(capacity)
+    extent.set(5)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    args = {"extent": extent, "output": output}
+    bindings = graph.bind(args)
+    assert bindings.fast_path_qualified, bindings.statistics()
+    assert calls == {"binding": 1, "lifetime": 1}
+
+    graph.run(bindings)
+    graph.run(bindings)
+    np.testing.assert_array_equal(output.to_numpy()[:5], np.full(5, 2, np.int32))
+    assert calls == {"binding": 1, "lifetime": 1}
+    stats = graph.binding_statistics()
+    assert stats["version_fast_replays"] == 2
+    assert stats["version_volatile_replays"] == 0
+
+    # Compatibility mappings retain the conservative per-invocation proof.
+    graph.run(args)
+    assert calls == {"binding": 2, "lifetime": 2}
+    assert graph.binding_statistics()["raw_replay_validations"] == 1
+
+    # A DeviceExtent used without the bounded contract remains conservative;
+    # the certificate is scoped to the exact symbolic extent name.
+    ordinary_builder = ti.graph.GraphBuilder()
+    ordinary_builder.dispatch(consume, extent_arg, output_arg)
+    ordinary_graph = ordinary_builder.compile()
+    ordinary_bindings = ordinary_graph.bind(args)
+    assert not ordinary_bindings.fast_path_qualified
+    assert "volatile_device_extent:extent" in ordinary_bindings.statistics()[
+        "volatile_reasons"
+    ]
+
+    # A failed update must not publish a partially validated replacement.
+    revision = bindings.revision
+    with pytest.raises(RuntimeError, match="capacity does not match"):
+        bindings.update(extent=ti.DeviceExtent(capacity + 1))
+    assert bindings.revision == revision
+    graph.run(bindings)
+    assert graph.binding_statistics()["version_fast_replays"] == 3
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_consecutive_bounded_consumers_share_prepared_packet(monkeypatch):
     capacity = 65

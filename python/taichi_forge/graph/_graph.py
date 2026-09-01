@@ -2397,6 +2397,16 @@ class _DeviceExtentGraphContract:
     ``bind_graph_arguments`` hook, so a replay validates the extent once.
     """
 
+    # DeviceExtent capacity, runtime generation, allocation identity, and an
+    # optional producer-owned identity are immutable for one published
+    # BindingVersion.  Publication validates all of them and the version keeps
+    # the DeviceExtent plus its flattened runtime allocation alive.  Graph and
+    # BindingVersion generation checks reject ti.reset() before replay, so a
+    # second Python lifetime scan would only repeat fixed work.  Raw mappings
+    # still enter validate_graph_bindings() for every invocation.
+    graph_runtime_lifetime_check_required = False
+    graph_publish_time_binding_validation_stable = True
+
     def __init__(self, extent_name, capacity):
         self.extent_name = extent_name
         self.capacity = int(capacity)
@@ -10165,11 +10175,23 @@ class _GraphSpec:
             return ()
         return tuple(observations)
 
-    @staticmethod
-    def _binding_value_volatile_reason(name, value):
+    def _binding_value_volatile_reason(self, name, value):
         from taichi_forge.lang.device_extent import DeviceExtent
 
         if isinstance(value, DeviceExtent):
+            certified = any(
+                isinstance(lease, _DeviceExtentGraphContract)
+                and lease.extent_name == name
+                and lease.graph_publish_time_binding_validation_stable is True
+                for lease in self.lifetime_leases
+            )
+            if certified:
+                # Like an Ndarray, the certified extent has dynamic device
+                # contents but a stable allocation identity. Graph.bind()
+                # snapshots its owner, flattens that allocation once, and
+                # qualifies the runtime generation after the bounded contract
+                # has proved its exact capacity and optional owner identity.
+                return None
             return f"volatile_device_extent:{name}"
         if isinstance(value, ProviderOwnedNdarrayBinding):
             return f"volatile_provider_binding:{name}"
