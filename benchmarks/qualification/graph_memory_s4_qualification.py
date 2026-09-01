@@ -1313,6 +1313,61 @@ def _default_output(repo_root: Path, head: str | None) -> Path:
     )
 
 
+def _compileiq_identity_provenance(
+    all_workers: Mapping[str, Sequence[Mapping[str, Any]]],
+    recipe_source: str,
+) -> dict[str, Any]:
+    domain_fingerprints_by_scope: dict[str, list[str]] = {}
+    recipe_sets_by_scope: dict[str, list[list[str]]] = {}
+    for scope, workers in all_workers.items():
+        domain_fingerprints_by_scope[scope] = sorted(
+            {
+                str(value)
+                for worker in workers
+                if (
+                    value := worker.get("route_evidence", {})
+                    .get("compileiq", {})
+                    .get("domain_fingerprint")
+                )
+            }
+        )
+        encoded_recipe_sets = sorted(
+            {
+                json.dumps(
+                    worker.get("route_evidence", {})
+                    .get("compileiq", {})
+                    .get("recipe_ids", ()),
+                    sort_keys=True,
+                )
+                for worker in workers
+                if worker.get("route_evidence", {})
+                .get("compileiq", {})
+                .get("recipe_ids")
+            }
+        )
+        recipe_sets_by_scope[scope] = [
+            json.loads(value) for value in encoded_recipe_sets
+        ]
+
+    consistent_within_each_scope = bool(
+        recipe_source != "compileiq"
+        or all(
+            len(domain_fingerprints_by_scope.get(scope, ())) == 1
+            and len(recipe_sets_by_scope.get(scope, ())) == 1
+            for scope in all_workers
+        )
+    )
+    return {
+        "passed": consistent_within_each_scope,
+        "compileiq_identity_consistent_within_each_scope": (
+            consistent_within_each_scope
+        ),
+        "compileiq_identity_may_differ_between_semantic_scopes": True,
+        "compileiq_domain_fingerprint_values_by_scope": (domain_fingerprints_by_scope),
+        "compileiq_recipe_set_values_by_scope": recipe_sets_by_scope,
+    }
+
+
 def _parent(args: Any) -> int:
     policy_errors = qualification_policy_errors(args)
     if policy_errors:
@@ -1447,58 +1502,22 @@ def _parent(args: Any) -> int:
             if worker.get("provenance", {}).get("native_core_sha256")
         }
     )
-    compileiq_domain_fingerprints = sorted(
-        {
-            worker.get("route_evidence", {})
-            .get("compileiq", {})
-            .get("domain_fingerprint")
-            for workers in all_workers.values()
-            for worker in workers
-            if worker.get("route_evidence", {})
-            .get("compileiq", {})
-            .get("domain_fingerprint")
-        }
-    )
-    compileiq_recipe_sets = sorted(
-        {
-            json.dumps(
-                worker.get("route_evidence", {})
-                .get("compileiq", {})
-                .get("recipe_ids", ()),
-                sort_keys=True,
-            )
-            for workers in all_workers.values()
-            for worker in workers
-            if worker.get("route_evidence", {})
-            .get("compileiq", {})
-            .get("recipe_ids")
-        }
-    )
-    compileiq_identity_consistent = bool(
-        args.recipe_source != "compileiq"
-        or (
-            len(compileiq_domain_fingerprints) == 1
-            and len(compileiq_recipe_sets) == 1
-        )
+    compileiq_identity = _compileiq_identity_provenance(
+        all_workers,
+        args.recipe_source,
     )
     provenance = {
         "passed": bool(
             repository["passed"]
             and worker_provenance_passed
             and len(core_hashes) == 1
-            and compileiq_identity_consistent
+            and compileiq_identity["passed"]
         ),
         "repository": repository,
         "all_workers_match_source_and_native": worker_provenance_passed,
         "native_core_sha256_values": core_hashes,
         "one_native_binary_across_workers": len(core_hashes) == 1,
-        "compileiq_identity_consistent_across_workers": (
-            compileiq_identity_consistent
-        ),
-        "compileiq_domain_fingerprint_values": compileiq_domain_fingerprints,
-        "compileiq_recipe_set_values": [
-            json.loads(value) for value in compileiq_recipe_sets
-        ],
+        **compileiq_identity,
     }
     noise = {
         "passed": bool(not pre_conflicts and not post_conflicts),

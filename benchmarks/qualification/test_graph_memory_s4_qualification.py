@@ -13,6 +13,7 @@ from benchmarks.qualification.graph_memory_s4_qualification import (
     SCHEMA,
     _aggregate_scope,
     _balanced_orders,
+    _compileiq_identity_provenance,
     _normalize_allow_dirty_paths,
     _plateau_comparison,
     _report_policy_errors,
@@ -101,6 +102,16 @@ def _worker(index=0, *, scope="radius1", ratio=0.9):
 
 def _scope_workers(scope="radius1", ratio=0.9):
     return [_worker(index, scope=scope, ratio=ratio) for index in range(10)]
+
+
+def _compileiq_scope_workers(scope, domain_fingerprint, recipe_ids):
+    workers = _scope_workers(scope)
+    for worker in workers:
+        worker["route_evidence"]["compileiq"] = {
+            "domain_fingerprint": domain_fingerprint,
+            "recipe_ids": list(recipe_ids),
+        }
+    return workers
 
 
 def test_formal_policy_is_exact_and_orders_are_balanced():
@@ -226,6 +237,35 @@ def test_report_policy_allows_one_negative_scope_but_never_raw_admission():
 
     report["policy"]["raw_dict_admission_eligible"] = True
     assert any("raw-dict" in error for error in _report_policy_errors(report))
+
+
+def test_compileiq_identity_is_stable_within_not_between_semantic_scopes():
+    workers = {
+        "radius1": _compileiq_scope_workers(
+            "radius1", "domain-radius1", ("direct-radius1", "staged-radius1")
+        ),
+        "radius4": _compileiq_scope_workers(
+            "radius4", "domain-radius4", ("direct-radius4", "staged-radius4")
+        ),
+    }
+    provenance = _compileiq_identity_provenance(workers, "compileiq")
+    assert provenance["passed"]
+    assert provenance["compileiq_identity_consistent_within_each_scope"]
+    assert provenance["compileiq_domain_fingerprint_values_by_scope"] == {
+        "radius1": ["domain-radius1"],
+        "radius4": ["domain-radius4"],
+    }
+
+    workers["radius4"][-1]["route_evidence"]["compileiq"] = {
+        "domain_fingerprint": "unstable-radius4",
+        "recipe_ids": ["direct-radius4", "staged-radius4"],
+    }
+    rejected = _compileiq_identity_provenance(workers, "compileiq")
+    assert not rejected["passed"]
+    assert rejected["compileiq_domain_fingerprint_values_by_scope"]["radius4"] == [
+        "domain-radius4",
+        "unstable-radius4",
+    ]
 
 
 def test_dirty_allowlist_normalization_is_explicit_and_repository_relative():
