@@ -27,6 +27,12 @@ from .fragments import (
     GraphFragmentTask,
     GraphRecipeFragment,
 )
+from .families import (
+    GraphExistingFamilyProvider,
+    GraphFamilySelection,
+    assemble_existing_family_recipe,
+)
+
 from .materialize import (
     GraphMaterializationContext,
     GraphMaterializationError,
@@ -36,6 +42,7 @@ from .materialize import (
     GraphMaterializedFragment,
     GraphMaterializedRecipe,
 )
+
 from .physical import (
     CompiledGraphPhysicalManifest,
     GraphPhysicalBindingManifest,
@@ -45,6 +52,7 @@ from .physical import (
     GraphPhysicalResourceManifest,
     GraphPhysicalSubmissionManifest,
     GraphPhysicalTaskManifest,
+    observe_graph_physical_manifest,
 )
 
 __all__ = [
@@ -60,6 +68,8 @@ __all__ = [
     "GraphFragmentResourceRequirement",
     "GraphFragmentSubmissionRequirement",
     "GraphFragmentTask",
+    "GraphExistingFamilyProvider",
+    "GraphFamilySelection",
     "GraphMaterializationContext",
     "GraphMaterializationError",
     "GraphMaterializationProduct",
@@ -82,4 +92,6 @@ __all__ = [
     "GraphRecipeFragment",
     "GraphRegionSelection",
     "GraphSemanticRegion",
+    "assemble_existing_family_recipe",
+    "observe_graph_physical_manifest",
 ]

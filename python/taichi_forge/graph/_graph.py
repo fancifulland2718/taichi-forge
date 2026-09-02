@@ -336,8 +336,16 @@ def _decode_exact_map_partition(value):
     return tuple(groups)
 
 
-def _new_runtime_graph_builder():
+def _new_runtime_graph_builder(explicit_source_groups=None):
     builder = _ti_core.GraphBuilder()
+    if explicit_source_groups is not None:
+        source_groups = tuple(tuple(group) for group in explicit_source_groups)
+        if source_groups:
+            builder._set_map_composer_max_group_size(
+                max(len(group) for group in source_groups))
+            builder._set_map_composer_allowed_groups(source_groups)
+        return builder
+
     internal_recipe = os.environ.get(_INTERNAL_MAP_FUSION_ENV)
     if internal_recipe is not None:
         internal_recipe = internal_recipe.strip().lower()
@@ -2023,7 +2031,7 @@ def _normalize_bounded_physical_grid_policy(value):
     return aliases[policy]
 
 
-def _bounded_route_request(backend, physical_grid="auto"):
+def _bounded_route_request(backend, physical_grid="auto", requested=None):
     physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
     if physical_grid == "extent":
         if backend == "cuda":
@@ -2051,7 +2059,13 @@ def _bounded_route_request(backend, physical_grid="auto"):
         }
     else:
         return "not_applicable"
-    requested = os.environ.get(env_name, default).strip().lower()
+    if requested is None:
+        requested = os.environ.get(env_name, default).strip().lower()
+    elif not isinstance(requested, str):
+        raise TypeError("bounded route request must be a string")
+    else:
+        requested = requested.strip().lower()
+
     if requested not in aliases:
         choices = "|".join(aliases)
         raise TaichiRuntimeError(
@@ -2060,10 +2074,15 @@ def _bounded_route_request(backend, physical_grid="auto"):
     return aliases[requested]
 
 
-def _cuda_bounded_update_policy():
-    requested = (
-        os.environ.get("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto").strip().lower()
-    )
+def _cuda_bounded_update_policy(requested=None):
+    if requested is None:
+        requested = os.environ.get("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY",
+                                   "auto").strip().lower()
+    elif not isinstance(requested, str):
+        raise TypeError("CUDA bounded update policy must be a string")
+    else:
+        requested = requested.strip().lower()
+
     aliases = {
         "auto": "grouped_stateful",
         "per_node": "per_node",
@@ -2099,9 +2118,20 @@ def _vulkan_bounded_packet_policy():
     return requested, aliases[requested]
 
 
-def _bounded_route(backend, ordered, physical_grid="auto"):
+def _bounded_route(
+    backend,
+    ordered,
+    physical_grid="auto",
+    *,
+    requested_route=None,
+    requested_update_policy=None,
+):
     physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
-    requested_route = _bounded_route_request(backend, physical_grid)
+    requested_route = _bounded_route_request(
+        backend,
+        physical_grid,
+        requested=requested_route,
+    )
     if backend == "vulkan":
         if requested_route == "masked_capacity":
             return BoundedDispatchCapabilities(
@@ -2174,25 +2204,25 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
     if backend == "cuda":
         update_policy = None
         if requested_route == "device_update":
-            _, update_policy = _cuda_bounded_update_policy()
+            _, update_policy = _cuda_bounded_update_policy(
+                requested_update_policy)
         cuda_capabilities = dict(
-            (
-                _ti_core.cuda_bounded_dispatch_probe()
-                if requested_route == "device_update"
-                else _ti_core.cuda_bounded_dispatch_capabilities()
-            )
-        )
+            (_ti_core.cuda_bounded_dispatch_probe()
+             if requested_route == "device_update" else
+             _ti_core.cuda_bounded_dispatch_capabilities()))
         driver_api_version = cuda_capabilities["driver_api_version"]
-        driver_version_eligible = bool(cuda_capabilities["driver_version_eligible"])
-        required_symbols_loaded = bool(cuda_capabilities["required_symbols_loaded"])
-        device_update_ptx_linked = bool(cuda_capabilities["device_update_ptx_linked"])
+        driver_version_eligible = bool(
+            cuda_capabilities["driver_version_eligible"])
+        required_symbols_loaded = bool(
+            cuda_capabilities["required_symbols_loaded"])
+        device_update_ptx_linked = bool(
+            cuda_capabilities["device_update_ptx_linked"])
         setup_probe_passed = bool(cuda_capabilities["setup_probe_passed"])
         if requested_route == "device_update":
             if not cuda_capabilities["exact_device_grid_available"]:
                 raise TaichiRuntimeError(
                     "CUDA bounded device_update is unavailable: "
-                    f"{cuda_capabilities['unavailable_reason']}"
-                )
+                    f"{cuda_capabilities['unavailable_reason']}")
             return BoundedDispatchCapabilities(
                 schema_version=5,
                 backend=backend,
@@ -2226,8 +2256,7 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
                     "CUDA loads the logical range end from DeviceExtent and "
                     "uses a saturation-capped device update only to reduce "
                     "physical launch work; the selected update policy is "
-                    f"{update_policy}"
-                ),
+                    f"{update_policy}"),
                 physical_grid_policy=physical_grid,
             )
         if requested_route == "auto" and not ordered:
@@ -2260,11 +2289,9 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
                 capacity=0,
                 block_dim=None,
                 fallback_reason="none",
-                reason=(
-                    "CUDA uses its ordinary saturation-capped grid-stride "
-                    "scheduler and loads the exact logical range end from "
-                    "DeviceExtent without host readback"
-                ),
+                reason=("CUDA uses its ordinary saturation-capped grid-stride "
+                        "scheduler and loads the exact logical range end from "
+                        "DeviceExtent without host readback"),
                 physical_grid_policy=physical_grid,
             )
         return BoundedDispatchCapabilities(
@@ -2297,14 +2324,11 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
             block_dim=None,
             fallback_reason=(
                 "forced_masked_capacity"
-                if requested_route == "masked_capacity"
-                else "ordered_segments_device_bounded_range_unavailable"
-            ),
-            reason=(
-                "CUDA uses the fixed-capacity masked route for ordered "
-                "segments or as an explicit diagnostic and performance "
-                "baseline"
-            ),
+                if requested_route == "masked_capacity" else
+                "ordered_segments_device_bounded_range_unavailable"),
+            reason=("CUDA uses the fixed-capacity masked route for ordered "
+                    "segments or as an explicit diagnostic and performance "
+                    "baseline"),
             physical_grid_policy=physical_grid,
         )
     else:
@@ -2313,9 +2337,8 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
         required_symbols_loaded = False
         device_update_ptx_linked = False
         setup_probe_passed = False
-        if requested_route == "exact_scheduler" or (
-            requested_route == "auto" and not ordered
-        ):
+        if requested_route == "exact_scheduler" or (requested_route == "auto"
+                                                    and not ordered):
             return BoundedDispatchCapabilities(
                 schema_version=5,
                 backend=backend,
@@ -2348,19 +2371,15 @@ def _bounded_route(backend, ordered, physical_grid="auto"):
                 reason=(
                     "CPU reads DeviceExtent from the Graph argument buffer "
                     "and submits only the clamped range as adaptive contiguous "
-                    "chunks independent of GPU block geometry"
-                ),
+                    "chunks independent of GPU block geometry"),
                 physical_grid_policy=physical_grid,
             )
         reason = (
             "CPU uses the cached fixed-capacity range task and masks payload "
-            "work from the extent"
-        )
-        fallback_reason = (
-            "forced_masked_capacity"
-            if requested_route == "masked_capacity"
-            else "ordered_segments_exact_cpu_scheduler_unavailable"
-        )
+            "work from the extent")
+        fallback_reason = ("forced_masked_capacity"
+                           if requested_route == "masked_capacity" else
+                           "ordered_segments_exact_cpu_scheduler_unavailable")
         range_mapping = "cpu_scheduler"
         minimum_driver_api_version = None
     return BoundedDispatchCapabilities(
@@ -2518,6 +2537,7 @@ class BoundedDispatchHandle:
         preparation_dispatches=None,
         packet_allocation_owner=True,
         capabilities=None,
+        publication_reuse=None,
     ):
         self.extent_name = extent_name
         self.offsets_name = offsets_name
@@ -2545,38 +2565,38 @@ class BoundedDispatchHandle:
         preparation_dispatches = int(preparation_dispatches)
         if preparation_dispatches < 0:
             raise ValueError("preparation dispatch count must be nonnegative")
+        if publication_reuse is None:
+            publication_reuse = (
+                "consecutive_packet"
+                if backend == "vulkan" and preparation_dispatches == 0 else
+                ("grouped_stateful" if backend == "cuda"
+                 and base.route == "adaptive_device_grid_update"
+                 and _cuda_bounded_update_policy()[1] == "grouped_stateful"
+                 else "per_consumer"))
+
+        if publication_reuse not in (
+                "consecutive_packet",
+                "grouped_stateful",
+                "per_consumer",
+        ):
+            raise ValueError("bounded publication reuse policy is invalid")
+
         self._capabilities = replace(
             base,
             capacity=self.capacity,
             block_dim=self.block_dim,
             producer_owned_launch_state=launch_state is not None,
             preparation_dispatches=preparation_dispatches,
-            publication_reuse=(
-                "consecutive_packet"
-                if backend == "vulkan" and preparation_dispatches == 0
-                else (
-                    "grouped_stateful"
-                    if backend == "cuda"
-                    and base.route == "adaptive_device_grid_update"
-                    and _cuda_bounded_update_policy()[1] == "grouped_stateful"
-                    else "per_consumer"
-                )
-            ),
-            static_admission=(
-                "conservative_saturated"
-                if backend == "cuda" and base.requested_route == "auto"
-                else "explicit_or_backend_native"
-            ),
+            publication_reuse=publication_reuse,
+            static_admission=("conservative_saturated" if backend == "cuda"
+                              and base.requested_route == "auto" else
+                              "explicit_or_backend_native"),
             static_admission_reason=(
                 "static topology does not prove sparse updater amortization"
-                if backend == "cuda" and base.requested_route == "auto"
-                else "none"
-            ),
-            physical_observation=(
-                "execution_stats_opt_in"
-                if backend == "cuda"
-                else "handle_snapshot_opt_in"
-            ),
+                if backend == "cuda" and base.requested_route == "auto" else
+                "none"),
+            physical_observation=("execution_stats_opt_in" if backend == "cuda"
+                                  else "handle_snapshot_opt_in"),
         )
 
     @property
@@ -3778,11 +3798,13 @@ def _internal_structured_control_recipe():
     return aliases[requested]
 
 
-def _cuda_structured_control_lowering(capabilities=None):
+def _cuda_structured_control_lowering(capabilities=None,
+                                      requested_recipe=None):
     """Select one stable CUDA control route for a compiled Graph node."""
 
     routes = _cuda_structured_control_routes(capabilities)
-    requested = _internal_structured_control_recipe()
+    requested = (_internal_structured_control_recipe()
+                 if requested_recipe is None else requested_recipe)
     if requested in (
         "cuda_nested_device_update",
         "cuda_nested_masked_bounded",
@@ -3817,11 +3839,12 @@ def _cuda_nested_structured_control_routes():
     )
 
 
-def _cuda_nested_structured_control_lowering():
+def _cuda_nested_structured_control_lowering(requested_recipe=None):
     """Freeze one depth-2 CUDA physical route during Graph construction."""
 
     routes = _cuda_nested_structured_control_routes()
-    requested = _internal_structured_control_recipe()
+    requested = (_internal_structured_control_recipe()
+                 if requested_recipe is None else requested_recipe)
     explicit = {
         "cuda_nested_device_update": _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
         "cuda_nested_masked_bounded": _CUDA_NESTED_MASKED_ROUTE,
@@ -5098,18 +5121,19 @@ class _CompiledCGraphNode:
     needs_runtime_args = True
 
     def __init__(
-        self,
-        compiled_graph,
-        dispatch_count,
-        runtime_arg_names=(),
-        ir_node=None,
-        recording_dispatches=(),
-        lifetime_leases=(),
-        source_native_count=0,
-        region_kind="cgraph",
-        fixed_runtime_args=None,
-        temporary_actions=(),
-        native_action_manifests=(),
+            self,
+            compiled_graph,
+            dispatch_count,
+            runtime_arg_names=(),
+            ir_node=None,
+            recording_dispatches=(),
+            lifetime_leases=(),
+            source_native_count=0,
+            region_kind="cgraph",
+            fixed_runtime_args=None,
+            temporary_actions=(),
+            native_action_manifests=(),
+            recipe_operations=(),
     ):
         self.compiled_graph = compiled_graph
         self.dispatch_count = dispatch_count
@@ -5131,6 +5155,8 @@ class _CompiledCGraphNode:
         )
         self.temporary_actions = tuple(temporary_actions)
         self.native_action_manifests = tuple(native_action_manifests)
+        self.recipe_operations = tuple(recipe_operations)
+
         if not all(
             isinstance(manifest, NativeActionManifest)
             for manifest in self.native_action_manifests
@@ -5658,7 +5684,7 @@ def _vulkan_compound_strategy_codes(chunk_count, first_chunk_strategy):
     return (first,) + (4,) * (chunk_count - 1)
 
 
-def _while_upgrade_status(arch, mode):
+def _while_upgrade_status(arch, mode, requested_recipe=None):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
             "Graph while lowering_mode must be auto, portable, or " "native_required"
@@ -5674,7 +5700,10 @@ def _while_upgrade_status(arch, mode):
             )
         return False, "not_gpu_structured_runtime"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
-    lowering = _cuda_structured_control_lowering(capabilities)
+    lowering = _cuda_structured_control_lowering(
+        capabilities,
+        requested_recipe=requested_recipe,
+    )
     if lowering is not None:
         return True, (
             "eligible"
@@ -5692,7 +5721,7 @@ def _while_upgrade_status(arch, mode):
     return False, reason
 
 
-def _cuda_branch_upgrade_status(arch, mode, kind):
+def _cuda_branch_upgrade_status(arch, mode, kind, requested_recipe=None):
     if mode not in ("auto", "portable", "native_required"):
         raise TaichiRuntimeError(
             f"Graph {kind} lowering_mode must be auto, portable, or " "native_required"
@@ -5704,7 +5733,10 @@ def _cuda_branch_upgrade_status(arch, mode, kind):
             raise TaichiRuntimeError(f"Graph {kind} native_required mode needs CUDA")
         return False, "not_cuda"
     capabilities = dict(_ti_core.cuda_conditional_graph_capabilities())
-    lowering = _cuda_structured_control_lowering(capabilities)
+    lowering = _cuda_structured_control_lowering(
+        capabilities,
+        requested_recipe=requested_recipe,
+    )
     if lowering is not None:
         return True, (
             "eligible"
@@ -5743,7 +5775,7 @@ def _compile_plain_sequential_runtime_node(
             raise TaichiRuntimeError(
                 "Structured Graph region kinds must match its Sequential values"
             )
-    builder = _new_runtime_graph_builder()
+    builder = _new_runtime_graph_builder(())
     ir_nodes = []
     dispatch_count = 0
     runtime_arg_names = set()
@@ -5834,6 +5866,10 @@ class _CompiledSequentialRegionNode:
             )
         self.name = name
         self.ir_node = ir_node
+        self.definition_sequence_snapshots = tuple(
+            _GraphSequentialRecipeSnapshot(sequence)
+            for sequence in definition_sequences)
+
         self.definition_children = tuple(
             _sequence_structured_nodes(sequence) for sequence in definition_sequences
         )
@@ -6322,6 +6358,7 @@ class _CompiledWhileGraphNode:
         masked_execution,
         lowering_mode,
         name,
+        _control_recipe=None,
     ):
         if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
             raise TaichiRuntimeError(
@@ -6512,8 +6549,8 @@ class _CompiledWhileGraphNode:
                 ) = nested
                 if self._cuda_nested is not None:
                     self._cuda_nested_control_lowering = (
-                        _cuda_nested_structured_control_lowering()
-                    )
+                        _cuda_nested_structured_control_lowering(
+                            _control_recipe))
         elif self._has_nested_control:
             self._vulkan_nested_reason = "outer_portable_lowering_requested"
             self._cuda_nested_reason = "outer_portable_lowering_requested"
@@ -6585,11 +6622,14 @@ class _CompiledWhileGraphNode:
         self._native_jit_cache = _ti_core.CompiledGraphJITCache()
         self._vulkan_chunk_limits = {}
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _while_upgrade_status(arch, lowering_mode)
-        )
-        self._cuda_control_lowering = (
-            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
-        )
+            _while_upgrade_status(
+                arch,
+                lowering_mode,
+                requested_recipe=_control_recipe,
+            ))
+        self._cuda_control_lowering = (_cuda_structured_control_lowering(
+            requested_recipe=_control_recipe)
+                                       if arch == _ti_core.Arch.cuda else None)
         if self._has_nested_control:
             nested_compiled = (
                 self._vulkan_nested is not None or self._cuda_nested is not None
@@ -7775,6 +7815,7 @@ class _CompiledIfGraphNode:
         control_inputs,
         lowering_mode,
         name,
+        _control_recipe=None,
     ):
         if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
             raise TaichiRuntimeError(
@@ -7858,11 +7899,15 @@ class _CompiledIfGraphNode:
         )
         arch = impl.current_cfg().arch
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _cuda_branch_upgrade_status(arch, lowering_mode, "if")
-        )
-        self._cuda_control_lowering = (
-            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
-        )
+            _cuda_branch_upgrade_status(
+                arch,
+                lowering_mode,
+                "if",
+                requested_recipe=_control_recipe,
+            ))
+        self._cuda_control_lowering = (_cuda_structured_control_lowering(
+            requested_recipe=_control_recipe)
+                                       if arch == _ti_core.Arch.cuda else None)
         if self._has_nested_control:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "nested_structured_portable_exact"
@@ -8178,6 +8223,7 @@ class _CompiledSwitchGraphNode:
         control_inputs,
         lowering_mode,
         name,
+        _control_recipe=None,
     ):
         if not isinstance(condition, Sequential) or condition._dispatch_count == 0:
             raise TaichiRuntimeError(
@@ -8272,11 +8318,15 @@ class _CompiledSwitchGraphNode:
         self._native_default_branch = -1 if default_region is None else len(branches)
         arch = impl.current_cfg().arch
         self._native_upgrade_eligible, self._native_upgrade_reason = (
-            _cuda_branch_upgrade_status(arch, lowering_mode, "switch")
-        )
-        self._cuda_control_lowering = (
-            _cuda_structured_control_lowering() if arch == _ti_core.Arch.cuda else None
-        )
+            _cuda_branch_upgrade_status(
+                arch,
+                lowering_mode,
+                "switch",
+                requested_recipe=_control_recipe,
+            ))
+        self._cuda_control_lowering = (_cuda_structured_control_lowering(
+            requested_recipe=_control_recipe)
+                                       if arch == _ti_core.Arch.cuda else None)
         if self._has_nested_control:
             self._native_upgrade_eligible = False
             self._native_upgrade_reason = "nested_structured_portable_exact"
@@ -9003,6 +9053,21 @@ def _merge_derived_runtime_arg_names(nodes):
     )
 
 
+def _runtime_node_physical_plan_id(node):
+    controls = ((node, ) if _is_structured_control_node(node) else tuple(
+        getattr(node, "control_nodes", ())))
+    routes = []
+    for control in controls:
+        route = getattr(control, "_cuda_nested_control_lowering", None)
+        if not route:
+            route = getattr(control, "_cuda_control_lowering", None)
+        if route:
+            routes.append((control.region_path, route))
+    if not routes:
+        return ""
+    return "structured-control:" + ";".join(f"{path}={route}"
+                                            for path, route in routes)
+
 def _graph_pipeline_definition(nodes):
     stages = []
     publication_epochs = {}
@@ -9011,8 +9076,7 @@ def _graph_pipeline_definition(nodes):
         source_native_count = int(getattr(node, "source_native_count", 0))
         if source_native_count != len(manifests):
             raise TaichiRuntimeError(
-                "Graph pipeline native count must match its action manifests"
-            )
+                "Graph pipeline native count must match its action manifests")
         ir_node = node.ir_node
         if isinstance(node, _CompiledWhileGraphNode):
             kind = "while"
@@ -9028,44 +9092,54 @@ def _graph_pipeline_definition(nodes):
             kind = "observation"
         else:
             kind = str(getattr(ir_node, "kind", type(node).__name__))
-        path_id = (
-            str(node.region_path)
-            if _is_structured_control_node(node)
-            else f"root/{index}"
-        )
-        name = str(getattr(node, "name", getattr(ir_node, "name", f"stage_{index}")))
+        path_id = (str(node.region_path)
+                   if _is_structured_control_node(node) else f"root/{index}")
+        name = str(
+            getattr(node, "name", getattr(ir_node, "name", f"stage_{index}")))
         dispatch_count = int(getattr(node, "dispatch_count", 0))
         tasks = _pipeline_task_manifests(node)
-        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(node)
+        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(
+            node)
         bounded_dispatches = _pipeline_bounded_dispatches_with_publications(
-            node, tasks, dispatch_count, publication_epochs
-        )
+            node, tasks, dispatch_count, publication_epochs)
         if dispatch_count == 0:
             _advance_publication_epochs(ir_node, publication_epochs)
-        stages.append(
-            {
-                "stage_index": index,
-                "path_id": path_id,
-                "name": name,
-                "kind": kind,
-                "region_kind": str(getattr(node, "region_kind", kind)),
-                "dispatch_count": dispatch_count,
-                "physical_dispatch_count": int(
-                    getattr(node, "physical_dispatch_count", dispatch_count)
-                ),
-                "runtime_arg_names": tuple(
-                    sorted(getattr(node, "runtime_arg_names", ()))
-                ),
-                "source_native_count": source_native_count,
-                "native_actions": manifests,
-                "task_mapping_status": task_mapping_status,
-                "bounded_mapping_status": bounded_mapping_status,
-                "tasks": tasks,
-                "bounded_dispatches": bounded_dispatches,
-                "synchronization": _ir_contains_flag(ir_node, "synchronization"),
-                "opaque": _ir_contains_flag(ir_node, "opaque"),
-            }
-        )
+        stages.append({
+            "stage_index":
+            index,
+            "path_id":
+            path_id,
+            "name":
+            name,
+            "kind":
+            kind,
+            "region_kind":
+            str(getattr(node, "region_kind", kind)),
+            "physical_plan_id":
+            _runtime_node_physical_plan_id(node),
+            "dispatch_count":
+            dispatch_count,
+            "physical_dispatch_count":
+            int(getattr(node, "physical_dispatch_count", dispatch_count)),
+            "runtime_arg_names":
+            tuple(sorted(getattr(node, "runtime_arg_names", ()))),
+            "source_native_count":
+            source_native_count,
+            "native_actions":
+            manifests,
+            "task_mapping_status":
+            task_mapping_status,
+            "bounded_mapping_status":
+            bounded_mapping_status,
+            "tasks":
+            tasks,
+            "bounded_dispatches":
+            bounded_dispatches,
+            "synchronization":
+            _ir_contains_flag(ir_node, "synchronization"),
+            "opaque":
+            _ir_contains_flag(ir_node, "opaque"),
+        })
     return tuple(stages)
 
 
@@ -9949,15 +10023,181 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
     return _CUDA_NESTED_CONTROL_RECIPE_IDS, selected
 
 
+def _replay_recipe_cgraph_node(node, selections, map_source_groups):
+    if not node.recipe_operations:
+        raise TaichiRuntimeError(
+            "selected complete Graph recipe has no frozen CGraph replay source"
+        )
+    builder = GraphBuilder(
+        _capture_recipe_sources=False,
+        _explicit_map_source_groups=tuple(map_source_groups),
+    )
+    for operation in node.recipe_operations:
+        kind = operation[0]
+        if kind == "dispatch":
+            _, kernel_cpp, args, label, source = operation
+            contracts = ()
+            layout_requirements = ()
+            if source is not None:
+                selected = selections.get(
+                    ("graph_memory", source._recipe_source_key))
+                if selected is not None:
+                    kernel_cpp, contracts, layout_requirements = source.materialize(
+                        selected.choice_id,
+                        record_selection=False,
+                    )
+            builder._record_dispatch(kernel_cpp, list(args), label)
+            if contracts or layout_requirements:
+                builder._pending_ir_nodes[-1] = replace(
+                    builder._pending_ir_nodes[-1],
+                    memory_disjoint_pairs=contracts,
+                    memory_layout_requirements=layout_requirements,
+                )
+            continue
+        if kind == "sequential":
+            builder.append(operation[1].thaw())
+            continue
+        if kind == "bounded":
+            selected = selections.get(
+                ("bounded_execution", "bounded:complete-scope"))
+            if selected is None:
+                raise TaichiRuntimeError(
+                    "bounded CGraph replay requires an explicit complete recipe"
+                )
+            operation[1].materialize(builder, selected.materialization_choice)
+            continue
+        if kind == "graph_reduction":
+            _, source, label = operation
+            selected = selections.get(
+                ("graph_reduction", source._recipe_source_key))
+            source.materialize(
+                builder,
+                None if selected is None else selected.choice_id,
+                label=label,
+                record_selection=False,
+            )
+            continue
+        raise TaichiRuntimeError(
+            f"unknown frozen Graph recipe operation {kind!r}")
+    builder._flush_graph_builder()
+    if len(builder._nodes) != 1 or not isinstance(builder._nodes[0],
+                                                  _CompiledCGraphNode):
+        raise TaichiRuntimeError(
+            "complete Graph CGraph replay did not produce one physical segment"
+        )
+    return builder._nodes[0]
+
+def _operation_has_selection(operation, selections):
+    kind = operation[0]
+    if kind == "dispatch" and operation[4] is not None:
+        source = operation[4]
+        return ("graph_memory", source._recipe_source_key) in selections
+    if kind == "bounded":
+        return ("bounded_execution", "bounded:complete-scope") in selections
+    if kind == "graph_reduction":
+        source = operation[1]
+        return ("graph_reduction", source._recipe_source_key) in selections
+    return False
+
+def _dispatch_leaf_count(node):
+    if isinstance(node, DispatchNode):
+        return 1
+    return sum(_dispatch_leaf_count(child) for child in node.children)
+
+def _clone_control_recipe_runtime_node(node, control_recipe):
+    if _is_structured_control_node(node):
+        return _clone_structured_recipe_node(node, control_recipe)
+    if isinstance(node, _CompiledSequentialRegionNode):
+        sequences = tuple(
+            _clone_recipe_sequential(sequence, control_recipe)
+            for sequence in node.definition_sequence_snapshots)
+        if not sequences:
+            raise TaichiRuntimeError(
+                "structured sequential recipe has no frozen definition source")
+        return _compile_sequential_runtime_node(
+            sequences,
+            name=node.name,
+            region_kind=node.region_kind,
+        )
+    raise TaichiRuntimeError("unknown structured-control recipe container")
+
+def _clone_structured_recipe_node(node, control_recipe):
+    regions = {
+        role: _clone_recipe_sequential(region, control_recipe)
+        for role, region in node._definition_regions
+    }
+    if isinstance(node, _CompiledWhileGraphNode):
+        return _CompiledWhileGraphNode(
+            regions["condition"],
+            regions["body"],
+            predicate=node.predicate,
+            control_inputs=node.control_inputs,
+            carried_state=node.carried_state,
+            max_iterations=node.max_iterations,
+            counter=node.counter,
+            status=node.status,
+            chunk_size=node.chunk_limit,
+            vulkan_first_chunk_strategy=node.vulkan_first_chunk_strategy,
+            masked_execution=node.masked_execution,
+            lowering_mode=node.lowering_mode,
+            name=node.name,
+            _control_recipe=control_recipe,
+        )
+    if isinstance(node, _CompiledIfGraphNode):
+        return _CompiledIfGraphNode(
+            regions["condition"],
+            regions["then"],
+            regions.get("else"),
+            predicate=node.predicate,
+            control_inputs=node.control_inputs,
+            lowering_mode=node.lowering_mode,
+            name=node.name,
+            _control_recipe=control_recipe,
+        )
+    if isinstance(node, _CompiledSwitchGraphNode):
+        branches = tuple(region for role, region in regions.items()
+                         if role.startswith("case_"))
+        return _CompiledSwitchGraphNode(
+            regions["condition"],
+            branches,
+            regions.get("default"),
+            selector=node.selector,
+            control_inputs=node.control_inputs,
+            lowering_mode=node.lowering_mode,
+            name=node.name,
+            _control_recipe=control_recipe,
+        )
+    raise TaichiRuntimeError("unknown structured-control recipe source")
+
+def _clone_recipe_sequential(sequence, control_recipe):
+    clone = (sequence.thaw()
+             if isinstance(sequence, _GraphSequentialRecipeSnapshot) else
+             _GraphSequentialRecipeSnapshot(sequence).thaw())
+    for index, item in enumerate(tuple(clone._items)):
+        if item[0] != "structured":
+            continue
+        child = _clone_structured_recipe_node(item[1], control_recipe)
+        clone._items[index] = ("structured", child)
+        clone._ir_nodes[index] = child.ir_node
+    return clone
+
+_CONTROL_RECIPE_ROUTES = {
+    _CUDA_CONDITIONAL_CONTROL_RECIPE_ID: "cuda_conditional_graph",
+    _CUDA_MASKED_CONTROL_RECIPE_ID: "cuda_masked_bounded_graph",
+    _CUDA_NESTED_DEVICE_UPDATE_CONTROL_RECIPE_ID: "cuda_nested_device_update",
+    _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID: "cuda_nested_masked_bounded",
+}
+
 class _GraphSpec:
     def __init__(
-        self,
-        nodes,
-        aot_graph_builder=None,
-        aot_compiled_graph=None,
-        graph_memory_sources=(),
-        graph_reduction_sources=(),
-        graph_native_algorithm_sources=(),
+            self,
+            nodes,
+            aot_graph_builder=None,
+            aot_compiled_graph=None,
+            graph_memory_sources=(),
+            graph_bounded_sources=(),
+            graph_reduction_sources=(),
+            graph_native_algorithm_sources=(),
     ):
         source_nodes = tuple(nodes)
         structured_control_nodes = _prepare_structured_definition_tree(source_nodes)
@@ -10013,6 +10253,10 @@ class _GraphSpec:
                 backend,
             )
         )
+        self.control_recipe_ids = tuple(control_recipe_ids)
+
+        self.selected_control_recipe_id = selected_control_recipe_id
+
         self.executable_optimization_space = _build_executable_optimization_space(
             self.pre_optimization_ir_root,
             self.fusion_plan,
@@ -10021,6 +10265,8 @@ class _GraphSpec:
             selected_control_recipe_id=selected_control_recipe_id,
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
+        self._graph_bounded_sources = tuple(graph_bounded_sources)
+
         self._graph_reduction_sources = tuple(graph_reduction_sources)
         self._graph_native_algorithm_sources = tuple(
             graph_native_algorithm_sources
@@ -10296,6 +10542,158 @@ class _GraphSpec:
                 }
             )
         return tuple(sources)
+
+    def materialize_complete_recipe(
+        self,
+        definition,
+        recipe,
+        selections,
+        *,
+        workspace_lanes,
+        workspace_saturation,
+    ):
+        """Build one explicit whole-Graph variant from frozen family sources."""
+
+        selection_by_source = {
+            (selection.family, selection.source_key): selection
+            for selection in selections
+        }
+        if len(selection_by_source) != len(selections):
+            raise TaichiRuntimeError(
+                "complete Graph recipe selects one family source more than once"
+            )
+        supported = {
+            "map_fusion",
+            "graph_memory",
+            "bounded_execution",
+            "structured_control",
+            "graph_reduction",
+            "native_algorithm",
+        }
+        unknown = {selection.family
+                   for selection in selections}.difference(supported)
+        if unknown:
+            raise TaichiRuntimeError(
+                "complete Graph recipe contains unsupported migrated families: "
+                + ", ".join(sorted(unknown)))
+
+        map_groups = []
+        for selection in selections:
+            if selection.family != "map_fusion":
+                continue
+            prefix = "dispatches:"
+            if not selection.source_key.startswith(prefix):
+                raise TaichiRuntimeError(
+                    "map-fusion fragment has no source partition")
+            try:
+                group = tuple(
+                    int(value)
+                    for value in selection.source_key[len(prefix):].split(","))
+            except ValueError as error:
+                raise TaichiRuntimeError(
+                    "map-fusion fragment source partition is invalid"
+                ) from error
+            map_groups.append(group)
+
+        control_selection = next(
+            (selection for selection in selections
+             if selection.family == "structured_control"),
+            None,
+        )
+        control_recipe = None
+        if control_selection is not None:
+            try:
+                control_recipe = _CONTROL_RECIPE_ROUTES[
+                    control_selection.choice_id]
+            except KeyError as error:
+                raise TaichiRuntimeError(
+                    "structured-control fragment recipe is unknown") from error
+
+        native_selections = {
+            selection.source_key: selection
+            for selection in selections
+            if selection.family == "native_algorithm"
+        }
+        rebuilt_native_nodes = {}
+        for source in self._graph_native_algorithm_sources:
+            selected = native_selections.get(source._recipe_source_key)
+            if selected is None:
+                continue
+            builder = GraphBuilder(
+                _capture_recipe_sources=False,
+                _explicit_map_source_groups=(),
+            )
+            source.materialize(
+                builder,
+                selected.choice_id,
+                record_selection=False,
+            )
+            builder._flush_graph_builder()
+            if len(builder._nodes) != 1:
+                raise TaichiRuntimeError(
+                    "native-algorithm recipe did not materialize one Graph node"
+                )
+            rebuilt_native_nodes[source._recipe_node_index] = builder._nodes[0]
+
+        nodes = []
+        dispatch_offset = 0
+        consumed_map_groups = set()
+        for node_index, node in enumerate(self.nodes):
+            if isinstance(node, _CompiledCGraphNode):
+                dispatch_count = _dispatch_leaf_count(node.ir_node)
+                local_groups = []
+                for group_index, group in enumerate(map_groups):
+                    inside = all(dispatch_offset <= index < dispatch_offset +
+                                 dispatch_count for index in group)
+                    intersects = any(
+                        dispatch_offset <= index < dispatch_offset +
+                        dispatch_count for index in group)
+                    if intersects and not inside:
+                        raise TaichiRuntimeError(
+                            "map-fusion fragment crosses a materialization segment"
+                        )
+                    if inside:
+                        local_groups.append(
+                            tuple(index - dispatch_offset for index in group))
+                        consumed_map_groups.add(group_index)
+                selected_operation = any(
+                    _operation_has_selection(operation, selection_by_source)
+                    for operation in node.recipe_operations)
+                if local_groups or selected_operation:
+                    node = _replay_recipe_cgraph_node(
+                        node,
+                        selection_by_source,
+                        local_groups,
+                    )
+                dispatch_offset += dispatch_count
+            elif control_recipe is not None and (
+                    _is_structured_control_node(node)
+                    or isinstance(node, _CompiledSequentialRegionNode)):
+                node = _clone_control_recipe_runtime_node(node, control_recipe)
+            node = rebuilt_native_nodes.get(node_index, node)
+            nodes.append(node)
+
+        if len(consumed_map_groups) != len(map_groups):
+            raise TaichiRuntimeError(
+                "map-fusion fragment is outside the frozen Graph source topology"
+            )
+        variant = _GraphSpec(
+            nodes,
+            graph_memory_sources=self._graph_memory_sources,
+            graph_bounded_sources=self._graph_bounded_sources,
+            graph_reduction_sources=self._graph_reduction_sources,
+            graph_native_algorithm_sources=self.
+            _graph_native_algorithm_sources,
+        )
+        variant._definition_source_spec = self
+        variant._complete_recipe_id = recipe.recipe_id
+        variant._disable_qualified_fusion_selector = True
+        return Graph(
+            variant,
+            workspace_lanes=workspace_lanes,
+            workspace_saturation=workspace_saturation,
+            definition=definition,
+        )
 
     def compileiq_executable_optimization_space(self):
         cached = self._compileiq_executable_space_cache
@@ -12681,6 +13079,58 @@ def _graph_memory_symbolic_abi(args):
     )
 
 
+def _graph_memory_candidate_preflight(kernel_cpp, args):
+    """Reject impossible shared-stage shapes before native specialization."""
+
+    raw = impl.get_runtime().prog._kernel_gpu_semantics_snapshot(kernel_cpp)
+    metadata = raw.get("graph_metadata", {})
+    if (_backend_name(raw.get("backend", "")) != "cuda"
+            or not metadata.get("available", False)
+            or metadata.get("opaque", True) or metadata.get("blocker")):
+        return False, "candidate has no proven CUDA pre-offload effects"
+    domain = metadata.get("iteration_domain", {})
+    begin = domain.get("begin")
+    end = domain.get("end")
+    if (domain.get("kind") != "constant_range" or isinstance(begin, bool)
+            or not isinstance(begin, int) or isinstance(end, bool)
+            or not isinstance(end, int) or begin < 0 or begin >= end):
+        return False, "candidate has no exact non-empty constant range"
+
+    staged_sources = set()
+    outputs = set()
+    for effect in metadata.get("effects", ()):
+        path = tuple(effect.get("arg_id", ()))
+        if (effect.get("resource_kind") != "argument" or len(path) != 1
+                or isinstance(path[0], bool) or not isinstance(path[0], int)
+                or not 0 <= path[0] < len(args)):
+            return False, "candidate effects are not top-level symbolic arguments"
+        index = path[0]
+        symbolic = args[index]
+        if (getattr(symbolic, "tag", None) != ArgKind.NDARRAY
+                or symbolic.field_dim != 1):
+            return False, "candidate effects are not one-dimensional ndarrays"
+        footprint = effect.get("footprint", {})
+        access = effect.get("access")
+        pattern = footprint.get("pattern")
+        offsets = tuple(footprint.get("affine_offsets", ()))
+        if access == "read" and pattern == "stencil":
+            halo = tuple(tuple(axis) for axis in footprint.get("halo", ()))
+            if len(set(offsets)) < 2 and not (len(halo) == 1 and len(
+                    halo[0]) == 2 and halo[0][0] < halo[0][1]):
+                return False, "staged input has fewer than two affine offsets"
+            staged_sources.add(index)
+            continue
+        if access == "write" and pattern == "exact_pointwise" and offsets == (
+                0, ):
+            outputs.add(index)
+            continue
+        return False, "candidate effects do not form a stencil-to-pointwise route"
+    if not 1 <= len(staged_sources) <= 2:
+        return False, "candidate requires one or two proven stencil inputs"
+    if not outputs or staged_sources.intersection(outputs):
+        return False, "candidate requires distinct write-only outputs"
+    return True, ""
+
 def _graph_memory_recipe_manifest(
     plan,
     manifests,
@@ -12735,6 +13185,18 @@ class _GraphMemoryRecipeSource:
             return None
         if not hasattr(kernel_fn, "with_launch_policy"):
             return None
+        ndarray_names = {
+            arg.name
+            for arg in args if getattr(arg, "tag", None) == ArgKind.NDARRAY
+        }
+
+        if len(ndarray_names) < 2:
+            # A shared-staged recipe requires at least one read-only source and
+            # one distinct write-only output. Reject the impossible shape from
+            # frozen symbolic ABI facts before asking the compiler to build a
+            # shared-memory specialization.
+            return None
+
         return cls(kernel_fn, args, label, baseline_kernel_cpp)
 
     def _prepare_definition(self):
@@ -12816,14 +13278,23 @@ class _GraphMemoryRecipeSource:
                 return self._candidate
             try:
                 self._prepare_definition()
-                self._candidate = self._build_candidate()
+                eligible, reason = _graph_memory_candidate_preflight(
+                    self.baseline_kernel_cpp,
+                    self.args,
+                )
+                if eligible:
+                    self._candidate = self._build_candidate()
+                else:
+                    self._candidate_failure = reason
+                    self._candidate = None
             except (
-                ValueError,
-                RuntimeError,
-                TaichiCompilationError,
-                TaichiRuntimeError,
+                    ValueError,
+                    RuntimeError,
+                    TaichiCompilationError,
+                    TaichiRuntimeError,
             ) as error:
-                self._candidate_failure = str(error).strip() or type(error).__name__
+                self._candidate_failure = str(error).strip() or type(
+                    error).__name__
                 self._candidate = None
             self._candidate_attempted = True
             return self._candidate
@@ -12839,7 +13310,7 @@ class _GraphMemoryRecipeSource:
             return ()
         return (self.direct_manifest, candidate[0])
 
-    def materialize(self, requested_recipe_id):
+    def materialize(self, requested_recipe_id, *, record_selection=True):
         try:
             self._prepare_definition()
         except (
@@ -12854,7 +13325,8 @@ class _GraphMemoryRecipeSource:
                 + (str(error).strip() or type(error).__name__)
             ) from None
         if requested_recipe_id == self.direct_manifest.recipe_id:
-            self.selected_recipe_id = requested_recipe_id
+            if record_selection:
+                self.selected_recipe_id = requested_recipe_id
             return self.baseline_kernel_cpp, (), ()
         candidate = self.candidate()
         if candidate is None:
@@ -12867,9 +13339,64 @@ class _GraphMemoryRecipeSource:
             raise TaichiRuntimeError(
                 "requested GraphMemory recipe is absent from this Graph definition"
             )
-        self.selected_recipe_id = requested_recipe_id
+        if record_selection:
+            self.selected_recipe_id = requested_recipe_id
+
         return kernel_cpp, contracts, layout_requirements
 
+
+class _GraphBoundedRecipeSource:
+    """Replayable device-bounded source with explicit physical selection."""
+    def __init__(
+        self,
+        kernel_fn,
+        args,
+        *,
+        extent,
+        capacity,
+        block_dim,
+        block_mode,
+        launch_state,
+        template_args,
+        label,
+    ):
+        self.kernel_fn = kernel_fn
+        self.args = tuple(args)
+        self.extent = extent
+        self.capacity = int(capacity)
+        self.block_dim = block_dim
+        self.block_mode = block_mode
+        self.launch_state = launch_state
+        self.template_args = template_args
+        self.label = label
+
+    def materialize(self, builder, strategy):
+        try:
+            route, update_policy = {
+                "logical_exact": ("auto", "auto"),
+                "adaptive_per_node": ("device_update", "per_node"),
+                "adaptive_grouped": ("device_update", "grouped_stateful"),
+                "masked_capacity": ("masked_capacity", "auto"),
+            }[strategy]
+        except KeyError as error:
+            raise TaichiRuntimeError(
+                f"unknown complete Graph bounded strategy {strategy!r}"
+            ) from error
+        return builder.dispatch_bounded(
+            self.kernel_fn,
+            *self.args,
+            extent=self.extent,
+            capacity=self.capacity,
+            block_dim=self.block_dim,
+            block_mode=self.block_mode,
+            physical_grid="auto",
+            launch_state=self.launch_state,
+            template_args=self.template_args,
+            label=self.label,
+            _recipe_route=route,
+            _recipe_update_policy=update_policy,
+            _register_recipe_source=False,
+        )
 
 def _require_bounded_symbolic_ndarray(value, role, dtype):
     if getattr(value, "tag", None) != ArgKind.NDARRAY:
@@ -13163,6 +13690,51 @@ class _AOTSequentialSnapshot:
         for (kernel_cpp, args), label in zip(self._dispatches, self._dispatch_labels):
             builder.dispatch(kernel_cpp, args, label)
 
+
+class _GraphSequentialRecipeSnapshot:
+    """Frozen replay input for one non-structured Sequential append."""
+    def __init__(self, sequence):
+        self._items = tuple(sequence._items)
+        self._ir_nodes = tuple(sequence._ir_nodes)
+        self._dispatches = tuple((kernel_cpp, tuple(args))
+                                 for kernel_cpp, args in sequence._dispatches)
+        self._dispatch_labels = tuple(sequence._dispatch_labels)
+        self._runtime_arg_names = frozenset(sequence._runtime_arg_names)
+        self._recording_runtime_arg_names = frozenset(
+            sequence._recording_runtime_arg_names)
+        self._derived_runtime_arg_names = frozenset(
+            sequence._derived_runtime_arg_names)
+        self._fixed_runtime_args = dict(sequence._fixed_runtime_args)
+        self._lifetime_leases = tuple(sequence._lifetime_leases)
+        self._source_native_count = int(sequence._source_native_count)
+        self._native_action_manifests = tuple(
+            sequence._native_action_manifests)
+        self._temporary_actions = tuple(sequence._temporary_actions)
+        self._dispatch_count = int(sequence._dispatch_count)
+        self._has_indirect_dispatch = bool(sequence._has_indirect_dispatch)
+        self._structured_depth = int(sequence._structured_depth)
+
+    def thaw(self):
+        sequence = Sequential()
+        sequence._items = list(self._items)
+        sequence._ir_nodes = list(self._ir_nodes)
+        sequence._dispatches = [(kernel_cpp, list(args))
+                                for kernel_cpp, args in self._dispatches]
+        sequence._dispatch_labels = list(self._dispatch_labels)
+        sequence._runtime_arg_names = set(self._runtime_arg_names)
+        sequence._recording_runtime_arg_names = set(
+            self._recording_runtime_arg_names)
+        sequence._derived_runtime_arg_names = set(
+            self._derived_runtime_arg_names)
+        sequence._fixed_runtime_args = dict(self._fixed_runtime_args)
+        sequence._lifetime_leases = list(self._lifetime_leases)
+        sequence._source_native_count = self._source_native_count
+        sequence._native_action_manifests = list(self._native_action_manifests)
+        sequence._temporary_actions = list(self._temporary_actions)
+        sequence._dispatch_count = self._dispatch_count
+        sequence._has_indirect_dispatch = self._has_indirect_dispatch
+        sequence._structured_depth = self._structured_depth
+        return sequence
 
 class Sequential:
     def __init__(self):
@@ -13712,10 +14284,22 @@ class Sequential:
 
 
 class GraphBuilder:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        _capture_recipe_sources=True,
+        _explicit_map_source_groups=None,
+    ):
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._aot_plan_cursor = 0
-        self._runtime_graph_builder = _new_runtime_graph_builder()
+        self._explicit_map_source_groups = _explicit_map_source_groups
+
+        self._runtime_graph_builder = _new_runtime_graph_builder(
+            _explicit_map_source_groups)
+        self._capture_recipe_sources = bool(_capture_recipe_sources)
+
+        self._runtime_graph_recipe_operations = []
+
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []
@@ -13731,6 +14315,8 @@ class GraphBuilder:
         self._active_bounded_publication = None
         self._declared_private_bindings = {}
         self._graph_memory_sources = []
+        self._graph_bounded_sources = []
+
         self._graph_reduction_sources = []
         self._graph_native_algorithm_sources = []
 
@@ -13781,7 +14367,9 @@ class GraphBuilder:
 
     def dispatch(self, kernel_fn, *args, template_args=None, label=None):
         label = _normalize_dispatch_label(label)
-        kernel_cpp = gen_cpp_kernel(kernel_fn, args, template_args=template_args)
+        kernel_cpp = gen_cpp_kernel(kernel_fn,
+                                    args,
+                                    template_args=template_args)
         unzipped_args = flatten_args(args)
         source = _GraphMemoryRecipeSource.try_create(
             kernel_fn,
@@ -13790,25 +14378,30 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
-        requested_memory_recipe = os.environ.get(_INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
+        requested_memory_recipe = os.environ.get(
+            _INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
         if requested_memory_recipe is not None:
             requested_memory_recipe = requested_memory_recipe.strip()
             if not requested_memory_recipe:
                 raise TaichiRuntimeError(
                     f"{_INTERNAL_GRAPH_MEMORY_RECIPE_ENV} must be a complete "
-                    "GraphMemory recipe ID"
-                )
+                    "GraphMemory recipe ID")
             if source is None:
                 raise TaichiRuntimeError(
                     "requested GraphMemory recipe has no eligible ordinary "
-                    "CUDA Graph dispatch source"
-                )
+                    "CUDA Graph dispatch source")
             kernel_cpp, contracts, layout_requirements = source.materialize(
-                requested_memory_recipe
-            )
+                requested_memory_recipe)
         else:
             contracts, layout_requirements = (), ()
-        self._record_dispatch(kernel_cpp, unzipped_args, label)
+        if source is not None:
+            source._recipe_source_key = f"memory:{len(self._graph_memory_sources)}"
+        self._record_dispatch(
+            kernel_cpp,
+            unzipped_args,
+            label,
+            _recipe_source=source,
+        )
         if contracts or layout_requirements:
             self._pending_ir_nodes[-1] = replace(
                 self._pending_ir_nodes[-1],
@@ -13851,6 +14444,8 @@ class GraphBuilder:
                     f"{_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV} must be a complete "
                     "Graph reduction recipe ID"
                 )
+        operation_start = len(self._runtime_graph_recipe_operations)
+
         source = append_typed_graph_reduction(
             self,
             values,
@@ -13862,6 +14457,14 @@ class GraphBuilder:
             label=label,
             requested_recipe_id=requested_recipe,
         )
+        source._recipe_source_key = (
+            f"graph_reduction:{len(self._graph_reduction_sources)}")
+
+        if self._capture_recipe_sources:
+            del self._runtime_graph_recipe_operations[operation_start:]
+            self._runtime_graph_recipe_operations.append(
+                ("graph_reduction", source, label))
+
         self._graph_reduction_sources.append(source)
         return self
 
@@ -13905,6 +14508,11 @@ class GraphBuilder:
             op=op,
             requested_recipe_id=requested_recipe,
         )
+        source._recipe_source_key = (
+            f"native_algorithm:{len(self._graph_native_algorithm_sources)}")
+
+        source._recipe_node_index = len(self._nodes) - 1
+
         self._graph_native_algorithm_sources.append(source)
         return self
 
@@ -14129,6 +14737,9 @@ class GraphBuilder:
         launch_state=None,
         template_args=None,
         label=None,
+        _recipe_route=None,
+        _recipe_update_policy=None,
+        _register_recipe_source=True,
     ):
         """Append one device-count-driven bounded payload dispatch.
 
@@ -14144,6 +14755,10 @@ class GraphBuilder:
         ``'capacity'`` is the explicit fixed-grid baseline, and ``'auto'``
         keeps the backend's conservative admission policy.
         """
+
+        operation_start = len(self._runtime_graph_recipe_operations)
+
+        ir_start = len(self._pending_ir_nodes)
 
         physical_grid = _normalize_bounded_physical_grid_policy(physical_grid)
         if isinstance(capacity, bool) or not isinstance(capacity, int):
@@ -14197,11 +14812,13 @@ class GraphBuilder:
                 "launch_state; CUDA will select its qualified logical/physical "
                 "route from the DeviceExtent."
             )
-        selected_route = (
-            None
-            if count is not None
-            else _bounded_route(backend, False, physical_grid=physical_grid)
-        )
+        selected_route = (None if count is not None else _bounded_route(
+            backend,
+            False,
+            physical_grid=physical_grid,
+            requested_route=_recipe_route,
+            requested_update_policy=_recipe_update_policy,
+        ))
         exact_device_grid = bool(
             selected_route is not None and selected_route.exact_grid
         )
@@ -14213,8 +14830,8 @@ class GraphBuilder:
             cuda_bounded_range and selected_route.route == "adaptive_device_grid_update"
         )
         cuda_update_policy = (
-            _cuda_bounded_update_policy()[1] if cuda_adaptive_grid else ""
-        )
+            _cuda_bounded_update_policy(_recipe_update_policy)[1]
+            if cuda_adaptive_grid else "")
         cuda_grouped_update = cuda_update_policy == "grouped_stateful"
         specialized_range = exact_device_grid or cuda_bounded_range
         policy = self._bounded_launch_policy(block_dim, block_mode, backend)
@@ -14429,7 +15046,31 @@ class GraphBuilder:
             preparation_dispatches=preparation_dispatches,
             packet_allocation_owner=packet_allocation_owner,
             capabilities=selected_route,
+            publication_reuse=("grouped_stateful" if cuda_grouped_update else
+                               "per_consumer" if backend == "cuda" else None),
         )
+        if _register_recipe_source:
+            source = _GraphBoundedRecipeSource(
+                kernel_fn,
+                args,
+                extent=extent,
+                capacity=capacity,
+                block_dim=block_dim,
+                block_mode=block_mode,
+                launch_state=launch_state,
+                template_args=template_args,
+                label=label,
+            )
+            source._recipe_source_key = (
+                f"bounded:{len(self._graph_bounded_sources)}")
+            source._recipe_physical_dispatches = (len(self._pending_ir_nodes) -
+                                                  ir_start)
+            self._graph_bounded_sources.append(source)
+            if self._capture_recipe_sources:
+                del self._runtime_graph_recipe_operations[operation_start:]
+                self._runtime_graph_recipe_operations.append(
+                    ("bounded", source))
+
         return handle
 
     def dispatch_ordered_segments(
@@ -14594,6 +15235,7 @@ class GraphBuilder:
         kernel_cpp,
         unzipped_args,
         label="",
+        _recipe_source=None,
     ):
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
@@ -14606,6 +15248,11 @@ class GraphBuilder:
         self._pending_ir_nodes.append(
             _dispatch_ir_node(kernel_cpp, unzipped_args, dispatch_label=label)
         )
+        if self._capture_recipe_sources:
+            self._runtime_graph_recipe_operations.append(
+                ("dispatch", kernel_cpp, tuple(unzipped_args), label,
+                 _recipe_source))
+
         self._dispatch_count += 1
 
     def _record_cuda_bounded_dispatch(
@@ -14708,6 +15355,10 @@ class GraphBuilder:
         self._runtime_graph_arg_names.update(node._runtime_arg_names)
         self._dispatch_count += node._dispatch_count
         self._pending_ir_nodes.extend(node._ir_nodes)
+        if self._capture_recipe_sources:
+            self._runtime_graph_recipe_operations.append(
+                ("sequential", _GraphSequentialRecipeSnapshot(node)))
+
         return self
 
     def _ensure_runtime_graph_builder(self):
@@ -14736,10 +15387,12 @@ class GraphBuilder:
                 fixed_runtime_args=self._runtime_graph_fixed_args,
                 lifetime_leases=self._runtime_graph_lifetime_leases,
                 source_native_count=self._runtime_graph_source_native_count,
-                native_action_manifests=(self._runtime_graph_native_action_manifests),
-            )
-        )
-        self._runtime_graph_builder = _new_runtime_graph_builder()
+                native_action_manifests=(
+                    self._runtime_graph_native_action_manifests),
+                recipe_operations=self._runtime_graph_recipe_operations,
+            ))
+        self._runtime_graph_builder = _new_runtime_graph_builder(
+            self._explicit_map_source_groups)
         self._dispatch_count = 0
         self._runtime_graph_arg_names = set()
         self._runtime_graph_dispatches = []
@@ -14748,6 +15401,8 @@ class GraphBuilder:
         self._runtime_graph_lifetime_leases = []
         self._runtime_graph_source_native_count = 0
         self._runtime_graph_native_action_manifests = []
+        self._runtime_graph_recipe_operations = []
+
         self._active_bounded_publication = None
 
     def _append_native(self, node, *, prewarm=False, admission="explicit"):
@@ -14984,10 +15639,10 @@ class GraphBuilder:
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
+                graph_bounded_sources=tuple(self._graph_bounded_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
                 graph_native_algorithm_sources=tuple(
-                    self._graph_native_algorithm_sources
-                ),
+                    self._graph_native_algorithm_sources),
             )
         backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
         return GraphDefinition._from_graph_spec(
@@ -15447,16 +16102,20 @@ class Graph:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
         if definition is None:
-            backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+            backend = _backend_name(_ti_core.arch_name(
+                impl.current_cfg().arch))
             definition = GraphDefinition._from_graph_spec(
                 self._spec,
                 backend,
                 core_commit=str(_ti_core.get_commit_hash()).lower(),
             )
-        elif definition._runtime_spec is not self._spec:
+        elif definition._runtime_spec is not self._spec and getattr(
+                self._spec,
+                "_definition_source_spec",
+                None,
+        ) is not definition._runtime_spec:
             raise TaichiRuntimeError(
-                "GraphDefinition baseline spec does not match this Graph"
-            )
+                "GraphDefinition baseline spec does not match this Graph")
         self._definition = definition
         if (
             self._spec.exclusive_provider_submission
@@ -15480,11 +16139,10 @@ class Graph:
         self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
-        self._qualified_fusion_selector = (
-            _QualifiedFusionRuntimeSelector.from_environment(
-                self._spec.executable_optimization_space
-            )
-        )
+        self._qualified_fusion_selector = (None if getattr(
+            self._spec, "_disable_qualified_fusion_selector",
+            False) else _QualifiedFusionRuntimeSelector.from_environment(
+                self._spec.executable_optimization_space))
         self._instances = {}
         self._workspace_pool = self._workspace_pool_for_current_runtime()
         self._instance = self._workspace_pool.primary
@@ -16538,7 +17196,7 @@ class Graph:
 
     @property
     def _compileiq_executable_optimization_space(self):
-        """Return the lazily expanded, Forge-owned offline recipe domain."""
+        """Return the legacy V1 analysis view; new searches use recipe_catalog()."""
 
         with self._lifecycle_lock:
             self._check_runtime_valid()
@@ -16546,14 +17204,40 @@ class Graph:
                 return self._spec.executable_optimization_space
             return self._spec.compileiq_executable_optimization_space()
 
+    def _complete_recipe_family_status(self, family):
+        catalog = self.definition.recipe_catalog()
+        if any(fragment.materializer.selection.family == family
+               for fragment in catalog.fragments):
+            return "complete_recipe_domain"
+        if family == "graph_memory":
+            sources = self._spec._graph_memory_sources
+            if not sources:
+                return "not_applicable"
+            failures = tuple(source.candidate_failure for source in sources
+                             if source.candidate_failure)
+            if failures:
+                return "candidate_rejected:" + "; ".join(failures)
+            return "definition_out_of_scope"
+        if family == "graph_reduction":
+            return ("definition_out_of_scope" if
+                    self._spec._graph_reduction_sources else "not_applicable")
+        if family == "native_algorithm":
+            return ("definition_out_of_scope"
+                    if self._spec._graph_native_algorithm_sources else
+                    "not_applicable")
+        if family == "bounded_execution":
+            _, _, status = _graph_bounded_recipe_scope(
+                self._spec.pipeline_definition)
+            return status
+        raise ValueError(f"unknown complete Graph recipe family {family!r}")
+
     @property
     def _compileiq_graph_memory_status(self):
         with self._lifecycle_lock:
             self._check_runtime_valid()
             if self._workspace_lane_capacity != 1:
                 return "workspace_lane_scope_rejected"
-            self._spec.compileiq_executable_optimization_space()
-            return self._spec._compileiq_graph_memory_status
+            return self._complete_recipe_family_status("graph_memory")
 
     @property
     def _compileiq_graph_reduction_status(self):
@@ -16561,8 +17245,7 @@ class Graph:
             self._check_runtime_valid()
             if self._workspace_lane_capacity != 1:
                 return "workspace_lane_scope_rejected"
-            self._spec.compileiq_executable_optimization_space()
-            return self._spec._compileiq_graph_reduction_status
+            return self._complete_recipe_family_status("graph_reduction")
 
     @property
     def _compileiq_graph_native_algorithm_status(self):
@@ -16570,8 +17253,7 @@ class Graph:
             self._check_runtime_valid()
             if self._workspace_lane_capacity != 1:
                 return "workspace_lane_scope_rejected"
-            self._spec.compileiq_executable_optimization_space()
-            return self._spec._compileiq_graph_native_algorithm_status
+            return self._complete_recipe_family_status("native_algorithm")
 
     @property
     def _compileiq_graph_bounded_status(self):
@@ -16579,8 +17261,7 @@ class Graph:
             self._check_runtime_valid()
             if self._workspace_lane_capacity != 1:
                 return "workspace_lane_scope_rejected"
-            self._spec.compileiq_executable_optimization_space()
-            return self._spec._compileiq_graph_bounded_status
+            return self._complete_recipe_family_status("bounded_execution")
 
     @property
     def _compileiq_map_materialization_available(self):

@@ -367,11 +367,32 @@ class GraphDefinition:
     def materialization_context(self, **options):
         """Create an explicit owner for transactional recipe materialization."""
 
+        from taichi_forge.graph._recipes.families import (
+            assemble_existing_family_recipe, )
+
         from taichi_forge.graph._recipes.materialize import (
             GraphMaterializationContext,
         )
 
+        options.setdefault("assembler", assemble_existing_family_recipe)
+
         return GraphMaterializationContext(self, **options)
+
+    def recipe_catalog(self, *, available_capabilities=(), providers=None):
+        """Discover established optimization families in one staged catalog."""
+
+        from taichi_forge.graph._recipes.catalog import GraphRecipeCatalog
+        from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
+
+        if providers is None:
+            providers = (GraphExistingFamilyProvider(), )
+        catalog = GraphRecipeCatalog(
+            self,
+            available_capabilities=available_capabilities,
+        )
+        catalog.discover(tuple(providers))
+        catalog.build_single_region_stage()
+        return catalog
 
     def materialize(self, recipe=None, *, context=None, **context_options):
         """Transactionally materialize a complete recipe.

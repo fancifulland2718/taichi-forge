@@ -233,6 +233,8 @@ class GraphPhysicalTaskManifest:
     region_ids: tuple[str, ...]
     kernel_indices: tuple[int, ...]
     queue: str
+    pipeline_identity: str = ""
+
     effects: tuple[ResourceEffect, ...] = ()
     binding_names: tuple[str, ...] = ()
     temporary_bytes: int = 0
@@ -248,6 +250,7 @@ class GraphPhysicalTaskManifest:
         region_ids=(),
         kernel_indices=(),
         queue="default",
+        pipeline_identity="",
         effects=(),
         binding_names=(),
         temporary_bytes=0,
@@ -274,6 +277,14 @@ class GraphPhysicalTaskManifest:
                 for item in kernel_indices
             ),
             queue=_required_text(queue, "Graph physical task queue"),
+            pipeline_identity=(
+                ""
+                if not pipeline_identity
+                else _required_text(
+                    pipeline_identity,
+                    "Graph physical task pipeline identity",
+                )
+            ),
             effects=effects,
             binding_names=_normalized_strings(
                 binding_names,
@@ -298,6 +309,7 @@ class GraphPhysicalTaskManifest:
             "region_ids": self.region_ids,
             "kernel_indices": self.kernel_indices,
             "queue": self.queue,
+            "pipeline_identity": self.pipeline_identity,
             "effects": tuple(item.to_dict() for item in self.effects),
             "binding_names": self.binding_names,
             "temporary_bytes": self.temporary_bytes,
@@ -911,8 +923,37 @@ def _definition_binding_manifest(definition):
     )
 
 
-def _stage_source_regions(definition, pipeline):
+def _stage_source_regions(definition, recipe, pipeline):
     source_regions = tuple(source.region_id for source in definition.sources)
+    path_regions = []
+
+    for stage in pipeline:
+        parts = str(stage.get("path_id", "")).split("/")
+        try:
+            source_index = int(parts[1].split(":", 1)[0])
+        except (IndexError, ValueError):
+            path_regions = []
+            break
+        prefix = f"graph/{source_index}:"
+        regions = tuple(
+            source.region_id
+            for source in definition.sources
+            if source.path.startswith(prefix)
+        )
+        if not regions:
+            path_regions = []
+            break
+        path_regions.append(regions)
+
+    if path_regions and {
+        region_id for regions in path_regions for region_id in regions
+    } == set(source_regions):
+        # One semantic source may expand to several physical dispatches (for
+        # example a partial/finalize reduction), while one structured source
+        # may lower into several runtime stages. Runtime stage lineage, rather
+        # than physical task cardinality, is the stable coverage relation.
+        return tuple(path_regions)
+
     counts = tuple(
         int(stage["dispatch_count"])
         + int(stage["source_native_count"])
@@ -920,6 +961,15 @@ def _stage_source_regions(definition, pipeline):
         for stage in pipeline
     )
     if sum(counts) != len(source_regions):
+        recipe_source_regions = tuple(
+            dict.fromkeys(
+                region_id
+                for step in recipe.execution_steps
+                for region_id in step.region_ids
+            )
+        )
+        if len(recipe_source_regions) == 1:
+            return tuple(recipe_source_regions for _ in pipeline)
         raise GraphPhysicalManifestError(
             "backend pipeline source count differs from GraphDefinition"
         )
@@ -931,19 +981,15 @@ def _stage_source_regions(definition, pipeline):
     return tuple(result)
 
 
-def observe_baseline_physical_manifest(definition, recipe, graph):
-    """Translate current native Graph/task observations into the V1 manifest."""
+def observe_graph_physical_manifest(definition, recipe, graph):
+    """Translate one materialized Graph into the backend-neutral manifest."""
 
-    if recipe.fragments:
-        raise GraphPhysicalManifestError(
-            "baseline physical observation cannot describe replacement fragments"
-        )
     if graph.definition is not definition:
         raise GraphPhysicalManifestError(
-            "materialized baseline Graph does not own this GraphDefinition"
+            "materialized Graph does not own this GraphDefinition"
         )
     pipeline = tuple(graph._spec.pipeline_definition)
-    stage_regions = _stage_source_regions(definition, pipeline)
+    stage_regions = _stage_source_regions(definition, recipe, pipeline)
     kernels = []
     tasks = []
     commands = []
@@ -953,7 +999,15 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
     # task normalization into a false exactness claim.
     command_topology_exact = False
 
-    def append_task(kind, regions, *, queue="default", kernel=None, properties=None):
+    def append_task(
+        kind,
+        regions,
+        *,
+        queue="default",
+        kernel=None,
+        pipeline_identity="",
+        properties=None,
+    ):
         task_index = len(tasks)
         tasks.append(
             GraphPhysicalTaskManifest.create(
@@ -963,6 +1017,7 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
                 region_ids=regions,
                 kernel_indices=(() if kernel is None else (kernel.kernel_index,)),
                 queue=queue,
+                pipeline_identity=pipeline_identity,
                 properties=properties,
             )
         )
@@ -980,6 +1035,7 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
     for stage, regions in zip(pipeline, stage_regions):
         stage_tasks = tuple(stage["tasks"])
         native_actions = tuple(stage["native_actions"])
+        stage_plan_identity = _stage_plan_identity(stage)
         if stage_tasks:
             for raw in stage_tasks:
                 raw_payload = asdict(raw)
@@ -1005,6 +1061,10 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
                     "kernel",
                     regions,
                     kernel=kernel,
+                    pipeline_identity=_combined_pipeline_identity(
+                        kernel.pipeline_identity,
+                        stage_plan_identity,
+                    ),
                     properties={
                         "stage_kind": stage["kind"],
                         "dispatch_index": raw.dispatch_index,
@@ -1013,16 +1073,24 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
                 )
         for action in native_actions:
             payload = action.to_dict()
+            physical_plan_id = action.physical_plan_id or (
+                "native-action:" + _digest(payload)
+            )
             append_task(
                 "native_action",
                 regions,
                 queue=action.queue,
+                pipeline_identity=_combined_pipeline_identity(
+                    physical_plan_id,
+                    stage_plan_identity,
+                ),
                 properties=payload,
             )
         if not stage_tasks and not native_actions and regions:
             append_task(
                 stage["kind"],
                 regions,
+                pipeline_identity=stage_plan_identity,
                 properties={
                     "path_id": stage["path_id"],
                     "physical_dispatch_count": stage["physical_dispatch_count"],
@@ -1037,10 +1105,38 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
     if memory.persistent_bytes:
         resources.append(
             GraphPhysicalResourceManifest(
-                resource_id="baseline:persistent",
+                resource_id="graph:persistent",
                 kind="graph_owned_aggregate",
                 requested_bytes=memory.persistent_bytes,
                 allocated_bytes=memory.persistent_bytes,
+                alignment=1,
+                ownership="graph_instance",
+                lifetime="graph",
+                exclusive_submission=memory.internal_storage_exclusive,
+            )
+        )
+    bounded_control_bytes = int(memory.persistent_bounded_control_bytes)
+    if bounded_control_bytes:
+        resources.append(
+            GraphPhysicalResourceManifest(
+                resource_id="graph:bounded_control",
+                kind="bounded_control_state",
+                requested_bytes=bounded_control_bytes,
+                allocated_bytes=bounded_control_bytes,
+                alignment=1,
+                ownership="graph_instance",
+                lifetime="graph",
+                exclusive_submission=True,
+            )
+        )
+    provider_persistent = int(memory.provider_generation_known_resident_requested_bytes)
+    if provider_persistent:
+        resources.append(
+            GraphPhysicalResourceManifest(
+                resource_id="graph:provider_generation",
+                kind="provider_owned_aggregate",
+                requested_bytes=provider_persistent,
+                allocated_bytes=provider_persistent,
                 alignment=1,
                 ownership="graph_instance",
                 lifetime="graph",
@@ -1054,7 +1150,7 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
     if transient_requested:
         resources.append(
             GraphPhysicalResourceManifest(
-                resource_id="baseline:transient",
+                resource_id="graph:transient",
                 kind="graph_temporary_aggregate",
                 requested_bytes=transient_requested,
                 allocated_bytes=transient_requested,
@@ -1103,6 +1199,26 @@ def observe_baseline_physical_manifest(definition, recipe, graph):
     )
 
 
+observe_baseline_physical_manifest = observe_graph_physical_manifest
+
+
+def _combined_pipeline_identity(*identities):
+    return "|".join(str(item) for item in identities if item)
+
+
+def _stage_plan_identity(stage):
+    identities = []
+    physical_plan_id = str(stage.get("physical_plan_id", ""))
+    if physical_plan_id:
+        identities.append(physical_plan_id)
+    bounded = tuple(
+        asdict(item["domain"]) for item in stage.get("bounded_dispatches", ())
+    )
+    if bounded:
+        identities.append("bounded-scope:" + _digest(bounded))
+    return "|".join(identities)
+
+
 __all__ = [
     "CompiledGraphPhysicalManifest",
     "GraphPhysicalBindingManifest",
@@ -1112,4 +1228,6 @@ __all__ = [
     "GraphPhysicalResourceManifest",
     "GraphPhysicalSubmissionManifest",
     "GraphPhysicalTaskManifest",
+    "observe_baseline_physical_manifest",
+    "observe_graph_physical_manifest",
 ]

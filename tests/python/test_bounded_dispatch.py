@@ -679,6 +679,8 @@ def test_cuda_bounded_execution_stats_observe_physical_launch_position(
     output = ti.ndarray(ti.i32, shape=1)
     args = {"requested": 65, "extent": extent, "output": output}
 
+    debug_stats = graph._graph_stats
+    assert debug_stats[0]["diagnostics_counters_complete"]
     graph.run(args)
     segment = graph.execution_stats().segments[0]
     assert segment.bounded_physical_observation_available
@@ -786,7 +788,8 @@ def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
     output = ti.ndarray(ti.i32, shape=capacity)
     visited = ti.ndarray(ti.i32, shape=1)
     extents = (ti.DeviceExtent(capacity), ti.DeviceExtent(capacity))
-    graph.execution_stats()
+    debug_stats = graph._graph_stats
+    assert debug_stats[0]["diagnostics_counters_complete"]
 
     def run_case(extent, requested, expected_count, overflow):
         output.fill(-1)
@@ -829,7 +832,8 @@ def test_cuda_exact_bounded_dispatch_replay_and_rebind(monkeypatch):
 
     report = graph.execution_stats()
     assert report.memory.persistent_argument_bytes >= 32
-    assert report.memory.persistent_bounded_control_bytes == 32
+    # Each distinct extent binding owns one retained per-node update control.
+    assert report.memory.persistent_bounded_control_bytes == 2 * 32
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False, saturating_grid_dim=2)
@@ -959,7 +963,11 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
         "first_visited": first,
         "second_visited": second,
     }
-    graph.execution_stats()
+    # Per-replay counters are deliberately test-only diagnostics. Enable them
+    # before the first submission instead of making the public static report
+    # mutate the production replay path.
+    debug_stats = graph._graph_stats
+    assert debug_stats[0]["diagnostics_counters_complete"]
 
     # Repeat states as well as changing them so the persistent-state fast path
     # is exercised without weakening boundary coverage.
@@ -998,6 +1006,7 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
     assert stable_segment.bounded_update_cache_hits == 6
     assert stable_segment.bounded_node_api_calls == 14
     assert stable_segment.bounded_max_group_size == 2
+    assert stable_report.memory.persistent_bounded_control_bytes == 96
 
     rebound_extent = ti.DeviceExtent(capacity)
     args["extent"] = rebound_extent
@@ -1029,7 +1038,9 @@ def test_cuda_grouped_stateful_bounded_update_shares_one_updater(monkeypatch):
     assert segment.bounded_update_state_changes == 1
     assert segment.bounded_update_cache_hits == 0
     assert segment.bounded_node_api_calls == 4
-    assert report.memory.persistent_bounded_control_bytes == 96
+    # Rebinding to a distinct extent retains a second replay signature, and
+    # the memory report accounts for both live grouped-control allocations.
+    assert report.memory.persistent_bounded_control_bytes == 2 * 96
     capabilities = ti.graph.bounded_dispatch_capabilities()
     assert capabilities["grouped_updates_supported"]
     assert capabilities["producer_update_policy"] == "grouped_stateful"
@@ -1087,8 +1098,8 @@ def test_cuda_grouped_updater_telemetry_is_lazily_enabled(monkeypatch):
     args = {"requested": 17, "extent": extent, "observed": observed}
 
     # Materialize and initialize the stateful updater before diagnostics are
-    # requested. The first snapshot enables device counters for later replays
-    # without rewriting the cached launch state.
+    # requested. The public report remains side-effect free; the private debug
+    # snapshot explicitly enables device counters for later test replays.
     graph.run(args)
     first = graph.execution_stats().segments[0]
     assert first.bounded_update_replays == 0
@@ -1096,6 +1107,8 @@ def test_cuda_grouped_updater_telemetry_is_lazily_enabled(monkeypatch):
     assert first.bounded_update_cache_hits == 0
     assert first.bounded_node_api_calls == 0
 
+    debug_stats = graph._graph_stats
+    assert not debug_stats[0]["diagnostics_counters_complete"]
     graph.run(args)
     graph.run(args)
     report = graph.execution_stats()
@@ -1353,7 +1366,8 @@ def test_bounded_same_graph_inflight_submissions_preserve_internal_state(
     # also proves that fixed-slot backpressure does not escape through an
     # ordinary fallback, which cannot preserve indirect dispatch semantics.
     if ti.lang.impl.current_cfg().arch == ti.vulkan:
-        graph.execution_stats()
+        debug_stats = graph._graph_stats
+        assert debug_stats[0]["diagnostics_counters_complete"]
 
     counts = (0, 1, 33, capacity, 19, capacity - 1) * 2
     extents = tuple(ti.DeviceExtent(capacity) for _ in counts)

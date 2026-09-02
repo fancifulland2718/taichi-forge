@@ -2982,7 +2982,7 @@ def test_backend_command_action_has_explicit_execution_contract_and_replay():
     assert pipeline.recordable_native_action_count == 1
     assert pipeline.opaque_native_action_count == 0
     manifest = pipeline.stages[0].native_actions[0]
-    assert manifest.schema_version == 3
+    assert manifest.schema_version == 4
     assert manifest.recordable
     assert not manifest.opaque
     assert manifest.automatic_admissible
@@ -3109,7 +3109,7 @@ def test_vulkan_buffer_commands_execute_directly_and_through_graph():
     assert pipeline.recordable_native_action_count == 1
     assert pipeline.opaque_native_action_count == 0
     manifest = pipeline.stages[0].native_actions[0]
-    assert manifest.schema_version == 3
+    assert manifest.schema_version == 4
     assert manifest.execution_kind == "backend_command"
     assert manifest.recording_kind == "native_command"
     assert manifest.queue == "compute"
@@ -3302,7 +3302,7 @@ def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     assert stage.bounded_dispatches == ()
     manifest = stage.native_actions[0]
     assert isinstance(manifest, ti.graph.NativeActionManifest)
-    assert manifest.schema_version == 3
+    assert manifest.schema_version == 4
     assert manifest.name == "recorded_dispatch"
     assert manifest.recordable
     assert not manifest.opaque

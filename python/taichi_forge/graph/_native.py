@@ -187,6 +187,7 @@ class NativeActionManifest:
     backend_command_replay: bool = False
     automatic_admissible: bool = False
     fragmentation_reason: str = "none"
+    physical_plan_id: str = ""
 
     def to_dict(self):
         return {
@@ -229,6 +230,7 @@ class NativeActionManifest:
             "backend_command_replay": self.backend_command_replay,
             "automatic_admissible": self.automatic_admissible,
             "fragmentation_reason": self.fragmentation_reason,
+            "physical_plan_id": self.physical_plan_id,
         }
 
 
@@ -1118,7 +1120,7 @@ def native_action_manifest(
         replay_mode = "opaque"
 
     return NativeActionManifest(
-        schema_version=3,
+        schema_version=4,
         name=name,
         recordable=action is not None,
         opaque=bool(getattr(ir_node, "opaque", action is None)),
@@ -1174,6 +1176,9 @@ def native_action_manifest(
                 if command_plan is not None
                 else "opaque_native_action"
             )
+        ),
+        physical_plan_id=str(
+            getattr(executable, "graph_physical_plan_id", "")
         ),
     )
 

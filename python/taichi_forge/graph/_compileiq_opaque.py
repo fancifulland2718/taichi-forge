@@ -5,6 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from types import MappingProxyType
 
+from typing import ClassVar
+
 from taichi_forge._compileiq_opaque import (
     CompileIQOpaqueUnavailableError,
     _CompileIQOpaqueRecipeTransport,
@@ -81,9 +83,7 @@ class CompileIQGraphRecipeSearch:
             provider_namespace = "taichi_forge.graph.bounded_execution"
             domain_version = "graph-bounded-complete-recipe.v1"
         elif adapter.recipe_kind == "graph_reduction":
-            semantic_schema = (
-                "taichi_forge.graph.compileiq-reduction-semantics.v1"
-            )
+            semantic_schema = "taichi_forge.graph.compileiq-reduction-semantics.v1"
             provider_namespace = "taichi_forge.graph.reduction"
             domain_version = "graph-reduction-complete-recipe.v1"
         elif adapter.recipe_kind == "graph_native_algorithm":
@@ -409,13 +409,405 @@ class CompileIQGraphRecipeSearch:
         return value
 
 
+class CompileIQCompleteGraphRecipeSearch:
+    """V1 transport façade over the Forge-owned complete recipe catalog.
+
+    The transport remains compatible with the reviewed modified CompileIQ fork,
+    but it neither rebuilds Graphs from environment variables nor owns a second
+    family materializer. All selected recipes cross GraphMaterializationContext.
+    """
+
+    _FAMILY_CONTRACTS: ClassVar[dict[str, tuple[str, str]]] = {
+        "map_fusion": (
+            "taichi_forge.graph.map_fusion",
+            "graph-partition-plan.v3",
+        ),
+        "graph_memory": (
+            "taichi_forge.graph.memory",
+            "graph-memory-complete-recipe.v2",
+        ),
+        "bounded_execution": (
+            "taichi_forge.graph.bounded_execution",
+            "graph-bounded-complete-recipe.v2",
+        ),
+        "structured_control": (
+            "taichi_forge.graph.structured_control",
+            "structured-control-complete-recipe.v2",
+        ),
+        "graph_reduction": (
+            "taichi_forge.graph.reduction",
+            "graph-reduction-complete-recipe.v2",
+        ),
+        "native_algorithm": (
+            "taichi_forge.graph.native_algorithm",
+            "graph-native-algorithm-complete-recipe.v2",
+        ),
+    }
+
+    def __init__(self, graph):
+        capability_components = _validated_compileiq_capability()
+        definition = getattr(graph, "definition", None)
+        if definition is None:
+            raise TypeError("complete Graph recipe search requires a GraphDefinition")
+        catalog = definition.recipe_catalog()
+        entries = catalog.entries()
+        families = tuple(
+            dict.fromkeys(
+                fragment.materializer.selection.family for fragment in catalog.fragments
+            )
+        )
+        family = families[0] if len(families) == 1 else ""
+        provider_namespace, domain_version = self._FAMILY_CONTRACTS.get(
+            family,
+            (
+                "taichi_forge.graph.complete_recipe",
+                "complete-graph-recipe.v1",
+            ),
+        )
+        semantic_payload = {
+            "schema": "taichi_forge.graph.complete-recipe-semantics.v1",
+            "definition": definition.to_dict(),
+            "recipes": tuple(entry.recipe.to_dict() for entry in entries),
+        }
+        semantic_fingerprint = _identity(
+            "forge-complete-graph-semantics-v1:",
+            semantic_payload,
+        )
+        self._transport = _CompileIQOpaqueRecipeTransport(
+            provider_namespace=provider_namespace,
+            domain_version=domain_version,
+            provider_semantic_fingerprint=semantic_fingerprint,
+            recipe_ids=tuple(entry.recipe.recipe_id for entry in entries),
+            baseline_recipe_id=catalog.baseline.recipe.recipe_id,
+            capability_components=capability_components,
+            domain_owner="complete Graph",
+            recipe_description="complete Graph recipe",
+        )
+        self._graph = graph
+        self._definition = definition
+        self._catalog = catalog
+        self._family = family
+        self._families = families
+        self._workspace_lanes = graph._workspace_lane_capacity
+        self._workspace_saturation = graph._workspace_saturation
+
+    @property
+    def capability(self):
+        return self._transport.capability
+
+    @property
+    def search_space(self):
+        return self._transport.search_space
+
+    @property
+    def worker_type(self):
+        return self._transport.worker_type
+
+    @property
+    def python_source_lock(self):
+        return self._transport.python_source_lock
+
+    @property
+    def domain_fingerprint(self):
+        return self._transport.domain_fingerprint
+
+    @property
+    def recipe_ids(self):
+        return self._transport.recipe_ids
+
+    @property
+    def baseline_recipe_id(self):
+        return self._catalog.baseline.recipe.recipe_id
+
+    @property
+    def semantic_plan_id(self):
+        return self._definition.semantic_graph_id
+
+    @property
+    def backend(self):
+        return self._definition.backend
+
+    def _decoded_recipe_id(self, parameters):
+        return self._transport.decode(parameters)
+
+    def _source_manifest(self, family, choice_id):
+        spec = self._definition._runtime_spec
+        if family == "graph_memory":
+            sources = spec._graph_memory_sources
+        elif family == "graph_reduction":
+            sources = spec._graph_reduction_sources
+        elif family == "native_algorithm":
+            sources = spec._graph_native_algorithm_sources
+        elif family == "bounded_execution":
+            from taichi_forge.graph._graph import _graph_bounded_recipe_scope
+
+            sources, _, _ = _graph_bounded_recipe_scope(spec.pipeline_definition)
+            for manifest in sources:
+                if manifest.recipe_id == choice_id:
+                    return manifest
+            return None
+        elif family == "structured_control":
+            return type(
+                "_ControlRecipeIdentity",
+                (),
+                {"recipe_id": choice_id},
+            )()
+        else:
+            return None
+        for source in sources:
+            for manifest in source.manifests():
+                if manifest.recipe_id == choice_id:
+                    return manifest
+        return None
+
+    def _baseline_family_manifest(self):
+        spec = self._definition._runtime_spec
+        family = self._family
+        if family == "graph_memory" and len(spec._graph_memory_sources) == 1:
+            source = spec._graph_memory_sources[0]
+            return self._source_manifest(family, source.selected_recipe_id)
+        if family == "graph_reduction" and len(spec._graph_reduction_sources) == 1:
+            source = spec._graph_reduction_sources[0]
+            return self._source_manifest(family, source.selected_recipe_id)
+        if (
+            family == "native_algorithm"
+            and len(spec._graph_native_algorithm_sources) == 1
+        ):
+            source = spec._graph_native_algorithm_sources[0]
+            return self._source_manifest(family, source.selected_recipe_id)
+        if family == "bounded_execution":
+            from taichi_forge.graph._graph import _graph_bounded_recipe_scope
+
+            manifests, selected, _ = _graph_bounded_recipe_scope(
+                spec.pipeline_definition
+            )
+            return next(
+                (item for item in manifests if item.recipe_id == selected),
+                None,
+            )
+        if family == "structured_control" and spec.selected_control_recipe_id:
+            return type(
+                "_ControlRecipeIdentity",
+                (),
+                {"recipe_id": spec.selected_control_recipe_id},
+            )()
+        return None
+
+    def _selection(self, recipe_id):
+        entry = self._catalog.entry(recipe_id)
+        recipe = entry.recipe
+        if not recipe.fragments:
+            return _CompleteGraphRecipeSelection(
+                recipe,
+                family=self._family,
+                source_manifest=self._baseline_family_manifest(),
+            )
+        if len(recipe.fragments) != 1:
+            return _CompleteGraphRecipeSelection(recipe)
+        family_selection = recipe.fragments[0].materializer.selection
+        manifest = self._source_manifest(
+            family_selection.family,
+            family_selection.choice_id,
+        )
+        return _CompleteGraphRecipeSelection(
+            recipe,
+            family=family_selection.family,
+            source_manifest=manifest,
+            selection=family_selection,
+        )
+
+    def select(self, parameters):
+        return self._selection(self._decoded_recipe_id(parameters))
+
+    def materialize(self, parameters, *, context=None):
+        """Materialize the selected complete recipe without worker overlays."""
+
+        selection = self.select(parameters)
+        if context is not None:
+            return self._definition.materialize(selection.recipe, context=context)
+        return self._definition.materialize(
+            selection.recipe,
+            workspace_lanes=self._workspace_lanes,
+            workspace_saturation=self._workspace_saturation,
+        )
+
+    def compileiq_search(
+        self,
+        objective_function,
+        *,
+        problem_type="min",
+        target_contract=None,
+    ):
+        return self._transport.exhaustive_search(
+            objective_function,
+            problem_type=problem_type,
+            target_contract=target_contract,
+        )
+
+    def search_coverage(self, compileiq_search):
+        return self._transport.search_coverage(compileiq_search)
+
+    def require_complete_search(self, compileiq_search):
+        return self._transport.require_complete_search(compileiq_search)
+
+    def select_best_result(self, compileiq_search, result):
+        recipe_id = self._transport.select_best_recipe_id(compileiq_search, result)
+        return self._selection(recipe_id)
+
+    def recipe_manifest(self, recipe_id):
+        if recipe_id not in self.recipe_ids:
+            raise KeyError(f"unknown complete Graph recipe {recipe_id!r}")
+        return MappingProxyType(
+            {
+                **self._selection(recipe_id).to_dict(),
+                "is_baseline": recipe_id == self.baseline_recipe_id,
+            }
+        )
+
+    def worker_environment(self, parameters):
+        self._decoded_recipe_id(parameters)
+        return MappingProxyType({})
+
+    def verify_materialized_graph(self, parameters, graph):
+        recipe_id = self._decoded_recipe_id(parameters)
+        manifest = getattr(graph, "manifest", None)
+        if manifest is not None and hasattr(graph, "executor"):
+            if manifest.recipe_id != recipe_id:
+                raise ValueError(
+                    "materialized Graph selected a different complete recipe"
+                )
+            graph = graph.executor
+        if getattr(graph, "definition", None) is not self._definition:
+            raise ValueError("materialized Graph belongs to a different definition")
+        actual_recipe_id = getattr(
+            getattr(graph, "_spec", None),
+            "_complete_recipe_id",
+            self.baseline_recipe_id,
+        )
+        if actual_recipe_id != recipe_id:
+            raise ValueError("materialized Graph selected a different complete recipe")
+        return self._selection(recipe_id)
+
+    def manifest(self):
+        value = {
+            "schema": "taichi_forge.graph.compileiq-complete-recipe-search.v1",
+            **self._transport.manifest(),
+            "semantic_plan_id": self.semantic_plan_id,
+            "backend": self.backend,
+            "families": self._families,
+            "recipes": tuple(
+                dict(self.recipe_manifest(recipe_id)) for recipe_id in self.recipe_ids
+            ),
+            "runtime_admission": "explicit_materialization_context_only",
+        }
+        if self._family:
+            value["recipe_kind"] = {
+                "bounded_execution": "graph_bounded_execution",
+                "native_algorithm": "graph_native_algorithm",
+            }.get(self._family, self._family)
+        return value
+
+
+class _CompleteGraphRecipeSelection:
+    """Compatibility view over one Forge-owned complete Graph recipe."""
+
+    def __init__(self, recipe, *, family="", source_manifest=None, selection=None):
+        self.recipe = recipe
+        self.spec_id = recipe.recipe_id
+        self.recipe_id = recipe.recipe_id
+        self.compilation_identity = recipe.planned_physical_id
+        self.execution_identity = recipe.planned_physical_id
+        self.family = family
+        self._source_manifest = source_manifest
+        self._selection = selection
+        self.materialization_recipe = (
+            "baseline" if selection is None else selection.materialization_choice
+        )
+        self.worker_environment = MappingProxyType({})
+        self.memory_recipe_manifest = (
+            source_manifest if family == "graph_memory" else None
+        )
+        self.reduction_recipe_manifest = (
+            source_manifest if family == "graph_reduction" else None
+        )
+        self.native_algorithm_recipe_manifest = (
+            source_manifest if family == "native_algorithm" else None
+        )
+        self.bounded_recipe_manifest = (
+            source_manifest if family == "bounded_execution" else None
+        )
+        self.control_recipe_id = (
+            ""
+            if family != "structured_control"
+            else (
+                selection.choice_id
+                if selection is not None
+                else getattr(source_manifest, "recipe_id", "")
+            )
+        )
+        if family == "map_fusion" and selection is not None:
+            marker = selection.source_key.removeprefix("dispatches:")
+            self.fusion_source_groups = (
+                tuple(int(value) for value in marker.split(",")),
+            )
+            self.fusion_recipe_ids = (selection.choice_id,)
+        else:
+            self.fusion_source_groups = ()
+            self.fusion_recipe_ids = ()
+
+    def to_dict(self):
+        value = {
+            "spec_id": self.spec_id,
+            "recipe_id": self.recipe_id,
+            "materialization_recipe": self.materialization_recipe,
+            "compilation_identity": self.compilation_identity,
+            "execution_identity": self.execution_identity,
+            "fragment_ids": tuple(
+                fragment.fragment_id for fragment in self.recipe.fragments
+            ),
+            "family": self.family or "baseline",
+            "fusion_recipe_ids": self.fusion_recipe_ids,
+            "fusion_source_groups": self.fusion_source_groups,
+        }
+        manifest = self._source_manifest
+        if manifest is not None and hasattr(manifest, "to_dict"):
+            payload = manifest.to_dict()
+            if self.family == "graph_memory":
+                value.update(
+                    memory_recipe_id=manifest.recipe_id,
+                    memory_recipe_manifest=payload,
+                )
+            elif self.family == "graph_reduction":
+                value.update(
+                    reduction_recipe_id=manifest.recipe_id,
+                    reduction_recipe_manifest=payload,
+                )
+            elif self.family == "native_algorithm":
+                value.update(
+                    native_algorithm_recipe_id=manifest.recipe_id,
+                    native_algorithm_recipe_manifest=payload,
+                )
+            elif self.family == "bounded_execution":
+                value.update(
+                    bounded_recipe_id=manifest.recipe_id,
+                    bounded_recipe_manifest=payload,
+                )
+        if self.control_recipe_id:
+            value["control_recipe_id"] = self.control_recipe_id
+        return value
+
+
 def compileiq_recipe_search(graph):
-    """Build a baseline-inclusive Graph domain for the exact modified fork."""
+    """Build a baseline-inclusive domain from the complete recipe catalog."""
+
+    if getattr(graph, "definition", None) is not None:
+        return CompileIQCompleteGraphRecipeSearch(graph)
 
     return CompileIQGraphRecipeSearch(graph)
 
 
 __all__ = [
+    "CompileIQCompleteGraphRecipeSearch",
     "CompileIQGraphRecipeSearch",
     "CompileIQGraphUnavailableError",
     "compileiq_recipe_search",

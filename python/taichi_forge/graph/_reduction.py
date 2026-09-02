@@ -432,7 +432,14 @@ class _GraphReductionRecipeSource:
         self._prepare_manifests()
         return self._manifests
 
-    def materialize(self, builder, requested_recipe_id=None, *, label=None):
+    def materialize(
+        self,
+        builder,
+        requested_recipe_id=None,
+        *,
+        label=None,
+        record_selection=True,
+    ):
         self._prepare_manifests()
         manifest_by_id = {manifest.recipe_id: manifest for manifest in self._manifests}
         if requested_recipe_id is None:
@@ -508,8 +515,10 @@ class _GraphReductionRecipeSource:
                 memory_disjoint_pairs=disjoint,
                 memory_layout_requirements=requirements,
             )
-        self.selected_recipe_id = manifest.recipe_id
-        self.selected_strategy = manifest.strategy
+        if record_selection:
+            self.selected_recipe_id = manifest.recipe_id
+            self.selected_strategy = manifest.strategy
+
         return manifest
 
 

@@ -451,10 +451,11 @@ class GraphMaterializationContext:
             raise TypeError("Graph materialization workspace_lanes must be an integer")
         if workspace_lanes <= 0:
             raise ValueError("Graph materialization workspace_lanes must be positive")
-        if workspace_saturation not in ("wait", "error"):
+        if workspace_saturation not in ("wait", "raise"):
             raise ValueError(
-                "Graph materialization workspace_saturation must be wait or error"
+                "Graph materialization workspace_saturation must be wait or raise"
             )
+
         if baseline_materializer is not None and not callable(baseline_materializer):
             raise TypeError("Graph baseline materializer must be callable")
         if assembler is not None and not callable(assembler):

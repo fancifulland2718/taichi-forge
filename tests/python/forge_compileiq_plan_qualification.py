@@ -138,41 +138,61 @@ def _graph_worker(scope, order, minimum_block_ms):
         for name in ("source", "temporary_a", "temporary_b", "temporary_c", "output")
     }
 
-    def build(recipe):
-        previous = os.environ.get("TAICHI_FORGE_INTERNAL_MAP_FUSION")
-        os.environ["TAICHI_FORGE_INTERNAL_MAP_FUSION"] = recipe
-        started = time.perf_counter_ns()
-        try:
-            builder = ti.graph.GraphBuilder()
-            builder.dispatch(stage_one, symbolic["source"], symbolic["temporary_a"])
-            builder.dispatch(
-                stage_two,
-                symbolic["source"],
-                symbolic["temporary_a"],
-                symbolic["temporary_b"],
-            )
-            builder.dispatch(
-                stage_three,
-                symbolic["source"],
-                symbolic["temporary_b"],
-                symbolic["temporary_c"],
-            )
-            builder.dispatch(
-                stage_four,
-                symbolic["source"],
-                symbolic["temporary_c"],
-                symbolic["output"],
-            )
-            graph = builder.compile()
-        finally:
-            if previous is None:
-                os.environ.pop("TAICHI_FORGE_INTERNAL_MAP_FUSION", None)
-            else:
-                os.environ["TAICHI_FORGE_INTERNAL_MAP_FUSION"] = previous
-        return graph, (time.perf_counter_ns() - started) / 1.0e6
 
-    baseline_graph, baseline_build_ms = build("baseline")
-    candidate_graph, candidate_build_ms = build("exact-v1:0,1,2,3")
+    started = time.perf_counter_ns()
+
+    builder = ti.graph.GraphBuilder(_explicit_map_source_groups=())
+
+    builder.dispatch(stage_one, symbolic["source"], symbolic["temporary_a"])
+
+    builder.dispatch(
+        stage_two,
+        symbolic["source"],
+        symbolic["temporary_a"],
+        symbolic["temporary_b"],
+    )
+
+    builder.dispatch(
+        stage_three,
+        symbolic["source"],
+        symbolic["temporary_b"],
+        symbolic["temporary_c"],
+    )
+
+    builder.dispatch(
+        stage_four,
+        symbolic["source"],
+        symbolic["temporary_c"],
+        symbolic["output"],
+    )
+
+    definition = builder.freeze()
+
+    baseline_graph = definition.compile()
+
+    baseline_build_ms = (time.perf_counter_ns() - started) / 1.0e6
+
+    catalog = definition.recipe_catalog()
+
+    full_fusion = next(
+        fragment for fragment in catalog.fragments
+        if fragment.materializer.selection.family == "map_fusion"
+        and fragment.materializer.selection.source_key == "dispatches:0,1,2,3")
+
+    candidate_entry = catalog.compose(
+        (full_fusion.fragment_id, ),
+        stage="qualification",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id, ),
+    )
+
+    started = time.perf_counter_ns()
+
+    candidate_materialized = definition.materialize(candidate_entry.recipe)
+
+    candidate_graph = candidate_materialized.executor
+
+    candidate_build_ms = (time.perf_counter_ns() - started) / 1.0e6
+
     physical = {
         "baseline": baseline_graph.physical_plan()["physical_dispatch_count"],
         "candidate": candidate_graph.physical_plan()["physical_dispatch_count"],
@@ -200,15 +220,17 @@ def _graph_worker(scope, order, minimum_block_ms):
         arguments[name] = arrays
         routes[name] = lambda graph=graph, arrays=arrays: graph.run(arrays)
 
-    for name in routes:
-        routes[name]()
+    for invoke in routes.values():
+        invoke()
+
     ti.sync()
     correctness = {name: bool(np.array_equal(arguments[name]["output"].to_numpy(), expected)) for name in routes}
     memory_after_warmup = dict(ti_core.get_device_memory_pool_stats())
     blocks = _measure_pair(routes, order, minimum_block_ms)
     memory_after_timing = dict(ti_core.get_device_memory_pool_stats())
-    for name in routes:
-        routes[name]()
+    for invoke in routes.values():
+        invoke()
+
     ti.sync()
     correctness.update(
         {
@@ -232,16 +254,17 @@ def _graph_worker(scope, order, minimum_block_ms):
             "baseline": baseline_build_ms,
             "candidate": candidate_build_ms,
         },
-        "candidate_materialization": "exact-v1:0,1,2,3",
+        "candidate_materialization": candidate_entry.recipe.recipe_id,
     }
 
 
 def _kernel_worker(order, minimum_block_ms):
     import taichi_forge as ti
     from taichi_forge._lib import core as ti_core
+
     from taichi_forge.lang._offload_execution_plan import (
-        _OffloadExecutionPlan,
         _bind_offload_execution_plan,
+        _OffloadExecutionPlan,
     )
 
     count = 1 << 20

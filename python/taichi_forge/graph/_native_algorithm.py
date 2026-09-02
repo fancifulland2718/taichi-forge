@@ -200,6 +200,10 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 int(source.inclusive),
             )
 
+    @property
+    def graph_physical_plan_id(self):
+        return f"graph-native-segmented-scan:{self._strategy}"
+
     def _run_serial(self):
         self._serial_call.run()
 
@@ -501,7 +505,13 @@ class _GraphSegmentedScanRecipeSource:
     def manifests(self):
         return self._manifests
 
-    def materialize(self, builder, requested_recipe_id=None):
+    def materialize(
+        self,
+        builder,
+        requested_recipe_id=None,
+        *,
+        record_selection=True,
+    ):
         manifests = {manifest.recipe_id: manifest for manifest in self._manifests}
         if requested_recipe_id is None:
             manifest = self._manifests[0]
@@ -518,8 +528,10 @@ class _GraphSegmentedScanRecipeSource:
             prewarm=False,
             admission="explicit",
         )
-        self.selected_recipe_id = manifest.recipe_id
-        self.selected_strategy = manifest.strategy
+        if record_selection:
+            self.selected_recipe_id = manifest.recipe_id
+            self.selected_strategy = manifest.strategy
+
         return manifest
 
 

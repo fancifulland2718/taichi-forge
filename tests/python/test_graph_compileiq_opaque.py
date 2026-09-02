@@ -210,7 +210,9 @@ def _control_space(*, selected="conditional"):
 
 
 def test_map_partition_search_rejects_ambiguous_native_builder_scope(monkeypatch):
-    monkeypatch.setattr(_compileiq_opaque, "_validated_compileiq_capability", _capability)
+    monkeypatch.setattr(
+        _compileiq_opaque, "_validated_compileiq_capability", _capability
+    )
     graph = _Graph(_space(), map_materialization_available=False)
 
     with pytest.raises(ValueError, match="one Forge-owned source GraphBuilder"):
@@ -354,7 +356,9 @@ def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
         "repository": "https://github.com/fancifulland2718/CompileIQ",
         "ref": "refs/heads/forge/opaque-objectives-v1.3",
         "commit": "300c426cf8bef288e926a06ab11431797d4942fa",
-        "wheel_sha256": ("1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"),
+        "wheel_sha256": (
+            "1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"
+        ),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
     json.dumps(manifest)
@@ -425,9 +429,7 @@ def test_structured_control_uses_its_own_opaque_domain_and_exact_route(monkeypat
     )
     manifest = search.manifest()
     assert manifest["recipe_kind"] == "structured_control"
-    assert manifest["runtime_admission"] == (
-        "offline_explicit_reconstruction_only"
-    )
+    assert manifest["runtime_admission"] == ("offline_explicit_reconstruction_only")
 
     masked_id = next(
         recipe_id
@@ -462,12 +464,8 @@ def test_nested_control_uses_distinct_opaque_domain_and_exact_route(monkeypatch)
     )
     manifest = search.manifest()
     assert manifest["recipe_kind"] == "structured_control"
-    assert manifest["structured_control_domain"] == (
-        "cuda_nested_while_while"
-    )
-    assert manifest["runtime_admission"] == (
-        "offline_explicit_reconstruction_only"
-    )
+    assert manifest["structured_control_domain"] == ("cuda_nested_while_while")
+    assert manifest["runtime_admission"] == ("offline_explicit_reconstruction_only")
 
     masked_id = next(
         recipe_id
@@ -486,9 +484,7 @@ def test_nested_control_uses_distinct_opaque_domain_and_exact_route(monkeypatch)
         parameters,
         _Graph(_nested_control_space(selected="masked")),
     )
-    assert verified.control_recipe_id == (
-        _CUDA_NESTED_MASKED_CONTROL_RECIPE_ID
-    )
+    assert verified.control_recipe_id == (_CUDA_NESTED_MASKED_CONTROL_RECIPE_ID)
 
 
 def test_decoded_selection_fails_closed_on_any_domain_drift(monkeypatch):
@@ -580,9 +576,17 @@ def test_incomplete_partition_domain_refines_only_observed_disjoint_frontier(
     assert len(refined.recipe_ids) == 4
     manifest = refined.manifest()
     assert manifest["partition_stage"] == "observed_frontier_pairwise_v1"
-    assert manifest["partition_parent_domain_fingerprint"] == (search.domain_fingerprint)
-    assert manifest["partition_frontier_spec_ids"] == tuple(sorted((left.spec_id, right.spec_id)))
-    combined = next(recipe for recipe in manifest["recipes"] if recipe["fusion_source_groups"] == ((0, 1), (3, 4)))
+    assert manifest["partition_parent_domain_fingerprint"] == (
+        search.domain_fingerprint
+    )
+    assert manifest["partition_frontier_spec_ids"] == tuple(
+        sorted((left.spec_id, right.spec_id))
+    )
+    combined = next(
+        recipe
+        for recipe in manifest["recipes"]
+        if recipe["fusion_source_groups"] == ((0, 1), (3, 4))
+    )
     assert combined["materialization_recipe"] == "exact-v1:0,1;3,4"
 
 
@@ -710,7 +714,7 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
+def test_modified_compileiq_exhausts_exact_graph_partitions():
     count = 257
 
     @ti.kernel
@@ -759,9 +763,11 @@ def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
             symbolic["middle"],
             symbolic["output"],
         )
-        return builder.compile()
+        return builder.compile(
+            workspace_lanes=2,
+            workspace_saturation="raise",
+        )
 
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
     baseline = build()
     plans = compileiq_recipe_search(baseline)
     assert len(plans.recipe_ids) == 4
@@ -782,14 +788,20 @@ def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
 
     def objective(parameters):
         selection = plans.select(parameters)
-        with monkeypatch.context() as environment:
-            for name, value in selection.worker_environment.items():
-                environment.setenv(name, value)
-            graph = build()
-        plans.verify_materialized_graph(parameters, graph)
-        graph.run(arguments)
-        ti.sync()
-        materialized.append((selection.spec_id, graph.physical_plan()["physical_dispatch_count"]))
+        with plans.materialize(parameters) as result:
+            plans.verify_materialized_graph(parameters, result)
+            graph = result.executor
+            assert graph._workspace_lane_capacity == 2
+            assert graph._workspace_saturation == "raise"
+            graph.run(arguments)
+            ti.sync()
+            materialized.append(
+                (
+                    selection.spec_id,
+                    graph.physical_plan()["physical_dispatch_count"],
+                )
+            )
+
         return float(plans.recipe_ids.index(selection.spec_id))
 
     compileiq_search = plans.compileiq_search(objective)
@@ -800,13 +812,13 @@ def test_modified_compileiq_exhausts_exact_graph_partitions(monkeypatch):
     assert coverage["complete"]
     assert coverage["evaluation_count"] == len(plans.recipe_ids)
     assert {recipe_id for recipe_id, _ in materialized} == set(plans.recipe_ids)
-    assert {dispatches for _, dispatches in materialized} == {1, 2, 3}
+    assert {dispatches for _, dispatches in materialized} == {1, 2}
     assert selected.spec_id == plans.recipe_ids[0]
     np.testing.assert_array_equal(output.to_numpy(), (source_np * 2 + 3) * 4)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_modified_compileiq_materializes_eight_stage_exact_partitions(monkeypatch):
+def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
     count = 257
 
     @ti.kernel
@@ -818,9 +830,7 @@ def test_modified_compileiq_materializes_eight_stage_exact_partitions(monkeypatc
         for i in domain:
             destination[i] = source[i] + 1
 
-    symbolic_domain = ti.graph.Arg(
-        ti.graph.ArgKind.NDARRAY, "domain", ti.i32, ndim=1
-    )
+    symbolic_domain = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "domain", ti.i32, ndim=1)
     symbolic = tuple(
         ti.graph.Arg(ti.graph.ArgKind.NDARRAY, f"value_{index}", ti.i32, ndim=1)
         for index in range(9)
@@ -837,21 +847,17 @@ def test_modified_compileiq_materializes_eight_stage_exact_partitions(monkeypatc
             )
         return builder.compile()
 
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
     baseline = build()
-    plans = compileiq_recipe_search(baseline)
-    manifest = plans.manifest()
-
-    assert manifest["partitions_complete"]
-    assert manifest["partition_stage"] == "exact_contiguous_v1"
-    assert manifest["partition_combination_count"] == 108, baseline._ir_debug_info[
-        "fusion_plan"
-    ]
-    assert len(plans.recipe_ids) == 108
-
-    recipes_by_groups = {
-        tuple(tuple(group) for group in recipe["fusion_source_groups"]): recipe
-        for recipe in manifest["recipes"]
+    catalog = baseline.definition.recipe_catalog()
+    fragments_by_group = {
+        tuple(
+            int(value)
+            for value in fragment.materializer.selection.source_key.removeprefix(
+                "dispatches:"
+            ).split(",")
+        ): fragment
+        for fragment in catalog.fragments
+        if fragment.materializer.selection.family == "map_fusion"
     }
     expected_physical = {
         ((0, 1, 2, 3), (4, 5, 6, 7)): 2,
@@ -867,24 +873,25 @@ def test_modified_compileiq_materializes_eight_stage_exact_partitions(monkeypatc
     }
 
     for source_groups, physical_dispatches in expected_physical.items():
-        recipe = recipes_by_groups[source_groups]
-        parameters = _parameters(plans, recipe["spec_id"])
-        selection = plans.select(parameters)
-        assert selection.materialization_recipe.startswith("exact-v1:")
-        with monkeypatch.context() as environment:
-            for name, value in selection.worker_environment.items():
-                environment.setenv(name, value)
-            graph = build()
-        plans.verify_materialized_graph(parameters, graph)
-        assert graph.physical_plan()["logical_dispatch_count"] == 8
-        assert graph.physical_plan()["physical_dispatch_count"] == physical_dispatches
-        graph.run(arguments)
-        ti.sync()
-        np.testing.assert_array_equal(arrays[-1].to_numpy(), source_np + 8)
+        entry = catalog.compose(
+            tuple(fragments_by_group[group].fragment_id for group in source_groups),
+            stage="compatible-composition",
+            parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+        )
+        assert len(entry.recipe.fragments) == len(source_groups)
+        with baseline.definition.materialize(entry.recipe) as materialized:
+            graph = materialized.executor
+            assert graph.physical_plan()["logical_dispatch_count"] == 8
+            assert (
+                graph.physical_plan()["physical_dispatch_count"] == physical_dispatches
+            )
+            graph.run(arguments)
+            ti.sync()
+            np.testing.assert_array_equal(arrays[-1].to_numpy(), source_np + 8)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch):
+def test_modified_compileiq_exhausts_complete_graph_bounded_recipes():
     probe = dict(ti_core.cuda_bounded_dispatch_probe())
     if not probe["exact_device_grid_available"]:
         pytest.skip(probe["unavailable_reason"])
@@ -938,18 +945,15 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
             )
         return builder.compile()
 
-    monkeypatch.setenv("TI_CUDA_BOUNDED_DISPATCH_MODE", "auto")
-    monkeypatch.setenv("TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY", "auto")
     baseline = build()
     plans = compileiq_recipe_search(baseline)
     manifest = plans.manifest()
     assert (
-        plans.search_space.provider_namespace
-        == "taichi_forge.graph.bounded_execution"
+        plans.search_space.provider_namespace == "taichi_forge.graph.bounded_execution"
     )
-    assert plans.search_space.domain_version == "graph-bounded-complete-recipe.v1"
+    assert plans.search_space.domain_version == "graph-bounded-complete-recipe.v2"
     assert manifest["recipe_kind"] == "graph_bounded_execution"
-    assert manifest["runtime_admission"] == "offline_explicit_reconstruction_only"
+    assert manifest["runtime_admission"] == "explicit_materialization_context_only"
     assert baseline._compileiq_graph_bounded_status == "complete_recipe_domain"
 
     expected_strategies = (
@@ -959,8 +963,7 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
         "masked_capacity",
     )
     assert {
-        recipe["bounded_recipe_manifest"]["strategy"]
-        for recipe in manifest["recipes"]
+        recipe["bounded_recipe_manifest"]["strategy"] for recipe in manifest["recipes"]
     } == set(expected_strategies)
 
     extent = ti.DeviceExtent(capacity)
@@ -978,24 +981,20 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
     def objective(parameters):
         selection = plans.select(parameters)
         strategy = selection.bounded_recipe_manifest.strategy
-        with monkeypatch.context() as environment:
-            for name, value in selection.worker_environment.items():
-                environment.setenv(name, value)
-            graph = build()
-        semantic_graph_ids.add(graph.definition.semantic_graph_id)
-        plans.verify_materialized_graph(parameters, graph)
-        first.fill(0)
-        second.fill(0)
-        graph.run(arguments)
-        ti.sync()
-        expected = 17 * 18 // 2
-        assert int(first.to_numpy()[0]) == expected
-        assert int(second.to_numpy()[0]) == expected
-        selected = graph._compileiq_executable_optimization_space.selected
-        assert selected.bounded_recipe_manifest.strategy == strategy
-        materialized[strategy] = (
-            graph.execution_stats().memory.persistent_bounded_control_bytes
-        )
+        with plans.materialize(parameters) as result:
+            graph = result.executor
+            semantic_graph_ids.add(graph.definition.semantic_graph_id)
+            plans.verify_materialized_graph(parameters, result)
+            first.fill(0)
+            second.fill(0)
+            graph.run(arguments)
+            ti.sync()
+            expected = 17 * 18 // 2
+            assert int(first.to_numpy()[0]) == expected
+            assert int(second.to_numpy()[0]) == expected
+            materialized[strategy] = (
+                graph.execution_stats().memory.persistent_bounded_control_bytes
+            )
         return float(expected_strategies.index(strategy))
 
     compileiq_search = plans.compileiq_search(objective)
@@ -1014,8 +1013,9 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
     assert selected.bounded_recipe_manifest.strategy == "logical_exact"
 
     forced = build(physical_grid="capacity")
-    with pytest.raises(ValueError, match="exact map-partition search requires"):
-        compileiq_recipe_search(forced)
+    forced_search = compileiq_recipe_search(forced)
+    assert forced_search.recipe_ids == (forced_search.baseline_recipe_id,)
+    assert forced_search.manifest()["families"] == ()
     assert forced._compileiq_graph_bounded_status == "source_policy_out_of_scope"
 
     single = build(consumer_count=1)

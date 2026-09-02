@@ -30,9 +30,7 @@ def _shared_staged_plan(kernel, *probe_args, block_dim=128):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
-    monkeypatch,
-):
+def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
     count = 1027
 
     @ti.kernel
@@ -53,7 +51,7 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
     assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     assert len(search.recipe_ids) == 2
     assert search.search_space.provider_namespace == "taichi_forge.graph.memory"
-    assert search.search_space.domain_version == "graph-memory-complete-recipe"
+    assert search.search_space.domain_version == "graph-memory-complete-recipe.v2"
     assert search.manifest()["recipe_kind"] == "graph_memory"
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
@@ -80,34 +78,19 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
             "recipe_id": recipe_id,
         }
 
-    def rebuild(recipe_id):
-        environment = search.worker_environment(parameters(recipe_id))
-        assert environment["TAICHI_FORGE_INTERNAL_MAP_FUSION"] == "baseline"
-        assert environment["TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"] == "auto"
-        assert (
-            environment["TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"]
-            == manifests[recipe_id]["memory_recipe_id"]
-        )
-        with monkeypatch.context() as reconstruction:
-            for name, value in environment.items():
-                reconstruction.setenv(name, value)
-            rebuilt_builder = ti.graph.GraphBuilder()
-            rebuilt_builder.dispatch(stencil, source_arg, output_arg)
-            rebuilt = rebuilt_builder.compile()
-        search.verify_materialized_graph(parameters(recipe_id), rebuilt)
-        return rebuilt
+    def materialize(recipe_id):
+        opaque_parameters = parameters(recipe_id)
+        assert dict(search.worker_environment(opaque_parameters)) == {}
+        materialized = search.materialize(opaque_parameters)
+        search.verify_materialized_graph(opaque_parameters, materialized)
+        return materialized
 
     observed = []
 
     def objective(opaque_parameters):
         selection = search.select(opaque_parameters)
-        rebuilt = rebuild(selection.spec_id)
-        observed.append(
-            (
-                selection.spec_id,
-                rebuilt._compileiq_executable_optimization_space.selected_spec_id,
-            )
-        )
+        with materialize(selection.spec_id) as result:
+            observed.append((selection.spec_id, result.manifest.recipe_id))
         return float(search.recipe_ids.index(selection.spec_id))
 
     exhaustive = search.compileiq_search(objective)
@@ -120,19 +103,15 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
     assert all(requested == actual for requested, actual in observed)
     assert selected.spec_id == search.recipe_ids[0]
 
-    direct_graph = rebuild(direct_id)
-    staged_graph = rebuild(staged_id)
-    assert (
-        direct_graph._compileiq_executable_optimization_space.semantic_plan_id
-        == staged_graph._compileiq_executable_optimization_space.semantic_plan_id
-    )
+    direct_materialized = materialize(direct_id)
+    staged_materialized = materialize(staged_id)
+    direct_graph = direct_materialized.executor
+    staged_graph = staged_materialized.executor
     assert (
         direct_graph.definition.semantic_graph_id
         == staged_graph.definition.semantic_graph_id
     )
-    assert (
-        direct_graph.definition.binding_abi == staged_graph.definition.binding_abi
-    )
+    assert direct_graph.definition.binding_abi == staged_graph.definition.binding_abi
     staged_task = next(
         task for task in staged_graph.task_manifest() if task.task_type == "range_for"
     )
@@ -159,15 +138,8 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
     short_output = ti.ndarray(ti.f32, shape=count - 1)
     with pytest.raises(RuntimeError, match="at least 1027 scalar elements"):
         staged_graph.bind({"source": short_source, "output": short_output})
-
-    with monkeypatch.context() as reconstruction:
-        reconstruction.setenv(
-            "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
-            "graph-memory:shared-staged-1d:" + "0" * 24,
-        )
-        with pytest.raises(RuntimeError, match="absent from this Graph definition"):
-            rejected = ti.graph.GraphBuilder()
-            rejected.dispatch(stencil, source_arg, output_arg)
+    direct_materialized.close()
+    staged_materialized.close()
 
 
 @pytest.mark.parametrize(
@@ -176,7 +148,6 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
 )
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
-    monkeypatch,
     dtype,
     numpy_dtype,
     element_bytes,
@@ -225,12 +196,11 @@ def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
         "domain_fingerprint": search.domain_fingerprint,
         "recipe_id": staged_id,
     }
-    selection = search.select(parameters)
-    with monkeypatch.context() as reconstruction:
-        for name, value in selection.worker_environment.items():
-            reconstruction.setenv(name, value)
-        staged_graph = build()
-    search.verify_materialized_graph(parameters, staged_graph)
+    materialized = search.materialize(parameters)
+
+    staged_graph = materialized.executor
+
+    search.verify_materialized_graph(parameters, materialized)
     staged_task = next(
         task for task in staged_graph.task_manifest() if task.task_type == "range_for"
     )
@@ -251,6 +221,8 @@ def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
     expected[1:-1] = values[:-2] + values[1:-1] * 2 + values[2:]
     np.testing.assert_array_equal(output.to_numpy(), expected)
 
+    materialized.close()
+
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypatch):
@@ -264,11 +236,7 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
     ):
         for i in range(2, count - 2):
             output[i] = (
-                left[i - 2]
-                + left[i]
-                + left[i + 1]
-                + right[i - 1] * 0.5
-                + right[i + 2]
+                left[i - 2] + left[i] + left[i + 1] + right[i - 1] * 0.5 + right[i + 2]
             )
 
     left_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "left", ti.f32, ndim=1)
@@ -337,11 +305,9 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
         "domain_fingerprint": search.domain_fingerprint,
         "recipe_id": staged_id,
     }
-    with monkeypatch.context() as reconstruction:
-        for name, value in search.worker_environment(parameters).items():
-            reconstruction.setenv(name, value)
-        staged_graph = build()
-    search.verify_materialized_graph(parameters, staged_graph)
+    materialized = search.materialize(parameters)
+    staged_graph = materialized.executor
+    search.verify_materialized_graph(parameters, materialized)
     task = next(
         item for item in staged_graph.task_manifest() if item.task_type == "range_for"
     )
@@ -362,9 +328,7 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
     left.from_numpy(left_values)
     right.from_numpy(right_values)
     output.fill(0)
-    bindings = staged_graph.bind(
-        {"left": left, "right": right, "output": output}
-    )
+    bindings = staged_graph.bind({"left": left, "right": right, "output": output})
     assert bindings.fast_path_qualified
     assert staged_graph.bind(
         {"left": left, "right": left, "output": output}
@@ -405,10 +369,11 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
         + right_values[4:]
     )
     np.testing.assert_array_equal(output.to_numpy(), expected)
+    materialized.close()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles(monkeypatch):
+def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles():
     count = 259
 
     @ti.kernel
@@ -456,11 +421,11 @@ def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles(monkeypatch)
         "domain_fingerprint": search.domain_fingerprint,
         "recipe_id": staged_id,
     }
-    with monkeypatch.context() as reconstruction:
-        for name, value in search.worker_environment(parameters).items():
-            reconstruction.setenv(name, value)
-        staged_graph = build()
-    search.verify_materialized_graph(parameters, staged_graph)
+    materialized = search.materialize(parameters)
+
+    staged_graph = materialized.executor
+
+    search.verify_materialized_graph(parameters, materialized)
     task = next(
         item for item in staged_graph.task_manifest() if item.task_type == "range_for"
     )
@@ -486,6 +451,8 @@ def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles(monkeypatch)
         + wide_values[2:]
     )
     np.testing.assert_array_equal(output.to_numpy(), expected)
+
+    materialized.close()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -514,9 +481,7 @@ def test_graph_memory_compileiq_keeps_one_byte_scalar_stencils_out_of_domain():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_memory_compileiq_rejects_unsupported_and_multi_dispatch_domains(
-    monkeypatch,
-):
+def test_graph_memory_compileiq_rejects_unsupported_candidates():
     count = 256
 
     @ti.kernel
@@ -541,21 +506,19 @@ def test_graph_memory_compileiq_rejects_unsupported_and_multi_dispatch_domains(
         for recipe_id in search.recipe_ids
     )
 
-    with monkeypatch.context() as reconstruction:
-        reconstruction.setenv(
-            "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
-            "graph-memory:shared-staged-1d:" + "0" * 24,
+    with pytest.raises(KeyError, match="unknown complete Graph recipe"):
+        search.materialize(
+            {
+                "domain_fingerprint": search.domain_fingerprint,
+                "recipe_id": "graph-recipe:" + "0" * 64,
+            }
         )
-        with pytest.raises(RuntimeError, match="cannot be materialized"):
-            rejected = ti.graph.GraphBuilder()
-            rejected.dispatch(pointwise, source_arg, output_arg)
 
     multi = ti.graph.GraphBuilder()
     multi.dispatch(pointwise, source_arg, output_arg)
     multi.dispatch(pointwise, source_arg, output_arg)
     multi_graph = multi.compile()
     multi_search = compileiq_recipe_search(multi_graph)
-    assert multi_graph._compileiq_graph_memory_status == "definition_out_of_scope"
     assert all(
         "memory_recipe_id" not in multi_search.recipe_manifest(recipe_id)
         for recipe_id in multi_search.recipe_ids
@@ -943,7 +906,7 @@ def test_private_graph_shared_staged_recipe_rejects_pointwise_input():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_memory_compound_records_materialize_complete_lane_layout(monkeypatch):
+def test_graph_memory_compound_records_materialize_complete_lane_layout():
     count = 259
 
     for element_shape, scalar_dtype, numpy_dtype in (
@@ -1006,7 +969,14 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout(monkeypa
             }
         ]
         assert staged["memory_layout_requirements"] == [
-            ["output", count - 1, record_bytes, scalar_bytes, list(element_shape), "aos"],
+            [
+                "output",
+                count - 1,
+                record_bytes,
+                scalar_bytes,
+                list(element_shape),
+                "aos",
+            ],
             ["source", count, record_bytes, scalar_bytes, list(element_shape), "aos"],
         ]
 
@@ -1014,11 +984,9 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout(monkeypa
             "domain_fingerprint": search.domain_fingerprint,
             "recipe_id": staged_id,
         }
-        with monkeypatch.context() as reconstruction:
-            for name, value in search.worker_environment(parameters).items():
-                reconstruction.setenv(name, value)
-            staged_graph = build()
-        search.verify_materialized_graph(parameters, staged_graph)
+        materialized = search.materialize(parameters)
+        staged_graph = materialized.executor
+        search.verify_materialized_graph(parameters, materialized)
         task = next(
             item
             for item in staged_graph.task_manifest()
@@ -1055,6 +1023,7 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout(monkeypa
         expected = np.zeros_like(values)
         expected[1:-1] = values[:-2] + values[1:-1] * 2 + values[2:]
         np.testing.assert_array_equal(output.to_numpy(), expected)
+        materialized.close()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

@@ -5,8 +5,6 @@ from taichi_forge.graph import compileiq_recipe_search
 
 from tests import test_utils
 
-_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
-
 
 def _reduction_arguments(dtype):
     return (
@@ -35,17 +33,17 @@ def _build_reduction_graph(
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatch):
+def test_graph_reduction_compileiq_materializes_complete_typed_domain():
     count = 4097
     graph = _build_reduction_graph(ti.i32, count)
-    assert graph._compileiq_graph_reduction_status == "complete_recipe_domain", (
-        graph._compileiq_graph_reduction_status
-    )
+    assert (
+        graph._compileiq_graph_reduction_status == "complete_recipe_domain"
+    ), graph._compileiq_graph_reduction_status
     search = compileiq_recipe_search(graph)
 
     assert search.manifest()["recipe_kind"] == "graph_reduction"
     assert search.search_space.provider_namespace == "taichi_forge.graph.reduction"
-    assert search.search_space.domain_version == "graph-reduction-complete-recipe.v1"
+    assert search.search_space.domain_version == "graph-reduction-complete-recipe.v2"
     assert len(search.recipe_ids) == 2
 
     manifests = {
@@ -60,8 +58,7 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
     phased_id = next(
         recipe_id
         for recipe_id, manifest in manifests.items()
-        if manifest["reduction_recipe_manifest"]["strategy"]
-        == "block_partial_finalize"
+        if manifest["reduction_recipe_manifest"]["strategy"] == "block_partial_finalize"
     )
     assert direct_id == search.baseline_recipe_id
     for manifest in manifests.values():
@@ -102,19 +99,16 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
         "bytes": partial_count * 4,
     }
 
-    def rebuild(recipe_id):
+    def materialize(recipe_id, context):
         parameters = {
             "domain_fingerprint": search.domain_fingerprint,
             "recipe_id": recipe_id,
         }
-        environment = search.worker_environment(parameters)
-        assert environment[_RECIPE_ENV] == manifests[recipe_id]["reduction_recipe_id"]
-        with monkeypatch.context() as reconstruction:
-            for name, value in environment.items():
-                reconstruction.setenv(name, value)
-            rebuilt = _build_reduction_graph(ti.i32, count)
-        search.verify_materialized_graph(parameters, rebuilt)
-        return rebuilt
+        assert dict(search.worker_environment(parameters)) == {}
+        materialized = search.materialize(parameters, context=context)
+        search.verify_materialized_graph(parameters, materialized)
+        assert materialized.manifest.recipe_id == recipe_id
+        return materialized
 
     values = ti.ndarray(ti.i32, shape=count)
     output = ti.ndarray(ti.i32, shape=1)
@@ -122,33 +116,36 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
     values.from_numpy(host_values)
     expected = np.asarray(host_values.sum(dtype=np.int64), dtype=np.int32).item()
     semantic_graph_ids = set()
-    for recipe_id in search.recipe_ids:
-        rebuilt = rebuild(recipe_id)
-        semantic_graph_ids.add(rebuilt.definition.semantic_graph_id)
-        output.fill(123)
-        bindings = rebuilt.bind({"values": values, "output": output})
-        assert bindings.fast_path_qualified
-        assert bindings.statistics()["memory_recipe_publish_validated"]
-        assert bindings.statistics()["fixed_bindings_flattened"]
-        rebuilt.run(bindings)
-        ti.sync()
-        assert output.to_numpy()[0] == expected
-        statistics = rebuilt.binding_statistics()
-        assert statistics["raw_replay_validations"] == 0
-        assert statistics["version_volatile_replays"] == 0
-        assert statistics["version_fast_replays"] == 1
-    assert semantic_graph_ids == {graph.definition.semantic_graph_id}
+    with graph.definition.materialization_context() as context:
+        for recipe_id in search.recipe_ids:
+            with materialize(recipe_id, context) as materialized:
+                rebuilt = materialized.executor
+                semantic_graph_ids.add(rebuilt.definition.semantic_graph_id)
+                output.fill(123)
+                bindings = rebuilt.bind({"values": values, "output": output})
+                assert bindings.fast_path_qualified
+                assert bindings.statistics()["memory_recipe_publish_validated"]
+                assert bindings.statistics()["fixed_bindings_flattened"]
+                rebuilt.run(bindings)
+                ti.sync()
+                assert output.to_numpy()[0] == expected
+                statistics = rebuilt.binding_statistics()
+                assert statistics["raw_replay_validations"] == 0
+                assert statistics["version_volatile_replays"] == 0
+                assert statistics["version_fast_replays"] == 1
+        assert semantic_graph_ids == {graph.definition.semantic_graph_id}
 
-    phased = rebuild(phased_id)
-    with pytest.raises(RuntimeError, match="requires proven disjoint storage"):
-        phased.bind({"values": values, "output": values})
-    short_values = ti.ndarray(ti.i32, shape=count - 1)
-    with pytest.raises(RuntimeError, match=f"at least {count} scalar elements"):
-        phased.bind({"values": short_values, "output": output})
+        with materialize(phased_id, context) as materialized:
+            phased = materialized.executor
+            with pytest.raises(RuntimeError, match="requires proven disjoint storage"):
+                phased.bind({"values": values, "output": values})
+            short_values = ti.ndarray(ti.i32, shape=count - 1)
+            with pytest.raises(RuntimeError, match=f"at least {count} scalar elements"):
+                phased.bind({"values": short_values, "output": output})
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_reduction_requires_explicit_floating_point_equivalence(monkeypatch):
+def test_graph_reduction_requires_explicit_floating_point_equivalence():
     with pytest.raises(ValueError, match="requires explicit"):
         _build_reduction_graph(ti.f32, 1024)
     with pytest.raises(ValueError, match="positive tolerance"):
@@ -179,35 +176,32 @@ def test_graph_reduction_requires_explicit_floating_point_equivalence(monkeypatc
     host_values = ((np.arange(1024, dtype=np.float32) % 17) - 8) * 0.125
     values.from_numpy(host_values)
     expected = host_values.sum(dtype=np.float32)
-    for recipe_id in search.recipe_ids:
-        parameters = {
-            "domain_fingerprint": search.domain_fingerprint,
-            "recipe_id": recipe_id,
-        }
-        manifest = search.recipe_manifest(recipe_id)
-        semantics = manifest["reduction_recipe_manifest"]["semantics"]
-        assert semantics["dtype"] == "f32"
-        assert semantics["determinism"] == "within_tolerance"
-        assert semantics["absolute_tolerance"] == 1e-4
-        assert semantics["relative_tolerance"] == 1e-5
-        with monkeypatch.context() as reconstruction:
-            for name, value in search.worker_environment(parameters).items():
-                reconstruction.setenv(name, value)
-            rebuilt = _build_reduction_graph(
-                ti.f32,
-                1024,
-                absolute_tolerance=1e-4,
-                relative_tolerance=1e-5,
-            )
-        search.verify_materialized_graph(parameters, rebuilt)
-        output.fill(123.0)
-        rebuilt.run(rebuilt.bind({"values": values, "output": output}))
-        ti.sync()
-        np.testing.assert_allclose(output.to_numpy()[0], expected, rtol=1e-5, atol=1e-4)
+
+    with graph.definition.materialization_context() as context:
+        for recipe_id in search.recipe_ids:
+            parameters = {
+                "domain_fingerprint": search.domain_fingerprint,
+                "recipe_id": recipe_id,
+            }
+            manifest = search.recipe_manifest(recipe_id)
+            semantics = manifest["reduction_recipe_manifest"]["semantics"]
+            assert semantics["dtype"] == "f32"
+            assert semantics["determinism"] == "within_tolerance"
+            assert semantics["absolute_tolerance"] == 1e-4
+            assert semantics["relative_tolerance"] == 1e-5
+            with search.materialize(parameters, context=context) as materialized:
+                search.verify_materialized_graph(parameters, materialized)
+                rebuilt = materialized.executor
+                output.fill(123.0)
+                rebuilt.run(rebuilt.bind({"values": values, "output": output}))
+                ti.sync()
+                np.testing.assert_allclose(
+                    output.to_numpy()[0], expected, rtol=1e-5, atol=1e-4
+                )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_graph_reduction_does_not_mix_with_other_graph_recipe_domains():
+def test_graph_reduction_recipe_composes_with_an_ordinary_dispatch():
     count = 1024
 
     @ti.kernel
@@ -225,6 +219,36 @@ def test_graph_reduction_does_not_mix_with_other_graph_recipe_domains():
     builder.reduce(output, result, count=count)
     graph = builder.compile()
 
-    assert graph._compileiq_graph_reduction_status == "definition_out_of_scope"
-    with pytest.raises(ValueError, match="exact map-partition search requires"):
-        compileiq_recipe_search(graph)
+    search = compileiq_recipe_search(graph)
+    assert search.manifest()["families"] == ("graph_reduction",)
+    assert len(search.recipe_ids) == 2
+
+    host_values = ((np.arange(count, dtype=np.int32) % 19) - 9).astype(np.int32)
+    input_array = ti.ndarray(ti.i32, shape=count)
+    intermediate = ti.ndarray(ti.i32, shape=count)
+    result_array = ti.ndarray(ti.i32, shape=1)
+    input_array.from_numpy(host_values)
+    expected = np.asarray(host_values.sum(dtype=np.int64), dtype=np.int32).item()
+
+    with graph.definition.materialization_context() as context:
+        for recipe_id in search.recipe_ids:
+            parameters = {
+                "domain_fingerprint": search.domain_fingerprint,
+                "recipe_id": recipe_id,
+            }
+            with search.materialize(parameters, context=context) as materialized:
+                search.verify_materialized_graph(parameters, materialized)
+                candidate = materialized.executor
+                result_array.fill(123)
+                candidate.run(
+                    candidate.bind(
+                        {
+                            "values": input_array,
+                            "output": intermediate,
+                            "result": result_array,
+                        }
+                    )
+                )
+                ti.sync()
+                np.testing.assert_array_equal(intermediate.to_numpy(), host_values)
+                assert result_array.to_numpy()[0] == expected
