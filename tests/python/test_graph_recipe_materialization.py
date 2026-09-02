@@ -1,0 +1,671 @@
+import json
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+import taichi_forge as ti
+from taichi_forge.graph._ir import (
+    DispatchNode,
+    GraphAccess,
+    ResourceEffect,
+    RuntimeBinding,
+    SequentialRegion,
+)
+from taichi_forge.graph._recipes import (
+    CompiledGraphPhysicalManifest,
+    GraphDefinition,
+    GraphFragmentResourceRequirement,
+    GraphFragmentTask,
+    GraphMaterializationContext,
+    GraphMaterializationError,
+    GraphMaterializationProduct,
+    GraphMaterializedAllocation,
+    GraphMaterializedFragment,
+    GraphPhysicalBindingManifest,
+    GraphPhysicalCommandManifest,
+    GraphPhysicalKernelManifest,
+    GraphPhysicalManifestError,
+    GraphPhysicalResourceManifest,
+    GraphPhysicalSubmissionManifest,
+    GraphPhysicalTaskManifest,
+    GraphRecipeComposer,
+    GraphRecipeFragment,
+)
+
+from tests import test_utils
+
+
+def _definition():
+    nodes = (
+        DispatchNode(
+            name="load",
+            effects=(
+                ResourceEffect("values", GraphAccess.READ),
+                ResourceEffect("middle", GraphAccess.WRITE),
+            ),
+            bindings=(RuntimeBinding("values", "ndarray"),),
+            logical_kernel_identity="kernel:load",
+        ),
+        DispatchNode(
+            name="map",
+            effects=(ResourceEffect("middle", GraphAccess.READ_WRITE),),
+            logical_kernel_identity="kernel:map",
+        ),
+        DispatchNode(
+            name="store",
+            effects=(
+                ResourceEffect("middle", GraphAccess.READ),
+                ResourceEffect("output", GraphAccess.WRITE),
+            ),
+            bindings=(RuntimeBinding("output", "ndarray"),),
+            logical_kernel_identity="kernel:store",
+        ),
+    )
+    root = SequentialRegion(nodes, name="graph")
+    spec = SimpleNamespace(
+        pre_optimization_ir_root=root,
+        definition_semantic_root=root,
+        definition_semantic_sources=(),
+        ir_root=root,
+        runtime_arg_names=frozenset(("values", "output")),
+        fixed_runtime_args={},
+        temporary_runtime_arg_names=frozenset(),
+        derived_runtime_arg_names=frozenset(),
+        execution_definition={
+            "nodes": (),
+            "dispatch_count": 3,
+            "native_count": 0,
+            "observation_count": 0,
+            "structured_control_count": 0,
+            "max_structured_depth": 0,
+            "runtime_arg_count": 2,
+            "fixed_runtime_arg_count": 0,
+            "internal_storage_bytes": 0,
+            "temporary_memory_plan": {},
+        },
+    )
+    return GraphDefinition._from_graph_spec(spec, "cuda", core_commit="test-core")
+
+
+def _bindings(definition):
+    return tuple(
+        GraphPhysicalBindingManifest(
+            binding_index=index,
+            name=item.name,
+            kinds=item.kinds,
+            required=item.required,
+            scope=item.scope,
+        )
+        for index, item in enumerate(definition.binding_abi)
+    )
+
+
+def _manifest(
+    definition,
+    recipe,
+    route,
+    *,
+    resources=(),
+    regions=None,
+    bindings=None,
+    provenance=None,
+    exact=True,
+):
+    regions = (
+        tuple(
+            dict.fromkeys(
+                region_id
+                for step in recipe.execution_steps
+                for region_id in step.region_ids
+            )
+        )
+        if regions is None
+        else tuple(regions)
+    )
+    kernels = (
+        GraphPhysicalKernelManifest.create(
+            0,
+            "kernel",
+            f"artifact:{route}",
+            pipeline_identity=f"pipeline:{route}",
+            source_identities=(f"source:{route}",),
+            actual_grid_size=8,
+            actual_block_size=128,
+            static_shared_bytes=256,
+            abi_binding_names=tuple(item.name for item in definition.binding_abi),
+        ),
+    )
+    tasks = (
+        GraphPhysicalTaskManifest.create(
+            0,
+            "kernel",
+            region_ids=regions,
+            kernel_indices=(0,),
+            queue="compute",
+            binding_names=tuple(item.name for item in definition.binding_abi),
+            properties={"actual_route": route},
+        ),
+    )
+    commands = (
+        GraphPhysicalCommandManifest.create(
+            0,
+            "dispatch",
+            task_indices=(0,),
+            queue="compute",
+            recording_scope="whole_graph",
+        ),
+    )
+    submissions = (
+        GraphPhysicalSubmissionManifest(
+            submission_index=0,
+            depends_on=(),
+            command_indices=(0,),
+            queues=("compute",),
+            recording_scope="whole_graph",
+            replay_mode="exact_replay",
+        ),
+    )
+    return CompiledGraphPhysicalManifest.create(
+        definition,
+        recipe,
+        backend=definition.backend,
+        kernels=kernels,
+        tasks=tasks,
+        commands=commands,
+        submissions=submissions,
+        resources=resources,
+        binding_abi=_bindings(definition) if bindings is None else tuple(bindings),
+        task_topology_exact=exact,
+        command_topology_exact=exact,
+        allocation_topology_exact=exact,
+        provenance=provenance,
+    )
+
+
+def _fragment(
+    definition,
+    source_index,
+    planned_route,
+    materializer,
+    *,
+    resources=(),
+):
+    task = GraphFragmentTask.create(
+        f"task:{planned_route}",
+        "kernel",
+        physical={"planned_route": planned_route},
+    )
+    return GraphRecipeFragment.create(
+        definition,
+        provider_namespace=f"test.{planned_route}",
+        provider_version="1",
+        coverage_region_ids=(definition.sources[source_index].region_id,),
+        tasks=(task,),
+        resources=resources,
+        materializer_key=f"materialize:{planned_route}",
+        materializer=materializer,
+    )
+
+
+def _constant_runtime():
+    return ("test-runtime", 7)
+
+
+def test_complete_recipe_publishes_atomically_and_retires_owners_in_reverse_order():
+    definition = _definition()
+    events = []
+    context = None
+
+    def materializer(name):
+        def materialize(scope, fragment):
+            assert context.statistics()["publications"] == 0
+            scope.own(
+                {"owner": name},
+                release=lambda _value: events.append(f"release:{name}"),
+                label=name,
+            )
+            events.append(f"materialized:{name}")
+            return GraphMaterializedFragment.create(fragment, {"segment": name})
+
+        return materialize
+
+    first = _fragment(definition, 0, "first", materializer("first"))
+    third = _fragment(definition, 2, "third", materializer("third"))
+    recipe = GraphRecipeComposer(definition).compose((first, third))
+
+    def assemble(scope, requested_definition, requested_recipe, fragments):
+        assert requested_definition is definition
+        assert tuple(item.payload["segment"] for item in fragments) == (
+            "first",
+            "third",
+        )
+        assert context.statistics()["publications"] == 0
+        scope.own(
+            {"owner": "assembly"},
+            release=lambda _value: events.append("release:assembly"),
+            label="assembly",
+        )
+        executor = {"route": "first+baseline+third"}
+        return GraphMaterializationProduct(
+            executor,
+            _manifest(definition, requested_recipe, "composed"),
+            release=lambda _value: events.append("release:executor"),
+        )
+
+    context = GraphMaterializationContext(
+        definition,
+        assembler=assemble,
+        runtime_identity_provider=_constant_runtime,
+    )
+    result = context.materialize(recipe)
+    cached = context.materialize(recipe)
+
+    assert result.executor == {"route": "first+baseline+third"}
+    assert cached.executor is result.executor
+    assert cached.cache_hit
+    assert result.manifest.identity_complete
+    assert result.manifest.recipe_id == recipe.recipe_id
+    json.dumps(result.materialization_report(), sort_keys=True, allow_nan=False)
+    assert context.statistics() == {
+        "attempts": 1,
+        "publications": 1,
+        "failures": 0,
+        "recipe_cache_hits": 1,
+        "materialized_physical_deduplications": 0,
+        "rollbacks": 0,
+        "rollback_failures": 0,
+        "releases": 0,
+        "state": "open",
+        "active_transactions": 0,
+        "live_recipe_ids": 1,
+        "live_physical_materializations": 1,
+        "live_handles": 2,
+        "live_owned_resources": 4,
+    }
+    result.close()
+    assert events == ["materialized:first", "materialized:third"]
+    cached.close()
+    assert events == [
+        "materialized:first",
+        "materialized:third",
+        "release:executor",
+        "release:assembly",
+        "release:third",
+        "release:first",
+    ]
+    assert context.statistics()["live_owned_resources"] == 0
+
+
+def test_failed_candidate_rolls_back_without_disturbing_baseline_or_next_candidate():
+    definition = _definition()
+    releases = []
+
+    def baseline(scope, requested_definition, recipe):
+        assert requested_definition is definition
+        return GraphMaterializationProduct(
+            {"route": "baseline"},
+            _manifest(definition, recipe, "baseline"),
+            release=lambda _value: releases.append("baseline"),
+        )
+
+    def failed(scope, fragment):
+        scope.own(
+            object(),
+            release=lambda _value: releases.append("failed-candidate"),
+            label="failed candidate",
+        )
+        raise RuntimeError("provider compilation failed")
+
+    good = lambda scope, fragment: GraphMaterializedFragment.create(
+        fragment,
+        {"route": "good"},
+    )
+    failed_fragment = _fragment(definition, 1, "failed", failed)
+    good_fragment = _fragment(definition, 1, "good", good)
+    failed_recipe = GraphRecipeComposer(definition).compose((failed_fragment,))
+    good_recipe = GraphRecipeComposer(definition).compose((good_fragment,))
+
+    def assemble(scope, requested_definition, recipe, fragments):
+        assert len(fragments) == 1
+        return GraphMaterializationProduct(
+            {"route": fragments[0].payload["route"]},
+            _manifest(definition, recipe, fragments[0].payload["route"]),
+            release=lambda value: releases.append(value["route"]),
+        )
+
+    context = GraphMaterializationContext(
+        definition,
+        baseline_materializer=baseline,
+        assembler=assemble,
+        runtime_identity_provider=_constant_runtime,
+    )
+    baseline_result = context.materialize()
+    with pytest.raises(GraphMaterializationError) as failure:
+        context.materialize(failed_recipe)
+    assert failure.value.phase == "fragment"
+    assert failure.value.cleanup_complete
+    assert releases == ["failed-candidate"]
+    assert baseline_result.executor == {"route": "baseline"}
+
+    good_result = context.materialize(good_recipe)
+    assert good_result.executor == {"route": "good"}
+    assert context.statistics()["failures"] == 1
+    assert context.statistics()["publications"] == 2
+    good_result.close()
+    baseline_result.close()
+    assert releases == ["failed-candidate", "good", "baseline"]
+
+
+def test_actual_physical_identity_deduplicates_distinct_plans_before_measurement():
+    definition = _definition()
+    releases = []
+
+    def materializer(name):
+        def materialize(scope, fragment):
+            scope.own(
+                {"compile": name},
+                release=lambda _value: releases.append(f"compile:{name}"),
+                label=f"compile {name}",
+            )
+            return GraphMaterializedFragment.create(fragment, {"name": name})
+
+        return materialize
+
+    first = _fragment(definition, 1, "planned-a", materializer("a"))
+    second = _fragment(definition, 1, "planned-b", materializer("b"))
+    third = _fragment(definition, 1, "planned-c", materializer("c"))
+    composer = GraphRecipeComposer(definition)
+    first_recipe = composer.compose((first,))
+    second_recipe = composer.compose((second,))
+    third_recipe = composer.compose((third,))
+    assert first_recipe.planned_physical_id != second_recipe.planned_physical_id
+
+    def assemble(scope, requested_definition, recipe, fragments):
+        name = fragments[0].payload["name"]
+        resources = (
+            (
+                GraphPhysicalResourceManifest(
+                    resource_id="actual-workspace",
+                    kind="device_buffer",
+                    requested_bytes=64,
+                    allocated_bytes=256,
+                    alignment=256,
+                    ownership="graph_instance",
+                    lifetime="graph",
+                ),
+            )
+            if name == "c"
+            else ()
+        )
+        return GraphMaterializationProduct(
+            {"executor": name},
+            _manifest(
+                definition,
+                recipe,
+                "actual-shared-route",
+                resources=resources,
+                provenance={"candidate": name},
+            ),
+            release=lambda _value: releases.append(f"executor:{name}"),
+        )
+
+    context = GraphMaterializationContext(
+        definition,
+        assembler=assemble,
+        runtime_identity_provider=_constant_runtime,
+    )
+    first_result = context.materialize(first_recipe)
+    second_result = context.materialize(second_recipe)
+    third_result = context.materialize(third_recipe)
+
+    assert first_result.materialized_physical_id == (
+        second_result.materialized_physical_id
+    )
+    assert second_result.deduplicated
+    assert second_result.representative_recipe_id == first_recipe.recipe_id
+    assert second_result.executor is first_result.executor
+    assert releases == ["executor:b", "compile:b"]
+    assert context.statistics()["materialized_physical_deduplications"] == 1
+    assert third_result.materialized_physical_id != (
+        first_result.materialized_physical_id
+    )
+    assert not third_result.deduplicated
+    assert third_result.manifest.persistent_allocated_bytes == 256
+
+    first_result.close()
+    assert releases == ["executor:b", "compile:b"]
+    second_result.close()
+    assert releases == [
+        "executor:b",
+        "compile:b",
+        "executor:a",
+        "compile:a",
+    ]
+    third_result.close()
+    assert releases[-2:] == ["executor:c", "compile:c"]
+
+
+def test_allocated_resources_must_match_requirements_and_appear_in_manifest():
+    definition = _definition()
+    releases = []
+    include_resource = {"value": False}
+    requirement = GraphFragmentResourceRequirement(
+        "workspace",
+        "device_buffer",
+        bytes=4096,
+        alignment=256,
+        ownership="graph_instance",
+        lifetime="graph",
+        exclusive_submission=True,
+    )
+    physical = GraphPhysicalResourceManifest(
+        resource_id="workspace",
+        kind="device_buffer",
+        requested_bytes=4096,
+        allocated_bytes=4352,
+        alignment=256,
+        ownership="graph_instance",
+        lifetime="graph",
+        exclusive_submission=True,
+    )
+
+    def allocator(requested):
+        assert requested is requirement
+        value = {"allocation": len(releases)}
+        return GraphMaterializedAllocation(
+            value,
+            physical,
+            release=lambda _value: releases.append("workspace"),
+        )
+
+    def materialize(scope, fragment):
+        allocation = scope.allocate(requirement)
+        return GraphMaterializedFragment.create(fragment, allocation)
+
+    fragment = _fragment(
+        definition,
+        1,
+        "workspace",
+        materialize,
+        resources=(requirement,),
+    )
+    recipe = GraphRecipeComposer(definition).compose((fragment,))
+
+    def assemble(scope, requested_definition, requested_recipe, fragments):
+        resources = (physical,) if include_resource["value"] else ()
+        return GraphMaterializationProduct(
+            {"allocation": fragments[0].payload},
+            _manifest(
+                definition,
+                requested_recipe,
+                "workspace-route",
+                resources=resources,
+            ),
+            release=lambda _value: releases.append("executor"),
+        )
+
+    context = GraphMaterializationContext(
+        definition,
+        assembler=assemble,
+        resource_allocator=allocator,
+        runtime_identity_provider=_constant_runtime,
+    )
+    with pytest.raises(GraphMaterializationError, match="omits") as failure:
+        context.materialize(recipe)
+    assert failure.value.cleanup_complete
+    assert releases == ["workspace"]
+    assert context.statistics()["live_physical_materializations"] == 0
+
+    include_resource["value"] = True
+    result = context.materialize(recipe)
+    assert result.manifest.persistent_requested_bytes == 4096
+    assert result.manifest.persistent_allocated_bytes == 4352
+    result.close()
+    assert releases == ["workspace", "executor", "workspace"]
+
+
+def test_runtime_generation_change_aborts_publish_and_rolls_back_the_candidate():
+    definition = _definition()
+    runtime = {"generation": 4}
+    releases = []
+
+    def materialize(scope, fragment):
+        scope.own(
+            object(),
+            release=lambda _value: releases.append("compiled-fragment"),
+            label="compiled fragment",
+        )
+        return GraphMaterializedFragment.create(fragment, {"route": "candidate"})
+
+    fragment = _fragment(definition, 1, "runtime-drift", materialize)
+    recipe = GraphRecipeComposer(definition).compose((fragment,))
+
+    def assemble(scope, requested_definition, requested_recipe, fragments):
+        runtime["generation"] += 1
+        return GraphMaterializationProduct(
+            {"route": fragments[0].payload["route"]},
+            _manifest(definition, requested_recipe, "runtime-drift"),
+            release=lambda _value: releases.append("executor"),
+        )
+
+    context = GraphMaterializationContext(
+        definition,
+        assembler=assemble,
+        runtime_identity_provider=lambda: ("runtime", runtime["generation"]),
+    )
+    with pytest.raises(GraphMaterializationError, match="runtime changed") as failure:
+        context.materialize(recipe)
+    assert failure.value.cleanup_complete
+    assert releases == ["executor", "compiled-fragment"]
+    assert context.statistics()["publications"] == 0
+    assert context.statistics()["live_owned_resources"] == 0
+    context.close()
+
+
+def test_incomplete_cleanup_poisoning_and_manifest_integrity_fail_closed():
+    definition = _definition()
+    baseline = GraphRecipeComposer(definition).compose()
+    source_regions = tuple(source.region_id for source in definition.sources)
+    with pytest.raises(GraphPhysicalManifestError, match="complete executable"):
+        _manifest(
+            definition,
+            baseline,
+            "missing-region",
+            regions=source_regions[:-1],
+        )
+    with pytest.raises(GraphPhysicalManifestError, match="public binding ABI"):
+        _manifest(
+            definition,
+            baseline,
+            "missing-binding",
+            bindings=_bindings(definition)[:-1],
+        )
+    forged = replace(baseline, planned_physical_id="planned-physical:forged")
+    admission_context = GraphMaterializationContext(
+        definition,
+        runtime_identity_provider=_constant_runtime,
+    )
+    with pytest.raises(GraphMaterializationError, match="canonical composition"):
+        admission_context.materialize(forged)
+    admission_context.close()
+
+    def failed(scope, fragment):
+        def cannot_release(_value):
+            raise RuntimeError("allocator lost the device owner")
+
+        scope.own(object(), release=cannot_release, label="poisoned allocation")
+        raise RuntimeError("materialization failed after allocation")
+
+    fragment = _fragment(definition, 1, "poison", failed)
+    recipe = GraphRecipeComposer(definition).compose((fragment,))
+    context = GraphMaterializationContext(
+        definition,
+        assembler=lambda *_args: None,
+        runtime_identity_provider=_constant_runtime,
+    )
+    with pytest.raises(GraphMaterializationError) as failure:
+        context.materialize(recipe)
+    assert not failure.value.cleanup_complete
+    assert len(failure.value.rollback_errors) == 1
+    assert context.statistics()["state"] == "poisoned"
+    with pytest.raises(GraphMaterializationError, match="poisoned"):
+        context.materialize(baseline)
+    context.close()
+
+
+@test_utils.test(arch=ti.cpu)
+def test_native_task_observation_produces_stable_complete_baseline_manifest():
+    @ti.kernel
+    def add_one(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for i in values:
+            output[i] = values[i] + 1
+
+    values_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "values",
+        ti.i32,
+        ndim=1,
+    )
+    output_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "output",
+        ti.i32,
+        ndim=1,
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(add_one, values_arg, output_arg)
+    definition = builder.freeze()
+
+    first_context = definition.materialization_context()
+    second_context = definition.materialization_context()
+    first = first_context.materialize()
+    second = second_context.materialize()
+    try:
+        first_report = first.materialization_report()
+        assert first.manifest.task_topology_exact
+        assert first.manifest.tasks
+        assert first.manifest.kernels
+        assert all(kernel.artifact_identity for kernel in first.manifest.kernels)
+        assert tuple(item["name"] for item in first_report["binding_abi"]) == (
+            "output",
+            "values",
+        )
+        assert first.materialized_physical_id == second.materialized_physical_id
+
+        values = ti.ndarray(ti.i32, shape=8)
+        output = ti.ndarray(ti.i32, shape=8)
+        values.from_numpy(__import__("numpy").arange(8, dtype="int32"))
+        first.executor.run({"values": values, "output": output})
+        assert output.to_numpy().tolist() == list(range(1, 9))
+    finally:
+        first.close()
+        second.close()
+
+    one_shot = definition.materialize()
+    assert one_shot.materialized_physical_id == first_report["materialized_physical_id"]
+    one_shot.close()
+    with pytest.raises(GraphMaterializationError, match="closed"):
+        _ = one_shot.executor

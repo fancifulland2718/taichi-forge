@@ -364,6 +364,44 @@ class GraphDefinition:
             definition=self,
         )
 
+    def materialization_context(self, **options):
+        """Create an explicit owner for transactional recipe materialization."""
+
+        from taichi_forge.graph._recipes.materialize import (
+            GraphMaterializationContext,
+        )
+
+        return GraphMaterializationContext(self, **options)
+
+    def materialize(self, recipe=None, *, context=None, **context_options):
+        """Transactionally materialize a complete recipe.
+
+        Omitting ``recipe`` preserves the baseline sentinel. Supplying a
+        context makes ownership and physical de-duplication explicit across a
+        search batch; a one-shot call keeps its private context alive through
+        the returned handle.
+        """
+
+        if context is not None and context_options:
+            raise TypeError(
+                "GraphDefinition.materialize context options require a new context"
+            )
+        if context is not None and context.definition is not self:
+            raise ValueError(
+                "GraphDefinition.materialize context belongs to another definition"
+            )
+        owns_context = context is None
+        context = context or self.materialization_context(**context_options)
+        try:
+            result = context.materialize(recipe)
+        except BaseException:
+            if owns_context:
+                context.close()
+            raise
+        if owns_context:
+            result._close_context_on_release = True
+        return result
+
     def to_dict(self):
         return {
             "schema": _GRAPH_DEFINITION_SCHEMA,
