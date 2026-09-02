@@ -34,7 +34,7 @@ _CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
     for recipe_id in domain
 )
 
-_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 3
+_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 4
 _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "direct": "graph-memory:direct:",
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
@@ -165,6 +165,12 @@ class _GraphMemoryRecipeManifest:
                 "byte_offset",
                 "tile_elements",
                 "tile_bytes",
+                "access_offsets",
+                "logical_output_count",
+                "direct_input_records",
+                "staged_input_records",
+                "direct_input_bytes",
+                "staged_input_bytes",
             }
             if not 1 <= len(sources) <= 2 or any(
                 not isinstance(source, dict)
@@ -189,6 +195,11 @@ class _GraphMemoryRecipeManifest:
                     "byte_offset",
                     "tile_elements",
                     "tile_bytes",
+                    "logical_output_count",
+                    "direct_input_records",
+                    "staged_input_records",
+                    "direct_input_bytes",
+                    "staged_input_bytes",
                 )
                 if (
                     not isinstance(source["arg_name"], str)
@@ -221,6 +232,35 @@ class _GraphMemoryRecipeManifest:
                     or source["tile_elements"] <= 0
                     or source["tile_bytes"]
                     != source["tile_elements"] * source["element_bytes"]
+                    or source["tile_elements"]
+                    <= source["halo_high"] - source["halo_low"]
+                    or not isinstance(source["access_offsets"], list)
+                    or len(source["access_offsets"]) < 2
+                    or any(
+                        isinstance(offset, bool) or not isinstance(offset, int)
+                        for offset in source["access_offsets"]
+                    )
+                    or source["access_offsets"] != sorted(set(source["access_offsets"]))
+                    or source["access_offsets"][0] != source["halo_low"]
+                    or source["access_offsets"][-1] != source["halo_high"]
+                    or source["logical_output_count"] <= 0
+                    or source["direct_input_records"]
+                    != source["logical_output_count"] * len(source["access_offsets"])
+                    or source["staged_input_records"]
+                    != source["logical_output_count"]
+                    + math.ceil(
+                        source["logical_output_count"]
+                        / (
+                            source["tile_elements"]
+                            - source["halo_high"]
+                            + source["halo_low"]
+                        )
+                    )
+                    * (source["halo_high"] - source["halo_low"])
+                    or source["direct_input_bytes"]
+                    != source["direct_input_records"] * source["element_bytes"]
+                    or source["staged_input_bytes"]
+                    != source["staged_input_records"] * source["element_bytes"]
                 ):
                     raise ValueError("staged GraphMemory tile layout is invalid")
                 source_names.add(source["arg_name"])

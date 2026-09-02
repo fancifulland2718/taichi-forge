@@ -182,7 +182,7 @@ def _access_footprint(effect, metadata):
             "workgroup-uniform control",
             binding_time=_GpuBindingTime.LOGICAL,
         ),
-        provenance="pre_offload_affine_access_metadata_v2",
+        provenance="pre_offload_affine_access_metadata_v3",
     )
 
 

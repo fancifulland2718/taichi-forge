@@ -168,6 +168,12 @@ Stmt *pointer_origin(Stmt *stmt) {
   return stmt;
 }
 
+bool is_thread_private_pointer(Stmt *stmt) {
+  auto *origin = pointer_origin(stmt);
+  auto *allocation = origin ? origin->cast<AllocaStmt>() : nullptr;
+  return allocation != nullptr && !allocation->is_shared;
+}
+
 std::string merge_access(const std::string &lhs, const std::string &rhs) {
   if (lhs == rhs) {
     return lhs;
@@ -231,6 +237,13 @@ class MetadataVisitor final : public BasicStmtVisitor {
   }
 
   void visit(AtomicOpStmt *stmt) override {
+    // Frontend augmented assignments may survive until this pre-offload stage
+    // as atomics on a thread-private local accumulator. They neither publish a
+    // Graph resource effect nor synchronize different loop iterations. Keep
+    // global, external, shared, and unknown atomics fail-closed below.
+    if (is_thread_private_pointer(stmt->dest)) {
+      return;
+    }
     block("atomic_effect", "atomic");
     record(stmt->dest, "atomic");
   }
@@ -272,7 +285,8 @@ class MetadataVisitor final : public BasicStmtVisitor {
               minimum == 0 ? "none" : "neighbor";
         } else {
           effect.footprint.pattern = "stencil";
-          effect.footprint.affine_offsets = {0};
+          effect.footprint.affine_offsets.assign(summary.affine_offsets.begin(),
+                                                  summary.affine_offsets.end());
           effect.footprint.halo = {{minimum, maximum}};
           effect.footprint.reuse_class = "neighbor";
         }

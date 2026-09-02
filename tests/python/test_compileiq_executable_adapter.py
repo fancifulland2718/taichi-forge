@@ -113,6 +113,12 @@ def _memory_manifest(strategy, digit):
                         "byte_offset": 0,
                         "tile_elements": 130,
                         "tile_bytes": 520,
+                        "access_offsets": (-1, 0, 1),
+                        "logical_output_count": 128,
+                        "direct_input_records": 384,
+                        "staged_input_records": 130,
+                        "direct_input_bytes": 1536,
+                        "staged_input_bytes": 520,
                     },
                 )
                 if staged

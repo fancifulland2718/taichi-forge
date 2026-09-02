@@ -12986,11 +12986,24 @@ def _graph_shared_staged_contract(kernel_cpp, args):
             )
         except (TypeError, ValueError):
             halo = ()
+        try:
+            access_offsets = tuple(
+                int(value)
+                for value in (
+                    () if footprint is None else footprint.get("affine_offsets", ())
+                )
+            )
+        except (TypeError, ValueError):
+            access_offsets = ()
         if (
             staged_effect is None
             or staged_effect.get("access") != "read"
             or footprint.get("pattern") != "stencil"
             or halo != ((halo_low, halo_high),)
+            or access_offsets != tuple(sorted(set(access_offsets)))
+            or len(access_offsets) < 2
+            or access_offsets[0] != halo_low
+            or access_offsets[-1] != halo_high
             or domain_begin + halo_low < 0
         ):
             raise TaichiRuntimeError(
@@ -13022,6 +13035,14 @@ def _graph_shared_staged_contract(kernel_cpp, args):
         expected_offset = (tile_end + alignment - 1) // alignment * alignment
         tile_elements = task["selected_block_size"] + halo_high - halo_low
         tile_bytes = tile_elements * record_stride
+        logical_output_count = domain_end - domain_begin
+        block_count = (logical_output_count + task["selected_block_size"] - 1) // task[
+            "selected_block_size"
+        ]
+        direct_input_records = logical_output_count * len(access_offsets)
+        staged_input_records = logical_output_count + block_count * (
+            halo_high - halo_low
+        )
         if (
             byte_offset != expected_offset
             or byte_offset % alignment
@@ -13047,6 +13068,12 @@ def _graph_shared_staged_contract(kernel_cpp, args):
                 "byte_offset": byte_offset,
                 "tile_elements": tile_elements,
                 "tile_bytes": tile_bytes,
+                "access_offsets": access_offsets,
+                "logical_output_count": logical_output_count,
+                "direct_input_records": direct_input_records,
+                "staged_input_records": staged_input_records,
+                "direct_input_bytes": direct_input_records * record_stride,
+                "staged_input_bytes": staged_input_records * record_stride,
             }
         )
     if tile_end != task["static_shared_bytes"]:

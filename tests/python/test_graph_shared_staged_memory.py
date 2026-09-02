@@ -145,6 +145,80 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
     staged_materialized.close()
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect():
+    count = 1031
+    radius = 4
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for i in range(radius, count - radius):
+            value = 0.0
+            for offset in ti.static(range(-radius, radius + 1)):
+                value += source[i + offset]
+            output[i] = value
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    source_graph = builder.compile()
+
+    metadata = source_graph._spec.compiled_graph()._dispatch_metadata[0]
+    assert metadata["version"] == 3
+    assert metadata["blocker"] == ""
+    assert metadata["side_effects"] == []
+    source_effect = next(
+        effect for effect in metadata["effects"] if effect["arg_id"] == [0]
+    )
+    assert source_effect["footprint"]["affine_offsets"] == list(
+        range(-radius, radius + 1)
+    )
+
+    search = compileiq_recipe_search(source_graph)
+    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
+    assert len(search.recipe_ids) == 4
+    staged_id, staged = next(
+        (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
+        for recipe_id in search.recipe_ids
+        if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
+        == "shared_staged_1d"
+        and search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["offload_plan"][
+            "tasks"
+        ][0]["workgroup_size"]
+        == 128
+    )
+    staged_source = staged["staged_sources"][0]
+    assert staged["schema_version"] == 4
+    assert staged_source["access_offsets"] == list(range(-radius, radius + 1))
+    assert staged_source["logical_output_count"] == 1023
+    assert staged_source["direct_input_records"] == 9207
+    assert staged_source["staged_input_records"] == 1087
+    assert staged_source["direct_input_bytes"] == 36828
+    assert staged_source["staged_input_bytes"] == 4348
+
+    source = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=count)
+    values = (np.arange(count, dtype=np.int64) % 17).astype(np.float32)
+    source.from_numpy(values)
+    expected = np.zeros(count, dtype=np.float32)
+    for offset in range(-radius, radius + 1):
+        expected[radius:-radius] += values[radius + offset : count - radius + offset]
+
+    with search.materialize(
+        {"domain_fingerprint": search.domain_fingerprint, "recipe_id": staged_id}
+    ) as materialized:
+        graph = materialized.executor
+        binding = graph.bind({"source": source, "output": output})
+        for _ in range(3):
+            graph.run(binding)
+        ti.sync()
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
 @pytest.mark.parametrize(
     ("dtype", "numpy_dtype", "element_bytes"),
     ((ti.f16, np.float16, 2), (ti.f64, np.float64, 8)),
@@ -289,7 +363,7 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
         ]
         == 128
     )
-    assert staged["schema_version"] == 3
+    assert staged["schema_version"] == 4
     assert staged["staged_sources"] == [
         {
             "alignment": 4,
@@ -304,6 +378,12 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
             "scalar_bytes": 4,
             "tile_bytes": 524,
             "tile_elements": 131,
+            "access_offsets": [-2, 0, 1],
+            "logical_output_count": 4095,
+            "direct_input_records": 12285,
+            "staged_input_records": 4191,
+            "direct_input_bytes": 49140,
+            "staged_input_bytes": 16764,
         },
         {
             "alignment": 4,
@@ -318,6 +398,12 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
             "scalar_bytes": 4,
             "tile_bytes": 524,
             "tile_elements": 131,
+            "access_offsets": [-1, 2],
+            "logical_output_count": 4095,
+            "direct_input_records": 8190,
+            "staged_input_records": 4191,
+            "direct_input_bytes": 32760,
+            "staged_input_bytes": 16764,
         },
     ]
     assert {tuple(pair) for pair in staged["memory_disjoint_pairs"]} == {
@@ -995,7 +1081,7 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout():
         scalar_bytes = np.dtype(numpy_dtype).itemsize
         lane_count = int(np.prod(element_shape))
         record_bytes = scalar_bytes * lane_count
-        assert staged["schema_version"] == 3
+        assert staged["schema_version"] == 4
         assert staged["staged_sources"] == [
             {
                 "alignment": scalar_bytes,
@@ -1010,6 +1096,12 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout():
                 "scalar_bytes": scalar_bytes,
                 "tile_bytes": (128 + 2) * record_bytes,
                 "tile_elements": 128 + 2,
+                "access_offsets": [-1, 0, 1],
+                "logical_output_count": 257,
+                "direct_input_records": 771,
+                "staged_input_records": 263,
+                "direct_input_bytes": 771 * record_bytes,
+                "staged_input_bytes": 263 * record_bytes,
             }
         ]
         assert staged["memory_layout_requirements"] == [

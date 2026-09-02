@@ -63,7 +63,7 @@ struct GraphKernelIterationDomain {
 };
 
 struct GraphKernelMetadata {
-  static constexpr std::uint32_t kVersion = 2;
+  static constexpr std::uint32_t kVersion = 3;
 
   std::uint32_t version{kVersion};
   bool available{false};
