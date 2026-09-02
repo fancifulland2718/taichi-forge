@@ -394,6 +394,22 @@ class GraphDefinition:
         catalog.build_single_region_stage()
         return catalog
 
+    def search_recipes(self, *, engine="compileiq", target=None, budget):
+        """Create a complete-Graph optimization session.
+
+        Candidate construction and materialization remain Forge-owned.  The
+        engine schedules opaque recipe identities and returns measurements.
+        """
+
+        from taichi_forge.graph._optimization_api import _GraphRecipeSearchSession
+
+        return _GraphRecipeSearchSession(
+            self,
+            engine=engine,
+            target=target,
+            budget=budget,
+        )
+
     def materialize(self, recipe=None, *, context=None, **context_options):
         """Transactionally materialize a complete recipe.
 
@@ -403,6 +419,14 @@ class GraphDefinition:
         the returned handle.
         """
 
+        from taichi_forge.graph._optimization_api import GraphRecipeHandle
+
+        if isinstance(recipe, GraphRecipeHandle):
+            if recipe.semantic_graph_id != self.semantic_graph_id:
+                raise ValueError(
+                    "Graph recipe handle belongs to a different GraphDefinition"
+                )
+            recipe = recipe._recipe
         if context is not None and context_options:
             raise TypeError(
                 "GraphDefinition.materialize context options require a new context"

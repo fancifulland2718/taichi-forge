@@ -1457,7 +1457,31 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 
 ### 使用魔改 CompileIQ 搜索完整 Graph execution recipe
 
-`ti.graph.compileiq_recipe_search(graph)` 是唯一公开的 CompileIQ recipe 搜索。其 map 域搜索精确、
+新代码应从 `GraphBuilder.freeze()` 开始，使用完整 Graph 公共对象
+`GraphOptimizationTarget`、`GraphSearchBudget`、`GraphRecipeHandle`、
+`GraphRecipeManifest`、`GraphOptimizationDecision` 与 `GraphOptimizationReport`：
+
+```python
+definition = builder.freeze()
+session = definition.search_recipes(
+    engine="compileiq",
+    target=ti.graph.GraphOptimizationTarget(
+        objectives=(("device_time_ns", "min"),),
+    ),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=32, repeat_count=3),
+)
+decision = session.run(evaluator)
+materialized = definition.materialize(decision.selection)
+report = materialized.materialization_report()
+```
+
+`evaluator(graph, recipe_handle)` 返回命名有限数值指标；请求保留指标
+`materialized_memory_bytes` 时，Forge 会从实际 physical manifest 自动填入。独立且兼容的
+fragment 会在 evaluation budget 内组合成完整候选。公共 recipe 摘要不公开 provider、block、
+tile、padding、lane、workgroup 或 PTXAS 裸参数。多目标结果保留 Pareto frontier，声明顺序只
+作为确定性的最终偏好；runtime `auto` 和普通 compile 均不改变。
+
+`ti.graph.compileiq_recipe_search(graph)` 是保留的低层兼容 API。其 map 域搜索精确、
 保持 barrier 的 source partition，而不是只看最大 `map2`/`map3`/`map4` width；不超过 4,095
 个 candidate 的乘积会完整枚举，更大的乘积会明确分阶段。精确 map 搜索要求一个 ordinary JIT
 CGraph 和一个 Forge-owned 源 builder；composed 或 multi-builder Graph 会 fail closed。

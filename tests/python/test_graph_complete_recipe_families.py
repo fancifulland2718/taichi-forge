@@ -95,6 +95,18 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
         stage="compatible-composition",
         parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
     )
+    public_session = definition.search_recipes(
+        engine="compileiq",
+        target=ti.graph.GraphOptimizationTarget(
+            objectives=(("device_time_ns", "min"),)
+        ),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=64),
+    )
+    assert any(
+        set(handle.manifest.families) == {"map_fusion", "graph_memory"}
+        and handle.manifest.selected_fragment_count == 2
+        for handle in public_session.recipes
+    )
 
     for name in _RECIPE_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")

@@ -445,12 +445,17 @@ class CompileIQCompleteGraphRecipeSearch:
         ),
     }
 
-    def __init__(self, graph):
+    def __init__(self, graph, *, catalog=None):
         capability_components = _validated_compileiq_capability()
         definition = getattr(graph, "definition", None)
         if definition is None:
             raise TypeError("complete Graph recipe search requires a GraphDefinition")
-        catalog = definition.recipe_catalog()
+        if catalog is None:
+            catalog = definition.recipe_catalog()
+        elif catalog.definition is not definition:
+            raise ValueError(
+                "complete Graph recipe catalog belongs to another definition"
+            )
         entries = catalog.entries()
         families = tuple(
             dict.fromkeys(
@@ -1131,6 +1136,14 @@ class _CompleteGraphRecipeSearchSessionV2:
                 message=str(error).strip() or type(error).__name__,
                 cleanup=cleanup,
                 manifest=manifest,
+            )
+        if "materialized_memory_bytes" in self._target_contract.metric_names:
+            metrics.setdefault(
+                "materialized_memory_bytes",
+                float(
+                    manifest.persistent_allocated_bytes
+                    + manifest.transient_allocated_bytes
+                ),
             )
         return self._outcome_type(
             metrics=metrics,

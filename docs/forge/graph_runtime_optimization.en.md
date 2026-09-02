@@ -720,7 +720,51 @@ executable contract.
 
 ## Offline modified-CompileIQ Graph recipe search
 
-`ti.graph.compileiq_recipe_search(graph)` freezes the executable recipes that
+The preferred whole-Graph workflow starts from the frozen semantic definition:
+
+```python
+definition = builder.freeze()
+target = ti.graph.GraphOptimizationTarget(
+    objectives=(
+        ("device_time_ns", "min"),
+        ("host_time_ns", "min"),
+        ("materialized_memory_bytes", "min"),
+    ),
+)
+budget = ti.graph.GraphSearchBudget(
+    evaluation_limit=48,
+    repeat_count=3,
+)
+session = definition.search_recipes(
+    engine="compileiq",
+    target=target,
+    budget=budget,
+)
+decision = session.run(evaluator)
+materialized = definition.materialize(decision.selection)
+physical_report = materialized.materialization_report()
+```
+
+The evaluator receives `(graph, recipe_handle)` and returns the named target
+metrics. Forge supplies exact `materialized_memory_bytes` from the observed
+physical manifest when that metric is requested. Objectives remain a Pareto
+problem inside the modified CompileIQ fork; their declared order only selects
+one deterministic result from the measured frontier. Constraints are optional
+and explicit. Search/time/memory budgets bound work but do not become compile-
+time performance admission gates.
+
+Forge constructs complete recipes from compatible fragments across independent
+regions and families until the user evaluation budget is filled. Public recipe
+handles expose only semantic identity, selected families, coverage, aggregate
+resources, and submission shape. Provider choices and raw tile, block, padding,
+lane, workgroup, or PTXAS axes remain private. A partial budget returns a report
+with exact measured and missing recipe IDs; a decision is made only from a
+complete feasible recipe. The decision does not change runtime `auto`, install
+a decision cache, or alter ordinary `GraphBuilder.compile()` behavior.
+
+`ti.graph.compileiq_recipe_search(graph)` remains the lower-level compatibility
+surface for callers that manage batches, checkpoints, and materialization
+contexts directly. It freezes the executable recipes that
 the Graph already owns into one baseline-inclusive offline search domain. An
 ordinary JIT CGraph with one Forge-owned source `GraphBuilder` exposes exact
 barrier-preserving contiguous partitions of its eligible map phases. A
@@ -788,8 +832,11 @@ cache, does not change runtime `auto`, and adds no per-replay direct fallback.
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python
 source manifest. The current source identity pins
-[`fancifulland2718/CompileIQ@579b572`](https://github.com/fancifulland2718/CompileIQ/commit/579b572d0e68165bea215f5a43c8ac09daadeb5e)
-from `forge/opaque-recipes-v1.2`; this revision makes the main-thread worker importable on Forge's Python 3.10 wheels and adds deterministic bounded-exhaustive opaque-domain search. `manifest()` exposes the full reviewed identity.
+[`fancifulland2718/CompileIQ@1bf6ded`](https://github.com/fancifulland2718/CompileIQ/commit/1bf6ded4878eb0b22a7c59bb6391912ea591763d)
+from `forge/complete-recipes-v2`; this revision supports the reviewed Python
+3.10--3.14 package contract, opaque complete-recipe batches, materialization
+budgets, multi-objective Pareto racing, and resumable checkpoints. `manifest()`
+exposes the full reviewed identity.
 Upstream CompileIQ, a different fork, or source drift raises
 `CompileIQGraphUnavailableError`. CompileIQ remains an optional offline tool:
 the Forge wheel does not depend on it, and importing `ti.graph` does not import

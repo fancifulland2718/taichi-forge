@@ -416,6 +416,41 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
     assert len(catalog.entries(stage="compatible-composition")) == 1
 
 
+def test_catalog_builds_budget_bounded_compatible_complete_recipes():
+    definition = _definition()
+    head_a = _fragment(definition, (0,), "head_a")
+    head_b = _fragment(definition, (0,), "head_b")
+    middle = _fragment(definition, (1,), "middle")
+    tail = _fragment(definition, (2,), "tail")
+    catalog = GraphRecipeCatalog(definition)
+
+    class Provider:
+        def fragments(self, requested_definition):
+            assert requested_definition is definition
+            return (head_a, head_b, middle, tail)
+
+    catalog.discover((Provider(),))
+    singletons = catalog.build_single_region_stage()
+    admitted = catalog.build_compatible_stage(candidate_limit=3)
+
+    assert len(singletons) == 4
+    assert len(admitted) == 3
+    assert all(len(entry.recipe.fragments) >= 2 for entry in admitted)
+    assert all(entry.parent_recipe_ids for entry in admitted)
+    assert all(
+        len(entry.parent_recipe_ids) == len(entry.recipe.fragments)
+        for entry in admitted
+    )
+    assert all(
+        not (
+            {head_a.fragment_id, head_b.fragment_id}
+            <= set(entry.recipe.fragment_ids)
+        )
+        for entry in admitted
+    )
+    assert catalog.build_compatible_stage(candidate_limit=0) == ()
+
+
 def test_fragment_task_dag_rejects_cycles_before_catalog_admission():
     definition = _definition()
     with pytest.raises(ValueError, match="cycle"):

@@ -1731,8 +1731,36 @@ Block tuning is backend- and workload-specific, so always compare against
 
 ### Complete Graph execution-recipe search with modified CompileIQ
 
-`ti.graph.compileiq_recipe_search(graph)` is the only public CompileIQ recipe
-search. Its map domain uses exact barrier-preserving source partitions,
+Use `GraphBuilder.freeze()` and the public whole-Graph objects
+`GraphOptimizationTarget`, `GraphSearchBudget`, `GraphRecipeHandle`,
+`GraphRecipeManifest`, `GraphOptimizationDecision`, and
+`GraphOptimizationReport` for new code:
+
+```python
+definition = builder.freeze()
+session = definition.search_recipes(
+    engine="compileiq",
+    target=ti.graph.GraphOptimizationTarget(
+        objectives=(("device_time_ns", "min"),),
+    ),
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=32, repeat_count=3),
+)
+decision = session.run(evaluator)
+materialized = definition.materialize(decision.selection)
+report = materialized.materialization_report()
+```
+
+`evaluator(graph, recipe_handle)` returns named finite metrics. The reserved
+`materialized_memory_bytes` metric is filled from the observed physical
+manifest when requested. Compatible independent fragments may be composed into
+one candidate up to the evaluation budget. Public recipe summaries never expose
+raw provider, block, tile, padding, lane, workgroup, or PTXAS knobs. Multi-
+objective results retain a Pareto frontier; declaration order is only a
+deterministic final preference. Runtime `auto` and ordinary compile remain
+unchanged.
+
+`ti.graph.compileiq_recipe_search(graph)` is the lower-level compatibility API.
+Its map domain uses exact barrier-preserving source partitions,
 not only a maximum `map2`/`map3`/`map4` width. It exhausts products up to 4,095
 candidates and explicitly stages larger products. Exact map search requires
 one ordinary JIT CGraph and one Forge-owned source builder; composed or

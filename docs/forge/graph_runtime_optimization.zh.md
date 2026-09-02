@@ -561,7 +561,45 @@ immutable primal/adjoint Graph pair、反向 dispatch 顺序或 native-node grad
 
 ## 离线魔改 CompileIQ Graph recipe 搜索
 
-`ti.graph.compileiq_recipe_search(graph)` 把 Graph 已经拥有的 executable recipe 冻结成一个
+首选的完整 Graph 工作流从冻结后的语义 definition 开始：
+
+```python
+definition = builder.freeze()
+target = ti.graph.GraphOptimizationTarget(
+    objectives=(
+        ("device_time_ns", "min"),
+        ("host_time_ns", "min"),
+        ("materialized_memory_bytes", "min"),
+    ),
+)
+budget = ti.graph.GraphSearchBudget(
+    evaluation_limit=48,
+    repeat_count=3,
+)
+session = definition.search_recipes(
+    engine="compileiq",
+    target=target,
+    budget=budget,
+)
+decision = session.run(evaluator)
+materialized = definition.materialize(decision.selection)
+physical_report = materialized.materialization_report()
+```
+
+evaluator 接收 `(graph, recipe_handle)` 并返回 target 中声明的命名指标；请求
+`materialized_memory_bytes` 时，Forge 会从实际 physical manifest 注入精确值。多个 objective
+在魔改 CompileIQ 内保持 Pareto 问题，不做加权压扁；声明顺序只用于从已测 frontier 中确定性
+选择一个结果。constraint 必须由用户显式提供。evaluation/time/memory budget 只约束搜索工作，
+不会变成编译期性能准入门槛。
+
+Forge 会在用户 evaluation budget 内组合跨独立 region 和 family 的兼容 fragment，形成完整
+recipe。公共 handle 只公开语义身份、family、覆盖、聚合资源和 submission 形态；provider choice
+以及 tile、block、padding、lane、workgroup、PTXAS 等裸轴仍为私有实现。预算不足时 report 会
+精确列出已测与缺失 recipe；decision 只从已经完整测量且可行的 recipe 中产生。该流程不会修改
+runtime `auto`、安装 decision cache 或改变普通 `GraphBuilder.compile()` 行为。
+
+`ti.graph.compileiq_recipe_search(graph)` 保留为低层兼容入口，供需要直接管理 batch、checkpoint
+和 materialization context 的调用者使用。它把 Graph 已经拥有的 executable recipe 冻结成一个
 包含 baseline 的离线搜索域。只有一个 Forge-owned 源 `GraphBuilder` 的 ordinary JIT CGraph
 会公开各个合法 map phase 的精确、保持 barrier 的连续分区。单元素 segment 表示不融合，
 2 至 4 个 map 的 segment 表示 Forge 拥有的完整融合方案。一条不间断的 2 至 8 map chain
@@ -610,8 +648,8 @@ qualification cache、不改变 runtime `auto`，也不引入逐 replay direct f
 
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为
-`forge/opaque-recipes-v1.2` 上的
-[`fancifulland2718/CompileIQ@579b572`](https://github.com/fancifulland2718/CompileIQ/commit/579b572d0e68165bea215f5a43c8ac09daadeb5e)，该版本让主线程 worker 可在 Forge 的 Python 3.10 wheel 中导入，并增加确定性的有界 exhaustive opaque-domain 搜索；
+`forge/complete-recipes-v2` 上的
+[`fancifulland2718/CompileIQ@1bf6ded`](https://github.com/fancifulland2718/CompileIQ/commit/1bf6ded4878eb0b22a7c59bb6391912ea591763d)，该版本支持经审查的 Python 3.10--3.14 package 合同、opaque 完整 recipe batch、物化预算、多目标 Pareto racing 与可恢复 checkpoint；
 `manifest()` 会公开完整审查身份。上游 CompileIQ、其他 fork 或源码漂移都会抛出
 `CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
 导入 `ti.graph` 也不会导入 CompileIQ。

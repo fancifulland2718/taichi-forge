@@ -132,6 +132,65 @@ class GraphRecipeCatalog:
             )
         return tuple(entries)
 
+    def build_compatible_stage(self, *, candidate_limit):
+        """Admit budget-bounded multi-fragment complete recipes.
+
+        The limit is supplied by the search budget, not by a family-specific
+        heuristic.  Compatibility is checked incrementally so overlapping
+        alternatives never inflate the materialized search domain.
+        """
+
+        if isinstance(candidate_limit, bool) or not isinstance(candidate_limit, int):
+            raise TypeError("Graph compatible candidate limit must be an integer")
+        if candidate_limit < 0:
+            raise ValueError("Graph compatible candidate limit must be non-negative")
+        if candidate_limit == 0:
+            return ()
+
+        from taichi_forge.graph._recipes.composer import (
+            GraphRecipeCompositionError,
+        )
+
+        fragments = tuple(
+            sorted(self._fragments.values(), key=lambda item: item.fragment_id)
+        )
+        singleton_by_fragment = {
+            entry.recipe.fragments[0].fragment_id: entry.recipe.recipe_id
+            for entry in self.entries(stage="single-region")
+            if len(entry.recipe.fragments) == 1
+        }
+        admitted = []
+
+        def extend(selected, start):
+            if len(admitted) >= candidate_limit:
+                return
+            for index in range(start, len(fragments)):
+                candidate = selected + (fragments[index],)
+                try:
+                    recipe = self.composer.compose(candidate)
+                except GraphRecipeCompositionError:
+                    continue
+                if len(candidate) >= 2:
+                    parent_recipe_ids = tuple(
+                        singleton_by_fragment[item.fragment_id] for item in candidate
+                    )
+                    before = len(self._ordered_recipe_ids)
+                    entry = self._admit(
+                        "compatible-composition",
+                        recipe,
+                        parent_recipe_ids,
+                    )
+                    if len(self._ordered_recipe_ids) != before:
+                        admitted.append(entry)
+                        if len(admitted) >= candidate_limit:
+                            return
+                extend(candidate, index + 1)
+                if len(admitted) >= candidate_limit:
+                    return
+
+        extend((), 0)
+        return tuple(admitted)
+
     def compose_compatible(self, fragment_groups, *, parent_recipe_ids=()):
         """Compose only caller-selected survivor groups, never a full product."""
 
