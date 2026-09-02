@@ -127,7 +127,6 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                     "strategy"
                 ]
                 if strategy == "global_scan_segment_correction":
-                    kernel_plan_type = type(executable._gather_call._plan)
                     plan_type = type(executable._scan_plan)
 
                     def reject_repeated_program_proof(*_args, **_kwargs):
@@ -135,21 +134,11 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                             "stable Graph replay repeated a provider Program proof"
                         )
 
-                    def reject_repeated_kernel_resource_proof(*_args, **_kwargs):
-                        raise AssertionError(
-                            "stable Graph replay repeated a fixed-kernel resource proof"
-                        )
-
                     with monkeypatch.context() as stable_replay:
                         stable_replay.setattr(
                             plan_type,
                             "matches_program",
                             reject_repeated_program_proof,
-                        )
-                        stable_replay.setattr(
-                            kernel_plan_type,
-                            "matches",
-                            reject_repeated_kernel_resource_proof,
                         )
                         rebuilt.run({})
                 elif strategy == "segment_local_serial":
@@ -178,10 +167,13 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                 assert executable.debug_info["kernel_plan_preparations"] == (
                     {
                         "segment_local_serial": 1,
-                        "global_scan_segment_correction": 2,
+                        "global_scan_segment_correction": 0,
                         "warp_chunked_carry": 0,
                         "block_chunked_carry": 0,
                     }[strategy]
+                )
+                assert executable.debug_info["nested_graph_replay"] == (
+                    strategy != "segment_local_serial"
                 )
                 execution_report = rebuilt.execution_stats()
                 assert execution_report.memory.provider_generation_report_count == 1
@@ -198,6 +190,62 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                     is True
                 )
     assert semantic_graph_ids == {graph.definition.semantic_graph_id}
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("inclusive", (False, True))
+def test_graph_native_segmented_scan_global_correction_handles_irregular_long_segments(
+    inclusive,
+):
+    lengths = np.asarray((1, 127, 128, 129, 4097), dtype=np.int32)
+    offsets = np.concatenate(
+        (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
+    )
+    capacity = int(offsets[-1])
+    layout = ti.algorithms.SegmentedLayout.from_offsets(offsets, capacity=capacity)
+    values = ti.ndarray(ti.i32, shape=capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    graph = _build(values, layout, output, inclusive=inclusive)
+    search = compileiq_recipe_search(graph)
+    recipes = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    global_id = next(
+        recipe_id
+        for recipe_id, recipe in recipes.items()
+        if recipe["native_algorithm_recipe_manifest"]["strategy"]
+        == "global_scan_segment_correction"
+    )
+    manifest = recipes[global_id]["native_algorithm_recipe_manifest"]
+    assert manifest["topology"] == {
+        "kind": "global_scan_segment_correction",
+        "correction_block_dim": 128,
+        "correction_graph_nodes": 2,
+    }
+
+    host = ((np.arange(capacity, dtype=np.int64) * 104729) - (1 << 30)).astype(np.int32)
+    expected = np.empty_like(host)
+    for begin, end in pairwise(offsets):
+        accumulated = np.cumsum(host[begin:end], dtype=np.int32)
+        if inclusive:
+            expected[begin:end] = accumulated
+        else:
+            expected[begin:end] = np.concatenate(
+                (np.zeros(1, dtype=np.int32), accumulated[:-1])
+            )
+    values.from_numpy(host)
+    with search.materialize(_parameters(search, global_id)) as materialized:
+        candidate = materialized.executor
+        for _ in range(3):
+            output.fill(0x5A5A5A5A)
+            candidate.run({})
+        ti.sync()
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        executable = candidate._spec.nodes[0].executable
+        assert executable.debug_info["provider_preparations"] == 1
+        assert executable.debug_info["kernel_plan_preparations"] == 0
+        assert executable.debug_info["nested_graph_replay"] is True
+        assert executable.backend_command_plan.provider_replay is True
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

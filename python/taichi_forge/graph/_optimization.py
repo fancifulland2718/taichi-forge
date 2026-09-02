@@ -791,8 +791,8 @@ class _GraphNativeAlgorithmRecipeManifest:
             },
             "global_scan_segment_correction": {
                 "kind": "global_scan_segment_correction",
-                "block_dim": 0,
-                "chunk_items": 0,
+                "correction_block_dim": 128,
+                "correction_graph_nodes": 2,
             },
             "warp_chunked_carry": {
                 "kind": "warp_chunked_carry",

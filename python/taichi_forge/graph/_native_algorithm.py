@@ -16,8 +16,6 @@ from taichi_forge.algorithms._algorithms import (
     _prog_available,
     _transform_value_type,
     _try_cuda_device_transform,
-    segmented_scan_apply_bases_ndarray,
-    segmented_scan_gather_bases_ndarray,
     segmented_scan_sum_serial_ndarray,
 )
 from taichi_forge.algorithms._autodiff import is_fwd_mode_active, is_tape_active
@@ -37,6 +35,7 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.graph._segmented_scan_kernels import (
+    generated_global_correction_kernels,
     generated_segment_chunk_kernel,
 )
 
@@ -175,8 +174,6 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         self._program = None
         self._provider_preparations = 0
         self._serial_call = None
-        self._gather_call = None
-        self._apply_call = None
         self._nested_graph = None
         self._nested_bindings = None
         self._bucket_indices = ()
@@ -198,21 +195,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 source.values.dtype,
                 source.layout,
             )
-            self._gather_call = _FrozenKernelCall(
-                segmented_scan_gather_bases_ndarray,
-                source.output,
-                source.layout._offsets,
-                self._bases,
-                source.layout.num_segments,
-            )
-            self._apply_call = _FrozenKernelCall(
-                segmented_scan_apply_bases_ndarray,
-                source.output,
-                source.layout._offsets,
-                self._bases,
-                source.layout.num_segments,
-                int(source.inclusive),
-            )
+            self._build_global_correction_graph()
         if strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
             self._build_chunked_graph()
 
@@ -295,6 +278,36 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         self._nested_graph = builder.compile()
         self._nested_bindings = self._nested_graph.bind(bindings)
 
+    def _build_global_correction_graph(self):
+        from taichi_forge.graph._graph import Arg, ArgKind, GraphBuilder
+
+        values = Arg(ArgKind.NDARRAY, "values", self._source.values.dtype, ndim=1)
+        scanned = Arg(ArgKind.NDARRAY, "scanned", self._source.output.dtype, ndim=1)
+        offsets = Arg(ArgKind.NDARRAY, "offsets", i32, ndim=1)
+        bases = Arg(ArgKind.NDARRAY, "bases", self._source.values.dtype, ndim=1)
+        gather, correct = generated_global_correction_kernels(
+            self._source.values.dtype,
+            128,
+            self._source.layout.num_segments,
+            inclusive=self._source.inclusive,
+        )
+        builder = GraphBuilder(
+            _capture_recipe_sources=False,
+            _explicit_map_source_groups=(),
+            _ignore_recipe_environment=True,
+        )
+        builder.dispatch(gather, scanned, offsets, bases)
+        builder.dispatch(correct, values, scanned, offsets, bases)
+        self._nested_graph = builder.compile()
+        self._nested_bindings = self._nested_graph.bind(
+            {
+                "values": self._source.values,
+                "scanned": self._source.output,
+                "offsets": self._source.layout._offsets,
+                "bases": self._bases,
+            }
+        )
+
     @property
     def graph_physical_plan_id(self):
         return f"graph-native-segmented-scan:{self._strategy}"
@@ -359,8 +372,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             self._prepare_global_provider_plans(impl.get_runtime().prog)
         else:
             self._invoke_global_provider_plans()
-        self._gather_call.run()
-        self._apply_call.run()
+        self._nested_graph.run(self._nested_bindings)
 
     @property
     def backend_command_plan(self):
@@ -405,9 +417,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             "method": self._method,
             "provider_preparations": self._provider_preparations,
             "kernel_plan_preparations": sum(
-                call.preparations
-                for call in (self._serial_call, self._gather_call, self._apply_call)
-                if call is not None
+                call.preparations for call in (self._serial_call,) if call is not None
             ),
             "action_owned_bytes": self._source.action_owned_bytes(self._strategy),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
@@ -616,7 +626,11 @@ class _GraphSegmentedScanRecipeSource:
                 _stage("gather_segment_bases", "taichi_dispatch"),
                 _stage("apply_segment_correction", "taichi_dispatch"),
             ],
-            {"kind": _GLOBAL_STRATEGY, "block_dim": 0, "chunk_items": 0},
+            {
+                "kind": _GLOBAL_STRATEGY,
+                "correction_block_dim": 128,
+                "correction_graph_nodes": 2,
+            },
             {
                 "ownership": "graph_native_action",
                 "action_owned_bytes": self.action_owned_bytes(_GLOBAL_STRATEGY),
