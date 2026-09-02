@@ -93,7 +93,7 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
             observed.append((selection.spec_id, result.manifest.recipe_id))
         return float(search.recipe_ids.index(selection.spec_id))
 
-    exhaustive = search.compileiq_search(objective)
+    exhaustive = search.compileiq_search_v1(objective)
     result = exhaustive.start()
     coverage = search.require_complete_search(exhaustive)
     selected = search.select_best_result(exhaustive, result)

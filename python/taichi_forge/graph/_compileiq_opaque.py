@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import import_module
+import math
 from types import MappingProxyType
 
 from typing import ClassVar
@@ -410,7 +411,7 @@ class CompileIQGraphRecipeSearch:
 
 
 class CompileIQCompleteGraphRecipeSearch:
-    """V1 transport façade over the Forge-owned complete recipe catalog.
+    """V2 search façade over the Forge-owned complete recipe catalog.
 
     The transport remains compatible with the reviewed modified CompileIQ fork,
     but it neither rebuilds Graphs from environment variables nor owns a second
@@ -631,13 +632,117 @@ class CompileIQCompleteGraphRecipeSearch:
             workspace_saturation=self._workspace_saturation,
         )
 
+    def batch(
+        self,
+        *,
+        recipe_ids=None,
+        stage_index=0,
+        parent_batch=None,
+        parent_recipe_ids=None,
+        fidelity_name="full",
+        fidelity_ordinal=0,
+        repeat_count=1,
+        work_scale=1.0,
+    ):
+        """Build one CompileIQ V2 batch from frozen complete recipes."""
+
+        recipe_ids = self.recipe_ids if recipe_ids is None else tuple(recipe_ids)
+        recipe_ids = tuple(sorted(recipe_ids, key=lambda item: item.encode("utf-8")))
+        if parent_recipe_ids is None and parent_batch is not None:
+            parent_recipe_ids = {
+                recipe_id: (recipe_id,)
+                for recipe_id in recipe_ids
+                if recipe_id in parent_batch.recipe_ids
+            }
+        parent_recipe_ids = {
+            recipe_id: tuple(
+                sorted(parent_ids, key=lambda item: item.encode("utf-8"))
+            )
+            for recipe_id, parent_ids in (parent_recipe_ids or {}).items()
+        }
+        estimates = {
+            recipe_id: (
+                self._catalog.entry(recipe_id).recipe.declared_persistent_resource_bytes
+                + self._catalog.entry(
+                    recipe_id
+                ).recipe.declared_transient_resource_bytes
+            )
+            for recipe_id in recipe_ids
+        }
+        stage_fingerprint = _identity(
+            "forge-complete-recipe-stage-v2:",
+            {
+                "semantic_graph_id": self.semantic_plan_id,
+                "stage_index": stage_index,
+                "parent_batch_fingerprint": (
+                    None
+                    if parent_batch is None
+                    else parent_batch.batch_fingerprint
+                ),
+                "recipe_ids": recipe_ids,
+                "parent_recipe_ids": parent_recipe_ids,
+                "fidelity": {
+                    "name": fidelity_name,
+                    "ordinal": fidelity_ordinal,
+                    "repeat_count": repeat_count,
+                    "work_scale": work_scale,
+                },
+            },
+        )
+        return self._transport.batch_v2(
+            recipe_ids=recipe_ids,
+            stage_index=stage_index,
+            stage_fingerprint=stage_fingerprint,
+            parent_batch=parent_batch,
+            parent_recipe_ids=parent_recipe_ids,
+            fidelity_name=fidelity_name,
+            fidelity_ordinal=fidelity_ordinal,
+            repeat_count=repeat_count,
+            work_scale=work_scale,
+            estimated_materialized_bytes=estimates,
+        )
+
     def compileiq_search(
+        self,
+        objective_function,
+        *,
+        budget,
+        problem_type="min",
+        target_contract=None,
+        deterministic_seed=0,
+        halving_factor=2,
+        minimum_survivors=1,
+        repeat_count=1,
+        fidelity_name="full",
+        checkpoint=None,
+        context=None,
+    ):
+        """Create the Forge-owned materializing CompileIQ V2 search session."""
+
+        return _CompleteGraphRecipeSearchSessionV2(
+            self,
+            objective_function,
+            budget=budget,
+            problem_type=problem_type,
+            target_contract=target_contract,
+            deterministic_seed=deterministic_seed,
+            halving_factor=halving_factor,
+            minimum_survivors=minimum_survivors,
+            repeat_count=repeat_count,
+            fidelity_name=fidelity_name,
+            checkpoint=checkpoint,
+            context=context,
+        )
+
+    def compileiq_search_v1(
         self,
         objective_function,
         *,
         problem_type="min",
         target_contract=None,
     ):
+        """Retained exhaustive compatibility route for external V1 callers."""
+
         return self._transport.exhaustive_search(
             objective_function,
             problem_type=problem_type,
@@ -645,12 +750,66 @@ class CompileIQCompleteGraphRecipeSearch:
         )
 
     def search_coverage(self, compileiq_search):
+        if getattr(compileiq_search, "PROTOCOL", "") == (
+            "budgeted_staged_pareto_racing_main_thread_v2"
+        ):
+            checkpoint = compileiq_search.checkpoint()
+            if not checkpoint.stages:
+                return MappingProxyType(
+                    {
+                        "complete": False,
+                        "baseline_observed": False,
+                        "evaluation_count": checkpoint.evaluation_count,
+                        "observed_recipe_ids": (),
+                        "missing_recipe_ids": self.recipe_ids,
+                        "verified_core": True,
+                        "termination_reason": compileiq_search.termination_reason,
+                    }
+                )
+            stage = checkpoint.stages[-1]
+            observed = tuple(stage.evaluated_recipe_ids)
+            missing = tuple(
+                recipe_id
+                for recipe_id in checkpoint.batches[-1].recipe_ids
+                if recipe_id not in observed
+            )
+            return MappingProxyType(
+                {
+                    "complete": stage.complete,
+                    "baseline_observed": self.baseline_recipe_id in observed,
+                    "evaluation_count": checkpoint.evaluation_count,
+                    "observed_recipe_ids": observed,
+                    "missing_recipe_ids": missing,
+                    "verified_core": True,
+                    "termination_reason": compileiq_search.termination_reason,
+                }
+            )
         return self._transport.search_coverage(compileiq_search)
 
     def require_complete_search(self, compileiq_search):
+        if getattr(compileiq_search, "PROTOCOL", "") == (
+            "budgeted_staged_pareto_racing_main_thread_v2"
+        ):
+            coverage = self.search_coverage(compileiq_search)
+            if not coverage["complete"]:
+                raise RuntimeError(
+                    "CompileIQ V2 stopped with a partial current-stage frontier; "
+                    f"missing={coverage['missing_recipe_ids']!r}"
+                )
+            return coverage
         return self._transport.require_complete_search(compileiq_search)
 
     def select_best_result(self, compileiq_search, result):
+        if getattr(compileiq_search, "PROTOCOL", "") == (
+            "budgeted_staged_pareto_racing_main_thread_v2"
+        ):
+            best = result.get_best_result()
+            if not isinstance(best, dict):
+                raise TypeError("CompileIQ V2 best result is not a dictionary")
+            recipe_id = best.get("recipe_id")
+            if recipe_id not in self.recipe_ids:
+                raise ValueError("CompileIQ V2 selected an unknown complete recipe")
+            return self._selection(recipe_id)
         recipe_id = self._transport.select_best_recipe_id(compileiq_search, result)
         return self._selection(recipe_id)
 
@@ -690,7 +849,7 @@ class CompileIQCompleteGraphRecipeSearch:
 
     def manifest(self):
         value = {
-            "schema": "taichi_forge.graph.compileiq-complete-recipe-search.v1",
+            "schema": "taichi_forge.graph.compileiq-complete-recipe-search.v2",
             **self._transport.manifest(),
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -706,6 +865,320 @@ class CompileIQCompleteGraphRecipeSearch:
                 "native_algorithm": "graph_native_algorithm",
             }.get(self._family, self._family)
         return value
+
+
+class _CompleteGraphRecipeSearchSessionV2:
+    """Bind CompileIQ racing to Forge's sole Graph materialization context."""
+
+    PROTOCOL = "budgeted_staged_pareto_racing_main_thread_v2"
+
+    def __init__(
+        self,
+        plans,
+        objective_function,
+        *,
+        budget,
+        problem_type,
+        target_contract,
+        deterministic_seed,
+        halving_factor,
+        minimum_survivors,
+        repeat_count,
+        fidelity_name,
+        checkpoint,
+        context,
+    ):
+        if not callable(objective_function):
+            raise TypeError("objective_function must be callable")
+        if problem_type not in ("min", "max"):
+            raise ValueError("problem_type must be 'min' or 'max'")
+        try:
+            support = import_module("compileiq.forge_support")
+            budget_type = getattr(support, "ForgeOpaqueSearchBudgetV2")
+            target_type = getattr(support, "ForgeOpaqueTargetContractV1")
+            objective_type = getattr(support, "ForgeOpaqueObjectiveV1")
+            outcome_type = getattr(support, "TrialOutcomeV2")
+            cleanup_type = getattr(support, "TrialCleanupV2")
+            failure_type = getattr(support, "TrialFailureV2")
+        except (ImportError, AttributeError) as error:
+            raise CompileIQGraphUnavailableError(
+                "modified CompileIQ does not expose the V2 Forge search contract"
+            ) from error
+        if not isinstance(budget, budget_type):
+            if not isinstance(budget, dict):
+                raise TypeError("budget must be a ForgeOpaqueSearchBudgetV2")
+            budget = budget_type(**budget)
+        scalar_metric = target_contract is None
+        if target_contract is None:
+            target_contract = target_type(
+                objectives=(objective_type(name="score", direction=problem_type),)
+            )
+        elif not isinstance(target_contract, target_type):
+            raise TypeError("target_contract must be a ForgeOpaqueTargetContractV1")
+        elif problem_type != "min":
+            raise ValueError(
+                "problem_type is unavailable with an explicit target contract"
+            )
+
+        self._plans = plans
+        self._objective_function = objective_function
+        self._target_contract = target_contract
+        self._scalar_metric = scalar_metric
+        self._outcome_type = outcome_type
+        self._cleanup_type = cleanup_type
+        self._failure_type = failure_type
+        self._owns_context = context is None
+        self._context = context or plans._definition.materialization_context(
+            workspace_lanes=plans._workspace_lanes,
+            workspace_saturation=plans._workspace_saturation,
+        )
+        self._closed = False
+        self._default_batch = plans.batch(
+            fidelity_name=fidelity_name,
+            repeat_count=repeat_count,
+        )
+        self._session = plans._transport.search_session_v2(
+            self._evaluate,
+            target_contract=target_contract,
+            budget=budget,
+            deterministic_seed=deterministic_seed,
+            halving_factor=halving_factor,
+            minimum_survivors=minimum_survivors,
+            checkpoint=checkpoint,
+        )
+
+    @property
+    def opaque_recipe_capability(self):
+        return self._session.opaque_recipe_capability
+
+    @property
+    def opaque_recipe_core_provenance(self):
+        return self._session.opaque_recipe_core_provenance
+
+    @property
+    def observations(self):
+        return self._session.observations
+
+    @property
+    def evaluation_count(self):
+        return self._session.evaluation_count
+
+    @property
+    def termination_reason(self):
+        return self._session.termination_reason
+
+    def _cleanup(self, status, released, detail):
+        return self._cleanup_type(
+            status=status,
+            released_resources=released,
+            detail_code=detail,
+        )
+
+    def _failure(
+        self,
+        request,
+        recipe,
+        *,
+        category,
+        code,
+        message,
+        cleanup,
+        manifest=None,
+    ):
+        return self._outcome_type(
+            metrics={},
+            planned_physical_id=recipe.planned_physical_id,
+            materialized_physical_id=(
+                None if manifest is None else manifest.materialized_physical_id
+            ),
+            materialized_memory_bytes=(
+                0
+                if manifest is None
+                else (
+                    manifest.persistent_allocated_bytes
+                    + manifest.transient_allocated_bytes
+                )
+            ),
+            provenance={
+                "backend": self._plans.backend,
+                "batch_fingerprint": request.batch_fingerprint,
+                "compileiq_python_source_lock": self._plans.python_source_lock,
+                "recipe_id": request.recipe_id,
+                "semantic_graph_id": self._plans.semantic_plan_id,
+            },
+            cleanup=cleanup,
+            failure=self._failure_type(
+                category=category,
+                code=code,
+                message=message,
+                retryable=False,
+            ),
+        )
+
+    def _evaluate(self, request):
+        recipe = self._plans._catalog.entry(request.recipe_id).recipe
+        try:
+            materialized = self._plans._definition.materialize(
+                recipe,
+                context=self._context,
+            )
+        except Exception as error:
+            cleanup_complete = bool(getattr(error, "cleanup_complete", False))
+            return self._failure(
+                request,
+                recipe,
+                category="materialization",
+                code=type(error).__name__,
+                message=str(error).strip() or type(error).__name__,
+                cleanup=(
+                    self._cleanup(
+                        "not_required",
+                        False,
+                        "materialization_rolled_back",
+                    )
+                    if cleanup_complete
+                    else self._cleanup(
+                        "incomplete",
+                        False,
+                        "materialization_cleanup_incomplete",
+                    )
+                ),
+            )
+
+        manifest = materialized.manifest
+        objective_error = None
+        raw_metrics = None
+        try:
+            raw_metrics = self._objective_function(materialized.executor, request)
+        except Exception as error:
+            objective_error = error
+        try:
+            materialized.close()
+        except Exception as error:
+            return self._failure(
+                request,
+                recipe,
+                category="cleanup",
+                code=type(error).__name__,
+                message=str(error).strip() or type(error).__name__,
+                cleanup=self._cleanup(
+                    "incomplete",
+                    False,
+                    "materialized_graph_release_failed",
+                ),
+                manifest=manifest,
+            )
+        cleanup = self._cleanup(
+            "complete",
+            True,
+            "materialized_graph_release_complete",
+        )
+        if objective_error is not None:
+            return self._failure(
+                request,
+                recipe,
+                category="objective",
+                code=type(objective_error).__name__,
+                message=(
+                    str(objective_error).strip() or type(objective_error).__name__
+                ),
+                cleanup=cleanup,
+                manifest=manifest,
+            )
+        if self._scalar_metric:
+            if isinstance(raw_metrics, bool) or not isinstance(
+                raw_metrics, (int, float)
+            ):
+                return self._failure(
+                    request,
+                    recipe,
+                    category="protocol",
+                    code="scalar_objective_required",
+                    message="scalar objective must return one finite numeric score",
+                    cleanup=cleanup,
+                    manifest=manifest,
+                )
+            raw_metrics = {"score": float(raw_metrics)}
+        elif not isinstance(raw_metrics, dict):
+            return self._failure(
+                request,
+                recipe,
+                category="protocol",
+                code="named_metrics_required",
+                message="explicit target objective must return a metric dictionary",
+                cleanup=cleanup,
+                manifest=manifest,
+            )
+        try:
+            if any(
+                not isinstance(name, str)
+                or not name
+                or isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+                for name, value in raw_metrics.items()
+            ):
+                raise ValueError(
+                    "metric names must be nonempty strings and values finite numbers"
+                )
+            metrics = {name: float(value) for name, value in raw_metrics.items()}
+        except (AttributeError, TypeError, ValueError) as error:
+            return self._failure(
+                request,
+                recipe,
+                category="protocol",
+                code="invalid_named_metrics",
+                message=str(error).strip() or type(error).__name__,
+                cleanup=cleanup,
+                manifest=manifest,
+            )
+        return self._outcome_type(
+            metrics=metrics,
+            planned_physical_id=recipe.planned_physical_id,
+            materialized_physical_id=manifest.materialized_physical_id,
+            materialized_memory_bytes=(
+                manifest.persistent_allocated_bytes
+                + manifest.transient_allocated_bytes
+            ),
+            provenance={
+                "backend": self._plans.backend,
+                "batch_fingerprint": request.batch_fingerprint,
+                "compileiq_python_source_lock": self._plans.python_source_lock,
+                "recipe_id": request.recipe_id,
+                "semantic_graph_id": self._plans.semantic_plan_id,
+            },
+            cleanup=cleanup,
+        )
+
+    def start(self):
+        return self.submit_batch(self._default_batch)
+
+    def submit_batch(self, batch):
+        if self._closed:
+            raise RuntimeError("CompileIQ V2 Graph search session is closed")
+        return self._session.submit_batch(batch)
+
+    def result(self):
+        return self._session.result()
+
+    def checkpoint(self):
+        return self._session.checkpoint()
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        if self._owns_context:
+            self._context.close()
+
+    def __enter__(self):
+        if self._closed:
+            raise RuntimeError("CompileIQ V2 Graph search session is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        del exc_type, exc_value, traceback
+        self.close()
 
 
 class _CompleteGraphRecipeSelection:

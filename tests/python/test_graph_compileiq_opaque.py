@@ -113,6 +113,34 @@ class _ExhaustiveSearch:
     PROTOCOL = "bounded_exhaustive_main_thread_v1"
 
 
+class _SearchSessionV2:
+    PROTOCOL = "budgeted_staged_pareto_racing_main_thread_v2"
+
+
+class _BudgetV2:
+    pass
+
+
+class _OutcomeV2:
+    SCHEMA = "compileiq.taichi-forge-trial-outcome.v2"
+
+
+class _CleanupV2:
+    pass
+
+
+class _BatchV2:
+    SCHEMA = "compileiq.opaque-recipe-batch.v2"
+
+
+class _FidelityV2:
+    pass
+
+
+class _LineageV2:
+    pass
+
+
 class _TargetContract:
     SCHEMA = "compileiq.taichi-forge-opaque-target-contract.v1"
 
@@ -130,17 +158,22 @@ class _Graph:
 def _capability():
     return MappingProxyType(
         {
-            "schema": "compileiq.taichi-forge-recipe-search-capability.v1",
-            "protocol_revision": 3,
-            "fork_build_id": "compileiq-taichi-forge-opaque-recipes.v1.3",
-            "package_version": "1.0.0dev3+taichiforge.opaque2",
+            "schema": "compileiq.taichi-forge-recipe-search-capability.v2",
+            "protocol_revision": 4,
+            "fork_build_id": "compileiq-taichi-forge-complete-recipes.v2",
+            "package_version": "1.0.0dev4+taichiforge.recipe2",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
+            "opaque_recipe_batch_schema": "compileiq.opaque-recipe-batch.v2",
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
             "opaque_target_contract_schema": (
                 "compileiq.taichi-forge-opaque-target-contract.v1"
             ),
             "opaque_target_selection": (
-                "explicit_objectives_constraints_pareto_no_scalarization_v1"
+                "uncertainty_aware_pareto_layers_no_scalarization_v2"
+            ),
+            "trial_outcome_schema": "compileiq.taichi-forge-trial-outcome.v2",
+            "search_checkpoint_schema": (
+                "compileiq.taichi-forge-search-checkpoint.v2"
             ),
             "max_recipe_ids": 4096,
             "max_field_utf8_bytes": 4096,
@@ -151,7 +184,10 @@ def _capability():
             ),
             "opaque_domain_binding": "capability_id_core_commit_core_lock",
             "objective_worker": "forge_main_thread_serial_v1",
-            "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
+            "opaque_recipe_search": (
+                "budgeted_staged_pareto_racing_main_thread_v2"
+            ),
+            "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
             "core_manifest_schema_version": 1,
             "core_commit": _compileiq_opaque._EXPECTED_CORE_COMMIT,
             "core_lock": _compileiq_opaque._EXPECTED_CORE_LOCK,
@@ -354,10 +390,10 @@ def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
     assert manifest["fallback"] == "disabled"
     assert manifest["reviewed_compileiq_distribution"] == {
         "repository": "https://github.com/fancifulland2718/CompileIQ",
-        "ref": "refs/heads/forge/opaque-objectives-v1.3",
-        "commit": "300c426cf8bef288e926a06ab11431797d4942fa",
+        "ref": "refs/heads/main",
+        "commit": "1bf6ded4878eb0b22a7c59bb6391912ea591763d",
         "wheel_sha256": (
-            "1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"
+            "5d0ed04049a9c5279ee86ac3959b2b53dfdf3cc100414b86980b1a2372430914"
         ),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
@@ -699,10 +735,19 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
             as_dict=lambda: capability
         ),
         ForgeMainThreadWorker=_Worker,
+        ForgeOpaqueSearchSessionV2=_SearchSessionV2,
+        ForgeOpaqueSearchBudgetV2=_BudgetV2,
+        TrialOutcomeV2=_OutcomeV2,
+        TrialCleanupV2=_CleanupV2,
         ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
         ForgeOpaqueTargetContractV1=_TargetContract,
     )
-    recipes = SimpleNamespace(OpaqueRecipeDomainV1=_OpaqueRecipeDomain)
+    recipes = SimpleNamespace(
+        OpaqueRecipeDomainV1=_OpaqueRecipeDomain,
+        OpaqueRecipeBatchV2=_BatchV2,
+        OpaqueRecipeFidelityV2=_FidelityV2,
+        OpaqueRecipeLineageV2=_LineageV2,
+    )
     modules = {
         "compileiq.forge_support": support,
         "compileiq.recipes": recipes,
@@ -804,7 +849,7 @@ def test_modified_compileiq_exhausts_exact_graph_partitions():
 
         return float(plans.recipe_ids.index(selection.spec_id))
 
-    compileiq_search = plans.compileiq_search(objective)
+    compileiq_search = plans.compileiq_search_v1(objective)
     result = compileiq_search.start()
     coverage = plans.require_complete_search(compileiq_search)
     selected = plans.select_best_result(compileiq_search, result)
@@ -997,7 +1042,7 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes():
             )
         return float(expected_strategies.index(strategy))
 
-    compileiq_search = plans.compileiq_search(objective)
+    compileiq_search = plans.compileiq_search_v1(objective)
     result = compileiq_search.start()
     coverage = plans.require_complete_search(compileiq_search)
     selected = plans.select_best_result(compileiq_search, result)

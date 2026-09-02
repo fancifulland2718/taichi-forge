@@ -9,18 +9,19 @@ from pathlib import Path
 from types import MappingProxyType
 
 
-_CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v1"
-_FORK_BUILD_ID = "compileiq-taichi-forge-opaque-recipes.v1.3"
-_PACKAGE_VERSION = "1.0.0dev3+taichiforge.opaque2"
+_CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v2"
+_FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
+_PACKAGE_VERSION = "1.0.0dev4+taichiforge.recipe2"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
-_REVIEWED_FORK_REF = "refs/heads/forge/opaque-objectives-v1.3"
-_REVIEWED_FORK_COMMIT = "300c426cf8bef288e926a06ab11431797d4942fa"
+_REVIEWED_FORK_REF = "refs/heads/main"
+_REVIEWED_FORK_COMMIT = "1bf6ded4878eb0b22a7c59bb6391912ea591763d"
 _REVIEWED_WHEEL_SHA256 = (
-    "1510c2ec7634b379c776103137692a4f3f2f9060cb3f7fd606368c07cd1602da"
+    "5d0ed04049a9c5279ee86ac3959b2b53dfdf3cc100414b86980b1a2372430914"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
+_BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"
 _AUDIT_SCHEMA = "compileiq.opaque-recipe-selection.v1"
-_CAPABILITY_ID_PREFIX = "ciq-forge-cap-v1:"
+_CAPABILITY_ID_PREFIX = "ciq-forge-cap-v2:"
 _DOMAIN_FINGERPRINT_KEY = "domain_fingerprint"
 _RECIPE_ID_KEY = "recipe_id"
 _MAX_RECIPES = 4096
@@ -35,12 +36,12 @@ _EXPECTED_CORE_LOCK = (
     "sha256:0bc59bcd0864ce77dcae75aa00af3f7d641737e9abd0bd3cdb21c78425f127aa"
 )
 _EXPECTED_CAPABILITY_ID = (
-    "ciq-forge-cap-v1:63f85504bd3a9f1a9c65ed232d15ec4d9fe2690b2bf6e245046e13a9e91f502a"
+    "ciq-forge-cap-v2:116c5626904834b7ae0dc6bdd193b07d12de94eea8ca6f32d72fe54e4ac3115a"
 )
 _OBJECTIVE_WORKER = "forge_main_thread_serial_v1"
 _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
-    "b69746d40430355b0a388cb0b9bb748d94c6af872a75938d3d266ae34e4343b9"
+    "072607b63f09c6ea488a40effe5573dae7e40eafe6f0319b8d58815dfdc4902d"
 )
 _SOURCE_LOCK_FILES = (
     "ciq.py",
@@ -48,6 +49,7 @@ _SOURCE_LOCK_FILES = (
     "core/core_comms.py",
     "core/core_types.py",
     "core/verify_core.py",
+    "forge_search_v2.py",
     "forge_support.py",
     "recipes.py",
     "results.py",
@@ -71,9 +73,12 @@ _CAPABILITY_KEYS = frozenset(
         "fork_build_id",
         "package_version",
         "opaque_recipe_domain_schema",
+        "opaque_recipe_batch_schema",
         "selection_audit_schema",
         "opaque_target_contract_schema",
         "opaque_target_selection",
+        "trial_outcome_schema",
+        "search_checkpoint_schema",
         "max_recipe_ids",
         "max_field_utf8_bytes",
         "max_canonical_bytes",
@@ -82,6 +87,7 @@ _CAPABILITY_KEYS = frozenset(
         "opaque_domain_binding",
         "objective_worker",
         "opaque_recipe_search",
+        "opaque_recipe_search_v1",
         "core_manifest_schema_version",
         "core_commit",
         "core_lock",
@@ -175,21 +181,40 @@ def _validated_compileiq_capability(
     except ImportError as error:
         raise error_type(
             "opaque recipe search requires the reviewed modified CompileIQ fork "
-            "with the v1 opaque-recipe capability"
+            "with the V2 complete-recipe capability"
         ) from error
 
     capability_factory = getattr(support, "forge_recipe_search_capability", None)
     worker_type = getattr(support, "ForgeMainThreadWorker", None)
+    session_type = getattr(support, "ForgeOpaqueSearchSessionV2", None)
+    budget_type = getattr(support, "ForgeOpaqueSearchBudgetV2", None)
+    outcome_type = getattr(support, "TrialOutcomeV2", None)
+    cleanup_type = getattr(support, "TrialCleanupV2", None)
     exhaustive_search_type = getattr(
         support, "ForgeOpaqueRecipeExhaustiveSearchV1", None
     )
     target_contract_type = getattr(support, "ForgeOpaqueTargetContractV1", None)
     domain_type = getattr(recipes, "OpaqueRecipeDomainV1", None)
+    batch_type = getattr(recipes, "OpaqueRecipeBatchV2", None)
+    fidelity_type = getattr(recipes, "OpaqueRecipeFidelityV2", None)
+    lineage_type = getattr(recipes, "OpaqueRecipeLineageV2", None)
     if (
         not callable(capability_factory)
         or domain_type is None
+        or not isinstance(batch_type, type)
+        or getattr(batch_type, "SCHEMA", None) != _BATCH_SCHEMA
+        or not isinstance(fidelity_type, type)
+        or not isinstance(lineage_type, type)
         or not isinstance(worker_type, type)
         or getattr(worker_type, "PROTOCOL", None) != _OBJECTIVE_WORKER
+        or not isinstance(session_type, type)
+        or getattr(session_type, "PROTOCOL", None)
+        != "budgeted_staged_pareto_racing_main_thread_v2"
+        or not isinstance(budget_type, type)
+        or not isinstance(outcome_type, type)
+        or getattr(outcome_type, "SCHEMA", None)
+        != "compileiq.taichi-forge-trial-outcome.v2"
+        or not isinstance(cleanup_type, type)
         or not isinstance(exhaustive_search_type, type)
         or getattr(exhaustive_search_type, "PROTOCOL", None)
         != "bounded_exhaustive_main_thread_v1"
@@ -212,16 +237,21 @@ def _validated_compileiq_capability(
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 3,
+        "protocol_revision": 4,
         "fork_build_id": _FORK_BUILD_ID,
         "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
+        "opaque_recipe_batch_schema": _BATCH_SCHEMA,
         "selection_audit_schema": _AUDIT_SCHEMA,
         "opaque_target_contract_schema": (
             "compileiq.taichi-forge-opaque-target-contract.v1"
         ),
         "opaque_target_selection": (
-            "explicit_objectives_constraints_pareto_no_scalarization_v1"
+            "uncertainty_aware_pareto_layers_no_scalarization_v2"
+        ),
+        "trial_outcome_schema": "compileiq.taichi-forge-trial-outcome.v2",
+        "search_checkpoint_schema": (
+            "compileiq.taichi-forge-search-checkpoint.v2"
         ),
         "max_recipe_ids": _MAX_RECIPES,
         "max_field_utf8_bytes": _MAX_FIELD_UTF8_BYTES,
@@ -230,7 +260,10 @@ def _validated_compileiq_capability(
         "core_verification": _CORE_VERIFICATION,
         "opaque_domain_binding": _OPAQUE_DOMAIN_BINDING,
         "objective_worker": _OBJECTIVE_WORKER,
-        "opaque_recipe_search": "bounded_exhaustive_main_thread_v1",
+        "opaque_recipe_search": (
+            "budgeted_staged_pareto_racing_main_thread_v2"
+        ),
+        "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
         "core_commit": _EXPECTED_CORE_COMMIT,
         "core_lock": _EXPECTED_CORE_LOCK,
         "capability_id": _EXPECTED_CAPABILITY_ID,
@@ -431,6 +464,109 @@ class _CompileIQOpaqueRecipeTransport:
             target_contract=target_contract,
         )
 
+    def batch_v2(
+        self,
+        *,
+        recipe_ids,
+        stage_index,
+        stage_fingerprint,
+        parent_batch=None,
+        parent_recipe_ids=None,
+        fidelity_name,
+        fidelity_ordinal,
+        repeat_count,
+        work_scale=1.0,
+        estimated_materialized_bytes=None,
+    ):
+        """Build one exact V2 batch without exposing recipe internals."""
+
+        try:
+            recipes = import_module("compileiq.recipes")
+            batch_type = getattr(recipes, "OpaqueRecipeBatchV2")
+            fidelity_type = getattr(recipes, "OpaqueRecipeFidelityV2")
+            lineage_type = getattr(recipes, "OpaqueRecipeLineageV2")
+        except (ImportError, AttributeError) as error:
+            raise CompileIQOpaqueUnavailableError(
+                "modified CompileIQ does not expose opaque recipe batches V2"
+            ) from error
+        recipe_ids = tuple(recipe_ids)
+        if (
+            not recipe_ids
+            or len(set(recipe_ids)) != len(recipe_ids)
+            or any(recipe_id not in self.recipe_ids for recipe_id in recipe_ids)
+        ):
+            raise ValueError(
+                "V2 batch recipes must be a nonempty unique subset of the frozen domain"
+            )
+        if self.baseline_recipe_id not in recipe_ids:
+            raise ValueError("every V2 batch must retain the frozen baseline")
+        parent_recipe_ids = parent_recipe_ids or {}
+        estimated_materialized_bytes = estimated_materialized_bytes or {}
+        unexpected_parents = set(parent_recipe_ids) - set(recipe_ids)
+        unexpected_estimates = set(estimated_materialized_bytes) - set(recipe_ids)
+        if unexpected_parents or unexpected_estimates:
+            raise ValueError("V2 batch metadata contains an unknown recipe")
+        return batch_type(
+            provider_namespace=self._domain.provider_namespace,
+            domain_version=self._domain.domain_version,
+            provider_semantic_fingerprint=(
+                self._domain.provider_semantic_fingerprint
+            ),
+            compileiq_capability_id=self._capability["capability_id"],
+            compileiq_core_commit=self._capability["core_commit"],
+            compileiq_core_lock=self._capability["core_lock"],
+            stage_index=stage_index,
+            stage_fingerprint=stage_fingerprint,
+            parent_batch_fingerprint=(
+                None if parent_batch is None else parent_batch.batch_fingerprint
+            ),
+            fidelity=fidelity_type(
+                name=fidelity_name,
+                ordinal=fidelity_ordinal,
+                repeat_count=repeat_count,
+                work_scale=work_scale,
+            ),
+            recipes=tuple(
+                lineage_type(
+                    recipe_id=recipe_id,
+                    parent_recipe_ids=tuple(parent_recipe_ids.get(recipe_id, ())),
+                    estimated_materialized_bytes=int(
+                        estimated_materialized_bytes.get(recipe_id, 0)
+                    ),
+                )
+                for recipe_id in recipe_ids
+            ),
+        )
+
+    def search_session_v2(
+        self,
+        objective_function,
+        *,
+        target_contract,
+        budget,
+        deterministic_seed=0,
+        halving_factor=2,
+        minimum_survivors=1,
+        checkpoint=None,
+    ):
+        try:
+            support = import_module("compileiq.forge_support")
+            session_type = getattr(support, "ForgeOpaqueSearchSessionV2")
+        except (ImportError, AttributeError) as error:
+            raise CompileIQOpaqueUnavailableError(
+                "modified CompileIQ does not expose staged opaque search V2"
+            ) from error
+        return session_type(
+            objective_function=objective_function,
+            baseline_recipe_id=self.baseline_recipe_id,
+            target_contract=target_contract,
+            budget=budget,
+            deterministic_seed=deterministic_seed,
+            halving_factor=halving_factor,
+            minimum_survivors=minimum_survivors,
+            checkpoint=checkpoint,
+        )
+
     @property
     def python_source_lock(self):
         return self._python_source_lock
@@ -577,7 +713,7 @@ class _CompileIQOpaqueRecipeTransport:
 
     def manifest(self):
         return {
-            "transport": "modified_compileiq_opaque_recipe_v1",
+            "transport": "modified_compileiq_complete_recipe_v2",
             "capability": dict(self._capability),
             "compileiq_python_source_lock": self._python_source_lock,
             "reviewed_compileiq_distribution": (_reviewed_distribution_manifest()),
@@ -588,8 +724,9 @@ class _CompileIQOpaqueRecipeTransport:
             ),
             "baseline_recipe_id": self.baseline_recipe_id,
             "recipe_count": len(self.recipe_ids),
-            "search_coverage": "complete_exact_fork_audit_required",
-            "search_mode": "bounded_exhaustive_main_thread_v1",
+            "search_coverage": "budgeted_partial_frontier_with_lineage",
+            "search_mode": "budgeted_staged_pareto_racing_main_thread_v2",
+            "v1_compatibility": "bounded_exhaustive_main_thread_v1",
             "fallback": "disabled",
         }
 
