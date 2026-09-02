@@ -209,6 +209,7 @@ def _graph_worker(scope, order, minimum_block_ms):
     expected = expected.astype(np.int32)
 
     arguments = {}
+    bindings = {}
     routes = {}
     graphs = {"baseline": baseline_graph, "candidate": candidate_graph}
     for name, graph in graphs.items():
@@ -218,7 +219,14 @@ def _graph_worker(scope, order, minimum_block_ms):
         }
         arrays["source"].from_numpy(source_np)
         arguments[name] = arrays
-        routes[name] = lambda graph=graph, arrays=arrays: graph.run(arrays)
+        binding = graph.bind(arrays)
+        if not binding.fast_path_qualified:
+            raise RuntimeError(
+                f"Graph qualification binding did not reach the stable fast path: "
+                f"{binding.statistics()}"
+            )
+        bindings[name] = binding
+        routes[name] = lambda graph=graph, binding=binding: graph.run(binding)
 
     for invoke in routes.values():
         invoke()
@@ -250,6 +258,13 @@ def _graph_worker(scope, order, minimum_block_ms):
         "memory_after_warmup": memory_after_warmup,
         "memory_after_timing": memory_after_timing,
         "physical_dispatches": physical,
+        "bindings": {
+            name: {
+                "version": dict(binding.statistics()),
+                "graph": dict(graphs[name].binding_statistics()),
+            }
+            for name, binding in bindings.items()
+        },
         "compile_build_ms_diagnostic": {
             "baseline": baseline_build_ms,
             "candidate": candidate_build_ms,
