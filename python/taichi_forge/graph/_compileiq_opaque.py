@@ -660,9 +660,7 @@ class CompileIQCompleteGraphRecipeSearch:
                 if recipe_id in parent_batch.recipe_ids
             }
         parent_recipe_ids = {
-            recipe_id: tuple(
-                sorted(parent_ids, key=lambda item: item.encode("utf-8"))
-            )
+            recipe_id: tuple(sorted(parent_ids, key=lambda item: item.encode("utf-8")))
             for recipe_id, parent_ids in (parent_recipe_ids or {}).items()
         }
         estimates = {
@@ -680,9 +678,7 @@ class CompileIQCompleteGraphRecipeSearch:
                 "semantic_graph_id": self.semantic_plan_id,
                 "stage_index": stage_index,
                 "parent_batch_fingerprint": (
-                    None
-                    if parent_batch is None
-                    else parent_batch.batch_fingerprint
+                    None if parent_batch is None else parent_batch.batch_fingerprint
                 ),
                 "recipe_ids": recipe_ids,
                 "parent_recipe_ids": parent_recipe_ids,
@@ -1052,11 +1048,30 @@ class _CompleteGraphRecipeSearchSessionV2:
 
         manifest = materialized.manifest
         objective_error = None
+        observation_error = None
         raw_metrics = None
         try:
             raw_metrics = self._objective_function(materialized.executor, request)
         except Exception as error:
             objective_error = error
+        if objective_error is None:
+            try:
+                # Some Graph-owned resources are intentionally allocated only
+                # after the evaluator publishes concrete bindings.  Refresh
+                # the observation here, outside the replay hot path, so the
+                # V2 memory budget sees the evaluated physical instance rather
+                # than the empty pre-binding shell.
+                from taichi_forge.graph._recipes.physical import (
+                    observe_graph_physical_manifest,
+                )
+
+                manifest = observe_graph_physical_manifest(
+                    self._plans._definition,
+                    recipe,
+                    materialized.executor,
+                )
+            except Exception as error:
+                observation_error = error
         try:
             materialized.close()
         except Exception as error:
@@ -1086,6 +1101,18 @@ class _CompleteGraphRecipeSearchSessionV2:
                 code=type(objective_error).__name__,
                 message=(
                     str(objective_error).strip() or type(objective_error).__name__
+                ),
+                cleanup=cleanup,
+                manifest=manifest,
+            )
+        if observation_error is not None:
+            return self._failure(
+                request,
+                recipe,
+                category="materialization",
+                code=type(observation_error).__name__,
+                message=(
+                    str(observation_error).strip() or type(observation_error).__name__
                 ),
                 cleanup=cleanup,
                 manifest=manifest,
@@ -1150,8 +1177,7 @@ class _CompleteGraphRecipeSearchSessionV2:
             planned_physical_id=recipe.planned_physical_id,
             materialized_physical_id=manifest.materialized_physical_id,
             materialized_memory_bytes=(
-                manifest.persistent_allocated_bytes
-                + manifest.transient_allocated_bytes
+                manifest.persistent_allocated_bytes + manifest.transient_allocated_bytes
             ),
             provenance={
                 "backend": self._plans.backend,

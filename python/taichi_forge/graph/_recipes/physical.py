@@ -1102,20 +1102,33 @@ def observe_graph_physical_manifest(definition, recipe, graph):
     execution = graph.execution_stats()
     memory = execution.memory
     resources = []
-    if memory.persistent_bytes:
+    bounded_control_bytes = int(memory.persistent_bounded_control_bytes)
+    persistent_non_bounded_bytes = int(memory.persistent_bytes) - bounded_control_bytes
+    if persistent_non_bounded_bytes < 0:
+        raise GraphPhysicalManifestError(
+            "Graph bounded-control memory exceeds total persistent memory"
+        )
+    if persistent_non_bounded_bytes:
         resources.append(
             GraphPhysicalResourceManifest(
-                resource_id="graph:persistent",
-                kind="graph_owned_aggregate",
-                requested_bytes=memory.persistent_bytes,
-                allocated_bytes=memory.persistent_bytes,
+                resource_id=(
+                    "graph:persistent_non_bounded"
+                    if bounded_control_bytes
+                    else "graph:persistent"
+                ),
+                kind=(
+                    "graph_owned_non_bounded"
+                    if bounded_control_bytes
+                    else "graph_owned_aggregate"
+                ),
+                requested_bytes=persistent_non_bounded_bytes,
+                allocated_bytes=persistent_non_bounded_bytes,
                 alignment=1,
                 ownership="graph_instance",
                 lifetime="graph",
                 exclusive_submission=memory.internal_storage_exclusive,
             )
         )
-    bounded_control_bytes = int(memory.persistent_bounded_control_bytes)
     if bounded_control_bytes:
         resources.append(
             GraphPhysicalResourceManifest(

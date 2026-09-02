@@ -196,13 +196,17 @@ def test_complete_recipe_v2_multifidelity_bounded_racing_keeps_lineage():
     total = ti.ndarray(ti.i32, shape=1)
     arguments = {"requested": 17, "extent": extent, "total": total}
     observed_recipes = set()
+    binding_sets = {}
+    binding_statistics = {}
 
     def objective(graph, request):
         total.fill(0)
-        graph.run(arguments)
+        bindings = binding_sets.setdefault(id(graph), graph.bind(arguments))
+        graph.run(bindings)
         ti.sync()
         assert int(total.to_numpy()[0]) == 17 * 18 // 2
         observed_recipes.add(request.recipe_id)
+        binding_statistics[request.recipe_id] = graph.binding_statistics()
         return {
             "physical_dispatches": float(
                 graph.physical_plan()["physical_dispatch_count"]
@@ -249,6 +253,21 @@ def test_complete_recipe_v2_multifidelity_bounded_racing_keeps_lineage():
     assert len(
         {item["materialized_physical_id"] for item in final.get_results()}
     ) == len(final.get_results())
+    memory_by_strategy = {
+        plans._selection(item["recipe_id"]).bounded_recipe_manifest.strategy: item[
+            "materialized_memory_bytes"
+        ]
+        for item in screened.get_results()
+    }
+    assert all(value > 0 for value in memory_by_strategy.values())
+    assert memory_by_strategy["adaptive_per_node"] > max(
+        memory_by_strategy["logical_exact"],
+        memory_by_strategy["masked_capacity"],
+    )
+    assert all(
+        statistics["raw_replay_validations"] == 0
+        for statistics in binding_statistics.values()
+    )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

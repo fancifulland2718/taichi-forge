@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
+from taichi_forge.graph._recipes.physical import observe_graph_physical_manifest
 
 from tests import test_utils
 
@@ -316,6 +317,9 @@ def test_complete_bounded_recipe_replays_all_scope_strategies_without_environmen
     }
     physical_identities = {}
     persistent_control_bytes = {}
+    manifest_persistent_bytes = {}
+    execution_persistent_bytes = {}
+    bounded_resource_bytes = {}
     with definition.materialization_context() as context:
         recipes = [("logical_exact", catalog.baseline.recipe)]
         recipes.extend(
@@ -335,14 +339,25 @@ def test_complete_bounded_recipe_replays_all_scope_strategies_without_environmen
             second.fill(0)
             materialized.executor.run(arguments)
             ti.sync()
+            observed_manifest = observe_graph_physical_manifest(
+                definition,
+                recipe,
+                materialized.executor,
+            )
             expected = arguments["requested"] * (arguments["requested"] + 1) // 2
             assert int(first.to_numpy()[0]) == expected
             assert int(second.to_numpy()[0]) == expected
-            physical_identities[strategy] = (
-                materialized.manifest.materialized_physical_id
+            physical_identities[strategy] = observed_manifest.materialized_physical_id
+            memory = materialized.executor.execution_stats().memory
+            persistent_control_bytes[strategy] = memory.persistent_bounded_control_bytes
+            execution_persistent_bytes[strategy] = memory.persistent_bytes
+            manifest_persistent_bytes[strategy] = (
+                observed_manifest.persistent_requested_bytes
             )
-            persistent_control_bytes[strategy] = (
-                materialized.executor.execution_stats().memory.persistent_bounded_control_bytes
+            bounded_resource_bytes[strategy] = sum(
+                resource.requested_bytes
+                for resource in observed_manifest.resources
+                if resource.kind == "bounded_control_state"
             )
 
     assert len(set(physical_identities.values())) == len(
@@ -352,6 +367,8 @@ def test_complete_bounded_recipe_replays_all_scope_strategies_without_environmen
     assert persistent_control_bytes["masked_capacity"] == 0
     assert persistent_control_bytes["adaptive_per_node"] > 0
     assert persistent_control_bytes["adaptive_grouped"] > 0
+    assert manifest_persistent_bytes == execution_persistent_bytes
+    assert bounded_resource_bytes == persistent_control_bytes
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
