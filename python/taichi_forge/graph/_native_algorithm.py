@@ -28,6 +28,7 @@ from taichi_forge.graph._ir import (
     SequentialRegion,
 )
 from taichi_forge.graph._native import NativeGraphExecutable, NativeGraphNode
+from taichi_forge.graph._native import BackendCommandPlan
 from taichi_forge.graph._optimization import (
     _GraphNativeAlgorithmRecipeManifest,
 )
@@ -35,20 +36,30 @@ from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_r
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import i32, u32
+from taichi_forge.graph._segmented_scan_kernels import (
+    generated_segment_chunk_kernel,
+)
 
 _INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE"
 )
 _SERIAL_STRATEGY = "segment_local_serial"
 _GLOBAL_STRATEGY = "global_scan_segment_correction"
+_WARP_STRATEGY = "warp_chunked_carry"
+_BLOCK_STRATEGY = "block_chunked_carry"
+_HYBRID_STRATEGY = "length_bucket_hybrid"
 _STRATEGY_METHOD = {
     _SERIAL_STRATEGY: "serial",
     _GLOBAL_STRATEGY: "global_scan",
+    _WARP_STRATEGY: "forge_warp_chunked_v1",
+    _BLOCK_STRATEGY: "forge_block_chunked_v1",
+    _HYBRID_STRATEGY: "forge_length_bucket_v1",
 }
 _SOURCE_FILES = (
     "algorithms/_algorithms.py",
     "graph/_native.py",
     "graph/_native_algorithm.py",
+    "graph/_segmented_scan_kernels.py",
     "graph/_optimization.py",
 )
 
@@ -166,6 +177,9 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         self._serial_call = None
         self._gather_call = None
         self._apply_call = None
+        self._nested_graph = None
+        self._nested_bindings = None
+        self._bucket_indices = ()
         if strategy == _SERIAL_STRATEGY:
             self._serial_call = _FrozenKernelCall(
                 segmented_scan_sum_serial_ndarray,
@@ -199,6 +213,87 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 source.layout.num_segments,
                 int(source.inclusive),
             )
+        if strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+            self._build_chunked_graph()
+
+    def _build_chunked_graph(self):
+        from taichi_forge.graph._graph import Arg, ArgKind, GraphBuilder
+
+        values = Arg(ArgKind.NDARRAY, "values", self._source.values.dtype, ndim=1)
+        offsets = Arg(ArgKind.NDARRAY, "offsets", i32, ndim=1)
+        output = Arg(ArgKind.NDARRAY, "output", self._source.output.dtype, ndim=1)
+        inclusive = Arg(ArgKind.SCALAR, "inclusive", i32)
+        builder = GraphBuilder(
+            _capture_recipe_sources=False,
+            _explicit_map_source_groups=(),
+            _ignore_recipe_environment=True,
+        )
+        bindings = {
+            "values": self._source.values,
+            "offsets": self._source.layout._offsets,
+            "output": self._source.output,
+            "inclusive": int(self._source.inclusive),
+        }
+        if self._strategy == _HYBRID_STRATEGY:
+            import numpy as np
+
+            offsets_host = self._source.offsets
+            short = np.asarray(
+                [
+                    index
+                    for index in range(self._source.layout.num_segments)
+                    if offsets_host[index + 1] - offsets_host[index] <= 32
+                ],
+                dtype=np.int32,
+            )
+            long = np.asarray(
+                [
+                    index
+                    for index in range(self._source.layout.num_segments)
+                    if offsets_host[index + 1] - offsets_host[index] > 32
+                ],
+                dtype=np.int32,
+            )
+            for name, indices, block_dim in (
+                ("short_segments", short, 32),
+                ("long_segments", long, 128),
+            ):
+                storage = impl.ndarray(i32, shape=len(indices))
+                storage.from_numpy(indices)
+                self._bucket_indices += (storage,)
+                symbolic = Arg(ArgKind.NDARRAY, name, i32, ndim=1)
+                scan = generated_segment_chunk_kernel(
+                    self._source.values.dtype,
+                    block_dim,
+                    len(indices),
+                    indexed=True,
+                )
+                builder.dispatch(
+                    scan,
+                    values,
+                    offsets,
+                    symbolic,
+                    output,
+                    inclusive,
+                )
+                bindings[name] = storage
+        else:
+            block_dim = 32 if self._strategy == _WARP_STRATEGY else 128
+            scan = generated_segment_chunk_kernel(
+                self._source.values.dtype,
+                block_dim,
+                self._source.layout.num_segments,
+                indexed=False,
+            )
+            builder.dispatch(
+                scan,
+                values,
+                offsets,
+                output,
+                inclusive,
+            )
+        self._nested_graph = builder.compile()
+        self._nested_bindings = self._nested_graph.bind(bindings)
 
     @property
     def graph_physical_plan_id(self):
@@ -253,6 +348,9 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         if self._strategy == _SERIAL_STRATEGY:
             self._run_serial()
             return
+        if self._strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+            self._nested_graph.run(self._nested_bindings)
+            return
         if self._transform_plan is None:
             # The provider calls below perform the first semantic execution and
             # publish their immutable native plans. Static shape, dtype, alias,
@@ -263,6 +361,28 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             self._invoke_global_provider_plans()
         self._gather_call.run()
         self._apply_call.run()
+
+    @property
+    def backend_command_plan(self):
+        if self._strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+            return BackendCommandPlan(
+                backend="cuda",
+                command_count=(2 if self._strategy == _HYBRID_STRATEGY else 1),
+                command_count_exact=True,
+                provider_replay=False,
+                fragmentation_reason="nested_cuda_graph_segmented_scan",
+            )
+        return BackendCommandPlan(
+            backend="cuda",
+            command_count=(1 if self._strategy == _SERIAL_STRATEGY else 4),
+            command_count_exact=(self._strategy == _SERIAL_STRATEGY),
+            provider_replay=(self._strategy == _GLOBAL_STRATEGY),
+            fragmentation_reason=(
+                "none"
+                if self._strategy == _SERIAL_STRATEGY
+                else "provider_command_not_graph_integrated"
+            ),
+        )
 
     @property
     def graph_ir_node(self):
@@ -291,15 +411,21 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             ),
             "action_owned_bytes": self._source.action_owned_bytes(self._strategy),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
+            "nested_graph_replay": self._nested_graph is not None,
         }
 
     def _graph_provider_memory_report(self):
         action_owned_bytes = self._source.action_owned_bytes(self._strategy)
         components = ()
         if action_owned_bytes:
+            component_name = (
+                "segment_buckets"
+                if self._strategy == _HYBRID_STRATEGY
+                else "segment_bases"
+            )
             components = (
                 HardwareMemoryComponent(
-                    "segment_bases",
+                    component_name,
                     action_owned_bytes,
                     True,
                     "provider_generation",
@@ -393,6 +519,7 @@ class _GraphSegmentedScanRecipeSource:
         self.output = output
         self.inclusive = inclusive
         self.operation = operation
+        self.offsets = tuple(int(value) for value in layout._offsets_host)
         self.topology_fingerprint = _topology_fingerprint(layout)
         self.baseline_strategy = (
             _GLOBAL_STRATEGY
@@ -447,15 +574,20 @@ class _GraphSegmentedScanRecipeSource:
         )
 
     def action_owned_bytes(self, strategy):
-        return 0 if strategy == _SERIAL_STRATEGY else self.layout.num_segments * 4
+        return (
+            self.layout.num_segments * 4
+            if strategy in (_GLOBAL_STRATEGY, _HYBRID_STRATEGY)
+            else 0
+        )
 
-    def _manifest(self, strategy, stages, workspace):
+    def _manifest(self, strategy, stages, topology, workspace):
         return _GraphNativeAlgorithmRecipeManifest.from_payload(
             {
                 "algorithm": "segmented_scan",
                 "strategy": strategy,
                 "semantics": self.semantics,
                 "physical_stages": stages,
+                "topology": topology,
                 "workspace": workspace,
                 "submission": {
                     "resource_binding": "fixed_graph_action",
@@ -469,6 +601,7 @@ class _GraphSegmentedScanRecipeSource:
         serial = self._manifest(
             _SERIAL_STRATEGY,
             [_stage("segment_local_serial", "taichi_dispatch")],
+            {"kind": _SERIAL_STRATEGY, "block_dim": 0, "chunk_items": 0},
             {
                 "ownership": "none",
                 "action_owned_bytes": 0,
@@ -483,24 +616,79 @@ class _GraphSegmentedScanRecipeSource:
                 _stage("gather_segment_bases", "taichi_dispatch"),
                 _stage("apply_segment_correction", "taichi_dispatch"),
             ],
+            {"kind": _GLOBAL_STRATEGY, "block_dim": 0, "chunk_items": 0},
             {
                 "ownership": "graph_native_action",
                 "action_owned_bytes": self.action_owned_bytes(_GLOBAL_STRATEGY),
                 "provider_shared_scope": "program_scan_arena",
             },
         )
+        warp = self._manifest(
+            _WARP_STRATEGY,
+            [_stage("warp_sized_segment_chunks", "taichi_dispatch")],
+            {"kind": _WARP_STRATEGY, "block_dim": 32, "chunk_items": 32},
+            {
+                "ownership": "none",
+                "action_owned_bytes": 0,
+                "provider_shared_scope": "none",
+            },
+        )
+        block = self._manifest(
+            _BLOCK_STRATEGY,
+            [_stage("block_segment_chunks", "taichi_dispatch")],
+            {"kind": _BLOCK_STRATEGY, "block_dim": 128, "chunk_items": 128},
+            {
+                "ownership": "none",
+                "action_owned_bytes": 0,
+                "provider_shared_scope": "none",
+            },
+        )
         by_strategy = {
             serial.strategy: serial,
             global_scan.strategy: global_scan,
+            warp.strategy: warp,
+            block.strategy: block,
         }
-        return (
-            by_strategy[self.baseline_strategy],
-            by_strategy[
-                _GLOBAL_STRATEGY
-                if self.baseline_strategy == _SERIAL_STRATEGY
-                else _SERIAL_STRATEGY
-            ],
+        manifests = [by_strategy[self.baseline_strategy]]
+        manifests.extend(
+            by_strategy[strategy]
+            for strategy in (
+                _SERIAL_STRATEGY,
+                _WARP_STRATEGY,
+                _BLOCK_STRATEGY,
+                _GLOBAL_STRATEGY,
+            )
+            if strategy != self.baseline_strategy
         )
+        short_count = sum(
+            self.offsets[index + 1] - self.offsets[index] <= 32
+            for index in range(self.layout.num_segments)
+        )
+        long_count = self.layout.num_segments - short_count
+        if short_count and long_count:
+            manifests.append(
+                self._manifest(
+                    _HYBRID_STRATEGY,
+                    [
+                        _stage("short_segment_warp_chunks", "taichi_dispatch"),
+                        _stage("long_segment_block_chunks", "taichi_dispatch"),
+                    ],
+                    {
+                        "kind": _HYBRID_STRATEGY,
+                        "short_max_items": 32,
+                        "short_segment_count": short_count,
+                        "long_segment_count": long_count,
+                        "short_block_dim": 32,
+                        "long_block_dim": 128,
+                    },
+                    {
+                        "ownership": "graph_native_action",
+                        "action_owned_bytes": self.action_owned_bytes(_HYBRID_STRATEGY),
+                        "provider_shared_scope": "none",
+                    },
+                )
+            )
+        return tuple(manifests)
 
     def manifests(self):
         return self._manifests

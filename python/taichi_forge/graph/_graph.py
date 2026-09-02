@@ -14427,6 +14427,7 @@ class GraphBuilder:
         *,
         _capture_recipe_sources=True,
         _explicit_map_source_groups=None,
+        _ignore_recipe_environment=False,
     ):
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._aot_plan_cursor = 0
@@ -14436,6 +14437,7 @@ class GraphBuilder:
             _explicit_map_source_groups
         )
         self._capture_recipe_sources = bool(_capture_recipe_sources)
+        self._ignore_recipe_environment = bool(_ignore_recipe_environment)
 
         self._runtime_graph_recipe_operations = []
 
@@ -14515,7 +14517,11 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
-        requested_memory_recipe = os.environ.get(_INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
+        requested_memory_recipe = (
+            None
+            if self._ignore_recipe_environment
+            else os.environ.get(_INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
+        )
         if requested_memory_recipe is not None:
             requested_memory_recipe = requested_memory_recipe.strip()
             if not requested_memory_recipe:

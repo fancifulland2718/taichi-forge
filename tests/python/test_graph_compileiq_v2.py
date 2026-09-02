@@ -207,9 +207,7 @@ def test_complete_recipe_v2_multifidelity_bounded_racing_keeps_lineage():
             "physical_dispatches": float(
                 graph.physical_plan()["physical_dispatch_count"]
             ),
-            "persistent_bytes": float(
-                graph.execution_stats().memory.persistent_bytes
-            ),
+            "persistent_bytes": float(graph.execution_stats().memory.persistent_bytes),
         }
 
     stage0 = plans.batch(
@@ -270,9 +268,13 @@ def test_complete_recipe_v2_memory_budget_skips_native_workspace_before_material
         for recipe in batch.recipes
     }
     assert estimates[plans.baseline_recipe_id] == 0
-    candidate_id = next(
+    memory_candidate_ids = {
         recipe_id for recipe_id, estimate in estimates.items() if estimate > 0
-    )
+    }
+    zero_memory_recipe_ids = {
+        recipe_id for recipe_id, estimate in estimates.items() if estimate == 0
+    }
+    assert memory_candidate_ids
 
     host = ((np.arange(capacity, dtype=np.int64) % 7) + 1).astype(np.int32)
     expected = np.empty_like(host)
@@ -296,9 +298,10 @@ def test_complete_recipe_v2_memory_budget_skips_native_workspace_before_material
         result = session.start()
 
     by_recipe = {item["recipe_id"]: item for item in result.get_results()}
-    assert observed == [plans.baseline_recipe_id]
+    assert set(observed) == zero_memory_recipe_ids
     assert by_recipe[plans.baseline_recipe_id]["feasible"]
-    assert by_recipe[candidate_id]["feasible"] is False
-    assert by_recipe[candidate_id]["failures"][0]["failure"]["code"] == (
-        "estimated_memory_budget_exceeded"
-    )
+    for candidate_id in memory_candidate_ids:
+        assert by_recipe[candidate_id]["feasible"] is False
+        assert by_recipe[candidate_id]["failures"][0]["failure"]["code"] == (
+            "estimated_memory_budget_exceeded"
+        )

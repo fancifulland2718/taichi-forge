@@ -67,7 +67,7 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
         search.search_space.domain_version
         == "graph-native-algorithm-complete-recipe.v2"
     )
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
 
     recipes = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
@@ -79,6 +79,8 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
     assert strategies == {
         "segment_local_serial",
         "global_scan_segment_correction",
+        "warp_chunked_carry",
+        "block_chunked_carry",
     }
     assert (
         recipes[search.baseline_recipe_id]["native_algorithm_recipe_manifest"][
@@ -124,24 +126,18 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                 strategy = recipes[recipe_id]["native_algorithm_recipe_manifest"][
                     "strategy"
                 ]
-                frozen_kernel_call = (
-                    executable._serial_call
-                    if strategy == "segment_local_serial"
-                    else executable._gather_call
-                )
-                kernel_plan_type = type(frozen_kernel_call._plan)
-
-                def reject_repeated_kernel_resource_proof(*_args, **_kwargs):
-                    raise AssertionError(
-                        "stable Graph replay repeated a fixed-kernel resource proof"
-                    )
-
                 if strategy == "global_scan_segment_correction":
+                    kernel_plan_type = type(executable._gather_call._plan)
                     plan_type = type(executable._scan_plan)
 
                     def reject_repeated_program_proof(*_args, **_kwargs):
                         raise AssertionError(
                             "stable Graph replay repeated a provider Program proof"
+                        )
+
+                    def reject_repeated_kernel_resource_proof(*_args, **_kwargs):
+                        raise AssertionError(
+                            "stable Graph replay repeated a fixed-kernel resource proof"
                         )
 
                     with monkeypatch.context() as stable_replay:
@@ -156,7 +152,14 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                             reject_repeated_kernel_resource_proof,
                         )
                         rebuilt.run({})
-                else:
+                elif strategy == "segment_local_serial":
+                    kernel_plan_type = type(executable._serial_call._plan)
+
+                    def reject_repeated_kernel_resource_proof(*_args, **_kwargs):
+                        raise AssertionError(
+                            "stable Graph replay repeated a fixed-kernel resource proof"
+                        )
+
                     with monkeypatch.context() as stable_replay:
                         stable_replay.setattr(
                             kernel_plan_type,
@@ -164,13 +167,21 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                             reject_repeated_kernel_resource_proof,
                         )
                         rebuilt.run({})
+                else:
+                    assert executable.debug_info["nested_graph_replay"]
+                    rebuilt.run({})
                 ti.sync()
                 np.testing.assert_array_equal(output.to_numpy(), expected)
                 assert executable.debug_info["provider_preparations"] == (
                     1 if strategy == "global_scan_segment_correction" else 0
                 )
                 assert executable.debug_info["kernel_plan_preparations"] == (
-                    2 if strategy == "global_scan_segment_correction" else 1
+                    {
+                        "segment_local_serial": 1,
+                        "global_scan_segment_correction": 2,
+                        "warp_chunked_carry": 0,
+                        "block_chunked_carry": 0,
+                    }[strategy]
                 )
                 execution_report = rebuilt.execution_stats()
                 assert execution_report.memory.provider_generation_report_count == 1
@@ -187,6 +198,62 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                     is True
                 )
     assert semantic_graph_ids == {graph.definition.semantic_graph_id}
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_native_segmented_scan_generates_and_replays_length_bucket_hybrid():
+    lengths = np.asarray((1, 7, 32, 33, 129, 511), dtype=np.int32)
+    offsets = np.concatenate(
+        (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
+    )
+    capacity = int(offsets[-1])
+    layout = ti.algorithms.SegmentedLayout.from_offsets(offsets, capacity=capacity)
+    values = ti.ndarray(ti.i32, shape=capacity)
+    output = ti.ndarray(ti.i32, shape=capacity)
+    graph = _build(values, layout, output, inclusive=False)
+    search = compileiq_recipe_search(graph)
+    recipes = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    hybrid_id = next(
+        recipe_id
+        for recipe_id, recipe in recipes.items()
+        if recipe["native_algorithm_recipe_manifest"]["strategy"]
+        == "length_bucket_hybrid"
+    )
+    manifest = recipes[hybrid_id]["native_algorithm_recipe_manifest"]
+    assert manifest["topology"] == {
+        "kind": "length_bucket_hybrid",
+        "short_max_items": 32,
+        "short_segment_count": 3,
+        "long_segment_count": 3,
+        "short_block_dim": 32,
+        "long_block_dim": 128,
+    }
+    assert manifest["workspace"]["action_owned_bytes"] == len(lengths) * 4
+
+    host = ((np.arange(capacity, dtype=np.int64) % 11) - 5).astype(np.int32)
+    expected = np.empty_like(host)
+    for begin, end in pairwise(offsets):
+        inclusive = np.cumsum(host[begin:end], dtype=np.int32)
+        expected[begin:end] = np.concatenate(
+            (np.zeros(1, dtype=np.int32), inclusive[:-1])
+        )
+    values.from_numpy(host)
+    with search.materialize(_parameters(search, hybrid_id)) as materialized:
+        candidate = materialized.executor
+        for _ in range(3):
+            output.fill(123)
+            candidate.run({})
+        ti.sync()
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        executable = candidate._spec.nodes[0].executable
+        assert executable.debug_info["nested_graph_replay"]
+        assert executable.backend_command_plan.command_count == 2
+        assert (
+            candidate.execution_stats().memory.provider_generation_known_resident_requested_bytes
+            == len(lengths) * 4
+        )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -240,7 +307,7 @@ def test_graph_native_segmented_scan_recipe_composes_with_ordinary_dispatch():
     search = compileiq_recipe_search(graph)
 
     assert search.manifest()["families"] == ("native_algorithm",)
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
     assert graph.definition._runtime_spec._graph_memory_sources == ()
 
     host = (np.arange(capacity, dtype=np.int32) % 5) + 1
@@ -267,7 +334,7 @@ def test_graph_native_segmented_scan_recipe_composes_with_ordinary_dispatch():
                     scratch.to_numpy(), np.zeros(capacity, dtype=np.int32)
                 )
                 physical_ids.add(materialized.materialized_physical_id)
-    assert len(physical_ids) == 2
+    assert len(physical_ids) == 4
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -334,9 +401,7 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                     "static_shared_bytes": num_groups * 4,
                 }
             owned_bytes = (
-                expected_owned_bytes
-                if strategy == "key_partitioned_two_level"
-                else 0
+                expected_owned_bytes if strategy == "key_partitioned_two_level" else 0
             )
             assert manifest["workspace"]["action_owned_bytes"] == owned_bytes
 

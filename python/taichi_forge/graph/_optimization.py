@@ -55,13 +55,22 @@ _GRAPH_REDUCTION_RECIPE_PREFIXES = {
     "hierarchical_partial_finalize": ("graph-reduction:hierarchical-partial-finalize:"),
 }
 
-_GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION = 2
 _GRAPH_NATIVE_ALGORITHM_RECIPE_PREFIXES = {
     ("segmented_scan", "segment_local_serial"): (
         "graph-native-algorithm:segmented-scan:serial:"
     ),
     ("segmented_scan", "global_scan_segment_correction"): (
         "graph-native-algorithm:segmented-scan:global-scan:"
+    ),
+    ("segmented_scan", "warp_chunked_carry"): (
+        "graph-native-algorithm:segmented-scan:warp-chunked:"
+    ),
+    ("segmented_scan", "block_chunked_carry"): (
+        "graph-native-algorithm:segmented-scan:block-chunked:"
+    ),
+    ("segmented_scan", "length_bucket_hybrid"): (
+        "graph-native-algorithm:segmented-scan:length-bucket:"
     ),
 }
 
@@ -630,6 +639,7 @@ class _GraphNativeAlgorithmRecipeManifest:
             "strategy",
             "semantics",
             "physical_stages",
+            "topology",
             "workspace",
             "submission",
             "source_lock",
@@ -755,7 +765,82 @@ class _GraphNativeAlgorithmRecipeManifest:
                     "call_count": 1,
                 },
             ],
-        }[key[1]]
+            "warp_chunked_carry": [
+                {
+                    "name": "warp_sized_segment_chunks",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                }
+            ],
+            "block_chunked_carry": [
+                {
+                    "name": "block_segment_chunks",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                }
+            ],
+        }.get(key[1])
+        topology = payload.get("topology")
+        if not isinstance(topology, dict) or topology.get("kind") != key[1]:
+            raise ValueError("Graph native-algorithm topology is incomplete")
+        expected_topology = {
+            "segment_local_serial": {
+                "kind": "segment_local_serial",
+                "block_dim": 0,
+                "chunk_items": 0,
+            },
+            "global_scan_segment_correction": {
+                "kind": "global_scan_segment_correction",
+                "block_dim": 0,
+                "chunk_items": 0,
+            },
+            "warp_chunked_carry": {
+                "kind": "warp_chunked_carry",
+                "block_dim": 32,
+                "chunk_items": 32,
+            },
+            "block_chunked_carry": {
+                "kind": "block_chunked_carry",
+                "block_dim": 128,
+                "chunk_items": 128,
+            },
+        }.get(key[1])
+        if key[1] == "length_bucket_hybrid":
+            expected_keys = {
+                "kind",
+                "short_max_items",
+                "short_segment_count",
+                "long_segment_count",
+                "short_block_dim",
+                "long_block_dim",
+            }
+            if (
+                frozenset(topology) != expected_keys
+                or topology.get("short_max_items") != 32
+                or topology.get("short_block_dim") != 32
+                or topology.get("long_block_dim") != 128
+                or not isinstance(topology.get("short_segment_count"), int)
+                or not isinstance(topology.get("long_segment_count"), int)
+                or topology["short_segment_count"] <= 0
+                or topology["long_segment_count"] <= 0
+                or topology["short_segment_count"] + topology["long_segment_count"]
+                != semantics["num_segments"]
+            ):
+                raise ValueError("Graph segmented scan bucket topology is invalid")
+            expected_stages = [
+                {
+                    "name": "short_segment_warp_chunks",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                },
+                {
+                    "name": "long_segment_block_chunks",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                },
+            ]
+        elif topology != expected_topology:
+            raise ValueError("Graph segmented scan topology is invalid")
         if stages != expected_stages:
             raise ValueError(
                 "Graph native-algorithm physical topology does not match strategy"
@@ -773,19 +858,29 @@ class _GraphNativeAlgorithmRecipeManifest:
             or len(source_lock) != 71
         ):
             raise ValueError("Graph native-algorithm source lock is invalid")
-        if key[1] == "segment_local_serial":
+        if key[1] in (
+            "segment_local_serial",
+            "warp_chunked_carry",
+            "block_chunked_carry",
+        ):
             if len(stages) != 1 or workspace != {
                 "ownership": "none",
                 "action_owned_bytes": 0,
                 "provider_shared_scope": "none",
             }:
-                raise ValueError("serial segmented scan recipe is not complete")
-        elif (
+                raise ValueError("workspace-free segmented scan recipe is incomplete")
+        elif key[1] == "global_scan_segment_correction" and (
             workspace["ownership"] != "graph_native_action"
             or workspace["action_owned_bytes"] != semantics["num_segments"] * 4
             or workspace["provider_shared_scope"] != "program_scan_arena"
         ):
             raise ValueError("global segmented scan recipe is not complete")
+        elif key[1] == "length_bucket_hybrid" and (
+            workspace["ownership"] != "graph_native_action"
+            or workspace["action_owned_bytes"] != semantics["num_segments"] * 4
+            or workspace["provider_shared_scope"] != "none"
+        ):
+            raise ValueError("hybrid segmented scan recipe is not complete")
         expected = prefix + _canonical_hash(payload)[:24]
         if self.recipe_id != expected:
             raise ValueError(
