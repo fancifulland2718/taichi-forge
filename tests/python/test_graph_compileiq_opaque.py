@@ -857,7 +857,7 @@ def test_modified_compileiq_exhausts_exact_graph_partitions():
     assert coverage["complete"]
     assert coverage["evaluation_count"] == len(plans.recipe_ids)
     assert {recipe_id for recipe_id, _ in materialized} == set(plans.recipe_ids)
-    assert {dispatches for _, dispatches in materialized} == {1, 2}
+    assert {dispatches for _, dispatches in materialized} == {1, 2, 3}
     assert selected.spec_id == plans.recipe_ids[0]
     np.testing.assert_array_equal(output.to_numpy(), (source_np * 2 + 3) * 4)
 
@@ -893,6 +893,26 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
         return builder.compile()
 
     baseline = build()
+    public_search = baseline.definition.search_recipes(
+        engine="compileiq",
+        target=ti.graph.GraphOptimizationTarget(
+            objectives=(("device_time_ns", "min"),)
+        ),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=108),
+    )
+    assert len(public_search.recipes) == 108
+    assert len({recipe.planned_physical_id for recipe in public_search.recipes}) == 108
+    assert public_search.baseline.manifest.is_baseline
+    assert {
+        family
+        for recipe in public_search.recipes
+        for family in recipe.manifest.families
+    } == {"baseline", "map_fusion"}
+    with baseline.definition.materialize(public_search.baseline) as materialized:
+        physical = materialized.executor.physical_plan()
+        assert physical["logical_dispatch_count"] == 8
+        assert physical["physical_dispatch_count"] == 8
+
     catalog = baseline.definition.recipe_catalog()
     fragments_by_group = {
         tuple(

@@ -566,8 +566,39 @@ def assemble_existing_family_recipe(
     return GraphMaterializationProduct(graph, manifest)
 
 
+def materialize_existing_family_baseline(scope, definition, recipe):
+    """Materialize the exact all-baseline whole-Graph recipe.
+
+    Reusing ``GraphDefinition.compile()`` here would also reuse any map fusion
+    that the ordinary GraphBuilder selected while the definition was frozen.
+    Complete recipes instead treat every uncovered map region as a singleton,
+    so route the empty selection through the same exact whole-Graph assembler
+    as non-baseline recipes.
+    """
+
+    if definition._runtime_spec.fusion_plan.candidate_recipes:
+        graph = definition._runtime_spec.materialize_complete_recipe(
+            definition,
+            recipe,
+            (),
+            workspace_lanes=scope._context.workspace_lanes,
+            workspace_saturation=scope._context.workspace_saturation,
+        )
+    else:
+        # No map-fusion axis exists, so the frozen executor already is the
+        # exact all-baseline recipe.  Reuse it to preserve structured-control
+        # ownership and provider baselines that require no reconstruction.
+        graph = definition.compile(
+            workspace_lanes=scope._context.workspace_lanes,
+            workspace_saturation=scope._context.workspace_saturation,
+        )
+    manifest = observe_graph_physical_manifest(definition, recipe, graph)
+    return GraphMaterializationProduct(graph, manifest)
+
+
 __all__ = [
     "GraphExistingFamilyProvider",
     "GraphFamilySelection",
     "assemble_existing_family_recipe",
+    "materialize_existing_family_baseline",
 ]

@@ -368,13 +368,19 @@ class GraphDefinition:
         """Create an explicit owner for transactional recipe materialization."""
 
         from taichi_forge.graph._recipes.families import (
-            assemble_existing_family_recipe, )
+            assemble_existing_family_recipe,
+            materialize_existing_family_baseline,
+        )
 
         from taichi_forge.graph._recipes.materialize import (
             GraphMaterializationContext,
         )
 
         options.setdefault("assembler", assemble_existing_family_recipe)
+        options.setdefault(
+            "baseline_materializer",
+            materialize_existing_family_baseline,
+        )
 
         return GraphMaterializationContext(self, **options)
 

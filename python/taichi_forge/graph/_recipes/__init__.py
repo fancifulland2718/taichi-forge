@@ -31,6 +31,7 @@ from .families import (
     GraphExistingFamilyProvider,
     GraphFamilySelection,
     assemble_existing_family_recipe,
+    materialize_existing_family_baseline,
 )
 
 from .materialize import (
@@ -93,5 +94,6 @@ __all__ = [
     "GraphRegionSelection",
     "GraphSemanticRegion",
     "assemble_existing_family_recipe",
+    "materialize_existing_family_baseline",
     "observe_graph_physical_manifest",
 ]

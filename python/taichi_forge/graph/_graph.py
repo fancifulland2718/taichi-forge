@@ -10738,7 +10738,18 @@ class _GraphSpec:
                     _operation_has_selection(operation, selection_by_source)
                     for operation in node.recipe_operations
                 )
-                if local_groups or selected_operation:
+                # A complete recipe describes the exact map partition for the
+                # whole frozen Graph.  Uncovered dispatches are singleton
+                # baseline regions, not permission to inherit the ordinary
+                # GraphBuilder's process-wide auto composer.  Replay every
+                # fusion-capable CGraph segment even when its exact group list
+                # is empty so baseline and partial recipes remain physically
+                # faithful to their declared coverage.
+                if (
+                    self.fusion_plan.candidate_recipes
+                    or local_groups
+                    or selected_operation
+                ):
                     node = _replay_recipe_cgraph_node(
                         node,
                         selection_by_source,
