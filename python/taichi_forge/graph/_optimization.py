@@ -515,7 +515,12 @@ class _GraphReductionRecipeManifest:
             }
             or topology.get("kind") != strategy
             or topology.get("load") != "scalar_coalesced"
-            or topology.get("in_block_reduction") not in ("tls_atomic", "shared_tree")
+            or topology.get("in_block_reduction")
+            not in (
+                "tls_atomic",
+                "shared_tree",
+                "warp_shuffle_shared_finalize",
+            )
             or isinstance(topology.get("block_dim"), bool)
             or not isinstance(topology.get("block_dim"), int)
             or isinstance(topology.get("items_per_thread"), bool)
@@ -564,7 +569,8 @@ class _GraphReductionRecipeManifest:
             or topology["items_per_thread"] not in (1, 2, 4)
             or topology["levels"]
             != (3 if strategy == "hierarchical_partial_finalize" else 2)
-            or topology["in_block_reduction"] != "shared_tree"
+            or topology["in_block_reduction"]
+            not in ("shared_tree", "warp_shuffle_shared_finalize")
             or workspace["ownership"] != "graph_instance"
             or not workspace["exclusive_submission"]
             or workspace["elements"] <= 0

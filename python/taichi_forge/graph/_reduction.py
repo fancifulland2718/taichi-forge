@@ -42,56 +42,6 @@ def _graph_reduce_direct_f32(
 
 
 @ti.kernel
-def _graph_reduce_partial_f32(
-    values: ti.types.ndarray(dtype=ti.f32, ndim=1),
-    partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
-    count: ti.i32,
-    worker_count: ti.i32,
-):
-    ti.loop_config(block_dim=_BLOCK_DIM)
-    for worker in range(worker_count):
-        lane = worker % _BLOCK_DIM
-        pad = ti.simt.block.SharedArray((_BLOCK_DIM,), ti.f32)
-        value = 0.0
-        for item in ti.static(range(_ITEMS_PER_THREAD)):
-            index = worker * _ITEMS_PER_THREAD + item
-            if index < count:
-                value += values[index]
-        pad[lane] = value
-        ti.simt.block.sync()
-        for stride in ti.static((128, 64, 32, 16, 8, 4, 2, 1)):
-            if lane < stride:
-                pad[lane] += pad[lane + stride]
-            ti.simt.block.sync()
-        if lane == 0:
-            partial[worker // _BLOCK_DIM] = pad[0]
-
-
-@ti.kernel
-def _graph_reduce_finalize_f32(
-    partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
-    output: ti.types.ndarray(dtype=ti.f32, ndim=1),
-    partial_count: ti.i32,
-):
-    ti.loop_config(block_dim=_BLOCK_DIM)
-    for lane in range(_BLOCK_DIM):
-        pad = ti.simt.block.SharedArray((_BLOCK_DIM,), ti.f32)
-        value = 0.0
-        index = lane
-        while index < partial_count:
-            value += partial[index]
-            index += _BLOCK_DIM
-        pad[lane] = value
-        ti.simt.block.sync()
-        for stride in ti.static((128, 64, 32, 16, 8, 4, 2, 1)):
-            if lane < stride:
-                pad[lane] += pad[lane + stride]
-            ti.simt.block.sync()
-        if lane == 0:
-            output[0] = pad[0]
-
-
-@ti.kernel
 def _graph_reduce_direct_i32(
     values: ti.types.ndarray(dtype=ti.i32, ndim=1),
     output: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -102,88 +52,26 @@ def _graph_reduce_direct_i32(
         ti.atomic_add(output[0], values[index])
 
 
-@ti.kernel
-def _graph_reduce_partial_i32(
-    values: ti.types.ndarray(dtype=ti.i32, ndim=1),
-    partial: ti.types.ndarray(dtype=ti.i32, ndim=1),
-    count: ti.i32,
-    worker_count: ti.i32,
-):
-    ti.loop_config(block_dim=_BLOCK_DIM)
-    for worker in range(worker_count):
-        lane = worker % _BLOCK_DIM
-        pad = ti.simt.block.SharedArray((_BLOCK_DIM,), ti.i32)
-        value = 0
-        for item in ti.static(range(_ITEMS_PER_THREAD)):
-            index = worker * _ITEMS_PER_THREAD + item
-            if index < count:
-                value += values[index]
-        pad[lane] = value
-        ti.simt.block.sync()
-        for stride in ti.static((128, 64, 32, 16, 8, 4, 2, 1)):
-            if lane < stride:
-                pad[lane] += pad[lane + stride]
-            ti.simt.block.sync()
-        if lane == 0:
-            partial[worker // _BLOCK_DIM] = pad[0]
-
-
-@ti.kernel
-def _graph_reduce_finalize_i32(
-    partial: ti.types.ndarray(dtype=ti.i32, ndim=1),
-    output: ti.types.ndarray(dtype=ti.i32, ndim=1),
-    partial_count: ti.i32,
-):
-    ti.loop_config(block_dim=_BLOCK_DIM)
-    for lane in range(_BLOCK_DIM):
-        pad = ti.simt.block.SharedArray((_BLOCK_DIM,), ti.i32)
-        value = 0
-        index = lane
-        while index < partial_count:
-            value += partial[index]
-            index += _BLOCK_DIM
-        pad[lane] = value
-        ti.simt.block.sync()
-        for stride in ti.static((128, 64, 32, 16, 8, 4, 2, 1)):
-            if lane < stride:
-                pad[lane] += pad[lane + stride]
-            ti.simt.block.sync()
-        if lane == 0:
-            output[0] = pad[0]
-
-
-_KERNELS = {
-    ti.f32: (
-        _graph_reduce_direct_f32,
-        _graph_reduce_partial_f32,
-        _graph_reduce_finalize_f32,
-    ),
-    ti.i32: (
-        _graph_reduce_direct_i32,
-        _graph_reduce_partial_i32,
-        _graph_reduce_finalize_i32,
-    ),
+_DIRECT_KERNELS = {
+    ti.f32: _graph_reduce_direct_f32,
+    ti.i32: _graph_reduce_direct_i32,
 }
 
 _GENERATED_KERNELS = {}
 
 
 def _generated_reduction_kernels(dtype, block_dim, items_per_thread):
-    """Build one coherent shared-tree kernel pair for a topology point."""
+    """Build a coalesced warp-shuffle kernel pair for a topology point."""
 
     key = (dtype, int(block_dim), int(items_per_thread))
     cached = _GENERATED_KERNELS.get(key)
     if cached is not None:
         return cached
-    if key[1:] == (_BLOCK_DIM, _ITEMS_PER_THREAD):
-        cached = _KERNELS[dtype][1:]
-        _GENERATED_KERNELS[key] = cached
-        return cached
-
-    strides = tuple(
-        1 << power for power in range(int(math.log2(block_dim)) - 1, -1, -1)
-    )
     zero = 0.0 if dtype == ti.f32 else 0
+    warp_count = block_dim // 32
+    shuffle_down = (
+        ti.simt.warp.shfl_down_f32 if dtype == ti.f32 else ti.simt.warp.shfl_down_i32
+    )
 
     @ti.kernel
     def partial_kernel(
@@ -195,20 +83,35 @@ def _generated_reduction_kernels(dtype, block_dim, items_per_thread):
         ti.loop_config(block_dim=block_dim)
         for worker in range(worker_count):
             lane = worker % block_dim
-            pad = ti.simt.block.SharedArray((block_dim,), dtype)
+            warp_lane = lane % 32
+            warp_id = lane // 32
+            warp_sums = ti.simt.block.SharedArray((warp_count,), dtype)
             value = zero
             for item in ti.static(range(items_per_thread)):
-                index = worker * items_per_thread + item
+                index = (
+                    (worker // block_dim) * block_dim * items_per_thread
+                    + item * block_dim
+                    + lane
+                )
                 if index < count:
                     value += values[index]
-            pad[lane] = value
+            for offset in ti.static((16, 8, 4, 2, 1)):
+                value += shuffle_down(ti.u32(0xFFFFFFFF), value, offset)
+            if warp_lane == 0:
+                warp_sums[warp_id] = value
             ti.simt.block.sync()
-            for stride in ti.static(strides):
-                if lane < stride:
-                    pad[lane] += pad[lane + stride]
-                ti.simt.block.sync()
-            if lane == 0:
-                partial[worker // block_dim] = pad[0]
+            if warp_id == 0:
+                value = zero
+                if warp_lane < warp_count:
+                    value = warp_sums[warp_lane]
+                for offset in ti.static((16, 8, 4, 2, 1)):
+                    value += shuffle_down(ti.u32(0xFFFFFFFF), value, offset)
+                if warp_lane == 0:
+                    partial[worker // block_dim] = value
+            # A physical block can execute several logical worker groups via
+            # the backend grid-stride loop. Keep later warps from publishing
+            # the next group's partials before warp zero consumes this group.
+            ti.simt.block.sync()
 
     @ti.kernel
     def finalize_kernel(
@@ -218,20 +121,27 @@ def _generated_reduction_kernels(dtype, block_dim, items_per_thread):
     ):
         ti.loop_config(block_dim=block_dim)
         for lane in range(block_dim):
-            pad = ti.simt.block.SharedArray((block_dim,), dtype)
+            warp_lane = lane % 32
+            warp_id = lane // 32
+            warp_sums = ti.simt.block.SharedArray((warp_count,), dtype)
             value = zero
             index = lane
             while index < partial_count:
                 value += partial[index]
                 index += block_dim
-            pad[lane] = value
+            for offset in ti.static((16, 8, 4, 2, 1)):
+                value += shuffle_down(ti.u32(0xFFFFFFFF), value, offset)
+            if warp_lane == 0:
+                warp_sums[warp_id] = value
             ti.simt.block.sync()
-            for stride in ti.static(strides):
-                if lane < stride:
-                    pad[lane] += pad[lane + stride]
-                ti.simt.block.sync()
-            if lane == 0:
-                output[0] = pad[0]
+            if warp_id == 0:
+                value = zero
+                if warp_lane < warp_count:
+                    value = warp_sums[warp_lane]
+                for offset in ti.static((16, 8, 4, 2, 1)):
+                    value += shuffle_down(ti.u32(0xFFFFFFFF), value, offset)
+                if warp_lane == 0:
+                    output[0] = value
 
     cached = (partial_kernel, finalize_kernel)
     _GENERATED_KERNELS[key] = cached
@@ -292,7 +202,7 @@ class _GraphReductionRecipeSource:
         if values.name == output.name:
             raise ValueError("Graph reduction input and output must be distinct")
         dtype = values.dtype()
-        if dtype not in _KERNELS or output.dtype() != dtype:
+        if dtype not in _DIRECT_KERNELS or output.dtype() != dtype:
             raise TypeError(
                 "Graph reduction input/output must share scalar f32 or i32 dtype"
             )
@@ -448,7 +358,7 @@ class _GraphReductionRecipeSource:
             from taichi_forge.graph._graph import gen_cpp_kernel
 
             _, count, _, _ = self._symbolic_arguments("direct")
-            direct = _KERNELS[self.dtype][0]
+            direct = _DIRECT_KERNELS[self.dtype]
             direct_cpp = gen_cpp_kernel(
                 direct,
                 (self.values, self.output, count),
@@ -524,7 +434,7 @@ class _GraphReductionRecipeSource:
                     "items_per_thread": items_per_thread,
                     "levels": 2,
                     "load": "scalar_coalesced",
-                    "in_block_reduction": "shared_tree",
+                    "in_block_reduction": "warp_shuffle_shared_finalize",
                 }
                 manifest = _GraphReductionRecipeManifest.from_payload(
                     {
@@ -664,7 +574,7 @@ class _GraphReductionRecipeSource:
                 self.semantics.count,
             )
             sequence.dispatch(
-                _KERNELS[self.dtype][0],
+                _DIRECT_KERNELS[self.dtype],
                 self.values,
                 self.output,
                 count,

@@ -63,6 +63,12 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
         if manifest["reduction_recipe_manifest"]["strategy"] == "block_partial_finalize"
     }
     assert topologies == {(256, 4), (128, 4), (64, 2)}
+    assert all(
+        manifest["reduction_recipe_manifest"]["topology"]["in_block_reduction"]
+        == "warp_shuffle_shared_finalize"
+        for manifest in manifests.values()
+        if manifest["reduction_recipe_manifest"]["strategy"] == "block_partial_finalize"
+    )
     direct_id = search.baseline_recipe_id
     phased_id = next(
         recipe_id
@@ -137,13 +143,14 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
                 assert bindings.fast_path_qualified
                 assert bindings.statistics()["memory_recipe_publish_validated"]
                 assert bindings.statistics()["fixed_bindings_flattened"]
-                rebuilt.run(bindings)
+                for _ in range(8):
+                    rebuilt.run(bindings)
                 ti.sync()
                 assert output.to_numpy()[0] == expected
                 statistics = rebuilt.binding_statistics()
                 assert statistics["raw_replay_validations"] == 0
                 assert statistics["version_volatile_replays"] == 0
-                assert statistics["version_fast_replays"] == 1
+                assert statistics["version_fast_replays"] == 8
         assert semantic_graph_ids == {graph.definition.semantic_graph_id}
 
         with materialize(phased_id, context) as materialized:
@@ -283,7 +290,7 @@ def test_graph_reduction_generates_and_materializes_hierarchical_topology():
         "items_per_thread": 4,
         "levels": 3,
         "load": "scalar_coalesced",
-        "in_block_reduction": "shared_tree",
+        "in_block_reduction": "warp_shuffle_shared_finalize",
     }
     first_partial_count = ((count + 4 - 1) // 4 + 256 - 1) // 256
     second_partial_count = (first_partial_count + 256 * 4 - 1) // (256 * 4)
@@ -316,3 +323,38 @@ def test_graph_reduction_generates_and_materializes_hierarchical_topology():
             materialized.manifest.persistent_requested_bytes
             == hierarchical["workspace"]["bytes"]
         )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_reduction_warp_recipe_is_correct_across_grid_stride_reuse():
+    # B64/I2 exceeds the CUDA backend's resident grid cap at this size, so a
+    # physical block must process multiple logical reduction groups.
+    count = 1_048_577
+    graph = _build_reduction_graph(ti.i32, count)
+    search = compileiq_recipe_search(graph)
+    recipe_id = next(
+        recipe_id
+        for recipe_id in search.recipe_ids
+        if (
+            search.recipe_manifest(recipe_id)["reduction_recipe_manifest"]["topology"][
+                "block_dim"
+            ]
+            == 64
+        )
+    )
+    values = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=1)
+    host = ((np.arange(count, dtype=np.int64) % 23) - 11).astype(np.int32)
+    values.from_numpy(host)
+    expected = np.asarray(host.sum(dtype=np.int64), dtype=np.int32).item()
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": recipe_id,
+    }
+    with search.materialize(parameters) as materialized:
+        candidate = materialized.executor
+        binding = candidate.bind({"values": values, "output": output})
+        for _ in range(32):
+            candidate.run(binding)
+        ti.sync()
+        assert output.to_numpy()[0] == expected
