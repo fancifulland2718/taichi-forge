@@ -350,6 +350,10 @@ void materialize_shared_task(OffloadedStmt *offload,
     std::int64_t tile_bytes{0};
   };
   std::vector<InputTile> input_tiles;
+  const std::set<int> requested_source_indices(
+      spec.memory_source_arg_indices.begin(),
+      spec.memory_source_arg_indices.end());
+  std::set<int> materialized_source_indices;
   std::int64_t aggregate_tile_bytes = 0;
   for (const auto &[path, summary] : arguments) {
     std::set<int> complete_lanes;
@@ -359,6 +363,11 @@ void materialize_shared_task(OffloadedStmt *offload,
     if (summary.reads) {
       require(!summary.writes, task_index,
               "staged inputs must be read-only external ndarrays");
+      const bool selected = requested_source_indices.empty() ||
+                            requested_source_indices.count(path.front()) != 0;
+      if (!selected) {
+        continue;
+      }
       require(summary.read_offsets.size() >= 2, task_index,
               "each read-only input must have at least two distinct affine "
               "offsets");
@@ -395,6 +404,7 @@ void materialize_shared_task(OffloadedStmt *offload,
       input_tiles.push_back(InputTile{&summary, path, halo_low, halo_high,
                                       element_bytes, scalar_bytes, alignment,
                                       tile_elements, byte_offset, tile_bytes});
+      materialized_source_indices.insert(path.front());
     } else {
       require(
           summary.writes && summary.write_offsets == std::set<std::int64_t>{0},
@@ -406,6 +416,10 @@ void materialize_shared_task(OffloadedStmt *offload,
   }
   require(!input_tiles.empty() && input_tiles.size() <= 2, task_index,
           "recipe requires one or two read-only affine inputs");
+  require(requested_source_indices.empty() ||
+              materialized_source_indices == requested_source_indices,
+          task_index,
+          "requested staged source is not an eligible read-only stencil input");
 
   offload->bls_prologue = std::make_unique<Block>();
   offload->bls_prologue->set_parent_stmt(offload);
@@ -488,7 +502,11 @@ void materialize_shared_task(OffloadedStmt *offload,
         input_tiles.begin(), input_tiles.end(), [&](const InputTile &candidate) {
           return access.base->arg_id == candidate.path;
         });
-    TI_ASSERT(tile != input_tiles.end());
+    if (tile == input_tiles.end()) {
+      // This read belongs to an eligible stencil source that the complete
+      // Graph recipe intentionally leaves on the direct global-memory path.
+      continue;
+    }
     VecStatement replacement;
     Stmt *local_index = replacement.push_back<LoopLinearIndexStmt>(offload);
     local_index = replacement.push_back<BinaryOpStmt>(

@@ -28,9 +28,7 @@ from taichi_forge.lang._compileiq_qualification import (
 _EXECUTABLE_PARAMETER = "forge_executable_spec"
 _INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 _INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
-_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = (
-    "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
-)
+_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
 _INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE"
 )
@@ -144,9 +142,7 @@ class GraphExecutableRecipeSelection:
             environment[_CUDA_BOUNDED_DISPATCH_MODE_ENV] = dispatch_mode
             environment[_CUDA_BOUNDED_UPDATE_POLICY_ENV] = update_policy
         if self.reduction_recipe_id:
-            environment[_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV] = (
-                self.reduction_recipe_id
-            )
+            environment[_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV] = self.reduction_recipe_id
         if self.native_algorithm_recipe_id:
             environment[_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV] = (
                 self.native_algorithm_recipe_id
@@ -247,9 +243,12 @@ class _CompileIQExecutableAdapter:
                 any(not recipe_id for recipe_id in memory_recipe_ids)
                 or any(spec.fusion_recipe_ids for spec in specs)
                 or any(control_recipe_ids)
-                or len(specs) != 2
+                or len(specs) < 2
                 or space.baseline.memory_recipe_manifest.strategy != "direct"
-                or specs[1].memory_recipe_manifest.strategy != "shared_staged_1d"
+                or any(
+                    spec.memory_recipe_manifest.strategy != "shared_staged_1d"
+                    for spec in specs[1:]
+                )
             ):
                 raise ValueError(
                     "GraphMemory space must contain one exact direct/staged domain"
@@ -259,9 +258,7 @@ class _CompileIQExecutableAdapter:
                 "map/control space cannot contain a memory recipe candidate"
             )
         if space.baseline.bounded_recipe_id:
-            strategies = tuple(
-                spec.bounded_recipe_manifest.strategy for spec in specs
-            )
+            strategies = tuple(spec.bounded_recipe_manifest.strategy for spec in specs)
             bounded_scopes = {
                 json.dumps(
                     {
@@ -302,9 +299,15 @@ class _CompileIQExecutableAdapter:
                 for spec in specs
             }
             if (
-                strategies != (
-                    "direct_atomic_tls",
-                    "block_partial_finalize",
+                not strategies
+                or strategies[0] != "direct_atomic_tls"
+                or any(
+                    strategy
+                    not in (
+                        "block_partial_finalize",
+                        "hierarchical_partial_finalize",
+                    )
+                    for strategy in strategies[1:]
                 )
                 or len(semantic_scopes) != 1
                 or any(not recipe_id for recipe_id in reduction_recipe_ids)
@@ -505,9 +508,7 @@ class _CompileIQExecutableAdapter:
             reduction_recipe_id=spec.reduction_recipe_id,
             reduction_recipe_manifest=(spec.reduction_recipe_manifest),
             native_algorithm_recipe_id=spec.native_algorithm_recipe_id,
-            native_algorithm_recipe_manifest=(
-                spec.native_algorithm_recipe_manifest
-            ),
+            native_algorithm_recipe_manifest=(spec.native_algorithm_recipe_manifest),
         )
 
     def verify_materialized(self, parameters, actual_space):
@@ -532,8 +533,7 @@ class _CompileIQExecutableAdapter:
             or actual.memory_recipe_id != selection.memory_recipe_id
             or actual.bounded_recipe_id != selection.bounded_recipe_id
             or actual.reduction_recipe_id != selection.reduction_recipe_id
-            or actual.native_algorithm_recipe_id
-            != selection.native_algorithm_recipe_id
+            or actual.native_algorithm_recipe_id != selection.native_algorithm_recipe_id
             or (
                 None
                 if actual.memory_recipe_manifest is None
@@ -815,9 +815,7 @@ class _CompileIQExecutableAdapter:
                 ][1],
             }
         if spec.reduction_recipe_id:
-            value["reduction_materialization_recipe"] = (
-                spec.reduction_recipe_id
-            )
+            value["reduction_materialization_recipe"] = spec.reduction_recipe_id
         if spec.native_algorithm_recipe_id:
             value["native_algorithm_materialization_recipe"] = (
                 spec.native_algorithm_recipe_id

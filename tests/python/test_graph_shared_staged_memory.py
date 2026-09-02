@@ -49,7 +49,7 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
 
     search = compileiq_recipe_search(source_graph)
     assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
     assert search.search_space.provider_namespace == "taichi_forge.graph.memory"
     assert search.search_space.domain_version == "graph-memory-complete-recipe.v2"
     assert search.manifest()["recipe_kind"] == "graph_memory"
@@ -65,6 +65,9 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
         recipe_id
         for recipe_id, manifest in manifests.items()
         if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+        and manifest["memory_recipe_manifest"]["staged_sources"][0]["arg_index"] == 0
+        and manifest["memory_recipe_manifest"]["staged_sources"][0]["tile_elements"]
+        == 130
     )
     assert direct_id == search.baseline_recipe_id
     assert not manifests[direct_id]["fusion_recipe_ids"]
@@ -98,7 +101,7 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
     coverage = search.require_complete_search(exhaustive)
     selected = search.select_best_result(exhaustive, result)
     assert coverage["complete"]
-    assert coverage["evaluation_count"] == 2
+    assert coverage["evaluation_count"] == len(search.recipe_ids)
     assert {item[0] for item in observed} == set(search.recipe_ids)
     assert all(requested == actual for requested, actual in observed)
     assert selected.spec_id == search.recipe_ids[0]
@@ -175,11 +178,13 @@ def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
-    assert len(manifests) == 2, source_graph._compileiq_graph_memory_status
+    assert len(manifests) == 4, source_graph._compileiq_graph_memory_status
     staged_id, staged_manifest = next(
         (recipe_id, manifest)
         for recipe_id, manifest in manifests.items()
         if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+        and manifest["memory_recipe_manifest"]["staged_sources"][0]["tile_elements"]
+        == 130
     )
     layout_requirements = {
         tuple(requirement)
@@ -254,11 +259,35 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
-    assert len(manifests) == 2
+    assert len(manifests) == 10
+    generated_shapes = {
+        (
+            tuple(source["arg_index"] for source in manifest["staged_sources"]),
+            manifest["offload_plan"]["tasks"][0]["workgroup_size"],
+        )
+        for manifest in (
+            value["memory_recipe_manifest"] for value in manifests.values()
+        )
+        if manifest["strategy"] == "shared_staged_1d"
+    }
+    assert generated_shapes == {
+        (source_indices, block_dim)
+        for source_indices in ((0,), (1,), (0, 1))
+        for block_dim in (64, 128, 256)
+    }
     staged_id, staged = next(
         (recipe_id, manifest["memory_recipe_manifest"])
         for recipe_id, manifest in manifests.items()
         if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_1d"
+        and tuple(
+            source["arg_index"]
+            for source in manifest["memory_recipe_manifest"]["staged_sources"]
+        )
+        == (0, 1)
+        and manifest["memory_recipe_manifest"]["offload_plan"]["tasks"][0][
+            "workgroup_size"
+        ]
+        == 128
     )
     assert staged["schema_version"] == 3
     assert staged["staged_sources"] == [
@@ -406,6 +435,17 @@ def test_graph_memory_multi_source_layout_aligns_mixed_scalar_tiles():
         for recipe_id in search.recipe_ids
         if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
         == "shared_staged_1d"
+        and tuple(
+            source["arg_index"]
+            for source in search.recipe_manifest(recipe_id)["memory_recipe_manifest"][
+                "staged_sources"
+            ]
+        )
+        == (0, 1)
+        and search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["offload_plan"][
+            "tasks"
+        ][0]["workgroup_size"]
+        == 128
     )
     assert [source["byte_offset"] for source in staged["staged_sources"]] == [
         0,
@@ -947,6 +987,10 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout():
             for recipe_id in search.recipe_ids
             if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
             == "shared_staged_1d"
+            and search.recipe_manifest(recipe_id)["memory_recipe_manifest"][
+                "offload_plan"
+            ]["tasks"][0]["workgroup_size"]
+            == 128
         )
         scalar_bytes = np.dtype(numpy_dtype).itemsize
         lane_count = int(np.prod(element_shape))

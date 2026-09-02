@@ -44,7 +44,7 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
     assert search.manifest()["recipe_kind"] == "graph_reduction"
     assert search.search_space.provider_namespace == "taichi_forge.graph.reduction"
     assert search.search_space.domain_version == "graph-reduction-complete-recipe.v2"
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
 
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
@@ -54,11 +54,22 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
         for manifest in manifests.values()
     }
     assert strategies == {"direct_atomic_tls", "block_partial_finalize"}
+    topologies = {
+        (
+            manifest["reduction_recipe_manifest"]["topology"]["block_dim"],
+            manifest["reduction_recipe_manifest"]["topology"]["items_per_thread"],
+        )
+        for manifest in manifests.values()
+        if manifest["reduction_recipe_manifest"]["strategy"] == "block_partial_finalize"
+    }
+    assert topologies == {(256, 4), (128, 4), (64, 2)}
     direct_id = search.baseline_recipe_id
     phased_id = next(
         recipe_id
         for recipe_id, manifest in manifests.items()
         if manifest["reduction_recipe_manifest"]["strategy"] == "block_partial_finalize"
+        and manifest["reduction_recipe_manifest"]["topology"]["block_dim"] == 256
+        and manifest["reduction_recipe_manifest"]["topology"]["items_per_thread"] == 4
     )
     assert direct_id == search.baseline_recipe_id
     for manifest in manifests.values():
@@ -170,7 +181,7 @@ def test_graph_reduction_requires_explicit_floating_point_equivalence():
         relative_tolerance=1e-5,
     )
     search = compileiq_recipe_search(graph)
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
     values = ti.ndarray(ti.f32, shape=1024)
     output = ti.ndarray(ti.f32, shape=1)
     host_values = ((np.arange(1024, dtype=np.float32) % 17) - 8) * 0.125
@@ -221,7 +232,7 @@ def test_graph_reduction_recipe_composes_with_an_ordinary_dispatch():
 
     search = compileiq_recipe_search(graph)
     assert search.manifest()["families"] == ("graph_reduction",)
-    assert len(search.recipe_ids) == 2
+    assert len(search.recipe_ids) == 4
 
     host_values = ((np.arange(count, dtype=np.int32) % 19) - 9).astype(np.int32)
     input_array = ti.ndarray(ti.i32, shape=count)
@@ -252,3 +263,56 @@ def test_graph_reduction_recipe_composes_with_an_ordinary_dispatch():
                 ti.sync()
                 np.testing.assert_array_equal(intermediate.to_numpy(), host_values)
                 assert result_array.to_numpy()[0] == expected
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_reduction_generates_and_materializes_hierarchical_topology():
+    count = 270337
+    graph = _build_reduction_graph(ti.i32, count)
+    search = compileiq_recipe_search(graph)
+    assert len(search.recipe_ids) == 5
+    hierarchical_id, hierarchical = next(
+        (recipe_id, search.recipe_manifest(recipe_id)["reduction_recipe_manifest"])
+        for recipe_id in search.recipe_ids
+        if search.recipe_manifest(recipe_id)["reduction_recipe_manifest"]["strategy"]
+        == "hierarchical_partial_finalize"
+    )
+    assert hierarchical["topology"] == {
+        "kind": "hierarchical_partial_finalize",
+        "block_dim": 256,
+        "items_per_thread": 4,
+        "levels": 3,
+        "load": "scalar_coalesced",
+        "in_block_reduction": "shared_tree",
+    }
+    first_partial_count = ((count + 4 - 1) // 4 + 256 - 1) // 256
+    second_partial_count = (first_partial_count + 256 * 4 - 1) // (256 * 4)
+    assert hierarchical["workspace"] == {
+        "ownership": "graph_instance",
+        "exclusive_submission": True,
+        "elements": first_partial_count + second_partial_count,
+        "bytes": (first_partial_count + second_partial_count) * 4,
+    }
+    assert len(hierarchical["physical_stages"]) == 3
+
+    values = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=1)
+    host_values = ((np.arange(count, dtype=np.int32) % 13) - 6).astype(np.int32)
+    values.from_numpy(host_values)
+    output.fill(123)
+    expected = np.asarray(host_values.sum(dtype=np.int64), dtype=np.int32).item()
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": hierarchical_id,
+    }
+    with search.materialize(parameters) as materialized:
+        search.verify_materialized_graph(parameters, materialized)
+        materialized.executor.run(
+            materialized.executor.bind({"values": values, "output": output})
+        )
+        ti.sync()
+        assert output.to_numpy()[0] == expected
+        assert (
+            materialized.manifest.persistent_requested_bytes
+            == hierarchical["workspace"]["bytes"]
+        )

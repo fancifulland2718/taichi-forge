@@ -48,10 +48,11 @@ _GRAPH_BOUNDED_RECIPE_PREFIXES = {
     "masked_capacity": "graph-bounded:masked-capacity:",
 }
 
-_GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION = 2
 _GRAPH_REDUCTION_RECIPE_PREFIXES = {
     "direct_atomic_tls": "graph-reduction:direct-atomic-tls:",
     "block_partial_finalize": "graph-reduction:block-partial-finalize:",
+    "hierarchical_partial_finalize": ("graph-reduction:hierarchical-partial-finalize:"),
 }
 
 _GRAPH_NATIVE_ALGORITHM_RECIPE_SCHEMA_VERSION = 1
@@ -132,8 +133,10 @@ class _GraphMemoryRecipeManifest:
         sources = payload.get("staged_sources")
         pairs = payload.get("memory_disjoint_pairs")
         layouts = payload.get("memory_layout_requirements")
-        if not isinstance(sources, list) or not isinstance(pairs, list) or not isinstance(
-            layouts, list
+        if (
+            not isinstance(sources, list)
+            or not isinstance(pairs, list)
+            or not isinstance(layouts, list)
         ):
             raise ValueError("GraphMemory physical memory contract is invalid")
         if strategy == "direct":
@@ -340,8 +343,7 @@ class _GraphBoundedExecutionRecipeManifest:
             isinstance(dispatch_count, bool)
             or not isinstance(dispatch_count, int)
             or dispatch_count <= 0
-            or dispatch_count
-            != sum(group["consumer_count"] for group in groups)
+            or dispatch_count != sum(group["consumer_count"] for group in groups)
         ):
             raise ValueError("GraphBounded dispatch count does not match its groups")
         if strategy == "adaptive_grouped" and not any(
@@ -395,7 +397,10 @@ class _GraphReductionRecipeManifest:
             payload = json.loads(self.payload_json)
         except json.JSONDecodeError as error:
             raise ValueError("Graph reduction recipe payload is invalid") from error
-        if not isinstance(payload, dict) or _canonical_json(payload) != self.payload_json:
+        if (
+            not isinstance(payload, dict)
+            or _canonical_json(payload) != self.payload_json
+        ):
             raise ValueError("Graph reduction recipe payload is not canonical")
         if payload.get("schema_version") != _GRAPH_REDUCTION_RECIPE_SCHEMA_VERSION:
             raise ValueError("Graph reduction recipe schema is unsupported")
@@ -404,6 +409,7 @@ class _GraphReductionRecipeManifest:
             "strategy",
             "semantics",
             "symbolic_abi",
+            "topology",
             "physical_stages",
             "workspace",
         }:
@@ -412,7 +418,9 @@ class _GraphReductionRecipeManifest:
         try:
             prefix = _GRAPH_REDUCTION_RECIPE_PREFIXES[strategy]
         except (KeyError, TypeError) as error:
-            raise ValueError("Graph reduction recipe strategy is unsupported") from error
+            raise ValueError(
+                "Graph reduction recipe strategy is unsupported"
+            ) from error
         semantics = payload.get("semantics")
         if not isinstance(semantics, dict) or frozenset(semantics) != {
             "operation",
@@ -484,6 +492,29 @@ class _GraphReductionRecipeManifest:
             for stage in stages
         ):
             raise ValueError("Graph reduction physical stage is invalid")
+        topology = payload.get("topology")
+        if (
+            not isinstance(topology, dict)
+            or frozenset(topology)
+            != {
+                "kind",
+                "block_dim",
+                "items_per_thread",
+                "levels",
+                "load",
+                "in_block_reduction",
+            }
+            or topology.get("kind") != strategy
+            or topology.get("load") != "scalar_coalesced"
+            or topology.get("in_block_reduction") not in ("tls_atomic", "shared_tree")
+            or isinstance(topology.get("block_dim"), bool)
+            or not isinstance(topology.get("block_dim"), int)
+            or isinstance(topology.get("items_per_thread"), bool)
+            or not isinstance(topology.get("items_per_thread"), int)
+            or isinstance(topology.get("levels"), bool)
+            or not isinstance(topology.get("levels"), int)
+        ):
+            raise ValueError("Graph reduction generated topology is invalid")
         workspace = payload.get("workspace")
         if not isinstance(workspace, dict) or frozenset(workspace) != {
             "ownership",
@@ -500,7 +531,17 @@ class _GraphReductionRecipeManifest:
                 raise ValueError("Graph reduction workspace size is invalid")
         if strategy == "direct_atomic_tls":
             if (
-                workspace != {
+                topology
+                != {
+                    "kind": "direct_atomic_tls",
+                    "block_dim": 0,
+                    "items_per_thread": 1,
+                    "levels": 1,
+                    "load": "scalar_coalesced",
+                    "in_block_reduction": "tls_atomic",
+                }
+                or workspace
+                != {
                     "ownership": "none",
                     "exclusive_submission": False,
                     "elements": 0,
@@ -510,11 +551,16 @@ class _GraphReductionRecipeManifest:
             ):
                 raise ValueError("direct Graph reduction must not own a workspace")
         elif (
-            workspace["ownership"] != "graph_instance"
+            topology["block_dim"] not in (64, 128, 256)
+            or topology["items_per_thread"] not in (1, 2, 4)
+            or topology["levels"]
+            != (3 if strategy == "hierarchical_partial_finalize" else 2)
+            or topology["in_block_reduction"] != "shared_tree"
+            or workspace["ownership"] != "graph_instance"
             or not workspace["exclusive_submission"]
             or workspace["elements"] <= 0
             or workspace["bytes"] <= 0
-            or len(stages) != 2
+            or len(stages) != topology["levels"]
         ):
             raise ValueError("partial Graph reduction requires an exclusive workspace")
         expected = prefix + _canonical_hash(payload)[:24]
@@ -531,7 +577,9 @@ class _GraphReductionRecipeManifest:
         try:
             prefix = _GRAPH_REDUCTION_RECIPE_PREFIXES[strategy]
         except (KeyError, TypeError) as error:
-            raise ValueError("Graph reduction recipe strategy is unsupported") from error
+            raise ValueError(
+                "Graph reduction recipe strategy is unsupported"
+            ) from error
         payload_json = _canonical_json(payload)
         return cls(
             recipe_id=prefix + _canonical_hash(payload)[:24],
@@ -566,7 +614,10 @@ class _GraphNativeAlgorithmRecipeManifest:
             payload = json.loads(self.payload_json)
         except json.JSONDecodeError as error:
             raise ValueError("Graph native-algorithm payload is invalid") from error
-        if not isinstance(payload, dict) or _canonical_json(payload) != self.payload_json:
+        if (
+            not isinstance(payload, dict)
+            or _canonical_json(payload) != self.payload_json
+        ):
             raise ValueError("Graph native-algorithm payload is not canonical")
         if (
             payload.get("schema_version")
@@ -621,9 +672,7 @@ class _GraphNativeAlgorithmRecipeManifest:
             or semantics["num_segments"] <= 0
             or semantics["num_items"] > semantics["capacity"]
             or not isinstance(semantics.get("topology_fingerprint"), str)
-            or not semantics["topology_fingerprint"].startswith(
-                "segmented-layout:"
-            )
+            or not semantics["topology_fingerprint"].startswith("segmented-layout:")
         ):
             raise ValueError("Graph segmented scan topology is invalid")
         for role in ("input", "output"):
@@ -637,19 +686,24 @@ class _GraphNativeAlgorithmRecipeManifest:
             ):
                 raise ValueError("Graph segmented scan resource ABI is invalid")
         stages = payload.get("physical_stages")
-        if not isinstance(stages, list) or not stages or any(
-            not isinstance(stage, dict)
-            or frozenset(stage) != {"name", "execution_kind", "call_count"}
-            or not isinstance(stage.get("name"), str)
-            or not stage["name"]
-            or stage.get("execution_kind") not in (
-                "taichi_dispatch",
-                "cuda_program_call",
+        if (
+            not isinstance(stages, list)
+            or not stages
+            or any(
+                not isinstance(stage, dict)
+                or frozenset(stage) != {"name", "execution_kind", "call_count"}
+                or not isinstance(stage.get("name"), str)
+                or not stage["name"]
+                or stage.get("execution_kind")
+                not in (
+                    "taichi_dispatch",
+                    "cuda_program_call",
+                )
+                or isinstance(stage.get("call_count"), bool)
+                or not isinstance(stage.get("call_count"), int)
+                or stage["call_count"] <= 0
+                for stage in stages
             )
-            or isinstance(stage.get("call_count"), bool)
-            or not isinstance(stage.get("call_count"), int)
-            or stage["call_count"] <= 0
-            for stage in stages
         ):
             raise ValueError("Graph native-algorithm physical stages are invalid")
         workspace = payload.get("workspace")
@@ -664,7 +718,8 @@ class _GraphNativeAlgorithmRecipeManifest:
             or isinstance(workspace.get("action_owned_bytes"), bool)
             or not isinstance(workspace.get("action_owned_bytes"), int)
             or workspace["action_owned_bytes"] < 0
-            or workspace.get("provider_shared_scope") not in (
+            or workspace.get("provider_shared_scope")
+            not in (
                 "none",
                 "program_scan_arena",
             )
@@ -719,15 +774,11 @@ class _GraphNativeAlgorithmRecipeManifest:
         ):
             raise ValueError("Graph native-algorithm source lock is invalid")
         if key[1] == "segment_local_serial":
-            if (
-                len(stages) != 1
-                or workspace
-                != {
-                    "ownership": "none",
-                    "action_owned_bytes": 0,
-                    "provider_shared_scope": "none",
-                }
-            ):
+            if len(stages) != 1 or workspace != {
+                "ownership": "none",
+                "action_owned_bytes": 0,
+                "provider_shared_scope": "none",
+            }:
                 raise ValueError("serial segmented scan recipe is not complete")
         elif (
             workspace["ownership"] != "graph_native_action"
@@ -1483,13 +1534,10 @@ def _make_spec(
             _GraphReductionRecipeManifest,
         ):
             raise TypeError(
-                "reduction_recipe_manifest must be a "
-                "_GraphReductionRecipeManifest"
+                "reduction_recipe_manifest must be a " "_GraphReductionRecipeManifest"
             )
         reduction_recipe_id = reduction_recipe_manifest.recipe_id
-        compilation_payload["reduction_recipe"] = (
-            reduction_recipe_manifest.to_dict()
-        )
+        compilation_payload["reduction_recipe"] = reduction_recipe_manifest.to_dict()
     native_algorithm_recipe_id = ""
     if native_algorithm_recipe_manifest is not None:
         if not isinstance(
@@ -1516,9 +1564,7 @@ def _make_spec(
     # Keep every established Graph recipe identity byte-for-byte stable when
     # the optional native-algorithm axis is absent.
     if native_algorithm_recipe_id:
-        execution_payload["native_algorithm_recipe_id"] = (
-            native_algorithm_recipe_id
-        )
+        execution_payload["native_algorithm_recipe_id"] = native_algorithm_recipe_id
     execution_identity = _canonical_hash(execution_payload)
     return _ExecutableOptimizationSpec(
         spec_id=f"executable:{compilation_identity[:24]}",
@@ -1621,8 +1667,7 @@ def _build_executable_optimization_space(
         }
         if (
             algorithms != {"segmented_scan"}
-            or strategies
-            != {"segment_local_serial", "global_scan_segment_correction"}
+            or strategies != {"segment_local_serial", "global_scan_segment_correction"}
             or len(scopes) != 1
         ):
             raise ValueError(
@@ -1677,16 +1722,20 @@ def _build_executable_optimization_space(
             )
         if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
             raise ValueError("Graph reduction recipes cannot combine with fusion")
-        if len(reduction_recipe_manifests) != 2:
+        if len(reduction_recipe_manifests) < 2:
             raise ValueError(
-                "the initial Graph reduction domain requires direct and one "
-                "partial/finalize candidate"
+                "Graph reduction domain requires direct and generated candidates"
             )
-        if tuple(
-            manifest.strategy for manifest in reduction_recipe_manifests
-        ) != ("direct_atomic_tls", "block_partial_finalize"):
+        if reduction_recipe_manifests[0].strategy != "direct_atomic_tls" or any(
+            manifest.strategy
+            not in (
+                "block_partial_finalize",
+                "hierarchical_partial_finalize",
+            )
+            for manifest in reduction_recipe_manifests[1:]
+        ):
             raise ValueError(
-                "Graph reduction domain must order direct before partial/finalize"
+                "Graph reduction domain must order direct before generated topologies"
             )
         scopes = {
             _canonical_json(manifest.semantics)
@@ -1714,7 +1763,7 @@ def _build_executable_optimization_space(
         return _ExecutableOptimizationSpace(
             semantic_plan_id=semantic_plan_id,
             baseline=specs[0],
-            candidates=(specs[1],),
+            candidates=specs[1:],
             selected_spec_id=None if selected is None else selected.spec_id,
             selection_status=(
                 "reduction_recipe_not_materialized"
@@ -1727,7 +1776,7 @@ def _build_executable_optimization_space(
             ),
             partition_stage="graph_reduction_complete_recipe",
             partitions_complete=True,
-            partition_combination_count=2,
+            partition_combination_count=len(specs),
         )
     if bounded_recipe_manifests:
         if control_recipe_ids or memory_recipe_manifests or reduction_recipe_manifests:
@@ -1736,9 +1785,7 @@ def _build_executable_optimization_space(
             )
         if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
             raise ValueError("GraphBounded recipes cannot combine with fusion")
-        strategies = tuple(
-            manifest.strategy for manifest in bounded_recipe_manifests
-        )
+        strategies = tuple(manifest.strategy for manifest in bounded_recipe_manifests)
         scopes = {
             _canonical_json(
                 {
@@ -1803,13 +1850,13 @@ def _build_executable_optimization_space(
             raise ValueError("GraphMemory recipes cannot combine with control")
         if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
             raise ValueError("GraphMemory recipes cannot combine with fusion")
-        if len(memory_recipe_manifests) != 2:
+        if len(memory_recipe_manifests) < 2:
             raise ValueError(
-                "the initial GraphMemory domain requires direct and one candidate"
+                "GraphMemory domain requires direct and generated candidates"
             )
-        if (
-            memory_recipe_manifests[0].strategy != "direct"
-            or memory_recipe_manifests[1].strategy != "shared_staged_1d"
+        if memory_recipe_manifests[0].strategy != "direct" or any(
+            manifest.strategy != "shared_staged_1d"
+            for manifest in memory_recipe_manifests[1:]
         ):
             raise ValueError("GraphMemory domain must order direct before shared-stage")
         specs = tuple(
@@ -1832,7 +1879,7 @@ def _build_executable_optimization_space(
         return _ExecutableOptimizationSpace(
             semantic_plan_id=semantic_plan_id,
             baseline=specs[0],
-            candidates=(specs[1],),
+            candidates=specs[1:],
             selected_spec_id=None if selected is None else selected.spec_id,
             selection_status=(
                 "memory_recipe_not_materialized"
@@ -1845,7 +1892,7 @@ def _build_executable_optimization_space(
             ),
             partition_stage="graph_memory_complete_recipe",
             partitions_complete=True,
-            partition_combination_count=2,
+            partition_combination_count=len(specs),
         )
     if control_recipe_ids:
         if control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS:

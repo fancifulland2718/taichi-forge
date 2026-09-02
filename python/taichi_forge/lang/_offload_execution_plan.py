@@ -86,6 +86,7 @@ class _TaskOptimizationSpec:
     grid_residency_waves: Optional[int] = None
     range_work_per_thread_target: int = 1
     memory_strategy: str = "direct"
+    memory_source_arg_indices: tuple[int, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.logical_task_id, str) or not self.logical_task_id:
@@ -111,6 +112,25 @@ class _TaskOptimizationSpec:
             raise ValueError("range_work_per_thread_target must be 1, 2, 4, or 8")
         if self.memory_strategy not in _MEMORY_STRATEGIES:
             raise ValueError("memory_strategy must be 'direct' or 'shared_staged_1d'")
+        memory_source_arg_indices = tuple(self.memory_source_arg_indices)
+        if (
+            any(
+                isinstance(index, bool) or not isinstance(index, int) or index < 0
+                for index in memory_source_arg_indices
+            )
+            or tuple(sorted(set(memory_source_arg_indices)))
+            != memory_source_arg_indices
+        ):
+            raise ValueError(
+                "memory_source_arg_indices must be sorted unique nonnegative integers"
+            )
+        object.__setattr__(
+            self,
+            "memory_source_arg_indices",
+            memory_source_arg_indices,
+        )
+        if self.memory_strategy == "direct" and memory_source_arg_indices:
+            raise ValueError("memory_source_arg_indices require shared_staged_1d")
         if self.memory_strategy == "shared_staged_1d" and (
             self.task_kind != "range_for"
             or self.workgroup_size is None
@@ -144,6 +164,7 @@ class _TaskOptimizationSpec:
             and self.grid_residency_waves is None
             and self.range_work_per_thread_target == 1
             and self.memory_strategy == "direct"
+            and not self.memory_source_arg_indices
         )
 
     @property
@@ -334,6 +355,14 @@ class _OffloadExecutionPlan:
                 raise ValueError(
                     f"task {spec.task_index} materialized different controls"
                 )
+            if (
+                spec.memory_source_arg_indices
+                and tuple(manifest.staged_external_arg_indices)
+                != spec.memory_source_arg_indices
+            ):
+                raise ValueError(
+                    f"task {spec.task_index} materialized different staged sources"
+                )
         return True
 
     @property
@@ -361,6 +390,7 @@ class _OffloadExecutionPlan:
             ],
             [task.range_work_per_thread_target for task in self.tasks],
             [task.memory_strategy for task in self.tasks],
+            [list(task.memory_source_arg_indices) for task in self.tasks],
         )
 
 

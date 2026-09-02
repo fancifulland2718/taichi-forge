@@ -340,7 +340,8 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &cuda_max_registers,
     const std::vector<int> &grid_residency_waves,
     const std::vector<int> &range_work_per_thread_targets,
-    const std::vector<std::string> &memory_strategies) {
+    const std::vector<std::string> &memory_strategies,
+    const std::vector<std::vector<int>> &memory_source_arg_indices) {
   TI_ERROR_IF(
       offload_execution_plan_frozen_.load(std::memory_order_acquire),
       "offload execution plan cannot be replaced after launch-context "
@@ -361,7 +362,8 @@ void Kernel::set_offload_execution_plan(
           cuda_max_registers.size() != task_count ||
           grid_residency_waves.size() != task_count ||
           range_work_per_thread_targets.size() != task_count ||
-          memory_strategies.size() != task_count,
+          memory_strategies.size() != task_count ||
+          memory_source_arg_indices.size() != task_count,
       "offload execution plan vectors must have one entry per physical task");
 
   OffloadExecutionPlan plan;
@@ -433,6 +435,19 @@ void Kernel::set_offload_execution_plan(
                 "'shared_staged_1d', got {}",
                 memory_strategies[index]);
     task.memory_strategy = memory_strategies[index];
+    const auto &source_indices = memory_source_arg_indices[index];
+    TI_ERROR_IF(
+        !std::is_sorted(source_indices.begin(), source_indices.end()) ||
+            std::adjacent_find(source_indices.begin(), source_indices.end()) !=
+                source_indices.end() ||
+            std::any_of(source_indices.begin(), source_indices.end(),
+                        [](int value) { return value < 0; }),
+        "offload task memory source indices must be sorted unique "
+        "nonnegative integers");
+    TI_ERROR_IF(task.memory_strategy == "direct" && !source_indices.empty(),
+                "offload task memory source indices require "
+                "shared_staged_1d");
+    task.memory_source_arg_indices = source_indices;
     TI_ERROR_IF(
         task.memory_strategy == "shared_staged_1d" &&
             (task.task_kind != "range_for" || task.workgroup_size == 0 ||

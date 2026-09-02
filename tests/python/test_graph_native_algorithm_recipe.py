@@ -268,3 +268,135 @@ def test_graph_native_segmented_scan_recipe_composes_with_ordinary_dispatch():
                 )
                 physical_ids.add(materialized.materialized_physical_id)
     assert len(physical_ids) == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
+    count = 4096
+    num_groups = 64
+    keys = ti.ndarray(ti.i32, shape=count)
+    values = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=num_groups)
+    host_keys = (np.arange(count, dtype=np.int32) * 37 + 11) % num_groups
+    host_keys[::127] = -1
+    host_keys[::191] = num_groups + 3
+    host_values = ((np.arange(count, dtype=np.int32) % 17) - 8).astype(np.int32)
+    expected = np.zeros(num_groups, dtype=np.int32)
+    valid = (host_keys >= 0) & (host_keys < num_groups)
+    np.add.at(expected, host_keys[valid], host_values[valid])
+    keys.from_numpy(host_keys)
+    values.from_numpy(host_values)
+
+    builder = ti.graph.GraphBuilder()
+    builder.keyed_reduce(keys, values, output)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+    assert graph._compileiq_graph_native_algorithm_status == "complete_recipe_domain"
+    assert len(search.recipe_ids) == 3
+    recipes = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    strategies = {
+        recipe["native_algorithm_recipe_manifest"]["strategy"]
+        for recipe in recipes.values()
+    }
+    assert strategies == {
+        "global_atomic",
+        "block_shared_dense",
+        "key_partitioned_two_level",
+    }
+    expected_owned_bytes = (num_groups + 1) * 4 + count * 4 + num_groups * 4
+    physical_ids = set()
+
+    with graph.definition.materialization_context() as context:
+        for recipe_id, recipe in recipes.items():
+            manifest = recipe["native_algorithm_recipe_manifest"]
+            semantics = manifest["semantics"]
+            assert semantics["operation"] == "sum"
+            assert semantics["invalid_key_policy"] == "ignore"
+            assert semantics["associativity"] == "modular_integer_sum"
+            assert semantics["determinism"] == "exact"
+            assert semantics["count"] == count
+            assert semantics["num_groups"] == num_groups
+            assert semantics["keys"]["fixed_resource"]
+            assert semantics["values"]["fixed_resource"]
+            assert semantics["output"]["fixed_resource"]
+            strategy = manifest["strategy"]
+            topology = manifest["topology"]
+            assert topology["kind"] == strategy
+            assert topology["stage_count"] == len(manifest["physical_stages"])
+            if strategy == "block_shared_dense":
+                assert topology == {
+                    "kind": "block_shared_dense",
+                    "block_dim": 256,
+                    "stage_count": 2,
+                    "dense_group_limit": 256,
+                    "static_shared_bytes": num_groups * 4,
+                }
+            owned_bytes = (
+                expected_owned_bytes
+                if strategy == "key_partitioned_two_level"
+                else 0
+            )
+            assert manifest["workspace"]["action_owned_bytes"] == owned_bytes
+
+            parameters = _parameters(search, recipe_id)
+            with search.materialize(parameters, context=context) as materialized:
+                search.verify_materialized_graph(parameters, materialized)
+                candidate = materialized.executor
+                for _ in range(2):
+                    output.fill(123)
+                    candidate.run({})
+                    ti.sync()
+                    np.testing.assert_array_equal(output.to_numpy(), expected)
+                executable = candidate._spec.nodes[0].executable
+                assert executable.debug_info["provider_preparations"] == (
+                    1 if strategy == "global_atomic" else 0
+                )
+                assert executable.debug_info["kernel_plan_preparations"] == (
+                    {
+                        "global_atomic": 0,
+                        "block_shared_dense": 0,
+                        "key_partitioned_two_level": 5,
+                    }[strategy]
+                )
+                assert executable.debug_info["action_owned_bytes"] == owned_bytes
+                assert executable.backend_command_plan.command_count == (
+                    {
+                        "global_atomic": 1,
+                        "block_shared_dense": 1,
+                        "key_partitioned_two_level": 5,
+                    }[strategy]
+                )
+                assert executable.backend_command_plan.command_count_exact == (
+                    strategy != "global_atomic"
+                )
+                assert executable.backend_command_plan.provider_replay == (
+                    strategy == "global_atomic"
+                )
+                assert executable.debug_info["nested_graph_replay"] == (
+                    strategy == "block_shared_dense"
+                )
+                memory = candidate.execution_stats().memory
+                assert memory.provider_generation_report_count == 1
+                assert (
+                    memory.provider_generation_known_resident_requested_bytes
+                    == owned_bytes
+                )
+                assert memory.provider_generation_requested_bytes_complete
+                physical_ids.add(materialized.materialized_physical_id)
+    assert len(physical_ids) == 3
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_keyed_aggregation_rejects_unscoped_floating_point_order():
+    count = 64
+    keys = ti.ndarray(ti.i32, shape=count)
+    values = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=8)
+    builder = ti.graph.GraphBuilder()
+    with pytest.raises(
+        RuntimeError,
+        match="requires plain 1D i32 keys and i32 value/output ndarrays",
+    ):
+        builder.keyed_reduce(keys, values, output)

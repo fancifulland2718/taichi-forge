@@ -25,7 +25,9 @@ _ITEMS_PER_THREAD = 4
 _REDUCTION_STRATEGIES = (
     "direct_atomic_tls",
     "block_partial_finalize",
+    "hierarchical_partial_finalize",
 )
+_GENERATED_BLOCK_ITEMS = ((256, 4), (128, 4), (64, 2))
 
 
 @ti.kernel
@@ -163,6 +165,78 @@ _KERNELS = {
     ),
 }
 
+_GENERATED_KERNELS = {}
+
+
+def _generated_reduction_kernels(dtype, block_dim, items_per_thread):
+    """Build one coherent shared-tree kernel pair for a topology point."""
+
+    key = (dtype, int(block_dim), int(items_per_thread))
+    cached = _GENERATED_KERNELS.get(key)
+    if cached is not None:
+        return cached
+    if key[1:] == (_BLOCK_DIM, _ITEMS_PER_THREAD):
+        cached = _KERNELS[dtype][1:]
+        _GENERATED_KERNELS[key] = cached
+        return cached
+
+    strides = tuple(
+        1 << power for power in range(int(math.log2(block_dim)) - 1, -1, -1)
+    )
+    zero = 0.0 if dtype == ti.f32 else 0
+
+    @ti.kernel
+    def partial_kernel(
+        values: ti.types.ndarray(dtype=dtype, ndim=1),
+        partial: ti.types.ndarray(dtype=dtype, ndim=1),
+        count: ti.i32,
+        worker_count: ti.i32,
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for worker in range(worker_count):
+            lane = worker % block_dim
+            pad = ti.simt.block.SharedArray((block_dim,), dtype)
+            value = zero
+            for item in ti.static(range(items_per_thread)):
+                index = worker * items_per_thread + item
+                if index < count:
+                    value += values[index]
+            pad[lane] = value
+            ti.simt.block.sync()
+            for stride in ti.static(strides):
+                if lane < stride:
+                    pad[lane] += pad[lane + stride]
+                ti.simt.block.sync()
+            if lane == 0:
+                partial[worker // block_dim] = pad[0]
+
+    @ti.kernel
+    def finalize_kernel(
+        partial: ti.types.ndarray(dtype=dtype, ndim=1),
+        output: ti.types.ndarray(dtype=dtype, ndim=1),
+        partial_count: ti.i32,
+    ):
+        ti.loop_config(block_dim=block_dim)
+        for lane in range(block_dim):
+            pad = ti.simt.block.SharedArray((block_dim,), dtype)
+            value = zero
+            index = lane
+            while index < partial_count:
+                value += partial[index]
+                index += block_dim
+            pad[lane] = value
+            ti.simt.block.sync()
+            for stride in ti.static(strides):
+                if lane < stride:
+                    pad[lane] += pad[lane + stride]
+                ti.simt.block.sync()
+            if lane == 0:
+                output[0] = pad[0]
+
+    cached = (partial_kernel, finalize_kernel)
+    _GENERATED_KERNELS[key] = cached
+    return cached
+
 
 def _canonical_hash(value):
     payload = json.dumps(
@@ -289,6 +363,7 @@ class _GraphReductionRecipeSource:
         self.selected_recipe_id = ""
         self.selected_strategy = ""
         self._manifests = None
+        self._recipe_specs = {}
         self._manifest_lock = threading.Lock()
 
     @property
@@ -311,26 +386,32 @@ class _GraphReductionRecipeSource:
 
     @property
     def selected_physical_dispatches(self):
-        return 1 if self.selected_strategy == "direct_atomic_tls" else 2
+        if not self.selected_recipe_id:
+            return 1
+        return self._recipe_specs.get(
+            self.selected_recipe_id,
+            {"levels": 1},
+        )["levels"]
 
-    def _symbolic_arguments(self):
+    def _symbolic_arguments(self, suffix=""):
         from taichi_forge.graph._graph import Arg, ArgKind
 
+        suffix = f"_{suffix}" if suffix else ""
         partial = Arg(
             ArgKind.NDARRAY,
-            f"{self.prefix}_partial",
+            f"{self.prefix}_partial{suffix}",
             self.dtype,
             ndim=1,
         )
-        count = Arg(ArgKind.SCALAR, f"{self.prefix}_count", ti.i32)
+        count = Arg(ArgKind.SCALAR, f"{self.prefix}_count{suffix}", ti.i32)
         worker_count = Arg(
             ArgKind.SCALAR,
-            f"{self.prefix}_worker_count",
+            f"{self.prefix}_worker_count{suffix}",
             ti.i32,
         )
         partial_count = Arg(
             ArgKind.SCALAR,
-            f"{self.prefix}_partial_count",
+            f"{self.prefix}_partial_count{suffix}",
             ti.i32,
         )
         return partial, count, worker_count, partial_count
@@ -366,19 +447,11 @@ class _GraphReductionRecipeSource:
                 return
             from taichi_forge.graph._graph import gen_cpp_kernel
 
-            partial, count, worker_count, partial_count = self._symbolic_arguments()
-            direct, partial_kernel, finalize = _KERNELS[self.dtype]
+            _, count, _, _ = self._symbolic_arguments("direct")
+            direct = _KERNELS[self.dtype][0]
             direct_cpp = gen_cpp_kernel(
                 direct,
                 (self.values, self.output, count),
-            )
-            partial_cpp = gen_cpp_kernel(
-                partial_kernel,
-                (self.values, partial, count, worker_count),
-            )
-            finalize_cpp = gen_cpp_kernel(
-                finalize,
-                (partial, self.output, partial_count),
             )
             semantics = self.semantics.to_dict()
             symbolic_abi = [
@@ -397,6 +470,14 @@ class _GraphReductionRecipeSource:
                     "strategy": "direct_atomic_tls",
                     "semantics": semantics,
                     "symbolic_abi": symbolic_abi,
+                    "topology": {
+                        "kind": "direct_atomic_tls",
+                        "block_dim": 0,
+                        "items_per_thread": 1,
+                        "levels": 1,
+                        "load": "scalar_coalesced",
+                        "in_block_reduction": "tls_atomic",
+                    },
                     "physical_stages": [self._stage("direct_atomic_tls", direct_cpp)],
                     "workspace": {
                         "ownership": "none",
@@ -406,24 +487,143 @@ class _GraphReductionRecipeSource:
                     },
                 }
             )
-            phased_manifest = _GraphReductionRecipeManifest.from_payload(
-                {
-                    "strategy": "block_partial_finalize",
-                    "semantics": semantics,
-                    "symbolic_abi": symbolic_abi,
-                    "physical_stages": [
-                        self._stage("map_partial", partial_cpp),
-                        self._stage("finalize", finalize_cpp),
-                    ],
-                    "workspace": {
-                        "ownership": "graph_instance",
-                        "exclusive_submission": True,
-                        "elements": self.partial_count,
-                        "bytes": self.partial_count * element_bytes,
-                    },
+            manifests = [direct_manifest]
+            self._recipe_specs[direct_manifest.recipe_id] = {
+                "strategy": "direct_atomic_tls",
+                "block_dim": 0,
+                "items_per_thread": 1,
+                "levels": 1,
+                "partial_counts": (),
+            }
+            for block_dim, items_per_thread in _GENERATED_BLOCK_ITEMS:
+                tag = f"b{block_dim}_i{items_per_thread}"
+                partial, stage_count, worker_count, partial_count = (
+                    self._symbolic_arguments(tag)
+                )
+                first_count = (
+                    self.semantics.count + items_per_thread - 1
+                ) // items_per_thread
+                first_partial_count = (first_count + block_dim - 1) // block_dim
+                first_worker_count = first_partial_count * block_dim
+                partial_kernel, finalize = _generated_reduction_kernels(
+                    self.dtype,
+                    block_dim,
+                    items_per_thread,
+                )
+                partial_cpp = gen_cpp_kernel(
+                    partial_kernel,
+                    (self.values, partial, stage_count, worker_count),
+                )
+                finalize_cpp = gen_cpp_kernel(
+                    finalize,
+                    (partial, self.output, partial_count),
+                )
+                topology = {
+                    "kind": "block_partial_finalize",
+                    "block_dim": block_dim,
+                    "items_per_thread": items_per_thread,
+                    "levels": 2,
+                    "load": "scalar_coalesced",
+                    "in_block_reduction": "shared_tree",
                 }
-            )
-            self._manifests = (direct_manifest, phased_manifest)
+                manifest = _GraphReductionRecipeManifest.from_payload(
+                    {
+                        "strategy": "block_partial_finalize",
+                        "semantics": semantics,
+                        "symbolic_abi": symbolic_abi,
+                        "topology": topology,
+                        "physical_stages": [
+                            self._stage(f"map_partial_{tag}", partial_cpp),
+                            self._stage(f"finalize_{tag}", finalize_cpp),
+                        ],
+                        "workspace": {
+                            "ownership": "graph_instance",
+                            "exclusive_submission": True,
+                            "elements": first_partial_count,
+                            "bytes": first_partial_count * element_bytes,
+                        },
+                    }
+                )
+                manifests.append(manifest)
+                self._recipe_specs[manifest.recipe_id] = {
+                    "strategy": manifest.strategy,
+                    "block_dim": block_dim,
+                    "items_per_thread": items_per_thread,
+                    "levels": 2,
+                    "partial_counts": (first_partial_count,),
+                    "worker_counts": (first_worker_count,),
+                }
+
+                if (block_dim, items_per_thread) == (
+                    _BLOCK_DIM,
+                    _ITEMS_PER_THREAD,
+                ) and first_partial_count > block_dim:
+                    second_partial_count = (
+                        first_partial_count + block_dim * items_per_thread - 1
+                    ) // (block_dim * items_per_thread)
+                    second_worker_count = second_partial_count * block_dim
+                    partial_two, count_two, worker_two, final_two = (
+                        self._symbolic_arguments(tag + "_l2")
+                    )
+                    partial_two_cpp = gen_cpp_kernel(
+                        partial_kernel,
+                        (partial, partial_two, count_two, worker_two),
+                    )
+                    hierarchical_finalize_cpp = gen_cpp_kernel(
+                        finalize,
+                        (partial_two, self.output, final_two),
+                    )
+                    hierarchical = _GraphReductionRecipeManifest.from_payload(
+                        {
+                            "strategy": "hierarchical_partial_finalize",
+                            "semantics": semantics,
+                            "symbolic_abi": symbolic_abi,
+                            "topology": {
+                                **topology,
+                                "kind": "hierarchical_partial_finalize",
+                                "levels": 3,
+                            },
+                            "physical_stages": [
+                                self._stage(
+                                    f"map_partial_{tag}",
+                                    partial_cpp,
+                                ),
+                                self._stage(
+                                    f"hierarchical_partial_{tag}",
+                                    partial_two_cpp,
+                                ),
+                                self._stage(
+                                    f"finalize_hierarchical_{tag}",
+                                    hierarchical_finalize_cpp,
+                                ),
+                            ],
+                            "workspace": {
+                                "ownership": "graph_instance",
+                                "exclusive_submission": True,
+                                "elements": (
+                                    first_partial_count + second_partial_count
+                                ),
+                                "bytes": (first_partial_count + second_partial_count)
+                                * element_bytes,
+                            },
+                        }
+                    )
+                    manifests.append(hierarchical)
+                    self._recipe_specs[hierarchical.recipe_id] = {
+                        "strategy": hierarchical.strategy,
+                        "block_dim": block_dim,
+                        "items_per_thread": items_per_thread,
+                        "levels": 3,
+                        "partial_counts": (
+                            first_partial_count,
+                            second_partial_count,
+                        ),
+                        "worker_counts": (
+                            first_worker_count,
+                            second_worker_count,
+                        ),
+                    }
+            self._manifests = tuple(manifests)
             if not self.selected_recipe_id:
                 self.selected_recipe_id = direct_manifest.recipe_id
                 self.selected_strategy = direct_manifest.strategy
@@ -454,48 +654,84 @@ class _GraphReductionRecipeSource:
                 ) from error
 
         sequence = builder.create_sequential()
-        partial, count, worker_count, partial_count = self._symbolic_arguments()
-        count = sequence._bind_internal_scalar(count.name, ti.i32, self.semantics.count)
-        direct, partial_kernel, finalize = _KERNELS[self.dtype]
+        recipe_spec = self._recipe_specs[manifest.recipe_id]
         label = "" if label is None else str(label)
         if manifest.strategy == "direct_atomic_tls":
+            _, count, _, _ = self._symbolic_arguments("direct")
+            count = sequence._bind_internal_scalar(
+                count.name,
+                ti.i32,
+                self.semantics.count,
+            )
             sequence.dispatch(
-                direct,
+                _KERNELS[self.dtype][0],
                 self.values,
                 self.output,
                 count,
                 label=f"{label}/direct" if label else "graph_reduction/direct",
             )
         else:
-            partial = sequence.private_ndarray(
-                partial.name,
+            block_dim = recipe_spec["block_dim"]
+            items_per_thread = recipe_spec["items_per_thread"]
+            partial_kernel, finalize = _generated_reduction_kernels(
                 self.dtype,
-                self.partial_count,
-                exclusive_submission=True,
+                block_dim,
+                items_per_thread,
             )
-            worker_count = sequence._bind_internal_scalar(
-                worker_count.name,
+            current_values = self.values
+            current_count = self.semantics.count
+            tag = f"b{block_dim}_i{items_per_thread}"
+            for level, (partial_count_value, worker_count_value) in enumerate(
+                zip(
+                    recipe_spec["partial_counts"],
+                    recipe_spec["worker_counts"],
+                ),
+                start=1,
+            ):
+                partial, count, worker_count, _ = self._symbolic_arguments(
+                    f"{tag}_l{level}"
+                )
+                partial = sequence.private_ndarray(
+                    partial.name,
+                    self.dtype,
+                    partial_count_value,
+                    exclusive_submission=True,
+                )
+                count = sequence._bind_internal_scalar(
+                    count.name,
+                    ti.i32,
+                    current_count,
+                )
+                worker_count = sequence._bind_internal_scalar(
+                    worker_count.name,
+                    ti.i32,
+                    worker_count_value,
+                )
+                sequence.dispatch(
+                    partial_kernel,
+                    current_values,
+                    partial,
+                    count,
+                    worker_count,
+                    label=(
+                        f"{label}/partial:{level}"
+                        if label
+                        else f"graph_reduction/partial:{level}"
+                    ),
+                )
+                current_values = partial
+                current_count = partial_count_value
+            _, _, _, final_count = self._symbolic_arguments(tag + "_final")
+            final_count = sequence._bind_internal_scalar(
+                final_count.name,
                 ti.i32,
-                self.worker_count,
-            )
-            partial_count = sequence._bind_internal_scalar(
-                partial_count.name,
-                ti.i32,
-                self.partial_count,
-            )
-            sequence.dispatch(
-                partial_kernel,
-                self.values,
-                partial,
-                count,
-                worker_count,
-                label=f"{label}/partial" if label else "graph_reduction/partial",
+                current_count,
             )
             sequence.dispatch(
                 finalize,
-                partial,
+                current_values,
                 self.output,
-                partial_count,
+                final_count,
                 label=f"{label}/finalize" if label else "graph_reduction/finalize",
             )
 
