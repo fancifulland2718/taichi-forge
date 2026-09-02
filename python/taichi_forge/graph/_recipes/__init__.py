@@ -1,5 +1,17 @@
 """Internal complete-Graph recipe foundations."""
 
+from .catalog import (
+    GraphFragmentProvider,
+    GraphRecipeCatalog,
+    GraphRecipeCatalogEntry,
+)
+from .composer import (
+    GraphExecutableRecipe,
+    GraphRecipeComposer,
+    GraphRecipeCompositionError,
+    GraphRecipeExecutionStep,
+    GraphRegionSelection,
+)
 from .definition import (
     GraphBaselineRecipe,
     GraphBindingABIEntry,
@@ -8,6 +20,13 @@ from .definition import (
     GraphDefinitionSource,
     GraphSemanticRegion,
 )
+from .fragments import (
+    GraphFragmentBindingRequirement,
+    GraphFragmentResourceRequirement,
+    GraphFragmentSubmissionRequirement,
+    GraphFragmentTask,
+    GraphRecipeFragment,
+)
 
 __all__ = [
     "GraphBaselineRecipe",
@@ -15,5 +34,18 @@ __all__ = [
     "GraphCompileProvenance",
     "GraphDefinition",
     "GraphDefinitionSource",
+    "GraphExecutableRecipe",
+    "GraphFragmentBindingRequirement",
+    "GraphFragmentProvider",
+    "GraphFragmentResourceRequirement",
+    "GraphFragmentSubmissionRequirement",
+    "GraphFragmentTask",
+    "GraphRecipeCatalog",
+    "GraphRecipeCatalogEntry",
+    "GraphRecipeComposer",
+    "GraphRecipeCompositionError",
+    "GraphRecipeExecutionStep",
+    "GraphRecipeFragment",
+    "GraphRegionSelection",
     "GraphSemanticRegion",
 ]
