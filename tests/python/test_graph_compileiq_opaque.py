@@ -973,6 +973,7 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
         "second": second,
     }
     materialized = {}
+    semantic_graph_ids = set()
 
     def objective(parameters):
         selection = plans.select(parameters)
@@ -981,6 +982,7 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
             for name, value in selection.worker_environment.items():
                 environment.setenv(name, value)
             graph = build()
+        semantic_graph_ids.add(graph.definition.semantic_graph_id)
         plans.verify_materialized_graph(parameters, graph)
         first.fill(0)
         second.fill(0)
@@ -1004,6 +1006,7 @@ def test_modified_compileiq_exhausts_complete_graph_bounded_recipes(monkeypatch)
     assert coverage["complete"]
     assert coverage["evaluation_count"] == 4
     assert set(materialized) == set(expected_strategies)
+    assert semantic_graph_ids == {baseline.definition.semantic_graph_id}
     assert materialized["logical_exact"] == 0
     assert materialized["masked_capacity"] == 0
     assert materialized["adaptive_per_node"] > 0

@@ -121,8 +121,10 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
     host_values = ((np.arange(count, dtype=np.int32) % 23) - 11).astype(np.int32)
     values.from_numpy(host_values)
     expected = np.asarray(host_values.sum(dtype=np.int64), dtype=np.int32).item()
+    semantic_graph_ids = set()
     for recipe_id in search.recipe_ids:
         rebuilt = rebuild(recipe_id)
+        semantic_graph_ids.add(rebuilt.definition.semantic_graph_id)
         output.fill(123)
         bindings = rebuilt.bind({"values": values, "output": output})
         assert bindings.fast_path_qualified
@@ -135,6 +137,7 @@ def test_graph_reduction_compileiq_reconstructs_complete_typed_domain(monkeypatc
         assert statistics["raw_replay_validations"] == 0
         assert statistics["version_volatile_replays"] == 0
         assert statistics["version_fast_replays"] == 1
+    assert semantic_graph_ids == {graph.definition.semantic_graph_id}
 
     phased = rebuild(phased_id)
     with pytest.raises(RuntimeError, match="requires proven disjoint storage"):

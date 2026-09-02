@@ -93,6 +93,7 @@ from taichi_forge.graph._optimization import (
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
+from taichi_forge.graph._recipes import GraphDefinition
 
 ArgKind = _ti_core.ArgKind
 
@@ -9414,6 +9415,83 @@ def _graph_bounded_semantic_root(root):
     return strip(root)
 
 
+def _graph_definition_semantic_root(root):
+    """Remove recipe-owned physical choices from a frozen semantic Graph.
+
+    This normalization is definition-time only. Runtime binding generations,
+    resource leases, and replay state remain owned by the compiled Graph.
+    """
+
+    def strip(node):
+        if isinstance(node, DispatchNode):
+            bounded = node.bounded_domain
+            logical_kernel_identity = node.logical_kernel_identity
+            if bounded is not None:
+                logical_kernel_identity = (
+                    bounded.semantic_kernel_identity or logical_kernel_identity
+                )
+                bounded = replace(
+                    bounded,
+                    block_dim=None,
+                    block_mode="auto",
+                    physical_grid_policy="auto",
+                    physical_grid_requirement="auto",
+                    update_policy="",
+                    publication_epoch=None,
+                )
+            name = node.dispatch_label
+            if not name:
+                name = "dispatch" if logical_kernel_identity else node.name
+            return replace(
+                node,
+                name=name,
+                bounded_domain=bounded,
+                logical_kernel_identity=logical_kernel_identity,
+                fusion_blocker="",
+                memory_disjoint_pairs=(),
+                memory_layout_requirements=(),
+            )
+        if isinstance(node, SequentialRegion):
+            return replace(
+                node,
+                children=tuple(strip(child) for child in node.children),
+            )
+        if isinstance(node, WhileRegion):
+            return replace(
+                node,
+                condition=strip(node.condition),
+                body=strip(node.body),
+                chunk_size=1,
+                compound_chunk_size=1,
+                vulkan_first_chunk_strategy="auto",
+                masked_execution=False,
+                lowering_mode="auto",
+            )
+        if isinstance(node, IfRegion):
+            return replace(
+                node,
+                condition=strip(node.condition),
+                then_region=strip(node.then_region),
+                else_region=(
+                    None if node.else_region is None else strip(node.else_region)
+                ),
+            )
+        if isinstance(node, SwitchRegion):
+            return replace(
+                node,
+                condition=strip(node.condition),
+                branches=tuple(strip(branch) for branch in node.branches),
+                default_region=(
+                    None
+                    if node.default_region is None
+                    else strip(node.default_region)
+                ),
+            )
+        return node
+
+    return strip(root)
+
+
 def _graph_bounded_recipe_scope(pipeline):
     bounded = tuple(
         dispatch
@@ -10154,6 +10232,70 @@ class _GraphSpec:
         self.ir_analysis = analyze_graph_ir(self.ir_root)
         for node in self.structured_control_nodes:
             node._graph_owner_token = structured_owner_token
+
+    @property
+    def definition_semantic_root(self):
+        """Return the physical-choice-free input for GraphDefinition."""
+
+        native_algorithm_definition = bool(
+            len(self._graph_native_algorithm_sources) == 1
+            and not self._graph_reduction_sources
+            and not self._graph_memory_sources
+            and self.native_count == 1
+            and self.dispatch_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and len(self.nodes) == 1
+        )
+        if native_algorithm_definition:
+            return self._graph_native_algorithm_sources[0].semantic_root
+
+        reduction_definition = bool(
+            len(self._graph_reduction_sources) == 1
+            and not self._graph_memory_sources
+            and self.native_count == 0
+            and self.structured_control_count == 0
+            and self.observation_count == 0
+            and len(self.nodes) == 1
+            and self.dispatch_count
+            == self._graph_reduction_sources[0].selected_physical_dispatches
+        )
+        if reduction_definition:
+            return self._graph_reduction_sources[0].semantic_root
+
+        return _graph_definition_semantic_root(self.pre_optimization_ir_root)
+
+    @property
+    def definition_semantic_sources(self):
+        """Return provider source facts without materializing any candidate."""
+
+        sources = []
+        for ordinal, source in enumerate(self._graph_memory_sources):
+            sources.append(
+                {
+                    "provider": "graph_memory",
+                    "ordinal": ordinal,
+                    "label": source.label,
+                    "symbolic_abi": _graph_memory_symbolic_abi(source.args),
+                }
+            )
+        for ordinal, source in enumerate(self._graph_reduction_sources):
+            sources.append(
+                {
+                    "provider": "graph_reduction",
+                    "ordinal": ordinal,
+                    "semantics": source.semantics.to_dict(),
+                }
+            )
+        for ordinal, source in enumerate(self._graph_native_algorithm_sources):
+            sources.append(
+                {
+                    "provider": "graph_native_algorithm",
+                    "ordinal": ordinal,
+                    "semantics": source.semantics,
+                }
+            )
+        return tuple(sources)
 
     def compileiq_executable_optimization_space(self):
         cached = self._compileiq_executable_space_cache
@@ -14820,21 +14962,25 @@ class GraphBuilder:
         """
         return self._append_native(node, prewarm=prewarm, admission=admission)
 
-    def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
+    def freeze(self):
+        """Freeze this builder into an immutable semantic Graph definition."""
+
         self._flush_graph_builder()
         if not self._nodes:
-            return Graph(
-                _CompiledCGraphNode(
-                    self._ensure_runtime_graph_builder().compile(),
-                    0,
-                    (),
-                    SequentialRegion((), name="cgraph"),
-                ),
-                workspace_lanes=workspace_lanes,
-                workspace_saturation=workspace_saturation,
+            compiled_graph = self._ensure_runtime_graph_builder().compile()
+            spec = _GraphSpec(
+                [
+                    _CompiledCGraphNode(
+                        compiled_graph,
+                        0,
+                        (),
+                        SequentialRegion((), name="cgraph"),
+                    )
+                ],
+                aot_compiled_graph=compiled_graph,
             )
-        return Graph(
-            _GraphSpec(
+        else:
+            spec = _GraphSpec(
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
@@ -14842,7 +14988,16 @@ class GraphBuilder:
                 graph_native_algorithm_sources=tuple(
                     self._graph_native_algorithm_sources
                 ),
-            ),
+            )
+        backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+        return GraphDefinition._from_graph_spec(
+            spec,
+            backend,
+            core_commit=str(_ti_core.get_commit_hash()).lower(),
+        )
+
+    def compile(self, *, workspace_lanes=1, workspace_saturation="wait"):
+        return self.freeze().compile(
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
         )
@@ -15273,6 +15428,7 @@ class Graph:
         *,
         workspace_lanes=1,
         workspace_saturation="wait",
+        definition=None,
     ) -> None:
         self._lifecycle_lock = threading.Lock()
         self._terminal_observation_token = object()
@@ -15290,6 +15446,18 @@ class Graph:
         else:
             node = _CompiledCGraphNode(compiled_graph, 0, ())
             self._spec = _GraphSpec([node], aot_compiled_graph=compiled_graph)
+        if definition is None:
+            backend = _backend_name(_ti_core.arch_name(impl.current_cfg().arch))
+            definition = GraphDefinition._from_graph_spec(
+                self._spec,
+                backend,
+                core_commit=str(_ti_core.get_commit_hash()).lower(),
+            )
+        elif definition._runtime_spec is not self._spec:
+            raise TaichiRuntimeError(
+                "GraphDefinition baseline spec does not match this Graph"
+            )
+        self._definition = definition
         if (
             self._spec.exclusive_provider_submission
             and self._workspace_lane_capacity != 1
@@ -15336,6 +15504,12 @@ class Graph:
         """
 
         return GraphBindingSet(self, arguments)
+
+    @property
+    def definition(self):
+        """Return the immutable semantic definition used by this Graph."""
+
+        return self._definition
 
     def binding_plan(self):
         """Return the immutable compiled public binding slot plan."""
@@ -16791,6 +16965,7 @@ def Arg(*args, **kwargs):
 __all__ = [
     "GraphBuilder",
     "Graph",
+    "GraphDefinition",
     "GraphBindingSet",
     "SubmissionTicket",
     "SubmissionPacer",

@@ -107,6 +107,7 @@ def test_graph_native_segmented_scan_reconstructs_complete_domain(
                 (np.zeros(1, dtype=numpy_dtype), accumulated[:-1])
             )
 
+    semantic_graph_ids = set()
     for recipe_id in search.recipe_ids:
         parameters = _parameters(search, recipe_id)
         environment = search.worker_environment(parameters)
@@ -117,6 +118,7 @@ def test_graph_native_segmented_scan_reconstructs_complete_domain(
             for name, value in environment.items():
                 reconstruction.setenv(name, value)
             rebuilt = _build(values, layout, output, inclusive=inclusive)
+        semantic_graph_ids.add(rebuilt.definition.semantic_graph_id)
         search.verify_materialized_graph(parameters, rebuilt)
         values.from_numpy(host)
         output.fill(0)
@@ -184,6 +186,7 @@ def test_graph_native_segmented_scan_reconstructs_complete_domain(
         assert (
             execution_report.memory.provider_generation_requested_bytes_complete is True
         )
+    assert semantic_graph_ids == {graph.definition.semantic_graph_id}
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

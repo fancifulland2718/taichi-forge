@@ -367,6 +367,7 @@ def test_map4_physics_vector_chain_matches_unfused(monkeypatch):
         baseline._executable_optimization_space.semantic_plan_id
         == fused._executable_optimization_space.semantic_plan_id
     )
+    assert baseline.definition.semantic_graph_id == fused.definition.semantic_graph_id
 
     rng = np.random.default_rng(42)
     count = 4099

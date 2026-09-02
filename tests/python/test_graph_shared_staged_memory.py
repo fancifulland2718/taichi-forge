@@ -126,6 +126,13 @@ def test_graph_memory_compileiq_recipe_reconstructs_complete_direct_and_staged(
         direct_graph._compileiq_executable_optimization_space.semantic_plan_id
         == staged_graph._compileiq_executable_optimization_space.semantic_plan_id
     )
+    assert (
+        direct_graph.definition.semantic_graph_id
+        == staged_graph.definition.semantic_graph_id
+    )
+    assert (
+        direct_graph.definition.binding_abi == staged_graph.definition.binding_abi
+    )
     staged_task = next(
         task for task in staged_graph.task_manifest() if task.task_type == "range_for"
     )
