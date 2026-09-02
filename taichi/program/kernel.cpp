@@ -341,7 +341,8 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &grid_residency_waves,
     const std::vector<int> &range_work_per_thread_targets,
     const std::vector<std::string> &memory_strategies,
-    const std::vector<std::vector<int>> &memory_source_arg_indices) {
+    const std::vector<std::vector<int>> &memory_source_arg_indices,
+    const std::vector<std::vector<int>> &fusion_groups) {
   TI_ERROR_IF(
       offload_execution_plan_frozen_.load(std::memory_order_acquire),
       "offload execution plan cannot be replaced after launch-context "
@@ -369,10 +370,7 @@ void Kernel::set_offload_execution_plan(
   OffloadExecutionPlan plan;
   plan.compilation_identity = compilation_identity;
   plan.execution_identity = execution_identity;
-  plan.tasks.reserve(task_count);
-  plan.task_kinds.reserve(task_count);
-  plan.grid_residency_waves.reserve(task_count);
-  plan.range_work_per_thread_targets.reserve(task_count);
+  plan.source_tasks.reserve(task_count);
   for (std::size_t index = 0; index < task_count; ++index) {
     TI_ERROR_IF(task_indices[index] != static_cast<int>(index),
                 "offload execution plan task indices must be contiguous; "
@@ -467,6 +465,55 @@ void Kernel::set_offload_execution_plan(
                 "offload execution plan v1 can tune only range_for tasks; "
                 "task {} is {}",
                 index, task.task_kind);
+    plan.source_tasks.push_back(std::move(task));
+  }
+
+  std::vector<int> fusion_group_at(task_count, -1);
+  int previous_end = -1;
+  plan.fusion_groups.reserve(fusion_groups.size());
+  for (std::size_t group_index = 0; group_index < fusion_groups.size();
+       ++group_index) {
+    const auto &group = fusion_groups[group_index];
+    TI_ERROR_IF(group.size() < 2 || group.size() > 4,
+                "offload fusion groups must contain two to four tasks");
+    TI_ERROR_IF(group.front() <= previous_end || group.back() >= task_count,
+                "offload fusion groups must be ordered, disjoint, and inside "
+                "the source topology");
+    for (std::size_t member = 0; member < group.size(); ++member) {
+      TI_ERROR_IF(group[member] != group.front() + static_cast<int>(member),
+                  "offload fusion groups must contain contiguous task indices");
+      const auto &task = plan.source_tasks[group[member]];
+      const bool nonbaseline =
+          task.workgroup_size != 0 ||
+          task.thread_local_mode != TaskLaunchThreadLocalMode::automatic ||
+          task.cuda_min_blocks_per_sm != 2 || task.cuda_max_registers != -1 ||
+          task.grid_residency_waves != 0 ||
+          task.range_work_per_thread_target != 1 ||
+          task.memory_strategy != "direct" ||
+          !task.memory_source_arg_indices.empty();
+      TI_ERROR_IF(task.task_kind != "range_for" || nonbaseline,
+                  "offload fusion requires baseline range_for source tasks");
+    }
+    fusion_group_at[group.front()] = static_cast<int>(group_index);
+    previous_end = group.back();
+    plan.fusion_groups.push_back(group);
+  }
+
+  plan.tasks.reserve(task_count);
+  plan.task_kinds.reserve(task_count);
+  plan.grid_residency_waves.reserve(task_count);
+  plan.range_work_per_thread_targets.reserve(task_count);
+  for (std::size_t source_index = 0; source_index < task_count;) {
+    auto task = plan.source_tasks[source_index];
+    const int group_index = fusion_group_at[source_index];
+    if (group_index >= 0) {
+      source_index = static_cast<std::size_t>(
+                         plan.fusion_groups[group_index].back()) +
+                     1;
+    } else {
+      ++source_index;
+    }
+    task.task_index = static_cast<std::uint32_t>(plan.tasks.size());
     plan.task_kinds.push_back(task.task_kind);
     plan.grid_residency_waves.push_back(task.grid_residency_waves);
     plan.range_work_per_thread_targets.push_back(

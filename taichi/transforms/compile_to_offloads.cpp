@@ -155,6 +155,197 @@ class SerialPreambleSafetyChecker final : public BasicStmtVisitor {
   bool safe_{true};
 };
 
+Stmt *offload_phase_pointer_origin(Stmt *stmt) {
+  while (auto *matrix = stmt ? stmt->cast<MatrixPtrStmt>() : nullptr) {
+    stmt = matrix->origin;
+  }
+  return stmt;
+}
+
+bool offload_phase_thread_private_pointer(Stmt *stmt) {
+  auto *origin = offload_phase_pointer_origin(stmt);
+  auto *allocation = origin ? origin->cast<AllocaStmt>() : nullptr;
+  return allocation != nullptr && !allocation->is_shared;
+}
+
+class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
+ public:
+  explicit ExactPointwiseOffloadChecker(OffloadedStmt *task) : task_(task) {
+    allow_undefined_visitor = true;
+    invoke_default_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void visit(GlobalLoadStmt *stmt) override {
+    check_pointer(stmt->src);
+  }
+
+  void visit(GlobalStoreStmt *stmt) override {
+    check_pointer(stmt->dest);
+  }
+
+  void visit(AtomicOpStmt *stmt) override {
+    if (!offload_phase_thread_private_pointer(stmt->dest)) {
+      reject("atomic or cross-thread read-modify-write effect");
+    }
+  }
+
+  void visit(Stmt *stmt) override {
+    if (stmt->has_global_side_effect()) {
+      reject("unsupported global side effect");
+    }
+  }
+
+  void preprocess_container_stmt(Stmt *stmt) override {
+    if (!stmt->is<IfStmt>()) {
+      reject("nested control flow");
+    }
+  }
+
+  bool qualified() const {
+    return reason_.empty();
+  }
+
+  const std::string &reason() const {
+    return reason_;
+  }
+
+ private:
+  bool exact_leading_index(const std::vector<Stmt *> &indices, int ndim) const {
+    if (ndim < 1 || indices.size() < static_cast<std::size_t>(ndim)) {
+      return false;
+    }
+    auto *index = indices.front()->cast<LoopIndexStmt>();
+    return index != nullptr && index->loop == task_ && index->index == 0;
+  }
+
+  void check_pointer(Stmt *pointer) {
+    pointer = offload_phase_pointer_origin(pointer);
+    if (auto *external = pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
+      if (!exact_leading_index(external->indices, external->ndim)) {
+        reject("non-pointwise external access");
+      }
+      return;
+    }
+    if (auto *global = pointer ? pointer->cast<GlobalPtrStmt>() : nullptr) {
+      auto *index = global->indices.size() == 1
+                        ? global->indices.front()->cast<LoopIndexStmt>()
+                        : nullptr;
+      if (global->snode == nullptr || !global->snode->is_path_all_dense ||
+          (global->activate && !global->snode->is_path_all_dense) ||
+          index == nullptr || index->loop != task_ || index->index != 0) {
+        reject("non-pointwise or sparse field access");
+      }
+      return;
+    }
+    if (!offload_phase_thread_private_pointer(pointer)) {
+      reject("unsupported pointer origin");
+    }
+  }
+
+  void reject(const std::string &reason) {
+    if (reason_.empty()) {
+      reason_ = reason;
+    }
+  }
+
+  OffloadedStmt *task_{nullptr};
+  std::string reason_;
+};
+
+class OffloadLoopIndexRebaser final : public BasicStmtVisitor {
+ public:
+  OffloadLoopIndexRebaser(OffloadedStmt *source, OffloadedStmt *destination)
+      : source_(source), destination_(destination) {
+    allow_undefined_visitor = true;
+  }
+
+  using BasicStmtVisitor::visit;
+
+  void visit(LoopIndexStmt *stmt) override {
+    if (stmt->loop == source_) {
+      stmt->loop = destination_;
+    }
+  }
+
+ private:
+  OffloadedStmt *source_{nullptr};
+  OffloadedStmt *destination_{nullptr};
+};
+
+bool empty_offload_auxiliary_blocks(const OffloadedStmt *task) {
+  auto empty = [](const std::unique_ptr<Block> &block) {
+    return block == nullptr || block->statements.empty();
+  };
+  return empty(task->tls_prologue) && empty(task->tls_epilogue) &&
+         empty(task->bls_prologue) && empty(task->bls_epilogue) &&
+         empty(task->mesh_prologue);
+}
+
+std::string offload_phase_fusion_blocker(
+    const std::vector<OffloadedStmt *> &tasks,
+    const std::vector<int> &group) {
+  const auto *first = tasks[group.front()];
+  for (const int index : group) {
+    const auto *task = tasks[index];
+    if (task->task_type != OffloadedStmt::TaskType::range_for) {
+      return "source task is not range_for";
+    }
+    if (!task->const_begin || !task->const_end || task->end_stmt != nullptr ||
+        task->reversed || task->is_bit_vectorized || task->one_to_one ||
+        task->external_shared_staged) {
+      return "source task has an unsupported range execution mode";
+    }
+    if (task->begin_value != first->begin_value ||
+        task->end_value != first->end_value ||
+        task->block_dim != first->block_dim ||
+        task->grid_dim != first->grid_dim ||
+        !empty_offload_auxiliary_blocks(task)) {
+      return "source tasks do not share one physical constant range";
+    }
+    const std::string sensitive =
+        BlockSensitiveOperationFinder::run(const_cast<OffloadedStmt *>(task));
+    if (!sensitive.empty()) {
+      return sensitive;
+    }
+    ExactPointwiseOffloadChecker checker(const_cast<OffloadedStmt *>(task));
+    task->body->accept(&checker);
+    if (!checker.qualified()) {
+      return checker.reason();
+    }
+  }
+  return "";
+}
+
+void apply_exact_pointwise_offload_fusion(
+    Block *root,
+    const Kernel::OffloadExecutionPlan &plan,
+    const std::vector<OffloadedStmt *> &source_tasks) {
+  for (const auto &group : plan.fusion_groups) {
+    const std::string blocker =
+        offload_phase_fusion_blocker(source_tasks, group);
+    TI_ERROR_IF(!blocker.empty(),
+                "offload phase fusion rejected source tasks {}..{}: {}",
+                group.front(), group.back(), blocker);
+  }
+
+  for (auto group_it = plan.fusion_groups.rbegin();
+       group_it != plan.fusion_groups.rend(); ++group_it) {
+    const auto &group = *group_it;
+    auto *destination = source_tasks[group.front()];
+    for (std::size_t member = 1; member < group.size(); ++member) {
+      auto *source = source_tasks[group[member]];
+      OffloadLoopIndexRebaser rebaser(source, destination);
+      source->body->accept(&rebaser);
+      while (!source->body->statements.empty()) {
+        destination->body->insert(source->body->extract(0));
+      }
+      root->extract(source);
+    }
+  }
+}
+
 void validate_task_launch_policy_body(
     IRNode *ir,
     const TaskLaunchPolicyApplication &application) {
@@ -230,14 +421,18 @@ void apply_offload_execution_plan(IRNode *ir,
       tasks.push_back(task);
     }
   }
-  TI_ERROR_IF(tasks.size() != plan->tasks.size(),
+  TI_ERROR_IF(tasks.size() != plan->source_tasks.size(),
               "offload execution plan topology mismatch: expected {} task(s), "
               "lowering produced {}",
-              plan->tasks.size(), tasks.size());
+              plan->source_tasks.size(), tasks.size());
   for (std::size_t index = 0; index < tasks.size(); ++index) {
     auto *task = tasks[index];
-    const auto &spec =
-        kernel->offload_task_optimization_spec(index, task->task_type);
+    const auto &spec = plan->source_tasks[index];
+    const auto actual_kind = OffloadedStmt::task_type_name(task->task_type);
+    TI_ERROR_IF(spec.task_index != index || spec.task_kind != actual_kind,
+                "offload execution plan source topology mismatch at task {}: "
+                "expected {}, got {}",
+                index, spec.task_kind, actual_kind);
     if (spec.workgroup_size == 0 ||
         spec.workgroup_size == task->block_dim) {
       continue;
@@ -255,6 +450,9 @@ void apply_offload_execution_plan(IRNode *ir,
                 "containing {}",
                 index, reason);
     task->block_dim = spec.workgroup_size;
+  }
+  if (!plan->fusion_groups.empty()) {
+    apply_exact_pointwise_offload_fusion(ir->as<Block>(), *plan, tasks);
   }
 }
 

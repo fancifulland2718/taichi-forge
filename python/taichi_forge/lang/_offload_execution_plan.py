@@ -186,6 +186,7 @@ class _OffloadExecutionPlan:
 
     semantic_kernel_identity: str
     tasks: tuple
+    fusion_groups: tuple[tuple[int, ...], ...] = ()
 
     def __post_init__(self):
         if (
@@ -217,6 +218,41 @@ class _OffloadExecutionPlan:
                 raise ValueError("logical task identities must be unique")
             logical_ids.add(task.logical_task_id)
 
+        fusion_groups = tuple(tuple(group) for group in self.fusion_groups)
+        object.__setattr__(self, "fusion_groups", fusion_groups)
+        occupied = set()
+        previous_start = -1
+        for group in fusion_groups:
+            if not 2 <= len(group) <= 4:
+                raise ValueError("offload fusion groups must contain two to four tasks")
+            if any(
+                isinstance(index, bool) or not isinstance(index, int) for index in group
+            ):
+                raise TypeError("offload fusion task indices must be integers")
+            if tuple(range(group[0], group[0] + len(group))) != group:
+                raise ValueError("offload fusion groups must be contiguous and ordered")
+            if group[0] < 0:
+                raise IndexError(
+                    "offload fusion task index is outside this execution plan"
+                )
+            if group[0] <= previous_start or occupied.intersection(group):
+                raise ValueError("offload fusion groups must be ordered and disjoint")
+            if group[-1] >= len(tasks):
+                raise IndexError(
+                    "offload fusion task index is outside this execution plan"
+                )
+            selected = tuple(tasks[index] for index in group)
+            if any(task.task_kind != "range_for" for task in selected):
+                raise ValueError(
+                    "offload fusion supports only consecutive range_for tasks"
+                )
+            if any(not task.is_baseline for task in selected):
+                raise ValueError(
+                    "offload fusion cannot be combined with per-task fixed-axis controls"
+                )
+            occupied.update(group)
+            previous_start = group[0]
+
         stable_payload = {
             "schema": _TASK_PLAN_SCHEMA,
             "semantic_kernel_identity": self.semantic_kernel_identity,
@@ -227,10 +263,19 @@ class _OffloadExecutionPlan:
             "semantic_kernel_identity": self.semantic_kernel_identity,
             "tasks": tuple(task.compilation_payload for task in tasks),
         }
+        if fusion_groups:
+            topology = {
+                "operation": "fuse_exact_pointwise_range_tasks",
+                "source_task_groups": fusion_groups,
+            }
+            stable_payload["topology_transform"] = topology
+            compilation_payload["topology_transform"] = topology
         # The plan and every task are frozen, so all derived launch identities
         # and topology facts are immutable for the plan's lifetime.
         object.__setattr__(
-            self, "_is_baseline", all(task.is_baseline for task in tasks)
+            self,
+            "_is_baseline",
+            not fusion_groups and all(task.is_baseline for task in tasks),
         )
         object.__setattr__(
             self,
@@ -244,6 +289,32 @@ class _OffloadExecutionPlan:
                 (task.logical_task_id, task.task_index, task.task_kind)
                 for task in tasks
             ),
+        )
+        materialized_tasks = []
+        materialized_lineage = []
+        group_by_start = {group[0]: group for group in fusion_groups}
+        grouped_members = {index for group in fusion_groups for index in group[1:]}
+        for source_index, task in enumerate(tasks):
+            if source_index in grouped_members:
+                continue
+            group = group_by_start.get(source_index, (source_index,))
+            physical_index = len(materialized_tasks)
+            materialized_tasks.append(
+                replace(
+                    task,
+                    logical_task_id=(
+                        f"tfl:{self.semantic_kernel_identity}:{physical_index}:"
+                        f"{task.task_kind}"
+                    ),
+                    task_index=physical_index,
+                )
+            )
+            materialized_lineage.append(
+                tuple(tasks[index].logical_task_id for index in group)
+            )
+        object.__setattr__(self, "_materialized_tasks", tuple(materialized_tasks))
+        object.__setattr__(
+            self, "_materialized_task_lineage", tuple(materialized_lineage)
         )
         object.__setattr__(self, "_identity", _identity("oep1:", stable_payload))
         object.__setattr__(
@@ -277,19 +348,39 @@ class _OffloadExecutionPlan:
 
     @property
     def stable_payload(self):
-        return {
+        payload = {
             "schema": _TASK_PLAN_SCHEMA,
             "semantic_kernel_identity": self.semantic_kernel_identity,
             "tasks": tuple(asdict(task) for task in self.tasks),
         }
+        if self.fusion_groups:
+            payload["topology_transform"] = {
+                "operation": "fuse_exact_pointwise_range_tasks",
+                "source_task_groups": self.fusion_groups,
+            }
+        return payload
 
     @property
     def compilation_payload(self):
-        return {
+        payload = {
             "schema": _TASK_PLAN_SCHEMA,
             "semantic_kernel_identity": self.semantic_kernel_identity,
             "tasks": tuple(task.compilation_payload for task in self.tasks),
         }
+        if self.fusion_groups:
+            payload["topology_transform"] = {
+                "operation": "fuse_exact_pointwise_range_tasks",
+                "source_task_groups": self.fusion_groups,
+            }
+        return payload
+
+    @property
+    def materialized_tasks(self):
+        return self._materialized_tasks
+
+    @property
+    def materialized_task_lineage(self):
+        return self._materialized_task_lineage
 
     @property
     def identity(self):
@@ -312,24 +403,40 @@ class _OffloadExecutionPlan:
             raise IndexError("task_index is outside this execution plan")
         tasks = list(self.tasks)
         tasks[task_index] = replace(tasks[task_index], **changes)
-        return type(self)(self.semantic_kernel_identity, tuple(tasks))
+        return type(self)(
+            self.semantic_kernel_identity,
+            tuple(tasks),
+            fusion_groups=self.fusion_groups,
+        )
+
+    def with_fused_task_groups(self, *groups):
+        if self.fusion_groups:
+            raise ValueError(
+                "offload execution plan already contains a topology transform"
+            )
+        return type(self)(
+            self.semantic_kernel_identity,
+            self.tasks,
+            fusion_groups=tuple(groups),
+        )
 
     def validate_topology(self, manifests):
         _, semantic_identity, topology = _validated_manifest_topology(manifests)
-        if (
-            semantic_identity != self.semantic_kernel_identity
-            or topology != self._topology_signature
-        ):
+        expected = tuple(
+            (task.logical_task_id, task.task_index, task.task_kind)
+            for task in self.materialized_tasks
+        )
+        if semantic_identity != self.semantic_kernel_identity or topology != expected:
             raise ValueError("materialized offload topology does not match the plan")
         return True
 
     def validate_materialization(self, manifests):
         manifests = tuple(manifests)
         self.validate_topology(manifests)
-        if len(manifests) != len(self.tasks):
+        if len(manifests) != len(self.materialized_tasks):
             raise ValueError("materialized task count does not match the plan")
         compilation_identity = self.compilation_identity
-        for spec, manifest in zip(self.tasks, manifests):
+        for spec, manifest in zip(self.materialized_tasks, manifests):
             if manifest.optimization_spec_id != compilation_identity:
                 raise ValueError(
                     "materialized compilation identity does not match the plan"
@@ -391,6 +498,7 @@ class _OffloadExecutionPlan:
             [task.range_work_per_thread_target for task in self.tasks],
             [task.memory_strategy for task in self.tasks],
             [list(task.memory_source_arg_indices) for task in self.tasks],
+            [list(group) for group in self.fusion_groups],
         )
 
 

@@ -90,6 +90,7 @@ from taichi_forge.graph._optimization import (
     _GraphBoundedExecutionRecipeManifest,
     _GraphFusionQualificationCache,
     _GraphMemoryRecipeManifest,
+    _GraphOffloadFusionRecipeManifest,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
@@ -10060,15 +10061,39 @@ def _replay_recipe_cgraph_node(node, selections, map_source_groups):
     for operation in node.recipe_operations:
         kind = operation[0]
         if kind == "dispatch":
-            _, kernel_cpp, args, label, source = operation
+            _, kernel_cpp, args, label, memory_source, offload_source = operation
             contracts = ()
             layout_requirements = ()
-            if source is not None:
-                selected = selections.get(("graph_memory", source._recipe_source_key))
+            memory_selection = (
+                None
+                if memory_source is None
+                else selections.get(("graph_memory", memory_source._recipe_source_key))
+            )
+            offload_selection = (
+                None
+                if offload_source is None
+                else selections.get(
+                    ("offload_phase_fusion", offload_source._recipe_source_key)
+                )
+            )
+            if memory_selection is not None and offload_selection is not None:
+                raise TaichiRuntimeError(
+                    "one Graph dispatch cannot select memory staging and offload "
+                    "phase fusion simultaneously"
+                )
+            if offload_selection is not None:
+                kernel_cpp, contracts = offload_source.materialize(
+                    offload_selection.choice_id,
+                    record_selection=False,
+                )
+            elif memory_selection is not None:
+                selected = memory_selection
                 if selected is not None:
-                    kernel_cpp, contracts, layout_requirements = source.materialize(
-                        selected.choice_id,
-                        record_selection=False,
+                    kernel_cpp, contracts, layout_requirements = (
+                        memory_source.materialize(
+                            selected.choice_id,
+                            record_selection=False,
+                        )
                     )
             builder._record_dispatch(kernel_cpp, list(args), label)
             if contracts or layout_requirements:
@@ -10116,9 +10141,20 @@ def _replay_recipe_cgraph_node(node, selections, map_source_groups):
 
 def _operation_has_selection(operation, selections):
     kind = operation[0]
-    if kind == "dispatch" and operation[4] is not None:
-        source = operation[4]
-        return ("graph_memory", source._recipe_source_key) in selections
+    if kind == "dispatch":
+        memory_source = operation[4]
+        offload_source = operation[5]
+        return (
+            memory_source is not None
+            and ("graph_memory", memory_source._recipe_source_key) in selections
+        ) or (
+            offload_source is not None
+            and (
+                "offload_phase_fusion",
+                offload_source._recipe_source_key,
+            )
+            in selections
+        )
     if kind == "bounded":
         return (
             "bounded_execution",
@@ -10236,6 +10272,7 @@ class _GraphSpec:
         aot_graph_builder=None,
         aot_compiled_graph=None,
         graph_memory_sources=(),
+        graph_offload_fusion_sources=(),
         graph_bounded_sources=(),
         graph_reduction_sources=(),
         graph_native_algorithm_sources=(),
@@ -10330,6 +10367,7 @@ class _GraphSpec:
             selected_control_recipe_id=selected_control_recipe_id,
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
+        self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
         self._graph_bounded_sources = tuple(graph_bounded_sources)
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
@@ -10588,6 +10626,15 @@ class _GraphSpec:
                     "symbolic_abi": _graph_memory_symbolic_abi(source.args),
                 }
             )
+        for ordinal, source in enumerate(self._graph_offload_fusion_sources):
+            sources.append(
+                {
+                    "provider": "offload_phase_fusion",
+                    "ordinal": ordinal,
+                    "label": source.label,
+                    "symbolic_abi": _graph_memory_symbolic_abi(source.args),
+                }
+            )
         for ordinal, source in enumerate(self._graph_reduction_sources):
             sources.append(
                 {
@@ -10628,6 +10675,7 @@ class _GraphSpec:
         supported = {
             "map_fusion",
             "graph_memory",
+            "offload_phase_fusion",
             "bounded_execution",
             "structured_control",
             "graph_reduction",
@@ -10774,6 +10822,7 @@ class _GraphSpec:
         variant = _GraphSpec(
             nodes,
             graph_memory_sources=self._graph_memory_sources,
+            graph_offload_fusion_sources=self._graph_offload_fusion_sources,
             graph_bounded_sources=self._graph_bounded_sources,
             graph_reduction_sources=self._graph_reduction_sources,
             graph_native_algorithm_sources=self._graph_native_algorithm_sources,
@@ -13513,6 +13562,235 @@ class _GraphMemoryRecipeSource:
         return kernel_cpp, contracts, layout_requirements
 
 
+def _offload_fusion_group_candidates(tasks, *, limit=64):
+    """Enumerate complete, disjoint phase-fusion choices in useful order."""
+
+    tasks = tuple(tasks)
+    result = []
+    seen = set()
+
+    def visit(index, groups):
+        if len(result) >= limit:
+            return
+        if index == len(tasks):
+            if groups and groups not in seen:
+                seen.add(groups)
+                result.append(groups)
+            return
+        for size in (4, 3, 2):
+            end = index + size
+            if end <= len(tasks) and all(
+                task.task_kind == "range_for" for task in tasks[index:end]
+            ):
+                visit(end, groups + (tuple(range(index, end)),))
+        visit(index + 1, groups)
+
+    visit(0, ())
+    return tuple(result)
+
+
+def _graph_offload_disjoint_pairs(args):
+    names = tuple(
+        sorted(
+            {arg.name for arg in args if getattr(arg, "tag", None) == ArgKind.NDARRAY}
+        )
+    )
+    return tuple(itertools.combinations(names, 2))
+
+
+def _graph_offload_fusion_recipe_manifest(
+    plan,
+    manifests,
+    args,
+    label,
+    strategy,
+    *,
+    memory_disjoint_pairs=(),
+):
+    lineage = plan.materialized_task_lineage
+    physical_stages = tuple(
+        {
+            "name": f"offload_{index}_{manifest.task_type}",
+            "kind": manifest.task_type,
+            "source_task_logical_ids": lineage[index],
+            "manifest": asdict(manifest),
+        }
+        for index, manifest in enumerate(manifests)
+    )
+    return _GraphOffloadFusionRecipeManifest.from_payload(
+        {
+            "strategy": strategy,
+            "dispatch_label": label,
+            "symbolic_abi": _graph_memory_symbolic_abi(args),
+            "semantic_kernel_identity": plan.semantic_kernel_identity,
+            "offload_plan_identity": plan.identity,
+            "offload_compilation_identity": plan.compilation_identity,
+            "offload_plan": plan.stable_payload,
+            "materialized_tasks": tuple(asdict(task) for task in manifests),
+            "source_task_lineage": lineage,
+            "fusion_groups": plan.fusion_groups,
+            "memory_disjoint_pairs": tuple(memory_disjoint_pairs),
+            "physical_stages": physical_stages,
+        }
+    )
+
+
+class _GraphOffloadFusionRecipeSource:
+    """Graph-owned compiler-IR topology domain for one semantic dispatch."""
+
+    def __init__(self, kernel_fn, args, label, baseline_kernel_cpp, manifests):
+        self.kernel_fn = kernel_fn
+        self.args = tuple(args)
+        self.label = label
+        self.baseline_kernel_cpp = baseline_kernel_cpp
+        self.baseline_manifests = tuple(manifests)
+        self.baseline_plan = None
+        self.direct_manifest = None
+        self.selected_recipe_id = ""
+        self._recipe_source_key = ""
+        self._definition_lock = threading.Lock()
+        self._candidates = None
+        self._candidate_failures = {}
+        self._candidate_lock = threading.Lock()
+
+    @classmethod
+    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+        if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
+            return None
+        if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
+            return None
+        if not hasattr(kernel_fn, "with_launch_policy"):
+            return None
+        try:
+            manifests = _kernel_task_manifests(baseline_kernel_cpp)
+        except (RuntimeError, TaichiRuntimeError):
+            return None
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests)
+
+    def _prepare_definition(self):
+        if self.direct_manifest is not None:
+            return
+        with self._definition_lock:
+            if self.direct_manifest is not None:
+                return
+            from taichi_forge.lang._offload_execution_plan import (
+                _OffloadExecutionPlan,
+            )
+
+            plan = _OffloadExecutionPlan.from_task_manifests(self.baseline_manifests)
+            direct_manifest = _graph_offload_fusion_recipe_manifest(
+                plan,
+                self.baseline_manifests,
+                self.args,
+                self.label,
+                "direct",
+            )
+            self.baseline_plan = plan
+            self.direct_manifest = direct_manifest
+            if not self.selected_recipe_id:
+                self.selected_recipe_id = direct_manifest.recipe_id
+
+    def _build_candidate(self, groups):
+        from taichi_forge.lang._offload_execution_plan import (
+            _bind_offload_execution_plan,
+        )
+
+        self._prepare_definition()
+        plan = self.baseline_plan.with_fused_task_groups(*groups)
+        binding = _bind_offload_execution_plan(self.kernel_fn, plan)
+        kernel_cpp = gen_cpp_kernel(binding, self.args)
+        manifests = _kernel_task_manifests(kernel_cpp)
+        plan.validate_materialization(manifests)
+        manifest = _graph_offload_fusion_recipe_manifest(
+            plan,
+            manifests,
+            self.args,
+            self.label,
+            "exact_pointwise_phase_fusion",
+            memory_disjoint_pairs=_graph_offload_disjoint_pairs(self.args),
+        )
+        return (
+            manifest,
+            kernel_cpp,
+            tuple(tuple(pair) for pair in manifest.to_dict()["memory_disjoint_pairs"]),
+        )
+
+    def candidates(self):
+        if self._candidates is not None:
+            return self._candidates
+        with self._candidate_lock:
+            if self._candidates is not None:
+                return self._candidates
+            candidates = []
+            try:
+                self._prepare_definition()
+                groups_domain = _offload_fusion_group_candidates(
+                    self.baseline_plan.tasks
+                )
+                for groups in groups_domain:
+                    try:
+                        candidates.append(self._build_candidate(groups))
+                    except (
+                        ValueError,
+                        RuntimeError,
+                        TaichiCompilationError,
+                        TaichiRuntimeError,
+                    ) as error:
+                        self._candidate_failures[groups] = (
+                            str(error).strip() or type(error).__name__
+                        )
+            except (
+                ValueError,
+                RuntimeError,
+                TaichiCompilationError,
+                TaichiRuntimeError,
+            ) as error:
+                self._candidate_failures[()] = (
+                    str(error).strip() or type(error).__name__
+                )
+            self._candidates = tuple(candidates)
+            return self._candidates
+
+    @property
+    def candidate_failure(self):
+        self.candidates()
+        return "; ".join(
+            f"{key or 'domain'}: {value}"
+            for key, value in self._candidate_failures.items()
+        )
+
+    def manifests(self):
+        candidates = self.candidates()
+        if not candidates:
+            return ()
+        return (self.direct_manifest, *(candidate[0] for candidate in candidates))
+
+    def materialize(self, requested_recipe_id, *, record_selection=True):
+        self._prepare_definition()
+        if requested_recipe_id == self.direct_manifest.recipe_id:
+            if record_selection:
+                self.selected_recipe_id = requested_recipe_id
+            return self.baseline_kernel_cpp, ()
+        candidate = next(
+            (
+                item
+                for item in self.candidates()
+                if item[0].recipe_id == requested_recipe_id
+            ),
+            None,
+        )
+        if candidate is None:
+            reason = self.candidate_failure or "candidate is unsupported"
+            raise TaichiRuntimeError(
+                "requested Graph offload-fusion recipe cannot be materialized: "
+                + reason
+            )
+        manifest, kernel_cpp, memory_disjoint_pairs = candidate
+        if record_selection:
+            self.selected_recipe_id = manifest.recipe_id
+        return kernel_cpp, memory_disjoint_pairs
+
+
 class _GraphBoundedRecipeSource:
     """Replayable device-bounded source with explicit physical selection."""
 
@@ -13541,9 +13819,7 @@ class _GraphBoundedRecipeSource:
         self.template_args = template_args
         self.label = label
         self.selected_strategy = selected_strategy
-        self.selected_block = (
-            None if selected_block is None else int(selected_block)
-        )
+        self.selected_block = None if selected_block is None else int(selected_block)
         self._recipe_group_key = ""
 
     def materialize(self, builder, strategy):
@@ -14496,6 +14772,7 @@ class GraphBuilder:
         self._active_bounded_publication = None
         self._declared_private_bindings = {}
         self._graph_memory_sources = []
+        self._graph_offload_fusion_sources = []
         self._graph_bounded_sources = []
 
         self._graph_reduction_sources = []
@@ -14557,6 +14834,13 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
+        offload_source = _GraphOffloadFusionRecipeSource.try_create(
+            kernel_fn,
+            unzipped_args,
+            label,
+            kernel_cpp,
+            template_args,
+        )
         requested_memory_recipe = (
             None
             if self._ignore_recipe_environment
@@ -14581,11 +14865,16 @@ class GraphBuilder:
             contracts, layout_requirements = (), ()
         if source is not None:
             source._recipe_source_key = f"memory:{len(self._graph_memory_sources)}"
+        if offload_source is not None:
+            offload_source._recipe_source_key = (
+                f"offload-fusion:{len(self._graph_offload_fusion_sources)}"
+            )
         self._record_dispatch(
             kernel_cpp,
             unzipped_args,
             label,
             _recipe_source=source,
+            _offload_recipe_source=offload_source,
         )
         if contracts or layout_requirements:
             self._pending_ir_nodes[-1] = replace(
@@ -14595,6 +14884,8 @@ class GraphBuilder:
             )
         if source is not None:
             self._graph_memory_sources.append(source)
+        if offload_source is not None:
+            self._graph_offload_fusion_sources.append(offload_source)
 
     def reduce(
         self,
@@ -15466,6 +15757,7 @@ class GraphBuilder:
         unzipped_args,
         label="",
         _recipe_source=None,
+        _offload_recipe_source=None,
     ):
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
@@ -15480,7 +15772,14 @@ class GraphBuilder:
         )
         if self._capture_recipe_sources:
             self._runtime_graph_recipe_operations.append(
-                ("dispatch", kernel_cpp, tuple(unzipped_args), label, _recipe_source)
+                (
+                    "dispatch",
+                    kernel_cpp,
+                    tuple(unzipped_args),
+                    label,
+                    _recipe_source,
+                    _offload_recipe_source,
+                )
             )
 
         self._dispatch_count += 1
@@ -15871,6 +16170,7 @@ class GraphBuilder:
                 self._nodes,
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
+                graph_offload_fusion_sources=tuple(self._graph_offload_fusion_sources),
                 graph_bounded_sources=tuple(self._graph_bounded_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
                 graph_native_algorithm_sources=tuple(

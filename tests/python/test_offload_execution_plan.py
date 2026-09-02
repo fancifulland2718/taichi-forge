@@ -57,7 +57,7 @@ def _materialized_manifests(plan):
             requested_range_work_per_thread_target=(task.range_work_per_thread_target),
             requested_memory_strategy=task.memory_strategy,
         )
-        for task in plan.tasks
+        for task in plan.materialized_tasks
     )
 
 
@@ -161,6 +161,41 @@ def test_offload_execution_plan_has_complete_deterministic_identity():
     assert first.compilation_identity == second.compilation_identity
     assert first.recipe_id.startswith("kernel-execution:offload-plan:v1:")
     assert len(first.tasks) == len(_manifests())
+
+
+def test_offload_phase_fusion_has_distinct_identity_and_exact_source_lineage():
+    baseline = _OffloadExecutionPlan.from_task_manifests(_manifests())
+    fused = baseline.with_fused_task_groups((1, 2))
+
+    assert not fused.is_baseline
+    assert fused.identity != baseline.identity
+    assert fused.compilation_identity != baseline.compilation_identity
+    assert fused.fusion_groups == ((1, 2),)
+    assert tuple(task.task_kind for task in fused.materialized_tasks) == (
+        "serial",
+        "range_for",
+    )
+    assert fused.materialized_task_lineage == (
+        ("tfl:kernel:stable:0:serial",),
+        (
+            "tfl:kernel:stable:1:range_for",
+            "tfl:kernel:stable:2:range_for",
+        ),
+    )
+    assert fused.native_arguments[-1] == [[1, 2]]
+    assert fused.validate_materialization(_materialized_manifests(fused))
+
+
+def test_offload_phase_fusion_rejects_fake_or_fixed_axis_topologies():
+    baseline = _OffloadExecutionPlan.from_task_manifests(_manifests())
+    with pytest.raises(ValueError, match="range_for"):
+        baseline.with_fused_task_groups((0, 1))
+    with pytest.raises(ValueError, match="contiguous"):
+        baseline.with_fused_task_groups((1, 3))
+    with pytest.raises(IndexError, match="outside"):
+        baseline.with_fused_task_groups((-1, 0))
+    with pytest.raises(ValueError, match="fixed-axis"):
+        baseline.replace_task(1, workgroup_size=128).with_fused_task_groups((1, 2))
 
 
 def test_offload_execution_plan_caches_identity_and_validates_cached_topology(

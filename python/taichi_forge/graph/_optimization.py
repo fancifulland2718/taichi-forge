@@ -40,6 +40,12 @@ _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
 }
 
+_GRAPH_OFFLOAD_FUSION_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_OFFLOAD_FUSION_RECIPE_PREFIXES = {
+    "direct": "graph-offload-fusion:direct:",
+    "exact_pointwise_phase_fusion": "graph-offload-fusion:exact-pointwise:",
+}
+
 _GRAPH_BOUNDED_RECIPE_SCHEMA_VERSION = 1
 _GRAPH_BOUNDED_RECIPE_PREFIXES = {
     "logical_exact": "graph-bounded:logical-exact:",
@@ -308,6 +314,133 @@ class _GraphMemoryRecipeManifest:
             prefix = _GRAPH_MEMORY_RECIPE_PREFIXES[strategy]
         except (KeyError, TypeError) as error:
             raise ValueError("GraphMemory recipe strategy is unsupported") from error
+        payload_json = _canonical_json(payload)
+        return cls(
+            recipe_id=prefix + _canonical_hash(payload)[:24],
+            payload_json=payload_json,
+        )
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
+@dataclass(frozen=True)
+class _GraphOffloadFusionRecipeManifest:
+    """One complete compiler-IR topology choice for a Graph dispatch."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("Graph offload-fusion recipe ID must be nonempty")
+        if not isinstance(self.payload_json, str) or not self.payload_json:
+            raise ValueError(
+                "Graph offload-fusion recipe payload must be canonical JSON"
+            )
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                "Graph offload-fusion recipe payload is invalid"
+            ) from error
+        if (
+            not isinstance(payload, dict)
+            or _canonical_json(payload) != self.payload_json
+        ):
+            raise ValueError("Graph offload-fusion recipe payload is not canonical")
+        if payload.get("schema_version") != _GRAPH_OFFLOAD_FUSION_RECIPE_SCHEMA_VERSION:
+            raise ValueError("Graph offload-fusion recipe schema is unsupported")
+        if frozenset(payload) != {
+            "schema_version",
+            "strategy",
+            "dispatch_label",
+            "symbolic_abi",
+            "semantic_kernel_identity",
+            "offload_plan_identity",
+            "offload_compilation_identity",
+            "offload_plan",
+            "materialized_tasks",
+            "source_task_lineage",
+            "fusion_groups",
+            "memory_disjoint_pairs",
+            "physical_stages",
+        }:
+            raise ValueError("Graph offload-fusion recipe payload fields are invalid")
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_OFFLOAD_FUSION_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("Graph offload-fusion strategy is unsupported") from error
+        tasks = payload.get("materialized_tasks")
+        lineage = payload.get("source_task_lineage")
+        groups = payload.get("fusion_groups")
+        stages = payload.get("physical_stages")
+        disjoint_pairs = payload.get("memory_disjoint_pairs")
+        if (
+            not isinstance(tasks, list)
+            or not tasks
+            or not isinstance(lineage, list)
+            or len(lineage) != len(tasks)
+            or not isinstance(groups, list)
+            or not isinstance(stages, list)
+            or len(stages) != len(tasks)
+            or not isinstance(disjoint_pairs, list)
+        ):
+            raise ValueError("Graph offload-fusion topology is invalid")
+        if any(
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(not isinstance(name, str) or not name for name in pair)
+            or pair[0] >= pair[1]
+            for pair in disjoint_pairs
+        ) or disjoint_pairs != sorted(disjoint_pairs):
+            raise ValueError("Graph offload-fusion disjoint contract is invalid")
+        flattened_lineage = []
+        for source_ids in lineage:
+            if (
+                not isinstance(source_ids, list)
+                or not source_ids
+                or any(not isinstance(item, str) or not item for item in source_ids)
+            ):
+                raise ValueError("Graph offload-fusion source lineage is invalid")
+            flattened_lineage.extend(source_ids)
+        if len(flattened_lineage) != len(set(flattened_lineage)):
+            raise ValueError("Graph offload-fusion source lineage is not one-to-one")
+        if strategy == "direct":
+            if groups or any(len(source_ids) != 1 for source_ids in lineage):
+                raise ValueError(
+                    "direct Graph offload topology must preserve every task"
+                )
+        elif not groups or not any(len(source_ids) >= 2 for source_ids in lineage):
+            raise ValueError("fused Graph offload topology has no fused source group")
+        if any(
+            not isinstance(stage, dict)
+            or stage.get("source_task_logical_ids") != lineage[index]
+            for index, stage in enumerate(stages)
+        ):
+            raise ValueError("Graph offload-fusion physical stages lose source lineage")
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError(
+                "Graph offload-fusion recipe ID does not match its payload"
+            )
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("Graph offload-fusion recipe payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_OFFLOAD_FUSION_RECIPE_SCHEMA_VERSION
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_OFFLOAD_FUSION_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError("Graph offload-fusion strategy is unsupported") from error
         payload_json = _canonical_json(payload)
         return cls(
             recipe_id=prefix + _canonical_hash(payload)[:24],

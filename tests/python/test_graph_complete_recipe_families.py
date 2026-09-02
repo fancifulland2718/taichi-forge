@@ -32,6 +32,131 @@ def _selection(fragment):
     return fragment.materializer.selection
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False, kernel_profiler=True)
+def test_complete_recipe_searches_and_materializes_offload_phase_fusion():
+    count = (1 << 17) + 19
+
+    @ti.kernel
+    def three_phase(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        first: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        second: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(count):
+            first[index] = source[index] * 2 + 1
+        for index in range(count):
+            second[index] = first[index] * 3 - 4
+        for index in range(count):
+            output[index] = second[index] ^ 0x55AA
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "first", "second", "output")
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        three_phase,
+        symbolic["source"],
+        symbolic["first"],
+        symbolic["second"],
+        symbolic["output"],
+    )
+    definition = builder.freeze()
+    source = definition._runtime_spec._graph_offload_fusion_sources[0]
+    manifests = source.manifests()
+    fused_manifest = next(
+        manifest
+        for manifest in manifests
+        if manifest.strategy == "exact_pointwise_phase_fusion"
+        and len(manifest.to_dict()["materialized_tasks"]) == 1
+    )
+    payload = fused_manifest.to_dict()
+    assert len(payload["source_task_lineage"]) == 1
+    assert len(payload["source_task_lineage"][0]) == 3
+    assert payload["fusion_groups"] == [[0, 1, 2]]
+
+    catalog = definition.recipe_catalog()
+    fragment = next(
+        item
+        for item in _family_fragments(catalog, "offload_phase_fusion")
+        if _selection(item).choice_id == fused_manifest.recipe_id
+    )
+    entry = catalog.compose(
+        (fragment.fragment_id,),
+        stage="compiler-ir-topology",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+    )
+    session = definition.search_recipes(
+        engine="compileiq",
+        target=ti.graph.GraphOptimizationTarget(
+            objectives=(("device_time_ns", "min"),)
+        ),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=16),
+    )
+    assert any(
+        handle.manifest.families == ("offload_phase_fusion",)
+        for handle in session.recipes
+    )
+
+    with definition.materialization_context() as context:
+        product = context.materialize(entry.recipe)
+        task_manifest = tuple(
+            task
+            for task in product.executor.task_manifest()
+            if task.task_type == "range_for"
+        )
+        assert len(task_manifest) == 1
+        assert (
+            task_manifest[0].optimization_spec_id
+            == payload["offload_compilation_identity"]
+        )
+
+        arrays = {name: ti.ndarray(ti.i32, shape=count) for name in symbolic}
+        host = np.arange(count, dtype=np.int32) - 31
+        arrays["source"].from_numpy(host)
+        arrays["output"].fill(0)
+        bindings = product.executor.bind(arrays)
+        published = product.executor.binding_statistics()
+        for _ in range(4):
+            product.executor.run(bindings)
+        ti.sync()
+        replayed = product.executor.binding_statistics()
+        assert replayed["version_builds"] == published["version_builds"]
+        assert replayed["raw_replay_validations"] == published["raw_replay_validations"]
+        assert replayed["version_fast_replays"] == (
+            published["version_fast_replays"] + 4
+        )
+        expected = ((host * 2 + 1) * 3 - 4) ^ 0x55AA
+        np.testing.assert_array_equal(arrays["output"].to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_complete_recipe_excludes_cross_lane_offload_phase_fusion():
+    count = 4096
+
+    @ti.kernel
+    def shifted_read(
+        data: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(count):
+            data[index] = index + 1
+        for index in range(count):
+            output[index] = data[(index + 1) % count]
+
+    data = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "data", ti.i32, ndim=1)
+    output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(shifted_read, data, output)
+    definition = builder.freeze()
+    source = definition._runtime_spec._graph_offload_fusion_sources[0]
+
+    assert source.manifests() == ()
+    assert "non-pointwise external access" in source.candidate_failure
+    assert not _family_fragments(definition.recipe_catalog(), "offload_phase_fusion")
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypatch):
     count = 1027

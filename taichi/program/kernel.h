@@ -90,7 +90,13 @@ class TI_DLL_EXPORT Kernel : public Callable {
   struct OffloadExecutionPlan {
     std::string compilation_identity;
     std::string execution_identity;
+    // The source topology is checked immediately after offloading. ``tasks``
+    // describes the physical topology after the optional compiler-owned
+    // pointwise fusion transform and is the only topology seen by codegen and
+    // launch-context construction.
+    std::vector<OffloadTaskOptimizationSpec> source_tasks;
     std::vector<OffloadTaskOptimizationSpec> tasks;
+    std::vector<std::vector<int>> fusion_groups;
     // Launch-only projections are materialized once with the immutable plan.
     // LaunchContextBuilder borrows these vectors instead of rebuilding and
     // validating them for every kernel invocation.
@@ -196,7 +202,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
       const std::vector<int> &grid_residency_waves,
       const std::vector<int> &range_work_per_thread_targets,
       const std::vector<std::string> &memory_strategies,
-      const std::vector<std::vector<int>> &memory_source_arg_indices);
+      const std::vector<std::vector<int>> &memory_source_arg_indices,
+      const std::vector<std::vector<int>> &fusion_groups);
 
   const std::optional<OffloadExecutionPlan> &get_offload_execution_plan()
       const;
