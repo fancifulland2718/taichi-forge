@@ -16,6 +16,9 @@ struct GraphKernelAccessFootprint {
   std::string pattern{"opaque"};
   int iteration_rank{0};
   std::vector<std::vector<std::int64_t>> affine_coefficients;
+  // Exact logical access offsets. Rank-one metadata also keeps the historical
+  // flattened ``affine_offsets`` projection below for compatibility.
+  std::vector<std::vector<std::int64_t>> affine_index_offsets;
   std::vector<std::int64_t> affine_offsets;
   std::vector<std::vector<std::int64_t>> halo;
   int contiguous_axis{-1};
@@ -24,6 +27,7 @@ struct GraphKernelAccessFootprint {
   TI_IO_DEF(pattern,
             iteration_rank,
             affine_coefficients,
+            affine_index_offsets,
             affine_offsets,
             halo,
             contiguous_axis,
@@ -58,12 +62,22 @@ struct GraphKernelIterationDomain {
   int axis{-1};
   std::int64_t begin{0};
   std::int64_t end{0};
+  // Present for a compiler-proven canonical flattened ndrange. These are the
+  // logical coordinates consumed by ExternalPtrStmt, not runtime guesses.
+  std::vector<std::int64_t> logical_shape;
+  std::vector<std::int64_t> logical_origin;
 
-  TI_IO_DEF(kind, arg_id, axis, begin, end);
+  TI_IO_DEF(kind,
+            arg_id,
+            axis,
+            begin,
+            end,
+            logical_shape,
+            logical_origin);
 };
 
 struct GraphKernelMetadata {
-  static constexpr std::uint32_t kVersion = 3;
+  static constexpr std::uint32_t kVersion = 4;
 
   std::uint32_t version{kVersion};
   bool available{false};

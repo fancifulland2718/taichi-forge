@@ -759,7 +759,8 @@ void offload_to_executable(IRNode *ir,
       offload_plan.has_value() &&
       std::any_of(offload_plan->tasks.begin(), offload_plan->tasks.end(),
                   [](const auto &task) {
-                    return task.memory_strategy == "shared_staged_1d";
+                    return task.memory_strategy == "shared_staged_1d" ||
+                           task.memory_strategy == "shared_staged_2d";
                   });
   if (has_shared_staged_task) {
     TI_COMPILE_PROFILER("cpp.ir.exec.make_external_shared_staged");

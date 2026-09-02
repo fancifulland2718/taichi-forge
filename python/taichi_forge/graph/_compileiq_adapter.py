@@ -246,7 +246,8 @@ class _CompileIQExecutableAdapter:
                 or len(specs) < 2
                 or space.baseline.memory_recipe_manifest.strategy != "direct"
                 or any(
-                    spec.memory_recipe_manifest.strategy != "shared_staged_1d"
+                    spec.memory_recipe_manifest.strategy
+                    not in ("shared_staged_1d", "shared_staged_2d")
                     for spec in specs[1:]
                 )
             ):

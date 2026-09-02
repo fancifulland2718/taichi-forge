@@ -34,10 +34,11 @@ _CUDA_STRUCTURED_CONTROL_RECIPE_IDS = tuple(
     for recipe_id in domain
 )
 
-_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 4
+_GRAPH_MEMORY_RECIPE_SCHEMA_VERSION = 5
 _GRAPH_MEMORY_RECIPE_PREFIXES = {
     "direct": "graph-memory:direct:",
     "shared_staged_1d": "graph-memory:shared-staged-1d:",
+    "shared_staged_2d": "graph-memory:shared-staged-2d:",
 }
 
 _GRAPH_OFFLOAD_FUSION_RECIPE_SCHEMA_VERSION = 1
@@ -102,6 +103,215 @@ def _canonical_json(value):
     )
 
 
+def _validate_graph_memory_2d_payload(payload):
+    sources = payload.get("staged_sources")
+    pairs = payload.get("memory_disjoint_pairs")
+    layouts = payload.get("memory_layout_requirements")
+    expected_fields = {
+        "arg_index",
+        "arg_name",
+        "iteration_shape",
+        "iteration_origin",
+        "tile_shape",
+        "halo_low",
+        "halo_high",
+        "element_bytes",
+        "scalar_bytes",
+        "element_shape",
+        "lane_count",
+        "alignment",
+        "byte_offset",
+        "tile_extents",
+        "tile_elements",
+        "tile_bytes",
+        "access_offsets",
+        "logical_output_count",
+        "direct_input_records",
+        "staged_input_records",
+        "direct_input_bytes",
+        "staged_input_bytes",
+    }
+    if (
+        not isinstance(sources, list)
+        or not 1 <= len(sources) <= 2
+        or any(
+            not isinstance(source, dict) or frozenset(source) != expected_fields
+            for source in sources
+        )
+        or not isinstance(pairs, list)
+        or not pairs
+        or not isinstance(layouts, list)
+        or not layouts
+    ):
+        raise ValueError("two-dimensional GraphMemory contract is incomplete")
+    indices = tuple(source["arg_index"] for source in sources)
+    if indices != tuple(sorted(set(indices))):
+        raise ValueError("two-dimensional GraphMemory source order is not canonical")
+
+    common_domain = None
+    common_tile = None
+    tile_end = 0
+    source_names = set()
+    for source in sources:
+        integer_fields = (
+            "arg_index",
+            "element_bytes",
+            "scalar_bytes",
+            "lane_count",
+            "alignment",
+            "byte_offset",
+            "tile_elements",
+            "tile_bytes",
+            "logical_output_count",
+            "direct_input_records",
+            "staged_input_records",
+            "direct_input_bytes",
+            "staged_input_bytes",
+        )
+        vectors = {
+            name: source[name]
+            for name in (
+                "iteration_shape",
+                "iteration_origin",
+                "tile_shape",
+                "halo_low",
+                "halo_high",
+                "tile_extents",
+            )
+        }
+        if (
+            not isinstance(source["arg_name"], str)
+            or not source["arg_name"]
+            or source["arg_name"] in source_names
+            or any(
+                isinstance(source[name], bool) or not isinstance(source[name], int)
+                for name in integer_fields
+            )
+            or any(
+                not isinstance(vector, list)
+                or len(vector) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in vector
+                )
+                for vector in vectors.values()
+            )
+            or any(value <= 0 for value in vectors["iteration_shape"])
+            or any(value <= 0 for value in vectors["tile_shape"])
+            or any(value <= 0 for value in vectors["tile_extents"])
+            or source["scalar_bytes"] not in (2, 4, 8)
+            or not isinstance(source["element_shape"], list)
+            or len(source["element_shape"]) > 2
+            or any(
+                isinstance(extent, bool) or not isinstance(extent, int) or extent <= 0
+                for extent in source["element_shape"]
+            )
+            or not 1 <= source["lane_count"] <= 16
+            or source["lane_count"] != math.prod(source["element_shape"] or (1,))
+            or source["element_bytes"] != source["scalar_bytes"] * source["lane_count"]
+            or source["alignment"] not in (2, 4, 8)
+            or source["byte_offset"] < tile_end
+            or source["byte_offset"] % source["alignment"]
+        ):
+            raise ValueError("two-dimensional GraphMemory source ABI is invalid")
+        offsets = source["access_offsets"]
+        if (
+            not isinstance(offsets, list)
+            or len(offsets) < 2
+            or any(
+                not isinstance(offset, list)
+                or len(offset) != 2
+                or any(
+                    isinstance(value, bool) or not isinstance(value, int)
+                    for value in offset
+                )
+                for offset in offsets
+            )
+            or offsets != sorted(offsets)
+            or len({tuple(offset) for offset in offsets}) != len(offsets)
+        ):
+            raise ValueError("two-dimensional GraphMemory access offsets are invalid")
+        halo_low = [min(offset[axis] for offset in offsets) for axis in range(2)]
+        halo_high = [max(offset[axis] for offset in offsets) for axis in range(2)]
+        expected_tile_extents = [
+            vectors["tile_shape"][axis] + halo_high[axis] - halo_low[axis]
+            for axis in range(2)
+        ]
+        expected_staged_records = 0
+        for outer in range(0, vectors["iteration_shape"][0], vectors["tile_shape"][0]):
+            outer_records = (
+                min(
+                    vectors["tile_shape"][0],
+                    vectors["iteration_shape"][0] - outer,
+                )
+                + halo_high[0]
+                - halo_low[0]
+            )
+            for inner in range(
+                0, vectors["iteration_shape"][1], vectors["tile_shape"][1]
+            ):
+                inner_records = (
+                    min(
+                        vectors["tile_shape"][1],
+                        vectors["iteration_shape"][1] - inner,
+                    )
+                    + halo_high[1]
+                    - halo_low[1]
+                )
+                expected_staged_records += outer_records * inner_records
+        logical_count = math.prod(vectors["iteration_shape"])
+        if (
+            vectors["halo_low"] != halo_low
+            or vectors["halo_high"] != halo_high
+            or vectors["tile_extents"] != expected_tile_extents
+            or source["tile_elements"] != math.prod(expected_tile_extents)
+            or source["tile_bytes"] != source["tile_elements"] * source["element_bytes"]
+            or source["logical_output_count"] != logical_count
+            or source["direct_input_records"] != logical_count * len(offsets)
+            or source["staged_input_records"] != expected_staged_records
+            or source["direct_input_bytes"]
+            != source["direct_input_records"] * source["element_bytes"]
+            or source["staged_input_bytes"]
+            != source["staged_input_records"] * source["element_bytes"]
+        ):
+            raise ValueError("two-dimensional GraphMemory tile traffic is invalid")
+        domain = (vectors["iteration_shape"], vectors["iteration_origin"])
+        if common_domain is None:
+            common_domain = domain
+            common_tile = vectors["tile_shape"]
+        elif domain != common_domain or vectors["tile_shape"] != common_tile:
+            raise ValueError("two-dimensional GraphMemory sources disagree on policy")
+        source_names.add(source["arg_name"])
+        tile_end = source["byte_offset"] + source["tile_bytes"]
+    if tile_end > 32 * 1024:
+        raise ValueError("two-dimensional GraphMemory shared budget is invalid")
+    if any(
+        not isinstance(layout, list)
+        or len(layout) != 6
+        or not isinstance(layout[0], str)
+        or not layout[0]
+        or not isinstance(layout[1], list)
+        or len(layout[1]) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in layout[1]
+        )
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in layout[2:4]
+        )
+        or not isinstance(layout[4], list)
+        or len(layout[4]) > 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in layout[4]
+        )
+        or layout[5] != "row_major_2d"
+        for layout in layouts
+    ):
+        raise ValueError("two-dimensional GraphMemory binding layout is invalid")
+
+
 @dataclass(frozen=True)
 class _GraphMemoryRecipeManifest:
     """Immutable complete physical recipe retained and verified by Forge."""
@@ -154,6 +364,12 @@ class _GraphMemoryRecipeManifest:
             or not isinstance(layouts, list)
         ):
             raise ValueError("GraphMemory physical memory contract is invalid")
+        if strategy == "shared_staged_2d":
+            _validate_graph_memory_2d_payload(payload)
+            expected = prefix + _canonical_hash(payload)[:24]
+            if self.recipe_id != expected:
+                raise ValueError("GraphMemory recipe ID does not match its payload")
+            return
         if strategy == "direct":
             if sources or pairs or layouts:
                 raise ValueError("direct GraphMemory recipe must not own staged layout")
@@ -2129,7 +2345,7 @@ def _build_executable_optimization_space(
                 "GraphMemory domain requires direct and generated candidates"
             )
         if memory_recipe_manifests[0].strategy != "direct" or any(
-            manifest.strategy != "shared_staged_1d"
+            manifest.strategy not in ("shared_staged_1d", "shared_staged_2d")
             for manifest in memory_recipe_manifests[1:]
         ):
             raise ValueError("GraphMemory domain must order direct before shared-stage")

@@ -85,6 +85,11 @@ class TI_DLL_EXPORT Kernel : public Callable {
     // is the canonical top-level external-argument subset staged by the
     // complete GraphMemory recipe.
     std::vector<int> memory_source_arg_indices;
+    // Complete compiler-owned physical policy for a canonical flattened 2-D
+    // range. Empty for direct and one-dimensional shared staging.
+    std::vector<int> memory_domain_shape;
+    std::vector<int> memory_domain_origin;
+    std::vector<int> memory_tile_shape;
   };
 
   struct OffloadExecutionPlan {
@@ -203,6 +208,9 @@ class TI_DLL_EXPORT Kernel : public Callable {
       const std::vector<int> &range_work_per_thread_targets,
       const std::vector<std::string> &memory_strategies,
       const std::vector<std::vector<int>> &memory_source_arg_indices,
+      const std::vector<std::vector<int>> &memory_domain_shapes,
+      const std::vector<std::vector<int>> &memory_domain_origins,
+      const std::vector<std::vector<int>> &memory_tile_shapes,
       const std::vector<std::vector<int>> &fusion_groups);
 
   const std::optional<OffloadExecutionPlan> &get_offload_execution_plan()

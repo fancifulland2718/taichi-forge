@@ -15,7 +15,7 @@ _CUDA_MIN_BLOCKS_PER_SM = (1, 2, 4)
 _CUDA_MAX_REGISTERS = (None, 0, 24, 48)
 _CUDA_GRID_RESIDENCY_WAVES = (None, 1, 2, 4)
 _RANGE_WORK_PER_THREAD_TARGETS = (1, 2, 4, 8)
-_MEMORY_STRATEGIES = ("direct", "shared_staged_1d")
+_MEMORY_STRATEGIES = ("direct", "shared_staged_1d", "shared_staged_2d")
 
 
 def _canonical_json(value):
@@ -87,6 +87,9 @@ class _TaskOptimizationSpec:
     range_work_per_thread_target: int = 1
     memory_strategy: str = "direct"
     memory_source_arg_indices: tuple[int, ...] = ()
+    memory_domain_shape: tuple[int, ...] = ()
+    memory_domain_origin: tuple[int, ...] = ()
+    memory_tile_shape: tuple[int, ...] = ()
 
     def __post_init__(self):
         if not isinstance(self.logical_task_id, str) or not self.logical_task_id:
@@ -111,7 +114,10 @@ class _TaskOptimizationSpec:
         if self.range_work_per_thread_target not in (_RANGE_WORK_PER_THREAD_TARGETS):
             raise ValueError("range_work_per_thread_target must be 1, 2, 4, or 8")
         if self.memory_strategy not in _MEMORY_STRATEGIES:
-            raise ValueError("memory_strategy must be 'direct' or 'shared_staged_1d'")
+            raise ValueError(
+                "memory_strategy must be 'direct', 'shared_staged_1d', or "
+                "'shared_staged_2d'"
+            )
         memory_source_arg_indices = tuple(self.memory_source_arg_indices)
         if (
             any(
@@ -129,8 +135,31 @@ class _TaskOptimizationSpec:
             "memory_source_arg_indices",
             memory_source_arg_indices,
         )
-        if self.memory_strategy == "direct" and memory_source_arg_indices:
-            raise ValueError("memory_source_arg_indices require shared_staged_1d")
+        memory_domain_shape = tuple(self.memory_domain_shape)
+        memory_domain_origin = tuple(self.memory_domain_origin)
+        memory_tile_shape = tuple(self.memory_tile_shape)
+        for name, values in (
+            ("memory_domain_shape", memory_domain_shape),
+            ("memory_domain_origin", memory_domain_origin),
+            ("memory_tile_shape", memory_tile_shape),
+        ):
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in values
+            ):
+                raise TypeError(f"{name} must contain integers")
+        if any(value <= 0 for value in (*memory_domain_shape, *memory_tile_shape)):
+            raise ValueError("memory domain and tile extents must be positive")
+        object.__setattr__(self, "memory_domain_shape", memory_domain_shape)
+        object.__setattr__(self, "memory_domain_origin", memory_domain_origin)
+        object.__setattr__(self, "memory_tile_shape", memory_tile_shape)
+        if self.memory_strategy == "direct" and (
+            memory_source_arg_indices
+            or memory_domain_shape
+            or memory_domain_origin
+            or memory_tile_shape
+        ):
+            raise ValueError("memory policy metadata requires a shared-staged strategy")
         if self.memory_strategy == "shared_staged_1d" and (
             self.task_kind != "range_for"
             or self.workgroup_size is None
@@ -140,6 +169,27 @@ class _TaskOptimizationSpec:
             raise ValueError(
                 "shared_staged_1d requires a range_for task, an exact "
                 "workgroup_size, automatic grid residency, and one item per thread"
+            )
+        if self.memory_strategy == "shared_staged_1d" and (
+            memory_domain_shape or memory_domain_origin or memory_tile_shape
+        ):
+            raise ValueError(
+                "shared_staged_1d does not accept a two-dimensional policy"
+            )
+        if self.memory_strategy == "shared_staged_2d" and (
+            self.task_kind != "range_for"
+            or self.workgroup_size is None
+            or self.grid_residency_waves is not None
+            or self.range_work_per_thread_target != 1
+            or len(memory_domain_shape) != 2
+            or len(memory_domain_origin) != 2
+            or len(memory_tile_shape) != 2
+            or memory_tile_shape[0] * memory_tile_shape[1] != self.workgroup_size
+        ):
+            raise ValueError(
+                "shared_staged_2d requires a range_for task, exact two-dimensional "
+                "domain/origin/tile metadata, automatic grid residency, and one "
+                "logical output per thread"
             )
         if self.task_kind != "range_for" and (
             self.workgroup_size is not None
@@ -165,6 +215,9 @@ class _TaskOptimizationSpec:
             and self.range_work_per_thread_target == 1
             and self.memory_strategy == "direct"
             and not self.memory_source_arg_indices
+            and not self.memory_domain_shape
+            and not self.memory_domain_origin
+            and not self.memory_tile_shape
         )
 
     @property
@@ -470,6 +523,15 @@ class _OffloadExecutionPlan:
                 raise ValueError(
                     f"task {spec.task_index} materialized different staged sources"
                 )
+            if spec.memory_strategy == "shared_staged_2d" and (
+                tuple(manifest.staged_iteration_shape) != spec.memory_domain_shape
+                or tuple(manifest.staged_iteration_origin) != spec.memory_domain_origin
+                or tuple(manifest.staged_tile_shape) != spec.memory_tile_shape
+                or manifest.range_mapping != "shared_tiled_2d_one_to_one"
+            ):
+                raise ValueError(
+                    f"task {spec.task_index} materialized a different 2D policy"
+                )
         return True
 
     @property
@@ -498,6 +560,9 @@ class _OffloadExecutionPlan:
             [task.range_work_per_thread_target for task in self.tasks],
             [task.memory_strategy for task in self.tasks],
             [list(task.memory_source_arg_indices) for task in self.tasks],
+            [list(task.memory_domain_shape) for task in self.tasks],
+            [list(task.memory_domain_origin) for task in self.tasks],
+            [list(task.memory_tile_shape) for task in self.tasks],
             [list(group) for group in self.fusion_groups],
         )
 

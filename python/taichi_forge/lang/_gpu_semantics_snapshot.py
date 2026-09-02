@@ -182,7 +182,7 @@ def _access_footprint(effect, metadata):
             "workgroup-uniform control",
             binding_time=_GpuBindingTime.LOGICAL,
         ),
-        provenance="pre_offload_affine_access_metadata_v3",
+        provenance="pre_offload_affine_access_metadata_v4",
     )
 
 
@@ -215,6 +215,8 @@ def _iteration_domain(metadata):
             "axis": int(domain["axis"]),
             "begin": int(domain["begin"]),
             "end": int(domain["end"]),
+            "logical_shape": tuple(domain.get("logical_shape", ())),
+            "logical_origin": tuple(domain.get("logical_origin", ())),
         },
         _GpuBindingTime.LOGICAL,
         _GpuOwnership.COMPILER,

@@ -2976,6 +2976,38 @@ void gpu_parallel_range_for_shared_staged(RuntimeContext *context,
     epilogue(context, tls_ptr);
 }
 
+void gpu_parallel_range_for_shared_staged_2d(RuntimeContext *context,
+                                             int begin,
+                                             int end,
+                                             int logical_height,
+                                             int logical_width,
+                                             int tile_height,
+                                             int tile_width,
+                                             range_for_xlogue prologue,
+                                             range_for_xlogue bls_prologue,
+                                             RangeForTaskFunc *func,
+                                             range_for_xlogue epilogue,
+                                             const std::size_t tls_size) {
+  int tiles_per_row = (logical_width + tile_width - 1) / tile_width;
+  int tile_row = block_idx() / tiles_per_row;
+  int tile_column = block_idx() % tiles_per_row;
+  int local_row = thread_idx() / tile_width;
+  int local_column = thread_idx() % tile_width;
+  int row = tile_row * tile_height + local_row;
+  int column = tile_column * tile_width + local_column;
+  int idx = begin + row * logical_width + column;
+  alignas(8) char tls_buffer[tls_size];
+  auto tls_ptr = &tls_buffer[0];
+  if (prologue)
+    prologue(context, tls_ptr);
+  bls_prologue(context, tls_ptr);
+  block_barrier();
+  if (row < logical_height && column < logical_width && idx < end)
+    func(context, tls_ptr, idx);
+  if (epilogue)
+    epilogue(context, tls_ptr);
+}
+
 struct mesh_task_helper_context {
   RuntimeContext *context;
   mesh_for_xlogue prologue{nullptr};

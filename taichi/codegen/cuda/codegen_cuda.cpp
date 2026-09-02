@@ -747,9 +747,21 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
     auto [begin, end] = get_range_for_bounds(stmt);
     if (stmt->external_shared_staged) {
       TI_ASSERT(bls_prologue != nullptr);
-      call("gpu_parallel_range_for_shared_staged", get_arg(0), begin, end,
-           tls_prologue, bls_prologue, body, epilogue,
-           tlctx->get_constant(stmt->tls_size));
+      if (stmt->external_shared_iteration_shape.size() == 2) {
+        TI_ASSERT(stmt->external_shared_tile_shape.size() == 2);
+        call("gpu_parallel_range_for_shared_staged_2d", get_arg(0), begin,
+             end,
+             tlctx->get_constant(stmt->external_shared_iteration_shape[0]),
+             tlctx->get_constant(stmt->external_shared_iteration_shape[1]),
+             tlctx->get_constant(stmt->external_shared_tile_shape[0]),
+             tlctx->get_constant(stmt->external_shared_tile_shape[1]),
+             tls_prologue, bls_prologue, body, epilogue,
+             tlctx->get_constant(stmt->tls_size));
+      } else {
+        call("gpu_parallel_range_for_shared_staged", get_arg(0), begin, end,
+             tls_prologue, bls_prologue, body, epilogue,
+             tlctx->get_constant(stmt->tls_size));
+      }
     } else if (stmt->one_to_one) {
       // CUDA bounded Graph payloads keep the backend's ordinary
       // saturation-capped grid-stride scheduler. Only the logical range end
@@ -977,7 +989,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
       }
       finalize_offloaded_task_function();
       current_task->grid_dim = stmt->grid_dim;
-      if (stmt->task_type == Type::range_for) {
+      if (stmt->task_type == Type::range_for &&
+          !(stmt->external_shared_staged &&
+            stmt->external_shared_iteration_shape.size() == 2)) {
         if (stmt->const_begin && stmt->const_end) {
           int num_threads = stmt->end_value - stmt->begin_value;
           int grid_dim = ((num_threads % stmt->block_dim) == 0)

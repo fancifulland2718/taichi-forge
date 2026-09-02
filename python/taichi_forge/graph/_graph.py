@@ -1,4 +1,5 @@
 import itertools
+import math
 import os
 import threading
 import time
@@ -3154,6 +3155,7 @@ class ParallelStorageFact:
     byte_end: Optional[int]
     compact_contiguous: Optional[bool]
     index_shape: Tuple[int, ...]
+    index_strides_bytes: Tuple[int, ...]
     element_shape: Tuple[int, ...]
     scalar_count: Optional[int]
     record_stride: Optional[int]
@@ -9700,6 +9702,7 @@ def _unsupported_parallel_storage_fact(resource, failure_reason, owner_status):
         byte_end=None,
         compact_contiguous=None,
         index_shape=(),
+        index_strides_bytes=(),
         element_shape=(),
         scalar_count=None,
         record_stride=None,
@@ -9730,6 +9733,9 @@ def _parallel_storage_fact(resource, description, owner_status):
         byte_end=int(properties.get("reachable_end", descriptor.byte_offset)),
         compact_contiguous=bool(properties.get("compact_contiguous", False)),
         index_shape=tuple(int(value) for value in descriptor.index_shape),
+        index_strides_bytes=tuple(
+            int(value) for value in descriptor.index_strides_bytes
+        ),
         element_shape=tuple(int(value) for value in descriptor.element_shape),
         scalar_count=int(properties.get("scalar_count", 0)),
         record_stride=int(properties.get("record_stride", 0)),
@@ -11145,6 +11151,15 @@ class _GraphSpec:
             return f"volatile_device_extent:{name}"
         if isinstance(value, ProviderOwnedNdarrayBinding):
             return f"volatile_provider_binding:{name}"
+        if isinstance(value, DenseNdarrayView) and (
+            name in self.binding_plan.memory_recipe_names
+            and self.binding_plan.memory_recipe_publish_frame_stable
+        ):
+            # A GraphMemory BindingVersion retains the canonical owner and an
+            # exact generation-qualified RuntimeStorageArgument. Rank, pitch,
+            # offset, and owner liveness are therefore publish-time facts, not
+            # reasons to reconstruct a descriptor during every replay.
+            return None
         if isinstance(value, (DenseNdarrayView, ScalarField, MatrixField)):
             return f"volatile_dense_storage:{name}"
         if isinstance(value, Matrix) and value.is_host_access:
@@ -11609,6 +11624,7 @@ class _GraphSpec:
                         byte_end=None,
                         compact_contiguous=None,
                         index_shape=(),
+                        index_strides_bytes=(),
                         element_shape=(),
                         scalar_count=None,
                         record_stride=None,
@@ -11871,6 +11887,7 @@ class _GraphSpec:
             storage[name] = (fact, description)
 
         for requirement in self.memory_layout_requirements:
+            expected_index_shape = ()
             if len(requirement) == 4:
                 name, minimum_records, record_stride, alignment = requirement
                 expected_element_shape = ()
@@ -11878,40 +11895,68 @@ class _GraphSpec:
             elif len(requirement) == 6:
                 (
                     name,
-                    minimum_records,
+                    minimum_extent,
                     record_stride,
                     alignment,
                     expected_element_shape,
                     expected_layout,
                 ) = requirement
                 expected_element_shape = tuple(expected_element_shape)
+                if isinstance(minimum_extent, (tuple, list)):
+                    expected_index_shape = tuple(int(value) for value in minimum_extent)
+                    minimum_records = None
+                else:
+                    minimum_records = int(minimum_extent)
             else:
                 raise TaichiRuntimeError(
                     "Graph memory recipe has an invalid layout certificate"
                 )
-            minimum_description = (
-                f"{minimum_records} scalar elements"
-                if not expected_element_shape
-                else f"{minimum_records} records and element shape "
-                f"{expected_element_shape}"
-            )
             fact, _ = storage[name]
+            if expected_index_shape:
+                layout_valid = (
+                    expected_layout == "row_major_2d"
+                    and len(expected_index_shape) == 2
+                    and len(fact.index_shape) == 2
+                    and len(fact.index_strides_bytes) == 2
+                    and all(
+                        actual >= minimum
+                        for actual, minimum in zip(
+                            fact.index_shape, expected_index_shape
+                        )
+                    )
+                    and fact.index_strides_bytes[0]
+                    >= fact.index_shape[1] * record_stride
+                    and fact.index_strides_bytes[1] == record_stride
+                )
+                minimum_description = (
+                    f"index shape at least {expected_index_shape}, positive "
+                    f"row pitch, and packed {record_stride}-byte inner records"
+                )
+            else:
+                layout_valid = (
+                    bool(fact.compact_contiguous)
+                    and len(fact.index_shape) == 1
+                    and fact.index_shape[0] >= minimum_records
+                    and expected_layout in ("scalar", "aos")
+                )
+                minimum_description = (
+                    f"at least {minimum_records} scalar elements"
+                    if not expected_element_shape
+                    else f"at least {minimum_records} records and element shape "
+                    f"{expected_element_shape}"
+                )
             if (
                 not fact.supported
                 or fact.owner_status != "kNone"
-                or not fact.compact_contiguous
-                or len(fact.index_shape) != 1
-                or fact.index_shape[0] < minimum_records
+                or not layout_valid
                 or fact.element_shape != expected_element_shape
                 or fact.record_stride != record_stride
                 or fact.byte_offset is None
                 or fact.byte_offset % alignment != 0
-                or expected_layout not in ("scalar", "aos")
             ):
                 raise TaichiRuntimeError(
-                    "Graph memory recipe requires a compact "
-                    f"one-dimensional {record_stride}-byte layout for {name!r}, "
-                    f"aligned to {alignment} bytes with at least "
+                    "Graph memory recipe requires a certified layout for "
+                    f"{name!r}, aligned to {alignment} bytes with "
                     f"{minimum_description}"
                 )
         for left, right in self.memory_disjoint_pairs:
@@ -12876,6 +12921,348 @@ def _bounded_semantic_kernel_identity(kernel_cpp):
     return identity
 
 
+def _graph_shared_staged_2d_contract(raw, task, args):
+    if (
+        task.get("range_mapping") != "shared_tiled_2d_one_to_one"
+        or isinstance(task.get("selected_block_size"), bool)
+        or not isinstance(task.get("selected_block_size"), int)
+        or task["selected_block_size"] <= 0
+        or not isinstance(task.get("static_shared_bytes"), int)
+        or task["static_shared_bytes"] <= 0
+        or task["static_shared_bytes"] > 32 * 1024
+    ):
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared-staged task did not materialize "
+            "its exact BLS mapping"
+        )
+    iteration_shape = tuple(task.get("staged_iteration_shape", ()))
+    iteration_origin = tuple(task.get("staged_iteration_origin", ()))
+    tile_shape = tuple(task.get("staged_tile_shape", ()))
+    if (
+        len(iteration_shape) != 2
+        or len(iteration_origin) != 2
+        or len(tile_shape) != 2
+        or any(
+            isinstance(value, bool) or not isinstance(value, int)
+            for value in (*iteration_shape, *iteration_origin, *tile_shape)
+        )
+        or any(value <= 0 for value in (*iteration_shape, *tile_shape))
+        or tile_shape[0] * tile_shape[1] != task["selected_block_size"]
+    ):
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared-staged task has no exact domain "
+            "and tile policy"
+        )
+    staged_indices = tuple(task.get("staged_external_arg_indices", ()))
+    halo_lows = tuple(tuple(axis) for axis in task.get("staged_halo_lows_nd", ()))
+    halo_highs = tuple(tuple(axis) for axis in task.get("staged_halo_highs_nd", ()))
+    access_offsets = tuple(
+        tuple(tuple(offset) for offset in source)
+        for source in task.get("staged_access_offsets", ())
+    )
+    byte_offsets = tuple(task.get("staged_byte_offsets", ()))
+    element_bytes = tuple(task.get("staged_element_bytes", ()))
+    scalar_bytes = tuple(task.get("staged_scalar_bytes", ()))
+    element_shapes = tuple(
+        tuple(shape) for shape in task.get("staged_element_shapes", ())
+    )
+    if (
+        not 1 <= len(staged_indices) <= 2
+        or any(
+            len(values) != len(staged_indices)
+            for values in (
+                halo_lows,
+                halo_highs,
+                access_offsets,
+                byte_offsets,
+                element_bytes,
+                scalar_bytes,
+                element_shapes,
+            )
+        )
+        or staged_indices != tuple(sorted(set(staged_indices)))
+        or any(not 0 <= index < len(args) for index in staged_indices)
+        or any(len(bounds) != 2 for bounds in (*halo_lows, *halo_highs))
+        or any(
+            len(offset) != 2
+            for source_offsets in access_offsets
+            for offset in source_offsets
+        )
+    ):
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared-staged task has incomplete ordered "
+            "tile metadata"
+        )
+
+    metadata = raw["graph_metadata"]
+    domain = metadata.get("iteration_domain", {})
+    if (
+        not metadata.get("available", False)
+        or metadata.get("opaque", True)
+        or metadata.get("blocker")
+        or domain.get("kind") != "constant_range"
+        or tuple(domain.get("logical_shape", ())) != iteration_shape
+        or tuple(domain.get("logical_origin", ())) != iteration_origin
+        or domain.get("begin") != 0
+        or domain.get("end") != iteration_shape[0] * iteration_shape[1]
+        or task.get("constant_range_size") != domain.get("end")
+    ):
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared staging requires one compiler-proven "
+            "canonical flattened ndrange"
+        )
+
+    effects = {}
+    for effect in metadata.get("effects", ()):
+        path = tuple(int(index) for index in effect.get("arg_id", ()))
+        if effect.get("resource_kind") != "argument" or len(path) != 1:
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared staging supports top-level "
+                "ndarray effects only"
+            )
+        index = path[0]
+        if not 0 <= index < len(args):
+            raise TaichiRuntimeError(
+                "Graph shared-staged effect argument is outside the symbolic ABI"
+            )
+        symbolic = args[index]
+        symbolic_element_shape = tuple(symbolic.element_shape)
+        if (
+            getattr(symbolic, "tag", None) != ArgKind.NDARRAY
+            or symbolic.field_dim != 2
+            or len(symbolic_element_shape) > 2
+            or any(extent <= 0 for extent in symbolic_element_shape)
+        ):
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared-staged effects require rank-two "
+                "scalar, vector, or matrix ndarrays"
+            )
+        effects[index] = effect
+
+    logical_output_count = iteration_shape[0] * iteration_shape[1]
+
+    def staged_record_count(halo_low, halo_high):
+        total = 0
+        for outer in range(0, iteration_shape[0], tile_shape[0]):
+            outer_records = (
+                min(tile_shape[0], iteration_shape[0] - outer)
+                + halo_high[0]
+                - halo_low[0]
+            )
+            for inner in range(0, iteration_shape[1], tile_shape[1]):
+                inner_records = (
+                    min(tile_shape[1], iteration_shape[1] - inner)
+                    + halo_high[1]
+                    - halo_low[1]
+                )
+                total += outer_records * inner_records
+        return total
+
+    staged_sources = []
+    source_names = []
+    tile_end = 0
+    for (
+        index,
+        halo_low,
+        halo_high,
+        offsets,
+        byte_offset,
+        reported_element_bytes,
+        reported_scalar_bytes,
+        reported_element_shape,
+    ) in zip(
+        staged_indices,
+        halo_lows,
+        halo_highs,
+        access_offsets,
+        byte_offsets,
+        element_bytes,
+        scalar_bytes,
+        element_shapes,
+    ):
+        staged_effect = effects.get(index)
+        footprint = (
+            None if staged_effect is None else staged_effect.get("footprint", {})
+        )
+        proven_offsets = tuple(
+            tuple(int(value) for value in offset)
+            for offset in (
+                () if footprint is None else footprint.get("affine_index_offsets", ())
+            )
+        )
+        proven_halo = tuple(
+            tuple(int(value) for value in axis)
+            for axis in (() if footprint is None else footprint.get("halo", ()))
+        )
+        if (
+            staged_effect is None
+            or staged_effect.get("access") != "read"
+            or footprint.get("pattern") != "stencil"
+            or footprint.get("iteration_rank") != 2
+            or tuple(offsets) != tuple(sorted(set(offsets)))
+            or tuple(offsets) != proven_offsets
+            or proven_halo != tuple(zip(halo_low, halo_high))
+            or len(offsets) < 2
+            or any(iteration_origin[axis] + halo_low[axis] < 0 for axis in range(2))
+        ):
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared-staged input does not match its "
+                "compiler-proven stencil footprint"
+            )
+        symbolic = args[index]
+        source_name = symbolic.name
+        source_dtype = symbolic.dtype()
+        scalar_stride = _ti_core.data_type_size(source_dtype)
+        alignment = _ti_core.data_type_alignment(source_dtype)
+        source_element_shape = tuple(symbolic.element_shape)
+        lane_count = math.prod(source_element_shape) if source_element_shape else 1
+        record_stride = scalar_stride * lane_count
+        tile_extents = tuple(
+            tile_shape[axis] + halo_high[axis] - halo_low[axis] for axis in range(2)
+        )
+        tile_elements = tile_extents[0] * tile_extents[1]
+        tile_bytes = tile_elements * record_stride
+        expected_offset = (tile_end + alignment - 1) // alignment * alignment
+        if (
+            scalar_stride not in (2, 4, 8)
+            or lane_count > 16
+            or reported_scalar_bytes != scalar_stride
+            or reported_element_shape != source_element_shape
+            or reported_element_bytes != record_stride
+            or byte_offset != expected_offset
+            or byte_offset % alignment
+            or tile_elements <= 0
+            or byte_offset + tile_bytes > task["static_shared_bytes"]
+        ):
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared-staged ordered tile layout is "
+                "not exact"
+            )
+        direct_input_records = logical_output_count * len(offsets)
+        staged_input_records = staged_record_count(halo_low, halo_high)
+        tile_end = byte_offset + tile_bytes
+        source_names.append(source_name)
+        staged_sources.append(
+            {
+                "arg_index": index,
+                "arg_name": source_name,
+                "iteration_shape": iteration_shape,
+                "iteration_origin": iteration_origin,
+                "tile_shape": tile_shape,
+                "halo_low": tuple(halo_low),
+                "halo_high": tuple(halo_high),
+                "element_bytes": record_stride,
+                "scalar_bytes": scalar_stride,
+                "element_shape": source_element_shape,
+                "lane_count": lane_count,
+                "alignment": alignment,
+                "byte_offset": byte_offset,
+                "tile_extents": tile_extents,
+                "tile_elements": tile_elements,
+                "tile_bytes": tile_bytes,
+                "access_offsets": tuple(offsets),
+                "logical_output_count": logical_output_count,
+                "direct_input_records": direct_input_records,
+                "staged_input_records": staged_input_records,
+                "direct_input_bytes": direct_input_records * record_stride,
+                "staged_input_bytes": staged_input_records * record_stride,
+            }
+        )
+    if tile_end != task["static_shared_bytes"]:
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared-staged aggregate shared-memory "
+            "budget is not exact"
+        )
+
+    def layout_requirement(name, minimum_shape, stride, alignment, shape):
+        return (
+            name,
+            tuple(minimum_shape),
+            stride,
+            alignment,
+            tuple(shape),
+            "row_major_2d",
+        )
+
+    layout_requirements = [
+        layout_requirement(
+            source["arg_name"],
+            tuple(
+                iteration_origin[axis]
+                + iteration_shape[axis]
+                + source["halo_high"][axis]
+                for axis in range(2)
+            ),
+            source["element_bytes"],
+            source["alignment"],
+            source["element_shape"],
+        )
+        for source in staged_sources
+    ]
+    output_names = []
+    for index, effect in effects.items():
+        if index in staged_indices:
+            continue
+        footprint = effect.get("footprint", {})
+        if effect.get("access") == "read" and footprint.get("pattern") == "stencil":
+            continue
+        offsets = tuple(
+            tuple(value for value in offset)
+            for offset in footprint.get("affine_index_offsets", ())
+        )
+        if (
+            effect.get("access") != "write"
+            or footprint.get("pattern") != "exact_pointwise"
+            or offsets != ((0, 0),)
+        ):
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared-staged outputs must be proven "
+                "write-only and pointwise"
+            )
+        symbolic = args[index]
+        output_name = symbolic.name
+        output_names.append(output_name)
+        output_scalar_stride = _ti_core.data_type_size(symbolic.dtype())
+        output_alignment = _ti_core.data_type_alignment(symbolic.dtype())
+        output_element_shape = tuple(symbolic.element_shape)
+        output_lane_count = (
+            math.prod(output_element_shape) if output_element_shape else 1
+        )
+        output_stride = output_scalar_stride * output_lane_count
+        if output_scalar_stride not in (2, 4, 8) or output_lane_count > 16:
+            raise TaichiRuntimeError(
+                "Graph two-dimensional shared-staged outputs use an unsupported "
+                "record ABI"
+            )
+        layout_requirements.append(
+            layout_requirement(
+                output_name,
+                tuple(
+                    iteration_origin[axis] + iteration_shape[axis] for axis in range(2)
+                ),
+                output_stride,
+                output_alignment,
+                output_element_shape,
+            )
+        )
+    if not output_names or set(source_names) & set(output_names):
+        raise TaichiRuntimeError(
+            "Graph two-dimensional shared-staged recipe requires distinct "
+            "write-only outputs"
+        )
+    return (
+        tuple(
+            sorted(
+                (source_name, output_name)
+                for source_name in source_names
+                for output_name in output_names
+            )
+        ),
+        tuple(sorted(layout_requirements)),
+        tuple(staged_sources),
+    )
+
+
 def _graph_shared_staged_contract(kernel_cpp, args):
     raw = impl.get_runtime().prog._kernel_gpu_semantics_snapshot(kernel_cpp)
     if _backend_name(raw["backend"]) != "cuda":
@@ -12885,13 +13272,16 @@ def _graph_shared_staged_contract(kernel_cpp, args):
     staged_tasks = tuple(
         task
         for task in raw["tasks"]
-        if task.get("requested_memory_strategy") == "shared_staged_1d"
+        if task.get("requested_memory_strategy")
+        in ("shared_staged_1d", "shared_staged_2d")
     )
     if len(staged_tasks) != 1:
         raise TaichiRuntimeError(
             "Graph shared-staged recipe must materialize exactly one staged task"
         )
     task = staged_tasks[0]
+    if task.get("requested_memory_strategy") == "shared_staged_2d":
+        return _graph_shared_staged_2d_contract(raw, task, args)
     if (
         task.get("task_type") != "range_for"
         or task.get("range_mapping") != "shared_tiled_one_to_one"
@@ -13259,7 +13649,7 @@ def _graph_memory_candidate_preflight(kernel_cpp, args):
         or metadata.get("opaque", True)
         or metadata.get("blocker")
     ):
-        return False, "candidate has no proven CUDA pre-offload effects", ()
+        return False, "candidate has no proven CUDA pre-offload effects", (), (), ()
     domain = metadata.get("iteration_domain", {})
     begin = domain.get("begin")
     end = domain.get("end")
@@ -13272,7 +13662,25 @@ def _graph_memory_candidate_preflight(kernel_cpp, args):
         or begin < 0
         or begin >= end
     ):
-        return False, "candidate has no exact non-empty constant range", ()
+        return False, "candidate has no exact non-empty constant range", (), (), ()
+
+    logical_shape = tuple(domain.get("logical_shape", ()))
+    logical_origin = tuple(domain.get("logical_origin", ()))
+    if logical_shape or logical_origin:
+        if (
+            len(logical_shape) != 2
+            or len(logical_origin) != 2
+            or any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in (*logical_shape, *logical_origin)
+            )
+            or any(value <= 0 for value in logical_shape)
+            or logical_shape[0] * logical_shape[1] != end - begin
+        ):
+            return False, "candidate has invalid canonical ndrange metadata", (), (), ()
+        expected_rank = 2
+    else:
+        expected_rank = 1
 
     staged_sources = set()
     outputs = set()
@@ -13285,32 +13693,68 @@ def _graph_memory_candidate_preflight(kernel_cpp, args):
             or not isinstance(path[0], int)
             or not 0 <= path[0] < len(args)
         ):
-            return False, "candidate effects are not top-level symbolic arguments", ()
+            return (
+                False,
+                "candidate effects are not top-level symbolic arguments",
+                (),
+                (),
+                (),
+            )
         index = path[0]
         symbolic = args[index]
-        if getattr(symbolic, "tag", None) != ArgKind.NDARRAY or symbolic.field_dim != 1:
-            return False, "candidate effects are not one-dimensional ndarrays", ()
+        if (
+            getattr(symbolic, "tag", None) != ArgKind.NDARRAY
+            or symbolic.field_dim != expected_rank
+        ):
+            return (
+                False,
+                "candidate effects do not match the compiler-proven ndarray rank",
+                (),
+                (),
+                (),
+            )
         footprint = effect.get("footprint", {})
         access = effect.get("access")
         pattern = footprint.get("pattern")
-        offsets = tuple(footprint.get("affine_offsets", ()))
+        if expected_rank == 1:
+            offsets = tuple(footprint.get("affine_offsets", ()))
+        else:
+            offsets = tuple(
+                tuple(offset) for offset in footprint.get("affine_index_offsets", ())
+            )
         if access == "read" and pattern == "stencil":
             halo = tuple(tuple(axis) for axis in footprint.get("halo", ()))
-            if len(set(offsets)) < 2 and not (
-                len(halo) == 1 and len(halo[0]) == 2 and halo[0][0] < halo[0][1]
+            if (
+                footprint.get("iteration_rank") != expected_rank
+                or len(set(offsets)) < 2
+                or len(halo) != expected_rank
+                or any(len(axis) != 2 for axis in halo)
             ):
-                return False, "staged input has fewer than two affine offsets", ()
+                return False, "staged input has incomplete affine offsets", (), (), ()
             staged_sources.add(index)
             continue
-        if access == "write" and pattern == "exact_pointwise" and offsets == (0,):
+        zero = (0,) if expected_rank == 1 else ((0, 0),)
+        if access == "write" and pattern == "exact_pointwise" and offsets == zero:
             outputs.add(index)
             continue
-        return False, "candidate effects do not form a stencil-to-pointwise route", ()
+        return (
+            False,
+            "candidate effects do not form a stencil-to-pointwise route",
+            (),
+            (),
+            (),
+        )
     if not 1 <= len(staged_sources) <= 2:
-        return False, "candidate requires one or two proven stencil inputs", ()
+        return False, "candidate requires one or two proven stencil inputs", (), (), ()
     if not outputs or staged_sources.intersection(outputs):
-        return False, "candidate requires distinct write-only outputs", ()
-    return True, "", tuple(sorted(staged_sources))
+        return False, "candidate requires distinct write-only outputs", (), (), ()
+    return (
+        True,
+        "",
+        tuple(sorted(staged_sources)),
+        logical_shape,
+        logical_origin,
+    )
 
 
 def _graph_memory_recipe_manifest(
@@ -13407,7 +13851,15 @@ class _GraphMemoryRecipeSource:
             if not self.selected_recipe_id:
                 self.selected_recipe_id = direct_manifest.recipe_id
 
-    def _build_candidate(self, block_dim, source_indices):
+    def _build_candidate(
+        self,
+        block_dim,
+        source_indices,
+        *,
+        domain_shape=(),
+        domain_origin=(),
+        tile_shape=(),
+    ):
         from taichi_forge.lang._offload_execution_plan import (
             _bind_offload_execution_plan,
         )
@@ -13416,11 +13868,15 @@ class _GraphMemoryRecipeSource:
         range_task = next(
             task for task in self.baseline_plan.tasks if task.task_kind == "range_for"
         )
+        strategy = "shared_staged_2d" if tile_shape else "shared_staged_1d"
         staged_plan = self.baseline_plan.replace_task(
             range_task.task_index,
             workgroup_size=block_dim,
-            memory_strategy="shared_staged_1d",
+            memory_strategy=strategy,
             memory_source_arg_indices=tuple(source_indices),
+            memory_domain_shape=tuple(domain_shape),
+            memory_domain_origin=tuple(domain_origin),
+            memory_tile_shape=tuple(tile_shape),
         )
         staged_binding = _bind_offload_execution_plan(self.kernel_fn, staged_plan)
         staged_kernel_cpp = gen_cpp_kernel(
@@ -13439,7 +13895,7 @@ class _GraphMemoryRecipeSource:
             manifests,
             self.args,
             self.label,
-            strategy="shared_staged_1d",
+            strategy=strategy,
             memory_disjoint_pairs=contracts,
             memory_layout_requirements=layout_requirements,
             staged_sources=staged_sources,
@@ -13460,9 +13916,14 @@ class _GraphMemoryRecipeSource:
             candidates = []
             try:
                 self._prepare_definition()
-                eligible, reason, source_indices = _graph_memory_candidate_preflight(
-                    self.baseline_kernel_cpp,
-                    self.args,
+                (
+                    eligible,
+                    reason,
+                    source_indices,
+                    domain_shape,
+                    domain_origin,
+                ) = _graph_memory_candidate_preflight(
+                    self.baseline_kernel_cpp, self.args
                 )
                 if eligible:
                     subsets = tuple(
@@ -13470,27 +13931,45 @@ class _GraphMemoryRecipeSource:
                         for size in range(1, len(source_indices) + 1)
                         for subset in itertools.combinations(source_indices, size)
                     )
-                    # Preserve the former 128-thread/all-source candidate as
-                    # the first generated neighbor for compatibility and then
-                    # expand coherently around it.
-                    configurations = ((128, source_indices),) + tuple(
-                        (block_dim, subset)
-                        for block_dim in (64, 128, 256)
-                        for subset in subsets
-                        if (block_dim, subset) != (128, source_indices)
-                    )
-                    for block_dim, subset in configurations:
+                    if domain_shape:
+                        configurations = tuple(
+                            (
+                                tile_shape[0] * tile_shape[1],
+                                subset,
+                                tile_shape,
+                            )
+                            for tile_shape in ((8, 8), (8, 16), (16, 16))
+                            for subset in subsets
+                        )
+                    else:
+                        # Preserve the former 128-thread/all-source candidate
+                        # as the first generated neighbor for compatibility.
+                        configurations = ((128, source_indices, ()),) + tuple(
+                            (block_dim, subset, ())
+                            for block_dim in (64, 128, 256)
+                            for subset in subsets
+                            if (block_dim, subset) != (128, source_indices)
+                        )
+                    for block_dim, subset, tile_shape in configurations:
                         try:
-                            candidates.append(self._build_candidate(block_dim, subset))
+                            candidates.append(
+                                self._build_candidate(
+                                    block_dim,
+                                    subset,
+                                    domain_shape=domain_shape,
+                                    domain_origin=domain_origin,
+                                    tile_shape=tile_shape,
+                                )
+                            )
                         except (
                             ValueError,
                             RuntimeError,
                             TaichiCompilationError,
                             TaichiRuntimeError,
                         ) as error:
-                            self._candidate_failures[(block_dim, subset)] = (
-                                str(error).strip() or type(error).__name__
-                            )
+                            self._candidate_failures[
+                                (block_dim, subset, tuple(tile_shape))
+                            ] = (str(error).strip() or type(error).__name__)
                 else:
                     self._candidate_failures[()] = reason
             except (
@@ -15030,7 +15509,7 @@ class GraphBuilder:
             )
         if (
             sum(
-                task.memory_strategy == "shared_staged_1d"
+                task.memory_strategy in ("shared_staged_1d", "shared_staged_2d")
                 for task in kernel_fn.plan.tasks
             )
             != 1

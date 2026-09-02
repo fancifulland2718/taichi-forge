@@ -342,6 +342,9 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &range_work_per_thread_targets,
     const std::vector<std::string> &memory_strategies,
     const std::vector<std::vector<int>> &memory_source_arg_indices,
+    const std::vector<std::vector<int>> &memory_domain_shapes,
+    const std::vector<std::vector<int>> &memory_domain_origins,
+    const std::vector<std::vector<int>> &memory_tile_shapes,
     const std::vector<std::vector<int>> &fusion_groups) {
   TI_ERROR_IF(
       offload_execution_plan_frozen_.load(std::memory_order_acquire),
@@ -364,7 +367,10 @@ void Kernel::set_offload_execution_plan(
           grid_residency_waves.size() != task_count ||
           range_work_per_thread_targets.size() != task_count ||
           memory_strategies.size() != task_count ||
-          memory_source_arg_indices.size() != task_count,
+          memory_source_arg_indices.size() != task_count ||
+          memory_domain_shapes.size() != task_count ||
+          memory_domain_origins.size() != task_count ||
+          memory_tile_shapes.size() != task_count,
       "offload execution plan vectors must have one entry per physical task");
 
   OffloadExecutionPlan plan;
@@ -428,9 +434,10 @@ void Kernel::set_offload_execution_plan(
     task.range_work_per_thread_target =
         range_work_per_thread_targets[index];
     TI_ERROR_IF(memory_strategies[index] != "direct" &&
-                    memory_strategies[index] != "shared_staged_1d",
-                "offload task memory strategy must be 'direct' or "
-                "'shared_staged_1d', got {}",
+                    memory_strategies[index] != "shared_staged_1d" &&
+                    memory_strategies[index] != "shared_staged_2d",
+                "offload task memory strategy must be 'direct', "
+                "'shared_staged_1d', or 'shared_staged_2d', got {}",
                 memory_strategies[index]);
     task.memory_strategy = memory_strategies[index];
     const auto &source_indices = memory_source_arg_indices[index];
@@ -442,10 +449,18 @@ void Kernel::set_offload_execution_plan(
                         [](int value) { return value < 0; }),
         "offload task memory source indices must be sorted unique "
         "nonnegative integers");
-    TI_ERROR_IF(task.memory_strategy == "direct" && !source_indices.empty(),
-                "offload task memory source indices require "
-                "shared_staged_1d");
+    const auto &domain_shape = memory_domain_shapes[index];
+    const auto &domain_origin = memory_domain_origins[index];
+    const auto &tile_shape = memory_tile_shapes[index];
+    TI_ERROR_IF(task.memory_strategy == "direct" &&
+                    (!source_indices.empty() || !domain_shape.empty() ||
+                     !domain_origin.empty() || !tile_shape.empty()),
+                "offload task memory policy metadata requires a shared-stage "
+                "strategy");
     task.memory_source_arg_indices = source_indices;
+    task.memory_domain_shape = domain_shape;
+    task.memory_domain_origin = domain_origin;
+    task.memory_tile_shape = tile_shape;
     TI_ERROR_IF(
         task.memory_strategy == "shared_staged_1d" &&
             (task.task_kind != "range_for" || task.workgroup_size == 0 ||
@@ -454,6 +469,24 @@ void Kernel::set_offload_execution_plan(
         "shared_staged_1d requires a range_for task, an exact "
         "workgroup size, automatic grid residency, and one item per "
         "thread");
+    TI_ERROR_IF(task.memory_strategy == "shared_staged_1d" &&
+                    (!domain_shape.empty() || !domain_origin.empty() ||
+                     !tile_shape.empty()),
+                "shared_staged_1d does not accept a two-dimensional policy");
+    const auto positive_pair = [](const std::vector<int> &values) {
+      return values.size() == 2 && values[0] > 0 && values[1] > 0;
+    };
+    TI_ERROR_IF(
+        task.memory_strategy == "shared_staged_2d" &&
+            (task.task_kind != "range_for" || task.workgroup_size == 0 ||
+             task.grid_residency_waves != 0 ||
+             task.range_work_per_thread_target != 1 ||
+             !positive_pair(domain_shape) || domain_origin.size() != 2 ||
+             !positive_pair(tile_shape) ||
+             static_cast<std::int64_t>(tile_shape[0]) * tile_shape[1] !=
+                 task.workgroup_size),
+        "shared_staged_2d requires exact two-dimensional domain, origin, and "
+        "tile metadata with one logical output per thread");
     const bool nonbaseline =
         task.workgroup_size != 0 ||
         task.thread_local_mode != TaskLaunchThreadLocalMode::automatic ||
@@ -490,7 +523,10 @@ void Kernel::set_offload_execution_plan(
           task.grid_residency_waves != 0 ||
           task.range_work_per_thread_target != 1 ||
           task.memory_strategy != "direct" ||
-          !task.memory_source_arg_indices.empty();
+          !task.memory_source_arg_indices.empty() ||
+          !task.memory_domain_shape.empty() ||
+          !task.memory_domain_origin.empty() ||
+          !task.memory_tile_shape.empty();
       TI_ERROR_IF(task.task_kind != "range_for" || nonbaseline,
                   "offload fusion requires baseline range_for source tasks");
     }

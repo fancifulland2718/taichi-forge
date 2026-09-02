@@ -146,6 +146,452 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_2d_stencil_materializes_true_tiles_and_replays_exactly():
+    rows = 67
+    columns = 53
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for row, column in ti.ndrange((1, rows - 1), (1, columns - 1)):
+            output[row, column] = (
+                source[row - 1, column]
+                + source[row, column - 1]
+                + source[row, column] * 2.0
+                + source[row, column + 1]
+                + source[row + 1, column]
+            )
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    source_graph = builder.compile()
+
+    metadata = source_graph._spec.compiled_graph()._dispatch_metadata[0]
+    assert metadata["version"] == 4
+    assert metadata["blocker"] == ""
+    assert metadata["iteration_domain"] == {
+        "kind": "constant_range",
+        "begin": 0,
+        "end": 65 * 51,
+        "arg_id": [],
+        "axis": -1,
+        "logical_shape": [65, 51],
+        "logical_origin": [1, 1],
+    }
+    source_effect = next(
+        effect for effect in metadata["effects"] if effect["arg_id"] == [0]
+    )
+    assert source_effect["footprint"]["iteration_rank"] == 2
+    assert source_effect["footprint"]["affine_index_offsets"] == [
+        [-1, 0],
+        [0, -1],
+        [0, 0],
+        [0, 1],
+        [1, 0],
+    ]
+    assert source_effect["footprint"]["halo"] == [[-1, 1], [-1, 1]]
+
+    search = compileiq_recipe_search(source_graph)
+    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+    assert len(manifests) == 4
+    staged_manifests = {
+        recipe_id: manifest["memory_recipe_manifest"]
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_2d"
+    }
+    assert {
+        tuple(manifest["offload_plan"]["tasks"][0]["memory_tile_shape"])
+        for manifest in staged_manifests.values()
+    } == {(8, 8), (8, 16), (16, 16)}
+    staged_id, staged = next(
+        (recipe_id, manifest)
+        for recipe_id, manifest in staged_manifests.items()
+        if manifest["offload_plan"]["tasks"][0]["memory_tile_shape"] == [8, 16]
+    )
+    assert staged["schema_version"] == 5
+    assert staged["memory_disjoint_pairs"] == [["source", "output"]]
+    assert {
+        (item[0], tuple(item[1]), item[2], item[3], tuple(item[4]), item[5])
+        for item in staged["memory_layout_requirements"]
+    } == {
+        ("source", (rows, columns), 4, 4, (), "row_major_2d"),
+        ("output", (rows - 1, columns - 1), 4, 4, (), "row_major_2d"),
+    }
+    staged_source = staged["staged_sources"][0]
+    assert staged_source["iteration_shape"] == [65, 51]
+    assert staged_source["iteration_origin"] == [1, 1]
+    assert staged_source["tile_shape"] == [8, 16]
+    assert staged_source["tile_extents"] == [10, 18]
+    assert staged_source["tile_elements"] == 180
+    assert staged_source["tile_bytes"] == 720
+    assert staged_source["logical_output_count"] == 3315
+    assert staged_source["direct_input_records"] == 16575
+    assert staged_source["staged_input_records"] == 4897
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with search.materialize(parameters) as materialized:
+        search.verify_materialized_graph(parameters, materialized)
+        graph = materialized.executor
+        task = next(
+            item for item in graph.task_manifest() if item.task_type == "range_for"
+        )
+        assert task.requested_memory_strategy == "shared_staged_2d"
+        assert task.range_mapping == "shared_tiled_2d_one_to_one"
+        assert task.selected_block_size == 128
+        assert task.staged_iteration_shape == (65, 51)
+        assert task.staged_iteration_origin == (1, 1)
+        assert task.staged_tile_shape == (8, 16)
+        assert task.static_shared_bytes == 720
+
+        source = ti.ndarray(ti.f32, shape=(rows, columns))
+        output = ti.ndarray(ti.f32, shape=(rows, columns))
+        values = (
+            np.arange(rows * columns, dtype=np.int64).reshape(rows, columns) % 41
+        ).astype(np.float32)
+        source.from_numpy(values)
+        output.fill(0)
+        bindings = graph.bind({"source": source, "output": output})
+        assert bindings.fast_path_qualified
+        for _ in range(5):
+            graph.run(bindings)
+        ti.sync()
+        expected = np.zeros_like(values)
+        expected[1:-1, 1:-1] = (
+            values[:-2, 1:-1]
+            + values[1:-1, :-2]
+            + values[1:-1, 1:-1] * 2.0
+            + values[1:-1, 2:]
+            + values[2:, 1:-1]
+        )
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        assert graph.binding_statistics()["version_fast_replays"] >= 5
+
+        with pytest.raises(RuntimeError, match="requires proven disjoint storage"):
+            graph.bind({"source": source, "output": source})
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_2d_two_source_domain_keeps_all_staging_subsets_distinct():
+    rows = 35
+    columns = 29
+
+    @ti.kernel
+    def two_source_stencil(
+        vertical: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        horizontal: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for row, column in ti.ndrange((1, rows - 1), (1, columns - 1)):
+            output[row, column] = (
+                vertical[row - 1, column]
+                + vertical[row, column]
+                + vertical[row + 1, column]
+                + horizontal[row, column - 1]
+                + horizontal[row, column + 1]
+            )
+
+    vertical_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vertical", ti.f32, ndim=2)
+    horizontal_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY, "horizontal", ti.f32, ndim=2
+    )
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(two_source_stencil, vertical_arg, horizontal_arg, output_arg)
+    source_graph = builder.compile()
+    search = compileiq_recipe_search(source_graph)
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+
+    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
+    assert len(manifests) == 10
+    staged_variants = {
+        (
+            tuple(
+                source["arg_index"]
+                for source in manifest["memory_recipe_manifest"]["staged_sources"]
+            ),
+            tuple(
+                manifest["memory_recipe_manifest"]["offload_plan"]["tasks"][0][
+                    "memory_tile_shape"
+                ]
+            ),
+        )
+        for manifest in manifests.values()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_2d"
+    }
+    assert staged_variants == {
+        (source_indices, tile_shape)
+        for source_indices in ((0,), (1,), (0, 1))
+        for tile_shape in ((8, 8), (8, 16), (16, 16))
+    }
+    staged_id, staged = next(
+        (recipe_id, manifest["memory_recipe_manifest"])
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_2d"
+        and tuple(
+            source["arg_index"]
+            for source in manifest["memory_recipe_manifest"]["staged_sources"]
+        )
+        == (0, 1)
+        and manifest["memory_recipe_manifest"]["offload_plan"]["tasks"][0][
+            "memory_tile_shape"
+        ]
+        == [8, 8]
+    )
+    assert [source["access_offsets"] for source in staged["staged_sources"]] == [
+        [[-1, 0], [0, 0], [1, 0]],
+        [[0, -1], [0, 1]],
+    ]
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with search.materialize(parameters) as materialized:
+        graph = materialized.executor
+        search.verify_materialized_graph(parameters, materialized)
+        task = next(
+            item for item in graph.task_manifest() if item.task_type == "range_for"
+        )
+        assert task.staged_external_arg_indices == (0, 1)
+        assert task.staged_halo_lows_nd == ((-1, 0), (0, -1))
+        assert task.staged_halo_highs_nd == ((1, 0), (0, 1))
+        assert task.static_shared_bytes == 640
+
+        vertical = ti.ndarray(ti.f32, shape=(rows, columns))
+        horizontal = ti.ndarray(ti.f32, shape=(rows, columns))
+        output = ti.ndarray(ti.f32, shape=(rows, columns))
+        vertical_values = np.arange(rows * columns, dtype=np.float32).reshape(
+            rows, columns
+        )
+        horizontal_values = vertical_values * 0.25 + 3.0
+        vertical.from_numpy(vertical_values)
+        horizontal.from_numpy(horizontal_values)
+        output.fill(0)
+        bindings = graph.bind(
+            {"vertical": vertical, "horizontal": horizontal, "output": output}
+        )
+        for _ in range(3):
+            graph.run(bindings)
+        ti.sync()
+        expected = np.zeros_like(vertical_values)
+        expected[1:-1, 1:-1] = (
+            vertical_values[:-2, 1:-1]
+            + vertical_values[1:-1, 1:-1]
+            + vertical_values[2:, 1:-1]
+            + horizontal_values[1:-1, :-2]
+            + horizontal_values[1:-1, 2:]
+        )
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_2d_high_reuse_recipe_has_exact_physical_accounting():
+    rows = 37
+    columns = 31
+    radius = 2
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for row, column in ti.ndrange(
+            (radius, rows - radius), (radius, columns - radius)
+        ):
+            value = 0.0
+            for delta_row, delta_column in ti.static(
+                ti.ndrange((-radius, radius + 1), (-radius, radius + 1))
+            ):
+                value += source[row + delta_row, column + delta_column]
+            output[row, column] = value
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    source_graph = builder.compile()
+    search = compileiq_recipe_search(source_graph)
+    manifests = {
+        recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
+    }
+
+    assert len(manifests) == 4
+    staged_id, staged = next(
+        (recipe_id, manifest["memory_recipe_manifest"])
+        for recipe_id, manifest in manifests.items()
+        if manifest["memory_recipe_manifest"]["strategy"] == "shared_staged_2d"
+        and manifest["memory_recipe_manifest"]["offload_plan"]["tasks"][0][
+            "memory_tile_shape"
+        ]
+        == [16, 16]
+    )
+    staged_source = staged["staged_sources"][0]
+    assert staged_source["iteration_shape"] == [33, 27]
+    assert staged_source["iteration_origin"] == [2, 2]
+    assert staged_source["tile_extents"] == [20, 20]
+    assert staged_source["tile_elements"] == 400
+    assert staged_source["logical_output_count"] == 891
+    assert staged_source["direct_input_records"] == 22275
+    assert staged_source["staged_input_records"] == 1575
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with search.materialize(parameters) as materialized:
+        search.verify_materialized_graph(parameters, materialized)
+        graph = materialized.executor
+        task = next(
+            item for item in graph.task_manifest() if item.task_type == "range_for"
+        )
+        assert task.actual_geometry_kind == "static_exact_tiled_2d"
+        assert task.actual_grid_size == 6
+        assert task.actual_block_size == 256
+        assert task.static_shared_bytes == 1600
+
+        source = ti.ndarray(ti.f32, shape=(rows, columns))
+        output = ti.ndarray(ti.f32, shape=(rows, columns))
+        values = (
+            np.arange(rows * columns, dtype=np.int64).reshape(rows, columns) % 29
+        ).astype(np.float32)
+        source.from_numpy(values)
+        output.fill(0)
+        bindings = graph.bind({"source": source, "output": output})
+        for _ in range(3):
+            graph.run(bindings)
+        ti.sync()
+        expected = np.zeros_like(values)
+        for delta_row in range(-radius, radius + 1):
+            for delta_column in range(-radius, radius + 1):
+                expected[radius:-radius, radius:-radius] += values[
+                    radius + delta_row : rows - radius + delta_row,
+                    radius + delta_column : columns - radius + delta_column,
+                ]
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_2d_compound_records_keep_packed_lane_layout():
+    rows = 21
+    columns = 19
+    vec2 = ti.types.vector(2, ti.f32)
+
+    @ti.kernel
+    def stencil(
+        source: ti.types.ndarray(dtype=vec2, ndim=2),
+        output: ti.types.ndarray(dtype=vec2, ndim=2),
+    ):
+        for row, column in ti.ndrange((1, rows - 1), (1, columns - 1)):
+            output[row, column] = (
+                source[row - 1, column]
+                + source[row, column - 1]
+                + source[row, column]
+                + source[row, column + 1]
+                + source[row + 1, column]
+            )
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", vec2, ndim=2)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", vec2, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(stencil, source_arg, output_arg)
+    source_graph = builder.compile()
+    search = compileiq_recipe_search(source_graph)
+    staged_id = next(
+        recipe_id
+        for recipe_id in search.recipe_ids
+        if search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["strategy"]
+        == "shared_staged_2d"
+        and search.recipe_manifest(recipe_id)["memory_recipe_manifest"]["offload_plan"][
+            "tasks"
+        ][0]["memory_tile_shape"]
+        == [8, 8]
+    )
+    staged_source = search.recipe_manifest(staged_id)["memory_recipe_manifest"][
+        "staged_sources"
+    ][0]
+    assert staged_source["element_shape"] == [2]
+    assert staged_source["element_bytes"] == 8
+    assert staged_source["tile_extents"] == [10, 10]
+    assert staged_source["tile_bytes"] == 800
+
+    parameters = {
+        "domain_fingerprint": search.domain_fingerprint,
+        "recipe_id": staged_id,
+    }
+    with search.materialize(parameters) as materialized:
+        graph = materialized.executor
+        search.verify_materialized_graph(parameters, materialized)
+        task = next(
+            item for item in graph.task_manifest() if item.task_type == "range_for"
+        )
+        assert task.staged_element_shapes == ((2,),)
+        assert task.staged_element_bytes == (8,)
+        assert task.static_shared_bytes == 800
+
+        source = ti.Vector.ndarray(2, ti.f32, shape=(rows, columns))
+        output = ti.Vector.ndarray(2, ti.f32, shape=(rows, columns))
+        values = np.arange(rows * columns * 2, dtype=np.float32).reshape(
+            rows, columns, 2
+        )
+        source.from_numpy(values)
+        output.fill(0)
+        bindings = graph.bind({"source": source, "output": output})
+        for _ in range(3):
+            graph.run(bindings)
+        ti.sync()
+        expected = np.zeros_like(values)
+        expected[1:-1, 1:-1] = (
+            values[:-2, 1:-1]
+            + values[1:-1, :-2]
+            + values[1:-1, 1:-1]
+            + values[1:-1, 2:]
+            + values[2:, 1:-1]
+        )
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_memory_2d_rejects_noncanonical_wraparound_coordinates():
+    rows = 33
+    columns = 31
+
+    @ti.kernel
+    def wrapped_stencil(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=2),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=2),
+    ):
+        for row, column in ti.ndrange(rows, columns):
+            output[row, column] = (
+                source[row, column]
+                + source[(row + 1) % rows, column]
+                + source[row, (column + 1) % columns]
+            )
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "source", ti.f32, ndim=2)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(wrapped_stencil, source_arg, output_arg)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+
+    assert len(search.recipe_ids) == 1
+    assert graph._compileiq_graph_memory_status.startswith("candidate_rejected:")
+    assert "memory_recipe_id" not in search.recipe_manifest(search.recipe_ids[0])
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect():
     count = 1031
     radius = 4
@@ -168,7 +614,7 @@ def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect()
     source_graph = builder.compile()
 
     metadata = source_graph._spec.compiled_graph()._dispatch_metadata[0]
-    assert metadata["version"] == 3
+    assert metadata["version"] == 4
     assert metadata["blocker"] == ""
     assert metadata["side_effects"] == []
     source_effect = next(
@@ -192,7 +638,7 @@ def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect()
         == 128
     )
     staged_source = staged["staged_sources"][0]
-    assert staged["schema_version"] == 4
+    assert staged["schema_version"] == 5
     assert staged_source["access_offsets"] == list(range(-radius, radius + 1))
     assert staged_source["logical_output_count"] == 1023
     assert staged_source["direct_input_records"] == 9207
@@ -363,7 +809,7 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
         ]
         == 128
     )
-    assert staged["schema_version"] == 4
+    assert staged["schema_version"] == 5
     assert staged["staged_sources"] == [
         {
             "alignment": 4,
@@ -1081,7 +1527,7 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout():
         scalar_bytes = np.dtype(numpy_dtype).itemsize
         lane_count = int(np.prod(element_shape))
         record_bytes = scalar_bytes * lane_count
-        assert staged["schema_version"] == 4
+        assert staged["schema_version"] == 5
         assert staged["staged_sources"] == [
             {
                 "alignment": scalar_bytes,

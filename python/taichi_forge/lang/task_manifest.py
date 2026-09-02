@@ -54,6 +54,12 @@ class OffloadedTaskManifest:
     staged_element_bytes: tuple
     staged_scalar_bytes: tuple
     staged_element_shapes: tuple
+    staged_iteration_shape: tuple
+    staged_iteration_origin: tuple
+    staged_tile_shape: tuple
+    staged_halo_lows_nd: tuple
+    staged_halo_highs_nd: tuple
+    staged_access_offsets: tuple
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):
@@ -66,10 +72,19 @@ class OffloadedTaskManifest:
             "staged_byte_offsets",
             "staged_element_bytes",
             "staged_scalar_bytes",
+            "staged_iteration_shape",
+            "staged_iteration_origin",
+            "staged_tile_shape",
         ):
             payload[name] = tuple(payload.get(name, ()))
         payload["staged_element_shapes"] = tuple(
             tuple(shape) for shape in payload.get("staged_element_shapes", ())
+        )
+        for name in ("staged_halo_lows_nd", "staged_halo_highs_nd"):
+            payload[name] = tuple(tuple(axis) for axis in payload.get(name, ()))
+        payload["staged_access_offsets"] = tuple(
+            tuple(tuple(offset) for offset in source)
+            for source in payload.get("staged_access_offsets", ())
         )
         return cls(**payload)
 

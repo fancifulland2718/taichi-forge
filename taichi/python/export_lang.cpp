@@ -210,6 +210,12 @@ py::dict offloaded_task_manifest_to_python(
   item["staged_element_bytes"] = task.staged_element_bytes;
   item["staged_scalar_bytes"] = task.staged_scalar_bytes;
   item["staged_element_shapes"] = task.staged_element_shapes;
+  item["staged_iteration_shape"] = task.staged_iteration_shape;
+  item["staged_iteration_origin"] = task.staged_iteration_origin;
+  item["staged_tile_shape"] = task.staged_tile_shape;
+  item["staged_halo_lows_nd"] = task.staged_halo_lows_nd;
+  item["staged_halo_highs_nd"] = task.staged_halo_highs_nd;
+  item["staged_access_offsets"] = task.staged_access_offsets;
   if (task.constant_range_size.has_value()) {
     item["constant_range_size"] = *task.constant_range_size;
   } else {
@@ -258,6 +264,8 @@ py::dict graph_kernel_metadata_to_python(
   domain["axis"] = metadata.iteration_domain.axis;
   domain["begin"] = metadata.iteration_domain.begin;
   domain["end"] = metadata.iteration_domain.end;
+  domain["logical_shape"] = metadata.iteration_domain.logical_shape;
+  domain["logical_origin"] = metadata.iteration_domain.logical_origin;
   item["iteration_domain"] = std::move(domain);
   py::list effects;
   for (const auto &effect : metadata.effects) {
@@ -273,6 +281,8 @@ py::dict graph_kernel_metadata_to_python(
     footprint["iteration_rank"] = effect.footprint.iteration_rank;
     footprint["affine_coefficients"] =
         effect.footprint.affine_coefficients;
+    footprint["affine_index_offsets"] =
+        effect.footprint.affine_index_offsets;
     footprint["affine_offsets"] = effect.footprint.affine_offsets;
     footprint["halo"] = effect.footprint.halo;
     footprint["contiguous_axis"] = effect.footprint.contiguous_axis;

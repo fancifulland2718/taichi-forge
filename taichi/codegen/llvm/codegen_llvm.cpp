@@ -2512,6 +2512,18 @@ void TaskCodeGenLLVM::annotate_current_task_metadata(OffloadedStmt *stmt) {
       stmt->external_shared_scalar_bytes;
   current_task->external_shared_element_shapes =
       stmt->external_shared_element_shapes;
+  current_task->external_shared_iteration_shape =
+      stmt->external_shared_iteration_shape;
+  current_task->external_shared_iteration_origin =
+      stmt->external_shared_iteration_origin;
+  current_task->external_shared_tile_shape =
+      stmt->external_shared_tile_shape;
+  current_task->external_shared_halo_lows_nd =
+      stmt->external_shared_halo_lows_nd;
+  current_task->external_shared_halo_highs_nd =
+      stmt->external_shared_halo_highs_nd;
+  current_task->external_shared_access_offsets =
+      stmt->external_shared_access_offsets;
   auto mutation = detect_sparse_topology_mutation(stmt);
   current_task->may_mutate_sparse_topology = mutation.may_mutate;
   current_task->sparse_mutation_snode_id = mutation.snode_id;
@@ -2907,13 +2919,44 @@ void TaskCodeGenLLVM::visit(BlockCornerIndexStmt *stmt) {
   } else if (stmt->loop->is<OffloadedStmt>() &&
              stmt->loop->as<OffloadedStmt>()->task_type ==
                  OffloadedStmt::TaskType::range_for &&
-             stmt->loop->as<OffloadedStmt>()->external_shared_staged &&
-             stmt->index == 0) {
+             stmt->loop->as<OffloadedStmt>()->external_shared_staged) {
     auto *offload = stmt->loop->as<OffloadedStmt>();
-    auto *block_corner =
-        builder->CreateMul(call("block_idx"), call("block_dim"));
-    llvm_val[stmt] = builder->CreateAdd(
-        block_corner, tlctx->get_constant(offload->begin_value));
+    if (offload->external_shared_iteration_shape.size() == 2) {
+      TI_ASSERT(offload->external_shared_iteration_origin.size() == 2);
+      TI_ASSERT(offload->external_shared_tile_shape.size() == 2);
+      TI_ASSERT(stmt->index == 0 || stmt->index == 1);
+      const int logical_width =
+          offload->external_shared_iteration_shape[1];
+      const int tile_height = offload->external_shared_tile_shape[0];
+      const int tile_width = offload->external_shared_tile_shape[1];
+      const int tiles_per_row =
+          (logical_width + tile_width - 1) / tile_width;
+      auto *block_index = call("block_idx");
+      llvm::Value *tile_coordinate = nullptr;
+      int tile_extent = 0;
+      if (stmt->index == 0) {
+        tile_coordinate = builder->CreateSDiv(
+            block_index, tlctx->get_constant(tiles_per_row));
+        tile_extent = tile_height;
+      } else {
+        tile_coordinate = builder->CreateSRem(
+            block_index, tlctx->get_constant(tiles_per_row));
+        tile_extent = tile_width;
+      }
+      auto *corner = builder->CreateMul(
+          tile_coordinate, tlctx->get_constant(tile_extent));
+      llvm_val[stmt] = builder->CreateAdd(
+          corner,
+          tlctx->get_constant(
+              offload->external_shared_iteration_origin[stmt->index]));
+    } else if (stmt->index == 0) {
+      auto *block_corner =
+          builder->CreateMul(call("block_idx"), call("block_dim"));
+      llvm_val[stmt] = builder->CreateAdd(
+          block_corner, tlctx->get_constant(offload->begin_value));
+    } else {
+      TI_NOT_IMPLEMENTED;
+    }
   } else {
     TI_NOT_IMPLEMENTED;
   }

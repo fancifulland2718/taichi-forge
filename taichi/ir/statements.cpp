@@ -440,6 +440,15 @@ std::unique_ptr<Stmt> OffloadedStmt::clone() const {
   new_stmt->external_shared_element_bytes = external_shared_element_bytes;
   new_stmt->external_shared_scalar_bytes = external_shared_scalar_bytes;
   new_stmt->external_shared_element_shapes = external_shared_element_shapes;
+  new_stmt->external_shared_iteration_shape =
+      external_shared_iteration_shape;
+  new_stmt->external_shared_iteration_origin =
+      external_shared_iteration_origin;
+  new_stmt->external_shared_tile_shape = external_shared_tile_shape;
+  new_stmt->external_shared_halo_lows_nd = external_shared_halo_lows_nd;
+  new_stmt->external_shared_halo_highs_nd = external_shared_halo_highs_nd;
+  new_stmt->external_shared_access_offsets =
+      external_shared_access_offsets;
   new_stmt->reversed = reversed;
   new_stmt->is_bit_vectorized = is_bit_vectorized;
   new_stmt->num_cpu_threads = num_cpu_threads;

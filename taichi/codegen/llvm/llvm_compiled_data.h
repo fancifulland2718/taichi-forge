@@ -56,6 +56,13 @@ class OffloadedTask {
   std::vector<int> external_shared_element_bytes;
   std::vector<int> external_shared_scalar_bytes;
   std::vector<std::vector<int>> external_shared_element_shapes;
+  std::vector<int> external_shared_iteration_shape;
+  std::vector<int> external_shared_iteration_origin;
+  std::vector<int> external_shared_tile_shape;
+  std::vector<std::vector<int>> external_shared_halo_lows_nd;
+  std::vector<std::vector<int>> external_shared_halo_highs_nd;
+  std::vector<std::vector<std::vector<int>>>
+      external_shared_access_offsets;
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
@@ -99,6 +106,12 @@ class OffloadedTask {
             external_shared_element_bytes,
             external_shared_scalar_bytes,
             external_shared_element_shapes,
+            external_shared_iteration_shape,
+            external_shared_iteration_origin,
+            external_shared_tile_shape,
+            external_shared_halo_lows_nd,
+            external_shared_halo_highs_nd,
+            external_shared_access_offsets,
             sparse_list_op,
             sparse_list_snode_id,
             sparse_list_parent_snode_id,

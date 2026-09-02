@@ -43,7 +43,7 @@ struct OffloadedTaskManifest {
   std::optional<std::int64_t> selected_grid_size;
   std::optional<std::int64_t> selected_block_size;
 
-  // Proven launch geometry for an ordinary direct invocation. Dynamic or
+  // Proven launch geometry for a materialized invocation. Dynamic or
   // invocation-specific launch paths must leave these empty and explain why.
   std::optional<std::int64_t> actual_grid_size;
   std::optional<std::int64_t> actual_block_size;
@@ -72,6 +72,12 @@ struct OffloadedTaskManifest {
   std::vector<int> staged_element_bytes;
   std::vector<int> staged_scalar_bytes;
   std::vector<std::vector<int>> staged_element_shapes;
+  std::vector<int> staged_iteration_shape;
+  std::vector<int> staged_iteration_origin;
+  std::vector<int> staged_tile_shape;
+  std::vector<std::vector<int>> staged_halo_lows_nd;
+  std::vector<std::vector<int>> staged_halo_highs_nd;
+  std::vector<std::vector<std::vector<int>>> staged_access_offsets;
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

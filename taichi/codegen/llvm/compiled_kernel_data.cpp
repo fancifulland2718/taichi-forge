@@ -86,7 +86,9 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.range_mapping =
         task.task_type == OffloadedTaskType::range_for
             ? (task.external_shared_staged
-                   ? "shared_tiled_one_to_one"
+                   ? (task.external_shared_iteration_shape.size() == 2
+                          ? "shared_tiled_2d_one_to_one"
+                          : "shared_tiled_one_to_one")
                    : (task.one_to_one
                           ? (cuda_execution ? "device_bounded_grid_stride"
                                             : "one_to_one")
@@ -127,6 +129,14 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.staged_element_bytes = task.external_shared_element_bytes;
       item.staged_scalar_bytes = task.external_shared_scalar_bytes;
       item.staged_element_shapes = task.external_shared_element_shapes;
+      item.staged_iteration_shape =
+          task.external_shared_iteration_shape;
+      item.staged_iteration_origin =
+          task.external_shared_iteration_origin;
+      item.staged_tile_shape = task.external_shared_tile_shape;
+      item.staged_halo_lows_nd = task.external_shared_halo_lows_nd;
+      item.staged_halo_highs_nd = task.external_shared_halo_highs_nd;
+      item.staged_access_offsets = task.external_shared_access_offsets;
     }
     if (cpu_execution) {
       item.actual_geometry_kind = "cpu_runtime_scheduler";
@@ -142,7 +152,19 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
       item.selected_block_size = positive_geometry(task.block_dim);
       item.actual_grid_size = item.selected_grid_size;
       item.actual_block_size = item.selected_block_size;
-      if (cuda_execution && task.one_to_one) {
+      if (task.external_shared_staged) {
+        if (task.external_shared_iteration_shape.size() == 2) {
+          item.actual_geometry_kind = "static_exact_tiled_2d";
+          item.actual_geometry_reason =
+              "the Graph shared-staged recipe materialized an exact "
+              "two-dimensional tile grid";
+        } else {
+          item.actual_geometry_kind = "static_exact_tiled_1d";
+          item.actual_geometry_reason =
+              "the Graph shared-staged recipe materialized an exact "
+              "one-dimensional tile grid";
+        }
+      } else if (cuda_execution && task.one_to_one) {
         item.actual_geometry_kind = "cuda_device_bounded_grid_stride";
         item.actual_geometry_reason =
             "the Graph payload uses the saturation-capped static grid and "
