@@ -359,7 +359,7 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
     graph = builder.compile()
     search = compileiq_recipe_search(graph)
     assert graph._compileiq_graph_native_algorithm_status == "complete_recipe_domain"
-    assert len(search.recipe_ids) == 3
+    assert len(search.recipe_ids) == 2
     recipes = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
@@ -370,9 +370,7 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
     assert strategies == {
         "global_atomic",
         "block_shared_dense",
-        "key_partitioned_two_level",
     }
-    expected_owned_bytes = (num_groups + 1) * 4 + count * 4 + num_groups * 4
     physical_ids = set()
 
     with graph.definition.materialization_context() as context:
@@ -400,9 +398,7 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                     "dense_group_limit": 256,
                     "static_shared_bytes": num_groups * 4,
                 }
-            owned_bytes = (
-                expected_owned_bytes if strategy == "key_partitioned_two_level" else 0
-            )
+            owned_bytes = 0
             assert manifest["workspace"]["action_owned_bytes"] == owned_bytes
 
             parameters = _parameters(search, recipe_id)
@@ -422,7 +418,6 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                     {
                         "global_atomic": 0,
                         "block_shared_dense": 0,
-                        "key_partitioned_two_level": 5,
                     }[strategy]
                 )
                 assert executable.debug_info["action_owned_bytes"] == owned_bytes
@@ -430,7 +425,6 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                     {
                         "global_atomic": 1,
                         "block_shared_dense": 1,
-                        "key_partitioned_two_level": 5,
                     }[strategy]
                 )
                 assert executable.backend_command_plan.command_count_exact == (
@@ -450,7 +444,48 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                 )
                 assert memory.provider_generation_requested_bytes_complete
                 physical_ids.add(materialized.materialized_physical_id)
-    assert len(physical_ids) == 3
+    assert len(physical_ids) == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_graph_keyed_aggregation_wide_domain_keeps_only_exact_atomic_recipe():
+    count = 1025
+    num_groups = 8192
+    keys = ti.ndarray(ti.i32, shape=count)
+    values = ti.ndarray(ti.i32, shape=count)
+    output = ti.ndarray(ti.i32, shape=num_groups)
+    indices = np.arange(count, dtype=np.int32)
+    host_keys = (indices * 37 + 11) % num_groups
+    host_keys[::127] = -1
+    host_keys[::191] = num_groups + 3
+    host_values = (np.iinfo(np.int32).max - (indices % 31)).astype(np.int32)
+    expected = np.zeros(num_groups, dtype=np.int32)
+    valid = (host_keys >= 0) & (host_keys < num_groups)
+    np.add.at(expected, host_keys[valid], host_values[valid])
+    keys.from_numpy(host_keys)
+    values.from_numpy(host_values)
+
+    builder = ti.graph.GraphBuilder()
+    builder.keyed_reduce(keys, values, output)
+    graph = builder.compile()
+    search = compileiq_recipe_search(graph)
+    assert len(search.recipe_ids) == 1
+    recipe_id = search.recipe_ids[0]
+    assert "native_algorithm_recipe_manifest" not in search.recipe_manifest(recipe_id)
+    parameters = _parameters(search, recipe_id)
+    with search.materialize(parameters) as materialized:
+        candidate = materialized.executor
+        for _ in range(2):
+            output.fill(123)
+            candidate.run({})
+            ti.sync()
+            np.testing.assert_array_equal(output.to_numpy(), expected)
+        executable = candidate._spec.nodes[0].executable
+        assert executable.debug_info["strategy"] == "global_atomic"
+        assert executable.backend_command_plan.command_count == 1
+        assert executable.backend_command_plan.provider_replay
+        assert not executable.debug_info["nested_graph_replay"]
+        assert executable.debug_info["action_owned_bytes"] == 0
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

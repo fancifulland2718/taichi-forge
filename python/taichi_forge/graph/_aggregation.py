@@ -24,7 +24,7 @@ from taichi_forge.graph._native import (
     NativeGraphExecutable,
     NativeGraphNode,
 )
-from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._memory import make_memory_report
 from taichi_forge.lang import impl, ops, simt
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
@@ -35,92 +35,14 @@ from taichi_forge.types.primitive_types import i32
 
 _ATOMIC_STRATEGY = "global_atomic"
 _BLOCK_SHARED_STRATEGY = "block_shared_dense"
-_TWO_LEVEL_STRATEGY = "key_partitioned_two_level"
 _STRATEGY_METHOD = {
     _ATOMIC_STRATEGY: "cuda_device",
     _BLOCK_SHARED_STRATEGY: "forge_block_shared_dense_v1",
-    _TWO_LEVEL_STRATEGY: "forge_key_partition_v1",
 }
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _BLOCK_SHARED_DIM = 256
 _BLOCK_SHARED_MAX_GROUPS = 256
 _GENERATED_BLOCK_SHARED_KERNELS = {}
-
-
-@kernel
-def _key_partition_clear(
-    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
-    cursor: ndarray_type.ndarray(dtype=i32, ndim=1),
-    output: ndarray_type.ndarray(ndim=1),
-    num_groups: i32,
-):
-    for group in range(num_groups + 1):
-        offsets[group] = 0
-        if group < num_groups:
-            cursor[group] = 0
-            output[group] = 0
-
-
-@kernel
-def _key_partition_count(
-    keys: ndarray_type.ndarray(dtype=i32, ndim=1),
-    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
-    count: i32,
-    num_groups: i32,
-):
-    for index in range(count):
-        key = keys[index]
-        if 0 <= key < num_groups:
-            ops.atomic_add(offsets[key + 1], 1)
-
-
-@kernel
-def _key_partition_prefix(
-    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
-    cursor: ndarray_type.ndarray(dtype=i32, ndim=1),
-    num_groups: i32,
-):
-    running = 0
-    loop_config(serialize=True)
-    for group in range(num_groups):
-        count = offsets[group + 1]
-        offsets[group] = running
-        cursor[group] = running
-        running += count
-    offsets[num_groups] = running
-
-
-@kernel
-def _key_partition_scatter(
-    keys: ndarray_type.ndarray(dtype=i32, ndim=1),
-    values: ndarray_type.ndarray(ndim=1),
-    cursor: ndarray_type.ndarray(dtype=i32, ndim=1),
-    partitioned_values: ndarray_type.ndarray(ndim=1),
-    count: i32,
-    num_groups: i32,
-):
-    for index in range(count):
-        key = keys[index]
-        if 0 <= key < num_groups:
-            position = ops.atomic_add(cursor[key], 1)
-            partitioned_values[position] = values[index]
-
-
-@kernel
-def _key_partition_reduce(
-    offsets: ndarray_type.ndarray(dtype=i32, ndim=1),
-    partitioned_values: ndarray_type.ndarray(ndim=1),
-    output: ndarray_type.ndarray(ndim=1),
-    num_groups: i32,
-):
-    for group in range(num_groups):
-        begin = offsets[group]
-        end = offsets[group + 1]
-        accumulator = partitioned_values[0] * 0
-        loop_config(serialize=True)
-        for local_index in range(end - begin):
-            accumulator += partitioned_values[begin + local_index]
-        output[group] = accumulator
 
 
 def _generated_block_shared_kernels(dtype, count, num_groups):
@@ -236,15 +158,16 @@ class _GraphKeyedAggregationRecipeManifest:
         if not isinstance(workspace, dict):
             raise ValueError("keyed aggregation workspace is incomplete")
         topology = payload.get("topology")
-        expected_topology = {
-            _ATOMIC_STRATEGY: {
+        if strategy == _ATOMIC_STRATEGY:
+            expected_topology = {
                 "kind": _ATOMIC_STRATEGY,
                 "block_dim": 0,
                 "stage_count": 1,
                 "dense_group_limit": 0,
                 "static_shared_bytes": 0,
-            },
-            _BLOCK_SHARED_STRATEGY: {
+            }
+        elif strategy == _BLOCK_SHARED_STRATEGY:
+            expected_topology = {
                 "kind": _BLOCK_SHARED_STRATEGY,
                 "block_dim": _BLOCK_SHARED_DIM,
                 "stage_count": 2,
@@ -252,26 +175,14 @@ class _GraphKeyedAggregationRecipeManifest:
                 "static_shared_bytes": (
                     semantics["num_groups"] * semantics["value_bytes"]
                 ),
-            },
-            _TWO_LEVEL_STRATEGY: {
-                "kind": _TWO_LEVEL_STRATEGY,
-                "block_dim": 128,
-                "stage_count": 5,
-                "dense_group_limit": 0,
-                "static_shared_bytes": 0,
-            },
-        }[strategy]
+            }
+        else:
+            raise AssertionError("unreachable keyed aggregation strategy")
         if topology != expected_topology:
             raise ValueError("keyed aggregation physical topology is incomplete")
         if payload.get("physical_stages") != list(_physical_stages(strategy)):
             raise ValueError("keyed aggregation physical stages are incomplete")
         expected_bytes = 0
-        if strategy == _TWO_LEVEL_STRATEGY:
-            expected_bytes = (
-                (semantics["num_groups"] + 1) * 4
-                + semantics["count"] * semantics["value_bytes"]
-                + semantics["num_groups"] * 4
-            )
         if (
             workspace.get("ownership")
             != ("graph_native_action" if expected_bytes else "none")
@@ -317,33 +228,7 @@ def _physical_stages(strategy):
                 "call_count": 1,
             },
         )
-    return (
-        {
-            "name": "clear_partition_metadata",
-            "execution_kind": "fixed_taichi_kernel",
-            "call_count": 1,
-        },
-        {
-            "name": "count_valid_keys",
-            "execution_kind": "fixed_taichi_kernel",
-            "call_count": 1,
-        },
-        {
-            "name": "prefix_key_ranges",
-            "execution_kind": "fixed_taichi_kernel",
-            "call_count": 1,
-        },
-        {
-            "name": "partition_values_by_key",
-            "execution_kind": "fixed_taichi_kernel",
-            "call_count": 1,
-        },
-        {
-            "name": "reduce_compact_key_ranges",
-            "execution_kind": "fixed_taichi_kernel",
-            "call_count": 1,
-        },
-    )
+    raise AssertionError("unreachable keyed aggregation strategy")
 
 
 class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
@@ -360,7 +245,6 @@ class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
             max_items=source.count,
             max_groups=source.num_groups,
         )
-        self._kernel_calls = ()
         self._nested_graph = None
         self._nested_bindings = None
         if strategy == _BLOCK_SHARED_STRATEGY:
@@ -395,52 +279,6 @@ class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
                     "output": source.output,
                 }
             )
-        elif strategy == _TWO_LEVEL_STRATEGY:
-            offsets, partitioned_values, cursor = self._workspace._get_native_buffers_typed(
-                source.count,
-                source.num_groups,
-                source.values.dtype,
-            )
-            from taichi_forge.graph._native_algorithm import _FrozenKernelCall
-
-            self._kernel_calls = (
-                _FrozenKernelCall(
-                    _key_partition_clear,
-                    offsets,
-                    cursor,
-                    source.output,
-                    source.num_groups,
-                ),
-                _FrozenKernelCall(
-                    _key_partition_count,
-                    source.keys,
-                    offsets,
-                    source.count,
-                    source.num_groups,
-                ),
-                _FrozenKernelCall(
-                    _key_partition_prefix,
-                    offsets,
-                    cursor,
-                    source.num_groups,
-                ),
-                _FrozenKernelCall(
-                    _key_partition_scatter,
-                    source.keys,
-                    source.values,
-                    cursor,
-                    partitioned_values,
-                    source.count,
-                    source.num_groups,
-                ),
-                _FrozenKernelCall(
-                    _key_partition_reduce,
-                    offsets,
-                    partitioned_values,
-                    source.output,
-                    source.num_groups,
-                ),
-            )
         self._plan = None
         self._program = None
         self._preparations = 0
@@ -452,10 +290,6 @@ class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
     def run(self):
         if self._strategy == _BLOCK_SHARED_STRATEGY:
             self._nested_graph.run(self._nested_bindings)
-            return
-        if self._strategy == _TWO_LEVEL_STRATEGY:
-            for call in self._kernel_calls:
-                call.run()
             return
         if self._plan is None:
             experimental_grouped_reduce(
@@ -490,11 +324,7 @@ class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
             command_count_exact=fixed_kernel_route,
             provider_replay=not fixed_kernel_route,
             fragmentation_reason=(
-                (
-                    "forge_block_shared_dense_pipeline"
-                    if self._strategy == _BLOCK_SHARED_STRATEGY
-                    else "forge_key_partition_pipeline"
-                )
+                "forge_block_shared_dense_pipeline"
                 if fixed_kernel_route
                 else "provider_command_not_graph_integrated"
             ),
@@ -521,47 +351,17 @@ class _GraphKeyedAggregationExecutable(NativeGraphExecutable):
             "strategy": self._strategy,
             "method": self._method,
             "provider_preparations": self._preparations,
-            "kernel_plan_preparations": sum(
-                call.preparations for call in self._kernel_calls
-            ),
+            "kernel_plan_preparations": 0,
             "nested_graph_replay": self._nested_graph is not None,
             "action_owned_bytes": self._source.action_owned_bytes(self._strategy),
             "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
         }
 
     def _graph_provider_memory_report(self):
-        components = ()
-        if self._strategy == _TWO_LEVEL_STRATEGY:
-            components = (
-                HardwareMemoryComponent(
-                    "key_offsets",
-                    (self._source.num_groups + 1) * 4,
-                    True,
-                    "provider_generation",
-                    "provider",
-                    resident=True,
-                ),
-                HardwareMemoryComponent(
-                    "partitioned_values",
-                    self._source.count * _dtype_nbytes(self._source.values.dtype),
-                    True,
-                    "provider_generation",
-                    "provider",
-                    resident=True,
-                ),
-                HardwareMemoryComponent(
-                    "partition_cursor",
-                    self._source.num_groups * 4,
-                    True,
-                    "provider_generation",
-                    "provider",
-                    resident=True,
-                ),
-            )
         return make_memory_report(
             "graph_keyed_aggregation",
             "cuda",
-            components,
+            (),
             ownership_scope="graph_native_action",
         )
 
@@ -671,20 +471,13 @@ class _GraphKeyedAggregationRecipeSource:
         )
 
     def action_owned_bytes(self, strategy):
-        if strategy != _TWO_LEVEL_STRATEGY:
-            return 0
-        return (
-            (self.num_groups + 1) * 4
-            + self.count * _dtype_nbytes(self.values.dtype)
-            + self.num_groups * 4
-        )
+        return 0
 
     def _build_manifests(self):
         result = []
         strategies = [_ATOMIC_STRATEGY]
         if self.num_groups <= _BLOCK_SHARED_MAX_GROUPS:
             strategies.append(_BLOCK_SHARED_STRATEGY)
-        strategies.append(_TWO_LEVEL_STRATEGY)
         for strategy in strategies:
             owned = self.action_owned_bytes(strategy)
             result.append(
@@ -698,7 +491,7 @@ class _GraphKeyedAggregationRecipeSource:
                             "block_dim": (
                                 _BLOCK_SHARED_DIM
                                 if strategy == _BLOCK_SHARED_STRATEGY
-                                else (128 if strategy == _TWO_LEVEL_STRATEGY else 0)
+                                else 0
                             ),
                             "stage_count": len(_physical_stages(strategy)),
                             "dense_group_limit": (
