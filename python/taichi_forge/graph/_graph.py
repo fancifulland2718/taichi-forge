@@ -13541,7 +13541,9 @@ class _GraphBoundedRecipeSource:
         self.template_args = template_args
         self.label = label
         self.selected_strategy = selected_strategy
-        self.selected_block = int(selected_block)
+        self.selected_block = (
+            None if selected_block is None else int(selected_block)
+        )
         self._recipe_group_key = ""
 
     def materialize(self, builder, strategy):
