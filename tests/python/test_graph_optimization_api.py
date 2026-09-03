@@ -214,6 +214,10 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
 
     decision = session.run(evaluator)
     report = decision.report
+    assert isinstance(decision, ti.graph.GraphOptimizationOutcome)
+    assert isinstance(report, ti.graph.GraphOptimizationReportV2)
+    assert decision.status == "selected"
+    assert decision.next_action == "apply_selection"
     assert report.search_complete
     assert report.evaluation_count == 10
     assert set(observed) == {recipe.recipe_id for recipe in session.recipes}
@@ -229,6 +233,40 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.compileiq_provenance["verification"] == (
         "bundled_manifest_lock_at_search_start"
     )
+    assert report.compileiq_report.schema_id == (
+        "compileiq.opaque-optimization-report.v1"
+    )
+    assert report.compileiq_report.detail == "summary"
+    assert report.compileiq_report.checkpoint.embedded is False
+    assert report.compileiq_report.trials == ()
+    assert report.selection_reason["provider_claims_used"] is False
+    assert report.outcome_status == "selected"
+    assert report.next_action == "apply_selection"
+    assert report.recipe_annotations
+    selected_annotation = next(
+        item
+        for item in report.recipe_annotations
+        if item["recipe_id"] == decision.selection.recipe_id
+    )
+    assert selected_annotation["measurement"]["complete"]
+    assert selected_annotation["measurement"]["materialized_physical_ids"]
+    assert all(
+        claim["source"] == "provider_declared_not_measured"
+        for item in report.recipe_annotations
+        for claim in item["provider_claims"]
+    )
+    restored_report = ti.graph.GraphOptimizationReportV2.from_json(
+        report.to_json()
+    )
+    assert restored_report.to_dict() == report.to_dict()
+    tampered_report = report.to_dict()
+    tampered_report["selection"]["reason"]["provider_claims_used"] = True
+    with pytest.raises(ValueError, match="identity mismatch"):
+        ti.graph.GraphOptimizationReportV2.from_dict(tampered_report)
+    markdown = report.to_markdown()
+    assert "Taichi Forge Graph Optimization Report" in markdown
+    assert "CompileIQ measurement facts" in markdown
+    assert "Provider notes above are declarations" in markdown
     assert decision.selection_artifact is not None
     resolved = definition.resolve_recipe(decision.selection_artifact)
     assert resolved.recipe_id == decision.selection.recipe_id
@@ -285,9 +323,14 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     )
     partial = partial_session.run(evaluator)
     assert partial.selection is None
+    assert partial.status == "resumable"
+    assert partial.next_action == "resume_search"
     assert not partial.report.search_complete
     assert partial.report.status["terminal_state"] == "budget_exhausted"
     assert partial.report.status["generation_status"] == "not_finalized"
+    assert partial.report.selection_reason["rule"] == (
+        "incomplete_evidence_no_selection"
+    )
     partial_checkpoint = partial.report.checkpoint
     compileiq_checkpoint = partial_checkpoint.compileiq_checkpoint
     assert len(compileiq_checkpoint["batches"]) == 2
