@@ -1,4 +1,4 @@
-"""Private transport for the exact reviewed modified CompileIQ fork."""
+"""Private transport for the compatible modified CompileIQ protocol."""
 
 from __future__ import annotations
 
@@ -14,9 +14,19 @@ _FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
 _PACKAGE_VERSION = "1.0.0dev6+taichiforge.report1"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
 _REVIEWED_FORK_REF = "refs/heads/main"
-_REVIEWED_FORK_COMMIT = "bd01493909d5ed7c29d8b56aa40059641aff9375"
+_REVIEWED_FORK_COMMIT = "f604a79934792a5b17cade81299603fbdb626130"
+_REVIEWED_WHEEL_PLATFORM = "win32/amd64"
+_REVIEWED_WHEEL_FILENAME = (
+    "compileiq-1.0.0.dev6+taichiforge.report1-py3-none-win_amd64.whl"
+)
 _REVIEWED_WHEEL_SHA256 = (
-    "fadde1f1a07475f8ccf89c8e7a4bb85e232cf2b6cfbf518ddbb8207f039ef627"
+    "fe8c45f71341736609cc9b2374d7c79e6d9e25e984c5fad2fd087714b2608c9c"
+)
+_REVIEWED_WHEEL_CORE_LOCK = (
+    "sha256:b4838970b7b913bbb7ce6bd50aaa0d132b0df8b11765bd76284736be8a16040b"
+)
+_REVIEWED_WHEEL_CAPABILITY_ID = (
+    "ciq-forge-cap-v2:36e64005bfc7d99fcbed6654f476086482d509c5820640028f3c4af03e5bad08"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"
@@ -43,31 +53,7 @@ _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
     "bc8e09772724ac9a741eba7bbed8ac093090bc45878b1ae519736cfd9f0f2144"
 )
-_SOURCE_LOCK_FILES = (
-    "ciq.py",
-    "config/const.py",
-    "core/core_comms.py",
-    "core/core_types.py",
-    "core/verify_core.py",
-    "forge_report.py",
-    "forge_search_v2.py",
-    "forge_support.py",
-    "recipes.py",
-    "results.py",
-    "search_spaces/base.py",
-    "search_spaces/compilers.py",
-    "search_spaces/manifest.py",
-    "search_spaces/models.py",
-    "search_spaces/resolver.py",
-    "tracker.py",
-    "types.py",
-    "utils/_setup_files.py",
-    "utils/gpu.py",
-    "utils/helpers.py",
-    "utils/validation.py",
-    "worker.py",
-)
-_CAPABILITY_KEYS = frozenset(
+_REQUIRED_CAPABILITY_KEYS = frozenset(
     (
         "schema",
         "protocol_revision",
@@ -104,7 +90,7 @@ _CAPABILITY_KEYS = frozenset(
 
 
 class CompileIQOpaqueUnavailableError(RuntimeError):
-    """The installed CompileIQ is not the reviewed Forge recipe fork."""
+    """The installed CompileIQ is not compatible with Forge recipe search."""
 
 
 def _canonical_json(value):
@@ -143,16 +129,13 @@ def _installed_compileiq_source_lock(
         raise error_type(
             "modified CompileIQ Python source manifest is unavailable"
         ) from error
-    if installed_files != _SOURCE_LOCK_FILES:
-        missing = sorted(set(_SOURCE_LOCK_FILES) - set(installed_files))
-        unexpected = sorted(set(installed_files) - set(_SOURCE_LOCK_FILES))
+    if not installed_files:
         raise error_type(
-            "installed CompileIQ Python source manifest does not match the reviewed "
-            f"Forge fork (missing={missing!r}, unexpected={unexpected!r})"
+            "modified CompileIQ Python source manifest contains no source files"
         )
 
     entries = []
-    for relative_path in _SOURCE_LOCK_FILES:
+    for relative_path in installed_files:
         path = package_root / Path(relative_path)
         try:
             normalized = (
@@ -187,7 +170,7 @@ def _validated_compileiq_capability(
         recipes = importer("compileiq.recipes")
     except ImportError as error:
         raise error_type(
-            "opaque recipe search requires the reviewed modified CompileIQ fork "
+            "opaque recipe search requires a compatible modified CompileIQ fork "
             "with the V2 complete-recipe capability"
         ) from error
 
@@ -263,16 +246,15 @@ def _validated_compileiq_capability(
         capability = capability_factory().as_dict()
     except Exception as error:
         raise error_type("modified CompileIQ capability negotiation failed") from error
-    if not isinstance(capability, dict) or frozenset(capability) != _CAPABILITY_KEYS:
-        raise error_type(
-            "modified CompileIQ capability has a missing or unexpected field"
-        )
+    if not isinstance(capability, dict) or not _REQUIRED_CAPABILITY_KEYS.issubset(
+        capability
+    ):
+        raise error_type("modified CompileIQ capability has a missing required field")
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
         "protocol_revision": 6,
         "fork_build_id": _FORK_BUILD_ID,
-        "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
         "opaque_recipe_batch_schema": _BATCH_SCHEMA,
         "opaque_dynamic_recipe_domain_schema": (
@@ -311,14 +293,14 @@ def _validated_compileiq_capability(
             "dynamic_batch_pareto_racing_main_thread_v2"
         ),
         "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
-        "core_commit": _EXPECTED_CORE_COMMIT,
-        "core_lock": _EXPECTED_CORE_LOCK,
-        "capability_id": _EXPECTED_CAPABILITY_ID,
     }
     if any(capability.get(name) != value for name, value in expected.items()):
         raise error_type(
-            "installed CompileIQ capability is not the exact reviewed Forge fork"
+            "installed CompileIQ capability is incompatible with Forge recipe search"
         )
+    package_version = capability["package_version"]
+    if not isinstance(package_version, str) or not package_version:
+        raise error_type("installed CompileIQ package has no version provenance")
     schema_version = capability["core_manifest_schema_version"]
     if (
         isinstance(schema_version, bool)
@@ -326,6 +308,17 @@ def _validated_compileiq_capability(
         or schema_version < 1
     ):
         raise error_type("CompileIQ capability has no valid core manifest version")
+    core_commit = capability["core_commit"]
+    if not isinstance(core_commit, str) or not core_commit:
+        raise error_type("CompileIQ capability has no valid bundled-core commit")
+    core_lock = capability["core_lock"]
+    if (
+        not isinstance(core_lock, str)
+        or len(core_lock) != len("sha256:") + 64
+        or not core_lock.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in core_lock[7:])
+    ):
+        raise error_type("CompileIQ capability has no valid bundled-core lock")
     identity_payload = {
         name: value for name, value in capability.items() if name != "capability_id"
     }
@@ -343,10 +336,6 @@ def _validated_compileiq_capability(
         if getattr(domain_type, name, None) != value:
             raise error_type(f"CompileIQ opaque recipe domain {name} mismatch")
     source_lock = _installed_compileiq_source_lock(support, error_type=error_type)
-    if source_lock != _EXPECTED_PYTHON_SOURCE_LOCK:
-        raise error_type(
-            "installed CompileIQ Python sources do not match the reviewed Forge fork"
-        )
     return MappingProxyType(dict(capability)), domain_type, worker_type, source_lock
 
 
@@ -354,14 +343,31 @@ def _reviewed_distribution_manifest():
     return {
         "repository": _REVIEWED_FORK_REPOSITORY,
         "ref": _REVIEWED_FORK_REF,
-        "commit": _REVIEWED_FORK_COMMIT,
-        "wheel_sha256": _REVIEWED_WHEEL_SHA256,
-        "runtime_verification": "capability_manifest_and_python_source_lock",
+        "acceptance": "compatible_capability_not_commit_or_wheel_hash",
+        "compatibility": {
+            "schema": _CAPABILITY_SCHEMA,
+            "protocol_revision": 6,
+            "fork_build_id": _FORK_BUILD_ID,
+        },
+        "qualified_snapshot": {
+            "commit": _REVIEWED_FORK_COMMIT,
+            "package_version": _PACKAGE_VERSION,
+            "wheel_filename": _REVIEWED_WHEEL_FILENAME,
+            "wheel_platform": _REVIEWED_WHEEL_PLATFORM,
+            "wheel_sha256": _REVIEWED_WHEEL_SHA256,
+            "capability_id": _REVIEWED_WHEEL_CAPABILITY_ID,
+            "core_commit": _EXPECTED_CORE_COMMIT,
+            "core_lock": _REVIEWED_WHEEL_CORE_LOCK,
+            "python_source_lock": _EXPECTED_PYTHON_SOURCE_LOCK,
+        },
+        "runtime_verification": (
+            "capability_identity_core_manifest_and_session_source_identity"
+        ),
     }
 
 
 class _CompileIQOpaqueRecipeTransport:
-    """Bind one provider-owned recipe set to the exact modified fork."""
+    """Bind one provider-owned recipe set to a compatible modified fork."""
 
     __slots__ = (
         "_baseline_recipe_id",

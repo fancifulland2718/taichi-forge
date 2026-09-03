@@ -8,6 +8,7 @@ from types import MappingProxyType, SimpleNamespace
 import numpy as np
 import pytest
 import taichi_forge as ti
+from taichi_forge import _compileiq_opaque as _shared_compileiq_opaque
 from taichi_forge._lib import core as ti_core
 from taichi_forge.graph import (
     CompileIQGraphUnavailableError,
@@ -252,7 +253,7 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
         raise ImportError("not installed")
 
     monkeypatch.setattr(_compileiq_opaque, "import_module", missing)
-    with pytest.raises(CompileIQGraphUnavailableError, match="reviewed modified"):
+    with pytest.raises(CompileIQGraphUnavailableError, match="compatible modified"):
         _compileiq_opaque._validated_compileiq_capability()
 
     capability = dict(_capability())
@@ -287,8 +288,95 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
     }
     monkeypatch.setattr(_compileiq_opaque, "import_module", modules.__getitem__)
 
-    with pytest.raises(CompileIQGraphUnavailableError, match="exact reviewed"):
+    with pytest.raises(CompileIQGraphUnavailableError, match="incompatible"):
         _compileiq_opaque._validated_compileiq_capability()
+
+
+def test_reviewed_compileiq_distribution_keeps_qualification_out_of_acceptance():
+    distribution = _shared_compileiq_opaque._reviewed_distribution_manifest()
+    snapshot = distribution["qualified_snapshot"]
+
+    assert distribution["acceptance"] == (
+        "compatible_capability_not_commit_or_wheel_hash"
+    )
+    assert "commit" not in distribution
+    assert "wheel_sha256" not in distribution
+    assert snapshot["commit"] == _shared_compileiq_opaque._REVIEWED_FORK_COMMIT
+    assert snapshot["wheel_platform"] == "win32/amd64"
+    assert snapshot["wheel_sha256"] == (
+        "fe8c45f71341736609cc9b2374d7c79e6d9e25e984c5fad2fd087714b2608c9c"
+    )
+    assert snapshot["core_lock"] == (
+        "sha256:b4838970b7b913bbb7ce6bd50aaa0d132b0df8b11765bd76284736be8a16040b"
+    )
+
+
+def test_future_compatible_compileiq_build_is_not_commit_or_wheel_locked(tmp_path):
+    capability = dict(_capability())
+    capability.update(
+        {
+            "package_version": "1.1.0+taichiforge.report2",
+            "core_manifest_schema_version": 2,
+            "core_commit": "b" * 40,
+            "core_lock": "sha256:" + ("c" * 64),
+            "compatible_additive_fact": "accepted",
+        }
+    )
+    identity_payload = {
+        name: value for name, value in capability.items() if name != "capability_id"
+    }
+    capability["capability_id"] = _shared_compileiq_opaque._identity(
+        _shared_compileiq_opaque._CAPABILITY_ID_PREFIX,
+        identity_payload,
+    )
+
+    package_root = tmp_path / "compileiq"
+    package_root.mkdir()
+    support_path = package_root / "forge_support.py"
+    support_path.write_text("# compatible future support\n", encoding="utf-8")
+    (package_root / "future_protocol_helper.py").write_text(
+        "# additive source\n",
+        encoding="utf-8",
+    )
+    support = SimpleNamespace(
+        __file__=str(support_path),
+        forge_recipe_search_capability=lambda: SimpleNamespace(
+            as_dict=lambda: capability
+        ),
+        ForgeMainThreadWorker=_Worker,
+        ForgeOpaqueSearchSessionV2=_SearchSessionV2,
+        ForgeOpaqueSearchBudgetV2=_BudgetV2,
+        TrialOutcomeV2=_OutcomeV2,
+        TrialCleanupV2=_CleanupV2,
+        ForgeOpaqueEvaluationContextV1=_EvaluationContextV1,
+        ForgeOpaqueSearchFinalizationV1=_FinalizationV1,
+        ForgeOpaqueSearchStatusV2=_SearchStatusV2,
+        OpaqueOptimizationReportV1=_OptimizationReportV1,
+        opaque_optimization_report_json_schema=lambda: {},
+        ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
+        ForgeOpaqueTargetContractV1=_TargetContract,
+    )
+    recipes = SimpleNamespace(
+        OpaqueRecipeDomainV1=_OpaqueRecipeDomain,
+        OpaqueRecipeBatchV2=_BatchV2,
+        OpaqueRecipeFidelityV2=_FidelityV2,
+        OpaqueRecipeLineageV2=_LineageV2,
+        OpaqueDynamicRecipeDomainV2=_DynamicDomainV2,
+    )
+    modules = {
+        "compileiq.forge_support": support,
+        "compileiq.recipes": recipes,
+    }
+
+    accepted, _, _, source_lock = (
+        _shared_compileiq_opaque._validated_compileiq_capability(
+            importer=modules.__getitem__
+        )
+    )
+    assert accepted["package_version"] == "1.1.0+taichiforge.report2"
+    assert accepted["compatible_additive_fact"] == "accepted"
+    assert source_lock.startswith("ciq-python-source-v1:")
+    assert source_lock != _shared_compileiq_opaque._EXPECTED_PYTHON_SOURCE_LOCK
 
 
 @test_utils.test(arch=ti.cpu)

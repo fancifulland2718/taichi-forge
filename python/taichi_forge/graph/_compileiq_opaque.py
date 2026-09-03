@@ -1,4 +1,4 @@
-"""Graph recipe transport for the reviewed modified CompileIQ fork."""
+"""Graph recipe transport for the compatible modified CompileIQ protocol."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from taichi_forge._compileiq_opaque import (
 
 
 class CompileIQGraphUnavailableError(CompileIQOpaqueUnavailableError):
-    """The installed CompileIQ is not the reviewed Graph recipe fork."""
+    """The installed CompileIQ is not Graph recipe-search compatible."""
 
 
 def _validated_compileiq_capability():
@@ -36,7 +36,7 @@ def _validated_compileiq_capability():
 class CompileIQCompleteGraphRecipeSearch:
     """V2 search façade over the Forge-owned complete recipe catalog.
 
-    The transport remains compatible with the reviewed modified CompileIQ fork,
+    The transport remains compatible with the modified CompileIQ V2 protocol,
     but it neither rebuilds Graphs from environment variables nor owns a second
     family materializer. All selected recipes cross GraphMaterializationContext.
     """
