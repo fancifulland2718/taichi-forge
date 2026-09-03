@@ -1867,7 +1867,8 @@ void export_lang(py::module &m) {
       .def("_begin_runtime_submission_transaction",
            &Program::begin_runtime_submission_transaction,
            py::call_guard<py::gil_scoped_release>(),
-           py::arg("gpu_timing") = false)
+           py::arg("gpu_timing") = false,
+           py::arg("cuda_concurrent_batch") = false)
       .def("_begin_external_cuda_submission",
            &Program::begin_external_cuda_submission)
       .def("_debug_runtime_completion_stats",
@@ -5388,7 +5389,8 @@ void export_lang(py::module &m) {
                            const VulkanNestedGraphRequest
                                *vulkan_nested = nullptr,
                            bool cuda_masked_control = false,
-         const CudaNestedGraphRequest *cuda_nested = nullptr) -> bool {
+                           const CudaNestedGraphRequest *cuda_nested = nullptr,
+                           bool cuda_concurrent_batch_lane = false) -> bool {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -5607,7 +5609,8 @@ void export_lang(py::module &m) {
           return result.submitted;
         }
         if (cache) {
-          self->jit_run_cached(compile_config, args, *cache);
+          self->jit_run_cached(compile_config, args, *cache,
+                               cuda_concurrent_batch_lane);
         } else {
           self->jit_run(compile_config, args);
         }
@@ -5847,6 +5850,11 @@ void export_lang(py::module &m) {
 
   py::class_<aot::CompiledGraph>(m, "CompiledGraph")
       .def_property_readonly(
+          "_has_dispatch_labels",
+          [](const aot::CompiledGraph &graph) {
+            return graph.has_dispatch_labels();
+          })
+      .def_property_readonly(
           "_dispatch_metadata",
           [](const aot::CompiledGraph &graph) {
             py::list result;
@@ -5968,6 +5976,34 @@ void export_lang(py::module &m) {
                            const py::dict &pyargs,
                            aot::CompiledGraphJITCache &cache) {
              jit_run_graph(self, compile_config, pyargs, &cache);
+           })
+      .def("jit_run_cached_cuda_concurrent_batch",
+           [jit_run_graph](aot::CompiledGraph *self,
+                           const CompileConfig &compile_config,
+                           const py::dict &pyargs,
+                           aot::CompiledGraphJITCache &cache) {
+             jit_run_graph(self, compile_config, pyargs, &cache,
+                           /*predicate=*/nullptr,
+                           /*max_iterations=*/0,
+                           /*continue_while_nonzero=*/true,
+                           /*conditional_selector=*/nullptr,
+                           /*branch_dispatch_counts=*/nullptr,
+                           /*conditional_type=*/-1,
+                           /*default_branch=*/-1,
+                           /*vulkan_predicate=*/nullptr,
+                           /*vulkan_counter=*/nullptr,
+                           /*vulkan_status=*/nullptr,
+                           /*vulkan_initial_dispatch_count=*/0,
+                           /*vulkan_execute_initial_dispatches=*/true,
+                           /*vulkan_strategy=*/0,
+                           /*vulkan_result=*/nullptr,
+                           /*vulkan_wait_for_result=*/true,
+                           /*vulkan_chunk_iterations=*/nullptr,
+                           /*vulkan_chunk_strategies=*/nullptr,
+                           /*vulkan_nested=*/nullptr,
+                           /*cuda_masked_control=*/false,
+                           /*cuda_nested=*/nullptr,
+                           /*cuda_concurrent_batch_lane=*/true);
            })
       .def("jit_run_bounded_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,

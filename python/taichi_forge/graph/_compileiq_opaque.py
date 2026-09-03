@@ -447,6 +447,10 @@ class CompileIQCompleteGraphRecipeSearch:
             "taichi_forge.graph.branch_join_schedule",
             "cuda-branch-join-complete-recipe.v1",
         ),
+        "workspace_concurrency": (
+            "taichi_forge.graph.workspace_concurrency",
+            "cuda-complete-graph-pair.v1",
+        ),
     }
 
     def __init__(self, graph, *, catalog=None):

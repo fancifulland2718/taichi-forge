@@ -335,6 +335,7 @@ class TI_DLL_EXPORT Program {
     void mark_submission() noexcept;
     void begin_gpu_region_timing(const std::string &path_id);
     void end_gpu_region_timing(const std::string &path_id);
+    void *register_cuda_concurrent_stream(void *stream);
     RuntimeCompletion finish();
     RuntimeSubmissionStatistics submission_statistics() const noexcept {
       return submission_statistics_;
@@ -343,14 +344,19 @@ class TI_DLL_EXPORT Program {
    private:
     friend class Program;
     explicit RuntimeSubmissionTransaction(Program *program,
-                                          bool gpu_timing);
+                                          bool gpu_timing,
+                                          bool cuda_concurrent_batch);
+    void join_cuda_concurrent_streams();
 
     Program *program_{nullptr};
     std::optional<RuntimeSubmissionScope> submission_scope_;
     bool submission_batch_open_{false};
     bool finished_{false};
     bool gpu_timing_requested_{false};
+    bool cuda_concurrent_batch_{false};
     RuntimeSubmissionTransaction *previous_telemetry_transaction_{nullptr};
+    void *cuda_concurrent_fork_event_{nullptr};
+    std::vector<void *> cuda_concurrent_streams_;
     RuntimeSubmissionStatistics submission_statistics_;
     StreamGpuTiming gpu_timing_;
     std::vector<RuntimeGpuRegionTiming> gpu_region_timings_;
@@ -545,7 +551,9 @@ class TI_DLL_EXPORT Program {
       StreamGpuTiming gpu_timing = nullptr,
       std::vector<RuntimeGpuRegionTiming> gpu_region_timings = {});
   std::unique_ptr<RuntimeSubmissionTransaction>
-  begin_runtime_submission_transaction(bool gpu_timing = false);
+  begin_runtime_submission_transaction(bool gpu_timing = false,
+                                       bool cuda_concurrent_batch = false);
+  void *register_runtime_cuda_concurrent_stream(void *stream);
   TI_FORCE_INLINE void mark_runtime_submission_pending() noexcept {
     runtime_submission_pending_.store(true, std::memory_order_relaxed);
   }
@@ -3968,6 +3976,8 @@ class TI_DLL_EXPORT Program {
         vulkan_graphics_pipelines;
     std::vector<std::shared_ptr<VulkanTriangleRayScene>> vulkan_ray_scenes;
     std::vector<std::shared_ptr<VulkanRayResource>> vulkan_ray_resources;
+    std::shared_ptr<RuntimeCompletionCudaEventPool> cuda_event_pool;
+    std::vector<void *> cuda_batch_events;
 
     std::size_t retained_resource_count(
         std::uint32_t kind) const noexcept override;
@@ -3975,7 +3985,7 @@ class TI_DLL_EXPORT Program {
       return argpacks.empty() && ndarrays.empty() && textures.empty() &&
              external_dense_storage.empty() && cuda_provider_plans.empty() &&
              vulkan_graphics_pipelines.empty() && vulkan_ray_scenes.empty() &&
-             vulkan_ray_resources.empty();
+             vulkan_ray_resources.empty() && cuda_batch_events.empty();
     }
   };
 
@@ -4046,6 +4056,7 @@ class TI_DLL_EXPORT Program {
   void release_completed_external_dense_storage_leases();
   void pin_cuda_provider_plan(
       std::shared_ptr<CudaProviderCompletionResource> plan);
+  void pin_runtime_cuda_batch_events(std::vector<void *> events);
   void release_completed_cuda_provider_plans();
   void release_completed_vulkan_native_resources();
   void begin_external_access_epoch(
@@ -4292,6 +4303,8 @@ class TI_DLL_EXPORT Program {
   bool external_dense_storage_resources_open_{true};
   ExternalDenseStorageInflightLeaseMap external_dense_storage_inflight_leases_;
   CudaProviderInflightPlanMap cuda_provider_inflight_plans_;
+  mutable std::mutex cuda_batch_event_mutex_;
+  std::vector<void *> cuda_batch_event_retirements_;
 };
 
 TI_FORCE_INLINE Program::RuntimeSubmissionScope::RuntimeSubmissionScope(

@@ -4939,6 +4939,11 @@ class _CGraphJITExecutable:
             context.compile_config(), context.flattened_args(), self._jit_cache
         )
 
+    def run_cuda_concurrent_batch(self, context):
+        self.compiled_graph.jit_run_cached_cuda_concurrent_batch(
+            context.compile_config(), context.flattened_args(), self._jit_cache
+        )
+
     def invalidate_runtime(self, preserve_executables=False):
         if preserve_executables:
             self._jit_cache.retire_snode_tree_runtime_state()
@@ -9936,6 +9941,125 @@ def _parallel_storage_description(resource, value):
     return _parallel_storage_fact(resource, description, owner_status), description
 
 
+def _graph_public_resource_accesses(root, public_names):
+    public_names = frozenset(public_names)
+    accesses = {}
+
+    def visit(node):
+        for effect in getattr(node, "effects", ()):
+            if not effect.runtime_bound or effect.resource not in public_names:
+                continue
+            reads, writes = accesses.get(effect.resource, (False, False))
+            reads = reads or effect.access in (
+                GraphAccess.READ,
+                GraphAccess.READ_WRITE,
+                GraphAccess.ATOMIC,
+                GraphAccess.OPAQUE,
+            )
+            writes = writes or effect.access in (
+                GraphAccess.WRITE,
+                GraphAccess.READ_WRITE,
+                GraphAccess.ATOMIC,
+                GraphAccess.OPAQUE,
+            )
+            accesses[effect.resource] = (reads, writes)
+        for child in getattr(node, "children", ()):
+            visit(child)
+
+    visit(root)
+    return MappingProxyType(accesses)
+
+
+def _certify_graph_invocation_pair(spec, versions):
+    accesses = _graph_public_resource_accesses(
+        spec.pre_optimization_ir_root,
+        spec.runtime_arg_names,
+    )
+    descriptions = [{}, {}]
+
+    def storage(invocation, resource):
+        cached = descriptions[invocation].get(resource)
+        if cached is not None:
+            return cached
+        value = versions[invocation].arguments[resource]
+        if isinstance(
+            value,
+            (int, float, np.integer, np.floating, Matrix),
+        ) and not isinstance(value, (bool, np.bool_)):
+            descriptions[invocation][resource] = False
+            return False
+        fact, description = _parallel_storage_description(resource, value)
+        if (
+            description is None
+            or not fact.supported
+            or fact.owner_status != "kNone"
+        ):
+            raise TaichiRuntimeError(
+                "Graph.bind_batch() requires certified device storage for "
+                f"{resource!r} in invocation {invocation}"
+            )
+        descriptions[invocation][resource] = description
+        return description
+
+    disjoint_pairs = []
+    for left, (_, left_writes) in accesses.items():
+        for right, (_, right_writes) in accesses.items():
+            if not left_writes and not right_writes:
+                continue
+            left_storage = storage(0, left)
+            right_storage = storage(1, right)
+            if left_storage is False or right_storage is False:
+                continue
+            try:
+                alias = analyze_storage_alias(left_storage, right_storage)
+            except Exception:
+                alias = "kUnknown"
+            if alias != "kProvenDisjoint":
+                raise TaichiRuntimeError(
+                    "Graph.bind_batch() requires proven disjoint cross-invocation "
+                    f"storage for {left!r} and {right!r}; got {alias}"
+                )
+            disjoint_pairs.append((left, right))
+    return tuple(disjoint_pairs)
+
+
+def _workspace_concurrency_spec_eligible(spec, backend):
+    if backend != "cuda":
+        return False
+    if (
+        spec.native_count
+        or spec.structured_control_count
+        or spec.observation_count
+        or spec.temporary_actions
+        or spec.lifetime_leases
+        or spec.exclusive_provider_submission
+        or len(spec.nodes) != 1
+    ):
+        return False
+    node = spec.nodes[0]
+    if (
+        not isinstance(node, _CompiledCGraphNode)
+        or node.dispatch_count < 2
+        or node.source_native_count
+        or node.parallel_dispatch_groups
+        or any(item.dispatch_packet is not None for item in node.recording_dispatches)
+        or bool(getattr(node.compiled_graph, "_has_dispatch_labels", False))
+    ):
+        return False
+    if not spec.fixed_runtime_args or not all(
+        isinstance(value, _GraphInternalNdarraySpec)
+        and value.exclusive_submission
+        for value in spec.fixed_runtime_args.values()
+    ):
+        return False
+    return bool(
+        _graph_public_resource_accesses(
+            spec.pre_optimization_ir_root,
+            spec.runtime_arg_names,
+        )
+    )
+
+
 @dataclass(frozen=True)
 class _PreparedGraphInvocation:
     arguments: object
@@ -10018,6 +10142,26 @@ class _GraphBindingVersion:
     fixed_bindings_flattened: bool
     fast_path_qualified: bool
     volatile_reasons: tuple
+
+
+@dataclass(frozen=True)
+class GraphInvocationBatch:
+    """Two immutable binding frames for one complete Graph pair workload.
+
+    Construct through :meth:`Graph.bind_batch`.  The object pins exact
+    publication-time storage identities and is accepted only by the Graph
+    that created it.  Cross-invocation write hazards are discharged once at
+    publication, never in the replay path.
+    """
+
+    _graph: object
+    runtime_generation: int
+    versions: tuple
+    disjoint_pairs: tuple
+
+    @property
+    def size(self):
+        return len(self.versions)
 
 
 def _snapshot_graph_binding_value(value):
@@ -10916,6 +11060,7 @@ class _GraphSpec:
             "offload_phase_fusion",
             "sparse_traversal",
             "branch_join_schedule",
+            "workspace_concurrency",
             "bounded_execution",
             "structured_control",
             "graph_reduction",
@@ -11105,11 +11250,33 @@ class _GraphSpec:
         variant._definition_source_spec = self
         variant._complete_recipe_id = recipe.recipe_id
         variant._disable_qualified_fusion_selector = True
+        workspace_concurrency = tuple(
+            selection
+            for selection in selections
+            if selection.family == "workspace_concurrency"
+        )
+        if len(workspace_concurrency) > 1:
+            raise TaichiRuntimeError(
+                "complete Graph recipe selects multiple workspace concurrency modes"
+            )
+        concurrent_workspace_pair = bool(workspace_concurrency)
+        if concurrent_workspace_pair:
+            selection = workspace_concurrency[0]
+            if (
+                selection.source_key != "whole-graph-pair"
+                or selection.choice_id != "cuda-concurrent-pair-v1"
+            ):
+                raise TaichiRuntimeError(
+                    "workspace concurrency selection is not a supported complete recipe"
+                )
+            workspace_lanes = 2
+            workspace_saturation = "wait"
         return Graph(
             variant,
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
             definition=definition,
+            _cuda_concurrent_workspace_pair=concurrent_workspace_pair,
         )
 
     def compileiq_executable_optimization_space(self):
@@ -12583,6 +12750,28 @@ class _GraphInstance:
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
 
+    def run_cuda_concurrent_batch(self, args):
+        if not isinstance(self._backend_executable, _CGraphJITExecutable):
+            raise TaichiRuntimeError(
+                "Concurrent workspace pair requires one JIT CGraph"
+            )
+        context = self._run_context
+        if context is None:
+            raise TaichiRuntimeError(
+                "Concurrent workspace pair requires runtime bindings"
+            )
+        prepared = self.spec.prepare_runtime_args(
+            args, None, self._fixed_runtime_args
+        )
+        context.begin(
+            prepared.arguments,
+            flattened_args=prepared.flattened_args,
+        )
+        try:
+            self._backend_executable.run_cuda_concurrent_batch(context)
+        finally:
+            context.end()
+
     def acquire_exclusive_internal_storage(self):
         if not self._exclusive_internal_storage:
             return None
@@ -12830,6 +13019,19 @@ class _GraphWorkspaceLanePool:
             instance = self._spec.instantiate((*self._key, index))
             self._instances[index] = instance
         return instance
+
+    def materialize_pair(self):
+        if not self.primary._exclusive_internal_storage:
+            raise TaichiRuntimeError(
+                "Graph invocation pairs require exclusive Graph-owned storage"
+            )
+        if self._capacity == 1:
+            return (self.primary, self.primary)
+        if self._capacity != 2:
+            raise TaichiRuntimeError(
+                "Complete workspace concurrency recipes require exactly two lanes"
+            )
+        return (self._materialize(0), self._materialize(1))
 
     def acquire(self, requested_lane=None):
         if not self.primary._exclusive_internal_storage:
@@ -17189,6 +17391,7 @@ class SubmissionTicket:
         "_submission_owners",
         "_telemetry",
         "_workspace_lane",
+        "_workspace_lanes",
     )
 
     def __init__(
@@ -17199,6 +17402,7 @@ class SubmissionTicket:
         observation=None,
         telemetry=None,
         workspace_lane=0,
+        workspace_lanes=None,
         submission_owners=(),
         completion_observations=(),
         runtime_owner_retained=False,
@@ -17214,6 +17418,11 @@ class SubmissionTicket:
         self._submission_owners = tuple(submission_owners)
         self._telemetry = telemetry
         self._workspace_lane = int(workspace_lane)
+        self._workspace_lanes = tuple(
+            (self._workspace_lane,)
+            if workspace_lanes is None
+            else (int(value) for value in workspace_lanes)
+        )
 
     def _observe_completion(self):
         observations = self._completion_observations
@@ -17277,6 +17486,10 @@ class SubmissionTicket:
     @property
     def workspace_lane(self):
         return self._workspace_lane
+
+    @property
+    def workspace_lanes(self):
+        return self._workspace_lanes
 
     @property
     def _has_backend_work(self):
@@ -17596,6 +17809,7 @@ class Graph:
         workspace_lanes=1,
         workspace_saturation="wait",
         definition=None,
+        _cuda_concurrent_workspace_pair=False,
     ) -> None:
         self._lifecycle_lock = threading.Lock()
         self._terminal_observation_token = object()
@@ -17633,6 +17847,13 @@ class Graph:
                 "GraphDefinition baseline spec does not match this Graph"
             )
         self._definition = definition
+        self._cuda_concurrent_workspace_pair = bool(
+            _cuda_concurrent_workspace_pair
+        )
+        if self._cuda_concurrent_workspace_pair and self._workspace_lane_capacity != 2:
+            raise TaichiRuntimeError(
+                "CUDA concurrent workspace pair recipes require exactly two lanes"
+            )
         if (
             self._spec.exclusive_provider_submission
             and self._workspace_lane_capacity != 1
@@ -17665,6 +17886,8 @@ class Graph:
         self._instances = {}
         self._workspace_pool = self._workspace_pool_for_current_runtime()
         self._instance = self._workspace_pool.primary
+        if self._cuda_concurrent_workspace_pair:
+            self._workspace_pool.materialize_pair()
         self._latest_instance = self._instance
         self._prepared_telemetry_modes = set()
         self._runtime_valid = True
@@ -17681,6 +17904,68 @@ class Graph:
         """
 
         return GraphBindingSet(self, arguments)
+
+    def bind_batch(self, invocations):
+        """Publish exactly two independent binding frames for pair execution.
+
+        This is the workload boundary used by the complete workspace-
+        concurrency recipe.  It accepts no lane or saturation parameter: the
+        recipe owns a fixed two-lane physical executor, while CompileIQ chooses
+        between that executor and the serial complete-Graph baseline.
+        """
+
+        if not isinstance(invocations, (tuple, list)) or len(invocations) != 2:
+            raise TaichiRuntimeError(
+                "Graph.bind_batch() requires exactly two invocation mappings"
+            )
+        if not all(isinstance(item, Mapping) for item in invocations):
+            raise TypeError("Graph.bind_batch() invocations must be mappings")
+        with self._lifecycle_lock:
+            self._check_runtime_valid()
+            if not _workspace_concurrency_spec_eligible(
+                self._spec, self._execution_arch
+            ):
+                raise TaichiRuntimeError(
+                    "Graph.bind_batch() requires an eligible CUDA JIT Graph "
+                    "with exclusive private workspace"
+                )
+            instances = (
+                self._workspace_pool.materialize_pair()
+                if self._cuda_concurrent_workspace_pair
+                else (self._instance, self._instance)
+            )
+            versions = tuple(
+                self._spec.build_binding_version(
+                    arguments,
+                    index + 1,
+                    fixed_runtime_args=instance._fixed_runtime_args,
+                    allow_fixed_binding_fast_path=True,
+                    allow_fast_path=self._qualified_fusion_selector is None,
+                    entrypoint="Graph.bind_batch",
+                )
+                for index, (arguments, instance) in enumerate(
+                    zip(invocations, instances)
+                )
+            )
+            if not all(version.fast_path_qualified for version in versions):
+                blockers = sorted(
+                    {
+                        blocker
+                        for version in versions
+                        for blocker in version.volatile_reasons
+                    }
+                )
+                raise TaichiRuntimeError(
+                    "Graph.bind_batch() requires immutable fast-qualified "
+                    "bindings; blockers: " + ", ".join(blockers)
+                )
+            disjoint_pairs = _certify_graph_invocation_pair(self._spec, versions)
+            return GraphInvocationBatch(
+                self,
+                int(impl.runtime_generation()),
+                versions,
+                disjoint_pairs,
+            )
 
     @property
     def definition(self):
@@ -18577,6 +18862,158 @@ class Graph:
             graph_token=self._terminal_observation_token,
         )
 
+    def submit_batch(self, batch, *, telemetry=False):
+        """Submit one certified two-invocation workload as one transaction.
+
+        The serial baseline replays both binding frames on the default stream
+        and one private workspace.  A materialized CUDA concurrency recipe
+        replays the complete Graph once on each private lane, then joins both
+        streams back to the default stream before publishing one completion.
+        """
+
+        telemetry = _normalize_submission_telemetry_mode(
+            telemetry, "Graph.submit_batch()"
+        )
+        telemetry_enabled = telemetry is not False
+        timestamp_telemetry = telemetry == "timestamps"
+        if not isinstance(batch, GraphInvocationBatch) or batch._graph is not self:
+            raise TaichiRuntimeError(
+                "Graph.submit_batch() requires this Graph's GraphInvocationBatch"
+            )
+        runtime = impl.pytaichi
+        internal_storage_leases = []
+        telemetry_lease = None
+        telemetry_state = None
+        transaction = None
+        submission_owners = ()
+        runtime_owner_retained = False
+        completion = None
+        instances = ()
+        lane_indices = ()
+        try:
+            with self._lifecycle_lock:
+                self._check_runtime_valid()
+                if runtime is not impl.pytaichi or batch.runtime_generation != int(
+                    impl.runtime_generation()
+                ):
+                    raise TaichiRuntimeError(
+                        "GraphInvocationBatch was published before ti.reset() "
+                        "or a runtime reinitialization"
+                    )
+                if not _workspace_concurrency_spec_eligible(
+                    self._spec, self._execution_arch
+                ):
+                    raise TaichiRuntimeError(
+                        "Graph.submit_batch() requires an eligible CUDA JIT Graph"
+                    )
+                submission_state = runtime._active_graph_submissions
+                if submission_state < 0:
+                    raise TaichiRuntimeError(
+                        "Graph batch submission cannot start while another Python "
+                        "thread is entering automatic differentiation"
+                    )
+                if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
+                    raise TaichiRuntimeError(
+                        "Graph batch submission is primal-only and cannot execute "
+                        "inside automatic differentiation"
+                    )
+                if self._cuda_concurrent_workspace_pair:
+                    instances = self._workspace_pool.materialize_pair()
+                    lane_indices = (0, 1)
+                else:
+                    instances = (self._instance, self._instance)
+                    lane_indices = (0, 0)
+                for instance in dict.fromkeys(instances):
+                    lease = instance.acquire_exclusive_internal_storage()
+                    if lease is not None:
+                        internal_storage_leases.append(lease)
+                telemetry_lease = (
+                    instances[0].acquire_structured_telemetry_lease(telemetry)
+                    if telemetry_enabled
+                    else None
+                )
+                runtime._active_graph_submissions = submission_state + 1
+                try:
+                    queue_before = (
+                        _queue_submission_snapshot() if telemetry_enabled else None
+                    )
+                    host_submit_start_ns = time.perf_counter_ns()
+                    transaction = runtime.prog._begin_runtime_submission_transaction(
+                        timestamp_telemetry,
+                        self._cuda_concurrent_workspace_pair,
+                    )
+                    owners = []
+                    for instance, version in zip(instances, batch.versions):
+                        runtime.prog._record_runtime_graph_submission()
+                        prepared = self._spec.prepare_invocation(
+                            version.arguments,
+                            None,
+                            None,
+                            entrypoint="Graph.submit_batch",
+                            binding_version=version,
+                        )
+                        if self._cuda_concurrent_workspace_pair:
+                            instance.run_cuda_concurrent_batch(prepared)
+                        else:
+                            instance.run(prepared)
+                        owners.extend(prepared.submission_owners)
+                    completion = transaction._finish()
+                    submission_statistics = (
+                        transaction._submission_statistics()
+                        if telemetry_enabled
+                        else None
+                    )
+                    transaction = None
+                    if telemetry == "summary":
+                        submission_statistics = dict(submission_statistics)
+                        submission_statistics["graph_submissions"] = 2
+                        submission_statistics["_exact"] = bool(
+                            self._cuda_concurrent_workspace_pair
+                        )
+                    host_submit_ns = time.perf_counter_ns() - host_submit_start_ns
+                    queue_after = (
+                        _queue_submission_snapshot() if telemetry_enabled else None
+                    )
+                    if telemetry_lease is not None:
+                        telemetry_state = telemetry_lease.attach(
+                            completion,
+                            _queue_submission_delta(queue_before, queue_after),
+                            host_submit_ns,
+                            submission_statistics,
+                        )
+                        telemetry_lease = None
+                    for lease in internal_storage_leases:
+                        lease.attach(completion)
+                    internal_storage_leases.clear()
+                    submission_owners = tuple(owners)
+                    self._latest_instance = instances[-1]
+                finally:
+                    runtime._active_graph_submissions -= 1
+
+                if submission_owners and completion.has_backend_work:
+                    runtime.retain_runtime_submission_owner(
+                        completion, (self, *submission_owners)
+                    )
+                    runtime_owner_retained = True
+        except BaseException:
+            if transaction is not None:
+                del transaction
+            if telemetry_lease is not None:
+                telemetry_lease.cancel()
+            for lease in internal_storage_leases:
+                lease.cancel()
+            raise
+        return SubmissionTicket(
+            completion,
+            runtime,
+            telemetry=telemetry_state,
+            workspace_lane=lane_indices[0],
+            workspace_lanes=lane_indices,
+            submission_owners=submission_owners,
+            runtime_owner_retained=runtime_owner_retained,
+            graph_token=self._terminal_observation_token,
+        )
+
     def prepare_telemetry(self, mode, *, slots=1):
         """Move opt-in telemetry allocation and JIT setup off the first sample.
 
@@ -19172,6 +19609,7 @@ __all__ = [
     "Graph",
     "GraphDefinition",
     "GraphBindingSet",
+    "GraphInvocationBatch",
     "SubmissionTicket",
     "SubmissionPacer",
     "NativeActionManifest",

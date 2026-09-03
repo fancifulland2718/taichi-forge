@@ -268,8 +268,11 @@ Program::RuntimeSubmissionWriteScope::~RuntimeSubmissionWriteScope() {
 
 Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
     Program *program,
-    bool gpu_timing)
-    : program_(program), gpu_timing_requested_(gpu_timing) {
+    bool gpu_timing,
+    bool cuda_concurrent_batch)
+    : program_(program),
+      gpu_timing_requested_(gpu_timing),
+      cuda_concurrent_batch_(cuda_concurrent_batch) {
   TI_ASSERT(program_ != nullptr);
   // The outer scope must observe tracking enabled so nested kernel/CGraph
   // launches reuse this reader instead of opening segment-local boundaries.
@@ -278,30 +281,55 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
   submission_scope_.emplace(program_->acquire_runtime_submission_scope());
   program_->program_impl_->begin_runtime_submission_batch();
   submission_batch_open_ = true;
-  if (gpu_timing) {
-    try {
+  try {
+    if (gpu_timing) {
       if (program_->compile_config().arch == Arch::cuda) {
         gpu_timing_ = RuntimeCompletion::begin_cuda_gpu_timing(
             nullptr, program_->runtime_fault_domain_);
       } else {
         gpu_timing_ = program_->program_impl_->begin_runtime_gpu_timing();
       }
-    } catch (...) {
-      try {
-        program_->program_impl_->end_runtime_submission_batch();
-      } catch (...) {
-      }
-      submission_batch_open_ = false;
-      throw;
     }
-    previous_telemetry_transaction_ =
-        Program::active_runtime_submission_telemetry_transaction();
-    Program::active_runtime_submission_telemetry_transaction() = this;
+    if (cuda_concurrent_batch_) {
+#if defined(TI_WITH_CUDA)
+      TI_ERROR_IF(program_->compile_config().arch != Arch::cuda,
+                  "Concurrent Graph submission batches require CUDA");
+      CUDAContext::get_instance().make_current();
+      auto &driver = CUDADriver::get_instance();
+      cuda_concurrent_fork_event_ =
+          program_->runtime_completion_cuda_event_pool_->acquire();
+      const auto error =
+          driver.event_record.call(cuda_concurrent_fork_event_, nullptr);
+      TI_ERROR_IF(error != CUDA_SUCCESS, "CUDA batch fork event record failed: {}",
+                  driver.event_record.get_error_message(error));
+#else
+      TI_ERROR("Concurrent Graph submission batches require a CUDA build");
+#endif
+    }
+    if (gpu_timing || cuda_concurrent_batch_) {
+      previous_telemetry_transaction_ =
+          Program::active_runtime_submission_telemetry_transaction();
+      Program::active_runtime_submission_telemetry_transaction() = this;
+    }
+  } catch (...) {
+#if defined(TI_WITH_CUDA)
+    if (cuda_concurrent_fork_event_ != nullptr) {
+      program_->runtime_completion_cuda_event_pool_->release(
+          cuda_concurrent_fork_event_, /*reusable=*/false);
+      cuda_concurrent_fork_event_ = nullptr;
+    }
+#endif
+    try {
+      program_->program_impl_->end_runtime_submission_batch();
+    } catch (...) {
+    }
+    submission_batch_open_ = false;
+    throw;
   }
 }
 
 Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
-  if (gpu_timing_requested_ &&
+  if ((gpu_timing_requested_ || cuda_concurrent_batch_) &&
       Program::active_runtime_submission_telemetry_transaction() == this) {
     Program::active_runtime_submission_telemetry_transaction() =
         previous_telemetry_transaction_;
@@ -309,6 +337,10 @@ Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
   if (program_ != nullptr && submission_batch_open_) {
     // Preserve already-recorded work on exception paths. A backend failure is
     // reported by the next explicit completion/synchronize boundary.
+    try {
+      join_cuda_concurrent_streams();
+    } catch (...) {
+    }
     try {
       program_->program_impl_->end_runtime_submission_batch();
     } catch (...) {
@@ -319,6 +351,98 @@ Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
   // is sufficient: legacy synchronize/next completion retains responsibility
   // for any resources already pinned by that segment.
   submission_scope_.reset();
+}
+
+void *Program::RuntimeSubmissionTransaction::register_cuda_concurrent_stream(
+    void *stream) {
+  TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
+  TI_ERROR_IF(!cuda_concurrent_batch_,
+              "Runtime submission transaction is not a concurrent CUDA batch");
+  TI_ERROR_IF(stream == nullptr,
+              "Concurrent CUDA Graph replay requires a non-default stream");
+#if defined(TI_WITH_CUDA)
+  if (std::find(cuda_concurrent_streams_.begin(),
+                cuda_concurrent_streams_.end(), stream) !=
+      cuda_concurrent_streams_.end()) {
+    return stream;
+  }
+  auto &driver = CUDADriver::get_instance();
+  const auto error = driver.stream_wait_event.call(
+      stream, cuda_concurrent_fork_event_, 0);
+  TI_ERROR_IF(error != CUDA_SUCCESS, "CUDA batch fork wait failed: {}",
+              driver.stream_wait_event.get_error_message(error));
+  cuda_concurrent_streams_.push_back(stream);
+  return stream;
+#else
+  TI_ERROR("Concurrent Graph submission batches require a CUDA build");
+#endif
+}
+
+void Program::RuntimeSubmissionTransaction::join_cuda_concurrent_streams() {
+  if (!cuda_concurrent_batch_ || cuda_concurrent_fork_event_ == nullptr) {
+    return;
+  }
+#if defined(TI_WITH_CUDA)
+  CUDAContext::get_instance().make_current();
+  auto &driver = CUDADriver::get_instance();
+  std::uint32_t first_error = CUDA_SUCCESS;
+  std::vector<void *> tail_events;
+  tail_events.reserve(cuda_concurrent_streams_.size());
+  try {
+    for (void *stream : cuda_concurrent_streams_) {
+      void *event =
+          program_->runtime_completion_cuda_event_pool_->acquire();
+      tail_events.push_back(event);
+      auto error = driver.event_record.call(event, stream);
+      if (error == CUDA_SUCCESS) {
+        error = driver.stream_wait_event.call(nullptr, event, 0);
+      }
+      if (error != CUDA_SUCCESS && first_error == CUDA_SUCCESS) {
+        first_error = error;
+      }
+    }
+  } catch (...) {
+    for (void *stream : cuda_concurrent_streams_) {
+      driver.stream_synchronize.call(stream);
+    }
+    driver.stream_synchronize.call(nullptr);
+    for (void *event : tail_events) {
+      program_->runtime_completion_cuda_event_pool_->release(
+          event, /*reusable=*/true);
+    }
+    if (cuda_concurrent_fork_event_ != nullptr) {
+      program_->runtime_completion_cuda_event_pool_->release(
+          cuda_concurrent_fork_event_, /*reusable=*/true);
+      cuda_concurrent_fork_event_ = nullptr;
+    }
+    cuda_concurrent_streams_.clear();
+    throw;
+  }
+  if (first_error != CUDA_SUCCESS) {
+    // This is an exception-only recovery path. Preserve already-enqueued work
+    // before releasing events; production batches use only event ordering.
+    for (void *stream : cuda_concurrent_streams_) {
+      driver.stream_synchronize.call(stream);
+    }
+    driver.stream_synchronize.call(nullptr);
+    for (void *event : tail_events) {
+      program_->runtime_completion_cuda_event_pool_->release(
+          event, /*reusable=*/true);
+    }
+    if (cuda_concurrent_fork_event_ != nullptr) {
+      program_->runtime_completion_cuda_event_pool_->release(
+          cuda_concurrent_fork_event_, /*reusable=*/true);
+      cuda_concurrent_fork_event_ = nullptr;
+    }
+  } else {
+    tail_events.push_back(cuda_concurrent_fork_event_);
+    cuda_concurrent_fork_event_ = nullptr;
+    program_->pin_runtime_cuda_batch_events(std::move(tail_events));
+  }
+  cuda_concurrent_streams_.clear();
+  TI_ERROR_IF(first_error != CUDA_SUCCESS, "CUDA batch join failed: {}",
+              driver.stream_wait_event.get_error_message(first_error));
+#endif
 }
 
 void Program::RuntimeSubmissionTransaction::mark_submission() noexcept {
@@ -371,6 +495,7 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
   TI_ERROR_IF(!active_gpu_region_timings_.empty(),
               "Runtime submission transaction has unfinished GPU region timing");
+  join_cuda_concurrent_streams();
   if (gpu_timing_) {
     if (program_->compile_config().arch == Arch::cuda) {
       RuntimeCompletion::end_cuda_gpu_timing(
@@ -387,7 +512,7 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   // while this transaction still owns the corresponding reader.
   submission_scope_.reset();
   finished_ = true;
-  if (gpu_timing_requested_ &&
+  if ((gpu_timing_requested_ || cuda_concurrent_batch_) &&
       Program::active_runtime_submission_telemetry_transaction() == this) {
     Program::active_runtime_submission_telemetry_transaction() =
         previous_telemetry_transaction_;
@@ -7623,6 +7748,14 @@ void Program::release_completed_vulkan_native_resources() {
   // CUDA provider plans and Vulkan native objects share the same completion
   // retirement boundary even though their backend-specific ownership differs.
   release_completed_cuda_provider_plans();
+  std::vector<void *> cuda_batch_events;
+  {
+    std::lock_guard<std::mutex> lock(cuda_batch_event_mutex_);
+    cuda_batch_events.swap(cuda_batch_event_retirements_);
+  }
+  for (void *event : cuda_batch_events) {
+    runtime_completion_cuda_event_pool_->release(event, /*reusable=*/true);
+  }
   std::vector<std::shared_ptr<VulkanGraphicsPipelineResource>> graphics;
   std::vector<std::shared_ptr<VulkanTriangleRayScene>> ray_scenes;
   std::vector<std::shared_ptr<VulkanRayResource>> ray_resources;
@@ -7673,6 +7806,20 @@ Program::RuntimeCompletionResourceBatch::~RuntimeCompletionResourceBatch() {
   for (auto &item : cuda_provider_plans) {
     item.second.resource->on_submission_retired(item.second.retirement_token);
   }
+  if (cuda_event_pool) {
+    for (void *event : cuda_batch_events) {
+      cuda_event_pool->release(event, /*reusable=*/true);
+    }
+  }
+}
+
+void Program::pin_runtime_cuda_batch_events(std::vector<void *> events) {
+  if (events.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lock(cuda_batch_event_mutex_);
+  cuda_batch_event_retirements_.insert(cuda_batch_event_retirements_.end(),
+                                       events.begin(), events.end());
 }
 
 std::shared_ptr<Program::RuntimeCompletionResourceBatch>
@@ -7707,6 +7854,10 @@ Program::detach_runtime_completion_resources() {
                     !vulkan_ray_resource_retirements_.empty();
   }
   if (!has_resources) {
+    std::lock_guard<std::mutex> lock(cuda_batch_event_mutex_);
+    has_resources = !cuda_batch_event_retirements_.empty();
+  }
+  if (!has_resources) {
     return nullptr;
   }
 
@@ -7739,6 +7890,13 @@ Program::detach_runtime_completion_resources() {
     std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
     batch->vulkan_ray_scenes.swap(vulkan_ray_scene_retirements_);
     batch->vulkan_ray_resources.swap(vulkan_ray_resource_retirements_);
+  }
+  {
+    std::lock_guard<std::mutex> lock(cuda_batch_event_mutex_);
+    batch->cuda_batch_events.swap(cuda_batch_event_retirements_);
+  }
+  if (!batch->cuda_batch_events.empty()) {
+    batch->cuda_event_pool = runtime_completion_cuda_event_pool_;
   }
   TI_ASSERT(!batch->empty());
   return batch;
@@ -8036,12 +8194,22 @@ RuntimeCompletion Program::record_runtime_completion(
 }
 
 std::unique_ptr<Program::RuntimeSubmissionTransaction>
-Program::begin_runtime_submission_transaction(bool gpu_timing) {
+Program::begin_runtime_submission_transaction(bool gpu_timing,
+                                               bool cuda_concurrent_batch) {
   ensure_runtime_submission_allowed("submission transaction");
   TI_ERROR_IF(finalized_,
               "Cannot begin a submission transaction after Program finalize");
   return std::unique_ptr<RuntimeSubmissionTransaction>(
-      new RuntimeSubmissionTransaction(this, gpu_timing));
+      new RuntimeSubmissionTransaction(this, gpu_timing,
+                                       cuda_concurrent_batch));
+}
+
+void *Program::register_runtime_cuda_concurrent_stream(void *stream) {
+  RuntimeSubmissionTransaction *transaction =
+      active_runtime_submission_telemetry_transaction();
+  TI_ERROR_IF(transaction == nullptr || transaction->program_ != this,
+              "Concurrent CUDA Graph replay requires an active batch transaction");
+  return transaction->register_cuda_concurrent_stream(stream);
 }
 
 Program::RuntimeSubmissionTransaction *&

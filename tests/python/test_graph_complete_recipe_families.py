@@ -1100,3 +1100,137 @@ def test_complete_recipe_materializes_coarse_cuda_branch_join_dag():
     short.dispatch(advance_b, symbols["b0"], symbols["b1"])
     short.dispatch(join, symbols["a1"], symbols["b1"], symbols["output"])
     assert not short.freeze()._runtime_spec._graph_branch_join_sources
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_complete_recipe_executes_independent_workspace_pair_as_one_submission():
+    count = 257
+
+    @ti.kernel
+    def initialize(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in source:
+            scratch[index] = source[index] * 0.75 + 1.0
+
+    @ti.kernel
+    def relax(
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        scale: ti.f32,
+    ):
+        for index in scratch:
+            value = scratch[index]
+            for _ in range(8):
+                value = value * scale + 0.03125
+            scratch[index] = value
+
+    @ti.kernel
+    def finalize(
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in output:
+            output[index] = scratch[index] * 1.25
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pair_source", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pair_output", ti.f32, ndim=1)
+    scale_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "pair_scale", ti.f32)
+    builder = ti.graph.GraphBuilder()
+    scratch = builder.private_ndarray("pair_scratch", ti.f32, count)
+    builder.dispatch(initialize, source_arg, scratch)
+    for _ in range(6):
+        builder.dispatch(relax, scratch, scale_arg)
+    builder.dispatch(finalize, scratch, output_arg)
+    definition = builder.freeze()
+
+    catalog = definition.recipe_catalog()
+    fragments = _family_fragments(catalog, "workspace_concurrency")
+    assert len(fragments) == 1
+    assert _selection(fragments[0]).source_key == "whole-graph-pair"
+    entry = catalog.compose(
+        (fragments[0].fragment_id,),
+        stage="cuda-complete-workspace-pair",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+    )
+
+    sources = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(2))
+    outputs = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(2))
+    host_sources = (
+        np.linspace(0.0, 1.0, count, dtype=np.float32),
+        np.linspace(1.0, 2.0, count, dtype=np.float32),
+    )
+    for source, host in zip(sources, host_sources):
+        source.from_numpy(host)
+    frames = tuple(
+        {
+            "pair_source": source,
+            "pair_output": output,
+            "pair_scale": 0.999,
+        }
+        for source, output in zip(sources, outputs)
+    )
+
+    with definition.materialization_context() as context:
+        with context.materialize(catalog.baseline.recipe) as baseline_product:
+            baseline = baseline_product.executor
+            baseline_batch = baseline.bind_batch(frames)
+            baseline_ticket = baseline.submit_batch(baseline_batch)
+            baseline_ticket.wait()
+            assert baseline_ticket.workspace_lanes == (0, 0)
+            baseline_id = baseline_product.materialized_physical_id
+            baseline_bytes = (
+                baseline.execution_stats().memory.persistent_internal_storage_bytes
+            )
+
+        with context.materialize(entry.recipe) as candidate_product:
+            candidate = candidate_product.executor
+            candidate.prepare_telemetry("timestamps")
+            candidate_batch = candidate.bind_batch(frames)
+            published = candidate.binding_statistics()
+            ticket = candidate.submit_batch(
+                candidate_batch,
+                telemetry="timestamps",
+            )
+            telemetry = ticket.telemetry()
+            replayed = candidate.binding_statistics()
+
+            assert ticket.workspace_lanes == (0, 1)
+            assert telemetry.gpu_duration_ns > 0
+            assert telemetry.host_submit_ns >= 0
+            assert replayed["raw_replay_validations"] == (
+                published["raw_replay_validations"]
+            )
+            assert replayed["version_fast_replays"] == (
+                published["version_fast_replays"] + 2
+            )
+            assert candidate_product.materialized_physical_id != baseline_id
+            assert candidate_product.manifest.submissions[0].replay_mode == (
+                "cuda_concurrent_complete_graph_pair"
+            )
+            assert tuple(candidate_product.manifest.submissions[0].queues) == (
+                "cuda_workspace:0",
+                "cuda_workspace:1",
+                "default",
+            )
+            assert (
+                candidate.execution_stats().memory.persistent_internal_storage_bytes
+                == baseline_bytes * 2
+            )
+
+            aliased_frames = (frames[0], {**frames[1], "pair_output": outputs[0]})
+            with pytest.raises(
+                TaichiRuntimeError,
+                match="requires proven disjoint cross-invocation storage",
+            ):
+                candidate.bind_batch(aliased_frames)
+
+    expected = []
+    for host in host_sources:
+        value = host * np.float32(0.75) + np.float32(1.0)
+        for _ in range(6):
+            for _ in range(8):
+                value = value * np.float32(0.999) + np.float32(0.03125)
+        expected.append(value * np.float32(1.25))
+    for output, reference in zip(outputs, expected):
+        np.testing.assert_allclose(output.to_numpy(), reference, rtol=2e-5)

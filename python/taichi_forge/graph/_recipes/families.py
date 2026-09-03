@@ -400,6 +400,72 @@ def _branch_join_fragments(definition, spec):
     return tuple(result)
 
 
+def _workspace_concurrency_fragments(definition, spec):
+    from taichi_forge.graph._graph import _workspace_concurrency_spec_eligible
+
+    if not _workspace_concurrency_spec_eligible(spec, definition.backend):
+        return ()
+    coverage = tuple(source.region_id for source in definition.sources)
+    source_key = "whole-graph-pair"
+    first_id = f"{source_key}:invoke:0"
+    second_id = f"{source_key}:invoke:1"
+    tasks = (
+        GraphFragmentTask.create(
+            first_id,
+            "cuda_complete_graph_invocation",
+            effects=spec.pre_optimization_ir_root.effects,
+            bindings=spec.pre_optimization_ir_root.bindings,
+            physical={
+                "family": "workspace_concurrency",
+                "queue": "cuda_workspace:0",
+                "invocation": 0,
+            },
+        ),
+        GraphFragmentTask.create(
+            second_id,
+            "cuda_complete_graph_invocation",
+            effects=spec.pre_optimization_ir_root.effects,
+            bindings=spec.pre_optimization_ir_root.bindings,
+            physical={
+                "family": "workspace_concurrency",
+                "queue": "cuda_workspace:1",
+                "invocation": 1,
+            },
+        ),
+        GraphFragmentTask.create(
+            f"{source_key}:join",
+            "cuda_complete_graph_pair_join",
+            depends_on=(first_id, second_id),
+            physical={
+                "family": "workspace_concurrency",
+                "queue": "default",
+                "event_join": True,
+            },
+        ),
+    )
+    return (
+        _fragment(
+            definition,
+            family="workspace_concurrency",
+            source_key=source_key,
+            choice_id="cuda-concurrent-pair-v1",
+            coverage=coverage,
+            tasks=tasks,
+            resources=(
+                GraphFragmentResourceRequirement(
+                    name=f"{source_key}:second-private-workspace",
+                    kind="workspace_lane",
+                    bytes=int(spec.internal_storage_bytes),
+                    alignment=1,
+                    ownership="graph_instance",
+                    lifetime="graph",
+                    exclusive_submission=True,
+                ),
+            ),
+        ),
+    )
+
+
 def _native_source_coverage(definition, source):
     prefix = f"graph/{source._recipe_node_index}:"
     root = next(
@@ -658,6 +724,7 @@ class GraphExistingFamilyProvider:
         fragments.extend(_offload_phase_fusion_fragments(definition, spec))
         fragments.extend(_sparse_traversal_fragments(definition, spec))
         fragments.extend(_branch_join_fragments(definition, spec))
+        fragments.extend(_workspace_concurrency_fragments(definition, spec))
         fragments.extend(_bounded_fragments(definition, spec))
         fragments.extend(_control_fragments(definition, spec))
         fragments.extend(

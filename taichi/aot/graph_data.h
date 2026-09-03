@@ -771,7 +771,8 @@ struct TI_DLL_EXPORT CompiledGraph {
                const std::unordered_map<std::string, IValue> &args) const;
   void jit_run_cached(const CompileConfig &compile_config,
                       const std::unordered_map<std::string, IValue> &args,
-                      CompiledGraphJITCache &cache) const;
+                      CompiledGraphJITCache &cache,
+                      bool cuda_concurrent_batch_lane = false) const;
   bool jit_run_bounded_cuda_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

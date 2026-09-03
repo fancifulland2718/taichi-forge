@@ -1067,19 +1067,21 @@ class CudaEventHandle {
 struct CudaDeferredReplayResources {
   CudaDeferredReplayResources(
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
-      std::vector<std::vector<uint8_t>> host_buffers)
+      std::vector<std::vector<uint8_t>> host_buffers,
+      void *stream = nullptr)
       : allocation_leases(std::move(leases)),
         host_arg_buffers(std::move(host_buffers)) {
-    ready_event.record(nullptr);
+    ready_event.record(stream);
   }
   CudaDeferredReplayResources(
       CudaEventHandle event,
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
-      std::vector<std::vector<uint8_t>> host_buffers)
+      std::vector<std::vector<uint8_t>> host_buffers,
+      void *stream = nullptr)
       : ready_event(std::move(event)),
         allocation_leases(std::move(leases)),
         host_arg_buffers(std::move(host_buffers)) {
-    ready_event.record(nullptr);
+    ready_event.record(stream);
   }
   ~CudaDeferredReplayResources() {
     // Host patch buffers and old allocation leases remain valid until every
@@ -1225,7 +1227,8 @@ struct CompiledGraphCudaState {
 
   void defer_replay_resources(
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>> leases,
-      std::vector<std::vector<uint8_t>> host_buffers) {
+      std::vector<std::vector<uint8_t>> host_buffers,
+      void *stream = nullptr) {
     collect_ready_deferred_resources();
     if (deferred_resources.size() >= kMaxDeferredReplayBatches) {
       if (diagnostics_enabled) {
@@ -1235,12 +1238,12 @@ struct CompiledGraphCudaState {
     }
     if (reusable_events.empty()) {
       deferred_resources.emplace_back(std::move(leases),
-                                      std::move(host_buffers));
+                                      std::move(host_buffers), stream);
     } else {
       CudaEventHandle event = std::move(reusable_events.back());
       reusable_events.pop_back();
       deferred_resources.emplace_back(std::move(event), std::move(leases),
-                                      std::move(host_buffers));
+                                      std::move(host_buffers), stream);
     }
     if (diagnostics_enabled) {
       stats.peak_deferred_replay_batches = std::max<std::uint64_t>(
@@ -1970,7 +1973,8 @@ bool patch_cuda_bounded_dispatch_controls(
     const CompiledGraph &graph,
     const std::vector<CudaGraphArgSignatureEntry> &signature,
     CompiledGraphCudaState &state,
-    std::vector<std::vector<uint8_t>> &host_buffers) {
+    std::vector<std::vector<uint8_t>> &host_buffers,
+    void *stream = nullptr) {
   if (state.bounded_dispatch_controls.size() != graph.dispatches.size()) {
     return false;
   }
@@ -2003,7 +2007,7 @@ bool patch_cuda_bounded_dispatch_controls(
                 sizeof(control.host_control));
     driver.memcpy_host_to_device_async(control.device_control,
                                        host_buffers.back().data(),
-                                       sizeof(control.host_control), nullptr);
+                                       sizeof(control.host_control), stream);
     if (state.diagnostics_enabled) {
       ++state.stats.asynchronous_control_updates;
     }
@@ -2034,7 +2038,7 @@ bool patch_cuda_bounded_dispatch_controls(
                 sizeof(group.host_control));
     driver.memcpy_host_to_device_async(group.device_control,
                                        host_buffers.back().data(),
-                                       sizeof(group.host_control), nullptr);
+                                       sizeof(group.host_control), stream);
     if (state.diagnostics_enabled) {
       ++state.stats.asynchronous_control_updates;
     }
@@ -2216,7 +2220,8 @@ bool patch_cuda_graph_arguments(
     const std::unordered_map<std::string, IValue> &args,
     const std::vector<CudaGraphArgSignatureEntry> &signature,
     CompiledGraphCudaState &state,
-    std::vector<std::vector<uint8_t>> &host_arg_buffers) {
+    std::vector<std::vector<uint8_t>> &host_arg_buffers,
+    void *stream = nullptr) {
   if (state.packets.size() != graph.dispatches.size()) {
     return false;
   }
@@ -2240,7 +2245,7 @@ bool patch_cuda_graph_arguments(
     host_arg_buffers.emplace_back();
     if (!launcher->update_cuda_graph_launch(
             state.packets[i].packet, launch_ctx, host_arg_buffers.back(),
-            /*stream=*/nullptr)) {
+            stream)) {
       return false;
     }
     const auto &metadata = dispatch.cuda_bounded_dispatch;
@@ -2253,7 +2258,7 @@ bool patch_cuda_graph_arguments(
       if (!launcher->update_cuda_graph_bounded_range(
               state.packets[i].packet,
               reinterpret_cast<void *>(*extent), metadata->capacity,
-              host_arg_buffers.back(), /*stream=*/nullptr)) {
+              host_arg_buffers.back(), stream)) {
         return false;
       }
     }
@@ -2332,7 +2337,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
                         const std::unordered_map<std::string, IValue> &args,
                         CompiledGraphJITCache &cache,
                         Program &program,
-                        RuntimeStatistics *statistics) {
+                        RuntimeStatistics *statistics,
+                        bool cuda_concurrent_batch_lane = false) {
   const bool stable_replay = cache.stable_replay_optimization_enabled.load(
       std::memory_order_relaxed);
   bool exact_slot = false;
@@ -2395,6 +2401,15 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       return false;
     }
   }
+  void *replay_stream = nullptr;
+  auto select_replay_stream = [&]() {
+    replay_stream =
+        cuda_concurrent_batch_lane
+            ? program.register_runtime_cuda_concurrent_stream(
+                  state->ensure_capture_stream())
+            : nullptr;
+    return replay_stream;
+  };
   // Production replay is deliberately attribution-free. Measured execution
   // uses the explicit submission-telemetry path instead of turning clocks and
   // counters on inside the latency-sensitive replay implementation.
@@ -2416,7 +2431,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       CUDAContext::get_instance().make_current();
       state->collect_ready_deferred_resources();
       CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
-                                              nullptr);
+                                              select_replay_stream());
       state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
       if (state->diagnostics_enabled) {
@@ -2462,7 +2477,8 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
   state->collect_ready_deferred_resources();
   if (state->graph_exec &&
       state->signature == signature->entries) {
-    CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
+    CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
+                                            select_replay_stream());
     state->stats.last_path = CompiledGraphExecutionPath::cuda_exact_replay;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
     if (state->diagnostics_enabled) {
@@ -2499,11 +2515,13 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       cuda_graph_signatures_are_structurally_compatible(
           state->signature, signature->entries);
   if (structurally_compatible) {
+    select_replay_stream();
     std::vector<std::vector<uint8_t>> host_arg_buffers;
     if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
-                                   host_arg_buffers) &&
+                                   host_arg_buffers, replay_stream) &&
         patch_cuda_bounded_dispatch_controls(
-            graph, signature->entries, *state, host_arg_buffers)) {
+            graph, signature->entries, *state, host_arg_buffers,
+            replay_stream)) {
       std::vector<std::unique_ptr<cuda::CudaDevice::AllocationLease>>
           old_allocation_leases;
       if (state->allocations != signature->allocations) {
@@ -2512,15 +2530,15 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
         state->allocations = signature->allocations;
       }
       state->signature = std::move(signature->entries);
-      // The default stream orders this event after the previous replay and
+      // The replay stream orders this event after the previous replay and
       // every argument-buffer upload above. At that point old allocations are
       // no longer referenced and the host staging buffers have been consumed.
       // Record before the new replay so bounded retirement does not wait for
       // one more graph execution than correctness requires.
       state->defer_replay_resources(std::move(old_allocation_leases),
-                                    std::move(host_arg_buffers));
+                                    std::move(host_arg_buffers), replay_stream);
       CUDADriver::get_instance().graph_launch(state->graph_exec.get(),
-                                              nullptr);
+                                              replay_stream);
       state->stats.last_path =
           CompiledGraphExecutionPath::cuda_patched_replay;
       state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
@@ -2533,8 +2551,19 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       return true;
     }
   }
-  // Any partial argument-buffer update is ordered on the default stream.
-  // Retiring the old executable synchronizes that stream before recapture.
+  // Any partial argument-buffer update is ordered on the chosen replay
+  // stream. Retirement synchronizes only the default stream, so a failed
+  // concurrent patch must drain its private stream before host staging and
+  // old allocation leases can be released. This is a fallback-only safety
+  // boundary and never runs on exact pair replay.
+  if (replay_stream != nullptr) {
+    const auto error =
+        CUDADriver::get_instance().stream_synchronize.call(replay_stream);
+    TI_ERROR_IF(error != CUDA_SUCCESS,
+                "CUDA concurrent Graph patch fallback synchronize failed: {}",
+                CUDADriver::get_instance()
+                    .stream_synchronize.get_error_message(error));
+  }
   const bool is_recapture = state->has_captured_once;
   state->retire();
   state->signature = std::move(signature->entries);
@@ -2718,7 +2747,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
       statistics->record_graph_recapture();
     }
   }
-  driver.graph_launch(state->graph_exec.get(), nullptr);
+  driver.graph_launch(state->graph_exec.get(), select_replay_stream());
   return true;
 }
 
@@ -5845,7 +5874,8 @@ void CompiledGraph::jit_run(
 void CompiledGraph::jit_run_cached(
     const CompileConfig &compile_config,
     const std::unordered_map<std::string, IValue> &args,
-    CompiledGraphJITCache &cache) const try {
+    CompiledGraphJITCache &cache,
+    bool cuda_concurrent_batch_lane) const try {
   const bool has_indirect_dispatch = has_indirect_dispatches();
   TI_ERROR_IF(has_indirect_dispatch &&
                   compile_config.arch != Arch::vulkan,
@@ -6025,7 +6055,8 @@ void CompiledGraph::jit_run_cached(
     // launch path below. Unlabeled graphs remain replay-first.
     if (!has_dispatch_labels() &&
         try_run_cuda_graph(*this, compile_config, args, cache, *program,
-                           &program->runtime_statistics())) {
+                           &program->runtime_statistics(),
+                           cuda_concurrent_batch_lane)) {
       program->mark_runtime_submission(
           RuntimeSubmissionKind::kGraphBackendSubmission);
       if (resource_guard) {
@@ -6038,6 +6069,9 @@ void CompiledGraph::jit_run_cached(
       finish_attribution();
       return;
     }
+    TI_ERROR_IF(cuda_concurrent_batch_lane,
+                "Concurrent CUDA Graph batch requires native unlabeled "
+                "Graph replay");
     if (program != nullptr) {
       program->runtime_statistics().record_graph_ordinary_fallback();
     }

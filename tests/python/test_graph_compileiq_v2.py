@@ -324,3 +324,133 @@ def test_complete_recipe_v2_memory_budget_skips_native_workspace_before_material
         assert by_recipe[candidate_id]["failures"][0]["failure"]["code"] == (
             "estimated_memory_budget_exceeded"
         )
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
+    from compileiq.forge_support import (
+        ForgeOpaqueObjectiveV1,
+        ForgeOpaqueTargetContractV1,
+    )
+
+    count = 257
+
+    @ti.kernel
+    def initialize(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in source:
+            scratch[index] = source[index] * 0.75 + 1.0
+
+    @ti.kernel
+    def relax(
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        scale: ti.f32,
+    ):
+        for index in scratch:
+            value = scratch[index]
+            for _ in range(8):
+                value = value * scale + 0.03125
+            scratch[index] = value
+
+    @ti.kernel
+    def finalize(
+        scratch: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in output:
+            output[index] = scratch[index] * 1.25
+
+    source_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pair_source", ti.f32, ndim=1)
+    output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "pair_output", ti.f32, ndim=1)
+    scale_arg = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "pair_scale", ti.f32)
+    builder = ti.graph.GraphBuilder()
+    scratch = builder.private_ndarray("pair_scratch", ti.f32, count)
+    builder.dispatch(initialize, source_arg, scratch)
+    for _ in range(6):
+        builder.dispatch(relax, scratch, scale_arg)
+    builder.dispatch(finalize, scratch, output_arg)
+    baseline = builder.compile()
+    plans = compileiq_recipe_search(baseline)
+
+    assert len(plans.recipe_ids) == 2
+    workspace_recipe_id = next(
+        recipe_id
+        for recipe_id in plans.recipe_ids
+        if plans._selection(recipe_id).family == "workspace_concurrency"
+    )
+    sources = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(2))
+    outputs = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(2))
+    host_sources = (
+        np.linspace(0.0, 1.0, count, dtype=np.float32),
+        np.linspace(1.0, 2.0, count, dtype=np.float32),
+    )
+    for source, host in zip(sources, host_sources):
+        source.from_numpy(host)
+    frames = tuple(
+        {
+            "pair_source": source,
+            "pair_output": output,
+            "pair_scale": 0.999,
+        }
+        for source, output in zip(sources, outputs)
+    )
+    batches = {}
+    lanes = {}
+    fast_replays = {}
+
+    def objective(graph, request):
+        graph.prepare_telemetry("timestamps")
+        invocation_batch = batches.setdefault(id(graph), graph.bind_batch(frames))
+        before = graph.binding_statistics()
+        ticket = graph.submit_batch(
+            invocation_batch,
+            telemetry="timestamps",
+        )
+        telemetry = ticket.telemetry()
+        after = graph.binding_statistics()
+        lanes[request.recipe_id] = ticket.workspace_lanes
+        fast_replays[request.recipe_id] = (
+            before["raw_replay_validations"],
+            after["raw_replay_validations"],
+            after["version_fast_replays"] - before["version_fast_replays"],
+        )
+        return {
+            "device_ns": float(telemetry.gpu_duration_ns),
+            "host_ns": float(telemetry.host_submit_ns),
+            "persistent_bytes": float(graph.execution_stats().memory.persistent_bytes),
+        }
+
+    target_contract = ForgeOpaqueTargetContractV1(
+        objectives=(
+            ForgeOpaqueObjectiveV1(name="device_ns", direction="min"),
+            ForgeOpaqueObjectiveV1(name="host_ns", direction="min"),
+            ForgeOpaqueObjectiveV1(name="persistent_bytes", direction="min"),
+        )
+    )
+    with plans.compileiq_search(
+        objective,
+        budget=_budget(len(plans.recipe_ids)),
+        target_contract=target_contract,
+        repeat_count=1,
+        deterministic_seed=17,
+    ) as session:
+        result = session.start()
+        coverage = plans.require_complete_search(session)
+
+    assert coverage["complete"]
+    measured = result.get_results()
+    assert len(measured) == 2
+    assert all(item["feasible"] for item in measured)
+    assert len({item["materialized_physical_id"] for item in measured}) == 2
+    assert lanes[plans.baseline_recipe_id] == (0, 0)
+    assert lanes[workspace_recipe_id] == (0, 1)
+    assert all(value == (0, 0, 2) for value in fast_replays.values())
+    memory_by_recipe = {
+        item["recipe_id"]: item["metrics"]["persistent_bytes"] for item in measured
+    }
+    assert (
+        memory_by_recipe[workspace_recipe_id]
+        > memory_by_recipe[plans.baseline_recipe_id]
+    )
