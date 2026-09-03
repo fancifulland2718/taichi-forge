@@ -400,6 +400,52 @@ def _branch_join_fragments(definition, spec):
     return tuple(result)
 
 
+def _recording_partition_fragments(definition, spec):
+    """Expose bounded binding-frontier cuts as opaque complete recipes."""
+
+    coverage = tuple(source.region_id for source in definition.sources)
+    result = []
+    for source in spec._graph_recording_partition_sources:
+        first_id = f"{source.source_key}:segment:0"
+        tasks = (
+            GraphFragmentTask.create(
+                first_id,
+                "cuda_recording_segment",
+                physical={
+                    "family": "recording_partition",
+                    "queue": "default",
+                    "dispatch_range": (0, source.cut_index),
+                    "isolated_bindings": source.isolated_bindings,
+                },
+            ),
+            GraphFragmentTask.create(
+                f"{source.source_key}:segment:1",
+                "cuda_recording_segment",
+                depends_on=(first_id,),
+                physical={
+                    "family": "recording_partition",
+                    "queue": "default",
+                    "dispatch_range": (
+                        source.cut_index,
+                        source.dispatch_count,
+                    ),
+                    "isolated_bindings": source.isolated_bindings,
+                },
+            ),
+        )
+        result.append(
+            _fragment(
+                definition,
+                family="recording_partition",
+                source_key=source.source_key,
+                choice_id=source.recipe_id,
+                coverage=coverage,
+                tasks=tasks,
+            )
+        )
+    return tuple(result)
+
+
 def _workspace_concurrency_fragments(definition, spec):
     from taichi_forge.graph._graph import _workspace_concurrency_spec_eligible
 
@@ -724,6 +770,7 @@ class GraphExistingFamilyProvider:
         fragments.extend(_offload_phase_fusion_fragments(definition, spec))
         fragments.extend(_sparse_traversal_fragments(definition, spec))
         fragments.extend(_branch_join_fragments(definition, spec))
+        fragments.extend(_recording_partition_fragments(definition, spec))
         fragments.extend(_workspace_concurrency_fragments(definition, spec))
         fragments.extend(_bounded_fragments(definition, spec))
         fragments.extend(_control_fragments(definition, spec))

@@ -447,6 +447,10 @@ class CompileIQCompleteGraphRecipeSearch:
             "taichi_forge.graph.branch_join_schedule",
             "cuda-branch-join-complete-recipe.v1",
         ),
+        "recording_partition": (
+            "taichi_forge.graph.recording_partition",
+            "cuda-binding-frontier-complete-recipe.v1",
+        ),
         "workspace_concurrency": (
             "taichi_forge.graph.workspace_concurrency",
             "cuda-complete-graph-pair.v1",

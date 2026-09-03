@@ -9486,6 +9486,25 @@ class _GraphBranchJoinRecipeSource:
         return f"cuda-fork-join-v1:{self.node_index}:{groups}:{self.join_index}"
 
 
+@dataclass(frozen=True)
+class _GraphRecordingPartitionRecipeSource:
+    """One bounded CUDA recording cut at a public binding frontier."""
+
+    source_key: str
+    node_index: int
+    cut_index: int
+    dispatch_count: int
+    isolated_bindings: tuple
+    stable_dispatch_count: int
+
+    @property
+    def recipe_id(self):
+        return (
+            "cuda-binding-frontier-v1:"
+            f"{self.node_index}:{self.cut_index}:{self.dispatch_count}"
+        )
+
+
 def _effect_reads(access):
     return access in (
         GraphAccess.READ,
@@ -9612,6 +9631,103 @@ def _discover_cuda_branch_join_sources(source_nodes, backend):
             )
         )
     return tuple(sources)
+
+
+def _discover_cuda_recording_partition_sources(source_nodes, backend):
+    """Find bounded cuts that can isolate binding churn from a stable region.
+
+    This is definition-time topology analysis only.  It does not guess which
+    binding will change at runtime and it never exposes a raw cut index as a
+    public optimization option.  Complete recipes carry the physical cut as
+    an opaque Forge-owned choice for workload evaluation.
+    """
+
+    if backend != "cuda" or len(source_nodes) != 1:
+        return ()
+    node = source_nodes[0]
+    children = tuple(getattr(node.ir_node, "children", ()))
+    operations = tuple(getattr(node, "recipe_operations", ()))
+    dispatches = tuple(getattr(node, "recording_dispatches", ()))
+    if (
+        not isinstance(node, _CompiledCGraphNode)
+        or len(children) < 8
+        or len(children) != len(operations)
+        or len(children) != len(dispatches)
+        or node.source_native_count
+        or node.temporary_actions
+        or node.parallel_dispatch_groups
+        or any(not isinstance(child, DispatchNode) for child in children)
+        or any(child.bounded_domain is not None for child in children)
+        or any(operation[0] != "dispatch" for operation in operations)
+    ):
+        return ()
+
+    # DispatchNode bindings preserve kernel-parameter roles (for example many
+    # kernels may each have a local parameter called ``source``).  Recording
+    # identity is keyed by the enclosing Graph's symbolic arguments instead,
+    # so derive frontiers from the frozen operation arguments.
+    public_bindings = frozenset(node.runtime_arg_names)
+    binding_sets = tuple(
+        frozenset(_runtime_arg_names(operation[2])).intersection(public_bindings)
+        for operation in operations
+    )
+    prefix = []
+    accumulated = frozenset()
+    for bindings in binding_sets:
+        accumulated = accumulated.union(bindings)
+        prefix.append(accumulated)
+    suffix = [frozenset()] * len(binding_sets)
+    accumulated = frozenset()
+    for index in range(len(binding_sets) - 1, -1, -1):
+        accumulated = accumulated.union(binding_sets[index])
+        suffix[index] = accumulated
+
+    ranked = []
+    for cut_index in range(1, len(children)):
+        left_only = prefix[cut_index - 1].difference(suffix[cut_index])
+        right_only = suffix[cut_index].difference(prefix[cut_index - 1])
+        stable_dispatch_count = max(
+            len(children) - cut_index if left_only else 0,
+            cut_index if right_only else 0,
+        )
+        if stable_dispatch_count < 4:
+            continue
+        isolated_bindings = tuple(sorted(left_only.union(right_only)))
+        if not isolated_bindings:
+            continue
+        ranked.append(
+            (
+                -stable_dispatch_count,
+                min(cut_index, len(children) - cut_index),
+                cut_index,
+                isolated_bindings,
+            )
+        )
+
+    # Four physical alternatives are enough to represent both edge frontiers
+    # and the strongest interior frontiers without creating a raw partition
+    # combinatorics problem for the complete-recipe catalog.
+    result = []
+    for _, _, cut_index, isolated_bindings in sorted(ranked)[:4]:
+        stable_dispatch_count = max(
+            len(children) - cut_index
+            if prefix[cut_index - 1].difference(suffix[cut_index])
+            else 0,
+            cut_index
+            if suffix[cut_index].difference(prefix[cut_index - 1])
+            else 0,
+        )
+        result.append(
+            _GraphRecordingPartitionRecipeSource(
+                source_key=f"recording-partition:0:{cut_index}",
+                node_index=0,
+                cut_index=cut_index,
+                dispatch_count=len(children),
+                isolated_bindings=isolated_bindings,
+                stable_dispatch_count=stable_dispatch_count,
+            )
+        )
+    return tuple(result)
 
 
 def _graph_memory_disjoint_pairs(root):
@@ -10505,6 +10621,49 @@ def _replay_recipe_cgraph_node(
     return builder._nodes[0]
 
 
+def _replay_recording_partition_nodes(node, source):
+    """Rebuild one frozen CGraph as two ordered backend Graph segments."""
+
+    operations = tuple(node.recipe_operations)
+    children = tuple(getattr(node.ir_node, "children", ()))
+    if (
+        source.dispatch_count != len(operations)
+        or len(children) != len(operations)
+        or not 0 < source.cut_index < len(operations)
+        or any(operation[0] != "dispatch" for operation in operations)
+        or any(not isinstance(child, DispatchNode) for child in children)
+    ):
+        raise TaichiRuntimeError(
+            "recording-partition recipe no longer matches its frozen CGraph source"
+        )
+
+    builder = GraphBuilder(
+        _capture_recipe_sources=False,
+        _explicit_map_source_groups=(),
+    )
+    for index, (operation, child) in enumerate(zip(operations, children), start=1):
+        _, kernel_cpp, args, label, *_ = operation
+        builder._record_dispatch(kernel_cpp, list(args), label)
+        # Keep the frozen semantic/effect contract verbatim.  Recompiling the
+        # dispatch recovers the executable packet; it must not silently erase
+        # memory, alias, or logical identity metadata owned by the definition.
+        builder._pending_ir_nodes[-1] = child
+        if index == source.cut_index:
+            builder._flush_graph_builder()
+    builder._flush_graph_builder()
+    nodes = tuple(builder._nodes)
+    if (
+        len(nodes) != 2
+        or any(not isinstance(item, _CompiledCGraphNode) for item in nodes)
+        or tuple(item.dispatch_count for item in nodes)
+        != (source.cut_index, source.dispatch_count - source.cut_index)
+    ):
+        raise TaichiRuntimeError(
+            "recording-partition recipe did not produce its declared CUDA segments"
+        )
+    return nodes
+
+
 def _operation_has_selection(operation, selections):
     kind = operation[0]
     if kind == "dispatch":
@@ -10702,6 +10861,9 @@ class _GraphSpec:
         self._graph_branch_join_sources = _discover_cuda_branch_join_sources(
             source_nodes,
             backend,
+        )
+        self._graph_recording_partition_sources = (
+            _discover_cuda_recording_partition_sources(source_nodes, backend)
         )
         control_recipe_domains = []
         for node_index, source_node in enumerate(source_nodes):
@@ -11060,6 +11222,7 @@ class _GraphSpec:
             "offload_phase_fusion",
             "sparse_traversal",
             "branch_join_schedule",
+            "recording_partition",
             "workspace_concurrency",
             "bounded_execution",
             "structured_control",
@@ -11162,12 +11325,42 @@ class _GraphSpec:
                 )
             branch_join_by_node[source.node_index] = source
 
+        recording_partition_selections = {
+            selection.source_key: selection
+            for selection in selections
+            if selection.family == "recording_partition"
+        }
+        recording_partition_by_node = {}
+        for source in self._graph_recording_partition_sources:
+            selected = recording_partition_selections.get(source.source_key)
+            if selected is None:
+                continue
+            if selected.choice_id != source.recipe_id:
+                raise TaichiRuntimeError(
+                    "recording-partition selection does not match its frozen source"
+                )
+            if source.node_index in recording_partition_by_node:
+                raise TaichiRuntimeError(
+                    "one CGraph segment cannot select multiple recording partitions"
+                )
+            recording_partition_by_node[source.node_index] = source
+
         nodes = []
         dispatch_offset = 0
         consumed_map_groups = set()
         for node_index, node in enumerate(self.nodes):
             if isinstance(node, _CompiledCGraphNode):
                 dispatch_count = _dispatch_leaf_count(node.ir_node)
+                recording_partition = recording_partition_by_node.get(node_index)
+                if recording_partition is not None:
+                    nodes.extend(
+                        _replay_recording_partition_nodes(
+                            node,
+                            recording_partition,
+                        )
+                    )
+                    dispatch_offset += dispatch_count
+                    continue
                 local_groups = []
                 for group_index, group in enumerate(map_groups):
                     inside = all(

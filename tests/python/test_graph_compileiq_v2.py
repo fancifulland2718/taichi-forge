@@ -332,6 +332,17 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
         ForgeOpaqueObjectiveV1,
         ForgeOpaqueTargetContractV1,
     )
+    from taichi_forge.graph import CompileIQCompleteGraphRecipeSearch
+    from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
+
+    class WorkspaceOnlyProvider:
+        def fragments(self, definition):
+            return tuple(
+                fragment
+                for fragment in GraphExistingFamilyProvider().fragments(definition)
+                if fragment.provider_namespace
+                == "taichi_forge.graph.workspace_concurrency"
+            )
 
     count = 257
 
@@ -372,7 +383,10 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
         builder.dispatch(relax, scratch, scale_arg)
     builder.dispatch(finalize, scratch, output_arg)
     baseline = builder.compile()
-    plans = compileiq_recipe_search(baseline)
+    catalog = baseline.definition.recipe_catalog(
+        providers=(WorkspaceOnlyProvider(),)
+    )
+    plans = CompileIQCompleteGraphRecipeSearch(baseline, catalog=catalog)
 
     assert len(plans.recipe_ids) == 2
     workspace_recipe_id = next(

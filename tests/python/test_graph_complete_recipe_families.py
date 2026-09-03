@@ -1234,3 +1234,113 @@ def test_complete_recipe_executes_independent_workspace_pair_as_one_submission()
         expected.append(value * np.float32(1.25))
     for output, reference in zip(outputs, expected):
         np.testing.assert_allclose(output.to_numpy(), reference, rtol=2e-5)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_complete_recipe_partitions_binding_churn_from_stable_cuda_recording():
+    count = 257
+    stages = 8
+
+    @ti.kernel
+    def initialize(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        scratch_a: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            scratch_a[index] = source[index] * 0.875 + 0.125
+
+    @ti.kernel
+    def advance(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        target: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            target[index] = source[index] * 0.999 + 0.03125
+
+    @ti.kernel
+    def publish(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            output[index] = source[index] * 1.25
+
+    symbols = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
+        for name in ("source", "scratch_a", "scratch_b", "output")
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(initialize, symbols["source"], symbols["scratch_a"])
+    current = "scratch_a"
+    for _ in range(stages):
+        target = "scratch_b" if current == "scratch_a" else "scratch_a"
+        builder.dispatch(advance, symbols[current], symbols[target])
+        current = target
+    builder.dispatch(publish, symbols[current], symbols["output"])
+    definition = builder.freeze()
+
+    catalog = definition.recipe_catalog()
+    fragments = _family_fragments(catalog, "recording_partition")
+    total_dispatches = stages + 2
+    tail = next(
+        fragment
+        for fragment in fragments
+        if _selection(fragment).source_key
+        == f"recording-partition:0:{total_dispatches - 1}"
+    )
+    assert "output" in tail.tasks[1].physical["isolated_bindings"]
+    entry = catalog.compose(
+        (tail.fragment_id,),
+        stage="cuda-binding-frontier-partition",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+    )
+
+    source = ti.ndarray(ti.f32, shape=count)
+    scratch_a = ti.ndarray(ti.f32, shape=count)
+    scratch_b = ti.ndarray(ti.f32, shape=count)
+    outputs = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(3))
+    host_source = np.linspace(-0.5, 1.5, count, dtype=np.float32)
+    source.from_numpy(host_source)
+    frames = tuple(
+        {
+            "source": source,
+            "scratch_a": scratch_a,
+            "scratch_b": scratch_b,
+            "output": output,
+        }
+        for output in outputs
+    )
+
+    with definition.materialization_context() as context:
+        with context.materialize(catalog.baseline.recipe) as baseline:
+            baseline_id = baseline.materialized_physical_id
+            assert len(baseline.executor.execution_stats().segments) == 1
+        with context.materialize(entry.recipe) as candidate:
+            graph = candidate.executor
+            bindings = tuple(graph.bind(frame) for frame in frames)
+            published = graph.binding_statistics()
+            for replay in range(12):
+                graph.run(bindings[replay % len(bindings)])
+            ti.sync()
+            replayed = graph.binding_statistics()
+            stats = graph.execution_stats()
+
+            assert candidate.materialized_physical_id != baseline_id
+            assert tuple(segment.dispatch_count for segment in stats.segments) == (
+                total_dispatches - 1,
+                1,
+            )
+            assert all(segment.backend_graph_path for segment in stats.segments)
+            assert replayed["raw_replay_validations"] == (
+                published["raw_replay_validations"]
+            )
+            assert replayed["version_fast_replays"] == (
+                published["version_fast_replays"] + 12
+            )
+
+    expected = host_source * np.float32(0.875) + np.float32(0.125)
+    for _ in range(stages):
+        expected = expected * np.float32(0.999) + np.float32(0.03125)
+    expected *= np.float32(1.25)
+    for output in outputs:
+        np.testing.assert_allclose(output.to_numpy(), expected, rtol=1e-5, atol=1e-6)
