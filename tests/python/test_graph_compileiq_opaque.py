@@ -10,11 +10,12 @@ import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.graph import (
-    CompileIQGraphRecipeSearch,
     CompileIQGraphUnavailableError,
-    GraphExecutableRecipeSelection,
     _compileiq_opaque,
     compileiq_recipe_search,
+)
+from taichi_forge.graph._compileiq_adapter import (
+    GraphExecutableRecipeSelection as _LegacyGraphExecutableRecipeSelection,
 )
 from taichi_forge.graph._optimization import (
     _CUDA_CONDITIONAL_CONTROL_RECIPE_ID,
@@ -34,10 +35,13 @@ _MAP2_RECIPE_ID = "fusion:map2:" + "b" * 24
 _MAP3_RECIPE_ID = "fusion:map3:" + "c" * 24
 _MAP4_RECIPE_ID = "fusion:map4:" + "d" * 24
 _ROOT = Path(__file__).resolve().parents[2]
+_LegacyCompileIQGraphRecipeSearch = _compileiq_opaque.CompileIQGraphRecipeSearch
 
 
 def test_compileiq_public_search_surface_is_graph_owned():
     assert ti.graph.compileiq_recipe_search is compileiq_recipe_search
+    assert not hasattr(ti.graph, "CompileIQGraphRecipeSearch")
+    assert not hasattr(ti.graph, "GraphExecutableRecipeSelection")
     assert not hasattr(ti, "compileiq_offload_execution_plan_search")
     assert not hasattr(ti.lang, "compileiq_offload_execution_plan_search")
     assert not hasattr(ti, "CompileIQOffloadExecutionPlanSearch")
@@ -252,7 +256,7 @@ def test_map_partition_search_rejects_ambiguous_native_builder_scope(monkeypatch
     graph = _Graph(_space(), map_materialization_available=False)
 
     with pytest.raises(ValueError, match="one Forge-owned source GraphBuilder"):
-        CompileIQGraphRecipeSearch(graph)
+        _LegacyCompileIQGraphRecipeSearch(graph)
 
 
 def _nested_control_space(*, selected="device_update"):
@@ -361,12 +365,17 @@ assert not loaded, loaded
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
-def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
+def test_public_graph_search_rejects_legacy_executable_spaces():
+    with pytest.raises(TypeError, match="frozen GraphDefinition"):
+        compileiq_recipe_search(_Graph(_space()))
+
+
+def test_private_legacy_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
     _install_reviewed_fork(monkeypatch)
 
-    search = compileiq_recipe_search(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
 
-    assert isinstance(search, CompileIQGraphRecipeSearch)
+    assert isinstance(search, _LegacyCompileIQGraphRecipeSearch)
     assert search.baseline_recipe_id in search.recipe_ids
     assert len(search.recipe_ids) == 4
     assert search.worker_type is _Worker
@@ -402,7 +411,7 @@ def test_public_graph_search_is_baseline_inclusive_and_opaque(monkeypatch):
 
 def test_graph_search_forwards_explicit_opaque_target_contract(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = compileiq_recipe_search(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
     target_contract = object()
     captured = {}
 
@@ -428,7 +437,7 @@ def test_graph_search_forwards_explicit_opaque_target_contract(monkeypatch):
 
 def test_decoded_selection_reuses_graph_materialization_identity(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
     map2_id = next(
         recipe_id
         for recipe_id in search.recipe_ids
@@ -438,7 +447,7 @@ def test_decoded_selection_reuses_graph_materialization_identity(monkeypatch):
 
     selection = search.select(parameters)
 
-    assert isinstance(selection, GraphExecutableRecipeSelection)
+    assert isinstance(selection, _LegacyGraphExecutableRecipeSelection)
     assert selection.spec_id == map2_id
     assert dict(search.worker_environment(parameters)) == {
         "TAICHI_FORGE_INTERNAL_MAP_FUSION": "map2",
@@ -454,7 +463,7 @@ def test_decoded_selection_reuses_graph_materialization_identity(monkeypatch):
 
 def test_structured_control_uses_its_own_opaque_domain_and_exact_route(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_control_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_control_space()))
 
     assert len(search.recipe_ids) == 2
     assert search.search_space.provider_namespace == (
@@ -489,7 +498,7 @@ def test_structured_control_uses_its_own_opaque_domain_and_exact_route(monkeypat
 
 def test_nested_control_uses_distinct_opaque_domain_and_exact_route(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_nested_control_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_nested_control_space()))
 
     assert len(search.recipe_ids) == 2
     assert search.search_space.provider_namespace == (
@@ -525,7 +534,7 @@ def test_nested_control_uses_distinct_opaque_domain_and_exact_route(monkeypatch)
 
 def test_decoded_selection_fails_closed_on_any_domain_drift(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
     baseline = _parameters(search, search.baseline_recipe_id)
 
     assert search.select(baseline).materialization_recipe == "baseline"
@@ -541,7 +550,7 @@ def test_decoded_selection_fails_closed_on_any_domain_drift(monkeypatch):
 
 def test_best_result_requires_complete_exact_fork_coverage(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
     candidate_id = next(
         recipe_id
         for recipe_id in search.recipe_ids
@@ -604,7 +613,7 @@ def test_incomplete_partition_domain_refines_only_observed_disjoint_frontier(
         partition_combination_count=16,
         partition_candidate_limit=4095,
     )
-    search = CompileIQGraphRecipeSearch(_Graph(space))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(space))
     observed = _compileiq_search_audit(search, search.recipe_ids)
 
     refined = search.refine(observed, (left.spec_id, right.spec_id))
@@ -628,7 +637,7 @@ def test_incomplete_partition_domain_refines_only_observed_disjoint_frontier(
 
 def test_search_schedule_and_qualification_keep_baseline_as_sentinel(monkeypatch):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
 
     scheduled = search.paired_schedule(blocks=2)
 
@@ -645,7 +654,7 @@ def test_public_search_requires_independent_qualification_before_runtime_cache(
     monkeypatch,
 ):
     _install_reviewed_fork(monkeypatch)
-    search = CompileIQGraphRecipeSearch(_Graph(_space()))
+    search = _LegacyCompileIQGraphRecipeSearch(_Graph(_space()))
     recipe_id = next(
         value for value in search.recipe_ids if value != search.baseline_recipe_id
     )
@@ -907,7 +916,7 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
         family
         for recipe in public_search.recipes
         for family in recipe.manifest.families
-    } == {"baseline", "map_fusion"}
+    } == {"baseline", "map_fusion", "recording_partition"}
     with baseline.definition.materialize(public_search.baseline) as materialized:
         physical = materialized.executor.physical_plan()
         assert physical["logical_dispatch_count"] == 8

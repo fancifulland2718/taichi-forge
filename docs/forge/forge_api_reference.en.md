@@ -1759,23 +1759,18 @@ objective results retain a Pareto frontier; declaration order is only a
 deterministic final preference. Runtime `auto` and ordinary compile remain
 unchanged.
 
-`ti.graph.compileiq_recipe_search(graph)` is the lower-level compatibility API.
-Its map domain uses exact barrier-preserving source partitions,
-not only a maximum `map2`/`map3`/`map4` width. It exhausts products up to 4,095
-candidates and explicitly stages larger products. Exact map search requires
-one ordinary JIT CGraph and one Forge-owned source builder; composed or
-multi-builder Graphs fail closed. Structured-control domains remain separate,
-and fusion-by-control Cartesian products are not exposed.
-
-A Graph satisfying the strict single-dispatch CUDA stencil contract instead
-exposes a separate complete `graph_memory` domain: a direct baseline and one
-Forge-owned `shared_staged_1d` candidate. The complete recipe freezes its
-offload plan, task manifest, halo, shared bytes, and binding requirements;
-CompileIQ still selects only an opaque spec ID. This domain is not combined
-with map or control, and a winner is available only through explicit offline
-reconstruction without changing runtime `auto`. `Graph.bind()` still
-qualifies concrete layout and alias requirements fail closed at publication,
-with no repeated heavy proof on stable replay.
+`ti.graph.compileiq_recipe_search(graph)` is the lower-level complete-recipe
+API for callers that manage batches, checkpoints, and materialization contexts
+directly. The Graph must be backed by a frozen `GraphDefinition`; the API uses
+that definition's whole-Graph catalog and has no fallback to the historical
+family executable-space adapter. A Graph without a definition is rejected
+instead of exposing map width, control route, provider, block, workgroup, or
+backend parameters to CompileIQ. Exact fusion partitions, memory staging,
+structured control, recording topology, and other low-level decisions remain
+available to Forge materializers and may be composed when their fragments are
+compatible. The modified CompileIQ boundary receives only complete opaque
+recipe tokens, and materialization always crosses the definition-owned
+transactional context.
 
 Task-indexed offload identities, materialization, and qualification remain
 private diagnostic infrastructure rather than a public

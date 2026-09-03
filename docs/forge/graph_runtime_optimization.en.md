@@ -762,72 +762,29 @@ with exact measured and missing recipe IDs; a decision is made only from a
 complete feasible recipe. The decision does not change runtime `auto`, install
 a decision cache, or alter ordinary `GraphBuilder.compile()` behavior.
 
-`ti.graph.compileiq_recipe_search(graph)` remains the lower-level compatibility
-surface for callers that manage batches, checkpoints, and materialization
-contexts directly. It freezes the executable recipes that
-the Graph already owns into one baseline-inclusive offline search domain. An
-ordinary JIT CGraph with one Forge-owned source `GraphBuilder` exposes exact
-barrier-preserving contiguous partitions of its eligible map phases. A
-singleton segment means no fusion; segments of two through four maps are
-complete Forge-owned fusion plans. For one uninterrupted chain of two through
-eight maps, the numbers of nonbaseline candidates are respectively 1, 3, 7,
-14, 28, 55, and 107. Atomic, reduction, labeled, and other legality barriers
-split the chain into independent phases. Their exact Cartesian product is
-enumerated while it fits the 4,095-candidate limit. Larger products enter an
-explicit single-phase-perturbation stage and may be refined only from a fully
-observed, bounded frontier; Forge never truncates a domain while claiming it
-is complete. Exact source groups are part of compilation and execution
-identity, so equal-size partitions at different positions remain distinct.
+`ti.graph.compileiq_recipe_search(graph)` remains the lower-level complete-
+recipe surface for callers that manage batches, checkpoints, and
+materialization contexts directly. The Graph must be backed by a frozen
+`GraphDefinition`; the call searches the same whole-Graph catalog as
+`definition.search_recipes(...)`. There is no public fallback to the historical
+family executable-space adapter. A Graph without a definition is rejected
+instead of exposing raw kernel or backend parameters to CompileIQ.
 
-Map-partition materialization fails closed for composed root Graphs, multiple
-native CGraph builders, workspace lanes, provider/structured/observation
-nodes, temporary or fixed state, and AOT-only Graphs. This prevents local
-dispatch indices from being applied to the wrong builder. An eligible CUDA
-Graph instead exposes exactly one bounded structured-control space. A flat
-source `while` uses
-`control:cuda_conditional_graph:v1` as baseline and
-`control:cuda_masked_bounded_graph:v1` as candidate. A depth-2 source uses
-`control:cuda_nested_device_update:v1` as baseline and
-`control:cuda_nested_masked_bounded:v1` as candidate. The nested domain
-requires exactly one root outer `while` whose body owns one through eight
-ordered leaf inner `while` regions. Every region must use
-`lowering_mode="auto"`, have an exact counter, and qualify for native
-submission; both physical routes must be independently available. Observation
-and native-provider nodes remain excluded. Ordinary CGraph prefix, suffix, and
-eligible gaps between inner regions remain in the same semantic plan.
+Exact fusion partitions, structured-control routes, scheduling, recording
+topology, and provider decisions remain Forge-owned fragment/materializer
+details. Their legality boundaries, source groups, and physical choices are
+part of recipe identity, and compatible fragments may be composed into one
+complete recipe. CompileIQ receives neither those implementation fields nor a
+Cartesian product of raw parameters; it receives only the opaque identity of
+each already-complete candidate.
 
-The map-fusion, flat-control, and nested-control domains are deliberately not
-combined. Explicit `portable` and `native_required` source policies, multiple
-root structured regions, and portable host-controlled routes are outside the
-control spaces. CompileIQ cannot form fusion-by-control or flat-by-nested
-Cartesian products. This API also does not invent fusion across reduction or
-atomic boundaries, or expose block, workgroup, PTXAS, or other kernel launch
-parameters.
-
-An ordinary CUDA Graph in a strict initial scope may now expose a separate
-`graph_memory` domain. Its source must be one Forge-owned `GraphBuilder` with
-one ordinary JIT CGraph, one dispatch, and exactly one range-for task. The
-compiler artifact must prove a one-dimensional f32 affine stencil, a read-only
-input, pointwise output, exact halo, and uniform shared-memory barrier. This
-domain contains exactly two complete recipes: a direct baseline and one fixed
-`shared_staged_1d` candidate. Forge retains source lineage lazily at explicit
-search time and freezes the complete offload plan, materialized task manifest,
-grid/workgroup, halo, shared bytes, source/output, layout/disjoint requirements,
-and compiler identity into the recipe manifest. CompileIQ sees only opaque spec
-tokens, never raw block, tile, halo, or `memory_strategy` axes.
-
-The `graph_memory` domain is mutually exclusive with map fusion and flat or
-nested control. Multi-dispatch, pointwise, non-CUDA, template-dispatch,
-provider/temporary/fixed-state, and multiple-workspace-lane definitions retain
-only their existing domain or baseline. A worker may apply a private complete
-recipe ID only while rebuilding the Graph definition. Forge then verifies the
-semantic plan, complete manifest, compilation and execution identities, and
-Graph task manifest again. The staged route still proves the concrete ndarray
-owner, extent, layout, alignment, and alias requirements once at `Graph.bind()`
-publication. An ineligible binding fails before submission, and stable replay
-adds no storage-description or alias analysis. A GraphMemory winner is available
-only through explicit offline reconstruction: it emits no runtime qualification
-cache, does not change runtime `auto`, and adds no per-replay direct fallback.
+Memory staging follows the same rule. The compiler and binding publication
+boundary may prove index geometry, halo, shared bytes, layout, ownership, and
+alias requirements for a complete materializer, but these facts are not public
+CompileIQ axes. Stable replay does not repeat the heavy proof. Materialization
+verifies the semantic definition, recipe identity, physical manifest, and
+published binding context transactionally; it does not install a runtime
+selector or change ordinary `auto` behavior.
 
 The constructor accepts only the reviewed modified CompileIQ fork. It verifies
 the capability manifest, bundled-core commit and lock, and the complete Python

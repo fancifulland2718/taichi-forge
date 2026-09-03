@@ -1481,17 +1481,13 @@ fragment 会在 evaluation budget 内组合成完整候选。公共 recipe 摘�
 tile、padding、lane、workgroup 或 PTXAS 裸参数。多目标结果保留 Pareto frontier，声明顺序只
 作为确定性的最终偏好；runtime `auto` 和普通 compile 均不改变。
 
-`ti.graph.compileiq_recipe_search(graph)` 是保留的低层兼容 API。其 map 域搜索精确、
-保持 barrier 的 source partition，而不是只看最大 `map2`/`map3`/`map4` width；不超过 4,095
-个 candidate 的乘积会完整枚举，更大的乘积会明确分阶段。精确 map 搜索要求一个 ordinary JIT
-CGraph 和一个 Forge-owned 源 builder；composed 或 multi-builder Graph 会 fail closed。
-structured-control 域继续独立，也不开放 fusion × control 的笛卡尔积。
-
-满足严格单 dispatch CUDA stencil 合同的 Graph 会改为公开一个独立的 `graph_memory` 完整域：
-direct baseline 与一个 Forge-owned `shared_staged_1d` candidate。完整 recipe 冻结 offload plan、
-task manifest、halo、shared bytes 和 binding requirements；CompileIQ 仍只选择 opaque spec ID。
-该域不与 map/control 组合，winner 只用于离线显式重建，不改变 runtime `auto`。实际资源的
-layout/alias 仍由 `Graph.bind()` 在发布时 fail closed 地资格化，稳定 replay 不重复重型证明。
+`ti.graph.compileiq_recipe_search(graph)` 是供调用者直接管理 batch、checkpoint 与
+materialization context 的低层完整 recipe API。Graph 必须由冻结的 `GraphDefinition` 支撑；
+该入口使用 definition 的 whole-Graph catalog，不再回退到历史 family executable-space adapter。
+缺少 definition 的 Graph 会被拒绝，而不是向 CompileIQ 暴露 map width、control route、provider、
+block、workgroup 或 backend 参数。精确 fusion partition、memory staging、structured control、
+recording topology 等底层决策继续供 Forge materializer 内部使用，并可在 fragment 兼容时组合。
+魔改 CompileIQ 边界只接收完整 opaque recipe token，所有物化仍经过 definition-owned 的事务 context。
 
 按 task 索引的 offload identity、物化和资格化实现保留为私有诊断基础，但不作为
 `ti.compileiq_offload_execution_plan_search` 公共 API。普通 kernel 继续使用源码合同和显式

@@ -825,7 +825,6 @@ class _CompileIQExecutableAdapter:
 
 
 __all__ = [
-    "GraphExecutableRecipeSelection",
     "_CompileIQExecutableAdapter",
     "_CompileIQExecutableSelection",
 ]

@@ -598,53 +598,21 @@ recipe。公共 handle 只公开语义身份、family、覆盖、聚合资源和
 精确列出已测与缺失 recipe；decision 只从已经完整测量且可行的 recipe 中产生。该流程不会修改
 runtime `auto`、安装 decision cache 或改变普通 `GraphBuilder.compile()` 行为。
 
-`ti.graph.compileiq_recipe_search(graph)` 保留为低层兼容入口，供需要直接管理 batch、checkpoint
-和 materialization context 的调用者使用。它把 Graph 已经拥有的 executable recipe 冻结成一个
-包含 baseline 的离线搜索域。只有一个 Forge-owned 源 `GraphBuilder` 的 ordinary JIT CGraph
-会公开各个合法 map phase 的精确、保持 barrier 的连续分区。单元素 segment 表示不融合，
-2 至 4 个 map 的 segment 表示 Forge 拥有的完整融合方案。一条不间断的 2 至 8 map chain
-分别有 1、3、7、14、28、55、107 个非 baseline candidate。atomic、reduction、label 等
-合法性 barrier 会把 chain 切为独立 phase；各 phase 的精确笛卡尔积只在不超过 4,095 个
-candidate 时完整枚举。更大的积会明确进入 single-phase-perturbation stage，且只能从已经
-完整观测的有界 frontier 继续细化；Forge 不会静默截断后仍声称搜索完整。精确 source group
-属于 compilation/execution identity，因此位置不同但 group size 相同的分区不会混同。
+`ti.graph.compileiq_recipe_search(graph)` 保留为低层完整 recipe 入口，供需要直接管理 batch、
+checkpoint 和 materialization context 的调用者使用。Graph 必须由冻结的 `GraphDefinition`
+支撑；该调用搜索与 `definition.search_recipes(...)` 相同的 whole-Graph catalog，不再公开回退
+到历史 family executable-space adapter。缺少 definition 的 Graph 会被拒绝，而不是向
+CompileIQ 暴露 raw kernel 或 backend 参数。
 
-对于 composed root Graph、多个 native CGraph builder、多个 workspace lane、provider/
-structured/observation node、temporary/fixed state 与 AOT-only Graph，map-partition 物化会
-fail closed，避免把局部 dispatch index 应用到错误的 builder。符合条件的 CUDA Graph 则
-只公开一个有限 structured-control 空间。flat 源 `while` 以
-`control:cuda_conditional_graph:v1` 为 baseline，以
-`control:cuda_masked_bounded_graph:v1` 为 candidate。depth-2 源结构以
-`control:cuda_nested_device_update:v1` 为 baseline，以
-`control:cuda_nested_masked_bounded:v1` 为 candidate。nested 域要求源码中恰好一个 root
-outer `while`，其 body 按序直接拥有 1 至 8 个 leaf inner `while`。每个 region 都必须使用
-`lowering_mode="auto"`、具有精确 counter、满足 native submission 资格，而且两条物理路线
-必须各自可用；observation 与 native-provider node 仍被排除。普通 CGraph prefix/suffix
-dispatch，以及 inner region 之间符合条件的 gap，仍属于同一 semantic plan。
+精确 fusion partition、structured-control route、schedule、recording topology 与 provider
+decision 继续作为 Forge-owned fragment/materializer 的内部细节。其合法性边界、source group
+和物理选择属于 recipe identity，兼容 fragment 可以组合成一个完整 recipe。CompileIQ 既看不到
+这些实现字段，也不能构造 raw 参数的笛卡尔积；它只接收每个已经完整的 candidate 的 opaque identity。
 
-map-fusion、flat-control 与 nested-control 三个搜索域刻意不组合。显式
-`portable`/`native_required` 源策略、多个 root structured region 和 portable host-controlled
-route 都不进入 control 空间；CompileIQ 不能构造 fusion × control 或 flat × nested 的
-笛卡尔积。这个 API 同样不会跨 reduction/atomic 边界发明 fusion，也不公开 block、
-workgroup、PTXAS 等普通 kernel launch 参数。
-
-一个满足严格范围的普通 CUDA Graph 现在还可以公开独立的 `graph_memory` 域：源码必须来自
-一个 Forge-owned `GraphBuilder`，只含一个 ordinary JIT CGraph、一个 dispatch 和恰好一个
-range-for task；compiler artifact 必须证明一维 f32 affine stencil、只读输入、pointwise 输出、
-精确 halo 与 uniform shared-memory barrier。该域只有两个完整 recipe：direct baseline 与一个
-固定的 `shared_staged_1d` candidate。Forge 在显式搜索前惰性保留 source lineage，并把完整
-offload plan、materialized task manifest、grid/workgroup、halo、shared bytes、source/output、
-layout/disjoint requirements 和 compiler identity 冻结进 recipe manifest。CompileIQ 只看到
-不透明 spec token，不会看到或组合 block、tile、halo、`memory_strategy` 等裸轴。
-
-`graph_memory` 与 map-fusion、flat/nested control 严格互斥；multi-dispatch、pointwise、非 CUDA、
-template dispatch、provider/temporary/fixed state、多个 workspace lane 等范围只保留原有域或
-baseline。worker 只能在 Graph definition 重建时应用私有完整 recipe ID，物化后 Forge 会再次
-核对 semantic plan、完整 manifest、compilation/execution identity 和 Graph task manifest。
-staged route 的实际 ndarray owner、extent、layout、alignment 与 alias requirement 仍在
-`Graph.bind()` 发布阶段一次性证明；无资格 binding 在 submission 前失败，稳定 replay 不新增
-storage descriptor 或 alias 分析。GraphMemory winner 只能离线显式重建，不生成 runtime
-qualification cache、不改变 runtime `auto`，也不引入逐 replay direct fallback。
+memory staging 同样遵守这一边界。compiler 与 binding 发布阶段可以为完整 materializer 证明
+index geometry、halo、shared bytes、layout、owner 与 alias requirement，但这些事实不是公共
+CompileIQ 轴；稳定 replay 不重复重型证明。物化会事务性核对 semantic definition、recipe identity、
+physical manifest 和已发布 binding context，不安装 runtime selector，也不改变普通 `auto` 行为。
 
 构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
 commit/lock 和完整 Python source manifest。当前源码身份固定为

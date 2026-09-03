@@ -1322,17 +1322,24 @@ class _CompleteGraphRecipeSelection:
 
 
 def compileiq_recipe_search(graph):
-    """Build a baseline-inclusive domain from the complete recipe catalog."""
+    """Build a baseline-inclusive domain from a complete recipe catalog.
 
-    if getattr(graph, "definition", None) is not None:
-        return CompileIQCompleteGraphRecipeSearch(graph)
+    The public entry point deliberately has no fallback to the historical
+    executable-space adapter.  Lower-level kernel and backend choices may be
+    consumed by Forge materializers, but they are not CompileIQ search axes.
+    """
 
-    return CompileIQGraphRecipeSearch(graph)
+    if getattr(graph, "definition", None) is None:
+        raise TypeError(
+            "compileiq_recipe_search() requires a compiled Graph backed by a "
+            "frozen GraphDefinition; legacy executable spaces and raw kernel/"
+            "backend axes are not public CompileIQ search domains"
+        )
+    return CompileIQCompleteGraphRecipeSearch(graph)
 
 
 __all__ = [
     "CompileIQCompleteGraphRecipeSearch",
-    "CompileIQGraphRecipeSearch",
     "CompileIQGraphUnavailableError",
     "compileiq_recipe_search",
 ]
