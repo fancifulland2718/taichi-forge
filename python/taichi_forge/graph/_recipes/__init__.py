@@ -55,6 +55,14 @@ from .physical import (
     GraphPhysicalTaskManifest,
     observe_graph_physical_manifest,
 )
+from .providers import (
+    GraphRecipeProvider,
+    GraphRecipeProviderDescriptor,
+    GraphRecipeProviderError,
+    GraphRecipeProviderSet,
+    PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    RUNTIME_GRAPH_ASSEMBLY_V1,
+)
 
 __all__ = [
     "CompiledGraphPhysicalManifest",
@@ -91,8 +99,14 @@ __all__ = [
     "GraphRecipeCompositionError",
     "GraphRecipeExecutionStep",
     "GraphRecipeFragment",
+    "GraphRecipeProvider",
+    "GraphRecipeProviderDescriptor",
+    "GraphRecipeProviderError",
+    "GraphRecipeProviderSet",
     "GraphRegionSelection",
     "GraphSemanticRegion",
+    "PROVIDER_OWNED_WHOLE_GRAPH_V1",
+    "RUNTIME_GRAPH_ASSEMBLY_V1",
     "assemble_existing_family_recipe",
     "materialize_existing_family_baseline",
     "observe_graph_physical_manifest",

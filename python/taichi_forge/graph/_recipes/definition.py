@@ -389,14 +389,21 @@ class GraphDefinition:
 
         from taichi_forge.graph._recipes.catalog import GraphRecipeCatalog
         from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
+        from taichi_forge.graph._recipes.providers import GraphRecipeProviderSet
 
         if providers is None:
             providers = (GraphExistingFamilyProvider(), )
+        provider_set = GraphRecipeProviderSet(
+            self,
+            tuple(providers),
+            available_capabilities=available_capabilities,
+        )
         catalog = GraphRecipeCatalog(
             self,
             available_capabilities=available_capabilities,
+            provider_set=provider_set,
         )
-        catalog.discover(tuple(providers))
+        catalog.discover()
         catalog.build_single_region_stage()
         return catalog
 

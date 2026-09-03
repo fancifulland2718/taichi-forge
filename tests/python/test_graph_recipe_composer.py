@@ -21,6 +21,9 @@ from taichi_forge.graph._recipes import (
     GraphRecipeComposer,
     GraphRecipeCompositionError,
     GraphRecipeFragment,
+    GraphRecipeProviderDescriptor,
+    GraphRecipeProviderError,
+    GraphRecipeProviderSet,
 )
 
 from tests import test_utils
@@ -93,6 +96,15 @@ def _task(task_id, route, *, effects=(), depends_on=(), temporaries=()):
         effects=effects,
         temporaries=temporaries,
         physical={"route": route},
+    )
+
+
+def _provider_descriptor(namespace="test.provider"):
+    return GraphRecipeProviderDescriptor(
+        namespace=namespace,
+        provider_version="1",
+        domain_version="test-domain-v1",
+        semantic_fingerprint="test-provider-semantics-v1",
     )
 
 
@@ -391,6 +403,8 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
     catalog = GraphRecipeCatalog(definition)
 
     class Provider:
+        descriptor = _provider_descriptor()
+
         def fragments(self, requested_definition):
             assert requested_definition is definition
             return (base, tail)
@@ -425,6 +439,8 @@ def test_catalog_builds_budget_bounded_compatible_complete_recipes():
     catalog = GraphRecipeCatalog(definition)
 
     class Provider:
+        descriptor = _provider_descriptor()
+
         def fragments(self, requested_definition):
             assert requested_definition is definition
             return (head_a, head_b, middle, tail)
@@ -449,6 +465,72 @@ def test_catalog_builds_budget_bounded_compatible_complete_recipes():
         for entry in admitted
     )
     assert catalog.build_compatible_stage(candidate_limit=0) == ()
+
+
+def test_provider_set_identity_is_order_independent_and_definition_bound():
+    definition = _definition()
+
+    class Provider:
+        def __init__(self, namespace):
+            self.descriptor = GraphRecipeProviderDescriptor(
+                namespace=namespace,
+                provider_version="1",
+                domain_version="test-domain-v1",
+                semantic_fingerprint=f"semantics:{namespace}",
+            )
+
+        def discover(self, requested_definition):
+            assert requested_definition is definition
+            return ()
+
+    first = Provider("test.first")
+    second = Provider("test.second")
+    forward = GraphRecipeProviderSet(definition, (first, second))
+    reverse = GraphRecipeProviderSet(definition, (second, first))
+
+    assert forward.provider_registry_id == reverse.provider_registry_id
+    assert forward.generation_domain_id == reverse.generation_domain_id
+    assert tuple(item.namespace for item in forward.descriptors) == (
+        "test.first",
+        "test.second",
+    )
+    json.dumps(forward.to_dict(), sort_keys=True, allow_nan=False)
+
+
+def test_provider_set_rejects_namespace_conflict_and_capability_drift():
+    definition = _definition()
+
+    class Provider:
+        def __init__(self, descriptor):
+            self.descriptor = descriptor
+
+        def discover(self, _definition):
+            return ()
+
+    descriptor = _provider_descriptor("test.duplicate")
+    with pytest.raises(GraphRecipeProviderError) as duplicate:
+        GraphRecipeProviderSet(
+            definition,
+            (Provider(descriptor), Provider(descriptor)),
+        )
+    assert duplicate.value.error_key == "provider_namespace_duplicate"
+
+    capability_descriptor = GraphRecipeProviderDescriptor(
+        namespace="test.capability",
+        provider_version="1",
+        domain_version="test-domain-v1",
+        semantic_fingerprint="test-capability-semantics-v1",
+        required_capabilities=("cuda.graph.capture",),
+    )
+    with pytest.raises(GraphRecipeProviderError) as unavailable:
+        GraphRecipeProviderSet(
+            definition,
+            (Provider(capability_descriptor),),
+            available_capabilities=(),
+        )
+    assert unavailable.value.to_dict()["error_key"] == (
+        "provider_capability_unavailable"
+    )
 
 
 def test_fragment_task_dag_rejects_cycles_before_catalog_admission():

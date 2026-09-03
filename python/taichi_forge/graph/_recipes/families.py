@@ -20,8 +20,28 @@ from taichi_forge.graph._recipes.materialize import (
     GraphMaterializedFragment,
 )
 from taichi_forge.graph._recipes.physical import observe_graph_physical_manifest
+from taichi_forge.graph._recipes.providers import (
+    GraphRecipeProviderDescriptor,
+    RUNTIME_GRAPH_ASSEMBLY_V1,
+)
 
 _PROVIDER_VERSION = "complete-graph-family-v1"
+_FAMILY_NAMESPACES = tuple(
+    "taichi_forge.graph." + family
+    for family in (
+        "bounded_execution",
+        "branch_join_schedule",
+        "graph_memory",
+        "graph_reduction",
+        "map_fusion",
+        "native_algorithm",
+        "offload_phase_fusion",
+        "recording_partition",
+        "sparse_traversal",
+        "structured_control",
+        "workspace_concurrency",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -761,6 +781,20 @@ def _control_fragments(definition, spec):
 
 class GraphExistingFamilyProvider:
     """Expose every currently materializable family without early return."""
+
+    descriptor = GraphRecipeProviderDescriptor(
+        namespace="taichi_forge.graph.existing_families",
+        provider_version=_PROVIDER_VERSION,
+        domain_version="existing-family-domain-v1",
+        semantic_fingerprint="existing-family-fragment-generation-v1",
+        assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
+        capabilities=("legacy-family-adapter",),
+        owned_fragment_namespaces=_FAMILY_NAMESPACES,
+        fragment_key_schema="family:source:choice.v1",
+    )
+
+    def discover(self, definition):
+        return self.fragments(definition)
 
     def fragments(self, definition):
         spec = definition._runtime_spec

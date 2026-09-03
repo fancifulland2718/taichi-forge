@@ -1,19 +1,16 @@
 """Staged catalog for complete Graph recipes without Cartesian expansion."""
 
 from dataclasses import dataclass
-from typing import Protocol
-
 from taichi_forge.graph._recipes.composer import (
     GraphExecutableRecipe,
     GraphRecipeComposer,
 )
 from taichi_forge.graph._recipes.fragments import GraphRecipeFragment
-
-
-class GraphFragmentProvider(Protocol):
-    """Minimal provider contract owned by Forge, not by CompileIQ."""
-
-    def fragments(self, definition) -> tuple[GraphRecipeFragment, ...]: ...
+from taichi_forge.graph._recipes.providers import (
+    GraphRecipeProvider as GraphFragmentProvider,
+    GraphRecipeProviderError,
+    GraphRecipeProviderSet,
+)
 
 
 @dataclass(frozen=True)
@@ -35,8 +32,26 @@ class GraphRecipeCatalogEntry:
 class GraphRecipeCatalog:
     """Build complete recipes in explicit stages and deduplicate physical plans."""
 
-    def __init__(self, definition, *, available_capabilities=()):
+    def __init__(
+        self,
+        definition,
+        *,
+        available_capabilities=(),
+        provider_set=None,
+    ):
         self.definition = definition
+        if provider_set is not None and not isinstance(
+            provider_set,
+            GraphRecipeProviderSet,
+        ):
+            raise TypeError(
+                "Graph recipe catalog provider_set must be GraphRecipeProviderSet"
+            )
+        if provider_set is not None and provider_set.definition is not definition:
+            raise ValueError(
+                "Graph recipe catalog provider set belongs to another definition"
+            )
+        self.provider_set = provider_set
         self.composer = GraphRecipeComposer(
             definition,
             available_capabilities=available_capabilities,
@@ -83,11 +98,47 @@ class GraphRecipeCatalog:
         self._fragments[fragment.fragment_id] = fragment
         return fragment
 
-    def discover(self, providers):
+    @property
+    def provider_registry_id(self):
+        return (
+            ""
+            if self.provider_set is None
+            else self.provider_set.provider_registry_id
+        )
+
+    @property
+    def generation_domain_id(self):
+        return (
+            ""
+            if self.provider_set is None
+            else self.provider_set.generation_domain_id
+        )
+
+    def discover(self, providers=None):
+        if providers is not None:
+            requested = GraphRecipeProviderSet(
+                self.definition,
+                providers,
+                available_capabilities=self.composer.available_capabilities,
+            )
+            if (
+                self.provider_set is not None
+                and requested.provider_registry_id
+                != self.provider_set.provider_registry_id
+            ):
+                raise GraphRecipeProviderError(
+                    "Graph recipe catalog provider set cannot change after creation",
+                    error_key="provider_registry_drift",
+                )
+            self.provider_set = requested
+        if self.provider_set is None:
+            raise GraphRecipeProviderError(
+                "Graph recipe catalog requires an explicit provider set",
+                error_key="provider_registry_missing",
+            )
         discovered = []
-        for provider in providers:
-            for fragment in provider.fragments(self.definition):
-                discovered.append(self.register_fragment(fragment))
+        for fragment in self.provider_set.discover():
+            discovered.append(self.register_fragment(fragment))
         return tuple(discovered)
 
     def _admit(self, stage, recipe, parent_recipe_ids):
