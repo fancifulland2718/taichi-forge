@@ -11,6 +11,7 @@ from ._optimization_api import (
     GraphOptimizationTarget as GraphOptimizationTarget,
     GraphRecipeHandle as GraphRecipeHandle,
     GraphRecipeManifest as GraphRecipeManifest,
+    GraphRecipeSearchStrategy as GraphRecipeSearchStrategy,
     GraphSearchBudget as GraphSearchBudget,
 )
 from ._recipes import (

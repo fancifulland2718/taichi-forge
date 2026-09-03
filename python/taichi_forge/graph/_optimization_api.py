@@ -6,6 +6,7 @@ provider knobs remain private to Forge's fragment/materializer layer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sys
@@ -190,6 +191,52 @@ class GraphSearchBudget:
 
 
 @dataclass(frozen=True)
+class GraphRecipeSearchStrategy:
+    """Bounded complete-recipe generation policy owned by Forge."""
+
+    mode: str = "exact_if_bounded"
+    exact_composition_limit: int = 256
+    max_generation_rounds: int = 3
+    max_generated_recipes: int = 1024
+
+    def __post_init__(self):
+        if self.mode not in ("exact_if_bounded", "staged"):
+            raise ValueError(
+                "Graph recipe search strategy mode must be exact_if_bounded or staged"
+            )
+        for name, value, minimum in (
+            ("exact_composition_limit", self.exact_composition_limit, 1),
+            ("max_generation_rounds", self.max_generation_rounds, 0),
+            ("max_generated_recipes", self.max_generated_recipes, 1),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(
+                    f"Graph recipe search strategy {name} must be at least {minimum}"
+                )
+        if (
+            self.mode == "exact_if_bounded"
+            and self.exact_composition_limit > self.max_generated_recipes
+        ):
+            raise ValueError(
+                "Graph exact composition limit cannot exceed max generated recipes"
+            )
+
+    @property
+    def strategy_id(self):
+        payload = _canonical_json(self.to_dict()).encode("ascii")
+        return "graph-recipe-search-strategy-v1:" + hashlib.sha256(payload).hexdigest()
+
+    def to_dict(self):
+        return {
+            "schema": "taichi_forge.graph_recipe_search_strategy.v1",
+            "mode": self.mode,
+            "exact_composition_limit": self.exact_composition_limit,
+            "max_generation_rounds": self.max_generation_rounds,
+            "max_generated_recipes": self.max_generated_recipes,
+        }
+
+
+@dataclass(frozen=True)
 class GraphRecipeManifest:
     """Public summary of one complete recipe without provider-local knobs."""
 
@@ -335,7 +382,8 @@ class GraphOptimizationReport:
     semantic_graph_id: str
     target: GraphOptimizationTarget
     budget: GraphSearchBudget
-    selected_recipe_id: str
+    strategy: GraphRecipeSearchStrategy
+    selected_recipe_id: str | None
     pareto_recipe_ids: tuple[str, ...]
     search_complete: bool
     termination_reason: str
@@ -346,6 +394,7 @@ class GraphOptimizationReport:
     _capability_json: str = field(repr=False)
     _provenance_json: str = field(repr=False)
     _checkpoint_json: str = field(repr=False)
+    _status_json: str = field(repr=False)
 
     @property
     def results(self):
@@ -363,12 +412,17 @@ class GraphOptimizationReport:
     def checkpoint(self):
         return json.loads(self._checkpoint_json)
 
+    @property
+    def status(self):
+        return json.loads(self._status_json)
+
     def to_dict(self):
         return {
             "schema": "taichi_forge.graph_optimization_report.v1",
             "semantic_graph_id": self.semantic_graph_id,
             "target": self.target.to_dict(),
             "budget": self.budget.to_dict(),
+            "strategy": self.strategy.to_dict(),
             "selected_recipe_id": self.selected_recipe_id,
             "pareto_recipe_ids": self.pareto_recipe_ids,
             "search": {
@@ -381,6 +435,7 @@ class GraphOptimizationReport:
             "results": self.results,
             "compileiq_capability": self.compileiq_capability,
             "compileiq_provenance": self.compileiq_provenance,
+            "status": self.status,
             "checkpoint": self.checkpoint,
         }
 
@@ -389,13 +444,15 @@ class GraphOptimizationReport:
 class GraphOptimizationDecision:
     """One selected complete recipe plus its full measured frontier."""
 
-    selection: GraphRecipeHandle
+    selection: GraphRecipeHandle | None
     pareto_frontier: tuple[GraphRecipeHandle, ...]
     report: GraphOptimizationReport
 
     def to_dict(self):
         return {
-            "selection": self.selection.to_dict(),
+            "selection": (
+                None if self.selection is None else self.selection.to_dict()
+            ),
             "pareto_frontier": tuple(
                 item.to_dict() for item in self.pareto_frontier
             ),
@@ -413,6 +470,8 @@ class _GraphRecipeSearchSession:
         engine,
         target,
         budget,
+        strategy,
+        checkpoint,
         providers,
         available_capabilities,
     ):
@@ -426,6 +485,12 @@ class _GraphRecipeSearchSession:
             )
         if not isinstance(budget, GraphSearchBudget):
             raise TypeError("Graph recipe search budget must be GraphSearchBudget")
+        if strategy is None:
+            strategy = GraphRecipeSearchStrategy()
+        if not isinstance(strategy, GraphRecipeSearchStrategy):
+            raise TypeError(
+                "Graph recipe search strategy must be GraphRecipeSearchStrategy"
+            )
 
         from taichi_forge.graph._compileiq_opaque import (
             CompileIQCompleteGraphRecipeSearch,
@@ -435,31 +500,184 @@ class _GraphRecipeSearchSession:
             providers=providers,
             available_capabilities=available_capabilities,
         )
-        remaining_capacity = max(
-            0,
-            budget.recipe_capacity - len(catalog.entries()),
-        )
-        catalog.build_compatible_stage(candidate_limit=remaining_capacity)
-        graph = definition.compile()
         self._definition = definition
-        self._plans = CompileIQCompleteGraphRecipeSearch(graph, catalog=catalog)
+        self._catalog = catalog
         self._target = target
         self._budget = budget
-        self._handles = {
-            entry.recipe.recipe_id: GraphRecipeHandle._from_recipe(
-                definition,
-                entry.recipe,
-                catalog.provider_set,
+        self._strategy = strategy
+        self._seed_fragment_ids = tuple(
+            fragment.fragment_id for fragment in catalog.fragments
+        )
+        exact = None
+        if strategy.mode == "exact_if_bounded":
+            exact = catalog.build_exact_stage(
+                candidate_limit=strategy.exact_composition_limit,
             )
-            for entry in catalog.entries()
-        }
+        self._execution_mode = (
+            "exact" if exact is not None and exact.exhaustive else "staged"
+        )
+        self._exact_enumeration = exact
+        if len(catalog.entries()) > strategy.max_generated_recipes:
+            raise ValueError(
+                "initial Graph recipe domain exceeds max_generated_recipes"
+            )
+        self._checkpoint = self._normalize_checkpoint(checkpoint)
+        if self._checkpoint is not None:
+            self._rebuild_checkpoint_catalog(self._checkpoint)
+        graph = definition.compile()
+        self._plans = CompileIQCompleteGraphRecipeSearch(
+            graph,
+            catalog=catalog,
+            search_strategy_id=strategy.strategy_id,
+        )
+        self._handles = {}
+        self._refresh_handles()
         self._used = False
+
+    @staticmethod
+    def _normalize_checkpoint(checkpoint):
+        if checkpoint is None:
+            return None
+        if hasattr(checkpoint, "as_dict"):
+            checkpoint = checkpoint.as_dict()
+        if not isinstance(checkpoint, dict):
+            raise TypeError("Graph recipe checkpoint must be a dictionary")
+        return json.loads(_canonical_json(checkpoint))
+
+    def _refresh_handles(self):
+        for entry in self._catalog.entries():
+            self._handles.setdefault(
+                entry.recipe.recipe_id,
+                GraphRecipeHandle._from_recipe(
+                    self._definition,
+                    entry.recipe,
+                    self._catalog.provider_set,
+                ),
+            )
+
+    @staticmethod
+    def _batch_recipe_ids(batch):
+        return tuple(item["recipe_id"] for item in batch.get("recipes", ()))
+
+    def _remaining_generation_capacity(self):
+        return max(
+            0,
+            self._strategy.max_generated_recipes - len(self._catalog.entries()),
+        )
+
+    def _generate(self, survivor_recipe_ids):
+        return self._catalog.build_survivor_stage(
+            survivor_recipe_ids,
+            seed_fragment_ids=self._seed_fragment_ids,
+            candidate_limit=self._remaining_generation_capacity(),
+        )
+
+    def _stage_members(self, survivor_recipe_ids, new_entries=()):
+        baseline_id = self._catalog.baseline.recipe.recipe_id
+        survivor_ids = tuple(
+            sorted(
+                dict.fromkeys(survivor_recipe_ids),
+                key=lambda item: item.encode("utf-8"),
+            )
+        )
+        recipe_ids = tuple(
+            sorted(
+                dict.fromkeys(
+                    (baseline_id, *survivor_ids)
+                    + tuple(entry.recipe.recipe_id for entry in new_entries)
+                ),
+                key=lambda item: item.encode("utf-8"),
+            )
+        )
+        parents = {}
+        survivor_set = set(survivor_ids)
+        for recipe_id in recipe_ids:
+            if recipe_id in survivor_set or recipe_id == baseline_id:
+                parents[recipe_id] = (recipe_id,)
+                continue
+            entry = self._catalog.entry(recipe_id)
+            if not set(entry.parent_recipe_ids).issubset(survivor_set):
+                raise RuntimeError(
+                    "generated Graph recipe lineage escaped the measured frontier"
+                )
+            parents[recipe_id] = entry.parent_recipe_ids
+        return recipe_ids, parents
+
+    def _validate_checkpoint_batch(
+        self,
+        batch,
+        expected_recipe_ids,
+        expected_parents=None,
+    ):
+        actual_ids = self._batch_recipe_ids(batch)
+        if actual_ids != tuple(
+            sorted(expected_recipe_ids, key=lambda item: item.encode("utf-8"))
+        ):
+            raise ValueError(
+                "Graph recipe checkpoint generation differs from this strategy"
+            )
+        expected_parents = expected_parents or {
+            recipe_id: () for recipe_id in actual_ids
+        }
+        actual_parents = {
+            item["recipe_id"]: tuple(item.get("parent_recipe_ids", ()))
+            for item in batch.get("recipes", ())
+        }
+        normalized_expected_parents = {
+            recipe_id: tuple(
+                sorted(parent_ids, key=lambda item: item.encode("utf-8"))
+            )
+            for recipe_id, parent_ids in expected_parents.items()
+        }
+        if actual_parents != normalized_expected_parents:
+            raise ValueError(
+                "Graph recipe checkpoint lineage differs from this strategy"
+            )
+        planned = {
+            item["recipe_id"]: item["planned_physical_id"]
+            for item in batch.get("recipes", ())
+        }
+        if any(
+            planned.get(recipe_id)
+            != self._catalog.entry(recipe_id).recipe.planned_physical_id
+            for recipe_id in actual_ids
+        ):
+            raise ValueError(
+                "Graph recipe checkpoint planned physical identity drifted"
+            )
+
+    def _rebuild_checkpoint_catalog(self, checkpoint):
+        batches = tuple(checkpoint.get("batches", ()))
+        stages = tuple(checkpoint.get("stages", ()))
+        if len(stages) != len(batches):
+            raise ValueError("Graph recipe checkpoint has inconsistent stage history")
+        if not batches:
+            return
+        initial_ids = tuple(entry.recipe.recipe_id for entry in self._catalog.entries())
+        self._validate_checkpoint_batch(batches[0], initial_ids)
+        if self._execution_mode == "exact" and len(batches) != 1:
+            raise ValueError("exact Graph recipe checkpoint contains extra stages")
+        for index in range(1, len(batches)):
+            previous_survivors = tuple(stages[index - 1].get("survivor_recipe_ids", ()))
+            fidelity = batches[index].get("fidelity", {})
+            if fidelity.get("terminal", False):
+                expected_ids, parents = self._stage_members(previous_survivors)
+            else:
+                generated = self._generate(previous_survivors)
+                expected_ids, parents = self._stage_members(
+                    previous_survivors,
+                    generated,
+                )
+            self._validate_checkpoint_batch(
+                batches[index],
+                expected_ids,
+                parents,
+            )
 
     @property
     def recipes(self):
-        return tuple(
-            self._handles[recipe_id] for recipe_id in self._plans.recipe_ids
-        )
+        self._refresh_handles()
+        return tuple(self._handles[recipe_id] for recipe_id in self._plans.recipe_ids)
 
     @property
     def baseline(self):
@@ -487,6 +705,149 @@ class _GraphRecipeSearchSession:
                 strictly_better = strictly_better or left_value > right_value
         return no_worse and strictly_better
 
+    @staticmethod
+    def _finalization_type():
+        from compileiq.forge_support import ForgeOpaqueSearchFinalizationV1
+
+        return ForgeOpaqueSearchFinalizationV1
+
+    def _finalize(self, search, *, generation_status, reason):
+        checkpoint = search.checkpoint()
+        if checkpoint.finalization is not None:
+            return search.result()
+        if search.termination_reason == "poisoned":
+            return search.result()
+        terminal_stage = None
+        if checkpoint.batches and checkpoint.batches[-1].fidelity.terminal:
+            terminal_stage = checkpoint.stages[-1]
+        terminal_status = (
+            "not_reached"
+            if terminal_stage is None
+            else ("complete" if terminal_stage.complete else "partial")
+        )
+        return search.finalize(
+            self._finalization_type()(
+                generation_status=generation_status,
+                terminal_fidelity_status=terminal_status,
+                reason=reason,
+            )
+        )
+
+    def _run_exact(self, search):
+        checkpoint = search.checkpoint()
+        if checkpoint.finalization is not None:
+            return search.result()
+        if not checkpoint.batches:
+            batch = self._plans.batch(
+                recipe_ids=self._plans.recipe_ids,
+                stage_index=0,
+                fidelity_name="terminal-exact",
+                fidelity_ordinal=0,
+                repeat_count=self._budget.repeat_count,
+                terminal=True,
+            )
+            result = search.submit_batch(batch)
+        else:
+            if len(checkpoint.batches) != 1:
+                raise ValueError("exact Graph recipe search has multiple batches")
+            result = search.result()
+            if not checkpoint.stages[-1].complete:
+                result = search.submit_batch(checkpoint.batches[-1])
+        terminal_complete = search.checkpoint().stages[-1].complete
+        if not terminal_complete:
+            return result
+        return self._finalize(
+            search,
+            generation_status="exhaustive",
+            reason="exact_domain_complete",
+        )
+
+    @staticmethod
+    def _terminal_reason_from_fidelity(name):
+        return {
+            "terminal-no-new-physical-identity": "no_new_physical_identity",
+            "terminal-generation-round-limit": "generation_round_limit",
+            "terminal-generated-recipe-limit": "generated_recipe_limit",
+        }.get(name, "strategy_complete")
+
+    def _run_staged(self, search):
+        checkpoint = search.checkpoint()
+        if checkpoint.finalization is not None:
+            return search.result()
+        if not checkpoint.batches:
+            batch = self._plans.batch(
+                recipe_ids=self._plans.recipe_ids,
+                stage_index=0,
+                fidelity_name="screen",
+                fidelity_ordinal=0,
+                repeat_count=self._budget.repeat_count,
+                terminal=False,
+            )
+            result = search.submit_batch(batch)
+        else:
+            result = search.result()
+            if not checkpoint.stages[-1].complete:
+                result = search.submit_batch(checkpoint.batches[-1])
+
+        while True:
+            checkpoint = search.checkpoint()
+            batch = checkpoint.batches[-1]
+            stage = checkpoint.stages[-1]
+            if not stage.complete:
+                # Keep budget/time interruptions resumable.  Finalizing here
+                # would correctly describe a partial run but would also freeze
+                # CompileIQ's checkpoint against its missing measurement keys.
+                return result
+            if batch.fidelity.terminal:
+                return self._finalize(
+                    search,
+                    generation_status="strategy_complete",
+                    reason=self._terminal_reason_from_fidelity(batch.fidelity.name),
+                )
+
+            generated_rounds = sum(
+                previous.stage_index > 0 and not previous.fidelity.terminal
+                for previous in checkpoint.batches
+            )
+            if generated_rounds >= self._strategy.max_generation_rounds:
+                terminal_name = "terminal-generation-round-limit"
+            elif self._remaining_generation_capacity() == 0:
+                terminal_name = "terminal-generated-recipe-limit"
+            else:
+                generated = self._generate(stage.survivor_recipe_ids)
+                self._refresh_handles()
+                if generated:
+                    recipe_ids, parents = self._stage_members(
+                        stage.survivor_recipe_ids,
+                        generated,
+                    )
+                    next_batch = self._plans.batch(
+                        recipe_ids=recipe_ids,
+                        stage_index=batch.stage_index + 1,
+                        parent_batch=batch,
+                        parent_recipe_ids=parents,
+                        fidelity_name="screen",
+                        fidelity_ordinal=batch.fidelity.ordinal + 1,
+                        repeat_count=self._budget.repeat_count,
+                        terminal=False,
+                    )
+                    result = search.submit_batch(next_batch)
+                    continue
+                terminal_name = "terminal-no-new-physical-identity"
+
+            recipe_ids, parents = self._stage_members(stage.survivor_recipe_ids)
+            terminal_batch = self._plans.batch(
+                recipe_ids=recipe_ids,
+                stage_index=batch.stage_index + 1,
+                parent_batch=batch,
+                parent_recipe_ids=parents,
+                fidelity_name=terminal_name,
+                fidelity_ordinal=batch.fidelity.ordinal + 1,
+                repeat_count=self._budget.repeat_count,
+                terminal=True,
+            )
+            result = search.submit_batch(terminal_batch)
+
     def run(self, evaluator):
         """Evaluate complete recipes and return a reproducible decision.
 
@@ -512,12 +873,18 @@ class _GraphRecipeSearchSession:
             halving_factor=self._budget.halving_factor,
             minimum_survivors=self._budget.minimum_survivors,
             repeat_count=self._budget.repeat_count,
+            checkpoint=self._checkpoint,
         ) as search:
-            result = search.start()
+            result = (
+                self._run_exact(search)
+                if self._execution_mode == "exact"
+                else self._run_staged(search)
+            )
             coverage = dict(self._plans.search_coverage(search))
             checkpoint = search.checkpoint().as_dict()
             capability = search.opaque_recipe_capability
             provenance = search.opaque_recipe_core_provenance
+            status = result.status.model_dump(by_alias=True)
 
         results = result.get_results()
         complete_feasible = tuple(
@@ -532,12 +899,11 @@ class _GraphRecipeSearchSession:
                 if other["recipe_id"] != item["recipe_id"]
             )
         )
-        if not frontier:
-            raise RuntimeError(
-                "Graph recipe search produced no complete feasible measured recipe"
-            )
-        selected_result = min(frontier, key=self._selection_key)
-        selected = self._handles[selected_result["recipe_id"]]
+        self._refresh_handles()
+        selected = None
+        if coverage["complete"] and frontier:
+            selected_result = min(frontier, key=self._selection_key)
+            selected = self._handles[selected_result["recipe_id"]]
         frontier_handles = tuple(
             self._handles[item["recipe_id"]]
             for item in sorted(frontier, key=self._selection_key)
@@ -546,7 +912,8 @@ class _GraphRecipeSearchSession:
             semantic_graph_id=self._definition.semantic_graph_id,
             target=self._target,
             budget=self._budget,
-            selected_recipe_id=selected.recipe_id,
+            strategy=self._strategy,
+            selected_recipe_id=(None if selected is None else selected.recipe_id),
             pareto_recipe_ids=tuple(item.recipe_id for item in frontier_handles),
             search_complete=bool(coverage["complete"]),
             termination_reason=result.termination_reason,
@@ -557,6 +924,7 @@ class _GraphRecipeSearchSession:
             _capability_json=_canonical_json(capability),
             _provenance_json=_canonical_json(provenance),
             _checkpoint_json=_canonical_json(checkpoint),
+            _status_json=_canonical_json(status),
         )
         return GraphOptimizationDecision(
             selection=selected,
@@ -571,5 +939,6 @@ __all__ = [
     "GraphOptimizationTarget",
     "GraphRecipeHandle",
     "GraphRecipeManifest",
+    "GraphRecipeSearchStrategy",
     "GraphSearchBudget",
 ]

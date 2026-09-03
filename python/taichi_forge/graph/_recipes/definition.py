@@ -453,6 +453,8 @@ class GraphDefinition:
         available_capabilities=(),
         target=None,
         budget,
+        strategy=None,
+        checkpoint=None,
     ):
         """Create a complete-Graph optimization session.
 
@@ -467,6 +469,8 @@ class GraphDefinition:
             engine=engine,
             target=target,
             budget=budget,
+            strategy=strategy,
+            checkpoint=checkpoint,
             providers=providers,
             available_capabilities=available_capabilities,
         )

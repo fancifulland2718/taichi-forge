@@ -457,7 +457,13 @@ class CompileIQCompleteGraphRecipeSearch:
         ),
     }
 
-    def __init__(self, graph, *, catalog=None):
+    def __init__(
+        self,
+        graph,
+        *,
+        catalog=None,
+        search_strategy_id="manual_dynamic_batches.v2",
+    ):
         capability_components = _validated_compileiq_capability()
         definition = getattr(graph, "definition", None)
         if definition is None:
@@ -526,7 +532,7 @@ class CompileIQCompleteGraphRecipeSearch:
                 )
             ),
             recipe_schema="taichi_forge.complete_graph_recipe.v2",
-            search_strategy_id="manual_dynamic_batches.v2",
+            search_strategy_id=search_strategy_id,
         )
         self._graph = graph
         self._definition = definition
@@ -558,7 +564,10 @@ class CompileIQCompleteGraphRecipeSearch:
 
     @property
     def recipe_ids(self):
-        return self._transport.recipe_ids
+        # V2 freezes the generation domain, not a candidate-set snapshot.
+        # Recipes admitted after a measured survivor stage must remain
+        # selectable and reportable through this façade.
+        return tuple(entry.recipe.recipe_id for entry in self._catalog.entries())
 
     @property
     def baseline_recipe_id(self):

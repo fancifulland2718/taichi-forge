@@ -23,6 +23,13 @@ def test_graph_optimization_public_contract_rejects_ambiguous_inputs():
         ti.graph.GraphSearchBudget(1, repeat_count=2)
     with pytest.raises(ValueError, match="materialized_memory_limit_bytes"):
         ti.graph.GraphSearchBudget(1, materialized_memory_limit_bytes=-1)
+    with pytest.raises(ValueError, match="strategy mode"):
+        ti.graph.GraphRecipeSearchStrategy(mode="guess")
+    with pytest.raises(ValueError, match="cannot exceed"):
+        ti.graph.GraphRecipeSearchStrategy(
+            exact_composition_limit=4,
+            max_generated_recipes=3,
+        )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -123,6 +130,65 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
             decision.selection.planned_physical_id
         )
         assert physical["materialized_physical_id"]
+
+    staged_strategy = ti.graph.GraphRecipeSearchStrategy(
+        mode="staged",
+        max_generation_rounds=2,
+        max_generated_recipes=16,
+    )
+    partial_session = definition.search_recipes(
+        engine="compileiq",
+        target=target,
+        budget=ti.graph.GraphSearchBudget(
+            evaluation_limit=6,
+            deterministic_seed=17,
+        ),
+        strategy=staged_strategy,
+    )
+    partial = partial_session.run(evaluator)
+    assert partial.selection is None
+    assert not partial.report.search_complete
+    assert partial.report.status["terminal_state"] == "budget_exhausted"
+    assert partial.report.status["generation_status"] == "not_finalized"
+    partial_checkpoint = partial.report.checkpoint
+    assert len(partial_checkpoint["batches"]) == 2
+    assert not partial_checkpoint["stages"][-1]["complete"]
+    assert partial_checkpoint["batches"][-1]["fidelity"]["terminal"]
+    survivors = set(partial_checkpoint["stages"][0]["survivor_recipe_ids"])
+    assert all(
+        set(item["parent_recipe_ids"]).issubset(survivors)
+        for item in partial_checkpoint["batches"][1]["recipes"]
+    )
+
+    resumed_observed = []
+
+    def resumed_evaluator(graph, recipe):
+        resumed_observed.append(recipe.recipe_id)
+        return evaluator(graph, recipe)
+
+    resumed_session = definition.search_recipes(
+        engine="compileiq",
+        target=target,
+        budget=ti.graph.GraphSearchBudget(
+            evaluation_limit=16,
+            deterministic_seed=17,
+        ),
+        strategy=staged_strategy,
+        checkpoint=partial_checkpoint,
+    )
+    resumed = resumed_session.run(resumed_evaluator)
+    assert resumed.selection is not None
+    assert resumed.report.search_complete
+    assert resumed.report.termination_reason == "no_new_physical_identity"
+    assert resumed.report.status["generation_status"] == "strategy_complete"
+    assert resumed.report.status["terminal_fidelity_status"] == "complete"
+    assert resumed.report.strategy.strategy_id == staged_strategy.strategy_id
+    assert resumed_observed
+    measurement_keys = tuple(
+        item["request"]["measurement_key"]
+        for item in resumed.report.checkpoint["records"]
+    )
+    assert len(measurement_keys) == len(set(measurement_keys))
 
     with pytest.raises(RuntimeError, match="single-use"):
         session.run(evaluator)
