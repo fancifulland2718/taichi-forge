@@ -43,8 +43,25 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
-- 新增面向经审查魔改 CompileIQ fork、且包含 baseline 的 Graph-owned 离线 recipe 搜索。当前审查身份更新为
-  `forge/opaque-recipes-v1.2` 的 `579b572`，支持 Forge Python 3.10 与确定性的
+- 完成 Forge-owned whole-Graph recipe 工作流。冻结的 `GraphDefinition` 现在可接入版本化内建或
+  外部 provider，把兼容 fragment 组合为完整物理 recipe，并通过魔改 CompileIQ V2 协议进行
+  survivor-driven staged search。显式 workload、evaluation、backend-environment、budget 与
+  checkpoint 合同支持可恢复搜索；稳定 selection artifact 可在等价 Graph 上检查测量适用性并
+  重新解析结构，而不反序列化 Python executable。内建优化 family 各自拥有 descriptor 与
+  materializer，不再扩张已退役的中央 executable-space adapter。
+
+  搜索返回 `GraphOptimizationReportV2`：确定性 JSON 事实源以及由它生成的 Markdown，包含终止状态、
+  Pareto trade-off、recipe/physical 注释、结构化失败、provenance 与 checkpoint identity。魔改
+  CompileIQ fork 提供底层版本化 `OpaqueOptimizationReportV1`，并覆盖 Python 3.10--3.14 wheel
+  smoke。运行时按 V2 协议 epoch、必需 schema/API 与自洽 capability/core identity 接受；fork
+  commit 和平台 wheel SHA-256 只描述某个已验证快照，后续兼容 build 不会仅因这些值或动态计算的
+  Python source identity 变化而被拒绝。source identity 仍绑定每个 session/checkpoint，所以跨 build
+  resume 会明确失败。该离线工作流不改变普通 compile/runtime `auto`，不增加 replay-time report
+  或检查，不声称 AOT binary 复用，也不替代下游生产验证。
+
+- 本待发布周期的历史实现与资格化记录：最初新增面向经审查魔改 CompileIQ fork、且包含 baseline 的
+  Graph-owned 离线 recipe 搜索。初始审查身份为 `forge/opaque-recipes-v1.2` 的 `579b572`，支持
+  Forge Python 3.10 与确定性的
   bounded-exhaustive opaque 搜索。完整、有序、按 task 索引的 CUDA kernel plan、覆盖审计和
   qualification 仍作为私有诊断基础保留；它们不再导出
   `ti.compileiq_offload_execution_plan_search()` 公共入口。无调用方的 fixed-axis kernel-wide
@@ -88,8 +105,9 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
   1.819x），并在 262,144 items / 65,536-item segment 保留 global scan（serial/global 中位
   3.161x）。所有路线都保持精确结果、memory stable，并由真实魔改 CompileIQ core 完整覆盖；
   测试期间存在外部 GameViewer compute process，属于性能 caveat。该证据只适用于精确 scope，
-  不改变 runtime 默认值。公开的 Graph recipe 路径通过精确 capability、bundled-core 与 Python-source
-  lock 拒绝上游或其他 CompileIQ build；CompileIQ 仍只是可选的离线依赖。
+  不改变 runtime 默认值。该历史路径通过精确 lock 拒绝源码漂移；上面完成的 V2 路径改为接受协议
+  兼容的 fork build，并把实际 source identity 绑定到 session/checkpoint 复用。CompileIQ 仍只是
+  可选的离线依赖。
 
   Graph memory 现在以一个独立的 Forge-owned 完整 recipe 域接入经审查的魔改 CompileIQ fork。
   严格单 dispatch CUDA f32 affine-stencil Graph 会公开 direct baseline 与一个完整

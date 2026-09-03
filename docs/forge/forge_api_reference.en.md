@@ -1733,21 +1733,38 @@ Block tuning is backend- and workload-specific, so always compare against
 
 Use `GraphBuilder.freeze()` and the public whole-Graph objects
 `GraphOptimizationTarget`, `GraphSearchBudget`, `GraphRecipeHandle`,
-`GraphRecipeManifest`, `GraphOptimizationDecision`, and
-`GraphOptimizationReport` for new code:
+`GraphRecipeManifest`, `GraphRecipeSearchStrategy`, `GraphWorkloadContext`,
+`GraphEvaluationContract`, `GraphBackendEnvironment`,
+`GraphOptimizationDecision`, and `GraphOptimizationReport` for new code:
 
 ```python
 definition = builder.freeze()
+target = ti.graph.GraphOptimizationTarget(
+    objectives=(("device_time_ns", "min"), ("materialized_memory_bytes", "min")),
+)
+workload = ti.graph.GraphWorkloadContext({"case": "representative-a", "size": n})
+evaluation = ti.graph.GraphEvaluationContract(
+    {"timing": "steady-replay", "synchronize": "after-sample"}
+)
+environment = ti.graph.GraphBackendEnvironment(
+    {"backend": "cuda", "device": device_identity, "driver": driver_identity}
+)
 session = definition.search_recipes(
     engine="compileiq",
-    target=ti.graph.GraphOptimizationTarget(
-        objectives=(("device_time_ns", "min"),),
-    ),
+    target=target,
     budget=ti.graph.GraphSearchBudget(evaluation_limit=32, repeat_count=3),
+    strategy=ti.graph.GraphRecipeSearchStrategy(mode="staged"),
+    workload_context=workload,
+    evaluation_contract=evaluation,
+    backend_environment=environment,
 )
 decision = session.run(evaluator)
-materialized = definition.materialize(decision.selection)
-report = materialized.materialization_report()
+json_facts = decision.report.to_json()
+human_summary = decision.report.to_markdown()
+
+if decision.status == "selected":
+    materialized = definition.materialize(decision.selection)
+    portable_selection = decision.selection_artifact.to_dict()
 ```
 
 `evaluator(graph, recipe_handle)` returns named finite metrics. The reserved
@@ -1758,6 +1775,23 @@ raw provider, block, tile, padding, lane, workgroup, or PTXAS knobs. Multi-
 objective results retain a Pareto frontier; declaration order is only a
 deterministic final preference. Runtime `auto` and ordinary compile remain
 unchanged.
+
+`decision.status` is `selected`, `resumable`, `no_feasible_candidate`, or
+`failed`; `decision.next_action` distinguishes applying a selection, resuming
+from `decision.checkpoint`, and reviewing incomplete or failed evidence. Resume
+must recreate the same definition, provider set, target, workload, evaluation,
+and backend-environment contracts. The report embeds a summary of the original
+CompileIQ facts, Pareto trade-offs, recipe/physical annotations, structured
+failures, termination reason, provenance, and the checkpoint. JSON is the
+canonical fact source; Markdown is generated from it.
+
+Persist `decision.selection_artifact`, not a Python materializer. A new process
+recreates an equivalent frozen definition and provider catalog, calls
+`check_recipe_applicability(...)` with current workload/evaluation/environment
+facts to decide whether old measurements still apply, and calls
+`resolve_recipe(artifact, providers=...)` to reconstruct the structurally
+identical recipe. Contract drift is explicit; Forge never unpickles executable
+objects. This is report, search, and selection reuse, not AOT binary reuse.
 
 `ti.graph.compileiq_recipe_search(graph)` is the lower-level complete-recipe
 API for callers that manage batches, checkpoints, and materialization contexts
@@ -1777,6 +1811,12 @@ private diagnostic infrastructure rather than a public
 `ti.compileiq_offload_execution_plan_search` API. Ordinary kernels continue to
 use source-owned contracts and explicit `TaskLaunchPolicy`; CompileIQ does not
 receive raw workgroup, TLS, register, or PTXAS axes.
+
+The modified CompileIQ wheel is accepted by the V2 protocol/capability contract,
+not by an exact fork commit or wheel hash. The installed Python source identity
+is nevertheless recorded and bound to checkpoints, so code drift invalidates
+resume rather than silently reusing measurements. The current commit and wheel
+SHA in the manifest describe one qualified build only.
 
 ### Device-resident bounded workloads with `DeviceExtent`
 

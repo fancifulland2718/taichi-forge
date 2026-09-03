@@ -786,18 +786,44 @@ verifies the semantic definition, recipe identity, physical manifest, and
 published binding context transactionally; it does not install a runtime
 selector or change ordinary `auto` behavior.
 
-The constructor accepts only the reviewed modified CompileIQ fork. It verifies
-the capability manifest, bundled-core commit and lock, and the complete Python
-source manifest. The current source identity pins
-[`fancifulland2718/CompileIQ@1bf6ded`](https://github.com/fancifulland2718/CompileIQ/commit/1bf6ded4878eb0b22a7c59bb6391912ea591763d)
-from `forge/complete-recipes-v2`; this revision supports the reviewed Python
-3.10--3.14 package contract, opaque complete-recipe batches, materialization
-budgets, multi-objective Pareto racing, and resumable checkpoints. `manifest()`
-exposes the full reviewed identity.
-Upstream CompileIQ, a different fork, or source drift raises
-`CompileIQGraphUnavailableError`. CompileIQ remains an optional offline tool:
-the Forge wheel does not depend on it, and importing `ti.graph` does not import
-CompileIQ.
+The constructor accepts a modified CompileIQ implementation compatible with the
+Forge V2 protocol epoch. It verifies the required schemas and API surface, the
+self-consistent capability identity, and the bundled-core manifest lock. Forge
+also hashes every installed CompileIQ Python source file and binds that identity
+to the search session and checkpoint. A source change therefore invalidates
+resume/reuse evidence, but does not make an otherwise compatible wheel
+uninstallable. Fork commit, platform wheel filename/SHA-256, package version,
+core identity, and Python-source identity are qualification provenance, not an
+installation allowlist. The current qualified Windows snapshot is
+[`fancifulland2718/CompileIQ@f604a79`](https://github.com/fancifulland2718/CompileIQ/commit/f604a79934792a5b17cade81299603fbdb626130);
+compatible later fork builds do not require a Taichi source change merely
+because their commit or wheel hash differs. Unmodified upstream or an
+incompatible protocol raises `CompileIQGraphUnavailableError`. CompileIQ
+remains an optional offline tool: the Forge wheel does not depend on it, and
+importing `ti.graph` does not import CompileIQ.
+
+The built-in catalog discovers optimization fragments from the frozen
+definition. Provider presence is not a claim that every Graph or backend emits
+a candidate:
+
+| Provider family | Physical decision represented | Availability boundary |
+| --- | --- | --- |
+| `map_fusion` | Exact map partition/fusion plan | Only declared compatible map regions. |
+| `graph_memory` | Direct versus staged memory plan | Only sources with a complete memory recipe and binding proof. |
+| `offload_phase_fusion` | Provider-owned offload phase plan | Only source-published alternatives; no raw task knob. |
+| `sparse_traversal` | Sparse traversal/active-set plan | Only source-published complete lifecycle alternatives. |
+| `branch_join_schedule` | Branch/fork/join schedule | Only legal dependency DAG alternatives. |
+| `recording_partition` | Binding-frontier recording partition | CUDA/source capability and exact frontier identity required. |
+| `workspace_concurrency` | Whole-Graph workspace lane/concurrency plan | Only eligible complete-Graph pairs with fixed resource identity. |
+| `bounded_execution` | Device-bounded execution plan | Only a source with a complete bounded route on the active backend. |
+| `structured_control` | Complete structured-control route | Only source-published control domains; no internal control knob is exposed. |
+| `graph_reduction` | Map/partial/finalize phase plan | Only a source that owns a complete reduction recipe. |
+| `native_algorithm` | Complete provider-neutral algorithm plan | Only source-published algorithm alternatives; not a provider router. |
+
+`runtime_assembly` is the common assembler, not a searchable optimization
+family. An external provider may join through the same versioned descriptor,
+fragment, resolution, and materialization contracts. The same provider set must
+be supplied again when resolving a persisted selection.
 
 CompileIQ sees fixed opaque ordinal tokens rather than Forge recipe IDs.
 GraphMemory, flat control, and nested control use distinct provider namespaces, domain versions, and

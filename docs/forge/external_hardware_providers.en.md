@@ -160,13 +160,15 @@ deployment. This separate-interpreter constraint does not change the Python
 support matrix of the Forge wheel itself.
 
 This process worker is distinct from `ti.graph.compileiq_recipe_search()`.
-That optional offline Graph-recipe API accepts only the reviewed Forge fork at
-`579b572`, including its complete capability,
-bundled-core, and Python-source locks. That fork supports the main-thread
-bounded-exhaustive worker on Forge's Python 3.10 wheel. A generic upstream
-installation or the external JSON worker above is not accepted as a substitute
-for that API. Task-indexed kernel/offload search remains private qualification
-infrastructure and is not a public API.
+That optional offline Graph-recipe API requires the modified fork's compatible
+V2 complete-recipe capability and main-thread staged-search worker. Acceptance
+is based on the protocol epoch, required schemas/API, and self-consistent core
+and capability identities; it is not tied to one fork commit or wheel hash.
+Forge records the installed Python-source identity and binds it to checkpoints,
+so source drift invalidates resume evidence. The qualified fork supports Python
+3.10--3.14. A generic upstream installation or the external JSON worker above
+is not a substitute for this API. Task-indexed kernel/offload search remains
+private qualification infrastructure and is not a public API.
 
 Forge invokes the versioned JSON v1 process protocol as:
 

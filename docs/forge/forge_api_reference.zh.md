@@ -1459,20 +1459,38 @@ launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 co
 
 新代码应从 `GraphBuilder.freeze()` 开始，使用完整 Graph 公共对象
 `GraphOptimizationTarget`、`GraphSearchBudget`、`GraphRecipeHandle`、
-`GraphRecipeManifest`、`GraphOptimizationDecision` 与 `GraphOptimizationReport`：
+`GraphRecipeManifest`、`GraphRecipeSearchStrategy`、`GraphWorkloadContext`、
+`GraphEvaluationContract`、`GraphBackendEnvironment`、`GraphOptimizationDecision`
+与 `GraphOptimizationReport`：
 
 ```python
 definition = builder.freeze()
+target = ti.graph.GraphOptimizationTarget(
+    objectives=(("device_time_ns", "min"), ("materialized_memory_bytes", "min")),
+)
+workload = ti.graph.GraphWorkloadContext({"case": "representative-a", "size": n})
+evaluation = ti.graph.GraphEvaluationContract(
+    {"timing": "steady-replay", "synchronize": "after-sample"}
+)
+environment = ti.graph.GraphBackendEnvironment(
+    {"backend": "cuda", "device": device_identity, "driver": driver_identity}
+)
 session = definition.search_recipes(
     engine="compileiq",
-    target=ti.graph.GraphOptimizationTarget(
-        objectives=(("device_time_ns", "min"),),
-    ),
+    target=target,
     budget=ti.graph.GraphSearchBudget(evaluation_limit=32, repeat_count=3),
+    strategy=ti.graph.GraphRecipeSearchStrategy(mode="staged"),
+    workload_context=workload,
+    evaluation_contract=evaluation,
+    backend_environment=environment,
 )
 decision = session.run(evaluator)
-materialized = definition.materialize(decision.selection)
-report = materialized.materialization_report()
+json_facts = decision.report.to_json()
+human_summary = decision.report.to_markdown()
+
+if decision.status == "selected":
+    materialized = definition.materialize(decision.selection)
+    portable_selection = decision.selection_artifact.to_dict()
 ```
 
 `evaluator(graph, recipe_handle)` 返回命名有限数值指标；请求保留指标
@@ -1480,6 +1498,19 @@ report = materialized.materialization_report()
 fragment 会在 evaluation budget 内组合成完整候选。公共 recipe 摘要不公开 provider、block、
 tile、padding、lane、workgroup 或 PTXAS 裸参数。多目标结果保留 Pareto frontier，声明顺序只
 作为确定性的最终偏好；runtime `auto` 和普通 compile 均不改变。
+
+`decision.status` 为 `selected`、`resumable`、`no_feasible_candidate` 或 `failed`；
+`decision.next_action` 会区分应用选择、从 `decision.checkpoint` 恢复，以及审阅不完整或失败证据。
+恢复时必须重建相同的 definition、provider set、target、workload、evaluation 与
+backend-environment 合同。report 会嵌入原始 CompileIQ 事实摘要、Pareto trade-off、
+recipe/physical 注释、结构化失败、终止原因、provenance 和 checkpoint；JSON 是规范事实源，
+Markdown 由它确定性生成。
+
+跨进程应持久化 `decision.selection_artifact`，而不是 Python materializer。新进程重建等价冻结
+definition/provider catalog，使用当前 workload/evaluation/environment 调用
+`check_recipe_applicability(...)` 判断历史测量是否仍适用，再调用
+`resolve_recipe(artifact, providers=...)` 重建结构相同的 recipe。合同漂移会明确返回，Forge
+不会反序列化 executable 对象；这里提供的是 report/search/selection 复用，不是 AOT binary 复用。
 
 `ti.graph.compileiq_recipe_search(graph)` 是供调用者直接管理 batch、checkpoint 与
 materialization context 的低层完整 recipe API。Graph 必须由冻结的 `GraphDefinition` 支撑；
@@ -1492,6 +1523,10 @@ recording topology 等底层决策继续供 Forge materializer 内部使用，�
 按 task 索引的 offload identity、物化和资格化实现保留为私有诊断基础，但不作为
 `ti.compileiq_offload_execution_plan_search` 公共 API。普通 kernel 继续使用源码合同和显式
 `TaskLaunchPolicy`；CompileIQ 不接收 workgroup、TLS、register 或 PTXAS 裸轴。
+
+魔改 CompileIQ wheel 按 V2 protocol/capability 合同接受，不绑定精确 fork commit 或 wheel hash。
+已安装 Python source identity 仍会记录并绑定 checkpoint，因此代码漂移会使 resume 失效，而不是
+静默复用测量；manifest 中的当前 commit 与 wheel SHA 只描述一个已验证 build。
 
 ### 使用 `DeviceExtent` 表达设备端有界工作量
 

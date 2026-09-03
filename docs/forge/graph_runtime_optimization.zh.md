@@ -614,13 +614,37 @@ index geometry、halo、shared bytes、layout、owner 与 alias requirement，�
 CompileIQ 轴；稳定 replay 不重复重型证明。物化会事务性核对 semantic definition、recipe identity、
 physical manifest 和已发布 binding context，不安装 runtime selector，也不改变普通 `auto` 行为。
 
-构造函数只接受经审查的魔改 CompileIQ fork，并校验 capability manifest、bundled-core
-commit/lock 和完整 Python source manifest。当前源码身份固定为
-`forge/complete-recipes-v2` 上的
-[`fancifulland2718/CompileIQ@1bf6ded`](https://github.com/fancifulland2718/CompileIQ/commit/1bf6ded4878eb0b22a7c59bb6391912ea591763d)，该版本支持经审查的 Python 3.10--3.14 package 合同、opaque 完整 recipe batch、物化预算、多目标 Pareto racing 与可恢复 checkpoint；
-`manifest()` 会公开完整审查身份。上游 CompileIQ、其他 fork 或源码漂移都会抛出
-`CompileIQGraphUnavailableError`。CompileIQ 仍是可选的离线工具：Forge wheel 不依赖它，
-导入 `ti.graph` 也不会导入 CompileIQ。
+构造函数接受与 Forge V2 协议 epoch 兼容的魔改 CompileIQ。它会校验必需 schema/API、
+自洽的 capability identity 和 bundled-core manifest lock；Forge 还会动态散列已安装包中的全部
+Python 源文件，并把该身份绑定到 search session 与 checkpoint。因此源码变化会使 resume/reuse
+证据明确失效，但不会让另一个协议兼容 wheel 无法安装。fork commit、平台 wheel 文件名与
+SHA-256、package version、core identity 和 Python-source identity 都只是资格化 provenance，
+不是安装白名单。当前已验证的 Windows 快照是
+[`fancifulland2718/CompileIQ@f604a79`](https://github.com/fancifulland2718/CompileIQ/commit/f604a79934792a5b17cade81299603fbdb626130)；
+后续兼容 fork build 不会仅因 commit 或 wheel hash 改变就要求修改 Taichi。未魔改的上游版本或
+不兼容协议会抛出 `CompileIQGraphUnavailableError`。CompileIQ 仍是可选离线工具：Forge wheel
+不依赖它，导入 `ti.graph` 也不会导入 CompileIQ。
+
+内建 catalog 会从冻结的 definition 动态发现优化 fragment。provider 存在不代表每个 Graph
+或 backend 都会产生 candidate：
+
+| Provider family | 表达的物理决策 | 可用性边界 |
+| --- | --- | --- |
+| `map_fusion` | 精确 map partition/fusion plan | 仅适用于显式声明且彼此兼容的 map region。 |
+| `graph_memory` | direct/staged memory plan | 必须存在完整 memory recipe 和 binding proof。 |
+| `offload_phase_fusion` | provider-owned offload phase plan | 仅使用 source 发布的完整替代项，不公开 raw task knob。 |
+| `sparse_traversal` | sparse traversal/active-set plan | 仅使用 source 发布的完整 lifecycle 替代项。 |
+| `branch_join_schedule` | branch/fork/join schedule | 仅产生依赖 DAG 合法的替代项。 |
+| `recording_partition` | binding-frontier recording partition | 需要 CUDA/source capability 和精确 frontier identity。 |
+| `workspace_concurrency` | whole-Graph workspace lane/concurrency plan | 仅适用于资源身份固定的合格完整 Graph pair。 |
+| `bounded_execution` | device-bounded execution plan | active backend 上必须存在 source-owned 完整 bounded route。 |
+| `structured_control` | 完整 structured-control route | 只使用 source 发布的 control domain，不公开内部控制 knob。 |
+| `graph_reduction` | map/partial/finalize phase plan | source 必须拥有完整 reduction recipe。 |
+| `native_algorithm` | provider-neutral 完整算法 plan | 只使用 source 发布的算法替代项，不承担 provider 路由。 |
+
+`runtime_assembly` 是共用 assembler，不是可搜索优化 family。外部 provider 可以通过同一套
+版本化 descriptor、fragment、resolution 与 materialization 合同接入；持久化选择在重新解析时
+必须再次提供相同 provider set。
 
 CompileIQ 只看到固定的不透明 ordinal token，而不是 Forge recipe ID。GraphMemory、flat 与 nested control
 使用不同的 provider namespace、domain version 与 semantic identity。Forge 会解码结果，检查

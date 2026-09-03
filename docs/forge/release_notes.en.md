@@ -47,8 +47,35 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
-- Added baseline-inclusive Graph-owned offline recipe search for the reviewed modified
-  CompileIQ fork. The reviewed identity is now `579b572` on
+- Completed the Forge-owned whole-Graph recipe workflow. A frozen
+  `GraphDefinition` now accepts versioned built-in or external providers,
+  composes compatible fragments into complete physical recipes, and performs
+  survivor-driven staged search through the modified CompileIQ V2 protocol.
+  Explicit workload, evaluation, backend-environment, budget, and checkpoint
+  contracts support resumable search; stable selection artifacts can be checked
+  for evidence applicability and structurally resolved on an equivalent Graph
+  without deserializing Python executables. Built-in optimization families own
+  their descriptors and materializers rather than extending the retired central
+  executable-space adapter.
+
+  Search returns `GraphOptimizationReportV2`: deterministic JSON facts plus a
+  generated Markdown view containing termination status, Pareto trade-offs,
+  recipe/physical annotations, structured failures, provenance, and checkpoint
+  identity. The modified CompileIQ fork provides the underlying versioned
+  `OpaqueOptimizationReportV1` and wheel smoke coverage for Python 3.10--3.14.
+  Runtime acceptance follows the V2 protocol epoch, required schemas/API, and
+  self-consistent capability/core identities. Fork commit and platform wheel
+  SHA-256 describe a qualified snapshot only; compatible later builds are not
+  rejected merely because those values or the dynamically computed Python
+  source identity changed. Source identity is still bound to each session and
+  checkpoint, so cross-build resume fails explicitly. This offline workflow
+  does not change ordinary compile/runtime `auto`, add replay-time reporting or
+  checks, claim AOT binary reuse, or replace downstream production validation.
+
+- Historical implementation and qualification record for this Unreleased
+  cycle: baseline-inclusive Graph-owned offline recipe search was first added
+  for the reviewed modified CompileIQ fork. The initial reviewed identity was
+  `579b572` on
   `forge/opaque-recipes-v1.2`, supporting Forge Python 3.10 and deterministic
   bounded-exhaustive opaque search. Complete ordered task-indexed CUDA kernel
   plans, coverage auditing, and qualification remain private diagnostic
@@ -110,9 +137,10 @@ grouped under the behavior they shipped.
   segments (serial/global 3.161x). All routes were exact, memory-stable, and
   covered by the real modified CompileIQ core; an external GameViewer compute
   process remained a performance caveat. This evidence is exact-scope and does
-  not change the runtime default. The public Graph recipe path rejects
-  upstream/different CompileIQ builds through exact capability, bundled-core,
-  and Python-source locks; CompileIQ remains an optional offline dependency.
+  not change the runtime default. That historical path rejected source drift
+  with exact locks; the completed V2 path described above accepts compatible
+  fork builds and binds their observed source identity to session/checkpoint
+  reuse. CompileIQ remains an optional offline dependency.
 
   Graph memory is now integrated with the reviewed modified CompileIQ fork as
   a separate Forge-owned complete-recipe domain. A strict single-dispatch CUDA
