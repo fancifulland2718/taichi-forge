@@ -365,6 +365,22 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
         for fragment in _family_fragments(catalog, "graph_memory")
         if _selection(fragment).choice_id == staged_id
     )
+    from taichi_forge.graph._recipes import (
+        GraphMemoryRecipeProvider,
+        GraphRuntimeAssemblyProvider,
+    )
+
+    assert isinstance(
+        catalog.provider_set.provider_for_fragment_namespace(
+            memory.provider_namespace
+        ),
+        GraphMemoryRecipeProvider,
+    )
+    assert memory.provider_domain_version == "graph-memory-domain-v1"
+    assert memory.assembly_provider_namespace == (
+        GraphRuntimeAssemblyProvider.descriptor.namespace
+    )
+    assert fusion.assembly_provider_namespace == memory.assembly_provider_namespace
     assert not set(fusion.coverage_region_ids).intersection(memory.coverage_region_ids)
     entry = catalog.compose(
         (fusion.fragment_id, memory.fragment_id),

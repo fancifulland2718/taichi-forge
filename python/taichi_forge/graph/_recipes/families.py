@@ -31,7 +31,6 @@ _FAMILY_NAMESPACES = tuple(
     for family in (
         "bounded_execution",
         "branch_join_schedule",
-        "graph_memory",
         "graph_reduction",
         "map_fusion",
         "native_algorithm",
@@ -177,7 +176,13 @@ def _fragment(
     tasks,
     resources=(),
     exclusive_submission=False,
+    provider_descriptor=None,
 ):
+    provider_descriptor = (
+        _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
+        if provider_descriptor is None
+        else provider_descriptor
+    )
     coverage = tuple(coverage)
     selection = GraphFamilySelection(
         family=family,
@@ -191,10 +196,8 @@ def _fragment(
     return GraphRecipeFragment.create(
         definition,
         provider_namespace=f"taichi_forge.graph.{family}",
-        provider_version=_PROVIDER_VERSION,
-        provider_domain_version=(
-            _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.domain_version
-        ),
+        provider_version=provider_descriptor.provider_version,
+        provider_domain_version=provider_descriptor.domain_version,
         fragment_key=f"{family}:{source_key}:{choice_id}",
         coverage_region_ids=coverage,
         tasks=tasks,
@@ -221,6 +224,7 @@ def _choice_fragment(
     manifest,
     *,
     materialization_choice=None,
+    provider_descriptor=None,
 ):
     payload = manifest.to_dict()
     exclusive = bool(
@@ -239,6 +243,7 @@ def _choice_fragment(
         resources=resources,
         exclusive_submission=exclusive
         or any(item.exclusive_submission for item in resources),
+        provider_descriptor=provider_descriptor,
     )
 
 
@@ -280,37 +285,6 @@ def _fusion_fragments(definition, spec):
                 tasks=(task,),
             )
         )
-    return tuple(result)
-
-
-def _memory_fragments(definition, spec):
-    unmatched = [source for source in definition.sources if source.kind == "dispatch"]
-    result = []
-    for ordinal, source in enumerate(spec._graph_memory_sources):
-        manifests = source.manifests()
-        if not manifests:
-            continue
-        semantic_identity = manifests[0].to_dict()["semantic_kernel_identity"]
-        match = next(
-            (item for item in unmatched if item.semantic_identity == semantic_identity),
-            None,
-        )
-        if match is None:
-            continue
-        unmatched.remove(match)
-        source_key = f"memory:{ordinal}"
-        for manifest in manifests:
-            if manifest.recipe_id == source.selected_recipe_id:
-                continue
-            result.append(
-                _choice_fragment(
-                    definition,
-                    "graph_memory",
-                    source_key,
-                    (match.region_id,),
-                    manifest,
-                )
-            )
     return tuple(result)
 
 
@@ -820,7 +794,6 @@ class GraphRuntimeAssemblyProvider:
         spec = definition._runtime_spec
         fragments = []
         fragments.extend(_fusion_fragments(definition, spec))
-        fragments.extend(_memory_fragments(definition, spec))
         fragments.extend(_offload_phase_fusion_fragments(definition, spec))
         fragments.extend(_sparse_traversal_fragments(definition, spec))
         fragments.extend(_branch_join_fragments(definition, spec))
@@ -888,7 +861,9 @@ GraphExistingFamilyProvider = GraphRuntimeAssemblyProvider
 def default_graph_recipe_providers():
     """Return the built-in providers required by the public recipe path."""
 
-    return (GraphRuntimeAssemblyProvider(),)
+    from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
+
+    return (GraphRuntimeAssemblyProvider(), GraphMemoryRecipeProvider())
 
 
 def assemble_existing_family_recipe(

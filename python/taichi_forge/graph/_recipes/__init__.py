@@ -35,6 +35,7 @@ from .families import (
     default_graph_recipe_providers,
     materialize_existing_family_baseline,
 )
+from .graph_memory import GraphMemoryRecipeProvider
 
 from .materialize import (
     GraphMaterializationContext,
@@ -89,6 +90,7 @@ __all__ = [
     "GraphMaterializedAllocation",
     "GraphMaterializedFragment",
     "GraphMaterializedRecipe",
+    "GraphMemoryRecipeProvider",
     "GraphPhysicalBindingManifest",
     "GraphPhysicalCommandManifest",
     "GraphPhysicalKernelManifest",
