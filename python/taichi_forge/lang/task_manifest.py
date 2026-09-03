@@ -33,6 +33,7 @@ class OffloadedTaskManifest:
     requested_grid_residency_waves: Optional[int]
     requested_range_work_per_thread_target: int
     requested_memory_strategy: str
+    requested_sparse_list_policy: str
     selected_grid_size: Optional[int]
     selected_block_size: Optional[int]
     actual_grid_size: Optional[int]
@@ -60,6 +61,12 @@ class OffloadedTaskManifest:
     staged_halo_lows_nd: tuple
     staged_halo_highs_nd: tuple
     staged_access_offsets: tuple
+    sparse_list_op: int
+    sparse_list_snode_id: int
+    sparse_list_parent_snode_id: int
+    sparse_list_parent_grid_bound: Optional[int]
+    may_mutate_sparse_topology: bool
+    sparse_mutation_snode_id: int
 
     @classmethod
     def _from_core(cls, value: Mapping[str, object]):

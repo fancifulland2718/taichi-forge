@@ -461,11 +461,14 @@ KernelLauncher::resolve_task_execution_plan(
   const auto &waves = launch_context.cuda_task_grid_residency_waves();
   const auto &work =
       launch_context.cuda_task_range_work_per_thread_targets();
+  const auto &sparse_policies =
+      launch_context.cuda_task_sparse_list_policies();
   TI_ERROR_IF(identity.empty(),
               "CUDA task execution plan requires a non-empty identity");
   TI_ERROR_IF(task_kinds.size() != context.offloaded_tasks.size() ||
                   waves.size() != context.offloaded_tasks.size() ||
-                  work.size() != context.offloaded_tasks.size(),
+                  work.size() != context.offloaded_tasks.size() ||
+                  sparse_policies.size() != context.offloaded_tasks.size(),
               "CUDA task execution plan topology mismatch: plan has {} "
               "task(s), artifact has {}",
               task_kinds.size(), context.offloaded_tasks.size());
@@ -476,7 +479,8 @@ KernelLauncher::resolve_task_execution_plan(
     const auto &cached = *found->second;
     TI_ERROR_IF(cached.task_kinds != task_kinds ||
                     cached.grid_residency_waves != waves ||
-                    cached.range_work_per_thread_targets != work,
+                    cached.range_work_per_thread_targets != work ||
+                    cached.sparse_list_policies != sparse_policies,
                 "CUDA task execution plan identity was reused with different "
                 "contents");
     TI_ASSERT(cached.content_digest == content_digest);
@@ -495,6 +499,7 @@ KernelLauncher::resolve_task_execution_plan(
   resolved->task_kinds = task_kinds;
   resolved->grid_residency_waves = waves;
   resolved->range_work_per_thread_targets = work;
+  resolved->sparse_list_policies = sparse_policies;
   resolved->tasks = context.offloaded_tasks;
   auto &telemetry = grid_residency_telemetry();
   const bool uses_waves =
@@ -520,6 +525,19 @@ KernelLauncher::resolve_task_execution_plan(
                   "CUDA task execution plan topology mismatch at task {}: "
                   "expected {}, got {}",
                   index, task_kinds[index], actual_kind);
+      TI_ERROR_IF(sparse_policies[index] != 0 && sparse_policies[index] != 1,
+                  "CUDA sparse list policy is invalid at task {}", index);
+      if (sparse_policies[index] == 1) {
+        TI_ERROR_IF(
+            task.task_type != OffloadedTaskType::listgen ||
+                task.sparse_list_op != OffloadedTask::kSparseListOpListgen ||
+                task.sparse_list_parent_grid_bound <= 0 || task.grid_dim <= 0,
+            "CUDA parent-bound sparse traversal requires an exact listgen "
+            "task at ordinal {}",
+            index);
+        task.grid_dim =
+            std::min(task.grid_dim, task.sparse_list_parent_grid_bound);
+      }
       if (waves[index] == 0 && work[index] == 1) {
         continue;
       }
@@ -715,6 +733,11 @@ void KernelLauncher::mark_sparse_list_task_launched(
     telemetry.snode_id = task.sparse_list_snode_id;
     telemetry.parent_snode_id = task.sparse_list_parent_snode_id;
     ++telemetry.rebuilds;
+    if (!telemetry.candidate_slots_dispatched.available) {
+      telemetry.candidate_slots_dispatched = {0, true};
+    }
+    telemetry.candidate_slots_dispatched.value +=
+        static_cast<std::uint64_t>(task.grid_dim) * task.block_dim;
   }
 
   auto &state = sparse_list_states_[task.sparse_list_snode_id];

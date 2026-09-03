@@ -295,6 +295,36 @@ def _offload_phase_fusion_fragments(definition, spec):
     return tuple(result)
 
 
+def _sparse_traversal_fragments(definition, spec):
+    unmatched = [source for source in definition.sources if source.kind == "dispatch"]
+    result = []
+    for source in spec._graph_sparse_traversal_sources:
+        manifests = source.manifests()
+        if len(manifests) < 2:
+            continue
+        semantic_identity = manifests[0].to_dict()["semantic_kernel_identity"]
+        match = next(
+            (item for item in unmatched if item.semantic_identity == semantic_identity),
+            None,
+        )
+        if match is None:
+            continue
+        unmatched.remove(match)
+        for manifest in manifests:
+            if manifest.recipe_id == source.selected_recipe_id:
+                continue
+            result.append(
+                _choice_fragment(
+                    definition,
+                    "sparse_traversal",
+                    source._recipe_source_key,
+                    (match.region_id,),
+                    manifest,
+                )
+            )
+    return tuple(result)
+
+
 def _native_source_coverage(definition, source):
     prefix = f"graph/{source._recipe_node_index}:"
     root = next(
@@ -551,6 +581,7 @@ class GraphExistingFamilyProvider:
         fragments.extend(_fusion_fragments(definition, spec))
         fragments.extend(_memory_fragments(definition, spec))
         fragments.extend(_offload_phase_fusion_fragments(definition, spec))
+        fragments.extend(_sparse_traversal_fragments(definition, spec))
         fragments.extend(_bounded_fragments(definition, spec))
         fragments.extend(_control_fragments(definition, spec))
         fragments.extend(

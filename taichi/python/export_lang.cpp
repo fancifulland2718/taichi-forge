@@ -193,6 +193,8 @@ py::dict offloaded_task_manifest_to_python(
   item["requested_range_work_per_thread_target"] =
       task.requested_range_work_per_thread_target;
   item["requested_memory_strategy"] = task.requested_memory_strategy;
+  item["requested_sparse_list_policy"] =
+      task.requested_sparse_list_policy;
   set_optional("selected_grid_size", task.selected_grid_size);
   set_optional("selected_block_size", task.selected_block_size);
   set_optional("actual_grid_size", task.actual_grid_size);
@@ -216,6 +218,13 @@ py::dict offloaded_task_manifest_to_python(
   item["staged_halo_lows_nd"] = task.staged_halo_lows_nd;
   item["staged_halo_highs_nd"] = task.staged_halo_highs_nd;
   item["staged_access_offsets"] = task.staged_access_offsets;
+  item["sparse_list_op"] = task.sparse_list_op;
+  item["sparse_list_snode_id"] = task.sparse_list_snode_id;
+  item["sparse_list_parent_snode_id"] = task.sparse_list_parent_snode_id;
+  set_optional("sparse_list_parent_grid_bound",
+               task.sparse_list_parent_grid_bound);
+  item["may_mutate_sparse_topology"] = task.may_mutate_sparse_topology;
+  item["sparse_mutation_snode_id"] = task.sparse_mutation_snode_id;
   if (task.constant_range_size.has_value()) {
     item["constant_range_size"] = *task.constant_range_size;
   } else {
@@ -245,6 +254,18 @@ lang::OffloadedTaskManifest overlay_execution_plan_launch_requests(
   task.requested_range_work_per_thread_target =
       spec.range_work_per_thread_target;
   task.requested_memory_strategy = spec.memory_strategy;
+  task.requested_sparse_list_policy = spec.sparse_list_policy;
+  if (spec.sparse_list_policy == "parent_capacity_bound" &&
+      task.sparse_list_parent_grid_bound.has_value() &&
+      task.selected_grid_size.has_value()) {
+    const auto resolved = std::min(*task.sparse_list_parent_grid_bound,
+                                   *task.selected_grid_size);
+    task.actual_grid_size = resolved;
+    task.actual_geometry_kind = "sparse_parent_capacity_bound";
+    task.actual_geometry_reason =
+        "the complete sparse traversal plan capped listgen CTAs by the "
+        "compiler-proven parent-list capacity";
+  }
   return task;
 }
 
@@ -6370,7 +6391,8 @@ void export_lang(py::module &m) {
       .def("insert_ret", &Kernel::insert_ret)
       .def("finalize_rets", &Kernel::finalize_rets)
       .def("finalize_params", &Kernel::finalize_params)
-      .def("make_launch_context", &Kernel::make_launch_context)
+      .def("make_launch_context", &Kernel::make_launch_context,
+           py::arg("cpu_bounded_range") = false)
       .def("definition_retired", &Kernel::definition_retired)
       .def("set_compile_tier_override",
            &Kernel::set_compile_tier_override)

@@ -64,8 +64,8 @@ Kernel::Kernel(Program &program,
   }
 }
 
-LaunchContextBuilder Kernel::make_launch_context() {
-  LaunchContextBuilder builder(this);
+LaunchContextBuilder Kernel::make_launch_context(bool cpu_bounded_range) {
+  LaunchContextBuilder builder(this, cpu_bounded_range);
   const OffloadExecutionPlan *plan = nullptr;
   if (offload_execution_plan_frozen_.load(std::memory_order_acquire)) {
     TI_ASSERT(offload_execution_plan_.has_value());
@@ -83,7 +83,8 @@ LaunchContextBuilder Kernel::make_launch_context() {
   if (plan != nullptr) {
     builder.bind_cuda_task_execution_plan(
         plan->execution_identity, plan->launch_content_digest, plan->task_kinds,
-        plan->grid_residency_waves, plan->range_work_per_thread_targets);
+        plan->grid_residency_waves, plan->range_work_per_thread_targets,
+        plan->sparse_list_policies);
   }
   return builder;
 }
@@ -340,6 +341,7 @@ void Kernel::set_offload_execution_plan(
     const std::vector<int> &cuda_max_registers,
     const std::vector<int> &grid_residency_waves,
     const std::vector<int> &range_work_per_thread_targets,
+    const std::vector<std::string> &sparse_list_policies,
     const std::vector<std::string> &memory_strategies,
     const std::vector<std::vector<int>> &memory_source_arg_indices,
     const std::vector<std::vector<int>> &memory_domain_shapes,
@@ -366,6 +368,7 @@ void Kernel::set_offload_execution_plan(
           cuda_max_registers.size() != task_count ||
           grid_residency_waves.size() != task_count ||
           range_work_per_thread_targets.size() != task_count ||
+          sparse_list_policies.size() != task_count ||
           memory_strategies.size() != task_count ||
           memory_source_arg_indices.size() != task_count ||
           memory_domain_shapes.size() != task_count ||
@@ -433,6 +436,12 @@ void Kernel::set_offload_execution_plan(
     task.grid_residency_waves = grid_residency_waves[index];
     task.range_work_per_thread_target =
         range_work_per_thread_targets[index];
+    TI_ERROR_IF(sparse_list_policies[index] != "saturating" &&
+                    sparse_list_policies[index] != "parent_capacity_bound",
+                "sparse list policy must be 'saturating' or "
+                "'parent_capacity_bound', got {}",
+                sparse_list_policies[index]);
+    task.sparse_list_policy = sparse_list_policies[index];
     TI_ERROR_IF(memory_strategies[index] != "direct" &&
                     memory_strategies[index] != "shared_staged_1d" &&
                     memory_strategies[index] != "shared_staged_2d",
@@ -493,10 +502,22 @@ void Kernel::set_offload_execution_plan(
         task.cuda_min_blocks_per_sm != 2 || task.cuda_max_registers != -1 ||
         task.grid_residency_waves != 0 ||
         task.range_work_per_thread_target != 1 ||
-        task.memory_strategy != "direct";
-    TI_ERROR_IF(task.task_kind != "range_for" && nonbaseline,
-                "offload execution plan v1 can tune only range_for tasks; "
-                "task {} is {}",
+        task.memory_strategy != "direct" ||
+        task.sparse_list_policy != "saturating";
+    const bool sparse_listgen_policy =
+        task.task_kind == "listgen" &&
+        task.sparse_list_policy == "parent_capacity_bound" &&
+        task.workgroup_size == 0 &&
+        task.thread_local_mode == TaskLaunchThreadLocalMode::automatic &&
+        task.cuda_min_blocks_per_sm == 2 && task.cuda_max_registers == -1 &&
+        task.grid_residency_waves == 0 &&
+        task.range_work_per_thread_target == 1 &&
+        task.memory_strategy == "direct";
+    TI_ERROR_IF(task.task_kind != "range_for" && nonbaseline &&
+                    !sparse_listgen_policy,
+                "offload execution plan can tune range_for tasks or select "
+                "the complete parent-bound policy for listgen tasks; task {} "
+                "is {}",
                 index, task.task_kind);
     plan.source_tasks.push_back(std::move(task));
   }
@@ -522,6 +543,7 @@ void Kernel::set_offload_execution_plan(
           task.cuda_min_blocks_per_sm != 2 || task.cuda_max_registers != -1 ||
           task.grid_residency_waves != 0 ||
           task.range_work_per_thread_target != 1 ||
+          task.sparse_list_policy != "saturating" ||
           task.memory_strategy != "direct" ||
           !task.memory_source_arg_indices.empty() ||
           !task.memory_domain_shape.empty() ||
@@ -539,6 +561,7 @@ void Kernel::set_offload_execution_plan(
   plan.task_kinds.reserve(task_count);
   plan.grid_residency_waves.reserve(task_count);
   plan.range_work_per_thread_targets.reserve(task_count);
+  plan.sparse_list_policies.reserve(task_count);
   for (std::size_t source_index = 0; source_index < task_count;) {
     auto task = plan.source_tasks[source_index];
     const int group_index = fusion_group_at[source_index];
@@ -554,6 +577,8 @@ void Kernel::set_offload_execution_plan(
     plan.grid_residency_waves.push_back(task.grid_residency_waves);
     plan.range_work_per_thread_targets.push_back(
         task.range_work_per_thread_target);
+    plan.sparse_list_policies.push_back(
+        task.sparse_list_policy == "parent_capacity_bound" ? 1 : 0);
     plan.tasks.push_back(std::move(task));
   }
   // A content-derived native digest prevents a caller from forging an
@@ -565,6 +590,7 @@ void Kernel::set_offload_execution_plan(
   serializer(plan.task_kinds);
   serializer(plan.grid_residency_waves);
   serializer(plan.range_work_per_thread_targets);
+  serializer(plan.sparse_list_policies);
   serializer.finalize();
   picosha2::hash256(serializer.data, plan.launch_content_digest);
   {

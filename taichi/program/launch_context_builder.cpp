@@ -51,13 +51,15 @@ void LaunchContextBuilder::bind_cuda_task_execution_plan(
     const CudaTaskExecutionPlanDigest &content_digest,
     const std::vector<std::string> &task_kinds,
     const std::vector<int> &grid_residency_waves,
-    const std::vector<int> &range_work_per_thread_targets) {
+    const std::vector<int> &range_work_per_thread_targets,
+    const std::vector<int> &sparse_list_policies) {
   cuda_task_execution_plan_identity_ = &identity;
   cuda_task_execution_plan_content_digest_ = &content_digest;
   cuda_task_execution_plan_kinds_ = &task_kinds;
   cuda_task_grid_residency_waves_ = &grid_residency_waves;
   cuda_task_range_work_per_thread_targets_ =
       &range_work_per_thread_targets;
+  cuda_task_sparse_list_policies_ = &sparse_list_policies;
 }
 
 void LaunchContextBuilder::set_cpu_bounded_range(void *extent,

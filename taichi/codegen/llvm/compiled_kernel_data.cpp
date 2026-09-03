@@ -118,6 +118,15 @@ std::vector<OffloadedTaskManifest> CompiledKernelData::task_manifest() const {
     item.requested_range_work_per_thread_target =
         task.requested_range_work_per_thread_target;
     item.requested_memory_strategy = task.requested_memory_strategy;
+    item.sparse_list_op = task.sparse_list_op;
+    item.sparse_list_snode_id = task.sparse_list_snode_id;
+    item.sparse_list_parent_snode_id = task.sparse_list_parent_snode_id;
+    if (task.sparse_list_parent_grid_bound > 0) {
+      item.sparse_list_parent_grid_bound =
+          task.sparse_list_parent_grid_bound;
+    }
+    item.may_mutate_sparse_topology = task.may_mutate_sparse_topology;
+    item.sparse_mutation_snode_id = task.sparse_mutation_snode_id;
     if (task.external_shared_staged) {
       item.staged_external_arg_index = task.external_shared_arg_index;
       item.staged_halo_low = task.external_shared_halo_low;

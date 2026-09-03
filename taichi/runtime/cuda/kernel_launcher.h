@@ -89,6 +89,7 @@ class KernelLauncher : public LLVM::KernelLauncher {
       std::vector<std::string> task_kinds;
       std::vector<int> grid_residency_waves;
       std::vector<int> range_work_per_thread_targets;
+      std::vector<int> sparse_list_policies;
       std::vector<OffloadedTask> tasks;
     };
 

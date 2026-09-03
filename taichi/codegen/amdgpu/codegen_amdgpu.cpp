@@ -398,9 +398,8 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
             &num_SMs, HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, 0);
         const int saturating = num_SMs * query_max_block_per_sm;
         int chosen = saturating;
-        // §16.13 (S3): mirror codegen_cuda.cpp listgen static grid_dim.
-        if (compile_config.listgen_static_grid_dim && stmt->snode != nullptr) {
-          size_t parent_list_max = 1;
+        size_t parent_list_max = 1;
+        if (stmt->snode != nullptr) {
           for (auto *sn = stmt->snode->parent;
                sn != nullptr && sn->type != SNodeType::root;
                sn = sn->parent) {
@@ -410,8 +409,13 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
               break;
             }
           }
-          chosen =
+          current_task->sparse_list_parent_grid_bound =
               std::max(1, std::min(saturating, (int)parent_list_max));
+        }
+        // §16.13 (S3): mirror codegen_cuda.cpp listgen static grid_dim.
+        if (compile_config.listgen_static_grid_dim &&
+            current_task->sparse_list_parent_grid_bound > 0) {
+          chosen = current_task->sparse_list_parent_grid_bound;
         }
         current_task->grid_dim = chosen;
       }

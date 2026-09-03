@@ -47,6 +47,12 @@ _GRAPH_OFFLOAD_FUSION_RECIPE_PREFIXES = {
     "exact_pointwise_phase_fusion": "graph-offload-fusion:exact-pointwise:",
 }
 
+_GRAPH_SPARSE_TRAVERSAL_RECIPE_SCHEMA_VERSION = 1
+_GRAPH_SPARSE_TRAVERSAL_RECIPE_PREFIXES = {
+    "saturating": "graph-sparse-traversal:saturating:",
+    "parent_capacity_bound": "graph-sparse-traversal:parent-capacity-bound:",
+}
+
 _GRAPH_BOUNDED_RECIPE_SCHEMA_VERSION = 1
 _GRAPH_BOUNDED_RECIPE_PREFIXES = {
     "logical_exact": "graph-bounded:logical-exact:",
@@ -662,6 +668,98 @@ class _GraphOffloadFusionRecipeManifest:
             recipe_id=prefix + _canonical_hash(payload)[:24],
             payload_json=payload_json,
         )
+
+    @property
+    def strategy(self):
+        return json.loads(self.payload_json)["strategy"]
+
+    def to_dict(self):
+        return {"recipe_id": self.recipe_id, **json.loads(self.payload_json)}
+
+
+@dataclass(frozen=True)
+class _GraphSparseTraversalRecipeManifest:
+    """One whole-dispatch sparse list-generation launch policy."""
+
+    recipe_id: str
+    payload_json: str
+
+    def __post_init__(self):
+        if not isinstance(self.recipe_id, str) or not self.recipe_id:
+            raise ValueError("Graph sparse traversal recipe ID must be nonempty")
+        try:
+            payload = json.loads(self.payload_json)
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("Graph sparse traversal payload is invalid") from error
+        if _canonical_json(payload) != self.payload_json:
+            raise ValueError("Graph sparse traversal payload is not canonical")
+        if (
+            payload.get("schema_version")
+            != _GRAPH_SPARSE_TRAVERSAL_RECIPE_SCHEMA_VERSION
+        ):
+            raise ValueError("Graph sparse traversal schema is unsupported")
+        strategy = payload.get("strategy")
+        try:
+            prefix = _GRAPH_SPARSE_TRAVERSAL_RECIPE_PREFIXES[strategy]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "Graph sparse traversal strategy is unsupported"
+            ) from error
+        listgen_tasks = payload.get("listgen_tasks")
+        materialized_tasks = payload.get("materialized_tasks")
+        if (
+            not isinstance(listgen_tasks, list)
+            or not listgen_tasks
+            or not isinstance(materialized_tasks, list)
+            or not materialized_tasks
+        ):
+            raise ValueError("Graph sparse traversal requires physical listgen tasks")
+        expected_policy = strategy
+        if any(
+            not isinstance(task, dict)
+            or task.get("task_kind") != "listgen"
+            or task.get("policy") != expected_policy
+            or not isinstance(task.get("snode_id"), int)
+            or task["snode_id"] < 0
+            or not isinstance(task.get("parent_snode_id"), int)
+            or task["parent_snode_id"] < 0
+            or not isinstance(task.get("parent_grid_bound"), int)
+            or task["parent_grid_bound"] <= 0
+            or not isinstance(task.get("selected_grid"), int)
+            or task["selected_grid"] <= 0
+            or not isinstance(task.get("actual_grid"), int)
+            or task["actual_grid"] <= 0
+            for task in listgen_tasks
+        ):
+            raise ValueError("Graph sparse traversal listgen identity is incomplete")
+        if strategy == "saturating" and any(
+            task["actual_grid"] != task["selected_grid"] for task in listgen_tasks
+        ):
+            raise ValueError("saturating sparse traversal changed a listgen grid")
+        if strategy == "parent_capacity_bound" and any(
+            task["actual_grid"]
+            != min(task["selected_grid"], task["parent_grid_bound"])
+            for task in listgen_tasks
+        ):
+            raise ValueError("parent-bound sparse traversal has the wrong grid")
+        expected = prefix + _canonical_hash(payload)[:24]
+        if self.recipe_id != expected:
+            raise ValueError("Graph sparse traversal ID does not match its payload")
+
+    @classmethod
+    def from_payload(cls, payload):
+        if not isinstance(payload, dict):
+            raise TypeError("Graph sparse traversal payload must be a dictionary")
+        payload = dict(payload)
+        payload["schema_version"] = _GRAPH_SPARSE_TRAVERSAL_RECIPE_SCHEMA_VERSION
+        try:
+            prefix = _GRAPH_SPARSE_TRAVERSAL_RECIPE_PREFIXES[payload.get("strategy")]
+        except (KeyError, TypeError) as error:
+            raise ValueError(
+                "Graph sparse traversal strategy is unsupported"
+            ) from error
+        payload_json = _canonical_json(payload)
+        return cls(prefix + _canonical_hash(payload)[:24], payload_json)
 
     @property
     def strategy(self):

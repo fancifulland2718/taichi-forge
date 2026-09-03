@@ -141,6 +141,13 @@ class LaunchContextBuilder {
                : kEmpty;
   }
 
+  const std::vector<int> &cuda_task_sparse_list_policies() const noexcept {
+    static const std::vector<int> kEmpty;
+    return cuda_task_sparse_list_policies_ != nullptr
+               ? *cuda_task_sparse_list_policies_
+               : kEmpty;
+  }
+
   LaunchContextBuilder(LaunchContextBuilder &&) = default;
   LaunchContextBuilder &operator=(LaunchContextBuilder &&) = default;
   LaunchContextBuilder(const LaunchContextBuilder &) = delete;
@@ -264,7 +271,8 @@ class LaunchContextBuilder {
       const CudaTaskExecutionPlanDigest &content_digest,
       const std::vector<std::string> &task_kinds,
       const std::vector<int> &grid_residency_waves,
-      const std::vector<int> &range_work_per_thread_targets);
+      const std::vector<int> &range_work_per_thread_targets,
+      const std::vector<int> &sparse_list_policies);
 
   void set_array_shape_and_strides(
       const std::vector<int> &arg_id,
@@ -295,6 +303,7 @@ class LaunchContextBuilder {
   const std::vector<std::string> *cuda_task_execution_plan_kinds_{nullptr};
   const std::vector<int> *cuda_task_grid_residency_waves_{nullptr};
   const std::vector<int> *cuda_task_range_work_per_thread_targets_{nullptr};
+  const std::vector<int> *cuda_task_sparse_list_policies_{nullptr};
   std::string dispatch_label_;
 
  public:

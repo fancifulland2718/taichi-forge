@@ -66,6 +66,10 @@ class OffloadedTask {
   int sparse_list_op{kSparseListOpNone};
   int sparse_list_snode_id{-1};
   int sparse_list_parent_snode_id{-1};
+  // Static CTA upper bound for this listgen task, derived from the maximum
+  // number of resident parent-list elements and capped by the ordinary
+  // hardware-saturating grid. Zero means that no exact bound was published.
+  int sparse_list_parent_grid_bound{0};
   bool may_mutate_sparse_topology{false};
   int sparse_mutation_snode_id{kSparseMutationNone};
 
@@ -115,6 +119,7 @@ class OffloadedTask {
             sparse_list_op,
             sparse_list_snode_id,
             sparse_list_parent_snode_id,
+            sparse_list_parent_grid_bound,
             may_mutate_sparse_topology,
             sparse_mutation_snode_id);
 };

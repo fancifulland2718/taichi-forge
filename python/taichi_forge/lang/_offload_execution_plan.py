@@ -16,6 +16,7 @@ _CUDA_MAX_REGISTERS = (None, 0, 24, 48)
 _CUDA_GRID_RESIDENCY_WAVES = (None, 1, 2, 4)
 _RANGE_WORK_PER_THREAD_TARGETS = (1, 2, 4, 8)
 _MEMORY_STRATEGIES = ("direct", "shared_staged_1d", "shared_staged_2d")
+_SPARSE_LIST_POLICIES = ("saturating", "parent_capacity_bound")
 
 
 def _canonical_json(value):
@@ -85,6 +86,7 @@ class _TaskOptimizationSpec:
     cuda_max_registers: Optional[int] = None
     grid_residency_waves: Optional[int] = None
     range_work_per_thread_target: int = 1
+    sparse_list_policy: str = "saturating"
     memory_strategy: str = "direct"
     memory_source_arg_indices: tuple[int, ...] = ()
     memory_domain_shape: tuple[int, ...] = ()
@@ -113,6 +115,11 @@ class _TaskOptimizationSpec:
             raise ValueError("grid_residency_waves must be None, 1, 2, or 4")
         if self.range_work_per_thread_target not in (_RANGE_WORK_PER_THREAD_TARGETS):
             raise ValueError("range_work_per_thread_target must be 1, 2, 4, or 8")
+        if self.sparse_list_policy not in _SPARSE_LIST_POLICIES:
+            raise ValueError(
+                "sparse_list_policy must be 'saturating' or "
+                "'parent_capacity_bound'"
+            )
         if self.memory_strategy not in _MEMORY_STRATEGIES:
             raise ValueError(
                 "memory_strategy must be 'direct', 'shared_staged_1d', or "
@@ -199,10 +206,17 @@ class _TaskOptimizationSpec:
             or self.grid_residency_waves is not None
             or self.range_work_per_thread_target != 1
             or self.memory_strategy != "direct"
+            or (
+                self.sparse_list_policy != "saturating"
+                and self.task_kind != "listgen"
+            )
         ):
             raise ValueError(
-                "the v1 execution plan only tunes physical range_for tasks"
+                "the execution plan only tunes physical range_for tasks, "
+                "except for one complete traversal policy on listgen tasks"
             )
+        if self.task_kind == "range_for" and self.sparse_list_policy != "saturating":
+            raise ValueError("range_for tasks cannot carry a sparse list policy")
 
     @property
     def is_baseline(self):
@@ -213,6 +227,7 @@ class _TaskOptimizationSpec:
             and self.cuda_max_registers is None
             and self.grid_residency_waves is None
             and self.range_work_per_thread_target == 1
+            and self.sparse_list_policy == "saturating"
             and self.memory_strategy == "direct"
             and not self.memory_source_arg_indices
             and not self.memory_domain_shape
@@ -225,6 +240,7 @@ class _TaskOptimizationSpec:
         payload = asdict(self)
         payload["grid_residency_waves"] = None
         payload["range_work_per_thread_target"] = 1
+        payload["sparse_list_policy"] = "saturating"
         return payload
 
 
@@ -510,6 +526,12 @@ class _OffloadExecutionPlan:
                 or manifest.requested_grid_residency_waves != spec.grid_residency_waves
                 or manifest.requested_range_work_per_thread_target
                 != spec.range_work_per_thread_target
+                or getattr(
+                    manifest,
+                    "requested_sparse_list_policy",
+                    "saturating",
+                )
+                != spec.sparse_list_policy
                 or manifest.requested_memory_strategy != spec.memory_strategy
             ):
                 raise ValueError(
@@ -558,6 +580,7 @@ class _OffloadExecutionPlan:
                 for task in self.tasks
             ],
             [task.range_work_per_thread_target for task in self.tasks],
+            [task.sparse_list_policy for task in self.tasks],
             [task.memory_strategy for task in self.tasks],
             [list(task.memory_source_arg_indices) for task in self.tasks],
             [list(task.memory_domain_shape) for task in self.tasks],

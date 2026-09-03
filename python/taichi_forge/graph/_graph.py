@@ -92,6 +92,7 @@ from taichi_forge.graph._optimization import (
     _GraphFusionQualificationCache,
     _GraphMemoryRecipeManifest,
     _GraphOffloadFusionRecipeManifest,
+    _GraphSparseTraversalRecipeManifest,
     _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
@@ -10067,7 +10068,15 @@ def _replay_recipe_cgraph_node(node, selections, map_source_groups):
     for operation in node.recipe_operations:
         kind = operation[0]
         if kind == "dispatch":
-            _, kernel_cpp, args, label, memory_source, offload_source = operation
+            (
+                _,
+                kernel_cpp,
+                args,
+                label,
+                memory_source,
+                offload_source,
+                sparse_source,
+            ) = operation
             contracts = ()
             layout_requirements = ()
             memory_selection = (
@@ -10082,12 +10091,32 @@ def _replay_recipe_cgraph_node(node, selections, map_source_groups):
                     ("offload_phase_fusion", offload_source._recipe_source_key)
                 )
             )
-            if memory_selection is not None and offload_selection is not None:
-                raise TaichiRuntimeError(
-                    "one Graph dispatch cannot select memory staging and offload "
-                    "phase fusion simultaneously"
+            sparse_selection = (
+                None
+                if sparse_source is None
+                else selections.get(
+                    ("sparse_traversal", sparse_source._recipe_source_key)
                 )
-            if offload_selection is not None:
+            )
+            selected_count = sum(
+                item is not None
+                for item in (
+                    memory_selection,
+                    offload_selection,
+                    sparse_selection,
+                )
+            )
+            if selected_count > 1:
+                raise TaichiRuntimeError(
+                    "one Graph dispatch cannot select multiple physical "
+                    "kernel recipe families simultaneously"
+                )
+            if sparse_selection is not None:
+                kernel_cpp = sparse_source.materialize(
+                    sparse_selection.choice_id,
+                    record_selection=False,
+                )
+            elif offload_selection is not None:
                 kernel_cpp, contracts = offload_source.materialize(
                     offload_selection.choice_id,
                     record_selection=False,
@@ -10150,6 +10179,7 @@ def _operation_has_selection(operation, selections):
     if kind == "dispatch":
         memory_source = operation[4]
         offload_source = operation[5]
+        sparse_source = operation[6]
         return (
             memory_source is not None
             and ("graph_memory", memory_source._recipe_source_key) in selections
@@ -10158,6 +10188,13 @@ def _operation_has_selection(operation, selections):
             and (
                 "offload_phase_fusion",
                 offload_source._recipe_source_key,
+            )
+            in selections
+        ) or (
+            sparse_source is not None
+            and (
+                "sparse_traversal",
+                sparse_source._recipe_source_key,
             )
             in selections
         )
@@ -10279,6 +10316,7 @@ class _GraphSpec:
         aot_compiled_graph=None,
         graph_memory_sources=(),
         graph_offload_fusion_sources=(),
+        graph_sparse_traversal_sources=(),
         graph_bounded_sources=(),
         graph_reduction_sources=(),
         graph_native_algorithm_sources=(),
@@ -10374,6 +10412,9 @@ class _GraphSpec:
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
+        self._graph_sparse_traversal_sources = tuple(
+            graph_sparse_traversal_sources
+        )
         self._graph_bounded_sources = tuple(graph_bounded_sources)
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
@@ -10682,6 +10723,7 @@ class _GraphSpec:
             "map_fusion",
             "graph_memory",
             "offload_phase_fusion",
+            "sparse_traversal",
             "bounded_execution",
             "structured_control",
             "graph_reduction",
@@ -10829,6 +10871,9 @@ class _GraphSpec:
             nodes,
             graph_memory_sources=self._graph_memory_sources,
             graph_offload_fusion_sources=self._graph_offload_fusion_sources,
+            graph_sparse_traversal_sources=(
+                self._graph_sparse_traversal_sources
+            ),
             graph_bounded_sources=self._graph_bounded_sources,
             graph_reduction_sources=self._graph_reduction_sources,
             graph_native_algorithm_sources=self._graph_native_algorithm_sources,
@@ -14041,6 +14086,205 @@ class _GraphMemoryRecipeSource:
         return kernel_cpp, contracts, layout_requirements
 
 
+def _graph_sparse_traversal_recipe_manifest(
+    plan,
+    manifests,
+    args,
+    label,
+    strategy,
+):
+    listgen_tasks = tuple(
+        {
+            "task_index": task.task_index,
+            "task_kind": task.task_type,
+            "logical_task_id": task.logical_task_id,
+            "snode_id": task.sparse_list_snode_id,
+            "parent_snode_id": task.sparse_list_parent_snode_id,
+            "parent_grid_bound": task.sparse_list_parent_grid_bound,
+            "selected_grid": task.selected_grid_size,
+            "actual_grid": task.actual_grid_size,
+            "policy": task.requested_sparse_list_policy,
+        }
+        for task in manifests
+        if task.sparse_list_op == 2
+    )
+    physical_stages = tuple(
+        {
+            "name": f"offload_{index}_{task.task_type}",
+            "kind": task.task_type,
+            "source_task_logical_ids": plan.materialized_task_lineage[index],
+            "manifest": asdict(task),
+        }
+        for index, task in enumerate(manifests)
+    )
+    return _GraphSparseTraversalRecipeManifest.from_payload(
+        {
+            "strategy": strategy,
+            "dispatch_label": label,
+            "symbolic_abi": _graph_memory_symbolic_abi(args),
+            "semantic_kernel_identity": plan.semantic_kernel_identity,
+            "offload_plan_identity": plan.identity,
+            "offload_compilation_identity": plan.compilation_identity,
+            "materialized_tasks": tuple(asdict(task) for task in manifests),
+            "source_task_lineage": plan.materialized_task_lineage,
+            "listgen_tasks": listgen_tasks,
+            "physical_stages": physical_stages,
+            "native_graph_capture": False,
+        }
+    )
+
+
+class _GraphSparseTraversalRecipeSource:
+    """Graph-owned complete policy for compiled sparse listgen tasks."""
+
+    def __init__(self, kernel_fn, args, label, baseline_kernel_cpp, manifests):
+        self.kernel_fn = kernel_fn
+        self.args = tuple(args)
+        self.label = label
+        self.baseline_kernel_cpp = baseline_kernel_cpp
+        self.baseline_manifests = tuple(manifests)
+        self.baseline_plan = None
+        self.direct_manifest = None
+        self.selected_recipe_id = ""
+        self._recipe_source_key = ""
+        self._definition_lock = threading.Lock()
+        self._candidate = None
+        self._candidate_prepared = False
+        self._candidate_failure = ""
+        self._candidate_lock = threading.Lock()
+
+    @classmethod
+    def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
+        if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
+            return None
+        if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
+            return None
+        if not hasattr(kernel_fn, "with_launch_policy"):
+            return None
+        try:
+            manifests = _kernel_task_manifests(baseline_kernel_cpp)
+        except (RuntimeError, TaichiRuntimeError):
+            return None
+        listgens = tuple(task for task in manifests if task.task_type == "listgen")
+        if (
+            not listgens
+            or any(task.may_mutate_sparse_topology for task in manifests)
+            or any(
+                task.sparse_list_op != 2
+                or task.sparse_list_snode_id < 0
+                or task.sparse_list_parent_snode_id < 0
+                or task.sparse_list_parent_grid_bound is None
+                or task.sparse_list_parent_grid_bound <= 0
+                or task.selected_grid_size is None
+                or task.selected_grid_size <= 0
+                for task in listgens
+            )
+            or not any(
+                task.sparse_list_parent_grid_bound < task.selected_grid_size
+                for task in listgens
+            )
+        ):
+            return None
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests)
+
+    def _prepare_definition(self):
+        if self.direct_manifest is not None:
+            return
+        with self._definition_lock:
+            if self.direct_manifest is not None:
+                return
+            from taichi_forge.lang._offload_execution_plan import (
+                _OffloadExecutionPlan,
+            )
+
+            plan = _OffloadExecutionPlan.from_task_manifests(
+                self.baseline_manifests
+            )
+            direct_manifest = _graph_sparse_traversal_recipe_manifest(
+                plan,
+                self.baseline_manifests,
+                self.args,
+                self.label,
+                "saturating",
+            )
+            self.baseline_plan = plan
+            self.direct_manifest = direct_manifest
+            if not self.selected_recipe_id:
+                self.selected_recipe_id = direct_manifest.recipe_id
+
+    def candidate(self):
+        if self._candidate_prepared:
+            return self._candidate
+        with self._candidate_lock:
+            if self._candidate_prepared:
+                return self._candidate
+            try:
+                from taichi_forge.lang._offload_execution_plan import (
+                    _bind_offload_execution_plan,
+                )
+
+                self._prepare_definition()
+                plan = self.baseline_plan
+                for task in self.baseline_manifests:
+                    if task.sparse_list_op == 2:
+                        plan = plan.replace_task(
+                            task.task_index,
+                            sparse_list_policy="parent_capacity_bound",
+                        )
+                binding = _bind_offload_execution_plan(self.kernel_fn, plan)
+                kernel_cpp = gen_cpp_kernel(binding, self.args)
+                manifests = _kernel_task_manifests(kernel_cpp)
+                plan.validate_materialization(manifests)
+                manifest = _graph_sparse_traversal_recipe_manifest(
+                    plan,
+                    manifests,
+                    self.args,
+                    self.label,
+                    "parent_capacity_bound",
+                )
+                self._candidate = (manifest, kernel_cpp)
+            except (
+                TypeError,
+                ValueError,
+                RuntimeError,
+                TaichiCompilationError,
+                TaichiRuntimeError,
+            ) as error:
+                self._candidate_failure = str(error).strip() or type(error).__name__
+            self._candidate_prepared = True
+            return self._candidate
+
+    @property
+    def candidate_failure(self):
+        self.candidate()
+        return self._candidate_failure
+
+    def manifests(self):
+        self._prepare_definition()
+        candidate = self.candidate()
+        return (
+            (self.direct_manifest,)
+            if candidate is None
+            else (self.direct_manifest, candidate[0])
+        )
+
+    def materialize(self, requested_recipe_id, *, record_selection=True):
+        self._prepare_definition()
+        if requested_recipe_id == self.direct_manifest.recipe_id:
+            if record_selection:
+                self.selected_recipe_id = requested_recipe_id
+            return self.baseline_kernel_cpp
+        candidate = self.candidate()
+        if candidate is None or requested_recipe_id != candidate[0].recipe_id:
+            reason = self.candidate_failure or "recipe is absent from this definition"
+            raise TaichiRuntimeError(
+                "requested sparse traversal recipe cannot be materialized: " + reason
+            )
+        if record_selection:
+            self.selected_recipe_id = requested_recipe_id
+        return candidate[1]
+
+
 def _offload_fusion_group_candidates(tasks, *, limit=64):
     """Enumerate complete, disjoint phase-fusion choices in useful order."""
 
@@ -15252,6 +15496,7 @@ class GraphBuilder:
         self._declared_private_bindings = {}
         self._graph_memory_sources = []
         self._graph_offload_fusion_sources = []
+        self._graph_sparse_traversal_sources = []
         self._graph_bounded_sources = []
 
         self._graph_reduction_sources = []
@@ -15320,6 +15565,13 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
+        sparse_source = _GraphSparseTraversalRecipeSource.try_create(
+            kernel_fn,
+            unzipped_args,
+            label,
+            kernel_cpp,
+            template_args,
+        )
         requested_memory_recipe = (
             None
             if self._ignore_recipe_environment
@@ -15348,12 +15600,17 @@ class GraphBuilder:
             offload_source._recipe_source_key = (
                 f"offload-fusion:{len(self._graph_offload_fusion_sources)}"
             )
+        if sparse_source is not None:
+            sparse_source._recipe_source_key = (
+                f"sparse-traversal:{len(self._graph_sparse_traversal_sources)}"
+            )
         self._record_dispatch(
             kernel_cpp,
             unzipped_args,
             label,
             _recipe_source=source,
             _offload_recipe_source=offload_source,
+            _sparse_recipe_source=sparse_source,
         )
         if contracts or layout_requirements:
             self._pending_ir_nodes[-1] = replace(
@@ -15365,6 +15622,8 @@ class GraphBuilder:
             self._graph_memory_sources.append(source)
         if offload_source is not None:
             self._graph_offload_fusion_sources.append(offload_source)
+        if sparse_source is not None:
+            self._graph_sparse_traversal_sources.append(sparse_source)
 
     def reduce(
         self,
@@ -16237,6 +16496,7 @@ class GraphBuilder:
         label="",
         _recipe_source=None,
         _offload_recipe_source=None,
+        _sparse_recipe_source=None,
     ):
         self._bind_declared_private_args(unzipped_args)
         self._active_bounded_publication = None
@@ -16258,6 +16518,7 @@ class GraphBuilder:
                     label,
                     _recipe_source,
                     _offload_recipe_source,
+                    _sparse_recipe_source,
                 )
             )
 
@@ -16650,6 +16911,9 @@ class GraphBuilder:
                 aot_graph_builder=self._aot_graph_plan.snapshot(),
                 graph_memory_sources=tuple(self._graph_memory_sources),
                 graph_offload_fusion_sources=tuple(self._graph_offload_fusion_sources),
+                graph_sparse_traversal_sources=tuple(
+                    self._graph_sparse_traversal_sources
+                ),
                 graph_bounded_sources=tuple(self._graph_bounded_sources),
                 graph_reduction_sources=tuple(self._graph_reduction_sources),
                 graph_native_algorithm_sources=tuple(

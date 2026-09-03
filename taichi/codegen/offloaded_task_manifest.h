@@ -36,6 +36,7 @@ struct OffloadedTaskManifest {
   std::optional<int> requested_grid_residency_waves;
   int requested_range_work_per_thread_target{1};
   std::string requested_memory_strategy{"direct"};
+  std::string requested_sparse_list_policy{"saturating"};
 
   // Values selected by backend code generation. CPU execution intentionally
   // leaves these empty instead of pretending that its worker scheduler is a
@@ -78,6 +79,16 @@ struct OffloadedTaskManifest {
   std::vector<std::vector<int>> staged_halo_lows_nd;
   std::vector<std::vector<int>> staged_halo_highs_nd;
   std::vector<std::vector<std::vector<int>>> staged_access_offsets;
+
+  // Sparse traversal identity and the exact launch-only grid candidate. The
+  // task manifest remains observational; a complete Forge plan owns any
+  // request to apply the bound.
+  int sparse_list_op{0};
+  int sparse_list_snode_id{-1};
+  int sparse_list_parent_snode_id{-1};
+  std::optional<std::int64_t> sparse_list_parent_grid_bound;
+  bool may_mutate_sparse_topology{false};
+  int sparse_mutation_snode_id{-1};
 
   std::uint64_t static_shared_bytes{0};
   std::uint64_t dynamic_shared_bytes{0};

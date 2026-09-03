@@ -6004,8 +6004,8 @@ void CompiledGraph::jit_run_cached(
     }
     TI_ASSERT(dispatch.ti_kernel);
     auto *prog = dispatch.ti_kernel->program;
-    LaunchContextBuilder launch_ctx(
-        dispatch.ti_kernel, dispatch.cpu_bounded_dispatch.has_value());
+    auto launch_ctx = dispatch.ti_kernel->make_launch_context(
+        dispatch.cpu_bounded_dispatch.has_value());
     if (compile_config.arch == Arch::cuda) {
       set_cuda_bounded_range_binding(dispatch, launch_ctx);
     }

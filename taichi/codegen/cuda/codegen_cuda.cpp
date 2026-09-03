@@ -1011,6 +1011,20 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
             &num_SMs, CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, nullptr);
         const int saturating = num_SMs * query_max_block_per_sm;
         int chosen = saturating;
+        size_t parent_list_max = 1;
+        if (stmt->snode != nullptr) {
+          for (auto *sn = stmt->snode->parent;
+               sn != nullptr && sn->type != SNodeType::root;
+               sn = sn->parent) {
+            parent_list_max *= (size_t)sn->num_cells_per_container;
+            if (parent_list_max >= (size_t)saturating) {
+              parent_list_max = (size_t)saturating;
+              break;
+            }
+          }
+          current_task->sparse_list_parent_grid_bound =
+              std::max(1, std::min(saturating, (int)parent_list_max));
+        }
         // §16.13 (S3, 2026-05-05): when the opt-in flag is set, derive a
         // static upper bound on the number of parent_list elements (i.e.
         // the i-axis count of element_listgen_nonroot's outer loop, see
@@ -1023,19 +1037,9 @@ class TaskCodeGenCUDA : public TaskCodeGenLLVM {
         // `root.bitmasked(64).f32`, parent_list has exactly 1 entry, so
         // saturating to thousands of blocks wastes >99% of launched
         // threads on dispatch overhead and atomic contention.
-        if (compile_config.listgen_static_grid_dim && stmt->snode != nullptr) {
-          size_t parent_list_max = 1;
-          for (auto *sn = stmt->snode->parent;
-               sn != nullptr && sn->type != SNodeType::root;
-               sn = sn->parent) {
-            parent_list_max *= (size_t)sn->num_cells_per_container;
-            if (parent_list_max >= (size_t)saturating) {
-              parent_list_max = (size_t)saturating;
-              break;
-            }
-          }
-          chosen =
-              std::max(1, std::min(saturating, (int)parent_list_max));
+        if (compile_config.listgen_static_grid_dim &&
+            current_task->sparse_list_parent_grid_bound > 0) {
+          chosen = current_task->sparse_list_parent_grid_bound;
         }
         current_task->grid_dim = chosen;
       }

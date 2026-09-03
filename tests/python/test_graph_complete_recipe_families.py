@@ -32,6 +32,153 @@ def _selection(fragment):
     return fragment.materializer.selection
 
 
+@test_utils.test(
+    arch=ti.cuda,
+    offline_cache=False,
+    cuda_sparse_pool_auto_size=True,
+    cuda_sparse_per_snode_pool=True,
+    listgen_static_grid_dim=False,
+)
+def test_complete_recipe_owns_sparse_listgen_grid_for_migrating_active_set():
+    block_count = 33
+    block_size = 8
+    domain_size = block_count * block_size
+    values = ti.field(ti.i32)
+    fields = ti.FieldsBuilder()
+    pointer = fields.pointer(
+        ti.i,
+        block_count,
+        vk_max_active=block_count,
+    )
+    pointer.bitmasked(ti.i, block_size).place(values)
+    tree = fields.finalize()
+    output = ti.ndarray(ti.i32, shape=2)
+
+    @ti.kernel
+    def deactivate_all():
+        for block in range(block_count):
+            ti.deactivate(pointer, block)
+
+    @ti.kernel
+    def activate_phase(phase: ti.i32):
+        for index in range(domain_size):
+            block = index // block_size
+            local = index % block_size
+            if block % 3 == phase and (local + phase) % 4 == 1:
+                values[index] = 1000 * (phase + 1) + index
+
+    @ti.kernel
+    def clear(result: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        result[0] = 0
+        result[1] = 0
+
+    @ti.kernel
+    def reduce_active(result: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for index in values:
+            ti.atomic_add(result[0], values[index])
+            ti.atomic_add(result[1], 1)
+
+    result_arg = ti.graph.Arg(
+        ti.graph.ArgKind.NDARRAY,
+        "result",
+        ti.i32,
+        ndim=1,
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(clear, result_arg)
+    builder.dispatch(reduce_active, result_arg)
+    definition = builder.freeze()
+
+    sources = definition._runtime_spec._graph_sparse_traversal_sources
+    assert len(sources) == 1
+    manifests = sources[0].manifests()
+    assert tuple(manifest.strategy for manifest in manifests) == (
+        "saturating",
+        "parent_capacity_bound",
+    )
+    bounded_manifest = manifests[1]
+    listgens = bounded_manifest.to_dict()["listgen_tasks"]
+    assert len(listgens) == 2
+    assert all(task["policy"] == "parent_capacity_bound" for task in listgens)
+    assert all(
+        task["actual_grid"]
+        == min(task["selected_grid"], task["parent_grid_bound"])
+        for task in listgens
+    )
+    assert any(
+        task["actual_grid"] < task["selected_grid"] for task in listgens
+    )
+
+    catalog = definition.recipe_catalog()
+    sparse_fragments = _family_fragments(catalog, "sparse_traversal")
+    assert len(sparse_fragments) == 1
+    fragment = sparse_fragments[0]
+    entry = catalog.compose(
+        (fragment.fragment_id,),
+        stage="sparse-traversal",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+    )
+    session = definition.search_recipes(
+        engine="compileiq",
+        target=ti.graph.GraphOptimizationTarget(
+            objectives=(("device_time_ns", "min"),)
+        ),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=2),
+    )
+    assert len(session.recipes) == 2
+    assert any(
+        handle.manifest.families == ("sparse_traversal",)
+        for handle in session.recipes
+    )
+
+    prog = ti.lang.impl.get_runtime().prog
+    with definition.materialization_context() as context:
+        product = context.materialize(entry.recipe)
+        task_manifests = product.executor.task_manifest()
+        physical_listgens = tuple(
+            task for task in task_manifests if task.sparse_list_op == 2
+        )
+        assert len(physical_listgens) == 2
+        assert all(
+            task.requested_sparse_list_policy == "parent_capacity_bound"
+            and task.actual_grid_size
+            == min(task.selected_grid_size, task.sparse_list_parent_grid_bound)
+            for task in physical_listgens
+        )
+        bindings = product.executor.bind({"result": output})
+        prog._debug_reset_sparse_listgen_stats()
+        for phase in (0, 1):
+            deactivate_all()
+            activate_phase(phase)
+            expected_values = [
+                1000 * (phase + 1) + index
+                for index in range(domain_size)
+                if index // block_size % 3 == phase
+                and (index % block_size + phase) % 4 == 1
+            ]
+            for _ in range(4):
+                product.executor.run(bindings)
+            ti.sync()
+            np.testing.assert_array_equal(
+                output.to_numpy(),
+                np.asarray((sum(expected_values), len(expected_values)), np.int32),
+            )
+
+        stats = dict(prog._debug_sparse_snode_tree_stats(tree.id))["listgen"]
+        totals = dict(stats["totals"])
+        assert totals["rebuilds"] >= 4
+        assert totals["reuse_hits"] >= 8
+        assert totals["candidate_slots_dispatched"] == 2 * sum(
+            task.actual_grid_size * task.selected_block_size
+            for task in physical_listgens
+        )
+        graph_stats = product.executor._graph_stats[0]
+        assert graph_stats["captures"] == 0
+        assert graph_stats["last_path"] == "ordinary_fallback"
+
+    tree.destroy()
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False, kernel_profiler=True)
 def test_complete_recipe_searches_and_materializes_offload_phase_fusion():
     count = (1 << 17) + 19
