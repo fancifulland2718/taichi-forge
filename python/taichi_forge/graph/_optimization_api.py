@@ -196,6 +196,10 @@ class GraphRecipeManifest:
     semantic_graph_id: str
     recipe_id: str
     planned_physical_id: str
+    provider_registry_id: str
+    generation_domain_id: str
+    assembly_protocol: str
+    assembly_provider_namespace: str
     families: tuple[str, ...]
     semantic_region_count: int
     selected_fragment_count: int
@@ -208,7 +212,7 @@ class GraphRecipeManifest:
     is_baseline: bool
 
     @classmethod
-    def _from_recipe(cls, definition, recipe):
+    def _from_recipe(cls, definition, recipe, provider_set=None):
         families = []
         for fragment in recipe.fragments:
             selection = fragment.provider_metadata.get("family_selection", {})
@@ -222,6 +226,14 @@ class GraphRecipeManifest:
             semantic_graph_id=definition.semantic_graph_id,
             recipe_id=recipe.recipe_id,
             planned_physical_id=recipe.planned_physical_id,
+            provider_registry_id=(
+                "" if provider_set is None else provider_set.provider_registry_id
+            ),
+            generation_domain_id=(
+                "" if provider_set is None else provider_set.generation_domain_id
+            ),
+            assembly_protocol=recipe.assembly_protocol,
+            assembly_provider_namespace=recipe.assembly_provider_namespace,
             families=tuple(dict.fromkeys(families)),
             semantic_region_count=len(recipe.region_selections),
             selected_fragment_count=len(recipe.fragments),
@@ -250,6 +262,12 @@ class GraphRecipeManifest:
             "semantic_graph_id": self.semantic_graph_id,
             "recipe_id": self.recipe_id,
             "planned_physical_id": self.planned_physical_id,
+            "provider_registry_id": self.provider_registry_id,
+            "generation_domain_id": self.generation_domain_id,
+            "assembly": {
+                "protocol": self.assembly_protocol,
+                "provider_namespace": self.assembly_provider_namespace,
+            },
             "families": self.families,
             "semantic_region_count": self.semantic_region_count,
             "selected_fragment_count": self.selected_fragment_count,
@@ -275,10 +293,24 @@ class GraphRecipeHandle:
 
     manifest: GraphRecipeManifest
     _recipe: object = field(repr=False, compare=False, hash=False)
+    _provider_set: object = field(
+        default=None,
+        repr=False,
+        compare=False,
+        hash=False,
+    )
 
     @classmethod
-    def _from_recipe(cls, definition, recipe):
-        return cls(GraphRecipeManifest._from_recipe(definition, recipe), recipe)
+    def _from_recipe(cls, definition, recipe, provider_set=None):
+        return cls(
+            GraphRecipeManifest._from_recipe(
+                definition,
+                recipe,
+                provider_set,
+            ),
+            recipe,
+            provider_set,
+        )
 
     @property
     def semantic_graph_id(self):
@@ -374,7 +406,16 @@ class GraphOptimizationDecision:
 class _GraphRecipeSearchSession:
     """Single-use public façade over Forge-owned recipe construction and V2."""
 
-    def __init__(self, definition, *, engine, target, budget):
+    def __init__(
+        self,
+        definition,
+        *,
+        engine,
+        target,
+        budget,
+        providers,
+        available_capabilities,
+    ):
         if engine != "compileiq":
             raise ValueError("Graph recipe search engine must be compileiq")
         if target is None:
@@ -390,7 +431,10 @@ class _GraphRecipeSearchSession:
             CompileIQCompleteGraphRecipeSearch,
         )
 
-        catalog = definition.recipe_catalog()
+        catalog = definition.recipe_catalog(
+            providers=providers,
+            available_capabilities=available_capabilities,
+        )
         remaining_capacity = max(
             0,
             budget.recipe_capacity - len(catalog.entries()),
@@ -405,6 +449,7 @@ class _GraphRecipeSearchSession:
             entry.recipe.recipe_id: GraphRecipeHandle._from_recipe(
                 definition,
                 entry.recipe,
+                catalog.provider_set,
             )
             for entry in catalog.entries()
         }

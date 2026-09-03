@@ -466,7 +466,8 @@ class GraphRecipeComposer:
             len(fragments) != 1 or baseline_coverage
         ):
             raise GraphRecipeCompositionError(
-                "provider-owned whole-Graph assembly requires one exact-coverage fragment"
+                "provider-owned whole-Graph assembly requires one "
+                "exact-coverage fragment"
             )
         selections = tuple(
             GraphRegionSelection(

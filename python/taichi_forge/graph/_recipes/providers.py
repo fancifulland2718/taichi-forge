@@ -370,7 +370,15 @@ class GraphRecipeProviderSet:
                 provider_namespace=fragment.provider_namespace,
                 fragment_key=fragment.fragment_key,
             )
-        resolved = method(self.definition, fragment.fragment_key)
+        try:
+            resolved = method(self.definition, fragment.fragment_key)
+        except KeyError as error:
+            raise GraphRecipeProviderError(
+                "Graph recipe fragment is unavailable by its stable key",
+                error_key="recipe_fragment_unavailable",
+                provider_namespace=fragment.provider_namespace,
+                fragment_key=fragment.fragment_key,
+            ) from error
         resolved = self.validate_fragment(resolved)
         if resolved.to_dict() != fragment.to_dict():
             raise GraphRecipeProviderError(

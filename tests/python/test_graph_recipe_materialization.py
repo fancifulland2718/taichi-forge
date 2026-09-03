@@ -32,6 +32,8 @@ from taichi_forge.graph._recipes import (
     GraphRecipeFragment,
     GraphRecipeProviderDescriptor,
     GraphRecipeProviderSet,
+    PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    RUNTIME_GRAPH_ASSEMBLY_V1,
 )
 
 from tests import test_utils
@@ -317,8 +319,11 @@ def test_complete_recipe_publishes_atomically_and_retires_owners_in_reverse_orde
 
     context = GraphMaterializationContext(
         definition,
-        assembler=assemble,
-        provider_set=_provider_set(definition, (first, third)),
+        provider_set=_provider_set(
+            definition,
+            (first, third),
+            assembler=assemble,
+        ),
         runtime_identity_provider=_constant_runtime,
     )
     result = context.materialize(recipe)
@@ -400,10 +405,10 @@ def test_failed_candidate_rolls_back_without_disturbing_baseline_or_next_candida
     context = GraphMaterializationContext(
         definition,
         baseline_materializer=baseline,
-        assembler=assemble,
         provider_set=_provider_set(
             definition,
             (failed_fragment, good_fragment),
+            assembler=assemble,
         ),
         runtime_identity_provider=_constant_runtime,
     )
@@ -479,8 +484,11 @@ def test_actual_physical_identity_deduplicates_distinct_plans_before_measurement
 
     context = GraphMaterializationContext(
         definition,
-        assembler=assemble,
-        provider_set=_provider_set(definition, (first, second, third)),
+        provider_set=_provider_set(
+            definition,
+            (first, second, third),
+            assembler=assemble,
+        ),
         runtime_identity_provider=_constant_runtime,
     )
     first_result = context.materialize(first_recipe)
@@ -575,8 +583,11 @@ def test_allocated_resources_must_match_requirements_and_appear_in_manifest():
 
     context = GraphMaterializationContext(
         definition,
-        assembler=assemble,
-        provider_set=_provider_set(definition, (fragment,)),
+        provider_set=_provider_set(
+            definition,
+            (fragment,),
+            assembler=assemble,
+        ),
         resource_allocator=allocator,
         runtime_identity_provider=_constant_runtime,
     )
@@ -620,8 +631,11 @@ def test_runtime_generation_change_aborts_publish_and_rolls_back_the_candidate()
 
     context = GraphMaterializationContext(
         definition,
-        assembler=assemble,
-        provider_set=_provider_set(definition, (fragment,)),
+        provider_set=_provider_set(
+            definition,
+            (fragment,),
+            assembler=assemble,
+        ),
         runtime_identity_provider=lambda: ("runtime", runtime["generation"]),
     )
     with pytest.raises(GraphMaterializationError, match="runtime changed") as failure:
@@ -671,7 +685,6 @@ def test_incomplete_cleanup_poisoning_and_manifest_integrity_fail_closed():
     recipe = GraphRecipeComposer(definition).compose((fragment,))
     context = GraphMaterializationContext(
         definition,
-        assembler=lambda *_args: None,
         provider_set=_provider_set(definition, (fragment,)),
         runtime_identity_provider=_constant_runtime,
     )
@@ -683,6 +696,139 @@ def test_incomplete_cleanup_poisoning_and_manifest_integrity_fail_closed():
     with pytest.raises(GraphMaterializationError, match="poisoned"):
         context.materialize(baseline)
     context.close()
+
+
+def test_external_provider_materializes_both_complete_recipe_assembly_protocols():
+    definition = _definition()
+
+    class ExternalProvider:
+        descriptor = ti.graph.GraphRecipeProviderDescriptor(
+            namespace="external.complete_graph",
+            provider_version="2.1",
+            domain_version="external-domain-v3",
+            semantic_fingerprint="external-semantics-v1",
+            assembly_protocols=(
+                ti.graph.RUNTIME_GRAPH_ASSEMBLY_V1,
+                ti.graph.PROVIDER_OWNED_WHOLE_GRAPH_V1,
+            ),
+            fragment_key_schema="route-name.v1",
+        )
+
+        def __init__(self):
+            common = {
+                "provider_namespace": self.descriptor.namespace,
+                "provider_version": self.descriptor.provider_version,
+                "provider_domain_version": self.descriptor.domain_version,
+                "assembly_provider_namespace": self.descriptor.namespace,
+            }
+            self.runtime_fragment = ti.graph.GraphRecipeFragment.create(
+                definition,
+                fragment_key="runtime-map",
+                coverage_region_ids=(definition.sources[1].region_id,),
+                tasks=(
+                    ti.graph.GraphFragmentTask.create(
+                        "runtime-map",
+                        "runtime_graph_fragment",
+                        physical={"route": "runtime-map"},
+                    ),
+                ),
+                provider_metadata={"route": "runtime-map"},
+                **common,
+            )
+            self.whole_fragment = ti.graph.GraphRecipeFragment.create(
+                definition,
+                fragment_key="owned-whole-graph",
+                coverage_region_ids=tuple(
+                    region.region_id for region in definition.regions
+                ),
+                tasks=(
+                    ti.graph.GraphFragmentTask.create(
+                        "owned-whole-graph",
+                        "provider_owned_graph",
+                        physical={"route": "owned-whole-graph"},
+                    ),
+                ),
+                assembly_protocol=ti.graph.PROVIDER_OWNED_WHOLE_GRAPH_V1,
+                provider_metadata={"route": "owned-whole-graph"},
+                **common,
+            )
+            self._by_key = {
+                fragment.fragment_key: fragment
+                for fragment in (self.runtime_fragment, self.whole_fragment)
+            }
+            self.resolved_keys = []
+
+        def discover(self, requested_definition):
+            assert requested_definition is definition
+            return tuple(self._by_key.values())
+
+        def resolve(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            self.resolved_keys.append(fragment_key)
+            return self._by_key[fragment_key]
+
+        def expand(self, requested_definition, fragment_key):
+            self.resolve(requested_definition, fragment_key)
+            return ()
+
+        def materialize(self, scope, fragment):
+            return ti.graph.GraphMaterializedFragment.create(
+                fragment,
+                {"route": fragment.provider_metadata["route"]},
+            )
+
+        def assemble(self, scope, requested_definition, recipe, fragments):
+            assert requested_definition is definition
+            route = fragments[0].payload["route"]
+            return ti.graph.GraphMaterializationProduct(
+                {"route": route, "protocol": recipe.assembly_protocol},
+                _manifest(definition, recipe, route),
+            )
+
+        def describe(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            return {"route": fragment_key}
+
+    provider = ExternalProvider()
+    catalog = definition.recipe_catalog(providers=(provider,))
+    recipes = tuple(
+        entry.recipe
+        for entry in catalog.entries(stage="single-region")
+    )
+    assert len(recipes) == 2
+    by_protocol = {recipe.assembly_protocol: recipe for recipe in recipes}
+    assert set(by_protocol) == {
+        RUNTIME_GRAPH_ASSEMBLY_V1,
+        PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    }
+    assert by_protocol[PROVIDER_OWNED_WHOLE_GRAPH_V1].baseline_coverage_region_ids == ()
+    assert all(catalog.resolve(recipe.recipe_id) == recipe for recipe in recipes)
+
+    with definition.materialization_context(
+        provider_set=catalog.provider_set,
+        runtime_identity_provider=_constant_runtime,
+    ) as context:
+        runtime = context.materialize(by_protocol[RUNTIME_GRAPH_ASSEMBLY_V1])
+        whole = context.materialize(by_protocol[PROVIDER_OWNED_WHOLE_GRAPH_V1])
+        assert runtime.executor == {
+            "route": "runtime-map",
+            "protocol": RUNTIME_GRAPH_ASSEMBLY_V1,
+        }
+        assert whole.executor == {
+            "route": "owned-whole-graph",
+            "protocol": PROVIDER_OWNED_WHOLE_GRAPH_V1,
+        }
+        assert runtime.materialized_physical_id != whole.materialized_physical_id
+        runtime.close()
+        whole.close()
+
+    assert provider.resolved_keys == [
+        "runtime-map",
+        "owned-whole-graph",
+        "runtime-map",
+        "owned-whole-graph",
+    ]
+    assert ti.graph.GraphRecipeProviderDescriptor is GraphRecipeProviderDescriptor
 
 
 @test_utils.test(arch=ti.cpu)

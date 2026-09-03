@@ -443,7 +443,15 @@ class GraphDefinition:
         catalog.build_single_region_stage()
         return catalog
 
-    def search_recipes(self, *, engine="compileiq", target=None, budget):
+    def search_recipes(
+        self,
+        *,
+        engine="compileiq",
+        providers=None,
+        available_capabilities=(),
+        target=None,
+        budget,
+    ):
         """Create a complete-Graph optimization session.
 
         Candidate construction and materialization remain Forge-owned.  The
@@ -457,6 +465,8 @@ class GraphDefinition:
             engine=engine,
             target=target,
             budget=budget,
+            providers=providers,
+            available_capabilities=available_capabilities,
         )
 
     def materialize(self, recipe=None, *, context=None, **context_options):
@@ -470,11 +480,13 @@ class GraphDefinition:
 
         from taichi_forge.graph._optimization_api import GraphRecipeHandle
 
+        handle_provider_set = None
         if isinstance(recipe, GraphRecipeHandle):
             if recipe.semantic_graph_id != self.semantic_graph_id:
                 raise ValueError(
                     "Graph recipe handle belongs to a different GraphDefinition"
                 )
+            handle_provider_set = recipe._provider_set
             recipe = recipe._recipe
         if context is not None and context_options:
             raise TypeError(
@@ -485,6 +497,19 @@ class GraphDefinition:
                 "GraphDefinition.materialize context belongs to another definition"
             )
         owns_context = context is None
+        if owns_context and handle_provider_set is not None:
+            if "providers" in context_options or "provider_set" in context_options:
+                requested = context_options.get("provider_set")
+                if (
+                    requested is not None
+                    and requested.provider_registry_id
+                    != handle_provider_set.provider_registry_id
+                ):
+                    raise ValueError(
+                        "Graph recipe handle provider set differs from materialization"
+                    )
+            else:
+                context_options["provider_set"] = handle_provider_set
         context = context or self.materialization_context(**context_options)
         try:
             result = context.materialize(recipe)

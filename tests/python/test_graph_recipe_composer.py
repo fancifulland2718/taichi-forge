@@ -24,6 +24,7 @@ from taichi_forge.graph._recipes import (
     GraphRecipeProviderDescriptor,
     GraphRecipeProviderError,
     GraphRecipeProviderSet,
+    PROVIDER_OWNED_WHOLE_GRAPH_V1,
 )
 
 from tests import test_utils
@@ -276,6 +277,15 @@ def test_composer_rejects_only_structural_and_physical_incompatibilities():
     )
     with pytest.raises(GraphRecipeCompositionError, match="unknown public binding"):
         GraphRecipeComposer(definition).compose((wrong_binding,))
+
+    partial_owned_graph = _fragment(
+        definition,
+        (1,),
+        "partial-owned-graph",
+        assembly_protocol=PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    )
+    with pytest.raises(GraphRecipeCompositionError, match="exact-coverage"):
+        GraphRecipeComposer(definition).compose((partial_owned_graph,))
 
     capability = _fragment(
         definition,

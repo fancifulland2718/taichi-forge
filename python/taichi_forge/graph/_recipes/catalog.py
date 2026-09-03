@@ -88,6 +88,29 @@ class GraphRecipeCatalog:
         representative = self._physical_duplicates.get(recipe_id, recipe_id)
         return self._entries[representative]
 
+    def resolve(self, recipe_id):
+        """Re-resolve one admitted recipe through this catalog's provider set."""
+
+        entry = self.entry(recipe_id)
+        recipe = entry.recipe
+        if not recipe.fragments:
+            return recipe
+        if self.provider_set is None:
+            raise GraphRecipeProviderError(
+                "Graph recipe resolution requires the catalog provider set",
+                error_key="provider_registry_missing",
+            )
+        resolved = tuple(
+            self.provider_set.resolve(fragment) for fragment in recipe.fragments
+        )
+        canonical = self.composer.compose(resolved)
+        if canonical.to_dict() != recipe.to_dict():
+            raise GraphRecipeProviderError(
+                "Graph recipe changed while resolving stable fragment keys",
+                error_key="recipe_resolution_drift",
+            )
+        return canonical
+
     def register_fragment(self, fragment):
         if not isinstance(fragment, GraphRecipeFragment):
             raise TypeError("Graph recipe catalog accepts GraphRecipeFragment values")

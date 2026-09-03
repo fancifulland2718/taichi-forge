@@ -13,3 +13,18 @@ from ._optimization_api import (
     GraphRecipeManifest as GraphRecipeManifest,
     GraphSearchBudget as GraphSearchBudget,
 )
+from ._recipes import (
+    CompiledGraphPhysicalManifest as CompiledGraphPhysicalManifest,
+    GraphFragmentBindingRequirement as GraphFragmentBindingRequirement,
+    GraphFragmentResourceRequirement as GraphFragmentResourceRequirement,
+    GraphFragmentSubmissionRequirement as GraphFragmentSubmissionRequirement,
+    GraphFragmentTask as GraphFragmentTask,
+    GraphMaterializationProduct as GraphMaterializationProduct,
+    GraphMaterializedFragment as GraphMaterializedFragment,
+    GraphRecipeFragment as GraphRecipeFragment,
+    GraphRecipeProvider as GraphRecipeProvider,
+    GraphRecipeProviderDescriptor as GraphRecipeProviderDescriptor,
+    GraphRecipeProviderError as GraphRecipeProviderError,
+    PROVIDER_OWNED_WHOLE_GRAPH_V1 as PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    RUNTIME_GRAPH_ASSEMBLY_V1 as RUNTIME_GRAPH_ASSEMBLY_V1,
+)

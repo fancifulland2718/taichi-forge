@@ -411,6 +411,23 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
         }
         for source, output in zip(sources, outputs)
     )
+    public_search = baseline.definition.search_recipes(
+        providers=(WorkspaceOnlyProvider(),),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=2),
+    )
+    public_candidate = next(
+        recipe
+        for recipe in public_search.recipes
+        if not recipe.manifest.is_baseline
+    )
+    assert public_candidate.manifest.provider_registry_id
+    assert public_candidate.manifest.generation_domain_id
+    with baseline.definition.materialize(public_candidate) as materialized:
+        public_batch = materialized.executor.bind_batch(frames)
+        public_ticket = materialized.executor.submit_batch(public_batch)
+        assert public_ticket.workspace_lanes == (0, 1)
+        public_ticket.wait()
+
     batches = {}
     lanes = {}
     fast_replays = {}
