@@ -364,16 +364,15 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
         ForgeOpaqueTargetContractV1,
     )
     from taichi_forge.graph import CompileIQCompleteGraphRecipeSearch
-    from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
+    from taichi_forge.graph._recipes import (
+        GraphRuntimeAssemblyProvider,
+        GraphWorkspaceConcurrencyRecipeProvider,
+    )
 
-    class WorkspaceOnlyProvider(GraphExistingFamilyProvider):
-        def fragments(self, definition):
-            return tuple(
-                fragment
-                for fragment in GraphExistingFamilyProvider().fragments(definition)
-                if fragment.provider_namespace
-                == "taichi_forge.graph.workspace_concurrency"
-            )
+    providers = (
+        GraphRuntimeAssemblyProvider(),
+        GraphWorkspaceConcurrencyRecipeProvider(),
+    )
 
     count = 257
 
@@ -415,7 +414,7 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
     builder.dispatch(finalize, scratch, output_arg)
     baseline = builder.compile()
     catalog = baseline.definition.recipe_catalog(
-        providers=(WorkspaceOnlyProvider(),)
+        providers=providers,
     )
     plans = CompileIQCompleteGraphRecipeSearch(baseline, catalog=catalog)
 
@@ -443,13 +442,11 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
         for source, output in zip(sources, outputs)
     )
     public_search = baseline.definition.search_recipes(
-        providers=(WorkspaceOnlyProvider(),),
+        providers=providers,
         budget=ti.graph.GraphSearchBudget(evaluation_limit=2),
     )
     public_candidate = next(
-        recipe
-        for recipe in public_search.recipes
-        if not recipe.manifest.is_baseline
+        recipe for recipe in public_search.recipes if not recipe.manifest.is_baseline
     )
     assert public_candidate.manifest.provider_registry_id
     assert public_candidate.manifest.generation_domain_id

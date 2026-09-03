@@ -28,15 +28,30 @@ from .fragments import (
     GraphRecipeFragment,
 )
 from .families import (
-    GraphExistingFamilyProvider,
     GraphFamilySelection,
     GraphRuntimeAssemblyProvider,
+    GraphRuntimeFragmentProvider,
     assemble_existing_family_recipe,
     default_graph_recipe_providers,
     materialize_existing_family_baseline,
 )
 from .branch_join import GraphBranchJoinRecipeProvider
+from .dispatch_families import (
+    GraphOffloadPhaseFusionRecipeProvider,
+    GraphSparseTraversalRecipeProvider,
+)
 from .graph_memory import GraphMemoryRecipeProvider
+from .map_fusion import GraphMapFusionRecipeProvider
+from .semantic_families import (
+    GraphBoundedExecutionRecipeProvider,
+    GraphNativeAlgorithmRecipeProvider,
+    GraphReductionRecipeProvider,
+    GraphStructuredControlRecipeProvider,
+)
+from .submission_families import (
+    GraphRecordingPartitionRecipeProvider,
+    GraphWorkspaceConcurrencyRecipeProvider,
+)
 
 from .materialize import (
     GraphMaterializationContext,
@@ -73,6 +88,7 @@ __all__ = [
     "GraphBaselineRecipe",
     "GraphBindingABIEntry",
     "GraphBranchJoinRecipeProvider",
+    "GraphBoundedExecutionRecipeProvider",
     "GraphCompileProvenance",
     "GraphDefinition",
     "GraphDefinitionSource",
@@ -82,9 +98,17 @@ __all__ = [
     "GraphFragmentResourceRequirement",
     "GraphFragmentSubmissionRequirement",
     "GraphFragmentTask",
-    "GraphExistingFamilyProvider",
     "GraphFamilySelection",
+    "GraphMapFusionRecipeProvider",
+    "GraphNativeAlgorithmRecipeProvider",
+    "GraphOffloadPhaseFusionRecipeProvider",
+    "GraphRecordingPartitionRecipeProvider",
+    "GraphReductionRecipeProvider",
     "GraphRuntimeAssemblyProvider",
+    "GraphRuntimeFragmentProvider",
+    "GraphSparseTraversalRecipeProvider",
+    "GraphStructuredControlRecipeProvider",
+    "GraphWorkspaceConcurrencyRecipeProvider",
     "GraphMaterializationContext",
     "GraphMaterializationError",
     "GraphMaterializationProduct",

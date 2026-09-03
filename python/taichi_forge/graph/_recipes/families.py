@@ -26,30 +26,35 @@ from taichi_forge.graph._recipes.providers import (
 )
 
 _PROVIDER_VERSION = "complete-graph-family-v1"
-_FAMILY_NAMESPACES = tuple(
-    "taichi_forge.graph." + family
-    for family in (
-        "bounded_execution",
-        "graph_reduction",
-        "map_fusion",
-        "native_algorithm",
-        "offload_phase_fusion",
-        "recording_partition",
-        "sparse_traversal",
-        "structured_control",
-        "workspace_concurrency",
-    )
-)
 _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR = GraphRecipeProviderDescriptor(
     namespace="taichi_forge.graph.runtime_assembly",
     provider_version=_PROVIDER_VERSION,
+    domain_version="runtime-graph-assembly-v1",
+    semantic_fingerprint="runtime-graph-assembly-delegation-v1",
+    assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
+    capabilities=("typed-runtime-graph-assembly",),
+    fragment_key_schema="assembly-owner-no-fragments.v1",
+)
+
+
+def runtime_family_provider_descriptor(
+    family,
+    *,
+    capabilities,
     domain_version="existing-family-domain-v1",
     semantic_fingerprint="existing-family-fragment-generation-v1",
-    assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
-    capabilities=("legacy-family-adapter", "typed-runtime-graph-assembly"),
-    owned_fragment_namespaces=_FAMILY_NAMESPACES,
-    fragment_key_schema="family:source:choice.v1",
-)
+):
+    """Create one independently owned built-in runtime-fragment contract."""
+
+    return GraphRecipeProviderDescriptor(
+        namespace=f"taichi_forge.graph.{family}",
+        provider_version=_PROVIDER_VERSION,
+        domain_version=domain_version,
+        semantic_fingerprint=semantic_fingerprint,
+        assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
+        capabilities=tuple(capabilities),
+        fragment_key_schema=f"{family}:source:choice.v1",
+    )
 
 
 @dataclass(frozen=True)
@@ -208,9 +213,7 @@ def _fragment(
         ),
         backend_requirements=(definition.backend,),
         assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
-        assembly_provider_namespace=(
-            _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.namespace
-        ),
+        assembly_provider_namespace=(_RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.namespace),
         provider_metadata={"family_selection": selection.to_dict()},
     )
 
@@ -243,219 +246,6 @@ def _choice_fragment(
         exclusive_submission=exclusive
         or any(item.exclusive_submission for item in resources),
         provider_descriptor=provider_descriptor,
-    )
-
-
-def _fusion_fragments(definition, spec):
-    dispatch_regions = tuple(
-        source.region_id for source in definition.sources if source.kind == "dispatch"
-    )
-    result = []
-    for recipe in spec.fusion_plan.candidate_recipes:
-        logical_indices = []
-        for source_id in recipe.source_dispatch_ids:
-            marker = source_id.rsplit("/dispatch:", 1)
-            if len(marker) != 2 or not marker[1].isdigit():
-                logical_indices = []
-                break
-            logical_indices.append(int(marker[1]))
-        if not logical_indices or any(
-            index >= len(dispatch_regions) for index in logical_indices
-        ):
-            continue
-        coverage = tuple(dispatch_regions[index] for index in logical_indices)
-        source_key = "dispatches:" + ",".join(str(index) for index in logical_indices)
-        task = GraphFragmentTask.create(
-            f"{source_key}:task:0",
-            "fused_map",
-            physical={
-                "family": "map_fusion",
-                "recipe": recipe.to_dict(),
-                "source_dispatch_indices": tuple(logical_indices),
-            },
-        )
-        result.append(
-            _fragment(
-                definition,
-                family="map_fusion",
-                source_key=source_key,
-                choice_id=recipe.recipe_id,
-                coverage=coverage,
-                tasks=(task,),
-            )
-        )
-    return tuple(result)
-
-
-def _offload_phase_fusion_fragments(definition, spec):
-    unmatched = [source for source in definition.sources if source.kind == "dispatch"]
-    result = []
-    for source in spec._graph_offload_fusion_sources:
-        manifests = source.manifests()
-        if not manifests:
-            continue
-        semantic_identity = manifests[0].to_dict()["semantic_kernel_identity"]
-        match = next(
-            (item for item in unmatched if item.semantic_identity == semantic_identity),
-            None,
-        )
-        if match is None:
-            continue
-        unmatched.remove(match)
-        for manifest in manifests:
-            if manifest.recipe_id == source.selected_recipe_id:
-                continue
-            result.append(
-                _choice_fragment(
-                    definition,
-                    "offload_phase_fusion",
-                    source._recipe_source_key,
-                    (match.region_id,),
-                    manifest,
-                )
-            )
-    return tuple(result)
-
-
-def _sparse_traversal_fragments(definition, spec):
-    unmatched = [source for source in definition.sources if source.kind == "dispatch"]
-    result = []
-    for source in spec._graph_sparse_traversal_sources:
-        manifests = source.manifests()
-        if len(manifests) < 2:
-            continue
-        semantic_identity = manifests[0].to_dict()["semantic_kernel_identity"]
-        match = next(
-            (item for item in unmatched if item.semantic_identity == semantic_identity),
-            None,
-        )
-        if match is None:
-            continue
-        unmatched.remove(match)
-        for manifest in manifests:
-            if manifest.recipe_id == source.selected_recipe_id:
-                continue
-            result.append(
-                _choice_fragment(
-                    definition,
-                    "sparse_traversal",
-                    source._recipe_source_key,
-                    (match.region_id,),
-                    manifest,
-                )
-            )
-    return tuple(result)
-
-
-def _recording_partition_fragments(definition, spec):
-    """Expose bounded binding-frontier cuts as opaque complete recipes."""
-
-    coverage = tuple(source.region_id for source in definition.sources)
-    result = []
-    for source in spec._graph_recording_partition_sources:
-        first_id = f"{source.source_key}:segment:0"
-        tasks = (
-            GraphFragmentTask.create(
-                first_id,
-                "cuda_recording_segment",
-                physical={
-                    "family": "recording_partition",
-                    "queue": "default",
-                    "dispatch_range": (0, source.cut_index),
-                    "isolated_bindings": source.isolated_bindings,
-                },
-            ),
-            GraphFragmentTask.create(
-                f"{source.source_key}:segment:1",
-                "cuda_recording_segment",
-                depends_on=(first_id,),
-                physical={
-                    "family": "recording_partition",
-                    "queue": "default",
-                    "dispatch_range": (
-                        source.cut_index,
-                        source.dispatch_count,
-                    ),
-                    "isolated_bindings": source.isolated_bindings,
-                },
-            ),
-        )
-        result.append(
-            _fragment(
-                definition,
-                family="recording_partition",
-                source_key=source.source_key,
-                choice_id=source.recipe_id,
-                coverage=coverage,
-                tasks=tasks,
-            )
-        )
-    return tuple(result)
-
-
-def _workspace_concurrency_fragments(definition, spec):
-    from taichi_forge.graph._graph import _workspace_concurrency_spec_eligible
-
-    if not _workspace_concurrency_spec_eligible(spec, definition.backend):
-        return ()
-    coverage = tuple(source.region_id for source in definition.sources)
-    source_key = "whole-graph-pair"
-    first_id = f"{source_key}:invoke:0"
-    second_id = f"{source_key}:invoke:1"
-    tasks = (
-        GraphFragmentTask.create(
-            first_id,
-            "cuda_complete_graph_invocation",
-            effects=spec.pre_optimization_ir_root.effects,
-            bindings=spec.pre_optimization_ir_root.bindings,
-            physical={
-                "family": "workspace_concurrency",
-                "queue": "cuda_workspace:0",
-                "invocation": 0,
-            },
-        ),
-        GraphFragmentTask.create(
-            second_id,
-            "cuda_complete_graph_invocation",
-            effects=spec.pre_optimization_ir_root.effects,
-            bindings=spec.pre_optimization_ir_root.bindings,
-            physical={
-                "family": "workspace_concurrency",
-                "queue": "cuda_workspace:1",
-                "invocation": 1,
-            },
-        ),
-        GraphFragmentTask.create(
-            f"{source_key}:join",
-            "cuda_complete_graph_pair_join",
-            depends_on=(first_id, second_id),
-            physical={
-                "family": "workspace_concurrency",
-                "queue": "default",
-                "event_join": True,
-            },
-        ),
-    )
-    return (
-        _fragment(
-            definition,
-            family="workspace_concurrency",
-            source_key=source_key,
-            choice_id="cuda-concurrent-pair-v1",
-            coverage=coverage,
-            tasks=tasks,
-            resources=(
-                GraphFragmentResourceRequirement(
-                    name=f"{source_key}:second-private-workspace",
-                    kind="workspace_lane",
-                    bytes=int(spec.internal_storage_bytes),
-                    alignment=1,
-                    ownership="graph_instance",
-                    lifetime="graph",
-                    exclusive_submission=True,
-                ),
-            ),
-        ),
     )
 
 
@@ -513,7 +303,14 @@ def _operation_source_coverage(
     return ()
 
 
-def _semantic_source_fragments(definition, spec, sources, family):
+def _semantic_source_fragments(
+    definition,
+    spec,
+    sources,
+    family,
+    *,
+    provider_descriptor=None,
+):
     if len(sources) == 1 and len(definition.sources) == 1:
         coverage_by_source = (
             _subtree_regions(definition, definition.sources[0].region_id),
@@ -549,198 +346,19 @@ def _semantic_source_fragments(definition, spec, sources, family):
                     source._recipe_source_key,
                     coverage,
                     manifest,
+                    provider_descriptor=provider_descriptor,
                 )
             )
     return tuple(result)
 
 
-def _bounded_fragments(definition, spec):
-    from taichi_forge.graph._graph import _cuda_nested_device_update_available
-    from taichi_forge.graph._optimization import (
-        _GraphBoundedExecutionRecipeManifest,
-    )
+class GraphRuntimeFragmentProvider:
+    """Shared stable-key mechanics for one independently owned family."""
 
-    sources = tuple(spec._graph_bounded_sources)
-    bounded = tuple(
-        dispatch
-        for stage in spec.pipeline_definition
-        for dispatch in stage["bounded_dispatches"]
-    )
-    if not sources or len(sources) != len(bounded):
-        return ()
-    grouped = {}
-    for source, dispatch in zip(sources, bounded):
-        domain = dispatch["domain"]
-        if (
-            domain.count_source != "device_extent"
-            or domain.ordered
-            or domain.physical_grid_policy != "auto"
-            or not domain.semantic_kernel_identity
-        ):
-            return ()
-        grouped.setdefault(dispatch["publication_key"], []).append((source, dispatch))
-
-    result = []
-    for ordinal, members in enumerate(grouped.values()):
-        source_key = f"bounded-group:{ordinal}"
-        coverage = []
-        selected_strategies = set()
-        for source, _ in members:
-            source._recipe_group_key = source_key
-            selected_strategies.add(source.selected_strategy)
-            source_coverage = _operation_source_coverage(
-                definition,
-                spec,
-                "bounded",
-                source,
-            )
-            if not source_coverage:
-                coverage = []
-                break
-            coverage.extend(source_coverage)
-        if not coverage or len(selected_strategies) != 1:
-            continue
-        _, first_dispatch = members[0]
-        publication = {
-            "count_name": first_dispatch["count_name"],
-            "capacity": first_dispatch["capacity"],
-            "block_dim": first_dispatch["domain"].block_dim,
-            "publication_epoch": first_dispatch["domain"].publication_epoch,
-            "consumer_count": len(members),
-        }
-        strategies = ["logical_exact"]
-        if _cuda_nested_device_update_available():
-            strategies.append("adaptive_per_node")
-            if len(members) >= 2:
-                strategies.append("adaptive_grouped")
-        strategies.append("masked_capacity")
-        manifests = tuple(
-            _GraphBoundedExecutionRecipeManifest.from_payload(
-                {
-                    "strategy": strategy,
-                    "source_physical_grid_policy": "auto",
-                    "bounded_dispatch_count": len(members),
-                    "publication_groups": (publication,),
-                }
-            )
-            for strategy in strategies
-        )
-        selected_strategy = next(iter(selected_strategies))
-        selected_id = next(
-            manifest.recipe_id
-            for manifest in manifests
-            if manifest.strategy == selected_strategy
-        )
-        result.extend(
-            _choice_fragment(
-                definition,
-                "bounded_execution",
-                source_key,
-                tuple(dict.fromkeys(coverage)),
-                manifest,
-                materialization_choice=manifest.strategy,
-            )
-            for manifest in manifests
-            if manifest.recipe_id != selected_id
-        )
-    return tuple(result)
-
-
-def _control_fragments(definition, spec):
-    domains = spec.control_recipe_domains
-    if not domains:
-        return ()
-    structured_kinds = frozenset(
-        ("while", "if", "switch", "while_region", "if_region", "switch_region")
-    )
-    regions_by_id = {region.region_id: region for region in definition.regions}
-
-    def has_structured_ancestor(region):
-        parent_id = region.parent_region_id
-        while parent_id is not None:
-            parent = regions_by_id[parent_id]
-            if parent.kind in structured_kinds:
-                return True
-            parent_id = parent.parent_region_id
-        return False
-
-    result = []
-    for node_index, recipe_ids, selected_recipe_id in domains:
-        source_prefix = f"graph/{node_index}:"
-        roots = tuple(
-            region
-            for region in definition.regions
-            if region.path.startswith(source_prefix)
-            and region.kind in structured_kinds
-            and not has_structured_ancestor(region)
-        )
-        if not roots:
-            continue
-        coverage = tuple(
-            region_id
-            for root in roots
-            for region_id in _subtree_regions(definition, root.region_id)
-        )
-        source_key = f"structured-control:node:{node_index}"
-        for recipe_id in recipe_ids:
-            if recipe_id == selected_recipe_id:
-                continue
-            task = GraphFragmentTask.create(
-                f"{source_key}:task:0",
-                "structured_control",
-                physical={
-                    "family": "structured_control",
-                    "recipe_id": recipe_id,
-                },
-            )
-            result.append(
-                _fragment(
-                    definition,
-                    family="structured_control",
-                    source_key=source_key,
-                    choice_id=recipe_id,
-                    coverage=coverage,
-                    tasks=(task,),
-                )
-            )
-    return tuple(result)
-
-
-class GraphRuntimeAssemblyProvider:
-    """Assemble typed runtime fragments while legacy families migrate."""
-
-    descriptor = _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
+    descriptor = None
 
     def discover(self, definition):
         return self.fragments(definition)
-
-    def fragments(self, definition):
-        spec = definition._runtime_spec
-        fragments = []
-        fragments.extend(_fusion_fragments(definition, spec))
-        fragments.extend(_offload_phase_fusion_fragments(definition, spec))
-        fragments.extend(_sparse_traversal_fragments(definition, spec))
-        fragments.extend(_recording_partition_fragments(definition, spec))
-        fragments.extend(_workspace_concurrency_fragments(definition, spec))
-        fragments.extend(_bounded_fragments(definition, spec))
-        fragments.extend(_control_fragments(definition, spec))
-        fragments.extend(
-            _semantic_source_fragments(
-                definition,
-                spec,
-                spec._graph_reduction_sources,
-                "graph_reduction",
-            )
-        )
-        fragments.extend(
-            _semantic_source_fragments(
-                definition,
-                spec,
-                spec._graph_native_algorithm_sources,
-                "native_algorithm",
-            )
-        )
-        return tuple(fragments)
 
     def resolve(self, definition, fragment_key):
         matches = tuple(
@@ -750,7 +368,8 @@ class GraphRuntimeAssemblyProvider:
         )
         if len(matches) != 1:
             raise KeyError(
-                f"existing Graph family fragment is unavailable: {fragment_key}"
+                f"{self.descriptor.namespace} fragment is unavailable: "
+                f"{fragment_key}"
             )
         return matches[0]
 
@@ -764,6 +383,40 @@ class GraphRuntimeAssemblyProvider:
             raise ValueError("Graph family fragment coverage changed before build")
         return GraphMaterializedFragment.create(fragment, selection)
 
+    def describe(self, definition, fragment_key):
+        return self.resolve(definition, fragment_key).provider_metadata
+
+
+class GraphRuntimeAssemblyProvider:
+    """Assembly-only owner for independently provided runtime fragments."""
+
+    descriptor = _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
+
+    def discover(self, definition):
+        return ()
+
+    def fragments(self, definition):
+        return ()
+
+    def resolve(self, definition, fragment_key):
+        matches = tuple(
+            fragment
+            for fragment in self.fragments(definition)
+            if fragment.fragment_key == fragment_key
+        )
+        if len(matches) != 1:
+            raise KeyError(
+                f"runtime assembly provider owns no fragments: {fragment_key}"
+            )
+        return matches[0]
+
+    def expand(self, definition, fragment_key):
+        self.resolve(definition, fragment_key)
+        return ()
+
+    def materialize(self, scope, fragment):
+        raise TypeError("runtime assembly provider owns no fragments")
+
     def assemble(self, scope, definition, recipe, materialized_fragments):
         return assemble_existing_family_recipe(
             scope,
@@ -776,23 +429,42 @@ class GraphRuntimeAssemblyProvider:
         return self.resolve(definition, fragment_key).provider_metadata
 
 
-# Transitional private compatibility name.  New code should use the assembly
-# role; Phase 7 removes the remaining family discovery responsibilities.
-GraphExistingFamilyProvider = GraphRuntimeAssemblyProvider
-
-
 def default_graph_recipe_providers():
     """Return the built-in providers required by the public recipe path."""
 
-    from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
     from taichi_forge.graph._recipes.branch_join import (
         GraphBranchJoinRecipeProvider,
+    )
+    from taichi_forge.graph._recipes.dispatch_families import (
+        GraphOffloadPhaseFusionRecipeProvider,
+        GraphSparseTraversalRecipeProvider,
+    )
+    from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
+    from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
+    from taichi_forge.graph._recipes.semantic_families import (
+        GraphBoundedExecutionRecipeProvider,
+        GraphNativeAlgorithmRecipeProvider,
+        GraphReductionRecipeProvider,
+        GraphStructuredControlRecipeProvider,
+    )
+    from taichi_forge.graph._recipes.submission_families import (
+        GraphRecordingPartitionRecipeProvider,
+        GraphWorkspaceConcurrencyRecipeProvider,
     )
 
     return (
         GraphRuntimeAssemblyProvider(),
+        GraphMapFusionRecipeProvider(),
         GraphMemoryRecipeProvider(),
+        GraphOffloadPhaseFusionRecipeProvider(),
+        GraphSparseTraversalRecipeProvider(),
         GraphBranchJoinRecipeProvider(),
+        GraphRecordingPartitionRecipeProvider(),
+        GraphWorkspaceConcurrencyRecipeProvider(),
+        GraphBoundedExecutionRecipeProvider(),
+        GraphStructuredControlRecipeProvider(),
+        GraphReductionRecipeProvider(),
+        GraphNativeAlgorithmRecipeProvider(),
     )
 
 
@@ -853,9 +525,10 @@ def materialize_existing_family_baseline(scope, definition, recipe):
 
 __all__ = [
     "GraphRuntimeAssemblyProvider",
-    "GraphExistingFamilyProvider",
+    "GraphRuntimeFragmentProvider",
     "GraphFamilySelection",
     "assemble_existing_family_recipe",
     "default_graph_recipe_providers",
     "materialize_existing_family_baseline",
+    "runtime_family_provider_descriptor",
 ]

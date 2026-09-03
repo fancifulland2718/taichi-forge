@@ -35,6 +35,35 @@ def _selection(fragment):
     return GraphFamilySelection.from_fragment(fragment)
 
 
+def test_default_runtime_recipe_families_have_independent_provider_ownership():
+    from taichi_forge.graph._recipes import default_graph_recipe_providers
+
+    providers = default_graph_recipe_providers()
+    descriptors = {
+        provider.descriptor.namespace: provider.descriptor for provider in providers
+    }
+    assembly = descriptors.pop("taichi_forge.graph.runtime_assembly")
+    assert assembly.owned_fragment_namespaces == ()
+    assert "legacy-family-adapter" not in assembly.capabilities
+    assert set(descriptors) == {
+        "taichi_forge.graph.bounded_execution",
+        "taichi_forge.graph.branch_join_schedule",
+        "taichi_forge.graph.graph_memory",
+        "taichi_forge.graph.graph_reduction",
+        "taichi_forge.graph.map_fusion",
+        "taichi_forge.graph.native_algorithm",
+        "taichi_forge.graph.offload_phase_fusion",
+        "taichi_forge.graph.recording_partition",
+        "taichi_forge.graph.sparse_traversal",
+        "taichi_forge.graph.structured_control",
+        "taichi_forge.graph.workspace_concurrency",
+    }
+    assert all(
+        descriptor.owned_fragment_namespaces == ()
+        for descriptor in descriptors.values()
+    )
+
+
 @test_utils.test(
     arch=ti.cuda,
     offline_cache=False,
@@ -104,13 +133,10 @@ def test_complete_recipe_owns_sparse_listgen_grid_for_migrating_active_set():
     assert len(listgens) == 2
     assert all(task["policy"] == "parent_capacity_bound" for task in listgens)
     assert all(
-        task["actual_grid"]
-        == min(task["selected_grid"], task["parent_grid_bound"])
+        task["actual_grid"] == min(task["selected_grid"], task["parent_grid_bound"])
         for task in listgens
     )
-    assert any(
-        task["actual_grid"] < task["selected_grid"] for task in listgens
-    )
+    assert any(task["actual_grid"] < task["selected_grid"] for task in listgens)
 
     catalog = definition.recipe_catalog()
     sparse_fragments = _family_fragments(catalog, "sparse_traversal")
@@ -130,8 +156,7 @@ def test_complete_recipe_owns_sparse_listgen_grid_for_migrating_active_set():
     )
     assert len(session.recipes) == 2
     assert any(
-        handle.manifest.families == ("sparse_traversal",)
-        for handle in session.recipes
+        handle.manifest.families == ("sparse_traversal",) for handle in session.recipes
     )
 
     prog = ti.lang.impl.get_runtime().prog
@@ -371,9 +396,7 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
     )
 
     assert isinstance(
-        catalog.provider_set.provider_for_fragment_namespace(
-            memory.provider_namespace
-        ),
+        catalog.provider_set.provider_for_fragment_namespace(memory.provider_namespace),
         GraphMemoryRecipeProvider,
     )
     assert memory.provider_domain_version == "graph-memory-domain-v1"
@@ -743,18 +766,19 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
         "native-and-synthetic-fusion",
         "assembly-failure",
     }
-    assert all(
-        not recipe.baseline_coverage_region_ids for recipe in by_route.values()
+    assert all(not recipe.baseline_coverage_region_ids for recipe in by_route.values())
+    assert (
+        len(
+            {
+                by_route[route].planned_physical_id
+                for route in (
+                    "native-and-direct-kernels",
+                    "native-and-synthetic-fusion",
+                )
+            }
+        )
+        == 2
     )
-    assert len(
-        {
-            by_route[route].planned_physical_id
-            for route in (
-                "native-and-direct-kernels",
-                "native-and-synthetic-fusion",
-            )
-        }
-    ) == 2
 
     source = ti.ndarray(ti.f32, shape=count)
     temporary = ti.ndarray(ti.f32, shape=count)
@@ -764,9 +788,7 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
     map_intermediate = map_values * 2.0 + 1.0
     map_expected = np.zeros(count, dtype=np.float32)
     map_expected[1:-1] = (
-        map_intermediate[:-2]
-        + map_intermediate[1:-1]
-        + map_intermediate[2:]
+        map_intermediate[:-2] + map_intermediate[1:-1] + map_intermediate[2:]
     )
 
     materialized_ids = set()
@@ -1391,9 +1413,7 @@ def test_complete_recipe_materializes_coarse_cuda_branch_join_dag():
                 (3, 7),
             )
 
-            values = {
-                name: ti.ndarray(ti.i32, shape=count) for name in symbols
-            }
+            values = {name: ti.ndarray(ti.i32, shape=count) for name in symbols}
             initial = np.arange(count, dtype=np.int32)
             values["a0"].from_numpy(initial)
             values["a1"].fill(0)

@@ -1,17 +1,16 @@
 """GraphMemory fragments on the versioned complete-recipe provider path."""
 
 from taichi_forge.graph._recipes.families import (
-    GraphFamilySelection,
+    GraphRuntimeFragmentProvider,
     _choice_fragment,
 )
-from taichi_forge.graph._recipes.materialize import GraphMaterializedFragment
 from taichi_forge.graph._recipes.providers import (
     GraphRecipeProviderDescriptor,
     RUNTIME_GRAPH_ASSEMBLY_V1,
 )
 
 
-class GraphMemoryRecipeProvider:
+class GraphMemoryRecipeProvider(GraphRuntimeFragmentProvider):
     """Discover and rebuild physical memory-plan alternatives by stable key."""
 
     descriptor = GraphRecipeProviderDescriptor(
@@ -23,9 +22,6 @@ class GraphMemoryRecipeProvider:
         capabilities=("graph-memory-plan", "typed-runtime-fragment"),
         fragment_key_schema="graph_memory:source:choice.v1",
     )
-
-    def discover(self, definition):
-        return self.fragments(definition)
 
     def fragments(self, definition):
         spec = definition._runtime_spec
@@ -64,29 +60,6 @@ class GraphMemoryRecipeProvider:
                     )
                 )
         return tuple(result)
-
-    def resolve(self, definition, fragment_key):
-        matches = tuple(
-            fragment
-            for fragment in self.fragments(definition)
-            if fragment.fragment_key == fragment_key
-        )
-        if len(matches) != 1:
-            raise KeyError(f"GraphMemory fragment is unavailable: {fragment_key}")
-        return matches[0]
-
-    def expand(self, definition, fragment_key):
-        self.resolve(definition, fragment_key)
-        return ()
-
-    def materialize(self, scope, fragment):
-        selection = GraphFamilySelection.from_fragment(fragment)
-        if fragment.coverage_region_ids != selection.coverage_region_ids:
-            raise ValueError("GraphMemory fragment coverage changed before build")
-        return GraphMaterializedFragment.create(fragment, selection)
-
-    def describe(self, definition, fragment_key):
-        return self.resolve(definition, fragment_key).provider_metadata
 
 
 __all__ = ["GraphMemoryRecipeProvider"]
