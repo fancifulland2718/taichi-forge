@@ -493,13 +493,85 @@ def test_catalog_builds_budget_bounded_compatible_complete_recipes():
         for entry in admitted
     )
     assert all(
-        not (
-            {head_a.fragment_id, head_b.fragment_id}
-            <= set(entry.recipe.fragment_ids)
-        )
+        not ({head_a.fragment_id, head_b.fragment_id} <= set(entry.recipe.fragment_ids))
         for entry in admitted
     )
     assert catalog.build_compatible_stage(candidate_limit=0) == ()
+
+
+def test_catalog_exact_proof_and_survivor_generation_are_deterministic():
+    definition = _definition()
+    head_a = _fragment(definition, (0,), "exact_head_a")
+    head_b = _fragment(definition, (0,), "exact_head_b")
+    middle = _fragment(definition, (1,), "exact_middle")
+    tail = _fragment(definition, (2,), "exact_tail")
+
+    class Provider:
+        descriptor = _provider_descriptor()
+
+        def __init__(self, reverse):
+            self.reverse = reverse
+
+        def discover(self, requested_definition):
+            assert requested_definition is definition
+            values = (head_a, middle, tail)
+            return tuple(reversed(values)) if self.reverse else values
+
+        def resolve(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            return {item.fragment_key: item for item in (head_a, head_b, middle, tail)}[
+                fragment_key
+            ]
+
+        def expand(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            return (head_b,) if fragment_key == head_a.fragment_key else ()
+
+    exact_recipe_sets = []
+    for reverse in (False, True):
+        catalog = GraphRecipeCatalog(definition)
+        catalog.discover((Provider(reverse),))
+        catalog.build_single_region_stage()
+        exact = catalog.build_exact_stage(candidate_limit=32)
+        assert exact.exhaustive
+        assert exact.reason == "exact_domain_enumerated"
+        exact_recipe_sets.append(exact.recipe_ids)
+    assert exact_recipe_sets[0] == exact_recipe_sets[1]
+
+    catalog = GraphRecipeCatalog(definition)
+    catalog.discover((Provider(False),))
+    singletons = catalog.build_single_region_stage()
+    before = tuple(entry.recipe.recipe_id for entry in catalog.entries())
+    bounded = catalog.build_exact_stage(candidate_limit=4)
+    assert not bounded.exhaustive
+    assert bounded.reason == "exact_candidate_limit_exceeded"
+    assert tuple(entry.recipe.recipe_id for entry in catalog.entries()) == before
+    assert head_b.fragment_id not in {
+        fragment.fragment_id for fragment in catalog.fragments
+    }
+
+    by_fragment = {entry.recipe.fragments[0].fragment_id: entry for entry in singletons}
+    frontier = (
+        by_fragment[head_a.fragment_id].recipe.recipe_id,
+        by_fragment[tail.fragment_id].recipe.recipe_id,
+    )
+    generated = catalog.build_survivor_stage(
+        frontier,
+        seed_fragment_ids=tuple(fragment.fragment_id for fragment in catalog.fragments),
+        candidate_limit=8,
+    )
+    assert generated
+    assert all(set(entry.parent_recipe_ids).issubset(frontier) for entry in generated)
+    assert any(
+        set(entry.recipe.fragment_ids) == {head_a.fragment_id, tail.fragment_id}
+        for entry in generated
+    )
+    assert any(
+        entry.recipe.fragment_ids == (head_b.fragment_id,) for entry in generated
+    )
+    assert len({entry.recipe.planned_physical_id for entry in generated}) == len(
+        generated
+    )
 
 
 def test_provider_set_identity_is_order_independent_and_definition_bound():
