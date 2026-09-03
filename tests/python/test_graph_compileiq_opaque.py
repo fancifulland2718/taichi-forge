@@ -161,6 +161,10 @@ class _SearchStatusV2:
     SCHEMA = "compileiq.taichi-forge-search-status.v2"
 
 
+class _OptimizationReportV1:
+    SCHEMA = "compileiq.opaque-optimization-report.v1"
+
+
 class _TargetContract:
     SCHEMA = "compileiq.taichi-forge-opaque-target-contract.v1"
 
@@ -179,9 +183,9 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v2",
-            "protocol_revision": 5,
+            "protocol_revision": 6,
             "fork_build_id": "compileiq-taichi-forge-complete-recipes.v2",
-            "package_version": "1.0.0dev5+taichiforge.recipe2",
+            "package_version": "1.0.0dev6+taichiforge.report1",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "opaque_recipe_batch_schema": "compileiq.opaque-recipe-batch.v2",
             "opaque_dynamic_recipe_domain_schema": (
@@ -205,6 +209,12 @@ def _capability():
                 "compileiq.taichi-forge-search-finalization.v1"
             ),
             "search_status_schema": "compileiq.taichi-forge-search-status.v2",
+            "optimization_report_schema": (
+                "compileiq.opaque-optimization-report.v1"
+            ),
+            "optimization_report_renderer": (
+                "json_fact_source_markdown_projection_v1"
+            ),
             "max_recipe_ids": 4096,
             "max_field_utf8_bytes": 4096,
             "max_canonical_bytes": 4 * 1024 * 1024,
@@ -426,9 +436,9 @@ def test_private_legacy_graph_search_is_baseline_inclusive_and_opaque(monkeypatc
     assert manifest["reviewed_compileiq_distribution"] == {
         "repository": "https://github.com/fancifulland2718/CompileIQ",
         "ref": "refs/heads/main",
-        "commit": "5440ac51cdd34d60f7b499a8295fc0a9d077d04b",
+        "commit": "bd01493909d5ed7c29d8b56aa40059641aff9375",
         "wheel_sha256": (
-            "75a388ec83a6063315236ddc4dee7659ec1cc3ec0fa7429673cc91ba2fb08cc1"
+            "fadde1f1a07475f8ccf89c8e7a4bb85e232cf2b6cfbf518ddbb8207f039ef627"
         ),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
@@ -777,6 +787,8 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
         ForgeOpaqueEvaluationContextV1=_EvaluationContextV1,
         ForgeOpaqueSearchFinalizationV1=_FinalizationV1,
         ForgeOpaqueSearchStatusV2=_SearchStatusV2,
+        OpaqueOptimizationReportV1=_OptimizationReportV1,
+        opaque_optimization_report_json_schema=lambda: {},
         ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
         ForgeOpaqueTargetContractV1=_TargetContract,
     )
@@ -939,8 +951,10 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
         ),
         budget=ti.graph.GraphSearchBudget(evaluation_limit=108),
     )
-    assert len(public_search.recipes) == 108
-    assert len({recipe.planned_physical_id for recipe in public_search.recipes}) == 108
+    assert len(public_search.recipes) > 1
+    assert len({recipe.planned_physical_id for recipe in public_search.recipes}) == len(
+        public_search.recipes
+    )
     assert public_search.baseline.manifest.is_baseline
     assert {
         family

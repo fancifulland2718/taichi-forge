@@ -78,7 +78,9 @@ def test_compileiq_plan_domain_is_complete_opaque_and_baseline_inclusive():
     baseline = search.recipe_manifest(search.baseline_recipe_id)
     task_count = len(baseline["tasks"])
 
-    assert search.capability["package_version"] == ("1.0.0dev5+taichiforge.recipe2")
+    assert search.capability["package_version"] == (
+        "1.0.0dev6+taichiforge.report1"
+    )
     assert search.baseline_recipe_id in search.recipe_ids
     assert 3 <= len(search.recipe_ids) <= 4096
     assert all(len(search.recipe_manifest(recipe_id)["tasks"]) == task_count for recipe_id in search.recipe_ids)

@@ -11,12 +11,12 @@ from types import MappingProxyType
 
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v2"
 _FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
-_PACKAGE_VERSION = "1.0.0dev5+taichiforge.recipe2"
+_PACKAGE_VERSION = "1.0.0dev6+taichiforge.report1"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
 _REVIEWED_FORK_REF = "refs/heads/main"
-_REVIEWED_FORK_COMMIT = "5440ac51cdd34d60f7b499a8295fc0a9d077d04b"
+_REVIEWED_FORK_COMMIT = "bd01493909d5ed7c29d8b56aa40059641aff9375"
 _REVIEWED_WHEEL_SHA256 = (
-    "75a388ec83a6063315236ddc4dee7659ec1cc3ec0fa7429673cc91ba2fb08cc1"
+    "fadde1f1a07475f8ccf89c8e7a4bb85e232cf2b6cfbf518ddbb8207f039ef627"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"
@@ -36,12 +36,12 @@ _EXPECTED_CORE_LOCK = (
     "sha256:0bc59bcd0864ce77dcae75aa00af3f7d641737e9abd0bd3cdb21c78425f127aa"
 )
 _EXPECTED_CAPABILITY_ID = (
-    "ciq-forge-cap-v2:f2a10c55bcf96b03c3b9fa9af33c14157e1d8638d86f2f3b32d677e47600c7dd"
+    "ciq-forge-cap-v2:66659a63e3082ef84551c7ff282ab11e0c0f601118a3f7bf1351466eb2edc363"
 )
 _OBJECTIVE_WORKER = "forge_main_thread_serial_v1"
 _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
-    "f87386b33c15fe2d1fe75770013a4444a9f90d9102ed46a5f0b74ee3df7976c9"
+    "bc8e09772724ac9a741eba7bbed8ac093090bc45878b1ae519736cfd9f0f2144"
 )
 _SOURCE_LOCK_FILES = (
     "ciq.py",
@@ -49,6 +49,7 @@ _SOURCE_LOCK_FILES = (
     "core/core_comms.py",
     "core/core_types.py",
     "core/verify_core.py",
+    "forge_report.py",
     "forge_search_v2.py",
     "forge_support.py",
     "recipes.py",
@@ -83,6 +84,8 @@ _CAPABILITY_KEYS = frozenset(
         "evaluation_context_schema",
         "search_finalization_schema",
         "search_status_schema",
+        "optimization_report_schema",
+        "optimization_report_renderer",
         "max_recipe_ids",
         "max_field_utf8_bytes",
         "max_canonical_bytes",
@@ -199,6 +202,10 @@ def _validated_compileiq_capability(
     )
     finalization_type = getattr(support, "ForgeOpaqueSearchFinalizationV1", None)
     status_type = getattr(support, "ForgeOpaqueSearchStatusV2", None)
+    report_type = getattr(support, "OpaqueOptimizationReportV1", None)
+    report_schema_factory = getattr(
+        support, "opaque_optimization_report_json_schema", None
+    )
     exhaustive_search_type = getattr(
         support, "ForgeOpaqueRecipeExhaustiveSearchV1", None
     )
@@ -237,6 +244,10 @@ def _validated_compileiq_capability(
         or not isinstance(status_type, type)
         or getattr(status_type, "SCHEMA", None)
         != "compileiq.taichi-forge-search-status.v2"
+        or not isinstance(report_type, type)
+        or getattr(report_type, "SCHEMA", None)
+        != "compileiq.opaque-optimization-report.v1"
+        or not callable(report_schema_factory)
         or not isinstance(exhaustive_search_type, type)
         or getattr(exhaustive_search_type, "PROTOCOL", None)
         != "bounded_exhaustive_main_thread_v1"
@@ -259,7 +270,7 @@ def _validated_compileiq_capability(
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 5,
+        "protocol_revision": 6,
         "fork_build_id": _FORK_BUILD_ID,
         "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
@@ -285,6 +296,10 @@ def _validated_compileiq_capability(
             "compileiq.taichi-forge-search-finalization.v1"
         ),
         "search_status_schema": "compileiq.taichi-forge-search-status.v2",
+        "optimization_report_schema": "compileiq.opaque-optimization-report.v1",
+        "optimization_report_renderer": (
+            "json_fact_source_markdown_projection_v1"
+        ),
         "max_recipe_ids": _MAX_RECIPES,
         "max_field_utf8_bytes": _MAX_FIELD_UTF8_BYTES,
         "max_canonical_bytes": _MAX_CANONICAL_BYTES,
