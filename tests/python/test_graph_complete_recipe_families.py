@@ -537,6 +537,303 @@ def test_complete_native_algorithm_recipe_materializes_all_physical_routes(
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
+    monkeypatch,
+):
+    from taichi_forge.graph._recipes import (
+        GraphFamilySelection,
+        GraphMaterializationProduct,
+        GraphMaterializedFragment,
+        GraphRecipeProviderDescriptor,
+        PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    )
+
+    count = 1024
+
+    @ti.kernel
+    def scale(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            temporary[index] = source[index] * 2.0
+
+    @ti.kernel
+    def bias(
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            output[index] = temporary[index] + 1.0
+
+    @ti.kernel
+    def stencil(
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        final: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(1, count - 1):
+            final[index] = output[index - 1] + output[index] + output[index + 1]
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
+        for name in ("source", "temporary", "output", "final")
+    }
+    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(scale, symbolic["source"], symbolic["temporary"])
+    builder.dispatch(bias, symbolic["temporary"], symbolic["output"])
+    builder.dispatch(stencil, symbolic["output"], symbolic["final"])
+    definition = builder.freeze()
+
+    class WholeGraphProvider:
+        descriptor = GraphRecipeProviderDescriptor(
+            namespace="tests.whole_graph_native_fusion",
+            provider_version="1.0",
+            domain_version="native-fusion-domain-v1",
+            semantic_fingerprint="native-fusion-reconstruction-v1",
+            assembly_protocols=(PROVIDER_OWNED_WHOLE_GRAPH_V1,),
+            capabilities=("native-kernels", "synthetic-fused-kernel"),
+            fragment_key_schema="whole-graph-route.v1",
+        )
+
+        def __init__(self):
+            self.retired_routes = []
+
+        def _fragment(self, requested_definition, route):
+            all_regions = tuple(
+                region.region_id for region in requested_definition.regions
+            )
+            if route == "native-and-direct-kernels":
+                physical_tasks = (
+                    ("direct-scale", "kernel", ()),
+                    ("direct-bias", "kernel", ("direct-scale",)),
+                    ("direct-stencil", "kernel", ("direct-bias",)),
+                )
+            elif route == "native-and-synthetic-fusion":
+                physical_tasks = (
+                    ("synthetic-map", "synthetic_fused_kernel", ()),
+                    ("direct-stencil", "kernel", ("synthetic-map",)),
+                )
+            elif route == "assembly-failure":
+                physical_tasks = (("failed-build", "provider_build", ()),)
+            else:
+                raise KeyError(route)
+            tasks = tuple(
+                ti.graph.GraphFragmentTask.create(
+                    task_id,
+                    kind,
+                    depends_on=depends_on,
+                    physical={"route": route, "kind": kind},
+                )
+                for task_id, kind, depends_on in physical_tasks
+            )
+            bindings = tuple(
+                ti.graph.GraphFragmentBindingRequirement(
+                    item.name,
+                    kinds=item.kinds,
+                    required=item.required,
+                    scope=item.scope,
+                )
+                for item in requested_definition.binding_abi
+            )
+            return ti.graph.GraphRecipeFragment.create(
+                requested_definition,
+                provider_namespace=self.descriptor.namespace,
+                provider_version=self.descriptor.provider_version,
+                provider_domain_version=self.descriptor.domain_version,
+                fragment_key=route,
+                coverage_region_ids=all_regions,
+                tasks=tasks,
+                binding_requirements=bindings,
+                backend_requirements=(requested_definition.backend,),
+                assembly_protocol=PROVIDER_OWNED_WHOLE_GRAPH_V1,
+                provider_metadata={"route": route},
+            )
+
+        def discover(self, requested_definition):
+            return tuple(
+                self._fragment(requested_definition, route)
+                for route in (
+                    "native-and-direct-kernels",
+                    "native-and-synthetic-fusion",
+                    "assembly-failure",
+                )
+            )
+
+        def resolve(self, requested_definition, fragment_key):
+            return self._fragment(requested_definition, fragment_key)
+
+        def expand(self, requested_definition, fragment_key):
+            self.resolve(requested_definition, fragment_key)
+            return ()
+
+        def materialize(self, scope, fragment):
+            route = fragment.provider_metadata["route"]
+            scope.own(
+                route,
+                release=self.retired_routes.append,
+                label=f"provider route {route}",
+            )
+            return GraphMaterializedFragment.create(fragment, route)
+
+        @staticmethod
+        def _optimized_selections(requested_definition):
+            spec = requested_definition._runtime_spec
+            fusion = next(
+                recipe
+                for recipe in spec.fusion_plan.candidate_recipes
+                if len(recipe.source_dispatch_ids) == 2
+            )
+            dispatch_indices = tuple(
+                int(source_id.rsplit("/dispatch:", 1)[1])
+                for source_id in fusion.source_dispatch_ids
+            )
+            dispatch_regions = tuple(
+                source.region_id
+                for source in requested_definition.sources
+                if source.kind == "dispatch"
+            )
+            fusion_selection = GraphFamilySelection(
+                family="map_fusion",
+                source_key="dispatches:" + ",".join(map(str, dispatch_indices)),
+                choice_id=fusion.recipe_id,
+                materialization_choice=fusion.recipe_id,
+                coverage_region_ids=tuple(
+                    dispatch_regions[index] for index in dispatch_indices
+                ),
+            )
+            return (fusion_selection,)
+
+        def assemble(self, scope, requested_definition, recipe, fragments):
+            assert len(fragments) == 1
+            route = fragments[0].payload
+            if route == "assembly-failure":
+                raise RuntimeError("injected whole-Graph assembly failure")
+            selections = (
+                ()
+                if route == "native-and-direct-kernels"
+                else self._optimized_selections(requested_definition)
+            )
+            graph = requested_definition._runtime_spec.materialize_complete_recipe(
+                requested_definition,
+                recipe,
+                selections,
+                workspace_lanes=scope._context.workspace_lanes,
+                workspace_saturation=scope._context.workspace_saturation,
+            )
+            manifest = observe_graph_physical_manifest(
+                requested_definition,
+                recipe,
+                graph,
+            )
+            return GraphMaterializationProduct(graph, manifest)
+
+        def describe(self, requested_definition, fragment_key):
+            self.resolve(requested_definition, fragment_key)
+            return {"route": fragment_key}
+
+    provider = WholeGraphProvider()
+    catalog = definition.recipe_catalog(providers=(provider,))
+    by_route = {
+        entry.recipe.fragments[0].provider_metadata["route"]: entry.recipe
+        for entry in catalog.entries(stage="single-region")
+    }
+    assert set(by_route) == {
+        "native-and-direct-kernels",
+        "native-and-synthetic-fusion",
+        "assembly-failure",
+    }
+    assert all(
+        not recipe.baseline_coverage_region_ids for recipe in by_route.values()
+    )
+    assert len(
+        {
+            by_route[route].planned_physical_id
+            for route in (
+                "native-and-direct-kernels",
+                "native-and-synthetic-fusion",
+            )
+        }
+    ) == 2
+
+    source = ti.ndarray(ti.f32, shape=count)
+    temporary = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=count)
+    final = ti.ndarray(ti.f32, shape=count)
+    map_values = np.arange(count, dtype=np.float32) * 0.25
+    map_intermediate = map_values * 2.0 + 1.0
+    map_expected = np.zeros(count, dtype=np.float32)
+    map_expected[1:-1] = (
+        map_intermediate[:-2]
+        + map_intermediate[1:-1]
+        + map_intermediate[2:]
+    )
+
+    materialized_ids = set()
+    memory_facts = {}
+    with definition.materialization_context(
+        provider_set=catalog.provider_set
+    ) as context:
+        with pytest.raises(RuntimeError, match="injected whole-Graph"):
+            context.materialize(by_route["assembly-failure"])
+        assert provider.retired_routes == ["assembly-failure"]
+        assert context.statistics()["state"] == "open"
+
+        for route in (
+            "native-and-direct-kernels",
+            "native-and-synthetic-fusion",
+        ):
+            source.from_numpy(map_values)
+            temporary.fill(0)
+            output.fill(0)
+            final.fill(0)
+            with context.materialize(by_route[route]) as materialized:
+                bindings = materialized.executor.bind(
+                    {
+                        "source": source,
+                        "temporary": temporary,
+                        "output": output,
+                        "final": final,
+                    }
+                )
+                before = materialized.executor.binding_statistics()
+                for _ in range(4):
+                    materialized.executor.run(bindings)
+                ti.sync()
+                after = materialized.executor.binding_statistics()
+                assert after["raw_replay_validations"] == (
+                    before["raw_replay_validations"]
+                )
+                assert after["version_fast_replays"] == (
+                    before["version_fast_replays"] + 4
+                )
+                np.testing.assert_array_equal(temporary.to_numpy(), map_values * 2.0)
+                np.testing.assert_array_equal(output.to_numpy(), map_values * 2.0 + 1.0)
+                np.testing.assert_array_equal(final.to_numpy(), map_expected)
+                materialized_ids.add(materialized.materialized_physical_id)
+                memory_facts[route] = (
+                    materialized.manifest.persistent_requested_bytes,
+                    materialized.manifest.transient_requested_bytes,
+                )
+                if route == "native-and-synthetic-fusion":
+                    assert any(
+                        task.properties.get("source_dispatch_count") == 2
+                        for task in materialized.manifest.tasks
+                    )
+
+    assert len(materialized_ids) == 2
+    assert set(memory_facts) == {
+        "native-and-direct-kernels",
+        "native-and-synthetic-fusion",
+    }
+    assert set(provider.retired_routes) == {
+        "assembly-failure",
+        "native-and-direct-kernels",
+        "native-and-synthetic-fusion",
+    }
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_complete_bounded_recipe_replays_all_scope_strategies_without_environment(
     monkeypatch,
 ):
