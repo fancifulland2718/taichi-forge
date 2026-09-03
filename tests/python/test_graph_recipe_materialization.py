@@ -30,6 +30,8 @@ from taichi_forge.graph._recipes import (
     GraphPhysicalTaskManifest,
     GraphRecipeComposer,
     GraphRecipeFragment,
+    GraphRecipeProviderDescriptor,
+    GraphRecipeProviderSet,
 )
 
 from tests import test_utils
@@ -182,6 +184,64 @@ def _manifest(
     )
 
 
+_TEST_PROVIDER_DESCRIPTOR = GraphRecipeProviderDescriptor(
+    namespace="test.materialization",
+    provider_version="1",
+    domain_version="test-materialization-v1",
+    semantic_fingerprint="test-materialization-semantics-v1",
+)
+_TEST_MATERIALIZERS = {}
+
+
+class _TestMaterializationProvider:
+    descriptor = _TEST_PROVIDER_DESCRIPTOR
+
+    def __init__(self, fragments, materializers, assembler=None):
+        self._fragments = tuple(fragments)
+        self._by_key = {
+            fragment.fragment_key: fragment for fragment in self._fragments
+        }
+        self._materializers = dict(materializers)
+        self._assembler = assembler
+
+    def discover(self, definition):
+        assert all(
+            fragment.semantic_graph_id == definition.semantic_graph_id
+            for fragment in self._fragments
+        )
+        return self._fragments
+
+    def resolve(self, _definition, fragment_key):
+        return self._by_key[fragment_key]
+
+    def expand(self, _definition, _fragment_key):
+        return ()
+
+    def materialize(self, scope, fragment):
+        return self._materializers[fragment.fragment_key](scope, fragment)
+
+    def assemble(self, scope, definition, recipe, fragments):
+        if self._assembler is None:
+            raise AssertionError("test provider has no assembler")
+        return self._assembler(scope, definition, recipe, fragments)
+
+    def describe(self, _definition, fragment_key):
+        return {"fragment_key": fragment_key}
+
+
+def _provider_set(definition, fragments, *, assembler=None):
+    fragments = tuple(fragments)
+    provider = _TestMaterializationProvider(
+        fragments,
+        {
+            fragment.fragment_key: _TEST_MATERIALIZERS[fragment.fragment_id]
+            for fragment in fragments
+        },
+        assembler=assembler,
+    )
+    return GraphRecipeProviderSet(definition, (provider,))
+
+
 def _fragment(
     definition,
     source_index,
@@ -195,16 +255,19 @@ def _fragment(
         "kernel",
         physical={"planned_route": planned_route},
     )
-    return GraphRecipeFragment.create(
+    fragment = GraphRecipeFragment.create(
         definition,
-        provider_namespace=f"test.{planned_route}",
+        provider_namespace=_TEST_PROVIDER_DESCRIPTOR.namespace,
         provider_version="1",
+        provider_domain_version=_TEST_PROVIDER_DESCRIPTOR.domain_version,
+        fragment_key=f"fragment:{planned_route}",
         coverage_region_ids=(definition.sources[source_index].region_id,),
         tasks=(task,),
         resources=resources,
-        materializer_key=f"materialize:{planned_route}",
-        materializer=materializer,
+        provider_metadata={"planned_route": planned_route},
     )
+    _TEST_MATERIALIZERS[fragment.fragment_id] = materializer
+    return fragment
 
 
 def _constant_runtime():
@@ -255,6 +318,7 @@ def test_complete_recipe_publishes_atomically_and_retires_owners_in_reverse_orde
     context = GraphMaterializationContext(
         definition,
         assembler=assemble,
+        provider_set=_provider_set(definition, (first, third)),
         runtime_identity_provider=_constant_runtime,
     )
     result = context.materialize(recipe)
@@ -337,6 +401,10 @@ def test_failed_candidate_rolls_back_without_disturbing_baseline_or_next_candida
         definition,
         baseline_materializer=baseline,
         assembler=assemble,
+        provider_set=_provider_set(
+            definition,
+            (failed_fragment, good_fragment),
+        ),
         runtime_identity_provider=_constant_runtime,
     )
     baseline_result = context.materialize()
@@ -412,6 +480,7 @@ def test_actual_physical_identity_deduplicates_distinct_plans_before_measurement
     context = GraphMaterializationContext(
         definition,
         assembler=assemble,
+        provider_set=_provider_set(definition, (first, second, third)),
         runtime_identity_provider=_constant_runtime,
     )
     first_result = context.materialize(first_recipe)
@@ -507,6 +576,7 @@ def test_allocated_resources_must_match_requirements_and_appear_in_manifest():
     context = GraphMaterializationContext(
         definition,
         assembler=assemble,
+        provider_set=_provider_set(definition, (fragment,)),
         resource_allocator=allocator,
         runtime_identity_provider=_constant_runtime,
     )
@@ -551,6 +621,7 @@ def test_runtime_generation_change_aborts_publish_and_rolls_back_the_candidate()
     context = GraphMaterializationContext(
         definition,
         assembler=assemble,
+        provider_set=_provider_set(definition, (fragment,)),
         runtime_identity_provider=lambda: ("runtime", runtime["generation"]),
     )
     with pytest.raises(GraphMaterializationError, match="runtime changed") as failure:
@@ -601,6 +672,7 @@ def test_incomplete_cleanup_poisoning_and_manifest_integrity_fail_closed():
     context = GraphMaterializationContext(
         definition,
         assembler=lambda *_args: None,
+        provider_set=_provider_set(definition, (fragment,)),
         runtime_identity_provider=_constant_runtime,
     )
     with pytest.raises(GraphMaterializationError) as failure:

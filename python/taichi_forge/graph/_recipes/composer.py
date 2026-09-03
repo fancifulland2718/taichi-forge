@@ -5,9 +5,13 @@ from dataclasses import dataclass
 from taichi_forge.graph._ir import GraphAccess
 from taichi_forge.graph._recipes.definition import _digest
 from taichi_forge.graph._recipes.fragments import GraphRecipeFragment
+from taichi_forge.graph._recipes.providers import (
+    PROVIDER_OWNED_WHOLE_GRAPH_V1,
+    RUNTIME_GRAPH_ASSEMBLY_V1,
+)
 
-_RECIPE_SCHEMA = "taichi_forge.graph_executable_recipe.v1"
-_PLANNED_RECIPE_SCHEMA = "taichi_forge.graph_recipe_planned_physical.v1"
+_RECIPE_SCHEMA = "taichi_forge.graph_executable_recipe.v2"
+_PLANNED_RECIPE_SCHEMA = "taichi_forge.graph_recipe_planned_physical.v2"
 
 
 class GraphRecipeCompositionError(ValueError):
@@ -59,6 +63,8 @@ class GraphExecutableRecipe:
     recipe_id: str
     semantic_graph_id: str
     planned_physical_id: str
+    assembly_protocol: str
+    assembly_provider_namespace: str
     fragments: tuple[GraphRecipeFragment, ...]
     baseline_coverage_region_ids: tuple[str, ...]
     region_selections: tuple[GraphRegionSelection, ...]
@@ -79,6 +85,10 @@ class GraphExecutableRecipe:
             "recipe_id": self.recipe_id,
             "semantic_graph_id": self.semantic_graph_id,
             "planned_physical_id": self.planned_physical_id,
+            "assembly": {
+                "protocol": self.assembly_protocol,
+                "provider_namespace": self.assembly_provider_namespace,
+            },
             "fragment_ids": self.fragment_ids,
             "fragments": tuple(fragment.to_dict() for fragment in self.fragments),
             "baseline_coverage_region_ids": self.baseline_coverage_region_ids,
@@ -403,6 +413,8 @@ class GraphRecipeComposer:
                 planned_physical_id=(
                     self.definition.baseline_recipe.planned_physical_id
                 ),
+                assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
+                assembly_provider_namespace="",
                 fragments=(),
                 baseline_coverage_region_ids=(
                     self.definition.baseline_recipe.coverage_region_ids
@@ -422,6 +434,18 @@ class GraphRecipeComposer:
         self._validate_coverage_compatibility(fragments)
         self._validate_resource_compatibility(fragments)
         self._validate_submission_compatibility(fragments)
+        assembly_protocols = {
+            fragment.assembly_protocol for fragment in fragments
+        }
+        assembly_providers = {
+            fragment.assembly_provider_namespace for fragment in fragments
+        }
+        if len(assembly_protocols) != 1 or len(assembly_providers) != 1:
+            raise GraphRecipeCompositionError(
+                "fragments require one shared assembly protocol and provider"
+            )
+        assembly_protocol = next(iter(assembly_protocols))
+        assembly_provider_namespace = next(iter(assembly_providers))
 
         owner_by_region = {
             region_id: fragment.fragment_id
@@ -438,6 +462,12 @@ class GraphRecipeComposer:
             for region in self.definition.regions
             if region.region_id not in owner_by_region
         )
+        if assembly_protocol == PROVIDER_OWNED_WHOLE_GRAPH_V1 and (
+            len(fragments) != 1 or baseline_coverage
+        ):
+            raise GraphRecipeCompositionError(
+                "provider-owned whole-Graph assembly requires one exact-coverage fragment"
+            )
         selections = tuple(
             GraphRegionSelection(
                 region.region_id,
@@ -452,6 +482,8 @@ class GraphRecipeComposer:
             "semantic_graph_id": self.definition.semantic_graph_id,
             "fragment_ids": tuple(fragment.fragment_id for fragment in fragments),
             "baseline_coverage_region_ids": baseline_coverage,
+            "assembly_protocol": assembly_protocol,
+            "assembly_provider_namespace": assembly_provider_namespace,
         }
         recipe_id = f"graph-recipe:{_digest(recipe_identity_payload)}"
         planned_payload = {
@@ -463,6 +495,8 @@ class GraphRecipeComposer:
             "fragment_planned_physical_ids": tuple(
                 fragment.planned_physical_id for fragment in fragments
             ),
+            "assembly_protocol": assembly_protocol,
+            "assembly_provider_namespace": assembly_provider_namespace,
             "region_selections": tuple(
                 {
                     "region_id": region.region_id,
@@ -516,6 +550,8 @@ class GraphRecipeComposer:
             recipe_id=recipe_id,
             semantic_graph_id=self.definition.semantic_graph_id,
             planned_physical_id=planned_physical_id,
+            assembly_protocol=assembly_protocol,
+            assembly_provider_namespace=assembly_provider_namespace,
             fragments=fragments,
             baseline_coverage_region_ids=baseline_coverage,
             region_selections=selections,

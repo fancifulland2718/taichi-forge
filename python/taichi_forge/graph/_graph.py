@@ -19352,7 +19352,8 @@ class Graph:
     def _complete_recipe_family_status(self, family):
         catalog = self.definition.recipe_catalog()
         if any(
-            fragment.materializer.selection.family == family
+            fragment.provider_metadata.get("family_selection", {}).get("family")
+            == family
             for fragment in catalog.fragments
         ):
             return "complete_recipe_domain"

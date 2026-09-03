@@ -1,11 +1,13 @@
 """Provider-owned replacement fragments for complete Graph recipes."""
 
+import json
 from dataclasses import dataclass, field
 
 from taichi_forge.graph._ir import ResourceEffect, RuntimeBinding, TemporaryRequirement
 from taichi_forge.graph._recipes.definition import _canonical_json, _digest
+from taichi_forge.graph._recipes.providers import RUNTIME_GRAPH_ASSEMBLY_V1
 
-_FRAGMENT_SCHEMA = "taichi_forge.graph_recipe_fragment.v1"
+_FRAGMENT_SCHEMA = "taichi_forge.graph_recipe_fragment.v2"
 _TASK_SCHEMA = "taichi_forge.graph_fragment_task.v1"
 _PLANNED_FRAGMENT_SCHEMA = "taichi_forge.graph_fragment_planned_physical.v1"
 
@@ -265,6 +267,10 @@ class GraphRecipeFragment:
     semantic_graph_id: str
     provider_namespace: str
     provider_version: str
+    provider_domain_version: str
+    fragment_key: str
+    assembly_protocol: str
+    assembly_provider_namespace: str
     coverage_region_ids: tuple[str, ...]
     semantic_region_digests: tuple[tuple[str, str], ...]
     tasks: tuple[GraphFragmentTask, ...]
@@ -273,11 +279,7 @@ class GraphRecipeFragment:
     submission: GraphFragmentSubmissionRequirement
     backend_requirements: tuple[str, ...]
     capability_requirements: tuple[str, ...]
-    materializer_key: str
-    _materializer: object = field(default=None, repr=False, compare=False, hash=False)
-    _neighbor_expander: object = field(
-        default=None, repr=False, compare=False, hash=False
-    )
+    _provider_metadata_json: str = field(default="{}", repr=False)
 
     @classmethod
     def create(
@@ -286,6 +288,8 @@ class GraphRecipeFragment:
         *,
         provider_namespace,
         provider_version,
+        provider_domain_version,
+        fragment_key,
         coverage_region_ids,
         tasks,
         binding_requirements=(),
@@ -293,13 +297,27 @@ class GraphRecipeFragment:
         submission=None,
         backend_requirements=(),
         capability_requirements=(),
-        materializer_key,
-        materializer=None,
-        neighbor_expander=None,
+        assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
+        assembly_provider_namespace=None,
+        provider_metadata=None,
     ):
         _required_text(provider_namespace, "Graph fragment provider namespace")
         _required_text(provider_version, "Graph fragment provider version")
-        _required_text(materializer_key, "Graph fragment materializer key")
+        _required_text(
+            provider_domain_version,
+            "Graph fragment provider domain version",
+        )
+        _required_text(fragment_key, "Graph fragment key")
+        _required_text(assembly_protocol, "Graph fragment assembly protocol")
+        if assembly_provider_namespace is None:
+            assembly_provider_namespace = provider_namespace
+        _required_text(
+            assembly_provider_namespace,
+            "Graph fragment assembly provider namespace",
+        )
+        provider_metadata_json = _canonical_json(
+            {} if provider_metadata is None else provider_metadata
+        )
         requested_coverage = set(
             _normalized_strings(
                 coverage_region_ids,
@@ -371,16 +389,22 @@ class GraphRecipeFragment:
             "submission": submission.to_dict(),
             "backend_requirements": backend_requirements,
             "capability_requirements": capability_requirements,
+            "assembly_protocol": assembly_protocol,
+            "assembly_provider_namespace": assembly_provider_namespace,
         }
         planned_physical_id = f"fragment-physical:{_digest(physical_payload)}"
         identity_payload = {
             "schema": _FRAGMENT_SCHEMA,
             "provider_namespace": provider_namespace,
             "provider_version": provider_version,
+            "provider_domain_version": provider_domain_version,
             "semantic_graph_id": definition.semantic_graph_id,
             "semantic_region_digests": semantic_region_digests,
             "planned_physical_id": planned_physical_id,
-            "materializer_key": materializer_key,
+            "fragment_key": fragment_key,
+            "assembly_protocol": assembly_protocol,
+            "assembly_provider_namespace": assembly_provider_namespace,
+            "provider_metadata": json.loads(provider_metadata_json),
         }
         fragment_id = f"graph-fragment:{_digest(identity_payload)}"
         return cls(
@@ -389,6 +413,10 @@ class GraphRecipeFragment:
             semantic_graph_id=definition.semantic_graph_id,
             provider_namespace=provider_namespace,
             provider_version=provider_version,
+            provider_domain_version=provider_domain_version,
+            fragment_key=fragment_key,
+            assembly_protocol=assembly_protocol,
+            assembly_provider_namespace=assembly_provider_namespace,
             coverage_region_ids=coverage,
             semantic_region_digests=semantic_region_digests,
             tasks=tasks,
@@ -397,22 +425,12 @@ class GraphRecipeFragment:
             submission=submission,
             backend_requirements=backend_requirements,
             capability_requirements=capability_requirements,
-            materializer_key=materializer_key,
-            _materializer=materializer,
-            _neighbor_expander=neighbor_expander,
+            _provider_metadata_json=provider_metadata_json,
         )
 
     @property
-    def materializer(self):
-        return self._materializer
-
-    def neighbors(self):
-        if self._neighbor_expander is None:
-            return ()
-        neighbors = tuple(self._neighbor_expander(self))
-        if not all(isinstance(item, GraphRecipeFragment) for item in neighbors):
-            raise TypeError("Graph fragment neighbor expansion returned a non-fragment")
-        return neighbors
+    def provider_metadata(self):
+        return json.loads(self._provider_metadata_json)
 
     def to_dict(self):
         return {
@@ -422,6 +440,10 @@ class GraphRecipeFragment:
             "semantic_graph_id": self.semantic_graph_id,
             "provider_namespace": self.provider_namespace,
             "provider_version": self.provider_version,
+            "provider_domain_version": self.provider_domain_version,
+            "fragment_key": self.fragment_key,
+            "assembly_protocol": self.assembly_protocol,
+            "assembly_provider_namespace": self.assembly_provider_namespace,
             "coverage_region_ids": self.coverage_region_ids,
             "semantic_region_digests": self.semantic_region_digests,
             "tasks": tuple(task.to_dict() for task in self.tasks),
@@ -432,5 +454,5 @@ class GraphRecipeFragment:
             "submission": self.submission.to_dict(),
             "backend_requirements": self.backend_requirements,
             "capability_requirements": self.capability_requirements,
-            "materializer_key": self.materializer_key,
+            "provider_metadata": self.provider_metadata,
         }

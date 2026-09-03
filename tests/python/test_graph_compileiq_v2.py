@@ -335,7 +335,7 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
     from taichi_forge.graph import CompileIQCompleteGraphRecipeSearch
     from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
 
-    class WorkspaceOnlyProvider:
+    class WorkspaceOnlyProvider(GraphExistingFamilyProvider):
         def fragments(self, definition):
             return tuple(
                 fragment
@@ -392,6 +392,7 @@ def test_complete_recipe_v2_measures_the_whole_workspace_pair_workload():
     workspace_recipe_id = next(
         recipe_id
         for recipe_id in plans.recipe_ids
+        if recipe_id != plans.baseline_recipe_id
         if plans._selection(recipe_id).family == "workspace_concurrency"
     )
     sources = tuple(ti.ndarray(ti.f32, shape=count) for _ in range(2))

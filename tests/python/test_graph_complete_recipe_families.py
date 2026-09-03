@@ -30,7 +30,9 @@ def _family_fragments(catalog, family):
 
 
 def _selection(fragment):
-    return fragment.materializer.selection
+    from taichi_forge.graph._recipes import GraphFamilySelection
+
+    return GraphFamilySelection.from_fragment(fragment)
 
 
 @test_utils.test(

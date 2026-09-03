@@ -471,9 +471,16 @@ class CompileIQCompleteGraphRecipeSearch:
         entries = catalog.entries()
         families = tuple(
             dict.fromkeys(
-                fragment.materializer.selection.family for fragment in catalog.fragments
+                str(
+                    fragment.provider_metadata.get("family_selection", {}).get(
+                        "family",
+                        "",
+                    )
+                )
+                for fragment in catalog.fragments
             )
         )
+        families = tuple(family for family in families if family)
         family = families[0] if len(families) == 1 else ""
         provider_namespace, domain_version = self._FAMILY_CONTRACTS.get(
             family,
@@ -622,7 +629,9 @@ class CompileIQCompleteGraphRecipeSearch:
             )
         if len(recipe.fragments) != 1:
             return _CompleteGraphRecipeSelection(recipe)
-        family_selection = recipe.fragments[0].materializer.selection
+        from taichi_forge.graph._recipes.families import GraphFamilySelection
+
+        family_selection = GraphFamilySelection.from_fragment(recipe.fragments[0])
         manifest = self._source_manifest(
             family_selection.family,
             family_selection.choice_id,
@@ -645,6 +654,7 @@ class CompileIQCompleteGraphRecipeSearch:
             return self._definition.materialize(selection.recipe, context=context)
         return self._definition.materialize(
             selection.recipe,
+            provider_set=self._catalog.provider_set,
             workspace_lanes=self._workspace_lanes,
             workspace_saturation=self._workspace_saturation,
         )
@@ -942,6 +952,7 @@ class _CompleteGraphRecipeSearchSessionV2:
         self._failure_type = failure_type
         self._owns_context = context is None
         self._context = context or plans._definition.materialization_context(
+            provider_set=plans._catalog.provider_set,
             workspace_lanes=plans._workspace_lanes,
             workspace_saturation=plans._workspace_saturation,
         )

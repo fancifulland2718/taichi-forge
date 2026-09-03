@@ -211,8 +211,8 @@ class GraphRecipeManifest:
     def _from_recipe(cls, definition, recipe):
         families = []
         for fragment in recipe.fragments:
-            selection = getattr(fragment.materializer, "selection", None)
-            family = getattr(selection, "family", "")
+            selection = fragment.provider_metadata.get("family_selection", {})
+            family = str(selection.get("family", ""))
             if not family:
                 family = fragment.provider_namespace.rsplit(".", 1)[-1]
             families.append(family)

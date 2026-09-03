@@ -364,22 +364,58 @@ class GraphDefinition:
             definition=self,
         )
 
-    def materialization_context(self, **options):
+    def materialization_context(
+        self,
+        *,
+        providers=None,
+        provider_set=None,
+        available_capabilities=(),
+        **options,
+    ):
         """Create an explicit owner for transactional recipe materialization."""
 
         from taichi_forge.graph._recipes.families import (
-            assemble_existing_family_recipe,
+            GraphExistingFamilyProvider,
             materialize_existing_family_baseline,
         )
 
         from taichi_forge.graph._recipes.materialize import (
             GraphMaterializationContext,
         )
+        from taichi_forge.graph._recipes.providers import GraphRecipeProviderSet
 
-        options.setdefault("assembler", assemble_existing_family_recipe)
+        if providers is not None and provider_set is not None:
+            raise TypeError(
+                "Graph materialization accepts providers or provider_set, not both"
+            )
+        if provider_set is None:
+            if providers is None:
+                providers = (GraphExistingFamilyProvider(), )
+            provider_set = GraphRecipeProviderSet(
+                self,
+                tuple(providers),
+                available_capabilities=available_capabilities,
+            )
+        elif not isinstance(provider_set, GraphRecipeProviderSet):
+            raise TypeError(
+                "Graph materialization provider_set must be GraphRecipeProviderSet"
+            )
+        elif provider_set.definition is not self:
+            raise ValueError(
+                "Graph materialization provider set belongs to another definition"
+            )
+        elif frozenset(available_capabilities) != provider_set.available_capabilities:
+            if available_capabilities:
+                raise ValueError(
+                    "Graph materialization capabilities differ from provider_set"
+                )
         options.setdefault(
             "baseline_materializer",
             materialize_existing_family_baseline,
+        )
+        options["provider_set"] = provider_set
+        options["available_capabilities"] = tuple(
+            sorted(provider_set.available_capabilities)
         )
 
         return GraphMaterializationContext(self, **options)

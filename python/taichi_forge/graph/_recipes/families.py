@@ -42,6 +42,16 @@ _FAMILY_NAMESPACES = tuple(
         "workspace_concurrency",
     )
 )
+_EXISTING_FAMILY_PROVIDER_DESCRIPTOR = GraphRecipeProviderDescriptor(
+    namespace="taichi_forge.graph.existing_families",
+    provider_version=_PROVIDER_VERSION,
+    domain_version="existing-family-domain-v1",
+    semantic_fingerprint="existing-family-fragment-generation-v1",
+    assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
+    capabilities=("legacy-family-adapter",),
+    owned_fragment_namespaces=_FAMILY_NAMESPACES,
+    fragment_key_schema="family:source:choice.v1",
+)
 
 
 @dataclass(frozen=True)
@@ -54,15 +64,27 @@ class GraphFamilySelection:
     materialization_choice: str
     coverage_region_ids: tuple[str, ...]
 
+    def to_dict(self):
+        return {
+            "family": self.family,
+            "source_key": self.source_key,
+            "choice_id": self.choice_id,
+            "materialization_choice": self.materialization_choice,
+            "coverage_region_ids": self.coverage_region_ids,
+        }
 
-@dataclass(frozen=True)
-class _FamilyFragmentMaterializer:
-    selection: GraphFamilySelection
-
-    def materialize(self, scope, fragment):
-        if fragment.coverage_region_ids != self.selection.coverage_region_ids:
-            raise ValueError("Graph family fragment coverage changed before build")
-        return GraphMaterializedFragment.create(fragment, self.selection)
+    @classmethod
+    def from_fragment(cls, fragment):
+        payload = fragment.provider_metadata.get("family_selection")
+        if not isinstance(payload, dict):
+            raise ValueError("Graph family fragment has no stable selection metadata")
+        return cls(
+            family=str(payload["family"]),
+            source_key=str(payload["source_key"]),
+            choice_id=str(payload["choice_id"]),
+            materialization_choice=str(payload["materialization_choice"]),
+            coverage_region_ids=tuple(payload["coverage_region_ids"]),
+        )
 
 
 def _subtree_regions(definition, root_region_id):
@@ -170,6 +192,10 @@ def _fragment(
         definition,
         provider_namespace=f"taichi_forge.graph.{family}",
         provider_version=_PROVIDER_VERSION,
+        provider_domain_version=(
+            _EXISTING_FAMILY_PROVIDER_DESCRIPTOR.domain_version
+        ),
+        fragment_key=f"{family}:{source_key}:{choice_id}",
         coverage_region_ids=coverage,
         tasks=tasks,
         binding_requirements=_binding_requirements(definition, coverage),
@@ -179,8 +205,11 @@ def _fragment(
             exclusive_submission=bool(exclusive_submission),
         ),
         backend_requirements=(definition.backend,),
-        materializer_key=f"{family}:{source_key}:{choice_id}",
-        materializer=_FamilyFragmentMaterializer(selection),
+        assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
+        assembly_provider_namespace=(
+            _EXISTING_FAMILY_PROVIDER_DESCRIPTOR.namespace
+        ),
+        provider_metadata={"family_selection": selection.to_dict()},
     )
 
 
@@ -782,16 +811,7 @@ def _control_fragments(definition, spec):
 class GraphExistingFamilyProvider:
     """Expose every currently materializable family without early return."""
 
-    descriptor = GraphRecipeProviderDescriptor(
-        namespace="taichi_forge.graph.existing_families",
-        provider_version=_PROVIDER_VERSION,
-        domain_version="existing-family-domain-v1",
-        semantic_fingerprint="existing-family-fragment-generation-v1",
-        assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
-        capabilities=("legacy-family-adapter",),
-        owned_fragment_namespaces=_FAMILY_NAMESPACES,
-        fragment_key_schema="family:source:choice.v1",
-    )
+    descriptor = _EXISTING_FAMILY_PROVIDER_DESCRIPTOR
 
     def discover(self, definition):
         return self.fragments(definition)
@@ -825,6 +845,39 @@ class GraphExistingFamilyProvider:
             )
         )
         return tuple(fragments)
+
+    def resolve(self, definition, fragment_key):
+        matches = tuple(
+            fragment
+            for fragment in self.fragments(definition)
+            if fragment.fragment_key == fragment_key
+        )
+        if len(matches) != 1:
+            raise KeyError(
+                f"existing Graph family fragment is unavailable: {fragment_key}"
+            )
+        return matches[0]
+
+    def expand(self, definition, fragment_key):
+        self.resolve(definition, fragment_key)
+        return ()
+
+    def materialize(self, scope, fragment):
+        selection = GraphFamilySelection.from_fragment(fragment)
+        if fragment.coverage_region_ids != selection.coverage_region_ids:
+            raise ValueError("Graph family fragment coverage changed before build")
+        return GraphMaterializedFragment.create(fragment, selection)
+
+    def assemble(self, scope, definition, recipe, materialized_fragments):
+        return assemble_existing_family_recipe(
+            scope,
+            definition,
+            recipe,
+            materialized_fragments,
+        )
+
+    def describe(self, definition, fragment_key):
+        return self.resolve(definition, fragment_key).provider_metadata
 
 
 def assemble_existing_family_recipe(

@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from taichi_forge.graph._recipes.definition import _digest
+from taichi_forge.graph._recipes.definition import _canonical_json, _digest
 
 RUNTIME_GRAPH_ASSEMBLY_V1 = "taichi_forge.runtime_graph_recipe.v1"
 PROVIDER_OWNED_WHOLE_GRAPH_V1 = "provider_owned_whole_graph.v1"
@@ -294,9 +294,49 @@ class GraphRecipeProviderSet:
                 "Graph recipe fragment provider version does not match its descriptor",
                 error_key="provider_version_drift",
                 provider_namespace=descriptor.namespace,
-                fragment_key=fragment.materializer_key,
+                fragment_key=fragment.fragment_key,
+            )
+        if fragment.provider_domain_version != descriptor.domain_version:
+            raise GraphRecipeProviderError(
+                "Graph recipe fragment domain version does not match its descriptor",
+                error_key="provider_domain_version_drift",
+                provider_namespace=descriptor.namespace,
+                fragment_key=fragment.fragment_key,
+            )
+        if fragment.assembly_protocol not in descriptor.assembly_protocols:
+            raise GraphRecipeProviderError(
+                "Graph recipe fragment uses an undeclared assembly protocol",
+                error_key="provider_assembly_protocol_drift",
+                provider_namespace=descriptor.namespace,
+                fragment_key=fragment.fragment_key,
+            )
+        assembly_descriptor = self.descriptor(
+            fragment.assembly_provider_namespace
+        )
+        if fragment.assembly_protocol not in assembly_descriptor.assembly_protocols:
+            raise GraphRecipeProviderError(
+                "Graph recipe assembly owner does not support the protocol",
+                error_key="assembly_provider_protocol_unavailable",
+                provider_namespace=fragment.assembly_provider_namespace,
+                fragment_key=fragment.fragment_key,
             )
         return fragment
+
+    def validate_fragment(self, fragment):
+        try:
+            descriptor, _provider = self._by_fragment_namespace[
+                fragment.provider_namespace
+            ]
+        except (AttributeError, KeyError) as error:
+            namespace = getattr(fragment, "provider_namespace", "")
+            raise GraphRecipeProviderError(
+                "Graph fragment namespace is not owned by this provider set: "
+                + namespace,
+                error_key="fragment_provider_unavailable",
+                provider_namespace=namespace,
+                fragment_key=getattr(fragment, "fragment_key", ""),
+            ) from error
+        return self._validate_fragment(descriptor, fragment)
 
     def discover(self):
         discovered = []
@@ -316,6 +356,98 @@ class GraphRecipeProviderSet:
                 for fragment in fragments
             )
         return tuple(discovered)
+
+    def resolve(self, fragment):
+        fragment = self.validate_fragment(fragment)
+        provider = self.provider_for_fragment_namespace(
+            fragment.provider_namespace
+        )
+        method = getattr(provider, "resolve", None)
+        if not callable(method):
+            raise GraphRecipeProviderError(
+                "Graph recipe provider has no stable-key resolver",
+                error_key="provider_resolver_missing",
+                provider_namespace=fragment.provider_namespace,
+                fragment_key=fragment.fragment_key,
+            )
+        resolved = method(self.definition, fragment.fragment_key)
+        resolved = self.validate_fragment(resolved)
+        if resolved.to_dict() != fragment.to_dict():
+            raise GraphRecipeProviderError(
+                "Graph recipe provider resolved different fragment facts",
+                error_key="provider_fragment_drift",
+                provider_namespace=fragment.provider_namespace,
+                fragment_key=fragment.fragment_key,
+            )
+        return resolved
+
+    def expand(self, fragment):
+        fragment = self.resolve(fragment)
+        provider = self.provider_for_fragment_namespace(
+            fragment.provider_namespace
+        )
+        method = getattr(provider, "expand", None)
+        if not callable(method):
+            return ()
+        neighbors = tuple(method(self.definition, fragment.fragment_key))
+        return tuple(self.validate_fragment(item) for item in neighbors)
+
+    def materialize(self, scope, fragment):
+        fragment = self.resolve(fragment)
+        provider = self.provider_for_fragment_namespace(
+            fragment.provider_namespace
+        )
+        method = getattr(provider, "materialize", None)
+        if not callable(method):
+            raise GraphRecipeProviderError(
+                "Graph recipe provider has no fragment materializer",
+                error_key="provider_materializer_missing",
+                provider_namespace=fragment.provider_namespace,
+                fragment_key=fragment.fragment_key,
+            )
+        return method(scope, fragment)
+
+    def assemble(self, scope, recipe, materialized_fragments):
+        namespace = recipe.assembly_provider_namespace
+        try:
+            descriptor, provider = self._by_provider_namespace[namespace]
+        except KeyError as error:
+            raise GraphRecipeProviderError(
+                "Graph recipe assembly provider is unavailable: " + namespace,
+                error_key="assembly_provider_unavailable",
+                provider_namespace=namespace,
+            ) from error
+        if recipe.assembly_protocol not in descriptor.assembly_protocols:
+            raise GraphRecipeProviderError(
+                "Graph recipe assembly provider does not support the recipe protocol",
+                error_key="assembly_provider_protocol_unavailable",
+                provider_namespace=namespace,
+            )
+        method = getattr(provider, "assemble", None)
+        if not callable(method):
+            raise GraphRecipeProviderError(
+                "Graph recipe provider has no whole-Graph assembler",
+                error_key="provider_assembler_missing",
+                provider_namespace=namespace,
+            )
+        return method(
+            scope,
+            self.definition,
+            recipe,
+            tuple(materialized_fragments),
+        )
+
+    def describe(self, fragment):
+        fragment = self.resolve(fragment)
+        provider = self.provider_for_fragment_namespace(
+            fragment.provider_namespace
+        )
+        method = getattr(provider, "describe", None)
+        if not callable(method):
+            return fragment.provider_metadata
+        description = method(self.definition, fragment.fragment_key)
+        _canonical_json(description)
+        return description
 
     def to_dict(self):
         return {

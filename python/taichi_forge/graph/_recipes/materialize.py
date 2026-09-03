@@ -14,6 +14,7 @@ from taichi_forge.graph._recipes.physical import (
     GraphPhysicalResourceManifest,
     observe_baseline_physical_manifest,
 )
+from taichi_forge.graph._recipes.providers import GraphRecipeProviderSet
 
 _MAX_SIGNED_BYTES = (1 << 63) - 1
 
@@ -405,15 +406,7 @@ def _default_baseline_materializer(scope, definition, recipe):
     return GraphMaterializationProduct(graph, manifest)
 
 
-def _invoke_fragment_materializer(materializer, scope, fragment):
-    method = getattr(materializer, "materialize", None)
-    result = (
-        method(scope, fragment)
-        if callable(method)
-        else materializer(scope, fragment)
-        if callable(materializer)
-        else None
-    )
+def _validate_materialized_fragment(result, scope, fragment):
     if not isinstance(result, GraphMaterializedFragment):
         raise TypeError(
             "Graph fragment materializer must return GraphMaterializedFragment"
@@ -444,6 +437,7 @@ class GraphMaterializationContext:
         workspace_saturation="wait",
         baseline_materializer=None,
         assembler=None,
+        provider_set=None,
         resource_allocator=None,
         runtime_identity_provider=None,
     ):
@@ -460,6 +454,17 @@ class GraphMaterializationContext:
             raise TypeError("Graph baseline materializer must be callable")
         if assembler is not None and not callable(assembler):
             raise TypeError("Graph recipe assembler must be callable")
+        if provider_set is not None and not isinstance(
+            provider_set,
+            GraphRecipeProviderSet,
+        ):
+            raise TypeError(
+                "Graph materialization provider_set must be GraphRecipeProviderSet"
+            )
+        if provider_set is not None and provider_set.definition is not definition:
+            raise ValueError(
+                "Graph materialization provider set belongs to another definition"
+            )
         if resource_allocator is not None and not callable(resource_allocator):
             raise TypeError("Graph resource allocator must be callable")
         if runtime_identity_provider is not None and not callable(
@@ -474,6 +479,7 @@ class GraphMaterializationContext:
             baseline_materializer or _default_baseline_materializer
         )
         self._assembler = assembler
+        self.provider_set = provider_set
         self._resource_allocator = resource_allocator
         self._runtime_identity_provider = (
             runtime_identity_provider or _default_runtime_identity
@@ -699,35 +705,35 @@ class GraphMaterializationContext:
         phase = "baseline" if not recipe.fragments else "fragment"
         try:
             if recipe.fragments:
+                if self.provider_set is None:
+                    raise GraphMaterializationError(
+                        "Graph fragment materialization requires a provider set",
+                        recipe_id=recipe.recipe_id,
+                        phase="fragment",
+                    )
                 materialized_fragments = []
                 for fragment in recipe.fragments:
-                    materializer = fragment.materializer
-                    if materializer is None:
-                        raise GraphMaterializationError(
-                            "Graph recipe fragment has no materializer",
-                            recipe_id=recipe.recipe_id,
-                            phase="fragment",
-                        )
                     materialized_fragments.append(
-                        _invoke_fragment_materializer(
-                            materializer,
+                        _validate_materialized_fragment(
+                            self.provider_set.materialize(scope, fragment),
                             scope,
                             fragment,
                         )
                     )
-                if self._assembler is None:
-                    raise GraphMaterializationError(
-                        "Graph materialization context has no whole-Graph assembler",
-                        recipe_id=recipe.recipe_id,
-                        phase="assemble",
-                    )
                 phase = "assemble"
-                product = self._assembler(
-                    scope,
-                    self.definition,
-                    recipe,
-                    tuple(materialized_fragments),
-                )
+                if self._assembler is not None:
+                    product = self._assembler(
+                        scope,
+                        self.definition,
+                        recipe,
+                        tuple(materialized_fragments),
+                    )
+                else:
+                    product = self.provider_set.assemble(
+                        scope,
+                        recipe,
+                        tuple(materialized_fragments),
+                    )
             else:
                 product = self._baseline_materializer(
                     scope,

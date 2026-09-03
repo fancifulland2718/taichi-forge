@@ -120,7 +120,8 @@ def _fragment(
     submission=None,
     backends=(),
     capabilities=(),
-    neighbor_expander=None,
+    assembly_protocol=None,
+    assembly_provider_namespace=None,
 ):
     sources = tuple(definition.sources[index] for index in source_indices)
     tasks = tasks or (_task(f"task_{route}", route),)
@@ -128,6 +129,8 @@ def _fragment(
         definition,
         provider_namespace=provider,
         provider_version="1",
+        provider_domain_version="test-domain-v1",
+        fragment_key=f"fragment:{route}",
         coverage_region_ids=tuple(source.region_id for source in sources),
         tasks=tasks,
         binding_requirements=bindings,
@@ -135,8 +138,16 @@ def _fragment(
         submission=submission,
         backend_requirements=backends,
         capability_requirements=capabilities,
-        materializer_key=f"materialize:{route}",
-        neighbor_expander=neighbor_expander,
+        **(
+            {}
+            if assembly_protocol is None
+            else {"assembly_protocol": assembly_protocol}
+        ),
+        **(
+            {}
+            if assembly_provider_namespace is None
+            else {"assembly_provider_namespace": assembly_provider_namespace}
+        ),
     )
 
 
@@ -245,9 +256,10 @@ def test_composer_rejects_only_structural_and_physical_incompatibilities():
         definition,
         provider_namespace="test.control",
         provider_version="1",
+        provider_domain_version="test-domain-v1",
+        fragment_key="fragment:control",
         coverage_region_ids=(definition.regions[0].region_id,),
         tasks=(_task("control", "control"),),
-        materializer_key="materialize:control",
     )
     with pytest.raises(GraphRecipeCompositionError, match="include its subtree"):
         GraphRecipeComposer(definition).compose((incomplete_subtree,))
@@ -373,6 +385,7 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
         "same_a",
         provider="provider.a",
         tasks=first_task,
+        assembly_provider_namespace="provider.shared_assembly",
     )
     second_provider = _fragment(
         definition,
@@ -380,6 +393,7 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
         "same_b",
         provider="provider.b",
         tasks=second_task,
+        assembly_provider_namespace="provider.shared_assembly",
     )
     assert first_provider.fragment_id != second_provider.fragment_id
     assert first_provider.planned_physical_id == second_provider.planned_physical_id
@@ -397,7 +411,6 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
         definition,
         (0,),
         "base",
-        neighbor_expander=lambda _fragment: (neighbor,),
     )
     tail = _fragment(definition, (2,), "tail")
     catalog = GraphRecipeCatalog(definition)
@@ -408,6 +421,18 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
         def fragments(self, requested_definition):
             assert requested_definition is definition
             return (base, tail)
+
+        def resolve(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            return {
+                base.fragment_key: base,
+                tail.fragment_key: tail,
+                neighbor.fragment_key: neighbor,
+            }[fragment_key]
+
+        def expand(self, requested_definition, fragment_key):
+            assert requested_definition is definition
+            return (neighbor,) if fragment_key == base.fragment_key else ()
 
     assert catalog.discover((Provider(),)) == (base, tail)
     single_entries = catalog.build_single_region_stage()
@@ -588,9 +613,10 @@ def test_multi_region_fragment_does_not_cross_structural_parents_implicitly():
         definition,
         provider_namespace="test.explicit_topology",
         provider_version="1",
+        provider_domain_version="test-domain-v1",
+        fragment_key="fragment:whole_graph",
         coverage_region_ids=tuple(region.region_id for region in definition.regions),
         tasks=(_task("whole_graph", "explicit_whole_graph_dag"),),
-        materializer_key="materialize:whole_graph",
     )
     recipe = GraphRecipeComposer(definition).compose((whole_subtree,))
     assert recipe.baseline_coverage_region_ids == ()
@@ -626,6 +652,8 @@ def test_actual_graph_definition_feeds_the_fragment_composer_without_v1_space():
         definition,
         provider_namespace="test.actual_graph_fusion",
         provider_version="1",
+        provider_domain_version="test-domain-v1",
+        fragment_key="fragment:fused_add_double",
         coverage_region_ids=tuple(source.region_id for source in definition.sources),
         tasks=(
             _task(
@@ -642,7 +670,6 @@ def test_actual_graph_definition_feeds_the_fragment_composer_without_v1_space():
             GraphFragmentBindingRequirement("output"),
         ),
         backend_requirements=("cpu",),
-        materializer_key="test:fused_add_double",
     )
     recipe = GraphRecipeComposer(definition).compose((combined,))
 

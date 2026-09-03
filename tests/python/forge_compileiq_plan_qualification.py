@@ -176,8 +176,9 @@ def _graph_worker(scope, order, minimum_block_ms):
 
     full_fusion = next(
         fragment for fragment in catalog.fragments
-        if fragment.materializer.selection.family == "map_fusion"
-        and fragment.materializer.selection.source_key == "dispatches:0,1,2,3")
+        if fragment.provider_metadata["family_selection"]["family"] == "map_fusion"
+        and fragment.provider_metadata["family_selection"]["source_key"]
+        == "dispatches:0,1,2,3")
 
     candidate_entry = catalog.compose(
         (full_fusion.fragment_id, ),

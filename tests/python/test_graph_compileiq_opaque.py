@@ -926,12 +926,15 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
     fragments_by_group = {
         tuple(
             int(value)
-            for value in fragment.materializer.selection.source_key.removeprefix(
+            for value in fragment.provider_metadata["family_selection"][
+                "source_key"
+            ].removeprefix(
                 "dispatches:"
             ).split(",")
         ): fragment
         for fragment in catalog.fragments
-        if fragment.materializer.selection.family == "map_fusion"
+        if fragment.provider_metadata["family_selection"]["family"]
+        == "map_fusion"
     }
     expected_physical = {
         ((0, 1, 2, 3), (4, 5, 6, 7)): 2,

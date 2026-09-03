@@ -91,6 +91,8 @@ class GraphRecipeCatalog:
     def register_fragment(self, fragment):
         if not isinstance(fragment, GraphRecipeFragment):
             raise TypeError("Graph recipe catalog accepts GraphRecipeFragment values")
+        if self.provider_set is not None:
+            self.provider_set.validate_fragment(fragment)
         previous = self._fragments.get(fragment.fragment_id)
         if previous is not None and previous != fragment:
             raise ValueError("Graph fragment ID collides with a different fragment")
@@ -257,11 +259,16 @@ class GraphRecipeCatalog:
     def expand_neighbors(self, recipe_id):
         """Replace one selected fragment at a time with provider-owned neighbors."""
 
+        if self.provider_set is None:
+            raise GraphRecipeProviderError(
+                "Graph neighbor expansion requires the catalog provider set",
+                error_key="provider_registry_missing",
+            )
         parent = self.entry(recipe_id)
         entries = []
         selected = parent.recipe.fragments
         for current in selected:
-            for neighbor in current.neighbors():
+            for neighbor in self.provider_set.expand(current):
                 self.register_fragment(neighbor)
                 fragment_ids = tuple(
                     neighbor.fragment_id
