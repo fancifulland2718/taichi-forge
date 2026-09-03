@@ -455,6 +455,9 @@ class GraphDefinition:
         budget,
         strategy=None,
         checkpoint=None,
+        workload_context=None,
+        evaluation_contract=None,
+        backend_environment=None,
     ):
         """Create a complete-Graph optimization session.
 
@@ -471,8 +474,255 @@ class GraphDefinition:
             budget=budget,
             strategy=strategy,
             checkpoint=checkpoint,
+            workload_context=workload_context,
+            evaluation_contract=evaluation_contract,
+            backend_environment=backend_environment,
             providers=providers,
             available_capabilities=available_capabilities,
+        )
+
+    def resolve_recipe(
+        self,
+        artifact,
+        *,
+        providers=None,
+        available_capabilities=(),
+    ):
+        """Rebuild a portable recipe selection through stable provider keys."""
+
+        from taichi_forge.graph._optimization_api import GraphRecipeHandle
+        from taichi_forge.graph._recipes.composer import GraphRecipeComposer
+        from taichi_forge.graph._recipes.families import (
+            default_graph_recipe_providers,
+        )
+        from taichi_forge.graph._recipes.providers import GraphRecipeProviderSet
+        from taichi_forge.graph._reuse import (
+            GraphRecipeReuseError,
+            GraphRecipeSelectionArtifact,
+        )
+
+        artifact = GraphRecipeSelectionArtifact.from_dict(artifact)
+        structure = artifact.structure
+        if structure.get("semantic_graph_id") != self.semantic_graph_id:
+            raise GraphRecipeReuseError(
+                "recipe artifact belongs to a different semantic Graph",
+                error_key="semantic_graph_drift",
+            )
+        if structure.get("backend") != self.backend:
+            raise GraphRecipeReuseError(
+                "recipe artifact backend is unavailable on this definition",
+                error_key="backend_unavailable",
+            )
+        if providers is None:
+            providers = default_graph_recipe_providers()
+        provider_set = GraphRecipeProviderSet(
+            self,
+            tuple(providers),
+            available_capabilities=available_capabilities,
+        )
+        if structure.get("provider_registry_id") != (provider_set.provider_registry_id):
+            raise GraphRecipeReuseError(
+                "recipe artifact provider registry drifted",
+                error_key="provider_registry_drift",
+            )
+        if structure.get("generation_domain_id") != (provider_set.generation_domain_id):
+            raise GraphRecipeReuseError(
+                "recipe artifact generation domain drifted",
+                error_key="generation_domain_drift",
+            )
+
+        manifest = artifact.recipe_manifest
+        fragment_manifests = tuple(manifest.get("fragments", ()))
+        if fragment_manifests:
+            fragments = []
+            for fragment_manifest in fragment_manifests:
+                try:
+                    namespace = fragment_manifest["provider_namespace"]
+                    fragment_key = fragment_manifest["fragment_key"]
+                except (KeyError, TypeError) as error:
+                    raise GraphRecipeReuseError(
+                        "recipe artifact has no stable fragment reference",
+                        error_key="recipe_manifest_invalid",
+                    ) from error
+                resolved = provider_set.resolve_key(namespace, fragment_key)
+                if _canonical_json(resolved.to_dict()) != _canonical_json(
+                    fragment_manifest
+                ):
+                    raise GraphRecipeReuseError(
+                        "provider fragment facts drifted from the recipe artifact",
+                        error_key="recipe_fragment_drift",
+                    )
+                fragments.append(resolved)
+            recipe = GraphRecipeComposer(
+                self,
+                available_capabilities=available_capabilities,
+            ).compose(tuple(fragments))
+        else:
+            recipe = GraphRecipeComposer(
+                self,
+                available_capabilities=available_capabilities,
+            ).compose()
+
+        recipe_manifest = recipe.to_dict()
+        manifest_digest = (
+            "graph-recipe-manifest-v1:"
+            + hashlib.sha256(
+                _canonical_json(recipe_manifest).encode("utf-8")
+            ).hexdigest()
+        )
+        if _canonical_json(recipe_manifest) != _canonical_json(manifest):
+            raise GraphRecipeReuseError(
+                "resolved recipe manifest drifted from the artifact",
+                error_key="recipe_manifest_drift",
+            )
+        for name, actual in (
+            ("recipe_id", recipe.recipe_id),
+            ("planned_physical_id", recipe.planned_physical_id),
+            ("recipe_manifest_digest", manifest_digest),
+        ):
+            if structure.get(name) != actual:
+                raise GraphRecipeReuseError(
+                    f"resolved recipe {name} drifted from the artifact",
+                    error_key="recipe_identity_drift",
+                )
+        return GraphRecipeHandle._from_recipe(self, recipe, provider_set)
+
+    def check_recipe_applicability(
+        self,
+        artifact,
+        *,
+        providers=None,
+        available_capabilities=(),
+        workload_context=None,
+        evaluation_contract=None,
+        backend_environment=None,
+        target=None,
+    ):
+        """Report whether structure and historical measurements remain reusable."""
+
+        from taichi_forge.graph._recipes.providers import GraphRecipeProviderError
+        from taichi_forge.graph._reuse import (
+            GraphBackendEnvironment,
+            GraphEvaluationContract,
+            GraphRecipeApplicabilityReport,
+            GraphRecipeReuseError,
+            GraphRecipeSelectionArtifact,
+            GraphWorkloadContext,
+        )
+
+        artifact = GraphRecipeSelectionArtifact.from_dict(artifact)
+        try:
+            self.resolve_recipe(
+                artifact,
+                providers=providers,
+                available_capabilities=available_capabilities,
+            )
+        except GraphRecipeProviderError as error:
+            if error.error_key == "provider_backend_unavailable":
+                status = "backend_unavailable"
+            elif error.error_key == "recipe_fragment_unavailable":
+                status = "recipe_unavailable"
+            else:
+                status = "provider_unavailable"
+            return GraphRecipeApplicabilityReport(
+                artifact.artifact_id,
+                status,
+                False,
+                False,
+                (error.error_key,),
+                str(error),
+            )
+        except GraphRecipeReuseError as error:
+            status = {
+                "backend_unavailable": "backend_unavailable",
+                "recipe_unavailable": "recipe_unavailable",
+            }.get(error.error_key, "contract_drift")
+            return GraphRecipeApplicabilityReport(
+                artifact.artifact_id,
+                status,
+                False,
+                False,
+                (error.error_key,),
+                str(error),
+            )
+
+        expected_types = (
+            ("workload_context", workload_context, GraphWorkloadContext),
+            ("evaluation_contract", evaluation_contract, GraphEvaluationContract),
+            ("backend_environment", backend_environment, GraphBackendEnvironment),
+        )
+        for name, value, expected_type in expected_types:
+            if value is not None and not isinstance(value, expected_type):
+                raise TypeError(f"{name} must be {expected_type.__name__}")
+        from taichi_forge.graph._optimization_api import GraphOptimizationTarget
+
+        if target is not None and not isinstance(target, GraphOptimizationTarget):
+            raise TypeError("target must be GraphOptimizationTarget")
+
+        evidence = artifact.evidence
+        current = {
+            "workload_context_id": (
+                None
+                if workload_context is None
+                else workload_context.workload_context_id
+            ),
+            "evaluation_contract_id": (
+                None
+                if evaluation_contract is None
+                else evaluation_contract.evaluation_contract_id
+            ),
+            "backend_environment_id": (
+                None
+                if backend_environment is None
+                else backend_environment.backend_environment_id
+            ),
+            "target_contract_id": (
+                None if target is None else target.target_contract_id
+            ),
+            "forge_compile_provenance": self.compile_provenance.to_dict(),
+        }
+        fields = tuple(current)
+        drift = [name for name in fields if evidence.get(name) != current[name]]
+        if evidence.get("reuse_scope") != "portable":
+            drift.append("reuse_scope")
+
+        try:
+            from taichi_forge.graph._compileiq_opaque import (
+                _validated_compileiq_capability,
+            )
+
+            capability, _domain, _worker, source_lock = (
+                _validated_compileiq_capability()
+            )
+            if evidence.get("compileiq_capability") != dict(capability):
+                drift.append("compileiq_capability")
+            if evidence.get("compileiq_python_source_lock") != source_lock:
+                drift.append("compileiq_python_source_lock")
+        except Exception:
+            drift.append("compileiq_runtime_unavailable")
+
+        terminal = evidence.get("terminal_fidelity") or {}
+        search_status = evidence.get("search_status") or {}
+        if not terminal.get("terminal", False) or (
+            search_status.get("terminal_fidelity_status") != "complete"
+        ):
+            drift.append("terminal_fidelity")
+        if drift:
+            return GraphRecipeApplicabilityReport(
+                artifact.artifact_id,
+                "structurally_resolvable_evidence_drift",
+                True,
+                False,
+                tuple(drift),
+                "recipe structure resolves, but historical evidence must be remeasured",
+            )
+        return GraphRecipeApplicabilityReport(
+            artifact.artifact_id,
+            "applicable",
+            True,
+            True,
+            (),
+            "recipe structure and historical evidence contracts match",
         )
 
     def materialize(self, recipe=None, *, context=None, **context_options):

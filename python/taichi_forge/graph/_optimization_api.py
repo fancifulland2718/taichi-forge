@@ -10,7 +10,16 @@ import hashlib
 import json
 import math
 import sys
+import uuid
 from dataclasses import dataclass, field
+
+from taichi_forge.graph._reuse import (
+    GraphBackendEnvironment,
+    GraphEvaluationContract,
+    GraphRecipeSearchCheckpointV1,
+    GraphRecipeSelectionArtifact,
+    GraphWorkloadContext,
+)
 
 
 def _nonempty_text(value, role):
@@ -95,6 +104,11 @@ class GraphOptimizationTarget:
             ),
         }
 
+    @property
+    def target_contract_id(self):
+        payload = _canonical_json(self.to_dict()).encode("ascii")
+        return "graph-optimization-target-v1:" + hashlib.sha256(payload).hexdigest()
+
     def _compileiq_contract(self):
         from compileiq.forge_support import (
             ForgeOpaqueConstraintV1,
@@ -148,10 +162,13 @@ class GraphSearchBudget:
             self.deterministic_seed, int
         ):
             raise TypeError("Graph search deterministic_seed must be an integer")
-        if _finite_number(
-            self.time_limit_seconds,
-            "Graph search time_limit_seconds",
-        ) <= 0:
+        if (
+            _finite_number(
+                self.time_limit_seconds,
+                "Graph search time_limit_seconds",
+            )
+            <= 0
+        ):
             raise ValueError("Graph search time_limit_seconds must be positive")
         memory = self.materialized_memory_limit_bytes
         if memory is not None and (
@@ -320,9 +337,7 @@ class GraphRecipeManifest:
             "selected_fragment_count": self.selected_fragment_count,
             "execution_step_count": self.execution_step_count,
             "resources": {
-                "declared_persistent_bytes": (
-                    self.declared_persistent_resource_bytes
-                ),
+                "declared_persistent_bytes": (self.declared_persistent_resource_bytes),
                 "declared_transient_bytes": self.declared_transient_resource_bytes,
             },
             "submission": {
@@ -410,7 +425,9 @@ class GraphOptimizationReport:
 
     @property
     def checkpoint(self):
-        return json.loads(self._checkpoint_json)
+        return GraphRecipeSearchCheckpointV1.from_dict(
+            json.loads(self._checkpoint_json)
+        )
 
     @property
     def status(self):
@@ -436,7 +453,7 @@ class GraphOptimizationReport:
             "compileiq_capability": self.compileiq_capability,
             "compileiq_provenance": self.compileiq_provenance,
             "status": self.status,
-            "checkpoint": self.checkpoint,
+            "checkpoint": self.checkpoint.to_dict(),
         }
 
 
@@ -446,15 +463,17 @@ class GraphOptimizationDecision:
 
     selection: GraphRecipeHandle | None
     pareto_frontier: tuple[GraphRecipeHandle, ...]
+    selection_artifact: GraphRecipeSelectionArtifact | None
     report: GraphOptimizationReport
 
     def to_dict(self):
         return {
-            "selection": (
-                None if self.selection is None else self.selection.to_dict()
-            ),
-            "pareto_frontier": tuple(
-                item.to_dict() for item in self.pareto_frontier
+            "selection": (None if self.selection is None else self.selection.to_dict()),
+            "pareto_frontier": tuple(item.to_dict() for item in self.pareto_frontier),
+            "selection_artifact": (
+                None
+                if self.selection_artifact is None
+                else self.selection_artifact.to_dict()
             ),
             "report": self.report.to_dict(),
         }
@@ -472,6 +491,9 @@ class _GraphRecipeSearchSession:
         budget,
         strategy,
         checkpoint,
+        workload_context,
+        evaluation_contract,
+        backend_environment,
         providers,
         available_capabilities,
     ):
@@ -491,6 +513,15 @@ class _GraphRecipeSearchSession:
             raise TypeError(
                 "Graph recipe search strategy must be GraphRecipeSearchStrategy"
             )
+        for name, value, expected_type in (
+            ("workload_context", workload_context, GraphWorkloadContext),
+            ("evaluation_contract", evaluation_contract, GraphEvaluationContract),
+            ("backend_environment", backend_environment, GraphBackendEnvironment),
+        ):
+            if value is not None and not isinstance(value, expected_type):
+                raise TypeError(
+                    f"Graph recipe search {name} must be {expected_type.__name__}"
+                )
 
         from taichi_forge.graph._compileiq_opaque import (
             CompileIQCompleteGraphRecipeSearch,
@@ -505,6 +536,37 @@ class _GraphRecipeSearchSession:
         self._target = target
         self._budget = budget
         self._strategy = strategy
+        self._workload_context = workload_context
+        self._evaluation_contract = evaluation_contract
+        self._backend_environment = backend_environment
+        self._session_nonce = uuid.uuid4().hex
+        self._reuse_scope = (
+            "portable"
+            if all(
+                item is not None
+                for item in (
+                    workload_context,
+                    evaluation_contract,
+                    backend_environment,
+                )
+            )
+            else "session_only"
+        )
+        self._workload_context_id = (
+            workload_context.workload_context_id
+            if workload_context is not None
+            else f"session-only-workload:{self._session_nonce}"
+        )
+        self._evaluation_contract_id = (
+            evaluation_contract.evaluation_contract_id
+            if evaluation_contract is not None
+            else f"session-only-evaluation:{self._session_nonce}"
+        )
+        self._backend_environment_id = (
+            backend_environment.backend_environment_id
+            if backend_environment is not None
+            else f"session-only-backend:{self._session_nonce}"
+        )
         self._seed_fragment_ids = tuple(
             fragment.fragment_id for fragment in catalog.fragments
         )
@@ -521,15 +583,26 @@ class _GraphRecipeSearchSession:
             raise ValueError(
                 "initial Graph recipe domain exceeds max_generated_recipes"
             )
-        self._checkpoint = self._normalize_checkpoint(checkpoint)
-        if self._checkpoint is not None:
+        self._joint_checkpoint = self._normalize_checkpoint(checkpoint)
+        self._checkpoint = None
+        if self._joint_checkpoint is not None:
+            self._validate_checkpoint_contract(self._joint_checkpoint)
+            self._checkpoint = self._joint_checkpoint.compileiq_checkpoint
             self._rebuild_checkpoint_catalog(self._checkpoint)
+            self._validate_checkpoint_generation(self._joint_checkpoint)
         graph = definition.compile()
         self._plans = CompileIQCompleteGraphRecipeSearch(
             graph,
             catalog=catalog,
             search_strategy_id=strategy.strategy_id,
         )
+        if self._joint_checkpoint is not None and (
+            self._joint_checkpoint.contract.get("compileiq_python_source_lock")
+            != self._plans.python_source_lock
+        ):
+            raise ValueError(
+                "Graph recipe checkpoint CompileIQ Python source lock drifted"
+            )
         self._handles = {}
         self._refresh_handles()
         self._used = False
@@ -538,11 +611,78 @@ class _GraphRecipeSearchSession:
     def _normalize_checkpoint(checkpoint):
         if checkpoint is None:
             return None
-        if hasattr(checkpoint, "as_dict"):
-            checkpoint = checkpoint.as_dict()
-        if not isinstance(checkpoint, dict):
-            raise TypeError("Graph recipe checkpoint must be a dictionary")
-        return json.loads(_canonical_json(checkpoint))
+        return GraphRecipeSearchCheckpointV1.from_dict(checkpoint)
+
+    def _checkpoint_contract(self, *, capability=None, provenance=None):
+        contract = {
+            "schema": "taichi_forge.graph_recipe_search_contract.v1",
+            "semantic_graph_id": self._definition.semantic_graph_id,
+            "backend": self._definition.backend,
+            "provider_registry_id": self._catalog.provider_registry_id,
+            "generation_domain_id": self._catalog.generation_domain_id,
+            "search_strategy_id": self._strategy.strategy_id,
+            "target_contract_id": self._target.target_contract_id,
+            "workload_context_id": self._workload_context_id,
+            "evaluation_contract_id": self._evaluation_contract_id,
+            "backend_environment_id": self._backend_environment_id,
+            "reuse_scope": self._reuse_scope,
+            "forge_compile_provenance": (self._definition.compile_provenance.to_dict()),
+        }
+        if capability is not None:
+            contract["compileiq_capability"] = capability
+        if provenance is not None:
+            contract["compileiq_provenance"] = provenance
+        if hasattr(self, "_plans"):
+            contract["compileiq_python_source_lock"] = self._plans.python_source_lock
+        return contract
+
+    def _generation_checkpoint(self):
+        return {
+            "schema": "taichi_forge.graph_recipe_generation_checkpoint.v1",
+            "execution_mode": self._execution_mode,
+            "seed_fragment_ids": self._seed_fragment_ids,
+            "fragments": tuple(
+                fragment.to_dict() for fragment in self._catalog.fragments
+            ),
+            "recipes": tuple(entry.to_dict() for entry in self._catalog.entries()),
+            "planned_physical_duplicates": self._catalog.physical_duplicates,
+        }
+
+    def _validate_checkpoint_contract(self, checkpoint):
+        contract = checkpoint.contract
+        if contract.get("reuse_scope") != "portable":
+            raise ValueError(
+                "session-only Graph recipe checkpoints cannot resume in a new session"
+            )
+        expected = self._checkpoint_contract()
+        fields = (
+            "semantic_graph_id",
+            "backend",
+            "provider_registry_id",
+            "generation_domain_id",
+            "search_strategy_id",
+            "target_contract_id",
+            "workload_context_id",
+            "evaluation_contract_id",
+            "backend_environment_id",
+            "reuse_scope",
+            "forge_compile_provenance",
+        )
+        drift = tuple(
+            name for name in fields if contract.get(name) != expected.get(name)
+        )
+        if drift:
+            raise ValueError(
+                "Graph recipe checkpoint contract drift: " + ", ".join(drift)
+            )
+
+    def _validate_checkpoint_generation(self, checkpoint):
+        if _canonical_json(checkpoint.generation) != _canonical_json(
+            self._generation_checkpoint()
+        ):
+            raise ValueError(
+                "Graph recipe checkpoint provider generation state drifted"
+            )
 
     def _refresh_handles(self):
         for entry in self._catalog.entries():
@@ -624,9 +764,7 @@ class _GraphRecipeSearchSession:
             for item in batch.get("recipes", ())
         }
         normalized_expected_parents = {
-            recipe_id: tuple(
-                sorted(parent_ids, key=lambda item: item.encode("utf-8"))
-            )
+            recipe_id: tuple(sorted(parent_ids, key=lambda item: item.encode("utf-8")))
             for recipe_id, parent_ids in expected_parents.items()
         }
         if actual_parents != normalized_expected_parents:
@@ -848,6 +986,81 @@ class _GraphRecipeSearchSession:
             )
             result = search.submit_batch(terminal_batch)
 
+    def _selection_artifact(
+        self,
+        selection,
+        selected_result,
+        checkpoint,
+        *,
+        capability,
+        provenance,
+        status,
+    ):
+        recipe_manifest = selection._recipe.to_dict()
+        recipe_manifest_digest = (
+            "graph-recipe-manifest-v1:"
+            + hashlib.sha256(
+                _canonical_json(recipe_manifest).encode("ascii")
+            ).hexdigest()
+        )
+        compileiq_checkpoint = checkpoint.compileiq_checkpoint
+        terminal_fidelity = None
+        if compileiq_checkpoint.get("batches"):
+            terminal_fidelity = {
+                **compileiq_checkpoint["batches"][-1]["fidelity"],
+                "fidelity_fingerprint": compileiq_checkpoint["stages"][-1][
+                    "fidelity_fingerprint"
+                ],
+            }
+        return GraphRecipeSelectionArtifact.create(
+            structure={
+                "semantic_graph_id": self._definition.semantic_graph_id,
+                "backend": self._definition.backend,
+                "provider_registry_id": self._catalog.provider_registry_id,
+                "generation_domain_id": self._catalog.generation_domain_id,
+                "provider_registry": self._catalog.provider_set.to_dict(),
+                "recipe_id": selection.recipe_id,
+                "recipe_manifest_digest": recipe_manifest_digest,
+                "planned_physical_id": selection.planned_physical_id,
+                "materialized_physical_id": selected_result.get(
+                    "materialized_physical_id"
+                ),
+            },
+            recipe_manifest=recipe_manifest,
+            evidence={
+                "reuse_scope": self._reuse_scope,
+                "workload_context": (
+                    None
+                    if self._workload_context is None
+                    else self._workload_context.to_dict()
+                ),
+                "evaluation_contract": (
+                    None
+                    if self._evaluation_contract is None
+                    else self._evaluation_contract.to_dict()
+                ),
+                "backend_environment": (
+                    None
+                    if self._backend_environment is None
+                    else self._backend_environment.to_dict()
+                ),
+                "workload_context_id": self._workload_context_id,
+                "evaluation_contract_id": self._evaluation_contract_id,
+                "backend_environment_id": self._backend_environment_id,
+                "target": self._target.to_dict(),
+                "target_contract_id": self._target.target_contract_id,
+                "terminal_fidelity": terminal_fidelity,
+                "search_status": status,
+                "compileiq_capability": capability,
+                "compileiq_provenance": provenance,
+                "compileiq_python_source_lock": self._plans.python_source_lock,
+                "forge_compile_provenance": (
+                    self._definition.compile_provenance.to_dict()
+                ),
+                "checkpoint_id": checkpoint.checkpoint_id,
+            },
+        )
+
     def run(self, evaluator):
         """Evaluate complete recipes and return a reproducible decision.
 
@@ -865,6 +1078,15 @@ class _GraphRecipeSearchSession:
         def objective(graph, request):
             return evaluator(graph, self._handles[request.recipe_id])
 
+        from compileiq.forge_support import ForgeOpaqueEvaluationContextV1
+
+        evaluation_context = ForgeOpaqueEvaluationContextV1(
+            reuse_scope=self._reuse_scope,
+            workload_context_id=self._workload_context_id,
+            evaluation_contract_id=self._evaluation_contract_id,
+            backend_environment_id=self._backend_environment_id,
+        )
+
         with self._plans.compileiq_search(
             objective,
             budget=self._budget._compileiq_budget(),
@@ -873,6 +1095,7 @@ class _GraphRecipeSearchSession:
             halving_factor=self._budget.halving_factor,
             minimum_survivors=self._budget.minimum_survivors,
             repeat_count=self._budget.repeat_count,
+            evaluation_context=evaluation_context,
             checkpoint=self._checkpoint,
         ) as search:
             result = (
@@ -881,10 +1104,19 @@ class _GraphRecipeSearchSession:
                 else self._run_staged(search)
             )
             coverage = dict(self._plans.search_coverage(search))
-            checkpoint = search.checkpoint().as_dict()
+            compileiq_checkpoint = search.checkpoint().as_dict()
             capability = search.opaque_recipe_capability
             provenance = search.opaque_recipe_core_provenance
             status = result.status.model_dump(by_alias=True)
+
+        checkpoint = GraphRecipeSearchCheckpointV1.create(
+            contract=self._checkpoint_contract(
+                capability=capability,
+                provenance=provenance,
+            ),
+            generation=self._generation_checkpoint(),
+            compileiq_checkpoint=compileiq_checkpoint,
+        )
 
         results = result.get_results()
         complete_feasible = tuple(
@@ -901,6 +1133,7 @@ class _GraphRecipeSearchSession:
         )
         self._refresh_handles()
         selected = None
+        selected_result = None
         if coverage["complete"] and frontier:
             selected_result = min(frontier, key=self._selection_key)
             selected = self._handles[selected_result["recipe_id"]]
@@ -923,12 +1156,25 @@ class _GraphRecipeSearchSession:
             _results_json=_canonical_json(results),
             _capability_json=_canonical_json(capability),
             _provenance_json=_canonical_json(provenance),
-            _checkpoint_json=_canonical_json(checkpoint),
+            _checkpoint_json=_canonical_json(checkpoint.to_dict()),
             _status_json=_canonical_json(status),
+        )
+        selection_artifact = (
+            None
+            if selected is None
+            else self._selection_artifact(
+                selected,
+                selected_result,
+                checkpoint,
+                capability=capability,
+                provenance=provenance,
+                status=status,
+            )
         )
         return GraphOptimizationDecision(
             selection=selected,
             pareto_frontier=frontier_handles,
+            selection_artifact=selection_artifact,
             report=report,
         )
 

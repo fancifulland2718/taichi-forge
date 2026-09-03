@@ -1,5 +1,6 @@
 from itertools import pairwise
 import json
+import multiprocessing
 
 import numpy as np
 import pytest
@@ -8,15 +9,104 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+def _resume_segmented_scan_in_fresh_process(
+    checkpoint,
+    workload_context,
+    evaluation_contract,
+    backend_environment,
+    result_queue,
+):
+    try:
+        ti.init(arch=ti.cuda, offline_cache=False)
+        lengths = np.asarray((1, 7, 32, 33, 129, 511), dtype=np.int32)
+        offsets = np.concatenate(
+            (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
+        )
+        capacity = int(offsets[-1])
+        layout = ti.algorithms.SegmentedLayout.from_offsets(
+            offsets,
+            capacity=capacity,
+        )
+        values = ti.ndarray(ti.i32, shape=capacity)
+        output = ti.ndarray(ti.i32, shape=capacity)
+        builder = ti.graph.GraphBuilder()
+        builder.segmented_scan(values, layout, output, inclusive=False)
+        definition = builder.freeze()
+        target = ti.graph.GraphOptimizationTarget(
+            objectives=(
+                ("physical_dispatches", "min"),
+                ("materialized_memory_bytes", "min"),
+            )
+        )
+        strategy = ti.graph.GraphRecipeSearchStrategy(
+            mode="staged",
+            max_generation_rounds=2,
+            max_generated_recipes=16,
+        )
+        host = ((np.arange(capacity, dtype=np.int64) % 11) - 5).astype(np.int32)
+        expected = np.empty_like(host)
+        for begin, end in pairwise(offsets):
+            inclusive = np.cumsum(host[begin:end], dtype=np.int32)
+            expected[begin:end] = np.concatenate(
+                (np.zeros(1, dtype=np.int32), inclusive[:-1])
+            )
+        evaluated = []
+
+        def evaluator(graph, recipe):
+            values.from_numpy(host)
+            output.fill(123)
+            graph.run({})
+            ti.sync()
+            np.testing.assert_array_equal(output.to_numpy(), expected)
+            evaluated.append(recipe.recipe_id)
+            return {
+                "physical_dispatches": float(
+                    graph.physical_plan()["physical_dispatch_count"]
+                )
+            }
+
+        outcome = definition.search_recipes(
+            target=target,
+            budget=ti.graph.GraphSearchBudget(
+                evaluation_limit=16,
+                deterministic_seed=17,
+            ),
+            strategy=strategy,
+            checkpoint=checkpoint,
+            workload_context=ti.graph.GraphWorkloadContext.from_dict(workload_context),
+            evaluation_contract=ti.graph.GraphEvaluationContract.from_dict(
+                evaluation_contract
+            ),
+            backend_environment=ti.graph.GraphBackendEnvironment.from_dict(
+                backend_environment
+            ),
+        ).run(evaluator)
+        result_queue.put(
+            {
+                "search_complete": outcome.report.search_complete,
+                "selected_recipe_id": outcome.selection.recipe_id,
+                "evaluated_recipe_ids": tuple(evaluated),
+                "evaluation_count": outcome.report.evaluation_count,
+            }
+        )
+    except BaseException as error:
+        result_queue.put(
+            {
+                "error": type(error).__name__,
+                "message": str(error),
+            }
+        )
+    finally:
+        ti.reset()
+
+
 def test_graph_optimization_public_contract_rejects_ambiguous_inputs():
     with pytest.raises(ValueError, match="objective"):
         ti.graph.GraphOptimizationTarget(objectives=())
     with pytest.raises(ValueError, match="direction"):
         ti.graph.GraphOptimizationTarget(objectives=(("time", "fastest"),))
     with pytest.raises(ValueError, match="relation"):
-        ti.graph.GraphOptimizationTarget(
-            constraints=(("memory", "<", 1.0),)
-        )
+        ti.graph.GraphOptimizationTarget(constraints=(("memory", "<", 1.0),))
     with pytest.raises(ValueError, match="evaluation_limit"):
         ti.graph.GraphSearchBudget(0)
     with pytest.raises(ValueError, match="cover one complete recipe"):
@@ -55,6 +145,27 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
             ("materialized_memory_bytes", "min"),
         )
     )
+    workload_context = ti.graph.GraphWorkloadContext(
+        {
+            "fixture": "segmented-exclusive-scan",
+            "lengths": lengths.tolist(),
+            "dtype": "i32",
+        }
+    )
+    evaluation_contract = ti.graph.GraphEvaluationContract(
+        {
+            "warmup": 0,
+            "synchronization": "ti.sync-after-run",
+            "correctness": "numpy-exact",
+            "metric": "physical-plan-manifest",
+        }
+    )
+    backend_environment = ti.graph.GraphBackendEnvironment(
+        {
+            "fixture": "pytest-current-cuda-device",
+            "runtime": "taichi-forge-test-runtime",
+        }
+    )
     budget = ti.graph.GraphSearchBudget(
         evaluation_limit=10,
         repeat_count=2,
@@ -64,6 +175,9 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         engine="compileiq",
         target=target,
         budget=budget,
+        workload_context=workload_context,
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
     )
     assert len(session.recipes) == 5
     assert session.baseline.manifest.is_baseline
@@ -107,8 +221,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.selected_recipe_id == decision.selection.recipe_id
     assert decision.selection in decision.pareto_frontier
     assert all(
-        "materialized_memory_bytes" in result["metrics"]
-        for result in report.results
+        "materialized_memory_bytes" in result["metrics"] for result in report.results
     )
     assert report.compileiq_capability["schema"] == (
         "compileiq.taichi-forge-recipe-search-capability.v2"
@@ -116,6 +229,28 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.compileiq_provenance["verification"] == (
         "bundled_manifest_lock_at_search_start"
     )
+    assert decision.selection_artifact is not None
+    resolved = definition.resolve_recipe(decision.selection_artifact)
+    assert resolved.recipe_id == decision.selection.recipe_id
+    applicability = definition.check_recipe_applicability(
+        decision.selection_artifact,
+        workload_context=workload_context,
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
+        target=target,
+    )
+    assert applicability.status == "applicable"
+    drifted = definition.check_recipe_applicability(
+        decision.selection_artifact,
+        workload_context=ti.graph.GraphWorkloadContext(
+            {"fixture": "different-workload"}
+        ),
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
+        target=target,
+    )
+    assert drifted.status == "structurally_resolvable_evidence_drift"
+    assert drifted.drift_fields == ("workload_context_id",)
     json.dumps(decision.to_dict(), sort_keys=True, allow_nan=False)
 
     with definition.materialize(decision.selection) as materialized:
@@ -144,6 +279,9 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
             deterministic_seed=17,
         ),
         strategy=staged_strategy,
+        workload_context=workload_context,
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
     )
     partial = partial_session.run(evaluator)
     assert partial.selection is None
@@ -151,14 +289,59 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert partial.report.status["terminal_state"] == "budget_exhausted"
     assert partial.report.status["generation_status"] == "not_finalized"
     partial_checkpoint = partial.report.checkpoint
-    assert len(partial_checkpoint["batches"]) == 2
-    assert not partial_checkpoint["stages"][-1]["complete"]
-    assert partial_checkpoint["batches"][-1]["fidelity"]["terminal"]
-    survivors = set(partial_checkpoint["stages"][0]["survivor_recipe_ids"])
+    compileiq_checkpoint = partial_checkpoint.compileiq_checkpoint
+    assert len(compileiq_checkpoint["batches"]) == 2
+    assert not compileiq_checkpoint["stages"][-1]["complete"]
+    assert compileiq_checkpoint["batches"][-1]["fidelity"]["terminal"]
+    survivors = set(compileiq_checkpoint["stages"][0]["survivor_recipe_ids"])
     assert all(
         set(item["parent_recipe_ids"]).issubset(survivors)
-        for item in partial_checkpoint["batches"][1]["recipes"]
+        for item in compileiq_checkpoint["batches"][1]["recipes"]
     )
+    drifted_contract = dict(partial_checkpoint.contract)
+    drifted_contract["workload_context_id"] = "graph-workload-context-v1:drift"
+    contract_drift_checkpoint = ti.graph.GraphRecipeSearchCheckpointV1.create(
+        contract=drifted_contract,
+        generation=partial_checkpoint.generation,
+        compileiq_checkpoint=compileiq_checkpoint,
+    )
+    with pytest.raises(ValueError, match="workload_context_id"):
+        definition.search_recipes(
+            engine="compileiq",
+            target=target,
+            budget=ti.graph.GraphSearchBudget(
+                evaluation_limit=16,
+                deterministic_seed=17,
+            ),
+            strategy=staged_strategy,
+            checkpoint=contract_drift_checkpoint,
+            workload_context=workload_context,
+            evaluation_contract=evaluation_contract,
+            backend_environment=backend_environment,
+        )
+
+    spawn_context = multiprocessing.get_context("spawn")
+    result_queue = spawn_context.Queue()
+    process = spawn_context.Process(
+        target=_resume_segmented_scan_in_fresh_process,
+        args=(
+            partial_checkpoint.to_dict(),
+            workload_context.to_dict(),
+            evaluation_contract.to_dict(),
+            backend_environment.to_dict(),
+            result_queue,
+        ),
+    )
+    process.start()
+    process.join(timeout=60)
+    assert not process.is_alive()
+    assert process.exitcode == 0
+    fresh_result = result_queue.get(timeout=5)
+    assert "error" not in fresh_result, fresh_result
+    assert fresh_result["search_complete"]
+    assert fresh_result["selected_recipe_id"]
+    assert fresh_result["evaluated_recipe_ids"]
+    assert fresh_result["evaluation_count"] > partial.report.evaluation_count
 
     resumed_observed = []
 
@@ -175,6 +358,9 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         ),
         strategy=staged_strategy,
         checkpoint=partial_checkpoint,
+        workload_context=workload_context,
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
     )
     resumed = resumed_session.run(resumed_evaluator)
     assert resumed.selection is not None
@@ -186,7 +372,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert resumed_observed
     measurement_keys = tuple(
         item["request"]["measurement_key"]
-        for item in resumed.report.checkpoint["records"]
+        for item in resumed.report.checkpoint.compileiq_checkpoint["records"]
     )
     assert len(measurement_keys) == len(set(measurement_keys))
 
@@ -217,6 +403,22 @@ def test_public_staged_search_materializes_new_survivor_compositions():
     target = ti.graph.GraphOptimizationTarget(
         objectives=(("selected_fragments", "max"),)
     )
+    workload_context = ti.graph.GraphWorkloadContext(
+        {
+            "fixture": "two-independent-segmented-scans",
+            "lengths": lengths.tolist(),
+        }
+    )
+    evaluation_contract = ti.graph.GraphEvaluationContract(
+        {
+            "synchronization": "ti.sync-after-run",
+            "correctness": "two-numpy-exact-oracles",
+            "metric": "selected-fragment-count",
+        }
+    )
+    backend_environment = ti.graph.GraphBackendEnvironment(
+        {"fixture": "pytest-current-cuda-device"}
+    )
     strategy = ti.graph.GraphRecipeSearchStrategy(
         mode="staged",
         max_generation_rounds=1,
@@ -230,6 +432,9 @@ def test_public_staged_search_materializes_new_survivor_compositions():
             minimum_survivors=32,
         ),
         strategy=strategy,
+        workload_context=workload_context,
+        evaluation_contract=evaluation_contract,
+        backend_environment=backend_environment,
     )
     initial_recipe_ids = {item.recipe_id for item in session.recipes}
     assert 2 < len(initial_recipe_ids) < strategy.max_generated_recipes
@@ -258,30 +463,20 @@ def test_public_staged_search_materializes_new_survivor_compositions():
         ti.sync()
         np.testing.assert_array_equal(first_output.to_numpy(), first_expected)
         np.testing.assert_array_equal(second_output.to_numpy(), second_expected)
-        return {
-            "selected_fragments": float(
-                recipe.manifest.selected_fragment_count
-            )
-        }
+        return {"selected_fragments": float(recipe.manifest.selected_fragment_count)}
 
     outcome = session.run(evaluator)
     assert outcome.selection is not None
     assert outcome.report.search_complete
-    checkpoint = outcome.report.checkpoint
+    checkpoint = outcome.report.checkpoint.compileiq_checkpoint
     assert len(checkpoint["batches"]) == 3
-    stage_zero_ids = {
-        item["recipe_id"] for item in checkpoint["batches"][0]["recipes"]
-    }
+    stage_zero_ids = {item["recipe_id"] for item in checkpoint["batches"][0]["recipes"]}
     generated_ids = {
         item["recipe_id"] for item in checkpoint["batches"][1]["recipes"]
     } - stage_zero_ids
     assert generated_ids
-    assert generated_ids.issubset(
-        {item.recipe_id for item in session.recipes}
-    )
-    stage_zero_survivors = set(
-        checkpoint["stages"][0]["survivor_recipe_ids"]
-    )
+    assert generated_ids.issubset({item.recipe_id for item in session.recipes})
+    stage_zero_survivors = set(checkpoint["stages"][0]["survivor_recipe_ids"])
     assert all(
         set(item["parent_recipe_ids"]).issubset(stage_zero_survivors)
         for item in checkpoint["batches"][1]["recipes"]
@@ -295,6 +490,9 @@ def test_public_staged_search_materializes_new_survivor_compositions():
         item["recipe_id"] for item in checkpoint["batches"][-1]["recipes"]
     }
     assert outcome.selection.manifest.selected_fragment_count == 2
+    assert outcome.selection_artifact is not None
+    resolved = definition.resolve_recipe(outcome.selection_artifact)
+    assert resolved.recipe_id == outcome.selection.recipe_id
 
 
 @test_utils.test(arch=ti.cpu)
@@ -324,3 +522,20 @@ def test_recipe_handle_is_bound_to_its_frozen_definition():
 
     with pytest.raises(ValueError, match="different GraphDefinition"):
         second.materialize(handle)
+
+    session_only = first.search_recipes(
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=1)
+    )
+    session_only_outcome = session_only.run(
+        lambda _graph, _recipe: {"device_time_ns": 1.0}
+    )
+    assert session_only_outcome.selection_artifact is not None
+    assert (
+        session_only_outcome.selection_artifact.evidence["reuse_scope"]
+        == "session_only"
+    )
+    with pytest.raises(ValueError, match="session-only"):
+        first.search_recipes(
+            budget=ti.graph.GraphSearchBudget(evaluation_limit=1),
+            checkpoint=session_only_outcome.report.checkpoint,
+        )
