@@ -7,7 +7,9 @@ from ._compileiq_opaque import (
 )
 from ._optimization_api import (
     GraphOptimizationDecision as GraphOptimizationDecision,
+    GraphOptimizationOutcome as GraphOptimizationOutcome,
     GraphOptimizationReport as GraphOptimizationReport,
+    GraphOptimizationReportV2 as GraphOptimizationReportV2,
     GraphOptimizationTarget as GraphOptimizationTarget,
     GraphRecipeHandle as GraphRecipeHandle,
     GraphRecipeManifest as GraphRecipeManifest,

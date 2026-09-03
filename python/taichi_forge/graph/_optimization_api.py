@@ -48,6 +48,17 @@ def _canonical_json(value):
     )
 
 
+def _compileiq_identity(prefix, value):
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return prefix + hashlib.sha256(encoded).hexdigest()
+
+
 @dataclass(frozen=True)
 class GraphOptimizationTarget:
     """Ordered whole-workload objectives and optional explicit constraints.
@@ -391,33 +402,99 @@ class GraphRecipeHandle:
 
 
 @dataclass(frozen=True)
-class GraphOptimizationReport:
-    """Detached, serializable evidence from one modified-CompileIQ search."""
+class GraphOptimizationReportV2:
+    """Forge explanation around one unmodified CompileIQ fact report."""
 
     semantic_graph_id: str
     target: GraphOptimizationTarget
     budget: GraphSearchBudget
     strategy: GraphRecipeSearchStrategy
+    outcome_status: str
+    next_action: str
     selected_recipe_id: str | None
     pareto_recipe_ids: tuple[str, ...]
+    selection_artifact_id: str | None
     search_complete: bool
     termination_reason: str
     evaluation_count: int
     measured_recipe_ids: tuple[str, ...]
     missing_recipe_ids: tuple[str, ...]
-    _results_json: str = field(repr=False)
-    _capability_json: str = field(repr=False)
+    _selection_reason_json: str = field(repr=False)
+    _tradeoffs_json: str = field(repr=False)
+    _recipe_annotations_json: str = field(repr=False)
+    _reuse_json: str = field(repr=False)
+    _compileiq_report_json: str = field(repr=False)
     _provenance_json: str = field(repr=False)
     _checkpoint_json: str = field(repr=False)
-    _status_json: str = field(repr=False)
+    report_id: str = field(init=False)
+
+    def __post_init__(self):
+        allowed = {
+            "selected": "apply_selection",
+            "resumable": "resume_search",
+            "no_feasible_candidate": "review_evidence",
+            "failed": "review_failures",
+        }
+        if allowed.get(self.outcome_status) != self.next_action:
+            raise ValueError("Graph optimization outcome and next action disagree")
+        if self.selected_recipe_id is not None:
+            if self.outcome_status != "selected":
+                raise ValueError("Graph report selection requires selected outcome")
+            if self.selected_recipe_id not in self.pareto_recipe_ids:
+                raise ValueError(
+                    "Graph report selection must belong to the Pareto frontier"
+                )
+        elif self.outcome_status == "selected":
+            raise ValueError("selected Graph outcome requires a recipe")
+        for payload in (
+            self._selection_reason_json,
+            self._tradeoffs_json,
+            self._recipe_annotations_json,
+            self._reuse_json,
+            self._provenance_json,
+        ):
+            json.loads(payload)
+        compileiq_report = self.compileiq_report
+        if compileiq_report.detail != "summary":
+            raise ValueError("Forge report must embed a summary CompileIQ report")
+        checkpoint = self.checkpoint
+        checkpoint_digest = _compileiq_identity(
+            "ciq-checkpoint-facts-v1:",
+            checkpoint.compileiq_checkpoint,
+        )
+        if checkpoint_digest != compileiq_report.checkpoint.digest:
+            raise ValueError("Forge checkpoint does not match the CompileIQ report")
+        object.__setattr__(
+            self,
+            "report_id",
+            _compileiq_identity("graph-optimization-report-v2:", self._payload()),
+        )
 
     @property
-    def results(self):
-        return tuple(json.loads(self._results_json))
+    def selection_reason(self):
+        return json.loads(self._selection_reason_json)
+
+    @property
+    def pareto_tradeoffs(self):
+        return tuple(json.loads(self._tradeoffs_json))
+
+    @property
+    def recipe_annotations(self):
+        return tuple(json.loads(self._recipe_annotations_json))
+
+    @property
+    def reuse(self):
+        return json.loads(self._reuse_json)
+
+    @property
+    def compileiq_report(self):
+        from compileiq.forge_support import OpaqueOptimizationReportV1
+
+        return OpaqueOptimizationReportV1.from_json(self._compileiq_report_json)
 
     @property
     def compileiq_capability(self):
-        return json.loads(self._capability_json)
+        return dict(self.compileiq_report.session.capability)
 
     @property
     def compileiq_provenance(self):
@@ -431,17 +508,88 @@ class GraphOptimizationReport:
 
     @property
     def status(self):
-        return json.loads(self._status_json)
+        return self.compileiq_report.status.model_dump(by_alias=True)
 
-    def to_dict(self):
+    @property
+    def results(self):
+        """Compatibility projection of the terminal candidate aggregates."""
+
+        report = self.compileiq_report
+        if not report.stages:
+            return ()
+        terminal_batch = report.stages[-1].batch_fingerprint
+        results = []
+        for candidate in report.candidates:
+            if candidate.batch_fingerprint != terminal_batch:
+                continue
+            metrics = {
+                name: summary.median for name, summary in candidate.metrics.items()
+            }
+            results.append(
+                {
+                    "recipe_id": candidate.recipe_id,
+                    "params": {"recipe_id": candidate.recipe_id},
+                    "stage_index": candidate.stage_index,
+                    "fidelity": candidate.fidelity_name,
+                    "observation_count": candidate.successful_observation_count,
+                    "required_observation_count": (
+                        candidate.required_observation_count
+                    ),
+                    "complete": candidate.complete,
+                    "metrics": metrics,
+                    "metric_bounds": {
+                        name: {
+                            "lower": summary.observed_min,
+                            "median": summary.median,
+                            "upper": summary.observed_max,
+                        }
+                        for name, summary in candidate.metrics.items()
+                    },
+                    "feasible": candidate.feasible,
+                    "constraint_violations": tuple(
+                        item.model_dump(by_alias=True)
+                        for item in candidate.constraint_violations
+                    ),
+                    "failures": tuple(
+                        item.model_dump(by_alias=True) for item in candidate.failures
+                    ),
+                    "planned_physical_id": (
+                        candidate.planned_physical_ids[0]
+                        if candidate.planned_physical_ids
+                        else None
+                    ),
+                    "materialized_physical_id": (
+                        candidate.materialized_physical_ids[0]
+                        if candidate.materialized_physical_ids
+                        else None
+                    ),
+                    "materialized_memory_bytes": (
+                        candidate.materialized_memory_peak_bytes
+                    ),
+                }
+            )
+        return tuple(results)
+
+    def _payload(self):
         return {
-            "schema": "taichi_forge.graph_optimization_report.v1",
+            "schema": "taichi_forge.graph_optimization_report.v2",
+            "outcome": {
+                "status": self.outcome_status,
+                "next_action": self.next_action,
+            },
             "semantic_graph_id": self.semantic_graph_id,
             "target": self.target.to_dict(),
             "budget": self.budget.to_dict(),
             "strategy": self.strategy.to_dict(),
-            "selected_recipe_id": self.selected_recipe_id,
-            "pareto_recipe_ids": self.pareto_recipe_ids,
+            "selection": {
+                "selected_recipe_id": self.selected_recipe_id,
+                "selection_artifact_id": self.selection_artifact_id,
+                "reason": self.selection_reason,
+            },
+            "pareto": {
+                "recipe_ids": self.pareto_recipe_ids,
+                "tradeoffs": self.pareto_tradeoffs,
+            },
             "search": {
                 "complete": self.search_complete,
                 "termination_reason": self.termination_reason,
@@ -449,25 +597,187 @@ class GraphOptimizationReport:
                 "measured_recipe_ids": self.measured_recipe_ids,
                 "missing_recipe_ids": self.missing_recipe_ids,
             },
-            "results": self.results,
-            "compileiq_capability": self.compileiq_capability,
+            "recipe_annotations": self.recipe_annotations,
+            "reuse": self.reuse,
+            "compileiq_report": self.compileiq_report.to_dict(),
             "compileiq_provenance": self.compileiq_provenance,
-            "status": self.status,
             "checkpoint": self.checkpoint.to_dict(),
         }
 
+    def to_dict(self):
+        return {"report_id": self.report_id, **self._payload()}
+
+    def to_json(self):
+        return _canonical_json(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, value):
+        if not isinstance(value, dict):
+            raise TypeError("Graph optimization report must be a dictionary")
+        expected_fields = {
+            "report_id",
+            "schema",
+            "outcome",
+            "semantic_graph_id",
+            "target",
+            "budget",
+            "strategy",
+            "selection",
+            "pareto",
+            "search",
+            "recipe_annotations",
+            "reuse",
+            "compileiq_report",
+            "compileiq_provenance",
+            "checkpoint",
+        }
+        if set(value) != expected_fields:
+            raise ValueError(
+                "Graph optimization report has missing or unexpected fields"
+            )
+        if value.get("schema") != "taichi_forge.graph_optimization_report.v2":
+            raise ValueError("Graph optimization report schema is unsupported")
+        target_payload = value["target"]
+        budget_payload = value["budget"]
+        strategy_payload = dict(value["strategy"])
+        strategy_payload.pop("schema", None)
+        selection = value["selection"]
+        pareto = value["pareto"]
+        search = value["search"]
+        outcome = value["outcome"]
+        report = cls(
+            semantic_graph_id=value["semantic_graph_id"],
+            target=GraphOptimizationTarget(
+                objectives=tuple(
+                    (item["name"], item["direction"])
+                    for item in target_payload["objectives"]
+                ),
+                constraints=tuple(
+                    (item["metric"], item["relation"], item["bound"])
+                    for item in target_payload["constraints"]
+                ),
+            ),
+            budget=GraphSearchBudget(**budget_payload),
+            strategy=GraphRecipeSearchStrategy(**strategy_payload),
+            outcome_status=outcome["status"],
+            next_action=outcome["next_action"],
+            selected_recipe_id=selection["selected_recipe_id"],
+            pareto_recipe_ids=tuple(pareto["recipe_ids"]),
+            selection_artifact_id=selection["selection_artifact_id"],
+            search_complete=bool(search["complete"]),
+            termination_reason=search["termination_reason"],
+            evaluation_count=int(search["evaluation_count"]),
+            measured_recipe_ids=tuple(search["measured_recipe_ids"]),
+            missing_recipe_ids=tuple(search["missing_recipe_ids"]),
+            _selection_reason_json=_canonical_json(selection["reason"]),
+            _tradeoffs_json=_canonical_json(pareto["tradeoffs"]),
+            _recipe_annotations_json=_canonical_json(value["recipe_annotations"]),
+            _reuse_json=_canonical_json(value["reuse"]),
+            _compileiq_report_json=_canonical_json(value["compileiq_report"]),
+            _provenance_json=_canonical_json(value["compileiq_provenance"]),
+            _checkpoint_json=_canonical_json(value["checkpoint"]),
+        )
+        if report.report_id != value.get("report_id"):
+            raise ValueError("Graph optimization report identity mismatch")
+        return report
+
+    @classmethod
+    def from_json(cls, value):
+        return cls.from_dict(json.loads(value))
+
+    def to_markdown(self):
+        lines = [
+            "# Taichi Forge Graph Optimization Report",
+            "",
+            f"- Report ID: `{self.report_id}`",
+            f"- Outcome: `{self.outcome_status}`",
+            f"- Next action: `{self.next_action}`",
+            f"- Search complete: `{str(self.search_complete).lower()}`",
+            f"- Termination: `{self.termination_reason}`",
+            "",
+            "## Selection",
+            "",
+            self.selection_reason["summary"],
+            "",
+            "## Recipe effects",
+            "",
+            "| Recipe | Families | Regions | Steps | Queues | Barriers | Peak bytes |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for annotation in self.recipe_annotations:
+            manifest = annotation["manifest"]
+            measurement = annotation["measurement"]
+            lines.append(
+                f"| `{annotation['recipe_id']}` | "
+                f"{', '.join(manifest['families'])} | "
+                f"{len(annotation['optimized_semantic_region_ids'])} | "
+                f"{manifest['execution_step_count']} | "
+                f"{manifest['submission']['queue_count']} | "
+                f"{manifest['submission']['barrier_count']} | "
+                f"{measurement['materialized_memory_peak_bytes']} |"
+            )
+        lines.extend(
+            ["", "Provider notes above are declarations, not measured claims."]
+        )
+        if self.pareto_tradeoffs:
+            lines.extend(["", "## Pareto trade-offs", ""])
+            for tradeoff in self.pareto_tradeoffs:
+                comparisons = ", ".join(
+                    f"{item['metric']}={item['relation']}"
+                    for item in tradeoff["relative_to_selected"]
+                )
+                lines.append(f"- `{tradeoff['recipe_id']}`: {comparisons}")
+        lines.extend(
+            [
+                "",
+                "## Reuse",
+                "",
+                f"- Scope: `{self.reuse['scope']}`",
+                f"- Checkpoint: `{self.reuse['checkpoint_id']}`",
+                "- Selection artifact: "
+                f"`{self.selection_artifact_id or 'unavailable'}`",
+                "",
+                "## CompileIQ measurement facts",
+                "",
+            ]
+        )
+        compileiq_lines = self.compileiq_report.to_markdown().splitlines()
+        if compileiq_lines and compileiq_lines[0].startswith("# "):
+            compileiq_lines = compileiq_lines[2:]
+        lines.extend(compileiq_lines)
+        return "\n".join(lines).rstrip() + "\n"
+
+
+# Public current name plus an explicit schema-versioned name.
+GraphOptimizationReport = GraphOptimizationReportV2
+
 
 @dataclass(frozen=True)
-class GraphOptimizationDecision:
-    """One selected complete recipe plus its full measured frontier."""
+class GraphOptimizationOutcome:
+    """Outcome-first view of selection, recovery and measured evidence."""
 
     selection: GraphRecipeHandle | None
     pareto_frontier: tuple[GraphRecipeHandle, ...]
     selection_artifact: GraphRecipeSelectionArtifact | None
-    report: GraphOptimizationReport
+    report: GraphOptimizationReportV2
+
+    @property
+    def status(self):
+        return self.report.outcome_status
+
+    @property
+    def next_action(self):
+        return self.report.next_action
+
+    @property
+    def checkpoint(self):
+        return self.report.checkpoint
 
     def to_dict(self):
         return {
+            "schema": "taichi_forge.graph_optimization_outcome.v1",
+            "status": self.status,
+            "next_action": self.next_action,
             "selection": (None if self.selection is None else self.selection.to_dict()),
             "pareto_frontier": tuple(item.to_dict() for item in self.pareto_frontier),
             "selection_artifact": (
@@ -477,6 +787,11 @@ class GraphOptimizationDecision:
             ),
             "report": self.report.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class GraphOptimizationDecision(GraphOptimizationOutcome):
+    """Compatibility name for the outcome returned by ``session.run()``."""
 
 
 class _GraphRecipeSearchSession:
@@ -1061,6 +1376,212 @@ class _GraphRecipeSearchSession:
             },
         )
 
+    @staticmethod
+    def _outcome_state(selected, status):
+        if selected is not None:
+            return "selected", "apply_selection"
+        if status["terminal_state"] in ("active", "budget_exhausted"):
+            return "resumable", "resume_search"
+        if status["terminal_state"] in (
+            "all_failed",
+            "poisoned",
+            "provider_failed",
+        ):
+            return "failed", "review_failures"
+        return "no_feasible_candidate", "review_evidence"
+
+    def _selection_reason(self, selected_result, status, *, search_complete):
+        if selected_result is not None:
+            values = tuple(
+                {
+                    "metric": name,
+                    "direction": direction,
+                    "observed_median": selected_result["metrics"][name],
+                }
+                for name, direction in self._target.objectives
+            )
+            return {
+                "status": "selected",
+                "rule": "forge_ordered_objective_lexicographic_v1",
+                "ordered_objectives": values,
+                "provider_claims_used": False,
+                "summary": (
+                    "Forge selected the lexicographically best recipe from the "
+                    "complete measured Pareto frontier using the caller's objective "
+                    "order; recipe ID is the final deterministic tie-breaker."
+                ),
+            }
+        if not search_complete and status["terminal_state"] in (
+            "active",
+            "budget_exhausted",
+        ):
+            return {
+                "status": "not_selected",
+                "rule": "incomplete_evidence_no_selection",
+                "ordered_objectives": (),
+                "provider_claims_used": False,
+                "summary": (
+                    "No recipe was selected because terminal evidence is incomplete; "
+                    "the checkpoint can be resumed under the same contract."
+                ),
+            }
+        return {
+            "status": "not_selected",
+            "rule": "no_complete_feasible_frontier",
+            "ordered_objectives": (),
+            "provider_claims_used": False,
+            "summary": (
+                "No recipe was selected because the completed evidence contains no "
+                "eligible feasible frontier."
+            ),
+        }
+
+    def _pareto_tradeoffs(self, frontier, selected_result):
+        if selected_result is None:
+            return ()
+        tradeoffs = []
+        for candidate in sorted(frontier, key=self._selection_key):
+            if candidate["recipe_id"] == selected_result["recipe_id"]:
+                continue
+            comparisons = []
+            for name, direction in self._target.objectives:
+                candidate_value = candidate["metrics"][name]
+                selected_value = selected_result["metrics"][name]
+                if candidate_value == selected_value:
+                    relation = "equal"
+                elif (direction == "min" and candidate_value < selected_value) or (
+                    direction == "max" and candidate_value > selected_value
+                ):
+                    relation = "better"
+                else:
+                    relation = "worse"
+                comparisons.append(
+                    {
+                        "metric": name,
+                        "direction": direction,
+                        "candidate_value": candidate_value,
+                        "selected_value": selected_value,
+                        "delta": candidate_value - selected_value,
+                        "relation": relation,
+                    }
+                )
+            tradeoffs.append(
+                {
+                    "recipe_id": candidate["recipe_id"],
+                    "relative_to_selected": tuple(comparisons),
+                }
+            )
+        return tuple(tradeoffs)
+
+    def _recipe_annotations(self, compileiq_report):
+        latest_candidates = {}
+        for candidate in sorted(
+            compileiq_report.candidates,
+            key=lambda item: (item.stage_index, item.candidate_key),
+        ):
+            latest_candidates[candidate.recipe_id] = candidate
+        baseline_manifest = self.baseline.manifest
+        annotations = []
+        for recipe_id in sorted(latest_candidates):
+            handle = self._handles[recipe_id]
+            recipe = handle._recipe
+            manifest = handle.manifest
+            candidate = latest_candidates[recipe_id]
+            provider_claims = []
+            declared_applicability = []
+            declared_limitations = []
+            for fragment in recipe.fragments:
+                claims = self._catalog.provider_set.describe(fragment)
+                if isinstance(claims, dict):
+                    applicability = claims.get("applicability")
+                    limitations = claims.get("limitations")
+                    if applicability is not None:
+                        declared_applicability.append(applicability)
+                    if limitations is not None:
+                        declared_limitations.append(limitations)
+                provider_claims.append(
+                    {
+                        "source": "provider_declared_not_measured",
+                        "provider_namespace": fragment.provider_namespace,
+                        "fragment_key": fragment.fragment_key,
+                        "claims": claims,
+                    }
+                )
+            physical_changes = {
+                "planned_identity_changed": (
+                    manifest.planned_physical_id
+                    != baseline_manifest.planned_physical_id
+                ),
+                "selected_fragment_delta": (
+                    manifest.selected_fragment_count
+                    - baseline_manifest.selected_fragment_count
+                ),
+                "execution_step_delta": (
+                    manifest.execution_step_count
+                    - baseline_manifest.execution_step_count
+                ),
+                "queue_count_delta": (
+                    manifest.queue_count - baseline_manifest.queue_count
+                ),
+                "barrier_count_delta": (
+                    manifest.barrier_count - baseline_manifest.barrier_count
+                ),
+                "declared_persistent_bytes_delta": (
+                    manifest.declared_persistent_resource_bytes
+                    - baseline_manifest.declared_persistent_resource_bytes
+                ),
+                "declared_transient_bytes_delta": (
+                    manifest.declared_transient_resource_bytes
+                    - baseline_manifest.declared_transient_resource_bytes
+                ),
+            }
+            annotations.append(
+                {
+                    "recipe_id": recipe_id,
+                    "display_name": (
+                        "Baseline"
+                        if manifest.is_baseline
+                        else " + ".join(manifest.families)
+                    ),
+                    "manifest": manifest.to_dict(),
+                    "semantic_region_ids": tuple(
+                        selection.region_id for selection in recipe.region_selections
+                    ),
+                    "optimized_semantic_region_ids": tuple(
+                        dict.fromkeys(
+                            region_id
+                            for fragment in recipe.fragments
+                            for region_id in fragment.coverage_region_ids
+                        )
+                    ),
+                    "physical_changes_from_baseline": physical_changes,
+                    "measurement": {
+                        "stage_index": candidate.stage_index,
+                        "fidelity_name": candidate.fidelity_name,
+                        "complete": candidate.complete,
+                        "feasible": candidate.feasible,
+                        "metrics": {
+                            name: summary.model_dump(by_alias=True)
+                            for name, summary in candidate.metrics.items()
+                        },
+                        "planned_physical_ids": candidate.planned_physical_ids,
+                        "materialized_physical_ids": (
+                            candidate.materialized_physical_ids
+                        ),
+                        "materialized_memory_peak_bytes": (
+                            candidate.materialized_memory_peak_bytes
+                        ),
+                        "failure_count": len(candidate.failures),
+                    },
+                    "provider_claims": tuple(provider_claims),
+                    "provider_declared_applicability": tuple(
+                        declared_applicability
+                    ),
+                    "provider_declared_limitations": tuple(declared_limitations),
+                }
+            )
+        return tuple(annotations)
+
     def run(self, evaluator):
         """Evaluate complete recipes and return a reproducible decision.
 
@@ -1108,6 +1629,7 @@ class _GraphRecipeSearchSession:
             capability = search.opaque_recipe_capability
             provenance = search.opaque_recipe_core_provenance
             status = result.status.model_dump(by_alias=True)
+            compileiq_report = result.report(detail="full")
 
         checkpoint = GraphRecipeSearchCheckpointV1.create(
             contract=self._checkpoint_contract(
@@ -1141,24 +1663,6 @@ class _GraphRecipeSearchSession:
             self._handles[item["recipe_id"]]
             for item in sorted(frontier, key=self._selection_key)
         )
-        report = GraphOptimizationReport(
-            semantic_graph_id=self._definition.semantic_graph_id,
-            target=self._target,
-            budget=self._budget,
-            strategy=self._strategy,
-            selected_recipe_id=(None if selected is None else selected.recipe_id),
-            pareto_recipe_ids=tuple(item.recipe_id for item in frontier_handles),
-            search_complete=bool(coverage["complete"]),
-            termination_reason=result.termination_reason,
-            evaluation_count=int(coverage["evaluation_count"]),
-            measured_recipe_ids=tuple(coverage["observed_recipe_ids"]),
-            missing_recipe_ids=tuple(coverage["missing_recipe_ids"]),
-            _results_json=_canonical_json(results),
-            _capability_json=_canonical_json(capability),
-            _provenance_json=_canonical_json(provenance),
-            _checkpoint_json=_canonical_json(checkpoint.to_dict()),
-            _status_json=_canonical_json(status),
-        )
         selection_artifact = (
             None
             if selected is None
@@ -1171,6 +1675,58 @@ class _GraphRecipeSearchSession:
                 status=status,
             )
         )
+        outcome_status, next_action = self._outcome_state(selected, status)
+        report = GraphOptimizationReportV2(
+            semantic_graph_id=self._definition.semantic_graph_id,
+            target=self._target,
+            budget=self._budget,
+            strategy=self._strategy,
+            outcome_status=outcome_status,
+            next_action=next_action,
+            selected_recipe_id=(None if selected is None else selected.recipe_id),
+            pareto_recipe_ids=tuple(item.recipe_id for item in frontier_handles),
+            selection_artifact_id=(
+                None
+                if selection_artifact is None
+                else selection_artifact.artifact_id
+            ),
+            search_complete=bool(coverage["complete"]),
+            termination_reason=result.termination_reason,
+            evaluation_count=int(coverage["evaluation_count"]),
+            measured_recipe_ids=tuple(coverage["observed_recipe_ids"]),
+            missing_recipe_ids=tuple(coverage["missing_recipe_ids"]),
+            _selection_reason_json=_canonical_json(
+                self._selection_reason(
+                    selected_result,
+                    status,
+                    search_complete=bool(coverage["complete"]),
+                )
+            ),
+            _tradeoffs_json=_canonical_json(
+                self._pareto_tradeoffs(frontier, selected_result)
+            ),
+            _recipe_annotations_json=_canonical_json(
+                self._recipe_annotations(compileiq_report)
+            ),
+            _reuse_json=_canonical_json(
+                {
+                    "scope": self._reuse_scope,
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "selection_artifact_id": (
+                        None
+                        if selection_artifact is None
+                        else selection_artifact.artifact_id
+                    ),
+                    "workload_context_id": self._workload_context_id,
+                    "evaluation_contract_id": self._evaluation_contract_id,
+                    "backend_environment_id": self._backend_environment_id,
+                    "resolution": "rebuild_provider_catalog_by_stable_recipe_id",
+                }
+            ),
+            _compileiq_report_json=compileiq_report.summary().to_json(),
+            _provenance_json=_canonical_json(provenance),
+            _checkpoint_json=_canonical_json(checkpoint.to_dict()),
+        )
         return GraphOptimizationDecision(
             selection=selected,
             pareto_frontier=frontier_handles,
@@ -1181,7 +1737,9 @@ class _GraphRecipeSearchSession:
 
 __all__ = [
     "GraphOptimizationDecision",
+    "GraphOptimizationOutcome",
     "GraphOptimizationReport",
+    "GraphOptimizationReportV2",
     "GraphOptimizationTarget",
     "GraphRecipeHandle",
     "GraphRecipeManifest",
