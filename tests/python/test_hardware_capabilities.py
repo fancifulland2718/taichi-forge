@@ -6,6 +6,10 @@ import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.hardware import _capabilities, _optix
+from taichi_forge.hardware._external_providers import (
+    external_provider_ids,
+    passive_external_provider_status,
+)
 from tests import test_utils
 
 
@@ -814,23 +818,25 @@ def test_passive_report_observes_an_already_loaded_provider(monkeypatch):
     assert cublas.selection == "not_considered"
 
 
-def test_native_passive_status_does_not_load_external_libraries():
+def test_hardware_report_passive_status_does_not_load_external_libraries():
     before = {
-        provider_id: dict(ti_core.cuda_external_library_status(provider_id))
-        for provider_id in ("cublas", "cusparse", "cufft", "cudss")
+        provider_id: passive_external_provider_status(provider_id)
+        for provider_id in external_provider_ids()
     }
     report = ti.hardware.report()
     after = {
-        provider_id: dict(ti_core.cuda_external_library_status(provider_id))
-        for provider_id in ("cublas", "cusparse", "cufft", "cudss")
+        provider_id: passive_external_provider_status(provider_id)
+        for provider_id in external_provider_ids()
     }
 
     assert report.external_components_probed is False
     assert {provider_id: status["library_loaded"] for provider_id, status in after.items()} == {
         provider_id: status["library_loaded"] for provider_id, status in before.items()
     }
-    assert all(status["native_facts"]["status_policy"] == "passive_existing_loader" for status in after.values())
+    assert all(status["native_facts"]["status_policy"] for status in after.values())
     assert all(not status["native_facts"]["external_component_probed"] for status in after.values())
+    assert all(not status["native_facts"]["provider_enablement_changed"] for status in after.values())
+    assert all(not status["native_facts"]["provider_selection_changed"] for status in after.values())
 
 
 def test_multibackend_core_route_requires_every_backend(monkeypatch):

@@ -8,7 +8,10 @@ from taichi_forge._hardware_telemetry import (
     hardware_provider_call,
     instrument_hardware_recording,
 )
-from taichi_forge.hardware._external_providers import external_provider_ids
+from taichi_forge.hardware._external_providers import (
+    external_provider_ids,
+    passive_external_provider_status,
+)
 from tests import test_utils
 
 
@@ -38,8 +41,8 @@ class _ProviderCallFailureRecording:
 @test_utils.test(arch=ti.cpu)
 def test_hardware_telemetry_is_passive_and_classifies_explicit_failure():
     provider_loaded_before = {
-        name: bool(ti_core.cuda_external_library_status(name)["library_loaded"])
-        for name in ("cublas", "cusparse", "cufft", "cudss")
+        name: bool(passive_external_provider_status(name)["library_loaded"])
+        for name in external_provider_ids()
     }
     before = ti.hardware.telemetry()
     assert before.schema_version == ti.hardware.HARDWARE_TELEMETRY_SCHEMA_VERSION
@@ -77,8 +80,8 @@ def test_hardware_telemetry_is_passive_and_classifies_explicit_failure():
     assert not recording.memory_report().components[0].resident
 
     provider_loaded_after = {
-        name: bool(ti_core.cuda_external_library_status(name)["library_loaded"])
-        for name in ("cublas", "cusparse", "cufft", "cudss")
+        name: bool(passive_external_provider_status(name)["library_loaded"])
+        for name in external_provider_ids()
     }
     assert provider_loaded_after == provider_loaded_before
 
