@@ -42,13 +42,13 @@ _FAMILY_NAMESPACES = tuple(
         "workspace_concurrency",
     )
 )
-_EXISTING_FAMILY_PROVIDER_DESCRIPTOR = GraphRecipeProviderDescriptor(
-    namespace="taichi_forge.graph.existing_families",
+_RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR = GraphRecipeProviderDescriptor(
+    namespace="taichi_forge.graph.runtime_assembly",
     provider_version=_PROVIDER_VERSION,
     domain_version="existing-family-domain-v1",
     semantic_fingerprint="existing-family-fragment-generation-v1",
     assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
-    capabilities=("legacy-family-adapter",),
+    capabilities=("legacy-family-adapter", "typed-runtime-graph-assembly"),
     owned_fragment_namespaces=_FAMILY_NAMESPACES,
     fragment_key_schema="family:source:choice.v1",
 )
@@ -193,7 +193,7 @@ def _fragment(
         provider_namespace=f"taichi_forge.graph.{family}",
         provider_version=_PROVIDER_VERSION,
         provider_domain_version=(
-            _EXISTING_FAMILY_PROVIDER_DESCRIPTOR.domain_version
+            _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.domain_version
         ),
         fragment_key=f"{family}:{source_key}:{choice_id}",
         coverage_region_ids=coverage,
@@ -207,7 +207,7 @@ def _fragment(
         backend_requirements=(definition.backend,),
         assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
         assembly_provider_namespace=(
-            _EXISTING_FAMILY_PROVIDER_DESCRIPTOR.namespace
+            _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR.namespace
         ),
         provider_metadata={"family_selection": selection.to_dict()},
     )
@@ -808,10 +808,10 @@ def _control_fragments(definition, spec):
     return tuple(result)
 
 
-class GraphExistingFamilyProvider:
-    """Expose every currently materializable family without early return."""
+class GraphRuntimeAssemblyProvider:
+    """Assemble typed runtime fragments while legacy families migrate."""
 
-    descriptor = _EXISTING_FAMILY_PROVIDER_DESCRIPTOR
+    descriptor = _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
 
     def discover(self, definition):
         return self.fragments(definition)
@@ -880,6 +880,17 @@ class GraphExistingFamilyProvider:
         return self.resolve(definition, fragment_key).provider_metadata
 
 
+# Transitional private compatibility name.  New code should use the assembly
+# role; Phase 7 removes the remaining family discovery responsibilities.
+GraphExistingFamilyProvider = GraphRuntimeAssemblyProvider
+
+
+def default_graph_recipe_providers():
+    """Return the built-in providers required by the public recipe path."""
+
+    return (GraphRuntimeAssemblyProvider(),)
+
+
 def assemble_existing_family_recipe(
     scope,
     definition,
@@ -936,8 +947,10 @@ def materialize_existing_family_baseline(scope, definition, recipe):
 
 
 __all__ = [
+    "GraphRuntimeAssemblyProvider",
     "GraphExistingFamilyProvider",
     "GraphFamilySelection",
     "assemble_existing_family_recipe",
+    "default_graph_recipe_providers",
     "materialize_existing_family_baseline",
 ]

@@ -375,7 +375,7 @@ class GraphDefinition:
         """Create an explicit owner for transactional recipe materialization."""
 
         from taichi_forge.graph._recipes.families import (
-            GraphExistingFamilyProvider,
+            default_graph_recipe_providers,
             materialize_existing_family_baseline,
         )
 
@@ -390,7 +390,7 @@ class GraphDefinition:
             )
         if provider_set is None:
             if providers is None:
-                providers = (GraphExistingFamilyProvider(), )
+                providers = default_graph_recipe_providers()
             provider_set = GraphRecipeProviderSet(
                 self,
                 tuple(providers),
@@ -424,11 +424,13 @@ class GraphDefinition:
         """Discover established optimization families in one staged catalog."""
 
         from taichi_forge.graph._recipes.catalog import GraphRecipeCatalog
-        from taichi_forge.graph._recipes.families import GraphExistingFamilyProvider
+        from taichi_forge.graph._recipes.families import (
+            default_graph_recipe_providers,
+        )
         from taichi_forge.graph._recipes.providers import GraphRecipeProviderSet
 
         if providers is None:
-            providers = (GraphExistingFamilyProvider(), )
+            providers = default_graph_recipe_providers()
         provider_set = GraphRecipeProviderSet(
             self,
             tuple(providers),

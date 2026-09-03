@@ -30,7 +30,9 @@ from .fragments import (
 from .families import (
     GraphExistingFamilyProvider,
     GraphFamilySelection,
+    GraphRuntimeAssemblyProvider,
     assemble_existing_family_recipe,
+    default_graph_recipe_providers,
     materialize_existing_family_baseline,
 )
 
@@ -79,6 +81,7 @@ __all__ = [
     "GraphFragmentTask",
     "GraphExistingFamilyProvider",
     "GraphFamilySelection",
+    "GraphRuntimeAssemblyProvider",
     "GraphMaterializationContext",
     "GraphMaterializationError",
     "GraphMaterializationProduct",
@@ -108,6 +111,7 @@ __all__ = [
     "PROVIDER_OWNED_WHOLE_GRAPH_V1",
     "RUNTIME_GRAPH_ASSEMBLY_V1",
     "assemble_existing_family_recipe",
+    "default_graph_recipe_providers",
     "materialize_existing_family_baseline",
     "observe_graph_physical_manifest",
 ]
