@@ -359,33 +359,58 @@ class GraphRecipeProviderSet:
 
     def resolve(self, fragment):
         fragment = self.validate_fragment(fragment)
-        provider = self.provider_for_fragment_namespace(
-            fragment.provider_namespace
+        resolved = self.resolve_key(
+            fragment.provider_namespace,
+            fragment.fragment_key,
         )
-        method = getattr(provider, "resolve", None)
-        if not callable(method):
-            raise GraphRecipeProviderError(
-                "Graph recipe provider has no stable-key resolver",
-                error_key="provider_resolver_missing",
-                provider_namespace=fragment.provider_namespace,
-                fragment_key=fragment.fragment_key,
-            )
-        try:
-            resolved = method(self.definition, fragment.fragment_key)
-        except KeyError as error:
-            raise GraphRecipeProviderError(
-                "Graph recipe fragment is unavailable by its stable key",
-                error_key="recipe_fragment_unavailable",
-                provider_namespace=fragment.provider_namespace,
-                fragment_key=fragment.fragment_key,
-            ) from error
-        resolved = self.validate_fragment(resolved)
         if resolved.to_dict() != fragment.to_dict():
             raise GraphRecipeProviderError(
                 "Graph recipe provider resolved different fragment facts",
                 error_key="provider_fragment_drift",
                 provider_namespace=fragment.provider_namespace,
                 fragment_key=fragment.fragment_key,
+            )
+        return resolved
+
+    def resolve_key(self, fragment_namespace, fragment_key):
+        """Resolve one fragment from portable provider namespace/key facts."""
+
+        descriptor, provider = self._by_fragment_namespace.get(
+            fragment_namespace,
+            (None, None),
+        )
+        if descriptor is None:
+            raise GraphRecipeProviderError(
+                "Graph fragment namespace is not owned by this provider set: "
+                + str(fragment_namespace),
+                error_key="fragment_provider_unavailable",
+                provider_namespace=str(fragment_namespace),
+                fragment_key=str(fragment_key),
+            )
+        method = getattr(provider, "resolve", None)
+        if not callable(method):
+            raise GraphRecipeProviderError(
+                "Graph recipe provider has no stable-key resolver",
+                error_key="provider_resolver_missing",
+                provider_namespace=descriptor.namespace,
+                fragment_key=str(fragment_key),
+            )
+        try:
+            resolved = method(self.definition, fragment_key)
+        except KeyError as error:
+            raise GraphRecipeProviderError(
+                "Graph recipe fragment is unavailable by its stable key",
+                error_key="recipe_fragment_unavailable",
+                provider_namespace=descriptor.namespace,
+                fragment_key=str(fragment_key),
+            ) from error
+        resolved = self.validate_fragment(resolved)
+        if resolved.fragment_key != fragment_key:
+            raise GraphRecipeProviderError(
+                "Graph recipe provider resolved a different stable fragment key",
+                error_key="provider_fragment_key_drift",
+                provider_namespace=descriptor.namespace,
+                fragment_key=str(fragment_key),
             )
         return resolved
 

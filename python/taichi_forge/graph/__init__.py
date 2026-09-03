@@ -14,6 +14,15 @@ from ._optimization_api import (
     GraphRecipeSearchStrategy as GraphRecipeSearchStrategy,
     GraphSearchBudget as GraphSearchBudget,
 )
+from ._reuse import (
+    GraphBackendEnvironment as GraphBackendEnvironment,
+    GraphEvaluationContract as GraphEvaluationContract,
+    GraphRecipeApplicabilityReport as GraphRecipeApplicabilityReport,
+    GraphRecipeReuseError as GraphRecipeReuseError,
+    GraphRecipeSearchCheckpointV1 as GraphRecipeSearchCheckpointV1,
+    GraphRecipeSelectionArtifact as GraphRecipeSelectionArtifact,
+    GraphWorkloadContext as GraphWorkloadContext,
+)
 from ._recipes import (
     CompiledGraphPhysicalManifest as CompiledGraphPhysicalManifest,
     GraphFragmentBindingRequirement as GraphFragmentBindingRequirement,
