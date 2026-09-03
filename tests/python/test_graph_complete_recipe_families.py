@@ -1045,6 +1045,26 @@ def test_complete_recipe_materializes_coarse_cuda_branch_join_dag():
     catalog = definition.recipe_catalog()
     fragments = _family_fragments(catalog, "branch_join_schedule")
     assert len(fragments) == 1
+    from taichi_forge.graph._recipes import (
+        GraphBranchJoinRecipeProvider,
+        GraphRuntimeAssemblyProvider,
+    )
+
+    assert isinstance(
+        catalog.provider_set.provider_for_fragment_namespace(
+            fragments[0].provider_namespace
+        ),
+        GraphBranchJoinRecipeProvider,
+    )
+    assert fragments[0].provider_domain_version == "branch-join-domain-v1"
+    assert fragments[0].assembly_provider_namespace == (
+        GraphRuntimeAssemblyProvider.descriptor.namespace
+    )
+    assert tuple(task.physical["queue"] for task in fragments[0].tasks) == (
+        *("cuda_branch:0",) * 4,
+        *("cuda_branch:1",) * 4,
+        "default",
+    )
     entry = catalog.compose(
         (fragments[0].fragment_id,),
         stage="coarse-cuda-branch-join",

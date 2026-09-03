@@ -35,6 +35,7 @@ from .families import (
     default_graph_recipe_providers,
     materialize_existing_family_baseline,
 )
+from .branch_join import GraphBranchJoinRecipeProvider
 from .graph_memory import GraphMemoryRecipeProvider
 
 from .materialize import (
@@ -71,6 +72,7 @@ __all__ = [
     "CompiledGraphPhysicalManifest",
     "GraphBaselineRecipe",
     "GraphBindingABIEntry",
+    "GraphBranchJoinRecipeProvider",
     "GraphCompileProvenance",
     "GraphDefinition",
     "GraphDefinitionSource",
