@@ -194,6 +194,109 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         session.run(evaluator)
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_public_staged_search_materializes_new_survivor_compositions():
+    lengths = np.asarray((3, 17, 53), dtype=np.int32)
+    offsets = np.concatenate(
+        (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
+    )
+    capacity = int(offsets[-1])
+    layout = ti.algorithms.SegmentedLayout.from_offsets(
+        offsets,
+        capacity=capacity,
+    )
+    first_input = ti.ndarray(ti.i32, shape=capacity)
+    first_output = ti.ndarray(ti.i32, shape=capacity)
+    second_input = ti.ndarray(ti.i32, shape=capacity)
+    second_output = ti.ndarray(ti.i32, shape=capacity)
+    builder = ti.graph.GraphBuilder()
+    builder.segmented_scan(first_input, layout, first_output, inclusive=False)
+    builder.segmented_scan(second_input, layout, second_output, inclusive=False)
+    definition = builder.freeze()
+
+    target = ti.graph.GraphOptimizationTarget(
+        objectives=(("selected_fragments", "max"),)
+    )
+    strategy = ti.graph.GraphRecipeSearchStrategy(
+        mode="staged",
+        max_generation_rounds=1,
+        max_generated_recipes=14,
+    )
+    session = definition.search_recipes(
+        target=target,
+        budget=ti.graph.GraphSearchBudget(
+            evaluation_limit=48,
+            deterministic_seed=23,
+            minimum_survivors=32,
+        ),
+        strategy=strategy,
+    )
+    initial_recipe_ids = {item.recipe_id for item in session.recipes}
+    assert 2 < len(initial_recipe_ids) < strategy.max_generated_recipes
+
+    first_host = ((np.arange(capacity) % 9) - 4).astype(np.int32)
+    second_host = ((np.arange(capacity) % 7) + 2).astype(np.int32)
+
+    def exclusive_scan(values):
+        expected = np.empty_like(values)
+        for begin, end in pairwise(offsets):
+            inclusive = np.cumsum(values[begin:end], dtype=np.int32)
+            expected[begin:end] = np.concatenate(
+                (np.zeros(1, dtype=np.int32), inclusive[:-1])
+            )
+        return expected
+
+    first_expected = exclusive_scan(first_host)
+    second_expected = exclusive_scan(second_host)
+
+    def evaluator(graph, recipe):
+        first_input.from_numpy(first_host)
+        second_input.from_numpy(second_host)
+        first_output.fill(0)
+        second_output.fill(0)
+        graph.run({})
+        ti.sync()
+        np.testing.assert_array_equal(first_output.to_numpy(), first_expected)
+        np.testing.assert_array_equal(second_output.to_numpy(), second_expected)
+        return {
+            "selected_fragments": float(
+                recipe.manifest.selected_fragment_count
+            )
+        }
+
+    outcome = session.run(evaluator)
+    assert outcome.selection is not None
+    assert outcome.report.search_complete
+    checkpoint = outcome.report.checkpoint
+    assert len(checkpoint["batches"]) == 3
+    stage_zero_ids = {
+        item["recipe_id"] for item in checkpoint["batches"][0]["recipes"]
+    }
+    generated_ids = {
+        item["recipe_id"] for item in checkpoint["batches"][1]["recipes"]
+    } - stage_zero_ids
+    assert generated_ids
+    assert generated_ids.issubset(
+        {item.recipe_id for item in session.recipes}
+    )
+    stage_zero_survivors = set(
+        checkpoint["stages"][0]["survivor_recipe_ids"]
+    )
+    assert all(
+        set(item["parent_recipe_ids"]).issubset(stage_zero_survivors)
+        for item in checkpoint["batches"][1]["recipes"]
+    )
+    assert all(
+        item["recipe_id"] in generated_ids
+        for item in checkpoint["batches"][1]["recipes"]
+        if len(item["parent_recipe_ids"]) == 2
+    )
+    assert outcome.selection.recipe_id in {
+        item["recipe_id"] for item in checkpoint["batches"][-1]["recipes"]
+    }
+    assert outcome.selection.manifest.selected_fragment_count == 2
+
+
 @test_utils.test(arch=ti.cpu)
 def test_recipe_handle_is_bound_to_its_frozen_definition():
     @ti.kernel
