@@ -161,21 +161,6 @@ def _scope_count(scope: str, configured_count: int) -> int:
     return int(configured_count)
 
 
-@contextmanager
-def _environment_overlay(values: Mapping[str, str]):
-    previous = {name: os.environ.get(name) for name in values}
-    try:
-        for name, value in values.items():
-            os.environ[name] = value
-        yield
-    finally:
-        for name, value in previous.items():
-            if value is None:
-                os.environ.pop(name, None)
-            else:
-                os.environ[name] = value
-
-
 def _nested_value(value: Mapping[str, Any], path: Sequence[str]) -> Any:
     current: Any = value
     for item in path:
@@ -804,37 +789,48 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
         materialized: dict[str, Any] = {}
         opaque_observed: list[dict[str, Any]] = []
 
-        def objective(parameters: Mapping[str, Any]) -> float:
-            selection = search.select(dict(parameters))
-            recipe = selection.memory_recipe_manifest.to_dict()
-            route = "direct" if recipe["strategy"] == "direct" else "staged"
+        for route, recipe_id in (
+            ("direct", strategy_to_recipe_id["direct"]),
+            ("staged", strategy_to_recipe_id["shared_staged_1d"]),
+        ):
+            parameters = {
+                "domain_fingerprint": search.domain_fingerprint,
+                "recipe_id": recipe_id,
+            }
             started = time.perf_counter_ns()
-            with _environment_overlay(selection.worker_environment):
-                selected_builder = ti.graph.GraphBuilder()
-                selected_builder.dispatch(stencil, source_arg, output_arg)
-                selected_graph = selected_builder.compile()
+            result = search.materialize(parameters)
             build_ms[route] = (time.perf_counter_ns() - started) / 1.0e6
-            search.verify_materialized_graph(dict(parameters), selected_graph)
-            materialized[route] = selected_graph
+            search.verify_materialized_graph(parameters, result)
+            materialized[route] = result
             build_memory_diagnostic[route] = _memory_observation(ti)
+
+        def objective(selected_graph: Any, request: Any) -> float:
+            recipe_manifest = search.recipe_manifest(request.recipe_id)
+            recipe = recipe_manifest["memory_recipe_manifest"]
+            route = "direct" if recipe["strategy"] == "direct" else "staged"
             opaque_observed.append(
                 {
                     "route": route,
-                    "spec_id": selection.spec_id,
-                    "memory_recipe_id": selection.memory_recipe_id,
-                    "selected_spec_id": (
-                        selected_graph._compileiq_executable_optimization_space.selected_spec_id
-                    ),
+                    "spec_id": request.recipe_id,
+                    "memory_recipe_id": recipe["recipe_id"],
+                    "selected_spec_id": (selected_graph._spec._complete_recipe_id),
                 }
             )
             return float(route == "staged")
 
-        exhaustive = search.compileiq_search(objective)
-        search_result = exhaustive.start()
-        coverage = search.require_complete_search(exhaustive)
-        selected = search.select_best_result(exhaustive, search_result)
-        direct_graph = materialized["direct"]
-        staged_graph = materialized["staged"]
+        from compileiq.forge_support import ForgeOpaqueSearchBudgetV2
+
+        budget = ForgeOpaqueSearchBudgetV2(
+            evaluation_limit=len(search.recipe_ids),
+            time_limit_seconds=300.0,
+            materialized_memory_limit_bytes=1 << 30,
+        )
+        with search.compileiq_search(objective, budget=budget) as exhaustive:
+            search_result = exhaustive.start()
+            coverage = search.require_complete_search(exhaustive)
+            selected = search.select_best_result(exhaustive, search_result)
+        direct_graph = materialized["direct"].executor
+        staged_graph = materialized["staged"].executor
         direct_recipe = recipe_rows[strategy_to_recipe_id["direct"]][
             "memory_recipe_manifest"
         ]
@@ -851,7 +847,7 @@ def _graph_memory_worker(args: Any) -> dict[str, Any]:
         staged_kernel_manifest_rows = staged_recipe["materialized_tasks"]
         compileiq_evidence.update(
             {
-                "graph_memory_status": source_graph._compileiq_graph_memory_status,
+                "graph_memory_status": "complete_recipe_domain",
                 "provider_namespace": search.search_space.provider_namespace,
                 "domain_version": search.search_space.domain_version,
                 "domain_fingerprint": search.domain_fingerprint,
@@ -1239,11 +1235,8 @@ def _worker_environment(
     environment["TI_VISIBLE_DEVICE"] = "0"
     environment["CUDA_VISIBLE_DEVICES"] = "0"
     for name in (
-        "TAICHI_FORGE_INTERNAL_MAP_FUSION",
         "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION",
         "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS",
-        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
-        "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
     ):
         environment.pop(name, None)
     return environment

@@ -18,7 +18,6 @@ from tests import test_utils
 
 _CACHE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _REPLAY_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
-_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
 
 
 def _entry(
@@ -192,8 +191,6 @@ def test_fusion_qualification_rejects_ambiguous_exact_entries():
 def test_qualified_fusion_materializes_once_and_falls_back_by_binding(
     monkeypatch, tmp_path
 ):
-    monkeypatch.setenv(_FUSION_ENV, "baseline")
-
     @ti.kernel
     def stage_one(
         source: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -238,7 +235,7 @@ def test_qualified_fusion_materializes_once_and_falls_back_by_binding(
     symbolic["count"] = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
 
     def build():
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe="baseline")
         builder.dispatch(
             stage_one,
             symbolic["source"],

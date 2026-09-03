@@ -9,12 +9,7 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 from tests import test_utils
 
-_RECIPE_ENVIRONMENTS = (
-    "TAICHI_FORGE_INTERNAL_MAP_FUSION",
-    "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE",
-    "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE",
-    "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE",
-    "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
+_MATERIALIZATION_ENVIRONMENTS = (
     "TI_CUDA_BOUNDED_DISPATCH_MODE",
     "TI_GRAPH_CUDA_BOUNDED_UPDATE_POLICY",
 )
@@ -498,8 +493,7 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
         name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
         for name in ("source", "temporary", "staged_input", "output")
     }
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="baseline")
     builder.dispatch(scale, symbolic["source"], symbolic["temporary"])
     builder.dispatch(bias, symbolic["temporary"], symbolic["staged_input"])
     builder.dispatch(stencil, symbolic["staged_input"], symbolic["output"])
@@ -555,7 +549,7 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
         for handle in public_session.recipes
     )
 
-    for name in _RECIPE_ENVIRONMENTS:
+    for name in _MATERIALIZATION_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")
     with definition.materialization_context() as context:
         materialized = context.materialize(entry.recipe)
@@ -622,7 +616,7 @@ def test_complete_reduction_recipe_owns_workspace_and_survives_bad_environment(
     ).recipe
     assert recipe.declared_persistent_resource_bytes == ((count + 1023) // 1024) * 4
 
-    for name in _RECIPE_ENVIRONMENTS:
+    for name in _MATERIALIZATION_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")
     with definition.materialization_context() as context:
         materialized = context.materialize(recipe)
@@ -664,7 +658,7 @@ def test_complete_native_algorithm_recipe_materializes_all_physical_routes(
     for begin, end in pairwise(offsets):
         expected[begin:end] = np.cumsum(host[begin:end], dtype=np.int32)
 
-    for name in _RECIPE_ENVIRONMENTS:
+    for name in _MATERIALIZATION_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")
     physical_identities = set()
     persistent_bytes = set()
@@ -735,8 +729,7 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
         name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
         for name in ("source", "temporary", "output", "final")
     }
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="baseline")
     builder.dispatch(scale, symbolic["source"], symbolic["temporary"])
     builder.dispatch(bias, symbolic["temporary"], symbolic["output"])
     builder.dispatch(stencil, symbolic["output"], symbolic["final"])
@@ -1053,7 +1046,7 @@ def test_complete_bounded_recipe_replays_all_scope_strategies_without_environmen
         expected_strategies - {"logical_exact"}
     )
 
-    for name in _RECIPE_ENVIRONMENTS:
+    for name in _MATERIALIZATION_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")
     extent = ti.DeviceExtent(capacity)
     first = ti.ndarray(ti.i32, shape=1)
@@ -1266,10 +1259,6 @@ def test_complete_structured_control_recipe_rebuilds_both_routes_without_environ
     counter = scalar("counter")
     target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
     monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
-    monkeypatch.setenv(
-        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
-        "cuda_conditional_graph",
-    )
     builder = ti.graph.GraphBuilder()
     builder.dispatch(initialize, state, predicate, counter)
     condition_region = builder.create_sequential()
@@ -1294,7 +1283,7 @@ def test_complete_structured_control_recipe_rebuilds_both_routes_without_environ
         for region in definition.regions
     )
 
-    for name in _RECIPE_ENVIRONMENTS:
+    for name in _MATERIALIZATION_ENVIRONMENTS:
         monkeypatch.setenv(name, "intentionally-invalid-after-freeze")
     physical_identities = set()
     routes = set()
@@ -1360,10 +1349,6 @@ def test_complete_structured_control_composes_independent_top_level_domains(
         return ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
 
     monkeypatch.delenv("TI_GRAPH_CUDA_FORCE_MASKED_CONTROL", raising=False)
-    monkeypatch.setenv(
-        "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE",
-        "cuda_conditional_graph",
-    )
     builder = ti.graph.GraphBuilder()
     symbols = []
     for suffix in ("a", "b"):

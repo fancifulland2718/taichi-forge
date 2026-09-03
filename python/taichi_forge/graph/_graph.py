@@ -93,19 +93,12 @@ from taichi_forge.graph._optimization import (
     _GraphMemoryRecipeManifest,
     _GraphOffloadFusionRecipeManifest,
     _GraphSparseTraversalRecipeManifest,
-    _INTERNAL_STRUCTURED_CONTROL_ENV,
     _build_executable_optimization_space,
 )
 from taichi_forge.graph._recipes import GraphDefinition
 
 ArgKind = _ti_core.ArgKind
 
-_INTERNAL_MAP_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
-_INTERNAL_GRAPH_MEMORY_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_MEMORY_RECIPE"
-_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
-_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV = (
-    "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE"
-)
 _INTERNAL_FUSION_QUALIFICATION_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_QUALIFICATION"
 _INTERNAL_FUSION_EXPECTED_REPLAYS_ENV = (
     "TAICHI_FORGE_INTERNAL_GRAPH_FUSION_EXPECTED_REPLAYS"
@@ -337,7 +330,7 @@ def _decode_exact_map_partition(value):
     return tuple(groups)
 
 
-def _new_runtime_graph_builder(explicit_source_groups=None):
+def _new_runtime_graph_builder(explicit_source_groups=None, map_recipe=None):
     builder = _ti_core.GraphBuilder()
     if explicit_source_groups is not None:
         source_groups = tuple(tuple(group) for group in explicit_source_groups)
@@ -348,7 +341,7 @@ def _new_runtime_graph_builder(explicit_source_groups=None):
             builder._set_map_composer_allowed_groups(source_groups)
         return builder
 
-    internal_recipe = os.environ.get(_INTERNAL_MAP_FUSION_ENV)
+    internal_recipe = map_recipe
     if internal_recipe is not None:
         internal_recipe = internal_recipe.strip().lower()
         exact_groups = _decode_exact_map_partition(internal_recipe)
@@ -367,7 +360,7 @@ def _new_runtime_graph_builder(explicit_source_groups=None):
         }
         if internal_recipe not in recipe_sizes:
             raise TaichiRuntimeError(
-                f"{_INTERNAL_MAP_FUSION_ENV} must be baseline, pair, map3, "
+                "internal map recipe must be baseline, pair, map3, "
                 "map4, or a canonical exact-v1 partition"
             )
         max_group_size = recipe_sizes[internal_recipe]
@@ -3802,38 +3795,11 @@ def _cuda_structured_control_routes(capabilities=None):
     )
 
 
-def _internal_structured_control_recipe():
-    requested = os.environ.get(_INTERNAL_STRUCTURED_CONTROL_ENV, "auto")
-    if not isinstance(requested, str):
-        raise TaichiRuntimeError("internal structured-control recipe must be a string")
-    requested = requested.strip().lower()
-    aliases = {
-        "auto": "auto",
-        "conditional": "cuda_conditional_graph",
-        "cuda_conditional_graph": "cuda_conditional_graph",
-        "masked": "cuda_masked_bounded_graph",
-        "cuda_masked_bounded_graph": "cuda_masked_bounded_graph",
-        "cuda_nested_device_update": "cuda_nested_device_update",
-        "cuda_nested_masked_bounded": "cuda_nested_masked_bounded",
-    }
-    if requested not in aliases:
-        raise TaichiRuntimeError(
-            f"{_INTERNAL_STRUCTURED_CONTROL_ENV} must be auto, "
-            "cuda_conditional_graph, cuda_masked_bounded_graph, "
-            "cuda_nested_device_update, or cuda_nested_masked_bounded"
-        )
-    return aliases[requested]
-
-
 def _cuda_structured_control_lowering(capabilities=None, requested_recipe=None):
     """Select one stable CUDA control route for a compiled Graph node."""
 
     routes = _cuda_structured_control_routes(capabilities)
-    requested = (
-        _internal_structured_control_recipe()
-        if requested_recipe is None
-        else requested_recipe
-    )
+    requested = "auto" if requested_recipe is None else requested_recipe
     if requested in (
         "cuda_nested_device_update",
         "cuda_nested_masked_bounded",
@@ -3872,11 +3838,7 @@ def _cuda_nested_structured_control_lowering(requested_recipe=None):
     """Freeze one depth-2 CUDA physical route during Graph construction."""
 
     routes = _cuda_nested_structured_control_routes()
-    requested = (
-        _internal_structured_control_recipe()
-        if requested_recipe is None
-        else requested_recipe
-    )
+    requested = "auto" if requested_recipe is None else requested_recipe
     explicit = {
         "cuda_nested_device_update": _CUDA_NESTED_DEVICE_UPDATE_ROUTE,
         "cuda_nested_masked_bounded": _CUDA_NESTED_MASKED_ROUTE,
@@ -10803,8 +10765,8 @@ class _GraphSpec:
                     (node_index, tuple(recipe_ids), selected_recipe_id)
                 )
         self.control_recipe_domains = tuple(control_recipe_domains)
-        # Retain the old single-domain facade for compatibility. Whole-Graph
-        # recipes consume the per-source domains above and can compose them.
+        # Retain the selected single-domain metadata for the complete-recipe
+        # provider. Qualified runtime fusion has its own map-only space.
         if len(self.control_recipe_domains) == 1:
             _, control_recipe_ids, selected_control_recipe_id = (
                 self.control_recipe_domains[0]
@@ -10814,13 +10776,8 @@ class _GraphSpec:
         self.control_recipe_ids = tuple(control_recipe_ids)
         self.selected_control_recipe_id = selected_control_recipe_id
 
-        self.executable_optimization_space = _build_executable_optimization_space(
-            self.pre_optimization_ir_root,
-            self.fusion_plan,
-            backend,
-            control_recipe_ids=control_recipe_ids,
-            selected_control_recipe_id=selected_control_recipe_id,
-        )
+        self._optimization_backend = backend
+        self._executable_optimization_space = None
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
         self._graph_sparse_traversal_sources = tuple(graph_sparse_traversal_sources)
@@ -10828,11 +10785,6 @@ class _GraphSpec:
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
         self._graph_native_algorithm_sources = tuple(graph_native_algorithm_sources)
-        self._compileiq_executable_space_cache = None
-        self._compileiq_graph_bounded_status = "not_evaluated"
-        self._compileiq_graph_memory_status = "not_evaluated"
-        self._compileiq_graph_reduction_status = "not_evaluated"
-        self._compileiq_graph_native_algorithm_status = "not_evaluated"
         self._aot_graph_builder = aot_graph_builder
         self._aot_compiled_graph = aot_compiled_graph
         self.needs_runtime_args = any(n.needs_runtime_args for n in self.nodes)
@@ -11224,183 +11176,6 @@ class _GraphSpec:
             definition=definition,
             _cuda_concurrent_workspace_pair=concurrent_workspace_pair,
         )
-
-    def compileiq_executable_optimization_space(self):
-        cached = self._compileiq_executable_space_cache
-        if cached is not None:
-            return cached
-
-        base = self.executable_optimization_space
-        bounded_dispatch_count = sum(
-            len(stage["bounded_dispatches"]) for stage in self.pipeline_definition
-        )
-        bounded_eligible_shape = bool(
-            base.baseline.backend == "cuda"
-            and bounded_dispatch_count
-            and self.native_count == 0
-            and self.structured_control_count == 0
-            and self.observation_count == 0
-            and len(self.nodes) == 1
-            and isinstance(self.nodes[0], _CompiledCGraphNode)
-            and isinstance(self.nodes[0].ir_node, SequentialRegion)
-            and not base.baseline.control_recipe_id
-            and not base.candidates
-        )
-        if bounded_eligible_shape:
-            manifests, selected_recipe_id, status = _graph_bounded_recipe_scope(
-                self.pipeline_definition
-            )
-            self._compileiq_graph_bounded_status = status
-            if manifests:
-                try:
-                    space = _build_executable_optimization_space(
-                        self.pre_optimization_ir_root,
-                        self.fusion_plan,
-                        base.baseline.backend,
-                        bounded_recipe_manifests=manifests,
-                        selected_bounded_recipe_id=selected_recipe_id,
-                        semantic_root=_graph_bounded_semantic_root(
-                            self.pre_optimization_ir_root
-                        ),
-                    )
-                except ValueError as error:
-                    self._compileiq_graph_bounded_status = "domain_rejected:" + str(
-                        error
-                    )
-                else:
-                    self._compileiq_executable_space_cache = space
-                    return space
-        elif bounded_dispatch_count:
-            self._compileiq_graph_bounded_status = "definition_out_of_scope"
-            self._compileiq_executable_space_cache = base
-            return base
-        else:
-            self._compileiq_graph_bounded_status = "not_applicable"
-
-        native_algorithm_eligible_shape = bool(
-            len(self._graph_native_algorithm_sources) == 1
-            and not self._graph_reduction_sources
-            and not self._graph_memory_sources
-            and self.native_count == 1
-            and self.dispatch_count == 0
-            and self.structured_control_count == 0
-            and self.observation_count == 0
-            and len(self.nodes) == 1
-            and isinstance(self.nodes[0], _CompiledNativeGraphNode)
-            and not base.baseline.control_recipe_id
-            and not base.candidates
-        )
-        if native_algorithm_eligible_shape:
-            source = self._graph_native_algorithm_sources[0]
-            manifests = source.manifests()
-            try:
-                space = _build_executable_optimization_space(
-                    self.pre_optimization_ir_root,
-                    self.fusion_plan,
-                    base.baseline.backend,
-                    native_algorithm_recipe_manifests=manifests,
-                    selected_native_algorithm_recipe_id=(source.selected_recipe_id),
-                    semantic_root=source.semantic_root,
-                )
-            except ValueError as error:
-                self._compileiq_graph_native_algorithm_status = (
-                    "domain_rejected:" + str(error)
-                )
-                self._compileiq_executable_space_cache = base
-                return base
-            self._compileiq_graph_native_algorithm_status = "complete_recipe_domain"
-            self._compileiq_executable_space_cache = space
-            return space
-        if self._graph_native_algorithm_sources:
-            self._compileiq_graph_native_algorithm_status = "definition_out_of_scope"
-            self._compileiq_executable_space_cache = base
-            return base
-        self._compileiq_graph_native_algorithm_status = "not_applicable"
-
-        reduction_eligible_shape = bool(
-            len(self._graph_reduction_sources) == 1
-            and not self._graph_memory_sources
-            and self.native_count == 0
-            and self.structured_control_count == 0
-            and self.observation_count == 0
-            and len(self.nodes) == 1
-            and isinstance(self.nodes[0], _CompiledCGraphNode)
-            and isinstance(self.nodes[0].ir_node, SequentialRegion)
-            and not base.baseline.control_recipe_id
-            and not base.candidates
-            and self.dispatch_count
-            == self._graph_reduction_sources[0].selected_physical_dispatches
-        )
-        if reduction_eligible_shape:
-            source = self._graph_reduction_sources[0]
-            manifests = source.manifests()
-            try:
-                space = _build_executable_optimization_space(
-                    self.pre_optimization_ir_root,
-                    self.fusion_plan,
-                    base.baseline.backend,
-                    reduction_recipe_manifests=manifests,
-                    selected_reduction_recipe_id=source.selected_recipe_id,
-                    semantic_root=source.semantic_root,
-                )
-            except ValueError as error:
-                self._compileiq_graph_reduction_status = "domain_rejected:" + str(error)
-                self._compileiq_executable_space_cache = base
-                return base
-            self._compileiq_graph_reduction_status = "complete_recipe_domain"
-            self._compileiq_executable_space_cache = space
-            return space
-        if self._graph_reduction_sources:
-            self._compileiq_graph_reduction_status = "definition_out_of_scope"
-            self._compileiq_executable_space_cache = base
-            return base
-        self._compileiq_graph_reduction_status = "not_applicable"
-
-        eligible_shape = bool(
-            len(self._graph_memory_sources) == 1
-            and self.dispatch_count == 1
-            and self.native_count == 0
-            and self.structured_control_count == 0
-            and self.observation_count == 0
-            and not self.fixed_runtime_args
-            and not self.temporary_actions
-            and not self.lifetime_leases
-            and len(self.nodes) == 1
-            and isinstance(self.nodes[0], _CompiledCGraphNode)
-            and isinstance(self.nodes[0].ir_node, SequentialRegion)
-            and not base.baseline.control_recipe_id
-            and not base.candidates
-        )
-        if not eligible_shape:
-            self._compileiq_graph_memory_status = "definition_out_of_scope"
-            self._compileiq_executable_space_cache = base
-            return base
-
-        source = self._graph_memory_sources[0]
-        manifests = source.manifests()
-        if not manifests:
-            self._compileiq_graph_memory_status = (
-                "candidate_rejected:" + source.candidate_failure
-            )
-            self._compileiq_executable_space_cache = base
-            return base
-        try:
-            semantic_root = _graph_memory_semantic_root(self.pre_optimization_ir_root)
-            space = _build_executable_optimization_space(
-                self.pre_optimization_ir_root,
-                self.fusion_plan,
-                base.baseline.backend,
-                memory_recipe_manifests=manifests,
-                selected_memory_recipe_id=source.selected_recipe_id,
-                semantic_root=semantic_root,
-            )
-        except ValueError as error:
-            self._compileiq_graph_memory_status = "domain_rejected:" + str(error)
-            self._compileiq_executable_space_cache = base
-            return base
-        self._compileiq_graph_memory_status = "complete_recipe_domain"
-        self._compileiq_executable_space_cache = space
-        return space
 
     def terminal_control_report(self, logical_iterations):
         """Synthesize the control report for one terminal-only submission."""
@@ -12423,6 +12198,18 @@ class _GraphSpec:
         if hasattr(self._aot_graph_builder, "item_count"):
             info["aot_item_count"] = self._aot_graph_builder.item_count
         return info
+
+    @property
+    def executable_optimization_space(self):
+        """Build the qualified map-fusion space only for its real consumers."""
+
+        if self._executable_optimization_space is None:
+            self._executable_optimization_space = _build_executable_optimization_space(
+                self.pre_optimization_ir_root,
+                self.fusion_plan,
+                self._optimization_backend,
+            )
+        return self._executable_optimization_space
 
     @property
     def ir_debug_info(self):
@@ -15834,17 +15621,17 @@ class GraphBuilder:
         *,
         _capture_recipe_sources=True,
         _explicit_map_source_groups=None,
-        _ignore_recipe_environment=False,
+        _map_recipe=None,
     ):
         self._aot_graph_plan = _AOTGraphBuilderPlan()
         self._aot_plan_cursor = 0
         self._explicit_map_source_groups = _explicit_map_source_groups
 
         self._runtime_graph_builder = _new_runtime_graph_builder(
-            _explicit_map_source_groups
+            _explicit_map_source_groups,
+            _map_recipe,
         )
         self._capture_recipe_sources = bool(_capture_recipe_sources)
-        self._ignore_recipe_environment = bool(_ignore_recipe_environment)
 
         self._runtime_graph_recipe_operations = []
 
@@ -15941,28 +15728,7 @@ class GraphBuilder:
             kernel_cpp,
             template_args,
         )
-        requested_memory_recipe = (
-            None
-            if self._ignore_recipe_environment
-            else os.environ.get(_INTERNAL_GRAPH_MEMORY_RECIPE_ENV)
-        )
-        if requested_memory_recipe is not None:
-            requested_memory_recipe = requested_memory_recipe.strip()
-            if not requested_memory_recipe:
-                raise TaichiRuntimeError(
-                    f"{_INTERNAL_GRAPH_MEMORY_RECIPE_ENV} must be a complete "
-                    "GraphMemory recipe ID"
-                )
-            if source is None:
-                raise TaichiRuntimeError(
-                    "requested GraphMemory recipe has no eligible ordinary "
-                    "CUDA Graph dispatch source"
-                )
-            kernel_cpp, contracts, layout_requirements = source.materialize(
-                requested_memory_recipe
-            )
-        else:
-            contracts, layout_requirements = (), ()
+        contracts, layout_requirements = (), ()
         if source is not None:
             source._recipe_source_key = f"memory:{len(self._graph_memory_sources)}"
         if offload_source is not None:
@@ -16017,14 +15783,6 @@ class GraphBuilder:
             append_typed_graph_reduction,
         )
 
-        requested_recipe = os.environ.get(_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV)
-        if requested_recipe is not None:
-            requested_recipe = requested_recipe.strip()
-            if not requested_recipe:
-                raise TaichiRuntimeError(
-                    f"{_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV} must be a complete "
-                    "Graph reduction recipe ID"
-                )
         operation_start = len(self._runtime_graph_recipe_operations)
 
         source = append_typed_graph_reduction(
@@ -16036,7 +15794,7 @@ class GraphBuilder:
             absolute_tolerance=absolute_tolerance,
             relative_tolerance=relative_tolerance,
             label=label,
-            requested_recipe_id=requested_recipe,
+            requested_recipe_id=None,
         )
         source._recipe_source_key = (
             f"graph_reduction:{len(self._graph_reduction_sources)}"
@@ -16072,14 +15830,6 @@ class GraphBuilder:
             append_graph_segmented_scan,
         )
 
-        requested_recipe = os.environ.get(_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV)
-        if requested_recipe is not None:
-            requested_recipe = requested_recipe.strip()
-            if not requested_recipe:
-                raise TaichiRuntimeError(
-                    f"{_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV} must be a "
-                    "complete Graph native-algorithm recipe ID"
-                )
         source = append_graph_segmented_scan(
             self,
             values,
@@ -16087,7 +15837,7 @@ class GraphBuilder:
             output,
             inclusive=inclusive,
             op=op,
-            requested_recipe_id=requested_recipe,
+            requested_recipe_id=None,
         )
         source._recipe_source_key = (
             f"native_algorithm:{len(self._graph_native_algorithm_sources)}"
@@ -17643,10 +17393,11 @@ class _QualifiedFusionRuntimeSelector:
         self._last_entry_id = None
 
     @classmethod
-    def from_environment(cls, space):
+    def from_environment(cls, spec):
         path = os.environ.get(_INTERNAL_FUSION_QUALIFICATION_ENV, "").strip()
         if not path:
             return None
+        space = spec.executable_optimization_space
         # Runtime auto-selection currently has CUDA performance evidence only.
         # CPU/Vulkan may still materialize recipes explicitly for correctness
         # qualification, but must not consume CUDA admission records.
@@ -17820,7 +17571,7 @@ class Graph:
             None
             if getattr(self._spec, "_disable_qualified_fusion_selector", False)
             else _QualifiedFusionRuntimeSelector.from_environment(
-                self._spec.executable_optimization_space
+                self._spec
             )
         )
         self._instances = {}
@@ -19088,105 +18839,6 @@ class Graph:
         with self._lifecycle_lock:
             self._check_runtime_valid()
             return self._spec.executable_optimization_space
-
-    @property
-    def _compileiq_executable_optimization_space(self):
-        """Return the legacy V1 analysis view; new searches use recipe_catalog()."""
-
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            if self._workspace_lane_capacity != 1:
-                return self._spec.executable_optimization_space
-            return self._spec.compileiq_executable_optimization_space()
-
-    def _complete_recipe_family_status(self, family):
-        catalog = self.definition.recipe_catalog()
-        if any(
-            fragment.provider_metadata.get("family_selection", {}).get("family")
-            == family
-            for fragment in catalog.fragments
-        ):
-            return "complete_recipe_domain"
-        if family == "graph_memory":
-            sources = self._spec._graph_memory_sources
-            if not sources:
-                return "not_applicable"
-            failures = tuple(
-                source.candidate_failure
-                for source in sources
-                if source.candidate_failure
-            )
-            if failures:
-                return "candidate_rejected:" + "; ".join(failures)
-            return "definition_out_of_scope"
-        if family == "graph_reduction":
-            return (
-                "definition_out_of_scope"
-                if self._spec._graph_reduction_sources
-                else "not_applicable"
-            )
-        if family == "native_algorithm":
-            return (
-                "definition_out_of_scope"
-                if self._spec._graph_native_algorithm_sources
-                else "not_applicable"
-            )
-        if family == "bounded_execution":
-            _, _, status = _graph_bounded_recipe_scope(self._spec.pipeline_definition)
-            return status
-        raise ValueError(f"unknown complete Graph recipe family {family!r}")
-
-    @property
-    def _compileiq_graph_memory_status(self):
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            if self._workspace_lane_capacity != 1:
-                return "workspace_lane_scope_rejected"
-            return self._complete_recipe_family_status("graph_memory")
-
-    @property
-    def _compileiq_graph_reduction_status(self):
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            if self._workspace_lane_capacity != 1:
-                return "workspace_lane_scope_rejected"
-            return self._complete_recipe_family_status("graph_reduction")
-
-    @property
-    def _compileiq_graph_native_algorithm_status(self):
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            if self._workspace_lane_capacity != 1:
-                return "workspace_lane_scope_rejected"
-            return self._complete_recipe_family_status("native_algorithm")
-
-    @property
-    def _compileiq_graph_bounded_status(self):
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            if self._workspace_lane_capacity != 1:
-                return "workspace_lane_scope_rejected"
-            return self._complete_recipe_family_status("bounded_execution")
-
-    @property
-    def _compileiq_map_materialization_available(self):
-        """Whether exact source groups have one unambiguous native builder."""
-
-        with self._lifecycle_lock:
-            self._check_runtime_valid()
-            return bool(
-                self._workspace_lane_capacity == 1
-                and not self._spec.native_count
-                and not self._spec.structured_control_count
-                and not self._spec.observation_count
-                and not self._spec.fixed_runtime_args
-                and not self._spec.temporary_actions
-                and not self._spec.lifetime_leases
-                and len(self._spec.nodes) == 1
-                and isinstance(self._spec.nodes[0], _CompiledCGraphNode)
-                and isinstance(self._spec.nodes[0].ir_node, SequentialRegion)
-                and self._spec._aot_graph_builder is not None
-            )
 
     @property
     def _qualified_fusion_stats(self):

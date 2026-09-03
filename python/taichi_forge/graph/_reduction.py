@@ -19,7 +19,6 @@ from taichi_forge.graph._optimization import _GraphReductionRecipeManifest
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
-_INTERNAL_GRAPH_REDUCTION_RECIPE_ENV = "TAICHI_FORGE_INTERNAL_GRAPH_REDUCTION_RECIPE"
 _BLOCK_DIM = 256
 _ITEMS_PER_THREAD = 4
 _REDUCTION_STRATEGIES = (

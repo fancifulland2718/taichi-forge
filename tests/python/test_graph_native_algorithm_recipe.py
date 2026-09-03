@@ -56,7 +56,6 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
     output = ti.ndarray(taichi_dtype, shape=capacity)
     graph = _build(values, layout, output, inclusive=inclusive)
 
-    assert graph._compileiq_graph_native_algorithm_status == "complete_recipe_domain"
     search = compileiq_recipe_search(graph)
     manifest = search.manifest()
     assert manifest["recipe_kind"] == "graph_native_algorithm"
@@ -114,7 +113,6 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
     with graph.definition.materialization_context() as context:
         for recipe_id in search.recipe_ids:
             parameters = _parameters(search, recipe_id)
-            assert dict(search.worker_environment(parameters)) == {}
             with search.materialize(parameters, context=context) as materialized:
                 rebuilt = materialized.executor
                 semantic_graph_ids.add(rebuilt.definition.semantic_graph_id)
@@ -406,7 +404,6 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
     builder.keyed_reduce(keys, values, output)
     graph = builder.compile()
     search = compileiq_recipe_search(graph)
-    assert graph._compileiq_graph_native_algorithm_status == "complete_recipe_domain"
     assert len(search.recipe_ids) == 2
     recipes = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids

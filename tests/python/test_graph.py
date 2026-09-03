@@ -2708,13 +2708,10 @@ def test_internal_map_fusion_recipe_overrides_legacy_auto_gate(monkeypatch):
 
     monkeypatch.setattr(ti_core, "GraphBuilder", ProbeBuilder)
     monkeypatch.setenv("TI_GRAPH_TWO_MAP_COMPOSER", "1")
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "baseline")
-    assert not _new_runtime_graph_builder().enabled
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "pair")
-    assert _new_runtime_graph_builder().enabled
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", "invalid")
+    assert not _new_runtime_graph_builder(map_recipe="baseline").enabled
+    assert _new_runtime_graph_builder(map_recipe="pair").enabled
     with pytest.raises(TaichiRuntimeError, match="must be baseline"):
-        _new_runtime_graph_builder()
+        _new_runtime_graph_builder(map_recipe="invalid")
 
 
 @pytest.mark.parametrize(
@@ -2723,10 +2720,8 @@ def test_internal_map_fusion_recipe_overrides_legacy_auto_gate(monkeypatch):
 )
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_bounded_map_composer_materializes_three_and_four_stage_groups(
-    monkeypatch, recipe_name, expected_group_size, expected_physical
+    recipe_name, expected_group_size, expected_physical
 ):
-    monkeypatch.setenv("TAICHI_FORGE_INTERNAL_MAP_FUSION", recipe_name)
-
     @ti.kernel
     def stage_one(
         source: ti.types.ndarray(dtype=ti.i32, ndim=1),
@@ -2766,7 +2761,7 @@ def test_bounded_map_composer_materializes_three_and_four_stage_groups(
         name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
         for name in ("source", "first", "second", "third", "output")
     }
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe=recipe_name)
     builder.dispatch(stage_one, symbolic["source"], symbolic["first"])
     builder.dispatch(
         stage_two,
@@ -4867,19 +4862,15 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
     if ti.lang.impl.current_cfg().arch != ti.cpu:
         assert graph._debug_info["nodes"][0]["nested_native_upgrade_eligible"]
     if ti.lang.impl.current_cfg().arch == ti.cuda:
-        optimization = graph._executable_optimization_space
         if dict(ti_core.cuda_bounded_dispatch_probe()).get(
             "exact_device_grid_available", False
         ):
-            assert tuple(
-                spec.control_recipe_id
-                for spec in (optimization.baseline, *optimization.candidates)
-            ) == (
+            assert graph._spec.control_recipe_ids == (
                 "control:cuda_nested_device_update:v1",
                 "control:cuda_nested_masked_bounded:v1",
             )
         else:
-            assert not optimization.baseline.control_recipe_id
+            assert not graph._spec.control_recipe_ids
         assert graph._graph_stats[0]["last_path"] in (
             "cuda_device_update_nested_capture",
             "cuda_device_update_nested_replay",

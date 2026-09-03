@@ -10,12 +10,8 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
-_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
-
-
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map_recipe_identity_tracks_source_kernel_code(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map2")
+def test_map_recipe_identity_tracks_source_kernel_code():
 
     @ti.kernel
     def producer_add(
@@ -48,7 +44,7 @@ def test_map_recipe_identity_tracks_source_kernel_code(monkeypatch):
     }
 
     def build(producer):
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe="map2")
         builder.dispatch(
             producer,
             symbolic["source"],
@@ -87,8 +83,7 @@ def test_map_recipe_identity_tracks_source_kernel_code(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map4")
+def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker():
 
     @ti.kernel
     def atomic_increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
@@ -98,7 +93,7 @@ def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker(monkeypatch):
     values_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1
     )
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map4")
     for _ in range(4):
         builder.dispatch(atomic_increment, values_arg)
     graph = builder.compile()
@@ -118,8 +113,7 @@ def test_augmented_pointwise_update_stays_an_atomic_fusion_blocker(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_barrier_preserving_phase_candidates_materialize_exact_groups(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "baseline")
+def test_barrier_preserving_phase_candidates_materialize_exact_groups():
     count = 257
 
     @ti.kernel
@@ -166,7 +160,7 @@ def test_barrier_preserving_phase_candidates_materialize_exact_groups(monkeypatc
         name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
         for name in ("source", "first", "second", "third", "output")
     }
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="baseline")
     builder.dispatch(pre_scale, symbolic["source"], symbolic["first"])
     builder.dispatch(pre_bias, symbolic["first"], symbolic["second"])
     builder.dispatch(scatter_atomic, symbolic["source"], symbolic["second"])
@@ -218,8 +212,7 @@ def test_barrier_preserving_phase_candidates_materialize_exact_groups(monkeypatc
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map4_fusion_preserves_runtime_alias_order(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map4")
+def test_map4_fusion_preserves_runtime_alias_order():
 
     @ti.kernel
     def stage_one(
@@ -255,7 +248,7 @@ def test_map4_fusion_preserves_runtime_alias_order(monkeypatch):
 
     left = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "left", ti.i32, ndim=1)
     right = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "right", ti.i32, ndim=1)
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map4")
     builder.dispatch(stage_one, left, right)
     builder.dispatch(stage_two, left, right)
     builder.dispatch(stage_three, left, right)
@@ -276,7 +269,7 @@ def test_map4_fusion_preserves_runtime_alias_order(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map4_physics_vector_chain_matches_unfused(monkeypatch):
+def test_map4_physics_vector_chain_matches_unfused():
     @ti.kernel
     def integrate_velocity(
         velocity: ti.types.ndarray(dtype=ti.f32, ndim=1),
@@ -327,8 +320,7 @@ def test_map4_physics_vector_chain_matches_unfused(monkeypatch):
     )
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             integrate_velocity,
             symbolic["velocity"],
@@ -402,7 +394,7 @@ def test_map4_physics_vector_chain_matches_unfused(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map4_particle_contact_chain_matches_unfused(monkeypatch):
+def test_map4_particle_contact_chain_matches_unfused():
     @ti.kernel
     def integrate_velocity(
         velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -508,8 +500,7 @@ def test_map4_particle_contact_chain_matches_unfused(monkeypatch):
     )
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             integrate_velocity,
             symbolic["velocity"],
@@ -590,7 +581,7 @@ def test_map4_particle_contact_chain_matches_unfused(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map4_dense_scalar_field_same_domain_matches_unfused(monkeypatch):
+def test_map4_dense_scalar_field_same_domain_matches_unfused():
     count = 4099
     source = ti.field(ti.i32, shape=count)
     first = ti.field(ti.i32, shape=count)
@@ -624,8 +615,7 @@ def test_map4_dense_scalar_field_same_domain_matches_unfused(monkeypatch):
             output[i] = third[i] - 5
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(stage_one)
         builder.dispatch(stage_two)
         builder.dispatch(stage_three)
@@ -657,7 +647,7 @@ def test_map4_dense_scalar_field_same_domain_matches_unfused(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map2_dense_vector_field_same_domain_matches_unfused(monkeypatch):
+def test_map2_dense_vector_field_same_domain_matches_unfused():
     count = 1021
     source = ti.Vector.field(3, ti.f32, shape=count)
     temporary = ti.Vector.field(3, ti.f32, shape=count)
@@ -679,8 +669,7 @@ def test_map2_dense_vector_field_same_domain_matches_unfused(monkeypatch):
             output[i] = temporary[i] * 0.5 - ti.Vector([0.5, 1.0, 1.5])
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(predict)
         builder.dispatch(apply)
         return builder.compile()
@@ -702,7 +691,7 @@ def test_map2_dense_vector_field_same_domain_matches_unfused(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_fused_dense_field_rejects_destroyed_snode_tree(monkeypatch):
+def test_fused_dense_field_rejects_destroyed_snode_tree():
     count = 257
     source = ti.field(ti.i32)
     temporary = ti.field(ti.i32)
@@ -721,8 +710,7 @@ def test_fused_dense_field_rejects_destroyed_snode_tree(monkeypatch):
         for i in range(count):
             output[i] = temporary[i] + 1
 
-    monkeypatch.setenv(_FUSION_ENV, "map2")
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map2")
     builder.dispatch(produce)
     builder.dispatch(consume)
     graph = builder.compile()
@@ -735,7 +723,7 @@ def test_fused_dense_field_rejects_destroyed_snode_tree(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_dense_field_cross_index_and_struct_for_stay_fusion_blockers(monkeypatch):
+def test_dense_field_cross_index_and_struct_for_stay_fusion_blockers():
     count = 257
     source = ti.field(ti.i32, shape=count)
     output = ti.field(ti.i32, shape=count)
@@ -751,8 +739,7 @@ def test_dense_field_cross_index_and_struct_for_stay_fusion_blockers(monkeypatch
             output[i] = source[i] + 1
 
     def build(kernel):
-        monkeypatch.setenv(_FUSION_ENV, "map2")
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe="map2")
         builder.dispatch(kernel)
         builder.dispatch(kernel)
         return builder.compile()
@@ -771,7 +758,7 @@ def test_dense_field_cross_index_and_struct_for_stay_fusion_blockers(monkeypatch
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda])
-def test_sparse_field_activation_stays_a_fusion_blocker(monkeypatch):
+def test_sparse_field_activation_stays_a_fusion_blocker():
     count = 256
     values = ti.field(ti.i32)
     block = ti.root.pointer(ti.i, count // 16)
@@ -782,8 +769,7 @@ def test_sparse_field_activation_stays_a_fusion_blocker(monkeypatch):
         for i in range(count):
             values[i] = i
 
-    monkeypatch.setenv(_FUSION_ENV, "map2")
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map2")
     builder.dispatch(activate_and_store)
     builder.dispatch(activate_and_store)
     graph = builder.compile()
@@ -793,7 +779,7 @@ def test_sparse_field_activation_stays_a_fusion_blocker(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_multicomponent_dynamic_lane_is_row_local_and_fuses(monkeypatch):
+def test_multicomponent_dynamic_lane_is_row_local_and_fuses():
     @ti.kernel
     def gather_component(
         source: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -832,8 +818,7 @@ def test_multicomponent_dynamic_lane_is_row_local_and_fuses(monkeypatch):
     }
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             gather_component,
             symbolic["source"],
@@ -893,7 +878,7 @@ def test_multicomponent_dynamic_lane_is_row_local_and_fuses(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers(monkeypatch):
+def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers():
     @ti.kernel
     def dynamic_leading(
         source: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -925,8 +910,7 @@ def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers(monkeypatch)
     count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
 
     def build(kernel, *args):
-        monkeypatch.setenv(_FUSION_ENV, "map2")
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe="map2")
         builder.dispatch(kernel, *args)
         builder.dispatch(kernel, *args)
         return builder.compile()
@@ -942,8 +926,7 @@ def test_dynamic_leading_and_cross_row_indices_stay_fusion_blockers(monkeypatch)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_map4_graph_rejects_active_ad_without_poisoning_replay(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map4")
+def test_map4_graph_rejects_active_ad_without_poisoning_replay():
 
     @ti.kernel
     def add_one(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
@@ -953,7 +936,7 @@ def test_map4_graph_rejects_active_ad_without_poisoning_replay(monkeypatch):
     values_arg = ti.graph.Arg(
         ti.graph.ArgKind.NDARRAY, "values", ti.f32, ndim=1
     )
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map4")
     for _ in range(4):
         builder.dispatch(add_one, values_arg)
     graph = builder.compile()
@@ -973,8 +956,7 @@ def test_map4_graph_rejects_active_ad_without_poisoning_replay(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_map4_replay_memory_identity_and_reset_lifecycle(monkeypatch):
-    monkeypatch.setenv(_FUSION_ENV, "map4")
+def test_map4_replay_memory_identity_and_reset_lifecycle():
 
     @ti.kernel
     def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
@@ -986,7 +968,7 @@ def test_map4_replay_memory_identity_and_reset_lifecycle(monkeypatch):
     )
 
     def build():
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe="map4")
         for _ in range(4):
             builder.dispatch(add_one, values_arg)
         return builder.compile()

@@ -36,9 +36,6 @@ def _build_reduction_graph(
 def test_graph_reduction_compileiq_materializes_complete_typed_domain():
     count = 4097
     graph = _build_reduction_graph(ti.i32, count)
-    assert (
-        graph._compileiq_graph_reduction_status == "complete_recipe_domain"
-    ), graph._compileiq_graph_reduction_status
     search = compileiq_recipe_search(graph)
 
     assert search.manifest()["recipe_kind"] == "graph_reduction"
@@ -121,7 +118,6 @@ def test_graph_reduction_compileiq_materializes_complete_typed_domain():
             "domain_fingerprint": search.domain_fingerprint,
             "recipe_id": recipe_id,
         }
-        assert dict(search.worker_environment(parameters)) == {}
         materialized = search.materialize(parameters, context=context)
         search.verify_materialized_graph(parameters, materialized)
         assert materialized.manifest.recipe_id == recipe_id

@@ -4,9 +4,6 @@ import taichi_forge as ti
 from tests import test_utils
 
 
-_FUSION_ENV = "TAICHI_FORGE_INTERNAL_MAP_FUSION"
-
-
 def _ndarray_args(names, dtype, ndim):
     return {
         name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, dtype, ndim=ndim)
@@ -15,7 +12,7 @@ def _ndarray_args(names, dtype, ndim):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_rigid_integrate_orientation_and_aabb_map3(monkeypatch):
+def test_rigid_integrate_orientation_and_aabb_map3():
     @ti.kernel
     def integrate_velocity(
         linear_velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -126,8 +123,7 @@ def test_rigid_integrate_orientation_and_aabb_map3(monkeypatch):
     symbolic["count"] = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             integrate_velocity,
             symbolic["linear_velocity"],
@@ -208,7 +204,7 @@ def test_rigid_integrate_orientation_and_aabb_map3(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_mpm_particle_local_state_and_boundary_map4(monkeypatch):
+def test_mpm_particle_local_state_and_boundary_map4():
     @ti.kernel
     def update_deformation(
         deformation: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -294,8 +290,7 @@ def test_mpm_particle_local_state_and_boundary_map4(monkeypatch):
     }
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             update_deformation,
             symbolic["deformation"],
@@ -383,7 +378,7 @@ def test_mpm_particle_local_state_and_boundary_map4(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_fem_node_integrate_and_fixed_boundary_map3(monkeypatch):
+def test_fem_node_integrate_and_fixed_boundary_map3():
     @ti.kernel
     def integrate_velocity(
         velocity: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -434,8 +429,7 @@ def test_fem_node_integrate_and_fixed_boundary_map3(monkeypatch):
     symbolic["count"] = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             integrate_velocity,
             symbolic["velocity"],
@@ -501,7 +495,7 @@ def test_fem_node_integrate_and_fixed_boundary_map3(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_pbd_predict_and_precomputed_correction_apply_map4(monkeypatch):
+def test_pbd_predict_and_precomputed_correction_apply_map4():
     @ti.kernel
     def predict(
         position: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -564,8 +558,7 @@ def test_pbd_predict_and_precomputed_correction_apply_map4(monkeypatch):
     symbolic["count"] = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
 
     def build(recipe):
-        monkeypatch.setenv(_FUSION_ENV, recipe)
-        builder = ti.graph.GraphBuilder()
+        builder = ti.graph.GraphBuilder(_map_recipe=recipe)
         builder.dispatch(
             predict,
             symbolic["position"],
@@ -646,7 +639,7 @@ def test_pbd_predict_and_precomputed_correction_apply_map4(monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
-def test_neighbor_constraint_projection_is_not_a_fusion_candidate(monkeypatch):
+def test_neighbor_constraint_projection_is_not_a_fusion_candidate():
     @ti.kernel
     def project_edges(
         predicted: ti.types.ndarray(dtype=ti.f32, ndim=2),
@@ -663,8 +656,7 @@ def test_neighbor_constraint_projection_is_not_a_fusion_candidate(monkeypatch):
     neighbor = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "neighbor", ti.i32, ndim=1)
     output = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=2)
     count = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "count", ti.i32)
-    monkeypatch.setenv(_FUSION_ENV, "map2")
-    builder = ti.graph.GraphBuilder()
+    builder = ti.graph.GraphBuilder(_map_recipe="map2")
     builder.dispatch(project_edges, predicted, neighbor, output, count)
     builder.dispatch(project_edges, predicted, neighbor, output, count)
     graph = builder.compile()

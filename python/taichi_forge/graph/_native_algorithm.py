@@ -39,9 +39,6 @@ from taichi_forge.graph._segmented_scan_kernels import (
     generated_segment_chunk_kernel,
 )
 
-_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE_ENV = (
-    "TAICHI_FORGE_INTERNAL_GRAPH_NATIVE_ALGORITHM_RECIPE"
-)
 _SERIAL_STRATEGY = "segment_local_serial"
 _GLOBAL_STRATEGY = "global_scan_segment_correction"
 _WARP_STRATEGY = "warp_chunked_carry"
@@ -209,7 +206,6 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         builder = GraphBuilder(
             _capture_recipe_sources=False,
             _explicit_map_source_groups=(),
-            _ignore_recipe_environment=True,
         )
         bindings = {
             "values": self._source.values,
@@ -294,7 +290,6 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         builder = GraphBuilder(
             _capture_recipe_sources=False,
             _explicit_map_source_groups=(),
-            _ignore_recipe_environment=True,
         )
         builder.dispatch(gather, scanned, offsets, bases)
         builder.dispatch(correct, values, scanned, offsets, bases)

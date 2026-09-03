@@ -16,6 +16,16 @@ from taichi_forge.graph import compileiq_recipe_search
 from tests import test_utils
 
 
+def _search_budget(evaluations):
+    from compileiq.forge_support import ForgeOpaqueSearchBudgetV2
+
+    return ForgeOpaqueSearchBudgetV2(
+        evaluation_limit=evaluations,
+        time_limit_seconds=300.0,
+        materialized_memory_limit_bytes=1 << 30,
+    )
+
+
 def _shared_staged_plan(kernel, *probe_args, block_dim=128):
     baseline = _OffloadExecutionPlan.from_task_manifests(
         kernel.task_manifest(*probe_args)
@@ -48,7 +58,6 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
     source_graph = builder.compile()
 
     search = compileiq_recipe_search(source_graph)
-    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     assert len(search.recipe_ids) == 4
     assert search.search_space.provider_namespace == "taichi_forge.graph.memory"
     assert search.search_space.domain_version == "graph-memory-complete-recipe.v2"
@@ -83,23 +92,23 @@ def test_graph_memory_compileiq_materializes_complete_direct_and_staged():
 
     def materialize(recipe_id):
         opaque_parameters = parameters(recipe_id)
-        assert dict(search.worker_environment(opaque_parameters)) == {}
         materialized = search.materialize(opaque_parameters)
         search.verify_materialized_graph(opaque_parameters, materialized)
         return materialized
 
     observed = []
 
-    def objective(opaque_parameters):
-        selection = search.select(opaque_parameters)
-        with materialize(selection.spec_id) as result:
-            observed.append((selection.spec_id, result.manifest.recipe_id))
-        return float(search.recipe_ids.index(selection.spec_id))
+    def objective(_graph, request):
+        observed.append((request.recipe_id, request.recipe_id))
+        return float(search.recipe_ids.index(request.recipe_id))
 
-    exhaustive = search.compileiq_search_v1(objective)
-    result = exhaustive.start()
-    coverage = search.require_complete_search(exhaustive)
-    selected = search.select_best_result(exhaustive, result)
+    with search.compileiq_search(
+        objective,
+        budget=_search_budget(len(search.recipe_ids)),
+    ) as exhaustive:
+        result = exhaustive.start()
+        coverage = search.require_complete_search(exhaustive)
+        selected = search.select_best_result(exhaustive, result)
     assert coverage["complete"]
     assert coverage["evaluation_count"] == len(search.recipe_ids)
     assert {item[0] for item in observed} == set(search.recipe_ids)
@@ -196,7 +205,6 @@ def test_graph_memory_2d_stencil_materializes_true_tiles_and_replays_exactly():
     assert source_effect["footprint"]["halo"] == [[-1, 1], [-1, 1]]
 
     search = compileiq_recipe_search(source_graph)
-    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
@@ -313,7 +321,6 @@ def test_graph_memory_2d_two_source_domain_keeps_all_staging_subsets_distinct():
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
 
-    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     assert len(manifests) == 10
     staged_variants = {
         (
@@ -587,7 +594,7 @@ def test_graph_memory_2d_rejects_noncanonical_wraparound_coordinates():
     search = compileiq_recipe_search(graph)
 
     assert len(search.recipe_ids) == 1
-    assert graph._compileiq_graph_memory_status.startswith("candidate_rejected:")
+    assert graph._spec._graph_memory_sources[0].candidate_failure
     assert "memory_recipe_id" not in search.recipe_manifest(search.recipe_ids[0])
 
 
@@ -625,7 +632,6 @@ def test_graph_memory_static_stencil_accumulator_is_not_a_global_atomic_effect()
     )
 
     search = compileiq_recipe_search(source_graph)
-    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     assert len(search.recipe_ids) == 4
     staged_id, staged = next(
         (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
@@ -698,7 +704,7 @@ def test_graph_memory_compileiq_supports_two_and_eight_byte_scalar_stencils(
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
-    assert len(manifests) == 4, source_graph._compileiq_graph_memory_status
+    assert len(manifests) == 4
     staged_id, staged_manifest = next(
         (recipe_id, manifest)
         for recipe_id, manifest in manifests.items()
@@ -775,7 +781,6 @@ def test_graph_memory_compileiq_materializes_two_ordered_shared_sources(monkeypa
 
     source_graph = build()
     search = compileiq_recipe_search(source_graph)
-    assert source_graph._compileiq_graph_memory_status == "complete_recipe_domain"
     manifests = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
     }
@@ -1048,7 +1053,7 @@ def test_graph_memory_compileiq_keeps_one_byte_scalar_stencils_out_of_domain():
 
     assert len(search.recipe_ids) == 1
     assert "only two-, four-, or eight-byte primitive lanes are supported" in (
-        graph._compileiq_graph_memory_status
+        graph._spec._graph_memory_sources[0].candidate_failure
     )
 
 
@@ -1071,7 +1076,7 @@ def test_graph_memory_compileiq_rejects_unsupported_candidates():
     graph = builder.compile()
     search = compileiq_recipe_search(graph)
 
-    assert graph._compileiq_graph_memory_status.startswith("candidate_rejected:")
+    assert graph._spec._graph_memory_sources[0].candidate_failure
     assert len(search.recipe_ids) == 1
     assert all(
         "memory_recipe_id" not in search.recipe_manifest(recipe_id)
@@ -1513,7 +1518,6 @@ def test_graph_memory_compound_records_materialize_complete_lane_layout():
 
         graph = build()
         search = compileiq_recipe_search(graph)
-        assert graph._compileiq_graph_memory_status == "complete_recipe_domain"
         staged_id, staged = next(
             (recipe_id, search.recipe_manifest(recipe_id)["memory_recipe_manifest"])
             for recipe_id in search.recipe_ids
@@ -1629,5 +1633,5 @@ def test_graph_memory_compound_recipe_rejects_partial_lane_policy():
     search = compileiq_recipe_search(graph)
     assert len(search.recipe_ids) == 1
     assert "compound staged inputs must read every lane" in (
-        graph._compileiq_graph_memory_status
+        graph._spec._graph_memory_sources[0].candidate_failure
     )

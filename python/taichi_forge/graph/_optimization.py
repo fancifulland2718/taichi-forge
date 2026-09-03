@@ -11,7 +11,6 @@ from taichi_forge.graph._ir import graph_ir_to_dict
 
 _GRAPH_FUSION_QUALIFICATION_SCHEMA = "taichi_forge.graph_fusion_qualification.v1"
 _GRAPH_FUSION_QUALIFICATION_MAX_BYTES = 4 * 1024 * 1024
-_INTERNAL_STRUCTURED_CONTROL_ENV = "TAICHI_FORGE_INTERNAL_STRUCTURED_CONTROL_RECIPE"
 _CUDA_CONDITIONAL_CONTROL_RECIPE_ID = "control:cuda_conditional_graph:v1"
 _CUDA_MASKED_CONTROL_RECIPE_ID = "control:cuda_masked_bounded_graph:v1"
 _CUDA_CONTROL_RECIPE_IDS = (
@@ -1417,22 +1416,19 @@ class _GraphNativeAlgorithmRecipeManifest:
 
 @dataclass(frozen=True)
 class _ExecutableOptimizationSpec:
+    """Qualified ordinary-runtime map-fusion identity.
+
+    Complete Graph families are represented by recipe fragments and never
+    enter this runtime-admission-only structure.
+    """
+
     spec_id: str
     semantic_plan_id: str
     backend: str
     fusion_recipe_ids: tuple
     compilation_identity: str
     execution_identity: str
-    control_recipe_id: str = ""
     fusion_source_groups: tuple = ()
-    memory_recipe_id: str = ""
-    memory_recipe_manifest: object = None
-    bounded_recipe_id: str = ""
-    bounded_recipe_manifest: object = None
-    reduction_recipe_id: str = ""
-    reduction_recipe_manifest: object = None
-    native_algorithm_recipe_id: str = ""
-    native_algorithm_recipe_manifest: object = None
 
     def __post_init__(self):
         if not self.spec_id.startswith("executable:"):
@@ -1467,143 +1463,12 @@ class _ExecutableOptimizationSpec:
             if claimed_dispatches.intersection(group):
                 raise ValueError("fusion source groups must be disjoint")
             claimed_dispatches.update(group)
-        if not isinstance(self.control_recipe_id, str):
-            raise ValueError("control recipe ID must be a string")
-        if (
-            self.control_recipe_id
-            and self.control_recipe_id not in _CUDA_STRUCTURED_CONTROL_RECIPE_IDS
-        ):
-            raise ValueError("control recipe ID is unsupported")
-        if self.control_recipe_id and self.fusion_recipe_ids:
-            raise ValueError(
-                "executable specs cannot combine control and fusion recipes"
-            )
-        if self.control_recipe_id and self.fusion_source_groups:
-            raise ValueError(
-                "structured-control specs cannot contain fusion source groups"
-            )
-        if bool(self.memory_recipe_id) != bool(self.memory_recipe_manifest):
-            raise ValueError(
-                "memory recipe ID and complete manifest must be provided together"
-            )
-        if self.memory_recipe_manifest is not None:
-            if not isinstance(self.memory_recipe_manifest, _GraphMemoryRecipeManifest):
-                raise TypeError(
-                    "memory recipe manifest must be a _GraphMemoryRecipeManifest"
-                )
-            if self.memory_recipe_id != self.memory_recipe_manifest.recipe_id:
-                raise ValueError("memory recipe ID does not match its manifest")
-            if self.control_recipe_id or self.fusion_recipe_ids:
-                raise ValueError(
-                    "executable specs cannot combine memory with control or fusion"
-                )
-            if self.fusion_source_groups:
-                raise ValueError(
-                    "GraphMemory specs cannot contain fusion source groups"
-                )
-        if bool(self.bounded_recipe_id) != bool(self.bounded_recipe_manifest):
-            raise ValueError(
-                "bounded recipe ID and complete manifest must be provided together"
-            )
-        if self.bounded_recipe_manifest is not None:
-            if not isinstance(
-                self.bounded_recipe_manifest,
-                _GraphBoundedExecutionRecipeManifest,
-            ):
-                raise TypeError(
-                    "bounded recipe manifest must be a "
-                    "_GraphBoundedExecutionRecipeManifest"
-                )
-            if self.bounded_recipe_id != self.bounded_recipe_manifest.recipe_id:
-                raise ValueError("bounded recipe ID does not match its manifest")
-            if (
-                self.control_recipe_id
-                or self.fusion_recipe_ids
-                or self.memory_recipe_id
-                or self.fusion_source_groups
-            ):
-                raise ValueError(
-                    "executable specs cannot combine bounded execution with "
-                    "control, fusion, or GraphMemory"
-                )
-        if bool(self.reduction_recipe_id) != bool(self.reduction_recipe_manifest):
-            raise ValueError(
-                "reduction recipe ID and complete manifest must be provided together"
-            )
-        if self.reduction_recipe_manifest is not None:
-            if not isinstance(
-                self.reduction_recipe_manifest,
-                _GraphReductionRecipeManifest,
-            ):
-                raise TypeError(
-                    "reduction recipe manifest must be a "
-                    "_GraphReductionRecipeManifest"
-                )
-            if self.reduction_recipe_id != self.reduction_recipe_manifest.recipe_id:
-                raise ValueError("reduction recipe ID does not match its manifest")
-            if (
-                self.control_recipe_id
-                or self.fusion_recipe_ids
-                or self.memory_recipe_id
-                or self.bounded_recipe_id
-                or self.fusion_source_groups
-            ):
-                raise ValueError(
-                    "executable specs cannot combine Graph reduction with control, "
-                    "fusion, GraphMemory, or bounded execution"
-                )
-        if bool(self.native_algorithm_recipe_id) != bool(
-            self.native_algorithm_recipe_manifest
-        ):
-            raise ValueError(
-                "native-algorithm recipe ID and manifest must be provided together"
-            )
-        if self.native_algorithm_recipe_manifest is not None:
-            if not isinstance(
-                self.native_algorithm_recipe_manifest,
-                _GraphNativeAlgorithmRecipeManifest,
-            ):
-                raise TypeError(
-                    "native-algorithm recipe manifest must be a "
-                    "_GraphNativeAlgorithmRecipeManifest"
-                )
-            if (
-                self.native_algorithm_recipe_id
-                != self.native_algorithm_recipe_manifest.recipe_id
-            ):
-                raise ValueError(
-                    "native-algorithm recipe ID does not match its manifest"
-                )
-            if (
-                self.control_recipe_id
-                or self.fusion_recipe_ids
-                or self.memory_recipe_id
-                or self.bounded_recipe_id
-                or self.reduction_recipe_id
-                or self.fusion_source_groups
-            ):
-                raise ValueError(
-                    "executable specs cannot combine a Graph native algorithm "
-                    "with another recipe axis"
-                )
         if not self.compilation_identity or not self.execution_identity:
             raise ValueError("executable optimization identities are required")
 
     def to_dict(self):
-        value = {
-            "schema_version": (
-                6
-                if self.native_algorithm_recipe_id
-                else (
-                    5
-                    if self.reduction_recipe_id
-                    else (
-                        4
-                        if self.bounded_recipe_id
-                        else (3 if self.memory_recipe_id else 2)
-                    )
-                )
-            ),
+        return {
+            "schema_version": 2,
             "spec_id": self.spec_id,
             "semantic_plan_id": self.semantic_plan_id,
             "backend": self.backend,
@@ -1612,27 +1477,6 @@ class _ExecutableOptimizationSpec:
             "execution_identity": self.execution_identity,
             "fusion_source_groups": self.fusion_source_groups,
         }
-        # Preserve the exact v1 map-fusion manifest and identities when this
-        # optional physical axis is absent.
-        if self.control_recipe_id:
-            value["control_recipe_id"] = self.control_recipe_id
-        if self.memory_recipe_id:
-            value["memory_recipe_id"] = self.memory_recipe_id
-            value["memory_recipe_manifest"] = self.memory_recipe_manifest.to_dict()
-        if self.bounded_recipe_id:
-            value["bounded_recipe_id"] = self.bounded_recipe_id
-            value["bounded_recipe_manifest"] = self.bounded_recipe_manifest.to_dict()
-        if self.reduction_recipe_id:
-            value["reduction_recipe_id"] = self.reduction_recipe_id
-            value["reduction_recipe_manifest"] = (
-                self.reduction_recipe_manifest.to_dict()
-            )
-        if self.native_algorithm_recipe_id:
-            value["native_algorithm_recipe_id"] = self.native_algorithm_recipe_id
-            value["native_algorithm_recipe_manifest"] = (
-                self.native_algorithm_recipe_manifest.to_dict()
-            )
-        return value
 
 
 @dataclass(frozen=True)
@@ -2063,13 +1907,8 @@ def _make_spec(
     semantic_plan_id,
     backend,
     fusion_recipe_ids,
-    control_recipe_id="",
     *,
     fusion_source_groups=(),
-    memory_recipe_manifest=None,
-    bounded_recipe_manifest=None,
-    reduction_recipe_manifest=None,
-    native_algorithm_recipe_manifest=None,
 ):
     fusion_recipe_ids = tuple(fusion_recipe_ids)
     fusion_source_groups = tuple(tuple(group) for group in fusion_source_groups)
@@ -2093,66 +1932,17 @@ def _make_spec(
         "fusion_recipe_ids": fusion_recipe_ids,
         "fusion_source_groups": fusion_source_groups,
     }
-    if control_recipe_id:
-        compilation_payload["control_recipe_id"] = control_recipe_id
-    memory_recipe_id = ""
-    if memory_recipe_manifest is not None:
-        if not isinstance(memory_recipe_manifest, _GraphMemoryRecipeManifest):
-            raise TypeError(
-                "memory_recipe_manifest must be a _GraphMemoryRecipeManifest"
-            )
-        memory_recipe_id = memory_recipe_manifest.recipe_id
-        compilation_payload["memory_recipe"] = memory_recipe_manifest.to_dict()
-    bounded_recipe_id = ""
-    if bounded_recipe_manifest is not None:
-        if not isinstance(
-            bounded_recipe_manifest,
-            _GraphBoundedExecutionRecipeManifest,
-        ):
-            raise TypeError(
-                "bounded_recipe_manifest must be a "
-                "_GraphBoundedExecutionRecipeManifest"
-            )
-        bounded_recipe_id = bounded_recipe_manifest.recipe_id
-        compilation_payload["bounded_recipe"] = bounded_recipe_manifest.to_dict()
-    reduction_recipe_id = ""
-    if reduction_recipe_manifest is not None:
-        if not isinstance(
-            reduction_recipe_manifest,
-            _GraphReductionRecipeManifest,
-        ):
-            raise TypeError(
-                "reduction_recipe_manifest must be a " "_GraphReductionRecipeManifest"
-            )
-        reduction_recipe_id = reduction_recipe_manifest.recipe_id
-        compilation_payload["reduction_recipe"] = reduction_recipe_manifest.to_dict()
-    native_algorithm_recipe_id = ""
-    if native_algorithm_recipe_manifest is not None:
-        if not isinstance(
-            native_algorithm_recipe_manifest,
-            _GraphNativeAlgorithmRecipeManifest,
-        ):
-            raise TypeError(
-                "native_algorithm_recipe_manifest must be a "
-                "_GraphNativeAlgorithmRecipeManifest"
-            )
-        native_algorithm_recipe_id = native_algorithm_recipe_manifest.recipe_id
-        compilation_payload["native_algorithm_recipe"] = (
-            native_algorithm_recipe_manifest.to_dict()
-        )
     compilation_identity = _canonical_hash(compilation_payload)
     execution_payload = {
         "compilation_identity": compilation_identity,
         "physical_dispatch_delta": -dispatch_reduction,
         "fusion_source_groups": fusion_source_groups,
-        "memory_recipe_id": memory_recipe_id,
-        "bounded_recipe_id": bounded_recipe_id,
-        "reduction_recipe_id": reduction_recipe_id,
+        # Preserve qualified map-fusion identities emitted before complete
+        # Graph families moved out of this legacy-named runtime structure.
+        "memory_recipe_id": "",
+        "bounded_recipe_id": "",
+        "reduction_recipe_id": "",
     }
-    # Keep every established Graph recipe identity byte-for-byte stable when
-    # the optional native-algorithm axis is absent.
-    if native_algorithm_recipe_id:
-        execution_payload["native_algorithm_recipe_id"] = native_algorithm_recipe_id
     execution_identity = _canonical_hash(execution_payload)
     return _ExecutableOptimizationSpec(
         spec_id=f"executable:{compilation_identity[:24]}",
@@ -2161,16 +1951,7 @@ def _make_spec(
         fusion_recipe_ids=fusion_recipe_ids,
         compilation_identity=compilation_identity,
         execution_identity=execution_identity,
-        control_recipe_id=control_recipe_id,
         fusion_source_groups=fusion_source_groups,
-        memory_recipe_id=memory_recipe_id,
-        memory_recipe_manifest=memory_recipe_manifest,
-        bounded_recipe_id=bounded_recipe_id,
-        bounded_recipe_manifest=bounded_recipe_manifest,
-        reduction_recipe_id=reduction_recipe_id,
-        reduction_recipe_manifest=reduction_recipe_manifest,
-        native_algorithm_recipe_id=native_algorithm_recipe_id,
-        native_algorithm_recipe_manifest=native_algorithm_recipe_manifest,
     )
 
 
@@ -2204,331 +1985,12 @@ def _build_executable_optimization_space(
     fusion_plan,
     backend,
     *,
-    control_recipe_ids=(),
-    selected_control_recipe_id="",
-    memory_recipe_manifests=(),
-    selected_memory_recipe_id="",
-    bounded_recipe_manifests=(),
-    selected_bounded_recipe_id="",
-    reduction_recipe_manifests=(),
-    selected_reduction_recipe_id="",
-    native_algorithm_recipe_manifests=(),
-    selected_native_algorithm_recipe_id="",
     semantic_root=None,
 ):
     semantic_digest = _canonical_hash(
         graph_ir_to_dict(root if semantic_root is None else semantic_root)
     )
     semantic_plan_id = f"semantic-plan:{semantic_digest[:24]}"
-    control_recipe_ids = tuple(control_recipe_ids)
-    memory_recipe_manifests = tuple(memory_recipe_manifests)
-    bounded_recipe_manifests = tuple(bounded_recipe_manifests)
-    reduction_recipe_manifests = tuple(reduction_recipe_manifests)
-    native_algorithm_recipe_manifests = tuple(native_algorithm_recipe_manifests)
-    if native_algorithm_recipe_manifests:
-        if (
-            control_recipe_ids
-            or memory_recipe_manifests
-            or bounded_recipe_manifests
-            or reduction_recipe_manifests
-        ):
-            raise ValueError(
-                "Graph native-algorithm recipes cannot combine with another axis"
-            )
-        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
-            raise ValueError(
-                "Graph native-algorithm recipes cannot combine with fusion"
-            )
-        if len(native_algorithm_recipe_manifests) != 2:
-            raise ValueError(
-                "the initial Graph native-algorithm domain requires two recipes"
-            )
-        algorithms = {
-            manifest.algorithm for manifest in native_algorithm_recipe_manifests
-        }
-        strategies = {
-            manifest.strategy for manifest in native_algorithm_recipe_manifests
-        }
-        scopes = {
-            _canonical_json(manifest.semantics)
-            for manifest in native_algorithm_recipe_manifests
-        }
-        if (
-            algorithms != {"segmented_scan"}
-            or strategies != {"segment_local_serial", "global_scan_segment_correction"}
-            or len(scopes) != 1
-        ):
-            raise ValueError(
-                "Graph native-algorithm domain is incomplete or semantically mixed"
-            )
-        specs = tuple(
-            _make_spec(
-                semantic_plan_id,
-                backend,
-                (),
-                native_algorithm_recipe_manifest=manifest,
-            )
-            for manifest in native_algorithm_recipe_manifests
-        )
-        selected = next(
-            (
-                spec
-                for spec in specs
-                if spec.native_algorithm_recipe_id
-                == selected_native_algorithm_recipe_id
-            ),
-            None,
-        )
-        return _ExecutableOptimizationSpace(
-            semantic_plan_id=semantic_plan_id,
-            baseline=specs[0],
-            candidates=specs[1:],
-            selected_spec_id=None if selected is None else selected.spec_id,
-            selection_status=(
-                "native_algorithm_recipe_not_materialized"
-                if selected is None
-                else (
-                    "selected_native_algorithm_baseline"
-                    if selected is specs[0]
-                    else "selected_native_algorithm_recipe"
-                )
-            ),
-            partition_stage="graph_native_algorithm_complete_recipe",
-            partitions_complete=True,
-            partition_combination_count=len(specs),
-        )
-    if reduction_recipe_manifests:
-        if (
-            control_recipe_ids
-            or memory_recipe_manifests
-            or bounded_recipe_manifests
-            or native_algorithm_recipe_manifests
-        ):
-            raise ValueError(
-                "Graph reduction recipes cannot combine with control, GraphMemory, "
-                "or bounded execution"
-            )
-        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
-            raise ValueError("Graph reduction recipes cannot combine with fusion")
-        if len(reduction_recipe_manifests) < 2:
-            raise ValueError(
-                "Graph reduction domain requires direct and generated candidates"
-            )
-        if reduction_recipe_manifests[0].strategy != "direct_atomic_tls" or any(
-            manifest.strategy
-            not in (
-                "block_partial_finalize",
-                "hierarchical_partial_finalize",
-            )
-            for manifest in reduction_recipe_manifests[1:]
-        ):
-            raise ValueError(
-                "Graph reduction domain must order direct before generated topologies"
-            )
-        scopes = {
-            _canonical_json(manifest.semantics)
-            for manifest in reduction_recipe_manifests
-        }
-        if len(scopes) != 1:
-            raise ValueError("Graph reduction recipes must share typed semantics")
-        specs = tuple(
-            _make_spec(
-                semantic_plan_id,
-                backend,
-                (),
-                reduction_recipe_manifest=manifest,
-            )
-            for manifest in reduction_recipe_manifests
-        )
-        selected = next(
-            (
-                spec
-                for spec in specs
-                if spec.reduction_recipe_id == selected_reduction_recipe_id
-            ),
-            None,
-        )
-        return _ExecutableOptimizationSpace(
-            semantic_plan_id=semantic_plan_id,
-            baseline=specs[0],
-            candidates=specs[1:],
-            selected_spec_id=None if selected is None else selected.spec_id,
-            selection_status=(
-                "reduction_recipe_not_materialized"
-                if selected is None
-                else (
-                    "selected_reduction_baseline"
-                    if selected is specs[0]
-                    else "selected_reduction_recipe"
-                )
-            ),
-            partition_stage="graph_reduction_complete_recipe",
-            partitions_complete=True,
-            partition_combination_count=len(specs),
-        )
-    if bounded_recipe_manifests:
-        if control_recipe_ids or memory_recipe_manifests or reduction_recipe_manifests:
-            raise ValueError(
-                "GraphBounded recipes cannot combine with control or GraphMemory"
-            )
-        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
-            raise ValueError("GraphBounded recipes cannot combine with fusion")
-        strategies = tuple(manifest.strategy for manifest in bounded_recipe_manifests)
-        scopes = {
-            _canonical_json(
-                {
-                    key: value
-                    for key, value in manifest.to_dict().items()
-                    if key not in ("recipe_id", "strategy")
-                }
-            )
-            for manifest in bounded_recipe_manifests
-        }
-        if len(scopes) != 1:
-            raise ValueError("GraphBounded recipes must share one exact scope")
-        allowed_domains = (
-            ("logical_exact", "masked_capacity"),
-            ("logical_exact", "adaptive_per_node", "masked_capacity"),
-            (
-                "logical_exact",
-                "adaptive_per_node",
-                "adaptive_grouped",
-                "masked_capacity",
-            ),
-        )
-        if strategies not in allowed_domains:
-            raise ValueError("GraphBounded recipe domain is incomplete or unordered")
-        specs = tuple(
-            _make_spec(
-                semantic_plan_id,
-                backend,
-                (),
-                bounded_recipe_manifest=manifest,
-            )
-            for manifest in bounded_recipe_manifests
-        )
-        selected = next(
-            (
-                spec
-                for spec in specs
-                if spec.bounded_recipe_id == selected_bounded_recipe_id
-            ),
-            None,
-        )
-        return _ExecutableOptimizationSpace(
-            semantic_plan_id=semantic_plan_id,
-            baseline=specs[0],
-            candidates=specs[1:],
-            selected_spec_id=None if selected is None else selected.spec_id,
-            selection_status=(
-                "bounded_recipe_not_materialized"
-                if selected is None
-                else (
-                    "selected_bounded_baseline"
-                    if selected is specs[0]
-                    else "selected_bounded_recipe"
-                )
-            ),
-            partition_stage="graph_bounded_complete_recipe",
-            partitions_complete=True,
-            partition_combination_count=len(specs),
-        )
-    if memory_recipe_manifests:
-        if control_recipe_ids:
-            raise ValueError("GraphMemory recipes cannot combine with control")
-        if fusion_plan.applied_groups or any(fusion_plan.candidate_partitions):
-            raise ValueError("GraphMemory recipes cannot combine with fusion")
-        if len(memory_recipe_manifests) < 2:
-            raise ValueError(
-                "GraphMemory domain requires direct and generated candidates"
-            )
-        if memory_recipe_manifests[0].strategy != "direct" or any(
-            manifest.strategy not in ("shared_staged_1d", "shared_staged_2d")
-            for manifest in memory_recipe_manifests[1:]
-        ):
-            raise ValueError("GraphMemory domain must order direct before shared-stage")
-        specs = tuple(
-            _make_spec(
-                semantic_plan_id,
-                backend,
-                (),
-                memory_recipe_manifest=manifest,
-            )
-            for manifest in memory_recipe_manifests
-        )
-        selected = next(
-            (
-                spec
-                for spec in specs
-                if spec.memory_recipe_id == selected_memory_recipe_id
-            ),
-            None,
-        )
-        return _ExecutableOptimizationSpace(
-            semantic_plan_id=semantic_plan_id,
-            baseline=specs[0],
-            candidates=specs[1:],
-            selected_spec_id=None if selected is None else selected.spec_id,
-            selection_status=(
-                "memory_recipe_not_materialized"
-                if selected is None
-                else (
-                    "selected_memory_baseline"
-                    if selected is specs[0]
-                    else "selected_memory_recipe"
-                )
-            ),
-            partition_stage="graph_memory_complete_recipe",
-            partitions_complete=True,
-            partition_combination_count=len(specs),
-        )
-    if control_recipe_ids:
-        if control_recipe_ids not in _CUDA_STRUCTURED_CONTROL_RECIPE_DOMAINS:
-            raise ValueError("structured-control recipe domain is unsupported")
-        baseline = _make_spec(
-            semantic_plan_id,
-            backend,
-            (),
-            control_recipe_ids[0],
-        )
-        candidates = tuple(
-            _make_spec(semantic_plan_id, backend, (), recipe_id)
-            for recipe_id in control_recipe_ids[1:]
-        )
-        specs = (baseline, *candidates)
-        if fusion_plan.applied_groups:
-            selected_spec_id = None
-            selection_status = "control_recipe_requires_unfused_source"
-        else:
-            selected = next(
-                (
-                    spec
-                    for spec in specs
-                    if spec.control_recipe_id == selected_control_recipe_id
-                ),
-                None,
-            )
-            selected_spec_id = None if selected is None else selected.spec_id
-            selection_status = (
-                "control_recipe_not_materialized"
-                if selected is None
-                else (
-                    "selected_control_baseline"
-                    if selected is baseline
-                    else "selected_control_recipe"
-                )
-            )
-        return _ExecutableOptimizationSpace(
-            semantic_plan_id=semantic_plan_id,
-            baseline=baseline,
-            candidates=candidates,
-            selected_spec_id=selected_spec_id,
-            selection_status=selection_status,
-            partition_stage="structured_control",
-            partitions_complete=True,
-            partition_combination_count=len(specs),
-        )
-
     baseline = _make_spec(semantic_plan_id, backend, ())
     candidate_recipe_sets = []
     for partition in fusion_plan.candidate_partitions:
@@ -2590,7 +2052,6 @@ __all__ = [
     "_GraphBoundedExecutionRecipeManifest",
     "_GraphMemoryRecipeManifest",
     "_GraphReductionRecipeManifest",
-    "_INTERNAL_STRUCTURED_CONTROL_ENV",
     "_ExecutableOptimizationSpace",
     "_ExecutableOptimizationSpec",
     "_GraphFusionBindingScope",
