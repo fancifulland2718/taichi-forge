@@ -2895,7 +2895,7 @@ def test_compiler_metadata_preserves_bounded_affine_stencil_without_fusing():
     graph = builder.compile()
 
     metadata = graph._spec.nodes[0].compiled_graph._dispatch_metadata[0]
-    assert metadata["version"] == 2
+    assert metadata["version"] == 4
     assert metadata["available"]
     assert not metadata["opaque"]
     assert not metadata["elementwise"]
@@ -2907,7 +2907,7 @@ def test_compiler_metadata_preserves_bounded_affine_stencil_without_fusing():
     )
     assert source_effect["footprint"]["pattern"] == "stencil"
     assert source_effect["footprint"]["affine_coefficients"] == [[1]]
-    assert source_effect["footprint"]["affine_offsets"] == [0]
+    assert source_effect["footprint"]["affine_offsets"] == [-1, 0, 1]
     assert source_effect["footprint"]["halo"] == [[-1, 1]]
     assert output_effect["footprint"]["pattern"] == "exact_pointwise"
     fusion = graph._ir_debug_info["fusion_plan"]
@@ -2937,7 +2937,7 @@ def test_compiler_metadata_preserves_bounded_affine_stencil_without_fusing():
     )
     assert shifted_source_effect["footprint"]["pattern"] == "affine"
     assert shifted_source_effect["footprint"]["affine_offsets"] == [1]
-    assert shifted_source_effect["footprint"]["halo"] == [[0, 0]]
+    assert shifted_source_effect["footprint"]["halo"] == [[1, 1]]
     assert not shifted_metadata["opaque"]
     assert not shifted_metadata["elementwise"]
 
