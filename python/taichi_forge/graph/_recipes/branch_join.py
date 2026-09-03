@@ -97,5 +97,19 @@ class GraphBranchJoinRecipeProvider(GraphRuntimeFragmentProvider):
             )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(
+            assembly.spec._graph_branch_join_sources,
+            selection.source_key,
+            attribute="source_key",
+        )
+        if selection.choice_id != source.recipe_id:
+            raise ValueError("branch/join selection does not match its frozen source")
+        assembly.select_parallel_schedule(
+            source.node_index,
+            source.branch_groups,
+            source.disjoint_pairs,
+        )
+
 
 __all__ = ["GraphBranchJoinRecipeProvider"]

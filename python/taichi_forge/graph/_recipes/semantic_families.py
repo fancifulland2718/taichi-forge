@@ -113,6 +113,26 @@ class GraphBoundedExecutionRecipeProvider(GraphRuntimeFragmentProvider):
             )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        sources = tuple(
+            source
+            for source in assembly.spec._graph_bounded_sources
+            if getattr(source, "_recipe_group_key", None) == selection.source_key
+        )
+        if not sources:
+            raise ValueError(
+                f"bounded-execution source is unavailable: {selection.source_key}"
+            )
+        for source in sources:
+
+            def rewrite_operation(builder, _operation, source=source):
+                source.materialize(
+                    builder,
+                    selection.materialization_choice,
+                )
+
+            assembly.select_operation(source, rewrite_operation)
+
 
 class GraphStructuredControlRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -181,6 +201,28 @@ class GraphStructuredControlRecipeProvider(GraphRuntimeFragmentProvider):
                 )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        from taichi_forge.graph._graph import (
+            _CONTROL_RECIPE_ROUTES,
+            _clone_control_recipe_runtime_node,
+        )
+
+        prefix = "structured-control:node:"
+        if not selection.source_key.startswith(prefix):
+            raise ValueError("structured-control fragment has no source-node partition")
+        try:
+            node_index = int(selection.source_key[len(prefix) :])
+            control_recipe = _CONTROL_RECIPE_ROUTES[selection.choice_id]
+        except (KeyError, ValueError) as error:
+            raise ValueError("structured-control selection is invalid") from error
+        assembly.rewrite_node(
+            node_index,
+            lambda node: _clone_control_recipe_runtime_node(
+                node,
+                control_recipe,
+            ),
+        )
+
 
 class GraphReductionRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -198,6 +240,22 @@ class GraphReductionRecipeProvider(GraphRuntimeFragmentProvider):
             provider_descriptor=self.descriptor,
         )
 
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(
+            assembly.spec._graph_reduction_sources,
+            selection.source_key,
+        )
+
+        def rewrite_operation(builder, operation):
+            source.materialize(
+                builder,
+                selection.choice_id,
+                label=operation[2],
+                record_selection=False,
+            )
+
+        assembly.select_operation(source, rewrite_operation)
+
 
 class GraphNativeAlgorithmRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -213,6 +271,33 @@ class GraphNativeAlgorithmRecipeProvider(GraphRuntimeFragmentProvider):
             spec._graph_native_algorithm_sources,
             "native_algorithm",
             provider_descriptor=self.descriptor,
+        )
+
+    def contribute_runtime(self, assembly, selection):
+        from taichi_forge.graph._graph import GraphBuilder
+
+        source = assembly.find_source(
+            assembly.spec._graph_native_algorithm_sources,
+            selection.source_key,
+        )
+        builder = GraphBuilder(
+            _capture_recipe_sources=False,
+            _explicit_map_source_groups=(),
+        )
+        source.materialize(
+            builder,
+            selection.choice_id,
+            record_selection=False,
+        )
+        builder._flush_graph_builder()
+        if len(builder._nodes) != 1:
+            raise ValueError(
+                "native-algorithm recipe did not materialize one Graph node"
+            )
+        replacement = builder._nodes[0]
+        assembly.rewrite_node(
+            source._recipe_node_index,
+            lambda _node: replacement,
         )
 
 

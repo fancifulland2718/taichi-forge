@@ -5195,8 +5195,7 @@ class _CompiledCGraphNode:
         self.native_action_manifests = tuple(native_action_manifests)
         self.recipe_operations = tuple(recipe_operations)
         self.parallel_dispatch_groups = tuple(
-            tuple(int(index) for index in group)
-            for group in parallel_dispatch_groups
+            tuple(int(index) for index in group) for group in parallel_dispatch_groups
         )
 
         if not all(
@@ -9111,8 +9110,7 @@ def _runtime_node_physical_plan_id(node):
     parallel_groups = tuple(getattr(node, "parallel_dispatch_groups", ()))
     if parallel_groups:
         encoded = ";".join(
-            ",".join(str(index) for index in group)
-            for group in parallel_groups
+            ",".join(str(index) for index in group) for group in parallel_groups
         )
         return "cuda-fork-join:" + encoded
     controls = (
@@ -9480,8 +9478,7 @@ class _GraphBranchJoinRecipeSource:
     @property
     def recipe_id(self):
         groups = ";".join(
-            ",".join(str(index) for index in group)
-            for group in self.branch_groups
+            ",".join(str(index) for index in group) for group in self.branch_groups
         )
         return f"cuda-fork-join-v1:{self.node_index}:{groups}:{self.join_index}"
 
@@ -9529,12 +9526,9 @@ def _branch_has_internal_dependency(nodes):
                 if not _effect_writes(left_effect.access):
                     continue
                 for right_effect in right.effects:
-                    if (
-                        left_effect.resource == right_effect.resource
-                        and (
-                            _effect_reads(right_effect.access)
-                            or _effect_writes(right_effect.access)
-                        )
+                    if left_effect.resource == right_effect.resource and (
+                        _effect_reads(right_effect.access)
+                        or _effect_writes(right_effect.access)
                     ):
                         return True
     return False
@@ -9624,9 +9618,7 @@ def _discover_cuda_branch_join_sources(source_nodes, backend):
                 ),
                 join_index=join_index,
                 disjoint_pairs=disjoint_pairs,
-                sequential_temporary_bytes=(
-                    plan.sequential_fallback_peak_bytes
-                ),
+                sequential_temporary_bytes=(plan.sequential_fallback_peak_bytes),
                 parallel_temporary_bytes=plan.parallel_peak_bytes,
             )
         )
@@ -9710,12 +9702,12 @@ def _discover_cuda_recording_partition_sources(source_nodes, backend):
     result = []
     for _, _, cut_index, isolated_bindings in sorted(ranked)[:4]:
         stable_dispatch_count = max(
-            len(children) - cut_index
-            if prefix[cut_index - 1].difference(suffix[cut_index])
-            else 0,
-            cut_index
-            if suffix[cut_index].difference(prefix[cut_index - 1])
-            else 0,
+            (
+                len(children) - cut_index
+                if prefix[cut_index - 1].difference(suffix[cut_index])
+                else 0
+            ),
+            cut_index if suffix[cut_index].difference(prefix[cut_index - 1]) else 0,
         )
         result.append(
             _GraphRecordingPartitionRecipeSource(
@@ -10105,11 +10097,7 @@ def _certify_graph_invocation_pair(spec, versions):
             descriptions[invocation][resource] = False
             return False
         fact, description = _parallel_storage_description(resource, value)
-        if (
-            description is None
-            or not fact.supported
-            or fact.owner_status != "kNone"
-        ):
+        if description is None or not fact.supported or fact.owner_status != "kNone":
             raise TaichiRuntimeError(
                 "Graph.bind_batch() requires certified device storage for "
                 f"{resource!r} in invocation {invocation}"
@@ -10163,8 +10151,7 @@ def _workspace_concurrency_spec_eligible(spec, backend):
     ):
         return False
     if not spec.fixed_runtime_args or not all(
-        isinstance(value, _GraphInternalNdarraySpec)
-        and value.exclusive_submission
+        isinstance(value, _GraphInternalNdarraySpec) and value.exclusive_submission
         for value in spec.fixed_runtime_args.values()
     ):
         return False
@@ -10484,7 +10471,7 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
 
 def _replay_recipe_cgraph_node(
     node,
-    selections,
+    assembly,
     map_source_groups,
     *,
     parallel_dispatch_groups=(),
@@ -10512,57 +10499,22 @@ def _replay_recipe_cgraph_node(
             ) = operation
             contracts = ()
             layout_requirements = ()
-            memory_selection = (
-                None
-                if memory_source is None
-                else selections.get(("graph_memory", memory_source._recipe_source_key))
-            )
-            offload_selection = (
-                None
-                if offload_source is None
-                else selections.get(
-                    ("offload_phase_fusion", offload_source._recipe_source_key)
+            rewriters = tuple(
+                rewriter
+                for rewriter in (
+                    assembly.dispatch_rewriter(memory_source),
+                    assembly.dispatch_rewriter(offload_source),
+                    assembly.dispatch_rewriter(sparse_source),
                 )
+                if rewriter is not None
             )
-            sparse_selection = (
-                None
-                if sparse_source is None
-                else selections.get(
-                    ("sparse_traversal", sparse_source._recipe_source_key)
-                )
-            )
-            selected_count = sum(
-                item is not None
-                for item in (
-                    memory_selection,
-                    offload_selection,
-                    sparse_selection,
-                )
-            )
-            if selected_count > 1:
+            if len(rewriters) > 1:
                 raise TaichiRuntimeError(
                     "one Graph dispatch cannot select multiple physical "
                     "kernel recipe families simultaneously"
                 )
-            if sparse_selection is not None:
-                kernel_cpp = sparse_source.materialize(
-                    sparse_selection.choice_id,
-                    record_selection=False,
-                )
-            elif offload_selection is not None:
-                kernel_cpp, contracts = offload_source.materialize(
-                    offload_selection.choice_id,
-                    record_selection=False,
-                )
-            elif memory_selection is not None:
-                selected = memory_selection
-                if selected is not None:
-                    kernel_cpp, contracts, layout_requirements = (
-                        memory_source.materialize(
-                            selected.choice_id,
-                            record_selection=False,
-                        )
-                    )
+            if rewriters:
+                kernel_cpp, contracts, layout_requirements = rewriters[0]()
             builder._record_dispatch(kernel_cpp, list(args), label)
             if contracts or layout_requirements:
                 builder._pending_ir_nodes[-1] = replace(
@@ -10576,25 +10528,24 @@ def _replay_recipe_cgraph_node(
             continue
         if kind == "bounded":
             source = operation[1]
-            selected = selections.get(("bounded_execution", source._recipe_group_key))
-            source.materialize(
-                builder,
-                (
-                    source.selected_strategy
-                    if selected is None
-                    else selected.materialization_choice
-                ),
-            )
+            rewriter = assembly.operation_rewriter(source)
+            if rewriter is None:
+                source.materialize(builder, source.selected_strategy)
+            else:
+                rewriter(builder, operation)
             continue
         if kind == "graph_reduction":
             _, source, label = operation
-            selected = selections.get(("graph_reduction", source._recipe_source_key))
-            source.materialize(
-                builder,
-                None if selected is None else selected.choice_id,
-                label=label,
-                record_selection=False,
-            )
+            rewriter = assembly.operation_rewriter(source)
+            if rewriter is None:
+                source.materialize(
+                    builder,
+                    None,
+                    label=label,
+                    record_selection=False,
+                )
+            else:
+                rewriter(builder, operation)
             continue
         raise TaichiRuntimeError(f"unknown frozen Graph recipe operation {kind!r}")
     if parallel_dispatch_groups:
@@ -10604,9 +10555,7 @@ def _replay_recipe_cgraph_node(
             current,
             memory_disjoint_pairs=tuple(
                 sorted(
-                    set(current.memory_disjoint_pairs).union(
-                        parallel_disjoint_pairs
-                    )
+                    set(current.memory_disjoint_pairs).union(parallel_disjoint_pairs)
                 )
             ),
         )
@@ -10662,41 +10611,6 @@ def _replay_recording_partition_nodes(node, source):
             "recording-partition recipe did not produce its declared CUDA segments"
         )
     return nodes
-
-
-def _operation_has_selection(operation, selections):
-    kind = operation[0]
-    if kind == "dispatch":
-        memory_source = operation[4]
-        offload_source = operation[5]
-        sparse_source = operation[6]
-        return (
-            memory_source is not None
-            and ("graph_memory", memory_source._recipe_source_key) in selections
-        ) or (
-            offload_source is not None
-            and (
-                "offload_phase_fusion",
-                offload_source._recipe_source_key,
-            )
-            in selections
-        ) or (
-            sparse_source is not None
-            and (
-                "sparse_traversal",
-                sparse_source._recipe_source_key,
-            )
-            in selections
-        )
-    if kind == "bounded":
-        return (
-            "bounded_execution",
-            operation[1]._recipe_group_key,
-        ) in selections
-    if kind == "graph_reduction":
-        source = operation[1]
-        return ("graph_reduction", source._recipe_source_key) in selections
-    return False
 
 
 def _dispatch_leaf_count(node):
@@ -10909,9 +10823,7 @@ class _GraphSpec:
         )
         self._graph_memory_sources = tuple(graph_memory_sources)
         self._graph_offload_fusion_sources = tuple(graph_offload_fusion_sources)
-        self._graph_sparse_traversal_sources = tuple(
-            graph_sparse_traversal_sources
-        )
+        self._graph_sparse_traversal_sources = tuple(graph_sparse_traversal_sources)
         self._graph_bounded_sources = tuple(graph_bounded_sources)
 
         self._graph_reduction_sources = tuple(graph_reduction_sources)
@@ -11201,166 +11113,38 @@ class _GraphSpec:
         self,
         definition,
         recipe,
-        selections,
+        assembly,
         *,
         workspace_lanes,
         workspace_saturation,
     ):
-        """Build one explicit whole-Graph variant from frozen family sources."""
+        """Build one explicit variant from provider-installed runtime hooks."""
 
-        selection_by_source = {
-            (selection.family, selection.source_key): selection
-            for selection in selections
-        }
-        if len(selection_by_source) != len(selections):
-            raise TaichiRuntimeError(
-                "complete Graph recipe selects one family source more than once"
+        from taichi_forge.graph._recipes.runtime_assembly import (
+            GraphRuntimeRecipeAssembly,
+        )
+
+        if not isinstance(assembly, GraphRuntimeRecipeAssembly):
+            raise TypeError(
+                "complete Graph materialization requires a runtime assembly plan"
             )
-        supported = {
-            "map_fusion",
-            "graph_memory",
-            "offload_phase_fusion",
-            "sparse_traversal",
-            "branch_join_schedule",
-            "recording_partition",
-            "workspace_concurrency",
-            "bounded_execution",
-            "structured_control",
-            "graph_reduction",
-            "native_algorithm",
-        }
-        unknown = {selection.family for selection in selections}.difference(supported)
-        if unknown:
-            raise TaichiRuntimeError(
-                "complete Graph recipe contains unsupported migrated families: "
-                + ", ".join(sorted(unknown))
-            )
+        if assembly.definition is not definition or assembly.spec is not self:
+            raise ValueError("runtime Graph assembly belongs to another definition")
 
-        map_groups = []
-        for selection in selections:
-            if selection.family != "map_fusion":
-                continue
-            prefix = "dispatches:"
-            if not selection.source_key.startswith(prefix):
-                raise TaichiRuntimeError("map-fusion fragment has no source partition")
-            try:
-                group = tuple(
-                    int(value)
-                    for value in selection.source_key[len(prefix) :].split(",")
-                )
-            except ValueError as error:
-                raise TaichiRuntimeError(
-                    "map-fusion fragment source partition is invalid"
-                ) from error
-            map_groups.append(group)
-
-        control_recipes = {}
-        for control_selection in (
-            selection
-            for selection in selections
-            if selection.family == "structured_control"
-        ):
-            try:
-                control_recipe = _CONTROL_RECIPE_ROUTES[control_selection.choice_id]
-            except KeyError as error:
-                raise TaichiRuntimeError(
-                    "structured-control fragment recipe is unknown"
-                ) from error
-            prefix = "structured-control:node:"
-            if not control_selection.source_key.startswith(prefix):
-                raise TaichiRuntimeError(
-                    "structured-control fragment has no source-node partition"
-                )
-            try:
-                source_node_index = int(control_selection.source_key[len(prefix) :])
-            except ValueError as error:
-                raise TaichiRuntimeError(
-                    "structured-control source-node partition is invalid"
-                ) from error
-            control_recipes[source_node_index] = control_recipe
-
-        native_selections = {
-            selection.source_key: selection
-            for selection in selections
-            if selection.family == "native_algorithm"
-        }
-        rebuilt_native_nodes = {}
-        for source in self._graph_native_algorithm_sources:
-            selected = native_selections.get(source._recipe_source_key)
-            if selected is None:
-                continue
-            builder = GraphBuilder(
-                _capture_recipe_sources=False,
-                _explicit_map_source_groups=(),
-            )
-            source.materialize(
-                builder,
-                selected.choice_id,
-                record_selection=False,
-            )
-            builder._flush_graph_builder()
-            if len(builder._nodes) != 1:
-                raise TaichiRuntimeError(
-                    "native-algorithm recipe did not materialize one Graph node"
-                )
-            rebuilt_native_nodes[source._recipe_node_index] = builder._nodes[0]
-
-        branch_join_selections = {
-            selection.source_key: selection
-            for selection in selections
-            if selection.family == "branch_join_schedule"
-        }
-        branch_join_by_node = {}
-        for source in self._graph_branch_join_sources:
-            selected = branch_join_selections.get(source.source_key)
-            if selected is None:
-                continue
-            if selected.choice_id != source.recipe_id:
-                raise TaichiRuntimeError(
-                    "branch/join selection does not match its frozen source"
-                )
-            if source.node_index in branch_join_by_node:
-                raise TaichiRuntimeError(
-                    "one CGraph segment cannot select multiple branch/join schedules"
-                )
-            branch_join_by_node[source.node_index] = source
-
-        recording_partition_selections = {
-            selection.source_key: selection
-            for selection in selections
-            if selection.family == "recording_partition"
-        }
-        recording_partition_by_node = {}
-        for source in self._graph_recording_partition_sources:
-            selected = recording_partition_selections.get(source.source_key)
-            if selected is None:
-                continue
-            if selected.choice_id != source.recipe_id:
-                raise TaichiRuntimeError(
-                    "recording-partition selection does not match its frozen source"
-                )
-            if source.node_index in recording_partition_by_node:
-                raise TaichiRuntimeError(
-                    "one CGraph segment cannot select multiple recording partitions"
-                )
-            recording_partition_by_node[source.node_index] = source
+        map_groups = assembly.map_source_groups
 
         nodes = []
         dispatch_offset = 0
         consumed_map_groups = set()
         for node_index, node in enumerate(self.nodes):
+            node_expander = assembly.node_expander(node_index)
+            if node_expander is not None:
+                nodes.extend(tuple(node_expander(node)))
+                if isinstance(node, _CompiledCGraphNode):
+                    dispatch_offset += _dispatch_leaf_count(node.ir_node)
+                continue
             if isinstance(node, _CompiledCGraphNode):
                 dispatch_count = _dispatch_leaf_count(node.ir_node)
-                recording_partition = recording_partition_by_node.get(node_index)
-                if recording_partition is not None:
-                    nodes.extend(
-                        _replay_recording_partition_nodes(
-                            node,
-                            recording_partition,
-                        )
-                    )
-                    dispatch_offset += dispatch_count
-                    continue
                 local_groups = []
                 for group_index, group in enumerate(map_groups):
                     inside = all(
@@ -11381,10 +11165,12 @@ class _GraphSpec:
                         )
                         consumed_map_groups.add(group_index)
                 selected_operation = any(
-                    _operation_has_selection(operation, selection_by_source)
+                    assembly.operation_has_selection(operation)
                     for operation in node.recipe_operations
                 )
-                branch_join_source = branch_join_by_node.get(node_index)
+                parallel_groups, parallel_disjoint_pairs = assembly.parallel_schedule(
+                    node_index
+                )
                 # A complete recipe describes the exact map partition for the
                 # whole frozen Graph.  Uncovered dispatches are singleton
                 # baseline regions, not permission to inherit the ordinary
@@ -11396,33 +11182,19 @@ class _GraphSpec:
                     self.fusion_plan.candidate_recipes
                     or local_groups
                     or selected_operation
-                    or branch_join_source is not None
+                    or parallel_groups
                 ):
                     node = _replay_recipe_cgraph_node(
                         node,
-                        selection_by_source,
+                        assembly,
                         local_groups,
-                        parallel_dispatch_groups=(
-                            ()
-                            if branch_join_source is None
-                            else branch_join_source.branch_groups
-                        ),
-                        parallel_disjoint_pairs=(
-                            ()
-                            if branch_join_source is None
-                            else branch_join_source.disjoint_pairs
-                        ),
+                        parallel_dispatch_groups=parallel_groups,
+                        parallel_disjoint_pairs=parallel_disjoint_pairs,
                     )
                 dispatch_offset += dispatch_count
-            elif node_index in control_recipes and (
-                _is_structured_control_node(node)
-                or isinstance(node, _CompiledSequentialRegionNode)
-            ):
-                node = _clone_control_recipe_runtime_node(
-                    node,
-                    control_recipes[node_index],
-                )
-            node = rebuilt_native_nodes.get(node_index, node)
+            node_rewriter = assembly.node_rewriter(node_index)
+            if node_rewriter is not None:
+                node = node_rewriter(node)
             nodes.append(node)
 
         if len(consumed_map_groups) != len(map_groups):
@@ -11433,9 +11205,7 @@ class _GraphSpec:
             nodes,
             graph_memory_sources=self._graph_memory_sources,
             graph_offload_fusion_sources=self._graph_offload_fusion_sources,
-            graph_sparse_traversal_sources=(
-                self._graph_sparse_traversal_sources
-            ),
+            graph_sparse_traversal_sources=(self._graph_sparse_traversal_sources),
             graph_bounded_sources=self._graph_bounded_sources,
             graph_reduction_sources=self._graph_reduction_sources,
             graph_native_algorithm_sources=self._graph_native_algorithm_sources,
@@ -11443,25 +11213,8 @@ class _GraphSpec:
         variant._definition_source_spec = self
         variant._complete_recipe_id = recipe.recipe_id
         variant._disable_qualified_fusion_selector = True
-        workspace_concurrency = tuple(
-            selection
-            for selection in selections
-            if selection.family == "workspace_concurrency"
-        )
-        if len(workspace_concurrency) > 1:
-            raise TaichiRuntimeError(
-                "complete Graph recipe selects multiple workspace concurrency modes"
-            )
-        concurrent_workspace_pair = bool(workspace_concurrency)
+        concurrent_workspace_pair = assembly.workspace_pair
         if concurrent_workspace_pair:
-            selection = workspace_concurrency[0]
-            if (
-                selection.source_key != "whole-graph-pair"
-                or selection.choice_id != "cuda-concurrent-pair-v1"
-            ):
-                raise TaichiRuntimeError(
-                    "workspace concurrency selection is not a supported complete recipe"
-                )
             workspace_lanes = 2
             workspace_saturation = "wait"
         return Graph(
@@ -12953,9 +12706,7 @@ class _GraphInstance:
             raise TaichiRuntimeError(
                 "Concurrent workspace pair requires runtime bindings"
             )
-        prepared = self.spec.prepare_runtime_args(
-            args, None, self._fixed_runtime_args
-        )
+        prepared = self.spec.prepare_runtime_args(args, None, self._fixed_runtime_args)
         context.begin(
             prepared.arguments,
             flattened_args=prepared.flattened_args,
@@ -14816,9 +14567,7 @@ class _GraphSparseTraversalRecipeSource:
                 _OffloadExecutionPlan,
             )
 
-            plan = _OffloadExecutionPlan.from_task_manifests(
-                self.baseline_manifests
-            )
+            plan = _OffloadExecutionPlan.from_task_manifests(self.baseline_manifests)
             direct_manifest = _graph_sparse_traversal_recipe_manifest(
                 plan,
                 self.baseline_manifests,
@@ -18040,9 +17789,7 @@ class Graph:
                 "GraphDefinition baseline spec does not match this Graph"
             )
         self._definition = definition
-        self._cuda_concurrent_workspace_pair = bool(
-            _cuda_concurrent_workspace_pair
-        )
+        self._cuda_concurrent_workspace_pair = bool(_cuda_concurrent_workspace_pair)
         if self._cuda_concurrent_workspace_pair and self._workspace_lane_capacity != 2:
             raise TaichiRuntimeError(
                 "CUDA concurrent workspace pair recipes require exactly two lanes"
@@ -19105,7 +18852,10 @@ class Graph:
                         "Graph batch submission cannot start while another Python "
                         "thread is entering automatic differentiation"
                     )
-                if runtime.target_tape is not None or runtime.fwd_mode_manager is not None:
+                if (
+                    runtime.target_tape is not None
+                    or runtime.fwd_mode_manager is not None
+                ):
                     raise TaichiRuntimeError(
                         "Graph batch submission is primal-only and cannot execute "
                         "inside automatic differentiation"

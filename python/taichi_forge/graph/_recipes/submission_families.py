@@ -61,6 +61,23 @@ class GraphRecordingPartitionRecipeProvider(GraphRuntimeFragmentProvider):
             )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        from taichi_forge.graph._graph import _replay_recording_partition_nodes
+
+        source = assembly.find_source(
+            assembly.spec._graph_recording_partition_sources,
+            selection.source_key,
+            attribute="source_key",
+        )
+        if selection.choice_id != source.recipe_id:
+            raise ValueError(
+                "recording-partition selection does not match its frozen source"
+            )
+        assembly.expand_node(
+            source.node_index,
+            lambda node: _replay_recording_partition_nodes(node, source),
+        )
+
 
 class GraphWorkspaceConcurrencyRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -134,6 +151,16 @@ class GraphWorkspaceConcurrencyRecipeProvider(GraphRuntimeFragmentProvider):
                 provider_descriptor=self.descriptor,
             ),
         )
+
+    def contribute_runtime(self, assembly, selection):
+        if (
+            selection.source_key != "whole-graph-pair"
+            or selection.choice_id != "cuda-concurrent-pair-v1"
+        ):
+            raise ValueError(
+                "workspace concurrency selection is not a supported complete recipe"
+            )
+        assembly.enable_workspace_pair()
 
 
 __all__ = [

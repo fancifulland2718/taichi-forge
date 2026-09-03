@@ -418,7 +418,7 @@ class GraphRuntimeAssemblyProvider:
         raise TypeError("runtime assembly provider owns no fragments")
 
     def assemble(self, scope, definition, recipe, materialized_fragments):
-        return assemble_existing_family_recipe(
+        return assemble_runtime_graph_recipe(
             scope,
             definition,
             recipe,
@@ -468,24 +468,41 @@ def default_graph_recipe_providers():
     )
 
 
-def assemble_existing_family_recipe(
+def assemble_runtime_graph_recipe(
     scope,
     definition,
     recipe,
     materialized_fragments,
 ):
-    """Materialize all selected families as one runtime Graph transaction."""
+    """Delegate every fragment contribution, then build one runtime Graph."""
 
-    selections = tuple(item.payload for item in materialized_fragments)
-    if not all(isinstance(item, GraphFamilySelection) for item in selections):
-        raise TypeError("whole-Graph family assembler received an unknown payload")
-    keys = tuple((item.family, item.source_key) for item in selections)
-    if len(keys) != len(set(keys)):
-        raise ValueError("complete Graph recipe selects a family source more than once")
+    from taichi_forge.graph._recipes.runtime_assembly import (
+        GraphRuntimeRecipeAssembly,
+    )
+
+    if len(materialized_fragments) != len(recipe.fragments):
+        raise ValueError("runtime Graph assembler received an incomplete fragment set")
+    assembly = GraphRuntimeRecipeAssembly(definition)
+    provider_set = scope._context.provider_set
+    for fragment, materialized in zip(recipe.fragments, materialized_fragments):
+        if materialized.fragment_id != fragment.fragment_id:
+            raise ValueError("runtime Graph materialization order changed")
+        selection = materialized.payload
+        if not isinstance(selection, GraphFamilySelection):
+            raise TypeError("runtime Graph assembler received an unknown payload")
+        provider = provider_set.provider_for_fragment_namespace(
+            fragment.provider_namespace
+        )
+        contribute = getattr(provider, "contribute_runtime", None)
+        if not callable(contribute):
+            raise TypeError(
+                "runtime Graph fragment provider has no assembly contribution"
+            )
+        contribute(assembly, selection)
     graph = definition._runtime_spec.materialize_complete_recipe(
         definition,
         recipe,
-        selections,
+        assembly,
         workspace_lanes=scope._context.workspace_lanes,
         workspace_saturation=scope._context.workspace_saturation,
     )
@@ -493,7 +510,7 @@ def assemble_existing_family_recipe(
     return GraphMaterializationProduct(graph, manifest)
 
 
-def materialize_existing_family_baseline(scope, definition, recipe):
+def materialize_runtime_graph_baseline(scope, definition, recipe):
     """Materialize the exact all-baseline whole-Graph recipe.
 
     Reusing ``GraphDefinition.compile()`` here would also reuse any map fusion
@@ -504,10 +521,14 @@ def materialize_existing_family_baseline(scope, definition, recipe):
     """
 
     if definition._runtime_spec.fusion_plan.candidate_recipes:
+        from taichi_forge.graph._recipes.runtime_assembly import (
+            GraphRuntimeRecipeAssembly,
+        )
+
         graph = definition._runtime_spec.materialize_complete_recipe(
             definition,
             recipe,
-            (),
+            GraphRuntimeRecipeAssembly(definition),
             workspace_lanes=scope._context.workspace_lanes,
             workspace_saturation=scope._context.workspace_saturation,
         )
@@ -527,8 +548,8 @@ __all__ = [
     "GraphRuntimeAssemblyProvider",
     "GraphRuntimeFragmentProvider",
     "GraphFamilySelection",
-    "assemble_existing_family_recipe",
+    "assemble_runtime_graph_recipe",
     "default_graph_recipe_providers",
-    "materialize_existing_family_baseline",
+    "materialize_runtime_graph_baseline",
     "runtime_family_provider_descriptor",
 ]

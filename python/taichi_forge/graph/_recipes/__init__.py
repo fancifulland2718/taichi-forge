@@ -31,10 +31,11 @@ from .families import (
     GraphFamilySelection,
     GraphRuntimeAssemblyProvider,
     GraphRuntimeFragmentProvider,
-    assemble_existing_family_recipe,
+    assemble_runtime_graph_recipe,
     default_graph_recipe_providers,
-    materialize_existing_family_baseline,
+    materialize_runtime_graph_baseline,
 )
+from .runtime_assembly import GraphRuntimeRecipeAssembly
 from .branch_join import GraphBranchJoinRecipeProvider
 from .dispatch_families import (
     GraphOffloadPhaseFusionRecipeProvider,
@@ -106,6 +107,7 @@ __all__ = [
     "GraphReductionRecipeProvider",
     "GraphRuntimeAssemblyProvider",
     "GraphRuntimeFragmentProvider",
+    "GraphRuntimeRecipeAssembly",
     "GraphSparseTraversalRecipeProvider",
     "GraphStructuredControlRecipeProvider",
     "GraphWorkspaceConcurrencyRecipeProvider",
@@ -138,8 +140,8 @@ __all__ = [
     "GraphSemanticRegion",
     "PROVIDER_OWNED_WHOLE_GRAPH_V1",
     "RUNTIME_GRAPH_ASSEMBLY_V1",
-    "assemble_existing_family_recipe",
+    "assemble_runtime_graph_recipe",
     "default_graph_recipe_providers",
-    "materialize_existing_family_baseline",
+    "materialize_runtime_graph_baseline",
     "observe_graph_physical_manifest",
 ]

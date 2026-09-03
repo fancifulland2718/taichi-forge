@@ -61,5 +61,19 @@ class GraphMemoryRecipeProvider(GraphRuntimeFragmentProvider):
                 )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(
+            assembly.spec._graph_memory_sources,
+            selection.source_key,
+        )
+
+        def rewrite_dispatch():
+            return source.materialize(
+                selection.choice_id,
+                record_selection=False,
+            )
+
+        assembly.select_dispatch(source, rewrite_dispatch)
+
 
 __all__ = ["GraphMemoryRecipeProvider"]

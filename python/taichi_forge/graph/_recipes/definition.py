@@ -376,7 +376,7 @@ class GraphDefinition:
 
         from taichi_forge.graph._recipes.families import (
             default_graph_recipe_providers,
-            materialize_existing_family_baseline,
+            materialize_runtime_graph_baseline,
         )
 
         from taichi_forge.graph._recipes.materialize import (
@@ -411,7 +411,7 @@ class GraphDefinition:
                 )
         options.setdefault(
             "baseline_materializer",
-            materialize_existing_family_baseline,
+            materialize_runtime_graph_baseline,
         )
         options["provider_set"] = provider_set
         options["available_capabilities"] = tuple(

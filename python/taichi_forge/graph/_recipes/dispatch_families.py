@@ -52,6 +52,21 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
             self.descriptor,
         )
 
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(
+            assembly.spec._graph_offload_fusion_sources,
+            selection.source_key,
+        )
+
+        def rewrite_dispatch():
+            kernel, contracts = source.materialize(
+                selection.choice_id,
+                record_selection=False,
+            )
+            return kernel, contracts, ()
+
+        assembly.select_dispatch(source, rewrite_dispatch)
+
 
 class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -71,6 +86,21 @@ class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
             "sparse_traversal",
             self.descriptor,
         )
+
+    def contribute_runtime(self, assembly, selection):
+        source = assembly.find_source(
+            assembly.spec._graph_sparse_traversal_sources,
+            selection.source_key,
+        )
+
+        def rewrite_dispatch():
+            kernel = source.materialize(
+                selection.choice_id,
+                record_selection=False,
+            )
+            return kernel, (), ()
+
+        assembly.select_dispatch(source, rewrite_dispatch)
 
 
 __all__ = [

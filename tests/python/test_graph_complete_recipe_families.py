@@ -64,6 +64,138 @@ def test_default_runtime_recipe_families_have_independent_provider_ownership():
     )
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_external_runtime_family_materializes_without_central_family_routing():
+    from taichi_forge.graph._recipes import (
+        GraphFamilySelection,
+        GraphFragmentBindingRequirement,
+        GraphFragmentTask,
+        GraphRecipeFragment,
+        GraphRecipeProviderDescriptor,
+        GraphRuntimeAssemblyProvider,
+        GraphRuntimeFragmentProvider,
+        RUNTIME_GRAPH_ASSEMBLY_V1,
+    )
+
+    count = 257
+
+    @ti.kernel
+    def scale(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            temporary[index] = source[index] * 2.0
+
+    @ti.kernel
+    def bias(
+        temporary: ti.types.ndarray(dtype=ti.f32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        for index in range(count):
+            output[index] = temporary[index] + 1.0
+
+    symbolic = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=1)
+        for name in ("source", "temporary", "output")
+    }
+    builder = ti.graph.GraphBuilder(_explicit_map_source_groups=())
+    builder.dispatch(scale, symbolic["source"], symbolic["temporary"])
+    builder.dispatch(bias, symbolic["temporary"], symbolic["output"])
+    definition = builder.freeze()
+
+    class ExternalMapProvider(GraphRuntimeFragmentProvider):
+        descriptor = GraphRecipeProviderDescriptor(
+            namespace="tests.external_runtime_map",
+            provider_version="1.0",
+            domain_version="external-runtime-map-v1",
+            semantic_fingerprint="external-runtime-map-fusion-v1",
+            assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
+            capabilities=("external-map-fusion",),
+            fragment_key_schema="external-map.v1",
+        )
+
+        def fragments(self, requested_definition):
+            fusion = next(
+                recipe
+                for recipe in requested_definition._runtime_spec.fusion_plan.candidate_recipes
+                if len(recipe.source_dispatch_ids) == 2
+            )
+            coverage = tuple(
+                source.region_id
+                for source in requested_definition.sources
+                if source.kind == "dispatch"
+            )
+            selection = GraphFamilySelection(
+                family="external_runtime_map",
+                source_key="external-map:0,1",
+                choice_id=fusion.recipe_id,
+                materialization_choice=fusion.recipe_id,
+                coverage_region_ids=coverage,
+            )
+            return (
+                GraphRecipeFragment.create(
+                    requested_definition,
+                    provider_namespace=self.descriptor.namespace,
+                    provider_version=self.descriptor.provider_version,
+                    provider_domain_version=self.descriptor.domain_version,
+                    fragment_key="external-map:0,1",
+                    coverage_region_ids=coverage,
+                    tasks=(
+                        GraphFragmentTask.create(
+                            "external-map:0,1",
+                            "synthetic_fused_kernel",
+                            physical={"source_group": (0, 1)},
+                        ),
+                    ),
+                    binding_requirements=tuple(
+                        GraphFragmentBindingRequirement(
+                            item.name,
+                            kinds=item.kinds,
+                            required=item.required,
+                            scope=item.scope,
+                        )
+                        for item in requested_definition.binding_abi
+                    ),
+                    backend_requirements=(requested_definition.backend,),
+                    assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
+                    assembly_provider_namespace=(
+                        GraphRuntimeAssemblyProvider.descriptor.namespace
+                    ),
+                    provider_metadata={"family_selection": selection.to_dict()},
+                ),
+            )
+
+        def contribute_runtime(self, assembly, selection):
+            assert selection.family == "external_runtime_map"
+            assembly.add_map_source_group((0, 1))
+
+    providers = (GraphRuntimeAssemblyProvider(), ExternalMapProvider())
+    catalog = definition.recipe_catalog(providers=providers)
+    recipe = catalog.entries(stage="single-region")[0].recipe
+    assert catalog.resolve(recipe.recipe_id) == recipe
+
+    source = ti.ndarray(ti.f32, shape=count)
+    temporary = ti.ndarray(ti.f32, shape=count)
+    output = ti.ndarray(ti.f32, shape=count)
+    host = np.linspace(-1.0, 1.0, count, dtype=np.float32)
+    source.from_numpy(host)
+    with definition.materialization_context(
+        provider_set=catalog.provider_set
+    ) as context:
+        with context.materialize(catalog.baseline.recipe) as baseline:
+            baseline_id = baseline.materialized_physical_id
+            assert len(baseline.manifest.tasks) == 2
+        with context.materialize(recipe) as optimized:
+            assert optimized.materialized_physical_id != baseline_id
+            assert len(optimized.manifest.tasks) == 1
+            optimized.executor.run(
+                {"source": source, "temporary": temporary, "output": output}
+            )
+            ti.sync()
+    np.testing.assert_allclose(output.to_numpy(), host * 2.0 + 1.0)
+
+
 @test_utils.test(
     arch=ti.cuda,
     offline_cache=False,
@@ -567,7 +699,9 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
         GraphFamilySelection,
         GraphMaterializationProduct,
         GraphMaterializedFragment,
+        GraphMapFusionRecipeProvider,
         GraphRecipeProviderDescriptor,
+        GraphRuntimeRecipeAssembly,
         PROVIDER_OWNED_WHOLE_GRAPH_V1,
     )
 
@@ -700,7 +834,7 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
             return GraphMaterializedFragment.create(fragment, route)
 
         @staticmethod
-        def _optimized_selections(requested_definition):
+        def _optimized_assembly(requested_definition):
             spec = requested_definition._runtime_spec
             fusion = next(
                 recipe
@@ -725,22 +859,27 @@ def test_provider_owned_whole_graph_rebuilds_native_and_synthetic_fused_routes(
                     dispatch_regions[index] for index in dispatch_indices
                 ),
             )
-            return (fusion_selection,)
+            assembly = GraphRuntimeRecipeAssembly(requested_definition)
+            GraphMapFusionRecipeProvider().contribute_runtime(
+                assembly,
+                fusion_selection,
+            )
+            return assembly
 
         def assemble(self, scope, requested_definition, recipe, fragments):
             assert len(fragments) == 1
             route = fragments[0].payload
             if route == "assembly-failure":
                 raise RuntimeError("injected whole-Graph assembly failure")
-            selections = (
-                ()
+            assembly = (
+                GraphRuntimeRecipeAssembly(requested_definition)
                 if route == "native-and-direct-kernels"
-                else self._optimized_selections(requested_definition)
+                else self._optimized_assembly(requested_definition)
             )
             graph = requested_definition._runtime_spec.materialize_complete_recipe(
                 requested_definition,
                 recipe,
-                selections,
+                assembly,
                 workspace_lanes=scope._context.workspace_lanes,
                 workspace_saturation=scope._context.workspace_saturation,
             )

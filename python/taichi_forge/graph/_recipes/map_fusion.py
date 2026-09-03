@@ -62,5 +62,17 @@ class GraphMapFusionRecipeProvider(GraphRuntimeFragmentProvider):
             )
         return tuple(result)
 
+    def contribute_runtime(self, assembly, selection):
+        prefix = "dispatches:"
+        if not selection.source_key.startswith(prefix):
+            raise ValueError("map-fusion fragment has no source partition")
+        try:
+            source_group = tuple(
+                int(value) for value in selection.source_key[len(prefix) :].split(",")
+            )
+        except ValueError as error:
+            raise ValueError("map-fusion source partition is invalid") from error
+        assembly.add_map_source_group(source_group)
+
 
 __all__ = ["GraphMapFusionRecipeProvider"]
