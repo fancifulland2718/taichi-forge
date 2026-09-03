@@ -443,6 +443,10 @@ class CompileIQCompleteGraphRecipeSearch:
             "taichi_forge.graph.native_algorithm",
             "graph-native-algorithm-complete-recipe.v2",
         ),
+        "branch_join_schedule": (
+            "taichi_forge.graph.branch_join_schedule",
+            "cuda-branch-join-complete-recipe.v1",
+        ),
     }
 
     def __init__(self, graph, *, catalog=None):

@@ -5258,6 +5258,8 @@ void export_lang(py::module &m) {
            &GraphBuilder::set_map_composer_max_group_size)
       .def("_set_map_composer_allowed_groups",
            &GraphBuilder::set_map_composer_allowed_groups)
+      .def("_set_cuda_parallel_dispatch_groups",
+           &GraphBuilder::set_cuda_parallel_dispatch_groups)
       .def("create_sequential", &GraphBuilder::new_sequential_node,
            py::return_value_policy::reference)
       .def("seq", &GraphBuilder::seq, py::return_value_policy::reference);

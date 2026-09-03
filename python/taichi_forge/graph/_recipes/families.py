@@ -325,6 +325,81 @@ def _sparse_traversal_fragments(definition, spec):
     return tuple(result)
 
 
+def _branch_join_fragments(definition, spec):
+    result = []
+    for source in spec._graph_branch_join_sources:
+        runtime_node = spec.nodes[source.node_index]
+        logical_nodes = tuple(runtime_node.ir_node.children)
+        task_by_dispatch = {}
+        tasks = []
+        for branch_index, group in enumerate(source.branch_groups):
+            previous = None
+            for dispatch_index in group:
+                task_id = f"{source.source_key}:dispatch:{dispatch_index}"
+                task = GraphFragmentTask.create(
+                    task_id,
+                    "cuda_branch_dispatch",
+                    depends_on=(() if previous is None else (previous,)),
+                    effects=logical_nodes[dispatch_index].effects,
+                    bindings=logical_nodes[dispatch_index].bindings,
+                    temporaries=logical_nodes[dispatch_index].temporaries,
+                    physical={
+                        "family": "branch_join_schedule",
+                        "queue": f"cuda_branch:{branch_index}",
+                        "dispatch_index": dispatch_index,
+                    },
+                )
+                tasks.append(task)
+                task_by_dispatch[dispatch_index] = task_id
+                previous = task_id
+
+        join_task_id = f"{source.source_key}:dispatch:{source.join_index}"
+        join_node = logical_nodes[source.join_index]
+        tasks.append(
+            GraphFragmentTask.create(
+                join_task_id,
+                "cuda_branch_join",
+                depends_on=tuple(
+                    task_by_dispatch[group[-1]]
+                    for group in source.branch_groups
+                ),
+                effects=join_node.effects,
+                bindings=join_node.bindings,
+                temporaries=join_node.temporaries,
+                physical={
+                    "family": "branch_join_schedule",
+                    "queue": "default",
+                    "dispatch_index": source.join_index,
+                    "branch_groups": source.branch_groups,
+                    "disjoint_pairs": source.disjoint_pairs,
+                    "sequential_temporary_bytes": (
+                        source.sequential_temporary_bytes
+                    ),
+                    "parallel_temporary_bytes": source.parallel_temporary_bytes,
+                },
+            )
+        )
+        dispatch_indices = tuple(
+            index
+            for group in source.branch_groups
+            for index in group
+        ) + (source.join_index,)
+        coverage = tuple(
+            definition.sources[index].region_id for index in dispatch_indices
+        )
+        result.append(
+            _fragment(
+                definition,
+                family="branch_join_schedule",
+                source_key=source.source_key,
+                choice_id=source.recipe_id,
+                coverage=coverage,
+                tasks=tuple(tasks),
+            )
+        )
+    return tuple(result)
+
+
 def _native_source_coverage(definition, source):
     prefix = f"graph/{source._recipe_node_index}:"
     root = next(
@@ -582,6 +657,7 @@ class GraphExistingFamilyProvider:
         fragments.extend(_memory_fragments(definition, spec))
         fragments.extend(_offload_phase_fusion_fragments(definition, spec))
         fragments.extend(_sparse_traversal_fragments(definition, spec))
+        fragments.extend(_branch_join_fragments(definition, spec))
         fragments.extend(_bounded_fragments(definition, spec))
         fragments.extend(_control_fragments(definition, spec))
         fragments.extend(

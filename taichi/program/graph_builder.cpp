@@ -834,6 +834,22 @@ std::unique_ptr<aot::CompiledGraph> GraphBuilder::compile() {
   std::vector<aot::CompiledDispatch> dispatches;
   seq()->compile(dispatches);
   aot::CompiledGraph graph{dispatches, all_args_};
+  if (!cuda_parallel_dispatch_groups_.empty()) {
+    const auto first = cuda_parallel_dispatch_groups_.front().front();
+    std::uint32_t expected = first;
+    for (const auto &group : cuda_parallel_dispatch_groups_) {
+      for (const auto dispatch_index : group) {
+        TI_ERROR_IF(dispatch_index != expected,
+                    "CUDA parallel Graph dispatch groups must form one "
+                    "ordered contiguous interval");
+        ++expected;
+      }
+    }
+    TI_ERROR_IF(expected >= dispatches.size(),
+                "CUDA parallel Graph schedule requires a serial join or "
+                "suffix dispatch after every branch");
+    graph.cuda_parallel_dispatch_groups = cuda_parallel_dispatch_groups_;
+  }
   for (auto &kernel : composed_kernels_) {
     graph.owned_jit_kernels.emplace_back(std::move(kernel));
   }
@@ -979,6 +995,28 @@ void GraphBuilder::set_map_composer_allowed_groups(
     }
   }
   map_composer_allowed_groups_ = std::move(accepted);
+}
+
+void GraphBuilder::set_cuda_parallel_dispatch_groups(
+    const std::vector<std::vector<std::uint32_t>> &groups) {
+  TI_ERROR_IF(groups.size() < 2 || groups.size() > 4,
+              "CUDA parallel Graph schedule requires two to four branches");
+  TI_ERROR_IF(map_composer_max_group_size_ != 1 ||
+                  !map_composer_allowed_groups_.empty(),
+              "CUDA parallel Graph schedule requires exact uncomposed "
+              "dispatch identities");
+  std::uint32_t expected = groups.front().empty() ? 0 : groups.front().front();
+  for (const auto &group : groups) {
+    TI_ERROR_IF(group.empty(),
+                "CUDA parallel Graph schedule branches must not be empty");
+    for (const auto dispatch_index : group) {
+      TI_ERROR_IF(dispatch_index != expected,
+                  "CUDA parallel Graph dispatch groups must be ordered, "
+                  "contiguous, and disjoint");
+      ++expected;
+    }
+  }
+  cuda_parallel_dispatch_groups_ = groups;
 }
 
 std::optional<aot::CompiledDispatch> GraphBuilder::try_compose_maps(

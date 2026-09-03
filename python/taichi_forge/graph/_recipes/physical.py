@@ -1007,13 +1007,17 @@ def observe_graph_physical_manifest(definition, recipe, graph):
         kernel=None,
         pipeline_identity="",
         properties=None,
+        depends_on=None,
+        command_depends_on=None,
     ):
         task_index = len(tasks)
+        if depends_on is None:
+            depends_on = () if task_index == 0 else (task_index - 1,)
         tasks.append(
             GraphPhysicalTaskManifest.create(
                 task_index,
                 kind,
-                depends_on=(() if task_index == 0 else (task_index - 1,)),
+                depends_on=depends_on,
                 region_ids=regions,
                 kernel_indices=(() if kernel is None else (kernel.kernel_index,)),
                 queue=queue,
@@ -1025,17 +1029,35 @@ def observe_graph_physical_manifest(definition, recipe, graph):
             GraphPhysicalCommandManifest.create(
                 len(commands),
                 kind,
-                depends_on=(() if not commands else (len(commands) - 1,)),
+                depends_on=(
+                    (() if not commands else (len(commands) - 1,))
+                    if command_depends_on is None
+                    else command_depends_on
+                ),
                 task_indices=(task_index,),
                 queue=queue,
                 properties=properties,
             )
         )
+        return task_index
 
     for stage, regions in zip(pipeline, stage_regions):
         stage_tasks = tuple(stage["tasks"])
         native_actions = tuple(stage["native_actions"])
         stage_plan_identity = _stage_plan_identity(stage)
+        parallel_groups = tuple(stage.get("parallel_dispatch_groups", ()))
+        branch_by_dispatch = {
+            dispatch_index: branch_index
+            for branch_index, group in enumerate(parallel_groups)
+            for dispatch_index in group
+        }
+        parallel_begin = (
+            parallel_groups[0][0] if parallel_groups else None
+        )
+        parallel_end = (
+            parallel_groups[-1][-1] + 1 if parallel_groups else None
+        )
+        last_task_by_dispatch = {}
         if stage_tasks:
             for raw in stage_tasks:
                 raw_payload = asdict(raw)
@@ -1057,9 +1079,46 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                     properties=raw_payload,
                 )
                 kernels.append(kernel)
-                append_task(
+                dispatch_index = int(raw.dispatch_index)
+                queue = "default"
+                task_dependencies = None
+                if parallel_groups:
+                    branch_index = branch_by_dispatch.get(dispatch_index)
+                    previous_same_dispatch = last_task_by_dispatch.get(
+                        dispatch_index
+                    )
+                    if previous_same_dispatch is not None:
+                        task_dependencies = (previous_same_dispatch,)
+                    elif branch_index is not None:
+                        queue = f"cuda_branch:{branch_index}"
+                        group = parallel_groups[branch_index]
+                        if dispatch_index == group[0]:
+                            task_dependencies = (
+                                ()
+                                if parallel_begin == 0
+                                else (
+                                    last_task_by_dispatch[parallel_begin - 1],
+                                )
+                            )
+                        else:
+                            task_dependencies = (
+                                last_task_by_dispatch[dispatch_index - 1],
+                            )
+                    elif dispatch_index == parallel_end:
+                        task_dependencies = tuple(
+                            last_task_by_dispatch[group[-1]]
+                            for group in parallel_groups
+                        )
+                    elif dispatch_index > 0:
+                        task_dependencies = (
+                            last_task_by_dispatch[dispatch_index - 1],
+                        )
+                    else:
+                        task_dependencies = ()
+                task_index = append_task(
                     "kernel",
                     regions,
+                    queue=queue,
                     kernel=kernel,
                     pipeline_identity=_combined_pipeline_identity(
                         kernel.pipeline_identity,
@@ -1069,8 +1128,14 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                         "stage_kind": stage["kind"],
                         "dispatch_index": raw.dispatch_index,
                         "source_dispatch_count": raw.source_dispatch_count,
+                        "parallel_branch": branch_by_dispatch.get(
+                            dispatch_index
+                        ),
                     },
+                    depends_on=task_dependencies,
+                    command_depends_on=task_dependencies,
                 )
+                last_task_by_dispatch[dispatch_index] = task_index
         for action in native_actions:
             payload = action.to_dict()
             physical_plan_id = action.physical_plan_id or (

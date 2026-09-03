@@ -5,6 +5,7 @@ import pytest
 import taichi_forge as ti
 from taichi_forge._lib import core as ti_core
 from taichi_forge.graph._recipes.physical import observe_graph_physical_manifest
+from taichi_forge.lang.exception import TaichiRuntimeError
 
 from tests import test_utils
 
@@ -964,3 +965,138 @@ def test_complete_structured_control_composes_independent_top_level_domains(
                 assert arguments["state_b"].to_numpy()[()] == 5
                 physical_ids.add(materialized.materialized_physical_id)
     assert len(physical_ids) == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_complete_recipe_materializes_coarse_cuda_branch_join_dag():
+    count = 257
+
+    @ti.kernel
+    def advance_a(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(count):
+            target[index] = source[index] + 1
+
+    @ti.kernel
+    def advance_b(
+        source: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        target: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(count):
+            target[index] = source[index] - 2
+
+    @ti.kernel
+    def join(
+        lhs: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        rhs: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        output: ti.types.ndarray(dtype=ti.i32, ndim=1),
+    ):
+        for index in range(count):
+            output[index] = lhs[index] + rhs[index]
+
+    symbols = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("a0", "a1", "b0", "b1", "output")
+    }
+    builder = ti.graph.GraphBuilder()
+    for stage in range(4):
+        builder.dispatch(
+            advance_a,
+            symbols["a0" if stage % 2 == 0 else "a1"],
+            symbols["a1" if stage % 2 == 0 else "a0"],
+        )
+    for stage in range(4):
+        builder.dispatch(
+            advance_b,
+            symbols["b0" if stage % 2 == 0 else "b1"],
+            symbols["b1" if stage % 2 == 0 else "b0"],
+        )
+    builder.dispatch(join, symbols["a0"], symbols["b0"], symbols["output"])
+    definition = builder.freeze()
+
+    sources = definition._runtime_spec._graph_branch_join_sources
+    assert len(sources) == 1
+    assert sources[0].branch_groups == ((0, 1, 2, 3), (4, 5, 6, 7))
+    assert sources[0].join_index == 8
+    assert sources[0].parallel_temporary_bytes == (
+        sources[0].sequential_temporary_bytes
+    )
+
+    catalog = definition.recipe_catalog()
+    fragments = _family_fragments(catalog, "branch_join_schedule")
+    assert len(fragments) == 1
+    entry = catalog.compose(
+        (fragments[0].fragment_id,),
+        stage="coarse-cuda-branch-join",
+        parent_recipe_ids=(catalog.baseline.recipe.recipe_id,),
+    )
+
+    with definition.materialization_context() as context:
+        with context.materialize(catalog.baseline.recipe) as baseline:
+            baseline_physical_id = baseline.materialized_physical_id
+        with context.materialize(entry.recipe) as product:
+            assert product.materialized_physical_id != baseline_physical_id
+            tasks = product.manifest.tasks
+            assert tuple(task.queue for task in tasks) == (
+                *("cuda_branch:0",) * 4,
+                *("cuda_branch:1",) * 4,
+                "default",
+            )
+            assert tuple(task.depends_on for task in tasks) == (
+                (),
+                (0,),
+                (1,),
+                (2,),
+                (),
+                (4,),
+                (5,),
+                (6,),
+                (3, 7),
+            )
+
+            values = {
+                name: ti.ndarray(ti.i32, shape=count) for name in symbols
+            }
+            initial = np.arange(count, dtype=np.int32)
+            values["a0"].from_numpy(initial)
+            values["a1"].fill(0)
+            values["b0"].from_numpy(initial * 3)
+            values["b1"].fill(0)
+            values["output"].fill(0)
+            bindings = product.executor.bind(values)
+            assert bindings.fast_path_qualified
+            published = product.executor.binding_statistics()
+            for _ in range(32):
+                product.executor.run(bindings)
+            ti.sync()
+            replayed = product.executor.binding_statistics()
+            assert replayed["version_builds"] == published["version_builds"]
+            assert replayed["raw_replay_validations"] == (
+                published["raw_replay_validations"]
+            )
+            assert replayed["version_fast_replays"] == (
+                published["version_fast_replays"] + 32
+            )
+            assert product.executor.execution_stats().execution_path == (
+                "cuda_exact_replay"
+            )
+            np.testing.assert_array_equal(
+                values["output"].to_numpy(),
+                initial * 4 - 128,
+            )
+
+            aliased = dict(values)
+            aliased["b0"] = aliased["a0"]
+            with pytest.raises(
+                TaichiRuntimeError,
+                match="requires proven disjoint storage",
+            ):
+                product.executor.bind(aliased)
+
+    short = ti.graph.GraphBuilder()
+    short.dispatch(advance_a, symbols["a0"], symbols["a1"])
+    short.dispatch(advance_b, symbols["b0"], symbols["b1"])
+    short.dispatch(join, symbols["a1"], symbols["b1"], symbols["output"])
+    assert not short.freeze()._runtime_spec._graph_branch_join_sources
