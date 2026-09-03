@@ -118,7 +118,7 @@ class _ExhaustiveSearch:
 
 
 class _SearchSessionV2:
-    PROTOCOL = "budgeted_staged_pareto_racing_main_thread_v2"
+    PROTOCOL = "dynamic_batch_pareto_racing_main_thread_v2"
 
 
 class _BudgetV2:
@@ -145,6 +145,22 @@ class _LineageV2:
     pass
 
 
+class _DynamicDomainV2:
+    SCHEMA = "compileiq.opaque-dynamic-recipe-domain.v2"
+
+
+class _EvaluationContextV1:
+    SCHEMA = "compileiq.taichi-forge-evaluation-context.v1"
+
+
+class _FinalizationV1:
+    SCHEMA = "compileiq.taichi-forge-search-finalization.v1"
+
+
+class _SearchStatusV2:
+    SCHEMA = "compileiq.taichi-forge-search-status.v2"
+
+
 class _TargetContract:
     SCHEMA = "compileiq.taichi-forge-opaque-target-contract.v1"
 
@@ -163,11 +179,14 @@ def _capability():
     return MappingProxyType(
         {
             "schema": "compileiq.taichi-forge-recipe-search-capability.v2",
-            "protocol_revision": 4,
+            "protocol_revision": 5,
             "fork_build_id": "compileiq-taichi-forge-complete-recipes.v2",
-            "package_version": "1.0.0dev4+taichiforge.recipe2",
+            "package_version": "1.0.0dev5+taichiforge.recipe2",
             "opaque_recipe_domain_schema": "compileiq.opaque-recipe-domain.v1",
             "opaque_recipe_batch_schema": "compileiq.opaque-recipe-batch.v2",
+            "opaque_dynamic_recipe_domain_schema": (
+                "compileiq.opaque-dynamic-recipe-domain.v2"
+            ),
             "selection_audit_schema": "compileiq.opaque-recipe-selection.v1",
             "opaque_target_contract_schema": (
                 "compileiq.taichi-forge-opaque-target-contract.v1"
@@ -179,6 +198,13 @@ def _capability():
             "search_checkpoint_schema": (
                 "compileiq.taichi-forge-search-checkpoint.v2"
             ),
+            "evaluation_context_schema": (
+                "compileiq.taichi-forge-evaluation-context.v1"
+            ),
+            "search_finalization_schema": (
+                "compileiq.taichi-forge-search-finalization.v1"
+            ),
+            "search_status_schema": "compileiq.taichi-forge-search-status.v2",
             "max_recipe_ids": 4096,
             "max_field_utf8_bytes": 4096,
             "max_canonical_bytes": 4 * 1024 * 1024,
@@ -189,7 +215,7 @@ def _capability():
             "opaque_domain_binding": "capability_id_core_commit_core_lock",
             "objective_worker": "forge_main_thread_serial_v1",
             "opaque_recipe_search": (
-                "budgeted_staged_pareto_racing_main_thread_v2"
+                "dynamic_batch_pareto_racing_main_thread_v2"
             ),
             "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
             "core_manifest_schema_version": 1,
@@ -400,9 +426,9 @@ def test_private_legacy_graph_search_is_baseline_inclusive_and_opaque(monkeypatc
     assert manifest["reviewed_compileiq_distribution"] == {
         "repository": "https://github.com/fancifulland2718/CompileIQ",
         "ref": "refs/heads/main",
-        "commit": "1bf6ded4878eb0b22a7c59bb6391912ea591763d",
+        "commit": "5440ac51cdd34d60f7b499a8295fc0a9d077d04b",
         "wheel_sha256": (
-            "5d0ed04049a9c5279ee86ac3959b2b53dfdf3cc100414b86980b1a2372430914"
+            "75a388ec83a6063315236ddc4dee7659ec1cc3ec0fa7429673cc91ba2fb08cc1"
         ),
         "runtime_verification": "capability_manifest_and_python_source_lock",
     }
@@ -748,6 +774,9 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
         ForgeOpaqueSearchBudgetV2=_BudgetV2,
         TrialOutcomeV2=_OutcomeV2,
         TrialCleanupV2=_CleanupV2,
+        ForgeOpaqueEvaluationContextV1=_EvaluationContextV1,
+        ForgeOpaqueSearchFinalizationV1=_FinalizationV1,
+        ForgeOpaqueSearchStatusV2=_SearchStatusV2,
         ForgeOpaqueRecipeExhaustiveSearchV1=_ExhaustiveSearch,
         ForgeOpaqueTargetContractV1=_TargetContract,
     )
@@ -756,6 +785,7 @@ def test_missing_or_different_compileiq_cannot_use_the_public_path(monkeypatch):
         OpaqueRecipeBatchV2=_BatchV2,
         OpaqueRecipeFidelityV2=_FidelityV2,
         OpaqueRecipeLineageV2=_LineageV2,
+        OpaqueDynamicRecipeDomainV2=_DynamicDomainV2,
     )
     modules = {
         "compileiq.forge_support": support,

@@ -11,12 +11,12 @@ from types import MappingProxyType
 
 _CAPABILITY_SCHEMA = "compileiq.taichi-forge-recipe-search-capability.v2"
 _FORK_BUILD_ID = "compileiq-taichi-forge-complete-recipes.v2"
-_PACKAGE_VERSION = "1.0.0dev4+taichiforge.recipe2"
+_PACKAGE_VERSION = "1.0.0dev5+taichiforge.recipe2"
 _REVIEWED_FORK_REPOSITORY = "https://github.com/fancifulland2718/CompileIQ"
 _REVIEWED_FORK_REF = "refs/heads/main"
-_REVIEWED_FORK_COMMIT = "1bf6ded4878eb0b22a7c59bb6391912ea591763d"
+_REVIEWED_FORK_COMMIT = "5440ac51cdd34d60f7b499a8295fc0a9d077d04b"
 _REVIEWED_WHEEL_SHA256 = (
-    "5d0ed04049a9c5279ee86ac3959b2b53dfdf3cc100414b86980b1a2372430914"
+    "75a388ec83a6063315236ddc4dee7659ec1cc3ec0fa7429673cc91ba2fb08cc1"
 )
 _DOMAIN_SCHEMA = "compileiq.opaque-recipe-domain.v1"
 _BATCH_SCHEMA = "compileiq.opaque-recipe-batch.v2"
@@ -36,12 +36,12 @@ _EXPECTED_CORE_LOCK = (
     "sha256:0bc59bcd0864ce77dcae75aa00af3f7d641737e9abd0bd3cdb21c78425f127aa"
 )
 _EXPECTED_CAPABILITY_ID = (
-    "ciq-forge-cap-v2:116c5626904834b7ae0dc6bdd193b07d12de94eea8ca6f32d72fe54e4ac3115a"
+    "ciq-forge-cap-v2:f2a10c55bcf96b03c3b9fa9af33c14157e1d8638d86f2f3b32d677e47600c7dd"
 )
 _OBJECTIVE_WORKER = "forge_main_thread_serial_v1"
 _EXPECTED_PYTHON_SOURCE_LOCK = (
     "ciq-python-source-v1:"
-    "072607b63f09c6ea488a40effe5573dae7e40eafe6f0319b8d58815dfdc4902d"
+    "f87386b33c15fe2d1fe75770013a4444a9f90d9102ed46a5f0b74ee3df7976c9"
 )
 _SOURCE_LOCK_FILES = (
     "ciq.py",
@@ -74,11 +74,15 @@ _CAPABILITY_KEYS = frozenset(
         "package_version",
         "opaque_recipe_domain_schema",
         "opaque_recipe_batch_schema",
+        "opaque_dynamic_recipe_domain_schema",
         "selection_audit_schema",
         "opaque_target_contract_schema",
         "opaque_target_selection",
         "trial_outcome_schema",
         "search_checkpoint_schema",
+        "evaluation_context_schema",
+        "search_finalization_schema",
+        "search_status_schema",
         "max_recipe_ids",
         "max_field_utf8_bytes",
         "max_canonical_bytes",
@@ -190,6 +194,11 @@ def _validated_compileiq_capability(
     budget_type = getattr(support, "ForgeOpaqueSearchBudgetV2", None)
     outcome_type = getattr(support, "TrialOutcomeV2", None)
     cleanup_type = getattr(support, "TrialCleanupV2", None)
+    evaluation_context_type = getattr(
+        support, "ForgeOpaqueEvaluationContextV1", None
+    )
+    finalization_type = getattr(support, "ForgeOpaqueSearchFinalizationV1", None)
+    status_type = getattr(support, "ForgeOpaqueSearchStatusV2", None)
     exhaustive_search_type = getattr(
         support, "ForgeOpaqueRecipeExhaustiveSearchV1", None
     )
@@ -198,6 +207,7 @@ def _validated_compileiq_capability(
     batch_type = getattr(recipes, "OpaqueRecipeBatchV2", None)
     fidelity_type = getattr(recipes, "OpaqueRecipeFidelityV2", None)
     lineage_type = getattr(recipes, "OpaqueRecipeLineageV2", None)
+    dynamic_domain_type = getattr(recipes, "OpaqueDynamicRecipeDomainV2", None)
     if (
         not callable(capability_factory)
         or domain_type is None
@@ -205,16 +215,28 @@ def _validated_compileiq_capability(
         or getattr(batch_type, "SCHEMA", None) != _BATCH_SCHEMA
         or not isinstance(fidelity_type, type)
         or not isinstance(lineage_type, type)
+        or not isinstance(dynamic_domain_type, type)
+        or getattr(dynamic_domain_type, "SCHEMA", None)
+        != "compileiq.opaque-dynamic-recipe-domain.v2"
         or not isinstance(worker_type, type)
         or getattr(worker_type, "PROTOCOL", None) != _OBJECTIVE_WORKER
         or not isinstance(session_type, type)
         or getattr(session_type, "PROTOCOL", None)
-        != "budgeted_staged_pareto_racing_main_thread_v2"
+        != "dynamic_batch_pareto_racing_main_thread_v2"
         or not isinstance(budget_type, type)
         or not isinstance(outcome_type, type)
         or getattr(outcome_type, "SCHEMA", None)
         != "compileiq.taichi-forge-trial-outcome.v2"
         or not isinstance(cleanup_type, type)
+        or not isinstance(evaluation_context_type, type)
+        or getattr(evaluation_context_type, "SCHEMA", None)
+        != "compileiq.taichi-forge-evaluation-context.v1"
+        or not isinstance(finalization_type, type)
+        or getattr(finalization_type, "SCHEMA", None)
+        != "compileiq.taichi-forge-search-finalization.v1"
+        or not isinstance(status_type, type)
+        or getattr(status_type, "SCHEMA", None)
+        != "compileiq.taichi-forge-search-status.v2"
         or not isinstance(exhaustive_search_type, type)
         or getattr(exhaustive_search_type, "PROTOCOL", None)
         != "bounded_exhaustive_main_thread_v1"
@@ -237,11 +259,14 @@ def _validated_compileiq_capability(
 
     expected = {
         "schema": _CAPABILITY_SCHEMA,
-        "protocol_revision": 4,
+        "protocol_revision": 5,
         "fork_build_id": _FORK_BUILD_ID,
         "package_version": _PACKAGE_VERSION,
         "opaque_recipe_domain_schema": _DOMAIN_SCHEMA,
         "opaque_recipe_batch_schema": _BATCH_SCHEMA,
+        "opaque_dynamic_recipe_domain_schema": (
+            "compileiq.opaque-dynamic-recipe-domain.v2"
+        ),
         "selection_audit_schema": _AUDIT_SCHEMA,
         "opaque_target_contract_schema": (
             "compileiq.taichi-forge-opaque-target-contract.v1"
@@ -253,6 +278,13 @@ def _validated_compileiq_capability(
         "search_checkpoint_schema": (
             "compileiq.taichi-forge-search-checkpoint.v2"
         ),
+        "evaluation_context_schema": (
+            "compileiq.taichi-forge-evaluation-context.v1"
+        ),
+        "search_finalization_schema": (
+            "compileiq.taichi-forge-search-finalization.v1"
+        ),
+        "search_status_schema": "compileiq.taichi-forge-search-status.v2",
         "max_recipe_ids": _MAX_RECIPES,
         "max_field_utf8_bytes": _MAX_FIELD_UTF8_BYTES,
         "max_canonical_bytes": _MAX_CANONICAL_BYTES,
@@ -261,7 +293,7 @@ def _validated_compileiq_capability(
         "opaque_domain_binding": _OPAQUE_DOMAIN_BINDING,
         "objective_worker": _OBJECTIVE_WORKER,
         "opaque_recipe_search": (
-            "budgeted_staged_pareto_racing_main_thread_v2"
+            "dynamic_batch_pareto_racing_main_thread_v2"
         ),
         "opaque_recipe_search_v1": "bounded_exhaustive_main_thread_v1",
         "core_commit": _EXPECTED_CORE_COMMIT,
@@ -320,6 +352,7 @@ class _CompileIQOpaqueRecipeTransport:
         "_baseline_recipe_id",
         "_capability",
         "_domain",
+        "_dynamic_domain",
         "_domain_owner",
         "_python_source_lock",
         "_recipe_description",
@@ -338,6 +371,11 @@ class _CompileIQOpaqueRecipeTransport:
         capability_components,
         domain_owner,
         recipe_description,
+        generation_domain_id=None,
+        provider_registry_id=None,
+        assembly_protocols=("provider_owned_opaque_recipe.v1",),
+        recipe_schema="taichi_forge.opaque_recipe.v1",
+        search_strategy_id="manual_dynamic_batches.v2",
     ):
         capability, domain_type, worker_type, python_source_lock = capability_components
         recipe_ids = tuple(recipe_ids)
@@ -374,6 +412,39 @@ class _CompileIQOpaqueRecipeTransport:
         except Exception as error:
             raise ValueError(
                 "modified CompileIQ rejected the complete opaque recipe domain"
+            ) from error
+        try:
+            recipes = import_module("compileiq.recipes")
+            dynamic_domain_type = getattr(recipes, "OpaqueDynamicRecipeDomainV2")
+            dynamic_domain = dynamic_domain_type(
+                provider_namespace=provider_namespace,
+                domain_version=domain_version,
+                generation_domain_id=(
+                    provider_semantic_fingerprint
+                    if generation_domain_id is None
+                    else generation_domain_id
+                ),
+                provider_registry_id=(
+                    _identity(
+                        "forge-provider-registry-v1:",
+                        {
+                            "provider_namespace": provider_namespace,
+                            "domain_version": domain_version,
+                        },
+                    )
+                    if provider_registry_id is None
+                    else provider_registry_id
+                ),
+                assembly_protocols=tuple(assembly_protocols),
+                recipe_schema=recipe_schema,
+                search_strategy_id=search_strategy_id,
+                compileiq_capability_id=capability["capability_id"],
+                compileiq_core_commit=capability["core_commit"],
+                compileiq_core_lock=capability["core_lock"],
+            )
+        except Exception as error:
+            raise ValueError(
+                "modified CompileIQ rejected the dynamic opaque recipe domain"
             ) from error
         expected_binding = {
             "compileiq_capability_id": capability["capability_id"],
@@ -415,6 +486,7 @@ class _CompileIQOpaqueRecipeTransport:
         self._baseline_recipe_id = baseline_recipe_id
         self._capability = MappingProxyType(dict(capability))
         self._domain = domain
+        self._dynamic_domain = dynamic_domain
         self._domain_owner = domain_owner
         self._python_source_lock = python_source_lock
         self._recipe_description = recipe_description
@@ -476,7 +548,9 @@ class _CompileIQOpaqueRecipeTransport:
         fidelity_ordinal,
         repeat_count,
         work_scale=1.0,
+        terminal=False,
         estimated_materialized_bytes=None,
+        planned_physical_ids=None,
     ):
         """Build one exact V2 batch without exposing recipe internals."""
 
@@ -490,27 +564,27 @@ class _CompileIQOpaqueRecipeTransport:
                 "modified CompileIQ does not expose opaque recipe batches V2"
             ) from error
         recipe_ids = tuple(recipe_ids)
-        if (
-            not recipe_ids
-            or len(set(recipe_ids)) != len(recipe_ids)
-            or any(recipe_id not in self.recipe_ids for recipe_id in recipe_ids)
+        if not recipe_ids or len(set(recipe_ids)) != len(recipe_ids):
+            raise ValueError("V2 batch recipes must be nonempty and unique")
+        if len(recipe_ids) > _MAX_RECIPES or any(
+            not isinstance(recipe_id, str) or not recipe_id for recipe_id in recipe_ids
         ):
-            raise ValueError(
-                "V2 batch recipes must be a nonempty unique subset of the frozen domain"
-            )
+            raise ValueError("V2 batch recipe identities are invalid")
         if self.baseline_recipe_id not in recipe_ids:
             raise ValueError("every V2 batch must retain the frozen baseline")
         parent_recipe_ids = parent_recipe_ids or {}
         estimated_materialized_bytes = estimated_materialized_bytes or {}
+        planned_physical_ids = planned_physical_ids or {}
         unexpected_parents = set(parent_recipe_ids) - set(recipe_ids)
         unexpected_estimates = set(estimated_materialized_bytes) - set(recipe_ids)
-        if unexpected_parents or unexpected_estimates:
+        unexpected_plans = set(planned_physical_ids) - set(recipe_ids)
+        if unexpected_parents or unexpected_estimates or unexpected_plans:
             raise ValueError("V2 batch metadata contains an unknown recipe")
         return batch_type(
-            provider_namespace=self._domain.provider_namespace,
-            domain_version=self._domain.domain_version,
+            provider_namespace=self._dynamic_domain.provider_namespace,
+            domain_version=self._dynamic_domain.domain_version,
             provider_semantic_fingerprint=(
-                self._domain.provider_semantic_fingerprint
+                self._dynamic_domain.generation_domain_id
             ),
             compileiq_capability_id=self._capability["capability_id"],
             compileiq_core_commit=self._capability["core_commit"],
@@ -525,10 +599,15 @@ class _CompileIQOpaqueRecipeTransport:
                 ordinal=fidelity_ordinal,
                 repeat_count=repeat_count,
                 work_scale=work_scale,
+                terminal=terminal,
             ),
             recipes=tuple(
                 lineage_type(
                     recipe_id=recipe_id,
+                    planned_physical_id=planned_physical_ids.get(
+                        recipe_id,
+                        _identity("opaque-planned-recipe-v1:", recipe_id),
+                    ),
                     parent_recipe_ids=tuple(parent_recipe_ids.get(recipe_id, ())),
                     estimated_materialized_bytes=int(
                         estimated_materialized_bytes.get(recipe_id, 0)
@@ -547,17 +626,35 @@ class _CompileIQOpaqueRecipeTransport:
         deterministic_seed=0,
         halving_factor=2,
         minimum_survivors=1,
+        evaluation_context=None,
         checkpoint=None,
     ):
         try:
             support = import_module("compileiq.forge_support")
             session_type = getattr(support, "ForgeOpaqueSearchSessionV2")
+            evaluation_context_type = getattr(
+                support,
+                "ForgeOpaqueEvaluationContextV1",
+            )
         except (ImportError, AttributeError) as error:
             raise CompileIQOpaqueUnavailableError(
                 "modified CompileIQ does not expose staged opaque search V2"
             ) from error
+        if evaluation_context is None:
+            evaluation_context = evaluation_context_type(
+                reuse_scope="session_only",
+                workload_context_id="unspecified-workload-context",
+                evaluation_contract_id="unspecified-evaluation-contract",
+                backend_environment_id="unspecified-backend-environment",
+            )
+        elif not isinstance(evaluation_context, evaluation_context_type):
+            raise TypeError(
+                "evaluation_context must be a ForgeOpaqueEvaluationContextV1"
+            )
         return session_type(
             objective_function=objective_function,
+            dynamic_domain=self._dynamic_domain,
+            evaluation_context=evaluation_context,
             baseline_recipe_id=self.baseline_recipe_id,
             target_contract=target_contract,
             budget=budget,
@@ -574,6 +671,10 @@ class _CompileIQOpaqueRecipeTransport:
     @property
     def domain_fingerprint(self):
         return self._domain.domain_fingerprint
+
+    @property
+    def dynamic_domain(self):
+        return self._dynamic_domain.model_copy(deep=True)
 
     @property
     def recipe_ids(self):
@@ -719,13 +820,13 @@ class _CompileIQOpaqueRecipeTransport:
             "reviewed_compileiq_distribution": (_reviewed_distribution_manifest()),
             "domain": self._domain.model_dump(by_alias=True),
             "domain_fingerprint": self.domain_fingerprint,
-            "provider_semantic_fingerprint": (
-                self._domain.provider_semantic_fingerprint
-            ),
+            "dynamic_domain": self._dynamic_domain.model_dump(by_alias=True),
+            "dynamic_domain_fingerprint": self._dynamic_domain.domain_fingerprint,
+            "provider_semantic_fingerprint": self._dynamic_domain.generation_domain_id,
             "baseline_recipe_id": self.baseline_recipe_id,
             "recipe_count": len(self.recipe_ids),
             "search_coverage": "budgeted_partial_frontier_with_lineage",
-            "search_mode": "budgeted_staged_pareto_racing_main_thread_v2",
+            "search_mode": "dynamic_batch_pareto_racing_main_thread_v2",
             "v1_compatibility": "bounded_exhaustive_main_thread_v1",
             "fallback": "disabled",
         }

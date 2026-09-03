@@ -469,6 +469,16 @@ class CompileIQCompleteGraphRecipeSearch:
                 "complete Graph recipe catalog belongs to another definition"
             )
         entries = catalog.entries()
+        if catalog.provider_set is None:
+            assembly_protocols = {
+                entry.recipe.assembly_protocol for entry in entries
+            }
+        else:
+            assembly_protocols = {
+                protocol
+                for descriptor in catalog.provider_set.descriptors
+                for protocol in descriptor.assembly_protocols
+            }
         families = tuple(
             dict.fromkeys(
                 str(
@@ -507,6 +517,16 @@ class CompileIQCompleteGraphRecipeSearch:
             capability_components=capability_components,
             domain_owner="complete Graph",
             recipe_description="complete Graph recipe",
+            generation_domain_id=catalog.generation_domain_id,
+            provider_registry_id=catalog.provider_registry_id,
+            assembly_protocols=tuple(
+                sorted(
+                    assembly_protocols,
+                    key=lambda item: item.encode("utf-8"),
+                )
+            ),
+            recipe_schema="taichi_forge.complete_graph_recipe.v2",
+            search_strategy_id="manual_dynamic_batches.v2",
         )
         self._graph = graph
         self._definition = definition
@@ -670,6 +690,7 @@ class CompileIQCompleteGraphRecipeSearch:
         fidelity_ordinal=0,
         repeat_count=1,
         work_scale=1.0,
+        terminal=False,
     ):
         """Build one CompileIQ V2 batch from frozen complete recipes."""
 
@@ -694,6 +715,10 @@ class CompileIQCompleteGraphRecipeSearch:
             )
             for recipe_id in recipe_ids
         }
+        planned_physical_ids = {
+            recipe_id: self._catalog.entry(recipe_id).recipe.planned_physical_id
+            for recipe_id in recipe_ids
+        }
         stage_fingerprint = _identity(
             "forge-complete-recipe-stage-v2:",
             {
@@ -709,6 +734,7 @@ class CompileIQCompleteGraphRecipeSearch:
                     "ordinal": fidelity_ordinal,
                     "repeat_count": repeat_count,
                     "work_scale": work_scale,
+                    "terminal": terminal,
                 },
             },
         )
@@ -722,7 +748,9 @@ class CompileIQCompleteGraphRecipeSearch:
             fidelity_ordinal=fidelity_ordinal,
             repeat_count=repeat_count,
             work_scale=work_scale,
+            terminal=terminal,
             estimated_materialized_bytes=estimates,
+            planned_physical_ids=planned_physical_ids,
         )
 
     def compileiq_search(
@@ -737,6 +765,7 @@ class CompileIQCompleteGraphRecipeSearch:
         minimum_survivors=1,
         repeat_count=1,
         fidelity_name="full",
+        evaluation_context=None,
         checkpoint=None,
         context=None,
     ):
@@ -753,6 +782,7 @@ class CompileIQCompleteGraphRecipeSearch:
             minimum_survivors=minimum_survivors,
             repeat_count=repeat_count,
             fidelity_name=fidelity_name,
+            evaluation_context=evaluation_context,
             checkpoint=checkpoint,
             context=context,
         )
@@ -774,9 +804,10 @@ class CompileIQCompleteGraphRecipeSearch:
 
     def search_coverage(self, compileiq_search):
         if getattr(compileiq_search, "PROTOCOL", "") == (
-            "budgeted_staged_pareto_racing_main_thread_v2"
+            "dynamic_batch_pareto_racing_main_thread_v2"
         ):
             checkpoint = compileiq_search.checkpoint()
+            status = compileiq_search.status
             if not checkpoint.stages:
                 return MappingProxyType(
                     {
@@ -787,6 +818,7 @@ class CompileIQCompleteGraphRecipeSearch:
                         "missing_recipe_ids": self.recipe_ids,
                         "verified_core": True,
                         "termination_reason": compileiq_search.termination_reason,
+                        "status": status.model_dump(by_alias=True),
                     }
                 )
             stage = checkpoint.stages[-1]
@@ -798,20 +830,26 @@ class CompileIQCompleteGraphRecipeSearch:
             )
             return MappingProxyType(
                 {
-                    "complete": stage.complete,
-                    "baseline_observed": self.baseline_recipe_id in observed,
+                    "complete": (
+                        status.generation_status
+                        in ("exhaustive", "strategy_complete")
+                        and status.evaluation_status == "complete"
+                        and status.terminal_fidelity_status == "complete"
+                    ),
+                    "baseline_observed": status.baseline_status == "available",
                     "evaluation_count": checkpoint.evaluation_count,
                     "observed_recipe_ids": observed,
                     "missing_recipe_ids": missing,
                     "verified_core": True,
                     "termination_reason": compileiq_search.termination_reason,
+                    "status": status.model_dump(by_alias=True),
                 }
             )
         return self._transport.search_coverage(compileiq_search)
 
     def require_complete_search(self, compileiq_search):
         if getattr(compileiq_search, "PROTOCOL", "") == (
-            "budgeted_staged_pareto_racing_main_thread_v2"
+            "dynamic_batch_pareto_racing_main_thread_v2"
         ):
             coverage = self.search_coverage(compileiq_search)
             if not coverage["complete"]:
@@ -824,7 +862,7 @@ class CompileIQCompleteGraphRecipeSearch:
 
     def select_best_result(self, compileiq_search, result):
         if getattr(compileiq_search, "PROTOCOL", "") == (
-            "budgeted_staged_pareto_racing_main_thread_v2"
+            "dynamic_batch_pareto_racing_main_thread_v2"
         ):
             best = result.get_best_result()
             if not isinstance(best, dict):
@@ -893,7 +931,7 @@ class CompileIQCompleteGraphRecipeSearch:
 class _CompleteGraphRecipeSearchSessionV2:
     """Bind CompileIQ racing to Forge's sole Graph materialization context."""
 
-    PROTOCOL = "budgeted_staged_pareto_racing_main_thread_v2"
+    PROTOCOL = "dynamic_batch_pareto_racing_main_thread_v2"
 
     def __init__(
         self,
@@ -908,6 +946,7 @@ class _CompleteGraphRecipeSearchSessionV2:
         minimum_survivors,
         repeat_count,
         fidelity_name,
+        evaluation_context,
         checkpoint,
         context,
     ):
@@ -923,6 +962,14 @@ class _CompleteGraphRecipeSearchSessionV2:
             outcome_type = getattr(support, "TrialOutcomeV2")
             cleanup_type = getattr(support, "TrialCleanupV2")
             failure_type = getattr(support, "TrialFailureV2")
+            evaluation_context_type = getattr(
+                support,
+                "ForgeOpaqueEvaluationContextV1",
+            )
+            finalization_type = getattr(
+                support,
+                "ForgeOpaqueSearchFinalizationV1",
+            )
         except (ImportError, AttributeError) as error:
             raise CompileIQGraphUnavailableError(
                 "modified CompileIQ does not expose the V2 Forge search contract"
@@ -950,6 +997,7 @@ class _CompleteGraphRecipeSearchSessionV2:
         self._outcome_type = outcome_type
         self._cleanup_type = cleanup_type
         self._failure_type = failure_type
+        self._finalization_type = finalization_type
         self._owns_context = context is None
         self._context = context or plans._definition.materialization_context(
             provider_set=plans._catalog.provider_set,
@@ -960,7 +1008,23 @@ class _CompleteGraphRecipeSearchSessionV2:
         self._default_batch = plans.batch(
             fidelity_name=fidelity_name,
             repeat_count=repeat_count,
+            terminal=True,
         )
+        if evaluation_context is None:
+            evaluation_context = evaluation_context_type(
+                reuse_scope="session_only",
+                workload_context_id=(
+                    f"unspecified-workload:{plans.semantic_plan_id}"
+                ),
+                evaluation_contract_id=(
+                    "taichi-forge.graph-objective.unspecified.v1"
+                ),
+                backend_environment_id=f"taichi-forge-backend:{plans.backend}",
+            )
+        elif not isinstance(evaluation_context, evaluation_context_type):
+            raise TypeError(
+                "evaluation_context must be a ForgeOpaqueEvaluationContextV1"
+            )
         self._session = plans._transport.search_session_v2(
             self._evaluate,
             target_contract=target_contract,
@@ -968,6 +1032,7 @@ class _CompleteGraphRecipeSearchSessionV2:
             deterministic_seed=deterministic_seed,
             halving_factor=halving_factor,
             minimum_survivors=minimum_survivors,
+            evaluation_context=evaluation_context,
             checkpoint=checkpoint,
         )
 
@@ -990,6 +1055,10 @@ class _CompleteGraphRecipeSearchSessionV2:
     @property
     def termination_reason(self):
         return self._session.termination_reason
+
+    @property
+    def status(self):
+        return self._session.status
 
     def _cleanup(self, status, released, detail):
         return self._cleanup_type(
@@ -1213,7 +1282,17 @@ class _CompleteGraphRecipeSearchSessionV2:
         )
 
     def start(self):
-        return self.submit_batch(self._default_batch)
+        result = self.submit_batch(self._default_batch)
+        stage = result.checkpoint().stages[-1]
+        if not stage.complete:
+            return result
+        return self._session.finalize(
+            self._finalization_type(
+                generation_status="exhaustive",
+                terminal_fidelity_status="complete",
+                reason="exact_batch_complete",
+            )
+        )
 
     def submit_batch(self, batch):
         if self._closed:
@@ -1222,6 +1301,11 @@ class _CompleteGraphRecipeSearchSessionV2:
 
     def result(self):
         return self._session.result()
+
+    def finalize(self, finalization):
+        if self._closed:
+            raise RuntimeError("CompileIQ V2 Graph search session is closed")
+        return self._session.finalize(finalization)
 
     def checkpoint(self):
         return self._session.checkpoint()

@@ -17,6 +17,17 @@ def _budget(evaluations, *, memory=1 << 30):
     )
 
 
+def _evaluation_context():
+    from compileiq.forge_support import ForgeOpaqueEvaluationContextV1
+
+    return ForgeOpaqueEvaluationContextV1(
+        reuse_scope="portable",
+        workload_context_id="forge-test-workload:v1",
+        evaluation_contract_id="forge-test-evaluator:v1",
+        backend_environment_id="forge-test-cuda:v1",
+    )
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
     count = 1025
@@ -101,12 +112,18 @@ def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
         budget=_budget(2),
         repeat_count=2,
         deterministic_seed=23,
+        evaluation_context=_evaluation_context(),
     ) as partial_session:
         partial = partial_session.start()
         checkpoint = partial.checkpoint()
         partial_coverage = plans.search_coverage(partial_session)
 
     assert partial.termination_reason == "evaluation_budget_exhausted"
+    assert partial.status.terminal_state == "budget_exhausted"
+    assert checkpoint.evaluation_context == _evaluation_context()
+    assert checkpoint.dynamic_domain.generation_domain_id == (
+        plans._catalog.generation_domain_id
+    )
     assert partial_coverage["evaluation_count"] == 2
     assert partial_coverage["baseline_observed"]
     assert len(first_measurements) == 2
@@ -126,6 +143,7 @@ def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
         budget=_budget(len(plans.recipe_ids) * 2),
         repeat_count=2,
         deterministic_seed=23,
+        evaluation_context=_evaluation_context(),
         checkpoint=checkpoint,
     ) as resumed_session:
         result = resumed_session.start()
@@ -133,6 +151,8 @@ def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
         selected = plans.select_best_result(resumed_session, result)
 
     assert coverage["complete"]
+    assert result.status.terminal_state == "complete"
+    assert result.status.decision_status == "selected"
     assert coverage["evaluation_count"] == len(plans.recipe_ids) * 2
     assert len(resumed_measurements) == len(plans.recipe_ids) * 2 - 2
     assert not {key for key, _ in first_measurements}.intersection(
@@ -148,6 +168,7 @@ def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
 def test_complete_recipe_v2_multifidelity_bounded_racing_keeps_lineage():
     from compileiq.forge_support import (
         ForgeOpaqueObjectiveV1,
+        ForgeOpaqueSearchFinalizationV1,
         ForgeOpaqueTargetContractV1,
     )
 
@@ -241,13 +262,23 @@ def test_complete_recipe_v2_multifidelity_bounded_racing_keeps_lineage():
             fidelity_ordinal=1,
             repeat_count=2,
             work_scale=1.0,
+            terminal=True,
         )
-        final = session.submit_batch(stage1)
+        session.submit_batch(stage1)
+        final = session.finalize(
+            ForgeOpaqueSearchFinalizationV1(
+                generation_status="strategy_complete",
+                terminal_fidelity_status="complete",
+                reason="test_frontier_complete",
+            )
+        )
         checkpoint = session.checkpoint()
 
     assert len(checkpoint.stages) == 2
     assert checkpoint.stages[1].batch_fingerprint == stage1.batch_fingerprint
     assert checkpoint.stages[1].complete
+    assert final.status.terminal_state == "complete"
+    assert final.status.decision_status == "pareto_only"
     assert observed_recipes == set(plans.recipe_ids)
     assert all(item["observation_count"] == 2 for item in final.get_results())
     assert len(
