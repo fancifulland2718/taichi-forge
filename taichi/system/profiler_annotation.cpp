@@ -1,10 +1,16 @@
 #include "taichi/system/profiler_annotation.h"
 
-#include <memory>
-#include <mutex>
-
-#include "taichi/common/dynamic_loader.h"
 #include "taichi/common/logging.h"
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+#include <nvtx3/nvToolsExt.h>
 
 namespace taichi::lang {
 namespace {
@@ -12,44 +18,19 @@ namespace {
 thread_local std::string dispatch_label;
 thread_local const std::string *profiler_name_override{nullptr};
 
-using NvtxRangePush = int (*)(const char *);
-using NvtxRangePop = int (*)();
-
-struct NvtxFunctions {
-  std::unique_ptr<DynamicLoader> loader;
-  NvtxRangePush range_push{nullptr};
-  NvtxRangePop range_pop{nullptr};
-};
-
-NvtxFunctions &nvtx_functions() {
-  static NvtxFunctions functions;
-  static std::once_flag once;
-  std::call_once(once, [&] {
-#if defined(_WIN32)
-    const char *candidates[] = {"nvToolsExt64_1.dll"};
-#elif defined(__APPLE__)
-    const char *candidates[] = {"libnvToolsExt.dylib"};
-#else
-    const char *candidates[] = {"libnvToolsExt.so.1", "libnvToolsExt.so"};
-#endif
-    for (const char *candidate : candidates) {
-      auto loader = std::make_unique<DynamicLoader>(candidate);
-      if (!loader->loaded()) {
-        continue;
-      }
-      auto push = reinterpret_cast<NvtxRangePush>(
-          loader->load_function_optional("nvtxRangePushA"));
-      auto pop = reinterpret_cast<NvtxRangePop>(
-          loader->load_function_optional("nvtxRangePop"));
-      if (push != nullptr && pop != nullptr) {
-        functions.loader = std::move(loader);
-        functions.range_push = push;
-        functions.range_pop = pop;
-        break;
-      }
+nvtxDomainHandle_t profiler_domain() {
+  // NVTX owns domain lifetime until process exit. Initialize only on an
+  // explicitly annotated operation, never on import or ordinary replay.
+  static nvtxDomainHandle_t domain = [] {
+    auto value = nvtxDomainCreateA("taichi_forge");
+    const char *categories[] = {"task", "search", "stage", "recipe",
+                                "materialization", "trial", "user"};
+    for (uint32_t index = 0; index < 7; ++index) {
+      nvtxDomainNameCategoryA(value, index + 1, categories[index]);
     }
-  });
-  return functions;
+    return value;
+  }();
+  return domain;
 }
 
 std::string escape_trace_component(const std::string &value) {
@@ -104,17 +85,29 @@ std::string make_labeled_task_name(const std::string &task_name,
 
 ScopedExternalProfilerAnnotation::ScopedExternalProfilerAnnotation(
     const std::string &name) {
-  auto &nvtx = nvtx_functions();
-  if (nvtx.range_push != nullptr) {
-    nvtx.range_push(name.c_str());
-    active_ = true;
-  }
+  push_external_profiler_range(name, 1, 0);
 }
 
 ScopedExternalProfilerAnnotation::~ScopedExternalProfilerAnnotation() {
-  if (active_) {
-    nvtx_functions().range_pop();
-  }
+  pop_external_profiler_range();
+}
+
+void push_external_profiler_range(const std::string &name,
+                                  uint32_t category,
+                                  uint64_t payload) {
+  nvtxEventAttributes_t event{};
+  event.version = NVTX_VERSION;
+  event.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+  event.category = category;
+  event.messageType = NVTX_MESSAGE_TYPE_ASCII;
+  event.message.ascii = name.c_str();
+  event.payloadType = NVTX_PAYLOAD_TYPE_UNSIGNED_INT64;
+  event.payload.ullValue = payload;
+  nvtxDomainRangePushEx(profiler_domain(), &event);
+}
+
+void pop_external_profiler_range() {
+  nvtxDomainRangePop(profiler_domain());
 }
 
 ScopedKernelProfilerName::ScopedKernelProfilerName(

@@ -240,6 +240,7 @@ add_subdirectory(taichi/rhi)
 
 set(CORE_LIBRARY_NAME taichi_core)
 add_library(${CORE_LIBRARY_NAME} OBJECT ${TAICHI_CORE_SOURCE})
+include(cmake/TaichiNvtx.cmake)
 if(TI_WITH_SPLIT_PYTHON_RUNTIME AND NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
     target_compile_definitions(${CORE_LIBRARY_NAME}
         PRIVATE TI_WITH_SPLIT_PYTHON_RUNTIME TI_BUILDING_PYTHON_RUNTIME)

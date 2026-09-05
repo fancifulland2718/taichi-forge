@@ -1054,6 +1054,8 @@ void export_lang(py::module &m) {
 
   m.def("_push_dispatch_label", &push_dispatch_label);
   m.def("_restore_dispatch_label", &restore_dispatch_label);
+  m.def("_push_external_profiler_range", &push_external_profiler_range);
+  m.def("_pop_external_profiler_range", &pop_external_profiler_range);
 
   // Internal F2 validation surface. The public API remains Graph.run() -> None
   // until CPU/CUDA/Vulkan Ticket semantics and reset/fault lifetime complete

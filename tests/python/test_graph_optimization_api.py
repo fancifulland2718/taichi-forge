@@ -1,4 +1,5 @@
 from itertools import pairwise
+from contextlib import nullcontext
 import json
 import multiprocessing
 
@@ -424,7 +425,8 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_public_staged_search_materializes_new_survivor_compositions():
+@pytest.mark.parametrize("trace_enabled", (False, True))
+def test_public_staged_search_materializes_new_survivor_compositions(monkeypatch, trace_enabled):
     lengths = np.asarray((3, 17, 53), dtype=np.int32)
     offsets = np.concatenate(
         (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
@@ -508,10 +510,53 @@ def test_public_staged_search_materializes_new_survivor_compositions():
         np.testing.assert_array_equal(second_output.to_numpy(), second_expected)
         return {"selected_fragments": float(recipe.manifest.selected_fragment_count)}
 
-    outcome = session.run(evaluator)
+    from taichi_forge._lib import core as ti_core
+
+    events = []
+    stack = []
+    native_push = ti_core._push_external_profiler_range
+    native_pop = ti_core._pop_external_profiler_range
+
+    def push(message, category, payload):
+        assert trace_enabled, "ordinary search must not enter NVTX"
+        events.append((message, category, payload))
+        stack.append(category)
+        native_push(message, category, payload)
+
+    def pop():
+        assert stack, "annotation scope must be balanced"
+        stack.pop()
+        native_pop()
+
+    monkeypatch.setattr(ti_core, "_push_external_profiler_range", push)
+    monkeypatch.setattr(ti_core, "_pop_external_profiler_range", pop)
+    with ti.profiler.recipe_search_trace() if trace_enabled else nullcontext():
+        outcome = session.run(evaluator)
+    assert not stack
     assert outcome.selection is not None
     assert outcome.report.search_complete
     checkpoint = outcome.report.checkpoint.compileiq_checkpoint
+    if trace_enabled:
+        assert {category for _, category, _ in events} == {2, 3, 4, 5, 6}
+        assert [(message, payload) for message, category, payload in events if category == 3] == [
+            (batch["stage_fingerprint"], batch["stage_index"]) for batch in checkpoint["batches"]
+        ]
+        requests = [record["request"] for record in checkpoint["records"] if record["source"] == "objective"]
+        # Checkpoints canonically sort records by identity, not execution order.
+        assert sorted((message, payload) for message, category, payload in events if category == 6) == sorted(
+            (
+                f"measurement={request['measurement_key']} observation={request['observation_index']} "
+                f"fidelity={request['fidelity_name']}",
+                request["observation_index"],
+            )
+            for request in requests
+        )
+        for category in (4, 5):
+            assert sorted(message for message, observed_category, _ in events if observed_category == category) == sorted(
+                request["recipe_id"] for request in requests
+            )
+    else:
+        assert not events
     assert len(checkpoint["batches"]) == 3
     stage_zero_ids = {item["recipe_id"] for item in checkpoint["batches"][0]["recipes"]}
     generated_ids = {

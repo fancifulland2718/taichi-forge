@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 
 namespace taichi::lang {
 
@@ -19,9 +20,14 @@ std::string make_labeled_task_name(const std::string &task_name,
                                    const std::string &task_id,
                                    const std::string &dispatch_label);
 
-// Optional NVTX bridge. It loads the provider lazily on the first labeled
-// dispatch and is a no-op when NVTX is absent. The unlabeled path never calls
-// into the loader.
+// Explicit, same-thread ranges. NVTX 3 is header-only and a no-op without an
+// attached tool. Unlabeled dispatch/replay never enters this annotation path.
+void push_external_profiler_range(const std::string &name,
+                                  uint32_t category,
+                                  uint64_t payload);
+void pop_external_profiler_range();
+
+// Existing labeled tasks use the same domain as explicit Graph search ranges.
 class ScopedExternalProfilerAnnotation {
  public:
   explicit ScopedExternalProfilerAnnotation(const std::string &name);
@@ -32,8 +38,6 @@ class ScopedExternalProfilerAnnotation {
   ScopedExternalProfilerAnnotation &operator=(
       const ScopedExternalProfilerAnnotation &) = delete;
 
- private:
-  bool active_{false};
 };
 
 // CPU profiling starts inside generated LLVM code with a static task name.

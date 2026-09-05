@@ -638,8 +638,22 @@ class _CompleteGraphRecipeSearchSessionV2:
             raise TypeError(
                 "evaluation_context must be a ForgeOpaqueEvaluationContextV1"
             )
+        from taichi_forge.profiler.external_trace import (
+            _recipe_trace_enabled,
+            _trace_materializer,
+            _trace_stage,
+            _trace_trial,
+        )
+
+        # Select diagnostic wrappers once at search construction. No Graph,
+        # kernel, or steady replay dispatch is wrapped or made to poll a flag.
+        trace = _recipe_trace_enabled.get()
+        evaluate = _trace_trial(self._evaluate) if trace else self._evaluate
+        self._materialize_recipe = plans._definition.materialize
+        if trace:
+            self._materialize_recipe = _trace_materializer(self._materialize_recipe)
         self._session = plans._transport.search_session_v2(
-            self._evaluate,
+            evaluate,
             target_contract=target_contract,
             budget=budget,
             deterministic_seed=deterministic_seed,
@@ -648,6 +662,8 @@ class _CompleteGraphRecipeSearchSessionV2:
             evaluation_context=evaluation_context,
             checkpoint=checkpoint,
         )
+        submit = self._session.submit_batch
+        self._submit_batch = _trace_stage(submit) if trace else submit
 
     @property
     def opaque_recipe_capability(self):
@@ -724,7 +740,7 @@ class _CompleteGraphRecipeSearchSessionV2:
     def _evaluate(self, request):
         recipe = self._plans._catalog.entry(request.recipe_id).recipe
         try:
-            materialized = self._plans._definition.materialize(
+            materialized = self._materialize_recipe(
                 recipe,
                 context=self._context,
             )
@@ -910,7 +926,7 @@ class _CompleteGraphRecipeSearchSessionV2:
     def submit_batch(self, batch):
         if self._closed:
             raise RuntimeError("CompileIQ V2 Graph search session is closed")
-        return self._session.submit_batch(batch)
+        return self._submit_batch(batch)
 
     def result(self):
         return self._session.result()
