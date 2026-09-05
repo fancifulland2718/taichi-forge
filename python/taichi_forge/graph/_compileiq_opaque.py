@@ -738,6 +738,7 @@ class _CompleteGraphRecipeSearchSessionV2:
 
     def _trial_provenance(self, request, observation):
         from taichi_forge.graph._trial_observations import _PROVENANCE_KEY, _encode_boundaries
+        from taichi_forge.graph._report_costs import _cost_provenance
 
         provenance = {
             "backend": self._plans.backend,
@@ -747,7 +748,10 @@ class _CompleteGraphRecipeSearchSessionV2:
             "semantic_graph_id": self._plans.semantic_plan_id,
         }
         if observation is not None:
-            provenance[_PROVENANCE_KEY] = _encode_boundaries(observation)
+            provenance[_PROVENANCE_KEY] = _encode_boundaries({
+                key: value for key, value in observation.items() if key != "cost_metrics"
+            })
+            provenance.update(_cost_provenance(observation.get("cost_metrics", {})))
         return provenance
 
     def _evaluate(self, request):
@@ -813,6 +817,10 @@ class _CompleteGraphRecipeSearchSessionV2:
             observation["after_evaluator_status"] = "objective_failed"
         timings["evaluator"] = perf_counter() - started
         if objective_error is None:
+            from taichi_forge.graph._report_costs import _ReportedMetrics
+
+            if isinstance(raw_metrics, _ReportedMetrics):
+                observation["cost_metrics"] = raw_metrics.cost_metrics
             started = perf_counter()
             try:
                 # Some Graph-owned resources are intentionally allocated only

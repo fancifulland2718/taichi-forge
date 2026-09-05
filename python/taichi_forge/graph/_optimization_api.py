@@ -487,6 +487,11 @@ class GraphOptimizationReportV2:
         return json.loads(self._reuse_json)
 
     @property
+    def context(self):
+        """Caller/frozen facts; None for reports predating context enrichment."""
+        return self.reuse.get("context")
+
+    @property
     def compileiq_report(self):
         from compileiq.forge_support import OpaqueOptimizationReportV1
 
@@ -687,6 +692,7 @@ class GraphOptimizationReportV2:
 
     def to_markdown(self):
         from taichi_forge.graph._trial_observations import _boundary_markdown
+        from taichi_forge.graph._report_context import _context_markdown, _cost_markdown
 
         lines = [
             "# Taichi Forge Graph Optimization Report",
@@ -725,6 +731,8 @@ class GraphOptimizationReportV2:
             )
         lines.extend(["", "Provider notes above are declarations, not measured claims."])
         lines.extend(_boundary_markdown(self.recipe_annotations))
+        lines.extend(_cost_markdown(self.recipe_annotations))
+        lines.extend(_context_markdown(self.context, self.recipe_annotations))
         if any(item.get("environment_observations") for item in self.recipe_annotations):
             lines.extend(
                 [
@@ -854,6 +862,9 @@ class _GraphRecipeSearchSession:
         from taichi_forge.graph._compileiq_opaque import (
             CompileIQCompleteGraphRecipeSearch,
         )
+        from taichi_forge.graph._report_costs import _cost_profiles
+
+        self._cost_profiles = _cost_profiles(evaluation_contract)
 
         catalog = definition.recipe_catalog(
             providers=providers,
@@ -1489,9 +1500,12 @@ class _GraphRecipeSearchSession:
     def _recipe_annotations(self, compileiq_report, compileiq_checkpoint):
         from taichi_forge.hardware._gpu_environment import _environment_observations
         from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _trial_boundaries
+        from taichi_forge.graph._report_costs import _cost_evidence, _cost_observations
+        from taichi_forge.graph._report_context import _frozen_fragments
 
         environment = _environment_observations(compileiq_checkpoint["records"])
         boundaries = _trial_boundaries(compileiq_checkpoint["records"])
+        costs = _cost_observations(compileiq_checkpoint["records"])
         latest_candidates = {}
         for candidate in sorted(
             compileiq_report.candidates,
@@ -1499,6 +1513,7 @@ class _GraphRecipeSearchSession:
         ):
             latest_candidates[candidate.recipe_id] = candidate
         baseline_manifest = self.baseline.manifest
+        baseline_candidate = latest_candidates.get(self.baseline.recipe_id)
         annotations = []
         for recipe_id in sorted(latest_candidates):
             handle = self._handles[recipe_id]
@@ -1569,6 +1584,9 @@ class _GraphRecipeSearchSession:
                     "environment_observations": tuple(environment.get(recipe_id, ())),
                     "trial_boundaries": tuple(boundaries.get(recipe_id, ())),
                     "provider_claims": tuple(provider_claims),
+                    "frozen_fragments": _frozen_fragments(recipe),
+                    "cost_observations": tuple(costs.get(recipe_id, ())),
+                    "cost_profiles": _cost_evidence(candidate, baseline_candidate, self._cost_profiles, costs),
                     "provider_declared_applicability": tuple(declared_applicability),
                     "provider_declared_limitations": tuple(declared_limitations),
                 }
@@ -1591,8 +1609,15 @@ class _GraphRecipeSearchSession:
             raise TypeError("Graph recipe evaluator must be callable")
         self._used = True
 
+        from taichi_forge.graph._report_costs import _separate_cost_metrics
+        from taichi_forge.graph._report_context import _search_context
+
+        target_names = frozenset(self._target._compileiq_contract().metric_names)
+
         def objective(graph, request):
-            return evaluator(graph, self._handles[request.recipe_id])
+            return _separate_cost_metrics(
+                evaluator(graph, self._handles[request.recipe_id]), self._cost_profiles, target_names
+            )
 
         from compileiq.forge_support import ForgeOpaqueEvaluationContextV1
 
@@ -1693,6 +1718,10 @@ class _GraphRecipeSearchSession:
                     "evaluation_contract_id": self._evaluation_contract_id,
                     "backend_environment_id": self._backend_environment_id,
                     "resolution": "rebuild_provider_catalog_by_stable_recipe_id",
+                    "context": _search_context(
+                        self._definition, self._catalog.provider_set, self._workload_context,
+                        self._evaluation_contract, self._backend_environment,
+                    ),
                 }
             ),
             _compileiq_report_json=compileiq_report.summary().to_json(),

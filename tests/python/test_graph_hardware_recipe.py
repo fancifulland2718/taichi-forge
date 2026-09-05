@@ -175,6 +175,17 @@ def test_spmm_complete_recipes_search_report_and_fresh_process_resolution(tmp_pa
     annotations = json.dumps(decision.report.recipe_annotations)
     assert "finite_inputs_only" in annotations
     assert "frozen_config" in annotations
+    frozen = [fragment for item in decision.report.recipe_annotations for fragment in item["frozen_fragments"]]
+    spmm_tasks = [
+        task["physical"] for fragment in frozen if fragment["provider_namespace"].endswith(".sparse_spmm")
+        for task in fragment["physical_tasks"]
+    ]
+    assert spmm_tasks
+    assert all(task["semantic_contract"]["numerical_contract"] == operation.semantics["numerical_contract"] for task in spmm_tasks)
+    assert all(task["component"] == operation.component for task in spmm_tasks)
+    markdown = decision.report.to_markdown()
+    assert '"bitwise_reproducibility": false' in markdown
+    assert '"provider": "cusparse"' in markdown
     resolved = definition.resolve_recipe(decision.selection_artifact, providers=providers)
     with definition.materialize(resolved) as materialized:
         evaluate(materialized.executor, resolved)

@@ -158,6 +158,13 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
             "synchronization": "ti.sync-after-run",
             "correctness": "numpy-exact",
             "metric": "physical-plan-manifest",
+            "cost_profiles": {
+                "contract_fixture": {
+                    "scope": "synthetic arithmetic fixture, not performance evidence",
+                    "unit": "us", "setup": "fixture_setup", "first": "fixture_first", "steady": "fixture_steady",
+                    "amortization_model": "setup_plus_first_plus_remaining_steady",
+                }
+            },
         }
     )
     backend_environment = ti.graph.GraphBackendEnvironment(
@@ -198,7 +205,11 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         ti.sync()
         np.testing.assert_array_equal(output.to_numpy(), expected)
         observed.append(recipe.recipe_id)
-        return {"physical_dispatches": float(graph.physical_plan()["physical_dispatch_count"])}
+        return {
+            "physical_dispatches": float(graph.physical_plan()["physical_dispatch_count"]),
+            "fixture_setup": 100.0, "fixture_first": 2.0,
+            "fixture_steady": 1.0 if recipe.manifest.is_baseline else 100.0,
+        }
 
     decision = session.run(evaluator)
     report = decision.report
@@ -223,11 +234,20 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.outcome_status == "selected"
     assert report.next_action == "apply_selection"
     assert report.recipe_annotations
+    assert report.context["evaluation"] == evaluation_contract.to_dict()
+    assert report.context["workload"] == workload_context.to_dict()
+    assert report.context["backend"] == backend_environment.to_dict()
+    assert all("fixture_setup" not in candidate.metrics for candidate in report.compileiq_report.candidates)
     selected_annotation = next(
         item for item in report.recipe_annotations if item["recipe_id"] == decision.selection.recipe_id
     )
     assert selected_annotation["measurement"]["complete"]
     assert selected_annotation["measurement"]["materialized_physical_ids"]
+    # Cost observations must not silently become search objectives or filter
+    # this structurally selected (but cost-negative) candidate from the report.
+    assert selected_annotation["cost_profiles"]["contract_fixture"]["break_even"]["status"] == "no_positive_steady_saving"
+    assert selected_annotation["cost_profiles"]["contract_fixture"]["phases"]["steady"]["median"] == 100.0
+    assert selected_annotation["frozen_fragments"]
     assert all(
         claim["source"] == "provider_declared_not_measured"
         for item in report.recipe_annotations
@@ -238,12 +258,22 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     legacy_annotations = []
     for annotation in report.recipe_annotations:
         annotation.pop("trial_boundaries", None)
+        annotation.pop("cost_profiles", None)
+        annotation.pop("cost_observations", None)
+        annotation.pop("frozen_fragments", None)
         annotation["measurement"].pop("materialized_memory_scope", None)
         legacy_annotations.append(annotation)
-    legacy_report = replace(report, _recipe_annotations_json=json.dumps(legacy_annotations, sort_keys=True))
+    legacy_reuse = report.reuse
+    legacy_reuse.pop("context", None)
+    legacy_report = replace(
+        report, _recipe_annotations_json=json.dumps(legacy_annotations, sort_keys=True),
+        _reuse_json=json.dumps(legacy_reuse, sort_keys=True),
+    )
     restored_legacy = ti.graph.GraphOptimizationReportV2.from_json(legacy_report.to_json())
     assert restored_legacy.to_dict() == legacy_report.to_dict()
     assert "Graph resource observation boundaries" not in restored_legacy.to_markdown()
+    assert restored_legacy.context is None
+    assert "Caller-measured lifecycle costs" not in restored_legacy.to_markdown()
     tampered_report = report.to_dict()
     tampered_report["selection"]["reason"]["provider_claims_used"] = True
     with pytest.raises(ValueError, match="identity mismatch"):
@@ -252,6 +282,8 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert "Taichi Forge Graph Optimization Report" in markdown
     assert "CompileIQ measurement facts" in markdown
     assert "Provider notes above are declarations" in markdown
+    assert "Caller-measured lifecycle costs" in markdown
+    assert "synthetic arithmetic fixture" in markdown
     assert decision.selection_artifact is not None
     resolved = definition.resolve_recipe(decision.selection_artifact)
     assert resolved.recipe_id == decision.selection.recipe_id
@@ -406,6 +438,12 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         for annotation in partial.report.recipe_annotations
         for trial in annotation["trial_boundaries"]
     }.issubset(boundary_keys)
+    resumed_cost_keys = {
+        item["measurement_key"] for annotation in resumed.report.recipe_annotations for item in annotation["cost_observations"]
+    }
+    assert {
+        item["measurement_key"] for annotation in partial.report.recipe_annotations for item in annotation["cost_observations"]
+    }.issubset(resumed_cost_keys)
 
     with pytest.raises(RuntimeError, match="single-use"):
         session.run(evaluator)
