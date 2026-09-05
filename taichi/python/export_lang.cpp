@@ -5426,14 +5426,15 @@ void export_lang(py::module &m) {
           auto pyarg = pyargs[arg_name.c_str()];
           if (tag == aot::ArgKind::kNdarray) {
             if (py::isinstance<py::tuple>(pyarg)) {
-              auto runtime_pair = pyarg.cast<py::tuple>();
+              auto runtime_pair = pyarg.template cast<py::tuple>();
               TI_ERROR_IF(runtime_pair.size() != 2,
                           "Graph ndarray runtime storage tuple must contain "
                           "the owner and argument");
               auto &runtime_argument =
-                  runtime_pair[1].cast<storage::RuntimeStorageArgument &>();
+                  runtime_pair[1]
+                      .template cast<storage::RuntimeStorageArgument &>();
               if (py::isinstance<Ndarray>(runtime_pair[0])) {
-                auto &val = runtime_pair[0].cast<Ndarray &>();
+                auto &val = runtime_pair[0].template cast<Ndarray &>();
                 args.insert(
                     {arg_name, aot::IValue::create(val, runtime_argument)});
               } else {
@@ -5444,21 +5445,21 @@ void export_lang(py::module &m) {
                     {arg_name, aot::IValue::create(runtime_argument)});
               }
             } else {
-              auto &val = pyarg.cast<Ndarray &>();
+              auto &val = pyarg.template cast<Ndarray &>();
               args.insert({arg_name, aot::IValue::create(val)});
             }
           } else if (tag == aot::ArgKind::kTexture ||
                      tag == aot::ArgKind::kRWTexture) {
-            auto &val = pyarg.cast<Texture &>();
+            auto &val = pyarg.template cast<Texture &>();
             args.insert({arg_name, aot::IValue::create(val)});
           } else if (tag == aot::ArgKind::kScalar) {
             auto expected_dtype = arg.dtype();
             insert_scalar_arg(arg_name, expected_dtype, pyarg);
           } else if (tag == aot::ArgKind::kMatrix) {
-            auto type_id = arg.dtype()->as<PrimitiveType>()->type;
+            auto type_id = arg.dtype()->template as<PrimitiveType>()->type;
             switch (type_id) {
               case PrimitiveTypeID::f16: {
-                auto arr = pyarg.cast<py::array_t<
+                auto arr = pyarg.template cast<py::array_t<
                     float32, py::array::c_style | py::array::forcecast>>();
                 py::buffer_info buffer_info = arr.request();
                 auto length = buffer_info.size;
@@ -5487,7 +5488,7 @@ void export_lang(py::module &m) {
               }
 #define PER_C_TYPE(type, ctype)                                           \
   case PrimitiveTypeID::type: {                                           \
-    auto arr = pyarg.cast<py::array_t<                                   \
+    auto arr = pyarg.template cast<py::array_t<                          \
         ctype, py::array::c_style | py::array::forcecast>>();            \
     py::buffer_info buffer_info = arr.request();                          \
     auto length = buffer_info.size;                                       \
