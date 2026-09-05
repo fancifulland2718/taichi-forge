@@ -235,3 +235,230 @@ def test_spmm_semantic_drift_and_explicit_preparation():
     for tolerance in (True, float("nan"), -1.0):
         with pytest.raises((TypeError, ValueError)):
             operation.matrix.record_spmm(8, absolute_tolerance=tolerance, relative_tolerance=2e-5)
+
+
+def _fft_definition(*, prepare=True, direction="forward"):
+    dimensions, batch = (24, 40), 3
+    source = ti.linalg.record_fft(
+        dimensions,
+        batch_count=batch,
+        direction=direction,
+        output="transform",
+        absolute_tolerance=2e-4,
+        relative_tolerance=2e-4,
+    )
+    if prepare:
+        source.prepare()
+    shape = (batch, *dimensions, 2)
+    bindings = {
+        name: ti.ndarray(ti.f32, shape)
+        for name in ("input", "transform", "middle", "output")
+    }
+    host = np.random.default_rng(49).uniform(-1, 1, shape).astype(np.float32)
+    bindings["input"].from_numpy(host)
+    complex_host = host[..., 0] + 1j * host[..., 1]
+    expected = (
+        np.fft.fft2(complex_host)
+        if direction == "forward"
+        else np.fft.ifft2(complex_host) * np.prod(dimensions)
+    )
+    expected = np.stack((expected.real, expected.imag), axis=-1) * 2 + 0.125
+
+    @ti.kernel
+    def scale(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=4),
+    ):
+        for b, i, j, c in ti.ndrange(batch, dimensions[0], dimensions[1], 2):
+            output[b, i, j, c] = source[b, i, j, c] * 2
+
+    @ti.kernel
+    def shift(
+        source: ti.types.ndarray(dtype=ti.f32, ndim=4),
+        output: ti.types.ndarray(dtype=ti.f32, ndim=4),
+    ):
+        for b, i, j, c in ti.ndrange(batch, dimensions[0], dimensions[1], 2):
+            output[b, i, j, c] = source[b, i, j, c] + 0.125
+
+    symbols = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=4)
+        for name in bindings
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(source, admission="auto")
+    builder.dispatch(scale, symbols["transform"], symbols["middle"])
+    builder.dispatch(shift, symbols["middle"], symbols["output"])
+    providers = (
+        *ti.graph.default_recipe_providers(),
+        ti.hardware.fft.FftRecipeProvider(),
+    )
+    return builder.freeze(), source, providers, bindings, expected
+
+
+def _mixed_hardware_definition():
+    _, spmm, _, sparse_bindings, sparse_expected = _spmm_definition()
+    operation = ti.linalg.record_fft(
+        (12, 20),
+        input="fft_input",
+        output="fft_output",
+        absolute_tolerance=2e-4,
+        relative_tolerance=2e-4,
+    )
+    operation.prepare()
+    host = np.random.default_rng(93).uniform(-1, 1, (12, 20, 2)).astype(np.float32)
+    bindings = {name: sparse_bindings[name] for name in ("input", "product")}
+    for name in ("fft_input", "fft_output"):
+        bindings[name] = ti.ndarray(ti.f32, host.shape)
+    bindings["fft_input"].from_numpy(host)
+    reference = np.fft.fft2(host[..., 0] + 1j * host[..., 1])
+    expected = {
+        "product": (sparse_expected - 0.25) / 2,
+        "fft_output": np.stack((reference.real, reference.imag), axis=-1),
+    }
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(spmm, admission="auto")
+    builder.append_native(operation, admission="auto")
+    providers = (
+        *ti.graph.default_recipe_providers(),
+        ti.hardware.linalg.SparseSpmmRecipeProvider(),
+        ti.hardware.fft.FftRecipeProvider(),
+    )
+    return builder.freeze(), operation, spmm, providers, bindings, expected
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_and_spmm_complete_recipes_compose_search_and_resolve_in_fresh_process(
+    tmp_path,
+):
+    import json
+    import subprocess
+    import sys
+
+    if (
+        not ti.hardware.fft.is_available()
+        or not ti.hardware.linalg.cusparse_spmm_is_available()
+    ):
+        pytest.skip("the optional cuFFT/cuSPARSE runtime is unavailable")
+    definition, operation, spmm, providers, bindings, expected = (
+        _mixed_hardware_definition()
+    )
+    observed = set()
+
+    def evaluate(graph, recipe):
+        bound = graph.bind(bindings)
+        for _ in range(3):
+            graph.run(bound)
+        for name, reference in expected.items():
+            np.testing.assert_allclose(
+                bindings[name].to_numpy(), reference, rtol=2e-4, atol=2e-4
+            )
+        assert (
+            graph._graph_stats[0]["last_path"] == "cuda_exact_replay"
+        ), graph._graph_stats
+        record = next(
+            lease
+            for lease in graph._spec.lifetime_leases
+            if hasattr(lease, "_graph_fft_source")
+        )
+        sparse_record = next(
+            lease
+            for lease in graph._spec.lifetime_leases
+            if hasattr(lease, "_graph_spmm_source")
+        )
+        observed.add((record.plan._separable, sparse_record.algorithm))
+        # A deterministic structural objective, not a performance claim.
+        return {
+            "phases": float(record.plan._separable)
+            + float(sparse_record.plan_info()["preprocessed"])
+        }
+
+    session = definition.search_recipes(
+        providers=providers,
+        target=ti.graph.GraphOptimizationTarget(objectives=(("phases", "max"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=8, repeat_count=1),
+        strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
+    )
+    expected_count = 2 * len(spmm.preparation_report())
+    assert (
+        len(session.recipes) == expected_count
+    ), "FFT and SpMM strategies must compose across native regions"
+    decision = session.run(evaluate)
+    assert (
+        decision.status == "selected" and decision.report.search_complete
+    ), decision.report.results
+    assert len(observed) == expected_count
+    assert (
+        len({result["materialized_physical_id"] for result in decision.report.results})
+        == expected_count
+    )
+    assert "columns_in_place_per_batch" in json.dumps(
+        decision.report.recipe_annotations
+    )
+    artifact = tmp_path / "fft.json"
+    artifact.write_text(
+        json.dumps(decision.selection_artifact.to_dict()), encoding="utf-8"
+    )
+    child = """
+import json,sys
+from pathlib import Path
+import numpy as np
+import taichi_forge as ti
+from tests.python.test_graph_hardware_recipe import _mixed_hardware_definition
+ti.init(arch=ti.cuda,offline_cache=False)
+definition,operation,spmm,providers,bindings,expected = _mixed_hardware_definition()
+artifact = ti.graph.GraphRecipeSelectionArtifact.from_dict(json.loads(Path(sys.argv[1]).read_text()))
+handle = definition.resolve_recipe(artifact,providers=providers)
+with definition.materialize(handle) as result:
+    bound=result.executor.bind(bindings)
+    for _ in range(3):
+        result.executor.run(bound)
+    for name,reference in expected.items():
+        np.testing.assert_allclose(bindings[name].to_numpy(), reference, rtol=2e-4, atol=2e-4)
+print('FFT_RESOLVED:'+handle.recipe_id)
+operation.close()
+ti.reset()
+"""
+    child_result = subprocess.run(
+        [sys.executable, "-c", child, str(artifact)],
+        capture_output=True,
+        text=True,
+        timeout=90,
+    )
+    assert child_result.returncode == 0, child_result.stdout + child_result.stderr
+    assert "FFT_RESOLVED:" + decision.report.selected_recipe_id in child_result.stdout
+    operation.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_recipe_preparation_and_numerical_semantics_are_explicit():
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, providers, bindings, expected = _fft_definition(
+        prepare=False
+    )
+    with pytest.raises(ti.graph.GraphRecipeProviderError) as caught:
+        definition.recipe_catalog(providers=providers)
+    assert caught.value.error_key == "fft_plan_preparation_required"
+    operation.prepare()
+    catalog = definition.recipe_catalog(providers=providers)
+    # Grouped/ndrange rank-four maps currently lack fusion metadata; neither
+    # missing metadata nor unchanged maps are represented as fake candidates.
+    assert len(catalog.entries()) == 2
+    with definition.materialization_context(
+        provider_set=catalog.provider_set
+    ) as context:
+        for entry in catalog.entries():
+            with context.materialize(entry.recipe) as result:
+                result.executor.run(result.executor.bind(bindings))
+                np.testing.assert_allclose(
+                    bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4
+                )
+    inverse, inverse_op, _, _, _ = _fft_definition(direction="inverse")
+    assert definition.semantic_graph_id != inverse.semantic_graph_id
+    for tolerance in (True, float("inf"), -1.0):
+        with pytest.raises((TypeError, ValueError)):
+            ti.linalg.record_fft(
+                (8, 8), absolute_tolerance=tolerance, relative_tolerance=1e-4
+            )
+    operation.close()
+    inverse_op.close()

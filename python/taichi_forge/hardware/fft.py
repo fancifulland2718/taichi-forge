@@ -1,5 +1,6 @@
 """Public optional cuFFT plan namespace."""
 
+from taichi_forge.hardware._fft_recipe import FftRecipeProvider
 from taichi_forge.hardware._fft import (
     CufftLayout,
     CufftPlan1D,
@@ -11,6 +12,7 @@ from taichi_forge.hardware._fft import (
 )
 
 __all__ = [
+    "FftRecipeProvider",
     "CufftLayout",
     "CufftPlan1D",
     "CufftPlanND",
