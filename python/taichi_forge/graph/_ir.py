@@ -1686,42 +1686,44 @@ def analyze_graph_ir(root):
     return GraphIRAnalysis(**counters)
 
 
+def _graph_effect_to_dict(effect, static_resources):
+    """Serialize one effect while preserving alias slots across a manifest."""
+    result = effect.to_dict()
+    resource = effect.resource
+    if not effect.runtime_bound and not isinstance(resource, str):
+        # Live storage stays in execution IR; only its serialized view gets a
+        # traversal-local slot, never a process address or executable object.
+        key = id(resource)
+        if key not in static_resources:
+            static_resources[key] = len(static_resources)
+        identity = {
+            "static_slot": static_resources[key],
+            "type": f"{type(resource).__module__}.{type(resource).__qualname__}",
+        }
+        if hasattr(resource, "shape"):
+            identity["shape"] = tuple(int(item) for item in resource.shape)
+        if hasattr(resource, "dtype"):
+            identity["dtype"] = str(resource.dtype)
+        if hasattr(resource, "element_shape"):
+            identity["element_shape"] = tuple(
+                int(item) for item in resource.element_shape
+            )
+        result["resource"] = identity
+    return result
+
+
 def graph_ir_to_dict(node, _structured_depth=0, *, _static_resources=None):
     if _static_resources is None:
         _static_resources = {}
-
-    def effect_dict(effect):
-        result = effect.to_dict()
-        resource = effect.resource
-        if not effect.runtime_bound and not isinstance(resource, str):
-            # Provider-owned storage remains a live object in execution IR.
-            # Only the serialized view uses traversal-local slots: equal
-            # storage stays equal across nodes, distinct allocations stay
-            # distinct, and no Python address enters the semantic digest.
-            key = id(resource)
-            if key not in _static_resources:
-                _static_resources[key] = len(_static_resources)
-            identity = {
-                "static_slot": _static_resources[key],
-                "type": f"{type(resource).__module__}.{type(resource).__qualname__}",
-            }
-            if hasattr(resource, "shape"):
-                identity["shape"] = tuple(int(item) for item in resource.shape)
-            if hasattr(resource, "dtype"):
-                identity["dtype"] = str(resource.dtype)
-            if hasattr(resource, "element_shape"):
-                identity["element_shape"] = tuple(
-                    int(item) for item in resource.element_shape
-                )
-            result["resource"] = identity
-        return result
 
     if node.kind in ("while_region", "if_region", "switch_region"):
         _structured_depth += 1
     result = {
         "kind": node.kind,
         "name": node.name,
-        "effects": tuple(effect_dict(effect) for effect in node.effects),
+        "effects": tuple(
+            _graph_effect_to_dict(effect, _static_resources) for effect in node.effects
+        ),
         "bindings": tuple(binding.to_dict() for binding in node.bindings),
         "temporaries": tuple(requirement.to_dict() for requirement in node.temporaries),
         "iteration_domain": node.iteration_domain,

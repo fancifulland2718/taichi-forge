@@ -998,6 +998,7 @@ def observe_graph_physical_manifest(definition, recipe, graph):
     # backend command DAG/replay partition. Do not promote our one-command-per-
     # task normalization into a false exactness claim.
     command_topology_exact = False
+    static_resources = {}
 
     def append_task(
         kind,
@@ -1054,7 +1055,7 @@ def observe_graph_physical_manifest(definition, recipe, graph):
         next_external = 0
 
         def append_native_action(action, external=None):
-            payload = action.to_dict()
+            payload = action.to_dict(_static_resources=static_resources)
             if external is not None:
                 payload = {**payload, **external}
             physical_plan_id = action.physical_plan_id or ("native-action:" + _digest(payload))

@@ -82,6 +82,41 @@ def _static_spec(root, *, runtime_arg_names=()):
     )
 
 
+def test_native_action_serialization_retains_alias_slots_without_live_objects():
+    import json
+    from taichi_forge.graph._native import NativeGraphExecutable, native_action_manifest
+
+    class StorageAction(NativeGraphExecutable):
+        def __init__(self, storage):
+            self.storage = storage
+
+        @property
+        def resource_effects(self):
+            return tuple(
+                ResourceEffect(value, GraphAccess.READ_WRITE, runtime_bound=False)
+                for value in self.storage
+            )
+
+    first = SimpleNamespace(shape=(32,), dtype="u8", element_shape=())
+    second = SimpleNamespace(shape=(32,), dtype="u8", element_shape=())
+    actions = tuple(
+        native_action_manifest(StorageAction(storage))
+        for storage in ((first, second), (second, first))
+    )
+    slots = {}
+    payloads = [action.to_dict(_static_resources=slots) for action in actions]
+    assert [
+        effect["resource"]["static_slot"]
+        for item in payloads
+        for effect in item["effects"]
+    ] == [0, 1, 1, 0]
+    assert json.loads(json.dumps(payloads))[0]["effects"][0]["resource"]["shape"] == [
+        32
+    ]
+    assert actions[0].effects[0].resource is first
+    assert actions[1].effects[0].resource is second
+
+
 @test_utils.test(arch=ti.cpu)
 def test_graph_builder_freeze_creates_stable_complete_baseline_definition():
     @ti.kernel

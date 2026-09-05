@@ -15,6 +15,7 @@ from taichi_forge.graph._ir import (
     ResourceEffect,
     RuntimeBinding,
     TemporaryRequirement,
+    _graph_effect_to_dict,
 )
 
 
@@ -189,7 +190,9 @@ class NativeActionManifest:
     fragmentation_reason: str = "none"
     physical_plan_id: str = ""
 
-    def to_dict(self):
+    def to_dict(self, *, _static_resources=None):
+        if _static_resources is None:
+            _static_resources = {}
         return {
             "schema_version": self.schema_version,
             "name": self.name,
@@ -209,7 +212,10 @@ class NativeActionManifest:
                 binding.to_dict()
                 for binding in self.derived_runtime_bindings
             ),
-            "effects": tuple(effect.to_dict() for effect in self.effects),
+            "effects": tuple(
+                _graph_effect_to_dict(effect, _static_resources)
+                for effect in self.effects
+            ),
             "temporaries": tuple(
                 temporary.to_dict() for temporary in self.temporaries
             ),
