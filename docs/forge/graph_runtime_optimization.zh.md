@@ -587,10 +587,61 @@ physical_report = materialized.materialization_report()
 ```
 
 evaluator 接收 `(graph, recipe_handle)` 并返回 target 中声明的命名指标；请求
-`materialized_memory_bytes` 时，Forge 会从实际 physical manifest 注入精确值。多个 objective
+`materialized_memory_bytes` 且 evaluator 未提供该值时，Forge 注入 evaluator 结束后观测到的已知
+Graph 分配量，不代表连续采样的设备或进程显存峰值。多个 objective
 在魔改 CompileIQ 内保持 Pareto 问题，不做加权压扁；声明顺序只用于从已测 frontier 中确定性
 选择一个结果。constraint 必须由用户显式提供。evaluation/time/memory budget 只约束搜索工作，
 不会变成编译期性能准入门槛。
+
+### 报告上下文与可选生命周期成本
+
+`decision.report.context` 保留调用者给出的 workload/evaluation/backend facts、冻结 provider registry
+和 Forge 编译来源。recipe 注释保留冻结 fragment 配置、物理 task 及已有的数值/组件合同。
+这些信息用于解释适用范围，不代表 Forge 独立验证了所有 driver/library 组合、数值容差或生产 workload。
+此扩展之前产生的报告，其 `context` 为 `None`。
+
+公共 `definition.search_recipes()` 可以通过 `GraphEvaluationContract` 声明只用于报告的成本指标：
+
+```python
+evaluation_contract = ti.graph.GraphEvaluationContract({
+    "correctness": "application-owned reference and tolerance",
+    "synchronization": "application-defined completion boundaries",
+    "cost_profiles": {
+        "lifecycle": {
+            "scope": "end-to-end elapsed time for one Graph generation",
+            "unit": "ms",
+            "setup": "setup_ms",
+            "first": "first_ms",
+            "steady": "steady_ms",
+            "amortization_model": "setup_plus_first_plus_remaining_steady",
+        },
+    },
+})
+session = definition.search_recipes(
+    target=target, budget=budget, evaluation_contract=evaluation_contract,
+)
+# evaluator 除 target 指标外，返回自己测量的 setup_ms、first_ms、steady_ms。
+# Forge 不会根据这些名字推断或代测耗时。
+decision = session.run(evaluator)
+```
+
+单位可为 `s`、`ms`、`us` 或 `ns`，同一个 profile 的各阶段共用单位。`scope` 必须说明实际测量范围；
+仅准备 binding 的耗时不一定等于完整 generation setup。setup/first/steady 映射可分别省略，缺测或 `None`
+表示不可得而不是零；提供的耗时必须有限且非负。声明的成本指标作为 opaque trial observation 保留，不会
+自动变成 CompileIQ objective/constraint；若调用者同时将它声明为 target，它仍正常参与该目标。未声明的
+额外返回指标仍会被拒绝。
+
+摊销模型须显式启用：`T(N) = setup + first + (N - 1) * steady`，`N >= 1`。首次执行替代一次稳态执行，
+setup 与 first 不应重叠。只有同 stage/fidelity 的完整且可行 baseline/candidate 证据可用于估算；缺测、
+无正向稳态收益或证据不可比时，不产生摊销次数。中位数估算与样本极值的算术边界分开，后者不是统计置信区间。
+范围重叠或单样本会明确标注，不构成自动采用门槛。host/device/end-to-end profile 不自动相加。
+
+JSON 保留原始成本观测（含失败 trial）与派生摘要，Markdown 由相同事实生成。搜索包装层的物化、evaluator
+总耗时和 cleanup wall time 是独立诊断，不替代调用者的 first/steady 测量。两处资源快照分别位于物化后与
+evaluator 结束后，不能观测所有中间分配或内存池 reservation。报告不在 steady Graph replay 中增加探测、
+同步或校验，也不会在 runtime `auto` 中自动启用某个 recipe。
+
+### 完整 recipe 搜索边界
 
 Forge 会在用户 evaluation budget 内组合跨独立 region 和 family 的兼容 fragment，形成完整
 recipe。公共 handle 只公开语义身份、family、覆盖、聚合资源和 submission 形态；provider choice

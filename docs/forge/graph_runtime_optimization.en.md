@@ -746,12 +746,75 @@ physical_report = materialized.materialization_report()
 ```
 
 The evaluator receives `(graph, recipe_handle)` and returns the named target
-metrics. Forge supplies exact `materialized_memory_bytes` from the observed
-physical manifest when that metric is requested. Objectives remain a Pareto
+metrics. When requested and not supplied by the evaluator, Forge fills
+`materialized_memory_bytes` with known Graph allocations observed after the
+evaluator. This is not continuous device/process peak memory. Objectives remain a Pareto
 problem inside the modified CompileIQ fork; their declared order only selects
 one deterministic result from the measured frontier. Constraints are optional
 and explicit. Search/time/memory budgets bound work but do not become compile-
 time performance admission gates.
+
+### Report context and optional lifecycle costs
+
+`decision.report.context` retains caller workload/evaluation/backend facts, the
+frozen provider registry and Forge compile provenance. Recipe annotations retain
+frozen fragment configurations, physical tasks and any declared numerical/component
+contracts. These facts explain applicability; they do not independently qualify a
+driver/library combination, numerical tolerance or production workload. Reports
+created before this enrichment return `None` for `context`.
+
+The public `definition.search_recipes()` entry accepts optional reporting-only
+cost metrics through `GraphEvaluationContract`. For example:
+
+```python
+evaluation_contract = ti.graph.GraphEvaluationContract({
+    "correctness": "application-owned reference and tolerance",
+    "synchronization": "application-defined completion boundaries",
+    "cost_profiles": {
+        "lifecycle": {
+            "scope": "end-to-end elapsed time for one Graph generation",
+            "unit": "ms",
+            "setup": "setup_ms",
+            "first": "first_ms",
+            "steady": "steady_ms",
+            "amortization_model": "setup_plus_first_plus_remaining_steady",
+        },
+    },
+})
+session = definition.search_recipes(
+    target=target, budget=budget, evaluation_contract=evaluation_contract,
+)
+# evaluator returns target metrics plus its own measured setup_ms, first_ms
+# and steady_ms. No timing is inferred from these names.
+decision = session.run(evaluator)
+```
+
+Units are `s`, `ms`, `us` or `ns`, shared by all phases in one profile. Specify the
+actual scope: preparing a binding is not necessarily the full generation setup.
+The setup/first/steady mappings may be omitted individually; missing values or
+`None` are unavailable, not zero. Supplied durations must be finite and nonnegative.
+A declared cost metric is retained as an opaque trial observation, not silently
+added to CompileIQ objectives/constraints. If also explicitly targeted, it remains
+a normal target metric. Undeclared extra metrics are still rejected.
+
+Amortization is opt-in. Its model is `T(N) = setup + first + (N - 1) * steady` for
+`N >= 1`: first replaces one steady execution, and setup/first must not overlap.
+Report estimates compare complete feasible baseline/candidate evidence at the
+same stage and fidelity. Missing data, nonpositive steady savings and incomparable
+evidence do not produce a break-even count. Median estimates and arithmetic bounds
+over observed sample extrema are separate; the latter are **not confidence intervals**.
+Overlap and single-sample evidence are labeled, not turned into adoption gates.
+Independent host/device/end-to-end profiles are never summed automatically.
+
+JSON preserves original cost observations, including failed trials, and derived
+summaries; Markdown uses the same facts. Search-wrapper materialization, evaluator
+and cleanup wall times are separate diagnostics, not substitutes for caller-owned
+first/steady measurements. The two resource snapshots bracket materialization and
+the evaluator; they cannot detect every intermediate allocation or pool reservation.
+Reporting adds no probe, synchronization or validation to steady Graph replay and
+does not enable a recipe in runtime `auto`.
+
+### Complete-recipe search boundaries
 
 Forge constructs complete recipes from compatible fragments across independent
 regions and families until the user evaluation budget is filled. Public recipe
