@@ -9,6 +9,7 @@ import taichi_forge as ti
 
 from taichi_forge.hardware._cub_segmented_capture import _CubSegmentedScanExecutable
 from taichi_forge.hardware._cub_source_provider import load_cub_source_provider
+from taichi_forge.graph._graph import _GraphRunContext
 from taichi_forge.lang import impl
 from tests import test_utils
 
@@ -81,6 +82,7 @@ def test_addon_capture_retains_fixed_storage_and_preserves_feedback(
     graph = builder.compile()
     assert len(graph._spec.fixed_runtime_args) == 8
     bound = graph.bind(arguments)
+    assert bound.fast_path_qualified, bound.statistics()
     np.testing.assert_array_equal(state.to_numpy(), initial)
 
     def unexpected(*args, **kwargs):
@@ -90,6 +92,10 @@ def test_addon_capture_retains_fixed_storage_and_preserves_feedback(
     monkeypatch.setattr(provider._library, "workspace_bytes", unexpected)
     monkeypatch.setattr(type(executables[0].recording), "execute", unexpected)
     monkeypatch.setattr(type(executables[0].plan), "_invocation", unexpected)
+    # Fixed retained ndarrays are as immutable as public ndarray bindings.
+    # Replays must reuse the published frame, not revalidate/flatten all arrays.
+    monkeypatch.setattr(_GraphRunContext, "_flatten_runtime_args", unexpected)
+    monkeypatch.setattr(type(graph._spec), "_validate_bound_runtime_args", unexpected)
     for _ in range(4):
         graph.run(bound)
         for _pass in range(2):

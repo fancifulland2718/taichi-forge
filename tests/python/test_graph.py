@@ -3169,6 +3169,83 @@ def test_vulkan_buffer_commands_reject_bounds_and_overlap():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+@pytest.mark.parametrize("fixed_kind", ("ndarray", "provider", "multi_lane"))
+def test_fixed_binding_frame_publication_and_execution(fixed_kind, monkeypatch):
+    from taichi_forge.graph._graph import _GraphRunContext
+    from taichi_forge.graph._native import ProviderOwnedNdarrayBinding
+
+    @ti.kernel
+    def add_fixed(
+        values: ti.types.ndarray(dtype=ti.i32, ndim=1),
+        offset: ti.types.ndarray(dtype=ti.i32, ndim=0),
+    ):
+        for i in values:
+            values[i] += offset[None]
+
+    values_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
+    offset_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "fixed_offset", ti.i32, ndim=0)
+    offset = ti.ndarray(ti.i32, shape=())
+    offset.fill(2)
+    fixed = (
+        ProviderOwnedNdarrayBinding(offset.arr, offset)
+        if fixed_kind == "provider"
+        else offset
+    )
+    tracker = {"fallback_runs": 0}
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(
+        _RecordedDispatchNode(
+            add_fixed,
+            (values_arg, offset_arg),
+            tracker,
+            offset,
+            fixed_bindings={"fixed_offset": fixed},
+        )
+    )
+    graph = builder.compile(workspace_lanes=2 if fixed_kind == "multi_lane" else 1)
+    values = ti.ndarray(ti.i32, shape=8)
+    values.fill(0)
+    bindings = graph.bind({"values": values})
+    assert bindings.fast_path_qualified == (fixed_kind == "ndarray")
+    assert tuple(bindings.snapshot()) == ("values",)
+    if bindings.fast_path_qualified:
+        version = bindings._version
+        prepared = graph._spec.prepare_invocation(
+            version.arguments, entrypoint="test", binding_version=version
+        )
+        assert prepared.arguments["fixed_offset"] is offset
+        assert prepared.arguments["values"] is values
+        with pytest.raises(TypeError):
+            prepared.arguments["fixed_offset"] = values
+
+        def unexpected(*args, **kwargs):
+            pytest.fail("fixed binding replay rebuilt its published frame")
+
+        with monkeypatch.context() as replay_patch:
+            replay_patch.setattr(_GraphRunContext, "_flatten_runtime_args", unexpected)
+            replay_patch.setattr(
+                type(graph._spec), "_validate_bound_runtime_args", unexpected
+            )
+            graph.run(bindings)
+    else:
+        graph.run(bindings)
+    np.testing.assert_array_equal(values.to_numpy(), np.full(8, 2, np.int32))
+    replacement = ti.ndarray(ti.i32, shape=8)
+    replacement.fill(10)
+    bindings.update(values=replacement)
+    offset.fill(3)
+    graph.run(bindings)
+    np.testing.assert_array_equal(replacement.to_numpy(), np.full(8, 13, np.int32))
+    np.testing.assert_array_equal(values.to_numpy(), np.full(8, 2, np.int32))
+    assert tracker["fallback_runs"] == 0
+    ti.reset()
+    with pytest.raises(TaichiRuntimeError, match="runtime reinitialization"):
+        bindings.update(values=values)
+    with pytest.raises(TaichiRuntimeError, match="runtime reinitialization"):
+        graph.run(bindings)
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     @ti.kernel
     def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):

@@ -10212,6 +10212,7 @@ class _GraphBindingVersion:
     runtime_generation: int
     slot_values: tuple
     arguments: object
+    execution_arguments: object
     flattened_args: object
     memory_recipe_certificate: object
     control_binding_certificate: object
@@ -10852,13 +10853,14 @@ class _GraphSpec:
             *(frozenset(action.temporary_bindings) for action in self.temporary_actions)
         )
         self.fixed_runtime_args = _merge_fixed_runtime_args(self.nodes)
-        # These values are either immutable scalars or Graph-instance-owned
-        # allocations whose identity cannot change before runtime teardown.
+        # These values are immutable scalars or retained ndarray allocations
+        # whose identity cannot change before runtime teardown, just like a
+        # public ndarray binding. Internal requirements resolve per instance.
         # A single workspace lane may therefore flatten them once together
         # with a published BindingVersion. Provider-controlled or otherwise
         # replaceable fixed values remain on the validated replay path.
         self._stable_fixed_binding_frame = bool(self.fixed_runtime_args) and all(
-            isinstance(value, (InternalNdarrayRequirement, int, float))
+            isinstance(value, (InternalNdarrayRequirement, Ndarray, int, float))
             for value in self.fixed_runtime_args.values()
         )
         self.internal_storage_bytes = _graph_internal_storage_bytes(
@@ -11409,6 +11411,7 @@ class _GraphSpec:
         if fixed_runtime_args:
             validation_args = dict(fixed_runtime_args)
             validation_args.update(snapshot)
+            validation_args = MappingProxyType(validation_args)
         # Validate at publication whenever the relevant bindings already form
         # the final frame, even if an unrelated blocker keeps replay on the
         # slow path. A provider that can replace resources defers its proof
@@ -11459,6 +11462,7 @@ class _GraphSpec:
             runtime_generation=int(impl.runtime_generation()),
             slot_values=slot_values,
             arguments=snapshot,
+            execution_arguments=validation_args,
             flattened_args=flattened,
             memory_recipe_certificate=memory_recipe_certificate,
             control_binding_certificate=control_binding_certificate,
@@ -11487,7 +11491,7 @@ class _GraphSpec:
                 )
             self._binding_statistics["version_fast_replays"] += 1
             return _PreparedGraphInvocation(
-                binding_version.arguments,
+                binding_version.execution_arguments,
                 (binding_version,),
                 binding_version.flattened_args,
                 binding_version,
