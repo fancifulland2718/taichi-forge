@@ -772,7 +772,8 @@ std::size_t Program::cuda_cudss_solve(std::uint64_t handle,
               "CUDA cuDSS received a null dense-vector device pointer.");
   plan->solve(csr, rhs_ptr, solution_ptr);
   pin_cuda_provider_plan(plan);
-  pin_ndarray_launch_leases(acquire_ndarray_leases({rhs, solution}));
+  auto leases = acquire_ndarray_leases({rhs, solution});
+  pin_ndarray_launch_leases(leases);
   mark_runtime_submission_pending();
   return 0;
 }

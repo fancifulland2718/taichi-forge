@@ -117,7 +117,8 @@ std::size_t Program::cuda_cublas_gemm_f32(Ndarray *a,
       &beta, output_ptr, n);
   TI_ERROR_IF(status != CUBLAS_STATUS_SUCCESS,
               "CUDA cuBLAS SGEMM failed (status {}).", status);
-  pin_ndarray_launch_leases(acquire_ndarray_leases({a, b, output}));
+  auto leases = acquire_ndarray_leases({a, b, output});
+  pin_ndarray_launch_leases(leases);
   mark_runtime_submission_pending();
   return 0;
 }
