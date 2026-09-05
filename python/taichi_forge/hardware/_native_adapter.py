@@ -1,5 +1,7 @@
 """Shared adapters for explicit hardware recordings in root Graphs."""
 
+from dataclasses import replace
+
 from taichi_forge.graph._ir import ResourceEffect, RuntimeBinding
 from taichi_forge.graph._native import (
     BackendCommandGraphAction,
@@ -124,6 +126,16 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
     @property
     def debug_info(self):
         return dict(_resolve(self._debug_info, self._recording))
+
+    @property
+    def graph_ir_node(self):
+        node = super().graph_ir_node
+        fingerprint = getattr(self._recording, "_graph_semantic_fingerprint", "")
+        return replace(node, semantic_fingerprint=fingerprint) if fingerprint else node
+
+    @property
+    def graph_physical_plan_id(self):
+        return getattr(self._recording, "_graph_physical_plan_id", "")
 
 
 class HardwareRecordingNode(NativeGraphNode):

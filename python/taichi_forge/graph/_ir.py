@@ -335,6 +335,9 @@ class NativeCallNode:
     synchronization: bool = False
     opaque: bool = True
     reduction_semantics: Optional[ReductionSemantics] = None
+    # Address-independent semantic facts owned by the native operation. Physical
+    # algorithms and local resource handles must not enter this fingerprint.
+    semantic_fingerprint: str = ""
 
     @property
     def kind(self):
@@ -1750,6 +1753,8 @@ def graph_ir_to_dict(node, _structured_depth=0):
         result["memory_layout_requirements"] = node.memory_layout_requirements
     if isinstance(node, NativeCallNode) and node.reduction_semantics is not None:
         result["reduction_semantics"] = node.reduction_semantics.to_dict()
+    if isinstance(node, NativeCallNode) and node.semantic_fingerprint:
+        result["semantic_fingerprint"] = node.semantic_fingerprint
     if isinstance(node, ObservationNode):
         result["batch"] = node.batch
     return result

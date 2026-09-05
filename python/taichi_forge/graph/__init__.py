@@ -1,4 +1,5 @@
 from ._graph import *
+from ._recipes.families import default_graph_recipe_providers as default_recipe_providers
 
 from ._compileiq_opaque import (
     CompileIQCompleteGraphRecipeSearch as CompileIQCompleteGraphRecipeSearch,

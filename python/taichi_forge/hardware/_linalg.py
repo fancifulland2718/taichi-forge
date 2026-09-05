@@ -806,7 +806,7 @@ def _cusparse_spmm_execution_contract(matrix, identity, rhs_count, algorithm):
         fixed_cost("workspace_allocation", "provider_generation"),
         fixed_cost("graph_capture", "graph_instance"),
     ]
-    if algorithm == "deterministic" and provider["spmm_preprocess_available"]:
+    if algorithm in ("deterministic", "csr3_preprocessed") and provider["spmm_preprocess_available"]:
         fixed_components.append(fixed_cost("spmm_preprocess", "provider_generation"))
     contract = RetainedExecutionContract(
         identity=retained_identity,
@@ -834,7 +834,12 @@ class CusparseSpmmRecording(BackendCommandRecording):
     loaded cuSPARSE release.
     """
 
-    _ALGORITHMS = {"row_major": 0, "deterministic": 1}
+    _ALGORITHMS = {
+        "row_major": 0,
+        "deterministic": 1,  # compatibility: optional preprocessing
+        "csr3_direct": 2,
+        "csr3_preprocessed": 3,
+    }
 
     def __init__(
         self,
@@ -857,7 +862,8 @@ class CusparseSpmmRecording(BackendCommandRecording):
             raise ValueError("CUDA cuSPARSE SpMM rhs_count must be in [2, INT_MAX]")
         if algorithm not in self._ALGORITHMS:
             raise ValueError(
-                "CUDA cuSPARSE SpMM algorithm must be row_major or deterministic"
+                "CUDA cuSPARSE SpMM algorithm must be row_major, deterministic, "
+                "csr3_direct, or csr3_preprocessed"
             )
         matrix._ensure_valid()  # pylint: disable=W0212
         contract = matrix._get_format_contract()  # pylint: disable=W0212

@@ -7654,6 +7654,18 @@ void export_lang(py::module &m) {
       .def("num_nonzero", &SparseMatrix::num_nonzero)
       .def("update_values", &SparseMatrix::update_values)
       .def(
+          "_cuda_cusparse_prepare_spmm",
+          [](SparseMatrix &matrix, Program *program, const Ndarray &input,
+             const Ndarray &output, int rhs_count, int algorithm) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA cuSPARSE SpMM preparation requires a scalar CSR "
+                        "matrix.");
+            csr->nd_spmm(program, input, output, rhs_count, algorithm, true);
+          },
+          py::arg("program"), py::arg("input"), py::arg("output"),
+          py::arg("rhs_count"), py::arg("algorithm"))
+      .def(
           "_cuda_cusparse_spmm_plan_info",
           [](const SparseMatrix &matrix, int rhs_count, int algorithm) {
             const auto *csr = dynamic_cast<const CuSparseMatrix *>(&matrix);

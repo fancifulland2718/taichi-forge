@@ -3633,16 +3633,16 @@ void CuSparseMatrix::spmm(size_t dB,
                           size_t dC,
                           int rhs_count,
                           int algorithm,
-                          CUstream stream) {
+                          CUstream stream,
+                          bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   TI_ERROR_IF(dtype_ != PrimitiveType::f32,
               "CUDA cuSPARSE SpMM supports f32 CSR matrices only.");
   TI_ERROR_IF(rhs_count < 2,
               "CUDA cuSPARSE SpMM requires at least two right-hand sides; "
               "use SpMV for one right-hand side.");
-  TI_ERROR_IF(algorithm != 0 && algorithm != 1,
-              "CUDA cuSPARSE SpMM algorithm must be 0 (row-major) or 1 "
-              "(deterministic).");
+  TI_ERROR_IF(algorithm < 0 || algorithm > 3,
+              "Invalid CUDA cuSPARSE SpMM physical plan.");
   TI_ERROR_IF(dB == 0 || dC == 0 || dB == dC,
               "CUDA cuSPARSE SpMM requires distinct live input/output "
               "allocations.");
@@ -3653,8 +3653,13 @@ void CuSparseMatrix::spmm(size_t dB,
   TI_ERROR_IF(!cusparse.capabilities().spmm_f32_available,
               "The loaded cuSPARSE provider does not expose the optional "
               "f32 SpMM dynamic-symbol contract.");
+  TI_ERROR_IF(algorithm == 3 &&
+                  !cusparse.capabilities().spmm_preprocess_available,
+              "The selected SpMM plan requires cuSPARSE preprocessing.");
 
-  ++spmm_calls_;
+  if (!prepare_only) {
+    ++spmm_calls_;
+  }
   const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
                    static_cast<std::uint32_t>(algorithm);
   auto found = spmm_plans_.find(key);
@@ -3699,7 +3704,7 @@ void CuSparseMatrix::spmm(size_t dB,
       ++spmm_workspace_allocations_;
     }
 
-    if (algorithm == 1 &&
+    if ((algorithm == 1 || algorithm == 3) &&
         cusparse.capabilities().spmm_preprocess_available) {
       created->preprocess_attempted = true;
       const auto preprocess_error = cusparse.cpSpMMPreprocess.call(
@@ -3709,6 +3714,10 @@ void CuSparseMatrix::spmm(size_t dB,
           created->output_descriptor, CUDA_R_32F, created->algorithm,
           created->workspace);
       created->preprocess_error = preprocess_error;
+      TI_ERROR_IF(algorithm == 3 && preprocess_error != 0,
+                  "The selected SpMM preprocessing failed with status {}; "
+                  "no different physical plan was substituted.",
+                  preprocess_error);
       if (preprocess_error == 0) {
         created->preprocessed = true;
         ++spmm_preprocess_builds_;
@@ -3749,6 +3758,9 @@ void CuSparseMatrix::spmm(size_t dB,
     ++spmm_dense_descriptor_rebinds_;
   }
 
+  if (prepare_only) {
+    return;
+  }
   float alpha = 1.0f;
   float beta = 0.0f;
   cusparse.cpSpMM(plan.handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
@@ -3765,7 +3777,7 @@ CuSparseMatrix::SpmmPlanInfo CuSparseMatrix::spmm_plan_info(
     int rhs_count, int algorithm) const {
   SpmmPlanInfo result;
 #if defined(TI_WITH_CUDA)
-  TI_ERROR_IF(rhs_count < 2 || (algorithm != 0 && algorithm != 1),
+  TI_ERROR_IF(rhs_count < 2 || algorithm < 0 || algorithm > 3,
               "Invalid CUDA cuSPARSE SpMM plan key.");
   std::lock_guard<std::mutex> lock(spmv_mutex_);
   const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
@@ -5570,7 +5582,8 @@ void CuSparseMatrix::nd_spmm(Program *prog,
                              const Ndarray &input,
                              const Ndarray &output,
                              int rhs_count,
-                             int algorithm) {
+                             int algorithm,
+                             bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   TI_ERROR_IF(!prog || !arch_is_cuda(prog->compile_config().arch),
               "CUDA cuSPARSE SpMM requires its owning CUDA Program.");
@@ -5588,7 +5601,8 @@ void CuSparseMatrix::nd_spmm(Program *prog,
               "shapes ({}, {}) and ({}, {}).",
               cols_, rhs_count, rows_, rhs_count);
   spmm(prog->get_ndarray_data_ptr_as_int(&input),
-       prog->get_ndarray_data_ptr_as_int(&output), rhs_count, algorithm);
+       prog->get_ndarray_data_ptr_as_int(&output), rhs_count, algorithm, nullptr,
+       prepare_only);
 #else
   TI_NOT_IMPLEMENTED;
 #endif

@@ -74,3 +74,164 @@ def test_captured_fft_survives_baseline_and_fused_recipe_reconstruction(native_f
             assert len(identities) == 2
     finally:
         plan.close()
+
+
+def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None):
+    rows, columns, rhs_count = 7, 5, 8
+    dense = np.zeros((rows, columns), np.float32)
+    offsets, indices, values = [0], [], []
+    for row in range(rows):
+        for column in sorted({row % columns, (row + 2) % columns}):
+            value = (row + 1) * 0.125 + column * 0.0625
+            indices.append(column)
+            values.append(value)
+            dense[row, column] = value
+        offsets.append(len(indices))
+    devices = []
+    for host, dtype in ((offsets, ti.i32), (indices, ti.i32), (values, ti.f32)):
+        array = ti.ndarray(dtype, len(host))
+        array.from_numpy(np.asarray(host, np.float32 if dtype == ti.f32 else np.int32))
+        devices.append(array)
+    matrix = ti.linalg.SparsePattern.csr(rows, columns, devices[0], devices[1]).matrix(devices[2])
+    host = np.arange(columns * rhs_count, dtype=np.float32).reshape(columns, rhs_count) / 16 - 0.5
+    bindings = {
+        "input": ti.ndarray(ti.f32, (columns, rhs_count)),
+        "product": ti.ndarray(ti.f32, (rows, rhs_count)),
+        "output": ti.ndarray(ti.f32, (rows, rhs_count)),
+    }
+    bindings["input"].from_numpy(host)
+    bindings["product"].fill(-123)
+    operation = matrix.record_spmm(
+        rhs_count,
+        output="product",
+        absolute_tolerance=tolerance,
+        relative_tolerance=tolerance,
+    )
+    if component_version is not None:
+        import json
+
+        # Simulate a different installed vendor release without changing math.
+        operation._component_json = json.dumps({**operation.component, "version": component_version})
+    if prepare:
+        before = matrix._debug_runtime_stats()
+        prepared = operation.prepare(bindings["input"], bindings["product"])
+        after = matrix._debug_runtime_stats()
+        assert prepared["row_streamed"]["prepared"]
+        assert prepared["tree_direct"]["preprocessed"] is False
+        assert before["operations"]["spmm_calls"] == after["operations"]["spmm_calls"] == 0
+        np.testing.assert_array_equal(bindings["product"].to_numpy(), -123)
+        np.testing.assert_array_equal(bindings["input"].to_numpy(), host)
+
+    @ti.kernel
+    def finish(product: ti.types.ndarray(dtype=ti.f32, ndim=2), output: ti.types.ndarray(dtype=ti.f32, ndim=2)):
+        for i, j in ti.ndrange(rows, rhs_count):
+            output[i, j] = product[i, j] * 2.0 + 0.25
+
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(operation, admission="auto")
+    builder.dispatch(
+        finish, *(ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=2) for name in ("product", "output"))
+    )
+    providers = (*ti.graph.default_recipe_providers(), ti.hardware.linalg.SparseSpmmRecipeProvider())
+    return builder.freeze(), operation, providers, bindings, dense @ host * 2 + 0.25
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_complete_recipes_search_report_and_fresh_process_resolution(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("the optional cuSPARSE SpMM runtime is unavailable")
+    definition, operation, providers, bindings, expected = _spmm_definition()
+    session = definition.search_recipes(
+        providers=providers,
+        target=ti.graph.GraphOptimizationTarget(objectives=(("preprocessed", "max"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=6, repeat_count=1),
+        strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
+    )
+    # This structural objective exercises selection/resolve, not an acceleration claim.
+    assert len(session.recipes) == len(operation.preparation_report())
+    observed = set()
+
+    def evaluate(graph, recipe):
+        bound = graph.bind(bindings)
+        for _ in range(3):
+            graph.run(bound)
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+        assert graph._graph_stats[0]["last_path"] == "cuda_exact_replay", graph._graph_stats
+        plans = [lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_spmm_source")]
+        assert len(plans) == 1
+        observed.add(plans[0]._graph_physical_plan_id)
+        return {"preprocessed": float(plans[0].plan_info()["preprocessed"])}
+
+    decision = session.run(evaluate)
+    assert decision.status == "selected", decision.report.results
+    assert decision.report.search_complete
+    assert len(observed) == len(session.recipes)
+    restored = ti.graph.GraphOptimizationReportV2.from_json(decision.report.to_json())
+    assert restored.to_dict() == decision.report.to_dict()
+    annotations = json.dumps(decision.report.recipe_annotations)
+    assert "finite_inputs_only" in annotations
+    assert "frozen_config" in annotations
+    resolved = definition.resolve_recipe(decision.selection_artifact, providers=providers)
+    with definition.materialize(resolved) as materialized:
+        evaluate(materialized.executor, resolved)
+        before_update = operation.matrix._debug_runtime_stats()["operations"]["spmm_plan_builds"]
+        updated = ti.ndarray(ti.f32, operation.semantics["nonzeros"])
+        updated.fill(0)
+        operation.matrix.update_values(updated)
+        materialized.executor.run(materialized.executor.bind(bindings))
+        np.testing.assert_array_equal(bindings["output"].to_numpy(), 0.25)
+        assert operation.matrix._debug_runtime_stats()["operations"]["spmm_plan_builds"] == before_update
+
+    # The new definition is rebuilt from normal Python code, never unpickled.
+    artifact = tmp_path / "selection.json"
+    artifact.write_text(json.dumps(decision.selection_artifact.to_dict()), encoding="utf-8")
+    child = """
+import json, sys
+from pathlib import Path
+import numpy as np
+import taichi_forge as ti
+from tests.python.test_graph_hardware_recipe import _spmm_definition
+ti.init(arch=ti.cuda, offline_cache=False)
+definition, operation, providers, bindings, expected = _spmm_definition()
+artifact = ti.graph.GraphRecipeSelectionArtifact.from_dict(json.loads(Path(sys.argv[1]).read_text(encoding='utf-8')))
+resolved = definition.resolve_recipe(artifact, providers=providers)
+with definition.materialize(resolved) as result:
+    result.executor.run(result.executor.bind(bindings))
+    np.testing.assert_allclose(bindings['output'].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+print('SPMM_RESOLVED:' + resolved.recipe_id)
+ti.reset()
+"""
+    child_result = subprocess.run(
+        [sys.executable, "-c", child, str(artifact)], capture_output=True, text=True, timeout=90
+    )
+    assert child_result.returncode == 0, child_result.stdout + child_result.stderr
+    assert "SPMM_RESOLVED:" + resolved.recipe_id in child_result.stdout
+
+    changed, _, changed_providers, _, _ = _spmm_definition(component_version=-1)
+    assert changed.semantic_graph_id == definition.semantic_graph_id
+    assert changed.baseline_recipe.recipe_id != definition.baseline_recipe.recipe_id
+    with pytest.raises(ti.graph.GraphRecipeReuseError):
+        changed.resolve_recipe(decision.selection_artifact, providers=changed_providers)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_semantic_drift_and_explicit_preparation():
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("the optional cuSPARSE SpMM runtime is unavailable")
+    definition, operation, providers, bindings, _ = _spmm_definition(prepare=False)
+    with pytest.raises(ti.graph.GraphRecipeProviderError) as error:
+        definition.recipe_catalog(providers=providers)
+    assert error.value.error_key == "spmm_plan_preparation_required"
+    with pytest.raises(AttributeError):
+        operation.rhs_count = 16
+    operation.prepare(bindings["input"], bindings["product"])
+    assert len(definition.recipe_catalog(providers=providers).entries()) >= 2
+    other, _, _, _, _ = _spmm_definition(tolerance=3e-5, prepare=False)
+    assert definition.semantic_graph_id != other.semantic_graph_id
+    for tolerance in (True, float("nan"), -1.0):
+        with pytest.raises((TypeError, ValueError)):
+            operation.matrix.record_spmm(8, absolute_tolerance=tolerance, relative_tolerance=2e-5)

@@ -34,7 +34,7 @@ def _stable_execution_definition(spec):
     """Keep definition-time execution facts and omit runtime generations."""
 
     execution = spec.execution_definition
-    return {
+    result = {
         "nodes": tuple(
             {
                 "kind": node["kind"],
@@ -56,6 +56,17 @@ def _stable_execution_definition(spec):
         "internal_storage_bytes": int(execution["internal_storage_bytes"]),
         "temporary_memory_plan": execution["temporary_memory_plan"],
     }
+    native_plans = tuple(
+        (node_index, action_index, action.physical_plan_id)
+        for node_index, node in enumerate(getattr(spec, "nodes", ()))
+        for action_index, action in enumerate(getattr(node, "native_action_manifests", ()))
+        if action.physical_plan_id
+    )
+    if native_plans:
+        # Frozen component/strategy identity belongs to physical reuse, never
+        # semantic equality. Legacy actions without such facts keep their IDs.
+        result["native_physical_plans"] = native_plans
+    return result
 
 
 @dataclass(frozen=True)

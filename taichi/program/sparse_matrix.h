@@ -1091,13 +1091,15 @@ class CuSparseMatrix : public SparseMatrix {
                const Ndarray &input,
                const Ndarray &output,
                int rhs_count,
-               int algorithm);
+               int algorithm,
+               bool prepare_only = false);
 
   void spmm(size_t input,
             size_t output,
             int rhs_count,
             int algorithm,
-            CUstream stream = nullptr);
+            CUstream stream = nullptr,
+            bool prepare_only = false);
 
   struct SpmmPlanInfo {
     bool prepared{false};

@@ -183,7 +183,7 @@ class CudaSparseSpmmCaptureCommand final
   bool supports(const std::unordered_map<std::string, aot::IValue> &args,
                 Program &program) const override {
     if (matrix_ == nullptr || program_ != &program || rhs_count_ < 2 ||
-        (algorithm_ != 0 && algorithm_ != 1)) {
+        algorithm_ < 0 || algorithm_ > 3) {
       return false;
     }
     const auto *input = cuda_sparse_spmm_ndarray(
@@ -196,12 +196,20 @@ class CudaSparseSpmmCaptureCommand final
 
   void prepare(const std::unordered_map<std::string, aot::IValue> &args,
                Program &program) override {
-    record(args, program, nullptr);
+    record_impl(args, program, nullptr, true);
   }
 
   void record(const std::unordered_map<std::string, aot::IValue> &args,
               Program &program,
               void *stream) override {
+    record_impl(args, program, stream, false);
+  }
+
+ private:
+  void record_impl(const std::unordered_map<std::string, aot::IValue> &args,
+                   Program &program,
+                   void *stream,
+                   bool prepare_only) {
     TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
                 "CUDA cuSPARSE SpMM capture recipe generation is stale");
     const auto *input = cuda_sparse_spmm_ndarray(
@@ -219,10 +227,9 @@ class CudaSparseSpmmCaptureCommand final
     matrix_->spmm(
         static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(input)),
         static_cast<std::size_t>(program.get_ndarray_data_ptr_as_int(output)),
-        rhs_count_, algorithm_, reinterpret_cast<CUstream>(stream));
+        rhs_count_, algorithm_, reinterpret_cast<CUstream>(stream), prepare_only);
   }
 
- private:
   CuSparseMatrix *matrix_{nullptr};
   Program *program_{nullptr};
   aot::Arg input_;
@@ -485,7 +492,7 @@ void validate_cuda_sparse_spmm_args(CuSparseMatrix *matrix,
   TI_ERROR_IF(rhs_count < 2,
               "CUDA sparse SpMM Graph proof requires at least two "
               "right-hand sides");
-  TI_ERROR_IF(algorithm != 0 && algorithm != 1,
+  TI_ERROR_IF(algorithm < 0 || algorithm > 3,
               "CUDA sparse SpMM Graph proof algorithm is invalid");
 }
 

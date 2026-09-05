@@ -634,6 +634,28 @@ class SparseMatrix:
                 "dispatch_failures"
             ]
 
+    def record_spmm(
+        self, rhs_count, *, input="input", output="output",
+        absolute_tolerance, relative_tolerance,
+    ):
+        """Describe a fixed-pattern f32 sparse-dense product for a Graph.
+
+        The mathematical operation is output = self @ input, using compact
+        row-major dense arrays. Tolerances permit different f32 summation
+        orders; inputs must be finite. No data scan is added to replay.
+        The initial implementation supports CUDA CSR SparsePattern matrices.
+        Call the returned operation's prepare(input_array, output_array)
+        before recipe search to expose retained physical plans without
+        allocating duplicate dense arrays or executing the product.
+        """
+        from taichi_forge.linalg._spmm import SparseSpmmOperation
+
+        return SparseSpmmOperation(
+            self, rhs_count, input=input, output=output,
+            absolute_tolerance=absolute_tolerance,
+            relative_tolerance=relative_tolerance,
+        )
+
     def spmv(self, other, *, method="auto"):
         """Multiplies by a device vector using auto, kernel, or provider route."""
 
