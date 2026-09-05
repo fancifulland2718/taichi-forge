@@ -15952,7 +15952,7 @@ class GraphBuilder:
 
         The public i32 semantic operation intentionally has no provider
         ``method`` parameter. Forge generates complete global-atomic,
-        block-shared dense, and key-partitioned physical recipes when their
+        and block-shared dense physical recipes when their
         context applies, and the whole-Graph CompileIQ session selects among
         them as opaque recipe tokens.
         """

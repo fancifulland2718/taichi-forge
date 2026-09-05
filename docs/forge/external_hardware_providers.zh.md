@@ -7,7 +7,7 @@ Taichi Forge 的官方 runtime wheel 始终保持 driver-only。可选 CUDA/vend
 `cu12`/`cu13` Forge wheel 变体。本文说明这一用户管理边界，并为 simulation 与 rendering
 中最相关的可选 library 给出推荐配置。
 
-本文是安装与部署指南。安装 library 本身不会选择执行路线；下列三个 library 已有显式
+本文是安装与部署指南。安装 library 本身不会选择执行路线；下列有界 operation 已有显式
 retained-provider API，而 discovery probe 始终不执行算法。
 
 ## 支持状态与调用边界
@@ -23,15 +23,58 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe(...)` 或 `ti.hardware.tensor.CusparseLtProvider` | 显式 FP16 2:4 matmul plan；无 Graph/kernel/auto 路线 |
 | cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.probe(...)` 或 `ti.hardware.tensor.CutensorProvider` | 显式 FP32 contraction plan；无 Graph/kernel/auto 路线 |
 | AmgX stable C API | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe(...)` 或 `ti.hardware.linalg.AmgxProvider` | 显式 host-CSR solver；无 Graph/kernel/auto 路线 |
-| NCCL | 仅 native-adapter 候选 | 用户安装系统包 | 没有公开 Forge probe 或执行 API | 仅外部 multi-GPU communication |
+| NCCL | 不属于 Forge 当前单 GPU 范围 | 用户安装系统包 | 没有公开 Forge probe 或执行 API | 仅外部 multi-GPU communication |
 
-这三个 provider 会出现在 `ti.hardware.providers()` 中。它们的 probe 检查有界版本族和
-execution-symbol surface，但不创建 plan，也不资格化 workload。只有应用创建对应 provider
-与 plan/solver object 时才开始执行。NCCL 仍是未注册候选。
+已注册外部 provider 会出现在 `ti.hardware.providers()` 中。它们的 probe 检查有界版本族和
+execution-symbol surface，但不创建 plan，也不资格化 workload。执行只通过已说明的领域 API
+或显式 provider/plan API 开始。NCCL 仍未注册。
 
 这些 host library 都不能从 `@ti.kernel` 内调用。当前只有文档明确说明的领域 API 可以自动
 选择，例如已资格化的 cuSPARSE SpMV 与 cuDSS solver selection。安装 cuSPARSELt、
 cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
+
+### Recording 与完整 recipe 搜索是不同能力
+
+下表描述当前源码 API，不代表所有 vendor release、driver、GPU 或 workload 均已资格化。
+库可以执行或录制，不等于其算法已作为 CompileIQ 搜索轴开放。
+
+| Operation | 语义入口与准备 | Graph 与搜索边界 |
+| --- | --- | --- |
+| 固定 pattern 稀疏-稠密乘法 | `SparseMatrix.record_spmm(...)`，随后 `operation.prepare(input_array, output_array)` | CUDA f32 CSR / 紧凑 row-major 稠密数组；通过 `GraphBuilder.append_native()` 追加。显式 `ti.hardware.linalg.SparseSpmmRecipeProvider()` 将冻结的 direct/preprocessed 策略加入完整 recipe。 |
+| Batched 2D complex FFT | `ti.linalg.record_fft(...)`，随后 `operation.prepare()` | CUDA complex-f32，紧凑 `(H, W, 2)` 或 `(batch, H, W, 2)` 数组，输入输出分离。显式 `ti.hardware.fft.FftRecipeProvider()` 在 whole-transform baseline 外增加 separable plan。 |
+| Toolkit reset-monoid segmented scan | 既有 `GraphBuilder.segmented_scan()` 加 `taichi_forge.hardware.source_providers` 中的 `CubSegmentedScanRecipeProvider(manifest_path)` | 可选 source-provider addon；有界 i32/u32 sum 与不可变 segmented layout。prepared capture、workspace 和 head-bitset 生命周期形成物理 recipe；addon 不在 portable runtime wheel 内。 |
+| 其他 cuSPARSE / cuFFT / cuDSS expert operation | 既有显式 plan 和已说明的 root Graph recording | recording 本身不提供 recipe generator；cuDSS root 有序调用不能描述成 CUDA Graph capture。 |
+| cuBLASLt | retained internal execution/recording 基础 | cuBLAS probe 不意味着已公开完整 matmul-region recipe 域。 |
+| cuSPARSELt / cuTENSOR / AmgX | 下文的显式 provider plan | 当前没有公开 complete-recipe provider 或通用 Graph recording 路线。 |
+
+先准备数学 operation，再 freeze Graph。SpMM/FFT 要求显式的 finite-input / f32 tolerance 合同，
+Forge 不在每次 replay 扫描数值。FFT 正向、逆向均不归一化，连续应用两者会将输入乘以 `H * W`。
+layout、精度和归一化属于语义要求，不是优化器选择。vendor 不开放的内部信息报告为 unknown，
+不能据此虚构内部 kernel 数。
+
+这些 provider 需要在 `definition.search_recipes(engine="compileiq", providers=..., ...)` 中，
+与 `ti.graph.default_recipe_providers()` 一同显式传入；没有匹配的已准备语义 region 时，不能凭
+provider 名称制造 region。维护的魔改 CompileIQ fork 只调度 opaque complete-recipe identity；
+Forge 负责组合、冻结物理配置和物化。计划重建失败不能静默改选另一 vendor heuristic。
+安装库或选中一个实测 recipe 都不改变普通 runtime auto。
+
+选择报告保留 setup/first/steady 成本、声明的数值合同、component identity 和显存范围。
+CompileIQ 的 trial memory 最大观测值不是 driver 实测的 device peak。冷物化、after-evaluator
+资源快照、请求 workspace 和 pool reservation 是不同观测；缺测写 unavailable，不能填零。
+生产采用由下游 workload 的实际复用次数和精度要求决定。search、resume、选择重解析和生命周期
+成本报告见 [Graph API 参考](forge_api_reference.zh.md)。
+
+### 显式启用的诊断设施
+
+NVTX 3 标注使用随构建引入的 header，不要求 `nvToolsExt` shared library；用于显式 profiling 中
+关联 stage/trial/recipe 与 GPU 工作，不是物理策略或自动性能门槛。
+
+`ti.hardware.gpu_environment()` 显式采集 NVIDIA 设备的 driver-provided NVML 信息。
+在同一线程以 `ti.hardware.capture_trial_environment()` 包围 `session.run(evaluator)`，可把边界
+观测附加到报告。NVML 缺失或字段不支持时返回结构化 unavailable。NVML 显存是全设备值，包含
+其他进程，不是 recipe/process peak；clock、power、temperature 快照也不是 trial 均值。
+采集没有 replay 轮询线程或额外 device 同步，但 host 采集时间计入外层搜索预算。被动
+`report()` / `telemetry()` 不会隐式启用它或探测外部库。
 
 ## 打包与版本规则
 

@@ -11,7 +11,7 @@ rendering.
 
 This page is an installation and deployment guide. Installing a library alone
 does not select an execution route. Forge exposes explicit retained-provider
-APIs for the three libraries below; discovery probes remain non-executing.
+APIs for the bounded operations below; discovery probes remain non-executing.
 
 ## Support status and call boundary
 
@@ -26,17 +26,72 @@ APIs for the three libraries below; discovery probes remain non-executing.
 | cuSPARSELt 0.8.x-0.9.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.probe(...)` or `ti.hardware.tensor.CusparseLtProvider` | Explicit FP16 2:4 matmul plan; no Graph/kernel/auto route |
 | cuTENSOR 2.0.x-2.7.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.probe(...)` or `ti.hardware.tensor.CutensorProvider` | Explicit FP32 contraction plan; no Graph/kernel/auto route |
 | AmgX stable C API | Registered bundled-adapter ABI | Forge adapter; user source build | `ti.hardware.probe(...)` or `ti.hardware.linalg.AmgxProvider` | Explicit host-CSR solver; no Graph/kernel/auto route |
-| NCCL | Native-adapter candidate only | User system package | No public Forge probe or execution API | External multi-GPU communication only |
+| NCCL | Outside Forge's current single-GPU scope | User system package | No public Forge probe or execution API | External multi-GPU communication only |
 
-These three providers appear in `ti.hardware.providers()`. Their probe audits a
+Registered external providers appear in `ti.hardware.providers()`. Their probe audits a
 bounded version family and execution-symbol surface, but still creates no plan
-and qualifies no workload. Execution starts only when the application creates
-the corresponding provider and plan/solver object. NCCL remains unregistered.
+and qualifies no workload. Execution starts only through the documented domain
+or explicit provider/plan API. NCCL remains unregistered.
 
 None of these host libraries can be called from inside `@ti.kernel`. Automatic
 use is currently limited to documented domain APIs such as qualified
 cuSPARSE SpMV and cuDSS solver selection. Installing cuSPARSELt, cuTENSOR,
 AmgX, or NCCL never causes compiler rewriting.
+
+### Recording and complete-recipe search are separate capabilities
+
+The following table describes the current source API, not qualification of every
+vendor release, driver, GPU, or workload. A library being executable or recordable
+does not imply that its algorithms are exposed as CompileIQ search axes.
+
+| Operation | Semantic entry and preparation | Graph and search boundary |
+| --- | --- | --- |
+| Fixed-pattern sparse-dense product | `SparseMatrix.record_spmm(...)`, then `operation.prepare(input_array, output_array)` | CUDA f32 CSR / compact row-major dense arrays; append the operation with `GraphBuilder.append_native()`. Explicit `ti.hardware.linalg.SparseSpmmRecipeProvider()` adds frozen direct/preprocessed strategies to complete recipes. |
+| Batched 2D complex FFT | `ti.linalg.record_fft(...)`, then `operation.prepare()` | CUDA complex-f32, compact arrays `(H, W, 2)` or `(batch, H, W, 2)`, distinct input/output. Explicit `ti.hardware.fft.FftRecipeProvider()` adds a separable plan alongside the whole-transform baseline. |
+| Toolkit reset-monoid segmented scan | Existing `GraphBuilder.segmented_scan()` plus `CubSegmentedScanRecipeProvider(manifest_path)` from `taichi_forge.hardware.source_providers` | Optional source-provider addon; bounded i32/u32 sum and immutable segmented layout. Prepared capture, workspace and head-bitset lifetime form the physical recipe; the addon is not part of the portable runtime wheel. |
+| Other cuSPARSE / cuFFT / cuDSS expert operations | Existing explicit plans and documented root Graph recording | Recording alone does not provide a recipe generator. cuDSS root ordering must not be described as CUDA Graph capture. |
+| cuBLASLt | Retained internal execution/recording foundation | No public complete matmul-region recipe domain is implied by the cuBLAS probe. |
+| cuSPARSELt / cuTENSOR / AmgX | Explicit provider plans described below | No complete-recipe provider or general Graph recording route is currently exposed. |
+
+Prepare mathematical operations before freezing the Graph. SpMM and FFT require
+explicit finite-input / f32 tolerance contracts; Forge does not scan values on
+each replay. FFT forward and inverse are both unnormalized, so applying both
+multiplies the input by `H * W`. Layout, precision and normalization are semantic
+requirements, not optimizer choices. Vendor internals not exposed by the library
+are reported as unknown, not fabricated kernel counts.
+
+These providers are opt-in additions alongside `ti.graph.default_recipe_providers()`
+at `definition.search_recipes(engine="compileiq", providers=..., ...)`. Supplying
+a provider without a matching prepared semantic region does not invent one.
+The maintained CompileIQ fork schedules only opaque complete-recipe identities;
+Forge owns composition, frozen physical configuration and materialization. A
+failed plan reconstruction is not silently replaced with another vendor heuristic.
+Installing a library or selecting a measured recipe does not change runtime auto.
+
+Selection reports retain setup/first/steady costs, declared numerical contracts,
+component identity and memory scope. CompileIQ's trial memory maximum is not a
+driver-observed device peak. Cold materialization, after-evaluator resource
+snapshots, requested workspace and pool reservation are different observations;
+missing measurements are unavailable, not zero. Production acceptance belongs
+to the downstream workload, including its reuse count and accuracy requirements.
+See the [Graph API reference](forge_api_reference.en.md) for search, resume,
+selection resolution and lifecycle-cost reports.
+
+### Opt-in diagnostic facilities
+
+NVTX 3 annotations use bundled headers, not a required `nvToolsExt` shared
+library. They correlate explicit profiling of stages/trials/recipes with GPU
+work; annotations are not physical strategies or automatic performance gates.
+
+`ti.hardware.gpu_environment()` explicitly samples driver-provided NVML on an
+NVIDIA device. `ti.hardware.capture_trial_environment()` attaches boundary
+observations when it encloses `session.run(evaluator)` on the same thread.
+Missing NVML or unsupported fields yield structured unavailable values. NVML
+memory is device-wide, including other processes, not recipe/process peak memory.
+Clock, power and temperature snapshots are not trial means. Sampling uses no
+replay polling thread or added device synchronization, but its host time counts
+toward the enclosing search budget. Passive `report()` / `telemetry()` do not
+implicitly enable it or probe external libraries.
 
 ## Packaging and version rules
 
