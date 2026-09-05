@@ -98,15 +98,20 @@ def test_appended_sequence_propagates_private_storage_ownership():
     output = ti.ndarray(ti.i32, shape=size)
     output.fill(0)
 
-    graph.execution_stats()
-    graph.run({"sequence_output": output})
-    graph.run({"sequence_output": output})
+    bindings = graph.bind({"sequence_output": output})
+    assert bindings.fast_path_qualified
+    graph.run(bindings)
+    graph.run(bindings)
 
     np.testing.assert_array_equal(
         output.to_numpy(), np.arange(size, dtype=np.int32) + 4
     )
     assert "sequence_scratch" not in graph._spec.runtime_arg_names
     assert graph._spec.internal_storage_bytes == size * 4
-    replay = graph.execution_stats().segments[0].replay_attribution
-    assert replay.binding_plan_misses == 1
-    assert replay.binding_plan_hits == 1
+    # Public statistics are passive: do not expect disabled native debug
+    # counters to measure replay. The published frame proves private-storage
+    # reuse without enabling instrumentation on the production path.
+    stats = graph.binding_statistics()
+    assert stats["flattened_frame_builds"] == 1
+    assert stats["version_fast_replays"] == 2
+    assert stats["raw_replay_validations"] == 0
