@@ -75,10 +75,19 @@ function(_ti_add_optix_provider target_name root)
         "${CMAKE_CURRENT_BINARY_DIR}/generated/optix_provider_${_header_abi}")
     set(_ptx "${_generated_dir}/device_program.ptx")
     set(_ptx_header "${_generated_dir}/device_program_ptx.h")
+    # This custom PTX command does not enable CMake's CUDA language, so honor
+    # its explicit host-compiler setting ourselves. The PTX toolchain may use
+    # an older supported MSVC than the native runtime/shim toolchain.
+    set(_ptx_host_options)
+    if(CMAKE_CUDA_HOST_COMPILER)
+        list(APPEND _ptx_host_options
+             --compiler-bindir "${CMAKE_CUDA_HOST_COMPILER}")
+    endif()
     add_custom_command(
         OUTPUT "${_ptx}"
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated_dir}"
         COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}"
+                ${_ptx_host_options}
                 --ptx --std=c++17 --use_fast_math
                 --gpu-architecture=compute_75
                 -I "${root}/include"

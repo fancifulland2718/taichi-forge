@@ -333,6 +333,17 @@ jobs:
       - name: Build runtime wheel
         shell: pwsh
         run: |
+          # CUDA 12.5 supports MSVC 192x/193x, not the runner's current 194x.
+          # Use the installed v142 toolset only for PTX preprocessing; native
+          # runtime/shim compilation retains the current MSVC environment.
+          $ptxToolset = Get-ChildItem -LiteralPath "$env:VCINSTALLDIR\Tools\MSVC" -Directory -Filter "14.29.*" |
+            Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $ptxToolset) { throw "CUDA 12.5 PTX compilation requires the runner's MSVC v142 toolset." }
+          $ptxHost = Join-Path $ptxToolset.FullName "bin\Hostx64\x64\cl.exe"
+          if (-not (Test-Path -LiteralPath $ptxHost)) { throw "PTX host compiler not found: $ptxHost" }
+          $ptxHost = $ptxHost.Replace('\', '/')
+          Write-Output "PTX host compiler: $ptxHost"
+          $env:CMAKE_ARGS += " `"-DCMAKE_CUDA_HOST_COMPILER:FILEPATH=$ptxHost`""
           nvcc -V
           python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 
