@@ -1,5 +1,6 @@
 #include "taichi/program/graph_builder.h"
 #include "taichi/program/graph_kernel_composer.h"
+#include "taichi/program/cuda_addon_capture.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/sparse_matrix.h"
@@ -997,6 +998,27 @@ void GraphBuilder::set_map_composer_max_group_size(
   TI_ERROR_IF(max_group_size < 1 || max_group_size > 4,
               "Graph map composer group size must be in [1, 4]");
   map_composer_max_group_size_ = max_group_size;
+}
+
+void GraphBuilder::dispatch_cuda_capture_addon(
+    Program *program,
+    std::uint64_t invoke_address,
+    const std::string &payload,
+    std::size_t stream_offset,
+    const std::vector<aot::Arg> &arguments,
+    const std::vector<std::size_t> &pointer_offsets,
+    const std::vector<std::size_t> &scalar_counts,
+    const std::vector<bool> &writable,
+    std::uint64_t error_address) {
+  auto command = make_cuda_addon_capture_command(
+      program, invoke_address, payload, stream_offset, arguments, pointer_offsets,
+      scalar_counts, writable, error_address);
+  for (const auto &argument : arguments) {
+    register_arg(argument);
+  }
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), arguments));
+  seq()->append(all_nodes_.back().get());
 }
 
 void GraphBuilder::set_map_composer_allowed_groups(

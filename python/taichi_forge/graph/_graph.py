@@ -16859,6 +16859,16 @@ class GraphBuilder:
                 and isinstance(capture_recipe, _CudaGraphCaptureRecipe)
             ):
                 compiled = _CompiledNativeGraphNode(executable)
+                # Retained addon workspace and other private resources belong
+                # to the CGraph binding frame too. Validate conflicts before
+                # mutating the native builder, at this cold build boundary.
+                for name, value in compiled.fixed_runtime_args.items():
+                    existing = self._runtime_graph_fixed_args.get(name)
+                    if existing is not None and existing is not value:
+                        raise TaichiRuntimeError(
+                            "CUDA capture actions provide conflicting fixed "
+                            f"binding {name!r}"
+                        )
                 capture_recipe.append_to_graph(
                     self._ensure_runtime_graph_builder(),
                     impl.get_runtime().prog,
@@ -16867,6 +16877,7 @@ class GraphBuilder:
                 self._runtime_graph_arg_names.update(
                     compiled.recording_runtime_arg_names
                 )
+                self._runtime_graph_fixed_args.update(compiled.fixed_runtime_args)
                 self._runtime_graph_lifetime_leases.extend(compiled.lifetime_leases)
                 self._runtime_graph_source_native_count += compiled.source_native_count
                 self._runtime_graph_native_action_manifests.extend(

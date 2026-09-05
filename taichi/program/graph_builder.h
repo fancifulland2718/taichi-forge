@@ -226,6 +226,17 @@ class GraphBuilder {
 
   Sequential *seq() const;
 
+  void dispatch_cuda_capture_addon(
+      Program *program,
+      std::uint64_t invoke_address,
+      const std::string &payload,
+      std::size_t stream_offset,
+      const std::vector<aot::Arg> &arguments,
+      const std::vector<std::size_t> &pointer_offsets,
+      const std::vector<std::size_t> &scalar_counts,
+      const std::vector<bool> &writable,
+      std::uint64_t error_address);
+
   void enable_two_map_composer() {
     map_composer_max_group_size_ = 2;
   }
