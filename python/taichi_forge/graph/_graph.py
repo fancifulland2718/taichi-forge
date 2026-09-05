@@ -3687,6 +3687,7 @@ _COUNTER_FIELDS = (
 )
 _BACKEND_GRAPH_PATHS = frozenset(
     (
+        "cuda_prepared_binding_plan",
         "cuda_capture",
         "cuda_exact_replay",
         "cuda_patched_replay",
@@ -3703,6 +3704,7 @@ _BACKEND_GRAPH_PATHS = frozenset(
 )
 _BACKEND_REPLAY_PATHS = frozenset(
     (
+        "cuda_prepared_binding_plan",
         "cuda_exact_replay",
         "cuda_patched_replay",
         "cuda_masked_replay",
@@ -10219,6 +10221,7 @@ class _GraphBindingVersion:
     fixed_bindings_flattened: bool
     fast_path_qualified: bool
     volatile_reasons: tuple
+    execution_frame: object = None
 
 
 @dataclass(frozen=True)
@@ -11186,7 +11189,10 @@ class _GraphSpec:
         variant._definition_source_spec = self
         variant._complete_recipe_id = recipe.recipe_id
         variant._disable_qualified_fusion_selector = True
+        variant._binding_executor_factory = assembly.binding_executor_factory
         concurrent_workspace_pair = assembly.workspace_pair
+        if variant._binding_executor_factory is not None and (concurrent_workspace_pair or workspace_lanes != 1):
+            raise TaichiRuntimeError("This prepared-binding submission recipe requires one workspace lane")
         if concurrent_workspace_pair:
             workspace_lanes = 2
             workspace_saturation = "wait"
@@ -12472,7 +12478,13 @@ class _GraphInstance:
             lambda: spec.pipeline_definition,
         )
 
-        if len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
+        binding_factory = getattr(spec, "_binding_executor_factory", None)
+        if binding_factory is not None:
+            executable = binding_factory(self)
+            self._backend_executable = executable
+            self._kind = executable.execution_kind
+            self._set_run_impl(self._run_prepared_backend)
+        elif len(spec.nodes) == 1 and isinstance(spec.nodes[0], _CompiledCGraphNode):
             node = spec.nodes[0]
             if spec.needs_runtime_args:
                 self._run_context = _GraphRunContext()
@@ -12696,6 +12708,17 @@ class _GraphInstance:
         for node in self._native_nodes:
             node.run(None, temporaries)
 
+    def prepare_binding_version(self, version):
+        prepare = getattr(self._backend_executable, "prepare_binding_version", None)
+        return version if prepare is None else prepare(version)
+
+    def _run_prepared_backend(self, prepared, temporaries=None):
+        self._backend_executable.run_prepared(prepared)
+
+    @property
+    def physical_submission_mode(self):
+        return getattr(self._backend_executable, "physical_submission_mode", "runtime_managed")
+
     def _run_general(self, args, temporaries=None):
         self._executable.run(args, temporaries)
 
@@ -12705,8 +12728,9 @@ class _GraphInstance:
 
     @property
     def debug_graph_stats(self):
-        if isinstance(self._backend_executable, _CGraphJITExecutable):
-            return [self._backend_executable.debug_graph_stats]
+        backend_stats = getattr(self._backend_executable, "debug_graph_stats", None)
+        if backend_stats is not None:
+            return [backend_stats]
         result = []
         for node in self.spec.nodes:
             if isinstance(node, _CompiledCGraphNode):
@@ -12726,8 +12750,9 @@ class _GraphInstance:
 
     @property
     def snapshot_graph_stats(self):
-        if isinstance(self._backend_executable, _CGraphJITExecutable):
-            return [self._backend_executable.snapshot_graph_stats]
+        backend_stats = getattr(self._backend_executable, "snapshot_graph_stats", None)
+        if backend_stats is not None:
+            return [backend_stats]
         result = []
         for node in self.spec.nodes:
             if isinstance(node, _CompiledCGraphNode):
@@ -17728,7 +17753,7 @@ class Graph:
                 allow_fast_path=self._qualified_fusion_selector is None,
             )
             with binding_set._lock:
-                binding_set._version = version
+                binding_set._version = self._instance.prepare_binding_version(version)
 
     def _update_binding_set(self, binding_set, values, *, replace_all):
         if not isinstance(values, Mapping):
@@ -17770,6 +17795,7 @@ class Graph:
                     allow_fast_path=self._qualified_fusion_selector is None,
                     entrypoint="GraphBindingSet.update",
                 )
+                version = self._instance.prepare_binding_version(version)
                 binding_set_ref = weakref.ref(binding_set)
                 retired_revision = current.revision
 

@@ -41,6 +41,7 @@ def test_default_runtime_recipe_families_have_independent_provider_ownership():
     assert assembly.owned_fragment_namespaces == ()
     assert "legacy-family-adapter" not in assembly.capabilities
     assert set(descriptors) == {
+        "taichi_forge.graph.binding_frames",
         "taichi_forge.graph.bounded_execution",
         "taichi_forge.graph.branch_join_schedule",
         "taichi_forge.graph.graph_memory",

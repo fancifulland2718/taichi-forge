@@ -1,6 +1,10 @@
 """One-shot provider contributions for runtime Graph recipe assembly."""
 
 
+def _retire_binding_executor(graph):
+    graph._invalidate_runtime()
+
+
 class GraphRuntimeRecipeAssembly:
     """Mutable build plan populated only at the materialization boundary.
 
@@ -18,6 +22,7 @@ class GraphRuntimeRecipeAssembly:
         "_operation_rewriters",
         "_parallel_schedules",
         "_workspace_pair",
+        "_binding_executor_factory",
     )
 
     def __init__(self, definition):
@@ -29,6 +34,7 @@ class GraphRuntimeRecipeAssembly:
         self._parallel_schedules = {}
         self._map_source_groups = []
         self._workspace_pair = False
+        self._binding_executor_factory = None
 
     @property
     def spec(self):
@@ -146,6 +152,20 @@ class GraphRuntimeRecipeAssembly:
     @property
     def workspace_pair(self):
         return self._workspace_pair
+
+    def select_binding_executor(self, factory):
+        """Install one complete submission strategy, only at materialization."""
+        if self._binding_executor_factory is not None:
+            raise ValueError("runtime Graph binding executor is selected twice")
+        self._binding_executor_factory = self._callable(factory, "binding executor factory")
+
+    @property
+    def binding_executor_factory(self):
+        return self._binding_executor_factory
+
+    @property
+    def executor_release(self):
+        return None if self._binding_executor_factory is None else _retire_binding_executor
 
 
 __all__ = ["GraphRuntimeRecipeAssembly"]

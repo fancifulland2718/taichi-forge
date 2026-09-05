@@ -1274,7 +1274,7 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                 replay_mode=(
                     "cuda_concurrent_complete_graph_pair"
                     if concurrent_workspace_pair
-                    else "runtime_managed"
+                    else graph._instance.physical_submission_mode
                 ),
             ),
         )

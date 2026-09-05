@@ -77,7 +77,16 @@ def test_complete_recipe_v2_budget_resume_reuses_real_graph_measurements():
         symbolic["output"],
     )
     baseline = builder.compile(workspace_lanes=2, workspace_saturation="raise")
-    plans = compileiq_recipe_search(baseline)
+    # This budget/resume fixture owns the four fusion plans, not the evolving
+    # default provider set (whose submission recipes may require one lane).
+    providers = tuple(
+        provider
+        for provider in ti.graph.default_recipe_providers()
+        if provider.descriptor.namespace in {"taichi_forge.graph.runtime_assembly", "taichi_forge.graph.map_fusion"}
+    )
+    plans = ti.graph.CompileIQCompleteGraphRecipeSearch(
+        baseline, catalog=baseline.definition.recipe_catalog(providers=providers)
+    )
     assert len(plans.recipe_ids) == 4
     canonical_batch = plans.batch(recipe_ids=plans.recipe_ids)
     reordered_batch = plans.batch(recipe_ids=reversed(plans.recipe_ids))

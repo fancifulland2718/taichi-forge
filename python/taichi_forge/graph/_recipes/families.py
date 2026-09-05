@@ -432,6 +432,7 @@ class GraphRuntimeAssemblyProvider:
 def default_graph_recipe_providers():
     """Return the built-in providers required by the public recipe path."""
 
+    from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
     from taichi_forge.graph._recipes.branch_join import (
         GraphBranchJoinRecipeProvider,
     )
@@ -460,6 +461,7 @@ def default_graph_recipe_providers():
         GraphSparseTraversalRecipeProvider(),
         GraphBranchJoinRecipeProvider(),
         GraphRecordingPartitionRecipeProvider(),
+        GraphBindingFrameRecipeProvider(),
         GraphWorkspaceConcurrencyRecipeProvider(),
         GraphBoundedExecutionRecipeProvider(),
         GraphStructuredControlRecipeProvider(),
@@ -506,8 +508,14 @@ def assemble_runtime_graph_recipe(
         workspace_lanes=scope._context.workspace_lanes,
         workspace_saturation=scope._context.workspace_saturation,
     )
-    manifest = observe_graph_physical_manifest(definition, recipe, graph)
-    return GraphMaterializationProduct(graph, manifest)
+    release = assembly.executor_release
+    try:
+        manifest = observe_graph_physical_manifest(definition, recipe, graph)
+    except BaseException:
+        if release is not None:
+            release(graph)
+        raise
+    return GraphMaterializationProduct(graph, manifest, release=release)
 
 
 def materialize_runtime_graph_baseline(scope, definition, recipe):
