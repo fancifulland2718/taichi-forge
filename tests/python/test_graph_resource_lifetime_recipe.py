@@ -362,6 +362,34 @@ def test_resource_recipe_records_real_temporary_work_and_freezes_ring_capacity(m
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_resource_recipe_resolution_builds_only_requested_fragment(monkeypatch):
+    definition = _definition(groups=4)
+    provider = GraphResourceLifetimeRecipeProvider()
+    fragments = provider.fragments(definition)
+    assert len(fragments) == 5
+    original = resource_lifetime._fragment
+    constructed = []
+
+    def record_fragment(*args, **kwargs):
+        constructed.append(kwargs["source_key"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(resource_lifetime, "_fragment", record_fragment)
+    for fragment in fragments:
+        constructed.clear()
+        assert provider.resolve(definition, fragment.fragment_key).to_dict() == fragment.to_dict()
+        assert constructed == [fragment.provider_metadata["family_selection"]["source_key"]]
+    constructed.clear()
+    with pytest.raises(KeyError, match="unavailable"):
+        provider.resolve(definition, fragments[0].fragment_key + ":missing")
+    assert not constructed
+    monkeypatch.setattr(resource_lifetime, "_pool_available", lambda generation: False)
+    with pytest.raises(KeyError, match="unavailable"):
+        provider.resolve(definition, fragments[0].fragment_key)
+    assert not constructed
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_resource_recipe_capability_miss_and_observation_failure_preserve_baseline(monkeypatch):
     from taichi_forge.graph._recipes import families
 

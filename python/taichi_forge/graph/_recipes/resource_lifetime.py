@@ -210,49 +210,56 @@ class GraphResourceLifetimeRecipeProvider(GraphRuntimeFragmentProvider):
 
     def fragments(self, definition):
         groups, nodes = self._groups(definition)
-        result = []
+        return tuple(self._build_fragment(definition, group, nodes) for group in groups)
+
+    def resolve(self, definition, fragment_key):
+        # Refresh cold capability/lifetime facts, but do not rebuild every other
+        # fragment for each selected group. No process-global resolution cache.
+        groups, nodes = self._groups(definition)
         for group in groups:
-            tasks = []
-            for index, source in enumerate(definition.sources[group.first : group.last + 1]):
-                node = nodes[source.path]
-                tasks.append(
-                    GraphFragmentTask.create(
-                        f"{group.key}:source:{index}",
-                        source.kind,
-                        depends_on=() if not tasks else (tasks[-1].task_id,),
-                        effects=node.effects,
-                        bindings=node.bindings,
-                        temporaries=node.temporaries,
-                        physical={
-                            "execution": "unchanged",
-                            "storage_allocator": "cuda_generation_pool",
-                            "allocation_members": group.members,
-                            "temporary_ring_capacity": group.arena_capacity,
-                        },
-                    )
-                )
-            result.append(
-                _fragment(
-                    definition,
-                    family="resource_lifetime",
-                    source_key=group.key,
-                    choice_id="generation-owned-storage",
-                    coverage=group.coverage,
-                    tasks=tasks,
-                    provider_descriptor=self.descriptor,
-                    resources=(
-                        GraphFragmentResourceRequirement(
-                            name=f"storage-group:{group.key}",
-                            kind="cuda_generation_pool",
-                            bytes=group.private_bytes + group.temporary_bytes,
-                            alignment=1,
-                            ownership="graph_instance",
-                            lifetime="graph",
-                        ),
-                    ),
+            if fragment_key == f"resource_lifetime:{group.key}:generation-owned-storage":
+                return self._build_fragment(definition, group, nodes)
+        raise KeyError(f"{self.descriptor.namespace} fragment is unavailable: {fragment_key}")
+
+    def _build_fragment(self, definition, group, nodes):
+        tasks = []
+        for index, source in enumerate(definition.sources[group.first : group.last + 1]):
+            node = nodes[source.path]
+            tasks.append(
+                GraphFragmentTask.create(
+                    f"{group.key}:source:{index}",
+                    source.kind,
+                    depends_on=() if not tasks else (tasks[-1].task_id,),
+                    effects=node.effects,
+                    bindings=node.bindings,
+                    temporaries=node.temporaries,
+                    physical={
+                        "execution": "unchanged",
+                        "storage_allocator": "cuda_generation_pool",
+                        "allocation_members": group.members,
+                        "temporary_ring_capacity": group.arena_capacity,
+                    },
                 )
             )
-        return tuple(result)
+        return _fragment(
+            definition,
+            family="resource_lifetime",
+            source_key=group.key,
+            choice_id="generation-owned-storage",
+            coverage=group.coverage,
+            tasks=tasks,
+            provider_descriptor=self.descriptor,
+            resources=(
+                GraphFragmentResourceRequirement(
+                    name=f"storage-group:{group.key}",
+                    kind="cuda_generation_pool",
+                    bytes=group.private_bytes + group.temporary_bytes,
+                    alignment=1,
+                    ownership="graph_instance",
+                    lifetime="graph",
+                ),
+            ),
+        )
 
     def contribute_runtime(self, assembly, selection):
         groups, _ = self._groups(assembly.definition)
