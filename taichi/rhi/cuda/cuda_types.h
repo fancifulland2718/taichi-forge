@@ -730,6 +730,41 @@ typedef struct cublasContext *cublasHandle_t;
 
 #endif
 
+// The unversioned cuGraphKernelNodeGetParams and
+// cuGraphExecKernelNodeSetParams exports use CUDA_KERNEL_NODE_PARAMS_v1.
+// Modern cuda.h aliases the source API to newer exports/structures; do not
+// substitute those layouts when resolving the legacy symbols dynamically.
+struct TaichiCudaKernelNodeParamsV1 {
+  void *function;
+  std::uint32_t grid_dim_x;
+  std::uint32_t grid_dim_y;
+  std::uint32_t grid_dim_z;
+  std::uint32_t block_dim_x;
+  std::uint32_t block_dim_y;
+  std::uint32_t block_dim_z;
+  std::uint32_t shared_memory_bytes;
+  void **kernel_params;
+  void **extra;
+};
+
+static_assert(sizeof(TaichiCudaKernelNodeParamsV1) == 56);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, function) == 0);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, grid_dim_x) == 8);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, block_dim_x) == 20);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, shared_memory_bytes) == 32);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, kernel_params) == 40);
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, extra) == 48);
+#if defined(TI_WITH_CUDA_TOOLKIT_HEADERS) && CUDA_VERSION >= 12000
+static_assert(sizeof(TaichiCudaKernelNodeParamsV1) ==
+              sizeof(CUDA_KERNEL_NODE_PARAMS_v1));
+static_assert(alignof(TaichiCudaKernelNodeParamsV1) ==
+              alignof(CUDA_KERNEL_NODE_PARAMS_v1));
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, kernel_params) ==
+              offsetof(CUDA_KERNEL_NODE_PARAMS_v1, kernelParams));
+static_assert(offsetof(TaichiCudaKernelNodeParamsV1, extra) ==
+              offsetof(CUDA_KERNEL_NODE_PARAMS_v1, extra));
+#endif
+
 // Stable ABI shims for CUDA conditional graph nodes. They intentionally use
 // only fixed-width and opaque types so driver-only builds do not require a
 // CUDA toolkit header. CUDA 12.8 defines CUgraphNodeParams as 256 bytes with
