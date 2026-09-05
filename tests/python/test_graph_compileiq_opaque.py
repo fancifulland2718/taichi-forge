@@ -566,7 +566,16 @@ def test_modified_compileiq_exhausts_exact_graph_partitions():
         )
 
     baseline = build()
-    plans = compileiq_recipe_search(baseline)
+    # This fixture exhausts fusion partitions with two workspace lanes. New
+    # default families (such as binding frames) have their own setup contracts.
+    providers = tuple(
+        provider
+        for provider in ti.graph.default_recipe_providers()
+        if provider.descriptor.namespace in {"taichi_forge.graph.runtime_assembly", "taichi_forge.graph.map_fusion"}
+    )
+    plans = ti.graph.CompileIQCompleteGraphRecipeSearch(
+        baseline, catalog=baseline.definition.recipe_catalog(providers=providers)
+    )
     assert len(plans.recipe_ids) == 4
 
     source = ti.ndarray(ti.i32, shape=count)
@@ -643,8 +652,18 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
         return builder.compile()
 
     baseline = build()
+    providers = tuple(
+        provider
+        for provider in ti.graph.default_recipe_providers()
+        if provider.descriptor.namespace in {
+            "taichi_forge.graph.runtime_assembly",
+            "taichi_forge.graph.map_fusion",
+            "taichi_forge.graph.recording_partition",
+        }
+    )
     public_search = baseline.definition.search_recipes(
         engine="compileiq",
+        providers=providers,
         target=ti.graph.GraphOptimizationTarget(
             objectives=(("device_time_ns", "min"),)
         ),
@@ -665,7 +684,7 @@ def test_complete_recipe_materializes_eight_stage_disjoint_fusion_fragments():
         assert physical["logical_dispatch_count"] == 8
         assert physical["physical_dispatch_count"] == 8
 
-    catalog = baseline.definition.recipe_catalog()
+    catalog = baseline.definition.recipe_catalog(providers=providers)
     fragments_by_group = {
         tuple(
             int(value)
