@@ -285,6 +285,69 @@ def test_source_provider_binary_audit_uses_shared_dependency_policy(
     assert not report["execution_qualified"]
 
 
+def test_cub_optional_scan_capability_does_not_break_old_addon_abi():
+    from types import SimpleNamespace
+    from taichi_forge.hardware._cub_source_provider import CubSourcePlan
+
+    old = SimpleNamespace(_library=SimpleNamespace(info=SimpleNamespace(features=0xF)))
+    with pytest.raises(ti.TaichiRuntimeError, match="does not provide"):
+        CubSourcePlan(old, "segmented_inclusive_scan_u32", 32)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("dtype", [ti.i32, ti.u32])
+@pytest.mark.parametrize("inclusive", [True, False])
+def test_cub_segmented_scan_reset_monoid_matches_modular_integer_reference(
+    dtype, inclusive
+):
+    manifest_path = os.environ.get("TI_FORGE_TEST_CUB_SOURCE_PROVIDER_MANIFEST")
+    if not manifest_path:
+        pytest.skip("a user-built CUB addon was not supplied")
+    provider = load_cub_source_provider(manifest_path)
+    if provider._library.info.features & 0x30 != 0x30:
+        pytest.skip("this ABI-compatible addon predates reset-monoid scan")
+    rng = np.random.default_rng(60809)
+    mode = "inclusive" if inclusive else "exclusive"
+    # Word, warp, block and multi-tile boundaries; empty and singleton
+    # segments; and one long segment extending across many scan tiles.
+    layouts = [
+        (1, [0, 0, 1]),
+        (33, [0, 1, 31, 32, 32, 33]),
+        (4097, list(range(4098))),
+        (65537, [0, 0, 1, 32, 129, 129, 65281, 65537]),
+        (1000003, [0, 1000003]),
+    ]
+    for n, offsets in layouts:
+        words = np.zeros((n + 31) // 32, dtype=np.uint32)
+        for begin in offsets[:-1]:
+            if begin < n:
+                words[begin >> 5] |= np.uint32(1 << (begin & 31))
+        data = rng.integers(0, 2**32, size=n, dtype=np.uint32)
+        values, output = ti.ndarray(dtype, n), ti.ndarray(dtype, n)
+        heads = ti.ndarray(ti.u32, len(words))
+        heads.from_numpy(words)
+        values.from_numpy(data.view(np.int32) if dtype == ti.i32 else data)
+        plan = provider.plan(f"segmented_{mode}_scan_u32", n)
+        plan.run(input=values, heads=heads, output=output)
+        ti.sync()
+        expected = np.empty(n, dtype=np.uint32)
+        for begin, end in zip(offsets, offsets[1:]):
+            if begin == end:
+                continue
+            partial = np.cumsum(data[begin:end], dtype=np.uint32)
+            if inclusive:
+                expected[begin:end] = partial
+            else:
+                expected[begin] = 0
+                expected[begin + 1 : end] = partial[:-1]
+        np.testing.assert_array_equal(output.to_numpy().view(np.uint32), expected)
+        # A second input must reset tile state rather than reuse old carry.
+        values.fill(0)
+        plan.run(input=values, heads=heads, output=output)
+        ti.sync()
+        np.testing.assert_array_equal(output.to_numpy(), np.zeros(n, dtype=np.uint32))
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 @pytest.mark.parametrize("n", [257, 65537])
 def test_cub_source_provider_executes_explicit_primitives_and_graph(n, monkeypatch):

@@ -9,6 +9,8 @@
 #include <limits>
 #include <string>
 
+#include "segmented_scan.cuh"
+
 #if defined(_WIN32)
 #define TI_FORGE_CUB_EXPORT __declspec(dllexport)
 #else
@@ -27,14 +29,19 @@ constexpr std::uint32_t kRadixSortPairsU32 = 1;
 constexpr std::uint32_t kRadixSortPairsU64 = 2;
 constexpr std::uint32_t kExclusiveScanU32 = 3;
 constexpr std::uint32_t kSelectFlaggedU32 = 4;
+constexpr std::uint32_t kSegmentedInclusiveScanU32 = 5;
+constexpr std::uint32_t kSegmentedExclusiveScanU32 = 6;
 
 constexpr std::uint64_t kFeatureRadixSortPairsU32 = 1ull << 0;
 constexpr std::uint64_t kFeatureRadixSortPairsU64 = 1ull << 1;
 constexpr std::uint64_t kFeatureExclusiveScanU32 = 1ull << 2;
 constexpr std::uint64_t kFeatureSelectFlaggedU32 = 1ull << 3;
+constexpr std::uint64_t kFeatureSegmentedInclusiveScanU32 = 1ull << 4;
+constexpr std::uint64_t kFeatureSegmentedExclusiveScanU32 = 1ull << 5;
 constexpr std::uint64_t kFeatures =
     kFeatureRadixSortPairsU32 | kFeatureRadixSortPairsU64 |
-    kFeatureExclusiveScanU32 | kFeatureSelectFlaggedU32;
+    kFeatureExclusiveScanU32 | kFeatureSelectFlaggedU32 |
+    kFeatureSegmentedInclusiveScanU32 | kFeatureSegmentedExclusiveScanU32;
 
 thread_local std::string last_error;
 
@@ -82,6 +89,8 @@ std::uint32_t check_invocation(const Invocation *invocation) {
     case kRadixSortPairsU64:
     case kExclusiveScanU32:
     case kSelectFlaggedU32:
+    case kSegmentedInclusiveScanU32:
+    case kSegmentedExclusiveScanU32:
       return kSuccess;
     default:
       return fail(kInvalidArgument, "unsupported CUB operation");
@@ -103,6 +112,22 @@ cudaError_t sort_pairs(const Invocation &invocation,
 
 cudaError_t invoke(const Invocation &invocation, std::size_t &workspace_bytes) {
   switch (invocation.operation) {
+    case kSegmentedInclusiveScanU32:
+      return forge_cub::segmented_scan<false>(
+          invocation.workspace, workspace_bytes,
+          static_cast<const std::uint32_t *>(invocation.input0),
+          static_cast<const std::uint32_t *>(invocation.input1),
+          static_cast<std::uint32_t *>(invocation.output0),
+          static_cast<int>(invocation.num_items),
+          static_cast<cudaStream_t>(invocation.stream));
+    case kSegmentedExclusiveScanU32:
+      return forge_cub::segmented_scan<true>(
+          invocation.workspace, workspace_bytes,
+          static_cast<const std::uint32_t *>(invocation.input0),
+          static_cast<const std::uint32_t *>(invocation.input1),
+          static_cast<std::uint32_t *>(invocation.output0),
+          static_cast<int>(invocation.num_items),
+          static_cast<cudaStream_t>(invocation.stream));
     case kRadixSortPairsU32:
       return sort_pairs<std::uint32_t>(invocation, workspace_bytes);
     case kRadixSortPairsU64:
@@ -137,6 +162,8 @@ bool required_pointers_present(const Invocation &invocation) {
   }
   if ((invocation.operation == kRadixSortPairsU32 ||
        invocation.operation == kRadixSortPairsU64 ||
+       invocation.operation == kSegmentedInclusiveScanU32 ||
+       invocation.operation == kSegmentedExclusiveScanU32 ||
        invocation.operation == kSelectFlaggedU32) &&
       !invocation.input1) {
     return false;

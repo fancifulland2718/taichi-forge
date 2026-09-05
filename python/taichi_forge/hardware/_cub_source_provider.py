@@ -36,7 +36,7 @@ from taichi_forge.hardware._source_provider import load_source_provider_manifest
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang.exception import TaichiRuntimeError
-from taichi_forge.types.primitive_types import u8, u32, u64
+from taichi_forge.types.primitive_types import i32, u8, u32, u64
 
 
 CUB_SOURCE_PROVIDER_ABI = "taichi-forge-cub-source-provider-c-abi1"
@@ -46,6 +46,8 @@ _RADIX_SORT_PAIRS_U32 = 1
 _RADIX_SORT_PAIRS_U64 = 2
 _EXCLUSIVE_SCAN_U32 = 3
 _SELECT_FLAGGED_U32 = 4
+_SEGMENTED_INCLUSIVE_SCAN_U32 = 5
+_SEGMENTED_EXCLUSIVE_SCAN_U32 = 6
 
 _OPERATION_SPECS = {
     "radix_sort_pairs_u32": {
@@ -88,7 +90,19 @@ _OPERATION_SPECS = {
         ),
     },
 }
-_REQUIRED_FEATURES = (1 << len(_OPERATION_SPECS)) - 1
+# ABI 1's original operations remain required. New algorithms are optional
+# capabilities so an older compatible addon can still execute its own plans.
+_REQUIRED_FEATURES = 0xF
+for _mode, _code in (
+    ("inclusive", _SEGMENTED_INCLUSIVE_SCAN_U32),
+    ("exclusive", _SEGMENTED_EXCLUSIVE_SCAN_U32),
+):
+    _OPERATION_SPECS[f"segmented_{_mode}_scan_u32"] = {
+        "code": _code,
+        "bindings": ("input", "heads", "output"),
+        "dtypes": ((i32, u32), u32, (i32, u32)),
+        "access": (GraphAccess.READ, GraphAccess.READ, GraphAccess.WRITE),
+    }
 
 
 class _ProviderInfo(ctypes.Structure):
@@ -274,7 +288,7 @@ def _validate_array(value, name, dtype, shape):
     if not isinstance(value, Ndarray):
         raise TaichiRuntimeError(f"CUB binding {name!r} must be a Taichi ndarray")
     if (
-        value.dtype != dtype
+        value.dtype not in (dtype if isinstance(dtype, tuple) else (dtype,))
         or tuple(value.element_shape) != ()
         or tuple(value.shape) != shape
     ):
@@ -294,6 +308,8 @@ class CubSourcePlan(BackendCommandRecording):
         self.operation = operation
         self.num_items = _dimension(num_items)
         spec = _OPERATION_SPECS[operation]
+        if not provider._library.info.features & (1 << (spec["code"] - 1)):
+            raise TaichiRuntimeError(f"CUB addon does not provide {operation}")
         super().__init__(
             backend="cuda",
             binding_names=spec["bindings"],
@@ -384,6 +400,8 @@ class CubSourcePlan(BackendCommandRecording):
         values = []
         for name, dtype in zip(spec["bindings"], spec["dtypes"]):
             shape = (1,) if name == "count" else (self.num_items,)
+            if name == "heads":
+                shape = (max(1, (self.num_items + 31) // 32),)
             _validate_array(bindings[name], name, dtype, shape)
             values.append(bindings[name])
         outputs = tuple(
@@ -410,6 +428,9 @@ class CubSourcePlan(BackendCommandRecording):
         elif self.operation == "exclusive_scan_u32":
             input0, output0 = pointers
             input1 = output1 = 0
+        elif self.operation.startswith("segmented_"):
+            input0, input1, output0 = pointers
+            output1 = 0
         else:
             input0, input1, output0, output1 = pointers
         return _Invocation(

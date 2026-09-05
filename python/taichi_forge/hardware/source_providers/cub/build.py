@@ -275,7 +275,12 @@ def build_cub_source_provider(
                     "name": "cccl/cub",
                     "version": cub_version,
                     "sha256": _sha256(cub_version_header),
-                }
+                },
+                {
+                    "name": "forge/segmented-scan",
+                    "version": "reset-monoid-v1",
+                    "sha256": _sha256(source.with_name("segmented_scan.cuh")),
+                },
             ],
         },
         "runtime_dependencies": [
@@ -288,6 +293,16 @@ def build_cub_source_provider(
         ],
         "source_identity": {"kind": "sha256", "value": _sha256(source)},
         "specializations": [
+            {
+                "operation": "segmented_scan",
+                "value_dtype": "i32/u32",
+                "head_encoding": "frozen-u32-bitset",
+                "inclusive": mode,
+                "temporary_storage": "caller_owned",
+            }
+            for mode in (False, True)
+        ]
+        + [
             {
                 "operation": "radix_sort_pairs",
                 "key_dtype": "u32",
