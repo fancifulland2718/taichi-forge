@@ -1,7 +1,7 @@
 """One-shot provider contributions for runtime Graph recipe assembly."""
 
 
-def _retire_binding_executor(graph):
+def _retire_runtime_resources(graph):
     graph._invalidate_runtime()
 
 
@@ -23,6 +23,7 @@ class GraphRuntimeRecipeAssembly:
         "_parallel_schedules",
         "_workspace_pair",
         "_binding_executor_factory",
+        "_storage_plans",
     )
 
     def __init__(self, definition):
@@ -35,6 +36,7 @@ class GraphRuntimeRecipeAssembly:
         self._map_source_groups = []
         self._workspace_pair = False
         self._binding_executor_factory = None
+        self._storage_plans = []
 
     @property
     def spec(self):
@@ -163,9 +165,22 @@ class GraphRuntimeRecipeAssembly:
     def binding_executor_factory(self):
         return self._binding_executor_factory
 
+    def select_storage(self, plan):
+        """Select private allocation ownership, never a steady replay callback."""
+        from taichi_forge.graph._recipes.runtime_storage import validate_storage_plans
+
+        validate_storage_plans(self.spec, (*self._storage_plans, plan))
+        self._storage_plans.append(plan)
+
+    @property
+    def storage_plans(self):
+        return tuple(self._storage_plans)
+
     @property
     def executor_release(self):
-        return None if self._binding_executor_factory is None else _retire_binding_executor
+        if self._binding_executor_factory is not None or self._storage_plans:
+            return _retire_runtime_resources
+        return None
 
 
 __all__ = ["GraphRuntimeRecipeAssembly"]

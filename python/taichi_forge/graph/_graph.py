@@ -408,7 +408,8 @@ class GraphOwnedNdarray(InternalNdarrayRequirement):
         )
 
 
-def _materialize_graph_internal_bindings(bindings):
+def _materialize_graph_internal_bindings(bindings, allocators=None):
+    allocators = allocators or {}
     materialized = {}
     storage_by_spec = {}
     owned = []
@@ -417,7 +418,7 @@ def _materialize_graph_internal_bindings(bindings):
             key = id(value)
             storage = storage_by_spec.get(key)
             if storage is None:
-                storage = ScalarNdarray(value.dtype, value.shape)
+                storage = allocators.get(name, ScalarNdarray)(value.dtype, value.shape)
                 storage_by_spec[key] = storage
                 owned.append(storage)
             materialized[name] = storage
@@ -519,14 +520,14 @@ class _GraphTemporaryArena:
             )
         )
 
-    def _new_slot(self):
+    def _new_slot(self, allocator=ScalarNdarray):
         raw_storage = (
             None
             if self._raw_storage_bytes == 0
-            else ScalarNdarray(i32, (self._raw_storage_bytes // self._WORD_BYTES,))
+            else allocator(i32, (self._raw_storage_bytes // self._WORD_BYTES,))
         )
         typed_storage = {
-            slot: ScalarNdarray(f32, (byte_count // self._WORD_BYTES,))
+            slot: allocator(f32, (byte_count // self._WORD_BYTES,))
             for slot, byte_count in self._typed_slot_bytes.items()
         }
         bindings = {
@@ -551,6 +552,13 @@ class _GraphTemporaryArena:
         self._slots.append(slot)
         self._allocations += 1
         return slot
+
+    def prepare_storage(self, allocator):
+        """Materialize the bounded ring at a recipe's cold setup boundary."""
+        if not self._available:
+            raise TaichiRuntimeError("Graph temporary arena cannot materialize this storage plan")
+        while len(self._slots) < self.capacity:
+            self._new_slot(allocator)
 
     def _reclaim(self):
         for slot in self._slots:
@@ -11190,6 +11198,7 @@ class _GraphSpec:
         variant._complete_recipe_id = recipe.recipe_id
         variant._disable_qualified_fusion_selector = True
         variant._binding_executor_factory = assembly.binding_executor_factory
+        variant._storage_plans = assembly.storage_plans
         concurrent_workspace_pair = assembly.workspace_pair
         if variant._binding_executor_factory is not None and (concurrent_workspace_pair or workspace_lanes != 1):
             raise TaichiRuntimeError("This prepared-binding submission recipe requires one workspace lane")
@@ -12438,16 +12447,34 @@ class _GraphExecutable:
 
 class _GraphInstance:
     def __init__(self, spec, key):
+        self._storage_owners = ()
+        self._backend_executable = None
+        try:
+            self._initialize(spec, key)
+        except BaseException as construction_error:
+            try:
+                self.invalidate_runtime()
+            except BaseException as cleanup_error:
+                raise cleanup_error from construction_error
+            raise
+
+    def _initialize(self, spec, key):
         self.spec = spec
         self.key = key
+        storage_plans = getattr(spec, "_storage_plans", ())
+        allocators, arena_allocator = {}, None
+        if storage_plans:
+            from taichi_forge.graph._recipes.runtime_storage import create_storage_owners, validate_storage_plans
+
+            validate_storage_plans(spec, storage_plans)
+            allocators, arena_allocator = create_storage_owners(self, storage_plans)
         (
             self._fixed_runtime_args,
             self._internal_storages,
-        ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args)
+        ) = _materialize_graph_internal_bindings(spec.fixed_runtime_args, allocators)
         self._exclusive_internal_storage = (
             any(
-                isinstance(value, _GraphInternalNdarraySpec)
-                and value.exclusive_submission
+                isinstance(value, _GraphInternalNdarraySpec) and value.exclusive_submission
                 for value in spec.fixed_runtime_args.values()
             )
             or spec.exclusive_provider_submission
@@ -12458,9 +12485,10 @@ class _GraphInstance:
         self._exclusive_internal_reuses = 0
         self._executable = None
         self._native_nodes = None
-        self._backend_executable = None
         self._run_context = None
         self._temporary_arena = _GraphTemporaryArena(spec.temporary_memory_plan)
+        if arena_allocator is not None:
+            self._temporary_arena.prepare_storage(arena_allocator)
         self._temporary_bindings = None
         self._observation_nodes = tuple(
             node
@@ -12669,10 +12697,16 @@ class _GraphInstance:
         return self
 
     def invalidate_runtime(self, preserve_executables=False):
-        if self._backend_executable is not None:
-            invalidate = getattr(self._backend_executable, "invalidate_runtime", None)
-            if invalidate is not None:
-                invalidate(preserve_executables=preserve_executables)
+        try:
+            if self._backend_executable is not None:
+                invalidate = getattr(self._backend_executable, "invalidate_runtime", None)
+                if invalidate is not None:
+                    invalidate(preserve_executables=preserve_executables)
+        finally:
+            if self._storage_owners:
+                from taichi_forge.graph._recipes.runtime_storage import retire_storage_owners
+
+                retire_storage_owners(self)
 
     def prewarm(self):
         if self._backend_executable is not None:
