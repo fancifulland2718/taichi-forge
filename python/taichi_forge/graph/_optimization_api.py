@@ -719,6 +719,15 @@ class GraphOptimizationReportV2:
         lines.extend(
             ["", "Provider notes above are declarations, not measured claims."]
         )
+        if any(item.get("environment_observations") for item in self.recipe_annotations):
+            lines.extend(
+                [
+                    "",
+                    "NVML observations are device-wide trial-boundary snapshots, not recipe/process peak memory "
+                    "or trial-average counters. Per-field unavailability is preserved in JSON; observations are "
+                    "diagnostics, not objectives or reuse requirements.",
+                ]
+            )
         if self.pareto_tradeoffs:
             lines.extend(["", "## Pareto trade-offs", ""])
             for tradeoff in self.pareto_tradeoffs:
@@ -1473,7 +1482,10 @@ class _GraphRecipeSearchSession:
             )
         return tuple(tradeoffs)
 
-    def _recipe_annotations(self, compileiq_report):
+    def _recipe_annotations(self, compileiq_report, compileiq_checkpoint):
+        from taichi_forge.hardware._gpu_environment import _environment_observations
+
+        environment = _environment_observations(compileiq_checkpoint["records"])
         latest_candidates = {}
         for candidate in sorted(
             compileiq_report.candidates,
@@ -1573,6 +1585,7 @@ class _GraphRecipeSearchSession:
                         ),
                         "failure_count": len(candidate.failures),
                     },
+                    "environment_observations": tuple(environment.get(recipe_id, ())),
                     "provider_claims": tuple(provider_claims),
                     "provider_declared_applicability": tuple(
                         declared_applicability
@@ -1706,7 +1719,7 @@ class _GraphRecipeSearchSession:
                 self._pareto_tradeoffs(frontier, selected_result)
             ),
             _recipe_annotations_json=_canonical_json(
-                self._recipe_annotations(compileiq_report)
+                self._recipe_annotations(compileiq_report, compileiq_checkpoint)
             ),
             _reuse_json=_canonical_json(
                 {

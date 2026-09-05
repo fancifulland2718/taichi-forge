@@ -62,6 +62,10 @@ from taichi_forge.hardware._memory import (
     HardwareMemoryComponent,
     HardwareMemoryReport,
 )
+from taichi_forge.hardware._gpu_environment import (
+    capture_trial_environment,
+    gpu_environment,
+)
 from taichi_forge.hardware._telemetry import (
     HARDWARE_TELEMETRY_SCHEMA_VERSION,
     HardwareTelemetryReport,
@@ -107,7 +111,9 @@ __all__ = [
     "UPDATE_POLICIES",
     "WORKSPACE_OWNERSHIP",
     "capability",
+    "capture_trial_environment",
     "execution_report",
+    "gpu_environment",
     "operations",
     "load_provider_admission_evidence",
     "probe",

@@ -647,8 +647,18 @@ class _CompleteGraphRecipeSearchSessionV2:
 
         # Select diagnostic wrappers once at search construction. No Graph,
         # kernel, or steady replay dispatch is wrapped or made to poll a flag.
+        from taichi_forge.hardware._gpu_environment import (
+            _observe_trial,
+            _trial_environment,
+        )
+
         trace = _recipe_trace_enabled.get()
-        evaluate = _trace_trial(self._evaluate) if trace else self._evaluate
+        evaluate = self._evaluate
+        sampler = _trial_environment.get()
+        if sampler is not None:
+            evaluate = _observe_trial(evaluate, sampler)
+        if trace:
+            evaluate = _trace_trial(evaluate)
         self._materialize_recipe = plans._definition.materialize
         if trace:
             self._materialize_recipe = _trace_materializer(self._materialize_recipe)
