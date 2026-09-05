@@ -65,6 +65,7 @@
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/cuda/cuda_compileiq_protocol.h"
+#include "taichi/runtime/cuda/graph_binding_frame.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 #if defined(TI_WITH_VULKAN)
@@ -5381,35 +5382,8 @@ void export_lang(py::module &m) {
     return encoded;
   };
 
-  auto jit_run_graph = [](aot::CompiledGraph *self,
-                          const CompileConfig &compile_config,
-                          const py::dict &pyargs,
-                          aot::CompiledGraphJITCache *cache,
-                          Ndarray *bounded_predicate = nullptr,
-                          int bounded_max_iterations = 0,
-                          bool continue_while_nonzero = true,
-                          Ndarray *conditional_selector = nullptr,
-                          const std::vector<int> *branch_dispatch_counts = nullptr,
-                          int conditional_type = -1,
-                          int default_branch = -1,
-                          Ndarray *vulkan_predicate = nullptr,
-                          Ndarray *vulkan_counter = nullptr,
-                          Ndarray *vulkan_status = nullptr,
-                          std::size_t vulkan_initial_dispatch_count = 0,
-                          bool vulkan_execute_initial_dispatches = true,
-                          std::uint32_t vulkan_strategy = 0,
-                          aot::CompiledGraphStructuredResult
-                              *vulkan_result = nullptr,
-                          bool vulkan_wait_for_result = true,
-                           const std::vector<int>
-                               *vulkan_chunk_iterations = nullptr,
-                           const std::vector<std::uint32_t>
-                               *vulkan_chunk_strategies = nullptr,
-                           const VulkanNestedGraphRequest
-                               *vulkan_nested = nullptr,
-                           bool cuda_masked_control = false,
-                           const CudaNestedGraphRequest *cuda_nested = nullptr,
-                           bool cuda_concurrent_batch_lane = false) -> bool {
+  auto with_graph_arguments = [](const aot::CompiledGraph *self,
+                                 const py::dict &pyargs, auto &&action) {
         std::unordered_map<std::string, aot::IValue> args;
         auto insert_scalar_arg = [&args](std::string arg_name,
                                          DataType expected_dtype,
@@ -5553,88 +5527,134 @@ void export_lang(py::module &m) {
         // serialized by Python. The cache owns the C++ transaction boundary;
         // Python objects passed in pyargs remain alive for this call.
         py::gil_scoped_release release;
-        if (vulkan_nested != nullptr) {
-          TI_ASSERT(cache != nullptr);
-      auto result =
-              self->jit_run_bounded_vulkan_nested_sequence_cached(
-                  compile_config, args, *cache,
-                  vulkan_nested->outer_predicate,
-                  vulkan_nested->outer_counter,
-                  vulkan_nested->outer_status,
-                  vulkan_nested->inner_controls,
-                  vulkan_nested->outer_condition_dispatch_count,
-                  vulkan_nested->outer_max_iterations,
-                  vulkan_nested->wait_for_result);
-      if (vulkan_nested->result != nullptr) {
-        *vulkan_nested->result = std::move(result);
-          return vulkan_nested->result->submitted;
-      }
-      return result.submitted;
-    }
-    if (cuda_nested != nullptr) {
-      TI_ASSERT(cache != nullptr);
-      return self->jit_submit_bounded_cuda_nested_sequence_cached(
-          compile_config, args, *cache, cuda_nested->outer_predicate,
-          cuda_nested->outer_counter, cuda_nested->outer_status,
-          cuda_nested->inner_controls,
-          cuda_nested->outer_condition_dispatch_count,
-          cuda_nested->outer_max_iterations,
-          cuda_nested->allow_device_update);
-        }
-        if (vulkan_chunk_iterations != nullptr) {
-          TI_ASSERT(cache != nullptr);
-          TI_ASSERT(vulkan_chunk_strategies != nullptr);
-          return self->jit_submit_bounded_vulkan_compound_cached(
-              compile_config, args, *cache, vulkan_predicate,
-              vulkan_counter, vulkan_status,
-              vulkan_initial_dispatch_count,
-              *vulkan_chunk_iterations, *vulkan_chunk_strategies);
-        }
-        if (bounded_predicate != nullptr) {
-          TI_ASSERT(cache != nullptr);
-          return cuda_masked_control
-                     ? self->jit_run_bounded_cuda_masked_cached(
-                           compile_config, args, *cache, bounded_predicate,
-                           bounded_max_iterations, continue_while_nonzero)
-                     : self->jit_run_bounded_cuda_cached(
-                           compile_config, args, *cache, bounded_predicate,
-                           bounded_max_iterations, continue_while_nonzero);
-        }
-        if (conditional_selector != nullptr) {
-          TI_ASSERT(cache != nullptr);
-          TI_ASSERT(branch_dispatch_counts != nullptr);
-          return cuda_masked_control
-                     ? self->jit_run_conditional_cuda_masked_cached(
-                           compile_config, args, *cache,
-                           conditional_selector, *branch_dispatch_counts,
-                           conditional_type, default_branch)
-                     : self->jit_run_conditional_cuda_cached(
-                           compile_config, args, *cache,
-                           conditional_selector, *branch_dispatch_counts,
-                           conditional_type, default_branch);
-        }
-        if (vulkan_predicate != nullptr) {
-          TI_ASSERT(cache != nullptr);
-          TI_ASSERT(vulkan_counter != nullptr);
-          auto result = self->jit_run_bounded_vulkan_cached(
-              compile_config, args, *cache, vulkan_predicate,
-              vulkan_counter, vulkan_status,
-              vulkan_initial_dispatch_count, bounded_max_iterations,
-              vulkan_execute_initial_dispatches,
-              vulkan_strategy, vulkan_wait_for_result);
-          if (vulkan_result != nullptr) {
-            *vulkan_result = result;
-          }
-          return result.submitted;
-        }
-        if (cache) {
-          self->jit_run_cached(compile_config, args, *cache,
-                               cuda_concurrent_batch_lane);
-        } else {
-          self->jit_run(compile_config, args);
-        }
-        return true;
+        return action(args);
       };
+
+  auto jit_run_graph =
+      [with_graph_arguments](
+          aot::CompiledGraph *self, const CompileConfig &compile_config,
+          const py::dict &pyargs, aot::CompiledGraphJITCache *cache,
+          Ndarray *bounded_predicate = nullptr, int bounded_max_iterations = 0,
+          bool continue_while_nonzero = true,
+          Ndarray *conditional_selector = nullptr,
+          const std::vector<int> *branch_dispatch_counts = nullptr,
+          int conditional_type = -1, int default_branch = -1,
+          Ndarray *vulkan_predicate = nullptr,
+          Ndarray *vulkan_counter = nullptr, Ndarray *vulkan_status = nullptr,
+          std::size_t vulkan_initial_dispatch_count = 0,
+          bool vulkan_execute_initial_dispatches = true,
+          std::uint32_t vulkan_strategy = 0,
+          aot::CompiledGraphStructuredResult *vulkan_result = nullptr,
+          bool vulkan_wait_for_result = true,
+          const std::vector<int> *vulkan_chunk_iterations = nullptr,
+          const std::vector<std::uint32_t> *vulkan_chunk_strategies = nullptr,
+          const VulkanNestedGraphRequest *vulkan_nested = nullptr,
+          bool cuda_masked_control = false,
+          const CudaNestedGraphRequest *cuda_nested = nullptr,
+          bool cuda_concurrent_batch_lane = false) -> bool {
+    return with_graph_arguments(self, pyargs, [&](const auto &args) -> bool {
+      if (vulkan_nested != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        auto result = self->jit_run_bounded_vulkan_nested_sequence_cached(
+            compile_config, args, *cache, vulkan_nested->outer_predicate,
+            vulkan_nested->outer_counter, vulkan_nested->outer_status,
+            vulkan_nested->inner_controls,
+            vulkan_nested->outer_condition_dispatch_count,
+            vulkan_nested->outer_max_iterations,
+            vulkan_nested->wait_for_result);
+        if (vulkan_nested->result != nullptr) {
+          *vulkan_nested->result = std::move(result);
+          return vulkan_nested->result->submitted;
+        }
+        return result.submitted;
+      }
+      if (cuda_nested != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        return self->jit_submit_bounded_cuda_nested_sequence_cached(
+            compile_config, args, *cache, cuda_nested->outer_predicate,
+            cuda_nested->outer_counter, cuda_nested->outer_status,
+            cuda_nested->inner_controls,
+            cuda_nested->outer_condition_dispatch_count,
+            cuda_nested->outer_max_iterations,
+            cuda_nested->allow_device_update);
+      }
+      if (vulkan_chunk_iterations != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        TI_ASSERT(vulkan_chunk_strategies != nullptr);
+        return self->jit_submit_bounded_vulkan_compound_cached(
+            compile_config, args, *cache, vulkan_predicate, vulkan_counter,
+            vulkan_status, vulkan_initial_dispatch_count,
+            *vulkan_chunk_iterations, *vulkan_chunk_strategies);
+      }
+      if (bounded_predicate != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        return cuda_masked_control
+                   ? self->jit_run_bounded_cuda_masked_cached(
+                         compile_config, args, *cache, bounded_predicate,
+                         bounded_max_iterations, continue_while_nonzero)
+                   : self->jit_run_bounded_cuda_cached(
+                         compile_config, args, *cache, bounded_predicate,
+                         bounded_max_iterations, continue_while_nonzero);
+      }
+      if (conditional_selector != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        TI_ASSERT(branch_dispatch_counts != nullptr);
+        return cuda_masked_control
+                   ? self->jit_run_conditional_cuda_masked_cached(
+                         compile_config, args, *cache, conditional_selector,
+                         *branch_dispatch_counts, conditional_type,
+                         default_branch)
+                   : self->jit_run_conditional_cuda_cached(
+                         compile_config, args, *cache, conditional_selector,
+                         *branch_dispatch_counts, conditional_type,
+                         default_branch);
+      }
+      if (vulkan_predicate != nullptr) {
+        TI_ASSERT(cache != nullptr);
+        TI_ASSERT(vulkan_counter != nullptr);
+        auto result = self->jit_run_bounded_vulkan_cached(
+            compile_config, args, *cache, vulkan_predicate, vulkan_counter,
+            vulkan_status, vulkan_initial_dispatch_count,
+            bounded_max_iterations, vulkan_execute_initial_dispatches,
+            vulkan_strategy, vulkan_wait_for_result);
+        if (vulkan_result != nullptr) {
+          *vulkan_result = result;
+        }
+        return result.submitted;
+      }
+      if (cache) {
+        self->jit_run_cached(compile_config, args, *cache,
+                             cuda_concurrent_batch_lane);
+      } else {
+        self->jit_run(compile_config, args);
+      }
+      return true;
+    });
+  };
+
+#if defined(TI_WITH_CUDA)
+  py::class_<cuda::GraphBindingFrame, std::shared_ptr<cuda::GraphBindingFrame>>(
+      m, "_CudaGraphBindingFrame");
+  py::class_<cuda::GraphBindingExecutor>(m, "_CudaGraphBindingExecutor")
+      .def_static("available", &cuda::GraphBindingExecutor::available)
+      .def(py::init<const aot::CompiledGraph &, const CompileConfig &,
+                    Program &>(),
+           py::keep_alive<1, 2>(), py::keep_alive<1, 4>())
+      .def("prepare",
+           [with_graph_arguments](cuda::GraphBindingExecutor &self,
+                                  const py::dict &args) {
+             return with_graph_arguments(&self.graph(), args,
+                                         [&](const auto &converted) {
+                                           return self.prepare(converted);
+                                         });
+           })
+      .def("run", &cuda::GraphBindingExecutor::run,
+           py::call_guard<py::gil_scoped_release>())
+      .def("close", &cuda::GraphBindingExecutor::close,
+           py::call_guard<py::gil_scoped_release>())
+      .def("snapshot", &cuda::GraphBindingExecutor::snapshot,
+           py::call_guard<py::gil_scoped_release>());
+#endif
 
   py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
       .def(py::init<>())

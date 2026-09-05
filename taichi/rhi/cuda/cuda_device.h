@@ -82,6 +82,16 @@ class CudaDevice : public LlvmDevice {
  public:
   class AllocationLease;
 
+  // Cold lifecycle hook: invalidate published Graph frames before releasing
+  // allocation registries. Weak registration never retains unused executors.
+  class RetainedGraphResource {
+   public:
+    virtual ~RetainedGraphResource() = default;
+    virtual void retire_graph_resource() noexcept = 0;
+  };
+  void register_graph_resource(
+      const std::shared_ptr<RetainedGraphResource> &resource);
+
   struct AllocInfo {
     void *ptr{nullptr};
     size_t size{0};
@@ -238,6 +248,7 @@ class CudaDevice : public LlvmDevice {
   };
 
   AllocationRegistry<AllocationRecord> allocations_;
+  std::vector<std::weak_ptr<RetainedGraphResource>> graph_resources_;
   // Serializes transitions between mapped and retiring allocations. The lock
   // is held only while map/unmap copies or allocation metadata changes; it is
   // not held while callers use the returned host pointer.

@@ -1,6 +1,7 @@
 #include "taichi/rhi/cuda/cuda_device.h"
 #include "taichi/rhi/llvm/device_memory_pool.h"
 
+#include <algorithm>
 #include <memory>
 
 #include "taichi/jit/jit_module.h"
@@ -368,8 +369,25 @@ void CudaDevice::unmap(DeviceAllocation alloc) {
   --mapped_allocation_count_;
 }
 
+void CudaDevice::register_graph_resource(
+    const std::shared_ptr<RetainedGraphResource> &resource) {
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  graph_resources_.erase(
+      std::remove_if(graph_resources_.begin(), graph_resources_.end(),
+                     [](const auto &entry) { return entry.expired(); }),
+      graph_resources_.end());
+  graph_resources_.push_back(resource);
+}
+
 void CudaDevice::clear() {
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
   auto context_guard = CUDAContext::get_instance().get_guard();
+  for (const auto &entry : graph_resources_) {
+    if (auto resource = entry.lock()) {
+      resource->retire_graph_resource();
+    }
+  }
+  graph_resources_.clear();
   std::lock_guard<std::mutex> lifecycle_lock(mapping_lifecycle_mutex_);
   if (mapped_allocation_count_ != 0) {
     TI_WARN("cannot clear CUDA allocations while {} allocation(s) are mapped",

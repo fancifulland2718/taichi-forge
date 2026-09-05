@@ -5,6 +5,7 @@ target_sources(cuda_runtime
   PRIVATE
     cuda_artifact_provider.cpp
     cuda_compileiq_protocol.cpp
+    graph_binding_frame.cpp
     jit_cuda.cpp
     kernel_launcher.cpp
   )
