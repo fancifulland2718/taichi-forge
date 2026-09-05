@@ -8941,15 +8941,25 @@ def _ir_contains_flag(node, flag):
 
 def _pipeline_task_manifests(node):
     if not isinstance(node, _CompiledCGraphNode):
-        return ()
+        return (), ()
     from taichi_forge.lang.task_manifest import GraphTaskManifest
 
-    raw = impl.get_runtime().prog._graph_task_manifest(node.compiled_graph)
-    return tuple(GraphTaskManifest._from_core(item) for item in raw)
+    program = impl.get_runtime().prog
+    raw = (
+        program._graph_task_manifest(node.compiled_graph, include_external_commands=True)
+        if node.source_native_count
+        else program._graph_task_manifest(node.compiled_graph)
+    )
+    return (
+        tuple(GraphTaskManifest._from_core(item) for item in raw if "external_command" not in item),
+        tuple(dict(item) for item in raw if "external_command" in item),
+    )
 
 
-def _pipeline_mapping_status(node):
+def _pipeline_mapping_status(node, external_commands=()):
     if isinstance(node, _CompiledCGraphNode):
+        if external_commands:
+            return "partial_external_commands", "partial_external_commands"
         return "available", "available"
     if _is_structured_control_node(node):
         return "structured_runtime_dependent", "structured_runtime_dependent"
@@ -9124,8 +9134,8 @@ def _graph_pipeline_definition(nodes):
         )
         name = str(getattr(node, "name", getattr(ir_node, "name", f"stage_{index}")))
         dispatch_count = int(getattr(node, "dispatch_count", 0))
-        tasks = _pipeline_task_manifests(node)
-        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(node)
+        tasks, external_commands = _pipeline_task_manifests(node)
+        task_mapping_status, bounded_mapping_status = _pipeline_mapping_status(node, external_commands)
         bounded_dispatches = _pipeline_bounded_dispatches_with_publications(
             node, tasks, dispatch_count, publication_epochs
         )
@@ -9154,6 +9164,7 @@ def _graph_pipeline_definition(nodes):
                 "task_mapping_status": task_mapping_status,
                 "bounded_mapping_status": bounded_mapping_status,
                 "tasks": tasks,
+                "external_commands": external_commands,
                 "bounded_dispatches": bounded_dispatches,
                 "synchronization": _ir_contains_flag(ir_node, "synchronization"),
                 "opaque": _ir_contains_flag(ir_node, "opaque"),
@@ -10487,6 +10498,14 @@ def _replay_recipe_cgraph_node(
             continue
         if kind == "sequential":
             builder.append(operation[1].thaw())
+            continue
+        if kind == "native":
+            _, executable, admission = operation
+            rewriter = assembly.operation_rewriter(executable)
+            if rewriter is None:
+                builder._append_native_executable(executable, admission=admission)
+            else:
+                rewriter(builder, operation)
             continue
         if kind == "bounded":
             source = operation[1]
@@ -16814,6 +16833,10 @@ class GraphBuilder:
         executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
+        return self._append_native_executable(executable, admission=admission)
+
+    def _append_native_executable(self, executable, *, admission):
+        """Record a frozen native executable during build, never during replay."""
         structured = executable.recordable_sequence
         if structured is not None:
             sequence = Sequential()
@@ -16850,6 +16873,10 @@ class GraphBuilder:
                     compiled.native_action_manifests
                 )
                 self._pending_ir_nodes.append(compiled.ir_node)
+                if self._capture_recipe_sources:
+                    self._runtime_graph_recipe_operations.append(
+                        ("native", executable, admission)
+                    )
                 # Provider pointers are JIT-only and must never leak into the
                 # backend-neutral serialized Graph schema.
                 self._aot_graph_plan.mark_internal_fixed_bindings()

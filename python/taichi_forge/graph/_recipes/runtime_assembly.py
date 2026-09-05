@@ -89,7 +89,7 @@ class GraphRuntimeRecipeAssembly:
             return any(
                 self.dispatch_rewriter(source) is not None for source in operation[4:7]
             )
-        if kind in ("bounded", "graph_reduction"):
+        if kind in ("bounded", "graph_reduction", "native"):
             return self.operation_rewriter(operation[1]) is not None
         return False
 

@@ -1044,6 +1044,28 @@ def observe_graph_physical_manifest(definition, recipe, graph):
     for stage, regions in zip(pipeline, stage_regions):
         stage_tasks = tuple(stage["tasks"])
         native_actions = tuple(stage["native_actions"])
+        external_commands = tuple(stage.get("external_commands", ()))
+        if external_commands and len(external_commands) != len(native_actions):
+            raise GraphPhysicalManifestError("external command positions do not cover the retained native actions")
+        if external_commands:
+            # Command order is observed, but vendor-internal kernel topology is
+            # not. A retained library call is not one measured CUDA kernel.
+            task_topology_exact = False
+        next_external = 0
+
+        def append_native_action(action, external=None):
+            payload = action.to_dict()
+            if external is not None:
+                payload = {**payload, **external}
+            physical_plan_id = action.physical_plan_id or ("native-action:" + _digest(payload))
+            append_task(
+                "native_action",
+                regions,
+                queue=action.queue,
+                pipeline_identity=_combined_pipeline_identity(physical_plan_id, stage_plan_identity),
+                properties=payload,
+            )
+
         stage_plan_identity = _stage_plan_identity(stage)
         parallel_groups = tuple(stage.get("parallel_dispatch_groups", ()))
         branch_by_dispatch = {
@@ -1060,6 +1082,12 @@ def observe_graph_physical_manifest(definition, recipe, graph):
         last_task_by_dispatch = {}
         if stage_tasks:
             for raw in stage_tasks:
+                while (
+                    next_external < len(external_commands)
+                    and external_commands[next_external]["dispatch_index"] < raw.dispatch_index
+                ):
+                    append_native_action(native_actions[next_external], external_commands[next_external])
+                    next_external += 1
                 raw_payload = asdict(raw)
                 kernel = GraphPhysicalKernelManifest.create(
                     len(kernels),
@@ -1136,20 +1164,9 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                     command_depends_on=task_dependencies,
                 )
                 last_task_by_dispatch[dispatch_index] = task_index
-        for action in native_actions:
-            payload = action.to_dict()
-            physical_plan_id = action.physical_plan_id or (
-                "native-action:" + _digest(payload)
-            )
-            append_task(
-                "native_action",
-                regions,
-                queue=action.queue,
-                pipeline_identity=_combined_pipeline_identity(
-                    physical_plan_id,
-                    stage_plan_identity,
-                ),
-                properties=payload,
+        for index in range(next_external, len(native_actions)):
+            append_native_action(
+                native_actions[index], external_commands[index] if external_commands else None
             )
         if not stage_tasks and not native_actions and regions:
             append_task(

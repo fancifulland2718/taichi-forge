@@ -265,7 +265,7 @@ def _native_source_coverage(definition, source):
 
 def _recipe_operation_dispatch_count(operation):
     kind = operation[0]
-    if kind == "dispatch":
+    if kind in ("dispatch", "native"):
         return 1
     if kind == "sequential":
         return operation[1]._dispatch_count

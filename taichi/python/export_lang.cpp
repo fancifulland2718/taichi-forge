@@ -1468,7 +1468,8 @@ void export_lang(py::module &m) {
              return result;
            })
       .def("_graph_task_manifest",
-           [](Program &program, const aot::CompiledGraph &graph) {
+           [](Program &program, const aot::CompiledGraph &graph,
+              bool include_external_commands) {
              auto tree_guard =
                  program.acquire_snode_tree_lifecycle_read_guard();
              py::list result;
@@ -1476,6 +1477,15 @@ void export_lang(py::module &m) {
                   dispatch_index < graph.dispatches.size();
                   ++dispatch_index) {
                const auto &dispatch = graph.dispatches[dispatch_index];
+               if (include_external_commands && dispatch.cuda_capture_command) {
+                 // A vendor command has no Forge offload IR. Preserve its
+                 // actual position without inventing a kernel/task geometry.
+                 py::dict item;
+                 item["external_command"] = dispatch.cuda_capture_command->kind();
+                 item["dispatch_index"] = dispatch_index;
+                 result.append(std::move(item));
+                 continue;
+               }
                TI_ERROR_IF(
                    dispatch.ti_kernel == nullptr,
                    "Task manifests are unavailable for AOT-only Graph "
@@ -1507,7 +1517,8 @@ void export_lang(py::module &m) {
                }
              }
              return result;
-           })
+           },
+           py::arg("graph"), py::arg("include_external_commands") = false)
       .def("_graph_gpu_semantics_snapshot",
            [](Program &program, const aot::CompiledGraph &graph) {
              const auto backend = program.compile_config().arch;
