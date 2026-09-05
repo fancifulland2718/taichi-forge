@@ -287,6 +287,7 @@ def test_resource_recipe_fork_search_and_fresh_definition_resolve(monkeypatch):
         assert all(value >= 0 for value in trial["host_wall_seconds"].values())
     assert "After materialization bytes" in decision.report.to_markdown()
     assert "Peak bytes" not in decision.report.to_markdown()
+    assert '"storage_allocator": "cuda_generation_pool"' in decision.report.to_markdown()
     fresh = _definition(groups=1)
     selection = fresh.resolve_recipe(decision.selection_artifact, providers=providers)
     with fresh.materialize(selection) as materialized:

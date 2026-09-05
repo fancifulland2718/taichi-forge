@@ -1,6 +1,7 @@
 """Lifecycle arithmetic and observational metrics must not change selection."""
 
 from types import SimpleNamespace
+import json
 
 import pytest
 
@@ -156,3 +157,38 @@ def test_overlap_and_single_samples_are_reported_not_converted_to_an_adoption_ga
     evidence = _cost_evidence(_candidate(), _candidate("baseline"), {"wall": _PROFILE}, observations)
     markdown = "\n".join(_cost_markdown(({"recipe_id": "candidate", "cost_profiles": evidence},)))
     assert "16 (median model estimate); observed ranges overlap; single-sample phase" in markdown
+
+
+def test_human_context_keeps_unknown_provider_fields_and_groups_equal_physical_tasks():
+    from taichi_forge.graph._report_context import _context_markdown
+
+    context = {
+        "workload": None,
+        "evaluation": None,
+        "backend": None,
+        "forge_compile_provenance": {},
+        "semantic_provider_sources": [{"semantics": {"accumulation": "modular_i32"}}],
+    }
+    annotations = [
+        {
+            "recipe_id": "recipe",
+            "frozen_fragments": [
+                {
+                    "fragment_key": "external",
+                    "provider_namespace": "application.provider",
+                    "provider_metadata": {"application_layout": "packed"},
+                    "physical_tasks": [
+                        {"task_id": "first", "physical": {"unknown_provider_field": "retained"}},
+                        {"task_id": "second", "physical": {"unknown_provider_field": "retained"}},
+                    ],
+                }
+            ],
+        }
+    ]
+    before = json.dumps(annotations, sort_keys=True)
+    markdown = "\n".join(_context_markdown(context, annotations))
+    assert '"application_layout": "packed"' in markdown
+    assert markdown.count('"unknown_provider_field": "retained"') == 1
+    assert '"task_count": 2' in markdown
+    assert '"accumulation": "modular_i32"' in markdown
+    assert json.dumps(annotations, sort_keys=True) == before

@@ -50,20 +50,31 @@ def _context_markdown(context, annotations):
     for key in ("workload", "evaluation", "backend", "forge_compile_provenance"):
         lines.extend(_json_section(key, context[key]))
     lines.extend(["", "## Frozen recipe configuration and numerical contracts", ""])
+    if context.get("semantic_provider_sources"):
+        lines.extend(_json_section("Frozen semantic source contracts", context["semantic_provider_sources"]))
     for annotation in annotations:
-        # This projection uses the actual frozen fragment rather than an
-        # evolving provider description. Full physical tasks remain in JSON.
+        # Physical field names are provider-owned. Do not restrict human
+        # explanations to the schema of a few existing library providers.
         contracts = []
         for fragment in annotation.get("frozen_fragments", ()):
+            plans = {}
             for task in fragment["physical_tasks"]:
                 physical = task["physical"]
-                relevant = {
-                    key: physical[key] for key in ("semantic_contract", "config", "component") if key in physical
+                identity = json.dumps(physical, sort_keys=True, separators=(",", ":"))
+                plan = plans.setdefault(identity, {"physical": physical, "task_count": 0})
+                plan["task_count"] += 1
+            contracts.append(
+                {
+                    "fragment_key": fragment["fragment_key"],
+                    "provider_namespace": fragment["provider_namespace"],
+                    "provider_metadata": fragment["provider_metadata"],
+                    "physical_plans": list(plans.values()),
                 }
-                if relevant:
-                    contracts.append({"fragment_key": fragment["fragment_key"], **relevant})
+            )
         if contracts:
+            lines.extend(["", "<details>", f"<summary>Frozen plans: {annotation['recipe_id']}</summary>", ""])
             lines.extend(_json_section(annotation["recipe_id"], contracts))
+            lines.extend(["", "</details>"])
     lines.extend(
         [
             "",
