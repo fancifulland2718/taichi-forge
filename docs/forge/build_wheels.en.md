@@ -1,7 +1,8 @@
 # Building Forge Wheels
 
-> Current release/build contract: `0.6.2`. The split runtime/shim model first shipped
-> in `0.4.23`; see [release notes](release_notes.en.md).
+> Current source build contract: `0.6.3`. This is not a claim that every build
+> profile or hardware combination is release-qualified. The split runtime/shim
+> model first shipped in `0.4.23`; see [release notes](release_notes.en.md).
 
 This document mirrors the public wheel build path used by
 `.github/workflows/publish_runtime_pypi.yml` and
@@ -50,7 +51,7 @@ process-wide lookup domain while preserving the C++ identity shared by the shim
 and its direct dependency.
 
 Runtime and shim source commits need not be identical. A shim is built by
-linking against the already-published runtime wheel of the same package version;
+linking against an already-built or published runtime wheel of the same package version;
 that link plus the private-ABI manifest is the compatibility gate. Validators
 therefore compare package version, ABI revision, canonical export closure, and
 the final binary audit rather than requiring equal Git identities.
@@ -71,8 +72,10 @@ python -I -m build --wheel --no-isolation
 
 Important details:
 
-- Install `build`, `scikit-build-core>=0.10`, `cmake<4`, `pybind11>=2.13`, and
-  `numpy` before building.
+- Install `packaging/constraints/release-build.txt` before building. Release
+  runtime and shim jobs use the same pinned pybind11 generation and the
+  file's Python-specific NumPy constraints; do not substitute old pybind11 2.x
+  instructions. Project metadata separately declares supported version ranges.
 - `cmake<4` is required because some vendored CMake projects still declare old
   policy versions rejected by CMake 4.
 - Use `CMAKE_ARGS`, not `TAICHI_CMAKE_ARGS`. The publish workflow uses
@@ -141,9 +144,13 @@ major version matches this value after installation.
 ## CUDA dependency classes
 
 Current source builds the standard CUDA runtime and native primitive providers
-against Forge's dynamically loaded Driver API. Building or installing the
-standard runtime wheel does not require a CUDA Toolkit, CUB, CUDART, CUPTI, or a
-CUDA-versioned Python package. A release still publishes exactly one
+against Forge's dynamically loaded Driver API. Installing and using that core
+does not require a user-side CUDA Toolkit, CUB, CUDART, CUPTI, or CUDA-versioned
+Python package. Building the complete runtime wheel is different: its existing
+bundled OptiX adapters compile PTX with CUDA Toolkit 12.5.1, and its cuDSS adapter
+uses the build-only headers from `packaging/constraints/cudss-build.txt`.
+Neither the Toolkit nor those vendor runtimes become wheel payloads. A release
+still publishes exactly one
 `taichi-forge-runtime` wheel for Windows and one for Linux; the distribution
 name, dependency, extras, and wheel tag never carry a `cu11`, `cu12`, or
 `cu13` suffix.
@@ -182,6 +189,30 @@ explicit `cuda_cub*` methods are deprecated. CUPTI/NVPerf is likewise an
 independent developer/profiler capability, not a primitive or release
 dependency.
 
+### Build profiles and optional addons
+
+`portable-runtime` describes the standard runtime's user-side dependency
+boundary; `driver-only` remains the binary validator's CUDA dependency-class
+argument. It does not mean that every build input is driver-only.
+
+`cuda-toolkit-addon` is a separately built provider binary, not another copy of
+the native runtime or a CPython-specific provider. The CUB source-provider
+builder produces a component manifest describing compiler/Toolkit/CCCL,
+linkage, target code and declared driver requirements. Manifest schema 3 and
+the source-provider C ABI describe compatibility; a matching repository HEAD
+is not required. Actual component changes still affect physical identity and
+reuse applicability. Static linkage is not proof of Toolkit independence.
+
+The reset-monoid segmented-scan addon can contribute complete Graph recipes;
+this is distinct from the deprecated `cuda_cub*` reference methods. Its explicit
+execution/search boundary is documented in
+[Optional external hardware providers](external_hardware_providers.en.md).
+Build it with `python -m taichi_forge.hardware.source_providers.cub.build --help`
+for the current compiler/target options. Do not copy its CUDART, compiler,
+vendor libraries or profiler runtime into the portable wheel. A full
+`cuda-toolkit-specialized-runtime` variant is not required or published merely
+to use this addon.
+
 After installing both distributions, `scripts/validate_installed_runtime.py`
 requires equal shim/runtime versions. Install validation resolves the shim
 wheel's declared Python dependencies, uses the local runtime wheel, runs
@@ -206,6 +237,9 @@ The publish workflow expects prebuilt LLVM 20 archives:
 
 - Windows: `LLVM20_WIN_URL`
 - Linux: `LLVM20_LINUX_URL` or `LLVM20_LINUX_MANYLINUX_URL`
+
+CI also requires `LLVM20_WIN_SHA256` and `LLVM20_LINUX_SHA256` for the selected
+archives. These are artifact integrity checks, not runtime/shim HEAD locks.
 
 These are produced by:
 
@@ -245,13 +279,12 @@ Install the Vulkan SDK used by the workflow:
 
 ```bash
 VULKAN_SDK_VERSION=1.4.304.1
-sdk_root="$HOME/vulkan-sdk"
-sdk_archive="/tmp/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz"
+sdk_root=$(mktemp -d "${TMPDIR:-/tmp}/forge-vulkan-sdk.XXXXXX")
+sdk_archive="$sdk_root/sdk.tar.xz"
 curl -fsSL \
   "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/linux/vulkansdk-linux-x86_64-${VULKAN_SDK_VERSION}.tar.xz" \
   -o "$sdk_archive"
-rm -rf "$sdk_root"
-mkdir -p "$sdk_root"
+echo "92d698f12a968b024e2b593037830262785b2b734553683457719d4da7c5b0d6  $sdk_archive" | sha256sum -c -
 tar -xJf "$sdk_archive" -C "$sdk_root" --strip-components=1
 
 export VULKAN_SDK="$sdk_root/x86_64"
@@ -264,29 +297,36 @@ export PATH="$VULKAN_SDK/bin:$PATH"
 Install Python build packages:
 
 ```bash
-python -m pip install --upgrade pip build
-python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" ninja numpy
+python -m pip install --requirement packaging/constraints/release-build.txt
+python -m pip install --require-hashes --no-deps --requirement packaging/constraints/cudss-build.txt
 
 export BASE_CMAKE_ARGS="-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CUDA:BOOL=ON -DTI_WITH_LLVM:BOOL=ON -DTI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON -DTI_WITH_C_API:BOOL=OFF -DTI_BUILD_TESTS:BOOL=OFF"
 python scripts/sync_runtime_dependency.py
 ```
 
-Build the platform runtime wheel once:
+Install CUDA Toolkit 12.5.1 for the existing bundled PTX build and make `nvcc`
+discoverable, as in the runtime workflow. This is a build-machine requirement,
+not an end-user Toolkit dependency. Build the platform runtime wheel once:
 
 ```bash
 CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
-Build the CPython shim wheel for the active Python interpreter:
+Repair and validate this runtime using the workflow's `repair_runtime_wheel.py`
+and strict binary checks before using it as a shim input. Set `RUNTIME_WHEEL`
+to the absolute path of that single validated wheel. Extract into a fresh
+directory and build the CPython shim for the active interpreter:
 
 ```bash
-CMAKE_ARGS="$BASE_CMAKE_ARGS" \
+python -m zipfile -e "$RUNTIME_WHEEL" runtime-unpacked
+runtime_link="$PWD/runtime-unpacked/taichi_forge_runtime/_lib/runtime_native"
+CMAKE_ARGS="$BASE_CMAKE_ARGS \"-DTI_PREBUILT_PYTHON_RUNTIME_DIR=$runtime_link\"" \
 python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
-The workflow then runs `auditwheel repair` on both wheel families. Use
-`auditwheel>=6.7,<7`: the shim repair deliberately excludes the separately
+The workflow runs `auditwheel repair` on both wheel families using the release
+constraints (currently 6.8.1): the shim repair deliberately excludes the separately
 distributed `libtaichi_runtime.so`, while post-repair validation requires the
 `DT_NEEDED` edge and relative `RUNPATH` and rejects any duplicated runtime
 payload. It also requires the runtime wheel's primary ELF to remain at the
@@ -301,7 +341,6 @@ table with the manifest after repair; byte-string marker checks alone are not a
 release qualification.
 
 ```bash
-python -m pip install "auditwheel>=6.7,<7" patchelf
 mkdir -p wheelhouse
 auditwheel repair dist/*.whl -w wheelhouse/ \
   --plat manylinux_2_35_x86_64 \
@@ -321,13 +360,16 @@ Required tools:
 - MSVC x64 developer environment.
 - Ninja.
 - Vulkan SDK `1.4.304.1`.
+- CUDA Toolkit `12.5.1` and a compatible PTX host compiler for the bundled
+  OptiX artifacts. The workflow explicitly selects installed MSVC v142 for
+  this PTX command; native runtime/shim compilation keeps its own MSVC toolset.
 - Prebuilt LLVM 20 archive from `LLVM20_WIN_URL`, or a local LLVM 20 build.
 
 Install Python build packages:
 
 ```powershell
-python -m pip install --upgrade pip build
-python -m pip install --upgrade "scikit-build-core>=0.10" "cmake<4" "pybind11>=2.13" numpy
+python -m pip install --requirement packaging/constraints/release-build.txt
+python -m pip install --require-hashes --no-deps --requirement packaging/constraints/cudss-build.txt
 ```
 
 Set paths:
@@ -340,17 +382,24 @@ $baseCmakeArgs = "-DTI_WITH_VULKAN:BOOL=ON -DTI_WITH_OPENGL:BOOL=ON -DTI_WITH_CU
 python scripts\sync_runtime_dependency.py
 ```
 
-Build the platform runtime wheel once:
+Set `$ptxHost` to the absolute path of the compatible `cl.exe` selected for
+CUDA 12.5 PTX preprocessing (not an unsupported newer compiler). Build the
+platform runtime wheel once:
 
 ```powershell
 $env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
+$env:CMAKE_ARGS += " `"-DCMAKE_CUDA_HOST_COMPILER:FILEPATH=$ptxHost`""
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
-Build the CPython shim wheel for the active Python interpreter:
+Repair and validate the runtime using the workflow's existing helpers. Set
+`$runtimeWheel` to that validated wheel's absolute path, extract into a fresh
+directory, and build the CPython shim against its DLL/import library:
 
 ```powershell
-$env:CMAKE_ARGS = $baseCmakeArgs
+python -m zipfile -e $runtimeWheel runtime-unpacked
+$runtimeLink = (Resolve-Path runtime-unpacked/taichi_forge_runtime/_lib/runtime_native).Path.Replace('\', '/')
+$env:CMAKE_ARGS = "$baseCmakeArgs `"-DTI_PREBUILT_PYTHON_RUNTIME_DIR=$runtimeLink`""
 python -I -m build --wheel --no-isolation -Cinstall.components=python
 ```
 
