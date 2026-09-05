@@ -8,6 +8,9 @@ from taichi_forge.graph._graph import _graph_definition_semantic_root
 from taichi_forge.graph._ir import (
     BoundedDomain,
     DispatchNode,
+    GraphAccess,
+    NativeCallNode,
+    ResourceEffect,
     RuntimeBinding,
     SequentialRegion,
     WhileRegion,
@@ -15,6 +18,43 @@ from taichi_forge.graph._ir import (
 from taichi_forge.graph._recipes import GraphDefinition
 
 from tests import test_utils
+
+
+def test_graph_definition_serializes_static_storage_without_losing_alias_topology():
+    def definition(*, shared=False, size=32):
+        first = SimpleNamespace(shape=(size,), dtype="u8", element_shape=())
+        second = (
+            first
+            if shared
+            else SimpleNamespace(shape=(size,), dtype="u8", element_shape=())
+        )
+        nodes = tuple(
+            NativeCallNode(
+                name="workspace",
+                effects=(
+                    ResourceEffect(
+                        resource, GraphAccess.READ_WRITE, runtime_bound=False
+                    ),
+                ),
+            )
+            for resource in (first, second)
+        )
+        root = SequentialRegion(children=nodes)
+        frozen = GraphDefinition._from_graph_spec(_static_spec(root), "cuda")
+        # Serialization is a view: execution still owns the real resources.
+        assert root.children[0].effects[0].resource is first
+        assert root.children[1].effects[0].resource is second
+        return frozen
+
+    distinct = definition()
+    repeated = definition()
+    shared = definition(shared=True)
+    resized = definition(size=64)
+    assert distinct.semantic_graph_id == repeated.semantic_graph_id
+    assert distinct.semantic_graph_id != shared.semantic_graph_id
+    assert distinct.semantic_graph_id != resized.semantic_graph_id
+    assert distinct.regions == repeated.regions
+    assert distinct.regions[-1].semantic_digest != shared.regions[-1].semantic_digest
 
 
 def _static_spec(root, *, runtime_arg_names=()):

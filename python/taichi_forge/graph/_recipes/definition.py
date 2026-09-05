@@ -173,9 +173,10 @@ def _semantic_inventory(root):
     regions = []
     sources = []
     region_by_path = {}
+    static_resources = {}
 
     def visit(node, path, parent_region_id, child_index):
-        semantic = graph_ir_to_dict(node)
+        semantic = graph_ir_to_dict(node, _static_resources=static_resources)
         semantic_digest = _digest(semantic)
         identity_payload = {
             "path": path,
