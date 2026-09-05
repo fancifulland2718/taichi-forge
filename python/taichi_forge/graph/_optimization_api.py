@@ -686,13 +686,15 @@ class GraphOptimizationReportV2:
         return cls.from_dict(json.loads(value))
 
     def to_markdown(self):
+        from taichi_forge.graph._trial_observations import _boundary_markdown
+
         lines = [
             "# Taichi Forge Graph Optimization Report",
             "",
             f"- Report ID: `{self.report_id}`",
             f"- Outcome: `{self.outcome_status}`",
             f"- Next action: `{self.next_action}`",
-            f"- Search complete: `{str(self.search_complete).lower()}`",
+            f"- Search schedule complete: `{str(self.search_complete).lower()}` (not evidence of an applicable result)",
             f"- Termination: `{self.termination_reason}`",
             "",
             "## Selection",
@@ -701,12 +703,17 @@ class GraphOptimizationReportV2:
             "",
             "## Recipe effects",
             "",
-            "| Recipe | Families | Regions | Steps | Queues | Barriers | Peak bytes |",
+            "| Recipe | Families | Regions | Steps | Queues | Barriers | Max reported materialized bytes |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: |",
         ]
         for annotation in self.recipe_annotations:
             manifest = annotation["manifest"]
             measurement = annotation["measurement"]
+            memory_display = (
+                measurement["materialized_memory_peak_bytes"]
+                if measurement["materialized_physical_ids"]
+                else "unavailable"
+            )
             lines.append(
                 f"| `{annotation['recipe_id']}` | "
                 f"{', '.join(manifest['families'])} | "
@@ -714,11 +721,10 @@ class GraphOptimizationReportV2:
                 f"{manifest['execution_step_count']} | "
                 f"{manifest['submission']['queue_count']} | "
                 f"{manifest['submission']['barrier_count']} | "
-                f"{measurement['materialized_memory_peak_bytes']} |"
+                f"{memory_display} |"
             )
-        lines.extend(
-            ["", "Provider notes above are declarations, not measured claims."]
-        )
+        lines.extend(["", "Provider notes above are declarations, not measured claims."])
+        lines.extend(_boundary_markdown(self.recipe_annotations))
         if any(item.get("environment_observations") for item in self.recipe_annotations):
             lines.extend(
                 [
@@ -732,8 +738,7 @@ class GraphOptimizationReportV2:
             lines.extend(["", "## Pareto trade-offs", ""])
             for tradeoff in self.pareto_tradeoffs:
                 comparisons = ", ".join(
-                    f"{item['metric']}={item['relation']}"
-                    for item in tradeoff["relative_to_selected"]
+                    f"{item['metric']}={item['relation']}" for item in tradeoff["relative_to_selected"]
                 )
                 lines.append(f"- `{tradeoff['recipe_id']}`: {comparisons}")
         lines.extend(
@@ -743,8 +748,7 @@ class GraphOptimizationReportV2:
                 "",
                 f"- Scope: `{self.reuse['scope']}`",
                 f"- Checkpoint: `{self.reuse['checkpoint_id']}`",
-                "- Selection artifact: "
-                f"`{self.selection_artifact_id or 'unavailable'}`",
+                "- Selection artifact: " f"`{self.selection_artifact_id or 'unavailable'}`",
                 "",
                 "## CompileIQ measurement facts",
                 "",
@@ -1484,8 +1488,10 @@ class _GraphRecipeSearchSession:
 
     def _recipe_annotations(self, compileiq_report, compileiq_checkpoint):
         from taichi_forge.hardware._gpu_environment import _environment_observations
+        from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _trial_boundaries
 
         environment = _environment_observations(compileiq_checkpoint["records"])
+        boundaries = _trial_boundaries(compileiq_checkpoint["records"])
         latest_candidates = {}
         for candidate in sorted(
             compileiq_report.candidates,
@@ -1520,50 +1526,29 @@ class _GraphRecipeSearchSession:
                     }
                 )
             physical_changes = {
-                "planned_identity_changed": (
-                    manifest.planned_physical_id
-                    != baseline_manifest.planned_physical_id
-                ),
+                "planned_identity_changed": (manifest.planned_physical_id != baseline_manifest.planned_physical_id),
                 "selected_fragment_delta": (
-                    manifest.selected_fragment_count
-                    - baseline_manifest.selected_fragment_count
+                    manifest.selected_fragment_count - baseline_manifest.selected_fragment_count
                 ),
-                "execution_step_delta": (
-                    manifest.execution_step_count
-                    - baseline_manifest.execution_step_count
-                ),
-                "queue_count_delta": (
-                    manifest.queue_count - baseline_manifest.queue_count
-                ),
-                "barrier_count_delta": (
-                    manifest.barrier_count - baseline_manifest.barrier_count
-                ),
+                "execution_step_delta": (manifest.execution_step_count - baseline_manifest.execution_step_count),
+                "queue_count_delta": (manifest.queue_count - baseline_manifest.queue_count),
+                "barrier_count_delta": (manifest.barrier_count - baseline_manifest.barrier_count),
                 "declared_persistent_bytes_delta": (
-                    manifest.declared_persistent_resource_bytes
-                    - baseline_manifest.declared_persistent_resource_bytes
+                    manifest.declared_persistent_resource_bytes - baseline_manifest.declared_persistent_resource_bytes
                 ),
                 "declared_transient_bytes_delta": (
-                    manifest.declared_transient_resource_bytes
-                    - baseline_manifest.declared_transient_resource_bytes
+                    manifest.declared_transient_resource_bytes - baseline_manifest.declared_transient_resource_bytes
                 ),
             }
             annotations.append(
                 {
                     "recipe_id": recipe_id,
-                    "display_name": (
-                        "Baseline"
-                        if manifest.is_baseline
-                        else " + ".join(manifest.families)
-                    ),
+                    "display_name": ("Baseline" if manifest.is_baseline else " + ".join(manifest.families)),
                     "manifest": manifest.to_dict(),
-                    "semantic_region_ids": tuple(
-                        selection.region_id for selection in recipe.region_selections
-                    ),
+                    "semantic_region_ids": tuple(selection.region_id for selection in recipe.region_selections),
                     "optimized_semantic_region_ids": tuple(
                         dict.fromkeys(
-                            region_id
-                            for fragment in recipe.fragments
-                            for region_id in fragment.coverage_region_ids
+                            region_id for fragment in recipe.fragments for region_id in fragment.coverage_region_ids
                         )
                     ),
                     "physical_changes_from_baseline": physical_changes,
@@ -1573,23 +1558,18 @@ class _GraphRecipeSearchSession:
                         "complete": candidate.complete,
                         "feasible": candidate.feasible,
                         "metrics": {
-                            name: summary.model_dump(by_alias=True)
-                            for name, summary in candidate.metrics.items()
+                            name: summary.model_dump(by_alias=True) for name, summary in candidate.metrics.items()
                         },
                         "planned_physical_ids": candidate.planned_physical_ids,
-                        "materialized_physical_ids": (
-                            candidate.materialized_physical_ids
-                        ),
-                        "materialized_memory_peak_bytes": (
-                            candidate.materialized_memory_peak_bytes
-                        ),
+                        "materialized_physical_ids": (candidate.materialized_physical_ids),
+                        "materialized_memory_peak_bytes": (candidate.materialized_memory_peak_bytes),
+                        "materialized_memory_scope": _MEMORY_SCOPE,
                         "failure_count": len(candidate.failures),
                     },
                     "environment_observations": tuple(environment.get(recipe_id, ())),
+                    "trial_boundaries": tuple(boundaries.get(recipe_id, ())),
                     "provider_claims": tuple(provider_claims),
-                    "provider_declared_applicability": tuple(
-                        declared_applicability
-                    ),
+                    "provider_declared_applicability": tuple(declared_applicability),
                     "provider_declared_limitations": tuple(declared_limitations),
                 }
             )
@@ -1600,7 +1580,9 @@ class _GraphRecipeSearchSession:
 
         ``evaluator`` receives ``(materialized_graph, recipe_handle)`` and must
         return a dictionary containing the target metrics.  Forge injects the
-        exact ``materialized_memory_bytes`` metric when it is requested.
+        ``materialized_memory_bytes`` metric when it is requested and omitted by
+        the evaluator. It observes known Graph allocations after the evaluator,
+        not continuous device/process peak memory.
         """
 
         if self._used:
@@ -1632,11 +1614,7 @@ class _GraphRecipeSearchSession:
             evaluation_context=evaluation_context,
             checkpoint=self._checkpoint,
         ) as search:
-            result = (
-                self._run_exact(search)
-                if self._execution_mode == "exact"
-                else self._run_staged(search)
-            )
+            result = self._run_exact(search) if self._execution_mode == "exact" else self._run_staged(search)
             coverage = dict(self._plans.search_coverage(search))
             compileiq_checkpoint = search.checkpoint().as_dict()
             capability = search.opaque_recipe_capability
@@ -1654,16 +1632,12 @@ class _GraphRecipeSearchSession:
         )
 
         results = result.get_results()
-        complete_feasible = tuple(
-            item for item in results if item["complete"] and item["feasible"]
-        )
+        complete_feasible = tuple(item for item in results if item["complete"] and item["feasible"])
         frontier = tuple(
             item
             for item in complete_feasible
             if not any(
-                self._dominates(other, item)
-                for other in complete_feasible
-                if other["recipe_id"] != item["recipe_id"]
+                self._dominates(other, item) for other in complete_feasible if other["recipe_id"] != item["recipe_id"]
             )
         )
         self._refresh_handles()
@@ -1672,10 +1646,7 @@ class _GraphRecipeSearchSession:
         if coverage["complete"] and frontier:
             selected_result = min(frontier, key=self._selection_key)
             selected = self._handles[selected_result["recipe_id"]]
-        frontier_handles = tuple(
-            self._handles[item["recipe_id"]]
-            for item in sorted(frontier, key=self._selection_key)
-        )
+        frontier_handles = tuple(self._handles[item["recipe_id"]] for item in sorted(frontier, key=self._selection_key))
         selection_artifact = (
             None
             if selected is None
@@ -1698,11 +1669,7 @@ class _GraphRecipeSearchSession:
             next_action=next_action,
             selected_recipe_id=(None if selected is None else selected.recipe_id),
             pareto_recipe_ids=tuple(item.recipe_id for item in frontier_handles),
-            selection_artifact_id=(
-                None
-                if selection_artifact is None
-                else selection_artifact.artifact_id
-            ),
+            selection_artifact_id=(None if selection_artifact is None else selection_artifact.artifact_id),
             search_complete=bool(coverage["complete"]),
             termination_reason=result.termination_reason,
             evaluation_count=int(coverage["evaluation_count"]),
@@ -1715,21 +1682,13 @@ class _GraphRecipeSearchSession:
                     search_complete=bool(coverage["complete"]),
                 )
             ),
-            _tradeoffs_json=_canonical_json(
-                self._pareto_tradeoffs(frontier, selected_result)
-            ),
-            _recipe_annotations_json=_canonical_json(
-                self._recipe_annotations(compileiq_report, compileiq_checkpoint)
-            ),
+            _tradeoffs_json=_canonical_json(self._pareto_tradeoffs(frontier, selected_result)),
+            _recipe_annotations_json=_canonical_json(self._recipe_annotations(compileiq_report, compileiq_checkpoint)),
             _reuse_json=_canonical_json(
                 {
                     "scope": self._reuse_scope,
                     "checkpoint_id": checkpoint.checkpoint_id,
-                    "selection_artifact_id": (
-                        None
-                        if selection_artifact is None
-                        else selection_artifact.artifact_id
-                    ),
+                    "selection_artifact_id": (None if selection_artifact is None else selection_artifact.artifact_id),
                     "workload_context_id": self._workload_context_id,
                     "evaluation_contract_id": self._evaluation_contract_id,
                     "backend_environment_id": self._backend_environment_id,

@@ -20,6 +20,112 @@ from tests import test_utils
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize("failure_phase", (None, "materialization", "objective", "observation", "cleanup", "protocol"))
+def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(monkeypatch, failure_phase):
+    from compileiq.forge_support import TrialCleanupV2, TrialFailureV2, TrialOutcomeV2
+    from taichi_forge.graph._recipes import physical
+    from taichi_forge.graph._trial_observations import _PROVENANCE_KEY, _boundary_markdown, _trial_boundaries
+
+    events = []
+    recipe = SimpleNamespace(planned_physical_id="planned", recipe_id="recipe")
+    request = SimpleNamespace(
+        recipe_id="recipe",
+        batch_fingerprint="batch",
+        measurement_key="measurement",
+        observation_index=0,
+        stage_index=1,
+        fidelity_name="full",
+    )
+
+    def manifest(size):
+        return SimpleNamespace(
+            materialized_physical_id=f"physical-{size}",
+            allocation_topology_exact=True,
+            persistent_requested_bytes=size,
+            persistent_allocated_bytes=size,
+            transient_requested_bytes=0,
+            transient_allocated_bytes=0,
+        )
+
+    def enter(phase):
+        events.append(phase)
+        if failure_phase == phase:
+            error = ValueError(f"injected {phase}")
+            error.cleanup_complete = True
+            raise error
+
+    def materialize(*args, **kwargs):
+        enter("materialization")
+        return SimpleNamespace(manifest=manifest(16), executor=object(), close=lambda: enter("cleanup"))
+
+    def evaluate(*args):
+        enter("objective")
+        return {"score": float("nan") if failure_phase == "protocol" else 1.0}
+
+    def observe(*args):
+        enter("observation")
+        return manifest(176)
+
+    session = object.__new__(_compileiq_opaque._CompleteGraphRecipeSearchSessionV2)
+    session._plans = SimpleNamespace(
+        _catalog=SimpleNamespace(entry=lambda identity: SimpleNamespace(recipe=recipe)),
+        _definition=object(),
+        backend="cuda",
+        python_source_lock="source",
+        semantic_plan_id="semantic",
+    )
+    session._context = object()
+    session._materialize_recipe = materialize
+    session._objective_function = evaluate
+    session._outcome_type = TrialOutcomeV2
+    session._cleanup_type = TrialCleanupV2
+    session._failure_type = TrialFailureV2
+    session._scalar_metric = False
+    session._target_contract = SimpleNamespace(metric_names=("score", "materialized_memory_bytes"))
+    monkeypatch.setattr(physical, "observe_graph_physical_manifest", observe)
+    outcome = session._evaluate(request)
+    assert (outcome.failure is None) == (failure_phase is None)
+    encoded = outcome.provenance[_PROVENANCE_KEY]
+    assert len(encoded.encode("utf-8")) < 4096
+    # Projection must include failed/older-stage records, but not fabricate
+    # observations for checkpoints produced before this annotation existed.
+    record = {"request": vars(request), "outcome": outcome.model_dump()}
+    legacy = {"request": vars(request), "outcome": {**record["outcome"], "provenance": {}}}
+    (observation,) = _trial_boundaries((legacy, record))["recipe"]
+    assert observation["trial_failed"] == (failure_phase is not None)
+    assert observation["stage_index"] == 1
+    timings = observation["host_wall_seconds"]
+    assert timings["materialization"] >= 0
+    if failure_phase == "materialization":
+        assert events == ["materialization"]
+        assert observation["after_materialization"] is None
+        assert observation["after_evaluator_status"] == "not_run"
+        assert timings["evaluator"] is None
+        assert timings["cleanup"] is None
+    else:
+        assert observation["after_materialization"]["persistent_allocated_bytes"] == 16
+        assert events == (
+            ["materialization", "objective"] + ([] if failure_phase == "objective" else ["observation"]) + ["cleanup"]
+        )
+        assert timings["evaluator"] >= 0
+        assert timings["cleanup"] >= 0
+    if failure_phase in ("materialization", "objective", "observation"):
+        assert observation["after_evaluator"] is None
+        assert observation["after_evaluator_status"] != "observed"
+        markdown = "\n".join(_boundary_markdown(({"recipe_id": "recipe", "trial_boundaries": (observation,)},)))
+        assert "unavailable" in markdown
+        assert "0 / 1" in markdown
+    else:
+        assert observation["after_evaluator"]["persistent_allocated_bytes"] == 176
+        assert observation["after_evaluator_status"] == "observed"
+        assert outcome.materialized_memory_bytes == 176
+        assert timings["post_evaluator_observation"] >= 0
+    if failure_phase is None:
+        assert outcome.metrics["materialized_memory_bytes"] == 176
+    elif failure_phase == "cleanup":
+        assert observation["cleanup_status"] == "incomplete"
+
+
 def test_compileiq_public_search_surface_is_graph_owned():
     assert ti.graph.compileiq_recipe_search is compileiq_recipe_search
     assert not hasattr(ti.graph, "CompileIQGraphRecipeSearch")

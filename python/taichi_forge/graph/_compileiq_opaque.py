@@ -5,6 +5,7 @@ from __future__ import annotations
 from importlib import import_module
 import math
 from types import MappingProxyType
+from time import perf_counter
 
 from typing import ClassVar
 
@@ -716,28 +717,16 @@ class _CompleteGraphRecipeSearchSessionV2:
         message,
         cleanup,
         manifest=None,
+        observation=None,
     ):
         return self._outcome_type(
             metrics={},
             planned_physical_id=recipe.planned_physical_id,
-            materialized_physical_id=(
-                None if manifest is None else manifest.materialized_physical_id
-            ),
+            materialized_physical_id=(None if manifest is None else manifest.materialized_physical_id),
             materialized_memory_bytes=(
-                0
-                if manifest is None
-                else (
-                    manifest.persistent_allocated_bytes
-                    + manifest.transient_allocated_bytes
-                )
+                0 if manifest is None else (manifest.persistent_allocated_bytes + manifest.transient_allocated_bytes)
             ),
-            provenance={
-                "backend": self._plans.backend,
-                "batch_fingerprint": request.batch_fingerprint,
-                "compileiq_python_source_lock": self._plans.python_source_lock,
-                "recipe_id": request.recipe_id,
-                "semantic_graph_id": self._plans.semantic_plan_id,
-            },
+            provenance=self._trial_provenance(request, observation),
             cleanup=cleanup,
             failure=self._failure_type(
                 category=category,
@@ -747,14 +736,46 @@ class _CompleteGraphRecipeSearchSessionV2:
             ),
         )
 
+    def _trial_provenance(self, request, observation):
+        from taichi_forge.graph._trial_observations import _PROVENANCE_KEY, _encode_boundaries
+
+        provenance = {
+            "backend": self._plans.backend,
+            "batch_fingerprint": request.batch_fingerprint,
+            "compileiq_python_source_lock": self._plans.python_source_lock,
+            "recipe_id": request.recipe_id,
+            "semantic_graph_id": self._plans.semantic_plan_id,
+        }
+        if observation is not None:
+            provenance[_PROVENANCE_KEY] = _encode_boundaries(observation)
+        return provenance
+
     def _evaluate(self, request):
+        from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _resource_boundary
+
         recipe = self._plans._catalog.entry(request.recipe_id).recipe
+        observation = {
+            "schema_version": 1,
+            "memory_scope": _MEMORY_SCOPE,
+            "after_materialization": None,
+            "after_evaluator": None,
+            "after_evaluator_status": "not_run",
+            "host_wall_seconds": {
+                "materialization": None,
+                "evaluator": None,
+                "post_evaluator_observation": None,
+                "cleanup": None,
+            },
+        }
+        timings = observation["host_wall_seconds"]
+        started = perf_counter()
         try:
             materialized = self._materialize_recipe(
                 recipe,
                 context=self._context,
             )
         except Exception as error:
+            timings["materialization"] = perf_counter() - started
             cleanup_complete = bool(getattr(error, "cleanup_complete", False))
             return self._failure(
                 request,
@@ -775,17 +796,24 @@ class _CompleteGraphRecipeSearchSessionV2:
                         "materialization_cleanup_incomplete",
                     )
                 ),
+                observation=observation,
             )
 
+        timings["materialization"] = perf_counter() - started
         manifest = materialized.manifest
+        observation["after_materialization"] = _resource_boundary(manifest)
         objective_error = None
         observation_error = None
         raw_metrics = None
+        started = perf_counter()
         try:
             raw_metrics = self._objective_function(materialized.executor, request)
         except Exception as error:
             objective_error = error
+            observation["after_evaluator_status"] = "objective_failed"
+        timings["evaluator"] = perf_counter() - started
         if objective_error is None:
+            started = perf_counter()
             try:
                 # Some Graph-owned resources are intentionally allocated only
                 # after the evaluator publishes concrete bindings.  Refresh
@@ -801,11 +829,17 @@ class _CompleteGraphRecipeSearchSessionV2:
                     recipe,
                     materialized.executor,
                 )
+                observation["after_evaluator"] = _resource_boundary(manifest)
+                observation["after_evaluator_status"] = "observed"
             except Exception as error:
                 observation_error = error
+                observation["after_evaluator_status"] = "observation_failed"
+            timings["post_evaluator_observation"] = perf_counter() - started
+        started = perf_counter()
         try:
             materialized.close()
         except Exception as error:
+            timings["cleanup"] = perf_counter() - started
             return self._failure(
                 request,
                 recipe,
@@ -818,7 +852,9 @@ class _CompleteGraphRecipeSearchSessionV2:
                     "materialized_graph_release_failed",
                 ),
                 manifest=manifest,
+                observation=observation,
             )
+        timings["cleanup"] = perf_counter() - started
         cleanup = self._cleanup(
             "complete",
             True,
@@ -830,11 +866,10 @@ class _CompleteGraphRecipeSearchSessionV2:
                 recipe,
                 category="objective",
                 code=type(objective_error).__name__,
-                message=(
-                    str(objective_error).strip() or type(objective_error).__name__
-                ),
+                message=(str(objective_error).strip() or type(objective_error).__name__),
                 cleanup=cleanup,
                 manifest=manifest,
+                observation=observation,
             )
         if observation_error is not None:
             return self._failure(
@@ -842,16 +877,13 @@ class _CompleteGraphRecipeSearchSessionV2:
                 recipe,
                 category="materialization",
                 code=type(observation_error).__name__,
-                message=(
-                    str(observation_error).strip() or type(observation_error).__name__
-                ),
+                message=(str(observation_error).strip() or type(observation_error).__name__),
                 cleanup=cleanup,
                 manifest=manifest,
+                observation=observation,
             )
         if self._scalar_metric:
-            if isinstance(raw_metrics, bool) or not isinstance(
-                raw_metrics, (int, float)
-            ):
+            if isinstance(raw_metrics, bool) or not isinstance(raw_metrics, (int, float)):
                 return self._failure(
                     request,
                     recipe,
@@ -860,6 +892,7 @@ class _CompleteGraphRecipeSearchSessionV2:
                     message="scalar objective must return one finite numeric score",
                     cleanup=cleanup,
                     manifest=manifest,
+                    observation=observation,
                 )
             raw_metrics = {"score": float(raw_metrics)}
         elif not isinstance(raw_metrics, dict):
@@ -871,6 +904,7 @@ class _CompleteGraphRecipeSearchSessionV2:
                 message="explicit target objective must return a metric dictionary",
                 cleanup=cleanup,
                 manifest=manifest,
+                observation=observation,
             )
         try:
             if any(
@@ -881,9 +915,7 @@ class _CompleteGraphRecipeSearchSessionV2:
                 or not math.isfinite(float(value))
                 for name, value in raw_metrics.items()
             ):
-                raise ValueError(
-                    "metric names must be nonempty strings and values finite numbers"
-                )
+                raise ValueError("metric names must be nonempty strings and values finite numbers")
             metrics = {name: float(value) for name, value in raw_metrics.items()}
         except (AttributeError, TypeError, ValueError) as error:
             return self._failure(
@@ -894,29 +926,19 @@ class _CompleteGraphRecipeSearchSessionV2:
                 message=str(error).strip() or type(error).__name__,
                 cleanup=cleanup,
                 manifest=manifest,
+                observation=observation,
             )
         if "materialized_memory_bytes" in self._target_contract.metric_names:
             metrics.setdefault(
                 "materialized_memory_bytes",
-                float(
-                    manifest.persistent_allocated_bytes
-                    + manifest.transient_allocated_bytes
-                ),
+                float(manifest.persistent_allocated_bytes + manifest.transient_allocated_bytes),
             )
         return self._outcome_type(
             metrics=metrics,
             planned_physical_id=recipe.planned_physical_id,
             materialized_physical_id=manifest.materialized_physical_id,
-            materialized_memory_bytes=(
-                manifest.persistent_allocated_bytes + manifest.transient_allocated_bytes
-            ),
-            provenance={
-                "backend": self._plans.backend,
-                "batch_fingerprint": request.batch_fingerprint,
-                "compileiq_python_source_lock": self._plans.python_source_lock,
-                "recipe_id": request.recipe_id,
-                "semantic_graph_id": self._plans.semantic_plan_id,
-            },
+            materialized_memory_bytes=(manifest.persistent_allocated_bytes + manifest.transient_allocated_bytes),
+            provenance=self._trial_provenance(request, observation),
             cleanup=cleanup,
         )
 

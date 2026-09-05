@@ -1,5 +1,6 @@
 from itertools import pairwise
 from contextlib import nullcontext
+from dataclasses import replace
 import json
 import multiprocessing
 
@@ -126,9 +127,7 @@ def test_graph_optimization_public_contract_rejects_ambiguous_inputs():
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     lengths = np.asarray((1, 7, 32, 33, 129, 511), dtype=np.int32)
-    offsets = np.concatenate(
-        (np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32))
-    )
+    offsets = np.concatenate((np.zeros(1, dtype=np.int32), np.cumsum(lengths, dtype=np.int32)))
     capacity = int(offsets[-1])
     layout = ti.algorithms.SegmentedLayout.from_offsets(
         offsets,
@@ -182,22 +181,14 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     )
     assert len(session.recipes) == 5
     assert session.baseline.manifest.is_baseline
-    assert all(
-        recipe.semantic_graph_id == definition.semantic_graph_id
-        for recipe in session.recipes
-    )
-    assert all(
-        "block_dim" not in json.dumps(recipe.to_dict(), sort_keys=True)
-        for recipe in session.recipes
-    )
+    assert all(recipe.semantic_graph_id == definition.semantic_graph_id for recipe in session.recipes)
+    assert all("block_dim" not in json.dumps(recipe.to_dict(), sort_keys=True) for recipe in session.recipes)
 
     host = ((np.arange(capacity, dtype=np.int64) % 11) - 5).astype(np.int32)
     expected = np.empty_like(host)
     for begin, end in pairwise(offsets):
         inclusive = np.cumsum(host[begin:end], dtype=np.int32)
-        expected[begin:end] = np.concatenate(
-            (np.zeros(1, dtype=np.int32), inclusive[:-1])
-        )
+        expected[begin:end] = np.concatenate((np.zeros(1, dtype=np.int32), inclusive[:-1]))
     observed = []
 
     def evaluator(graph, recipe):
@@ -207,11 +198,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         ti.sync()
         np.testing.assert_array_equal(output.to_numpy(), expected)
         observed.append(recipe.recipe_id)
-        return {
-            "physical_dispatches": float(
-                graph.physical_plan()["physical_dispatch_count"]
-            )
-        }
+        return {"physical_dispatches": float(graph.physical_plan()["physical_dispatch_count"])}
 
     decision = session.run(evaluator)
     report = decision.report
@@ -225,18 +212,10 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.missing_recipe_ids == ()
     assert report.selected_recipe_id == decision.selection.recipe_id
     assert decision.selection in decision.pareto_frontier
-    assert all(
-        "materialized_memory_bytes" in result["metrics"] for result in report.results
-    )
-    assert report.compileiq_capability["schema"] == (
-        "compileiq.taichi-forge-recipe-search-capability.v2"
-    )
-    assert report.compileiq_provenance["verification"] == (
-        "bundled_manifest_lock_at_search_start"
-    )
-    assert report.compileiq_report.schema_id == (
-        "compileiq.opaque-optimization-report.v1"
-    )
+    assert all("materialized_memory_bytes" in result["metrics"] for result in report.results)
+    assert report.compileiq_capability["schema"] == ("compileiq.taichi-forge-recipe-search-capability.v2")
+    assert report.compileiq_provenance["verification"] == ("bundled_manifest_lock_at_search_start")
+    assert report.compileiq_report.schema_id == ("compileiq.opaque-optimization-report.v1")
     assert report.compileiq_report.detail == "summary"
     assert report.compileiq_report.checkpoint.embedded is False
     assert report.compileiq_report.trials == ()
@@ -245,9 +224,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.next_action == "apply_selection"
     assert report.recipe_annotations
     selected_annotation = next(
-        item
-        for item in report.recipe_annotations
-        if item["recipe_id"] == decision.selection.recipe_id
+        item for item in report.recipe_annotations if item["recipe_id"] == decision.selection.recipe_id
     )
     assert selected_annotation["measurement"]["complete"]
     assert selected_annotation["measurement"]["materialized_physical_ids"]
@@ -256,10 +233,17 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         for item in report.recipe_annotations
         for claim in item["provider_claims"]
     )
-    restored_report = ti.graph.GraphOptimizationReportV2.from_json(
-        report.to_json()
-    )
+    restored_report = ti.graph.GraphOptimizationReportV2.from_json(report.to_json())
     assert restored_report.to_dict() == report.to_dict()
+    legacy_annotations = []
+    for annotation in report.recipe_annotations:
+        annotation.pop("trial_boundaries", None)
+        annotation["measurement"].pop("materialized_memory_scope", None)
+        legacy_annotations.append(annotation)
+    legacy_report = replace(report, _recipe_annotations_json=json.dumps(legacy_annotations, sort_keys=True))
+    restored_legacy = ti.graph.GraphOptimizationReportV2.from_json(legacy_report.to_json())
+    assert restored_legacy.to_dict() == legacy_report.to_dict()
+    assert "Graph resource observation boundaries" not in restored_legacy.to_markdown()
     tampered_report = report.to_dict()
     tampered_report["selection"]["reason"]["provider_claims_used"] = True
     with pytest.raises(ValueError, match="identity mismatch"):
@@ -281,9 +265,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert applicability.status == "applicable"
     drifted = definition.check_recipe_applicability(
         decision.selection_artifact,
-        workload_context=ti.graph.GraphWorkloadContext(
-            {"fixture": "different-workload"}
-        ),
+        workload_context=ti.graph.GraphWorkloadContext({"fixture": "different-workload"}),
         evaluation_contract=evaluation_contract,
         backend_environment=backend_environment,
         target=target,
@@ -300,9 +282,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         np.testing.assert_array_equal(output.to_numpy(), expected)
         physical = materialized.materialization_report()
         assert physical["recipe_id"] == decision.selection.recipe_id
-        assert physical["planned_physical_id"] == (
-            decision.selection.planned_physical_id
-        )
+        assert physical["planned_physical_id"] == (decision.selection.planned_physical_id)
         assert physical["materialized_physical_id"]
 
     staged_strategy = ti.graph.GraphRecipeSearchStrategy(
@@ -329,9 +309,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert not partial.report.search_complete
     assert partial.report.status["terminal_state"] == "budget_exhausted"
     assert partial.report.status["generation_status"] == "not_finalized"
-    assert partial.report.selection_reason["rule"] == (
-        "incomplete_evidence_no_selection"
-    )
+    assert partial.report.selection_reason["rule"] == ("incomplete_evidence_no_selection")
     partial_checkpoint = partial.report.checkpoint
     compileiq_checkpoint = partial_checkpoint.compileiq_checkpoint
     assert len(compileiq_checkpoint["batches"]) == 2
@@ -339,8 +317,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert compileiq_checkpoint["batches"][-1]["fidelity"]["terminal"]
     survivors = set(compileiq_checkpoint["stages"][0]["survivor_recipe_ids"])
     assert all(
-        set(item["parent_recipe_ids"]).issubset(survivors)
-        for item in compileiq_checkpoint["batches"][1]["recipes"]
+        set(item["parent_recipe_ids"]).issubset(survivors) for item in compileiq_checkpoint["batches"][1]["recipes"]
     )
     drifted_contract = dict(partial_checkpoint.contract)
     drifted_contract["workload_context_id"] = "graph-workload-context-v1:drift"
@@ -415,10 +392,20 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert resumed.report.strategy.strategy_id == staged_strategy.strategy_id
     assert resumed_observed
     measurement_keys = tuple(
-        item["request"]["measurement_key"]
-        for item in resumed.report.checkpoint.compileiq_checkpoint["records"]
+        item["request"]["measurement_key"] for item in resumed.report.checkpoint.compileiq_checkpoint["records"]
     )
     assert len(measurement_keys) == len(set(measurement_keys))
+    boundary_keys = tuple(
+        trial["measurement_key"]
+        for annotation in resumed.report.recipe_annotations
+        for trial in annotation["trial_boundaries"]
+    )
+    assert sorted(boundary_keys) == sorted(measurement_keys)
+    assert {
+        trial["measurement_key"]
+        for annotation in partial.report.recipe_annotations
+        for trial in annotation["trial_boundaries"]
+    }.issubset(boundary_keys)
 
     with pytest.raises(RuntimeError, match="single-use"):
         session.run(evaluator)

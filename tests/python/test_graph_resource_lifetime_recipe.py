@@ -238,7 +238,9 @@ def test_resource_usage_components_compose_and_have_actual_distinct_pool_topolog
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_resource_recipe_fork_search_and_fresh_definition_resolve():
+def test_resource_recipe_fork_search_and_fresh_definition_resolve(monkeypatch):
+    from taichi_forge.graph import _trial_observations
+
     definition = _definition(groups=1)
     providers = _providers()
     arguments = _arguments(groups=1)
@@ -249,9 +251,17 @@ def test_resource_recipe_fork_search_and_fresh_definition_resolve():
         strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
     )
     observed = set()
+    original_snapshot = _trial_observations._resource_boundary
 
     def evaluate(graph, request):
-        graph.run(graph.bind(arguments))
+        def unexpected_replay_observation(*args, **kwargs):
+            raise AssertionError("search observation entered Graph replay")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(_trial_observations, "_resource_boundary", unexpected_replay_observation)
+            bound = graph.bind(arguments)
+            for _ in range(3):
+                graph.run(bound)
         _check(arguments, groups=1)
         observed.add(request.recipe_id)
         # Deterministic interface contract, explicitly not a speed benchmark.
@@ -262,6 +272,21 @@ def test_resource_recipe_fork_search_and_fresh_definition_resolve():
     assert decision.report.search_complete
     assert len(observed) == 2
     assert "resident VRAM" in json.dumps(decision.report.recipe_annotations)
+    assert _trial_observations._resource_boundary is original_snapshot
+    for annotation in decision.report.recipe_annotations:
+        (trial,) = annotation["trial_boundaries"]
+        assert not trial["trial_failed"]
+        assert trial["cleanup_status"] == "complete"
+        assert trial["after_evaluator_status"] == "observed"
+        cold = trial["after_materialization"]
+        evaluated = trial["after_evaluator"]
+        # Binding lazily creates Graph argument storage for both recipes. This
+        # must remain visible rather than being reported as a cold memory peak.
+        assert evaluated["persistent_allocated_bytes"] > cold["persistent_allocated_bytes"]
+        assert evaluated["materialized_physical_id"] in annotation["measurement"]["materialized_physical_ids"]
+        assert all(value >= 0 for value in trial["host_wall_seconds"].values())
+    assert "After materialization bytes" in decision.report.to_markdown()
+    assert "Peak bytes" not in decision.report.to_markdown()
     fresh = _definition(groups=1)
     selection = fresh.resolve_recipe(decision.selection_artifact, providers=providers)
     with fresh.materialize(selection) as materialized:
