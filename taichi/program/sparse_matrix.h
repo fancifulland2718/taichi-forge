@@ -1085,7 +1085,10 @@ class CuSparseMatrix : public SparseMatrix {
 
   void nd_spmv_kernel(Program *prog, const Ndarray &x, const Ndarray &y);
 
-  void spmv(size_t x, size_t y, CUstream stream = nullptr);
+  void spmv(size_t x,
+            size_t y,
+            CUstream stream = nullptr,
+            bool prepare_only = false);
 
   void nd_spmm(Program *prog,
                const Ndarray &input,
@@ -1123,7 +1126,8 @@ class CuSparseMatrix : public SparseMatrix {
             int fill_mode,
             bool unit_diagonal,
             bool transpose,
-            CUstream stream = nullptr);
+            CUstream stream = nullptr,
+            bool prepare_only = false);
 
   void nd_spsm(Program *prog,
                const Ndarray &input,
@@ -1139,7 +1143,8 @@ class CuSparseMatrix : public SparseMatrix {
             int fill_mode,
             bool unit_diagonal,
             bool transpose,
-            CUstream stream = nullptr);
+            CUstream stream = nullptr,
+            bool prepare_only = false);
 
   void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
 
@@ -1250,7 +1255,10 @@ class CuSparseBsrMatrix final : public SparseMatrix {
 
   void nd_spmv(Program *prog, const Ndarray &x, const Ndarray &y);
   void nd_spmv_kernel(Program *prog, const Ndarray &x, const Ndarray &y);
-  void spmv(size_t x, size_t y, CUstream stream = nullptr);
+  void spmv(size_t x,
+            size_t y,
+            CUstream stream = nullptr,
+            bool prepare_only = false);
   void spmv_kernel(size_t x, size_t y, CUstream stream = nullptr);
   bool supports_spmv_stream_binding() const;
   void update_values(Program *prog, const Ndarray &values) override;

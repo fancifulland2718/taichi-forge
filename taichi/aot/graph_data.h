@@ -267,6 +267,9 @@ class CudaGraphCaptureCommand {
   virtual bool supports(
       const std::unordered_map<std::string, IValue> &args,
       Program &program) const = 0;
+  // Prepare descriptors, private workspace and analysis only. No user binding
+  // may be modified and no mathematical operation may be executed: feedback
+  // bindings otherwise advance the Graph state before its first submission.
   virtual void prepare(const std::unordered_map<std::string, IValue> &args,
                        Program &program) = 0;
   virtual void record(const std::unordered_map<std::string, IValue> &args,

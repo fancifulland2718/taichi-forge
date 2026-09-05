@@ -104,12 +104,20 @@ class CudaSparseSpmvCaptureCommand final
 
   void prepare(const std::unordered_map<std::string, aot::IValue> &args,
                Program &program) override {
-    record(args, program, nullptr);
+    record_impl(args, program, nullptr, true);
   }
 
   void record(const std::unordered_map<std::string, aot::IValue> &args,
               Program &program,
               void *stream) override {
+    record_impl(args, program, stream, false);
+  }
+
+ private:
+  void record_impl(const std::unordered_map<std::string, aot::IValue> &args,
+                   Program &program,
+                   void *stream,
+                   bool prepare_only) {
     TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
                 "CUDA capture recipe provider generation is stale");
     TI_ERROR_IF(dynamic_cast<CuSparseMatrix *>(matrix_) == nullptr &&
@@ -137,18 +145,17 @@ class CudaSparseSpmvCaptureCommand final
 #if defined(TI_WITH_CUDA)
     auto capture_stream = reinterpret_cast<CUstream>(stream);
     if (auto *csr = dynamic_cast<CuSparseMatrix *>(matrix_)) {
-      csr->spmv(input_address, output_address, capture_stream);
+      csr->spmv(input_address, output_address, capture_stream, prepare_only);
       return;
     }
     auto *bsr = dynamic_cast<CuSparseBsrMatrix *>(matrix_);
     TI_ASSERT(bsr != nullptr);
-    bsr->spmv(input_address, output_address, capture_stream);
+    bsr->spmv(input_address, output_address, capture_stream, prepare_only);
 #else
     TI_NOT_IMPLEMENTED;
 #endif
   }
 
- private:
   SparseMatrix *matrix_{nullptr};
   Program *program_{nullptr};
   aot::Arg input_;
@@ -291,12 +298,20 @@ class CudaSparseTriangularCaptureCommand final
 
   void prepare(const std::unordered_map<std::string, aot::IValue> &args,
                Program &program) override {
-    record(args, program, nullptr);
+    record_impl(args, program, nullptr, true);
   }
 
   void record(const std::unordered_map<std::string, aot::IValue> &args,
               Program &program,
               void *stream) override {
+    record_impl(args, program, stream, false);
+  }
+
+ private:
+  void record_impl(const std::unordered_map<std::string, aot::IValue> &args,
+                   Program &program,
+                   void *stream,
+                   bool prepare_only) {
     TI_ERROR_IF(matrix_ == nullptr || program_ != &program,
                 "CUDA cuSPARSE triangular capture recipe generation is "
                 "stale");
@@ -325,14 +340,13 @@ class CudaSparseTriangularCaptureCommand final
     auto capture_stream = reinterpret_cast<CUstream>(stream);
     if (rhs_count_ == 1) {
       matrix_->spsv(input_address, output_address, fill_mode_, unit_diagonal_,
-                    transpose_, capture_stream);
+                    transpose_, capture_stream, prepare_only);
     } else {
       matrix_->spsm(input_address, output_address, rhs_count_, fill_mode_,
-                    unit_diagonal_, transpose_, capture_stream);
+                    unit_diagonal_, transpose_, capture_stream, prepare_only);
     }
   }
 
- private:
   CuSparseMatrix *matrix_{nullptr};
   Program *program_{nullptr};
   aot::Arg input_;
@@ -383,7 +397,8 @@ class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
 
   void prepare(const std::unordered_map<std::string, aot::IValue> &args,
                Program &program) override {
-    record(args, program, nullptr);
+    // Plan creation already performs cuFFT planning/JIT and workspace setup.
+    // Executing here would mutate feedback state before the first Graph run.
   }
 
   void record(const std::unordered_map<std::string, aot::IValue> &args,

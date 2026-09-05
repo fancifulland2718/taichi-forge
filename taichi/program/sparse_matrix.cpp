@@ -3542,11 +3542,16 @@ bool CuSparseMatrix::supports_spmv_stream_binding() const {
 #endif
 }
 
-void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
+void CuSparseMatrix::spmv(size_t dX,
+                          size_t dY,
+                          CUstream stream,
+                          bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
-  record_spmv_call();
+  if (!prepare_only) {
+    record_spmv_call();
+  }
   if (!spmv_handle_) {
     CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
     spmv_stream_ = nullptr;
@@ -3622,6 +3627,9 @@ void CuSparseMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
     }
   } else {
     ++spmv_preprocess_fallbacks_;
+  }
+  if (prepare_only) {
+    return;
   }
   cusparse.cpSpMV(spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
                   matrix_, spmv_vec_x_, &beta, spmv_vec_y_, CUDA_R_32F,
@@ -3800,7 +3808,8 @@ void CuSparseMatrix::spsv(size_t dX,
                           int fill_mode,
                           bool unit_diagonal,
                           bool transpose,
-                          CUstream stream) {
+                          CUstream stream,
+                          bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   TI_ERROR_IF(dtype_ != PrimitiveType::f32 || rows_ != cols_,
               "CUDA cuSPARSE SpSV requires a square f32 CSR matrix.");
@@ -3817,7 +3826,9 @@ void CuSparseMatrix::spsv(size_t dX,
               "The loaded cuSPARSE provider does not expose the retained "
               "f32 SpSV value-update contract.");
 
-  ++spsv_calls_;
+  if (!prepare_only) {
+    ++spsv_calls_;
+  }
   const auto key = static_cast<std::uint64_t>(fill_mode) |
                    (static_cast<std::uint64_t>(unit_diagonal) << 1) |
                    (static_cast<std::uint64_t>(transpose) << 2);
@@ -3899,6 +3910,9 @@ void CuSparseMatrix::spsv(size_t dX,
     plan.output_ptr = dY;
     ++spsv_dense_descriptor_rebinds_;
   }
+  if (prepare_only) {
+    return;
+  }
   float alpha = 1.0f;
   cusparse.cpSpSVSolve(
       plan.handle, plan.operation, &alpha, plan.matrix_descriptor,
@@ -3915,7 +3929,8 @@ void CuSparseMatrix::spsm(size_t dB,
                           int fill_mode,
                           bool unit_diagonal,
                           bool transpose,
-                          CUstream stream) {
+                          CUstream stream,
+                          bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   TI_ERROR_IF(dtype_ != PrimitiveType::f32 || rows_ != cols_,
               "CUDA cuSPARSE SpSM requires a square f32 CSR matrix.");
@@ -3934,7 +3949,9 @@ void CuSparseMatrix::spsm(size_t dB,
               "The loaded cuSPARSE provider does not expose the retained "
               "f32 SpSM value-update contract.");
 
-  ++spsm_calls_;
+  if (!prepare_only) {
+    ++spsm_calls_;
+  }
   const auto flags = static_cast<std::uint64_t>(fill_mode) |
                      (static_cast<std::uint64_t>(unit_diagonal) << 1) |
                      (static_cast<std::uint64_t>(transpose) << 2);
@@ -4021,6 +4038,9 @@ void CuSparseMatrix::spsm(size_t dB,
                               reinterpret_cast<void *>(dC));
     plan.output_ptr = dC;
     ++spsm_dense_descriptor_rebinds_;
+  }
+  if (prepare_only) {
+    return;
   }
   float alpha = 1.0f;
   cusparse.cpSpSMSolve(
@@ -4310,11 +4330,16 @@ bool CuSparseBsrMatrix::supports_spmv_stream_binding() const {
 #endif
 }
 
-void CuSparseBsrMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
+void CuSparseBsrMatrix::spmv(size_t dX,
+                            size_t dY,
+                            CUstream stream,
+                            bool prepare_only) {
 #if defined(TI_WITH_CUDA)
   auto numeric_guard = acquire_numeric_access_guard();
   std::lock_guard<std::mutex> lock(spmv_mutex_);
-  record_spmv_call();
+  if (!prepare_only) {
+    record_spmv_call();
+  }
   if (!spmv_handle_) {
     CUSPARSEDriver::get_instance().cpCreate(&spmv_handle_);
     spmv_stream_ = nullptr;
@@ -4368,6 +4393,9 @@ void CuSparseBsrMatrix::spmv(size_t dX, size_t dY, CUstream stream) {
     spmv_buffer_initialized_ = true;
   } else {
     record_spmv_plan_reuse();
+  }
+  if (prepare_only) {
+    return;
   }
   CUSPARSEDriver::get_instance().cpSpMV(
       spmv_handle_, CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha, matrix_,

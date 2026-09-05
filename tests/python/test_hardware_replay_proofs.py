@@ -214,9 +214,9 @@ def test_cuda_cusparse_mixed_command_replay_proof():
     )
 
     provider_stats = matrix._debug_runtime_stats()["operations"]
-    # Provider work is issued only during warm-up and capture, never from the
-    # Python replay loop or once per exact replay.
-    assert provider_stats["spmv_calls"] == 2
+    # Preparation does not execute mathematical work; it is issued only when
+    # recording capture, never from the Python loop or once per exact replay.
+    assert provider_stats["spmv_calls"] == 1
 
     cache = graph._instance._backend_executable._jit_cache
     cache._set_stable_replay_optimization(False)
@@ -225,7 +225,7 @@ def test_cuda_cusparse_mixed_command_replay_proof():
     fallback_stats = graph._graph_stats[0]
     assert fallback_stats["last_path"] == "ordinary_fallback"
     assert fallback_stats["last_fallback_reason"] == "runtime_mode"
-    assert matrix._debug_runtime_stats()["operations"]["spmv_calls"] == 3
+    assert matrix._debug_runtime_stats()["operations"]["spmv_calls"] == 2
     cache._set_stable_replay_optimization(True)
 
     # A changed allocation identity must never patch cuSPARSE descriptors.
@@ -244,9 +244,9 @@ def test_cuda_cusparse_mixed_command_replay_proof():
     assert rebound_stats["backend_replay_signature_slot_capacity"] == 2
     # The debug snapshot exposes the active slot's counters, not a lifetime
     # total across recycled slots.  Provider calls remain the exact churn
-    # oracle: two calls (prewarm + capture) per new fixed binding, and no call
+    # oracle: one capture call per new fixed binding, and no call
     # for its following replay.
-    assert matrix._debug_runtime_stats()["operations"]["spmv_calls"] == 203
+    assert matrix._debug_runtime_stats()["operations"]["spmv_calls"] == 102
     np.testing.assert_allclose(
         rebound["result"].to_numpy(),
         2.0 * diagonal * source_host + 1.0,

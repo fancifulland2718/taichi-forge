@@ -125,7 +125,7 @@ def test_cufft_c2c_executes_directly_and_through_graph():
     assert graph._debug_info["native_count"] == 1
     assert "backend_command_nodes" not in optimization
     graph_stats = graph._graph_stats[0]
-    assert graph_stats["captures"] == 0, {
+    assert graph_stats["captures"] == 1, {
         key: graph_stats.get(key)
         for key in (
             "attempts",
@@ -135,8 +135,8 @@ def test_cufft_c2c_executes_directly_and_through_graph():
             "fallbacks",
         )
     }
-    assert graph_stats["last_path"] == "ordinary_fallback"
-    assert graph_stats["last_fallback_reason"] == "structural_unsupported"
+    assert graph_stats["last_path"] == "cuda_capture"
+    assert graph_stats["last_fallback_reason"] == "none"
 
     plan.close()
     with pytest.raises(RuntimeError, match="closed"):

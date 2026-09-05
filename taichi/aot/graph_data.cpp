@@ -2382,20 +2382,15 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     return false;
   }
   if (has_capture_commands) {
-    const bool has_taichi_dispatch = std::any_of(
-        graph.dispatches.begin(), graph.dispatches.end(),
-        [](const auto &dispatch) { return dispatch.ti_kernel != nullptr; });
     const bool providers_supported = std::all_of(
         graph.dispatches.begin(), graph.dispatches.end(),
         [&](const auto &dispatch) {
           return dispatch.cuda_capture_command == nullptr ||
                  dispatch.cuda_capture_command->supports(args, program);
         });
-    // Capture recipes are prewarmed against their real bindings before stream
-    // capture. A surrounding Taichi dispatch is therefore part of the current
-    // mixed-command contract; provider-only graphs remain on the ordinary path
-    // until destructive-input recipes can prewarm through private scratch.
-    if (!has_taichi_dispatch || !providers_supported) {
+    // Preparation builds plans/analysis but never executes user operations.
+    // Kernel presence is neither necessary nor a proof of safe preparation.
+    if (!providers_supported) {
       mark_cuda_graph_fallback(
           *state, CompiledGraphFallbackReason::structural_unsupported, true);
       return false;
@@ -2586,7 +2581,7 @@ bool try_run_cuda_graph(const CompiledGraph &graph,
     const auto &dispatch = graph.dispatches[i];
     if (dispatch.cuda_capture_command) {
       // Build provider descriptors, workspace and optional preprocessing
-      // before CUDA capture. A recipe may submit cold warm-up work here.
+      // before CUDA capture, without executing the user's mathematical work.
       dispatch.cuda_capture_command->prepare(args, program);
       state->packets.emplace_back(capture_stream);
       continue;

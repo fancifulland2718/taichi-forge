@@ -216,7 +216,7 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
     assert graph._debug_info["native_count"] == 1
     assert "backend_command_nodes" not in optimization
     graph_stats = graph._graph_stats[0]
-    assert graph_stats["captures"] == 0, {
+    assert graph_stats["captures"] == 1, {
         key: graph_stats.get(key)
         for key in (
             "attempts",
@@ -226,17 +226,17 @@ def test_cusparse_spmv_executes_directly_and_through_graph():
             "fallbacks",
         )
     }
-    assert graph_stats["last_path"] == "ordinary_fallback"
-    assert graph_stats["last_fallback_reason"] == "structural_unsupported"
+    assert graph_stats["last_path"] == "cuda_capture"
+    assert graph_stats["last_fallback_reason"] == "none"
     assert graph._spec.lifetime_leases
     stats = matrix._debug_runtime_stats()
     assert stats["operations"]["spmv_calls"] == 2
     assert stats["operations"]["spmv_handle_creations"] == 1
     assert stats["operations"]["spmv_plan_builds"] == 1
-    assert stats["operations"]["spmv_plan_reuses"] == 1
+    assert stats["operations"]["spmv_plan_reuses"] == 2  # prepare, then capture
     if stats["provider"]["spmv_preprocess_available"]:
         assert stats["operations"]["spmv_preprocess_builds"] == 1
-        assert stats["operations"]["spmv_preprocess_reuses"] == 1
+        assert stats["operations"]["spmv_preprocess_reuses"] == 2
 
     updated_values = ti.ndarray(ti.f32, shape=stats["identity"]["nnz"])
     updated_values.fill(1.0)
