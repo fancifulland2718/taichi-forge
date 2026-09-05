@@ -12,6 +12,7 @@ on:
       - "packaging/runtime/**"
       - "scripts/repair_runtime_wheel.py"
       - "scripts/validate_runtime_wheel.py"
+      - "scripts/validate_source_provider.py"
       - "taichi/rhi/cuda/**"
       - "python/taichi_forge/hardware/_cub_source_provider.py"
       - "python/taichi_forge/hardware/_source_provider.py"
@@ -78,7 +79,9 @@ jobs:
           python python/taichi_forge/hardware/source_providers/cub/build.py \
             --output dist-source-provider \
             --target-code sm_80,compute_80
-          python -c 'import hashlib,json,pathlib; p=pathlib.Path("dist-source-provider/cub_source_provider.json"); d=json.loads(p.read_text()); b=p.parent/d["binary"]["path"]; assert hashlib.sha256(b.read_bytes()).hexdigest()==d["binary"]["sha256"]'
+          python scripts/validate_source_provider.py \
+            --manifest dist-source-provider/cub_source_provider.json \
+            --platform linux --output dist-source-provider/build-audit.json
 
       - name: Download prebuilt LLVM 20
         run: |
@@ -143,7 +146,11 @@ jobs:
           python python/taichi_forge/hardware/source_providers/cub/build.py `
             --output dist-source-provider `
             --target-code sm_80,compute_80
-          python -c 'import hashlib,json,pathlib; p=pathlib.Path("dist-source-provider/cub_source_provider.json"); d=json.loads(p.read_text()); b=p.parent/d["binary"]["path"]; assert hashlib.sha256(b.read_bytes()).hexdigest()==d["binary"]["sha256"]'
+          if ($LASTEXITCODE -ne 0) { throw "CUB addon compilation failed." }
+          python scripts/validate_source_provider.py `
+            --manifest dist-source-provider/cub_source_provider.json `
+            --platform windows --output dist-source-provider/build-audit.json
+          if ($LASTEXITCODE -ne 0) { throw "CUB addon dependency audit failed." }
 
       - name: Download prebuilt LLVM 20
         shell: pwsh

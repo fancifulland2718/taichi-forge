@@ -19,7 +19,7 @@ from pathlib import Path
 _PROVIDER_ABI = "taichi-forge-cub-source-provider-c-abi1"
 # Keep the standalone builder runnable from a source checkout that has no
 # Forge extension module yet. The manifest loader's unit test pins this value.
-_MANIFEST_SCHEMA_VERSION = 2
+_MANIFEST_SCHEMA_VERSION = 3
 
 
 def _sha256(path):
@@ -51,6 +51,30 @@ def _nvcc_version(nvcc):
     return match.group(1)
 
 
+def _static_cudart(toolkit_root):
+    candidates = (
+        toolkit_root / "lib" / "x64" / "cudart_static.lib",
+        toolkit_root / "lib64" / "libcudart_static.a",
+    )
+    for path in candidates:
+        if path.is_file():
+            return path
+    raise RuntimeError("could not locate the CUDART static library")
+
+
+def _audit_target_code(cuobjdump, binary, targets):
+    # Verify emitted code, not just the requested -gencode flags. Listing PTX
+    # reports sm_NN names too, so preserve the container kind explicitly.
+    sass = _run_output([str(cuobjdump), "--list-elf", str(binary)])
+    ptx = _run_output([str(cuobjdump), "--list-ptx", str(binary)])
+    observed = {f"sm_{item}" for item in re.findall(r"\.sm_(\d+)\.cubin\b", sass)}
+    observed.update(f"compute_{item}" for item in re.findall(r"\.sm_(\d+)\.ptx\b", ptx))
+    if observed != set(targets):
+        raise RuntimeError(
+            f"emitted device code differs from requested targets: {sorted(observed)} vs {targets}"
+        )
+
+
 def _toolkit_versions(toolkit_root):
     version_path = toolkit_root / "version.json"
     if not version_path.is_file():
@@ -61,7 +85,9 @@ def _toolkit_versions(toolkit_root):
         try:
             value = document[component]["version"]
         except (KeyError, TypeError) as exc:
-            raise RuntimeError(f"CUDA Toolkit version manifest lacks {component}") from exc
+            raise RuntimeError(
+                f"CUDA Toolkit version manifest lacks {component}"
+            ) from exc
         if not isinstance(value, str) or not value:
             raise RuntimeError(f"CUDA Toolkit {component} version is invalid")
         return value
@@ -131,7 +157,11 @@ def _host_compiler(explicit):
             "could not find the NVCC host compiler; pass --host-compiler explicitly"
         )
     identity = f"{compiler.name}:sha256:{_sha256(compiler)}"
-    cxx_abi = "msvc-x64" if os.name == "nt" else f"{platform.system().lower()}-{platform.machine()}"
+    cxx_abi = (
+        "msvc-x64"
+        if os.name == "nt"
+        else f"{platform.system().lower()}-{platform.machine()}"
+    )
     return compiler, identity, cxx_abi
 
 
@@ -169,9 +199,19 @@ def build_cub_source_provider(
     cuda_version, cudart_version = _toolkit_versions(toolkit_root)
     cub_version, cub_version_header = _cub_identity(toolkit_root)
     nvcc_version = _nvcc_version(nvcc_path)
+    targets = _target_code(
+        target_code if isinstance(target_code, str) else ",".join(target_code)
+    )
+    ptxas = nvcc_path.with_name("ptxas.exe" if os.name == "nt" else "ptxas")
+    compiler_components = [
+        {"name": "nvcc", "version": nvcc_version, "sha256": _sha256(nvcc_path)},
+    ]
+    if any(code.startswith("sm_") for code in targets):
+        compiler_components.append(
+            {"name": "ptxas", "version": _nvcc_version(ptxas), "sha256": _sha256(ptxas)}
+        )
+    cudart_static = _static_cudart(toolkit_root)
     compiler, compiler_identity, cxx_abi = _host_compiler(host_compiler)
-    targets = _target_code(target_code) if isinstance(target_code, str) else tuple(target_code)
-
     output = Path(output_directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
     suffix = ".dll" if os.name == "nt" else ".so"
@@ -200,9 +240,24 @@ def build_cub_source_provider(
     subprocess.run(command, check=True)
     if not binary.is_file():
         raise RuntimeError("NVCC completed without producing the provider binary")
+    cuobjdump = nvcc_path.with_name("cuobjdump.exe" if os.name == "nt" else "cuobjdump")
+    _audit_target_code(cuobjdump, binary, targets)
 
     document = {
         "schema_version": _MANIFEST_SCHEMA_VERSION,
+        "build_profile": {
+            "schema_version": 1,
+            "kind": "cuda-toolkit-addon",
+            "abi_boundary": "provider-c-abi",
+            "driver_contract": {
+                # This CUB reference uses ordinary launch/memory APIs, with
+                # no dependency on a newer minor-release Driver API feature.
+                "minimum_api_version": int(cudart_version.split(".")[0]) * 1000,
+                "ptx_api_version": int(nvcc_version.split(".")[0]) * 1000
+                + int(nvcc_version.split(".")[1]) * 10,
+                "basis": "cuda-minor-compatibility-for-sass; compiler-release-driver-for-ptx-jit",
+            },
+        },
         "provider_id": "cub_reference",
         "provider_abi": _PROVIDER_ABI,
         "provider_abi_version": 1,
@@ -210,6 +265,7 @@ def build_cub_source_provider(
         "toolchain": {
             "cuda_toolkit": cuda_version,
             "nvcc": nvcc_version,
+            "compiler_components": compiler_components,
             "host_compiler": compiler_identity,
             "cxx_abi": cxx_abi,
             "build_flags": flags,
@@ -227,7 +283,7 @@ def build_cub_source_provider(
                 "name": "cudart",
                 "linkage": "static",
                 "version": cudart_version,
-                "sha256": None,
+                "sha256": _sha256(cudart_static),
             }
         ],
         "source_identity": {"kind": "sha256", "value": _sha256(source)},
@@ -258,7 +314,9 @@ def build_cub_source_provider(
             },
         ],
     }
-    manifest.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return manifest
 
 

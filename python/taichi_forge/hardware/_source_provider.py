@@ -13,7 +13,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 
-SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION = 2
+SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION = 3
 
 _TOP_LEVEL_FIELDS = frozenset(
     (
@@ -43,6 +43,40 @@ _TOOLCHAIN_FIELDS = frozenset(
 _SOURCE_IDENTITY_FIELDS = frozenset(("kind", "value"))
 _DEPENDENCY_FIELDS = frozenset(("name", "linkage", "version", "sha256"))
 _SOURCE_DEPENDENCY_FIELDS = frozenset(("name", "version", "sha256"))
+_BUILD_PROFILE_FIELDS = frozenset(
+    ("schema_version", "kind", "abi_boundary", "driver_contract")
+)
+_DRIVER_CONTRACT_FIELDS = frozenset(("minimum_api_version", "ptx_api_version", "basis"))
+
+
+def _build_profile(value):
+    value = _mapping(value, "build_profile")
+    _exact_fields(value, _BUILD_PROFILE_FIELDS, "build_profile")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise SourceProviderManifestError("unsupported build-profile schema")
+    if (
+        value["kind"] != "cuda-toolkit-addon"
+        or value["abi_boundary"] != "provider-c-abi"
+    ):
+        raise SourceProviderManifestError(
+            "source providers require a CUDA addon with a provider C ABI"
+        )
+    driver = _mapping(value["driver_contract"], "build_profile.driver_contract")
+    _exact_fields(driver, _DRIVER_CONTRACT_FIELDS, "build_profile.driver_contract")
+    for name in ("minimum_api_version", "ptx_api_version"):
+        version = driver[name]
+        if isinstance(version, bool) or not isinstance(version, int) or version <= 0:
+            raise SourceProviderManifestError(
+                f"driver_contract.{name} must be a positive integer"
+            )
+    if driver["ptx_api_version"] < driver["minimum_api_version"]:
+        raise SourceProviderManifestError(
+            "PTX driver API requirement cannot precede the runtime floor"
+        )
+    _string(driver["basis"], "driver_contract.basis")
+    return MappingProxyType(
+        {**value, "driver_contract": MappingProxyType(dict(driver))}
+    )
 
 
 class SourceProviderManifestError(ValueError):
@@ -66,7 +100,9 @@ def _exact_fields(value, expected, name):
         details.append("missing " + ", ".join(missing))
     if unexpected:
         details.append("unexpected " + ", ".join(unexpected))
-    raise SourceProviderManifestError(f"{name} fields are not exact: " + "; ".join(details))
+    raise SourceProviderManifestError(
+        f"{name} fields are not exact: " + "; ".join(details)
+    )
 
 
 def _string(value, name):
@@ -77,7 +113,9 @@ def _string(value, name):
 
 def _string_tuple(value, name, *, allow_empty=False, allow_duplicates=False):
     if not isinstance(value, list) or (not value and not allow_empty):
-        suffix = "a JSON string array" if allow_empty else "a nonempty JSON string array"
+        suffix = (
+            "a JSON string array" if allow_empty else "a nonempty JSON string array"
+        )
         raise SourceProviderManifestError(f"{name} must be {suffix}")
     result = tuple(_string(item, f"{name} entry") for item in value)
     if not allow_duplicates and len(set(result)) != len(result):
@@ -88,7 +126,9 @@ def _string_tuple(value, name, *, allow_empty=False, allow_duplicates=False):
 def _sha256(value, name):
     value = _string(value, name).lower()
     if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
-        raise SourceProviderManifestError(f"{name} must be a lowercase SHA-256 hex digest")
+        raise SourceProviderManifestError(
+            f"{name} must be a lowercase SHA-256 hex digest"
+        )
     return value
 
 
@@ -103,15 +143,21 @@ def _file_sha256(path):
 def _confined_binary_path(manifest_path, relative_path):
     relative = Path(_string(relative_path, "binary.path"))
     if relative.is_absolute():
-        raise SourceProviderManifestError("binary.path must be relative to the manifest directory")
+        raise SourceProviderManifestError(
+            "binary.path must be relative to the manifest directory"
+        )
     root = manifest_path.parent.resolve()
     candidate = (root / relative).resolve()
     try:
         candidate.relative_to(root)
     except ValueError as exc:
-        raise SourceProviderManifestError("binary.path escapes the manifest directory") from exc
+        raise SourceProviderManifestError(
+            "binary.path escapes the manifest directory"
+        ) from exc
     if not candidate.is_file():
-        raise SourceProviderManifestError(f"source-provider binary does not exist: {candidate}")
+        raise SourceProviderManifestError(
+            f"source-provider binary does not exist: {candidate}"
+        )
     return candidate
 
 
@@ -119,7 +165,11 @@ def _target_code(value):
     result = _string_tuple(value, "toolchain.target_code")
     for item in result:
         prefix, separator, capability = item.partition("_")
-        if separator != "_" or prefix not in ("sm", "compute") or not capability.isdigit():
+        if (
+            separator != "_"
+            or prefix not in ("sm", "compute")
+            or not capability.isdigit()
+        ):
             raise SourceProviderManifestError(
                 "toolchain.target_code entries must use sm_NN or compute_NN"
             )
@@ -141,22 +191,20 @@ class SourceProviderSourceDependency:
     sha256: str
 
 
-def _source_dependencies(value):
+def _source_dependencies(value, field="source_dependencies"):
     if not isinstance(value, list) or not value:
         raise SourceProviderManifestError(
-            "toolchain.source_dependencies must be a nonempty JSON object array"
+            f"toolchain.{field} must be a nonempty JSON object array"
         )
     dependencies = []
     names = set()
     for index, item in enumerate(value):
-        name = f"toolchain.source_dependencies[{index}]"
+        name = f"toolchain.{field}[{index}]"
         item = _mapping(item, name)
         _exact_fields(item, _SOURCE_DEPENDENCY_FIELDS, name)
         dependency_name = _string(item["name"], f"{name}.name")
         if dependency_name in names:
-            raise SourceProviderManifestError(
-                "toolchain source dependency names must be unique"
-            )
+            raise SourceProviderManifestError(f"toolchain {field} names must be unique")
         names.add(dependency_name)
         dependencies.append(
             SourceProviderSourceDependency(
@@ -181,20 +229,130 @@ class SourceProviderManifest:
     source_identity: object
     specializations: tuple
     manifest_sha256: str
+    build_profile: object = None
+
+    def cuda_compatibility(self, capability, driver_api_version):
+        """Evaluate declared code/driver requirements at explicit load/search.
+
+        Eligibility is not execution qualification. Library initialization,
+        optional APIs and numerical qualification still belong to the provider.
+        Legacy manifests do not acquire an invented driver contract.
+        """
+        if (
+            isinstance(capability, bool)
+            or not isinstance(capability, int)
+            or capability <= 0
+        ):
+            raise ValueError("CUDA compute capability must be a positive integer")
+        if driver_api_version is not None and (
+            isinstance(driver_api_version, bool)
+            or not isinstance(driver_api_version, int)
+            or driver_api_version <= 0
+        ):
+            raise ValueError(
+                "CUDA driver API version must be a positive integer or None"
+            )
+        targets = self.toolchain["target_code"]
+        sass = [
+            code
+            for code in targets
+            if code.startswith("sm_")
+            and int(code[3:]) // 10 == capability // 10
+            and int(code[3:]) <= capability
+        ]
+        ptx = [
+            code
+            for code in targets
+            if code.startswith("compute_") and int(code[8:]) <= capability
+        ]
+        path = "sass" if sass else "ptx_jit" if ptx else None
+        required = None
+        reason = None if path else "target_code_unavailable"
+        if self.build_profile is not None and path:
+            contract = self.build_profile["driver_contract"]
+            required = contract["minimum_api_version" if sass else "ptx_api_version"]
+            if driver_api_version is None:
+                reason = "driver_version_unavailable"
+            elif driver_api_version < required:
+                reason = "driver_api_too_old" if sass else "ptx_jit_driver_too_old"
+        return {
+            "eligible": reason is None,
+            "code_path": path,
+            "required_driver_api_version": required,
+            "observed_driver_api_version": driver_api_version,
+            "unavailable_reason": reason,
+            "driver_contract_declared": self.build_profile is not None,
+            "execution_qualified": False,
+        }
+
+    def build_report(self):
+        """JSON-safe build facts, without probing or loading any external runtime."""
+        compilers = self.toolchain.get("compiler_components", ())
+        components = [
+            *(
+                {
+                    "name": item.name,
+                    "version": item.version,
+                    "sha256": item.sha256,
+                    "role": "compiler",
+                }
+                for item in compilers
+            ),
+            *(
+                {
+                    "name": item.name,
+                    "version": item.version,
+                    "sha256": item.sha256,
+                    "role": "source",
+                }
+                for item in self.toolchain["source_dependencies"]
+            ),
+            *(
+                {
+                    "name": item.name,
+                    "version": item.version,
+                    "sha256": item.sha256,
+                    "role": item.linkage,
+                }
+                for item in self.runtime_dependencies
+            ),
+        ]
+        if not compilers:
+            components.insert(
+                0,
+                {"name": "nvcc", "version": self.toolchain["nvcc"], "role": "compiler"},
+            )
+        profile = (
+            None
+            if self.build_profile is None
+            else {
+                **self.build_profile,
+                "driver_contract": dict(self.build_profile["driver_contract"]),
+            }
+        )
+        facts = {
+            "profile": profile,
+            "toolkit_release": self.toolchain["cuda_toolkit"],
+            "components": components,
+            "target_code": list(self.toolchain["target_code"]),
+            "provider_abi": self.provider_abi,
+            "provider_abi_version": self.provider_abi_version,
+            "binary_sha256": self.binary_sha256,
+            "host_abi": self.toolchain["cxx_abi"],
+        }
+        # Binary identity binds compile options and source; local compiler paths,
+        # manifest whitespace, and repository HEAD are not compatibility axes.
+        facts["build_identity"] = (
+            "source-build:"
+            + hashlib.sha256(
+                json.dumps(facts, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        )
+        return facts
 
     def supports_cuda_compute_capability(self, capability):
-        """Checks exact cubin or forward-compatible embedded PTX coverage."""
-
-        if isinstance(capability, bool) or not isinstance(capability, int) or capability <= 0:
-            raise ValueError("CUDA compute capability must be a positive integer")
-        target_code = self.toolchain["target_code"]
-        if f"sm_{capability}" in target_code:
-            return True
-        return any(
-            int(item.removeprefix("compute_")) <= capability
-            for item in target_code
-            if item.startswith("compute_")
-        )
+        """Check standard cubin/PTX architecture coverage, not driver eligibility."""
+        return self.cuda_compatibility(capability, None)["code_path"] is not None
 
     @property
     def identity(self):
@@ -221,19 +379,32 @@ def load_source_provider_manifest(
 
     path = Path(manifest_path).resolve()
     if not path.is_file():
-        raise SourceProviderManifestError(f"source-provider manifest does not exist: {path}")
+        raise SourceProviderManifestError(
+            f"source-provider manifest does not exist: {path}"
+        )
     raw = path.read_bytes()
     try:
         document = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SourceProviderManifestError("source-provider manifest must be UTF-8 JSON") from exc
+        raise SourceProviderManifestError(
+            "source-provider manifest must be UTF-8 JSON"
+        ) from exc
     document = _mapping(document, "manifest")
-    _exact_fields(document, _TOP_LEVEL_FIELDS, "manifest")
-    if document["schema_version"] != SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION:
+    schema = document.get("schema_version")
+    if type(schema) is not int or schema not in (
+        2,
+        SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION,
+    ):
         raise SourceProviderManifestError(
             "unsupported source-provider manifest schema "
-            f"{document['schema_version']!r}; expected {SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION}"
+            f"{schema!r}; expected 2 or {SOURCE_PROVIDER_MANIFEST_SCHEMA_VERSION}"
         )
+    _exact_fields(
+        document,
+        _TOP_LEVEL_FIELDS | ({"build_profile"} if schema == 3 else set()),
+        "manifest",
+    )
+    build_profile = _build_profile(document["build_profile"]) if schema == 3 else None
 
     provider_id = _string(document["provider_id"], "provider_id")
     provider_abi = _string(document["provider_abi"], "provider_abi")
@@ -243,7 +414,9 @@ def load_source_provider_manifest(
         or not isinstance(provider_abi_version, int)
         or provider_abi_version <= 0
     ):
-        raise SourceProviderManifestError("provider_abi_version must be a positive integer")
+        raise SourceProviderManifestError(
+            "provider_abi_version must be a positive integer"
+        )
     if expected_provider_id is not None and provider_id != expected_provider_id:
         raise SourceProviderManifestError(
             f"source-provider id {provider_id!r} does not match {expected_provider_id!r}"
@@ -265,12 +438,20 @@ def load_source_provider_manifest(
         )
 
     toolchain_value = _mapping(document["toolchain"], "toolchain")
-    _exact_fields(toolchain_value, _TOOLCHAIN_FIELDS, "toolchain")
+    _exact_fields(
+        toolchain_value,
+        _TOOLCHAIN_FIELDS | ({"compiler_components"} if schema == 3 else set()),
+        "toolchain",
+    )
     toolchain = MappingProxyType(
         {
-            "cuda_toolkit": _string(toolchain_value["cuda_toolkit"], "toolchain.cuda_toolkit"),
+            "cuda_toolkit": _string(
+                toolchain_value["cuda_toolkit"], "toolchain.cuda_toolkit"
+            ),
             "nvcc": _string(toolchain_value["nvcc"], "toolchain.nvcc"),
-            "host_compiler": _string(toolchain_value["host_compiler"], "toolchain.host_compiler"),
+            "host_compiler": _string(
+                toolchain_value["host_compiler"], "toolchain.host_compiler"
+            ),
             "cxx_abi": _string(toolchain_value["cxx_abi"], "toolchain.cxx_abi"),
             "build_flags": _string_tuple(
                 toolchain_value["build_flags"],
@@ -281,6 +462,15 @@ def load_source_provider_manifest(
             "target_code": _target_code(toolchain_value["target_code"]),
             "source_dependencies": _source_dependencies(
                 toolchain_value["source_dependencies"]
+            ),
+            **(
+                {
+                    "compiler_components": _source_dependencies(
+                        toolchain_value["compiler_components"], "compiler_components"
+                    )
+                }
+                if schema == 3
+                else {}
             ),
         }
     )
@@ -299,7 +489,9 @@ def load_source_provider_manifest(
         dependency_names.add(name)
         linkage = _string(item["linkage"], f"runtime_dependencies[{index}].linkage")
         if linkage not in ("dynamic", "static"):
-            raise SourceProviderManifestError("runtime dependency linkage must be dynamic or static")
+            raise SourceProviderManifestError(
+                "runtime dependency linkage must be dynamic or static"
+            )
         dependency_hash = item["sha256"]
         if dependency_hash is not None:
             dependency_hash = _sha256(
@@ -309,7 +501,9 @@ def load_source_provider_manifest(
             SourceProviderRuntimeDependency(
                 name=name,
                 linkage=linkage,
-                version=_string(item["version"], f"runtime_dependencies[{index}].version"),
+                version=_string(
+                    item["version"], f"runtime_dependencies[{index}].version"
+                ),
                 sha256=dependency_hash,
             )
         )
@@ -326,12 +520,16 @@ def load_source_provider_manifest(
 
     specializations_value = document["specializations"]
     if not isinstance(specializations_value, list) or not specializations_value:
-        raise SourceProviderManifestError("specializations must be a nonempty JSON object array")
+        raise SourceProviderManifestError(
+            "specializations must be a nonempty JSON object array"
+        )
     specializations = []
     for index, item in enumerate(specializations_value):
         item = _mapping(item, f"specializations[{index}]")
         if not item:
-            raise SourceProviderManifestError(f"specializations[{index}] must not be empty")
+            raise SourceProviderManifestError(
+                f"specializations[{index}] must not be empty"
+            )
         for key, value in item.items():
             _string(key, f"specializations[{index}] key")
             if not isinstance(value, (str, int, bool)) or isinstance(value, float):
@@ -352,6 +550,7 @@ def load_source_provider_manifest(
         source_identity=source_identity,
         specializations=tuple(specializations),
         manifest_sha256=hashlib.sha256(raw).hexdigest(),
+        build_profile=build_profile,
     )
 
 

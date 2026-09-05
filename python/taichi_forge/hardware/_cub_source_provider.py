@@ -9,6 +9,7 @@ startup and without relinking the Forge runtime.
 import ctypes
 import threading
 
+from taichi_forge._lib import core as _ti_core
 from taichi_forge._hardware_telemetry import (
     hardware_provider_call,
     instrument_hardware_recording,
@@ -195,7 +196,15 @@ class _CubSourceLibrary:
             or (info.features & _REQUIRED_FEATURES) != _REQUIRED_FEATURES
         ):
             raise TaichiRuntimeError("CUB source-provider ABI identity is incomplete")
-        expected_cuda = _encoded_cuda_version(manifest.toolchain["cuda_toolkit"])
+        cudart = next(
+            (item for item in manifest.runtime_dependencies if item.name == "cudart"),
+            None,
+        )
+        if cudart is None:
+            raise TaichiRuntimeError(
+                "CUB source-provider manifest lacks its CUDART dependency"
+            )
+        expected_cuda = _encoded_cuda_version(cudart.version)
         expected_cub = _encoded_cub_version(
             _source_dependency(manifest, "cccl/cub").version
         )
@@ -303,6 +312,11 @@ class CubSourcePlan(BackendCommandRecording):
         )
         self.workspace_bytes = provider._library.workspace_bytes(query)
         self.workspace = impl.ndarray(u8, shape=max(1, self.workspace_bytes))
+        build_report = provider.manifest.build_report()
+        self._graph_semantic_fingerprint = (
+            f"forge.primitive.v1:{operation}:{self.num_items}"
+        )
+        self._graph_physical_plan_id = f"{build_report['build_identity']}:{operation}:{self.num_items}:{self.workspace_bytes}"
         identity = make_retained_plan_identity(
             "algorithms.primitives.cub",
             "cub_reference",
@@ -311,7 +325,12 @@ class CubSourcePlan(BackendCommandRecording):
                 "provider_abi": CUB_SOURCE_PROVIDER_ABI,
                 "provider_version": provider.version,
                 "provider_binary_identity": provider.manifest.binary_sha256,
-                "provider_manifest_identity": provider.manifest.manifest_sha256,
+                "provider_manifest_identity": (
+                    build_report["build_identity"]
+                    if provider.manifest.build_profile is not None
+                    else provider.manifest.manifest_sha256
+                ),
+                "build_profile": build_report,
             },
             problem_scope={"operation": operation, "num_items": self.num_items},
             execution_scope={
@@ -449,11 +468,18 @@ class CubSourceProvider:
             expected_provider_abi=CUB_SOURCE_PROVIDER_ABI,
         )
         capability = int(impl.get_cuda_compute_capability())
-        if not manifest.supports_cuda_compute_capability(capability):
+        compatibility = manifest.cuda_compatibility(
+            capability, _ti_core.cuda_driver_api_version()
+        )
+        if not compatibility["eligible"]:
             raise TaichiRuntimeError(
-                f"CUB source-provider has no code compatible with CUDA capability {capability}"
+                f"CUB source-provider is unavailable: {compatibility['unavailable_reason']}; "
+                f"CUDA capability={capability}, required driver API="
+                f"{compatibility['required_driver_api_version']}, "
+                f"observed={compatibility['observed_driver_api_version']}"
             )
         self.manifest = manifest
+        self.compatibility = compatibility
         self._library = _load_process_library(manifest)
         self._runtime_prog = impl.get_runtime().prog
         self._runtime_generation = int(impl.runtime_generation())
