@@ -1,7 +1,24 @@
 """Cold, provider-owned storage contributions to a runtime Graph instance."""
 
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+
+
+@dataclass(frozen=True)
+class GraphStoragePoolReport:
+    """Explicit cold-boundary measurements, separate from requested storage."""
+
+    allocator: str
+    allocation_members: tuple[str, ...]
+    allocation_count: int
+    requested_bytes: int
+    used_current_bytes: int | None
+    reserved_current_bytes: int | None
+    used_high_bytes: int | None
+    reserved_high_bytes: int | None
+    release_threshold_bytes: int | None
+    closed: bool
+    instance_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -17,6 +34,7 @@ class GraphRuntimeStoragePlan:
     binding_names: tuple[str, ...]
     temporary_arena: bool
     factory: object = field(repr=False, compare=False)
+    temporary_capacity: int | None = None
 
     def __post_init__(self):
         if not isinstance(self.plan_id, str) or not self.plan_id:
@@ -28,6 +46,13 @@ class GraphRuntimeStoragePlan:
             raise ValueError("Graph storage plan must own private bindings or a temporary arena")
         if not callable(self.factory):
             raise TypeError("Graph storage owner factory must be callable")
+        if self.temporary_capacity is not None and (
+            not self.temporary_arena
+            or isinstance(self.temporary_capacity, bool)
+            or not isinstance(self.temporary_capacity, int)
+            or not 1 <= self.temporary_capacity <= 64
+        ):
+            raise ValueError("Graph storage temporary capacity requires an arena and a bounded slot count")
         object.__setattr__(self, "binding_names", names)
 
 
@@ -69,6 +94,7 @@ def create_storage_owners(instance, plans):
     """Publish each owner immediately so partial construction can retire it."""
     allocators = {}
     arena_allocator = None
+    arena_capacity = None
     for plan in plans:
         owner = plan.factory()
         instance._storage_owners += (owner,)
@@ -76,7 +102,18 @@ def create_storage_owners(instance, plans):
         allocators.update((name, allocate) for name in plan.binding_names)
         if plan.temporary_arena:
             arena_allocator = allocate
-    return allocators, arena_allocator
+            arena_capacity = plan.temporary_capacity
+    return allocators, arena_allocator, arena_capacity
+
+
+def storage_pool_reports(instances):
+    """Only called by explicit execution_stats, never by replay or acquisition."""
+    return tuple(
+        replace(observe(), instance_index=index)
+        for index, instance in enumerate(instances)
+        for owner in instance._storage_owners
+        if (observe := getattr(owner, "storage_pool_report", None)) is not None
+    )
 
 
 def retire_storage_owners(instance):

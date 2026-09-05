@@ -458,10 +458,19 @@ class GraphPhysicalResourceManifest:
     scope: str = "internal"
     binding_name: str = ""
     exclusive_submission: bool = False
+    allocation_members: tuple[str, ...] = ()
+    allocation_count: int | None = None
 
     def __post_init__(self):
         _required_text(self.resource_id, "Graph physical resource ID")
         _required_text(self.kind, "Graph physical resource kind")
+        members = tuple(self.allocation_members)
+        for member in members:
+            _required_text(member, "Graph allocation group member")
+        if len(set(members)) != len(members):
+            raise GraphPhysicalManifestError("Graph allocation group members must be unique")
+        object.__setattr__(self, "allocation_members", tuple(sorted(members)))
+        _nonnegative_int(self.allocation_count, "Graph physical allocation count", optional=True)
         _nonnegative_int(
             self.requested_bytes,
             "Graph physical resource requested bytes",
@@ -521,6 +530,8 @@ class GraphPhysicalResourceManifest:
             "scope": self.scope,
             "binding_name": self.binding_name,
             "exclusive_submission": self.exclusive_submission,
+            **({"allocation_members": self.allocation_members} if self.allocation_members else {}),
+            **({"allocation_count": self.allocation_count} if self.allocation_count is not None else {}),
         }
 
 
@@ -594,6 +605,8 @@ def _resource_identity_payload(resources, public_bindings):
                 resource.binding_name if resource.scope == "public_external" else ""
             ),
             "exclusive_submission": resource.exclusive_submission,
+            **({"allocation_members": resource.allocation_members} if resource.allocation_members else {}),
+            **({"allocation_count": resource.allocation_count} if resource.allocation_count is not None else {}),
         }
         for index, resource in enumerate(resources)
     )
@@ -1191,22 +1204,35 @@ def observe_graph_physical_manifest(definition, recipe, graph):
     bounded_control_bytes = int(memory.persistent_bounded_control_bytes)
     persistent_non_bounded_bytes = int(memory.persistent_bytes) - bounded_control_bytes
     if persistent_non_bounded_bytes < 0:
-        raise GraphPhysicalManifestError(
-            "Graph bounded-control memory exceeds total persistent memory"
+        raise GraphPhysicalManifestError("Graph bounded-control memory exceeds total persistent memory")
+    # These owners allocated actual Program-registered arrays. Their grouping
+    # is physical identity; current/high pool backing pages are observations,
+    # not requested allocations and must not perturb identity after replay.
+    for index, pool in enumerate(execution.storage_pools):
+        if pool.closed or pool.allocation_count == 0:
+            raise GraphPhysicalManifestError("materialized Graph storage pool has no live allocation owner")
+        resources.append(
+            GraphPhysicalResourceManifest(
+                resource_id=f"graph:storage_pool:{index}",
+                kind=pool.allocator,
+                requested_bytes=pool.requested_bytes,
+                allocated_bytes=pool.requested_bytes,
+                alignment=1,
+                ownership="graph_instance",
+                lifetime="graph",
+                allocation_members=pool.allocation_members,
+                allocation_count=pool.allocation_count,
+                exclusive_submission=memory.internal_storage_exclusive,
+            )
         )
+        persistent_non_bounded_bytes -= pool.requested_bytes
+    if persistent_non_bounded_bytes < 0:
+        raise GraphPhysicalManifestError("Graph pool storage exceeds reported persistent allocation")
     if persistent_non_bounded_bytes:
         resources.append(
             GraphPhysicalResourceManifest(
-                resource_id=(
-                    "graph:persistent_non_bounded"
-                    if bounded_control_bytes
-                    else "graph:persistent"
-                ),
-                kind=(
-                    "graph_owned_non_bounded"
-                    if bounded_control_bytes
-                    else "graph_owned_aggregate"
-                ),
+                resource_id=("graph:persistent_non_bounded" if bounded_control_bytes else "graph:persistent"),
+                kind=("graph_owned_non_bounded" if bounded_control_bytes else "graph_owned_aggregate"),
                 requested_bytes=persistent_non_bounded_bytes,
                 allocated_bytes=persistent_non_bounded_bytes,
                 alignment=1,

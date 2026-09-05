@@ -442,6 +442,7 @@ def default_graph_recipe_providers():
     )
     from taichi_forge.graph._recipes.graph_memory import GraphMemoryRecipeProvider
     from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
+    from taichi_forge.graph._recipes.resource_lifetime import GraphResourceLifetimeRecipeProvider
     from taichi_forge.graph._recipes.semantic_families import (
         GraphBoundedExecutionRecipeProvider,
         GraphNativeAlgorithmRecipeProvider,
@@ -462,6 +463,7 @@ def default_graph_recipe_providers():
         GraphBranchJoinRecipeProvider(),
         GraphRecordingPartitionRecipeProvider(),
         GraphBindingFrameRecipeProvider(),
+        GraphResourceLifetimeRecipeProvider(),
         GraphWorkspaceConcurrencyRecipeProvider(),
         GraphBoundedExecutionRecipeProvider(),
         GraphStructuredControlRecipeProvider(),

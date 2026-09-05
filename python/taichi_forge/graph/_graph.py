@@ -495,7 +495,6 @@ class _GraphTemporaryArena:
         self._allocations = 0
         self._reuses = 0
         self._waits = 0
-        self._storage_bytes = _align_up(plan.planned_peak_bytes, self._WORD_BYTES)
         self._typed_slot_bytes = {}
         for allocation in plan.allocations:
             if allocation.storage_kind == "f32":
@@ -512,6 +511,10 @@ class _GraphTemporaryArena:
             default=0,
         )
         self._raw_storage_bytes = _align_up(self._raw_storage_bytes, self._WORD_BYTES)
+        # Typed slots are separate allocations, not slices in the raw arena.
+        # Report actual requested storage rather than padding in the logical
+        # combined liveness plan. Driver pool backing pages are separate data.
+        self._storage_bytes = self._raw_storage_bytes + sum(self._typed_slot_bytes.values())
         self._available = bool(plan.allocations) and not (
             plan.conflicting_requirements
             or any(
@@ -1914,6 +1917,7 @@ class GraphExecutionReport:
     segments: Tuple[GraphExecutionSegmentReport, ...]
     memory: GraphMemoryReport
     provider_memory: Tuple[object, ...]
+    storage_pools: Tuple[object, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -4527,6 +4531,7 @@ def _execution_report(
     telemetry_arena_stats=None,
     internal_storage_stats=None,
     provider_memory=(),
+    storage_pools=(),
 ):
     flat_backend_stats = tuple(_flatten_backend_stats(backend_stats))
     segments = []
@@ -4881,6 +4886,7 @@ def _execution_report(
         segments=tuple(segments),
         memory=memory,
         provider_memory=provider_memory,
+        storage_pools=tuple(storage_pools),
     )
 
 
@@ -10454,6 +10460,17 @@ def _cuda_structured_control_recipe_domain(source_nodes, control_nodes, backend)
     return _CUDA_NESTED_CONTROL_RECIPE_IDS, selected
 
 
+def _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label):
+    # Reconstruct only bindings still consumed by this dispatch. Copying the
+    # entire old fixed frame would also retain workspaces of replaced recipes.
+    # The frozen declaration object preserves private aliases and lifetime.
+    for symbolic in args:
+        name = getattr(symbolic, "name", None)
+        if name in node.fixed_runtime_args:
+            builder._bind_internal_runtime_arg(symbolic, node.fixed_runtime_args[name])
+    builder._record_dispatch(kernel_cpp, list(args), label)
+
+
 def _replay_recipe_cgraph_node(
     node,
     assembly,
@@ -10500,7 +10517,7 @@ def _replay_recipe_cgraph_node(
                 )
             if rewriters:
                 kernel_cpp, contracts, layout_requirements = rewriters[0]()
-            builder._record_dispatch(kernel_cpp, list(args), label)
+            _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label)
             if contracts or layout_requirements:
                 builder._pending_ir_nodes[-1] = replace(
                     builder._pending_ir_nodes[-1],
@@ -10585,7 +10602,7 @@ def _replay_recording_partition_nodes(node, source):
     )
     for index, (operation, child) in enumerate(zip(operations, children), start=1):
         _, kernel_cpp, args, label, *_ = operation
-        builder._record_dispatch(kernel_cpp, list(args), label)
+        _record_frozen_recipe_dispatch(builder, node, kernel_cpp, args, label)
         # Keep the frozen semantic/effect contract verbatim.  Recompiling the
         # dispatch recovers the executable packet; it must not silently erase
         # memory, alias, or logical identity metadata owned by the definition.
@@ -12462,12 +12479,12 @@ class _GraphInstance:
         self.spec = spec
         self.key = key
         storage_plans = getattr(spec, "_storage_plans", ())
-        allocators, arena_allocator = {}, None
+        allocators, arena_allocator, arena_capacity = {}, None, None
         if storage_plans:
             from taichi_forge.graph._recipes.runtime_storage import create_storage_owners, validate_storage_plans
 
             validate_storage_plans(spec, storage_plans)
-            allocators, arena_allocator = create_storage_owners(self, storage_plans)
+            allocators, arena_allocator, arena_capacity = create_storage_owners(self, storage_plans)
         (
             self._fixed_runtime_args,
             self._internal_storages,
@@ -12486,7 +12503,7 @@ class _GraphInstance:
         self._executable = None
         self._native_nodes = None
         self._run_context = None
-        self._temporary_arena = _GraphTemporaryArena(spec.temporary_memory_plan)
+        self._temporary_arena = _GraphTemporaryArena(spec.temporary_memory_plan, capacity=arena_capacity)
         if arena_allocator is not None:
             self._temporary_arena.prepare_storage(arena_allocator)
         self._temporary_bindings = None
@@ -19062,6 +19079,9 @@ class Graph:
             provider_memory = (
                 self._spec.provider_memory_reports() if self._spec is not None else ()
             )
+            from taichi_forge.graph._recipes.runtime_storage import storage_pool_reports
+
+            storage_pools = storage_pool_reports(self._workspace_pool.instances) if lifecycle_state == "ready" else ()
             return _execution_report(
                 self._execution_definition,
                 self._execution_arch,
@@ -19077,6 +19097,7 @@ class Graph:
                 telemetry_arena_stats=telemetry_arena_stats,
                 internal_storage_stats=internal_storage_stats,
                 provider_memory=provider_memory,
+                storage_pools=storage_pools,
             )
 
     @property

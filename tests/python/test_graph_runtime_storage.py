@@ -1,6 +1,7 @@
 """Allocation ownership at assembly/instance boundaries, with real Graph work."""
 
 from types import SimpleNamespace
+from math import prod
 
 import numpy as np
 import pytest
@@ -260,6 +261,9 @@ def test_selected_temporary_ring_is_prepared_eagerly_and_reuses_registered_stora
     assert memory.temporary_arena_slots == memory.temporary_arena_capacity == 3
     assert memory.temporary_arena_allocations == 3
     assert len(owners[0].allocations) == 6
+    assert memory.persistent_temporary_bytes == sum(
+        prod(shape) * core.data_type_size(dtype) for dtype, shape in owners[0].allocations
+    )
     output = ti.ndarray(ti.i32, 131)
     for _ in range(13):
         graph.run(dict(output=output))
