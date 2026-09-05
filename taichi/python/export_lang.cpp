@@ -66,6 +66,7 @@
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/cuda/cuda_compileiq_protocol.h"
 #include "taichi/runtime/cuda/graph_binding_frame.h"
+#include "taichi/runtime/cuda/graph_memory_pool.h"
 #include "taichi/runtime/cuda/kernel_launcher.h"
 #endif
 #if defined(TI_WITH_VULKAN)
@@ -5653,6 +5654,19 @@ void export_lang(py::module &m) {
       .def("close", &cuda::GraphBindingExecutor::close,
            py::call_guard<py::gil_scoped_release>())
       .def("snapshot", &cuda::GraphBindingExecutor::snapshot,
+           py::call_guard<py::gil_scoped_release>());
+
+  py::class_<cuda::GraphMemoryPool>(m, "_CudaGraphMemoryPool")
+      .def_static("available", &cuda::GraphMemoryPool::available)
+      .def(py::init<Program &, std::uint64_t>(), py::keep_alive<1, 2>())
+      .def("create_ndarray", &cuda::GraphMemoryPool::create_ndarray,
+           py::return_value_policy::reference,
+           py::call_guard<py::gil_scoped_release>())
+      .def("trim", &cuda::GraphMemoryPool::trim,
+           py::call_guard<py::gil_scoped_release>())
+      .def("close", &cuda::GraphMemoryPool::close,
+           py::call_guard<py::gil_scoped_release>())
+      .def("snapshot", &cuda::GraphMemoryPool::snapshot,
            py::call_guard<py::gil_scoped_release>());
 #endif
 

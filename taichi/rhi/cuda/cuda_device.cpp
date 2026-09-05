@@ -22,7 +22,8 @@ CudaDevice::AllocationRecord::AllocationRecord(
       use_cached(other.use_cached),
       use_memory_pool(other.use_memory_pool),
       stream(other.stream),
-      mapping(std::move(other.mapping)) {
+      mapping(std::move(other.mapping)),
+      pool_owner(std::move(other.pool_owner)) {
   other.owner = nullptr;
   other.ptr = nullptr;
 }
@@ -40,6 +41,7 @@ CudaDevice::AllocationRecord &CudaDevice::AllocationRecord::operator=(
     use_memory_pool = other.use_memory_pool;
     stream = other.stream;
     mapping = std::move(other.mapping);
+    pool_owner = std::move(other.pool_owner);
     other.owner = nullptr;
     other.ptr = nullptr;
   }
@@ -79,6 +81,7 @@ void CudaDevice::AllocationRecord::release() {
   }
   owner = nullptr;
   ptr = nullptr;
+  pool_owner.reset();
 }
 
 CudaDevice::AllocationLease::~AllocationLease() {
@@ -112,6 +115,18 @@ CudaDevice::CudaDevice() {
 
 CudaDevice::~CudaDevice() {
   clear();
+  if (!graph_memory_pools_.empty() && backend_calls_safe()) {
+    // Program teardown normally synchronized already. A standalone device
+    // must also finish its pending frees before destroying their owned pools.
+    try {
+      auto context = CUDAContext::get_instance().get_guard();
+      CUDADriver::get_instance().stream_synchronize(nullptr);
+      collect_graph_memory_pools();
+    } catch (...) {
+      // Driver failures have been reported; pool handles share the fault
+      // domain and do not release allocations through a failed context.
+    }
+  }
 }
 
 CudaDevice::AllocInfo CudaDevice::get_alloc_info(
@@ -202,6 +217,26 @@ DeviceAllocation CudaDevice::allocate_memory_runtime(
   TI_ERROR_IF(result != RhiResult::success,
               "Failed to track CUDA runtime allocation: {}", result);
   return {this, alloc_id};
+}
+
+DeviceAllocation CudaDevice::allocate_memory_from_pool(
+    std::size_t bytes,
+    void *pool,
+    std::shared_ptr<void> pool_owner) {
+  auto mapping = std::make_unique<MappingState>();
+  auto context = CUDAContext::get_instance().get_guard();
+  void *ptr = nullptr;
+  if (bytes != 0) {
+    CUDADriver::get_instance().malloc_async_from_pool(&ptr, bytes, pool,
+                                                      nullptr);
+  }
+  AllocationRecord record(this, ptr, bytes, false, true, false, true, nullptr,
+                          std::move(mapping));
+  record.pool_owner = std::move(pool_owner);
+  auto [result, handle] = allocations_.emplace(std::move(record));
+  TI_ERROR_IF(result != RhiResult::success,
+              "Unable to register Graph pool allocation");
+  return DeviceAllocation{this, handle};
 }
 
 uint64_t *CudaDevice::allocate_llvm_runtime_memory_jit(
@@ -369,6 +404,51 @@ void CudaDevice::unmap(DeviceAllocation alloc) {
   --mapped_allocation_count_;
 }
 
+void CudaDevice::register_graph_memory_pool(std::shared_ptr<void> pool) {
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  collect_graph_memory_pools();
+  graph_memory_pools_.push_back(std::move(pool));
+}
+
+void CudaDevice::collect_graph_memory_pools() {
+  auto submission = CUDAContext::get_instance().get_submission_lock_guard();
+  std::vector<const void *> eligible;
+  for (const auto &pool : graph_memory_pools_) {
+    if (pool.use_count() == 1) {
+      eligible.push_back(pool.get());
+    }
+  }
+  if (eligible.empty()) {
+    return;
+  }
+  if (backend_calls_safe()) {
+    auto context = CUDAContext::get_instance().get_guard();
+    // All pool allocation/free operations use the legacy default stream.
+    // One nonblocking query at a cold boundary covers every eligible pool;
+    // unrelated queued work may defer reclamation, never force a replay wait.
+    auto &driver = CUDADriver::get_instance();
+    const auto result = driver.stream_query.call(nullptr);
+    if (result == CUDA_ERROR_NOT_READY) {
+      return;
+    }
+    if (result != CUDA_SUCCESS) {
+      BackendRuntimeError error(Arch::cuda, result, "stream_query",
+                                driver.stream_query.get_error_message(result));
+      report_backend_error(error);
+      throw error;
+    }
+  }
+  // A different thread may enqueue another pool's final free after the query.
+  // Only the owners known to be retired BEFORE this completion proof qualify.
+  const auto retiring = [&](const auto &pool) {
+    return std::find(eligible.begin(), eligible.end(), pool.get()) !=
+           eligible.end();
+  };
+  graph_memory_pools_.erase(std::remove_if(graph_memory_pools_.begin(),
+                                           graph_memory_pools_.end(), retiring),
+                            graph_memory_pools_.end());
+}
+
 void CudaDevice::register_graph_resource(
     const std::shared_ptr<RetainedGraphResource> &resource) {
   auto submission = CUDAContext::get_instance().get_submission_lock_guard();
@@ -395,6 +475,7 @@ void CudaDevice::clear() {
     return;
   }
   allocations_.clear();
+  collect_graph_memory_pools();
 }
 
 void CudaDevice::memcpy_internal(DevicePtr dst, DevicePtr src, uint64_t size) {

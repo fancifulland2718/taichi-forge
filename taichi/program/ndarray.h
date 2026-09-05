@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <vector>
 
 #include "taichi/inc/constants.h"
@@ -26,6 +27,15 @@ class TI_DLL_EXPORT Ndarray {
                    ExternalArrayLayout layout = ExternalArrayLayout::kNull,
                    const DebugInfo &dbg_info = DebugInfo(),
                    bool host_read = false);
+
+  // Cold materializer allocator, with the ordinary constructor ABI preserved.
+  Ndarray(Program *prog,
+          DataType type,
+          const std::vector<int> &shape,
+          ExternalArrayLayout layout,
+          const DebugInfo &dbg_info,
+          bool host_read,
+          const std::function<DeviceAllocation(std::size_t)> &allocator);
 
   /* Constructs a Ndarray from an existing DeviceAllocation.
    * It doesn't handle the allocation and deallocation.

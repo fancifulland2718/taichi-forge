@@ -955,6 +955,13 @@ class TI_DLL_EXPORT Program {
 
   ArgPack *create_argpack(const DataType dt);
 
+  // Internal materializer hook, not a raw allocation or tuning API. Storage
+  // is published as a Program-owned Ndarray with the normal resource ID.
+  Ndarray *create_ndarray_with_allocator(
+      DataType type,
+      const std::vector<int> &shape,
+      const std::function<DeviceAllocation(std::size_t)> &allocator);
+
   std::string get_kernel_return_data_layout() {
     return program_impl_->get_kernel_return_data_layout();
   };
@@ -3753,6 +3760,15 @@ class TI_DLL_EXPORT Program {
   std::vector<SNodeTreeDependency>
   snapshot_snode_tree_dependencies_unlocked(
       const std::vector<int> &tree_ids) const;
+
+  Ndarray *create_ndarray_impl(
+      DataType type,
+      const std::vector<int> &shape,
+      ExternalArrayLayout layout,
+      bool zero_fill,
+      const DebugInfo &dbg_info,
+      bool host_read,
+      const std::function<DeviceAllocation(std::size_t)> &allocator);
 
   class RuntimeSubmissionWriteScope {
    public:

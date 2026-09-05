@@ -730,6 +730,29 @@ typedef struct cublasContext *cublasHandle_t;
 
 #endif
 
+// CUDA 11.2 CUmemPoolProps: the original reserved tail includes fields added
+// by later headers. Zero it all; request only device-local, non-exportable
+// pinned memory, without requiring a Toolkit or changing the default pool.
+struct TaichiCudaMemPoolProps {
+  std::uint32_t allocation_type;
+  std::uint32_t handle_types;
+  std::uint32_t location_type;
+  std::int32_t location_id;
+  void *win32_security_attributes;
+  unsigned char reserved[64];
+};
+static_assert(sizeof(TaichiCudaMemPoolProps) == 88);
+static_assert(offsetof(TaichiCudaMemPoolProps, location_type) == 8);
+static_assert(offsetof(TaichiCudaMemPoolProps, reserved) == 24);
+#if defined(TI_WITH_CUDA_TOOLKIT_HEADERS) && CUDA_VERSION >= 11020
+static_assert(sizeof(TaichiCudaMemPoolProps) == sizeof(CUmemPoolProps));
+static_assert(alignof(TaichiCudaMemPoolProps) == alignof(CUmemPoolProps));
+static_assert(offsetof(TaichiCudaMemPoolProps, location_type) ==
+              offsetof(CUmemPoolProps, location));
+static_assert(offsetof(TaichiCudaMemPoolProps, win32_security_attributes) ==
+              offsetof(CUmemPoolProps, win32SecurityAttributes));
+#endif
+
 // The unversioned cuGraphKernelNodeGetParams and
 // cuGraphExecKernelNodeSetParams exports use CUDA_KERNEL_NODE_PARAMS_v1.
 // Modern cuda.h aliases the source API to newer exports/structures; do not

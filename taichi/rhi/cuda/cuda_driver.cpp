@@ -415,6 +415,14 @@ void CUDADriver::malloc_async(void **dev_ptr, size_t size, CUstream stream) {
   }
 }
 
+void CUDADriver::malloc_async_from_pool(void **dev_ptr,
+                                        size_t size,
+                                        void *pool,
+                                        CUstream stream) {
+  async_allocation_calls_.fetch_add(1, std::memory_order_relaxed);
+  mem_alloc_from_pool_async(dev_ptr, size, pool, stream);
+}
+
 void CUDADriver::mem_free_async(void *dev_ptr, CUstream stream) {
   if (cuda::detail::memory_allocation_route(
           CUDAContext::get_instance().supports_mem_pool()) ==

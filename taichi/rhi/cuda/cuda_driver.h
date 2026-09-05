@@ -278,6 +278,10 @@ class CUDADriver : protected CUDADriverBase {
   void (*driver_get_version)(int *);
 
   void malloc_async(void **ptr, size_t size, CUstream stream);
+  void malloc_async_from_pool(void **ptr,
+                              size_t size,
+                              void *pool,
+                              CUstream stream);
 
   void mem_free_async(void *ptr, CUstream stream);
 

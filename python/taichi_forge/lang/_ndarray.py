@@ -681,6 +681,19 @@ class ScalarNdarray(Ndarray):
         self.element_type = dtype
 
     @classmethod
+    def _graph_pool_storage(cls, dtype, arr_shape, pool):
+        """Materialize private Graph storage in an owned native CUDA pool."""
+
+        value = cls.__new__(cls)
+        Ndarray.__init__(value)
+        value.dtype = cook_dtype(dtype)
+        value.arr = pool.create_ndarray(value.dtype, arr_shape)
+        value._register_runtime_object()
+        value.shape = tuple(value.arr.shape)
+        value.element_type = dtype
+        return value
+
+    @classmethod
     def _graph_observation_storage(cls, dtype, arr_shape):
         """Allocate tiny completion-attached storage for Graph snapshots."""
 

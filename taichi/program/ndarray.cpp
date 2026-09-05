@@ -25,10 +25,20 @@ size_t flatten_index(const std::vector<int> &shapes,
 
 Ndarray::Ndarray(Program *prog,
                  const DataType type,
+                 const std::vector<int> &shape,
+                 ExternalArrayLayout layout,
+                 const DebugInfo &dbg_info,
+                 bool host_read)
+    : Ndarray(prog, type, shape, layout, dbg_info, host_read, {}) {
+}
+
+Ndarray::Ndarray(Program *prog,
+                 const DataType type,
                  const std::vector<int> &shape_,
                  ExternalArrayLayout layout_,
                  const DebugInfo &dbg_info_,
-                 bool host_read)
+                 bool host_read,
+                 const std::function<DeviceAllocation(std::size_t)> &allocator)
     : dtype(type),
       shape(shape_),
       layout(layout_),
@@ -69,7 +79,11 @@ Ndarray::Ndarray(Program *prog,
     usage = usage | AllocUsage::Indirect | AllocUsage::Vertex |
             AllocUsage::Index | AllocUsage::Uniform;
   }
-  if (host_read) {
+  if (allocator) {
+    TI_ERROR_IF(host_read,
+                "Graph storage allocator cannot supply host readback storage");
+    ndarray_alloc_ = allocator(element_size_ * nelement_);
+  } else if (host_read) {
     ndarray_alloc_ = prog->allocate_host_read_memory_on_device(
         nelement_ * element_size_, usage);
   } else {

@@ -9142,6 +9142,26 @@ Ndarray *Program::create_ndarray(const DataType type,
                                  bool zero_fill,
                                  const DebugInfo &dbg_info,
                                  bool host_read) {
+  return create_ndarray_impl(type, shape, layout, zero_fill, dbg_info,
+                             host_read, {});
+}
+
+Ndarray *Program::create_ndarray_with_allocator(
+    DataType type,
+    const std::vector<int> &shape,
+    const std::function<DeviceAllocation(std::size_t)> &allocator) {
+  return create_ndarray_impl(type, shape, ExternalArrayLayout::kNull, true,
+                             DebugInfo(), false, allocator);
+}
+
+Ndarray *Program::create_ndarray_impl(
+    DataType type,
+    const std::vector<int> &shape,
+    ExternalArrayLayout layout,
+    bool zero_fill,
+    const DebugInfo &dbg_info,
+    bool host_read,
+    const std::function<DeviceAllocation(std::size_t)> &allocator) {
   std::lock_guard<std::recursive_mutex> submission_lock(
       runtime_resource_submission_mutex_);
   {
@@ -9150,8 +9170,8 @@ Ndarray *Program::create_ndarray(const DataType type,
                 "Cannot create Ndarray after Program finalize");
   }
 
-  auto arr =
-      std::make_unique<Ndarray>(this, type, shape, layout, dbg_info, host_read);
+  auto arr = std::make_unique<Ndarray>(this, type, shape, layout, dbg_info,
+                                       host_read, allocator);
   Ndarray *view = arr.get();
   std::unique_lock<std::mutex> lock(ndarray_lifecycle_mutex_);
   auto [result, handle] =

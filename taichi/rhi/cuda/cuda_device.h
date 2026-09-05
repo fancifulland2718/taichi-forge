@@ -92,6 +92,11 @@ class CudaDevice : public LlvmDevice {
   void register_graph_resource(
       const std::shared_ptr<RetainedGraphResource> &resource);
 
+  // Owned pools retire only after all allocation owners and their queued
+  // frees have finished. Collection is restricted to cold pool boundaries.
+  void register_graph_memory_pool(std::shared_ptr<void> pool);
+  void collect_graph_memory_pools();
+
   struct AllocInfo {
     void *ptr{nullptr};
     size_t size{0};
@@ -127,6 +132,12 @@ class CudaDevice : public LlvmDevice {
                             DeviceAllocation *out_devalloc) override;
   DeviceAllocation allocate_memory_runtime(
       const LlvmRuntimeAllocParams &params) override;
+
+  // Cold Graph materialization only. Handles keep the normal registry/lease
+  // retirement contract; the caller owns the non-default CUDA pool.
+  DeviceAllocation allocate_memory_from_pool(std::size_t bytes,
+                                             void *pool,
+                                             std::shared_ptr<void> pool_owner);
   void dealloc_memory(DeviceAllocation handle) override;
 
   uint64_t *allocate_llvm_runtime_memory_jit(
@@ -245,10 +256,14 @@ class CudaDevice : public LlvmDevice {
     bool use_memory_pool{false};
     CUstream stream{nullptr};
     std::unique_ptr<MappingState> mapping;
+    // Cold allocation lifetime only: destroy an owned pool after its final
+    // allocation has submitted free, not when the factory closes.
+    std::shared_ptr<void> pool_owner;
   };
 
   AllocationRegistry<AllocationRecord> allocations_;
   std::vector<std::weak_ptr<RetainedGraphResource>> graph_resources_;
+  std::vector<std::shared_ptr<void>> graph_memory_pools_;
   // Serializes transitions between mapped and retiring allocations. The lock
   // is held only while map/unmap copies or allocation metadata changes; it is
   // not held while callers use the returned host pointer.

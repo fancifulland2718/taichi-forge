@@ -1,6 +1,29 @@
 // CUDA APIs newer than Taichi's minimum supported driver must stay optional.
 // Capability checks gate every call site before invoking these wrappers.
 
+PER_CUDA_OPTIONAL_FUNCTION(stream_query, cuStreamQuery, void *);
+
+PER_CUDA_OPTIONAL_FUNCTION(mem_pool_create,
+                           cuMemPoolCreate,
+                           void **,
+                           const TaichiCudaMemPoolProps *);
+PER_CUDA_OPTIONAL_FUNCTION(mem_pool_destroy, cuMemPoolDestroy, void *);
+PER_CUDA_OPTIONAL_FUNCTION(mem_pool_trim_to,
+                           cuMemPoolTrimTo,
+                           void *,
+                           std::size_t);
+PER_CUDA_OPTIONAL_FUNCTION(mem_pool_get_attribute,
+                           cuMemPoolGetAttribute,
+                           void *,
+                           std::uint32_t,
+                           void *);
+PER_CUDA_OPTIONAL_FUNCTION(mem_alloc_from_pool_async,
+                           cuMemAllocFromPoolAsync,
+                           void **,
+                           std::size_t,
+                           void *,
+                           void *);
+
 PER_CUDA_OPTIONAL_FUNCTION(stream_begin_capture_to_graph,
                            cuStreamBeginCaptureToGraph,
                            void *,
