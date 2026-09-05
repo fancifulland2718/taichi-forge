@@ -122,6 +122,7 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
                                                         &error_node, &result);
     if (error != CUDA_SUCCESS || result != 0) {
       // Never silently substitute recapture/reinstantiation for this recipe.
+      failed = true;
       BackendRuntimeError failure(
           Arch::cuda, error, "graph_exec_update_v1",
           fmt::format(
@@ -377,16 +378,14 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
       driver.graph_instantiate_with_flags(&state.executable, data.graph, 0);
       state.active = frame;
     } else {
-      // Qualify before publication, then restore the active binding. Pending
-      // launches retain the argument pointers with which they were enqueued.
+      // Preparation may leave the executable configured for this frame: every
+      // run explicitly names its frame, and no mathematical work executes here.
+      // Retain the previous configuration for already queued launches before
+      // updating. Restoring it only to update again on run would add two
+      // redundant driver calls to the common prepare-then-run path.
+      state.retain_pending(state.active);
       state.update(data.graph);
-      try {
-        state.update(state.active->state_->graph);
-      } catch (...) {
-        state.failed = true;
-        state.active = frame;
-        throw;
-      }
+      state.active = frame;
     }
     state.program->mark_runtime_submission_pending();
     state.retain_pending(frame);

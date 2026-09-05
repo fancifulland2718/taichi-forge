@@ -160,6 +160,14 @@ def test_binding_frame_churn_retires_history_and_rejects_foreign_owner():
             executor.prepare(dict(source=source.arr, scratch=scratch.arr, output=output.arr, scale=2))
         executor.run(frame)
         assert output.to_numpy()[0] == sum(2 * scale + 7 for scale in range(1, 97)) + 199
+        # A successful prepare can replace the executor's current
+        # configuration without executing it or changing the old frame.
+        unlaunched = _prepare(executor, source, scratch, output, 500, slot=3)
+        executor.run(frame)
+        result = output.to_numpy()
+        assert result[0] == sum(2 * scale + 7 for scale in range(1, 97)) + 398
+        assert result[3] == 0
+        del unlaunched
     finally:
         executor.close()
         other.close()
