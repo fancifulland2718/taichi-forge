@@ -81,6 +81,13 @@ def runtime_contract_manifest():
                 }
             ),
             "features": MappingProxyType(dict(native.get("features", {}))),
+            "build_profile": MappingProxyType(
+                dict(
+                    native.get(
+                        "build_profile", {"schema_version": 1, "kind": "unknown"}
+                    )
+                )
+            ),
             "compiler_compatibility": MappingProxyType(
                 {
                     "runtime": native.get("runtime_compiler_abi"),

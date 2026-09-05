@@ -18,6 +18,11 @@ inline constexpr std::uint64_t kForgeFeatureCuda = 1ull << 2;
 inline constexpr std::uint64_t kForgeFeatureVulkan = 1ull << 3;
 inline constexpr std::uint64_t kForgeFeatureGgui = 1ull << 4;
 inline constexpr std::uint64_t kForgeFeatureOpenGl = 1ull << 5;
+// Additive native build facts, not new bootstrap fields or ABI requirements.
+// The presence bit distinguishes old runtimes from a known portable build.
+inline constexpr std::uint64_t kForgeBuildProfileKnown = 1ull << 6;
+inline constexpr std::uint64_t kForgeBuildToolkitReference = 1ull << 7;
+inline constexpr std::uint64_t kForgeBuildCupti = 1ull << 8;
 
 // Stable C bootstrap used before the pybind module touches any C++ object
 // crossing the split-runtime boundary.  Never extend this v1 struct in place;

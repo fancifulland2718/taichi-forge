@@ -7004,6 +7004,18 @@ void export_lang(py::module &m) {
     result["runtime_compiler_abi"] = get_forge_native_compiler_abi();
     result["shim_compiler_abi"] = forge_compiler_abi_identity();
     const auto bitmap = get_forge_native_feature_bitmap();
+    py::dict profile;
+    profile["schema_version"] = 1;
+    const bool profile_known = bitmap & kForgeBuildProfileKnown;
+    const bool toolkit_reference = bitmap & kForgeBuildToolkitReference;
+    const bool cupti = bitmap & kForgeBuildCupti;
+    profile["kind"] = !profile_known ? "unknown"
+                      : (toolkit_reference || cupti)
+                          ? "cuda-toolkit-specialized-runtime"
+                          : "portable-runtime";
+    profile["cuda_toolkit_primitive_reference"] = toolkit_reference;
+    profile["cupti"] = cupti;
+    result["build_profile"] = std::move(profile);
     py::dict features;
     features["cpu"] = bool(bitmap & kForgeFeatureCpu);
     features["llvm"] = bool(bitmap & kForgeFeatureLlvm);

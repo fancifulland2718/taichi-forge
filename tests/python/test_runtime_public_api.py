@@ -38,6 +38,30 @@ def test_runtime_contract_manifest_is_safe_before_init():
     assert ti.lang.impl.get_runtime().prog is None
 
 
+def test_runtime_build_profile_is_native_owned_and_optional(monkeypatch):
+    native = runtime_contracts._native_contract_manifest()
+    native["source_id"] = "runtime-commit"
+    native["shim_source_id"] = "different-shim-commit"
+    profile = {
+        "schema_version": 1,
+        "kind": "cuda-toolkit-specialized-runtime",
+        "cuda_toolkit_primitive_reference": True,
+        "cupti": False,
+    }
+    native["build_profile"] = profile
+    monkeypatch.setattr(runtime_contracts, "_native_contract_manifest", lambda: native)
+    result = runtime_contracts.validate_runtime_contract()
+    assert dict(result["build_profile"]) == profile
+    with pytest.raises(TypeError):
+        result["build_profile"]["kind"] = "portable-runtime"
+    del native["build_profile"]
+    # Older ABI-compatible wheels are not rejected or falsely called portable.
+    assert (
+        runtime_contracts.validate_runtime_contract()["build_profile"]["kind"]
+        == "unknown"
+    )
+
+
 def test_runtime_contract_rejects_compiler_abi_mismatch(monkeypatch):
     native = runtime_contracts._native_contract_manifest()
     native["shim_compiler_abi"] = "different-cxxabi"
