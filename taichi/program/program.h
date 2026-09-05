@@ -1311,7 +1311,8 @@ class TI_DLL_EXPORT Program {
       int output_stride,
       int output_distance,
       int batch_count,
-      int transform_kind);
+      int transform_kind,
+      bool separable = false);
 
   std::size_t cuda_cufft_execute(std::uint64_t handle,
                                  Ndarray *input,

@@ -3103,7 +3103,7 @@ void export_lang(py::module &m) {
            py::arg("input_stride"), py::arg("input_distance"),
            py::arg("output_embed"), py::arg("output_stride"),
            py::arg("output_distance"), py::arg("batch_count"),
-           py::arg("transform_kind"),
+           py::arg("transform_kind"), py::arg("separable") = false,
            py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cufft_execute",
            tracked_native_program_method(&Program::cuda_cufft_execute),

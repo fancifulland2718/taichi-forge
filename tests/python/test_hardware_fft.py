@@ -479,6 +479,94 @@ def test_cufft_inflight_close_is_completion_retained_and_generation_safe():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("dimensions,batch", (((7, 9), 3), ((32, 16), 1), ((31, 64), 2)))
+@pytest.mark.parametrize("direction", ("forward", "inverse"))
+def test_cufft_separable_plan_preserves_batches_capture_and_cache_identity(dimensions, batch, direction):
+    from taichi_forge.hardware._fft import _CufftPlanBase
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+
+    class SeparablePlan(_CufftPlanBase):
+        def __init__(self):
+            self._initialize(dimensions, batch_count=batch, transform="c2c", _separable=True)
+
+    initial = ti.hardware.fft.cache_statistics()
+    regular = ti.hardware.fft.CufftPlanND(dimensions, batch_count=batch)
+    separable, shared = SeparablePlan(), SeparablePlan()
+    stats = ti.hardware.fft.cache_statistics()
+    assert stats.live_plans == initial.live_plans + 2
+    assert stats.cache_misses == initial.cache_misses + 2
+    assert stats.cache_hits == initial.cache_hits + 1
+    program = ti.lang.impl.get_runtime().prog
+    assert not program._cuda_cufft_plan_memory_statistics(regular._handle)["separable"]
+    assert program._cuda_cufft_plan_memory_statistics(separable._handle)["separable"]
+    assert separable._graph_provider_memory_identity() != regular._graph_provider_memory_identity()
+
+    source = ti.ndarray(ti.f32, regular.input_shape)
+    product = ti.ndarray(ti.f32, regular.output_shape)
+    output = ti.ndarray(ti.f32, regular.output_shape)
+    host = np.random.default_rng(81).uniform(-1, 1, regular.input_shape).astype(np.float32)
+    source.from_numpy(host)
+    values = host[..., 0] + 1j * host[..., 1]
+    reference = np.fft.fft2(values) if direction == "forward" else np.fft.ifft2(values) * np.prod(dimensions)
+    expected = np.stack((reference.real, reference.imag), axis=-1)
+
+    @ti.kernel
+    def finish(source: ti.types.ndarray(dtype=ti.f32), output: ti.types.ndarray(dtype=ti.f32)):
+        for index in ti.grouped(source):
+            output[index] = source[index] + 0.125
+
+    try:
+        shared.close()
+        for plan in (regular, separable):
+            plan.execute(source, product, direction=direction)
+            np.testing.assert_allclose(product.to_numpy(), expected, rtol=2e-4, atol=2e-4)
+            builder = ti.graph.GraphBuilder()
+            builder.append_native(plan.record(direction=direction, output="product"), admission="auto")
+            builder.dispatch(
+                finish,
+                *(
+                    ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=len(source.shape))
+                    for name in ("product", "output")
+                ),
+            )
+            graph = builder.compile()
+            bound = graph.bind({"input": source, "product": product, "output": output})
+            for _ in range(3):
+                graph.run(bound)
+            np.testing.assert_allclose(output.to_numpy(), expected + 0.125, rtol=2e-4, atol=2e-4)
+            np.testing.assert_array_equal(source.to_numpy(), host)
+            assert graph._graph_stats[0]["last_path"] == "cuda_exact_replay", graph._graph_stats
+        del bound, graph, builder
+    finally:
+        shared.close()
+        separable.close()
+        regular.close()
+    ti.sync()
+    final = ti.hardware.fft.cache_statistics()
+    assert final.live_plans == initial.live_plans
+    assert final.workspace_bytes_live == initial.workspace_bytes_live
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_separable_plan_rejects_incompatible_layout_before_caching():
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    program = ti.lang.impl.get_runtime().prog
+    baseline = ti.hardware.fft.cache_statistics()
+    for transform, embed, stride, distance in ((1, (8, 16), 1, 128), (0, (8, 20), 1, 160), (0, (8, 16), 2, 256)):
+        with pytest.raises(RuntimeError, match="Separable cuFFT"):
+            program._create_cuda_cufft_plan_many(
+                (8, 16), embed, stride, distance, embed, stride, distance, 1, transform, True
+            )
+    after = ti.hardware.fft.cache_statistics()
+    assert after.live_plans == baseline.live_plans
+    assert after.live_handles == baseline.live_handles
+    assert after.workspace_bytes_live == baseline.workspace_bytes_live
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cufft_plan_and_graph_fail_closed_after_runtime_reset():
     if not ti.hardware.fft.is_available():
         pytest.skip("a compatible optional cuFFT shared library is unavailable")

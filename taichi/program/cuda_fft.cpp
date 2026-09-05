@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <unordered_set>
 #include <utility>
@@ -42,6 +43,7 @@ struct CufftPlanDescriptor {
   int output_distance{0};
   int batch_count{1};
   CufftTransformKind transform_kind{CufftTransformKind::c2c};
+  bool separable{false};
 };
 
 CufftTransformKind validate_transform_kind(int transform_kind) {
@@ -164,8 +166,31 @@ CufftScalarCounts cufft_scalar_counts(
       static_cast<std::size_t>((std::numeric_limits<int>::max)());
   TI_ERROR_IF(input_span > max_int || output_span > max_int,
               "CUDA cuFFT transform storage span exceeds INT_MAX.");
-  TI_ERROR_IF(descriptor.input_distance < static_cast<int>(input_span) ||
-                  descriptor.output_distance < static_cast<int>(output_span),
+  const auto disjoint_batches = [&](const std::vector<int> &logical,
+                                    int stride, int distance,
+                                    std::size_t span) {
+    if (distance <= 0) {
+      return false;
+    }
+    if (descriptor.batch_count == 1 ||
+        static_cast<std::size_t>(distance) >= span) {
+      return true;
+    }
+    if (logical.size() != 1) {
+      return false;
+    }
+    // For rank-one batches, collisions require ds*stride == db*distance.
+    // The smallest positive ds/db pair is distance/gcd, stride/gcd.
+    const int divisor = std::gcd(stride, distance);
+    return logical.front() <= distance / divisor ||
+           descriptor.batch_count <= stride / divisor;
+  };
+  TI_ERROR_IF(!disjoint_batches(cufft_input_logical_dimensions(descriptor),
+                               descriptor.input_stride,
+                               descriptor.input_distance, input_span) ||
+                  !disjoint_batches(cufft_output_logical_dimensions(descriptor),
+                                    descriptor.output_stride,
+                                    descriptor.output_distance, output_span),
               "CUDA cuFFT batch distance must not overlap transform storage.");
   const auto batch_offset = static_cast<std::size_t>(descriptor.batch_count - 1);
   const auto input_elements = checked_add(
@@ -203,6 +228,9 @@ std::string cufft_plan_cache_key(const CufftPlanDescriptor &descriptor) {
   key << descriptor.output_stride << ':' << descriptor.output_distance << ':'
       << descriptor.batch_count << ':'
       << static_cast<int>(descriptor.transform_kind);
+  if (descriptor.separable) {
+    key << ":row-batch-column-inplace";
+  }
   return key.str();
 }
 
@@ -216,6 +244,40 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
       : descriptor_(std::move(descriptor)),
         scalar_counts_(cufft_scalar_counts(descriptor_)),
         fault_domain_(std::move(fault_domain)) {
+    if (descriptor_.separable) {
+      TI_ERROR_IF(descriptor_.dimensions.size() != 2 ||
+                      descriptor_.transform_kind != CufftTransformKind::c2c ||
+                      descriptor_.input_embed != descriptor_.dimensions ||
+                      descriptor_.output_embed != descriptor_.dimensions ||
+                      descriptor_.input_stride != 1 ||
+                      descriptor_.output_stride != 1,
+                  "Separable cuFFT requires compact two-dimensional C2C.");
+      const int height = descriptor_.dimensions[0];
+      const int width = descriptor_.dimensions[1];
+      const auto plane = checked_multiply(height, width, "separable plane");
+      const auto row_batches = checked_multiply(
+          descriptor_.batch_count, height, "separable row batch");
+      TI_ERROR_IF(plane > (std::numeric_limits<int>::max)() ||
+                      row_batches > (std::numeric_limits<int>::max)() ||
+                      descriptor_.input_distance != static_cast<int>(plane) ||
+                      descriptor_.output_distance != static_cast<int>(plane),
+                  "Separable cuFFT batch layout exceeds its compact contract.");
+      CufftPlanDescriptor rows{{width}, {width}, 1, width,
+                               {width}, 1, width,
+                               static_cast<int>(row_batches),
+                               CufftTransformKind::c2c};
+      CufftPlanDescriptor columns{{height}, {height}, width, 1,
+                                  {height}, width, 1, width,
+                                  CufftTransformKind::c2c};
+      children_.push_back(std::make_unique<CudaFftPlan>(
+          std::move(rows), true, fault_domain_));
+      children_.push_back(std::make_unique<CudaFftPlan>(
+          std::move(columns), true, fault_domain_));
+      workspace_bytes_ = checked_add(children_[0]->workspace_bytes(),
+                                     children_[1]->workspace_bytes(),
+                                     "separable workspace");
+      return;
+    }
     auto &driver = CUFFTDriver::get_instance();
     TI_ERROR_IF(!driver.load_cufft(),
                 "CUDA cuFFT could not load a compatible shared library and "
@@ -317,6 +379,16 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
                int direction,
                CUstream stream) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (descriptor_.separable) {
+      TI_ERROR_IF(children_.size() != 2, "Separable cuFFT plan is closed.");
+      children_[0]->execute(input, output, direction, stream);
+      const auto plane_scalars = scalar_counts_.output / descriptor_.batch_count;
+      for (int batch = 0; batch < descriptor_.batch_count; ++batch) {
+        auto *plane = static_cast<float *>(output) + batch * plane_scalars;
+        children_[1]->execute(plane, plane, direction, stream);
+      }
+      return;
+    }
     TI_ERROR_IF(handle_ == 0, "CUDA cuFFT plan is closed.");
     auto &driver = CUFFTDriver::get_instance();
     const auto stream_status = driver.set_stream.call(handle_, stream);
@@ -343,6 +415,10 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
 
   void destroy(bool provider_calls_safe) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
+    for (auto &child : children_) {
+      child->destroy(provider_calls_safe);
+    }
+    children_.clear();
     if (handle_ == 0) {
       return;
     }
@@ -360,6 +436,7 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
   std::size_t workspace_bytes_{0};
   int handle_{0};
   std::shared_ptr<RuntimeFaultDomain> fault_domain_;
+  std::vector<std::unique_ptr<CudaFftPlan>> children_;
   std::mutex mutex_;
 };
 
@@ -385,7 +462,8 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
     int output_stride,
     int output_distance,
     int batch_count,
-    int transform_kind) {
+    int transform_kind,
+    bool separable) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA cuFFT plans require the CUDA backend.");
@@ -398,7 +476,7 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
                                  output_stride,
                                  output_distance,
                                  batch_count,
-                                 validated_transform};
+                                 validated_transform, separable};
   cufft_scalar_counts(descriptor);
   TI_ERROR_IF(!CUDADriver::get_instance_without_context()
                    .nvidia_extensions_available(),
@@ -579,7 +657,8 @@ Program::cuda_cufft_plan_memory_statistics(std::uint64_t handle) {
   }
   return {{"workspace_bytes",
            static_cast<std::uint64_t>(found->second->workspace_bytes())},
-          {"shared_handle_count", shared_handle_count}};
+          {"shared_handle_count", shared_handle_count},
+          {"separable", found->second->descriptor().separable ? 1 : 0}};
 }
 
 std::unordered_map<std::string, std::uint64_t>
@@ -667,7 +746,8 @@ std::uint64_t Program::create_cuda_cufft_plan_many(std::vector<int>,
                                                    int,
                                                    int,
                                                    int,
-                                                   int) {
+                                                   int,
+                                                   bool) {
   TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
 }
 

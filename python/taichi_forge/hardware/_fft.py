@@ -282,12 +282,14 @@ class _CufftPlanBase:
         transform,
         input_layout=None,
         output_layout=None,
+        _separable=False,
     ):
         self.dimensions = _positive_int_tuple(dimensions, "dimensions")
         self.rank = len(self.dimensions)
         self.batch_count = _positive_int(batch_count, "batch_count")
         self.transform = transform
         self.transform_value = _transform_value(transform)
+        self._separable = bool(_separable)
         input_dimensions = list(self.dimensions)
         output_dimensions = list(self.dimensions)
         if transform == "c2r":
@@ -328,7 +330,7 @@ class _CufftPlanBase:
                     self.dimensions[0], self.batch_count, self.transform_value
                 )
             else:
-                handle = program._create_cuda_cufft_plan_many(
+                arguments = (
                     self.dimensions,
                     self.input_layout.embed,
                     self.input_layout.stride,
@@ -338,6 +340,9 @@ class _CufftPlanBase:
                     self.output_layout.batch_distance,
                     self.batch_count,
                     self.transform_value,
+                )
+                handle = program._create_cuda_cufft_plan_many(
+                    *arguments, *((True,) if self._separable else ())
                 )
         self._handle = int(handle)
         self._workspace_bytes = int(
@@ -368,7 +373,10 @@ class _CufftPlanBase:
                 },
             },
             execution_scope={
-                "algorithm": "cufft_estimate",
+                "algorithm": (
+                    "row_batch_column_inplace"
+                    if self._separable else "cufft_estimate"
+                ),
                 "workspace_limit_bytes": self._workspace_bytes,
                 "stream_binding": "runtime_ordered",
                 "capture_compatible": True,
@@ -525,7 +533,7 @@ class _CufftPlanBase:
         return self.memory_report()
 
     def _graph_provider_memory_identity(self):
-        return (
+        identity = (
             "cufft_plan",
             self._runtime_generation,
             self.dimensions,
@@ -534,6 +542,7 @@ class _CufftPlanBase:
             self.input_layout,
             self.output_layout,
         )
+        return (*identity, "row_batch_column_inplace") if self._separable else identity
 
     def close(self):
         if self._handle is None:
