@@ -278,6 +278,19 @@ def test_cusparse_spmm_retains_plans_and_executes_directly_and_through_graph():
     output = ti.ndarray(ti.f32, shape=expected.shape)
     input_array.from_numpy(input_values)
 
+    pending_plan = ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count)
+    before_observation = matrix._debug_runtime_stats()
+    assert pending_plan.plan_info() == {
+        "status": "available",
+        "prepared": False,
+        "preprocess_attempted": False,
+        "preprocessed": False,
+        "preprocess_error": 0,
+        "workspace_bytes": 0,
+    }
+    assert pending_plan.memory_report().known_resident_requested_bytes == 0
+    assert matrix._debug_runtime_stats() == before_observation
+
     ti.hardware.linalg.spmm_f32(matrix, input_array, output)
     ti.sync()
     np.testing.assert_allclose(output.to_numpy(), expected, rtol=2e-5, atol=2e-5)
@@ -300,6 +313,9 @@ def test_cusparse_spmm_retains_plans_and_executes_directly_and_through_graph():
         "graph_capture",
     )
     assert retained is retained_execution_contract(ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count))
+    first_plan_info = recording.plan_info()
+    assert first_plan_info["prepared"]
+    assert not first_plan_info["preprocess_attempted"]
 
     output.fill(0)
     result = ti.ndarray(ti.f32, shape=expected.shape)
@@ -344,6 +360,23 @@ def test_cusparse_spmm_retains_plans_and_executes_directly_and_through_graph():
     assert stats["resources"]["spmm_workspace_reserved_bytes"] >= 0
     report = recording.memory_report()
     assert report.ownership_scope == "sparse_matrix_rhs_algorithm_generation"
+    assert recording.plan_info() == first_plan_info
+    second_recording = ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count, algorithm="deterministic")
+    second_plan_info = second_recording.plan_info()
+    assert second_plan_info["prepared"]
+    assert second_plan_info["preprocess_attempted"] == stats["provider"]["spmm_preprocess_available"]
+    assert second_plan_info["preprocessed"] == (stats["operations"]["spmm_preprocess_builds"] == 1)
+    assert (
+        first_plan_info["workspace_bytes"] + second_plan_info["workspace_bytes"]
+        == stats["resources"]["spmm_workspace_reserved_bytes"]
+    )
+    assert report.known_resident_requested_bytes == first_plan_info["workspace_bytes"]
+    assert second_recording.memory_report().known_resident_requested_bytes == second_plan_info["workspace_bytes"]
+    assert not report.resident_requested_bytes_complete  # vendor handles remain opaque
+    # An unprepared RHS has no share of either existing plan's allocation.
+    unprepared = ti.hardware.linalg.CusparseSpmmRecording(matrix, rhs_count + 1)
+    assert not unprepared.plan_info()["prepared"]
+    assert unprepared.memory_report().known_resident_requested_bytes == 0
 
     wrong = ti.ndarray(ti.f32, shape=(columns, rhs_count + 1))
     with pytest.raises(RuntimeError, match="shape"):

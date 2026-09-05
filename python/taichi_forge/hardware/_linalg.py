@@ -827,7 +827,12 @@ def _cusparse_spmm_execution_contract(matrix, identity, rhs_count, algorithm):
 
 @instrument_hardware_recording("linalg.spmm.cusparse_explicit")
 class CusparseSpmmRecording(BackendCommandRecording):
-    """Retained row-major f32 CSR SpMM over two or more right-hand sides."""
+    """Retained row-major f32 CSR SpMM over two or more right-hand sides.
+
+    ``deterministic`` is the legacy name for vendor CSR_ALG3, not a
+    cross-version bitwise guarantee. Numerical behavior depends on the
+    loaded cuSPARSE release.
+    """
 
     _ALGORITHMS = {"row_major": 0, "deterministic": 1}
 
@@ -903,6 +908,7 @@ class CusparseSpmmRecording(BackendCommandRecording):
         )
         attach_retained_execution_contract(self, retained_contract)
         object.__setattr__(self, "_memory_resources", memory_resources)
+        object.__setattr__(self, "_plan_info_snapshot", None)
 
     @property
     def resource_effects(self):
@@ -949,19 +955,42 @@ class CusparseSpmmRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.matrix._ensure_valid()  # pylint: disable=W0212
 
+    def plan_info(self):
+        """Observe this RHS/algorithm plan without preparing it or synchronizing.
+
+        Workspace belongs to the matrix-owned plan, not to the recording or
+        the entire matrix cache. A missing native observation capability is
+        reported as unknown, never replaced with another plan's byte count.
+        """
+        self.matrix._ensure_valid()  # pylint: disable=W0212
+        query = getattr(self.matrix.matrix, "_cuda_cusparse_spmm_plan_info", None)
+        info = (
+            {"status": "available", **dict(query(self.rhs_count, self._algorithm_code))}
+            if query is not None
+            else {
+                "status": "unavailable",
+                "prepared": None,
+                "preprocess_attempted": None,
+                "preprocessed": None,
+                "preprocess_error": None,
+                "workspace_bytes": None,
+            }
+        )
+        object.__setattr__(self, "_plan_info_snapshot", info)
+        return dict(info)
+
     def memory_report(self):
         lifecycle_state = "ready"
         resident = True
-        resources = self._memory_resources
+        info = self._plan_info_snapshot
         try:
-            resources = dict(
-                self.matrix._debug_runtime_stats()["resources"]  # pylint: disable=W0212
-            )
-            object.__setattr__(self, "_memory_resources", resources)
+            info = self.plan_info()
         except TaichiRuntimeError:
             lifecycle_state = "runtime_invalid"
             resident = False
-        workspace_bytes = int(resources.get("spmm_workspace_reserved_bytes", 0))
+        workspace_bytes = None if info is None else info["workspace_bytes"]
+        prepared = None if info is None else info["prepared"]
+        resident = resident and prepared is not False
         return make_memory_report(
             "cusparse_spmm_f32",
             "cuda",
@@ -969,7 +998,7 @@ class CusparseSpmmRecording(BackendCommandRecording):
                 HardwareMemoryComponent(
                     "retained_spmm_workspace",
                     workspace_bytes,
-                    True,
+                    workspace_bytes is not None,
                     "provider_generation",
                     "shared_user_object",
                     resident=resident,

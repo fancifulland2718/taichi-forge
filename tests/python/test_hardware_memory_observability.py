@@ -45,6 +45,52 @@ def test_hardware_memory_schema_separates_known_requested_and_opaque_bytes():
         report.lifecycle_state = "closed"
 
 
+def test_spmm_plan_memory_missing_observation_and_retired_owner():
+    from types import SimpleNamespace
+
+    from taichi_forge.hardware._linalg import CusparseSpmmRecording
+    from taichi_forge.lang.exception import TaichiRuntimeError
+
+    native = SimpleNamespace()
+    matrix = SimpleNamespace(matrix=native, _ensure_valid=lambda: None)
+    # Exercise the report compatibility boundary without initializing CUDA or
+    # fabricating an executable recording/retained execution certificate.
+    recording = object.__new__(CusparseSpmmRecording)
+    for key, value in {
+        "matrix": matrix,
+        "rhs_count": 8,
+        "_algorithm_code": 1,
+        "_plan_info_snapshot": None,
+        "_memory_resources": {"spmm_workspace_reserved_bytes": 99999},
+    }.items():
+        object.__setattr__(recording, key, value)
+    assert recording.plan_info()["status"] == "unavailable"
+    report = recording.memory_report()
+    assert report.components[0].requested_bytes is None
+    assert not report.resident_requested_bytes_complete
+    assert report.known_resident_requested_bytes == 0
+
+    native._cuda_cusparse_spmm_plan_info = lambda rhs, algorithm: {
+        "prepared": True,
+        "preprocess_attempted": True,
+        "preprocessed": False,
+        "preprocess_error": 10,
+        "workspace_bytes": 4096,
+    }
+    info = recording.plan_info()
+    assert info["preprocess_error"] == 10
+    info["workspace_bytes"] = 99999
+
+    def retired():
+        raise TaichiRuntimeError("the matrix runtime was reset")
+
+    matrix._ensure_valid = retired
+    report = recording.memory_report()
+    assert report.lifecycle_state == "runtime_invalid"
+    assert report.known_capacity_requested_bytes == 4096
+    assert report.known_resident_requested_bytes == 0
+
+
 @test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_cuda_provider_memory_reports_do_not_invent_vendor_workspace_bytes():
     opaque_reports = (

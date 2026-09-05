@@ -1099,6 +1099,16 @@ class CuSparseMatrix : public SparseMatrix {
             int algorithm,
             CUstream stream = nullptr);
 
+  struct SpmmPlanInfo {
+    bool prepared{false};
+    bool preprocess_attempted{false};
+    bool preprocessed{false};
+    std::uint32_t preprocess_error{0};
+    std::uint64_t workspace_bytes{0};
+  };
+
+  SpmmPlanInfo spmm_plan_info(int rhs_count, int algorithm) const;
+
   void nd_spsv(Program *prog,
                const Ndarray &input,
                const Ndarray &output,

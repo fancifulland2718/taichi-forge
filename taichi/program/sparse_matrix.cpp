@@ -3077,7 +3077,9 @@ struct CuSparseMatrix::SpmmPlan {
   std::size_t workspace_size{0};
   int rhs_count{0};
   cusparseSpMMAlg_t algorithm{CUSPARSE_SPMM_CSR_ALG2};
+  bool preprocess_attempted{false};
   bool preprocessed{false};
+  std::uint32_t preprocess_error{0};
 #endif
 };
 
@@ -3699,12 +3701,14 @@ void CuSparseMatrix::spmm(size_t dB,
 
     if (algorithm == 1 &&
         cusparse.capabilities().spmm_preprocess_available) {
+      created->preprocess_attempted = true;
       const auto preprocess_error = cusparse.cpSpMMPreprocess.call(
           created->handle, CUSPARSE_OPERATION_NON_TRANSPOSE,
           CUSPARSE_OPERATION_NON_TRANSPOSE, &alpha,
           created->matrix_descriptor, created->input_descriptor, &beta,
           created->output_descriptor, CUDA_R_32F, created->algorithm,
           created->workspace);
+      created->preprocess_error = preprocess_error;
       if (preprocess_error == 0) {
         created->preprocessed = true;
         ++spmm_preprocess_builds_;
@@ -3755,6 +3759,28 @@ void CuSparseMatrix::spmm(size_t dB,
 #else
   TI_NOT_IMPLEMENTED;
 #endif
+}
+
+CuSparseMatrix::SpmmPlanInfo CuSparseMatrix::spmm_plan_info(
+    int rhs_count, int algorithm) const {
+  SpmmPlanInfo result;
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(rhs_count < 2 || (algorithm != 0 && algorithm != 1),
+              "Invalid CUDA cuSPARSE SpMM plan key.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
+                   static_cast<std::uint32_t>(algorithm);
+  const auto found = spmm_plans_.find(key);
+  if (found != spmm_plans_.end()) {
+    const auto &plan = *found->second;
+    result.prepared = true;
+    result.preprocess_attempted = plan.preprocess_attempted;
+    result.preprocessed = plan.preprocessed;
+    result.preprocess_error = plan.preprocess_error;
+    result.workspace_bytes = plan.workspace_size;
+  }
+#endif
+  return result;
 }
 
 void CuSparseMatrix::spsv(size_t dX,
