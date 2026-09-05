@@ -28,11 +28,11 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r"(?:"
     r"(?:cublas(?:lt)?64_|cusparse64_|cusolver64_|cufft(?:w)?64_|"
     r"cusparseLt64_|cudss64_|curand64_|cupti64_|"
-    r"nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda|"
+    r"nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda|nvml|nvToolsExt|"
     r"amgxsh|nccl|cutensor(?:Mg)?(?:64_)?)"
     r"[^/]*\.dll"
     r"|lib(?:cublas(?:lt)?|cusparse|cusolver|cufft(?:w)?|curand|cupti|"
-    r"cusparseLt|cudss|nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda|"
+    r"cusparseLt|cudss|nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda|nvidia-ml|nvToolsExt|"
     r"amgxsh|nccl|cutensor(?:Mg)?)(?:-[^.]+)?\.so(?:\..*)?"
     r")",
     re.IGNORECASE,
@@ -364,6 +364,79 @@ def _strict_provider_exports(zf: ZipFile, members: dict[str, str], platform: str
                 )
 
 
+def _binary_imports(binary: Path, platform: str) -> set[str]:
+    if platform == "windows":
+        tool = shutil.which("dumpbin")
+        arguments = ["/nologo", "/dependents", str(binary)]
+        # /DEPENDENTS lists both ordinary and delay-loaded DLLs.
+        pattern = re.compile(r"^\s*([^\s]+\.dll)\s*$", re.IGNORECASE | re.MULTILINE)
+    else:
+        tool = shutil.which("readelf") or shutil.which("llvm-readelf")
+        arguments = ["-d", str(binary)]
+        pattern = re.compile(r"\(NEEDED\).*\[([^\]]+)\]")
+    if tool is None:
+        required = "dumpbin" if platform == "windows" else "readelf or llvm-readelf"
+        raise RuntimeError(f"strict {platform} dependency audit requires {required}")
+    result = subprocess.run([tool, *arguments], capture_output=True, text=True, encoding="utf-8", errors="replace")
+    if result.returncode:
+        raise RuntimeError(f"binary dependency audit failed for {binary.name}: {result.stdout}{result.stderr}")
+    return {match.group(1) for match in pattern.finditer(result.stdout)}
+
+
+def _validate_binary_dependencies(binary: Path, platform: str, *, allowed_cudart_major: int | None = None) -> None:
+    dependencies = _binary_imports(binary, platform)
+    forbidden = set()
+    for dependency in dependencies:
+        name = Path(dependency).name
+        cudart_major = _cudart_major(platform, name)
+        if (
+            FORBIDDEN_VENDOR_RUNTIME.fullmatch(name)
+            or re.fullmatch(r"(?:python3\d*\.dll|libpython[^/]*\.so(?:\..*)?)", name, re.IGNORECASE)
+            or (cudart_major is not None and cudart_major != allowed_cudart_major)
+        ):
+            forbidden.add(dependency)
+    if forbidden:
+        raise RuntimeError(f"{binary.name} has implicit vendor or CPython dependencies: {sorted(forbidden)}")
+    if platform != "windows":
+        tool = shutil.which("nm") or shutil.which("llvm-nm")
+        if tool is None:
+            raise RuntimeError("strict ELF dependency audit requires nm")
+        result = subprocess.run(
+            [tool, "-D", "--undefined-only", str(binary)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode:
+            raise RuntimeError(f"undefined-symbol audit failed for {binary.name}: {result.stdout}{result.stderr}")
+        if re.search(r"\s_?Py[A-Za-z0-9_]*(?:@\S+)?\s*$", result.stdout, re.MULTILINE):
+            raise RuntimeError(f"{binary.name} has unresolved CPython symbols")
+
+
+def _shared_binary_member(name: str, platform: str) -> bool:
+    basename = Path(name).name
+    return basename.lower().endswith(".dll") if platform == "windows" else bool(re.search(r"\.so(?:\..*)?$", basename))
+
+
+def _strict_wheel_dependencies(
+    zf: ZipFile, names: list[str], platform: str, runtime: str, cuda_major: int | None
+) -> None:
+    if platform == "macos":
+        # CUDA/provider dependency policy is scoped to Windows and ELF wheels.
+        return
+    # Inspect the shipped files, including auditwheel-grafted dependencies, not
+    # a possibly different copy left in a build directory. Extraction is by
+    # basename into a fresh directory for each member, never ZipFile.extractall.
+    for member in sorted(name for name in names if _shared_binary_member(name, platform)):
+        with tempfile.TemporaryDirectory(prefix="taichi-wheel-dependency-audit-") as directory:
+            binary = Path(directory) / Path(member).name
+            binary.write_bytes(zf.read(member))
+            _validate_binary_dependencies(
+                binary, platform, allowed_cudart_major=cuda_major if member == runtime else None
+            )
+
+
 def inspect_runtime_wheel(
     wheel: Path,
     expected_cuda_major: int | None = None,
@@ -462,6 +535,17 @@ def inspect_runtime_wheel(
                     "or ambiguous: "
                     f"expected={sorted(expected_optional_runtime_providers)}, "
                     f"actual={sorted(actual_optional_runtime_providers)}"
+                )
+            provider_binaries = [
+                name for name in names if name.startswith(provider_prefix) and _shared_binary_member(name, platform)
+            ]
+            expected_providers = (
+                expected_optix_providers | expected_cudss_providers | expected_optional_runtime_providers
+            )
+            if len(provider_binaries) != len(set(provider_binaries)) or set(provider_binaries) != expected_providers:
+                raise RuntimeError(
+                    "Runtime wheel hardware adapter set contains unexpected or duplicate binaries: "
+                    f"expected={sorted(expected_providers)}, actual={sorted(provider_binaries)}"
                 )
         if CUDA_VARIANT.search(version):
             raise RuntimeError(f"CUDA-versioned runtime wheel versions are forbidden: {version}")
@@ -582,6 +666,7 @@ def inspect_runtime_wheel(
                 },
                 platform,
             )
+            _strict_wheel_dependencies(zf, names, platform, native_runtimes[0], cuda_major)
         if platform == "windows":
             import_library = f"{PACKAGE}/_lib/runtime_native/taichi_runtime.lib"
             if names.count(import_library) != 1:

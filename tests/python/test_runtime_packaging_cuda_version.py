@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 import re
+import subprocess
 from zipfile import ZipFile
 
 import pytest
@@ -1256,13 +1257,9 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF") == 2
     assert workflow.count("packaging/constraints/cudss-build.txt") == 2
     assert workflow.count("--require-hashes --no-deps") == 2
-    assert "Expected seven bundled hardware adapters" in workflow
     assert "CUDAToolkit_NVCC_EXECUTABLE" not in workflow
-    assert "Reject implicit CUDA Toolkit shared-library imports" in workflow
-    assert "Reject implicit CUDA Toolkit DLL imports" in workflow
-    assert "cudart64_|cupti64_|nvrtc64_" in workflow
-    assert "cudss|amgxsh|nccl|cutensor" in workflow
-    assert "cudss64_|amgxsh|nccl|cutensor" in workflow
+    # Final wheel checks own adapter membership, imports and CPython isolation.
+    assert workflow.count("--strict-binary") == 3
     assert not re.search(
         r"taichi[-_]forge[-_]runtime[-_](?:cu|cuda)\d+",
         workflow,
@@ -1314,3 +1311,146 @@ def test_dynamic_cudart_requirement_keeps_legacy_cache_compatibility():
             "TI_CUDA_CUB_SORT_DYNAMIC_CUDART": "ON",
         }
     )
+
+
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+@pytest.mark.parametrize("kind", ("system", "cudart", "vendor", "python", "nvml", "nvtx"))
+def test_final_binary_dependency_audit_includes_delay_load_and_elf_needed(monkeypatch, tmp_path, platform, kind):
+    names = {
+        "system": ("KERNEL32.dll", "libstdc++.so.6"),
+        "cudart": ("cudart64_13.dll", "libcudart-abcd.so.13.1"),
+        "vendor": ("cublasLt64_13.dll", "libcublasLt-abcd.so.13"),
+        "python": ("python314.dll", "libpython3.14.so.1.0"),
+        "nvml": ("nvml.dll", "libnvidia-ml.so.1"),
+        "nvtx": ("nvToolsExt64_1.dll", "libnvToolsExt.so.1"),
+    }
+    dependency = names[kind][platform != "windows"]
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if command[0] == "nm":
+            output = "                 U malloc@GLIBC_2.2.5\n"
+        elif platform == "windows":
+            output = f"Image has the following delay load dependencies:\n\n    {dependency}\n\n  Summary\n"
+        else:
+            output = f"0x0000000000000001 (NEEDED) Shared library: [{dependency}]\n"
+        return subprocess.CompletedProcess(command, 0, output, "")
+
+    monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name)
+    monkeypatch.setattr(validate_runtime_wheel.subprocess, "run", run)
+    binary = tmp_path / ("taichi_runtime.dll" if platform == "windows" else "libtaichi_runtime.so")
+    if kind == "system":
+        validate_runtime_wheel._validate_binary_dependencies(binary, platform)
+    else:
+        with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
+            validate_runtime_wheel._validate_binary_dependencies(binary, platform)
+    assert commands[0][1:-1] == (["/nologo", "/dependents"] if platform == "windows" else ["-d"])
+    if kind == "cudart":
+        validate_runtime_wheel._validate_binary_dependencies(binary, platform, allowed_cudart_major=13)
+        with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
+            validate_runtime_wheel._validate_binary_dependencies(binary, platform, allowed_cudart_major=12)
+
+
+@pytest.mark.parametrize("output", ("                 U PyObject_Call\n", "                 U _Py_Dealloc@ABI\n"))
+def test_elf_dependency_audit_keeps_unresolved_python_check(monkeypatch, tmp_path, output):
+    monkeypatch.setattr(validate_runtime_wheel, "_binary_imports", lambda *args: {"libc.so.6"})
+    monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name)
+    monkeypatch.setattr(
+        validate_runtime_wheel.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, output, ""),
+    )
+    with pytest.raises(RuntimeError, match="unresolved CPython symbols"):
+        validate_runtime_wheel._validate_binary_dependencies(tmp_path / "libprovider.so", "manylinux")
+
+
+@pytest.mark.parametrize("tool_available,exit_code", ((False, 0), (True, 1)))
+def test_binary_dependency_audit_does_not_accept_missing_or_failed_tools(
+    monkeypatch, tmp_path, tool_available, exit_code
+):
+    monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name if tool_available else None)
+    monkeypatch.setattr(
+        validate_runtime_wheel.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, exit_code, "", "injected failure"),
+    )
+    with pytest.raises(RuntimeError, match="requires|audit failed"):
+        validate_runtime_wheel._validate_binary_dependencies(tmp_path / "runtime.dll", "windows")
+
+
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+def test_runtime_wheel_rejects_unknown_hardware_adapter(tmp_path, platform):
+    tag = "win_amd64" if platform == "windows" else "manylinux_2_35_x86_64"
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(wheel, platform=platform, version="0.6.3", cuda_major=13, dependency_class="driver-only")
+    extra = "unexpected.dll" if platform == "windows" else "libunexpected.so"
+    with ZipFile(wheel, "a") as zf:
+        zf.writestr(f"taichi_forge_runtime/_lib/hardware_providers/{extra}", b"unreviewed adapter")
+    with pytest.raises(RuntimeError, match="unexpected or duplicate binaries"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+@pytest.mark.parametrize("fault", (None, "runtime", "adapter", "grafted"))
+def test_strict_wheel_audits_shipped_runtime_adapters_and_grafted_libraries(monkeypatch, tmp_path, platform, fault):
+    tag = "win_amd64" if platform == "windows" else "manylinux_2_35_x86_64"
+    wheel = tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{tag}.whl"
+    _write_runtime_wheel(wheel, platform=platform, version="0.6.3", cuda_major=13, dependency_class="driver-only")
+    runtime = "taichi_runtime.dll" if platform == "windows" else "libtaichi_runtime.so"
+    adapters = validate_runtime_wheel._expected_optional_runtime_provider_members(platform)
+    adapter = Path(sorted(adapters)[0]).name
+    grafted = "grafted.dll" if platform == "windows" else "libgrafted-0123.so.1"
+    with ZipFile(wheel, "a") as zf:
+        zf.writestr(f"taichi_forge_runtime.libs/{grafted}", b"grafted by wheel repair")
+    seen = set()
+    faulty = {"runtime": runtime, "adapter": adapter, "grafted": grafted}.get(fault)
+
+    def imports(binary, target):
+        assert target == platform
+        assert binary.is_file()
+        seen.add(binary.name)
+        return {"cublas64_13.dll" if platform == "windows" else "libcublas.so.13"} if binary.name == faulty else set()
+
+    monkeypatch.setattr(validate_runtime_wheel, "_strict_binary_exports", lambda *args: None)
+    monkeypatch.setattr(validate_runtime_wheel, "_strict_provider_exports", lambda *args: None)
+    monkeypatch.setattr(validate_runtime_wheel, "_binary_imports", imports)
+    monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name)
+    monkeypatch.setattr(
+        validate_runtime_wheel.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    if fault:
+        with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel, strict_binary=True)
+    else:
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, strict_binary=True)
+        expected = (
+            validate_runtime_wheel._expected_optix_provider_members(platform)
+            | validate_runtime_wheel._expected_cudss_provider_members(platform)
+            | adapters
+        )
+        assert seen == {runtime, grafted, *(Path(member).name for member in expected)}
+
+
+@pytest.mark.parametrize("adapter_depends_on_cudart", (False, True))
+def test_toolkit_reference_cudart_allowance_does_not_leak_into_adapters(
+    monkeypatch, tmp_path, adapter_depends_on_cudart
+):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"
+    _write_runtime_wheel(wheel, platform="windows", version="0.6.3", cuda_major=13)
+
+    def imports(binary, platform):
+        if binary.name == "taichi_runtime.dll" or adapter_depends_on_cudart and "_provider_" in binary.name:
+            return {"cudart64_13.dll"}
+        return set()
+
+    monkeypatch.setattr(validate_runtime_wheel, "_strict_binary_exports", lambda *args: None)
+    monkeypatch.setattr(validate_runtime_wheel, "_strict_provider_exports", lambda *args: None)
+    monkeypatch.setattr(validate_runtime_wheel, "_binary_imports", imports)
+    if adapter_depends_on_cudart:
+        with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel, strict_binary=True)
+    else:
+        assert validate_runtime_wheel.inspect_runtime_wheel(wheel, strict_binary=True).cuda_major == 13
