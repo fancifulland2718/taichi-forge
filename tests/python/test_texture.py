@@ -634,9 +634,11 @@ def test_texture_registry_resize_churn_conserves_resources():
 
     iterations = stress_iterations(256)
     backend = "cuda" if impl.current_cfg().arch == ti.cuda else "vulkan"
+    # Vulkan image recordings retain these same texture registry generations.
+    memory_providers = ("vulkan-texture", "vulkan-image") if backend == "vulkan" else ("cuda-texture",)
     process_memory = ProcessMemoryPlateau(
         f"{backend}-texture-resource-churn",
-        (f"{backend}-texture",),
+        memory_providers,
         enabled=True,
     )
     process_memory.capture("before")

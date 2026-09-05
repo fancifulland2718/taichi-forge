@@ -423,11 +423,11 @@ def _process_memory_observation(path, provider):
             reasons.append("process_memory_iterations_underqualified")
         if not qualification.get("rss_available"):
             reasons.append("process_rss_unavailable")
-        if not qualification.get("rss_plateau"):
+        elif not qualification.get("rss_plateau"):
             reasons.append("process_rss_plateau_failed")
         if not qualification.get("gpu_process_available"):
             reasons.append("gpu_process_memory_unavailable")
-        if not qualification.get("gpu_process_plateau"):
+        elif not qualification.get("gpu_process_plateau"):
             reasons.append("gpu_process_memory_plateau_failed")
     return {
         "schema": payload.get("schema"),

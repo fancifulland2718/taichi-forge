@@ -1,4 +1,5 @@
 import ast
+import json
 from pathlib import Path
 
 import pytest
@@ -93,3 +94,38 @@ def test_lifecycle_process_memory_observation_fails_closed(tmp_path):
     empty = lifecycle._process_memory_observation(path, "cuda-cudss")
     assert not empty["process_level_memory_qualified"]
     assert "process_memory_provider_record_missing" in empty["reasons"]
+
+
+@pytest.mark.parametrize("metric", ("rss", "gpu_process"))
+@pytest.mark.parametrize("available,plateau", ((False, False), (True, False), (True, True)))
+def test_lifecycle_memory_distinguishes_missing_measurement_from_growth(tmp_path, metric, available, plateau):
+    qualification = {
+        "minimum_iterations_met": True,
+        "rss_available": True,
+        "rss_plateau": True,
+        "gpu_process_available": True,
+        "gpu_process_plateau": True,
+        "process_level_memory_qualified": available and plateau,
+        f"{metric}_available": available,
+        f"{metric}_plateau": plateau,
+    }
+    record = {"providers": ["vulkan-texture", "vulkan-image"], "qualification": qualification}
+    path = tmp_path / "memory.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": lifecycle.MEMORY_SCHEMA,
+                "records": [
+                    {"providers": ["cuda-texture"], "qualification": {}},
+                    record,
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    observed = lifecycle._process_memory_observation(path, "vulkan-image")
+    prefix = "process_rss" if metric == "rss" else "gpu_process_memory"
+    expected = () if plateau else (f"{prefix}_{'plateau_failed' if available else 'unavailable'}",)
+    assert observed["records"] == (record,)
+    assert observed["reasons"] == expected
+    assert observed["process_level_memory_qualified"] is (available and plateau)
