@@ -1,3 +1,7 @@
-"""Build inputs for optional user-owned hardware source providers."""
+"""Explicit separately built hardware addons and complete Graph providers."""
 
-__all__ = ()
+from taichi_forge.hardware.source_providers._segmented_scan_recipe import (
+    CubSegmentedScanRecipeProvider,
+)
+
+__all__ = ("CubSegmentedScanRecipeProvider",)

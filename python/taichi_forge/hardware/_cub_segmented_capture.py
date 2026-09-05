@@ -22,6 +22,8 @@ from taichi_forge.hardware._cub_source_provider import (
     _validate_array,
 )
 from taichi_forge.hardware._native_adapter import static_resource_effect
+from taichi_forge.hardware._native_adapter import runtime_generation_matches
+from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._retained import (
     HardwareExecutionCostModel,
     attach_retained_execution_contract,
@@ -171,6 +173,25 @@ class _CubSegmentedScanExecutable(NativeGraphExecutable):
     @property
     def graph_physical_plan_id(self):
         return f"{self.plan._graph_physical_plan_id}:native-capture-reset-monoid-v1"
+
+    def _graph_provider_memory_report(self):
+        valid = runtime_generation_matches(self.plan.provider)
+        heads = tuple(self.bindings.values())[1]
+        return make_memory_report(
+            "cub_segmented_scan",
+            "cuda",
+            tuple(
+                HardwareMemoryComponent(
+                    name, size, True, "provider_generation", "provider", resident=valid
+                )
+                for name, size in (
+                    ("head_bitset", int(heads.shape[0]) * 4),
+                    ("scan_tile_state", max(1, self.plan.workspace_bytes)),
+                )
+            ),
+            lifecycle_state="ready" if valid else "runtime_invalid",
+            ownership_scope="plan_generation",
+        )
 
     @property
     def debug_info(self):
