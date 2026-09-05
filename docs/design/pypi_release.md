@@ -58,10 +58,19 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 | 变量 | 必需 | 内容 |
 | ---- | --- | ---- |
 | `LLVM20_WIN_URL`               | ✅ Windows 发行必需 | LLVM 20 Windows zip 的公网 URL（由 `build_llvm20_windows.yml` 产出） |
-| `LLVM20_LINUX_MANYLINUX_URL`   | ✅ Linux 发行必需   | LLVM 20 Linux zip 的公网 URL（manylinux 构建） |
+| `LLVM20_WIN_SHA256`            | ✅ Windows 发行必需 | 对应 Windows zip 的 SHA256（64 位十六进制，不带前缀） |
+| `LLVM20_LINUX_URL`             | ✅ Linux 发行必需   | LLVM 20 Linux zip 的公网 URL（manylinux 构建）；也可使用兼容别名 `LLVM20_LINUX_MANYLINUX_URL` |
+| `LLVM20_LINUX_SHA256`          | ✅ Linux 发行必需   | 对应 Linux zip 的 SHA256（64 位十六进制，不带前缀） |
 
 这些 URL 可以指向同一个项目的 "LLVM 20" Release 下的 asset，例如：
 `https://github.com/<owner>/taichi/releases/download/llvm20/taichi-llvm-20-msvc2026.zip`
+
+校验值对应下载的 LLVM artifact，不绑定 Forge commit HEAD。变更 URL 时同步核对该产物的校验值；不要用另一平台
+或另一构建的值。公开 artifact 的 digest/随附 checksum 应与实际下载文件一致。
+
+手动运行 `publish_pypi.yml` 并设置 `publish=false`，会构建、安装验证并汇总校验完整的两个平台 runtime 和
+Python 3.10–3.14 shim wheel 集合，保存为 `validated-wheel-set` artifact。该模式不进入发布 environment，
+不上传 PyPI/TestPyPI，也不创建 GitHub Release。只有完整集合通过后，显式发布才消费这份已验证的 artifact。
 
 ### 1.5 （备选）PAT fallback
 
