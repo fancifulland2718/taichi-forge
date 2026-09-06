@@ -500,6 +500,25 @@ def test_spmm_restored_workspace_mismatch_retires_failed_selected_plan(framed):
     operation.close()
 
 
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_hardware_recipe_discovery_explains_unmatched_semantics_without_reprobing(monkeypatch):
+    from taichi_forge._lib import core
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    definition, operation, providers, _, _ = _spmm_definition()
+    catalog = definition.recipe_catalog(providers=(*providers, ti.hardware.fft.FftRecipeProvider()))
+    observations = {entry["provider_namespace"]: entry for entry in catalog.discovery_report()["providers"]}
+    assert observations["taichi_forge.graph.fft"]["provider_explanation"]["reason"] == "no_frozen_fft_semantic_source"
+    assert observations["taichi_forge.graph.fft"]["fragment_count"] == 0
+    spmm = observations["taichi_forge.graph.sparse_spmm"]
+    assert spmm["provider_explanation"]["semantic_source_count"] == 1
+    assert spmm["fragment_count"] == len(operation.preparation_report()) - 1
+    monkeypatch.setattr(core, "cuda_external_library_status", lambda *args: pytest.fail("no report probe"))
+    assert catalog.discovery_report()["providers"]
+    operation.close()
+
+
 def _fft_definition(*, prepare=True, direction="forward", preparation=None, binding_frames=False):
     dimensions, batch = (24, 40), 3
     source = ti.linalg.record_fft(

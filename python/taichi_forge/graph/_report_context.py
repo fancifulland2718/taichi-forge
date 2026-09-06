@@ -3,7 +3,7 @@
 import json
 
 
-def _search_context(definition, provider_set, workload, evaluation, backend):
+def _search_context(definition, provider_set, workload, evaluation, backend, *, catalog=None):
     return {
         "source": "caller_declarations_and_frozen_forge_facts_not_qualification",
         "workload": None if workload is None else workload.to_dict(),
@@ -13,6 +13,7 @@ def _search_context(definition, provider_set, workload, evaluation, backend):
         "forge_compile_provenance": definition.compile_provenance.to_dict(),
         "semantic_provider_sources": json.loads(definition._semantic_payload_json)["provider_sources"],
         "baseline_execution": definition.planned_physical_manifest["execution"],
+        "recipe_discovery": None if catalog is None else catalog.discovery_report(),
     }
 
 
@@ -49,6 +50,20 @@ def _context_markdown(context, annotations):
     ]
     for key in ("workload", "evaluation", "backend", "forge_compile_provenance"):
         lines.extend(_json_section(key, context[key]))
+    if context.get("recipe_discovery") is not None:
+        lines.extend(
+            [
+                "",
+                "## Recipe discovery and composition",
+                "",
+                "These are observed generation attempts, not performance rejections or an exhaustive "
+                "capability audit. No fragment may mean an assembler-only provider or unmatched semantics; "
+                "a missing provider explanation remains unknown. Rejected combinations and physical "
+                "duplicates were not measured as separate candidates. Search completeness and measured "
+                "Pareto selection are reported separately.",
+            ]
+        )
+        lines.extend(_json_section("Generation observations", context["recipe_discovery"]))
     lines.extend(["", "## Frozen recipe configuration and numerical contracts", ""])
     if context.get("semantic_provider_sources"):
         lines.extend(_json_section("Frozen semantic source contracts", context["semantic_provider_sources"]))

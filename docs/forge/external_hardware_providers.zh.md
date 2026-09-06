@@ -39,6 +39,10 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 下表描述当前源码 API，不代表所有 vendor release、driver、GPU 或 workload 均已资格化。
 库可以执行或录制，不等于其算法已作为 CompileIQ 搜索轴开放。
 
+`ti.hardware.capability(operation_id).to_dict()["recipe_search"]` 提供静态的语义/provider 入口及更窄的
+适用范围，与专家执行和 `graph_integration` 分开；它不加载可选库，也不证明当前 workload 可用。
+`no_builtin_entry_declared` 只表示该 operation 未声明内建完整 recipe 入口，不禁止应用提供自己的 provider。
+
 | Operation | 语义入口与准备 | Graph 与搜索边界 |
 | --- | --- | --- |
 | 固定 pattern 稀疏-稠密乘法 | `SparseMatrix.record_spmm(...)`，随后 `operation.prepare(input_array, output_array)` | CUDA f32 CSR / 紧凑 row-major 稠密数组；通过 `GraphBuilder.append_native()` 追加。显式 `ti.hardware.linalg.SparseSpmmRecipeProvider()` 将冻结的 direct/preprocessed 策略加入完整 recipe。 |

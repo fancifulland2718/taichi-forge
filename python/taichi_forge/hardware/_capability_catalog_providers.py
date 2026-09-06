@@ -158,10 +158,16 @@ def d1_provider_operations(_operation):
             resource_effects=("read:sparse_matrix", "read:input", "write:output"),
             lifetime_policy="resource_generation",
             update_policy="rebind",
-            requirements=(
-                "compatible cuSPARSE shared library with generic SpMM symbols",
-            ),
+            requirements=("compatible cuSPARSE shared library with generic SpMM symbols",),
             public_api="ti.hardware.linalg.spmm_f32",
+            recipe_semantic_api="SparseMatrix.record_spmm",
+            recipe_provider_api="ti.hardware.linalg.SparseSpmmRecipeProvider",
+            recipe_scope=(
+                "CUDA f32 CSR SparsePattern",
+                "compact row-major dense arrays",
+                "explicit preparation or imported expected facts",
+                "caller-qualified finite-input tolerance",
+            ),
             dtypes=("matrix:f32", "input:f32", "output:f32"),
             layouts=(
                 "scalar CSR",
@@ -313,6 +319,14 @@ def d1_provider_operations(_operation):
             update_policy="rebind",
             requirements=("compatible cuFFT shared library",),
             public_api="ti.hardware.fft.CufftPlan1D / CufftPlanND",
+            recipe_semantic_api="ti.linalg.record_fft",
+            recipe_provider_api="ti.hardware.fft.FftRecipeProvider",
+            recipe_scope=(
+                "CUDA batched 2D complex-f32",
+                "compact out-of-place arrays",
+                "explicit preparation or imported expected facts",
+                "caller-qualified finite-input tolerance",
+            ),
             dtypes=("real:f32", "complex-pair:f32"),
             shapes_or_tiles=(
                 "C2C:(length,2) or (batch,length,2)",
@@ -409,9 +423,7 @@ def d1_provider_operations(_operation):
                 "user-managed cuDSS 0.8.x matching CUDA 12 or CUDA 13",
                 "compatible user-managed cuBLAS dependency",
             ),
-            public_api=(
-                "ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"
-            ),
+            public_api=("ti.linalg.SparseSolver(provider='auto', provider_profile=profile)"),
             dtypes=("matrix:f32", "rhs:f32", "solution:f32"),
             shapes_or_tiles=("single square matrix", "single rhs"),
             layouts=("scalar CSR with i32 offsets and indices",),

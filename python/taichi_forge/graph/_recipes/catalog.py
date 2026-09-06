@@ -70,6 +70,7 @@ class GraphRecipeCatalog:
         self._ordered_recipe_ids = []
         self._planned_physical_representatives = {}
         self._physical_duplicates = {}
+        self._composition_rejections = {}
         baseline = self.composer.compose()
         self._admit("baseline", baseline, ())
 
@@ -90,6 +91,32 @@ class GraphRecipeCatalog:
     @property
     def physical_duplicates(self):
         return dict(self._physical_duplicates)
+
+    def _record_rejection(self, stage, fragments, error):
+        key = (stage, str(error))
+        previous = self._composition_rejections.get(key)
+        if previous is None:
+            previous = {
+                "stage": stage,
+                "reason": str(error),
+                "attempt_count": 0,
+                "example_fragment_ids": tuple(sorted(item.fragment_id for item in fragments)),
+            }
+            self._composition_rejections[key] = previous
+        previous["attempt_count"] += 1
+
+    def discovery_report(self):
+        """Passive generation facts, not a proof of every possible recipe."""
+        return {
+            "scope": "generation_attempts_in_this_session_not_exhaustive_support_or_performance_evidence",
+            "providers": () if self.provider_set is None else self.provider_set.discovery_observations,
+            "registered_fragment_count": len(self._fragments),
+            "admitted_recipe_count": len(self._entries),
+            "planned_physical_duplicates": self.physical_duplicates,
+            "composition_rejections": tuple(
+                dict(self._composition_rejections[key]) for key in sorted(self._composition_rejections)
+            ),
+        }
 
     def entries(self, *, stage=None):
         entries = tuple(
@@ -227,9 +254,9 @@ class GraphRecipeCatalog:
         """Enumerate the complete reachable domain only when it is provably small.
 
         Neighbor expansion is explored to a fixed point before compatible
-        fragment subsets are composed.  The catalog is left unchanged when the
-        proof exceeds ``candidate_limit`` so callers can fall back to staged
-        generation without leaking a partial exact-domain probe.
+        fragment subsets are composed. Admitted recipes and fragments are left
+        unchanged when the proof exceeds ``candidate_limit``; diagnostic
+        attempt counts may still describe the abandoned exact probe.
         """
 
         if isinstance(candidate_limit, bool) or not isinstance(candidate_limit, int):
@@ -293,7 +320,8 @@ class GraphRecipeCatalog:
                 candidate = selected + (ordered_fragments[index],)
                 try:
                     recipe = self.composer.compose(candidate)
-                except GraphRecipeCompositionError:
+                except GraphRecipeCompositionError as error:
+                    self._record_rejection("exact-probe", candidate, error)
                     continue
                 recipes.setdefault(recipe.recipe_id, recipe)
                 if len(recipes) > candidate_limit:
@@ -365,7 +393,8 @@ class GraphRecipeCatalog:
         def offer(fragments, parents, stage):
             try:
                 recipe = self.composer.compose(tuple(fragments))
-            except GraphRecipeCompositionError:
+            except GraphRecipeCompositionError as error:
+                self._record_rejection(stage, fragments, error)
                 return
             if recipe.recipe_id in self._entries:
                 return
@@ -470,7 +499,8 @@ class GraphRecipeCatalog:
                 candidate = selected + (fragments[index],)
                 try:
                     recipe = self.composer.compose(candidate)
-                except GraphRecipeCompositionError:
+                except GraphRecipeCompositionError as error:
+                    self._record_rejection("compatible-composition", candidate, error)
                     continue
                 if len(candidate) >= 2:
                     parent_recipe_ids = tuple(

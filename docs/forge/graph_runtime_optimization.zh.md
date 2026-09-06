@@ -619,6 +619,13 @@ Graph 分配量，不代表连续采样的设备或进程显存峰值。多个 o
 这些信息用于解释适用范围，不代表 Forge 独立验证了所有 driver/library 组合、数值容差或生产 workload。
 此扩展之前产生的报告，其 `context` 为 `None`。
 
+`report.recipe_discovery`（也在 `report.context["recipe_discovery"]`）保留 provider fragment 数、可选
+provider 解释、被拒绝的组合尝试和 planned-physical 重复项。`catalog.discovery_report()` 被动读取相同
+冷生成观测，不重新 discovery 或 probe 库。provider 可实现可选的 `explain_discovery(definition)`，
+在 discovery 时返回 JSON-safe 事实；这些是 provider 声明，不是性能测量。没有解释的空 fragment 结果保持
+未知：可能是只负责装配，也可能是不匹配的 Graph 语义。拒绝次数是本 session（含有界 exact probe）的尝试数，
+不是所有可能组合。实测失败、Pareto 未选中和预算不完整仍使用报告原有字段；诊断不改变准入、预算或 replay。
+
 公共 `definition.search_recipes()` 可以通过 `GraphEvaluationContract` 声明只用于报告的成本指标：
 
 ```python

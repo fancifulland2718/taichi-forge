@@ -98,6 +98,16 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
 
         assembly.select_operation(executable, rewrite)
 
+    def explain_discovery(self, definition):
+        count = sum(1 for _ in _sources(definition))
+        return {
+            "source": "provider_declared_not_measured",
+            "semantic_source_count": count,
+            "reason": "prepared_fixed_pattern_sources" if count else "no_frozen_spmm_semantic_source",
+            "semantic_api": "SparseMatrix.record_spmm",
+            "scope": "CUDA f32 CSR, real dense preparation or imported expected facts",
+        }
+
     def describe(self, definition, fragment_key):
         fragment = self.resolve(definition, fragment_key)
         selection = fragment.provider_metadata["family_selection"]

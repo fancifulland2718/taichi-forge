@@ -245,6 +245,10 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert report.outcome_status == "selected"
     assert report.next_action == "apply_selection"
     assert report.recipe_annotations
+    assert report.recipe_discovery == report.context["recipe_discovery"]
+    assert report.recipe_discovery["admitted_recipe_count"] == len(session.recipes)
+    assert report.recipe_discovery["providers"]
+    assert report.recipe_discovery["composition_rejections"]
     assert report.context["evaluation"] == evaluation_contract.to_dict()
     assert report.context["workload"] == workload_context.to_dict()
     assert report.context["backend"] == backend_environment.to_dict()
@@ -291,6 +295,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert restored_legacy.to_dict() == legacy_report.to_dict()
     assert "Graph resource observation boundaries" not in restored_legacy.to_markdown()
     assert restored_legacy.context is None
+    assert restored_legacy.recipe_discovery is None
     assert "Caller-measured lifecycle costs" not in restored_legacy.to_markdown()
     assert "Metric definitions" not in restored_legacy.to_markdown()
     tampered_report = report.to_dict()
@@ -304,6 +309,8 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert "Caller-measured lifecycle costs" in markdown
     assert "synthetic arithmetic fixture" in markdown
     assert "Metric definitions" in markdown
+    assert "Recipe discovery and composition" in markdown
+    assert "not performance rejections" in markdown
     assert "not elapsed time" in markdown
     assert decision.selection_artifact is not None
     resolved = definition.resolve_recipe(decision.selection_artifact)

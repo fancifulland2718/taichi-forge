@@ -92,6 +92,16 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
 
         assembly.select_operation(executable, rewrite)
 
+    def explain_discovery(self, definition):
+        count = sum(1 for _ in _sources(definition))
+        return {
+            "source": "provider_declared_not_measured",
+            "semantic_source_count": count,
+            "reason": "prepared_batched_2d_sources" if count else "no_frozen_fft_semantic_source",
+            "semantic_api": "ti.linalg.record_fft",
+            "scope": "CUDA complex-f32, compact batched 2D, prepared or imported expected facts",
+        }
+
     def describe(self, definition, fragment_key):
         fragment = self.resolve(definition, fragment_key)
         selection = fragment.provider_metadata["family_selection"]

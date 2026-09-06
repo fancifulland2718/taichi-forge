@@ -492,6 +492,10 @@ class GraphOptimizationReportV2:
         return self.reuse.get("context")
 
     @property
+    def recipe_discovery(self):
+        return None if self.context is None else self.context.get("recipe_discovery")
+
+    @property
     def compileiq_report(self):
         from compileiq.forge_support import OpaqueOptimizationReportV1
 
@@ -1725,8 +1729,12 @@ class _GraphRecipeSearchSession:
                     "backend_environment_id": self._backend_environment_id,
                     "resolution": "rebuild_provider_catalog_by_stable_recipe_id",
                     "context": _search_context(
-                        self._definition, self._catalog.provider_set, self._workload_context,
-                        self._evaluation_contract, self._backend_environment,
+                        self._definition,
+                        self._catalog.provider_set,
+                        self._workload_context,
+                        self._evaluation_contract,
+                        self._backend_environment,
+                        catalog=self._catalog,
                     ),
                 }
             ),

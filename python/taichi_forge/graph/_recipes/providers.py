@@ -219,6 +219,7 @@ class GraphRecipeProviderSet:
                 fragment_owners[namespace] = (descriptor, provider)
 
         self._entries = tuple(provider_entries)
+        self._discovery_observations = ()
         self._by_provider_namespace = {
             descriptor.namespace: (descriptor, provider)
             for descriptor, provider in self._entries
@@ -340,6 +341,7 @@ class GraphRecipeProviderSet:
 
     def discover(self):
         discovered = []
+        observations = []
         for descriptor, provider in self._entries:
             method = getattr(provider, "discover", None)
             if not callable(method):
@@ -355,7 +357,26 @@ class GraphRecipeProviderSet:
                 self._validate_fragment(descriptor, fragment)
                 for fragment in fragments
             )
+            explain = getattr(provider, "explain_discovery", None)
+            notes = explain(self.definition) if callable(explain) else None
+            observations.append(
+                {
+                    "provider_namespace": descriptor.namespace,
+                    "fragment_count": len(fragments),
+                    "status": "fragments_produced" if fragments else "no_fragment_produced",
+                    "provider_explanation": notes,
+                }
+            )
+        # Copy JSON facts once at discovery. Reading the report never calls a
+        # provider or probes its optional runtime again.
+        self._discovery_observations = _canonical_json(observations)
         return tuple(discovered)
+
+    @property
+    def discovery_observations(self):
+        import json
+
+        return () if not self._discovery_observations else tuple(json.loads(self._discovery_observations))
 
     def resolve(self, fragment):
         fragment = self.validate_fragment(fragment)

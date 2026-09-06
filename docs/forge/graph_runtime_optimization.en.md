@@ -791,6 +791,19 @@ contracts. These facts explain applicability; they do not independently qualify 
 driver/library combination, numerical tolerance or production workload. Reports
 created before this enrichment return `None` for `context`.
 
+`report.recipe_discovery` (also `report.context["recipe_discovery"]`) preserves
+provider fragment counts, optional provider explanations, rejected composition
+attempts and planned-physical duplicates. `catalog.discovery_report()` reads the
+same cold-generation observations without rediscovery or a library probe.
+Providers may optionally implement `explain_discovery(definition)` to return
+JSON-safe facts during discovery; these are provider declarations, not measured
+performance. An empty fragment result without an explanation remains unknown:
+it can be an assembler-only provider or unmatched Graph semantics. Rejection
+counts describe attempts made by this session, including bounded exact probes,
+not all possible combinations. Measured failures, Pareto nonselection and budget
+incompleteness remain in their existing report sections. None of these diagnostic
+fields changes eligibility, the search budget or replay behavior.
+
 The public `definition.search_recipes()` entry accepts optional reporting-only
 cost metrics through `GraphEvaluationContract`. For example:
 

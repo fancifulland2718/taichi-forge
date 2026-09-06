@@ -127,6 +127,21 @@ def test_static_hardware_catalog_is_complete_immutable_and_schema_separate():
         )
 
 
+def test_hardware_recipe_entry_points_are_static_narrow_and_do_not_load_vendor_runtimes(monkeypatch):
+    monkeypatch.setattr(ti_core, "cuda_external_library_status", lambda *args: pytest.fail("no vendor probe"))
+    spmm = ti.hardware.capability("linalg.spmm.cusparse_explicit").to_dict()["recipe_search"]
+    fft = ti.hardware.capability("fft.transform.cufft").to_dict()["recipe_search"]
+    assert spmm["semantic_api"] == "SparseMatrix.record_spmm"
+    assert spmm["provider_api"] == "ti.hardware.linalg.SparseSpmmRecipeProvider"
+    assert "CUDA f32 CSR SparsePattern" in spmm["scope"]
+    assert fft["semantic_api"] == "ti.linalg.record_fft"
+    assert "CUDA batched 2D complex-f32" in fft["scope"]
+    expert_only = ti.hardware.capability("linalg.matmul.cublaslt_explicit").to_dict()["recipe_search"]
+    assert expert_only["status"] == "no_builtin_entry_declared"
+    assert expert_only["provider_api"] is None
+    assert spmm["qualification"] == "static_entry_points_not_workload_availability"
+
+
 def test_hardware_activation_modes_make_automatic_and_manual_routes_explicit():
     by_id = {operation.operation_id: operation for operation in ti.hardware.operations()}
     expected = {

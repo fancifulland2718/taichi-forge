@@ -241,6 +241,9 @@ class HardwareOperationDescriptor:
     fallback_equivalent: Optional[bool] = None
     requirements: Tuple[str, ...] = ()
     public_api: Optional[str] = None
+    recipe_semantic_api: Optional[str] = None
+    recipe_provider_api: Optional[str] = None
+    recipe_scope: Tuple[str, ...] = ()
     notes: Tuple[str, ...] = ()
     schema_version: int = HARDWARE_CAPABILITY_SCHEMA_VERSION
 
@@ -260,6 +263,7 @@ class HardwareOperationDescriptor:
         numeric_contracts = _unique_strings("numeric_contracts", self.numeric_contracts)
         requirements = _unique_strings("requirements", self.requirements)
         notes = _unique_strings("notes", self.notes)
+        recipe_scope = _unique_strings("recipe_scope", self.recipe_scope)
         for backend in backends:
             _validate_member("backend", backend, _BACKENDS)
         for scope in scopes:
@@ -337,6 +341,10 @@ class HardwareOperationDescriptor:
             raise TypeError("public_api must be None or a nonempty string")
         if self.deterministic is not None and not isinstance(self.deterministic, bool):
             raise TypeError("deterministic must be None or bool")
+        for name in ("recipe_semantic_api", "recipe_provider_api"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise TypeError(f"{name} must be None or a nonempty string")
         if self.fallback_provider is not None and (
             not isinstance(self.fallback_provider, str) or not self.fallback_provider
         ):
@@ -369,6 +377,7 @@ class HardwareOperationDescriptor:
         object.__setattr__(self, "numeric_contracts", numeric_contracts)
         object.__setattr__(self, "requirements", requirements)
         object.__setattr__(self, "notes", notes)
+        object.__setattr__(self, "recipe_scope", recipe_scope)
 
     def to_dict(self):
         return {
@@ -403,6 +412,13 @@ class HardwareOperationDescriptor:
             "fallback_equivalent": self.fallback_equivalent,
             "requirements": self.requirements,
             "public_api": self.public_api,
+            "recipe_search": {
+                "semantic_api": self.recipe_semantic_api,
+                "provider_api": self.recipe_provider_api,
+                "scope": self.recipe_scope,
+                "status": "explicit_semantic_entry" if self.recipe_provider_api else "no_builtin_entry_declared",
+                "qualification": "static_entry_points_not_workload_availability",
+            },
             "notes": self.notes,
         }
 
@@ -790,6 +806,9 @@ def _operation(
     fallback_equivalent=None,
     requirements=(),
     public_api=None,
+    recipe_semantic_api=None,
+    recipe_provider_api=None,
+    recipe_scope=(),
     notes=(),
 ):
     return HardwareOperationDescriptor(
@@ -821,6 +840,9 @@ def _operation(
         fallback_equivalent=fallback_equivalent,
         requirements=tuple(requirements),
         public_api=public_api,
+        recipe_semantic_api=recipe_semantic_api,
+        recipe_provider_api=recipe_provider_api,
+        recipe_scope=tuple(recipe_scope),
         notes=tuple(notes),
     )
 

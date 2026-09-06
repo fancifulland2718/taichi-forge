@@ -45,6 +45,12 @@ The following table describes the current source API, not qualification of every
 vendor release, driver, GPU, or workload. A library being executable or recordable
 does not imply that its algorithms are exposed as CompileIQ search axes.
 
+`ti.hardware.capability(operation_id).to_dict()["recipe_search"]` reports static
+semantic/provider entry points and their narrower scope, independently of expert
+execution and `graph_integration`. It does not load the optional library or certify
+the current workload. `no_builtin_entry_declared` means no built-in complete-recipe
+entry is declared for that operation; it does not prohibit application providers.
+
 | Operation | Semantic entry and preparation | Graph and search boundary |
 | --- | --- | --- |
 | Fixed-pattern sparse-dense product | `SparseMatrix.record_spmm(...)`, then `operation.prepare(input_array, output_array)` | CUDA f32 CSR / compact row-major dense arrays; append the operation with `GraphBuilder.append_native()`. Explicit `ti.hardware.linalg.SparseSpmmRecipeProvider()` adds frozen direct/preprocessed strategies to complete recipes. |

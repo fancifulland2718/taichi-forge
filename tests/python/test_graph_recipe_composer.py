@@ -488,6 +488,7 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
     assert admitted[0].recipe.recipe_id == admitted[1].recipe.recipe_id
     assert len(deduplicated.entries(stage="single-region")) == 1
     assert len(deduplicated.physical_duplicates) == 1
+    assert deduplicated.discovery_report()["planned_physical_duplicates"] == deduplicated.physical_duplicates
 
     neighbor = _fragment(definition, (0,), "neighbor")
     base = _fragment(
@@ -536,6 +537,54 @@ def test_catalog_stages_explicit_composition_neighbors_and_physical_dedup():
     assert len(composed) == 1
     assert composed[0].recipe.fragment_ids == (base.fragment_id, tail.fragment_id)
     assert len(catalog.entries(stage="compatible-composition")) == 1
+
+
+def test_catalog_discovery_explanations_are_passive_and_separate_conflicts_from_absent_candidates(monkeypatch):
+    definition = _definition()
+    first = _fragment(definition, (0,), "first")
+    conflicting = _fragment(definition, (0,), "conflicting")
+
+    class Producer:
+        descriptor = _provider_descriptor()
+
+        def fragments(self, requested):
+            return (first, conflicting)
+
+        def explain_discovery(self, requested):
+            return {"source": "provider_declared_not_measured", "reason": "two alternative lowerings"}
+
+    class Empty:
+        descriptor = _provider_descriptor("test.empty")
+
+        def fragments(self, requested):
+            return ()
+
+    producer, empty = Producer(), Empty()
+    catalog = GraphRecipeCatalog(definition)
+    catalog.discover((producer, empty))
+    catalog.build_single_region_stage()
+    catalog.build_compatible_stage(candidate_limit=8)
+    report = catalog.discovery_report()
+    entries = {entry["provider_namespace"]: entry for entry in report["providers"]}
+    assert entries["test.empty"]["status"] == "no_fragment_produced"
+    assert entries["test.empty"]["provider_explanation"] is None
+    assert entries["test.provider"]["fragment_count"] == 2
+    assert entries["test.provider"]["provider_explanation"]["reason"] == "two alternative lowerings"
+    assert report["admitted_recipe_count"] == 3
+    assert report["composition_rejections"]
+    assert all(item["attempt_count"] > 0 and item["reason"] for item in report["composition_rejections"])
+    assert {first.fragment_id, conflicting.fragment_id} == set(
+        report["composition_rejections"][0]["example_fragment_ids"]
+    )
+    for provider in (producer, empty):
+        monkeypatch.setattr(provider, "fragments", lambda *args: pytest.fail("report must not rediscover"))
+    monkeypatch.setattr(producer, "explain_discovery", lambda *args: pytest.fail("report must not call provider"))
+    report["providers"][0]["status"] = "mutated"
+    report["composition_rejections"][0]["attempt_count"] = -1
+    fresh = catalog.discovery_report()
+    assert fresh["providers"][0]["status"] != "mutated"
+    assert fresh["composition_rejections"][0]["attempt_count"] > 0
+    assert "performance_evidence" in fresh["scope"]
 
 
 def test_catalog_builds_budget_bounded_compatible_complete_recipes():
