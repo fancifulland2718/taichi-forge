@@ -623,6 +623,12 @@ Graph 分配量，不代表连续采样的设备或进程显存峰值。多个 o
 
 ```python
 evaluation_contract = ti.graph.GraphEvaluationContract({
+    "metric_definitions": {
+        "device_us": {
+            "unit": "us", "scope": "device_event_elapsed_including_idle_gaps",
+            "source": "CUDA events", "interval": "after warmup; 64 replays / 64",
+        },
+    },
     "correctness": "application-owned reference and tolerance",
     "synchronization": "application-defined completion boundaries",
     "cost_profiles": {
@@ -644,7 +650,12 @@ session = definition.search_recipes(
 decision = session.run(evaluator)
 ```
 
-单位可为 `s`、`ms`、`us` 或 `ns`，同一个 profile 的各阶段共用单位。`scope` 必须说明实际测量范围；
+可选的 `metric_definitions` 为具名 objective/constraint 声明 `unit`、`scope`、`source`、`interval`，
+并保留同步或 aggregation 等额外 JSON 事实；它不添加指标或自动插桩。JSON/Markdown 明确标识未声明口径，
+不由名字猜测含义。CUDA event 区间可能包含空隙，不等于 kernel 活跃时间；存在重叠 kernel 时还须说明活跃
+时间是求和还是区间并集。修改这些调用者事实会改变用于证据复用的 evaluation contract。
+
+cost profile 单位可为 `s`、`ms`、`us` 或 `ns`，同一个 profile 的各阶段共用单位。`scope` 必须说明实际测量范围；
 仅准备 binding 的耗时不一定等于完整 generation setup。setup/first/steady 映射可分别省略，缺测或 `None`
 表示不可得而不是零；提供的耗时必须有限且非负。声明的成本指标作为 opaque trial observation 保留，不会
 自动变成 CompileIQ objective/constraint；若调用者同时将它声明为 target，它仍正常参与该目标。未声明的

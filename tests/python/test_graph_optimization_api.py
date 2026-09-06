@@ -158,10 +158,21 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
             "synchronization": "ti.sync-after-run",
             "correctness": "numpy-exact",
             "metric": "physical-plan-manifest",
+            "metric_definitions": {
+                "physical_dispatches": {
+                    "unit": "count",
+                    "scope": "materialized Graph kernel dispatches, not elapsed time",
+                    "source": "graph.physical_plan",
+                    "interval": "one materialized recipe after correctness replay",
+                }
+            },
             "cost_profiles": {
                 "contract_fixture": {
                     "scope": "synthetic arithmetic fixture, not performance evidence",
-                    "unit": "us", "setup": "fixture_setup", "first": "fixture_first", "steady": "fixture_steady",
+                    "unit": "us",
+                    "setup": "fixture_setup",
+                    "first": "fixture_first",
+                    "steady": "fixture_steady",
                     "amortization_model": "setup_plus_first_plus_remaining_steady",
                 }
             },
@@ -242,6 +253,12 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         item for item in report.recipe_annotations if item["recipe_id"] == decision.selection.recipe_id
     )
     assert selected_annotation["measurement"]["complete"]
+    assert selected_annotation["measurement"]["metric_definitions"]["physical_dispatches"]["declaration"] == (
+        evaluation_contract.facts["metric_definitions"]["physical_dispatches"]
+    )
+    assert (
+        selected_annotation["measurement"]["metric_definitions"]["materialized_memory_bytes"]["status"] == "undeclared"
+    )
     assert selected_annotation["measurement"]["materialized_physical_ids"]
     # Cost observations must not silently become search objectives or filter
     # this structurally selected (but cost-negative) candidate from the report.
@@ -262,6 +279,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         annotation.pop("cost_observations", None)
         annotation.pop("frozen_fragments", None)
         annotation["measurement"].pop("materialized_memory_scope", None)
+        annotation["measurement"].pop("metric_definitions", None)
         legacy_annotations.append(annotation)
     legacy_reuse = report.reuse
     legacy_reuse.pop("context", None)
@@ -274,6 +292,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert "Graph resource observation boundaries" not in restored_legacy.to_markdown()
     assert restored_legacy.context is None
     assert "Caller-measured lifecycle costs" not in restored_legacy.to_markdown()
+    assert "Metric definitions" not in restored_legacy.to_markdown()
     tampered_report = report.to_dict()
     tampered_report["selection"]["reason"]["provider_claims_used"] = True
     with pytest.raises(ValueError, match="identity mismatch"):
@@ -284,6 +303,8 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert "Provider notes above are declarations" in markdown
     assert "Caller-measured lifecycle costs" in markdown
     assert "synthetic arithmetic fixture" in markdown
+    assert "Metric definitions" in markdown
+    assert "not elapsed time" in markdown
     assert decision.selection_artifact is not None
     resolved = definition.resolve_recipe(decision.selection_artifact)
     assert resolved.recipe_id == decision.selection.recipe_id
@@ -423,6 +444,11 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert resumed.report.status["terminal_fidelity_status"] == "complete"
     assert resumed.report.strategy.strategy_id == staged_strategy.strategy_id
     assert resumed_observed
+    assert all(
+        annotation["measurement"]["metric_definitions"]["physical_dispatches"]["declaration"]
+        == evaluation_contract.facts["metric_definitions"]["physical_dispatches"]
+        for annotation in resumed.report.recipe_annotations
+    )
     measurement_keys = tuple(
         item["request"]["measurement_key"] for item in resumed.report.checkpoint.compileiq_checkpoint["records"]
     )

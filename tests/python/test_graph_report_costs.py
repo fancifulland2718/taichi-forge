@@ -13,6 +13,7 @@ from taichi_forge.graph._report_costs import (
     _separate_cost_metrics,
 )
 from taichi_forge.graph._reuse import GraphEvaluationContract
+from taichi_forge.graph._report_measurements import _metric_definitions, _measurement_definitions, _measurement_markdown
 
 
 _PROFILE = {
@@ -23,6 +24,40 @@ _PROFILE = {
     "steady": "steady_ms",
     "amortization_model": "setup_plus_first_plus_remaining_steady",
 }
+
+
+def test_metric_definitions_preserve_scope_and_do_not_infer_device_time_from_names():
+    declaration = {
+        "unit": "us",
+        "scope": "device_event_elapsed_including_idle_gaps",
+        "source": "CUDA events",
+        "interval": "after warmup; 64 replays / 64",
+        "synchronization": "after interval",
+    }
+    contract = GraphEvaluationContract({"metric_definitions": {"device_us": declaration}})
+    definitions = _metric_definitions(contract, {})
+    measured = _measurement_definitions(("device_us", "gpu_time", "missing_bytes"), definitions)
+    assert measured["device_us"]["declaration"] == declaration
+    assert measured["gpu_time"]["status"] == "undeclared"
+    assert measured["missing_bytes"]["declaration"] is None
+    before = json.dumps(measured, sort_keys=True)
+    markdown = "\n".join(_measurement_markdown(({"measurement": {"metric_definitions": measured}},)))
+    assert "including_idle_gaps" in markdown and "not the sum or union" in markdown
+    assert "| gpu_time | undeclared |" in markdown
+    assert json.dumps(measured, sort_keys=True) == before
+    assert _measurement_markdown(({"measurement": {}},)) == []
+    assert _metric_definitions(None, {}) == {}
+    for field in ("unit", "scope", "source", "interval"):
+        with pytest.raises(ValueError, match=field):
+            _metric_definitions(
+                GraphEvaluationContract({"metric_definitions": {"device_us": {**declaration, field: ""}}}), {}
+            )
+    with pytest.raises(ValueError, match="conflicting units"):
+        _metric_definitions(contract, {"time": {"unit": "ms", "steady": "device_us"}})
+    changed = GraphEvaluationContract(
+        {"metric_definitions": {"device_us": {**declaration, "scope": "kernel_active_sum"}}}
+    )
+    assert changed.evaluation_contract_id != contract.evaluation_contract_id
 
 
 def _candidate(name="candidate", **changes):

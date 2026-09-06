@@ -693,6 +693,7 @@ class GraphOptimizationReportV2:
     def to_markdown(self):
         from taichi_forge.graph._trial_observations import _boundary_markdown
         from taichi_forge.graph._report_context import _context_markdown, _cost_markdown, _provider_preparation_markdown
+        from taichi_forge.graph._report_measurements import _measurement_markdown
 
         lines = [
             "# Taichi Forge Graph Optimization Report",
@@ -731,6 +732,7 @@ class GraphOptimizationReportV2:
             )
         lines.extend(["", "Provider notes above are declarations, not measured claims."])
         lines.extend(_boundary_markdown(self.recipe_annotations))
+        lines.extend(_measurement_markdown(self.recipe_annotations))
         lines.extend(_cost_markdown(self.recipe_annotations))
         lines.extend(_context_markdown(self.context, self.recipe_annotations))
         lines.extend(_provider_preparation_markdown(self.recipe_annotations))
@@ -864,8 +866,10 @@ class _GraphRecipeSearchSession:
             CompileIQCompleteGraphRecipeSearch,
         )
         from taichi_forge.graph._report_costs import _cost_profiles
+        from taichi_forge.graph._report_measurements import _metric_definitions
 
         self._cost_profiles = _cost_profiles(evaluation_contract)
+        self._metric_definitions = _metric_definitions(evaluation_contract, self._cost_profiles)
 
         catalog = definition.recipe_catalog(
             providers=providers,
@@ -1502,6 +1506,7 @@ class _GraphRecipeSearchSession:
         from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _trial_boundaries
         from taichi_forge.graph._report_costs import _cost_evidence, _cost_observations
         from taichi_forge.graph._report_context import _frozen_fragments
+        from taichi_forge.graph._report_measurements import _measurement_definitions
 
         environment = _environment_observations(compileiq_checkpoint["records"])
         boundaries = _trial_boundaries(compileiq_checkpoint["records"])
@@ -1575,6 +1580,7 @@ class _GraphRecipeSearchSession:
                         "metrics": {
                             name: summary.model_dump(by_alias=True) for name, summary in candidate.metrics.items()
                         },
+                        "metric_definitions": _measurement_definitions(candidate.metrics, self._metric_definitions),
                         "planned_physical_ids": candidate.planned_physical_ids,
                         "materialized_physical_ids": (candidate.materialized_physical_ids),
                         "materialized_memory_peak_bytes": (candidate.materialized_memory_peak_bytes),

@@ -796,6 +796,12 @@ cost metrics through `GraphEvaluationContract`. For example:
 
 ```python
 evaluation_contract = ti.graph.GraphEvaluationContract({
+    "metric_definitions": {
+        "device_us": {
+            "unit": "us", "scope": "device_event_elapsed_including_idle_gaps",
+            "source": "CUDA events", "interval": "after warmup; 64 replays / 64",
+        },
+    },
     "correctness": "application-owned reference and tolerance",
     "synchronization": "application-defined completion boundaries",
     "cost_profiles": {
@@ -817,7 +823,15 @@ session = definition.search_recipes(
 decision = session.run(evaluator)
 ```
 
-Units are `s`, `ms`, `us` or `ns`, shared by all phases in one profile. Specify the
+Optional `metric_definitions` annotate named objectives/constraints with an explicit
+`unit`, `scope`, `source` and `interval`; extra JSON facts, such as synchronization
+or aggregation, are preserved. This does not add a metric or instrument execution.
+JSON and Markdown keep undeclared semantics explicit and do not infer them from
+names. CUDA event elapsed time may include idle gaps; it is not active kernel time.
+Declare whether active work means a sum or a union when kernels can overlap.
+Changing these caller facts changes the evaluation contract for evidence reuse.
+
+Cost-profile units are `s`, `ms`, `us` or `ns`, shared by all phases in one profile. Specify the
 actual scope: preparing a binding is not necessarily the full generation setup.
 The setup/first/steady mappings may be omitted individually; missing values or
 `None` are unavailable, not zero. Supplied durations must be finite and nonnegative.
