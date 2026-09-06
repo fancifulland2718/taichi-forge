@@ -173,9 +173,9 @@ jobs:
       - name: Validate runtime native build options
         run: |
           set -euo pipefail
-          cache="$(find _skbuild -name CMakeCache.txt | sort | head -n 1)"
-          if [[ -z "$cache" ]]; then
-            echo "::error::CMakeCache.txt was not generated."
+          cache="$(find _skbuild -maxdepth 2 -name CMakeCache.txt -type f -print)"
+          if [[ -z "$cache" || "$cache" == *$'\n'* ]]; then
+            echo "::error::Expected exactly one top-level runtime CMakeCache.txt."
             exit 1
           fi
           grep -F "TI_WITH_CUDA_TOOLKIT:BOOL=OFF" "$cache"
@@ -356,14 +356,15 @@ jobs:
       - name: Validate runtime native build options
         shell: pwsh
         run: |
-          $cache = Get-ChildItem -Path _skbuild -Recurse -File -Filter CMakeCache.txt |
-            Sort-Object FullName |
-            Select-Object -First 1
-          if (-not $cache) {
-            Write-Error "CMakeCache.txt was not generated."
+          $buildDirs = @(Get-ChildItem -LiteralPath _skbuild -Directory | Where-Object {
+            Test-Path -LiteralPath (Join-Path $_.FullName "CMakeCache.txt")
+          })
+          if ($buildDirs.Count -ne 1) {
+            Write-Error "Expected exactly one top-level runtime CMakeCache.txt."
             exit 1
           }
-          $content = Get-Content -Path $cache.FullName -Raw
+          $cache = Join-Path $buildDirs[0].FullName "CMakeCache.txt"
+          $content = Get-Content -LiteralPath $cache -Raw
           foreach ($expected in @(
               "TI_WITH_CUDA_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF",
