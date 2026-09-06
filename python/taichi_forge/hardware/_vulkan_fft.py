@@ -9,7 +9,10 @@ import weakref
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.graph._recipes.definition import _digest
-from taichi_forge.hardware._bundled_runtime_provider import _binary_sha256
+from taichi_forge.hardware._bundled_runtime_provider import (
+    _binary_sha256,
+    _runtime_package_roots,
+)
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
@@ -24,13 +27,23 @@ from taichi_forge.types.primitive_types import f32
 
 _ABI = "taichi-forge-vkfft-provider-c-abi1"
 _PLANS = weakref.WeakSet()
+_ADAPTER_STEM = "taichi_forge_vkfft_provider_abi1_vkfft134"
 
 
 def _adapter_path(value):
     value = value if value is not None else os.environ.get("TI_VKFFT_LIBRARY_PATH")
+    if value is None:
+        filename = (
+            f"{_ADAPTER_STEM}.dll" if os.name == "nt" else f"lib{_ADAPTER_STEM}.so"
+        )
+        for root in _runtime_package_roots():
+            candidate = root / "_lib" / "hardware_providers" / filename
+            if candidate.is_file():
+                return str(candidate.resolve())
     if not value:
         raise ValueError(
-            "provide adapter_path or TI_VKFFT_LIBRARY_PATH for the optional Vulkan FFT adapter"
+            "the optional Vulkan FFT adapter is not bundled; provide adapter_path "
+            "or TI_VKFFT_LIBRARY_PATH, or install a runtime wheel containing it"
         )
     path = Path(value).expanduser()
     if not path.is_file():
@@ -156,7 +169,8 @@ class VulkanFftPlan:
     when it exceeds one. ``normalization='inverse'`` divides an inverse by
     the transform volume; the default leaves both directions unnormalized.
 
-    Pass the optional VkFFT 1.3.4 adapter explicitly, or configure
+    The optional VkFFT 1.3.4 adapter is resolved from the runtime package only
+    on explicit use. Override it with ``adapter_path`` or
     ``TI_VKFFT_LIBRARY_PATH``. Creation can compile shaders and initialize
     lookup tables. Execution submits no readback or host wait. Root Graphs
     retain a host call per FFT action, executing a pre-recorded GPU sequence;

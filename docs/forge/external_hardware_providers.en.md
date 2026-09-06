@@ -20,7 +20,7 @@ APIs for the bounded operations below; discovery probes remain non-executing.
 | cuBLAS | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cublas")` | Direct Python or root Graph; not kernel-callable |
 | cuSPARSE | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cusparse")` | Domain auto/explicit or root Graph; not kernel-callable |
 | cuFFT | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
-| VkFFT 1.3.4 | Optional ABI1 Vulkan JIT adapter | Explicit addon/build; not currently included in standard wheels | `ti.hardware.probe("vkfft", library_path=...)` | Fixed-storage `VulkanFftPlan` or root Graph; no FFT recipe search |
+| VkFFT 1.3.4 | Optional ABI1 Vulkan JIT adapter | Current runtime build configuration; older artifacts may omit it | `ti.hardware.probe("vkfft")` or explicit library path | Fixed-storage `VulkanFftPlan` or root Graph; no FFT recipe search |
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
@@ -743,8 +743,13 @@ runtime containing the FFT bridge and the separate
 `taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO. The adapter compiles VkFFT 1.3.4
 with a matched static glslang/SPIRV-Tools distribution. Execution needs the Vulkan
 loader/driver, not CUDA, the Vulkan SDK, or a shared glslang runtime. Standard
-wheel inclusion is not implied; builders enable `TI_BUILD_VKFFT_PROVIDER` and
-supply the inputs in `cmake/TaichiVkfftProvider.cmake`.
+runtime builds enable `TI_BUILD_VKFFT_PROVIDER` and install the adapter under
+`taichi_forge_runtime/_lib/hardware_providers`, with upstream notices under
+`_lib/licenses/vkfft`. Older artifacts may omit it; probe the installed adapter
+instead of assuming a source checkout describes an already-published wheel.
+Builders can supply an offline `TI_VKFFT_ROOT` and matched static compiler paths
+in `cmake/TaichiVkfftProvider.cmake`; otherwise the build fetches pinned VkFFT
+sources. No source download or C++ build occurs on user-side plan creation.
 
 ```python
 ti.init(arch=ti.vulkan)
@@ -752,7 +757,7 @@ data = ti.ndarray(ti.f32, shape=(2, 16, 8, 2))
 # Populate data with interleaved real/imaginary scalars before execution.
 with ti.hardware.fft.VulkanFftPlan(
     data, (16, 8), batch_count=2, direction="inverse",
-    normalization="inverse", adapter_path=adapter_path,
+    normalization="inverse",
 ) as plan:
     plan.run()  # In place, on Forge's ordered compute queue.
     builder = ti.graph.GraphBuilder()
@@ -764,7 +769,10 @@ with ti.hardware.fft.VulkanFftPlan(
     build_and_allocation_facts = plan.statistics()
 ```
 
-Alternatively set `TI_VKFFT_LIBRARY_PATH` to the adapter file. The legacy
+Explicit use resolves the adapter from the runtime package without global
+provider enablement or discovery during ordinary import/replay. To override it,
+pass `adapter_path` or set `TI_VKFFT_LIBRARY_PATH`; an invalid explicit override
+fails without falling back to a bundled library. The legacy
 `ti.hardware.fft.is_available()` / `cache_statistics()` remain cuFFT-only;
 `ti.hardware.probe("vkfft", ...)` checks the adapter ABI without creating a plan
 or qualifying a device/workload. Passive reports inspect only known open plans.

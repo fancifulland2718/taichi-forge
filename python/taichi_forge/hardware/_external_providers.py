@@ -33,8 +33,8 @@ _EXTERNAL_PROVIDER_SPECS = (
     ExternalProviderSpec(
         provider_id="vkfft",
         adapter_kind="optional_jit_provider_c_abi",
-        install_owner="user_optional_addon",
-        library_path_policy="required",
+        install_owner="forge_runtime_wheel",
+        library_path_policy="optional",
         process_handle_policy="provider_object",
         runtime_resource_policy="provider_plan",
         transitive_dependencies=("vulkan_loader",),

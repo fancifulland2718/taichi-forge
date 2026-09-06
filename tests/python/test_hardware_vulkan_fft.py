@@ -15,7 +15,10 @@ from tests import test_utils
 def _adapter():
     path = os.environ.get("TI_VKFFT_LIBRARY_PATH")
     if not path:
-        pytest.skip("the optional Vulkan FFT adapter is not configured")
+        try:
+            path = _vulkan_fft._adapter_path(None)
+        except ValueError:
+            pytest.skip("the optional Vulkan FFT adapter is not configured or bundled")
     # An explicitly configured but broken adapter must fail, not skip.
     return path
 
@@ -55,6 +58,7 @@ def test_vulkan_fft_cold_contracts_and_passive_discovery(monkeypatch):
 
     monkeypatch.setattr(_vulkan_fft.ctypes, "CDLL", unexpected_load)
     monkeypatch.delenv("TI_VKFFT_LIBRARY_PATH", raising=False)
+    monkeypatch.setattr(_vulkan_fft, "_runtime_package_roots", lambda: ())
     status = passive_external_provider_status("vkfft")
     assert not status["library_loaded"]
     assert not status["native_facts"]["external_component_probed"]
@@ -67,6 +71,43 @@ def test_vulkan_fft_cold_contracts_and_passive_discovery(monkeypatch):
     assert descriptor.update_policy == "immutable"
     assert descriptor.public_api == "ti.hardware.fft.VulkanFftPlan"
     assert ti.hardware.report().external_components_probed is False
+
+
+def test_vulkan_fft_bundled_resolution_is_cold_and_honors_explicit_overrides(
+    monkeypatch, tmp_path
+):
+    filename = (
+        f"{_vulkan_fft._ADAPTER_STEM}.dll"
+        if os.name == "nt"
+        else f"lib{_vulkan_fft._ADAPTER_STEM}.so"
+    )
+    bundled = tmp_path / "runtime" / "_lib" / "hardware_providers" / filename
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"path resolution fixture, not an executable library")
+    override = tmp_path / "override.dll"
+    override.write_bytes(b"path resolution fixture")
+    discovered = []
+
+    def roots():
+        discovered.append(True)
+        return (tmp_path / "runtime",)
+
+    monkeypatch.setattr(_vulkan_fft, "_runtime_package_roots", roots)
+    monkeypatch.delenv("TI_VKFFT_LIBRARY_PATH", raising=False)
+    passive_external_provider_status("vkfft")
+    ti.hardware.report()
+    assert not discovered
+    assert _vulkan_fft._adapter_path(None) == str(bundled.resolve())
+    assert discovered == [True]
+    monkeypatch.setenv("TI_VKFFT_LIBRARY_PATH", str(override))
+    assert _vulkan_fft._adapter_path(None) == str(override.resolve())
+    assert _vulkan_fft._adapter_path(bundled) == str(bundled.resolve())
+    with pytest.raises(FileNotFoundError):
+        _vulkan_fft._adapter_path(tmp_path / "missing.dll")
+    monkeypatch.setenv("TI_VKFFT_LIBRARY_PATH", str(tmp_path / "missing-env.dll"))
+    with pytest.raises(FileNotFoundError):
+        _vulkan_fft._adapter_path(None)
+    assert discovered == [True]  # Explicit invalid overrides never fall back.
 
 
 @pytest.mark.parametrize(
@@ -92,7 +133,7 @@ def test_vulkan_fft_transforms_match_independent_reference(
     assert passive_external_provider_status("vkfft") == before
     axes = tuple(range(-len(dimensions), 0))
     with ti.hardware.fft.VulkanFftPlan(
-        data, dimensions, batch_count=batches, adapter_path=adapter
+        data, dimensions, batch_count=batches
     ) as forward:
         forward.run()
         np.testing.assert_allclose(

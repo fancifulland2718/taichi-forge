@@ -17,7 +17,7 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | cuBLAS | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cublas")` | direct Python 或 root Graph；不能在 kernel 内调用 |
 | cuSPARSE | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | cuFFT | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
-| VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 显式 addon/构建；目前不含在标准 wheel | `ti.hardware.probe("vkfft", library_path=...)` | 固定存储 `VulkanFftPlan` 或 root Graph；无 FFT recipe 搜索 |
+| VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 当前 runtime 构建配置包含，旧产物可能没有 | `ti.hardware.probe("vkfft")` 或显式路径 | 固定存储 `VulkanFftPlan` 或 root Graph；无 FFT recipe 搜索 |
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
@@ -636,8 +636,11 @@ exact-scope、fail-closed admission 合同；否则应保持 provider 显式选�
 当前源码提供 `ti.hardware.fft.VulkanFftPlan`，要求包含 FFT 原生桥接的 runtime，以及独立
 `taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO。adapter 使用 VkFFT 1.3.4 和匹配的静态
 glslang/SPIRV-Tools 构建；执行需要 Vulkan loader/driver，不需要 CUDA、Vulkan SDK 或共享
-glslang runtime。目前不默认随标准 wheel 提供；构建者启用 `TI_BUILD_VKFFT_PROVIDER`，并按
-`cmake/TaichiVkfftProvider.cmake` 提供明确的源码与静态库路径。
+glslang runtime。当前标准 runtime 构建启用 `TI_BUILD_VKFFT_PROVIDER`，adapter 安装于
+`taichi_forge_runtime/_lib/hardware_providers`，上游声明安装于 `_lib/licenses/vkfft`。旧产物可能没有
+该 adapter，应探测实际安装结果，不把当前源码当作已发布 wheel。离线构建可按
+`cmake/TaichiVkfftProvider.cmake` 提供 `TI_VKFFT_ROOT` 和匹配的静态库；未给源码路径时仅在构建期
+获取固定版本 VkFFT，不在用户创建计划时下载源码或编译 C++。
 
 ```python
 ti.init(arch=ti.vulkan)
@@ -645,7 +648,7 @@ data = ti.ndarray(ti.f32, shape=(2, 16, 8, 2))
 # 执行前填充实部/虚部交错的标量数据。
 with ti.hardware.fft.VulkanFftPlan(
     data, (16, 8), batch_count=2, direction="inverse",
-    normalization="inverse", adapter_path=adapter_path,
+    normalization="inverse",
 ) as plan:
     plan.run()  # 原地变换，复用 Forge 有序 compute queue。
     builder = ti.graph.GraphBuilder()
@@ -657,7 +660,9 @@ with ti.hardware.fft.VulkanFftPlan(
     build_and_allocation_facts = plan.statistics()
 ```
 
-也可以用 `TI_VKFFT_LIBRARY_PATH` 指定 adapter 文件。旧的 `ti.hardware.fft.is_available()` /
+显式使用时才从 runtime 包解析 adapter，不在普通 import/replay 中发现或全局启用 provider。
+可用 `adapter_path` 或 `TI_VKFFT_LIBRARY_PATH` 覆盖；显式路径无效时直接失败，不静默回落。
+旧的 `ti.hardware.fft.is_available()` /
 `cache_statistics()` 仍只描述 cuFFT；`ti.hardware.probe("vkfft", library_path=...)` 检查 adapter
 ABI，不创建计划、不证明设备或 workload 可执行。被动状态只统计已知的公开未关闭计划。
 
