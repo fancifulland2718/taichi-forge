@@ -253,7 +253,7 @@ def test_spmm_semantic_drift_and_explicit_preparation():
             operation.matrix.record_spmm(8, absolute_tolerance=tolerance, relative_tolerance=2e-5)
 
 
-def _fft_definition(*, prepare=True, direction="forward"):
+def _fft_definition(*, prepare=True, direction="forward", preparation=None):
     dimensions, batch = (24, 40), 3
     source = ti.linalg.record_fft(
         dimensions,
@@ -262,6 +262,7 @@ def _fft_definition(*, prepare=True, direction="forward"):
         output="transform",
         absolute_tolerance=2e-4,
         relative_tolerance=2e-4,
+        preparation=preparation,
     )
     if prepare:
         source.prepare()
@@ -637,3 +638,105 @@ def test_fft_frozen_description_preserves_other_live_baselines_and_recompiles_af
             del rebuilt
             gc.collect()
             assert ti.hardware.fft.cache_statistics().live_plans == 1
+
+
+@pytest.mark.parametrize("alternative", (False, True))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_fresh_process_resolves_without_baseline_plan_and_materializes_only_selection(tmp_path, alternative):
+    import json
+    import subprocess
+    import sys
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, providers, bindings, expected = _fft_definition()
+
+    def evaluate(graph, recipe):
+        graph.run(graph.bind(bindings))
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+        record = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_fft_source"))
+        return {"alternative": float(record.plan._separable)}
+
+    decision = definition.search_recipes(
+        providers=providers,
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=2, repeat_count=1),
+        target=ti.graph.GraphOptimizationTarget(objectives=(("alternative", "max" if alternative else "min"),)),
+    ).run(evaluate)
+    assert decision.status == "selected", decision.report.results
+    artifact = tmp_path / "fft-restore.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "preparation": operation.preparation_artifact(),
+                "selection": decision.selection_artifact.to_dict(),
+                "alternative": alternative,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child = """
+import json,sys
+from pathlib import Path
+import numpy as np
+import taichi_forge as ti
+from tests.python.test_graph_hardware_recipe import _fft_definition
+ti.init(arch=ti.cuda,offline_cache=False)
+data=json.loads(Path(sys.argv[1]).read_text())
+assert ti.hardware.fft.cache_statistics().create_requests == 0
+definition,operation,providers,bindings,expected = _fft_definition(prepare=False, preparation=data['preparation'])
+assert ti.hardware.fft.cache_statistics().create_requests == 0
+assert not operation._plans
+selection=ti.graph.GraphRecipeSelectionArtifact.from_dict(data['selection'])
+handle=definition.resolve_recipe(selection,providers=providers)
+assert ti.hardware.fft.cache_statistics().create_requests == 0
+with definition.materialize(handle) as result:
+    stats=ti.hardware.fft.cache_statistics()
+    assert stats.create_requests == stats.live_handles == stats.live_plans == 1,stats
+    record=next(lease for lease in result.executor._spec.lifetime_leases if hasattr(lease,'_graph_fft_source'))
+    assert record.plan._separable == data['alternative']
+    assert record._graph_fft_source._preparation_origin == 'imported_expected_facts_not_current_measurement'
+    bound=result.executor.bind(bindings)
+    operation.close()
+    for _ in range(13):
+        result.executor.run(bound)
+    np.testing.assert_allclose(bindings['output'].to_numpy(),expected,rtol=2e-4,atol=2e-4)
+    assert ti.hardware.fft.cache_statistics().create_requests == 1
+    if data['alternative']:
+        catalog=definition.recipe_catalog(providers=providers)
+        fragment=next(entry.recipe.fragments[0] for entry in catalog.entries() if entry.recipe.fragments)
+        description=providers[-1].describe(definition,fragment.fragment_key)
+        observation=description['preparation_observation']
+        assert observation['preparation_origin'] == 'imported_expected_facts_not_current_measurement'
+        assert observation['restoration_observation']['unselected_plans_created'] == 0
+        assert observation['host_setup_seconds'] == data['preparation']['plans']['row_batch_column_inplace']['host_setup_seconds']
+        from taichi_forge.graph._report_context import _provider_preparation_markdown
+        text='\\n'.join(_provider_preparation_markdown([{'recipe_id':handle.recipe_id,'provider_claims':[
+            {'claims':description,'provider_namespace':fragment.provider_namespace,'fragment_key':fragment.fragment_key}]}]))
+        assert 'host_elapsed_for_selected_fft_plan_recreation' in text
+print('PLAN_FREE_RESOLVE:'+handle.recipe_id)
+ti.reset()
+"""
+    completed = subprocess.run([sys.executable, "-c", child, str(artifact)], capture_output=True, text=True, timeout=90)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "PLAN_FREE_RESOLVE:" + decision.report.selected_recipe_id in completed.stdout
+    operation.close()
+
+
+@pytest.mark.parametrize("drift", ("schema", "semantics", "device", "component", "workspace_type", "elapsed"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_preparation_rejects_drift_before_creating_any_native_plan(drift):
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    _, operation, _, _, _ = _fft_definition()
+    preparation = operation.preparation_artifact()
+    if drift in ("schema", "semantics", "device", "component"):
+        preparation[drift] = "drift"
+    elif drift == "workspace_type":
+        preparation["plans"]["whole_transform"]["workspace_bytes"] = True
+    else:
+        preparation["plans"]["whole_transform"]["host_setup_seconds"] = -1
+    before = ti.hardware.fft.cache_statistics()
+    with pytest.raises(ValueError, match="FFT preparation"):
+        _fft_definition(prepare=False, preparation=preparation)
+    assert ti.hardware.fft.cache_statistics() == before
+    operation.close()

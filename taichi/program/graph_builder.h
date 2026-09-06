@@ -224,6 +224,13 @@ class GraphBuilder {
                                    std::size_t input_scalars,
                                    std::size_t output_scalars);
 
+  // A frozen provider source preserves topology without an executable plan.
+  // Forge must replace it at cold materialization before any submission.
+  void dispatch_cuda_capture_description(
+      Program *program,
+      const std::string &kind,
+      const std::vector<aot::Arg> &arguments);
+
   Sequential *seq() const;
 
   void dispatch_cuda_capture_addon(

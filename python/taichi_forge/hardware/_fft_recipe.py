@@ -114,7 +114,9 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
                 **source.preparation_report()[strategy],
                 "measurement_scope": "host_elapsed_for_fft_plan_creation",
                 "shared_initialization": "not_separated",
-                "selected_only_restore": "not_measured",
+                "preparation_origin": source._preparation_origin,
+                "selected_only_restore": "observed" if strategy in source._restoration else "not_measured",
+                "restoration_observation": source._restoration.get(strategy),
             },
             "limitations": (
                 "CUDA f32 complex-to-complex only; compact two-dimensional transforms and explicit batch count",

@@ -59,7 +59,15 @@ FFT Graph recording 只持有所用的物理计划，不反向持有搜索 opera
 已退休计划，在该冷边界核对 component/workspace 与准备事实是否一致。冻结 definition 持有 FFT 描述，
 不再持有 baseline 计划；释放搜索 operation 与 builder 后可仅驻留所选计划，其他仍存活的 Graph 则合法保有
 自己的计划。baseline `definition.compile()` 在编译边界重新获取计划，不在 replay 时恢复。
-这尚不代表无计划的跨进程恢复。
+跨进程无计划恢复时，与搜索 selection artifact 一起保存 `operation.preparation_artifact()`。在新进程用
+相同参数重建 `record_fft(..., preparation=saved_preparation)`，加入等价 builder 后 freeze，再正常调用
+`definition.resolve_recipe(...)` 和 `definition.materialize(...)`。这条路径不要调用 `prepare()`，否则会
+显式准备全部导入候选。freeze、catalog discovery、选择解析均不创建 FFT 计划，物化只创建所请求的计划。
+此功能需要新的 native capture-description 能力；旧兼容 runtime 仍可运行普通 FFT，但会明确拒绝该恢复路径。
+
+准备 artifact 仅包含预期 JSON 事实，不含 Python executable 或 vendor 二进制。恢复时核对语义、设备和 component，
+物化时再次核对实际所选计划的 component/workspace；库探测只在这个显式冷边界发生。报告标明导入的准备观测属于
+历史数据，计划重建的实测另行记录。库名/版本相同不证明二进制身份或生产性能，该 artifact 不是 AOT 或二进制缓存。
 
 这些 provider 需要在 `definition.search_recipes(engine="compileiq", providers=..., ...)` 中，
 与 `ti.graph.default_recipe_providers()` 一同显式传入；没有匹配的已准备语义 region 时，不能凭

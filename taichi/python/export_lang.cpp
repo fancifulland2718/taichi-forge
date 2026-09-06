@@ -5280,6 +5280,9 @@ void export_lang(py::module &m) {
            py::arg("plan_handle"), py::arg("program"), py::arg("input"),
            py::arg("output"), py::arg("direction"),
            py::arg("input_scalars"), py::arg("output_scalars"))
+      .def("_dispatch_cuda_capture_description",
+           &GraphBuilder::dispatch_cuda_capture_description,
+           py::arg("program"), py::arg("kind"), py::arg("arguments"))
       .def("_dispatch_cuda_addon_capture_recipe",
            &GraphBuilder::dispatch_cuda_capture_addon,
            py::arg("program"), py::arg("invoke_address"), py::arg("payload"),

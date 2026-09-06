@@ -72,7 +72,23 @@ Frozen definitions retain FFT descriptions rather than baseline plan leases.
 Releasing the search operation and builder therefore permits selected-only plan
 residency; any other live Graph still legitimately retains its own plan. Baseline
 `definition.compile()` reacquires a plan at compile time, never during replay.
-This does not yet provide plan-free, cross-process restoration.
+For plan-free cross-process restoration, save `operation.preparation_artifact()`
+alongside the search decision's selection artifact. Recreate the same
+`record_fft(...)` operation with `preparation=saved_preparation`, append it to the
+equivalent builder, and freeze. Then use `definition.resolve_recipe(...)` and
+`definition.materialize(...)` normally. Do **not** call `prepare()` on this path:
+it explicitly prepares all imported candidates. Freeze, catalog discovery and
+selection resolution create no FFT plans; materialization creates only the
+requested plan. The new native capture-description capability is required; older
+compatible runtimes keep ordinary FFT support but reject this restoration path.
+
+Preparation artifacts contain expected JSON facts, not Python executables or
+vendor binaries. Restoration checks the semantic/device/component contract;
+materialization checks the actual selected plan's component and workspace again.
+Library discovery is explicit at this cold boundary. Report annotations label
+imported preparation observations as historical and separately record observed
+plan recreation. A matching library name/version is not proof of binary identity
+or production performance, and the artifact is not an AOT or binary cache.
 
 These providers are opt-in additions alongside `ti.graph.default_recipe_providers()`
 at `definition.search_recipes(engine="compileiq", providers=..., ...)`. Supplying

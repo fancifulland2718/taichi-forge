@@ -16997,7 +16997,10 @@ class GraphBuilder:
             raise TaichiRuntimeError(
                 "Graph native admission must be 'explicit' or 'auto'"
             )
-        executable = compile_native_graph_node(node)
+        describe = None if prewarm else getattr(node, "_graph_recipe_description", None)
+        executable = None if describe is None else describe()
+        if executable is None:
+            executable = compile_native_graph_node(node)
         if prewarm:
             executable.prewarm()
         return self._append_native_executable(executable, admission=admission)

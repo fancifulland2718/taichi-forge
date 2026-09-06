@@ -7,6 +7,8 @@ import time
 import weakref
 
 from taichi_forge.graph._native import NativeGraphNode
+from taichi_forge.graph._native import BackendCommandRecording, _CudaGraphCaptureRecipe
+from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._recipes.definition import _canonical_json, _digest
 from taichi_forge.graph._recipes.deferred import FrozenNativeRecipeSource
 from taichi_forge.hardware._fft import (
@@ -16,7 +18,10 @@ from taichi_forge.hardware._fft import (
     _positive_int,
     _positive_int_tuple,
 )
+from taichi_forge.hardware._admission import _current_cuda_device_scope
 from taichi_forge.hardware._native_adapter import native_recording_node, validate_runtime_generation
+from taichi_forge.hardware._retained import passive_dynamic_provider_scope
+from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
@@ -69,6 +74,20 @@ class _FftDescription:
     def preparation_report(self):
         return {strategy: dict(info) for strategy, info in self._preparation.items()}
 
+    def preparation_artifact(self):
+        """JSON-safe expected plan facts for explicit, plan-free reconstruction.
+
+        This is not a binary cache or a fresh measurement. The selected plan's
+        component and workspace are verified when it is actually materialized.
+        """
+        return {
+            "schema": "taichi_forge.fft_preparation.v1",
+            "semantics": self.semantics,
+            "component": self.component,
+            "device": json.loads(self._device_json),
+            "plans": self.preparation_report(),
+        }
+
 
 class _FftPlanCatalog(_FftDescription):
     """Preparation facts and weak plan lookup, never an owner of search plans.
@@ -77,13 +96,18 @@ class _FftPlanCatalog(_FftDescription):
     operation; neither this catalog nor its lock participates in Graph replay.
     """
 
-    def __init__(self, operation, baseline):
+    def __init__(self, operation, baseline=None):
         self._semantics_json = operation._semantics_json
         self._component_json = operation._component_json
         self._preparation = operation._preparation
-        self._runtime_prog = baseline._runtime_prog
-        self._runtime_generation = baseline._runtime_generation
-        self._plans = weakref.WeakValueDictionary(whole_transform=baseline)
+        self._device_json = operation._device_json
+        self._preparation_origin = operation._preparation_origin
+        self._restoration = {}
+        self._runtime_prog = impl.get_runtime().prog
+        self._runtime_generation = int(impl.runtime_generation())
+        self._plans = weakref.WeakValueDictionary()
+        if baseline is not None:
+            self._plans["whole_transform"] = baseline
         self._lock = threading.RLock()
 
     def _recording(self, strategy):
@@ -93,6 +117,7 @@ class _FftPlanCatalog(_FftDescription):
                 raise TaichiRuntimeError("FFT physical plan has not been prepared")
             plan = self._plans.get(strategy)
             if plan is None or plan.closed:
+                started = time.perf_counter()
                 semantics = self.semantics
                 if strategy == "whole_transform":
                     plan = CufftPlanND(semantics["dimensions"], batch_count=semantics["batch_count"])
@@ -110,6 +135,12 @@ class _FftPlanCatalog(_FftDescription):
                     plan.close()
                     raise TaichiRuntimeError("Recreated FFT plan differs from its prepared component or workspace")
                 self._plans[strategy] = plan
+                self._restoration[strategy] = {
+                    "measurement_scope": "host_elapsed_for_selected_fft_plan_recreation",
+                    "host_setup_seconds": time.perf_counter() - started,
+                    "workspace_bytes": plan._workspace_bytes,
+                    "unselected_plans_created": 0,
+                }
             plan._validate_lifetime()
             return _FftRecording(self, strategy, plan)
 
@@ -128,6 +159,65 @@ class _FrozenFftSource(FrozenNativeRecipeSource):
         return self._graph_fft_source._recording(self._strategy)._as_graph_native_node().compile()
 
 
+class _FftCaptureDescription(_CudaGraphCaptureRecipe):
+    kind = "cufft_fixed_plan"
+
+    def __init__(self, source):
+        self._source = source
+
+    def append_to_graph(self, builder, program):
+        from taichi_forge.graph._graph import Arg, ArgKind
+        from taichi_forge.types.primitive_types import f32
+
+        semantics = self._source.semantics
+        rank = 4 if semantics["batch_count"] > 1 else 3
+        arguments = [Arg(ArgKind.NDARRAY, name, f32, ndim=rank) for name in (self._source.input, self._source.output)]
+        append = getattr(builder, "_dispatch_cuda_capture_description", None)
+        if append is None:
+            raise TaichiRuntimeError("Plan-free FFT restoration is unavailable in this native runtime")
+        append(program, self.kind, arguments)
+
+
+class _FftDescriptionRecording(BackendCommandRecording):
+    """A non-executable, provider-owned baseline description for Graph freeze."""
+
+    def __init__(self, source):
+        super().__init__(
+            backend="cuda",
+            binding_names=(source.input, source.output),
+            command_count=1,
+            workspace_ownership="provider_generation",
+            replay_mode="stream_capture",
+        )
+        object.__setattr__(self, "_graph_fft_source", source)
+        object.__setattr__(self, "_graph_semantic_fingerprint", source.semantic_fingerprint)
+        object.__setattr__(self, "_graph_physical_plan_id", _fft_physical_id(source, "whole_transform"))
+        object.__setattr__(self, "_cuda_capture_recipe", _FftCaptureDescription(source))
+
+    @property
+    def resource_effects(self):
+        return (
+            ResourceEffect(self._graph_fft_source.input, GraphAccess.READ),
+            ResourceEffect(self._graph_fft_source.output, GraphAccess.WRITE),
+        )
+
+    def execute(self, bindings):
+        raise TaichiRuntimeError("An FFT description must be materialized before execution")
+
+    def _freeze_graph_recipe_source(self):
+        return _FrozenFftSource(self._graph_fft_source, "whole_transform")
+
+
+def _fft_physical_id(source, strategy):
+    return "fft-physical:" + _digest(
+        {
+            "semantics": source.semantic_fingerprint,
+            "config": source.physical_config(strategy),
+            "component": source.component,
+        }
+    )
+
+
 class _FftRecording(CufftRecording):
     def __init__(self, source, strategy, plan):
         super().__init__(
@@ -141,14 +231,7 @@ class _FftRecording(CufftRecording):
         object.__setattr__(
             self,
             "_graph_physical_plan_id",
-            "fft-physical:"
-            + _digest(
-                {
-                    "semantics": source.semantic_fingerprint,
-                    "config": source.physical_config(strategy),
-                    "component": source.component,
-                }
-            ),
+            _fft_physical_id(source, strategy),
         )
 
     def _as_graph_native_node(self):
@@ -182,6 +265,7 @@ class FftOperation(_FftDescription, NativeGraphNode):
         output="output",
         absolute_tolerance,
         relative_tolerance,
+        preparation=None,
     ):
         dimensions = _positive_int_tuple(dimensions, "FFT dimensions")
         batch_count = _positive_int(batch_count, "FFT batch_count")
@@ -235,17 +319,80 @@ class FftOperation(_FftDescription, NativeGraphNode):
         )
         self._plans, self._preparation = {}, {}
         self._closed = False
+        self._device_json = _canonical_json(_current_cuda_device_scope())
+        self._preparation_origin = "current_process_plan_creation"
+        if preparation is not None:
+            self._restore_preparation(preparation)
+            self._catalog = _FftPlanCatalog(self)
+            return
         started = time.perf_counter()
         plan = CufftPlanND(dimensions, batch_count=batch_count)
         self._plans["whole_transform"] = plan
-        self._component_json = _canonical_json(
-            plan._retained_identity.to_dict()["provider_scope"]
-        )
+        self._component_json = _canonical_json(plan._retained_identity.to_dict()["provider_scope"])
         self._preparation["whole_transform"] = {
             "workspace_bytes": plan._workspace_bytes,
             "host_setup_seconds": time.perf_counter() - started,
         }
         self._catalog = _FftPlanCatalog(self, plan)
+
+    def _restore_preparation(self, preparation):
+        # Copy and validate data only. No executable, Python object or vendor
+        # plan is deserialized, and no missing baseline is silently prepared.
+        data = json.loads(_canonical_json(preparation))
+        if not isinstance(data, dict) or data.get("schema") != "taichi_forge.fft_preparation.v1":
+            raise ValueError("Invalid FFT preparation schema")
+        if _canonical_json(data.get("semantics")) != self._semantics_json:
+            raise ValueError("FFT preparation semantic contract drifted")
+        if _canonical_json(data.get("device")) != self._device_json:
+            raise ValueError("FFT preparation device contract drifted")
+        plans = data.get("plans")
+        if not isinstance(plans, dict) or "whole_transform" not in plans:
+            raise ValueError("FFT preparation requires baseline plan facts")
+        for strategy, info in plans.items():
+            self.physical_config(strategy)
+            if not isinstance(info, dict):
+                raise ValueError("Invalid FFT preparation plan facts")
+            workspace = info.get("workspace_bytes")
+            elapsed = info.get("host_setup_seconds")
+            if isinstance(workspace, bool) or not isinstance(workspace, int) or workspace < 0:
+                raise ValueError("FFT preparation workspace must be a nonnegative integer")
+            if (
+                isinstance(elapsed, bool)
+                or not isinstance(elapsed, (int, float))
+                or not math.isfinite(elapsed)
+                or elapsed < 0
+            ):
+                raise ValueError("FFT preparation elapsed time must be finite and nonnegative")
+        component = passive_dynamic_provider_scope("cufft", "cufft-plan-many-dynamic-symbols-v3")
+        if not component["library_candidate"]:
+            from taichi_forge.hardware._external_providers import probe_external_provider
+
+            status = probe_external_provider("cufft")
+            if status.get("discovery") != "available":
+                raise TaichiRuntimeError("FFT preparation requires an available CUDA cuFFT provider")
+            component = {
+                "provider_abi": status["provider_abi"],
+                "provider_version": status["provider_version"],
+                "library_candidate": status["native_facts"]["library_candidate"],
+                "provider_binary_identity": None,
+            }
+        if component != data.get("component"):
+            raise ValueError("FFT preparation provider component drifted")
+        self._component_json = _canonical_json(component)
+        self._preparation = plans
+        self._preparation_origin = "imported_expected_facts_not_current_measurement"
+
+    def _graph_recipe_description(self):
+        if self._closed:
+            raise TaichiRuntimeError("FFT operation has been closed")
+        if self._preparation_origin == "current_process_plan_creation":
+            return None
+        validate_runtime_generation(self._catalog, "FFT recipe catalog belongs to a retired runtime")
+        return native_recording_node(
+            _FftDescriptionRecording(self._catalog),
+            lifetime_leases=lambda item: (item._graph_fft_source,),
+            debug_info={"kind": "fft_transform"},
+        ).compile()
 
     def prepare(self):
         """Prepare the alternative once, before search, without executing FFT.
@@ -256,6 +403,10 @@ class FftOperation(_FftDescription, NativeGraphNode):
         """
         if self._closed:
             raise TaichiRuntimeError("FFT operation has been closed")
+        if self._preparation_origin != "current_process_plan_creation":
+            for strategy in self._preparation:
+                self._plans[strategy] = self._catalog._recording(strategy).plan
+            return self.preparation_report()
         baseline = self._plans["whole_transform"]
         baseline._validate_lifetime()
         info = baseline._runtime_prog._cuda_cufft_plan_memory_statistics(baseline._handle)
@@ -299,10 +450,14 @@ def record_fft(
     output="output",
     absolute_tolerance,
     relative_tolerance,
+    preparation=None,
 ):
     """Describe an unnormalized 2D C2C FFT; see FftOperation for the array contract.
 
     Call operation.prepare() before using the explicit FftRecipeProvider.
+    Alternatively, pass a prior operation.preparation_artifact() as preparation
+    to rebuild a Graph without creating FFT plans. Do not call prepare() on that
+    path unless intentionally preparing all imported candidates again.
     Physical decomposition remains provider-owned, never a CompileIQ raw axis.
     """
     return FftOperation(
@@ -313,6 +468,7 @@ def record_fft(
         output=output,
         absolute_tolerance=absolute_tolerance,
         relative_tolerance=relative_tolerance,
+        preparation=preparation,
     )
 
 

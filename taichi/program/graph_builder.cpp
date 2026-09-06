@@ -434,6 +434,41 @@ class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
   std::size_t output_scalars_{0};
 };
 
+class CudaCaptureDescription final : public aot::CudaGraphCaptureCommand {
+ public:
+  CudaCaptureDescription(Program *program, std::string kind)
+      : program_(program), kind_(std::move(kind)) {
+  }
+
+  const char *kind() const override {
+    return kind_.c_str();
+  }
+
+  Program *program() const override {
+    return program_;
+  }
+
+  bool supports(const std::unordered_map<std::string, aot::IValue> &,
+                Program &) const override {
+    return false;
+  }
+
+  void prepare(const std::unordered_map<std::string, aot::IValue> &,
+               Program &) override {
+    TI_ERROR("A frozen CUDA provider description requires materialization");
+  }
+
+  void record(const std::unordered_map<std::string, aot::IValue> &,
+              Program &,
+              void *) override {
+    TI_ERROR("A frozen CUDA provider description cannot execute");
+  }
+
+ private:
+  Program *program_;
+  std::string kind_;
+};
+
 class CudaCaptureCommandDispatch final : public Node {
  public:
   CudaCaptureCommandDispatch(
@@ -990,6 +1025,21 @@ void GraphBuilder::dispatch_cuda_capture_cufft(std::uint64_t plan_handle,
       output_scalars);
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), std::vector<aot::Arg>{input, output}));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_description(
+    Program *program,
+    const std::string &kind,
+    const std::vector<aot::Arg> &arguments) {
+  TI_ERROR_IF(program == nullptr || kind.empty(),
+              "Frozen CUDA descriptions require a Program and command kind");
+  for (const auto &argument : arguments) {
+    register_arg(argument);
+  }
+  auto command = std::make_shared<CudaCaptureDescription>(program, kind);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), arguments));
   seq()->append(all_nodes_.back().get());
 }
 
