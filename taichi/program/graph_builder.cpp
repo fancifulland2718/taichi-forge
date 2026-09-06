@@ -184,6 +184,10 @@ class CudaSparseSpmmCaptureCommand final
     return "cusparse_spmm_f32";
   }
 
+  bool supports_binding_frames() const override {
+    return true;
+  }
+
   Program *program() const override {
     return program_;
   }
@@ -360,6 +364,10 @@ class CudaSparseTriangularCaptureCommand final
 
 class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
  public:
+  std::shared_ptr<void> retain_binding_frame_plan(Program &program) override {
+    return program.retain_cuda_cufft_capture_plan(plan_handle_);
+  }
+
   CudaCufftCaptureCommand(std::uint64_t plan_handle,
                           Program *program,
                           aot::Arg input,
@@ -378,6 +386,10 @@ class CudaCufftCaptureCommand final : public aot::CudaGraphCaptureCommand {
 
   const char *kind() const override {
     return "cufft_fixed_plan";
+  }
+
+  bool supports_binding_frames() const override {
+    return true;
   }
 
   Program *program() const override {

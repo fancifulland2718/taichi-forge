@@ -278,6 +278,14 @@ class CudaGraphCaptureCommand {
   virtual bool requires_exact_bindings() const {
     return true;
   }
+  // Opt-in only for a fixed provider plan whose captured parameters can live
+  // in separate immutable binding frames. Queried at construction, not replay.
+  virtual bool supports_binding_frames() const {
+    return false;
+  }
+  virtual std::shared_ptr<void> retain_binding_frame_plan(Program &program) {
+    return {};
+  }
 };
 
 struct CompiledDispatch {

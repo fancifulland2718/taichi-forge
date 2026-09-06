@@ -124,6 +124,34 @@ performance contract. `fast_path_qualified`, blocker strings, and statistics
 are performance diagnostics rather than correctness admission. `ti.reset()`
 invalidates the Graph and all of its BindingSets.
 
+### Complete-recipe immutable CUDA frames
+
+On capable CUDA runtimes, the default recipe providers can also generate an
+exclusive whole-Graph immutable-frame candidate. It supports one ndarray-only
+segment containing ordinary JIT dispatches and fixed-plan commands produced by
+`ti.linalg.record_fft()` or `SparseMatrix.record_spmm()`, including mixed FFT/SpMM
+segments. Arbitrary vendor recordings, external synchronization domains, SNodes,
+device-controlled topology and multi-lane workspaces are not included. Captured
+commands must produce kernel nodes only. Discovery alone does not prove that an
+installed vendor plan meets this condition; binding preparation reports failure.
+
+For this selected recipe, `Graph.bind()` validates and captures each immutable
+frame without executing mathematical work. It uploads at most one packed JIT
+argument image, retains the provider/allocation owners, and prepares one reusable
+executable. Switching published frames updates that executable without recapture,
+argument uploads or host-device synchronization. Completion events protect
+in-flight frames; switching is not claimed to have zero driver overhead. Matrix
+values may still change through the fixed-pattern `update_values()` contract.
+
+Measure preparation, device execution, host submission and retained memory
+separately. Raw mapping calls and binding churn include capture/preparation;
+published frame objects retain argument images and opaque driver Graph objects.
+The current exact-cover composer does not combine this exclusive submission
+recipe with separate FFT/SpMM algorithm fragments. Its expanded provider domain
+invalidates older provider-bound search evidence, not otherwise compatible wheels.
+Ordinary runtime auto selection is unchanged. Validation here is Windows-only;
+production qualification remains application-owned.
+
 ## Dense Field lifetime and heterogeneous blocks
 
 Dense scalar, vector, and matrix Fields are supported as definition-time

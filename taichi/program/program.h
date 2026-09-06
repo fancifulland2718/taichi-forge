@@ -1345,6 +1345,7 @@ class TI_DLL_EXPORT Program {
                                      int direction);
 
   bool cuda_cufft_capture_plan_available(std::uint64_t handle);
+  std::shared_ptr<void> retain_cuda_cufft_capture_plan(std::uint64_t handle);
 
   std::size_t cuda_cufft_capture_record(std::uint64_t handle,
                                         Ndarray *input,

@@ -98,6 +98,25 @@ for bindings in (bindings_a, bindings_b, bindings_a):
 `fast_path_qualified` 与 blocker/statistics 只用于性能诊断，不能替代 correctness admission。
 `ti.reset()` 会同时使 Graph 及其全部 BindingSet 失效。
 
+### 完整 recipe 的 CUDA 不可变参数帧
+
+在具备能力的 CUDA runtime 上，默认 provider 可生成独占 whole-Graph 的不可变参数帧候选。
+范围是一段 ndarray Graph：普通 JIT dispatch 与 `ti.linalg.record_fft()`、
+`SparseMatrix.record_spmm()` 生成的固定计划可混合；不包含任意 vendor recording、外部同步域、
+SNode、device-controlled topology 或多 lane workspace。捕获结果必须只有 kernel node；发现候选
+不等于当前 vendor plan 一定满足条件，不满足时在绑定准备阶段明确失败。
+
+选中该 recipe 后，`Graph.bind()` 完成校验、捕获、至多一次合并 JIT 参数上传和所有权保留，
+不执行数学工作。预发布帧之间通过更新一个 executable 切换，无需重新捕获、上传参数或同步
+host/device；在途帧仍需要 completion event，因此不宣称切换没有 driver 开销。固定稀疏结构的
+矩阵值仍可通过 `update_values()` 改变。
+
+准备成本、device、host 与保留显存需要分别衡量。原始 mapping 调用或频繁重新绑定仍包含准备/
+capture 成本；发布帧会保留参数图像与不透明 driver Graph 对象。当前 exact-cover composer 尚不
+组合这个独占提交 recipe 与独立 FFT/SpMM 算法 fragment。扩展后的 provider domain 会使旧的
+provider-bound 搜索证据失效，不把兼容 wheel 锁到 commit。普通 runtime auto 不变；本次只验证
+Windows，生产适用性由应用确认。
+
 ## Dense Field 生命周期与异构 block
 
 dense scalar、vector 与 matrix Field 可作为 definition-time binding。此时内容可变，但

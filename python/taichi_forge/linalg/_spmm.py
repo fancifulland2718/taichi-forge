@@ -20,6 +20,8 @@ _STRATEGIES = {
 
 
 class _SpmmRecording(CusparseSpmmRecording):
+    _graph_binding_frame_capture_safe = True
+
     def __init__(self, source, strategy):
         algorithm, _preprocess = _STRATEGIES[strategy]
         super().__init__(

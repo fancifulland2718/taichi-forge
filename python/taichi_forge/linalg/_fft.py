@@ -146,6 +146,8 @@ class _FftPlanCatalog(_FftDescription):
 
 
 class _FrozenFftSource(FrozenNativeRecipeSource):
+    _graph_binding_frame_capture_safe = True
+
     def __init__(self, catalog, strategy):
         self._graph_fft_source = catalog
         self._strategy = strategy
@@ -219,6 +221,8 @@ def _fft_physical_id(source, strategy):
 
 
 class _FftRecording(CufftRecording):
+    _graph_binding_frame_capture_safe = True
+
     def __init__(self, source, strategy, plan):
         super().__init__(
             plan,

@@ -24,15 +24,32 @@ def _eligible(spec, backend):
     if config.debug or config.kernel_profiler or len(spec.nodes) != 1:
         return False
     node = spec.nodes[0]
+    if not isinstance(node, _CompiledCGraphNode):
+        return False
+    if getattr(node, "source_native_count", 0):
+        supports_commands = getattr(native, "supports_capture_commands", None)
+        if supports_commands is None or not supports_commands():
+            return False
+        # Frozen definitions expose sources; materialized segments expose their
+        # actual execution leases. Neither discovery path creates vendor plans.
+        sources = tuple(
+            getattr(operation[1], "_recording", None)
+            for operation in node.recipe_operations
+            if operation[0] == "native"
+        ) or tuple(
+            lease for lease in node.lifetime_leases if getattr(lease, "_graph_binding_frame_capture_safe", False)
+        )
+        if len(sources) != node.source_native_count or not all(
+            getattr(source, "_graph_binding_frame_capture_safe", False) for source in sources
+        ):
+            return False
     return (
         isinstance(node, _CompiledCGraphNode)
         and spec.needs_runtime_args
         and not spec.snode_tree_dependency_info
-        and not node.source_native_count
-        and not node.native_action_manifests
         and not node.temporary_actions
         and not node.parallel_dispatch_groups
-        and all(operation[0] == "dispatch" for operation in node.recipe_operations)
+        and all(operation[0] in ("dispatch", "native") for operation in node.recipe_operations)
     )
 
 
@@ -49,21 +66,61 @@ class _BindingFrameExecutor:
 
         spec = instance.spec
         if not _eligible(spec, "cuda"):
-            raise ValueError("immutable argument frames require one ordinary CUDA ndarray Graph")
+            raise ValueError(
+                "immutable argument frames require one CUDA ndarray Graph with qualified fixed-plan commands"
+            )
         node = spec.nodes[0]
+        recordings = tuple(
+            lease for lease in node.lifetime_leases if getattr(lease, "_graph_binding_frame_capture_safe", False)
+        )
+        retained_owners = {
+            id(owner) for recording in recordings for owner in (recording, getattr(recording, "plan", None))
+        }
+        if any(id(lease) not in retained_owners for lease in spec.runtime_lifetime_leases):
+            raise ValueError("immutable frames cannot discharge an unrelated provider lifetime")
+        self._provider_validators = tuple(lease.validate_graph_lifetime for lease in spec.runtime_lifetime_leases)
+        for validate in self._provider_validators:
+            validate()
         self._native = core._CudaGraphBindingExecutor(node.compiled_graph, impl.current_cfg(), impl.get_runtime().prog)
         self._dispatch_count = node.physical_dispatch_count
         self._task_count = sum(len(stage["tasks"]) for stage in spec.pipeline_definition)
         self._raw_context = _GraphRunContext()
+        self._spec = spec
+        # Pin the concrete matrix, not merely its replaceable Python wrapper.
+        # FFT execution resources are pinned by the native frame executor.
+        self._provider_owners = tuple(
+            lease.matrix.matrix
+            for lease in node.lifetime_leases
+            if getattr(lease, "_graph_binding_frame_capture_safe", False) and hasattr(lease, "matrix")
+        )
+        # Only this materialized, single-lane spec uses the retained native
+        # executor. Its lifetime pins retire with that executor on close/reset;
+        # ordinary Graph specs and caller-owned plans keep their old policy.
+        spec.runtime_lifetime_leases = ()
 
     def prewarm(self):
         return self
 
     def prepare_binding_version(self, version):
         if not version.fast_path_qualified:
-            raise ValueError("immutable argument frames require a publication-qualified Graph binding")
+            if not self._spec.native_count or set(version.volatile_reasons).difference(
+                ("volatile_lifetime_provider", "volatile_runtime_provider")
+            ):
+                raise ValueError("immutable argument frames require a publication-qualified Graph binding")
+            # This executor only accepts certified fixed-plan commands. Validate
+            # their current owners here; native preparation validates shapes,
+            # aliasing and allocation lifetime before capturing immutable args.
+            for validate in self._provider_validators:
+                validate()
+            context = self._raw_context
+            context.begin(version.execution_arguments)
+            try:
+                flattened = dict(context.flattened_args())
+            finally:
+                context.end()
+            version = replace(version, flattened_args=flattened)
         frame = self._native.prepare(version.flattened_args)
-        return replace(version, execution_frame=frame)
+        return replace(version, execution_frame=frame, fast_path_qualified=True, volatile_reasons=())
 
     def run_prepared(self, invocation):
         version = invocation.binding_version
@@ -82,6 +139,7 @@ class _BindingFrameExecutor:
 
     def invalidate_runtime(self, preserve_executables=False):
         self._native.close()
+        self._provider_owners = ()
         self._raw_context = None
 
     @property
@@ -111,15 +169,21 @@ class _BindingFrameExecutor:
 class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "binding_frames",
-        capabilities=("immutable-argument-images", "whole-graph-executable-reuse", "typed-runtime-fragment"),
-        domain_version="immutable-binding-frame-domain-v1",
-        semantic_fingerprint="ordinary-cuda-graph-binding-lifetime-v1",
+        capabilities=(
+            "immutable-argument-images",
+            "whole-graph-executable-reuse",
+            "typed-runtime-fragment",
+            "fixed-plan-provider-capture",
+        ),
+        domain_version="immutable-binding-frame-domain-v2",
+        semantic_fingerprint="cuda-graph-fixed-plan-binding-lifetime-v2",
     )
 
     def fragments(self, definition):
         if not _eligible(definition._runtime_spec, definition.backend):
             return ()
         spec = definition._runtime_spec
+        native = bool(spec.native_count)
         return (
             _fragment(
                 definition,
@@ -141,6 +205,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                             "binding_transition": "whole_executable_update",
                             "argument_lifetime": "published_binding_and_inflight_work",
                             "workspace_lanes": 1,
+                            **({"provider_parameters": "captured_per_binding_fixed_plan"} if native else {}),
                         },
                     ),
                 ),
@@ -163,8 +228,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 "retain argument images and allocation leases until last device use",
             ),
             "limitations": (
-                "one ordinary CUDA Graph and one workspace lane",
-                "no SNode, external synchronization domain, vendor command or device-controlled topology",
+                "one CUDA Graph and one workspace lane; only certified fixed-plan FFT/SpMM commands may join JIT dispatches",
+                "no SNode, external synchronization domain or device-controlled topology; capture must contain only kernel nodes",
                 "raw mapping calls include argument preparation; use Graph.bind to amortize it",
                 "prepared frames trade retained argument memory and setup for binding-switch cost",
                 "whole-Graph coverage is exclusive in the current exact-cover composer",

@@ -589,6 +589,15 @@ bool Program::cuda_cufft_capture_plan_available(std::uint64_t handle) {
   return cuda_cufft_plans_.find(handle) != cuda_cufft_plans_.end();
 }
 
+std::shared_ptr<void> Program::retain_cuda_cufft_capture_plan(
+    std::uint64_t handle) {
+  std::lock_guard<std::mutex> lock(cuda_cufft_plan_mutex_);
+  const auto found = cuda_cufft_plans_.find(handle);
+  TI_ERROR_IF(found == cuda_cufft_plans_.end(),
+              "CUDA cuFFT capture plan handle is stale or closed.");
+  return found->second;
+}
+
 std::size_t Program::cuda_cufft_capture_record(std::uint64_t handle,
                                                Ndarray *input,
                                                Ndarray *output,
@@ -767,6 +776,10 @@ std::size_t Program::cuda_cufft_execute_c2c(std::uint64_t,
 
 bool Program::cuda_cufft_capture_plan_available(std::uint64_t) {
   return false;
+}
+
+std::shared_ptr<void> Program::retain_cuda_cufft_capture_plan(std::uint64_t) {
+  TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
 }
 
 std::size_t Program::cuda_cufft_capture_record(std::uint64_t,

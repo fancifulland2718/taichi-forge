@@ -76,7 +76,17 @@ def test_captured_fft_survives_baseline_and_fused_recipe_reconstruction(native_f
         plan.close()
 
 
-def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None):
+def _hardware_recipe_providers(binding_frames):
+    # Strategy/lifetime fixtures isolate their provider domain. Dedicated mixed
+    # frame tests below use the full default set, including submission recipes.
+    return tuple(
+        provider
+        for provider in ti.graph.default_recipe_providers()
+        if binding_frames or not provider.descriptor.namespace.endswith(".binding_frames")
+    )
+
+
+def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None, binding_frames=False):
     rows, columns, rhs_count = 7, 5, 8
     dense = np.zeros((rows, columns), np.float32)
     offsets, indices, values = [0], [], []
@@ -132,7 +142,7 @@ def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None):
     builder.dispatch(
         finish, *(ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.f32, ndim=2) for name in ("product", "output"))
     )
-    providers = (*ti.graph.default_recipe_providers(), ti.hardware.linalg.SparseSpmmRecipeProvider())
+    providers = (*_hardware_recipe_providers(binding_frames), ti.hardware.linalg.SparseSpmmRecipeProvider())
     return builder.freeze(), operation, providers, bindings, dense @ host * 2 + 0.25
 
 
@@ -253,7 +263,7 @@ def test_spmm_semantic_drift_and_explicit_preparation():
             operation.matrix.record_spmm(8, absolute_tolerance=tolerance, relative_tolerance=2e-5)
 
 
-def _fft_definition(*, prepare=True, direction="forward", preparation=None):
+def _fft_definition(*, prepare=True, direction="forward", preparation=None, binding_frames=False):
     dimensions, batch = (24, 40), 3
     source = ti.linalg.record_fft(
         dimensions,
@@ -306,13 +316,13 @@ def _fft_definition(*, prepare=True, direction="forward", preparation=None):
     builder.dispatch(scale, symbols["transform"], symbols["middle"])
     builder.dispatch(shift, symbols["middle"], symbols["output"])
     providers = (
-        *ti.graph.default_recipe_providers(),
+        *_hardware_recipe_providers(binding_frames),
         ti.hardware.fft.FftRecipeProvider(),
     )
     return builder.freeze(), source, providers, bindings, expected
 
 
-def _mixed_hardware_definition():
+def _mixed_hardware_definition(*, binding_frames=False):
     _, spmm, _, sparse_bindings, sparse_expected = _spmm_definition()
     operation = ti.linalg.record_fft(
         (12, 20),
@@ -336,7 +346,7 @@ def _mixed_hardware_definition():
     builder.append_native(spmm, admission="auto")
     builder.append_native(operation, admission="auto")
     providers = (
-        *ti.graph.default_recipe_providers(),
+        *_hardware_recipe_providers(binding_frames),
         ti.hardware.linalg.SparseSpmmRecipeProvider(),
         ti.hardware.fft.FftRecipeProvider(),
     )
@@ -448,6 +458,40 @@ ti.reset()
     assert child_result.returncode == 0, child_result.stdout + child_result.stderr
     assert "FFT_RESOLVED:" + decision.report.selected_recipe_id in child_result.stdout
     operation.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_binding_frame_retains_closed_plan_until_executor_retirement():
+    from taichi_forge._lib import core
+    from taichi_forge.lang import impl
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("optional FFT provider is unavailable")
+    if not getattr(core._CudaGraphBindingExecutor, "supports_capture_commands", lambda: False)():
+        pytest.skip("fixed-library binding frames are unavailable")
+    definition, operation, _providers, bindings, expected = _fft_definition()
+    graph = definition.compile()
+    native = core._CudaGraphBindingExecutor(
+        graph._spec.nodes[0].compiled_graph, impl.current_cfg(), impl.get_runtime().prog
+    )
+    arguments = {name: value.arr for name, value in bindings.items()}
+    frame = native.prepare(arguments)
+    plan = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_handle"))
+    plan.close()
+    operation.close()
+    try:
+        for _ in range(31):
+            native.run(frame)
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+        with pytest.raises(RuntimeError, match="fixed plan"):
+            native.prepare(arguments)
+        # A rejected new binding does not poison the already published frame.
+        native.run(frame)
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+    finally:
+        native.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        native.run(frame)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -739,4 +783,124 @@ def test_fft_preparation_rejects_drift_before_creating_any_native_plan(drift):
     with pytest.raises(ValueError, match="FFT preparation"):
         _fft_definition(prepare=False, preparation=preparation)
     assert ti.hardware.fft.cache_statistics() == before
+    operation.close()
+
+
+@pytest.mark.parametrize("family", ("fft", "spmm", "mixed"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fixed_library_binding_frames_prepare_without_execution_and_preserve_queued_buffers(family):
+    from taichi_forge._lib import core
+
+    if not ti.hardware.fft.is_available() or not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional FFT/SpMM providers are unavailable")
+    if not getattr(core._CudaGraphBindingExecutor, "supports_capture_commands", lambda: False)():
+        pytest.skip("this native runtime does not support fixed-library binding frames")
+    if family == "mixed":
+        definition, operation, spmm, providers, bindings, expected = _mixed_hardware_definition(binding_frames=True)
+    else:
+        factory = _fft_definition if family == "fft" else _spmm_definition
+        definition, operation, providers, bindings, expected_output = factory(binding_frames=True)
+        expected = {"output": expected_output}
+    catalog = definition.recipe_catalog(providers=providers)
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if any(fragment.provider_namespace.endswith(".binding_frames") for fragment in entry.recipe.fragments)
+    )
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as result:
+            graph = result.executor
+            groups = []
+            for _ in range(5):
+                group = {}
+                for name, source in bindings.items():
+                    array = ti.ndarray(ti.f32, source.shape)
+                    array.from_numpy(source.to_numpy())
+                    if name in expected:
+                        array.fill(-987)
+                    group[name] = array
+                groups.append(group)
+            published = [graph.bind(group) for group in groups]
+            for group in groups:
+                for name in expected:
+                    np.testing.assert_array_equal(group[name].to_numpy(), -987)
+            before = graph._graph_stats[0]["binding_frame_state"]
+            assert before["executables"] == 1
+            assert before["frames"] == len(groups)
+            assert before["preparation_upload_calls"] == (0 if family == "mixed" else len(groups))
+            if family != "spmm":
+                operation.close()
+            import sys
+
+            provider_calls = []
+
+            def observe(frame, event, _arg):
+                if event == "call" and frame.f_globals.get("__name__", "") in (
+                    "taichi_forge.linalg._fft",
+                    "taichi_forge.linalg._spmm",
+                    "taichi_forge.hardware._fft",
+                    "taichi_forge.hardware._linalg",
+                ):
+                    provider_calls.append(frame.f_code.co_name)
+
+            sys.setprofile(observe)
+            try:
+                for step in range(157):
+                    graph.run(published[(step * 3) % len(groups)])
+            finally:
+                sys.setprofile(None)
+            assert not provider_calls
+            for group in groups:
+                for name, reference in expected.items():
+                    np.testing.assert_allclose(group[name].to_numpy(), reference, rtol=2e-4, atol=2e-4)
+            after = graph._graph_stats[0]["binding_frame_state"]
+            assert after["preparation_upload_calls"] == before["preparation_upload_calls"]
+            assert after["argument_bytes"] == before["argument_bytes"]
+            assert after["executables"] == 1
+            assert not result.manifest.task_topology_exact
+
+            if family == "spmm":
+                matrix = operation.matrix
+                replacement = ti.ndarray(ti.f32, matrix._debug_runtime_stats()["identity"]["nnz"])
+                replacement.fill(0)
+                matrix.update_values(replacement)
+                for binding in published:
+                    graph.run(binding)
+                # The post-SpMM map adds 0.25; updates change values, not frames.
+                for group in groups:
+                    np.testing.assert_allclose(group["output"].to_numpy(), 0.25)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_mixed_library_frames_are_reachable_through_default_complete_recipe_search():
+    from taichi_forge._lib import core
+
+    if not ti.hardware.fft.is_available() or not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional FFT/SpMM providers are unavailable")
+    if not getattr(core._CudaGraphBindingExecutor, "supports_capture_commands", lambda: False)():
+        pytest.skip("this native runtime does not support fixed-library binding frames")
+    definition, operation, spmm, providers, bindings, expected = _mixed_hardware_definition(binding_frames=True)
+    observed = []
+
+    def evaluate(graph, recipe):
+        bound = graph.bind(bindings)
+        for _ in range(3):
+            graph.run(bound)
+        for name, reference in expected.items():
+            np.testing.assert_allclose(bindings[name].to_numpy(), reference, rtol=2e-4, atol=2e-4)
+        framed = graph._graph_stats[0]["last_path"] == "cuda_prepared_binding_plan"
+        observed.append(framed)
+        return {"immutable_frames": float(framed)}
+
+    decision = definition.search_recipes(
+        providers=providers,
+        target=ti.graph.GraphOptimizationTarget(objectives=(("immutable_frames", "max"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=16, repeat_count=1),
+        strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
+    ).run(evaluate)
+    assert decision.status == "selected", decision.report.results
+    assert decision.report.search_complete
+    assert any(observed) and not all(observed)
+    selected = decision.selection_artifact.recipe_manifest
+    assert any(item["provider_namespace"].endswith(".binding_frames") for item in selected["fragments"])
     operation.close()

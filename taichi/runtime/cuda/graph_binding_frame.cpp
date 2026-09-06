@@ -76,6 +76,7 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
   KernelLauncher *launcher{nullptr};
   std::vector<std::shared_ptr<KernelExecutionHandle>> kernels;
   std::vector<KernelLauncher::Handle> handles;
+  std::vector<std::shared_ptr<void>> provider_plans;
   std::mutex mutex;
   std::atomic<bool> closed{false};
   bool failed{false};
@@ -177,6 +178,7 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
     event_pool->clear();
     kernels.clear();
     handles.clear();
+    provider_plans.clear();
     device = nullptr;
     // The Python binding pins the Program shell. Keep its address immutable
     // so a preparation racing explicit close can acquire the existing resource
@@ -206,7 +208,6 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
   TI_ERROR_IF(
       graph.dispatches.empty() || !graph.snode_tree_dependencies.empty() ||
           graph.has_indirect_dispatches() ||
-          graph.has_cuda_capture_commands() ||
           graph.has_cuda_parallel_dispatch_groups() ||
           graph.has_dispatch_labels(),
       "CUDA binding frames require an ordinary unlabeled ndarray Graph");
@@ -216,6 +217,13 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
   TI_ERROR_IF(!available(),
               "CUDA binding-frame executable update is unavailable");
   for (const auto &dispatch : graph.dispatches) {
+    if (dispatch.cuda_capture_command) {
+      TI_ERROR_IF(
+          !dispatch.cuda_capture_command->supports_binding_frames() ||
+              dispatch.cuda_capture_command->program() != state->program,
+          "CUDA provider command does not support immutable binding frames");
+      continue;
+    }
     TI_ERROR_IF(!dispatch.ti_kernel || dispatch.cuda_bounded_dispatch ||
                     dispatch.cpu_bounded_dispatch ||
                     !dispatch.snode_tree_dependencies.empty(),
@@ -236,6 +244,13 @@ GraphBindingExecutor::GraphBindingExecutor(const aot::CompiledGraph &graph,
               "CUDA binding frames require the CUDA launcher and async memory");
   state->program_domain = state->program->runtime_program_generation();
   for (const auto &dispatch : graph.dispatches) {
+    if (dispatch.cuda_capture_command) {
+      state->handles.emplace_back();
+      state->kernels.push_back(nullptr);
+      state->provider_plans.push_back(
+          dispatch.cuda_capture_command->retain_binding_frame_plan(program_owner));
+      continue;
+    }
     auto kernel = state->program->compile_kernel_execution_handle(
         config, state->program->get_device_caps(), *dispatch.ti_kernel);
     const auto &compiled =
@@ -339,6 +354,16 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
     argument_offsets.reserve(state.graph.dispatches.size());
     for (std::size_t i = 0; i < state.graph.dispatches.size(); ++i) {
       const auto &dispatch = state.graph.dispatches[i];
+      if (dispatch.cuda_capture_command) {
+        auto &command = *dispatch.cuda_capture_command;
+        TI_ERROR_IF(!command.supports(args, *state.program),
+                    "CUDA provider binding-frame arguments do not match the fixed plan");
+        // Provider descriptors/preprocessing only, never mathematical work.
+        command.prepare(args, *state.program);
+        data.packets.emplace_back();
+        argument_offsets.push_back(0);
+        continue;
+      }
       data.contexts.push_back(
           std::make_unique<LaunchContextBuilder>(dispatch.ti_kernel));
       auto &launch = *data.contexts.back();
@@ -392,8 +417,14 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
     driver.stream_begin_capture(state.capture_stream,
                                 CU_STREAM_CAPTURE_MODE_THREAD_LOCAL);
     capturing = true;
-    for (const auto &packet : data.packets) {
-      state.launcher->capture_cuda_graph_launch(packet, state.capture_stream);
+    for (std::size_t i = 0; i < state.graph.dispatches.size(); ++i) {
+      const auto &command = state.graph.dispatches[i].cuda_capture_command;
+      if (command) {
+        command->record(args, *state.program, state.capture_stream);
+      } else {
+        state.launcher->capture_cuda_graph_launch(data.packets[i],
+                                                  state.capture_stream);
+      }
     }
     const auto error =
         driver.stream_end_capture.call(state.capture_stream, &data.graph);
