@@ -684,7 +684,9 @@ def test_complete_native_algorithm_recipe_materializes_all_physical_routes(
             physical_identities.add(materialized.manifest.materialized_physical_id)
             persistent_bytes.add(materialized.manifest.persistent_requested_bytes)
     assert len(physical_identities) == 1 + len(fragments)
-    assert persistent_bytes == {0, layout.num_segments * 4}
+    # The retained global recipe owns exact hierarchical scratch too, instead
+    # of borrowing the mutable Program scan arena.
+    assert persistent_bytes == {0, layout.num_segments * 4 + (capacity // 1024) * 4}
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

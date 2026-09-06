@@ -14,8 +14,6 @@ from taichi_forge.algorithms._algorithms import (
     _check_segmented_request,
     _primitive_view,
     _prog_available,
-    _transform_value_type,
-    _try_cuda_device_transform,
     segmented_scan_sum_serial_ndarray,
 )
 from taichi_forge.algorithms._autodiff import is_fwd_mode_active, is_tape_active
@@ -35,10 +33,12 @@ from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.graph._segmented_scan_kernels import (
+    generated_global_copy_kernel,
     generated_global_correction_kernels,
     generated_segment_chunk_kernel,
     generated_segment_shuffle_kernel,
 )
+from taichi_forge.graph._retained_scan import RetainedScanRecording, scan_workspace_bytes
 
 _SERIAL_STRATEGY = "segment_local_serial"
 _GLOBAL_STRATEGY = "global_scan_segment_correction"
@@ -68,6 +68,7 @@ _SOURCE_FILES = (
     "graph/_native.py",
     "graph/_native_algorithm.py",
     "graph/_segmented_scan_kernels.py",
+    "graph/_retained_scan.py",
     "graph/_optimization.py",
 )
 
@@ -175,12 +176,8 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             max_items=source.layout.capacity,
             max_segments=source.layout.num_segments,
         )
-        self._transform_workspace = None
-        self._scan_executor = None
+        self._scan_scratch = None
         self._bases = None
-        self._transform_plan = None
-        self._scan_plan = None
-        self._program = None
         self._provider_preparations = 0
         self._serial_call = None
         self._nested_graph = None
@@ -196,10 +193,9 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 int(source.inclusive),
             )
         if strategy == _GLOBAL_STRATEGY:
-            self._transform_workspace = self._workspace._get_transform_workspace(
-                source.layout
+            self._scan_scratch = impl.ndarray(
+                u32, shape=scan_workspace_bytes(source.layout.num_items, source.values.dtype) // 4
             )
-            self._scan_executor = self._workspace._get_scan_executor(source.layout)
             self._bases = self._workspace._get_base_buffer(
                 source.values.dtype,
                 source.layout,
@@ -308,6 +304,10 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             _capture_recipe_sources=False,
             _explicit_map_source_groups=(),
         )
+        builder.dispatch(
+            generated_global_copy_kernel(self._source.values.dtype, self._source.layout.num_items), values, scanned
+        )
+        builder.append_native(RetainedScanRecording(self._source.values.dtype, self._source.layout.num_items))
         builder.dispatch(gather, scanned, offsets, bases)
         builder.dispatch(correct, values, scanned, offsets, bases)
         self._nested_graph = builder.compile()
@@ -317,6 +317,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 "scanned": self._source.output,
                 "offsets": self._source.layout._offsets,
                 "bases": self._bases,
+                "scan_scratch": self._scan_scratch,
             }
         )
 
@@ -327,63 +328,10 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
     def _run_serial(self):
         self._serial_call.run()
 
-    def _prepare_global_provider_plans(self, prog):
-        value_type = _transform_value_type(self._source.values.dtype)
-        if not _try_cuda_device_transform(
-            self._source.values,
-            self._source.output,
-            value_type,
-            1,
-            0,
-            self._transform_workspace,
-        ):
-            raise TaichiRuntimeError(
-                "Graph-native segmented scan could not materialize its CUDA "
-                "transform stage"
-            )
-        self._transform_plan = self._transform_workspace._native_transform_plan
-        if not self._scan_executor._try_cuda_device_scan(self._source.output):
-            raise TaichiRuntimeError(
-                "Graph-native segmented scan could not materialize its CUDA "
-                "global-scan stage"
-            )
-        self._scan_plan = self._scan_executor._native_scan_plan
-        if (
-            self._transform_plan is None
-            or self._scan_plan is None
-            or not self._transform_plan.matches_program(prog)
-            or not self._scan_plan.matches_program(prog)
-        ):
-            raise TaichiRuntimeError(
-                "Graph-native segmented scan provider plans did not publish "
-                "stable execution identities"
-            )
-        self._workspace._update_usage(include_scan_provider=True)
-        self._program = prog
-        self._provider_preparations += 1
-
-    def _invoke_global_provider_plans(self):
-        # Graph.run() rejects runtime-generation drift before this action is
-        # reached. Repeating a Program identity proof here would turn a stable
-        # compile-time fact back into per-replay defensive work.
-        self._transform_plan.invoke(self._program)
-        self._scan_plan.invoke(self._program)
-
     def run(self):
         if self._strategy == _SERIAL_STRATEGY:
             self._run_serial()
             return
-        if self._strategy in _CHUNK_STRATEGIES:
-            self._nested_graph.run(self._nested_bindings)
-            return
-        if self._transform_plan is None:
-            # The provider calls below perform the first semantic execution and
-            # publish their immutable native plans. Static shape, dtype, alias,
-            # topology, and capability checks were already discharged when the
-            # Graph action was built; stable replay never re-enters them.
-            self._prepare_global_provider_plans(impl.get_runtime().prog)
-        else:
-            self._invoke_global_provider_plans()
         self._nested_graph.run(self._nested_bindings)
 
     @property
@@ -400,11 +348,9 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             backend="cuda",
             command_count=(1 if self._strategy == _SERIAL_STRATEGY else 4),
             command_count_exact=(self._strategy == _SERIAL_STRATEGY),
-            provider_replay=(self._strategy == _GLOBAL_STRATEGY),
+            provider_replay=False,
             fragmentation_reason=(
-                "none"
-                if self._strategy == _SERIAL_STRATEGY
-                else "provider_command_not_graph_integrated"
+                "none" if self._strategy == _SERIAL_STRATEGY else "nested_cuda_graph_retained_global_scan"
             ),
         )
 
@@ -428,11 +374,11 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             "strategy": self._strategy,
             "method": self._method,
             "provider_preparations": self._provider_preparations,
-            "kernel_plan_preparations": sum(
-                call.preparations for call in (self._serial_call,) if call is not None
-            ),
+            "kernel_plan_preparations": sum(call.preparations for call in (self._serial_call,) if call is not None),
             "action_owned_bytes": self._source.action_owned_bytes(self._strategy),
-            "workspace_bytes_peak": self._workspace.workspace_bytes_peak,
+            "workspace_bytes_peak": max(
+                self._workspace.workspace_bytes_peak, self._source.action_owned_bytes(self._strategy)
+            ),
             "nested_graph_replay": self._nested_graph is not None,
         }
 
@@ -448,16 +394,24 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
             components = (
                 HardwareMemoryComponent(
                     component_name,
-                    action_owned_bytes,
+                    self._source.layout.num_segments * 4,
                     True,
                     "provider_generation",
                     "provider",
                     resident=True,
                 ),
             )
-        # The CUDA scan arena is Program-shared rather than owned by this
-        # Graph generation. Its current contribution remains available in
-        # debug_info.workspace_bytes_peak and is not double-counted here.
+        if self._scan_scratch is not None:
+            components += (
+                HardwareMemoryComponent(
+                    "retained_scan_scratch",
+                    int(self._scan_scratch.shape[0]) * 4,
+                    True,
+                    "provider_generation",
+                    "provider",
+                    resident=True,
+                ),
+            )
         return make_memory_report(
             "graph_native_segmented_scan",
             "cuda",
@@ -597,9 +551,9 @@ class _GraphSegmentedScanRecipeSource:
 
     def action_owned_bytes(self, strategy):
         return (
-            self.layout.num_segments * 4
-            if strategy in (_GLOBAL_STRATEGY, _HYBRID_STRATEGY)
-            else 0
+            self.layout.num_segments * 4 + scan_workspace_bytes(self.layout.num_items, self.values.dtype)
+            if strategy == _GLOBAL_STRATEGY
+            else self.layout.num_segments * 4 if strategy == _HYBRID_STRATEGY else 0
         )
 
     def _manifest(self, strategy, stages, topology, workspace):
@@ -633,8 +587,8 @@ class _GraphSegmentedScanRecipeSource:
         global_scan = self._manifest(
             _GLOBAL_STRATEGY,
             [
-                _stage("copy_input", "cuda_program_call"),
-                _stage("global_inclusive_scan", "cuda_program_call"),
+                _stage("copy_input", "taichi_dispatch"),
+                _stage("global_inclusive_scan", "cuda_retained_scan_recording"),
                 _stage("gather_segment_bases", "taichi_dispatch"),
                 _stage("apply_segment_correction", "taichi_dispatch"),
             ],
@@ -642,11 +596,14 @@ class _GraphSegmentedScanRecipeSource:
                 "kind": _GLOBAL_STRATEGY,
                 "correction_block_dim": 128,
                 "correction_graph_nodes": 2,
+                "submission": "retained_cuda_graph",
+                "scan_scratch": "graph_bound_ndarray",
+                "scan_extent": int(self.layout.num_items),
             },
             {
                 "ownership": "graph_native_action",
                 "action_owned_bytes": self.action_owned_bytes(_GLOBAL_STRATEGY),
-                "provider_shared_scope": "program_scan_arena",
+                "provider_shared_scope": "none",
             },
         )
         warp = self._manifest(

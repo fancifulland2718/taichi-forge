@@ -236,6 +236,12 @@ class GraphBuilder {
 
   Sequential *seq() const;
 
+  void dispatch_cuda_capture_scan(Program *program,
+                                  const aot::Arg &values,
+                                  const aot::Arg &workspace,
+                                  int num_items,
+                                  int value_type);
+
   void dispatch_cuda_capture_addon(
       Program *program,
       std::uint64_t invoke_address,

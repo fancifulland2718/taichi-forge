@@ -127,19 +127,13 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                     "strategy"
                 ]
                 if strategy == "global_scan_segment_correction":
-                    plan_type = type(executable._scan_plan)
+                    from taichi_forge.graph._retained_scan import RetainedScanRecording
 
-                    def reject_repeated_program_proof(*_args, **_kwargs):
-                        raise AssertionError(
-                            "stable Graph replay repeated a provider Program proof"
-                        )
+                    def reject_host_provider(*_args, **_kwargs):
+                        raise AssertionError("retained scan replay entered a host provider")
 
                     with monkeypatch.context() as stable_replay:
-                        stable_replay.setattr(
-                            plan_type,
-                            "matches_program",
-                            reject_repeated_program_proof,
-                        )
+                        stable_replay.setattr(RetainedScanRecording, "execute", reject_host_provider)
                         rebuilt.run({})
                 elif strategy == "segment_local_serial":
                     kernel_plan_type = type(executable._serial_call._plan)
@@ -161,9 +155,7 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                     rebuilt.run({})
                 ti.sync()
                 np.testing.assert_array_equal(output.to_numpy(), expected)
-                assert executable.debug_info["provider_preparations"] == (
-                    1 if strategy == "global_scan_segment_correction" else 0
-                )
+                assert executable.debug_info["provider_preparations"] == 0
                 assert executable.debug_info["kernel_plan_preparations"] == (
                     {
                         "segment_local_serial": 1,
@@ -179,19 +171,74 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                 )
                 execution_report = rebuilt.execution_stats()
                 assert execution_report.memory.provider_generation_report_count == 1
-                assert (
-                    execution_report.memory.provider_generation_known_resident_requested_bytes
-                    == (
-                        (len(offsets) - 1) * 4
-                        if strategy == "global_scan_segment_correction"
-                        else 0
-                    )
+                assert execution_report.memory.provider_generation_known_resident_requested_bytes == (
+                    (len(offsets) - 1) * 4 + int(executable._scan_scratch.shape[0]) * 4
+                    if strategy == "global_scan_segment_correction"
+                    else 0
                 )
                 assert (
                     execution_report.memory.provider_generation_requested_bytes_complete
                     is True
                 )
     assert semantic_graph_ids == {graph.definition.semantic_graph_id}
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("dtype,inclusive", ((ti.i32, False), (ti.u32, True)))
+def test_retained_global_scan_survives_arena_growth_clear_and_preserves_padding(dtype, inclusive):
+    from taichi_forge.graph._retained_scan import scan_workspace_bytes
+
+    # More than two hierarchy levels, empty segments, modular overflow, and
+    # unused capacity exercise the real scan/correction/lifetime contract.
+    lengths = np.array([0, 1, 31, 0, 1025, (1 << 20) + 19, 0], np.int32)
+    offsets = np.concatenate((np.zeros(1, np.int32), np.cumsum(lengths, dtype=np.int32)))
+    n, capacity = int(offsets[-1]), int(offsets[-1]) + 17
+    host = np.random.default_rng(91).integers(0, 2**32, capacity, dtype=np.uint32)
+    if dtype == ti.i32:
+        host = host.view(np.int32)
+    expected = np.full_like(host, 73)
+    for begin, end in pairwise(offsets):
+        if begin != end:
+            summed = np.cumsum(host[begin:end], dtype=host.dtype)
+            expected[begin:end] = summed if inclusive else np.concatenate((np.zeros(1, host.dtype), summed[:-1]))
+    values, output = (ti.ndarray(dtype, capacity) for _ in range(2))
+    values.from_numpy(host)
+    output.fill(73)
+    layout = ti.algorithms.SegmentedLayout.from_offsets(offsets, capacity=capacity)
+    builder = ti.graph.GraphBuilder()
+    builder.segmented_scan(values, layout, output, inclusive=inclusive)
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog()
+    # This large topology chooses the global strategy as its complete baseline;
+    # baseline fragments are deliberately omitted by the composer.
+    recipe = next(entry.recipe for entry in catalog.entries() if not entry.recipe.fragments)
+    prog = ti.lang.impl.get_runtime().prog
+    with definition.materialization_context() as context:
+        with context.materialize(recipe) as materialized:
+            graph = materialized.executor
+            bound = graph.bind({})
+            # Freeze/materialization/bind must not advance user computation.
+            np.testing.assert_array_equal(output.to_numpy(), np.full_like(host, 73))
+            for _ in range(5):
+                graph.run(bound)
+            # Ordinary scans grow and then discard the Program-shared arena.
+            unrelated = ti.ndarray(ti.i32, 2 * capacity)
+            unrelated.fill(1)
+            prog.cuda_device_inclusive_scan_ndarray(unrelated.arr, 0)
+            prog._primitive_workspace_clear()
+            before = prog._primitive_workspace_stats()
+            for _ in range(31):
+                graph.run(bound)
+            np.testing.assert_array_equal(output.to_numpy(), expected)
+            np.testing.assert_array_equal(values.to_numpy(), host)
+            after = prog._primitive_workspace_stats()
+            assert after["acquisitions"] == before["acquisitions"]
+            assert after["reserved_bytes"] == before["reserved_bytes"] == 0
+            executable = graph._spec.nodes[0].executable
+            assert executable._nested_graph._graph_stats[0]["last_path"] == "cuda_exact_replay"
+            assert graph.execution_stats().memory.provider_generation_known_resident_requested_bytes == (
+                len(lengths) * 4 + scan_workspace_bytes(n, dtype)
+            )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -223,6 +270,9 @@ def test_graph_native_segmented_scan_global_correction_handles_irregular_long_se
         "kind": "global_scan_segment_correction",
         "correction_block_dim": 128,
         "correction_graph_nodes": 2,
+        "submission": "retained_cuda_graph",
+        "scan_scratch": "graph_bound_ndarray",
+        "scan_extent": capacity,
     }
 
     host = ((np.arange(capacity, dtype=np.int64) * 104729) - (1 << 30)).astype(np.int32)
@@ -244,10 +294,10 @@ def test_graph_native_segmented_scan_global_correction_handles_irregular_long_se
         ti.sync()
         np.testing.assert_array_equal(output.to_numpy(), expected)
         executable = candidate._spec.nodes[0].executable
-        assert executable.debug_info["provider_preparations"] == 1
+        assert executable.debug_info["provider_preparations"] == 0
         assert executable.debug_info["kernel_plan_preparations"] == 0
         assert executable.debug_info["nested_graph_replay"] is True
-        assert executable.backend_command_plan.provider_replay is True
+        assert executable.backend_command_plan.provider_replay is False
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

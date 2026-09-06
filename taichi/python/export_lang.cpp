@@ -30,6 +30,7 @@
 #include "taichi/ir/statements.h"
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/program/graph_builder.h"
+#include "taichi/program/cuda_scan_capture.h"
 #include "taichi/program/extension.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/matrix.h"
@@ -574,6 +575,7 @@ py::dict primitive_workspace_snapshot_to_dict(
 }  // namespace
 
 void export_lang(py::module &m) {
+  m.def("_cuda_scan_capture_workspace_bytes", &lang::cuda_scan_capture_workspace_bytes);
   using namespace taichi::lang;
   using namespace std::placeholders;
 
@@ -5309,6 +5311,10 @@ void export_lang(py::module &m) {
            py::arg("stream_offset"), py::arg("arguments"),
            py::arg("pointer_offsets"), py::arg("scalar_counts"),
            py::arg("writable"), py::arg("error_address") = 0)
+      .def("_dispatch_cuda_scan_capture_recipe",
+           &GraphBuilder::dispatch_cuda_capture_scan,
+           py::arg("program"), py::arg("values"), py::arg("workspace"),
+           py::arg("num_items"), py::arg("value_type"))
       .def("compile", &GraphBuilder::compile)
       .def("_enable_two_map_composer",
            &GraphBuilder::enable_two_map_composer)

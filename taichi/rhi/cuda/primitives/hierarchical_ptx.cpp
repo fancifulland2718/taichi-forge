@@ -468,7 +468,8 @@ std::size_t driver_inclusive_scan_strided_for_family(
     bool reverse,
     void *stream,
     PrimitiveWorkspaceArena *workspace_arena,
-    PrimitiveWorkspaceFamily workspace_family) {
+    PrimitiveWorkspaceFamily workspace_family,
+    void *retained_workspace = nullptr) {
   TI_ERROR_IF(num_items < 0,
               "CUDA Driver scan expects non-negative num_items.");
   TI_ERROR_IF(!data, "CUDA Driver scan received a null data pointer.");
@@ -486,11 +487,14 @@ std::size_t driver_inclusive_scan_strided_for_family(
   std::optional<PrimitiveWorkspaceArena::Lease<DriverWorkspace>> workspace;
   std::array<void *, 8> level_ptrs{};
   if (layout.level_count != 0) {
-    workspace.emplace(
-        acquire_workspace(workspace_arena, workspace_family, stream));
-    (*workspace)->ensure(layout.bytes);
+    if (retained_workspace == nullptr) {
+      workspace.emplace(
+          acquire_workspace(workspace_arena, workspace_family, stream));
+      (*workspace)->ensure(layout.bytes);
+      retained_workspace = (*workspace)->data();
+    }
     for (std::size_t i = 0; i < layout.level_count; ++i) {
-      level_ptrs[i] = byte_offset((*workspace)->data(), layout.offsets[i]);
+      level_ptrs[i] = byte_offset(retained_workspace, layout.offsets[i]);
     }
   }
 
@@ -545,7 +549,7 @@ std::size_t driver_inclusive_scan_strided_for_family(
     launch_uniform(data, static_cast<std::uint64_t>(offset),
                    static_cast<std::uint64_t>(stride), n, level_ptrs[0],
                    reverse ? 1 : 0);
-    return (*workspace)->allocated_bytes();
+    return workspace ? (*workspace)->allocated_bytes() : layout.bytes;
   }
   return 0;
 }
@@ -562,6 +566,28 @@ std::size_t driver_inclusive_scan_strided(
   return driver_inclusive_scan_strided_for_family(
       data, num_items, value_type, offset, stride, reverse, stream,
       workspace_arena, PrimitiveWorkspaceFamily::scan);
+}
+
+std::size_t driver_scan_workspace_bytes(int num_items,
+                                        CudaTransformValueType value_type) {
+  TI_ERROR_IF(num_items < 0, "CUDA scan requires a non-negative size");
+  return scan_layout(static_cast<std::uint32_t>(num_items),
+                     value_type_size(value_type))
+      .bytes;
+}
+
+void driver_prepare_scan() {
+  (void)kernels();
+}
+
+void driver_inclusive_scan_with_workspace(void *data,
+                                          int num_items,
+                                          CudaTransformValueType value_type,
+                                          void *workspace,
+                                          void *stream) {
+  driver_inclusive_scan_strided_for_family(
+      data, num_items, value_type, 0, value_type_size(value_type), false,
+      stream, nullptr, PrimitiveWorkspaceFamily::scan, workspace);
 }
 
 std::size_t driver_reduce_strided(void *values,

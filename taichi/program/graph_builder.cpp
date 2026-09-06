@@ -1,6 +1,7 @@
 #include "taichi/program/graph_builder.h"
 #include "taichi/program/graph_kernel_composer.h"
 #include "taichi/program/cuda_addon_capture.h"
+#include "taichi/program/cuda_scan_capture.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/program/sparse_matrix.h"
@@ -1104,6 +1105,20 @@ void GraphBuilder::dispatch_cuda_capture_addon(
   }
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), arguments));
+  seq()->append(all_nodes_.back().get());
+}
+
+void GraphBuilder::dispatch_cuda_capture_scan(Program *program,
+                                              const aot::Arg &values,
+                                              const aot::Arg &workspace,
+                                              int num_items,
+                                              int value_type) {
+  auto command = make_cuda_scan_capture_command(program, values, workspace,
+                                                num_items, value_type);
+  register_arg(values);
+  register_arg(workspace);
+  all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
+      std::move(command), std::vector<aot::Arg>{values, workspace}));
   seq()->append(all_nodes_.back().get());
 }
 

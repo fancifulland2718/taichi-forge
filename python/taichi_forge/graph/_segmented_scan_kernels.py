@@ -10,6 +10,25 @@ from taichi_forge.types.primitive_types import i32, u32
 _SEGMENT_SCAN_KERNELS = {}
 _GLOBAL_CORRECTION_KERNELS = {}
 _SHUFFLE_SCAN_KERNELS = {}
+_GLOBAL_COPY_KERNELS = {}
+
+
+def generated_global_copy_kernel(dtype, num_items):
+    key = (dtype, int(num_items))
+    cached = _GLOBAL_COPY_KERNELS.get(key)
+    if cached is not None:
+        return cached
+
+    @kernel
+    def copy_input(
+        values: ndarray_type.ndarray(dtype=dtype, ndim=1), scanned: ndarray_type.ndarray(dtype=dtype, ndim=1)
+    ):
+        loop_config(block_dim=256)
+        for index in range(num_items):
+            scanned[index] = values[index]
+
+    _GLOBAL_COPY_KERNELS[key] = copy_input
+    return copy_input
 
 
 def generated_segment_shuffle_kernel(dtype, block_dim, segment_count):

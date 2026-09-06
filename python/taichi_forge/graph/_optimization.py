@@ -1206,6 +1206,7 @@ class _GraphNativeAlgorithmRecipeManifest:
                 not in (
                     "taichi_dispatch",
                     "cuda_program_call",
+                    "cuda_retained_scan_recording",
                 )
                 or isinstance(stage.get("call_count"), bool)
                 or not isinstance(stage.get("call_count"), int)
@@ -1244,12 +1245,12 @@ class _GraphNativeAlgorithmRecipeManifest:
             "global_scan_segment_correction": [
                 {
                     "name": "copy_input",
-                    "execution_kind": "cuda_program_call",
+                    "execution_kind": "taichi_dispatch",
                     "call_count": 1,
                 },
                 {
                     "name": "global_inclusive_scan",
-                    "execution_kind": "cuda_program_call",
+                    "execution_kind": "cuda_retained_scan_recording",
                     "call_count": 1,
                 },
                 {
@@ -1291,6 +1292,9 @@ class _GraphNativeAlgorithmRecipeManifest:
                 "kind": "global_scan_segment_correction",
                 "correction_block_dim": 128,
                 "correction_graph_nodes": 2,
+                "submission": "retained_cuda_graph",
+                "scan_scratch": "graph_bound_ndarray",
+                "scan_extent": semantics["num_items"],
             },
             "warp_chunked_carry": {
                 "kind": "warp_chunked_carry",
@@ -1388,8 +1392,8 @@ class _GraphNativeAlgorithmRecipeManifest:
                 raise ValueError("workspace-free segmented scan recipe is incomplete")
         elif key[1] == "global_scan_segment_correction" and (
             workspace["ownership"] != "graph_native_action"
-            or workspace["action_owned_bytes"] != semantics["num_segments"] * 4
-            or workspace["provider_shared_scope"] != "program_scan_arena"
+            or workspace["action_owned_bytes"] < semantics["num_segments"] * 4 + 4
+            or workspace["provider_shared_scope"] != "none"
         ):
             raise ValueError("global segmented scan recipe is not complete")
         elif key[1] == "length_bucket_hybrid" and (

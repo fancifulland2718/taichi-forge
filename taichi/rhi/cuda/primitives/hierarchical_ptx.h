@@ -27,6 +27,17 @@ enum class CudaDriverSortKeyType : int {
 
 bool driver_hierarchical_available();
 
+// Cold Graph preparation and exact, caller-owned scratch. Recording never
+// acquires the mutable Program arena; the Graph retains the bound allocation.
+std::size_t driver_scan_workspace_bytes(int num_items,
+                                        CudaTransformValueType value_type);
+void driver_prepare_scan();
+void driver_inclusive_scan_with_workspace(void *data,
+                                          int num_items,
+                                          CudaTransformValueType value_type,
+                                          void *workspace,
+                                          void *stream);
+
 std::size_t driver_inclusive_scan_strided(
     void *data,
     int num_items,
