@@ -492,9 +492,19 @@ compile/warmup 不计时。GPU 仅在确认没有其他 Python/GPU compute proce
 | CUDA | 0.871 ms | 1.800 ms | global，2.07x |
 | Vulkan | 3.855 ms | 1.597 ms | serial，2.41x |
 
-这些结果只用于支持粗粒度 backend 分派，不是阈值扫参或跨 driver 保证。
-Graph/public 差异属于很小的固定 replay 效应，不足以立项 segmented 专用 fused
-native node。
+这些历史结果描述普通 API 的粗粒度 backend 分派，不是阈值扫参、跨 driver 保证，
+也不能作为否定新 whole-Graph 实现的依据。
+
+`GraphBuilder.segmented_scan()` 对固定、互不重叠的 1D i32/u32 ndarray 与不可变
+segment layout 提供独立的 CUDA 完整 recipe 域。默认 provider 保留 serial、shared-memory
+chunk carry、global correction，以及混合段长下的 bucketed 策略，同时提供寄存器 shuffle
+和分层 warp carry。新方案执行精确的模 2^32 inclusive/exclusive sum，不分配 global scratch；
+分层方案每 block 使用 16 字节 shared memory，每 chunk 两个 block barrier，纯 warp 方案
+不需要 shared memory 或 block barrier。这些是完整操作的物理实现，不是公开 block 参数轴。
+
+通过 `builder.freeze().search_recipes(...)` 按实际 workload 指标搜索，普通 `method="auto"`
+不变。这不等于任意相邻 producer/consumer kernel 融合：值语义、可见中间写入与跨语言下沉
+仍需要单独的合同。
 
 ## Device-side 数值检查
 

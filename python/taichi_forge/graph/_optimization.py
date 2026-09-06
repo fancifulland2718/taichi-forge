@@ -84,6 +84,12 @@ _GRAPH_NATIVE_ALGORITHM_RECIPE_PREFIXES = {
     ("segmented_scan", "length_bucket_hybrid"): (
         "graph-native-algorithm:segmented-scan:length-bucket:"
     ),
+    ("segmented_scan", "warp_shuffle_carry"): (
+        "graph-native-algorithm:segmented-scan:warp-shuffle:"
+    ),
+    ("segmented_scan", "block_hierarchical_carry"): (
+        "graph-native-algorithm:segmented-scan:block-hierarchical:"
+    ),
 }
 
 
@@ -1331,12 +1337,29 @@ class _GraphNativeAlgorithmRecipeManifest:
                     "call_count": 1,
                 },
             ]
+        elif key[1] in ("warp_shuffle_carry", "block_hierarchical_carry"):
+            warp_only = key[1] == "warp_shuffle_carry"
+            expected_stages = [
+                {
+                    "name": "warp_register_segment_chunks" if warp_only else "hierarchical_warp_segment_chunks",
+                    "execution_kind": "taichi_dispatch",
+                    "call_count": 1,
+                }
+            ]
+            expected_topology = {
+                "kind": key[1],
+                "block_dim": 32 if warp_only else 128,
+                "chunk_items": 32 if warp_only else 128,
+                "warp_prefix": "shuffle_up_modular_u32",
+                "static_shared_bytes": 0 if warp_only else 16,
+                "block_barriers_per_chunk": 0 if warp_only else 2,
+            }
+            if topology != expected_topology:
+                raise ValueError("Graph segmented shuffle topology is invalid")
         elif topology != expected_topology:
             raise ValueError("Graph segmented scan topology is invalid")
         if stages != expected_stages:
-            raise ValueError(
-                "Graph native-algorithm physical topology does not match strategy"
-            )
+            raise ValueError("Graph native-algorithm physical topology does not match strategy")
         submission = payload.get("submission")
         if submission != {
             "resource_binding": "fixed_graph_action",
@@ -1354,6 +1377,8 @@ class _GraphNativeAlgorithmRecipeManifest:
             "segment_local_serial",
             "warp_chunked_carry",
             "block_chunked_carry",
+            "warp_shuffle_carry",
+            "block_hierarchical_carry",
         ):
             if len(stages) != 1 or workspace != {
                 "ownership": "none",

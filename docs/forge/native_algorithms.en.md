@@ -605,10 +605,24 @@ short-workload overfitting:
 | CUDA | 0.871 ms | 1.800 ms | global, 2.07x |
 | Vulkan | 3.855 ms | 1.597 ms | serial, 2.41x |
 
-These measurements justify the coarse backend dispatch; they are not a
-threshold sweep or a cross-driver guarantee. Graph/public differences are
-small fixed replay effects and did not justify a segmented-specific fused
-native node.
+These historical measurements describe the coarse ordinary API dispatch;
+they are not a threshold sweep, a cross-driver guarantee, or evidence against
+new whole-Graph implementations.
+
+`GraphBuilder.segmented_scan()` has a separate CUDA complete-recipe domain for
+fixed, disjoint 1D i32/u32 arrays and immutable segment layouts. The default
+recipe providers retain serial, shared-memory chunk carry, global correction,
+and (for mixed segment lengths) bucketed strategies, alongside register-shuffle
+and hierarchical-warp carry. The new strategies perform exact modulo-2^32
+inclusive/exclusive sums without global scratch; hierarchical carry uses 16
+bytes of shared memory per block and two block barriers per chunk. Warp-only
+carry needs neither shared memory nor block barriers. These are physical
+implementations of the complete operation, not public block-size search axes.
+
+Search them through `builder.freeze().search_recipes(...)` and compare actual
+workload metrics. Ordinary `method="auto"` is unchanged. This does **not** fuse
+arbitrary neighboring producer/consumer kernels: value semantics, visible
+intermediate stores and cross-language lowering still need a separate contract.
 
 ## Device-side Numeric Checks
 

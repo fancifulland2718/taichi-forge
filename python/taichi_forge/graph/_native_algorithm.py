@@ -37,6 +37,7 @@ from taichi_forge.types.primitive_types import i32, u32
 from taichi_forge.graph._segmented_scan_kernels import (
     generated_global_correction_kernels,
     generated_segment_chunk_kernel,
+    generated_segment_shuffle_kernel,
 )
 
 _SERIAL_STRATEGY = "segment_local_serial"
@@ -44,12 +45,23 @@ _GLOBAL_STRATEGY = "global_scan_segment_correction"
 _WARP_STRATEGY = "warp_chunked_carry"
 _BLOCK_STRATEGY = "block_chunked_carry"
 _HYBRID_STRATEGY = "length_bucket_hybrid"
+_WARP_SHUFFLE_STRATEGY = "warp_shuffle_carry"
+_BLOCK_SHUFFLE_STRATEGY = "block_hierarchical_carry"
+_CHUNK_STRATEGIES = (
+    _WARP_STRATEGY,
+    _BLOCK_STRATEGY,
+    _HYBRID_STRATEGY,
+    _WARP_SHUFFLE_STRATEGY,
+    _BLOCK_SHUFFLE_STRATEGY,
+)
 _STRATEGY_METHOD = {
     _SERIAL_STRATEGY: "serial",
     _GLOBAL_STRATEGY: "global_scan",
     _WARP_STRATEGY: "forge_warp_chunked_v1",
     _BLOCK_STRATEGY: "forge_block_chunked_v1",
     _HYBRID_STRATEGY: "forge_length_bucket_v1",
+    _WARP_SHUFFLE_STRATEGY: "forge_warp_shuffle_v1",
+    _BLOCK_SHUFFLE_STRATEGY: "forge_block_hierarchical_v1",
 }
 _SOURCE_FILES = (
     "algorithms/_algorithms.py",
@@ -193,7 +205,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 source.layout,
             )
             self._build_global_correction_graph()
-        if strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+        if strategy in _CHUNK_STRATEGIES:
             self._build_chunked_graph()
 
     def _build_chunked_graph(self):
@@ -257,13 +269,18 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
                 )
                 bindings[name] = storage
         else:
-            block_dim = 32 if self._strategy == _WARP_STRATEGY else 128
-            scan = generated_segment_chunk_kernel(
-                self._source.values.dtype,
-                block_dim,
-                self._source.layout.num_segments,
-                indexed=False,
-            )
+            block_dim = 32 if self._strategy in (_WARP_STRATEGY, _WARP_SHUFFLE_STRATEGY) else 128
+            if self._strategy in (_WARP_SHUFFLE_STRATEGY, _BLOCK_SHUFFLE_STRATEGY):
+                scan = generated_segment_shuffle_kernel(
+                    self._source.values.dtype, block_dim, self._source.layout.num_segments
+                )
+            else:
+                scan = generated_segment_chunk_kernel(
+                    self._source.values.dtype,
+                    block_dim,
+                    self._source.layout.num_segments,
+                    indexed=False,
+                )
             builder.dispatch(
                 scan,
                 values,
@@ -356,7 +373,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
         if self._strategy == _SERIAL_STRATEGY:
             self._run_serial()
             return
-        if self._strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+        if self._strategy in _CHUNK_STRATEGIES:
             self._nested_graph.run(self._nested_bindings)
             return
         if self._transform_plan is None:
@@ -371,7 +388,7 @@ class _GraphSegmentedScanExecutable(NativeGraphExecutable):
 
     @property
     def backend_command_plan(self):
-        if self._strategy in (_WARP_STRATEGY, _BLOCK_STRATEGY, _HYBRID_STRATEGY):
+        if self._strategy in _CHUNK_STRATEGIES:
             return BackendCommandPlan(
                 backend="cuda",
                 command_count=(2 if self._strategy == _HYBRID_STRATEGY else 1),
@@ -658,6 +675,25 @@ class _GraphSegmentedScanRecipeSource:
             warp.strategy: warp,
             block.strategy: block,
         }
+        for strategy, block_dim, stage_name in (
+            (_WARP_SHUFFLE_STRATEGY, 32, "warp_register_segment_chunks"),
+            (_BLOCK_SHUFFLE_STRATEGY, 128, "hierarchical_warp_segment_chunks"),
+        ):
+            if self.layout.num_items == 0:
+                continue  # No device work means no distinct shuffle recipe.
+            by_strategy[strategy] = self._manifest(
+                strategy,
+                [_stage(stage_name, "taichi_dispatch")],
+                {
+                    "kind": strategy,
+                    "block_dim": block_dim,
+                    "chunk_items": block_dim,
+                    "warp_prefix": "shuffle_up_modular_u32",
+                    "static_shared_bytes": 0 if block_dim == 32 else 16,
+                    "block_barriers_per_chunk": 0 if block_dim == 32 else 2,
+                },
+                {"ownership": "none", "action_owned_bytes": 0, "provider_shared_scope": "none"},
+            )
         manifests = [by_strategy[self.baseline_strategy]]
         manifests.extend(
             by_strategy[strategy]
@@ -666,12 +702,13 @@ class _GraphSegmentedScanRecipeSource:
                 _WARP_STRATEGY,
                 _BLOCK_STRATEGY,
                 _GLOBAL_STRATEGY,
+                _WARP_SHUFFLE_STRATEGY,
+                _BLOCK_SHUFFLE_STRATEGY,
             )
-            if strategy != self.baseline_strategy
+            if strategy != self.baseline_strategy and strategy in by_strategy
         )
         short_count = sum(
-            self.offsets[index + 1] - self.offsets[index] <= 32
-            for index in range(self.layout.num_segments)
+            self.offsets[index + 1] - self.offsets[index] <= 32 for index in range(self.layout.num_segments)
         )
         long_count = self.layout.num_segments - short_count
         if short_count and long_count:

@@ -66,7 +66,7 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
         search.search_space.domain_version
         == "graph-native-algorithm-complete-recipe.v2"
     )
-    assert len(search.recipe_ids) == 4
+    assert len(search.recipe_ids) == 6
 
     recipes = {
         recipe_id: search.recipe_manifest(recipe_id) for recipe_id in search.recipe_ids
@@ -80,6 +80,8 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
         "global_scan_segment_correction",
         "warp_chunked_carry",
         "block_chunked_carry",
+        "warp_shuffle_carry",
+        "block_hierarchical_carry",
     }
     assert (
         recipes[search.baseline_recipe_id]["native_algorithm_recipe_manifest"][
@@ -168,6 +170,8 @@ def test_graph_native_segmented_scan_materializes_complete_domain(
                         "global_scan_segment_correction": 0,
                         "warp_chunked_carry": 0,
                         "block_chunked_carry": 0,
+                        "warp_shuffle_carry": 0,
+                        "block_hierarchical_carry": 0,
                     }[strategy]
                 )
                 assert executable.debug_info["nested_graph_replay"] == (
@@ -353,7 +357,7 @@ def test_graph_native_segmented_scan_recipe_composes_with_ordinary_dispatch():
     search = compileiq_recipe_search(graph)
 
     assert search.manifest()["families"] == ("native_algorithm",)
-    assert len(search.recipe_ids) == 4
+    assert len(search.recipe_ids) == 6
     assert graph.definition._runtime_spec._graph_memory_sources == ()
 
     host = (np.arange(capacity, dtype=np.int32) % 5) + 1
@@ -380,7 +384,54 @@ def test_graph_native_segmented_scan_recipe_composes_with_ordinary_dispatch():
                     scratch.to_numpy(), np.zeros(capacity, dtype=np.int32)
                 )
                 physical_ids.add(materialized.materialized_physical_id)
-    assert len(physical_ids) == 4
+    assert len(physical_ids) == 6
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("dtype", (ti.i32, ti.u32))
+@pytest.mark.parametrize("inclusive", (False, True))
+def test_segmented_shuffle_irregular_overflow_queued_replay(dtype, inclusive):
+    # Empty segments, partial warps/blocks and many repeated carries coexist.
+    lengths = np.array([0, 1, 31, 32, 33, 0, 127, 128, 129, 4097, 65537, 0], np.int32)
+    offsets = np.concatenate((np.zeros(1, np.int32), np.cumsum(lengths, dtype=np.int32)))
+    n = int(offsets[-1])
+    layout = ti.algorithms.SegmentedLayout.from_offsets(offsets, capacity=n + 11)
+    host = np.random.default_rng(733).integers(0, 2**32, n + 11, dtype=np.uint32)
+    if dtype == ti.i32:
+        host = host.view(np.int32)
+    values, output = (ti.ndarray(dtype, n + 11) for _ in range(2))
+    values.from_numpy(host)
+    expected = np.full_like(host, 77)
+    for begin, end in pairwise(offsets):
+        if end == begin:
+            continue
+        summed = np.cumsum(host[begin:end], dtype=host.dtype)
+        expected[begin:end] = summed if inclusive else np.concatenate((np.zeros(1, host.dtype), summed[:-1]))
+    builder = ti.graph.GraphBuilder()
+    builder.segmented_scan(values, layout, output, inclusive=inclusive)
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog()
+    stages = {"warp_register_segment_chunks", "hierarchical_warp_segment_chunks"}
+    recipes = [
+        entry.recipe
+        for entry in catalog.entries()
+        if any(task.kind in stages for fragment in entry.recipe.fragments for task in fragment.tasks)
+    ]
+    assert len(recipes) == 2
+    physical_ids = set()
+    with definition.materialization_context() as context:
+        for recipe in recipes:
+            with context.materialize(recipe) as materialized:
+                graph = materialized.executor
+                output.fill(77)
+                bound = graph.bind({})
+                for _ in range(73):
+                    graph.run(bound)
+                np.testing.assert_array_equal(output.to_numpy(), expected)
+                np.testing.assert_array_equal(values.to_numpy(), host)
+                assert graph.execution_stats().memory.provider_generation_known_resident_requested_bytes == 0
+                physical_ids.add(materialized.materialized_physical_id)
+    assert len(physical_ids) == 2
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -490,6 +541,69 @@ def test_graph_keyed_aggregation_generates_complete_fixed_resource_domain():
                 assert memory.provider_generation_requested_bytes_complete
                 physical_ids.add(materialized.materialized_physical_id)
     assert len(physical_ids) == 2
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_segmented_shuffle_public_search_selection_artifact_and_rebuild():
+    def build():
+        layout, _ = _layout(8192, 256)
+        values, output = (ti.ndarray(ti.u32, 8192) for _ in range(2))
+        values.fill(1)
+        builder = ti.graph.GraphBuilder()
+        builder.segmented_scan(values, layout, output)
+        return builder.freeze(), output
+
+    definition, output = build()
+    catalog = definition.recipe_catalog()
+    observed = set()
+    expected = np.tile(np.arange(1, 257, dtype=np.uint32), 32)
+
+    def evaluate(graph, handle):
+        graph.run({})
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        observed.add(handle.recipe_id)
+        recipe = catalog.entry(handle.recipe_id).recipe
+        # A deterministic contract fixture, deliberately not a performance score.
+        return {
+            "fixture_hierarchical_selection": float(
+                any(
+                    task.kind == "hierarchical_warp_segment_chunks"
+                    for fragment in recipe.fragments
+                    for task in fragment.tasks
+                )
+            )
+        }
+
+    decision = definition.search_recipes(
+        target=ti.graph.GraphOptimizationTarget(objectives=(("fixture_hierarchical_selection", "max"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=6, repeat_count=1),
+        strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
+    ).run(evaluate)
+    assert decision.status == "selected" and decision.report.search_complete
+    assert len(observed) == 6
+    artifact = ti.graph.GraphRecipeSelectionArtifact.from_dict(decision.selection_artifact.to_dict())
+    rebuilt, rebuilt_output = build()
+    assert rebuilt.semantic_graph_id == definition.semantic_graph_id
+    selected = rebuilt.resolve_recipe(artifact)
+    with rebuilt.materialize(selected) as materialized:
+        for _ in range(9):
+            materialized.executor.run({})
+        np.testing.assert_array_equal(rebuilt_output.to_numpy(), expected)
+        assert materialized.executor._spec.nodes[0].executable.debug_info["strategy"] == "block_hierarchical_carry"
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_segmented_shuffle_does_not_advertise_an_empty_physical_plan():
+    layout = ti.algorithms.SegmentedLayout.from_offsets(np.zeros(4, np.int32), capacity=7)
+    values, output = (ti.ndarray(ti.u32, 7) for _ in range(2))
+    builder = ti.graph.GraphBuilder()
+    builder.segmented_scan(values, layout, output)
+    catalog = builder.freeze().recipe_catalog()
+    assert all(
+        task.kind not in ("warp_register_segment_chunks", "hierarchical_warp_segment_chunks")
+        for fragment in catalog.fragments
+        for task in fragment.tasks
+    )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
