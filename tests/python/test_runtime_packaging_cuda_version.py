@@ -378,6 +378,13 @@ def test_runtime_repair_uses_only_selected_build_cache(tmp_path):
         "CUDAToolkit_VERSION_MAJOR:STRING=11\n" f"CMAKE_HOME_DIRECTORY:INTERNAL={source.as_posix()}\n",
         encoding="utf-8",
     )
+    dependency = current / "_deps" / "ti_nvtx_headers-subbuild"
+    dependency.mkdir(parents=True)
+    (dependency / "CMakeCache.txt").write_text(
+        f"CMAKE_HOME_DIRECTORY:INTERNAL={dependency.as_posix()}\n"
+        "CUDAToolkit_VERSION_MAJOR:STRING=99\n",
+        encoding="utf-8",
+    )
 
     assert repair_runtime_wheel._artifact_roots(current, "windows") == [runtime_output]
     assert repair_runtime_wheel._artifact_roots(current, "linux") == [current]

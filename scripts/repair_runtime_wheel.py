@@ -26,7 +26,11 @@ def _cmake_cache_values(roots: list[Path] | None = None) -> dict[str, str]:
     for cache in sorted(
         path
         for root in search_roots
-        for path in root.rglob("CMakeCache.txt")
+        for path in (
+            [root / "CMakeCache.txt"]
+            if (root / "CMakeCache.txt").is_file()
+            else root.glob("*/CMakeCache.txt")
+        )
     ):
         for line in cache.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line or line.startswith("//") or line.startswith("#"):
