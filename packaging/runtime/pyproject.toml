@@ -38,7 +38,7 @@ wheel.packages = ["src/taichi_forge_runtime"]
 wheel.py-api = "py3"
 install.components = ["runtime"]
 # Validate the independent provider toolchains before the expensive runtime.
-build.targets = ["taichi_forge_optix_providers", "taichi_forge_cudss_providers", "taichi_forge_optional_runtime_providers", "taichi_runtime"]
+build.targets = ["taichi_forge_optix_providers", "taichi_forge_cudss_providers", "taichi_forge_optional_runtime_providers", "taichi_forge_vkfft_providers", "taichi_runtime"]
 wheel.exclude = [
   "**/__pycache__/**",
   "**/*.pyc",
@@ -67,6 +67,7 @@ TI_WITH_CUPTI = "OFF"
 TI_BUILD_BUNDLED_OPTIX_PROVIDERS = "ON"
 TI_BUILD_BUNDLED_CUDSS_PROVIDER = "ON"
 TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS = "ON"
+TI_BUILD_VKFFT_PROVIDER = "ON"
 TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT = "OFF"
 
 [tool.scikit-build.metadata.version]

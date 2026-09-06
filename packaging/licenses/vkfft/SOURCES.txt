@@ -1,0 +1,21 @@
+The optional Forge Vulkan FFT adapter includes VkFFT and the static shader
+compiler components below. It does not distribute the Vulkan driver or a
+CUDA runtime. These notices accompany the SDK 1.4.304.1 release-build inputs;
+custom builds replacing static dependencies must retain their own notices.
+
+VkFFT v1.3.4 (MIT; installed from the actual build source tree):
+https://github.com/DTolm/VkFFT/tree/066a17c17068c0f11c9298d848c2976c71fad1c1
+
+glslang (SDK tag vulkan-sdk-1.4.304.1):
+https://github.com/KhronosGroup/glslang/blob/b3a6aa7b03c51ba976e4f4e96b1e31f77f43f312/LICENSE.txt
+The complete upstream license collection is preserved, including descriptions
+of tools and optional components that are not part of this adapter.
+
+SPIRV-Tools (SDK tag vulkan-sdk-1.4.304.1):
+https://github.com/KhronosGroup/SPIRV-Tools/blob/4d2f0b40bfe290dea6c6904dafdf7fd8328ba346/LICENSE
+
+SPIRV-Headers (SDK tag vulkan-sdk-1.4.304.1):
+https://github.com/KhronosGroup/SPIRV-Headers/blob/3f17b2af6784bfa2c5aa5dbb8e0e74a607dd8b3b/LICENSE
+
+Forge's adapter and resource-lifetime bridge are separate implementation files.
+The upstream compiler sources are not modified by this adapter build.

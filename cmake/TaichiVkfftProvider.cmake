@@ -5,9 +5,24 @@ add_custom_target(taichi_forge_vkfft_providers)
 if(NOT TI_BUILD_VKFFT_PROVIDER)
     return()
 endif()
+if(APPLE OR (DEFINED TI_WITH_VULKAN AND NOT TI_WITH_VULKAN))
+    message(STATUS "The optional VkFFT adapter requires the Vulkan backend")
+    return()
+endif()
 
-# An explicit build input, not a new runtime compiler downloader or a second
-# native runtime profile. Release wheel inclusion is qualified separately.
+# Fetch only at build time, like the other bundled adapters. Consumers do not
+# download a compiler or build C++ at plan creation. An explicit source root
+# remains available for offline builds; it is not a runtime/shim commit lock.
+if(NOT TI_VKFFT_ROOT)
+    include(FetchContent)
+    FetchContent_Declare(ti_vkfft_source
+        GIT_REPOSITORY https://github.com/DTolm/VkFFT.git
+        GIT_TAG 066a17c17068c0f11c9298d848c2976c71fad1c1 # v1.3.4
+        GIT_SHALLOW FALSE
+        SOURCE_SUBDIR _forge_headers_only)
+    FetchContent_MakeAvailable(ti_vkfft_source)
+    set(TI_VKFFT_ROOT "${ti_vkfft_source_SOURCE_DIR}")
+endif()
 set(_ti_vkfft_header "${TI_VKFFT_ROOT}/vkFFT/vkFFT.h")
 if(NOT EXISTS "${_ti_vkfft_header}")
     message(FATAL_ERROR "Set TI_VKFFT_ROOT to the VkFFT v1.3.4 source tree")
@@ -24,11 +39,11 @@ find_path(TI_VKFFT_GLSLANG_INCLUDE glslang_c_interface.h
 # Use the compiler distribution's matched static libraries. Do not bind to
 # Forge's differently-versioned SPIRV-Tools target or export their symbols.
 find_library(TI_VKFFT_GLSLANG_STATIC NAMES glslang
-             HINTS "$ENV{VULKAN_SDK}/Lib" REQUIRED)
+             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
 find_library(TI_VKFFT_SPIRV_OPT_STATIC NAMES SPIRV-Tools-opt
-             HINTS "$ENV{VULKAN_SDK}/Lib" REQUIRED)
+             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
 find_library(TI_VKFFT_SPIRV_STATIC NAMES SPIRV-Tools
-             HINTS "$ENV{VULKAN_SDK}/Lib" REQUIRED)
+             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
 if(UNIX)
     foreach(_ti_vkfft_library TI_VKFFT_GLSLANG_STATIC TI_VKFFT_SPIRV_OPT_STATIC
                              TI_VKFFT_SPIRV_STATIC)
@@ -58,3 +73,15 @@ if(UNIX AND NOT APPLE)
     target_link_options(taichi_forge_vkfft_provider PRIVATE "LINKER:--exclude-libs,ALL")
 endif()
 add_dependencies(taichi_forge_vkfft_providers taichi_forge_vkfft_provider)
+
+# Plain standalone adapter builds need not define a Python installation root.
+if(INSTALL_LIB_DIR)
+    install(TARGETS taichi_forge_vkfft_provider
+        RUNTIME DESTINATION ${INSTALL_LIB_DIR}/hardware_providers COMPONENT runtime
+        LIBRARY DESTINATION ${INSTALL_LIB_DIR}/hardware_providers COMPONENT runtime)
+    install(FILES "${TI_VKFFT_ROOT}/LICENSE"
+        DESTINATION ${INSTALL_LIB_DIR}/licenses/vkfft
+        RENAME VkFFT-LICENSE.txt COMPONENT runtime)
+    install(DIRECTORY "${CMAKE_CURRENT_LIST_DIR}/../packaging/licenses/vkfft/"
+        DESTINATION ${INSTALL_LIB_DIR}/licenses/vkfft COMPONENT runtime)
+endif()

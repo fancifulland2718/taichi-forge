@@ -1409,6 +1409,46 @@ def test_runtime_wheel_rejects_unknown_hardware_adapter(tmp_path, platform):
         validate_runtime_wheel.inspect_runtime_wheel(wheel)
 
 
+@pytest.mark.parametrize("fault", (None, "missing_license", "empty_license", "wrong_abi", "duplicate"))
+def test_optional_vkfft_wheel_payload_preserves_legacy_and_checks_delivery(tmp_path, fault):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"
+    _write_runtime_wheel(wheel, platform="windows", version="0.6.3", cuda_major=13, dependency_class="driver-only")
+    # The optional adapter does not invalidate an older ABI-compatible wheel.
+    validate_runtime_wheel.inspect_runtime_wheel(wheel)
+    with pytest.raises(RuntimeError, match="VkFFT adapter set"):
+        validate_runtime_wheel.inspect_runtime_wheel(wheel, require_vkfft=True)
+    stem = validate_runtime_wheel.VKFFT_ADAPTER_STEM
+    member = f"taichi_forge_runtime/_lib/hardware_providers/{stem}.dll"
+    if fault == "wrong_abi":
+        member = member.replace("abi1", "abi9")
+    with ZipFile(wheel, "a") as zf:
+        zf.writestr(member, b"adapter")
+        if fault == "duplicate":
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                zf.writestr(member, b"duplicate adapter")
+        for filename in validate_runtime_wheel.VKFFT_LICENSE_FILES:
+            if fault == "missing_license" and filename == "glslang-LICENSE.txt":
+                continue
+            contents = " " if fault == "empty_license" and filename == "glslang-LICENSE.txt" else "upstream notice"
+            zf.writestr(f"taichi_forge_runtime/_lib/licenses/vkfft/{filename}", contents)
+    if fault is None:
+        assert validate_runtime_wheel.inspect_runtime_wheel(wheel, require_vkfft=True).dependency_class == "driver-only"
+    else:
+        with pytest.raises(RuntimeError, match="VkFFT"):
+            validate_runtime_wheel.inspect_runtime_wheel(wheel)
+
+
+@pytest.mark.parametrize("dependency", ("vulkan-1.dll", "glslang.dll", "SPIRV-Tools-shared.dll", "cudart64_13.dll"))
+def test_vkfft_static_compiler_binary_contract(monkeypatch, tmp_path, dependency):
+    binary = tmp_path / f"{validate_runtime_wheel.VKFFT_ADAPTER_STEM}.dll"
+    monkeypatch.setattr(validate_runtime_wheel, "_binary_imports", lambda *args: {dependency})
+    if dependency == "vulkan-1.dll":
+        validate_runtime_wheel._validate_binary_dependencies(binary, "windows")
+    else:
+        with pytest.raises(RuntimeError, match="dependencies"):
+            validate_runtime_wheel._validate_binary_dependencies(binary, "windows")
+
+
 @pytest.mark.parametrize("platform", ("windows", "manylinux"))
 @pytest.mark.parametrize("fault", (None, "runtime", "adapter", "grafted"))
 def test_strict_wheel_audits_shipped_runtime_adapters_and_grafted_libraries(monkeypatch, tmp_path, platform, fault):

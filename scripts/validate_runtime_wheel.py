@@ -53,6 +53,30 @@ OPTIONAL_RUNTIME_PROVIDERS = {
         "taichi_forge_amgx_provider_query",
     ),
 }
+VKFFT_ADAPTER_STEM = "taichi_forge_vkfft_provider_abi1_vkfft134"
+VKFFT_LICENSE_FILES = (
+    "VkFFT-LICENSE.txt",
+    "glslang-LICENSE.txt",
+    "SPIRV-Tools-LICENSE.txt",
+    "SPIRV-Headers-LICENSE.txt",
+    "SOURCES.txt",
+)
+
+
+def _validate_vkfft_payload(zf: ZipFile, names: list[str], platform: str, required: bool) -> set[str]:
+    prefix = f"{PACKAGE}/_lib/hardware_providers/"
+    entries = [name for name in names if name.startswith(prefix) and "taichi_forge_vkfft_provider" in Path(name).name]
+    if not entries and not required:
+        # Keep inspecting older ABI-compatible wheels without a HEAD lock.
+        return set()
+    expected = f"{prefix}{VKFFT_ADAPTER_STEM}.dll" if platform == "windows" else f"{prefix}lib{VKFFT_ADAPTER_STEM}.so"
+    if platform == "macos" or entries != [expected]:
+        raise RuntimeError(f"Runtime wheel VkFFT adapter set is missing or ambiguous: {entries}")
+    for filename in VKFFT_LICENSE_FILES:
+        member = f"{PACKAGE}/_lib/licenses/vkfft/{filename}"
+        if names.count(member) != 1 or not zf.read(member).strip():
+            raise RuntimeError(f"Runtime wheel VkFFT license payload is missing or empty: {filename}")
+    return {expected}
 
 
 def _expected_optix_provider_members(platform: str) -> set[str]:
@@ -357,7 +381,7 @@ def _strict_provider_exports(zf: ZipFile, members: dict[str, str], platform: str
             else:
                 symbols = {line.split()[0].split("@", 1)[0] for line in completed.stdout.splitlines() if line.split()}
             forge_exports = {symbol for symbol in symbols if symbol.startswith("taichi_forge_")}
-            if forge_exports != {required}:
+            if forge_exports != {required} or (VKFFT_ADAPTER_STEM in member and symbols != {required}):
                 raise RuntimeError(
                     f"provider adapter {member} must export exactly {required!r}; "
                     f"found Forge exports {sorted(forge_exports)}"
@@ -402,6 +426,14 @@ def _validate_binary_dependencies(
         cudart_major = _cudart_major(platform, name)
         if (
             FORBIDDEN_VENDOR_RUNTIME.fullmatch(name)
+            or (
+                VKFFT_ADAPTER_STEM in binary.name
+                and re.match(
+                    r"(?:lib)?(?:glslang|SPIRV-Tools|SPIRV\.|HLSL\.|OGLCompiler\.|OSDependent\.|MachineIndependent\.)",
+                    name,
+                    re.IGNORECASE,
+                )
+            )
             or re.fullmatch(r"(?:python3\d*\.dll|libpython[^/]*\.so(?:\..*)?)", name, re.IGNORECASE)
             or (cudart_major is not None and cudart_major != allowed_cudart_major)
         ):
@@ -457,6 +489,7 @@ def inspect_runtime_wheel(
     expected_dependency_class: str = "either",
     strict_binary: bool = False,
     required_export_manifest_schema: int | None = None,
+    require_vkfft: bool = False,
 ) -> RuntimeWheelInfo:
     if expected_dependency_class not in {
         "driver-only",
@@ -478,6 +511,7 @@ def inspect_runtime_wheel(
         if corrupt is not None:
             raise RuntimeError(f"Corrupt wheel member in {wheel.name}: {corrupt}")
         names = zf.namelist()
+        actual_vkfft_providers = _validate_vkfft_payload(zf, names, platform, require_vkfft)
         metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
         record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
         if len(metadata_names) != 1 or len(record_names) != 1:
@@ -554,7 +588,10 @@ def inspect_runtime_wheel(
                 name for name in names if name.startswith(provider_prefix) and _shared_binary_member(name, platform)
             ]
             expected_providers = (
-                expected_optix_providers | expected_cudss_providers | expected_optional_runtime_providers
+                expected_optix_providers
+                | expected_cudss_providers
+                | expected_optional_runtime_providers
+                | actual_vkfft_providers
             )
             if len(provider_binaries) != len(set(provider_binaries)) or set(provider_binaries) != expected_providers:
                 raise RuntimeError(
@@ -671,6 +708,7 @@ def inspect_runtime_wheel(
                 {
                     **{member: "taichi_forge_optix_provider_query" for member in actual_optix_providers},
                     **{member: "taichi_forge_cudss_provider_query" for member in actual_cudss_providers},
+                    **{member: "taichi_forge_vkfft_provider_query" for member in actual_vkfft_providers},
                     **{
                         member: symbol
                         for member in actual_optional_runtime_providers
@@ -700,6 +738,7 @@ def validate_runtime_wheels(
     expected_dependency_class: str = "either",
     strict_binary: bool = False,
     required_export_manifest_schema: int | None = None,
+    require_vkfft: bool = False,
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -714,6 +753,7 @@ def validate_runtime_wheels(
             expected_dependency_class,
             strict_binary,
             required_export_manifest_schema,
+            require_vkfft,
         )
         for wheel in wheels
     ]
@@ -746,6 +786,11 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--cuda-major", type=int)
+    parser.add_argument(
+        "--require-vkfft",
+        action="store_true",
+        help="Require the optional VkFFT adapter and its license payload in this artifact set",
+    )
     parser.add_argument(
         "--dependency-class",
         choices=["driver-only", "toolkit-reference", "either"],
@@ -781,6 +826,7 @@ def main() -> None:
             args.dependency_class,
             args.strict_binary,
             args.export_manifest_schema,
+            args.require_vkfft,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
