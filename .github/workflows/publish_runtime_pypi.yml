@@ -237,6 +237,9 @@ jobs:
     needs: resolve_version
     runs-on: windows-2022
     env:
+      # Preserve the initialized MSVC environment for native and custom PTX
+      # commands instead of relying on MSBuild's tool-environment setup.
+      CMAKE_GENERATOR: Ninja
       CMAKE_ARGS: >-
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON

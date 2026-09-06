@@ -37,7 +37,8 @@ build-dir = "../../_skbuild/runtime-{wheel_tag}"
 wheel.packages = ["src/taichi_forge_runtime"]
 wheel.py-api = "py3"
 install.components = ["runtime"]
-build.targets = ["taichi_runtime", "taichi_forge_optix_providers", "taichi_forge_cudss_providers", "taichi_forge_optional_runtime_providers"]
+# Validate the independent provider toolchains before the expensive runtime.
+build.targets = ["taichi_forge_optix_providers", "taichi_forge_cudss_providers", "taichi_forge_optional_runtime_providers", "taichi_runtime"]
 wheel.exclude = [
   "**/__pycache__/**",
   "**/*.pyc",
