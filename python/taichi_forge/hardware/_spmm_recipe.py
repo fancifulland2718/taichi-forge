@@ -39,7 +39,7 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "sparse_spmm",
         capabilities=("fixed-pattern-spmm", "frozen-preprocess-policy"),
-        domain_version="spmm-retained-plans-v1",
+        domain_version="spmm-retained-plans-v2",
         semantic_fingerprint="f32-csr-row-major-relaxed-finite-v1",
     )
 
@@ -78,6 +78,7 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
                         tasks=(task,),
                         exclusive_submission=True,
                         provider_descriptor=self.descriptor,
+                        compatible_executor_kinds=("cuda_immutable_argument_frames",),
                     )
                 )
         return tuple(fragments)

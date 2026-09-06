@@ -87,6 +87,12 @@ CompileIQ 的 trial memory 最大观测值不是 driver 实测的 device peak。
 生产采用由下游 workload 的实际复用次数和精度要求决定。search、resume、选择重解析和生命周期
 成本报告见 [Graph API 参考](forge_api_reference.zh.md)。
 
+已准备的 FFT、SpMM region 策略也可与默认 CUDA immutable binding-frame 执行器组合。计算 region
+仍独占其语义覆盖；执行器包围装配后的计算，不替换计算本身。只有显式声明兼容的 region provider
+参与，一个 recipe 最多选择一个执行器，其他 family 不会自动获得兼容性。物化保留所选固定计划，
+`graph.bind(...)` 在排队 replay 前准备不可变参数帧；传入普通 mapping 仍包含准备成本。组合可在
+保留所选 device 算法的同时减少 host 重提交，但不保证所有组合更快或显存更少。
+
 ### 显式启用的诊断设施
 
 NVTX 3 标注使用随构建引入的 header，不要求 `nvToolsExt` shared library；用于显式 profiling 中

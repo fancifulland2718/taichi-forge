@@ -79,6 +79,10 @@ class GraphExecutableRecipe:
     def fragment_ids(self):
         return tuple(fragment.fragment_id for fragment in self.fragments)
 
+    @property
+    def executor_fragment(self):
+        return next((fragment for fragment in self.fragments if fragment.submission.executor_kind), None)
+
     def to_dict(self):
         return {
             "schema": _RECIPE_SCHEMA,
@@ -92,14 +96,20 @@ class GraphExecutableRecipe:
             "fragment_ids": self.fragment_ids,
             "fragments": tuple(fragment.to_dict() for fragment in self.fragments),
             "baseline_coverage_region_ids": self.baseline_coverage_region_ids,
-            "region_selections": tuple(
-                selection.to_dict() for selection in self.region_selections
-            ),
+            "region_selections": tuple(selection.to_dict() for selection in self.region_selections),
             "execution_steps": tuple(step.to_dict() for step in self.execution_steps),
             "submission": {
                 "queues": self.queues,
                 "barrier_count": self.barrier_count,
                 "exclusive_submission": self.exclusive_submission,
+                **(
+                    {
+                        "executor_fragment_id": self.executor_fragment.fragment_id,
+                        "executor_kind": self.executor_fragment.submission.executor_kind,
+                    }
+                    if self.executor_fragment is not None
+                    else {}
+                ),
             },
             "resources": {
                 "declared_persistent_bytes": self.declared_persistent_resource_bytes,
@@ -306,6 +316,26 @@ class GraphRecipeComposer:
                                 "fragments have overlapping semantic coverage"
                             )
 
+    def _computation_fragments(self, fragments):
+        executors = tuple(fragment for fragment in fragments if fragment.submission.executor_kind)
+        regions = tuple(fragment for fragment in fragments if not fragment.submission.executor_kind)
+        if not executors:
+            return regions
+        if len(executors) != 1:
+            raise GraphRecipeCompositionError("one complete Graph can select only one executor")
+        executor = executors[0]
+        if executor.assembly_protocol != RUNTIME_GRAPH_ASSEMBLY_V1:
+            raise GraphRecipeCompositionError("Graph executor requires runtime Graph assembly")
+        if not {source.region_id for source in self.definition.sources} <= set(executor.coverage_region_ids):
+            raise GraphRecipeCompositionError("Graph executor must cover every executable source")
+        kind = executor.submission.executor_kind
+        for fragment in regions:
+            if kind not in fragment.submission.compatible_executor_kinds:
+                raise GraphRecipeCompositionError("region fragment is not compatible with Graph executor: " + kind)
+            if fragment.submission.queue != executor.submission.queue:
+                raise GraphRecipeCompositionError("Graph executor and region must use the same queue")
+        return regions
+
     def _validate_resource_compatibility(self, fragments):
         resources = {}
         temporary_owners = {}
@@ -431,7 +461,8 @@ class GraphRecipeComposer:
         for fragment in fragments:
             self._validate_fragment(fragment)
         fragments = self._ordered_fragments(fragments)
-        self._validate_coverage_compatibility(fragments)
+        computation_fragments = self._computation_fragments(fragments)
+        self._validate_coverage_compatibility(computation_fragments)
         self._validate_resource_compatibility(fragments)
         self._validate_submission_compatibility(fragments)
         assembly_protocols = {
@@ -449,12 +480,12 @@ class GraphRecipeComposer:
 
         owner_by_region = {
             region_id: fragment.fragment_id
-            for fragment in fragments
+            for fragment in computation_fragments
             for region_id in fragment.coverage_region_ids
         }
         physical_owner_by_region = {
             region_id: fragment.planned_physical_id
-            for fragment in fragments
+            for fragment in computation_fragments
             for region_id in fragment.coverage_region_ids
         }
         baseline_coverage = tuple(
@@ -477,7 +508,7 @@ class GraphRecipeComposer:
             )
             for region in self.definition.regions
         )
-        execution_steps = self._execution_steps(fragments)
+        execution_steps = self._execution_steps(computation_fragments)
         recipe_identity_payload = {
             "schema": _RECIPE_SCHEMA,
             "semantic_graph_id": self.definition.semantic_graph_id,

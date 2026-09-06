@@ -34,7 +34,7 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "fft",
         capabilities=("c2c-fft-region", "retained-separable-plan", "cross-batch-column-plan"),
-        domain_version="fft-retained-plans-v2",
+        domain_version="fft-retained-plans-v3",
         semantic_fingerprint="compact-2d-c2c-finite-f32-v1",
     )
 
@@ -73,6 +73,7 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
                         tasks=(task,),
                         exclusive_submission=True,
                         provider_descriptor=self.descriptor,
+                        compatible_executor_kinds=("cuda_immutable_argument_frames",),
                     )
                 )
         return tuple(fragments)

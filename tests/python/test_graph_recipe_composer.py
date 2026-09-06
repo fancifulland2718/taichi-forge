@@ -152,6 +152,79 @@ def _fragment(
     )
 
 
+def test_graph_executor_wraps_exact_region_coverage_and_survivor_generation():
+    definition = _definition()
+    composer = GraphRecipeComposer(definition)
+    compatible = GraphFragmentSubmissionRequirement(compatible_executor_kinds=("prepared_frames",))
+    region = _fragment(definition, (0,), "region", submission=compatible)
+    executor = _fragment(
+        definition,
+        (0, 1, 2),
+        "executor",
+        submission=GraphFragmentSubmissionRequirement(executor_kind="prepared_frames"),
+    )
+    recipe = composer.compose((executor, region))
+    assert composer.compose((region, executor)) == recipe
+    assert recipe.executor_fragment == executor
+    assert recipe.region_selections == composer.compose((region,)).region_selections
+    assert recipe.execution_steps == composer.compose((region,)).execution_steps
+    assert executor.fragment_id not in {step.fragment_id for step in recipe.execution_steps}
+    assert recipe.to_dict()["submission"]["executor_fragment_id"] == executor.fragment_id
+    assert (
+        len(
+            {
+                composer.compose().planned_physical_id,
+                composer.compose((region,)).planned_physical_id,
+                composer.compose((executor,)).planned_physical_id,
+                recipe.planned_physical_id,
+            }
+        )
+        == 4
+    )
+    # Opting into composition is not different device code or a measurement candidate.
+    uncertified = _fragment(definition, (0,), "region")
+    assert uncertified.planned_physical_id == region.planned_physical_id
+    assert uncertified.fragment_id != region.fragment_id
+    catalog = GraphRecipeCatalog(definition)
+    catalog.register_fragment(region)
+    catalog.register_fragment(executor)
+    catalog.build_single_region_stage()
+    parent = composer.compose((region,))
+    generated = catalog.build_survivor_stage(
+        (parent.recipe_id,), seed_fragment_ids=(executor.fragment_id,), candidate_limit=4
+    )
+    assert len(generated) == 1 and generated[0].recipe == recipe
+    assert generated[0].parent_recipe_ids == (parent.recipe_id,)
+
+
+@pytest.mark.parametrize("invalid", ("overlap", "unqualified", "two_executors", "partial", "queue", "provider_owned"))
+def test_graph_executor_never_relaxes_computation_or_submission_legality(invalid):
+    definition = _definition()
+    executor = _fragment(
+        definition,
+        (0,) if invalid == "partial" else (0, 1, 2),
+        "executor",
+        submission=GraphFragmentSubmissionRequirement(executor_kind="prepared_frames"),
+        assembly_protocol=PROVIDER_OWNED_WHOLE_GRAPH_V1 if invalid == "provider_owned" else None,
+    )
+    region = _fragment(
+        definition,
+        (0,),
+        "region",
+        submission=GraphFragmentSubmissionRequirement(
+            compatible_executor_kinds=() if invalid == "unqualified" else ("prepared_frames",),
+            queue="other" if invalid == "queue" else "default",
+        ),
+    )
+    fragments = (executor, region)
+    if invalid == "overlap":
+        fragments += (_fragment(definition, (0,), "overlap", submission=region.submission),)
+    elif invalid == "two_executors":
+        fragments += (_fragment(definition, (0, 1, 2), "second", submission=executor.submission),)
+    with pytest.raises(GraphRecipeCompositionError):
+        GraphRecipeComposer(definition).compose(fragments)
+
+
 def test_composer_fills_baseline_and_selects_two_disjoint_regions_independently():
     definition = _definition()
     composer = GraphRecipeComposer(definition)

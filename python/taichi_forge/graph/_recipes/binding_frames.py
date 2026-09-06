@@ -175,8 +175,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "typed-runtime-fragment",
             "fixed-plan-provider-capture",
         ),
-        domain_version="immutable-binding-frame-domain-v2",
-        semantic_fingerprint="cuda-graph-fixed-plan-binding-lifetime-v2",
+        domain_version="immutable-binding-frame-domain-v3",
+        semantic_fingerprint="cuda-graph-composed-fixed-plan-binding-lifetime-v3",
     )
 
     def fragments(self, definition):
@@ -210,6 +210,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     ),
                 ),
                 provider_descriptor=self.descriptor,
+                executor_kind="cuda_immutable_argument_frames",
             ),
         )
 
@@ -232,7 +233,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 "no SNode, external synchronization domain or device-controlled topology; capture must contain only kernel nodes",
                 "raw mapping calls include argument preparation; use Graph.bind to amortize it",
                 "prepared frames trade retained argument memory and setup for binding-switch cost",
-                "whole-Graph coverage is exclusive in the current exact-cover composer",
+                "wraps baseline or explicitly compatible FFT/SpMM region strategies; unrelated replacements remain unavailable",
                 "benefit and driver-owned memory require workload measurements",
             ),
         }

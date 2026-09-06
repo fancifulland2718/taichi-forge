@@ -109,6 +109,17 @@ Forge owns composition, frozen physical configuration and materialization. A
 failed plan reconstruction is not silently replaced with another vendor heuristic.
 Installing a library or selecting a measured recipe does not change runtime auto.
 
+Prepared FFT and SpMM region strategies can also compose with the default CUDA
+immutable binding-frame executor. Computation regions still have exclusive
+semantic coverage; the executor wraps the assembled computation rather than
+replacing it. Only explicitly compatible region providers participate, and one
+recipe selects at most one executor. Unrelated replacement families do not gain
+this capability automatically. Materialization retains the selected fixed plans;
+`graph.bind(...)` prepares immutable parameter frames before queued replay. Raw
+mapping calls still include preparation. This combination can reduce host
+resubmission costs without changing the chosen device algorithm; it is not a
+claim that every combined recipe is faster or uses less memory.
+
 Selection reports retain setup/first/steady costs, declared numerical contracts,
 component identity and memory scope. CompileIQ's trial memory maximum is not a
 driver-observed device peak. Cold materialization, after-evaluator resource

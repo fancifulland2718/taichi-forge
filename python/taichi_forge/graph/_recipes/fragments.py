@@ -178,10 +178,23 @@ class GraphFragmentSubmissionRequirement:
     barrier_before: bool = False
     barrier_after: bool = False
     exclusive_submission: bool = False
+    # An executor wraps the assembled computation; it does not replace the
+    # covered semantic regions. Region providers must explicitly opt in.
+    executor_kind: str = ""
+    compatible_executor_kinds: tuple[str, ...] = ()
 
     def __post_init__(self):
         _required_text(self.queue, "Graph fragment queue")
         _required_text(self.recording_scope, "Graph fragment recording scope")
+        if not isinstance(self.executor_kind, str):
+            raise TypeError("Graph executor kind must be a string")
+        object.__setattr__(
+            self,
+            "compatible_executor_kinds",
+            _normalized_strings(self.compatible_executor_kinds, "Graph compatible executor kind"),
+        )
+        if self.executor_kind and self.compatible_executor_kinds:
+            raise ValueError("Graph executor cannot also declare region compatibility")
 
     def to_dict(self):
         return {
@@ -190,6 +203,8 @@ class GraphFragmentSubmissionRequirement:
             "barrier_before": self.barrier_before,
             "barrier_after": self.barrier_after,
             "exclusive_submission": self.exclusive_submission,
+            **({"executor_kind": self.executor_kind} if self.executor_kind else {}),
+            **({"compatible_executor_kinds": self.compatible_executor_kinds} if self.compatible_executor_kinds else {}),
         }
 
 
@@ -379,6 +394,10 @@ class GraphRecipeFragment:
             capability_requirements,
             "Graph fragment capability requirement",
         )
+        # Compatibility is a composition certificate, not different device
+        # code. Keep physical deduplication independent of that declaration.
+        physical_submission = submission.to_dict()
+        physical_submission.pop("compatible_executor_kinds", None)
         physical_payload = {
             "schema": _PLANNED_FRAGMENT_SCHEMA,
             "semantic_graph_id": definition.semantic_graph_id,
@@ -386,7 +405,7 @@ class GraphRecipeFragment:
             "tasks": _planned_task_payloads(tasks),
             "binding_requirements": tuple(item.to_dict() for item in bindings),
             "resources": tuple(item.to_dict() for item in resources),
-            "submission": submission.to_dict(),
+            "submission": physical_submission,
             "backend_requirements": backend_requirements,
             "capability_requirements": capability_requirements,
             "assembly_protocol": assembly_protocol,
@@ -405,6 +424,11 @@ class GraphRecipeFragment:
             "assembly_protocol": assembly_protocol,
             "assembly_provider_namespace": assembly_provider_namespace,
             "provider_metadata": json.loads(provider_metadata_json),
+            **(
+                {"compatible_executor_kinds": submission.compatible_executor_kinds}
+                if submission.compatible_executor_kinds
+                else {}
+            ),
         }
         fragment_id = f"graph-fragment:{_digest(identity_payload)}"
         return cls(

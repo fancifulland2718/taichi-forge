@@ -805,8 +805,9 @@ def test_fft_preparation_rejects_drift_before_creating_any_native_plan(drift):
 
 
 @pytest.mark.parametrize("family", ("fft", "spmm", "mixed"))
+@pytest.mark.parametrize("composed", (False, True))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_fixed_library_binding_frames_prepare_without_execution_and_preserve_queued_buffers(family):
+def test_fixed_library_binding_frames_prepare_without_execution_and_preserve_queued_buffers(family, composed):
     from taichi_forge._lib import core
 
     if not ti.hardware.fft.is_available() or not ti.hardware.linalg.cusparse_spmm_is_available():
@@ -820,11 +821,15 @@ def test_fixed_library_binding_frames_prepare_without_execution_and_preserve_que
         definition, operation, providers, bindings, expected_output = factory(binding_frames=True)
         expected = {"output": expected_output}
     catalog = definition.recipe_catalog(providers=providers)
-    recipe = next(
+    if composed:
+        catalog.build_compatible_stage(candidate_limit=32)
+    recipes = tuple(
         entry.recipe
         for entry in catalog.entries()
         if any(fragment.provider_namespace.endswith(".binding_frames") for fragment in entry.recipe.fragments)
     )
+    recipe = (max if composed else min)(recipes, key=lambda item: len(item.fragments))
+    assert len(recipe.fragments) == ((3 if family == "mixed" else 2) if composed else 1)
     with definition.materialization_context(provider_set=catalog.provider_set) as context:
         with context.materialize(recipe) as result:
             graph = result.executor
@@ -890,7 +895,7 @@ def test_fixed_library_binding_frames_prepare_without_execution_and_preserve_que
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_mixed_library_frames_are_reachable_through_default_complete_recipe_search():
+def test_mixed_library_frames_are_reachable_through_default_complete_recipe_search(tmp_path):
     from taichi_forge._lib import core
 
     if not ti.hardware.fft.is_available() or not ti.hardware.linalg.cusparse_spmm_is_available():
@@ -898,7 +903,7 @@ def test_mixed_library_frames_are_reachable_through_default_complete_recipe_sear
     if not getattr(core._CudaGraphBindingExecutor, "supports_capture_commands", lambda: False)():
         pytest.skip("this native runtime does not support fixed-library binding frames")
     definition, operation, spmm, providers, bindings, expected = _mixed_hardware_definition(binding_frames=True)
-    observed = []
+    observed = set()
 
     def evaluate(graph, recipe):
         bound = graph.bind(bindings)
@@ -907,18 +912,60 @@ def test_mixed_library_frames_are_reachable_through_default_complete_recipe_sear
         for name, reference in expected.items():
             np.testing.assert_allclose(bindings[name].to_numpy(), reference, rtol=2e-4, atol=2e-4)
         framed = graph._graph_stats[0]["last_path"] == "cuda_prepared_binding_plan"
-        observed.append(framed)
-        return {"immutable_frames": float(framed)}
+        fft_record = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_fft_strategy"))
+        spmm_record = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_spmm_source"))
+        observed.add(
+            (framed, fft_record._graph_fft_strategy, spmm_record.algorithm, spmm_record.plan_info()["preprocessed"])
+        )
+        # Favor the combination, not just baseline computation with a new executor.
+        return {
+            "immutable_frames": float(framed)
+            + float(fft_record.plan._separable)
+            + float(spmm_record.plan_info()["preprocessed"])
+        }
 
     decision = definition.search_recipes(
         providers=providers,
         target=ti.graph.GraphOptimizationTarget(objectives=(("immutable_frames", "max"),)),
-        budget=ti.graph.GraphSearchBudget(evaluation_limit=16, repeat_count=1),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=32, repeat_count=1),
         strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
     ).run(evaluate)
     assert decision.status == "selected", decision.report.results
     assert decision.report.search_complete
-    assert any(observed) and not all(observed)
+    expected_count = 2 * len(operation.preparation_report()) * len(spmm.preparation_report())
+    assert len(observed) == expected_count
+    assert len({row["materialized_physical_id"] for row in decision.report.results}) == expected_count
     selected = decision.selection_artifact.recipe_manifest
     assert any(item["provider_namespace"].endswith(".binding_frames") for item in selected["fragments"])
+    assert any(item["provider_namespace"].endswith(".fft") for item in selected["fragments"])
+    assert any(item["provider_namespace"].endswith(".sparse_spmm") for item in selected["fragments"])
+    import json
+    import subprocess
+    import sys
+
+    artifact = tmp_path / "composed-executor.json"
+    artifact.write_text(json.dumps(decision.selection_artifact.to_dict()), encoding="utf-8")
+    child = """
+import json,sys
+from pathlib import Path
+import numpy as np
+import taichi_forge as ti
+from tests.python.test_graph_hardware_recipe import _mixed_hardware_definition
+ti.init(arch=ti.cuda,offline_cache=False)
+definition,operation,spmm,providers,bindings,expected=_mixed_hardware_definition(binding_frames=True)
+selection=definition.resolve_recipe(ti.graph.GraphRecipeSelectionArtifact.from_dict(json.loads(Path(sys.argv[1]).read_text())),providers=providers)
+with definition.materialize(selection) as result:
+    graph=result.executor
+    bound=graph.bind(bindings)
+    operation.close()
+    assert bound._version.execution_frame is not None
+    assert any(getattr(lease,'_graph_fft_strategy','whole_transform')!='whole_transform' for lease in graph._spec.lifetime_leases)
+    for _ in range(47): graph.run(bound)
+    for name,reference in expected.items(): np.testing.assert_allclose(bindings[name].to_numpy(),reference,rtol=2e-4,atol=2e-4)
+print('COMPOSED_EXECUTOR_RESTORED')
+ti.reset()
+"""
+    completed = subprocess.run([sys.executable, "-c", child, str(artifact)], capture_output=True, text=True, timeout=90)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "COMPOSED_EXECUTOR_RESTORED" in completed.stdout
     operation.close()

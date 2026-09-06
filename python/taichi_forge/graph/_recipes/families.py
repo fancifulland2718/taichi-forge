@@ -181,6 +181,8 @@ def _fragment(
     resources=(),
     exclusive_submission=False,
     provider_descriptor=None,
+    executor_kind="",
+    compatible_executor_kinds=(),
 ):
     provider_descriptor = (
         _RUNTIME_ASSEMBLY_PROVIDER_DESCRIPTOR
@@ -210,6 +212,8 @@ def _fragment(
         submission=GraphFragmentSubmissionRequirement(
             recording_scope="whole_graph",
             exclusive_submission=bool(exclusive_submission),
+            executor_kind=executor_kind,
+            compatible_executor_kinds=compatible_executor_kinds,
         ),
         backend_requirements=(definition.backend,),
         assembly_protocol=RUNTIME_GRAPH_ASSEMBLY_V1,
