@@ -43,6 +43,7 @@ _OPERATION_IDS = (
     "linalg.spmm.cusparse_explicit",
     "linalg.spsv.cusparse_explicit",
     "linalg.spsm.cusparse_explicit",
+    "fft.transform.vkfft",
     "fft.transform.cufft",
     "linalg.solve.cudss",
     "linalg.solve.cudss_auto",

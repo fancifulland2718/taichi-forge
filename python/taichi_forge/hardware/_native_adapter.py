@@ -175,9 +175,9 @@ def native_recording_node(
     ``publish_time_binding_validation_stable`` is an internal certificate for
     validation that depends only on identities/types retained by one immutable
     Graph BindingVersion. It must remain false for dynamic generation, shape,
-    replacement, or submission-owner checks. The Vulkan graphics recordings
-    are currently the only certified users: native pipeline-handle lookup is
-    their separate fail-closed lifetime boundary.
+    replacement, or submission-owner checks. Vulkan graphics and fixed-storage
+    FFT recordings use native handle lookup as their separate fail-closed
+    lifetime boundary.
     """
 
     if runtime_bindings is None:

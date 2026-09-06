@@ -17,7 +17,9 @@ class VulkanFftPlan : public vkapi::DeviceObj {
     TiForgeVkfftQueryFn query{};
     library.load_function(TI_FORGE_VKFFT_QUERY_SYMBOL, query);
     TI_ERROR_IF(query(TI_FORGE_VKFFT_ABI_VERSION, sizeof(api), &api) != 0 ||
+                    api.struct_size != sizeof(api) ||
                     api.abi_version != TI_FORGE_VKFFT_ABI_VERSION ||
+                    api.vkfft_version != 10304 ||
                     !api.create || !api.append || !api.memory || !api.destroy ||
                     !api.last_error,
                 "Vulkan FFT adapter ABI is incompatible: {}", path);

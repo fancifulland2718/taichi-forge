@@ -31,6 +31,16 @@ class ExternalProviderSpec:
 
 _EXTERNAL_PROVIDER_SPECS = (
     ExternalProviderSpec(
+        provider_id="vkfft",
+        adapter_kind="optional_jit_provider_c_abi",
+        install_owner="user_optional_addon",
+        library_path_policy="required",
+        process_handle_policy="provider_object",
+        runtime_resource_policy="provider_plan",
+        transitive_dependencies=("vulkan_loader",),
+        python_adapter_module="taichi_forge.hardware._vulkan_fft",
+    ),
+    ExternalProviderSpec(
         provider_id="cublas",
         adapter_kind="native_symbols",
         install_owner="user_cuda_environment",
