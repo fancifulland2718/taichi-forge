@@ -356,6 +356,17 @@ powershell -File scripts\build_llvm20_local.ps1
 
 随后将 `LLVM_DIR` 指向生成的 `dist\taichi-llvm-20\lib\cmake\llvm`。
 
+### 仅 Windows 的 CI 验证
+
+手动触发 `publish_pypi.yml` 时，可设置 `validation_platform=windows` 与 `publish=false`。
+此时构建并验证五个 Windows CPython shim，跳过 Linux、完整发布集合汇总和发布。
+默认 `validation_platform=all` 保留完整发布矩阵。
+
+如需复用已成功构建的 Windows runtime，再传入其数字 `runtime_run_id`。workflow 下载该运行的
+`wheel-windows-runtime` artifact，直接用于 shim 链接，不重编 native。复用仍要求包版本、native/provider
+合同及 C++ compiler ABI 相容，但不要求 source commit 相同。本地另一套 MSVC 编出的 shim 未必能搭配
+CI runtime。此类审计产物不等于完整发布集合，也不代替 GPU 执行资格。
+
 ## CPU-only smoke 构建
 
 本地 smoke 检查可以关闭 CUDA、Vulkan、OpenGL 和 C API 来减少构建时间。这对齐 lightweight
