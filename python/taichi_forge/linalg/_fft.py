@@ -26,8 +26,10 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 
 class _SeparableFftPlan(_CufftPlanBase):
-    def __init__(self, dimensions, batch_count):
-        self._initialize(dimensions, batch_count=batch_count, transform="c2c", _separable=True)
+    def __init__(self, dimensions, batch_count, *, cross_batch=False):
+        self._initialize(
+            dimensions, batch_count=batch_count, transform="c2c", _separable=True, _cross_batch=cross_batch
+        )
 
 
 class _FftDescription:
@@ -56,7 +58,7 @@ class _FftDescription:
         return self.semantics["direction"]
 
     def physical_config(self, strategy):
-        if strategy not in ("whole_transform", "row_batch_column_inplace"):
+        if strategy not in ("whole_transform", "row_batch_column_inplace", "row_batch_cross_batch_columns"):
             raise ValueError("Unknown FFT physical strategy")
         return {
             "strategy": strategy,
@@ -67,7 +69,11 @@ class _FftDescription:
             "phases": (
                 ("whole_transform",)
                 if strategy == "whole_transform"
-                else ("all_rows_out_of_place", "columns_in_place_per_batch")
+                else (
+                    ("all_rows_out_of_place", "columns_in_place_across_batches")
+                    if strategy == "row_batch_cross_batch_columns"
+                    else ("all_rows_out_of_place", "columns_in_place_per_batch")
+                )
             ),
         }
 
@@ -121,8 +127,12 @@ class _FftPlanCatalog(_FftDescription):
                 semantics = self.semantics
                 if strategy == "whole_transform":
                     plan = CufftPlanND(semantics["dimensions"], batch_count=semantics["batch_count"])
-                elif strategy == "row_batch_column_inplace":
-                    plan = _SeparableFftPlan(semantics["dimensions"], semantics["batch_count"])
+                elif strategy in ("row_batch_column_inplace", "row_batch_cross_batch_columns"):
+                    plan = _SeparableFftPlan(
+                        semantics["dimensions"],
+                        semantics["batch_count"],
+                        cross_batch=strategy == "row_batch_cross_batch_columns",
+                    )
                 else:
                     raise ValueError("Unknown FFT physical strategy")
                 # Rebuild only the requested plan, preserving the frozen facts.
@@ -231,6 +241,7 @@ class _FftRecording(CufftRecording):
             output=source.output,
         )
         object.__setattr__(self, "_graph_fft_source", source)
+        object.__setattr__(self, "_graph_fft_strategy", strategy)
         object.__setattr__(self, "_graph_semantic_fingerprint", source.semantic_fingerprint)
         object.__setattr__(
             self,
@@ -246,8 +257,7 @@ class _FftRecording(CufftRecording):
         )
 
     def _freeze_graph_recipe_source(self):
-        strategy = "row_batch_column_inplace" if self.plan._separable else "whole_transform"
-        return _FrozenFftSource(self._graph_fft_source, strategy)
+        return _FrozenFftSource(self._graph_fft_source, self._graph_fft_strategy)
 
 
 class FftOperation(_FftDescription, NativeGraphNode):
@@ -274,30 +284,21 @@ class FftOperation(_FftDescription, NativeGraphNode):
         dimensions = _positive_int_tuple(dimensions, "FFT dimensions")
         batch_count = _positive_int(batch_count, "FFT batch_count")
         if len(dimensions) != 2:
-            raise ValueError(
-                "Graph FFT currently requires exactly two transform dimensions"
-            )
+            raise ValueError("Graph FFT currently requires exactly two transform dimensions")
         if direction not in ("forward", "inverse"):
             raise ValueError("Graph FFT direction must be forward or inverse")
-        if (
-            any(not isinstance(name, str) or not name for name in (input, output))
-            or input == output
-        ):
+        if any(not isinstance(name, str) or not name for name in (input, output)) or input == output:
             raise ValueError("Graph FFT needs two distinct nonempty binding names")
         tolerances = []
         for value in (absolute_tolerance, relative_tolerance):
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise TypeError(
-                    "Graph FFT tolerances must be finite nonnegative numbers"
-                )
+                raise TypeError("Graph FFT tolerances must be finite nonnegative numbers")
             value = float(value)
             if not math.isfinite(value) or value < 0:
                 raise ValueError("Graph FFT tolerances must be finite and nonnegative")
             tolerances.append(value)
         if not any(tolerances):
-            raise ValueError(
-                "Graph FFT needs positive tolerance; bitwise reproducibility is not promised"
-            )
+            raise ValueError("Graph FFT needs positive tolerance; bitwise reproducibility is not promised")
         self._semantics_json = _canonical_json(
             {
                 "operation": "fft_transform",
@@ -399,7 +400,7 @@ class FftOperation(_FftDescription, NativeGraphNode):
         ).compile()
 
     def prepare(self):
-        """Prepare the alternative once, before search, without executing FFT.
+        """Prepare available decompositions before search, without executing FFT.
 
         The operation retains prepared plans until close. Graphs separately
         retain only plans they use; their lifetime does not end with this owner.
@@ -416,15 +417,26 @@ class FftOperation(_FftDescription, NativeGraphNode):
         info = baseline._runtime_prog._cuda_cufft_plan_memory_statistics(baseline._handle)
         if "separable" not in info:
             raise TaichiRuntimeError("Separable FFT plans are unavailable in this native runtime")
-        if "row_batch_column_inplace" not in self._plans:
-            started = time.perf_counter()
-            plan = _SeparableFftPlan(tuple(self.semantics["dimensions"]), self.semantics["batch_count"])
-            self._plans["row_batch_column_inplace"] = plan
-            self._preparation["row_batch_column_inplace"] = {
-                "workspace_bytes": plan._workspace_bytes,
-                "host_setup_seconds": time.perf_counter() - started,
-            }
-            self._catalog._plans["row_batch_column_inplace"] = plan
+        strategies = ["row_batch_column_inplace"]
+        if hasattr(baseline._runtime_prog, "_create_cuda_cufft_cross_batch_plan") and (
+            self.semantics["batch_count"],
+            self.semantics["dimensions"][1],
+        ) != (1, 1):
+            strategies.append("row_batch_cross_batch_columns")
+        for strategy in strategies:
+            if strategy not in self._plans:
+                started = time.perf_counter()
+                plan = _SeparableFftPlan(
+                    tuple(self.semantics["dimensions"]),
+                    self.semantics["batch_count"],
+                    cross_batch=strategy == "row_batch_cross_batch_columns",
+                )
+                self._plans[strategy] = plan
+                self._preparation[strategy] = {
+                    "workspace_bytes": plan._workspace_bytes,
+                    "host_setup_seconds": time.perf_counter() - started,
+                }
+                self._catalog._plans[strategy] = plan
         return self.preparation_report()
 
     def _recording(self, strategy):

@@ -42,7 +42,7 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 | Operation | 语义入口与准备 | Graph 与搜索边界 |
 | --- | --- | --- |
 | 固定 pattern 稀疏-稠密乘法 | `SparseMatrix.record_spmm(...)`，随后 `operation.prepare(input_array, output_array)` | CUDA f32 CSR / 紧凑 row-major 稠密数组；通过 `GraphBuilder.append_native()` 追加。显式 `ti.hardware.linalg.SparseSpmmRecipeProvider()` 将冻结的 direct/preprocessed 策略加入完整 recipe。 |
-| Batched 2D complex FFT | `ti.linalg.record_fft(...)`，随后 `operation.prepare()` | CUDA complex-f32，紧凑 `(H, W, 2)` 或 `(batch, H, W, 2)` 数组，输入输出分离。显式 `ti.hardware.fft.FftRecipeProvider()` 在 whole-transform baseline 外增加 separable plan。 |
+| Batched 2D complex FFT | `ti.linalg.record_fft(...)`，随后 `operation.prepare()` | CUDA complex-f32，紧凑 `(H, W, 2)` 或 `(batch, H, W, 2)` 数组，输入输出分离。显式 `ti.hardware.fft.FftRecipeProvider()` 在 whole-transform baseline 外提供逐图像列计划，以及 native 支持时的跨 batch 列计划。 |
 | Toolkit reset-monoid segmented scan | 既有 `GraphBuilder.segmented_scan()` 加 `taichi_forge.hardware.source_providers` 中的 `CubSegmentedScanRecipeProvider(manifest_path)` | 可选 source-provider addon；有界 i32/u32 sum 与不可变 segmented layout。prepared capture、workspace 和 head-bitset 生命周期形成物理 recipe；addon 不在 portable runtime wheel 内。 |
 | 其他 cuSPARSE / cuFFT / cuDSS expert operation | 既有显式 plan 和已说明的 root Graph recording | recording 本身不提供 recipe generator；cuDSS root 有序调用不能描述成 CUDA Graph capture。 |
 | cuBLASLt | retained internal execution/recording 基础 | cuBLAS probe 不意味着已公开完整 matmul-region recipe 域。 |
@@ -52,6 +52,12 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 Forge 不在每次 replay 扫描数值。FFT 正向、逆向均不归一化，连续应用两者会将输入乘以 `H * W`。
 layout、精度和归一化属于语义要求，不是优化器选择。vendor 不开放的内部信息报告为 unknown，
 不能据此虚构内部 kernel 数。
+
+两种分离 FFT 都先批量变换所有行，再利用输出数组原地变换列，无额外 dense transpose buffer。
+逐图像方案在列阶段调用 batch 数次；跨 batch 方案每列调用一次，单次批量处理独立图像。这改变物理
+launch 和访存组织，不改变数学归一化或布局；都不是通用赢家，whole-transform 也可能优于两者。
+`prepare()` 记录实际 workspace/准备事实；FFT provider domain 扩展使旧 provider-bound 搜索证据失效，
+不与 wheel commit 绑定。旧 native 不生成新增策略；导入的选择若需要它，物化时明确失败，不替换成其他计划。
 
 FFT Graph recording 只持有所用的物理计划，不反向持有搜索 operation 的全部候选计划。`operation.close()`
 释放 operation 的准备阶段所有权，并禁止继续调用它的 `prepare()` 或 `compile()`；已构建 Graph 的计划租约

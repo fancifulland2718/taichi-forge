@@ -479,17 +479,20 @@ def test_cufft_inflight_close_is_completion_retained_and_generation_safe():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-@pytest.mark.parametrize("dimensions,batch", (((7, 9), 3), ((32, 16), 1), ((31, 64), 2)))
+@pytest.mark.parametrize("dimensions,batch", (((7, 9), 3), ((32, 16), 1), ((31, 64), 2), ((7, 3), 17)))
 @pytest.mark.parametrize("direction", ("forward", "inverse"))
-def test_cufft_separable_plan_preserves_batches_capture_and_cache_identity(dimensions, batch, direction):
+@pytest.mark.parametrize("cross_batch", (False, True))
+def test_cufft_separable_plan_preserves_batches_capture_and_cache_identity(dimensions, batch, direction, cross_batch):
     from taichi_forge.hardware._fft import _CufftPlanBase
 
     if not ti.hardware.fft.is_available():
         pytest.skip("the optional cuFFT runtime is unavailable")
+    if cross_batch and not hasattr(ti.lang.impl.get_runtime().prog, "_create_cuda_cufft_cross_batch_plan"):
+        pytest.skip("cross-batch FFT is unavailable")
 
     class SeparablePlan(_CufftPlanBase):
         def __init__(self):
-            self._initialize(dimensions, batch_count=batch, transform="c2c", _separable=True)
+            self._initialize(dimensions, batch_count=batch, transform="c2c", _separable=True, _cross_batch=cross_batch)
 
     initial = ti.hardware.fft.cache_statistics()
     regular = ti.hardware.fft.CufftPlanND(dimensions, batch_count=batch)
@@ -501,6 +504,8 @@ def test_cufft_separable_plan_preserves_batches_capture_and_cache_identity(dimen
     program = ti.lang.impl.get_runtime().prog
     assert not program._cuda_cufft_plan_memory_statistics(regular._handle)["separable"]
     assert program._cuda_cufft_plan_memory_statistics(separable._handle)["separable"]
+    if cross_batch:
+        assert program._cuda_cufft_plan_memory_statistics(separable._handle)["cross_batch"]
     assert separable._graph_provider_memory_identity() != regular._graph_provider_memory_identity()
 
     source = ti.ndarray(ti.f32, regular.input_shape)
@@ -564,6 +569,23 @@ def test_cufft_separable_plan_rejects_incompatible_layout_before_caching():
     assert after.live_plans == baseline.live_plans
     assert after.live_handles == baseline.live_handles
     assert after.workspace_bytes_live == baseline.workspace_bytes_live
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cufft_cross_batch_rejects_invalid_descriptions_without_allocating_plans():
+    program = ti.lang.impl.get_runtime().prog
+    create = getattr(program, "_create_cuda_cufft_cross_batch_plan", None)
+    if create is None:
+        pytest.skip("cross-batch FFT is unavailable")
+    before = ti.hardware.fft.cache_statistics()
+    for dimensions, batch in (((), 1), ((7,), 1), ((7, 0), 2), ((2**30, 4), 1), ((7, 3), 0)):
+        with pytest.raises(RuntimeError):
+            create(dimensions, batch)
+    after = ti.hardware.fft.cache_statistics()
+    assert after.create_requests == before.create_requests
+    assert after.live_plans == before.live_plans
+    assert after.workspace_bytes_live == before.workspace_bytes_live
+    assert after.live_handles == before.live_handles
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

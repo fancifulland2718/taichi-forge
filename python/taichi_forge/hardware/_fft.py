@@ -283,6 +283,7 @@ class _CufftPlanBase:
         input_layout=None,
         output_layout=None,
         _separable=False,
+        _cross_batch=False,
     ):
         self.dimensions = _positive_int_tuple(dimensions, "dimensions")
         self.rank = len(self.dimensions)
@@ -290,6 +291,9 @@ class _CufftPlanBase:
         self.transform = transform
         self.transform_value = _transform_value(transform)
         self._separable = bool(_separable)
+        self._cross_batch = bool(_cross_batch)
+        if self._cross_batch and (not self._separable or self.rank != 2 or transform != "c2c"):
+            raise ValueError("Cross-batch FFT requires a separable two-dimensional C2C plan")
         input_dimensions = list(self.dimensions)
         output_dimensions = list(self.dimensions)
         if transform == "c2r":
@@ -325,7 +329,14 @@ class _CufftPlanBase:
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         with hardware_provider_call("cufft", failure_phase="provider_plan_failure"):
-            if self.rank == 1 and input_compact and output_compact:
+            if self._cross_batch:
+                if not input_compact or not output_compact:
+                    raise ValueError("Cross-batch FFT requires compact input and output")
+                create = getattr(program, "_create_cuda_cufft_cross_batch_plan", None)
+                if create is None:
+                    raise TaichiRuntimeError("Cross-batch FFT is unavailable in this native runtime")
+                handle = create(self.dimensions, self.batch_count)
+            elif self.rank == 1 and input_compact and output_compact:
                 handle = program._create_cuda_cufft_plan_1d(
                     self.dimensions[0], self.batch_count, self.transform_value
                 )
@@ -374,7 +385,7 @@ class _CufftPlanBase:
             },
             execution_scope={
                 "algorithm": (
-                    "row_batch_column_inplace"
+                    "row_batch_cross_batch_columns" if self._cross_batch else "row_batch_column_inplace"
                     if self._separable else "cufft_estimate"
                 ),
                 "workspace_limit_bytes": self._workspace_bytes,
@@ -542,6 +553,8 @@ class _CufftPlanBase:
             self.input_layout,
             self.output_layout,
         )
+        if self._cross_batch:
+            return (*identity, "row_batch_cross_batch_columns")
         return (*identity, "row_batch_column_inplace") if self._separable else identity
 
     def close(self):

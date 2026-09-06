@@ -392,7 +392,7 @@ def test_fft_and_spmm_complete_recipes_compose_search_and_resolve_in_fresh_proce
             for lease in graph._spec.lifetime_leases
             if hasattr(lease, "_graph_spmm_source")
         )
-        observed.add((record.plan._separable, sparse_record.algorithm))
+        observed.add((record._graph_fft_strategy, sparse_record.algorithm))
         # A deterministic structural objective, not a performance claim.
         return {
             "phases": float(record.plan._separable)
@@ -402,10 +402,10 @@ def test_fft_and_spmm_complete_recipes_compose_search_and_resolve_in_fresh_proce
     session = definition.search_recipes(
         providers=providers,
         target=ti.graph.GraphOptimizationTarget(objectives=(("phases", "max"),)),
-        budget=ti.graph.GraphSearchBudget(evaluation_limit=8, repeat_count=1),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=16, repeat_count=1),
         strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
     )
-    expected_count = 2 * len(spmm.preparation_report())
+    expected_count = len(operation.preparation_report()) * len(spmm.preparation_report())
     assert (
         len(session.recipes) == expected_count
     ), "FFT and SpMM strategies must compose across native regions"
@@ -508,7 +508,7 @@ def test_fft_recipe_preparation_and_numerical_semantics_are_explicit():
     catalog = definition.recipe_catalog(providers=providers)
     # Grouped/ndrange rank-four maps currently lack fusion metadata; neither
     # missing metadata nor unchanged maps are represented as fake candidates.
-    assert len(catalog.entries()) == 2
+    assert len(catalog.entries()) == len(operation.preparation_report())
     with definition.materialization_context(
         provider_set=catalog.provider_set
     ) as context:
@@ -527,10 +527,12 @@ def test_fft_recipe_preparation_and_numerical_semantics_are_explicit():
     inverse_op.close()
 
 
-@pytest.mark.parametrize("use_alternative", (False, True))
+@pytest.mark.parametrize(
+    "selected_strategy", ("whole_transform", "row_batch_column_inplace", "row_batch_cross_batch_columns")
+)
 @pytest.mark.parametrize("explicit_close", (False, True))
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_alternative, explicit_close):
+def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(selected_strategy, explicit_close):
     import gc
     import weakref
 
@@ -540,7 +542,20 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
     owner = weakref.ref(operation)
     plans = {name: weakref.ref(plan) for name, plan in operation._plans.items()}
     catalog = definition.recipe_catalog(providers=providers)
-    recipe = next(entry.recipe for entry in catalog.entries() if bool(entry.recipe.fragments) == use_alternative)
+    if selected_strategy not in operation.preparation_report():
+        pytest.skip("FFT decomposition is unavailable")
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if (
+            not entry.recipe.fragments
+            if selected_strategy == "whole_transform"
+            else any(
+                f.provider_metadata["family_selection"]["materialization_choice"] == selected_strategy
+                for f in entry.recipe.fragments
+            )
+        )
+    )
     context = definition.materialization_context(provider_set=catalog.provider_set)
     result = context.materialize(recipe)
     graph = result.executor
@@ -558,8 +573,7 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
     del operation
     gc.collect()
     assert owner() is None
-    assert (plans["whole_transform"]() is not None) == (not use_alternative)
-    assert (plans["row_batch_column_inplace"]() is not None) == use_alternative
+    assert {name for name, reference in plans.items() if reference() is not None} == {selected_strategy}
     before = ti.hardware.fft.cache_statistics()
     for _ in range(31):
         graph.run(bound)
@@ -568,8 +582,7 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
     result.close()
     del bound, graph, result
     gc.collect()
-    assert plans["whole_transform"]() is None
-    assert plans["row_batch_column_inplace"]() is None
+    assert all(reference() is None for reference in plans.values())
     # Prepared facts remain resolvable without retaining the alternative.
     assert [entry.recipe.recipe_id for entry in definition.recipe_catalog(providers=providers).entries()] == [
         entry.recipe.recipe_id for entry in catalog.entries()
@@ -607,8 +620,8 @@ def test_fft_retired_plan_recreation_rejects_changed_facts_and_releases_the_new_
     before = ti.hardware.fft.cache_statistics()
     factory = _fft._SeparableFftPlan
 
-    def changed_plan(*args):
-        plan = factory(*args)
+    def changed_plan(*args, **kwargs):
+        plan = factory(*args, **kwargs)
         if drift == "workspace":
             plan._workspace_bytes += 1
         else:
@@ -684,9 +697,11 @@ def test_fft_frozen_description_preserves_other_live_baselines_and_recompiles_af
             assert ti.hardware.fft.cache_statistics().live_plans == 1
 
 
-@pytest.mark.parametrize("alternative", (False, True))
+@pytest.mark.parametrize(
+    "selected_strategy", ("whole_transform", "row_batch_column_inplace", "row_batch_cross_batch_columns")
+)
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_fft_fresh_process_resolves_without_baseline_plan_and_materializes_only_selection(tmp_path, alternative):
+def test_fft_fresh_process_resolves_without_baseline_plan_and_materializes_only_selection(tmp_path, selected_strategy):
     import json
     import subprocess
     import sys
@@ -695,16 +710,19 @@ def test_fft_fresh_process_resolves_without_baseline_plan_and_materializes_only_
         pytest.skip("the optional cuFFT runtime is unavailable")
     definition, operation, providers, bindings, expected = _fft_definition()
 
+    if selected_strategy not in operation.preparation_report():
+        pytest.skip("FFT decomposition is unavailable")
+
     def evaluate(graph, recipe):
         graph.run(graph.bind(bindings))
         np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
         record = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_fft_source"))
-        return {"alternative": float(record.plan._separable)}
+        return {"selected_strategy": float(record._graph_fft_strategy == selected_strategy)}
 
     decision = definition.search_recipes(
         providers=providers,
-        budget=ti.graph.GraphSearchBudget(evaluation_limit=2, repeat_count=1),
-        target=ti.graph.GraphOptimizationTarget(objectives=(("alternative", "max" if alternative else "min"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=3, repeat_count=1),
+        target=ti.graph.GraphOptimizationTarget(objectives=(("selected_strategy", "max"),)),
     ).run(evaluate)
     assert decision.status == "selected", decision.report.results
     artifact = tmp_path / "fft-restore.json"
@@ -713,7 +731,7 @@ def test_fft_fresh_process_resolves_without_baseline_plan_and_materializes_only_
             {
                 "preparation": operation.preparation_artifact(),
                 "selection": decision.selection_artifact.to_dict(),
-                "alternative": alternative,
+                "selected_strategy": selected_strategy,
             }
         ),
         encoding="utf-8",
@@ -737,7 +755,7 @@ with definition.materialize(handle) as result:
     stats=ti.hardware.fft.cache_statistics()
     assert stats.create_requests == stats.live_handles == stats.live_plans == 1,stats
     record=next(lease for lease in result.executor._spec.lifetime_leases if hasattr(lease,'_graph_fft_source'))
-    assert record.plan._separable == data['alternative']
+    assert record._graph_fft_strategy == data['selected_strategy']
     assert record._graph_fft_source._preparation_origin == 'imported_expected_facts_not_current_measurement'
     bound=result.executor.bind(bindings)
     operation.close()
@@ -745,14 +763,14 @@ with definition.materialize(handle) as result:
         result.executor.run(bound)
     np.testing.assert_allclose(bindings['output'].to_numpy(),expected,rtol=2e-4,atol=2e-4)
     assert ti.hardware.fft.cache_statistics().create_requests == 1
-    if data['alternative']:
+    if data['selected_strategy'] != 'whole_transform':
         catalog=definition.recipe_catalog(providers=providers)
-        fragment=next(entry.recipe.fragments[0] for entry in catalog.entries() if entry.recipe.fragments)
+        fragment=next(entry.recipe.fragments[0] for entry in catalog.entries() if entry.recipe.recipe_id==handle.recipe_id)
         description=providers[-1].describe(definition,fragment.fragment_key)
         observation=description['preparation_observation']
         assert observation['preparation_origin'] == 'imported_expected_facts_not_current_measurement'
         assert observation['restoration_observation']['unselected_plans_created'] == 0
-        assert observation['host_setup_seconds'] == data['preparation']['plans']['row_batch_column_inplace']['host_setup_seconds']
+        assert observation['host_setup_seconds'] == data['preparation']['plans'][data['selected_strategy']]['host_setup_seconds']
         from taichi_forge.graph._report_context import _provider_preparation_markdown
         text='\\n'.join(_provider_preparation_markdown([{'recipe_id':handle.recipe_id,'provider_claims':[
             {'claims':description,'provider_namespace':fragment.provider_namespace,'fragment_key':fragment.fragment_key}]}]))

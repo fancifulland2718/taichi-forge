@@ -44,6 +44,7 @@ struct CufftPlanDescriptor {
   int batch_count{1};
   CufftTransformKind transform_kind{CufftTransformKind::c2c};
   bool separable{false};
+  bool cross_batch{false};
 };
 
 CufftTransformKind validate_transform_kind(int transform_kind) {
@@ -229,7 +230,8 @@ std::string cufft_plan_cache_key(const CufftPlanDescriptor &descriptor) {
       << descriptor.batch_count << ':'
       << static_cast<int>(descriptor.transform_kind);
   if (descriptor.separable) {
-    key << ":row-batch-column-inplace";
+    key << (descriptor.cross_batch ? ":row-batch-cross-batch-columns"
+                                   : ":row-batch-column-inplace");
   }
   return key.str();
 }
@@ -269,6 +271,13 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
       CufftPlanDescriptor columns{{height}, {height}, width, 1,
                                   {height}, width, 1, width,
                                   CufftTransformKind::c2c};
+      if (descriptor_.cross_batch) {
+        // At column c: input[b * H * W + r * W + c]. Batch across
+        // independent images, rather than launching once per image.
+        columns.input_distance = static_cast<int>(plane);
+        columns.output_distance = static_cast<int>(plane);
+        columns.batch_count = descriptor_.batch_count;
+      }
       children_.push_back(std::make_unique<CudaFftPlan>(
           std::move(rows), true, fault_domain_));
       children_.push_back(std::make_unique<CudaFftPlan>(
@@ -382,9 +391,13 @@ class CudaFftPlan final : public CudaProviderCompletionResource {
     if (descriptor_.separable) {
       TI_ERROR_IF(children_.size() != 2, "Separable cuFFT plan is closed.");
       children_[0]->execute(input, output, direction, stream);
-      const auto plane_scalars = scalar_counts_.output / descriptor_.batch_count;
-      for (int batch = 0; batch < descriptor_.batch_count; ++batch) {
-        auto *plane = static_cast<float *>(output) + batch * plane_scalars;
+      const auto stride = descriptor_.cross_batch
+                              ? 2
+                              : scalar_counts_.output / descriptor_.batch_count;
+      const int count = descriptor_.cross_batch ? descriptor_.dimensions[1]
+                                                : descriptor_.batch_count;
+      for (int index = 0; index < count; ++index) {
+        auto *plane = static_cast<float *>(output) + index * stride;
         children_[1]->execute(plane, plane, direction, stream);
       }
       return;
@@ -464,6 +477,40 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
     int batch_count,
     int transform_kind,
     bool separable) {
+  return create_cuda_cufft_plan_many_decomposed(
+      std::move(dimensions), std::move(input_embed), input_stride,
+      input_distance, std::move(output_embed), output_stride, output_distance,
+      batch_count, transform_kind, separable, false);
+}
+
+std::uint64_t Program::create_cuda_cufft_cross_batch_plan(
+    std::vector<int> dimensions,
+    int batch_count) {
+  TI_ERROR_IF(
+      dimensions.size() != 2 || dimensions[0] <= 0 || dimensions[1] <= 0,
+      "Cross-batch cuFFT requires two positive dimensions.");
+  const auto plane =
+      checked_multiply(dimensions[0], dimensions[1], "cross-batch plane");
+  TI_ERROR_IF(plane > (std::numeric_limits<int>::max)(),
+              "Cross-batch cuFFT plane exceeds the compact layout contract.");
+  return create_cuda_cufft_plan_many_decomposed(
+      dimensions, dimensions, 1, static_cast<int>(plane), dimensions, 1,
+      static_cast<int>(plane), batch_count,
+      static_cast<int>(CufftTransformKind::c2c), true, true);
+}
+
+std::uint64_t Program::create_cuda_cufft_plan_many_decomposed(
+    std::vector<int> dimensions,
+    std::vector<int> input_embed,
+    int input_stride,
+    int input_distance,
+    std::vector<int> output_embed,
+    int output_stride,
+    int output_distance,
+    int batch_count,
+    int transform_kind,
+    bool separable,
+    bool cross_batch) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "CUDA cuFFT plans require the CUDA backend.");
@@ -476,7 +523,7 @@ std::uint64_t Program::create_cuda_cufft_plan_many(
                                  output_stride,
                                  output_distance,
                                  batch_count,
-                                 validated_transform, separable};
+                                 validated_transform, separable, cross_batch};
   cufft_scalar_counts(descriptor);
   TI_ERROR_IF(!CUDADriver::get_instance_without_context()
                    .nvidia_extensions_available(),
@@ -667,7 +714,8 @@ Program::cuda_cufft_plan_memory_statistics(std::uint64_t handle) {
   return {{"workspace_bytes",
            static_cast<std::uint64_t>(found->second->workspace_bytes())},
           {"shared_handle_count", shared_handle_count},
-          {"separable", found->second->descriptor().separable ? 1 : 0}};
+          {"separable", found->second->descriptor().separable ? 1 : 0},
+          {"cross_batch", found->second->descriptor().cross_batch ? 1 : 0}};
 }
 
 std::unordered_map<std::string, std::uint64_t>
@@ -740,6 +788,25 @@ void Program::cuda_clear_cufft_plans() {
 #else
 
 namespace taichi::lang {
+
+std::uint64_t Program::create_cuda_cufft_cross_batch_plan(std::vector<int>,
+                                                          int) {
+  TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
+}
+
+std::uint64_t Program::create_cuda_cufft_plan_many_decomposed(std::vector<int>,
+                                                              std::vector<int>,
+                                                              int,
+                                                              int,
+                                                              std::vector<int>,
+                                                              int,
+                                                              int,
+                                                              int,
+                                                              int,
+                                                              bool,
+                                                              bool) {
+  TI_ERROR("CUDA cuFFT requires TI_WITH_CUDA=ON.");
+}
 
 std::uint64_t Program::create_cuda_cufft_plan_1d(std::size_t,
                                                  std::size_t,

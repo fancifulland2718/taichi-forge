@@ -3120,6 +3120,10 @@ void export_lang(py::module &m) {
            py::arg("output_distance"), py::arg("batch_count"),
            py::arg("transform_kind"), py::arg("separable") = false,
            py::call_guard<py::gil_scoped_release>())
+      .def("_create_cuda_cufft_cross_batch_plan",
+           tracked_native_program_method(&Program::create_cuda_cufft_cross_batch_plan),
+           py::arg("dimensions"), py::arg("batch_count"),
+           py::call_guard<py::gil_scoped_release>())
       .def("_cuda_cufft_execute",
            tracked_native_program_method(&Program::cuda_cufft_execute),
            py::arg("handle"), py::arg("input"), py::arg("output"),

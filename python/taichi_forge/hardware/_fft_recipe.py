@@ -17,13 +17,9 @@ def _sources(definition):
         for operation in getattr(node, "recipe_operations", ()):
             if operation[0] == "native":
                 executable = operation[1]
-                source = getattr(
-                    getattr(executable, "_recording", None), "_graph_fft_source", None
-                )
+                source = getattr(getattr(executable, "_recording", None), "_graph_fft_source", None)
                 if source is not None:
-                    path = (
-                        f"graph/{node_index}:{node.ir_node.kind}/{ordinal}:native_call"
-                    )
+                    path = f"graph/{node_index}:{node.ir_node.kind}/{ordinal}:native_call"
                     yield path, regions[path], source, executable
             ordinal += _recipe_operation_dispatch_count(operation)
 
@@ -37,8 +33,8 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
 
     descriptor = runtime_family_provider_descriptor(
         "fft",
-        capabilities=("c2c-fft-region", "retained-separable-plan"),
-        domain_version="fft-retained-plans-v1",
+        capabilities=("c2c-fft-region", "retained-separable-plan", "cross-batch-column-plan"),
+        domain_version="fft-retained-plans-v2",
         semantic_fingerprint="compact-2d-c2c-finite-f32-v1",
     )
 
@@ -53,45 +49,42 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
                     error_key="fft_plan_preparation_required",
                     provider_namespace=self.descriptor.namespace,
                 )
-            task = GraphFragmentTask.create(
-                f"{path}:{strategy}",
-                "retained_fft_transform",
-                physical={
-                    "semantic_contract": source.semantics,
-                    "config": source.physical_config(strategy),
-                    "component": source.component,
-                    "workspace_bytes": prepared[strategy]["workspace_bytes"],
-                    "vendor_internal_kernel_topology": "unknown",
-                },
-            )
-            fragments.append(
-                _fragment(
-                    definition,
-                    family="fft",
-                    source_key=path,
-                    choice_id=strategy,
-                    coverage=(region_id,),
-                    tasks=(task,),
-                    exclusive_submission=True,
-                    provider_descriptor=self.descriptor,
+            for strategy in prepared:
+                if strategy == "whole_transform":
+                    continue
+                task = GraphFragmentTask.create(
+                    f"{path}:{strategy}",
+                    "retained_fft_transform",
+                    physical={
+                        "semantic_contract": source.semantics,
+                        "config": source.physical_config(strategy),
+                        "component": source.component,
+                        "workspace_bytes": prepared[strategy]["workspace_bytes"],
+                        "vendor_internal_kernel_topology": "unknown",
+                    },
                 )
-            )
+                fragments.append(
+                    _fragment(
+                        definition,
+                        family="fft",
+                        source_key=path,
+                        choice_id=strategy,
+                        coverage=(region_id,),
+                        tasks=(task,),
+                        exclusive_submission=True,
+                        provider_descriptor=self.descriptor,
+                    )
+                )
         return tuple(fragments)
 
     def contribute_runtime(self, assembly, selection):
-        matches = tuple(
-            row
-            for row in _sources(assembly.definition)
-            if row[0] == selection.source_key
-        )
+        matches = tuple(row for row in _sources(assembly.definition) if row[0] == selection.source_key)
         if len(matches) != 1:
             raise ValueError("Frozen FFT semantic region is unavailable")
         _, _, source, executable = matches[0]
         strategy = selection.materialization_choice
         if strategy not in source.preparation_report():
-            raise ValueError(
-                "FFT plan was not prepared; no physical substitution was performed"
-            )
+            raise ValueError("FFT plan was not prepared; no physical substitution was performed")
 
         def rewrite(builder, operation):
             builder._append_native(source._recording(strategy), admission=operation[2])
@@ -101,9 +94,7 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
     def describe(self, definition, fragment_key):
         fragment = self.resolve(definition, fragment_key)
         selection = fragment.provider_metadata["family_selection"]
-        source = next(
-            row[2] for row in _sources(definition) if row[0] == selection["source_key"]
-        )
+        source = next(row[2] for row in _sources(definition) if row[0] == selection["source_key"])
         strategy = selection["materialization_choice"]
         return {
             **fragment.provider_metadata,
@@ -124,6 +115,7 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
                 "operation.close releases search-owned plans; live Graphs retain their own plans, frozen definitions retain descriptions",
                 "prepared metadata does not retain unused plans; per-plan workspace is not total process VRAM",
                 "in-place columns use the output allocation; public input and output remain distinct",
+                "cross-batch columns execute once per column; per-image columns execute once per batch, neither is universally faster",
                 "vendor-internal kernel count is unobserved by the manifest; use profiler evidence when needed",
             ),
         }

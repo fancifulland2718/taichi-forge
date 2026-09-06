@@ -48,7 +48,7 @@ does not imply that its algorithms are exposed as CompileIQ search axes.
 | Operation | Semantic entry and preparation | Graph and search boundary |
 | --- | --- | --- |
 | Fixed-pattern sparse-dense product | `SparseMatrix.record_spmm(...)`, then `operation.prepare(input_array, output_array)` | CUDA f32 CSR / compact row-major dense arrays; append the operation with `GraphBuilder.append_native()`. Explicit `ti.hardware.linalg.SparseSpmmRecipeProvider()` adds frozen direct/preprocessed strategies to complete recipes. |
-| Batched 2D complex FFT | `ti.linalg.record_fft(...)`, then `operation.prepare()` | CUDA complex-f32, compact arrays `(H, W, 2)` or `(batch, H, W, 2)`, distinct input/output. Explicit `ti.hardware.fft.FftRecipeProvider()` adds a separable plan alongside the whole-transform baseline. |
+| Batched 2D complex FFT | `ti.linalg.record_fft(...)`, then `operation.prepare()` | CUDA complex-f32, compact arrays `(H, W, 2)` or `(batch, H, W, 2)`, distinct input/output. Explicit `ti.hardware.fft.FftRecipeProvider()` adds separable per-image and, on capable runtimes, cross-batch column plans alongside the whole-transform baseline. |
 | Toolkit reset-monoid segmented scan | Existing `GraphBuilder.segmented_scan()` plus `CubSegmentedScanRecipeProvider(manifest_path)` from `taichi_forge.hardware.source_providers` | Optional source-provider addon; bounded i32/u32 sum and immutable segmented layout. Prepared capture, workspace and head-bitset lifetime form the physical recipe; the addon is not part of the portable runtime wheel. |
 | Other cuSPARSE / cuFFT / cuDSS expert operations | Existing explicit plans and documented root Graph recording | Recording alone does not provide a recipe generator. cuDSS root ordering must not be described as CUDA Graph capture. |
 | cuBLASLt | Retained internal execution/recording foundation | No public complete matmul-region recipe domain is implied by the cuBLAS probe. |
@@ -60,6 +60,17 @@ each replay. FFT forward and inverse are both unnormalized, so applying both
 multiplies the input by `H * W`. Layout, precision and normalization are semantic
 requirements, not optimizer choices. Vendor internals not exposed by the library
 are reported as unknown, not fabricated kernel counts.
+
+Both separable FFT strategies transform all rows first and use the output array
+for in-place columns, without a dense transpose buffer. The per-image plan then
+executes columns once per image; the cross-batch plan executes once per column,
+batching independent images within each call. This changes physical launch and
+memory-access organization, not mathematical normalization or layout. Neither is
+universally faster, and whole-transform can outperform both. `prepare()` records
+actual workspace and setup facts; the expanded FFT provider domain invalidates
+older provider-bound search evidence, not compatible wheels. Older native
+runtimes omit the additional strategy; an imported selection needing it fails
+explicitly at materialization instead of substituting another plan.
 
 FFT Graph recordings retain only their own physical plan, not the search
 operation's entire plan collection. `operation.close()` releases the operation's
