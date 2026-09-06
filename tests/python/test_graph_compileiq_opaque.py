@@ -330,7 +330,7 @@ import pathlib
 import sys
 
 root = pathlib.Path(sys.argv[1])
-sys.path.insert(0, str(root / "python"))
+sys.path.insert(0, str(root))
 import taichi_forge.graph
 
 loaded = [
@@ -341,7 +341,8 @@ loaded = [
 assert not loaded, loaded
 """
     completed = subprocess.run(
-        [sys.executable, "-c", script, str(_ROOT)],
+        # Use the artifact under test, not an unrelated checkout/native pair.
+        [sys.executable, "-c", script, str(Path(ti.__file__).resolve().parent.parent)],
         check=False,
         capture_output=True,
         text=True,
