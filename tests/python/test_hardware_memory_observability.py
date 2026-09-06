@@ -232,6 +232,9 @@ def test_vulkan_timestamp_ticket_releases_device_children_across_reinit():
     recording = ti.graph.VulkanBufferCommandRecording(
         (
             command.fill_u32("destination", 64, 0),
+            # This recording has an explicit barrier policy. Both transfer
+            # commands write the same range; a barrier after copy is too late.
+            command.buffer_barrier("destination"),
             command.copy("destination", "source", 64),
             command.memory_barrier(),
         )
