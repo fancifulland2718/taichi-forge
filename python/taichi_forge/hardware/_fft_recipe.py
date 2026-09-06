@@ -119,7 +119,7 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
             "limitations": (
                 "CUDA f32 complex-to-complex only; compact two-dimensional transforms and explicit batch count",
                 "both directions are unnormalized; finite inputs and downstream-qualified tolerance",
-                "operation.close releases search-owned plans; Graphs retain their own plans and definitions retain baseline",
+                "operation.close releases search-owned plans; live Graphs retain their own plans, frozen definitions retain descriptions",
                 "prepared metadata does not retain unused plans; per-plan workspace is not total process VRAM",
                 "in-place columns use the output allocation; public input and output remain distinct",
                 "vendor-internal kernel count is unobserved by the manifest; use profiler evidence when needed",

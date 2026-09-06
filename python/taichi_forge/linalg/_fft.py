@@ -8,6 +8,7 @@ import weakref
 
 from taichi_forge.graph._native import NativeGraphNode
 from taichi_forge.graph._recipes.definition import _canonical_json, _digest
+from taichi_forge.graph._recipes.deferred import FrozenNativeRecipeSource
 from taichi_forge.hardware._fft import (
     CufftPlanND,
     CufftRecording,
@@ -113,6 +114,20 @@ class _FftPlanCatalog(_FftDescription):
             return _FftRecording(self, strategy, plan)
 
 
+class _FrozenFftSource(FrozenNativeRecipeSource):
+    def __init__(self, catalog, strategy):
+        self._graph_fft_source = catalog
+        self._strategy = strategy
+
+    @property
+    def _recording(self):
+        # Provider discovery uses the same descriptive source as live records.
+        return self
+
+    def materialize(self):
+        return self._graph_fft_source._recording(self._strategy)._as_graph_native_node().compile()
+
+
 class _FftRecording(CufftRecording):
     def __init__(self, source, strategy, plan):
         super().__init__(
@@ -142,6 +157,10 @@ class _FftRecording(CufftRecording):
             lifetime_leases=lambda item: (item.plan, item),
             debug_info={"kind": "fft_transform"},
         )
+
+    def _freeze_graph_recipe_source(self):
+        strategy = "row_batch_column_inplace" if self.plan._separable else "whole_transform"
+        return _FrozenFftSource(self._graph_fft_source, strategy)
 
 
 class FftOperation(_FftDescription, NativeGraphNode):
@@ -264,8 +283,8 @@ class FftOperation(_FftDescription, NativeGraphNode):
     def close(self):
         """Release this preparation owner; existing Graph plan leases stay live.
 
-        Frozen definitions still own their baseline recording. Closing an
-        operation does not promise selected-only residency or cold restoration.
+        Frozen definitions retain descriptions, not FFT execution plans. Live
+        Graphs and in-flight native submissions keep their independent leases.
         """
         self._closed = True
         self._plans.clear()

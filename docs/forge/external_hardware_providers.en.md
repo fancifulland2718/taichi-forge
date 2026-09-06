@@ -68,8 +68,11 @@ already-built Graphs keep their plan leases. An unused plan can retire once its
 last execution owner is gone. Frozen recipe metadata remains available, and a
 later materialization recreates only the requested retired plan, checking its
 component and workspace against the prepared facts at that cold boundary.
-Frozen definitions still retain their baseline recording. This is not a guarantee
-of selected-only residency or plan-free, cross-process restoration.
+Frozen definitions retain FFT descriptions rather than baseline plan leases.
+Releasing the search operation and builder therefore permits selected-only plan
+residency; any other live Graph still legitimately retains its own plan. Baseline
+`definition.compile()` reacquires a plan at compile time, never during replay.
+This does not yet provide plan-free, cross-process restoration.
 
 These providers are opt-in additions alongside `ti.graph.default_recipe_providers()`
 at `definition.search_recipes(engine="compileiq", providers=..., ...)`. Supplying

@@ -8958,6 +8958,9 @@ def _ir_contains_flag(node, flag):
 def _pipeline_task_manifests(node):
     if not isinstance(node, _CompiledCGraphNode):
         return (), ()
+    frozen = getattr(node, "_frozen_pipeline_task_manifests", None)
+    if frozen is not None:
+        return frozen
     from taichi_forge.lang.task_manifest import GraphTaskManifest
 
     program = impl.get_runtime().prog
@@ -10532,6 +10535,10 @@ def _replay_recipe_cgraph_node(
             _, executable, admission = operation
             rewriter = assembly.operation_rewriter(executable)
             if rewriter is None:
+                from taichi_forge.graph._recipes.deferred import FrozenNativeRecipeSource
+
+                if isinstance(executable, FrozenNativeRecipeSource):
+                    executable = executable.materialize()
                 builder._append_native_executable(executable, admission=admission)
             else:
                 rewriter(builder, operation)
@@ -10723,6 +10730,85 @@ _CONTROL_RECIPE_ROUTES = {
 
 
 class _GraphSpec:
+    def _with_recipe_nodes(self, nodes):
+        return _GraphSpec(
+            nodes,
+            graph_memory_sources=self._graph_memory_sources,
+            graph_offload_fusion_sources=self._graph_offload_fusion_sources,
+            graph_sparse_traversal_sources=self._graph_sparse_traversal_sources,
+            graph_bounded_sources=self._graph_bounded_sources,
+            graph_reduction_sources=self._graph_reduction_sources,
+            graph_native_algorithm_sources=self._graph_native_algorithm_sources,
+        )
+
+    def freeze_native_recipe_sources(self):
+        """Detach opt-in native owners without mutating any live Graph/builder."""
+        from copy import copy
+        from taichi_forge.graph._recipes.deferred import FrozenNativeRecipeSource
+
+        nodes = []
+        changed = False
+        for node in self.nodes:
+            if not isinstance(node, _CompiledCGraphNode):
+                nodes.append(node)
+                continue
+            operations = []
+            removed_leases, retained_leases = set(), set()
+            detached = False
+            for operation in node.recipe_operations:
+                if operation[0] == "native":
+                    executable = operation[1]
+                    freeze = getattr(executable, "_freeze_graph_recipe_source", None)
+                    source = None if freeze is None else freeze()
+                    if source is not None:
+                        if not isinstance(source, FrozenNativeRecipeSource):
+                            raise TypeError("native recipe freeze requires a cold reconstruction source")
+                        action = executable.recordable_action
+                        if action.fixed_bindings or action.temporary_bindings:
+                            raise ValueError("detachable native recipes cannot retain private Graph bindings")
+                        removed_leases.update(id(lease) for lease in (executable, *executable.lifetime_leases))
+                        operation = ("native", source, operation[2])
+                        detached = True
+                    elif not isinstance(executable, FrozenNativeRecipeSource):
+                        retained_leases.update(id(lease) for lease in (executable, *executable.lifetime_leases))
+                operations.append(operation)
+            if detached:
+                node = copy(node)
+                node._frozen_pipeline_task_manifests = _pipeline_task_manifests(node)
+                node.compiled_graph = None
+                node._jit_cache = None
+                node.recipe_operations = tuple(operations)
+                node.lifetime_leases = tuple(
+                    lease
+                    for lease in node.lifetime_leases
+                    if id(lease) not in removed_leases or id(lease) in retained_leases
+                )
+                node._requires_recipe_materialization = True
+                changed = True
+            nodes.append(node)
+        return self._with_recipe_nodes(nodes) if changed else self
+
+    def materialize_baseline_sources(self, definition):
+        """Reconstruct detached segments only at the explicit compile boundary."""
+        if not any(getattr(node, "_requires_recipe_materialization", False) for node in self.nodes):
+            return self
+        from taichi_forge.graph._recipes.runtime_assembly import GraphRuntimeRecipeAssembly
+
+        assembly = GraphRuntimeRecipeAssembly(definition)
+        nodes = []
+        for node in self.nodes:
+            if getattr(node, "_requires_recipe_materialization", False):
+                groups = tuple(
+                    tuple(int(item.split(":")[1]) for item in group)
+                    for group in node.composer_source_groups
+                    if len(group) > 1 and all(item is not None for item in group)
+                )
+                node = _replay_recipe_cgraph_node(node, assembly, groups)
+            nodes.append(node)
+        variant = self._with_recipe_nodes(nodes)
+        variant._definition_source_spec = self
+        return variant
+
     def __init__(
         self,
         nodes,
@@ -11181,6 +11267,7 @@ class _GraphSpec:
                 # faithful to their declared coverage.
                 if (
                     self.fusion_plan.candidate_recipes
+                    or getattr(node, "_requires_recipe_materialization", False)
                     or local_groups
                     or selected_operation
                     or parallel_groups

@@ -137,6 +137,10 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
     def graph_physical_plan_id(self):
         return getattr(self._recording, "_graph_physical_plan_id", "")
 
+    def _freeze_graph_recipe_source(self):
+        freeze = getattr(self._recording, "_freeze_graph_recipe_source", None)
+        return None if freeze is None else freeze()
+
 
 class HardwareRecordingNode(NativeGraphNode):
     def __init__(

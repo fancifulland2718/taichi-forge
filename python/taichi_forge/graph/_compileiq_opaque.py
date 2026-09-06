@@ -88,16 +88,16 @@ class CompileIQCompleteGraphRecipeSearch:
         catalog=None,
         search_strategy_id="manual_dynamic_batches.v2",
     ):
+        from taichi_forge.graph._recipes.definition import GraphDefinition
+
         capability_components = _validated_compileiq_capability()
-        definition = getattr(graph, "definition", None)
+        definition = graph if isinstance(graph, GraphDefinition) else getattr(graph, "definition", None)
         if definition is None:
             raise TypeError("complete Graph recipe search requires a GraphDefinition")
         if catalog is None:
             catalog = definition.recipe_catalog()
         elif catalog.definition is not definition:
-            raise ValueError(
-                "complete Graph recipe catalog belongs to another definition"
-            )
+            raise ValueError("complete Graph recipe catalog belongs to another definition")
         entries = catalog.entries()
         if catalog.provider_set is None:
             assembly_protocols = {
@@ -158,13 +158,12 @@ class CompileIQCompleteGraphRecipeSearch:
             recipe_schema="taichi_forge.complete_graph_recipe.v2",
             search_strategy_id=search_strategy_id,
         )
-        self._graph = graph
         self._definition = definition
         self._catalog = catalog
         self._family = family
         self._families = families
-        self._workspace_lanes = graph._workspace_lane_capacity
-        self._workspace_saturation = graph._workspace_saturation
+        self._workspace_lanes = 1 if isinstance(graph, GraphDefinition) else graph._workspace_lane_capacity
+        self._workspace_saturation = "wait" if isinstance(graph, GraphDefinition) else graph._workspace_saturation
 
     @property
     def capability(self):

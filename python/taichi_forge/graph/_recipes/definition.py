@@ -293,6 +293,9 @@ class GraphDefinition:
 
     @classmethod
     def _from_graph_spec(cls, spec, backend, *, core_commit=""):
+        freeze_sources = getattr(spec, "freeze_native_recipe_sources", None)
+        if freeze_sources is not None:
+            spec = freeze_sources()
         semantic_root = getattr(
             spec,
             "definition_semantic_root",
@@ -370,7 +373,7 @@ class GraphDefinition:
         from taichi_forge.graph._graph import Graph
 
         return Graph(
-            self._runtime_spec,
+            self._runtime_spec.materialize_baseline_sources(self),
             workspace_lanes=workspace_lanes,
             workspace_saturation=workspace_saturation,
             definition=self,

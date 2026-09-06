@@ -513,7 +513,7 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
     del operation
     gc.collect()
     assert owner() is None
-    assert plans["whole_transform"]() is not None  # Frozen definition owns baseline.
+    assert (plans["whole_transform"]() is not None) == (not use_alternative)
     assert (plans["row_batch_column_inplace"]() is not None) == use_alternative
     before = ti.hardware.fft.cache_statistics()
     for _ in range(31):
@@ -523,6 +523,7 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
     result.close()
     del bound, graph, result
     gc.collect()
+    assert plans["whole_transform"]() is None
     assert plans["row_batch_column_inplace"]() is None
     # Prepared facts remain resolvable without retaining the alternative.
     assert [entry.recipe.recipe_id for entry in definition.recipe_catalog(providers=providers).entries()] == [
@@ -535,6 +536,13 @@ def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_
         np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
         assert ti.hardware.fft.cache_statistics().create_requests == before.create_requests + 1
     context.close()
+
+    # Public search transports the definition, not an unused baseline Graph.
+    # Constructing a session must not reacquire either retired plan.
+    before_session = ti.hardware.fft.cache_statistics()
+    session = definition.search_recipes(providers=providers, budget=ti.graph.GraphSearchBudget(evaluation_limit=2))
+    assert session.recipes
+    assert ti.hardware.fft.cache_statistics().create_requests == before_session.create_requests
 
 
 @pytest.mark.parametrize("drift", ("workspace", "component"))
@@ -589,3 +597,43 @@ def test_fft_metadata_catalog_does_not_recreate_plans_after_runtime_reset():
     ti.reset()
     with pytest.raises(RuntimeError, match="retired runtime"):
         source._recording("row_batch_column_inplace")
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_frozen_description_preserves_other_live_baselines_and_recompiles_after_retirement():
+    import gc
+    import weakref
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, providers, bindings, expected = _fft_definition()
+    baseline_plan = weakref.ref(operation._plans["whole_transform"])
+    original = definition.compile()
+    original_bound = original.bind(bindings)
+    original.run(original_bound)
+    catalog = definition.recipe_catalog(providers=providers)
+    alternative = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    operation.close()
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(alternative) as result:
+            candidate = result.executor
+            bound = candidate.bind(bindings)
+            for _ in range(7):
+                original.run(original_bound)
+                candidate.run(bound)
+            np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+            assert baseline_plan() is not None
+            del original_bound, original
+            gc.collect()
+            assert baseline_plan() is None
+            before = ti.hardware.fft.cache_statistics()
+            assert before.live_plans == 1
+            # Compile is the resource boundary, not bind/run. The definition
+            # itself must not keep this recreated baseline after retirement.
+            rebuilt = definition.compile()
+            assert ti.hardware.fft.cache_statistics().create_requests == before.create_requests + 1
+            rebuilt.run(rebuilt.bind(bindings))
+            np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+            del rebuilt
+            gc.collect()
+            assert ti.hardware.fft.cache_statistics().live_plans == 1

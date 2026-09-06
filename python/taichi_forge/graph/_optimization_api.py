@@ -930,9 +930,8 @@ class _GraphRecipeSearchSession:
             self._checkpoint = self._joint_checkpoint.compileiq_checkpoint
             self._rebuild_checkpoint_catalog(self._checkpoint)
             self._validate_checkpoint_generation(self._joint_checkpoint)
-        graph = definition.compile()
         self._plans = CompileIQCompleteGraphRecipeSearch(
-            graph,
+            definition,
             catalog=catalog,
             search_strategy_id=strategy.strategy_id,
         )
