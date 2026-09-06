@@ -11,12 +11,24 @@ on:
         description: "Version resolved by the caller"
         required: true
         type: string
+      platform:
+        description: "Runtime artifacts to build: all, windows, or linux"
+        required: false
+        type: string
+        default: all
   workflow_dispatch:
     inputs:
       version:
         description: "Version (e.g. 0.6.3 or 0.6.3rc1); leave empty to use version.txt"
         required: false
         default: ""
+
+      platform:
+        description: "Runtime artifacts to build (no publishing)"
+        required: false
+        type: choice
+        default: all
+        options: [all, windows, linux]
 
 permissions:
   contents: read
@@ -44,6 +56,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          case "${{ inputs.platform }}" in
+            all|windows|linux) ;;
+            *) echo "Unsupported runtime platform" >&2; exit 1 ;;
+          esac
           if [[ -n "${{ inputs.version }}" ]]; then
             ver="${{ inputs.version }}"
           else
@@ -55,6 +71,7 @@ jobs:
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
   build_linux_runtime:
+    if: ${{ inputs.platform != 'windows' }}
     name: Linux runtime wheel
     needs: resolve_version
     runs-on: ubuntu-22.04
@@ -184,6 +201,7 @@ jobs:
           grep -F "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON" "$cache"
           grep -F "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON" "$cache"
           grep -F "TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS:BOOL=ON" "$cache"
+          grep -F "TI_BUILD_VKFFT_PROVIDER:BOOL=ON" "$cache"
           grep -F "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
@@ -210,7 +228,7 @@ jobs:
           set -euo pipefail
           python scripts/validate_runtime_wheel.py \
             --wheel-dir dist-runtime --platform linux \
-            --dependency-class driver-only --strict-binary
+            --dependency-class driver-only --strict-binary --require-vkfft
 
       - name: Audit runtime wheel
         run: |
@@ -226,7 +244,7 @@ jobs:
           auditwheel show wheelhouse-runtime/*.whl
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \
-            --dependency-class driver-only --strict-binary
+            --dependency-class driver-only --strict-binary --require-vkfft
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -236,6 +254,7 @@ jobs:
           if-no-files-found: error
 
   build_windows_runtime:
+    if: ${{ inputs.platform != 'linux' }}
     name: Windows runtime wheel
     needs: resolve_version
     runs-on: windows-2022
@@ -372,6 +391,7 @@ jobs:
               "TI_BUILD_BUNDLED_OPTIX_PROVIDERS:BOOL=ON",
               "TI_BUILD_BUNDLED_CUDSS_PROVIDER:BOOL=ON",
               "TI_BUILD_BUNDLED_OPTIONAL_RUNTIME_PROVIDERS:BOOL=ON",
+              "TI_BUILD_VKFFT_PROVIDER:BOOL=ON",
               "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA:BOOL=ON",
               "TI_WITH_VULKAN:BOOL=ON",
@@ -406,7 +426,7 @@ jobs:
         run: |
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows `
-            --dependency-class driver-only --strict-binary
+            --dependency-class driver-only --strict-binary --require-vkfft
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
