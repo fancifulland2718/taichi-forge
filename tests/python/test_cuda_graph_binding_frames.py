@@ -108,6 +108,65 @@ def test_prepared_frames_are_pure_and_queued_reuse_preserves_each_binding():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_binding_event_backlog_reuses_observed_peak_and_releases_on_close():
+    # A serial device dependency establishes a real backlog before the short
+    # frame submissions, without a host sleep or a replay synchronization.
+    @ti.kernel
+    def queue_dependency(value: ti.types.ndarray(dtype=ti.u32, ndim=1)):
+        x = value[0]
+        ti.loop_config(serialize=True)
+        for _ in range(10000000):
+            x ^= x << 13
+            x ^= x >> 17
+            x ^= x << 5
+        value[0] = x
+
+    dependency = ti.ndarray(ti.u32, 1)
+    dependency.fill(123)
+    queue_dependency(dependency)
+    ti.sync()
+    graph = _graph()
+    executor = _executor(graph)
+    source, scratch, output = (ti.ndarray(ti.i32, 513) for _ in range(3))
+    source.fill(3)
+    output.fill(0)
+    frames = [_prepare(executor, source, scratch, output, i + 1, i) for i in range(4)]
+    ti.sync()
+    before = executor.snapshot()
+    created = None
+    try:
+        for batch in range(3):
+            queue_dependency(dependency)
+            for index in range(64):
+                executor.run(frames[index % 4])
+            pending = executor.snapshot()
+            ti.sync()
+            finished = executor.snapshot()
+            assert finished["pending_frame_leases"] == 0
+            assert finished["completion_events_destroyed"] == 0
+            assert finished["completion_events_abandoned"] == 0
+            assert finished["completion_events_cached"] == finished["completion_events_created"]
+            if batch == 0:
+                # This is a resource-path coverage assertion, not a speed gate.
+                assert pending["pending_frame_leases"] > 16
+                created = finished["completion_events_created"]
+            else:
+                assert finished["completion_events_created"] == created
+            assert finished["argument_bytes"] == before["argument_bytes"]
+            assert finished["preparation_upload_calls"] == before["preparation_upload_calls"]
+        expected = np.zeros(513, np.int32)
+        expected[:4] = 3 * 16 * (3 * np.arange(1, 5) + 7)
+        np.testing.assert_array_equal(output.to_numpy(), expected)
+        assert finished["completion_events_reused"] >= 128
+    finally:
+        executor.close()
+    closed = executor.snapshot()
+    assert closed["completion_events_cached"] == 0
+    assert closed["completion_events_created"] == closed["completion_events_destroyed"]
+    assert closed["argument_bytes"] == 0
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_prepared_frame_pins_device_allocations_without_pinning_python_arrays():
     graph = _graph()
     executor = _executor(graph)

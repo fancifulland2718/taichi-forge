@@ -93,7 +93,8 @@ struct GraphBindingExecutor::State : CudaDevice::RetainedGraphResource {
   State(const aot::CompiledGraph &graph_, const CompileConfig &config_)
       : graph(graph_), config(config_) {
     event_pool = std::make_shared<RuntimeCompletionCudaEventPool>(
-        std::weak_ptr<RuntimeFaultDomain>{}, 16);
+        std::weak_ptr<RuntimeFaultDomain>{}, 0,
+        RuntimeCompletionCudaEventPool::Retention::until_clear);
   }
 
   ~State() override {
@@ -522,6 +523,7 @@ GraphBindingExecutor::snapshot() {
       ++frames;
     }
   }
+  const auto events = state.event_pool->snapshot();
   return {{"closed", state.closed.load(std::memory_order_relaxed)},
           {"failed", state.failed},
           {"frames", frames},
@@ -529,6 +531,14 @@ GraphBindingExecutor::snapshot() {
           {"kernel_nodes", nodes},
           {"executables", state.executable ? 1 : 0},
           {"pending_frame_leases", state.pending.size()},
+          // Driver event bytes are opaque. Counts describe retained handles,
+          // never requested ndarray bytes or a measured VRAM peak.
+          {"completion_events_created", events.created},
+          {"completion_events_reused", events.reused},
+          {"completion_events_cached", events.cached},
+          {"completion_events_destroyed", events.destroyed},
+          {"completion_events_abandoned", events.abandoned},
+          {"completion_event_cache_until_close", 1},
           {"preparation_upload_calls", state.upload_calls},
           {"preparation_upload_bytes", state.upload_bytes}};
 }

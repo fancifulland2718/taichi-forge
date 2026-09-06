@@ -29,9 +29,17 @@ struct RuntimeCompletionCudaEventPoolSnapshot {
 // synchronize proves completion. Pending or faulted events are never reused.
 class TI_DLL_EXPORT RuntimeCompletionCudaEventPool {
  public:
-  RuntimeCompletionCudaEventPool(
-      std::weak_ptr<RuntimeFaultDomain> fault_domain,
-      std::size_t max_cached_events);
+  enum class Retention {
+    bounded,
+    // Retain only events actually allocated for observed in-flight work.
+    // The owner calls clear() at its cold retirement boundary; no
+    // preallocation.
+    until_clear,
+  };
+
+  RuntimeCompletionCudaEventPool(std::weak_ptr<RuntimeFaultDomain> fault_domain,
+                                 std::size_t max_cached_events,
+                                 Retention retention = Retention::bounded);
   ~RuntimeCompletionCudaEventPool();
 
   RuntimeCompletionCudaEventPool(

@@ -21,9 +21,11 @@
 namespace taichi::lang {
 struct RuntimeCompletionCudaEventPool::Impl {
   Impl(std::weak_ptr<RuntimeFaultDomain> fault_domain,
-       std::size_t max_cached_events)
+       std::size_t max_cached_events,
+       Retention retention)
       : fault_domain(std::move(fault_domain)),
-        max_cached_events(max_cached_events) {
+        max_cached_events(max_cached_events),
+        retention(retention) {
   }
 
   bool backend_calls_safe() const noexcept {
@@ -33,6 +35,7 @@ struct RuntimeCompletionCudaEventPool::Impl {
 
   std::weak_ptr<RuntimeFaultDomain> fault_domain;
   const std::size_t max_cached_events;
+  const Retention retention;
   mutable std::mutex mutex;
   std::vector<void *> cached_events;
   std::atomic<std::uint64_t> created{0};
@@ -44,9 +47,11 @@ struct RuntimeCompletionCudaEventPool::Impl {
 
 RuntimeCompletionCudaEventPool::RuntimeCompletionCudaEventPool(
     std::weak_ptr<RuntimeFaultDomain> fault_domain,
-    std::size_t max_cached_events)
+    std::size_t max_cached_events,
+    Retention retention)
     : impl_(std::make_unique<Impl>(std::move(fault_domain),
-                                   max_cached_events)) {
+                                   max_cached_events,
+                                   retention)) {
 }
 
 RuntimeCompletionCudaEventPool::~RuntimeCompletionCudaEventPool() {
@@ -89,7 +94,8 @@ void RuntimeCompletionCudaEventPool::release(void *event,
 #ifdef TI_WITH_CUDA
   if (reusable && impl_->backend_calls_safe()) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->cached_events.size() < impl_->max_cached_events) {
+    if (impl_->retention == Retention::until_clear ||
+        impl_->cached_events.size() < impl_->max_cached_events) {
       impl_->cached_events.push_back(event);
       impl_->returned.fetch_add(1, std::memory_order_relaxed);
       return;

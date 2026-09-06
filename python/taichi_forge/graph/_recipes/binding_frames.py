@@ -20,6 +20,9 @@ def _eligible(spec, backend):
     native = getattr(core, "_CudaGraphBindingExecutor", None)
     if native is None or not native.available():
         return False
+    retained_events = getattr(native, "retains_completion_events_until_close", None)
+    if retained_events is None or not retained_events():
+        return False
     config = impl.current_cfg()
     if config.debug or config.kernel_profiler or len(spec.nodes) != 1:
         return False
@@ -175,8 +178,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "typed-runtime-fragment",
             "fixed-plan-provider-capture",
         ),
-        domain_version="immutable-binding-frame-domain-v3",
-        semantic_fingerprint="cuda-graph-composed-fixed-plan-binding-lifetime-v3",
+        domain_version="immutable-binding-frame-domain-v4",
+        semantic_fingerprint="cuda-graph-composed-binding-lifetime-retained-events-v4",
     )
 
     def fragments(self, definition):
@@ -204,6 +207,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                             "executable_count": 1,
                             "binding_transition": "whole_executable_update",
                             "argument_lifetime": "published_binding_and_inflight_work",
+                            "completion_events": "reuse_observed_peak_until_executor_close",
                             "workspace_lanes": 1,
                             **({"provider_parameters": "captured_per_binding_fixed_plan"} if native else {}),
                         },
@@ -227,12 +231,14 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 "prepare argument images when bindings are published",
                 "reuse one executable across prepared bindings without reuploading arguments",
                 "retain argument images and allocation leases until last device use",
+                "reuse completed event handles up to the observed queue peak until executor close",
             ),
             "limitations": (
                 "one CUDA Graph and one workspace lane; only certified fixed-plan FFT/SpMM commands may join JIT dispatches",
                 "no SNode, external synchronization domain or device-controlled topology; capture must contain only kernel nodes",
                 "raw mapping calls include argument preparation; use Graph.bind to amortize it",
                 "prepared frames trade retained argument memory and setup for binding-switch cost",
+                "cached completion handles retain opaque driver storage, not measured ndarray or peak VRAM bytes",
                 "wraps baseline or explicitly compatible FFT/SpMM region strategies; unrelated replacements remain unavailable",
                 "benefit and driver-owned memory require workload measurements",
             ),
