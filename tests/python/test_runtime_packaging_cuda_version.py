@@ -1243,6 +1243,23 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "refs/tags/forge-v*" in workflow
     assert "tag_name: forge-v${{" in workflow
     assert "tag_name: v${{" not in workflow
+    # Partial platform audits may reuse an ABI-compatible runtime artifact, but
+    # must not enter the full-release aggregation/publication path.
+    assert "validation_platform:" in workflow
+    assert "options: [all, windows]" in workflow
+    assert "Platform-scoped validation cannot publish" in workflow
+    assert "Runtime reuse requires Windows-only validation and a numeric run ID" in workflow
+    assert "run-id: ${{ inputs.runtime_run_id || github.run_id }}" in workflow
+    assert "github-token: ${{ github.token }}" in workflow
+    assert "actions: read" in workflow
+    assert "platform: ${{ inputs.validation_platform || 'all' }}" in workflow
+    windows_job = workflow.split("  build_windows:\n", 1)[1].split("  validate_wheel_set:\n", 1)[0]
+    assert "needs.resolve_version.result == 'success'" in windows_job
+    assert "needs.build_runtime.result == 'success'" in windows_job
+    assert "inputs.runtime_run_id && inputs.validation_platform == 'windows'" in windows_job
+    for job in ("build_linux", "validate_wheel_set"):
+        section = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
+        assert "if: ${{ inputs.validation_platform != 'windows' }}" in section
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():

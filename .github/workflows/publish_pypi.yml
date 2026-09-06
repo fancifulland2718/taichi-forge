@@ -34,6 +34,16 @@ on:
         description: "Version (e.g. 0.6.3 or 0.6.3rc1); leave empty to use version.txt"
         required: false
         default: ""
+      validation_platform:
+        description: "Validation scope; Windows-only runs never publish"
+        type: choice
+        options: [all, windows]
+        default: all
+      runtime_run_id:
+        description: "Optional existing Windows runtime artifact run; validation only"
+        type: string
+        required: false
+        default: ""
       publish:
         description: "Upload to PyPI after building (true/false)"
         required: false
@@ -49,6 +59,7 @@ on:
 permissions:
   # Needed by softprops/action-gh-release to create/update the GitHub Release.
   contents: write
+  actions: read
   # Needed by pypa/gh-action-pypi-publish (Trusted Publishing / OIDC).
   id-token: write
 
@@ -77,9 +88,20 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: set
+        env:
+          VALIDATION_PLATFORM: ${{ inputs.validation_platform || 'all' }}
+          RUNTIME_RUN_ID: ${{ inputs.runtime_run_id }}
+          REQUEST_PUBLISH: ${{ inputs.publish }}
         shell: bash
         run: |
           set -euo pipefail
+          case "$VALIDATION_PLATFORM" in all|windows) ;; *) echo "Invalid validation platform"; exit 1 ;; esac
+          if [[ "$VALIDATION_PLATFORM" != all && ( "$REQUEST_PUBLISH" == true || "$GITHUB_REF" == refs/tags/forge-v* ) ]]; then
+            echo "Platform-scoped validation cannot publish"; exit 1
+          fi
+          if [[ -n "$RUNTIME_RUN_ID" && ( "$VALIDATION_PLATFORM" != windows || ! "$RUNTIME_RUN_ID" =~ ^[0-9]+$ ) ]]; then
+            echo "Runtime reuse requires Windows-only validation and a numeric run ID"; exit 1
+          fi
           if [[ "${GITHUB_REF}" == refs/tags/forge-v* ]]; then
             ver="${GITHUB_REF#refs/tags/forge-v}"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
@@ -97,13 +119,16 @@ jobs:
 
   build_runtime:
     name: Build runtime artifacts
+    if: ${{ !inputs.runtime_run_id }}
     needs: resolve_version
     uses: ./.github/workflows/publish_runtime_pypi.yml
     with:
       version: ${{ needs.resolve_version.outputs.version }}
+      platform: ${{ inputs.validation_platform || 'all' }}
 
   build_linux:
     name: Linux wheel (py${{ matrix.python }})
+    if: ${{ inputs.validation_platform != 'windows' }}
     needs: [resolve_version, build_runtime]
     runs-on: ubuntu-22.04
     strategy:
@@ -358,6 +383,7 @@ jobs:
 
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
+    if: ${{ !cancelled() && needs.resolve_version.result == 'success' && (needs.build_runtime.result == 'success' || (inputs.runtime_run_id && inputs.validation_platform == 'windows')) }}
     needs: [resolve_version, build_runtime]
     runs-on: windows-2022
     strategy:
@@ -475,6 +501,8 @@ jobs:
         with:
           name: wheel-windows-runtime
           path: runtime-wheel
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.runtime_run_id || github.run_id }}
 
       - name: Extract runtime artifact for shim link
         shell: pwsh
@@ -567,6 +595,8 @@ jobs:
 
   validate_wheel_set:
     name: Validate complete wheel set
+    # A platform-scoped audit produces per-shim artifacts, not a release set.
+    if: ${{ inputs.validation_platform != 'windows' }}
     needs: [resolve_version, build_runtime, build_linux, build_windows]
     runs-on: ubuntu-latest
     permissions:
