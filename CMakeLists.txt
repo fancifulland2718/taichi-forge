@@ -131,6 +131,7 @@ include(cmake/TaichiCore.cmake)
 include(cmake/TaichiOptixProvider.cmake)
 include(cmake/TaichiCudssProvider.cmake)
 include(cmake/TaichiOptionalRuntimeProviders.cmake)
+include(cmake/TaichiVkfftProvider.cmake)
 
 option(TI_BUILD_TESTS "Build the CPP tests" OFF)
 
