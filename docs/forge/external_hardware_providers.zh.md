@@ -71,6 +71,14 @@ FFT Graph recording 只持有所用的物理计划，不反向持有搜索 opera
 显式准备全部导入候选。freeze、catalog discovery、选择解析均不创建 FFT 计划，物化只创建所请求的计划。
 此功能需要新的 native capture-description 能力；旧兼容 runtime 仍可运行普通 FFT，但会明确拒绝该恢复路径。
 
+SpMM 通过 `matrix.record_spmm(..., preparation=saved_preparation)` 使用同样的准备 JSON/选择恢复流程。
+native 支持计划租约时，`operation.close()` 只释放搜索拥有的计划；同一 matrix/RHS/algorithm 的计划仍与
+存活 Graph 命令和原有专家接口缓存共享。冻结 definition 持有矩阵身份和预期事实，不持有 baseline 计划。
+与 FFT 不同，SpMM 创建所选计划需要真实 dense bindings：freeze、resolve、materialize 均不创建计划，
+准备参数帧的 bind（普通 executor 则是首次 native preparation）只创建并核对所选计划。导入准备事实不代表
+已经测量恢复耗时。workspace 是计划分配量，不是 driver 总驻留或 device peak。旧 runtime 保持原矩阵缓存，
+明确拒绝 selected-only artifact 导入。
+
 准备 artifact 仅包含预期 JSON 事实，不含 Python executable 或 vendor 二进制。恢复时核对语义、设备和 component，
 物化时再次核对实际所选计划的 component/workspace；库探测只在这个显式冷边界发生。报告标明导入的准备观测属于
 历史数据，计划重建的实测另行记录。库名/版本相同不证明二进制身份或生产性能，该 artifact 不是 AOT 或二进制缓存。

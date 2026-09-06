@@ -1114,6 +1114,15 @@ class CuSparseMatrix : public SparseMatrix {
 
   SpmmPlanInfo spmm_plan_info(int rhs_count, int algorithm) const;
 
+  struct SpmmPlanLease {
+    std::shared_ptr<void> plan;
+  };
+  // Cold ownership transfer. Existing expert caches are retained unless the
+  // caller explicitly owns the newly prepared entry.
+  SpmmPlanLease retain_spmm_plan(int rhs_count,
+                                 int algorithm,
+                                 bool release_cache = false);
+
   void nd_spsv(Program *prog,
                const Ndarray &input,
                const Ndarray &output,
@@ -1211,7 +1220,11 @@ class CuSparseMatrix : public SparseMatrix {
   std::uint64_t spmv_preprocess_builds_{0};
   std::uint64_t spmv_preprocess_reuses_{0};
   std::uint64_t spmv_preprocess_fallbacks_{0};
-  std::unordered_map<std::uint64_t, std::shared_ptr<SpmmPlan>> spmm_plans_;
+  struct SpmmPlanEntry {
+    std::weak_ptr<SpmmPlan> plan;
+    std::shared_ptr<SpmmPlan> cache_owner;
+  };
+  std::unordered_map<std::uint64_t, SpmmPlanEntry> spmm_plans_;
   std::uint64_t spmm_calls_{0};
   std::uint64_t spmm_plan_builds_{0};
   std::uint64_t spmm_plan_reuses_{0};

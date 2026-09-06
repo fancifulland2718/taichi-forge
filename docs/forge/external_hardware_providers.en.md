@@ -93,6 +93,18 @@ selection resolution create no FFT plans; materialization creates only the
 requested plan. The new native capture-description capability is required; older
 compatible runtimes keep ordinary FFT support but reject this restoration path.
 
+SpMM uses the same JSON preparation/selection workflow via
+`matrix.record_spmm(..., preparation=saved_preparation)`. With native plan-lease
+support, `operation.close()` releases only search-owned plans; equal matrix/RHS/
+algorithm plans remain shared with live Graph commands and pre-existing expert
+caches. Frozen definitions retain matrix identity and expected facts, not a
+baseline plan. Unlike FFT, SpMM needs real dense bindings to create its selected
+plan: freeze, resolve and materialize create none; prepared-frame binding (or the
+ordinary executor's first native preparation) creates and checks only that plan.
+Importing preparation facts does not measure restoration time. Reported workspace
+is plan-owned allocation, not total driver residency or device peak. Older
+runtimes retain the legacy matrix cache and reject selected-only artifact import.
+
 Preparation artifacts contain expected JSON facts, not Python executables or
 vendor binaries. Restoration checks the semantic/device/component contract;
 materialization checks the actual selected plan's component and workspace again.

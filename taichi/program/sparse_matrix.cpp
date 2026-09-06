@@ -3671,7 +3671,9 @@ void CuSparseMatrix::spmm(size_t dB,
   const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
                    static_cast<std::uint32_t>(algorithm);
   auto found = spmm_plans_.find(key);
-  if (found == spmm_plans_.end()) {
+  auto retained =
+      found == spmm_plans_.end() ? nullptr : found->second.plan.lock();
+  if (!retained) {
     auto created = std::make_shared<SpmmPlan>();
     created->rhs_count = rhs_count;
     created->algorithm = algorithm == 0 ? CUSPARSE_SPMM_CSR_ALG2
@@ -3735,16 +3737,17 @@ void CuSparseMatrix::spmm(size_t dB,
     } else if (algorithm == 1) {
       ++spmm_preprocess_fallbacks_;
     }
-    found = spmm_plans_.emplace(key, std::move(created)).first;
+    retained = created;
+    spmm_plans_[key] = {created, created};
     ++spmm_plan_builds_;
   } else {
     ++spmm_plan_reuses_;
-    if (found->second->preprocessed) {
+    if (retained->preprocessed) {
       ++spmm_preprocess_reuses_;
     }
   }
 
-  auto &plan = *found->second;
+  auto &plan = *retained;
   if (plan.stream != stream) {
     cusparse.cpSetStream(plan.handle, stream);
     CUstream bound_stream = reinterpret_cast<CUstream>(1);
@@ -3791,8 +3794,10 @@ CuSparseMatrix::SpmmPlanInfo CuSparseMatrix::spmm_plan_info(
   const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
                    static_cast<std::uint32_t>(algorithm);
   const auto found = spmm_plans_.find(key);
-  if (found != spmm_plans_.end()) {
-    const auto &plan = *found->second;
+  const auto retained =
+      found == spmm_plans_.end() ? nullptr : found->second.plan.lock();
+  if (retained) {
+    const auto &plan = *retained;
     result.prepared = true;
     result.preprocess_attempted = plan.preprocess_attempted;
     result.preprocessed = plan.preprocessed;
@@ -3801,6 +3806,36 @@ CuSparseMatrix::SpmmPlanInfo CuSparseMatrix::spmm_plan_info(
   }
 #endif
   return result;
+}
+
+CuSparseMatrix::SpmmPlanLease CuSparseMatrix::retain_spmm_plan(
+    int rhs_count,
+    int algorithm,
+    bool release_cache) {
+#if defined(TI_WITH_CUDA)
+  TI_ERROR_IF(rhs_count < 2 || algorithm < 0 || algorithm > 3,
+              "Invalid CUDA cuSPARSE SpMM lease key.");
+  std::lock_guard<std::mutex> lock(spmv_mutex_);
+  const auto key = (static_cast<std::uint64_t>(rhs_count) << 32) |
+                   static_cast<std::uint32_t>(algorithm);
+  const auto found = spmm_plans_.find(key);
+  auto plan = found == spmm_plans_.end() ? nullptr : found->second.plan.lock();
+  TI_ERROR_IF(!plan, "CUDA cuSPARSE SpMM lease requires a prepared plan.");
+  if (release_cache) {
+    found->second.cache_owner.reset();
+  }
+  for (auto it = spmm_plans_.begin(); it != spmm_plans_.end();) {
+    if (it->second.plan.expired()) {
+      it = spmm_plans_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  return {std::move(plan)};
+#else
+  TI_NOT_IMPLEMENTED;
+  return {};
+#endif
 }
 
 void CuSparseMatrix::spsv(size_t dX,
@@ -4143,9 +4178,12 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
       static_cast<std::uint64_t>(nnz_) * sizeof(float32);
   result.spmv_workspace_reserved_bytes =
       spmv_buffer_initialized_ ? spmv_buffer_size_ : 0;
-  for (const auto &[key, plan] : spmm_plans_) {
+  for (const auto &[key, entry] : spmm_plans_) {
     (void)key;
-    result.spmm_workspace_reserved_bytes += plan->workspace_size;
+    if (const auto plan = entry.plan.lock()) {
+      result.spmm_workspace_reserved_bytes += plan->workspace_size;
+      ++result.spmm_plan_count;
+    }
   }
   for (const auto &[key, plan] : spsv_plans_) {
     (void)key;
@@ -4172,15 +4210,14 @@ SparseMatrixRuntimeStatistics CuSparseMatrix::debug_runtime_statistics() const {
         pattern_->operator_references();
     result.pattern_storage_shared = true;
   }
-  result.matrix_descriptor_count =
-      (matrix_ != nullptr ? 1 : 0) + spmm_plans_.size() +
-      spsv_plans_.size() + spsm_plans_.size();
+  result.matrix_descriptor_count = (matrix_ != nullptr ? 1 : 0) +
+                                   result.spmm_plan_count + spsv_plans_.size() +
+                                   spsm_plans_.size();
   result.dense_vector_descriptor_count =
       (spmv_vec_x_ != nullptr ? 1 : 0) + (spmv_vec_y_ != nullptr ? 1 : 0) +
       spsv_plans_.size() * 2;
   result.spmv_handle_count = spmv_handle_ != nullptr ? 1 : 0;
-  result.spmm_plan_count = spmm_plans_.size();
-  result.spmm_dense_matrix_descriptor_count = spmm_plans_.size() * 2;
+  result.spmm_dense_matrix_descriptor_count = result.spmm_plan_count * 2;
   result.spsv_plan_count = spsv_plans_.size();
   result.spsm_plan_count = spsm_plans_.size();
   result.triangular_dense_descriptor_count =

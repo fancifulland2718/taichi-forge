@@ -635,8 +635,14 @@ class SparseMatrix:
             ]
 
     def record_spmm(
-        self, rhs_count, *, input="input", output="output",
-        absolute_tolerance, relative_tolerance,
+        self,
+        rhs_count,
+        *,
+        input="input",
+        output="output",
+        absolute_tolerance,
+        relative_tolerance,
+        preparation=None,
     ):
         """Describe a fixed-pattern f32 sparse-dense product for a Graph.
 
@@ -647,13 +653,20 @@ class SparseMatrix:
         Call the returned operation's prepare(input_array, output_array)
         before recipe search to expose retained physical plans without
         allocating duplicate dense arrays or executing the product.
+        Alternatively, pass expected preparation_artifact() JSON facts from
+        an equivalent operation for selected-only restoration on capable
+        runtimes. The selected plan is prepared with real bindings, not here.
         """
         from taichi_forge.linalg._spmm import SparseSpmmOperation
 
         return SparseSpmmOperation(
-            self, rhs_count, input=input, output=output,
+            self,
+            rhs_count,
+            input=input,
+            output=output,
             absolute_tolerance=absolute_tolerance,
             relative_tolerance=relative_tolerance,
+            preparation=preparation,
         )
 
     def spmv(self, other, *, method="auto"):

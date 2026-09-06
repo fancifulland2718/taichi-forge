@@ -86,7 +86,7 @@ def _hardware_recipe_providers(binding_frames):
     )
 
 
-def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None, binding_frames=False):
+def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None, binding_frames=False, preparation=None):
     rows, columns, rhs_count = 7, 5, 8
     dense = np.zeros((rows, columns), np.float32)
     offsets, indices, values = [0], [], []
@@ -116,6 +116,7 @@ def _spmm_definition(*, tolerance=2e-5, prepare=True, component_version=None, bi
         output="product",
         absolute_tolerance=tolerance,
         relative_tolerance=tolerance,
+        preparation=preparation,
     )
     if component_version is not None:
         import json
@@ -261,6 +262,242 @@ def test_spmm_semantic_drift_and_explicit_preparation():
     for tolerance in (True, float("nan"), -1.0):
         with pytest.raises((TypeError, ValueError)):
             operation.matrix.record_spmm(8, absolute_tolerance=tolerance, relative_tolerance=2e-5)
+
+
+@pytest.mark.parametrize("framed", (False, True))
+@pytest.mark.parametrize("strategy", ("row_streamed", "tree_direct", "pattern_preprocessed"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_search_owner_retires_without_freezing_or_invalidating_execution_plans(strategy, framed):
+    import gc
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    definition, operation, providers, bindings, expected = _spmm_definition(binding_frames=framed)
+    matrix = operation.matrix
+    if not hasattr(matrix.matrix, "_cuda_cusparse_retain_spmm_plan"):
+        pytest.skip("native SpMM plan leases are unavailable")
+    if strategy not in operation.preparation_report():
+        pytest.skip("requested SpMM preparation is unavailable")
+    plan_count = lambda: matrix._debug_runtime_stats()["resources"]["spmm_plan_count"]
+    assert plan_count() == len(operation.preparation_report())
+    catalog = definition.recipe_catalog(providers=providers)
+    catalog.build_compatible_stage(candidate_limit=32)
+    expected_families = ({"binding_frames"} if framed else set()) | (
+        {"sparse_spmm"} if strategy != "row_streamed" else set()
+    )
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if {f.provider_namespace.rsplit(".", 1)[-1] for f in entry.recipe.fragments} == expected_families
+        and all(
+            f.provider_metadata["family_selection"]["choice_id"] == strategy
+            for f in entry.recipe.fragments
+            if f.provider_namespace.endswith(".sparse_spmm")
+        )
+    )
+    operation.close()
+    gc.collect()
+    assert plan_count() == 0, "a frozen definition must not retain all search plans or a baseline plan"
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as result:
+            graph = result.executor
+            bound = graph.bind(bindings)
+            for _ in range(41):
+                graph.run(bound)
+            np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+            assert plan_count() == 1
+            # Another search owner can borrow this plan, then retire its own
+            # alternatives without freeing the executable's selected workspace.
+            other = matrix.record_spmm(
+                operation.rhs_count, output="product", absolute_tolerance=2e-5, relative_tolerance=2e-5
+            )
+            other.prepare(bindings["input"], bindings["product"])
+            assert plan_count() == len(operation.preparation_report())
+            other.close()
+            gc.collect()
+            assert plan_count() == 1
+            for _ in range(7):
+                graph.run(bound)
+            np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+            with pytest.raises(RuntimeError, match="closed"):
+                operation.prepare(bindings["input"], bindings["product"])
+    del graph, bound, result
+    gc.collect()
+    assert plan_count() == 0
+
+
+@pytest.mark.parametrize("framed", (False, True))
+@pytest.mark.parametrize("strategy", ("row_streamed", "tree_direct", "pattern_preprocessed"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_preparation_artifact_restores_only_selected_plan_in_new_process(tmp_path, strategy, framed):
+    import json
+    import subprocess
+    import sys
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    definition, operation, providers, bindings, expected = _spmm_definition(binding_frames=framed)
+    if not operation._owned_plans or strategy not in operation.preparation_report():
+        pytest.skip("selected-only SpMM restoration is unavailable")
+
+    def evaluate(graph, recipe):
+        bound = graph.bind(bindings)
+        graph.run(bound)
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-5, atol=2e-5)
+        recording = next(lease for lease in graph._spec.lifetime_leases if hasattr(lease, "_graph_spmm_strategy"))
+        return {
+            "selection": float(recording._graph_spmm_strategy == strategy)
+            + float((bound._version.execution_frame is not None) == framed)
+        }
+
+    decision = definition.search_recipes(
+        providers=providers,
+        target=ti.graph.GraphOptimizationTarget(objectives=(("selection", "max"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=16, repeat_count=1),
+        strategy=ti.graph.GraphRecipeSearchStrategy(mode="exact_if_bounded"),
+    ).run(evaluate)
+    assert decision.status == "selected" and decision.report.search_complete, decision.report.results
+    artifact = tmp_path / "spmm-selection.json"
+    artifact.write_text(
+        json.dumps(
+            {
+                "preparation": operation.preparation_artifact(),
+                "selection": decision.selection_artifact.to_dict(),
+                "strategy": strategy,
+                "framed": framed,
+            }
+        ),
+        encoding="utf-8",
+    )
+    child = """
+import gc,json,sys
+from pathlib import Path
+import numpy as np
+import taichi_forge as ti
+from tests.python.test_graph_hardware_recipe import _spmm_definition
+ti.init(arch=ti.cuda,offline_cache=False)
+data=json.loads(Path(sys.argv[1]).read_text())
+definition,operation,providers,bindings,expected=_spmm_definition(prepare=False,preparation=data['preparation'],binding_frames=data['framed'])
+stats=lambda:operation.matrix._debug_runtime_stats()
+assert stats()['operations']['spmm_plan_builds']==0,stats()
+selection=definition.resolve_recipe(ti.graph.GraphRecipeSelectionArtifact.from_dict(data['selection']),providers=providers)
+assert stats()['operations']['spmm_plan_builds']==0
+with definition.materialize(selection) as result:
+    assert stats()['operations']['spmm_plan_builds']==0
+    graph=result.executor
+    bound=graph.bind(bindings)
+    operation.close()
+    for _ in range(29):graph.run(bound)
+    np.testing.assert_allclose(bindings['output'].to_numpy(),expected,rtol=2e-5,atol=2e-5)
+    assert stats()['operations']['spmm_plan_builds']==1,stats()
+    assert stats()['resources']['spmm_plan_count']==1
+    recording=next(lease for lease in graph._spec.lifetime_leases if hasattr(lease,'_graph_spmm_strategy'))
+    assert recording._graph_spmm_strategy==data['strategy']
+    assert recording.plan_info()['workspace_bytes']==data['preparation']['plans'][data['strategy']]['workspace_bytes']
+    assert recording._graph_spmm_source._preparation_origin=='imported_expected_facts_not_current_measurement'
+del graph,bound,result,recording
+gc.collect()
+assert stats()['resources']['spmm_plan_count']==0,stats()
+print('SELECTED_SPMM_RESTORED_WITHOUT_BASELINE')
+ti.reset()
+"""
+    completed = subprocess.run([sys.executable, "-c", child, str(artifact)], capture_output=True, text=True, timeout=90)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "SELECTED_SPMM_RESTORED_WITHOUT_BASELINE" in completed.stdout
+    operation.close()
+
+
+@pytest.mark.parametrize("drift", ("schema", "semantics", "component", "device", "workspace", "elapsed", "preprocess"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_preparation_contract_drift_is_rejected_without_plan_creation(monkeypatch, drift):
+    from taichi_forge._lib import core
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    _, operation, _, _, _ = _spmm_definition()
+    if not operation._owned_plans:
+        pytest.skip("native SpMM plan ownership is unavailable")
+    saved = operation.preparation_artifact()
+    if drift in ("schema", "semantics", "component", "device"):
+        saved[drift] = "drift"
+    elif drift == "workspace":
+        saved["plans"]["tree_direct"]["workspace_bytes"] = True
+    elif drift == "elapsed":
+        saved["plans"]["tree_direct"]["host_setup_seconds"] = -1
+    else:
+        saved["plans"]["tree_direct"]["preprocessed"] = True
+    monkeypatch.setattr(
+        core.SparseMatrix,
+        "_cuda_cusparse_prepare_spmm",
+        lambda *args: pytest.fail("contract drift must not create a vendor plan"),
+    )
+    with pytest.raises(ValueError, match="SpMM preparation"):
+        _spmm_definition(prepare=False, preparation=saved)
+    operation.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_search_leases_do_not_retire_preexisting_expert_cache():
+    import gc
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    definition, operation, _, bindings, _ = _spmm_definition(prepare=False)
+    matrix = operation.matrix
+    if not operation._owned_plans:
+        pytest.skip("native SpMM plan ownership is unavailable")
+    expert = ti.hardware.linalg.CusparseSpmmRecording(matrix, operation.rhs_count, output="product")
+    expert.execute({"input": bindings["input"], "product": bindings["product"]})
+    ti.sync()
+    assert matrix._debug_runtime_stats()["resources"]["spmm_plan_count"] == 1
+    operation.prepare(bindings["input"], bindings["product"])
+    operation.close()
+    del definition
+    gc.collect()
+    assert matrix._debug_runtime_stats()["resources"]["spmm_plan_count"] == 1
+    assert expert.plan_info()["prepared"]
+
+
+@pytest.mark.parametrize("framed", (False, True))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_spmm_restored_workspace_mismatch_retires_failed_selected_plan(framed):
+    import gc
+
+    if not ti.hardware.linalg.cusparse_spmm_is_available():
+        pytest.skip("optional SpMM provider is unavailable")
+    _, original, _, _, _ = _spmm_definition()
+    if not original._owned_plans:
+        pytest.skip("native SpMM plan ownership is unavailable")
+    saved = original.preparation_artifact()
+    saved["plans"]["tree_direct"]["workspace_bytes"] += 256
+    original.close()
+    definition, operation, providers, bindings, _ = _spmm_definition(
+        prepare=False, preparation=saved, binding_frames=framed
+    )
+    catalog = definition.recipe_catalog(providers=providers)
+    catalog.build_compatible_stage(candidate_limit=32)
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if bool(entry.recipe.executor_fragment) == framed
+        and any(
+            f.provider_namespace.endswith(".sparse_spmm")
+            and f.provider_metadata["family_selection"]["choice_id"] == "tree_direct"
+            for f in entry.recipe.fragments
+        )
+    )
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as result:
+            with pytest.raises(RuntimeError, match="workspace differs"):
+                bound = result.executor.bind(bindings)
+                result.executor.run(bound)
+        del result
+    gc.collect()
+    stats = operation.matrix._debug_runtime_stats()
+    assert stats["operations"]["spmm_plan_builds"] == 1
+    assert stats["resources"]["spmm_plan_count"] == 0
+    assert stats["resources"]["spmm_workspace_reserved_bytes"] == 0
+    operation.close()
 
 
 def _fft_definition(*, prepare=True, direction="forward", preparation=None, binding_frames=False):

@@ -171,13 +171,17 @@ class CudaSparseSpmmCaptureCommand final
                                aot::Arg input,
                                aot::Arg output,
                                int rhs_count,
-                               int algorithm)
+                               int algorithm,
+                               bool owned_plan,
+                               std::int64_t expected_workspace)
       : matrix_(matrix),
         program_(program),
         input_(std::move(input)),
         output_(std::move(output)),
         rhs_count_(rhs_count),
-        algorithm_(algorithm) {
+        algorithm_(algorithm),
+        owned_plan_(owned_plan),
+        expected_workspace_(expected_workspace) {
   }
 
   const char *kind() const override {
@@ -208,7 +212,21 @@ class CudaSparseSpmmCaptureCommand final
 
   void prepare(const std::unordered_map<std::string, aot::IValue> &args,
                Program &program) override {
+    const auto existed =
+        matrix_->spmm_plan_info(rhs_count_, algorithm_).prepared;
     record_impl(args, program, nullptr, true);
+    // Capture commands, and therefore in-flight executors, retain their own
+    // workspace. Search-owned entries need no matrix-wide strong cache owner.
+    auto retained = matrix_->retain_spmm_plan(rhs_count_, algorithm_,
+                                              owned_plan_ && !existed);
+    if (expected_workspace_ >= 0) {
+      const auto info = matrix_->spmm_plan_info(rhs_count_, algorithm_);
+      TI_ERROR_IF(
+          info.workspace_bytes !=
+              static_cast<std::uint64_t>(expected_workspace_),
+          "Restored SpMM workspace differs from the prepared contract.");
+    }
+    retained_plan_ = std::move(retained);
   }
 
   void record(const std::unordered_map<std::string, aot::IValue> &args,
@@ -248,6 +266,9 @@ class CudaSparseSpmmCaptureCommand final
   aot::Arg output_;
   int rhs_count_{0};
   int algorithm_{0};
+  bool owned_plan_{false};
+  std::int64_t expected_workspace_{-1};
+  CuSparseMatrix::SpmmPlanLease retained_plan_;
 };
 
 class CudaSparseTriangularCaptureCommand final
@@ -988,13 +1009,16 @@ void GraphBuilder::dispatch_cuda_capture_cusparse_spmm(
     const aot::Arg &input,
     const aot::Arg &output,
     int rhs_count,
-    int algorithm) {
+    int algorithm,
+    bool owned_plan,
+    std::int64_t expected_workspace) {
   validate_cuda_sparse_spmm_args(matrix, program, input, output, rhs_count,
                                  algorithm);
   register_arg(input);
   register_arg(output);
   auto command = std::make_shared<CudaSparseSpmmCaptureCommand>(
-      matrix, program, input, output, rhs_count, algorithm);
+      matrix, program, input, output, rhs_count, algorithm, owned_plan,
+      expected_workspace);
   all_nodes_.push_back(std::make_unique<CudaCaptureCommandDispatch>(
       std::move(command), std::vector<aot::Arg>{input, output}));
   seq()->append(all_nodes_.back().get());

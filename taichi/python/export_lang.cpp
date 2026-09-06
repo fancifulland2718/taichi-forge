@@ -5262,6 +5262,22 @@ void export_lang(py::module &m) {
           py::arg("matrix"), py::arg("program"), py::arg("input"),
           py::arg("output"), py::arg("rhs_count"), py::arg("algorithm"))
       .def(
+          "_dispatch_cuda_cusparse_spmm_owned_capture_recipe",
+          [](GraphBuilder &builder, const py::object &matrix, Program *program,
+             const aot::Arg &input, const aot::Arg &output, int rhs_count,
+             int algorithm, std::int64_t expected_workspace) {
+            auto *csr =
+                dynamic_cast<CuSparseMatrix *>(matrix.cast<SparseMatrix *>());
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA SpMM ownership requires a scalar CSR matrix.");
+            builder.dispatch_cuda_capture_cusparse_spmm(
+                csr, program, input, output, rhs_count, algorithm, true,
+                expected_workspace);
+          },
+          py::arg("matrix"), py::arg("program"), py::arg("input"),
+          py::arg("output"), py::arg("rhs_count"), py::arg("algorithm"),
+          py::arg("expected_workspace") = -1)
+      .def(
           "_dispatch_cuda_cusparse_triangular_capture_recipe",
           [](GraphBuilder &builder, const py::object &matrix,
              Program *program, const aot::Arg &input,
@@ -7714,6 +7730,7 @@ void export_lang(py::module &m) {
              std::shared_ptr<SparseBsrPattern>>(m, "SparseBsrPattern")
       .def("_debug_runtime_stats", sparse_pattern_runtime_stats);
 
+  py::class_<CuSparseMatrix::SpmmPlanLease>(m, "_CudaSpmmPlanLease");
   py::class_<SparseMatrix>(m, "SparseMatrix")
       .def(py::init<>())
       .def(py::init<int, int, DataType>(), py::arg("rows"), py::arg("cols"),
@@ -7727,6 +7744,17 @@ void export_lang(py::module &m) {
       .def("num_cols", &SparseMatrix::num_cols)
       .def("num_nonzero", &SparseMatrix::num_nonzero)
       .def("update_values", &SparseMatrix::update_values)
+      .def(
+          "_cuda_cusparse_retain_spmm_plan",
+          [](SparseMatrix &matrix, int rhs_count, int algorithm,
+             bool release_cache) {
+            auto *csr = dynamic_cast<CuSparseMatrix *>(&matrix);
+            TI_ERROR_IF(csr == nullptr,
+                        "CUDA SpMM ownership requires a scalar CSR matrix.");
+            return csr->retain_spmm_plan(rhs_count, algorithm, release_cache);
+          },
+          py::arg("rhs_count"), py::arg("algorithm"),
+          py::arg("release_cache") = false, py::keep_alive<0, 1>())
       .def(
           "_cuda_cusparse_prepare_spmm",
           [](SparseMatrix &matrix, Program *program, const Ndarray &input,

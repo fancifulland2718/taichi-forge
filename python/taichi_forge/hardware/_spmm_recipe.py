@@ -39,7 +39,7 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "sparse_spmm",
         capabilities=("fixed-pattern-spmm", "frozen-preprocess-policy"),
-        domain_version="spmm-retained-plans-v2",
+        domain_version="spmm-retained-plans-v3",
         semantic_fingerprint="f32-csr-row-major-relaxed-finite-v1",
     )
 
@@ -113,12 +113,19 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
                 "measurement_scope": "host_elapsed_for_spmm_preparation_or_cache_reuse",
                 "shared_initialization": "not_separated",
                 "selected_only_restore": "not_measured",
+                "preparation_origin": source._preparation_origin,
+                "plan_ownership": (
+                    "independent_search_and_execution_leases" if source._owned_plans else "legacy_matrix_cache"
+                ),
+                "restoration_boundary": "first_bound_native_preparation" if source._owned_plans else "unavailable",
             },
             "limitations": (
                 "CUDA scalar f32 CSR SparsePattern only; compact row-major dense bindings",
                 "finite inputs and caller-qualified tolerance; no bitwise cross-version promise",
                 "matrix-owned workspace shared by equal RHS/algorithm; runtime-ordered submissions",
-                "preparing search retains all candidate plans until the matrix generation ends; per-plan bytes are not total process residency",
+                "close releases search leases; live Graph commands and pre-existing matrix caches retain their own plans",
+                "frozen definitions hold matrix identity and expected facts, not search plans; per-plan bytes are not process residency",
+                "selected plan creation requires real dense bindings; restored preparation timing remains historical, not freshly measured",
                 "setup observation is outside trial metrics; production qualification remains downstream-owned",
             ),
         }
