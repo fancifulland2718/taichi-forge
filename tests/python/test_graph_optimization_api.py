@@ -174,7 +174,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         }
     )
     budget = ti.graph.GraphSearchBudget(
-        evaluation_limit=10,
+        evaluation_limit=14,
         repeat_count=2,
         deterministic_seed=17,
     )
@@ -186,7 +186,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         evaluation_contract=evaluation_contract,
         backend_environment=backend_environment,
     )
-    assert len(session.recipes) == 5
+    assert len(session.recipes) == 7
     assert session.baseline.manifest.is_baseline
     assert all(recipe.semantic_graph_id == definition.semantic_graph_id for recipe in session.recipes)
     assert all("block_dim" not in json.dumps(recipe.to_dict(), sort_keys=True) for recipe in session.recipes)
@@ -218,7 +218,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
     assert decision.status == "selected"
     assert decision.next_action == "apply_selection"
     assert report.search_complete
-    assert report.evaluation_count == 10
+    assert report.evaluation_count == 14
     assert set(observed) == {recipe.recipe_id for recipe in session.recipes}
     assert report.missing_recipe_ids == ()
     assert report.selected_recipe_id == decision.selection.recipe_id
@@ -326,7 +326,7 @@ def test_public_complete_recipe_search_materializes_measured_pareto_decision():
         engine="compileiq",
         target=target,
         budget=ti.graph.GraphSearchBudget(
-            evaluation_limit=6,
+            evaluation_limit=8,
             deterministic_seed=17,
         ),
         strategy=staged_strategy,
