@@ -17,6 +17,7 @@ retained-provider API，而 discovery probe 始终不执行算法。
 | cuBLAS | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cublas")` | direct Python 或 root Graph；不能在 kernel 内调用 |
 | cuSPARSE | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | cuFFT | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
+| VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 显式 addon/构建；目前不含在标准 wheel | `ti.hardware.probe("vkfft", library_path=...)` | 固定存储 `VulkanFftPlan` 或 root Graph；无 FFT recipe 搜索 |
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
 | Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
@@ -629,6 +630,47 @@ workaround，不能写成 Forge runtime requirement。
 
 不要把本地 benchmark 直接变成全局自动 heuristic。automatic selection 必须建立
 exact-scope、fail-closed admission 合同；否则应保持 provider 显式选择。
+
+## 可选 Vulkan FFT 计划
+
+当前源码提供 `ti.hardware.fft.VulkanFftPlan`，要求包含 FFT 原生桥接的 runtime，以及独立
+`taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO。adapter 使用 VkFFT 1.3.4 和匹配的静态
+glslang/SPIRV-Tools 构建；执行需要 Vulkan loader/driver，不需要 CUDA、Vulkan SDK 或共享
+glslang runtime。目前不默认随标准 wheel 提供；构建者启用 `TI_BUILD_VKFFT_PROVIDER`，并按
+`cmake/TaichiVkfftProvider.cmake` 提供明确的源码与静态库路径。
+
+```python
+ti.init(arch=ti.vulkan)
+data = ti.ndarray(ti.f32, shape=(2, 16, 8, 2))
+# 执行前填充实部/虚部交错的标量数据。
+with ti.hardware.fft.VulkanFftPlan(
+    data, (16, 8), batch_count=2, direction="inverse",
+    normalization="inverse", adapter_path=adapter_path,
+) as plan:
+    plan.run()  # 原地变换，复用 Forge 有序 compute queue。
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.record(data="signal"))
+    graph = builder.compile()
+    bindings = graph.bind({"signal": data})
+    graph.run(bindings)
+    memory = plan.memory_report()
+    build_and_allocation_facts = plan.statistics()
+```
+
+也可以用 `TI_VKFFT_LIBRARY_PATH` 指定 adapter 文件。旧的 `ti.hardware.fft.is_available()` /
+`cache_statistics()` 仍只描述 cuFFT；`ti.hardware.probe("vkfft", library_path=...)` 检查 adapter
+ABI，不创建计划、不证明设备或 workload 可执行。被动状态只统计已知的公开未关闭计划。
+
+首版支持原地 compact C2C f32、rank 1--3 与显式 batch；尺寸只能包含 2/3/5/7/11/13 素因子。
+更大素因子因上游错误清理路径尚待资格化而暂缓，不是性能淘汰。默认 `normalization="none"`
+使正逆变换均不归一化；`"inverse"` 将逆变换除以 transform volume。存储、shape、方向和归一化
+在计划中冻结，Graph 必须绑定原 ndarray，不支持运行时替换存储。
+
+创建计划可能 JIT 并同步初始化查找表。重放执行保留的 secondary GPU 命令序列，但每个 FFT action
+仍有 root-ordered host call；不能称为整个 Graph 的原生 capture，也不等同于 `ti.linalg.record_fft()`
+的 CUDA 输入输出分离合同，不新增 CompileIQ 路由轴。关闭计划拒绝后续调用，已提交 command buffer
+仍保留资源。请求分配统计不含用户存储和不透明驱动对象；close 和初始化请求分配峰值均不能证明
+显存已退役或真实 device peak。这里不声明生产加速，也不保证所有驱动组合。
 
 ## 官方参考
 

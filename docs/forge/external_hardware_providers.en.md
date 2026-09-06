@@ -20,6 +20,7 @@ APIs for the bounded operations below; discovery probes remain non-executing.
 | cuBLAS | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cublas")` | Direct Python or root Graph; not kernel-callable |
 | cuSPARSE | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cusparse")` | Domain auto/explicit or root Graph; not kernel-callable |
 | cuFFT | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
+| VkFFT 1.3.4 | Optional ABI1 Vulkan JIT adapter | Explicit addon/build; not currently included in standard wheels | `ti.hardware.probe("vkfft", library_path=...)` | Fixed-storage `VulkanFftPlan` or root Graph; no FFT recipe search |
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
 | Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
@@ -734,6 +735,55 @@ the following:
 Do not turn a local benchmark into an automatic global heuristic. Automatic
 selection requires an exact-scope, fail-closed admission contract; otherwise
 keep the provider explicit.
+
+## Optional Vulkan FFT plans
+
+The current source exposes `ti.hardware.fft.VulkanFftPlan`. It requires a native
+runtime containing the FFT bridge and the separate
+`taichi_forge_vkfft_provider_abi1_vkfft134` DLL/SO. The adapter compiles VkFFT 1.3.4
+with a matched static glslang/SPIRV-Tools distribution. Execution needs the Vulkan
+loader/driver, not CUDA, the Vulkan SDK, or a shared glslang runtime. Standard
+wheel inclusion is not implied; builders enable `TI_BUILD_VKFFT_PROVIDER` and
+supply the inputs in `cmake/TaichiVkfftProvider.cmake`.
+
+```python
+ti.init(arch=ti.vulkan)
+data = ti.ndarray(ti.f32, shape=(2, 16, 8, 2))
+# Populate data with interleaved real/imaginary scalars before execution.
+with ti.hardware.fft.VulkanFftPlan(
+    data, (16, 8), batch_count=2, direction="inverse",
+    normalization="inverse", adapter_path=adapter_path,
+) as plan:
+    plan.run()  # In place, on Forge's ordered compute queue.
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(plan.record(data="signal"))
+    graph = builder.compile()
+    bindings = graph.bind({"signal": data})
+    graph.run(bindings)
+    memory = plan.memory_report()
+    build_and_allocation_facts = plan.statistics()
+```
+
+Alternatively set `TI_VKFFT_LIBRARY_PATH` to the adapter file. The legacy
+`ti.hardware.fft.is_available()` / `cache_statistics()` remain cuFFT-only;
+`ti.hardware.probe("vkfft", ...)` checks the adapter ABI without creating a plan
+or qualifying a device/workload. Passive reports inspect only known open plans.
+
+This slice supports in-place compact C2C f32, rank 1--3 and explicit batching.
+Dimensions may contain only prime factors 2, 3, 5, 7, 11 and 13; larger factors
+await upstream error-cleanup qualification, not a speed threshold. The default
+`normalization="none"` leaves both directions unnormalized; `"inverse"` divides
+the inverse by the transform volume. Storage, shape, direction and normalization
+are frozen per plan. A Graph binding must reference the original array.
+
+Plan creation may JIT and synchronize lookup-table initialization. Replay uses a
+retained secondary GPU command sequence with one root-ordered host call per FFT
+action; this is not enclosing native Graph capture, `ti.linalg.record_fft()`'s
+CUDA out-of-place contract, or a new CompileIQ route. Closing a plan rejects
+future calls but already submitted command buffers retain their resources.
+Requested allocations exclude caller storage and opaque driver objects; neither
+closing the handle nor the initialization allocation peak proves device VRAM
+retirement/peak. No production speedup or all-driver compatibility is claimed.
 
 ## Official references
 
