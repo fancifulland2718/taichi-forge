@@ -50,6 +50,7 @@ def test_default_runtime_recipe_families_have_independent_provider_ownership():
         "taichi_forge.graph.native_algorithm",
         "taichi_forge.graph.offload_phase_fusion",
         "taichi_forge.graph.recording_partition",
+        "taichi_forge.graph.resource_lifetime",
         "taichi_forge.graph.sparse_traversal",
         "taichi_forge.graph.structured_control",
         "taichi_forge.graph.workspace_concurrency",
@@ -652,7 +653,7 @@ def test_complete_native_algorithm_recipe_materializes_all_physical_routes(
     definition = builder.freeze()
     catalog = definition.recipe_catalog()
     fragments = _family_fragments(catalog, "native_algorithm")
-    assert len(fragments) == 3
+    assert len(fragments) == 5  # Includes register-shuffle and hierarchical carry.
 
     host = ((np.arange(capacity, dtype=np.int64) % 7) + 1).astype(np.int32)
     expected = np.empty_like(host)
@@ -682,7 +683,7 @@ def test_complete_native_algorithm_recipe_materializes_all_physical_routes(
             np.testing.assert_array_equal(output.to_numpy(), expected)
             physical_identities.add(materialized.manifest.materialized_physical_id)
             persistent_bytes.add(materialized.manifest.persistent_requested_bytes)
-    assert len(physical_identities) == 4
+    assert len(physical_identities) == 1 + len(fragments)
     assert persistent_bytes == {0, layout.num_segments * 4}
 
 
