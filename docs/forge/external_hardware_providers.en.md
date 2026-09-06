@@ -61,6 +61,16 @@ multiplies the input by `H * W`. Layout, precision and normalization are semanti
 requirements, not optimizer choices. Vendor internals not exposed by the library
 are reported as unknown, not fabricated kernel counts.
 
+FFT Graph recordings retain only their own physical plan, not the search
+operation's entire plan collection. `operation.close()` releases the operation's
+preparation ownership and prevents further calls to its `prepare()` or `compile()`;
+already-built Graphs keep their plan leases. An unused plan can retire once its
+last execution owner is gone. Frozen recipe metadata remains available, and a
+later materialization recreates only the requested retired plan, checking its
+component and workspace against the prepared facts at that cold boundary.
+Frozen definitions still retain their baseline recording. This is not a guarantee
+of selected-only residency or plan-free, cross-process restoration.
+
 These providers are opt-in additions alongside `ti.graph.default_recipe_providers()`
 at `definition.search_recipes(engine="compileiq", providers=..., ...)`. Supplying
 a provider without a matching prepared semantic region does not invent one.

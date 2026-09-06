@@ -53,6 +53,12 @@ Forge 不在每次 replay 扫描数值。FFT 正向、逆向均不归一化，�
 layout、精度和归一化属于语义要求，不是优化器选择。vendor 不开放的内部信息报告为 unknown，
 不能据此虚构内部 kernel 数。
 
+FFT Graph recording 只持有所用的物理计划，不反向持有搜索 operation 的全部候选计划。`operation.close()`
+释放 operation 的准备阶段所有权，并禁止继续调用它的 `prepare()` 或 `compile()`；已构建 Graph 的计划租约
+继续有效。未使用计划在最后一个执行拥有者释放后可退休。冻结 recipe 元数据仍可读取，后续物化只重建所请求的
+已退休计划，在该冷边界核对 component/workspace 与准备事实是否一致。冻结 definition 仍持有 baseline
+recording，因此这不保证仅所选显存驻留，也不代表已经实现无计划的跨进程恢复。
+
 这些 provider 需要在 `definition.search_recipes(engine="compileiq", providers=..., ...)` 中，
 与 `ti.graph.default_recipe_providers()` 一同显式传入；没有匹配的已准备语义 region 时，不能凭
 provider 名称制造 region。维护的魔改 CompileIQ fork 只调度 opaque complete-recipe identity；

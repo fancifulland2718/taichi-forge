@@ -477,8 +477,115 @@ def test_fft_recipe_preparation_and_numerical_semantics_are_explicit():
     assert definition.semantic_graph_id != inverse.semantic_graph_id
     for tolerance in (True, float("inf"), -1.0):
         with pytest.raises((TypeError, ValueError)):
-            ti.linalg.record_fft(
-                (8, 8), absolute_tolerance=tolerance, relative_tolerance=1e-4
-            )
+            ti.linalg.record_fft((8, 8), absolute_tolerance=tolerance, relative_tolerance=1e-4)
     operation.close()
     inverse_op.close()
+
+
+@pytest.mark.parametrize("use_alternative", (False, True))
+@pytest.mark.parametrize("explicit_close", (False, True))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_search_owner_can_retire_without_invalidating_graph_plan_leases(use_alternative, explicit_close):
+    import gc
+    import weakref
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, providers, bindings, expected = _fft_definition()
+    owner = weakref.ref(operation)
+    plans = {name: weakref.ref(plan) for name, plan in operation._plans.items()}
+    catalog = definition.recipe_catalog(providers=providers)
+    recipe = next(entry.recipe for entry in catalog.entries() if bool(entry.recipe.fragments) == use_alternative)
+    context = definition.materialization_context(provider_set=catalog.provider_set)
+    result = context.materialize(recipe)
+    graph = result.executor
+    bound = graph.bind(bindings)
+    # Queue work, release only the search owner, then continue with the same
+    # published binding. Native completion and Graph leases own live plans.
+    for _ in range(11):
+        graph.run(bound)
+    if explicit_close:
+        operation.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            operation.prepare()
+        with pytest.raises(RuntimeError, match="closed"):
+            operation.compile()
+    del operation
+    gc.collect()
+    assert owner() is None
+    assert plans["whole_transform"]() is not None  # Frozen definition owns baseline.
+    assert (plans["row_batch_column_inplace"]() is not None) == use_alternative
+    before = ti.hardware.fft.cache_statistics()
+    for _ in range(31):
+        graph.run(bound)
+    np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+    assert ti.hardware.fft.cache_statistics().create_requests == before.create_requests
+    result.close()
+    del bound, graph, result
+    gc.collect()
+    assert plans["row_batch_column_inplace"]() is None
+    # Prepared facts remain resolvable without retaining the alternative.
+    assert [entry.recipe.recipe_id for entry in definition.recipe_catalog(providers=providers).entries()] == [
+        entry.recipe.recipe_id for entry in catalog.entries()
+    ]
+    assert ti.hardware.fft.cache_statistics().create_requests == before.create_requests
+    alternative = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    with context.materialize(alternative) as restored:
+        restored.executor.run(restored.executor.bind(bindings))
+        np.testing.assert_allclose(bindings["output"].to_numpy(), expected, rtol=2e-4, atol=2e-4)
+        assert ti.hardware.fft.cache_statistics().create_requests == before.create_requests + 1
+    context.close()
+
+
+@pytest.mark.parametrize("drift", ("workspace", "component"))
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_retired_plan_recreation_rejects_changed_facts_and_releases_the_new_handle(monkeypatch, drift):
+    import gc
+    from taichi_forge.linalg import _fft
+    from taichi_forge.graph._recipes.materialize import GraphMaterializationError
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, providers, _, _ = _fft_definition()
+    catalog = definition.recipe_catalog(providers=providers)
+    alternative = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    operation.close()
+    gc.collect()
+    before = ti.hardware.fft.cache_statistics()
+    factory = _fft._SeparableFftPlan
+
+    def changed_plan(*args):
+        plan = factory(*args)
+        if drift == "workspace":
+            plan._workspace_bytes += 1
+        else:
+            from types import SimpleNamespace
+
+            original = plan._retained_identity.to_dict()
+            plan._retained_identity = SimpleNamespace(to_dict=lambda: {**original, "provider_scope": {"drift": True}})
+        return plan
+
+    monkeypatch.setattr(_fft, "_SeparableFftPlan", changed_plan)
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with pytest.raises(GraphMaterializationError, match="component or workspace"):
+            context.materialize(alternative)
+        after = ti.hardware.fft.cache_statistics()
+        assert after.live_handles == before.live_handles
+        assert after.workspace_bytes_live == before.workspace_bytes_live
+        monkeypatch.setattr(_fft, "_SeparableFftPlan", factory)
+        with context.materialize(alternative):
+            assert ti.hardware.fft.cache_statistics().live_handles == before.live_handles + 1
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_fft_metadata_catalog_does_not_recreate_plans_after_runtime_reset():
+    from taichi_forge.hardware._fft_recipe import _sources
+
+    if not ti.hardware.fft.is_available():
+        pytest.skip("the optional cuFFT runtime is unavailable")
+    definition, operation, _, _, _ = _fft_definition()
+    source = next(_sources(definition))[2]
+    operation.close()
+    ti.reset()
+    with pytest.raises(RuntimeError, match="retired runtime"):
+        source._recording("row_batch_column_inplace")
