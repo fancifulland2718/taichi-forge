@@ -110,7 +110,12 @@ class FftRecipeProvider(GraphRuntimeFragmentProvider):
             "semantic_contract": source.semantics,
             "frozen_config": source.physical_config(strategy),
             "component_applicability": source.component,
-            "preparation_observation": source.preparation_report()[strategy],
+            "preparation_observation": {
+                **source.preparation_report()[strategy],
+                "measurement_scope": "host_elapsed_for_fft_plan_creation",
+                "shared_initialization": "not_separated",
+                "selected_only_restore": "not_measured",
+            },
             "limitations": (
                 "CUDA f32 complex-to-complex only; compact two-dimensional transforms and explicit batch count",
                 "both directions are unnormalized; finite inputs and downstream-qualified tolerance",

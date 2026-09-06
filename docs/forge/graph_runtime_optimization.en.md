@@ -806,6 +806,15 @@ over observed sample extrema are separate; the latter are **not confidence inter
 Overlap and single-sample evidence are labeled, not turned into adoption gates.
 Independent host/device/end-to-end profiles are never summed automatically.
 
+Markdown also renders provider-owned `preparation_observation` facts already
+retained in recipe annotations. FFT observations cover plan creation; SpMM
+observations cover preparation that may reuse cached plans. Shared initialization
+is not separated, and selected-only restore is not measured. These observations
+are not trial metrics, isolated cold-start costs or whole-Graph setup. A missing
+baseline observation is unavailable, not zero. Repeated fragments can share plans:
+do not sum their times or workspace bytes, or interpret workspace as process VRAM.
+They do not populate `cost_profiles` or drive selection/amortization automatically.
+
 JSON preserves original cost observations, including failed trials, and derived
 summaries; Markdown uses the same facts. Search-wrapper materialization, evaluator
 and cleanup wall times are separate diagnostics, not substitutes for caller-owned

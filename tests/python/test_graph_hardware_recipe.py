@@ -186,6 +186,11 @@ def test_spmm_complete_recipes_search_report_and_fresh_process_resolution(tmp_pa
     markdown = decision.report.to_markdown()
     assert '"bitwise_reproducibility": false' in markdown
     assert '"provider": "cusparse"' in markdown
+    assert '"host_setup_seconds":' in markdown
+    assert '"measurement_scope": "host_elapsed_for_spmm_preparation_or_cache_reuse"' in markdown
+    assert '"selected_only_restore": "not_measured"' in markdown
+    assert all(not annotation["cost_profiles"] for annotation in decision.report.recipe_annotations)
+    assert restored.to_markdown() == markdown
     resolved = definition.resolve_recipe(decision.selection_artifact, providers=providers)
     with definition.materialize(resolved) as materialized:
         evaluate(materialized.executor, resolved)
@@ -405,6 +410,10 @@ def test_fft_and_spmm_complete_recipes_compose_search_and_resolve_in_fresh_proce
     assert "columns_in_place_per_batch" in json.dumps(
         decision.report.recipe_annotations
     )
+    markdown = decision.report.to_markdown()
+    assert '"measurement_scope": "host_elapsed_for_fft_plan_creation"' in markdown
+    assert '"measurement_scope": "host_elapsed_for_spmm_preparation_or_cache_reuse"' in markdown
+    assert '"shared_initialization": "not_separated"' in markdown
     artifact = tmp_path / "fft.json"
     artifact.write_text(
         json.dumps(decision.selection_artifact.to_dict()), encoding="utf-8"

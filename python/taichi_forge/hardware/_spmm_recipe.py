@@ -107,7 +107,12 @@ class SparseSpmmRecipeProvider(GraphRuntimeFragmentProvider):
             "semantic_contract": source.semantics,
             "frozen_config": source.physical_config(strategy),
             "component_applicability": source.component,
-            "preparation_observation": source.preparation_report()[strategy],
+            "preparation_observation": {
+                **source.preparation_report()[strategy],
+                "measurement_scope": "host_elapsed_for_spmm_preparation_or_cache_reuse",
+                "shared_initialization": "not_separated",
+                "selected_only_restore": "not_measured",
+            },
             "limitations": (
                 "CUDA scalar f32 CSR SparsePattern only; compact row-major dense bindings",
                 "finite inputs and caller-qualified tolerance; no bitwise cross-version promise",

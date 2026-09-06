@@ -692,7 +692,7 @@ class GraphOptimizationReportV2:
 
     def to_markdown(self):
         from taichi_forge.graph._trial_observations import _boundary_markdown
-        from taichi_forge.graph._report_context import _context_markdown, _cost_markdown
+        from taichi_forge.graph._report_context import _context_markdown, _cost_markdown, _provider_preparation_markdown
 
         lines = [
             "# Taichi Forge Graph Optimization Report",
@@ -733,6 +733,7 @@ class GraphOptimizationReportV2:
         lines.extend(_boundary_markdown(self.recipe_annotations))
         lines.extend(_cost_markdown(self.recipe_annotations))
         lines.extend(_context_markdown(self.context, self.recipe_annotations))
+        lines.extend(_provider_preparation_markdown(self.recipe_annotations))
         if any(item.get("environment_observations") for item in self.recipe_annotations):
             lines.extend(
                 [

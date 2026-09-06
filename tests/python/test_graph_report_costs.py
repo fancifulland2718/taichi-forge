@@ -192,3 +192,51 @@ def test_human_context_keeps_unknown_provider_fields_and_groups_equal_physical_t
     assert '"task_count": 2' in markdown
     assert '"accumulation": "modular_i32"' in markdown
     assert json.dumps(annotations, sort_keys=True) == before
+
+
+def test_provider_preparation_rendering_preserves_scope_without_inventing_lifecycle_costs():
+    from taichi_forge.graph._report_context import _cost_markdown, _provider_preparation_markdown
+
+    observation = {
+        "host_setup_seconds": 0.0125,
+        "workspace_bytes": 4096,
+        "measurement_scope": "application_specific_cached_preparation",
+        "shared_initialization": "not_separated",
+        "unknown_provider_fact": {"retained": True},
+    }
+    annotations = [
+        {"recipe_id": "baseline"},
+        {
+            "recipe_id": "candidate",
+            "provider_claims": [
+                {
+                    "source": "provider_declared_not_measured",
+                    "provider_namespace": "application.provider",
+                    "fragment_key": "external",
+                    "claims": {"preparation_observation": observation},
+                },
+                {"claims": "legacy description"},
+                {"claims": {"preparation_observation": None}},
+            ],
+        },
+    ]
+    before = json.dumps(annotations, sort_keys=True)
+    lines = _provider_preparation_markdown(annotations)
+    opening = lines.index("```json")
+    rendered = json.loads("\n".join(lines[opening + 1 : lines.index("```", opening + 1)]))
+    assert rendered == [
+        {
+            "recipe_id": "candidate",
+            "provider_namespace": "application.provider",
+            "fragment_key": "external",
+            "source": "provider_declared_not_measured",
+            "preparation_observation": observation,
+        }
+    ]
+    assert json.dumps(annotations, sort_keys=True) == before
+    assert _provider_preparation_markdown(annotations[:1]) == []
+    assert _cost_markdown(annotations) == []
+    markdown = "\n".join(lines)
+    assert "Missing phases and baseline observations are unavailable, not zero" in markdown
+    assert "Do not sum these times or workspaces" in markdown
+    assert "not CompileIQ trial measurements" in markdown

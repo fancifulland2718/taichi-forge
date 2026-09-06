@@ -636,6 +636,12 @@ setup 与 first 不应重叠。只有同 stage/fidelity 的完整且可行 basel
 无正向稳态收益或证据不可比时，不产生摊销次数。中位数估算与样本极值的算术边界分开，后者不是统计置信区间。
 范围重叠或单样本会明确标注，不构成自动采用门槛。host/device/end-to-end profile 不自动相加。
 
+Markdown 同时展示 recipe 注释中已有的 provider-owned `preparation_observation`。FFT 观测范围是计划创建；
+SpMM 观测范围是可能命中计划缓存的准备过程。共享初始化未单独拆分，selected-only restore 未测量。这些不是
+trial 指标、隔离冷启动或完整 Graph setup；baseline 缺测表示不可得，不是零。重复 fragment 可能共享计划，
+不能将时间或 workspace 跨 recipe 相加，也不能把 workspace 当作进程显存。它们不会自动填充 `cost_profiles`，
+也不会自动参与选择或摊销估算。
+
 JSON 保留原始成本观测（含失败 trial）与派生摘要，Markdown 由相同事实生成。搜索包装层的物化、evaluator
 总耗时和 cleanup wall time 是独立诊断，不替代调用者的 first/steady 测量。两处资源快照分别位于物化后与
 evaluator 结束后，不能观测所有中间分配或内存池 reservation。报告不在 steady Graph replay 中增加探测、

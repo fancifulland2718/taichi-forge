@@ -86,6 +86,38 @@ def _context_markdown(context, annotations):
     return lines
 
 
+def _provider_preparation_markdown(annotations):
+    observations = []
+    for annotation in annotations:
+        for entry in annotation.get("provider_claims", ()):
+            claims = entry.get("claims")
+            if not isinstance(claims, dict) or claims.get("preparation_observation") is None:
+                continue
+            observations.append(
+                {
+                    "recipe_id": annotation["recipe_id"],
+                    "provider_namespace": entry["provider_namespace"],
+                    "fragment_key": entry["fragment_key"],
+                    "source": entry.get("source"),
+                    "preparation_observation": claims["preparation_observation"],
+                }
+            )
+    if not observations:
+        return []
+    return [
+        "",
+        "## Provider-reported preparation observations",
+        "",
+        "These provider-owned facts are not CompileIQ trial measurements or automatically selected objectives. "
+        "Use the declared measurement scope: plan preparation may reuse a cache or include shared initialization; "
+        "it is not necessarily isolated cold start, full Graph setup, first/steady execution or selected-only restore. "
+        "Missing phases and baseline observations are unavailable, not zero. Repeated fragments may refer to the "
+        "same retained plan. Do not sum these times or workspaces across recipes, or treat workspace as process VRAM. "
+        "Lifecycle costs and amortization still require separately mapped caller measurements.",
+        *_json_section("Recorded provider preparation facts", observations),
+    ]
+
+
 def _cost_markdown(annotations):
     if not any(item.get("cost_profiles") for item in annotations):
         return []
