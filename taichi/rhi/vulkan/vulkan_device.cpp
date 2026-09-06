@@ -1491,6 +1491,13 @@ vkapi::IVkCommandBuffer VulkanCommandList::vk_command_buffer() {
   return buffer_;
 }
 
+VkCommandBuffer VulkanCommandList::begin_external_compute(
+    vkapi::IDeviceObj owner) {
+  buffer_->refs.push_back(std::move(owner));
+  current_pipeline_ = nullptr;
+  return buffer_->buffer;
+}
+
 void VulkanCommandList::set_next_renderpass_color_final_layout(
     ImageLayout layout) {
   TI_ERROR_IF(layout != ImageLayout::color_attachment &&

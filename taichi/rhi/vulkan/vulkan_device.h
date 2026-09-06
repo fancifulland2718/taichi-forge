@@ -598,6 +598,10 @@ class VulkanCommandList : public CommandList {
 
   vkapi::IVkCommandBuffer vk_command_buffer();
 
+  // External compute recording changes the bound pipeline. Keep the external
+  // objects with the command buffer and invalidate only recording-time state.
+  VkCommandBuffer begin_external_compute(vkapi::IDeviceObj owner);
+
   // Profiler support
   void begin_profiler_scope(const std::string &kernel_name) override;
   void end_profiler_scope() override;
@@ -1030,6 +1034,11 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   VkQueue compute_queue() const {
     return compute_queue_;
+  }
+
+  // Cold provider initialization may submit LUT uploads on the shared queue.
+  std::unique_lock<std::mutex> acquire_external_compute_queue_lock() {
+    return acquire_queue_lock(compute_queue_);
   }
 
   std::tuple<VkDeviceMemory, size_t, size_t> get_vkmemory_offset_size(

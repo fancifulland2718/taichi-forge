@@ -86,6 +86,7 @@ struct Plan {
   TiForgeVkfftConfig config{};
   VkCommandPool pool{VK_NULL_HANDLE};
   VkFence fence{VK_NULL_HANDLE};
+  VkCommandBuffer executable{VK_NULL_HANDLE};
   VkFFTApplication application{};
   Allocations allocations;
   bool initialized{false};
@@ -185,6 +186,36 @@ int create_plan(const TiForgeVkfftConfig *config, TiForgeVkfftPlan *out) {
       return fail("initializeVkFFT", fft_result);
     }
     plan->initialized = true;
+    VkCommandBufferAllocateInfo allocation{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocation.commandPool = plan->pool;
+    allocation.level = VK_COMMAND_BUFFER_LEVEL_SECONDARY;
+    allocation.commandBufferCount = 1;
+    result = vkAllocateCommandBuffers(config->device, &allocation,
+                                      &plan->executable);
+    if (result != VK_SUCCESS) {
+      return fail("vkAllocateCommandBuffers", result);
+    }
+    VkCommandBufferInheritanceInfo inheritance{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO};
+    VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    begin.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
+    begin.pInheritanceInfo = &inheritance;
+    result = vkBeginCommandBuffer(plan->executable, &begin);
+    if (result != VK_SUCCESS) {
+      return fail("vkBeginCommandBuffer", result);
+    }
+    VkFFTLaunchParams launch{};
+    launch.commandBuffer = &plan->executable;
+    const auto record_result =
+        VkFFTAppend(&plan->application, config->direction, &launch);
+    if (record_result != VKFFT_SUCCESS) {
+      return fail("VkFFTAppend during plan recording", record_result);
+    }
+    result = vkEndCommandBuffer(plan->executable);
+    if (result != VK_SUCCESS) {
+      return fail("vkEndCommandBuffer", result);
+    }
     *out = plan.release();
     error_message[0] = '\0';
     return 0;
@@ -197,13 +228,11 @@ int create_plan(const TiForgeVkfftConfig *config, TiForgeVkfftPlan *out) {
 
 int append_plan(TiForgeVkfftPlan handle, VkCommandBuffer command) {
   auto *plan = static_cast<Plan *>(handle);
-  // Validated, immutable binding; caller serializes recording and retains the
-  // plan through command completion. No JIT, submission or waits here.
-  VkFFTLaunchParams launch{};
-  launch.commandBuffer = &command;
-  const auto result =
-      VkFFTAppend(&plan->application, plan->config.direction, &launch);
-  return result == VKFFT_SUCCESS ? 0 : fail("VkFFTAppend", result);
+  // The complete vendor dispatch sequence was recorded once at plan creation.
+  // Reuse it inside the caller's ordered primary command list, without a
+  // vendor host dispatch loop, descriptor rebinding, JIT or extra submission.
+  vkCmdExecuteCommands(command, 1, &plan->executable);
+  return 0;
 }
 
 void plan_memory(TiForgeVkfftPlan handle, TiForgeVkfftMemory *out) {

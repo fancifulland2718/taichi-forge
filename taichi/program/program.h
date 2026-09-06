@@ -111,6 +111,7 @@ struct VulkanBufferCommand {
 
 class Program;
 class CudaFftPlan;
+class VulkanFftPlan;
 class CudaCudssPlan;
 class VulkanTriangleRayScene;
 class VulkanRayResource;
@@ -1304,6 +1305,18 @@ class TI_DLL_EXPORT Program {
   void destroy_vulkan_ray_resource(std::uint64_t handle);
 
   void vulkan_clear_ray_scenes();
+
+  std::uint64_t create_vulkan_fft_plan(const std::string &adapter_path,
+                                      Ndarray *data,
+                                      const std::vector<int> &dimensions,
+                                      int batches,
+                                      int direction,
+                                      bool normalize_inverse);
+  void vulkan_fft_execute(std::uint64_t handle);
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_fft_plan_statistics(std::uint64_t handle);
+  void destroy_vulkan_fft_plan(std::uint64_t handle);
+  void vulkan_clear_fft_plans();
 
   std::uint64_t create_cuda_cufft_plan_1d(std::size_t length,
                                           std::size_t batch_count,
@@ -4175,6 +4188,9 @@ class TI_DLL_EXPORT Program {
       vulkan_ray_resource_retirements_;
   std::uint64_t next_vulkan_ray_resource_handle_{1};
   std::mutex cuda_cufft_plan_mutex_;
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanFftPlan>>
+      vulkan_fft_plans_;
+  std::uint64_t next_vulkan_fft_plan_handle_{1};
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;
   std::unordered_map<std::string, std::weak_ptr<CudaFftPlan>>

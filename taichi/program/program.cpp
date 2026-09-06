@@ -8902,6 +8902,7 @@ void Program::finalize() {
                 [&] { vulkan_clear_graphics_pipelines(); });
     best_effort("clear Vulkan ray scenes",
                 [&] { vulkan_clear_ray_scenes(); });
+    best_effort("clear Vulkan FFT plans", [&] { vulkan_clear_fft_plans(); });
     best_effort("clear Vulkan primitive caches",
                 [&] { vulkan_clear_primitive_caches(); });
   }

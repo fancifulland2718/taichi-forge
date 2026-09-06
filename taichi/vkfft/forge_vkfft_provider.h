@@ -54,7 +54,8 @@ typedef struct TiForgeVkfftApi {
   // All functions return 0 on success. Errors are available on the calling
   // thread. Creation may submit/wait for LUT initialization: the caller must
   // hold its existing queue lock. No execution is submitted by append().
-  // Record serially against one plan. The caller supplies surrounding memory
+  // append() executes a retained secondary command buffer in a primary one.
+  // Use the original ordered queue. The caller supplies surrounding memory
   // barriers and retains the plan and its buffer until all recorded command
   // buffers have been retired (not merely until the last append returns).
   int (*create)(const TiForgeVkfftConfig *, TiForgeVkfftPlan *);
