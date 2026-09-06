@@ -78,6 +78,9 @@ def test_prepared_frames_are_pure_and_queued_reuse_preserves_each_binding():
     np.testing.assert_array_equal(output.to_numpy(), np.zeros(size, np.int32))
     before = executor.snapshot()
     assert before["frames"] == 7
+    # A published frame owns one aligned parameter image for all dispatches.
+    assert before["preparation_upload_calls"] == 7
+    assert before["preparation_upload_bytes"] == before["argument_bytes"]
     assert before["executables"] == 1
     assert before["kernel_nodes"] >= 14
     expected = np.zeros(size, np.int32)
@@ -268,4 +271,45 @@ def test_binding_frames_copy_matrix_arguments_and_survive_executor_close():
         executor.run(second)
     executor.close()
     np.testing.assert_array_equal(output.to_numpy(), np.array([3, -11, 17, 31]) * 111)
+    assert executor.snapshot()["argument_bytes"] == 0
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_packed_frames_preserve_mixed_scalar_layouts_and_async_host_images():
+    @ti.kernel
+    def integer_stage(bias: ti.i64, output: ti.types.ndarray(dtype=ti.i64, ndim=1)):
+        for i in output:
+            output[i] = bias + i
+
+    @ti.kernel
+    def real_stage(gain: ti.f64, bias: ti.i32, output: ti.types.ndarray(dtype=ti.f64, ndim=1)):
+        for i in output:
+            output[i] += gain * i + bias
+
+    bias = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "bias", ti.i64)
+    gain = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "gain", ti.f64)
+    shift = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "shift", ti.i32)
+    integers = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "integers", ti.i64, ndim=1)
+    reals = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "reals", ti.f64, ndim=1)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(integer_stage, bias, integers)
+    builder.dispatch(real_stage, gain, shift, reals)
+    builder.dispatch(integer_stage, bias, integers)
+    graph = builder.compile()
+    executor = _executor(graph)
+    integer_output = ti.ndarray(ti.i64, 257)
+    real_output = ti.ndarray(ti.f64, 257)
+    real_output.fill(0)
+    try:
+        # Prepare and immediately queue different images without a host wait.
+        for i in range(19):
+            frame = executor.prepare(
+                dict(bias=2**42 + i, gain=0.125, shift=i, integers=integer_output.arr, reals=real_output.arr)
+            )
+            executor.run(frame)
+        np.testing.assert_array_equal(integer_output.to_numpy(), 2**42 + 18 + np.arange(257, dtype=np.int64))
+        np.testing.assert_array_equal(real_output.to_numpy(), 19 * 0.125 * np.arange(257) + sum(range(19)))
+        assert executor.snapshot()["preparation_upload_calls"] == 19
+    finally:
+        executor.close()
     assert executor.snapshot()["argument_bytes"] == 0

@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <set>
 
@@ -25,6 +27,8 @@ struct GraphBindingFrame::State {
   std::vector<KernelLauncher::GraphLaunchPacket> packets;
   // Source bytes outlive asynchronous preparation uploads.
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
+  void *argument_image{nullptr};
+  std::vector<std::uint8_t> host_argument_image;
   std::vector<std::unique_ptr<CudaDevice::AllocationLease>> allocations;
   std::size_t bytes{0};
   std::size_t nodes{0};
@@ -38,12 +42,10 @@ struct GraphBindingFrame::State {
         if (graph) {
           driver.graph_destroy(graph);
         }
-        for (auto &packet : packets) {
-          if (packet.device_arg_buffer) {
-            // Release follows completion or synchronized close, on the same
-            // default stream as argument preparation and actual replay.
-            driver.mem_free_async(packet.device_arg_buffer, nullptr);
-          }
+        if (argument_image) {
+          // Packet pointers are slices, not independently owned allocations.
+          // Retirement follows completion on the preparation/replay stream.
+          driver.mem_free_async(argument_image, nullptr);
         }
       } catch (...) {
         // The driver wrapper already reported any backend fault. Never
@@ -51,7 +53,9 @@ struct GraphBindingFrame::State {
       }
     }
     graph = nullptr;
+    argument_image = nullptr;
     packets.clear();
+    host_argument_image.clear();
     contexts.clear();
     allocations.clear();
     device = nullptr;
@@ -331,6 +335,8 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
   bool uploaded = false;
   try {
     data.packets.reserve(state.graph.dispatches.size());
+    std::vector<std::size_t> argument_offsets;
+    argument_offsets.reserve(state.graph.dispatches.size());
     for (std::size_t i = 0; i < state.graph.dispatches.size(); ++i) {
       const auto &dispatch = state.graph.dispatches[i];
       data.contexts.push_back(
@@ -341,16 +347,46 @@ std::shared_ptr<GraphBindingFrame> GraphBindingExecutor::prepare(
       state.program->resolve_runtime_storage_launch_context_under_guard(launch);
       data.packets.emplace_back();
       auto &packet = data.packets.back();
-      // Upload on replay's default stream. The idle nonblocking capture stream
-      // only records kernels: preparation does not execute mathematical work.
-      uploaded = true;
-      TI_ERROR_IF(!state.launcher->prepare_cuda_graph_launch(
-                      state.handles[i], launch, packet, nullptr),
+      TI_ERROR_IF(!state.launcher->prepare_cuda_graph_launch_packet(
+                      state.handles[i], launch, packet),
                   "CUDA binding-frame launch packet is unsupported");
-      data.bytes += packet.device_arg_buffer_size;
-      if (packet.device_arg_buffer_size) {
-        ++state.upload_calls;
-        state.upload_bytes += packet.device_arg_buffer_size;
+      // Preserve the 256-byte alignment each separate CUDA allocation had.
+      // Padding is part of actual argument storage and its reported bytes.
+      constexpr std::size_t alignment = 256;
+      const auto previous_size = data.host_argument_image.size();
+      TI_ERROR_IF(previous_size >
+                      std::numeric_limits<std::size_t>::max() - (alignment - 1),
+                  "CUDA binding-frame argument image is too large");
+      const auto offset = (previous_size + alignment - 1) & ~(alignment - 1);
+      argument_offsets.push_back(offset);
+      if (packet.arg_buffer_size) {
+        TI_ERROR_IF(packet.arg_buffer_size >
+                        std::numeric_limits<std::size_t>::max() - offset,
+                    "CUDA binding-frame argument image is too large");
+        data.host_argument_image.resize(offset + packet.arg_buffer_size);
+        std::memcpy(data.host_argument_image.data() + offset,
+                    packet.context.arg_buffer, packet.arg_buffer_size);
+      }
+    }
+    data.bytes = data.host_argument_image.size();
+    if (data.bytes) {
+      driver.malloc_async(&data.argument_image, data.bytes, nullptr);
+      // Keep the host image until the frame retires, including failed capture.
+      // Only preparation uploads; exact replay retains its previous path.
+      uploaded = true;
+      driver.memcpy_host_to_device_async(data.argument_image,
+                                         data.host_argument_image.data(),
+                                         data.bytes, nullptr);
+      ++state.upload_calls;
+      state.upload_bytes += data.bytes;
+    }
+    for (std::size_t i = 0; i < data.packets.size(); ++i) {
+      auto &packet = data.packets[i];
+      if (packet.arg_buffer_size) {
+        packet.device_arg_buffer =
+            static_cast<char *>(data.argument_image) + argument_offsets[i];
+        packet.context.arg_buffer =
+            static_cast<char *>(packet.device_arg_buffer);
       }
     }
     driver.stream_begin_capture(state.capture_stream,

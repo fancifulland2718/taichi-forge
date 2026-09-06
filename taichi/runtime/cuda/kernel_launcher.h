@@ -178,6 +178,11 @@ class KernelLauncher : public LLVM::KernelLauncher {
                                  LaunchContextBuilder &ctx,
                                  GraphLaunchPacket &packet,
                                  void *stream);
+  // Cold-only packet preparation without allocating or uploading arguments.
+  // The caller must publish device argument storage before capture.
+  bool prepare_cuda_graph_launch_packet(Handle handle,
+                                        LaunchContextBuilder &ctx,
+                                        GraphLaunchPacket &packet);
   bool prepare_cuda_graph_bounded_range(Handle handle,
                                         LaunchContextBuilder &ctx,
                                         GraphLaunchPacket &packet,

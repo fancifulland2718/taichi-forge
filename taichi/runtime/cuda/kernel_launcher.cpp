@@ -904,9 +904,27 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
                                                LaunchContextBuilder &ctx,
                                                GraphLaunchPacket &packet,
                                                void *stream) {
+  if (!prepare_cuda_graph_launch_packet(handle, ctx, packet)) {
+    return false;
+  }
+  if (packet.arg_buffer_size == 0) {
+    return true;
+  }
+  CUDADriver::get_instance().malloc_async(&packet.device_arg_buffer,
+                                          packet.arg_buffer_size, stream);
+  CUDADriver::get_instance().memcpy_host_to_device_async(
+      packet.device_arg_buffer, packet.context.arg_buffer,
+      packet.arg_buffer_size, stream);
+  packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
+  return true;
+}
+
+bool KernelLauncher::prepare_cuda_graph_launch_packet(
+    Handle handle,
+    LaunchContextBuilder &ctx,
+    GraphLaunchPacket &packet) {
   RuntimeContext context;
-  if (!prepare_cuda_graph_context(handle, ctx, context,
-                                  &packet.offloaded_tasks,
+  if (!prepare_cuda_graph_context(handle, ctx, context, &packet.offloaded_tasks,
                                   &packet.task_execution_plan_identity)) {
     return false;
   }
@@ -927,12 +945,6 @@ bool KernelLauncher::prepare_cuda_graph_launch(Handle handle,
     packet.context.arg_buffer = nullptr;
     return true;
   }
-  CUDADriver::get_instance().malloc_async(&packet.device_arg_buffer,
-                                          packet.arg_buffer_size, stream);
-  CUDADriver::get_instance().memcpy_host_to_device_async(
-      packet.device_arg_buffer, packet.context.arg_buffer,
-      packet.arg_buffer_size, stream);
-  packet.context.arg_buffer = static_cast<char *>(packet.device_arg_buffer);
   return true;
 }
 
