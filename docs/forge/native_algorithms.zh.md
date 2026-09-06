@@ -502,6 +502,11 @@ chunk carry、global correction，以及混合段长下的 bucketed 策略，同
 分层方案每 block 使用 16 字节 shared memory，每 chunk 两个 block barrier，纯 warp 方案
 不需要 shared memory 或 block barrier。这些是完整操作的物理实现，不是公开 block 参数轴。
 
+global-correction 策略使用 retained CUDA Graph 和独立的 Graph-bound scan scratch，普通 Program
+arena 增长/清理不影响录制。它只处理 `num_items`，保持未使用 capacity 不变；改变的是 host 提交
+与 scratch 生命周期，不改变数学求和或普通 primitive 的 `method="auto"`。录制、显存及首次编译
+代价见 [Graph runtime 优化](graph_runtime_optimization.zh.md#global-segmented-scan-的-retained-recording)。
+
 通过 `builder.freeze().search_recipes(...)` 按实际 workload 指标搜索，普通 `method="auto"`
 不变。这不等于任意相邻 producer/consumer kernel 融合：值语义、可见中间写入与跨语言下沉
 仍需要单独的合同。
@@ -538,7 +543,7 @@ buffer 和后端 replay plan。
 buffer 和 native plan 跨帧或跨重复调用存活，是热循环推荐写法。除非具体 workspace
 明确提供同步，否则并发调用必须使用独立 workspace。
 
-GPU scratch 归 active Program 的 primitive arena 所有，通过既有 workspace clear/reset API
+普通 primitive 的 GPU scratch 归 active Program 的 primitive arena 所有，通过既有 workspace clear/reset API
 回收，不再保存在 process-global owner map。CPU primitive scratch 对每个算法族、每个 worker
 thread 最多保留 8 MiB；8 MiB 到 64 MiB 使用瞬时分配，超过 64 MiB 保持既有 serial
 fallback。这是驻留上界策略，不表示每次操作的峰值临时空间都不超过 8 MiB。

@@ -9,8 +9,9 @@ The static-Field feature contract is maintained separately in
 [Dense Field Graph](dense_field_graph.en.md).
 
 The base Graph modernization and native-node replay model first shipped in
-Forge 0.4.1. This page describes the published 0.6.2 contracts for lifetime,
-backend replay, structured control, diagnostics, and Dense Field Graph. See the
+Forge 0.4.1. This page describes the current source contracts, including the
+0.6.3 recipe additions; an older installed artifact may lack a named native
+capability. See the
 [release notes](release_notes.en.md) for the introduction version of each
 capability.
 
@@ -146,11 +147,37 @@ values may still change through the fixed-pattern `update_values()` contract.
 Measure preparation, device execution, host submission and retained memory
 separately. Raw mapping calls and binding churn include capture/preparation;
 published frame objects retain argument images and opaque driver Graph objects.
-The current exact-cover composer does not combine this exclusive submission
-recipe with separate FFT/SpMM algorithm fragments. Its expanded provider domain
+The composer can wrap explicitly compatible FFT/SpMM computation fragments with
+one whole-Graph executor; the executor does not replace their semantic coverage.
+Unrelated families are not implicitly compatible. Completed event handles are
+reused up to the observed queue peak and retained until executor close/reset;
+this avoids repeated event creation/destruction after backlog retirement, without
+preallocation or new replay synchronization. Their opaque driver storage is not
+included in ndarray requested bytes or advertised as a measured VRAM peak.
+Diagnostic binding-frame snapshots expose created/reused/cached/destroyed counts.
+The expanded provider domain
 invalidates older provider-bound search evidence, not otherwise compatible wheels.
 Ordinary runtime auto selection is unchanged. Validation here is Windows-only;
 production qualification remains application-owned.
+
+### Retained global segmented scan
+
+The complete i32/u32 `GraphBuilder.segmented_scan()` global-correction strategy
+records input copy, hierarchical Driver scan, base gathering and correction in
+one retained CUDA Graph. It retains its own exact scratch ndarray through the
+existing Graph allocation leases; clearing or growing the ordinary Program scan
+arena cannot invalidate that recording. The active `num_items` are scanned and
+unused capacity is left unchanged. Preparation loads kernels, but does not run
+the user's computation. Replay has no primitive-arena acquisition or host scalar
+readback. Ordinary primitive `method="auto"` is unchanged.
+
+This primarily removes separate host launches, not scan kernels. Each live
+materialization retains private scratch, so multiple Graphs can use more memory
+than a shared arena. Reports distinguish segment bases and retained scan scratch;
+requested bytes are not allocator/driver residency. Additional first-use JIT
+compilation can also cost more. This path requires the native retained-scan
+capability and remains a fixed-resource Graph action, not arbitrary
+producer/consumer fusion or a binding-frame-compatible region.
 
 ## Dense Field lifetime and heterogeneous blocks
 
@@ -176,7 +203,7 @@ AD boundary, performance evidence, and Linux status are maintained in
 | CUDA | CUDA Driver API capture and executable replay, with patch or recapture when bindings change | Capture/replay and direct submission are serialized at the native host-submission boundary | Captured allocations are generation-qualified and retained until ordered retirement |
 | Vulkan | Runtime-owned command recording and replay | GFX recording and replay registry mutations are protected per host API call | Monotonic graph identity, deferred retirement, fixed eight-slot in-flight ring |
 
-Recurring resource signatures use bounded MRU state rather than an unbounded
+Ordinary CGraph paths use bounded MRU state rather than an unbounded signature
 history. Each CGraph retains up to four generation-qualified runtime binding
 plans; CUDA retains two executable resource signatures and Vulkan retains four
 immutable launch signatures. This covers common ping-pong and short ring
@@ -185,6 +212,10 @@ scalar or matrix value changes patch the current compatible executable instead
 of consuming another resource slot; Vulkan retains recurring value signatures
 inside its same four-slot bound. Stale generations and `ti.reset()` retire all
 related entries.
+
+These ordinary-cache limits do not describe the opt-in immutable-frame recipe:
+its published frames and observed completion-event peak have the separate
+ownership policy described above.
 
 ## Task observability without launch control
 
@@ -1214,6 +1245,11 @@ result APIs.
 
 The focused validation set includes:
 
+- `tests/python/test_graph_native_algorithm_recipe.py` for retained integer scan
+  recording, padding, modular arithmetic and independence from Program arena cleanup;
+- `tests/python/test_cuda_graph_binding_frames.py` for immutable frames, queued
+  event reuse, close/reset and allocation lifetime;
+
 - `tests/python/test_graph.py` for public contracts, lifetime, replay,
   structured control, and diagnostics;
 - `tests/python/test_graph_iterative_qualification.py` for f32 PCG and
@@ -1248,6 +1284,12 @@ validation/headless/headed replay, sanitizer coverage, and allocator-specific
 RSS/VRAM/reset measurements. See
 [Linux revalidation status](linux_revalidation.en.md) for the exact remaining
 matrix.
+
+The recipe-composition, SpMM ownership/reporting, retained-scan and event-retention
+closeout was checked on Windows with Python 3.10 and a matching local native
+build. This does not requalify Linux, every Python wheel, vendor-version combination
+or production workload. CompileIQ compatibility is capability/protocol based, not
+an exact commit pin; checkpoint measurement reuse still requires matching contracts.
 
 ## Related documents
 

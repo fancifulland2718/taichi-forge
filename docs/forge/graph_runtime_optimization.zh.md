@@ -6,8 +6,8 @@
 [Forge API 参考](forge_api_reference.zh.md)。
 静态 Field 功能合同单独维护在 [Dense Field Graph](dense_field_graph.zh.md)。
 
-Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述已正式发布的
-0.6.2 生命周期、后端 replay、结构化控制、诊断与 Dense Field Graph 合同；各能力的
+Graph 基础现代化与 native node replay 模型首次发布于 Forge 0.4.1。本文描述当前源码合同，
+包括 0.6.3 的 recipe 更新；较旧安装产物可能缺少相应 native capability。各能力的
 首次公开版本见[版本更新说明](release_notes.zh.md)。
 
 ## 范围与不变量
@@ -112,10 +112,28 @@ host/device；在途帧仍需要 completion event，因此不宣称切换没有 
 矩阵值仍可通过 `update_values()` 改变。
 
 准备成本、device、host 与保留显存需要分别衡量。原始 mapping 调用或频繁重新绑定仍包含准备/
-capture 成本；发布帧会保留参数图像与不透明 driver Graph 对象。当前 exact-cover composer 尚不
-组合这个独占提交 recipe 与独立 FFT/SpMM 算法 fragment。扩展后的 provider domain 会使旧的
+capture 成本；发布帧会保留参数图像与不透明 driver Graph 对象。composer 可用一个完整 Graph
+执行器包围显式兼容的 FFT/SpMM 计算 fragment，执行器不替换它们的语义覆盖，其他 family 不会
+自动兼容。已完成的 event 按实际队列峰值复用，保留至 executor close/reset；不预分配、不增加
+replay 同步，避免积压清理后反复创建/销毁 event。driver 对象字节数不透明，不计作 ndarray
+请求字节，也不宣称已测得显存峰值；诊断 binding-frame snapshot 提供 created/reused/cached/destroyed 数。
+扩展后的 provider domain 会使旧的
 provider-bound 搜索证据失效，不把兼容 wheel 锁到 commit。普通 runtime auto 不变；本次只验证
 Windows，生产适用性由应用确认。
+
+### Global segmented scan 的 retained recording
+
+完整 i32/u32 `GraphBuilder.segmented_scan()` 的 global-correction 策略将 input copy、分层
+Driver scan、base gathering 和 correction 录制进同一 CUDA Graph。它通过现有 Graph allocation
+lease 保留独立、尺寸确定的 scratch ndarray，普通 Program scan arena 的增长/清理不会使录制
+地址失效。只扫描有效 `num_items`，未使用 capacity 保持不变；准备加载 kernel，不执行用户数学
+运算。replay 不访问 primitive arena，也不读回 host scalar。普通 primitive `method="auto"` 不变。
+
+主要收益是减少独立 host launch，而不是减少 scan kernel。每个存活物化持有私有 scratch，多个
+Graph 相比共享 arena 可能消耗更多显存；报告分别列出 segment bases 与 retained scan scratch，
+请求字节不是 allocator/driver 驻留量。额外首次 JIT 编译也可能增加成本。该路径要求 native
+retained-scan capability，仍是 fixed-resource Graph action，不代表任意 producer/consumer fusion
+或可与 binding-frame executor 组合的 region。
 
 ## Dense Field 生命周期与异构 block
 
@@ -137,12 +155,15 @@ dense-storage 合同。异构应用应在稳定 block 内组织同构 environmen
 | CUDA | CUDA Driver API capture 与 executable replay；binding 变化时 patch 或 recapture | capture/replay 与 direct submission 在 native host-submission 边界串行 | captured allocation 使用带 generation 的身份并持有到有序退役 |
 | Vulkan | runtime-owned command record 与 replay | 每次 host API 调用保护 GFX record 和 replay registry mutation | 单调 graph identity、延迟退役、固定 8-slot 在途 ring |
 
-重复出现的 resource signature 使用有界 MRU，而不是无界历史。每个 CGraph 最多保留四个带
+普通 CGraph 路径的 resource signature 使用有界 MRU，而不是无界历史。每个 CGraph 最多保留四个带
 generation 的 runtime binding plan；CUDA 保留两个 executable resource signature，Vulkan
 保留四个 immutable launch signature。这覆盖常见 ping-pong 和短 ring buffer，同时限制 driver
 object 与 retained allocation lease。CUDA 的 scalar/matrix 值变化只 patch 当前兼容
 executable，不额外占用 resource slot；Vulkan 的重复 value signature 共用同一个四槽上限。
 stale generation 与 `ti.reset()` 会退役全部关联 entry。
+
+这些普通缓存上限不代表显式选择的 immutable-frame recipe；后者的发布帧与实际 completion-event
+峰值使用前文单独说明的所有权策略。
 
 ## 不干预 launch 的 task 可观测性
 
@@ -937,6 +958,10 @@ Primitive 所有权与结果 API 见 [Native algorithms](native_algorithms.zh.md
 
 专项验证包括：
 
+- `tests/python/test_graph_native_algorithm_recipe.py`：retained integer scan、padding、模运算及
+  Program arena 清理后的录制独立性；
+- `tests/python/test_cuda_graph_binding_frames.py`：不可变帧、排队 event 复用、close/reset 与 allocation 生命周期；
+
 - `tests/python/test_graph.py`：公开合同、生命周期、replay、结构化控制与诊断；
 - `tests/python/test_graph_iterative_qualification.py`：在通用结构化/provider 合同上验证
   f32 PCG 与非对称 BiCGSTAB；
@@ -962,6 +987,10 @@ Windows 验证覆盖 CPU、CUDA 与 Vulkan runtime 路径。Linux 编译分支�
 Driver-only/Toolkit-OFF 零参数 capture、Vulkan validation/headless/headed replay、
 sanitizer，以及 allocator-specific RSS/VRAM/reset 测量。准确待测矩阵见
 [Linux 复测状态](linux_revalidation.zh.md)。
+
+recipe 组合、SpMM 所有权/报告、retained scan 与 event 保留的本轮收束使用 Windows、Python 3.10
+和匹配的本地 native build 验证，不重新资格化 Linux、所有 Python wheel、vendor 版本组合或生产
+workload。CompileIQ 按 capability/protocol 兼容，不锁定某个 commit；checkpoint 测量复用仍要求合同一致。
 
 ## 相关文档
 

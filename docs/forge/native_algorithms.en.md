@@ -619,6 +619,13 @@ bytes of shared memory per block and two block barriers per chunk. Warp-only
 carry needs neither shared memory nor block barriers. These are physical
 implementations of the complete operation, not public block-size search axes.
 
+The global-correction strategy uses a retained CUDA Graph with private,
+Graph-bound scan scratch; ordinary Program arena growth/clear does not affect
+it. Only `num_items` are processed, preserving unused capacity. This changes host
+submission and scratch lifetime, not the mathematical sum or the ordinary
+primitive's `method="auto"`. See [Graph runtime optimization](graph_runtime_optimization.en.md#retained-global-segmented-scan)
+for recording, memory and first-use compilation trade-offs.
+
 Search them through `builder.freeze().search_recipes(...)` and compare actual
 workload metrics. Ordinary `method="auto"` is unchanged. This does **not** fuse
 arbitrary neighboring producer/consumer kernels: value semantics, visible
@@ -660,7 +667,7 @@ alive across frames or repeated calls. This is the preferred pattern for hot
 loops. Concurrent calls must use independent workspaces unless the individual
 workspace explicitly documents synchronization.
 
-GPU scratch is owned by the active Program's primitive arena and is reclaimed
+Ordinary primitive GPU scratch is owned by the active Program's arena and is reclaimed
 by the existing workspace clear/reset APIs; cached resources are not kept in
 process-global owner maps. CPU primitive scratch retains at most 8 MiB per
 family and worker thread, uses transient allocations from 8 through 64 MiB, and

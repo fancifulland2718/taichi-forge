@@ -48,6 +48,8 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 | 固定 pattern 稀疏-稠密乘法 | `SparseMatrix.record_spmm(...)`，随后 `operation.prepare(input_array, output_array)` | CUDA f32 CSR / 紧凑 row-major 稠密数组；通过 `GraphBuilder.append_native()` 追加。显式 `ti.hardware.linalg.SparseSpmmRecipeProvider()` 将冻结的 direct/preprocessed 策略加入完整 recipe。 |
 | Batched 2D complex FFT | `ti.linalg.record_fft(...)`，随后 `operation.prepare()` | CUDA complex-f32，紧凑 `(H, W, 2)` 或 `(batch, H, W, 2)` 数组，输入输出分离。显式 `ti.hardware.fft.FftRecipeProvider()` 在 whole-transform baseline 外提供逐图像列计划，以及 native 支持时的跨 batch 列计划。 |
 | Toolkit reset-monoid segmented scan | 既有 `GraphBuilder.segmented_scan()` 加 `taichi_forge.hardware.source_providers` 中的 `CubSegmentedScanRecipeProvider(manifest_path)` | 可选 source-provider addon；有界 i32/u32 sum 与不可变 segmented layout。prepared capture、workspace 和 head-bitset 生命周期形成物理 recipe；addon 不在 portable runtime wheel 内。 |
+| Driver-native segmented scan | `GraphBuilder.segmented_scan()` 与默认 recipe providers | 固定、互不重叠的 i32/u32 数组和不可变 segment；global correction 使用 retained CUDA recording 与 Graph-bound scratch，不依赖外部 Toolkit 库；仍是 fixed-resource action，不是 binding-frame region。 |
+| Vulkan VkFFT | 显式 fixed-storage plan 或 root Graph recording | Vulkan JIT/source adapter；不意味着已有内建完整 FFT recipe 搜索或 CUDA binding-frame 接入。 |
 | 其他 cuSPARSE / cuFFT / cuDSS expert operation | 既有显式 plan 和已说明的 root Graph recording | recording 本身不提供 recipe generator；cuDSS root 有序调用不能描述成 CUDA Graph capture。 |
 | cuBLASLt | retained internal execution/recording 基础 | cuBLAS probe 不意味着已公开完整 matmul-region recipe 域。 |
 | cuSPARSELt / cuTENSOR / AmgX | 下文的显式 provider plan | 当前没有公开 complete-recipe provider 或通用 Graph recording 路线。 |
