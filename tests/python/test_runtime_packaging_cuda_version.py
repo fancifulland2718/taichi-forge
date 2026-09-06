@@ -695,6 +695,16 @@ def test_shared_wheel_validator_rejects_cuda_versioned_release(tmp_path):
         (
             "windows",
             "win_amd64",
+            "taichi_forge_runtime/_lib/runtime_native/nvcuda.dll",
+        ),
+        (
+            "manylinux",
+            "manylinux_2_35_x86_64",
+            "taichi_forge_runtime.libs/libcuda.so.1",
+        ),
+        (
+            "windows",
+            "win_amd64",
             "taichi_forge_runtime/_lib/runtime_native/cublas64_13.dll",
         ),
         (
@@ -1241,6 +1251,7 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert "workflow_call:" in workflow
     assert "gh-action-pypi-publish" not in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
+    assert "--exclude libcuda.so.1" in workflow
     assert workflow.count("--dependency-class driver-only") == 3
     assert workflow.count("TI_WITH_CUDA:BOOL=ON") == 4
     assert workflow.count("TI_WITH_VULKAN:BOOL=ON") == 4
@@ -1432,6 +1443,58 @@ def test_strict_wheel_audits_shipped_runtime_adapters_and_grafted_libraries(monk
             | adapters
         )
         assert seen == {runtime, grafted, *(Path(member).name for member in expected)}
+
+
+@pytest.mark.parametrize("platform", ("windows", "manylinux"))
+@pytest.mark.parametrize(
+    "location,dependency_kind,allowed",
+    (
+        ("optix", "driver", True),
+        ("runtime", "driver", False),
+        ("other_adapter", "driver", False),
+        ("grafted_optix_name", "driver", False),
+        ("optix", "cudart", False),
+        ("optix", "vendor", False),
+        ("optix", "python", False),
+    ),
+)
+def test_driver_import_exception_is_scoped_to_shipped_optix_adapter(
+    monkeypatch, tmp_path, platform, location, dependency_kind, allowed
+):
+    runtime = (
+        "taichi_forge_runtime/_lib/runtime_native/taichi_runtime.dll"
+        if platform == "windows"
+        else "taichi_forge_runtime/_lib/runtime_native/libtaichi_runtime.so"
+    )
+    optix = min(validate_runtime_wheel._expected_optix_provider_members(platform))
+    member = {
+        "optix": optix,
+        "runtime": runtime,
+        "other_adapter": min(validate_runtime_wheel._expected_optional_runtime_provider_members(platform)),
+        "grafted_optix_name": f"taichi_forge_runtime.libs/{Path(optix).name}",
+    }[location]
+    dependencies = {
+        "driver": ("nvcuda.dll", "libcuda.so.1"),
+        "cudart": ("cudart64_13.dll", "libcudart.so.13"),
+        "vendor": ("nvoptix.dll", "libnvoptix.so.1"),
+        "python": ("python314.dll", "libpython3.14.so.1.0"),
+    }
+    dependency = dependencies[dependency_kind][platform != "windows"]
+    monkeypatch.setattr(validate_runtime_wheel, "_binary_imports", lambda *args: {dependency})
+    monkeypatch.setattr(validate_runtime_wheel.shutil, "which", lambda name: name)
+    monkeypatch.setattr(
+        validate_runtime_wheel.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(command, 0, "", ""),
+    )
+    with ZipFile(tmp_path / "dependency-scope.whl", "w") as zf:
+        zf.writestr(member, b"binary content replaced by the import reader")
+    with ZipFile(tmp_path / "dependency-scope.whl") as zf:
+        if allowed:
+            validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None)
+        else:
+            with pytest.raises(RuntimeError, match="implicit vendor or CPython dependencies"):
+                validate_runtime_wheel._strict_wheel_dependencies(zf, [member], platform, runtime, None)
 
 
 @pytest.mark.parametrize("adapter_depends_on_cudart", (False, True))

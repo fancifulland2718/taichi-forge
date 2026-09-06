@@ -217,7 +217,10 @@ jobs:
           set -euo pipefail
           mkdir -p wheelhouse-runtime
           auditwheel show dist-runtime/*.whl || true
-          auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ --plat manylinux_2_35_x86_64
+          # Existing lazy OptiX adapters use the host driver. Never graft the
+          # driver or a Toolkit link stub into the runtime wheel.
+          auditwheel repair dist-runtime/*.whl -w wheelhouse-runtime/ \
+            --plat manylinux_2_35_x86_64 --exclude libcuda.so.1
           python scripts/repair_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux
           auditwheel show wheelhouse-runtime/*.whl

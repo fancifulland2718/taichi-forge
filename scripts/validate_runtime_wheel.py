@@ -383,11 +383,22 @@ def _binary_imports(binary: Path, platform: str) -> set[str]:
     return {match.group(1) for match in pattern.finditer(result.stdout)}
 
 
-def _validate_binary_dependencies(binary: Path, platform: str, *, allowed_cudart_major: int | None = None) -> None:
+def _validate_binary_dependencies(
+    binary: Path,
+    platform: str,
+    *,
+    allowed_cudart_major: int | None = None,
+    allowed_cuda_driver: bool = False,
+) -> None:
     dependencies = _binary_imports(binary, platform)
     forbidden = set()
+    driver_name = "nvcuda.dll" if platform == "windows" else "libcuda.so.1"
     for dependency in dependencies:
         name = Path(dependency).name
+        # Existing OptiX adapters link the Driver API, not CUDART. They are
+        # loaded explicitly, so their driver dependency is not a core import.
+        if allowed_cuda_driver and name.lower() == driver_name:
+            continue
         cudart_major = _cudart_major(platform, name)
         if (
             FORBIDDEN_VENDOR_RUNTIME.fullmatch(name)
@@ -433,7 +444,10 @@ def _strict_wheel_dependencies(
             binary = Path(directory) / Path(member).name
             binary.write_bytes(zf.read(member))
             _validate_binary_dependencies(
-                binary, platform, allowed_cudart_major=cuda_major if member == runtime else None
+                binary,
+                platform,
+                allowed_cudart_major=cuda_major if member == runtime else None,
+                allowed_cuda_driver=member in _expected_optix_provider_members(platform),
             )
 
 
