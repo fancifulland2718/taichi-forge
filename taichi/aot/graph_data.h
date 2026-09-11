@@ -500,6 +500,8 @@ struct CompiledGraphStats {
 // diagnostics from enlarging every persistent CUDA/Vulkan stats object.
 struct CompiledGraphDebugSnapshot {
   CompiledGraphStats stats;
+  // CPU upload copies retained until stream completion, not device storage.
+  uint64_t known_deferred_host_argument_bytes{0};
   uint64_t known_compiled_tasks{0};
   uint32_t known_compiled_dispatches{0};
   uint32_t runtime_binding_plan_slots{0};

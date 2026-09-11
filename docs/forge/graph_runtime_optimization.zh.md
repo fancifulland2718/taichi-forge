@@ -552,6 +552,11 @@ structured node 拥有的 condition/body cache，以及满足资格的 control/o
 这些内部 cache 不会展开成公开 CGraph segment。driver 内部 command buffer、descriptor
 pool 与 allocator reservation 仍需通过后端 profiler 和进程显存测量评估。
 
+`memory.deferred_host_argument_bytes` 单独报告为异步完成保活的 CPU 参数上传副本。
+它是当前保留量，不是显存或累计传输量；读取报告不会等待或回收这些副本。
+该项不计入 `persistent_argument_bytes` 和 `persistent_bytes`。旧 native 若未提供
+独立统计则返回 `None`；旧版的持久参数总量仍可能混入 host 副本。
+
 推荐从一个在途 invocation 开始配置。只有 Nsight 或等价 trace 证明宿主 enqueue/wait 能与
 有效 GPU 工作重叠，且峰值显存、p95/p99 尾延迟与 replay saturation 均满足预算时，才提高到
 两个。不要把 runtime completion 的内部安全上限当作应用队列深度，也不要为每个小任务创建

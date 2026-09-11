@@ -721,6 +721,14 @@ condition/body caches and qualified control/observation arenas owned by
 structured nodes even though those internal caches are not expanded into
 public CGraph segments.
 
+`memory.deferred_host_argument_bytes` separately reports CPU argument-upload
+copies still retained for asynchronous completion. It is a current retained
+snapshot, not GPU memory or cumulative transfer volume. Reading the report
+does not wait for or collect those copies. These bytes are excluded from
+`persistent_argument_bytes` and `persistent_bytes`. On older native builds
+without separate accounting the field is `None`; those builds may still mix
+host copies into the persistent-argument total.
+
 Start with one invocation in flight. Increase the limit to two only when an
 Nsight or equivalent trace demonstrates useful overlap between host enqueue or
 wait and productive GPU work, while peak memory, p95/p99 latency, and replay

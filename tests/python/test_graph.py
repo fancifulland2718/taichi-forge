@@ -3743,13 +3743,13 @@ def test_cached_graph_stats_are_side_effect_free_and_binding_is_generation_safe(
     ti.sync()
     stable = graph.execution_stats()
     assert not stable.segments[0].replay_attribution.enabled
-    # Vulkan may materialize another bounded physical replay slot while the
-    # first batch is in flight. Once the slot bound is reached, later batches
-    # must stop growing persistent storage.
+    # Asynchronous Vulkan batches can populate more replay slots depending on
+    # device timing; a fixed invocation count does not prove slot saturation.
     assert stable.memory.persistent_bytes >= memory_before
+    # Test reuse after completion with a ready slot, not assumed saturation.
     for _ in range(32):
         graph.run({"arr": second})
-    ti.sync()
+        ti.sync()
     assert (
         graph.execution_stats().memory.persistent_bytes
         == stable.memory.persistent_bytes
@@ -3757,6 +3757,9 @@ def test_cached_graph_stats_are_side_effect_free_and_binding_is_generation_safe(
 
     backend_stats = graph._instance._backend_executable.snapshot_graph_stats
     assert backend_stats["runtime_binding_plan_slots"] == 2
+    host_bytes = backend_stats.get("known_deferred_host_argument_bytes")
+    if host_bytes is not None:
+        assert graph.execution_stats().memory.deferred_host_argument_bytes == host_bytes
     if ti.lang.impl.current_cfg().arch == ti.cuda:
         assert backend_stats["backend_replay_signature_slots"] == 2
         assert backend_stats["backend_replay_signature_slot_capacity"] == 2
@@ -6241,6 +6244,8 @@ def test_cuda_while_control_rebinds_budget_polarity_and_external_predicate():
             (second, 5, False, 5), (second, 2, False, 2),
             (first, 2, False, 0), (first, 2, True, 2),
         )
+        device_bytes = None
+        retained_host_bytes = []
         for predicate, budget, polarity, expected in cases:
             output.fill(0)
             assert node.compiled_graph.jit_run_bounded_cuda_cached(
@@ -6248,6 +6253,17 @@ def test_cuda_while_control_rebinds_budget_polarity_and_external_predicate():
                 predicate.arr, budget, polarity,
             )
             assert output[None] == expected
+            memory_stats = cache._debug_graph_stats(False)
+            if "known_deferred_host_argument_bytes" in memory_stats:
+                retained_host_bytes.append(memory_stats["known_deferred_host_argument_bytes"])
+                if device_bytes is None:
+                    device_bytes = memory_stats["known_persistent_argument_bytes"]
+                assert memory_stats["known_persistent_argument_bytes"] == device_bytes
+        if retained_host_bytes:
+            # The first control upload is still retained in the explicit
+            # snapshot. The next exact replay collects it without changing
+            # any device allocation; reports must not conflate these bytes.
+            assert retained_host_bytes[:2] == [24, 0]
         stats = cache._debug_graph_stats()
         assert stats["captures"] == 1
         assert stats["recaptures"] == 0

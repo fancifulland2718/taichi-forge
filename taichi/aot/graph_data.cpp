@@ -1430,6 +1430,11 @@ struct CompiledGraphCudaState {
     for (const auto &packet : packets) {
       bytes += packet.packet.device_arg_buffer_size;
     }
+    return bytes;
+  }
+
+  uint64_t known_deferred_host_argument_bytes() const {
+    uint64_t bytes = 0;
     for (const auto &batch : deferred_resources) {
       for (const auto &buffer : batch.host_arg_buffers) {
         bytes += buffer.size();
@@ -5415,9 +5420,11 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
   const bool diagnostics_previously_enabled = graph_diagnostics_enabled;
   std::uint32_t backend_replay_signature_slots = 0;
   std::uint32_t backend_replay_signature_slot_capacity = 0;
+  uint64_t deferred_host_argument_bytes = 0;
   auto finalize = [&](CompiledGraphStats result) {
     CompiledGraphDebugSnapshot snapshot;
     snapshot.stats = result;
+    snapshot.known_deferred_host_argument_bytes = deferred_host_argument_bytes;
     snapshot.diagnostics_previously_enabled =
         diagnostics_previously_enabled;
     const bool execution_observed =
@@ -5591,6 +5598,8 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     }
     result.known_persistent_argument_bytes =
         cuda_graph_state->known_persistent_argument_bytes();
+    deferred_host_argument_bytes =
+        cuda_graph_state->known_deferred_host_argument_bytes();
     result.known_bounded_control_bytes =
         cuda_graph_state->known_bounded_control_bytes();
     for (const auto &alternate : cuda_graph_state_alternates) {
@@ -5599,6 +5608,8 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
       }
       result.known_persistent_argument_bytes +=
           alternate->known_persistent_argument_bytes();
+      deferred_host_argument_bytes +=
+          alternate->known_deferred_host_argument_bytes();
       result.known_bounded_control_bytes +=
           alternate->known_bounded_control_bytes();
     }

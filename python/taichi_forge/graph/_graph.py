@@ -1856,7 +1856,12 @@ class GraphExecutionSegmentReport:
 
 @dataclass(frozen=True)
 class GraphMemoryReport:
-    """Known Graph-owned memory; driver-internal memory remains unknown."""
+    """Known Graph-owned memory; driver-internal memory remains unknown.
+
+    Deferred host upload copies are separate from persistent backend storage.
+    Their byte count is a retained snapshot, not cumulative transfer volume or
+    total host memory. None denotes a native build without separate accounting.
+    """
 
     persistent_argument_bytes: int
     persistent_bounded_control_bytes: int
@@ -1907,6 +1912,7 @@ class GraphMemoryReport:
     provider_generation_requested_bytes_complete: bool
     provider_generation_opaque_component_count: int
     opaque_driver_bytes: Optional[int]
+    deferred_host_argument_bytes: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -3775,6 +3781,7 @@ def _empty_backend_stats():
             "last_fallback_reason": "none",
             "zero_arg_eligible": False,
             "known_persistent_argument_bytes": 0,
+            "known_deferred_host_argument_bytes": 0,
             "known_bounded_control_bytes": 0,
             "known_bounded_update_groups": 0,
             "known_bounded_updater_dispatches": 0,
@@ -4775,6 +4782,9 @@ def _execution_report(
     persistent_bounded_control_bytes = sum(
         int(stats.get("known_bounded_control_bytes", 0)) for stats in flat_backend_stats
     )
+    host_argument_snapshots = tuple(
+        stats.get("known_deferred_host_argument_bytes") for stats in flat_backend_stats
+    )
     temporary_memory_plan = temporary_memory_plan or {}
     temporary_arena_stats = temporary_arena_stats or {}
     observation_arena_stats = observation_arena_stats or {}
@@ -4878,6 +4888,11 @@ def _execution_report(
             report.opaque_component_count for report in provider_memory
         ),
         opaque_driver_bytes=None,
+        deferred_host_argument_bytes=(
+            sum(int(value) for value in host_argument_snapshots)
+            if all(value is not None for value in host_argument_snapshots)
+            else None
+        ),
     )
     return GraphExecutionReport(
         schema_version=7,
