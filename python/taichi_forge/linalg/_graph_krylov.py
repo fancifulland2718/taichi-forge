@@ -221,11 +221,40 @@ class GraphKrylovSolver:
             z: ti.types.ndarray(dtype=ti.f32, ndim=1),
             p: ti.types.ndarray(dtype=ti.f32, ndim=1),
             rz_old: ti.types.ndarray(dtype=ti.f32, ndim=0),
+            partial: ti.types.ndarray(dtype=ti.f32, ndim=1),
         ):
-            rz_old[None] = 0.0
-            for index in range(size):
-                p[index] = z[index]
-                ti.atomic_add(rz_old[None], r[index] * z[index])
+            if ti.static(use_block_reduction):
+                ti.loop_config(block_dim=reduction_block_dim)
+                for worker in range(reduction_worker_count):
+                    lane = worker % reduction_block_dim
+                    pad = ti.simt.block.SharedArray((reduction_block_dim,), ti.f32)
+                    value = 0.0
+                    for item in ti.static(range(reduction_items_per_thread)):
+                        index = worker * reduction_items_per_thread + item
+                        if index < size:
+                            p[index] = z[index]
+                            value += r[index] * z[index]
+                    pad[lane] = value
+                    ti.simt.block.sync()
+                    for stride in ti.static([128, 64, 32, 16, 8, 4, 2, 1]):
+                        if lane < stride:
+                            pad[lane] += pad[lane + stride]
+                        ti.simt.block.sync()
+                    if lane == 0:
+                        partial[worker // reduction_block_dim] = pad[0]
+                # Reuse the now-dead initialization partials. One small serial
+                # finalize avoids a size-wide atomic hotspot and adds no new
+                # workspace or launch relative to the old clear + atomic pair.
+                total = 0.0
+                ti.loop_config(serialize=True)
+                for block in range(reduction_partial_count):
+                    total += partial[block]
+                rz_old[None] = total
+            else:
+                rz_old[None] = 0.0
+                for index in range(size):
+                    p[index] = z[index]
+                    ti.atomic_add(rz_old[None], r[index] * z[index])
 
         @ti.kernel
         def evaluate_condition(
@@ -556,6 +585,7 @@ class GraphKrylovSolver:
                 vectors["z"],
                 vectors["p"],
                 scalars["rz_old"],
+                partials["partial0"],
             )
 
         condition = builder.create_sequential()
@@ -785,6 +815,7 @@ class GraphKrylovSolver:
                 vectors["z"],
                 vectors["p"],
                 scalars["rz_old"],
+                partials["partial0"],
             )
 
         condition = ti.graph.GraphBuilder().create_sequential()

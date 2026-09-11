@@ -644,7 +644,8 @@ def test_compiled_graph_provider_pcg_uses_recordable_device_control():
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
 def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
-    size = 128
+    # Cross several reduction tiles with an incomplete final tile.
+    size = 2051
     operator, preconditioner, diagonal = _compiled_graph_stencil_and_jacobi(size)
     plan = ti.linalg.experimental.SolvePlan(
         operator,
@@ -695,6 +696,15 @@ def test_multidispatch_graph_pcg_submit_converges_and_reports_stop_position():
         assert submission_stats["terminal_materializations"] == 1
         assert submission_stats["native_completed_results"] == 0
         assert submission_stats["persistent_internal_storage_bytes"] > size * 4
+
+    # The seed reuses initialization partials: later zero-RHS execution must
+    # overwrite every partial instead of inheriting the previous solve's dot.
+    rhs.fill(0.0)
+    output.fill(1.0)
+    zero = plan.submit(rhs, out=output).result()
+    assert zero.converged and zero.iterations == 0
+    assert zero.initial_residual_norm == zero.residual_norm == 0.0
+    np.testing.assert_array_equal(output.to_numpy(), 0.0)
 
 
 @test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
