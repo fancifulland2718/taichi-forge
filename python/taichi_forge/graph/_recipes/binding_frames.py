@@ -190,8 +190,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-secondary-image-recording",
             "vulkan-readonly-tlas-recording",
         ),
-        domain_version="immutable-binding-frame-domain-v7",
-        semantic_fingerprint="cuda-vulkan-composed-binding-retained-resources-v7",
+        domain_version="immutable-binding-frame-domain-v8",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-binding-resources-v8",
     )
 
     def fragments(self, definition):
@@ -200,9 +200,16 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
         if vulkan:
             from taichi_forge.graph._recipes.vulkan_binding_frames import eligible
 
-            # Mixed FFT/provider graphs retain their existing provider-owned
-            # submission fragment; do not generate a duplicate physical plan.
-            if spec.native_count or not eligible(spec, definition.backend):
+            # Some existing providers own their whole-Graph submission recipe.
+            # Preserve that identity without knowing any hardware family here.
+            if any(
+                getattr(
+                    getattr(getattr(node, "executable", None), "_recording", None),
+                    "_owns_vulkan_binding_frame_recipe",
+                    False,
+                )
+                for node in spec.nodes
+            ) or not eligible(spec, definition.backend):
                 return ()
         elif not _eligible(spec, definition.backend):
             return ()
@@ -213,7 +220,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 family="binding_frames",
                 source_key="whole-graph-bindings",
                 choice_id="immutable-argument-images",
-                coverage=tuple(source.region_id for source in definition.sources),
+                coverage=tuple(region.region_id for region in (definition.regions if vulkan else definition.sources)),
                 tasks=(
                     GraphFragmentTask.create(
                         "whole-graph-bindings:execute",
@@ -269,9 +276,9 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     "record a closed image-layout cycle; repair entry layouts only after layout changes",
                 ),
                 "limitations": (
-                    "flat Vulkan kernel Graph, one workspace lane; no SNode or external synchronization domains",
+                    "flat Vulkan kernel/native Graph, one workspace lane; no SNode or external synchronization domains",
                     "TLAS bindings are read-only; AS builds/refits use their existing ordered commands outside the frame",
-                    "one-mip sampled/storage images; simultaneous sampled/storage alias in one task is unavailable",
+                    "managed 2D storage mip views; simultaneous sampled/storage alias in one task is unavailable",
                     "raw mapping calls include argument preparation; use Graph.bind to amortize it",
                     "uploads and intervening graphics operations retain their existing explicit boundaries",
                     "driver-owned command/descriptor memory remains opaque; benefit requires workload measurements",

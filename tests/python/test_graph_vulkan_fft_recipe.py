@@ -62,6 +62,11 @@ def test_vulkan_fft_complete_recipes_compose_real_partitions_and_immutable_frame
     data, original = _input((32, 16), 5)
     definition, plans = _definition(data, (32, 16), 5)
     catalog = definition.recipe_catalog(providers=_providers())
+    # The FFT provider retains its existing whole-Graph submission identity;
+    # the generic native-command path must not emit a duplicate frame recipe.
+    assert not any(
+        f.provider_namespace.endswith(".binding_frames") for f in catalog.fragments
+    )
     fragments = [
         f for f in catalog.fragments if f.provider_namespace.endswith(".vulkan_fft")
     ]

@@ -19,6 +19,11 @@ class TI_DLL_EXPORT ExternalGraphCommand {
       Program &program,
       const std::unordered_map<std::string, aot::IValue> &args) const = 0;
   virtual void record(Device *device, CommandList *commands) const = 0;
+  // Fixed image uses resolved during cold binding validation. The enclosing
+  // recorder owns layout transitions and closes the replay layout cycle.
+  virtual std::vector<std::pair<DeviceAllocation, ImageLayout>> image_uses() const {
+    return {};
+  }
   virtual bool supports_inline_recording() const {
     return false;
   }

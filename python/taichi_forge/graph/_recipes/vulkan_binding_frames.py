@@ -46,12 +46,12 @@ def eligible(spec, backend):
             ):
                 return False
         elif isinstance(node, _CompiledNativeGraphNode):
-            from taichi_forge.hardware._vulkan_fft import _FrozenVulkanFftSource, _Recording
-
             recording = getattr(node.executable, "_recording", None)
-            if not isinstance(
-                recording, (_Recording, _FrozenVulkanFftSource)
-            ) or not recording.source._statistics.get("inline_recording_available"):
+            if not callable(
+                getattr(recording, "_vulkan_graph_command", None)
+            ) or not getattr(recording.source, "_statistics", {}).get(
+                "inline_recording_available"
+            ):
                 return False
         else:
             return False
@@ -70,7 +70,7 @@ class VulkanBindingFrameExecutor:
         spec = instance.spec
         if not eligible(spec, "vulkan"):
             raise ValueError(
-                "Vulkan binding frames require fixed resource dispatches and inline-recordable FFT plans"
+                "Vulkan binding frames require fixed resource dispatches and inline-recordable native plans"
             )
         self._program = impl.get_runtime().prog
         self._prepare = core._prepare_vulkan_graph_recording
@@ -80,12 +80,7 @@ class VulkanBindingFrameExecutor:
                 self._sources.append(node.compiled_graph)
             else:
                 recording = node.executable._recording
-                recording.plan.validate_graph_lifetime()
-                self._sources.append(
-                    self._program._vulkan_fft_graph_command(
-                        recording.plan._handle, recording.data
-                    )
-                )
+                self._sources.append(recording._vulkan_graph_command())
         self._frames = weakref.WeakSet()
         self._context = _GraphRunContext()
         self._dispatch_count = spec.dispatch_count

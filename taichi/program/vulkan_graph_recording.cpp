@@ -15,6 +15,20 @@ aot::CompiledGraph graph_recording_argument_schema(
   auto merge = [&](const aot::Arg &arg) {
     auto [entry, inserted] = result.args.emplace(arg.name, arg);
     const auto &prior = entry->second;
+    const auto is_image = [](aot::ArgKind kind) {
+      return kind == aot::ArgKind::kTexture || kind == aot::ArgKind::kRWTexture;
+    };
+    // Native image uses and a kernel's sampled/storage view can share one
+    // Texture binding. Preserve the stricter storage format, while keeping
+    // incompatible storage declarations rejected by the ordinary equality test.
+    if (!inserted && is_image(arg.tag) && is_image(prior.tag) &&
+        arg.element_shape.size() == prior.element_shape.size() &&
+        arg.tag != prior.tag) {
+      if (arg.tag == aot::ArgKind::kRWTexture) {
+        entry->second = arg;
+      }
+      return;
+    }
     TI_ERROR_IF(
         !inserted && arg != prior,
         "Prepared Vulkan Graph has conflicting argument declarations: {}",
@@ -167,7 +181,7 @@ Program::create_vulkan_graph_recording(
       operations.push_back(
           {{}, [command](Device *device, CommandList *commands) {
              command->record(device, commands);
-           }, command->supports_inline_recording()});
+           }, command->supports_inline_recording(), command->image_uses()});
     }
   }
   auto registration =

@@ -2785,6 +2785,20 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   std::size_t kernel_index = 0;
   for (const auto &operation : operations) {
     if (operation.external) {
+      for (const auto &[image, layout] : operation.images) {
+        TI_ERROR_IF(image.device != device_ ||
+                        last_image_layouts_.find(image.alloc_id) ==
+                            last_image_layouts_.end(),
+                    "Prepared native Graph image is not owned by this device");
+        const auto [previous, first_use] =
+            recorded_image_layouts.emplace(image.alloc_id, layout);
+        if (first_use) {
+          entry_images.emplace_back(image, layout);
+        } else if (previous->second != layout) {
+          commands->image_transition(image, previous->second, layout);
+          previous->second = layout;
+        }
+      }
       operation.external(device_, commands.get());
       commands->memory_barrier();
       continue;

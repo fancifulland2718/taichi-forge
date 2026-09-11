@@ -307,6 +307,7 @@ class TI_DLL_EXPORT GfxRuntime {
     // Cold-only append of an already-owned external command. Empty for kernels.
     std::function<void(Device *, CommandList *)> external;
     bool inline_recording{false};
+    std::vector<std::pair<DeviceAllocation, ImageLayout>> images;
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {

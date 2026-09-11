@@ -376,6 +376,9 @@ class VulkanFftPlan:
 
 
 class _Recording(BackendCommandRecording):
+    # VulkanFftRecipeProvider owns the existing whole-Graph submission identity.
+    _owns_vulkan_binding_frame_recipe = True
+
     def __init__(self, plan, data, *, recipe_owned=False):
         super().__init__(
             backend="vulkan",
@@ -396,6 +399,12 @@ class _Recording(BackendCommandRecording):
 
     def _freeze_graph_recipe_source(self):
         return _FrozenVulkanFftSource(self) if self._recipe_owned else None
+
+    def _vulkan_graph_command(self):
+        self.plan.validate_graph_lifetime()
+        return self.plan._runtime_prog._vulkan_fft_graph_command(
+            self.plan._handle, self.data
+        )
 
     @property
     def resource_effects(self):
@@ -453,6 +462,8 @@ def _recreate_recording(source, data, *, batch_tile=None):
 class _FrozenVulkanFftSource(FrozenNativeRecipeSource):
     """Process-local storage and immutable expected facts, no native plan lease."""
 
+    _owns_vulkan_binding_frame_recipe = True
+
     def __init__(self, recording):
         plan = recording.plan
         plan.validate_graph_lifetime()
@@ -478,6 +489,11 @@ class _FrozenVulkanFftSource(FrozenNativeRecipeSource):
 
     _recording = property(lambda self: self)
     source = property(lambda self: self)
+
+    def _vulkan_graph_command(self):
+        raise ValueError(
+            "Frozen FFT source must be materialized before binding commands"
+        )
 
     def validate_graph_lifetime(self):
         if not runtime_generation_matches(self):
