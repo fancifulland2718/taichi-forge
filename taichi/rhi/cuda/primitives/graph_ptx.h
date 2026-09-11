@@ -108,9 +108,15 @@ struct CudaGraphPredicateGroupControl {
   std::uint64_t replay_count{0};
   std::uint64_t state_change_count{0};
   std::uint64_t node_api_call_count{0};
+  // Contiguous leaf controls owned by an outer slot. Its direct node list
+  // includes their updaters, not their payloads. Disabling the parent must
+  // retire leaf payload enablement too, even though those updaters won't run.
+  std::uintptr_t child_controls{0};
+  std::uint32_t child_count{0};
+  std::uint32_t reserved{0};
 };
 
-static_assert(sizeof(CudaGraphPredicateGroupControl) == 80);
+static_assert(sizeof(CudaGraphPredicateGroupControl) == 96);
 static_assert(offsetof(CudaGraphPredicateGroupControl, predicate) == 0);
 static_assert(offsetof(CudaGraphPredicateGroupControl, parent_gate) == 8);
 static_assert(offsetof(CudaGraphPredicateGroupControl, gate) == 16);
@@ -128,6 +134,8 @@ static_assert(offsetof(CudaGraphPredicateGroupControl, state_change_count) ==
               64);
 static_assert(offsetof(CudaGraphPredicateGroupControl, node_api_call_count) ==
               72);
+static_assert(offsetof(CudaGraphPredicateGroupControl, child_controls) == 80);
+static_assert(offsetof(CudaGraphPredicateGroupControl, child_count) == 88);
 
 struct CudaGraphBoundedProbeResult {
   bool attempted{false};
@@ -193,9 +201,10 @@ void driver_graph_update_bounded_extent(CudaGraphBoundedExtentControl *control,
                                         void *stream = nullptr);
 void driver_graph_update_bounded_group(CudaGraphBoundedGroupControl *control,
                                        void *stream = nullptr);
-void driver_graph_update_predicate_group(
+std::uint32_t driver_graph_update_predicate_group(
     CudaGraphPredicateGroupControl *control,
-    void *stream = nullptr);
+    void *stream = nullptr,
+    void **device_node = nullptr);
 void *driver_graph_bounded_probe_payload_function();
 CudaGraphBoundedProbeResult driver_graph_bounded_probe(bool run);
 

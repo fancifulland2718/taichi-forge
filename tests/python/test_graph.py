@@ -4663,6 +4663,12 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
                     "cuda_device_update_nested_patched_replay",
                 )
                 memory = graph.execution_stats().memory
+                if dict(ti_core.cuda_bounded_dispatch_capabilities()).get(
+                    "nested_parent_gated_updaters_compiled", False
+                ):
+                    assert "parent_gated_updaters" in graph._spec.pipeline_definition[0][
+                        "physical_plan_id"
+                    ]
                 assert 0 < high_stats["known_bounded_control_bytes"] <= 65536
                 assert memory.persistent_argument_bytes >= high_stats["known_bounded_control_bytes"]
 
@@ -4708,6 +4714,28 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
                     "cuda_masked_replay",
                     "cuda_masked_patched_replay",
                 )
+
+    if submit_supported:
+        # Only device contents change: an exact replay must disable previously
+        # active children, preserve inactive state, then correctly reactivate.
+        binding = graph.bind({**args, "outer_target": 5, "inner_target": 1})
+        for initial_outer in (5, 0, 5, 3, 5, 0):
+            for value in args.values():
+                value.fill(0)
+            args["outer_state"].fill(initial_outer)
+            args["inner_state"].fill(17)
+            args["inner_predicate"].fill(1)
+            args["inner_counter"].fill(19)
+            graph.submit(binding).wait()
+            stops = tuple(range(initial_outer + 1, 6))
+            assert args["outer_state"].to_numpy()[()] == 5
+            assert args["outer_counter"].to_numpy()[()] == len(stops)
+            assert args["inner_state"].to_numpy()[()] == (5 if stops else 17)
+            assert args["inner_counter"].to_numpy()[()] == (5 if stops else 19)
+            assert args["inner_total"].to_numpy()[()] == sum(stops)
+            assert tuple(args["inner_stops"].to_numpy()) == stops + (0,) * (
+                5 - len(stops)
+            )
 
     debug = graph._debug_info
     assert debug["structured_control_count"] == 2

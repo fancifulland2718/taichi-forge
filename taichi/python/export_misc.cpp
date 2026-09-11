@@ -886,6 +886,7 @@ void export_misc(py::module &m) {
         probe.partial_failure_capacity_safe;
     result["runtime_path_compiled"] = runtime_path_compiled;
     result["exact_device_grid_available"] = exact_device_grid_available;
+    result["nested_parent_gated_updaters_compiled"] = update_compiled;
     result["probe_driver_error"] = probe.driver_error;
     result["probe_sparse_visited"] = probe.sparse_visited;
     result["probe_zero_visited"] = probe.zero_visited;
@@ -935,6 +936,7 @@ void export_misc(py::module &m) {
     result["partial_failure_capacity_safe"] = false;
     result["runtime_path_compiled"] = false;
     result["exact_device_grid_available"] = false;
+    result["nested_parent_gated_updaters_compiled"] = false;
     result["probe_driver_error"] = 0;
     result["probe_sparse_visited"] = 0;
     result["probe_zero_visited"] = 0;

@@ -3490,6 +3490,9 @@ bool try_run_cuda_device_update_nested_control_graph(
         reinterpret_cast<std::uintptr_t>(state->masked_gate);
     outer_control.continue_while_nonzero = 1;
     outer_control.telemetry_enabled = state->diagnostics_enabled ? 1u : 0u;
+    outer_control.child_controls = reinterpret_cast<std::uintptr_t>(
+        state->nested_device_controls + initialized_control_count);
+    outer_control.child_count = static_cast<std::uint32_t>(controls_per_outer - 1);
     for (std::size_t child = 0; child < inner_controls.size(); ++child) {
       for (int inner_iteration = 0;
            inner_iteration < inner_controls[child].max_iterations;
@@ -3585,8 +3588,11 @@ bool try_run_cuda_device_update_nested_control_graph(
     for (int outer_iteration = 0; outer_iteration < outer_max_iterations;
          ++outer_iteration) {
       const std::size_t outer_control_index = control_index++;
-      cuda::driver_graph_update_predicate_group(
+      payload_error = cuda::driver_graph_update_predicate_group(
           state->nested_device_controls + outer_control_index, capture_stream);
+      if (payload_error != CUDA_SUCCESS) {
+        break;
+      }
       std::size_t payload_cursor = outer_condition_dispatch_count;
       for (const auto &inner : inner_controls) {
         for (std::size_t i = payload_cursor;
@@ -3600,9 +3606,15 @@ bool try_run_cuda_device_update_nested_control_graph(
              payload_error == CUDA_SUCCESS;
              ++inner_iteration) {
           const std::size_t inner_control_index = control_index++;
-          cuda::driver_graph_update_predicate_group(
+          void *updater_node = nullptr;
+          payload_error = cuda::driver_graph_update_predicate_group(
               state->nested_device_controls + inner_control_index,
-              capture_stream);
+              capture_stream, &updater_node);
+          if (payload_error != CUDA_SUCCESS) {
+            break;
+          }
+          control_nodes[outer_control_index].push_back(
+              reinterpret_cast<std::uintptr_t>(updater_node));
           for (std::size_t i = inner.body_dispatch_begin;
                i < inner.dispatch_end && payload_error == CUDA_SUCCESS;
                ++i) {
@@ -5585,6 +5597,11 @@ CompiledGraphDebugSnapshot CompiledGraphJITCache::debug_graph_stats() {
     if (nested_update_count != 0) {
       result.known_bounded_grouped_payloads += static_cast<std::uint32_t>(
           cuda_graph_state->nested_host_nodes.size());
+      // Parent-owned updater handles are already counted as updater dispatches,
+      // not business payloads. The known count is topology, not active launches.
+      for (const auto &control : cuda_graph_state->nested_host_controls) {
+        result.known_bounded_grouped_payloads -= control.child_count;
+      }
     }
     result.known_bounded_max_group_size =
         per_node_update_count == 0 ? 0u : 1u;

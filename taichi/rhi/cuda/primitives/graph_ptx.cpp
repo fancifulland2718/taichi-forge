@@ -453,9 +453,9 @@ GROUP_DONE:
     .param .u64 control_param
 )
 {
-    .reg .pred %p<12>;
-    .reg .b32 %r<16>;
-    .reg .b64 %rd<12>;
+    .reg .pred %p<16>;
+    .reg .b32 %r<24>;
+    .reg .b64 %rd<20>;
     .param .b64 call_node;
     .param .b32 call_enabled;
     .param .b32 call_result;
@@ -509,10 +509,11 @@ PREDICATE_GROUP_TELEMETRY_DONE:
     st.global.u64 [%rd1+64], %rd7;
 PREDICATE_GROUP_CHANGE_RECORDED:
     mov.u32 %r9, 0;
+    mov.u32 %r20, %r4;
 
 PREDICATE_GROUP_LOOP:
     setp.ge.u32 %p10, %r9, %r4;
-    @%p10 bra PREDICATE_GROUP_COMMIT;
+    @%p10 bra PREDICATE_GROUP_CHILDREN;
     cvt.u64.u32 %rd8, %r9;
     shl.b64 %rd9, %rd8, 3;
     add.u64 %rd10, %rd5, %rd9;
@@ -527,12 +528,60 @@ PREDICATE_GROUP_LOOP:
     add.u32 %r9, %r9, 1;
     bra PREDICATE_GROUP_LOOP;
 
+PREDICATE_GROUP_CHILDREN:
+    // Enabling a parent only enables its leaf updaters. Their cached payload
+    // state is still exact, and each leaf evaluates its own predicate later.
+    setp.ne.u32 %p12, %r12, 0;
+    @%p12 bra PREDICATE_GROUP_COMMIT;
+    ld.global.u64 %rd12, [%rd1+80];
+    ld.global.u32 %r17, [%rd1+88];
+    mov.u32 %r16, 0;
+PREDICATE_GROUP_CHILD:
+    setp.ge.u32 %p12, %r16, %r17;
+    @%p12 bra PREDICATE_GROUP_COMMIT;
+    ld.global.u32 %r21, [%rd12+40];
+    ld.global.u32 %r22, [%rd12+44];
+    setp.eq.u32 %p13, %r21, 0;
+    setp.ne.u32 %p14, %r22, 0;
+    and.pred %p15, %p13, %p14;
+    @%p15 bra PREDICATE_GROUP_NEXT_CHILD;
+    ld.global.u64 %rd13, [%rd12+24];
+    ld.global.u32 %r18, [%rd12+32];
+    mov.u32 %r19, 0;
+PREDICATE_GROUP_CHILD_NODE:
+    setp.ge.u32 %p12, %r19, %r18;
+    @%p12 bra PREDICATE_GROUP_CHILD_COMMIT;
+    ld.global.u64 %rd14, [%rd13];
+    st.param.b64 [call_node], %rd14;
+    st.param.b32 [call_enabled], %r13;
+    call.uni (call_result), cudaGraphKernelNodeSetEnabled,
+        (call_node, call_enabled);
+    ld.param.b32 %r15, [call_result];
+    setp.ne.u32 %p11, %r15, 0;
+    @%p11 bra PREDICATE_GROUP_FAIL;
+    add.u64 %rd13, %rd13, 8;
+    add.u32 %r19, %r19, 1;
+    add.u32 %r20, %r20, 1;
+    bra PREDICATE_GROUP_CHILD_NODE;
+PREDICATE_GROUP_CHILD_COMMIT:
+    // Publish disabled only after all updates succeed. A later active parent
+    // can reuse this state; never leave last_enabled claiming an enabled node.
+    st.global.u32 [%rd12+40], %r13;
+    mov.u32 %r22, 1;
+    st.global.u32 [%rd12+44], %r22;
+PREDICATE_GROUP_NEXT_CHILD:
+    ld.global.u64 %rd14, [%rd12+16];
+    st.global.u32 [%rd14], %r13;
+    add.u64 %rd12, %rd12, 96;
+    add.u32 %r16, %r16, 1;
+    bra PREDICATE_GROUP_CHILD;
+
 PREDICATE_GROUP_COMMIT:
     st.global.u32 [%rd1+40], %r12;
     mov.u32 %r10, 1;
     st.global.u32 [%rd1+44], %r10;
     @%p6 bra PREDICATE_GROUP_DONE;
-    cvt.u64.u32 %rd8, %r4;
+    cvt.u64.u32 %rd8, %r20;
     ld.global.u64 %rd9, [%rd1+72];
     add.u64 %rd9, %rd9, %rd8;
     st.global.u64 [%rd1+72], %rd9;
@@ -783,17 +832,38 @@ void driver_graph_update_bounded_group(CudaGraphBoundedGroupControl *control,
                                      {&control_arg}, {}, 1, 1, 0, stream);
 }
 
-void driver_graph_update_predicate_group(
+std::uint32_t driver_graph_update_predicate_group(
     CudaGraphPredicateGroupControl *control,
-    void *stream) {
+    void *stream,
+    void **device_node) {
   std::uint32_t driver_error = CUDA_SUCCESS;
-  TI_ERROR_IF(!ensure_bounded_module(&driver_error),
-              "CUDA predicate Graph updater PTX failed to load: {}",
-              get_cuda_error_message(driver_error));
+  if (!ensure_bounded_module(&driver_error)) {
+    return driver_error;
+  }
   void *control_arg = control;
-  CUDAContext::get_instance().launch(predicate_group_update_func,
-                                     "cuda_graph_update_predicate_group",
-                                     {&control_arg}, {}, 1, 1, 0, stream);
+  void *arguments[] = {&control_arg};
+  auto &driver = CUDADriver::get_instance();
+  if (device_node == nullptr) {
+    return driver.launch_kernel.call(predicate_group_update_func, 1, 1, 1,
+                                      1, 1, 1, 0, stream, arguments, nullptr);
+  }
+  *device_node = nullptr;
+  TaichiCudaLaunchAttribute attribute{};
+  attribute.id = TAICHI_CU_LAUNCH_ATTRIBUTE_DEVICE_UPDATABLE_KERNEL_NODE;
+  attribute.value.device_updatable_kernel_node.device_updatable = 1;
+  TaichiCudaLaunchConfig config{};
+  config.grid_dim_x = config.grid_dim_y = config.grid_dim_z = 1;
+  config.block_dim_x = config.block_dim_y = config.block_dim_z = 1;
+  config.stream = stream;
+  config.attributes = &attribute;
+  config.num_attributes = 1;
+  driver_error = driver.launch_kernel_ex.call(
+      &config, predicate_group_update_func, arguments, nullptr);
+  if (driver_error != CUDA_SUCCESS) {
+    return driver_error;
+  }
+  *device_node = attribute.value.device_updatable_kernel_node.device_node;
+  return *device_node == nullptr ? CUDA_ERROR_NOT_SUPPORTED : CUDA_SUCCESS;
 }
 
 void *driver_graph_bounded_probe_payload_function() {

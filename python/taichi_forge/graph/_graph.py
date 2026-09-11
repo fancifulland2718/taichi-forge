@@ -9308,6 +9308,12 @@ def _runtime_node_physical_plan_id(node):
     routes = []
     for control in controls:
         route = getattr(control, "_cuda_nested_control_lowering", None)
+        if route == _CUDA_NESTED_DEVICE_UPDATE_ROUTE and dict(
+            _ti_core.cuda_bounded_dispatch_capabilities()
+        ).get("nested_parent_gated_updaters_compiled", False):
+            # A cold, native-owned implementation fact, not a resource snapshot
+            # or a replay-time probe. Old native builds retain their old ID.
+            route += ":parent_gated_updaters"
         if not route:
             route = getattr(control, "_cuda_control_lowering", None)
         if route:
