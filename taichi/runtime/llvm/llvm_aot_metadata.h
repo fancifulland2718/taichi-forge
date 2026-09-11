@@ -10,7 +10,9 @@
 namespace taichi::lang::LLVM {
 
 inline constexpr char kLlvmAotMetadataFilename[] = "aot_metadata.json";
-inline constexpr std::uint32_t kLlvmAotSchemaVersion = 1;
+// Graph Arg now serializes the exact image format. Reject old binary tables
+// before decoding them; this is an artifact schema, not a runtime wheel pin.
+inline constexpr std::uint32_t kLlvmAotSchemaVersion = 2;
 
 struct LlvmAotMetadata {
   std::uint32_t schema_version{0};

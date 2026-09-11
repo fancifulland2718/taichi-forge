@@ -187,13 +187,16 @@ def describe_symbolic_arg(symbolic_arg):
         )
     if tag == _ti_core.ArgKind.RWTEXTURE:
         from taichi_forge.types.texture_type import TY_CH2FORMAT
+        from taichi_forge.lang.enums import Format
+
+        fmt = symbolic_arg.texture_format
+        if fmt == Format.unknown:  # Legacy C++/JSON arguments lack this field.
+            fmt = TY_CH2FORMAT[(symbolic_arg.channel_format(), symbolic_arg.num_channels)]
 
         return ArgumentTypeDescriptor(
             "rw_texture",
             ndim=len(symbolic_arg.texture_shape),
-            fmt=TY_CH2FORMAT[
-                (symbolic_arg.channel_format(), symbolic_arg.num_channels)
-            ],
+            fmt=fmt,
         )
     return ArgumentTypeDescriptor(
         "scalar", describe_element_type(symbolic_arg.element_dtype())

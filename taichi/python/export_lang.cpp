@@ -5381,6 +5381,10 @@ void export_lang(py::module &m) {
 
   py::class_<aot::Arg>(m, "Arg")
       .def(py::init<aot::ArgKind, std::string, DataType &, size_t,
+                    std::vector<int>, BufferFormat>(),
+           py::arg("tag"), py::arg("name"), py::arg("channel_format"),
+           py::arg("num_channels"), py::arg("shape"), py::arg("texture_format"))
+      .def(py::init<aot::ArgKind, std::string, DataType &, size_t,
                     std::vector<int>>(),
            py::arg("tag"), py::arg("name"), py::arg("dtype"),
            py::arg("field_dim"), py::arg("element_shape"))
@@ -5394,6 +5398,7 @@ void export_lang(py::module &m) {
       .def_readonly("texture_shape", &aot::Arg::element_shape)
       .def_readonly("field_dim", &aot::Arg::field_dim)
       .def_readonly("num_channels", &aot::Arg::num_channels)
+      .def_readonly("texture_format", &aot::Arg::texture_format)
       .def("dtype", &aot::Arg::dtype)
       .def("element_dtype", &aot::Arg::element_dtype)
       .def("channel_format", &aot::Arg::dtype);

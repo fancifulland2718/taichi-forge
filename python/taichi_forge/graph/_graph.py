@@ -9923,7 +9923,7 @@ def _graph_resource_binding_requirements(nodes):
             ):
                 key = (arg.name, int(arg.tag), len(arg.texture_shape))
                 if arg.tag == ArgKind.RWTEXTURE:
-                    key += (str(arg.channel_format()), arg.num_channels)
+                    key += (str(arg.channel_format()), arg.num_channels, str(arg.texture_format))
                 requirements[key] = arg
 
     def visit(node):
@@ -11888,13 +11888,16 @@ class _GraphSpec:
                 raise TaichiRuntimeError(
                     f"Graph Texture {arg.name!r} has the wrong dimensionality"
                 )
-            if arg.tag == ArgKind.RWTEXTURE and FORMAT2TY_CH[value.fmt] != (
-                arg.channel_format(),
-                arg.num_channels,
-            ):
-                raise TaichiRuntimeError(
-                    f"Graph RWTexture {arg.name!r} has the wrong format"
+            if arg.tag == ArgKind.RWTEXTURE:
+                matches_format = (
+                    value.fmt == arg.texture_format
+                    if arg.texture_format != enums.Format.unknown
+                    else FORMAT2TY_CH[value.fmt] == (arg.channel_format(), arg.num_channels)
                 )
+                if not matches_format:
+                    raise TaichiRuntimeError(
+                        f"Graph RWTexture {arg.name!r} has the wrong format"
+                    )
         for arg in self._acceleration_structure_binding_requirements:
             if arg.name not in snapshot:
                 continue
@@ -19903,7 +19906,7 @@ def _make_arg_rwtexture(kwargs: Dict[str, Any]):
         )
     channel_format, num_channels = FORMAT2TY_CH[fmt]
     return _ti_core.Arg(
-        ArgKind.RWTEXTURE, name, channel_format, num_channels, [2] * ndim
+        ArgKind.RWTEXTURE, name, channel_format, num_channels, [2] * ndim, fmt
     )
 
 

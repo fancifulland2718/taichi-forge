@@ -18,6 +18,50 @@ from tests.python.hardware_process_memory import ProcessMemoryPlateau
 supported_archs_texture = [ti.vulkan]
 supported_archs_texture_excluding_load_store = [ti.vulkan, ti.opengl]
 
+
+@pytest.mark.parametrize("fmt,integer_fmt,channels", [
+    (ti.Format.r8, ti.Format.r8u, 1),
+    (ti.Format.rg8, ti.Format.rg8u, 2),
+    (ti.Format.rgba8, ti.Format.rgba8u, 4),
+])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_graph_rwtexture_preserves_normalized_format(fmt, integer_fmt, channels):
+    from taichi_forge.types._argument_descriptor import describe_symbolic_arg
+
+    @ti.kernel
+    def write(image: ti.types.rw_texture(num_dimensions=2, fmt=fmt)):
+        for x, y in image:
+            image.store(ti.Vector([x, y]), ti.Vector([0.25, 0.5, 0.75, 1.0]))
+
+    @ti.kernel
+    def read(image: ti.types.texture(num_dimensions=2), result: ti.types.ndarray(dtype=ti.f32, ndim=3)):
+        for x, y in ti.ndrange(result.shape[0], result.shape[1]):
+            value = image.fetch(ti.Vector([x, y]), 0)
+            for c in ti.static(range(4)):
+                result[x, y, c] = value[c]
+
+    arg = ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, "image", ndim=2, fmt=fmt)
+    wrong = ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, "image", ndim=2, fmt=integer_fmt)
+    assert describe_symbolic_arg(arg).fmt == fmt
+    assert describe_symbolic_arg(wrong).fmt == integer_fmt
+    builder = ti.graph.GraphBuilder()
+    with pytest.raises(Exception, match="format mismatch"):
+        builder.dispatch(write, wrong)
+    builder.dispatch(write, arg)
+    builder.dispatch(read, ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "sampled", ndim=2),
+                     ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=3))
+    graph = builder.compile()
+    texture = ti.Texture(fmt, (9, 7))
+    result = ti.ndarray(ti.f32, (9, 7, 4))
+    with pytest.raises(RuntimeError, match="wrong format"):
+        graph.bind({"image": ti.Texture(integer_fmt, (9, 7)), "sampled": texture, "result": result})
+    bindings = graph.bind({"image": texture, "sampled": texture, "result": result})
+    graph.submit(bindings)
+    graph.submit(bindings)
+    expected = np.array([0.25, 0.5, 0.75, 1.0], dtype=np.float32)
+    np.testing.assert_allclose(result.to_numpy()[..., :channels],
+                               np.broadcast_to(expected[:channels], (9, 7, channels)), atol=0.5 / 255 + 1e-6)
+
 integer_storage_image_cases = [
     (ti.Format.r16u, ti.u32, 1, (1, 0, 0, 0)),
     (ti.Format.rg16u, ti.u32, 2, (1, 65535, 0, 0)),

@@ -67,6 +67,8 @@ struct Arg {
 
   // For texture
   size_t num_channels;  // TODO: maybe rename field_dim and merge?
+  // Channel type/count cannot distinguish UNORM from integer image formats.
+  BufferFormat texture_format{BufferFormat::unknown};
 
   // For serialization & deserialization
   explicit Arg()
@@ -97,8 +99,10 @@ struct Arg {
                const std::string &name,
                const DataType &dtype,
                size_t dim = 0,
-               const std::vector<int> &element_shape = {})
-      : tag(tag), name(name), element_shape(element_shape) {
+               const std::vector<int> &element_shape = {},
+               BufferFormat texture_format = BufferFormat::unknown)
+      : tag(tag), name(name), element_shape(element_shape),
+        texture_format(texture_format) {
     field_dim = 0;
     num_channels = 0;
     if (tag == ArgKind::kTexture || tag == ArgKind::kRWTexture) {
@@ -150,14 +154,16 @@ struct Arg {
     return tag == other.tag && name == other.name &&
            field_dim == other.field_dim && dtype_id == other.dtype_id &&
            element_shape == other.element_shape &&
-           num_channels == other.num_channels;
+           num_channels == other.num_channels &&
+           texture_format == other.texture_format;
   }
 
   bool operator!=(const Arg &other) const {
     return !(*this == other);
   }
 
-  TI_IO_DEF(name, dtype_id, field_dim, tag, element_shape, num_channels);
+  TI_IO_DEF(name, dtype_id, field_dim, tag, element_shape, num_channels,
+            texture_format);
 };
 
 /**

@@ -1732,6 +1732,11 @@ artifacts created before this metadata contract must be rebuilt; the loader
 rejects a missing sidecar rather than guessing requirements from the build
 machine.
 
+LLVM AOT schema 2 also preserves exact Graph storage-image formats (for example,
+RGBA8 UNORM versus RGBA8 UINT). Rebuild schema-1 binary Graph artifacts before
+loading them with this runtime; the existing metadata check rejects the old
+schema before decoding. This artifact version is not a wheel/commit pin.
+
 GFX AOT artifacts now preserve dense SNodeTree layout identity explicitly.
 metadata.json stores every artifact-local root-buffer size, each field's tree
 id, and each kernel's sorted tree dependencies. The C API loader allocates all

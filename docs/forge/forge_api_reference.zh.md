@@ -1447,6 +1447,10 @@ device 及其选定 PTX target。更高 target 可以开放 target-specific code
 此 metadata 合同建立前生成的 CUDA LLVM AOT artifact 必须重新构建；loader 会拒绝缺失
 sidecar 的产物，而不会根据构建机猜测能力要求。
 
+LLVM AOT schema 2 另外保存 Graph storage image 的精确格式，例如 RGBA8 UNORM 与 RGBA8 UINT。
+schema-1 的二进制 Graph artifact 需要重新生成；已有 metadata 检查会在解码前明确拒绝旧格式。
+这是 artifact schema，不是 wheel 与 commit 的绑定。
+
 GFX AOT artifact 现在显式保存稠密 SNodeTree layout identity。metadata.json 会记录每个
 artifact-local root buffer 的大小、每个 field 所属的 tree id，以及每个 kernel 已排序的 tree
 依赖。C API loader 会分配全部已序列化 root，并把记录的 tree 数传给 kernel 注册，不再假定

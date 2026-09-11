@@ -34,6 +34,9 @@ TEST(LlvmAotMetadataTest, ValidatesCudaComputeAndPtxRequirements) {
 
   LLVM::LlvmAotMetadata missing_schema;
   EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(missing_schema));
+  auto old_graph_layout = metadata;
+  old_graph_layout.schema_version = 1;
+  EXPECT_ANY_THROW(LLVM::validate_llvm_aot_metadata(old_graph_layout));
 
   LLVM::LlvmAotMetadata missing_ptx;
   missing_ptx.schema_version = LLVM::kLlvmAotSchemaVersion;
