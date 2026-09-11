@@ -9337,6 +9337,14 @@ def _runtime_node_physical_plan_id(node):
             route += ":parent_gated_updaters"
         if not route:
             route = getattr(control, "_cuda_control_lowering", None)
+        if (
+            isinstance(control, _CompiledWhileGraphNode)
+            and route == "cuda_conditional_graph"
+            and dict(_ti_core.cuda_conditional_graph_capabilities()).get(
+                "while_device_reset_compiled", False
+            )
+        ):
+            route += ":device_reset"
         if route:
             routes.append((control.region_path, route))
     if not routes:

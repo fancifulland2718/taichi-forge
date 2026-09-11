@@ -21,22 +21,28 @@ const char kCudaGraphConditionalPtx[] = R"ptx(
 
 .visible .entry graph_set_conditional(
     .param .u64 control_param,
-    .param .u64 handle_param
+    .param .u64 handle_param,
+    .param .u32 reset_iteration_param
 )
 {
     .reg .pred %p<6>;
-    .reg .b32 %r<7>;
+    .reg .b32 %r<8>;
     .reg .b64 %rd<4>;
     .param .b64 call_handle;
     .param .b32 call_value;
 
     ld.param.u64 %rd1, [control_param];
     ld.param.u64 %rd2, [handle_param];
+    ld.param.u32 %r7, [reset_iteration_param];
     ld.global.u64 %rd3, [%rd1+0];
-    ld.global.u32 %r1, [%rd1+8];
     ld.global.u32 %r2, [%rd1+12];
     ld.global.u32 %r3, [%rd1+16];
+    mov.u32 %r4, 0;
+    setp.ne.u32 %p5, %r7, 0;
+    @%p5 bra ITERATION_READY;
+    ld.global.u32 %r1, [%rd1+8];
     add.u32 %r4, %r1, 1;
+ITERATION_READY:
     st.global.u32 [%rd1+8], %r4;
     ld.global.u32 %r5, [%rd3];
 
@@ -724,13 +730,15 @@ void driver_graph_prepare_conditional_setter() {
 
 void driver_graph_set_conditional(CudaGraphConditionalControl *control,
                                   std::uint64_t conditional_handle,
-                                  void *stream) {
+                                  void *stream,
+                                  bool reset_iteration) {
   ensure_module();
   void *control_arg = control;
   void *handle_arg = &conditional_handle;
+  std::uint32_t reset_arg = reset_iteration ? 1u : 0u;
   CUDAContext::get_instance().launch(
       set_conditional_func, "cuda_graph_set_conditional",
-      {&control_arg, handle_arg}, {}, 1, 1, 0, stream);
+      {&control_arg, handle_arg, &reset_arg}, {}, 1, 1, 0, stream);
 }
 
 void driver_graph_set_branch_conditional(CudaGraphConditionalControl *control,

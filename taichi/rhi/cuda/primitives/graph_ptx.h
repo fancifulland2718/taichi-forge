@@ -164,7 +164,8 @@ bool driver_graph_conditional_setter_compiled();
 void driver_graph_prepare_conditional_setter();
 void driver_graph_set_conditional(CudaGraphConditionalControl *control,
                                   std::uint64_t conditional_handle,
-                                  void *stream = nullptr);
+                                  void *stream = nullptr,
+                                  bool reset_iteration = false);
 void driver_graph_set_branch_conditional(CudaGraphConditionalControl *control,
                                          std::uint64_t conditional_handle,
                                          void *stream = nullptr);

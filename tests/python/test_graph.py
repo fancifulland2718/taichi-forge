@@ -6177,6 +6177,19 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     second["counter"].fill(0)
     graph.run(second)
 
+    # The same executable must restart its private iteration state after an
+    # inactive launch, a full-budget launch, and an ordinary early stop.
+    for enabled, initial_state, expected_iterations in (
+        (0, 0, 0), (1, -100, 20), (1, 0, 7)
+    ):
+        second["enabled"].fill(enabled)
+        second["state"].fill(initial_state)
+        second["counter"].fill(0)
+        graph.run(second)
+        assert graph.control_flow_stats()[0].logical_iterations == expected_iterations
+        assert second["state"][None] == initial_state + expected_iterations
+        assert second["counter"][None] == expected_iterations
+
     native_stats = graph._graph_stats[0]
     assert native_stats["captures"] == 1
     assert native_stats["patched_replays"] >= 0
@@ -6184,11 +6197,83 @@ def test_structured_graph_while_native_rebind_and_replay_diagnostics():
     assert native_stats["last_path"] == "cuda_exact_replay"
     # Diagnostics describe the current MRU executable. The alternate A/B slot
     # owns the first binding's independent counters.
-    assert native_stats["asynchronous_control_updates"] == 3
+    device_reset = capabilities.get("while_device_reset_compiled", False)
+    assert native_stats["asynchronous_control_updates"] == (1 if device_reset else 6)
+    plan_id = graph._spec.pipeline_definition[0]["physical_plan_id"]
+    assert ("device_reset" in plan_id) == device_reset
     assert 1 <= native_stats["peak_deferred_replay_batches"] <= 2
     assert native_stats["deferred_replay_waits"] >= 0
     assert native_stats["backend_replay_signature_slots"] == 2
     assert native_stats["backend_replay_signature_slot_capacity"] == 2
+
+
+@test_utils.test(arch=ti.cuda)
+def test_cuda_while_control_rebinds_budget_polarity_and_external_predicate():
+    from taichi_forge.graph._graph import _GraphRunContext
+
+    capabilities = dict(ti_core.cuda_conditional_graph_capabilities())
+    if not capabilities.get("general_graph_exact_control_available", False):
+        pytest.skip("general CUDA conditional Graph is unavailable")
+
+    @ti.kernel
+    def step(output: ti.types.ndarray(dtype=ti.i32, ndim=0)):
+        output[None] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(step, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.i32, ndim=0))
+    graph = builder.compile()
+    node = graph._spec.nodes[0]
+    cache = ti_core.CompiledGraphJITCache()
+    cache._debug_graph_stats()
+    output = ti.ndarray(ti.i32, shape=())
+    first = ti.ndarray(ti.i32, shape=())
+    second = ti.ndarray(ti.i32, shape=())
+    first.fill(1)
+    second.fill(0)
+    context = _GraphRunContext()
+    context.begin({"output": output})
+    try:
+        # Predicate is deliberately absent from captured body arguments. The
+        # cache must lease/rebind it independently, without changing topology.
+        cases = (
+            (first, 3, True, 3), (first, 3, True, 3),
+            (first, 5, True, 5), (first, 5, False, 0),
+            (second, 5, False, 5), (second, 2, False, 2),
+            (first, 2, False, 0), (first, 2, True, 2),
+        )
+        for predicate, budget, polarity, expected in cases:
+            output.fill(0)
+            assert node.compiled_graph.jit_run_bounded_cuda_cached(
+                context.compile_config(), context.flattened_args(), cache,
+                predicate.arr, budget, polarity,
+            )
+            assert output[None] == expected
+        stats = cache._debug_graph_stats()
+        assert stats["captures"] == 1
+        assert stats["recaptures"] == 0
+        device_reset = capabilities.get("while_device_reset_compiled", False)
+        assert stats["patched_replays"] == (2 if device_reset else 0)
+        assert stats["asynchronous_control_updates"] == (7 if device_reset else 8)
+        # Releasing wrappers before cache retirement must not invalidate the
+        # predicate allocation retained by the last captured executable.
+        del cases, predicate, first, second
+        gc.collect()
+        if device_reset:
+            output.fill(0)
+            for _ in range(3):
+                ephemeral = ti.ndarray(ti.i32, shape=())
+                ephemeral.fill(1)
+                assert node.compiled_graph.jit_run_bounded_cuda_cached(
+                    context.compile_config(), context.flattened_args(), cache,
+                    ephemeral.arr, 2, True,
+                )
+                del ephemeral
+                gc.collect()
+            assert output[None] == 6
+    finally:
+        context.end()
+        cache.clear_runtime_state()
+        graph.close()
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

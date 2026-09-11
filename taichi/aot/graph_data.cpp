@@ -1175,6 +1175,9 @@ struct CompiledGraphCudaState {
   cuda::CudaGraphConditionalControl *conditional_control{nullptr};
   std::uint64_t conditional_handle{0};
   bool conditional_mode{false};
+  DeviceAllocation conditional_predicate_allocation{kDeviceNullAllocation};
+  int conditional_max_iterations{0};
+  bool conditional_continue_while_nonzero{true};
   void *masked_gate{nullptr};
   void *masked_inner_gate{nullptr};
   bool masked_mode{false};
@@ -1335,6 +1338,9 @@ struct CompiledGraphCudaState {
     bounded_dispatch_group_member_indices.clear();
     conditional_handle = 0;
     conditional_mode = false;
+    conditional_predicate_allocation = kDeviceNullAllocation;
+    conditional_max_iterations = 0;
+    conditional_continue_while_nonzero = true;
     masked_mode = false;
     masked_nested_mode = false;
     device_update_nested_mode = false;
@@ -4239,21 +4245,30 @@ bool try_run_cuda_bounded_graph(
 
   auto update_control = [&]() {
     TI_ASSERT(state->conditional_control != nullptr);
+    std::vector<std::vector<uint8_t>> host_buffers;
+    if (state->conditional_predicate_allocation == predicate_allocation &&
+        state->conditional_max_iterations == max_iterations &&
+        state->conditional_continue_while_nonzero == continue_while_nonzero) {
+      return host_buffers;
+    }
     cuda::CudaGraphConditionalControl control;
     control.predicate = reinterpret_cast<std::uintptr_t>(
         predicate_device->get_alloc_info(predicate_allocation).ptr);
-    // The parent-graph setter increments before checking the iteration cap.
-    // Wrapping UINT32_MAX to zero makes it the launch-time predicate check;
-    // setters captured at the end of the body then advance iterations 1..N.
-    control.iteration = ~std::uint32_t{0};
+    // The first captured setter resets iteration on device for every launch;
+    // only a changed binding/budget needs a host upload. The default stream
+    // orders this upload after previous replays and before the next launch.
+    control.iteration = 0;
     control.max_iterations = static_cast<std::uint32_t>(max_iterations);
     control.continue_while_nonzero = continue_while_nonzero ? 1u : 0u;
-    std::vector<std::vector<uint8_t>> host_buffers(1);
+    host_buffers.resize(1);
     host_buffers.front().resize(sizeof(control));
     std::memcpy(host_buffers.front().data(), &control, sizeof(control));
     driver.memcpy_host_to_device_async(state->conditional_control,
                                        host_buffers.front().data(),
                                        sizeof(control), nullptr);
+    state->conditional_predicate_allocation = predicate_allocation;
+    state->conditional_max_iterations = max_iterations;
+    state->conditional_continue_while_nonzero = continue_while_nonzero;
     if (state->diagnostics_enabled) {
       ++state->stats.asynchronous_control_updates;
     }
@@ -4264,15 +4279,21 @@ bool try_run_cuda_bounded_graph(
     try {
       driver.graph_launch(state->graph_exec.get(), nullptr);
     } catch (...) {
-      state->defer_replay_resources({}, std::move(host_buffers));
+      if (!host_buffers.empty()) {
+        state->defer_replay_resources({}, std::move(host_buffers));
+      }
       throw;
     }
-    state->defer_replay_resources({}, std::move(host_buffers));
+    if (!host_buffers.empty()) {
+      state->defer_replay_resources({}, std::move(host_buffers));
+    }
     state->stats.last_path = path;
     state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
   };
 
-  if (state->conditional_mode && state->graph_exec &&
+  if (state->conditional_mode && state->conditional_type == -1 &&
+      state->graph_exec &&
+      state->conditional_predicate_allocation == predicate_allocation &&
       state->signature == signature->entries) {
     launch(CompiledGraphExecutionPath::cuda_exact_replay);
     if (state->diagnostics_enabled) {
@@ -4292,6 +4313,12 @@ bool try_run_cuda_bounded_graph(
     return false;
   }
 
+  // Binding/capture boundary only: a native caller may supply the predicate
+  // outside the body arguments. Lease it like pointers in captured kernels.
+  if (std::find(signature->allocations.begin(), signature->allocations.end(),
+                predicate_allocation) == signature->allocations.end()) {
+    signature->allocations.push_back(predicate_allocation);
+  }
   auto allocation_leases =
       acquire_cuda_graph_allocation_leases(signature->allocations);
   if (!allocation_leases.has_value()) {
@@ -4300,7 +4327,8 @@ bool try_run_cuda_bounded_graph(
     return false;
   }
   const bool structurally_compatible =
-      state->conditional_mode && state->graph_exec &&
+      state->conditional_mode && state->conditional_type == -1 &&
+      state->graph_exec &&
       cuda_graph_signatures_are_structurally_compatible(
           state->signature, signature->entries);
   if (structurally_compatible) {
@@ -4427,7 +4455,8 @@ bool try_run_cuda_bounded_graph(
     CudaStreamCaptureGuard capture_guard(capture_stream);
     try {
       cuda::driver_graph_set_conditional(
-          state->conditional_control, conditional_handle, capture_stream);
+          state->conditional_control, conditional_handle, capture_stream,
+          /*reset_iteration=*/true);
     } catch (...) {
       if (state->diagnostics_enabled) {
         ++state->stats.capture_exceptions;

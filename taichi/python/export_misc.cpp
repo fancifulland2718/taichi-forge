@@ -757,6 +757,7 @@ void export_misc(py::module &m) {
     result["conditional_graph_symbols_loaded"] = symbols_loaded;
     result["device_setter_lowering_compiled"] = setter_compiled;
     result["general_device_setter_lowering_compiled"] = graph_setter_compiled;
+    result["while_device_reset_compiled"] = graph_setter_compiled;
     result["ordinary_graph_symbols_loaded"] = ordinary_graph_symbols_loaded;
     result["internal_masked_latch_compiled"] = masked_latch_compiled;
     result["runtime_path_compiled"] = true;
@@ -819,6 +820,7 @@ void export_misc(py::module &m) {
     result["conditional_graph_symbols_loaded"] = false;
     result["device_setter_lowering_compiled"] = false;
     result["general_device_setter_lowering_compiled"] = false;
+    result["while_device_reset_compiled"] = false;
     result["ordinary_graph_symbols_loaded"] = false;
     result["internal_masked_latch_compiled"] = false;
     result["runtime_path_compiled"] = false;
