@@ -48,15 +48,14 @@ void validate_texture_region(Texture *texture,
                              std::uint32_t base_layer,
                              std::uint32_t layer_count,
                              const char *name) {
-  TI_ERROR_IF(mip_level != 0,
-              "Vulkan {} mip level is unsupported by the current Texture "
-              "resource model.",
+  TI_ERROR_IF(mip_level >= texture->get_mip_levels(),
+              "Vulkan {} mip level is outside the allocated Texture chain.",
               name);
   TI_ERROR_IF(base_layer != 0 || layer_count != 1,
               "Vulkan {} array layers are unsupported by the current Texture "
               "resource model.",
               name);
-  const auto size = texture->get_size();
+  const auto size = texture->get_mip_size(mip_level);
   for (std::size_t axis = 0; axis < 3; ++axis) {
     TI_ERROR_IF(static_cast<std::uint64_t>(offset[axis]) + extent[axis] >
                     static_cast<std::uint64_t>(size[axis]),

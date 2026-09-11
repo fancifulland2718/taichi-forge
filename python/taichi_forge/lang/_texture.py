@@ -111,9 +111,12 @@ class Texture:
     Args:
         fmt (ti.Format): Color format of the texture.
         shape (Tuple[int]): Shape of the Texture.
+        mip_levels (int): Allocated levels, including the base level. More than
+            one level currently requires 2D Vulkan. Contents are not generated
+            automatically; uploads without an explicit region target level zero.
     """
 
-    def __init__(self, fmt, arr_shape, *, sampler=None):
+    def __init__(self, fmt, arr_shape, *, sampler=None, mip_levels=1):
         try:
             arr_shape = tuple(arr_shape)
         except TypeError as exc:
@@ -139,6 +142,16 @@ class Texture:
         runtime = impl.get_runtime()
         self._runtime_prog = runtime.prog
         arch = impl.current_cfg().arch
+        if isinstance(mip_levels, bool):
+            raise TypeError("Texture mip_levels must be an integer")
+        try:
+            mip_levels = operator.index(mip_levels)
+        except TypeError as exc:
+            raise TypeError("Texture mip_levels must be an integer") from exc
+        if not 1 <= mip_levels <= max(arr_shape).bit_length():
+            raise ValueError("Texture mip_levels is outside the complete mip chain")
+        if mip_levels > 1 and (arch != _ti_core.Arch.vulkan or len(arr_shape) != 2):
+            raise ValueError("Managed mip chains currently require a 2D Vulkan Texture")
         graphics_texture_arches = (
             _ti_core.Arch.cuda,
             _ti_core.Arch.vulkan,
@@ -165,12 +178,26 @@ class Texture:
                 )
             sampler_config = sampler._as_core_config()
         self.tex = self._runtime_prog.create_texture(
-            fmt, arr_shape, sampler_config
+            fmt, arr_shape, sampler_config, mip_levels
         )
         self.fmt = fmt
         self.num_dims = len(arr_shape)
         self.shape = arr_shape
+        self._mip_levels = mip_levels
         runtime.register_runtime_object(self)
+
+    @property
+    def mip_levels(self):
+        return self._mip_levels
+
+    def mip_shape(self, level):
+        """Return the allocated mip extent; odd dimensions round down."""
+        if isinstance(level, bool):
+            raise TypeError("Texture mip level must be an integer")
+        level = operator.index(level)
+        if not 0 <= level < self._mip_levels:
+            raise ValueError("Texture mip level is outside the allocated chain")
+        return tuple(max(1, extent >> level) for extent in self.shape)
 
     def _invalidate_runtime(self):
         self.tex = None

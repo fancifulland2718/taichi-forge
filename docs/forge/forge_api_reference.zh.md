@@ -244,10 +244,18 @@ grid = ti.Texture(ti.Format.r32f, (nx, ny), sampler=sampler)
 ```
 
 filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_repeat` 或
-`clamp_to_edge`；Vulkan sampler object 按 immutable 配置在 device 内缓存。当前 texture
-只有一个 mip 且使用 normalized coordinate，暂不公开 anisotropy 与 comparison sampling。
+`clamp_to_edge`；Vulkan sampler object 按 immutable 配置在 device 内缓存。二维 Vulkan texture
+可用 `ti.Texture(fmt, (width, height), mip_levels=N)` 显式分配 mip 链，默认仍为一级。
+`mip_shape(level)` 返回该级尺寸，奇数向下取整且最小为一；不会自动填充内容。
+采样使用 normalized coordinate，暂不公开 anisotropy 与 comparison sampling。
 `sample_lod()` 使用 sampler，精确整数 coordinate 的 `fetch()` 忽略它；浮点 filtering 不
 承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为 texture。
+`ti.hardware.image.VulkanImageRegion(mip_level=N)` 为显式 buffer/image copy 或 blit 选择层级；
+省略 extent 时使用该级剩余范围，不是基础层尺寸。不带 region 的 copy 和 `from_ndarray()` /
+`from_field()` 便利上传仍写第零级，保留已初始化的高层。Vulkan buffer-image copy 是 x 最快的
+原始 texel 搬运，并不把 NumPy `(height, width, channels)` 自动转置为逻辑 `(x, y)` 数组。
+mip 便利上传要求匹配的紧密 texel；field 目前限定匹配的 root-dense 存储，其他布局需显式转换。
+此 allocation/transfer 纵切不包含 array layer、自动生成 mip 或非零 storage-image LOD 绑定。
 CUDA 也支持基于 Driver API array/texture object 的显式 sampled texture，并支持保留确切
 sampler generation 生命周期的 cached Graph capture。固定 `Graph.bind()` 在发布前验证
 Texture 类型和维度；原位上传保持 capture，替换 Texture 使用另一有界 executable slot 或

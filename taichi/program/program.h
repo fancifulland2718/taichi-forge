@@ -1167,7 +1167,8 @@ class TI_DLL_EXPORT Program {
 
   Texture *create_texture(BufferFormat buffer_format,
                           const std::vector<int> &shape,
-                          ImageSamplerConfig sampler_config = {});
+                          ImageSamplerConfig sampler_config = {},
+                          int mip_levels = 1);
 
   void vulkan_copy_texture(Texture *destination, Texture *source);
 

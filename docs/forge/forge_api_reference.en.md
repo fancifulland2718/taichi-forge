@@ -301,11 +301,25 @@ grid = ti.Texture(ti.Format.r32f, (nx, ny), sampler=sampler)
 
 The current choices are `nearest`/`linear` filtering and `repeat`,
 `mirrored_repeat`, or `clamp_to_edge` independently per axis. Vulkan sampler
-objects are cached by immutable configuration. Textures currently have one
-mip level and normalized coordinates; anisotropy and comparison sampling are
-not exposed. `sample_lod()` uses the sampler while exact integer-coordinate
+objects are cached by immutable configuration. 2D Vulkan textures can explicitly
+allocate `ti.Texture(fmt, (width, height), mip_levels=N)`; the default remains one
+level. `mip_shape(level)` returns each allocated extent, rounding odd dimensions
+down and clamping to one. Levels are not populated automatically. Sampling uses
+normalized coordinates; anisotropy and comparison sampling are not exposed.
+`sample_lod()` uses the sampler while exact integer-coordinate
 `fetch()` ignores it. Floating filtering does not promise cross-device
 bitwise determinism.
+
+`ti.hardware.image.VulkanImageRegion(mip_level=N)` selects a level for explicit
+buffer/image copies or blits. Omitted extent means the remainder of that level,
+not the base image. Copies without a region and convenience `from_ndarray()` /
+`from_field()` uploads still target level zero and preserve initialized higher
+levels. Vulkan buffer-image transfers are raw, x-fastest texels; a NumPy
+`(height, width, channels)` buffer is not a logical `(x, y)` array transpose.
+Mipped convenience uploads require matching tightly packed texels; field uploads
+currently accept matching root-dense storage. Repacking unsupported layouts is
+explicit. Array layers, automatic mip generation and nonzero storage-image LOD
+binding are not included in this allocation/transfer slice.
 Ordinary field or ndarray access is never converted to texture sampling. CUDA
 also supports explicit sampled textures over Driver-API arrays/texture objects,
 including cached Graph capture with generation-owned sampler lifetimes. Fixed

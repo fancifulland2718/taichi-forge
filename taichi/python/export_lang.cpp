@@ -2648,10 +2648,11 @@ void export_lang(py::module &m) {
           "create_texture",
           [&](Program *program, BufferFormat fmt,
               const std::vector<int> &shape,
-              const ImageSamplerConfig &sampler_config) -> Texture * {
-            return program->create_texture(fmt, shape, sampler_config);
+              const ImageSamplerConfig &sampler_config, int mip_levels) -> Texture * {
+            return program->create_texture(fmt, shape, sampler_config, mip_levels);
           },
           py::arg("fmt"), py::arg("shape"), py::arg("sampler_config"),
+          py::arg("mip_levels") = 1,
           py::return_value_policy::reference)
       .def("get_ndarray_data_ptr_as_int",
            [](Program *program, Ndarray *ndarray) {

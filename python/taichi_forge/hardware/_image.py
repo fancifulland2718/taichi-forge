@@ -40,17 +40,17 @@ def _coordinates(value, name, *, positive):
     return (*result, *padding)
 
 
-def _texture_extent(texture):
-    return (*tuple(texture.shape), *(1,) * (3 - len(texture.shape)))
+def _texture_extent(texture, mip_level=0):
+    shape = texture.mip_shape(mip_level)
+    return (*shape, *(1,) * (3 - len(shape)))
 
 
 @dataclass(frozen=True)
 class VulkanImageRegion:
     """One color-image subresource region.
 
-    Current :class:`Texture` resources contain one mip and one layer. The mip
-    and layer fields are explicit so unsupported requests fail locally rather
-    than being silently treated as the base subresource.
+    Managed 2D Vulkan Textures can allocate an explicit mip chain. Array layers
+    remain unsupported; no region silently aliases the base subresource.
     """
 
     offset: tuple = (0, 0, 0)
@@ -82,7 +82,7 @@ class VulkanImageRegion:
     def resolved_extent(self, texture):
         if self.extent is not None:
             return self.extent
-        size = _texture_extent(texture)
+        size = _texture_extent(texture, self.mip_level)
         extent = tuple(size[axis] - self.offset[axis] for axis in range(3))
         if any(value <= 0 for value in extent):
             raise TaichiRuntimeError("Vulkan image region offset exceeds its texture")
@@ -211,7 +211,7 @@ class _VulkanImageTransferRecording(BackendCommandRecording):
 
 
 class VulkanImageCopyRecording(_VulkanImageTransferRecording):
-    """One reusable whole-image or region-to-region color copy."""
+    """One reusable base-level or explicit region-to-region color copy."""
 
     def __init__(
         self,

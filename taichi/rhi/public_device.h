@@ -1308,6 +1308,7 @@ struct ImageParams {
   ImageAllocUsage usage{ImageAllocUsage::Storage | ImageAllocUsage::Sampled |
                         ImageAllocUsage::Attachment};
   ImageSamplerConfig sampler_config{};
+  uint32_t mip_levels{1};
 };
 
 struct BlendFunc {

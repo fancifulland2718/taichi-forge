@@ -1986,9 +1986,9 @@ void VulkanCommandList::image_transition(DeviceAllocation img,
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
   }
   barrier.subresourceRange.baseMipLevel = 0;
-  barrier.subresourceRange.levelCount = 1;
+  barrier.subresourceRange.levelCount = image->mip_levels;
   barrier.subresourceRange.baseArrayLayer = 0;
-  barrier.subresourceRange.layerCount = 1;
+  barrier.subresourceRange.layerCount = image->array_layers;
 
   VkPipelineStageFlags source_stage;
   VkPipelineStageFlags destination_stage;
@@ -3695,6 +3695,7 @@ vkapi::IVkSampler VulkanDevice::get_sampler(
   sampler_info.compareEnable = VK_FALSE;
   sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
   sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sampler_info.maxLod = VK_LOD_CLAMP_NONE;
 
   auto sampler = vkapi::create_sampler(device_, sampler_info);
   image_samplers_.emplace_back(config, sampler);
@@ -3763,9 +3764,16 @@ vkapi::IVkImageView VulkanDevice::get_vk_lod_imageview(
 }
 
 DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
-  ImageAllocInternal &alloc = image_allocations_.acquire();
+  const auto num_mip_levels = params.mip_levels;
+  uint32_t max_mip_levels = 0;
+  for (auto extent = std::max({params.x, params.y, params.z}); extent > 0;
+       extent >>= 1) {
+    ++max_mip_levels;
+  }
+  TI_ERROR_IF(num_mip_levels == 0 || num_mip_levels > max_mip_levels,
+              "Vulkan image mip count is outside the complete chain");
 
-  int num_mip_levels = 1;
+  ImageAllocInternal &alloc = image_allocations_.acquire();
 
   bool is_depth = params.format == BufferFormat::depth16 ||
                   params.format == BufferFormat::depth24stencil8 ||

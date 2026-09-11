@@ -4,6 +4,8 @@
 #include "taichi/rhi/device.h"
 #include "taichi/ir/snode.h"
 
+#include <algorithm>
+
 #ifdef TI_WITH_CUDA
 #include "taichi/rhi/cuda/cuda_context.h"
 #include "taichi/rhi/cuda/cuda_device.h"
@@ -281,14 +283,27 @@ Texture::Texture(Program *prog,
                  int height,
                  int depth,
                  ImageSamplerConfig sampler_config,
-                 ImageDimension dimension)
+                 ImageDimension dimension,
+                 int mip_levels)
     : format_(format),
       width_(width),
       height_(height),
       depth_(depth),
+      mip_levels_(mip_levels),
       dimension_(dimension),
       sampler_config_(sampler_config),
       prog_(prog) {
+  TI_ERROR_IF(mip_levels < 1, "Texture mip_levels must be positive");
+  TI_ERROR_IF(mip_levels > 1 &&
+                  (prog->compile_config().arch != Arch::vulkan ||
+                   dimension != ImageDimension::d2D),
+              "Managed mip chains currently require a 2D Vulkan Texture");
+  int max_levels = 0;
+  for (int extent = std::max({width, height, depth}); extent > 0; extent >>= 1) {
+    ++max_levels;
+  }
+  TI_ERROR_IF(mip_levels > max_levels,
+              "Texture mip_levels exceeds the complete mip chain");
   auto [type, num_channels] = buffer_format2type_channels(format);
   dtype_ = type;
   num_channels_ = static_cast<int>(num_channels);
@@ -379,6 +394,7 @@ Texture::Texture(Program *prog,
   img_params.z = depth;
   img_params.initial_layout = ImageLayout::undefined;
   img_params.sampler_config = sampler_config;
+  img_params.mip_levels = mip_levels;
   if (format == BufferFormat::depth16 ||
       format == BufferFormat::depth24stencil8 ||
       format == BufferFormat::depth32f) {
@@ -419,6 +435,13 @@ bool Texture::is_cuda_texture() const noexcept {
   return cuda_texture_ != nullptr;
 }
 
+std::array<int, 3> Texture::get_mip_size(int level) const {
+  TI_ERROR_IF(level < 0 || level >= mip_levels_,
+              "Texture mip level is outside the allocated chain");
+  return {std::max(1, width_ >> level), std::max(1, height_ >> level),
+          std::max(1, depth_ >> level)};
+}
+
 std::uint64_t Texture::get_cuda_texture_object() const {
   TI_ERROR_IF(!cuda_texture_, "Texture is not backed by a CUDA texture object");
   return cuda_texture_->sampled_object;
@@ -433,6 +456,25 @@ void Texture::from_ndarray(Ndarray *ndarray) {
   auto resource_guard = prog_->acquire_runtime_resource_submission_guard();
   auto texture_lease = prog_->acquire_texture_external_lease(this);
   prog_->validate_ndarrays_for_external_submission({ndarray});
+
+#ifdef TI_WITH_VULKAN
+  if (mip_levels_ > 1) {
+    // The legacy upload path discards the whole image from UNDEFINED. A base
+    // level upload must preserve initialized higher levels of a mip chain.
+    TI_ERROR_IF(ndarray->shape.size() != 2 || ndarray->shape[0] != width_ ||
+                    ndarray->shape[1] != height_ ||
+                    ndarray->get_element_size() !=
+                        data_type_size(dtype_) * num_channels_,
+                "Mipped Texture upload requires matching shape and texel size");
+    prog_->vulkan_copy_ndarray_to_texture(
+        this, ndarray, 0, ndarray->shape[0],
+        ndarray->shape.size() > 1 ? ndarray->shape[1] : 1,
+        {0, 0, 0}, {width_, height_, depth_}, 0, 0, 1);
+    // Preserve this convenience upload's completion contract.
+    prog_->synchronize();
+    return;
+  }
+#endif
 
   auto semaphore = prog_->flush();
 
@@ -532,6 +574,36 @@ void Texture::from_snode(SNode *snode) {
   auto tree_guard = prog_->acquire_snode_tree_lifecycle_read_guard();
   auto resource_guard = prog_->acquire_runtime_resource_submission_guard();
   auto texture_lease = prog_->acquire_texture_external_lease(this);
+#ifdef TI_WITH_VULKAN
+  if (mip_levels_ > 1) {
+    TI_ERROR_IF(!snode->is_path_all_dense || !snode->parent ||
+                    !snode->parent->parent ||
+                    snode->parent->parent->type != SNodeType::root ||
+                    snode->shape_along_axis(0) != width_ ||
+                    snode->shape_along_axis(1) != height_ ||
+                    snode->parent->cell_size_bytes !=
+                        data_type_size(dtype_) * num_channels_,
+                "Mipped Texture upload requires a matching tightly packed "
+                "root-dense Field");
+    const auto source = get_device_ptr(prog_, snode);
+    BufferImageCopyParams params;
+    params.buffer_row_length = snode->shape_along_axis(0);
+    params.buffer_image_height = snode->shape_along_axis(1);
+    params.image_extent = {static_cast<uint32_t>(width_),
+                           static_cast<uint32_t>(height_),
+                           static_cast<uint32_t>(depth_)};
+    const auto image = texture_alloc_;
+    prog_->enqueue_compute_op_lambda(
+        [source, image, params](Device *, CommandList *commands) {
+          commands->buffer_barrier(source);
+          commands->buffer_to_image(image, source, ImageLayout::transfer_dst,
+                                    params);
+        },
+        {{image, ImageLayout::transfer_dst, ImageLayout::shader_read}});
+    prog_->synchronize();
+    return;
+  }
+#endif
   auto semaphore = prog_->flush();
 
 #ifdef TI_WITH_CUDA

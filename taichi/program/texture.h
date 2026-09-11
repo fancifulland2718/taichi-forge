@@ -35,7 +35,8 @@ class TI_DLL_EXPORT Texture {
                    int height,
                    int depth = 1,
                    ImageSamplerConfig sampler_config = {},
-                   ImageDimension dimension = ImageDimension::d2D);
+                   ImageDimension dimension = ImageDimension::d2D,
+                   int mip_levels = 1);
 
   /* Constructs a Texture from an existing DeviceAllocation
    * It doesn't handle the allocation and deallocation.
@@ -78,6 +79,12 @@ class TI_DLL_EXPORT Texture {
     return {width_, height_, depth_};
   }
 
+  int get_mip_levels() const {
+    return mip_levels_;
+  }
+
+  std::array<int, 3> get_mip_size(int level) const;
+
  private:
   struct CudaTextureResource;
 
@@ -95,6 +102,7 @@ class TI_DLL_EXPORT Texture {
   int width_;
   int height_;
   int depth_;
+  int mip_levels_{1};
   ImageDimension dimension_{ImageDimension::d2D};
   ImageSamplerConfig sampler_config_;
 
