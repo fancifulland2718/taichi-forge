@@ -92,10 +92,18 @@ def test_observation_rejects_bad_storage_before_producer_submission():
     builder.observe(observed)
     graph = builder.compile()
     wrong_dtype = ti.field(ti.i32, shape=())
-    with pytest.raises(RuntimeError, match="dtype"):
-        graph.run({"state": state, "observed": wrong_dtype})
+    # Retain the traceback while synchronizing and retiring the Graph. A native
+    # submission transaction must not remain alive through the failed frame.
+    failures = []
+    for execute in (graph.run, graph.submit):
+        with pytest.raises(RuntimeError, match="dtype") as failure:
+            execute({"state": state, "observed": wrong_dtype})
+        failures.append(failure)
+        ti.sync()
     assert state.to_numpy()[()] == 17
     graph.close()
+    ti.reset()
+    assert len(failures) == 2
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
