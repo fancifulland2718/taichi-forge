@@ -91,6 +91,9 @@ class TI_DLL_EXPORT Renderer {
   void scene_v2(SceneBase *scene);
 
   bool draw_frame(GuiBase *gui, bool blocking_acquire = false);
+  void set_offscreen_targets(taichi::lang::Texture *color,
+                            taichi::lang::Texture *depth);
+  bool has_offscreen_targets() const noexcept;
 
   const AppContext &app_context() const;
   AppContext &app_context();
@@ -116,6 +119,8 @@ class TI_DLL_EXPORT Renderer {
         ndarray_resource_leases;
     std::vector<SharedTextureResourceLease>
         texture_resource_leases;
+    taichi::lang::DeviceAllocationUnique scene_uniform;
+    taichi::lang::DeviceAllocationUnique scene_lights;
   };
 
   void resize_lights_ssbo(int new_ssbo_size);
@@ -132,11 +137,18 @@ class TI_DLL_EXPORT Renderer {
   void retain_texture(taichi::lang::Texture *texture);
   void recycle_renderable_list(std::vector<std::unique_ptr<Renderable>> &list);
   void recycle_renderables(InFlightFrame &frame);
+  void record_renderpass(taichi::lang::CommandList *commands,
+                         taichi::lang::DeviceAllocation color,
+                         taichi::lang::DeviceAllocation depth,
+                         GuiBase *gui);
+  bool draw_offscreen_targets(GuiBase *gui);
 
   glm::vec3 background_color_ = glm::vec3(0.f, 0.f, 0.f);
 
   AppContext app_context_;
   SwapChain swap_chain_;
+  SharedTextureResourceLease offscreen_color_;
+  SharedTextureResourceLease offscreen_depth_;
 
   std::vector<std::unique_ptr<Renderable>> renderables_;
   std::vector<Renderable *> render_queue_;

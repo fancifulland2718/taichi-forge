@@ -402,6 +402,8 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
 
     recording = raster.record()  # freezes draw topology and resource bindings
     recording.execute()          # graphics submission without host readback
+    color = raster.color_texture # managed RGBA8; a kernel can sample it directly
+    depth = raster.depth_texture # managed D32F; reverse-Z, clear value 0
     rgba = raster.color_numpy()  # separate explicit synchronous observation
 
     builder = ti.graph.GraphBuilder()
@@ -411,16 +413,39 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
 
 `mesh_instance()`, `particles()`, `lines()`, `point_light()`, and `clear()` are
 also available. A recording binds the same resource objects but rereads their
-latest contents on replay. The current slice is Vulkan-only and uses a hidden
-window's provider-owned color/depth targets plus built-in GGUI shaders. One
-execution can be consumed by either `color_numpy()` or `depth_numpy()`, not
-both. This is a Python native executable and is not kernel-callable.
+latest contents on replay. The Vulkan-only adapter uses built-in GGUI shaders
+and Program-owned, single-level 2D RGBA8/D32F Texture targets. Optional
+`color_target=` and `depth_target=` accept live matching textures with the
+same resolution and runtime. Targets are fixed at construction; changing
+attachments requires a new pass. There is no second resident hidden framebuffer.
+
+The output textures can be bound before rendering and become valid after
+execution. Subsequent Graph kernels or low-level graphics can consume them
+without readback; references remain usable after `destroy()` until runtime
+reset. Depth is reverse-Z with clear value **0**, not world-space distance.
+Texture coordinates follow the regular Vulkan texture convention. Explicit
+`color_numpy()` / `depth_numpy()` preserve the prior width-first host layout
+and flip the y axis relative to raw Texture fetch; one execution permits one
+of these host observations. No HDR, picking ID, or automatic mip generation
+is implied. The memory report counts the two logical image allocations;
+GGUI draw buffers, driver alignment, and pipeline bytes remain unknown.
+This is a Python native executable and is not kernel-callable.
 An explicit root `GraphBuilder.append_native(..., admission="explicit")`
 records it as an opaque segmented node and preserves ordering and lifetime;
 it does not fuse GGUI helper dispatches into the enclosing backend Graph.
-`admission="auto"`, structured Graph regions, and AOT reject it until helper
-dispatches and provider-owned output bindings participate in an exact effect
-contract. This D0 API adds no dependency or wheel variant.
+Color/depth writes are declared in the recording's effects. `admission="auto"`,
+structured Graph regions, and AOT still reject this segmented GGUI route;
+managed outputs alone do not make its helper dispatches backend-capturable.
+This API adds no dependency or wheel variant.
+
+`record()` prepares persistent device VBO/index/transform staging and compiles
+its packing helpers. Replay rereads in-place field/ndarray contents on device;
+it does not route geometry through NumPy. Missing mesh normals are recomputed
+on device with the existing equal-face-weight convention. The recording's
+memory report additionally counts its prepared staging. Host NumPy geometry
+is direct-execution only: upload it to device storage before recording a Graph.
+Changing explicit execution bindings prepares a new staging set; retain a
+recording with fixed bindings for repeat submission.
 
 ### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3 in development)
 

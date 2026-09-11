@@ -322,6 +322,9 @@ void Renderer::discard_pending_frame() {
 }
 
 size_t Renderer::max_frames_in_flight() {
+  if (has_offscreen_targets()) {
+    return 2;
+  }
   return std::max<size_t>(
       2, static_cast<size_t>(swap_chain_.surface().get_image_count()));
 }
@@ -482,8 +485,166 @@ void Renderer::wait_for_in_flight_frames() {
   }
 }
 
+void Renderer::record_renderpass(CommandList *commands,
+                                DeviceAllocation image,
+                                DeviceAllocation depth_image,
+                                GuiBase *gui_base) {
+  bool color_clear = true;
+  std::vector<float> clear_colors = {background_color_[0], background_color_[1],
+                                     background_color_[2], 1};
+
+  for (auto renderable : render_queue_) {
+    renderable->record_prepass_this_frame_commands(commands);
+  }
+
+  commands->begin_renderpass(
+      /*x0=*/0, /*y0=*/0, /*x1=*/swap_chain_.width(),
+      /*y1=*/swap_chain_.height(), /*num_color_attachments=*/1, &image,
+      &color_clear, &clear_colors, &depth_image,
+      /*depth_clear=*/true);
+
+  const auto &render_viewport =
+      app_context_.window_layout().framebuffer_render_viewport;
+  if (render_viewport.width() > 0 && render_viewport.height() > 0) {
+    commands->set_raster_viewport_and_scissor(
+        render_viewport.x0, render_viewport.y0, render_viewport.x1,
+        render_viewport.y1);
+    for (auto renderable : render_queue_) {
+      renderable->record_this_frame_commands(commands);
+    }
+  }
+
+  if (app_context_.config.ggui_arch == Arch::vulkan) {
+    Gui *gui = static_cast<Gui *>(gui_base);
+    if (gui != nullptr && gui->has_widgets()) {
+      VkRenderPass pass = static_cast<VulkanCommandList *>(commands)
+                              ->current_renderpass()
+                              ->renderpass;
+
+      if (gui->render_pass() == VK_NULL_HANDLE) {
+        gui->init_render_resources(pass);
+      } else if (gui->render_pass() != pass) {
+        gui->cleanup_render_resources();
+        gui->init_render_resources(pass);
+      }
+      gui->draw(commands);
+    } else if (gui != nullptr) {
+      gui->end_frame();
+    }
+  }
+#ifdef TI_WITH_METAL
+  else if (app_context_.config.ggui_arch == Arch::metal) {
+    GuiMetal *gui = static_cast<GuiMetal *>(gui_base);
+    if (gui != nullptr && gui->has_widgets()) {
+
+      auto mtl_cmd_list = static_cast<MetalCommandList *>(commands);
+
+      MTLRenderPassDescriptor *pass = mtl_cmd_list->create_render_pass_desc(
+          false, mtl_cmd_list->is_renderpass_active());
+      mtl_cmd_list->set_renderpass_active();
+
+      gui->init_render_resources(pass);
+      gui->draw(commands);
+    } else if (gui != nullptr) {
+      gui->end_frame();
+    }
+  }
+#endif
+  else {
+    TI_NOT_IMPLEMENTED;
+  }
+
+  commands->end_renderpass();
+}
+
+bool Renderer::has_offscreen_targets() const noexcept {
+  return bool(offscreen_color_);
+}
+
+void Renderer::set_offscreen_targets(Texture *color, Texture *depth) {
+  Program *program = app_context_.prog();
+  TI_ERROR_IF(!program || app_context_.config.show_window ||
+                  program->compile_config().arch != Arch::vulkan,
+              "Runtime render targets require a Vulkan-owned hidden renderer");
+  TI_ERROR_IF(has_offscreen_targets() || has_render_work() ||
+                  !in_flight_frames_.empty(),
+              "Runtime render targets must be fixed before recording any frame");
+  TI_ERROR_IF(!color || !depth || color->owning_program() != program ||
+                  depth->owning_program() != program,
+              "Raster attachments must belong to the active Program");
+  const std::array<int, 3> shape{static_cast<int>(swap_chain_.width()),
+                                static_cast<int>(swap_chain_.height()), 1};
+  TI_ERROR_IF(color->get_size() != shape || depth->get_size() != shape ||
+                  color->get_dimension() != ImageDimension::d2D ||
+                  depth->get_dimension() != ImageDimension::d2D ||
+                  color->get_mip_levels() != 1 || depth->get_mip_levels() != 1 ||
+                  color->get_buffer_format() != BufferFormat::rgba8 ||
+                  depth->get_buffer_format() != BufferFormat::depth32f,
+              "Raster targets require matching single-level RGBA8 and D32F images");
+  auto color_lease = std::make_shared<Program::TextureResourceLease>(
+      program->acquire_texture_external_lease(color));
+  auto depth_lease = std::make_shared<Program::TextureResourceLease>(
+      program->acquire_texture_external_lease(depth));
+  // No frame has used the default attachments. Release their color/depth and
+  // readback allocations instead of keeping two resident framebuffer sets.
+  swap_chain_.release_default_attachments();
+  offscreen_color_ = std::move(color_lease);
+  offscreen_depth_ = std::move(depth_lease);
+}
+
+bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
+  // Targets were qualified and retained once at the cold binding boundary.
+  // Draw/vertex preparation remains the existing GGUI path.
+  const auto color = offscreen_color_->get()->get_device_allocation();
+  const auto depth = offscreen_depth_->get()->get_device_allocation();
+  auto *program = app_context_.prog();
+  // Allocate the owner container before submitting. A later host allocation
+  // failure must not drop resources already referenced by the GPU.
+  pending_texture_resource_leases_.reserve(
+      pending_texture_resource_leases_.size() + 2);
+  in_flight_frames_.emplace_back();
+  auto &frame = in_flight_frames_.back();
+  frame.renderables = std::move(renderables_);
+  frame.ndarray_resource_leases = std::move(pending_ndarray_resource_leases_);
+  frame.texture_resource_leases = std::move(pending_texture_resource_leases_);
+  frame.texture_resource_leases.push_back(offscreen_color_);
+  frame.texture_resource_leases.push_back(offscreen_depth_);
+  // Scene descriptors contain these allocation identities. Unlike the old
+  // host-staged draw path, consecutive frames no longer imply a device wait.
+  frame.scene_uniform = std::move(scene_ubo_);
+  frame.scene_lights = std::move(lights_ssbo_);
+  try {
+    render_complete_semaphore_ = program->enqueue_graphics_op_lambda(
+        [this, color, depth, gui_base](GraphicsDevice *, CommandList *commands) {
+          record_renderpass(commands, color, depth, gui_base);
+        },
+        {{color, ImageLayout::color_attachment, ImageLayout::shader_read},
+         {depth, ImageLayout::depth_attachment, ImageLayout::shader_read}});
+    frame.complete = render_complete_semaphore_;
+  } catch (...) {
+    // A graphics submission may have succeeded before its compute bridge
+    // failed. Only this exceptional cleanup waits before buffers can recycle.
+    if (app_context_.device().backend_calls_safe()) {
+      app_context_.device().wait_idle();
+    }
+    render_queue_.clear();
+    pending_set_image_ = nullptr;
+    pending_runtime_resource_handles_.clear();
+    recycle_renderables(frame);
+    in_flight_frames_.pop_back();
+    throw;
+  }
+  render_queue_.clear();
+  pending_set_image_ = nullptr;
+  pending_runtime_resource_handles_.clear();
+  return true;
+}
+
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
   last_frame_used_shared_cuda_vulkan_ = false;
+  if (has_offscreen_targets()) {
+    return draw_offscreen_targets(gui_base);
+  }
   SurfaceImage surface_image;
   if (blocking_acquire) {
     surface_image = swap_chain_.surface().acquire_surface_image();
@@ -503,80 +664,13 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
           surface->take_present_waits_after_acquire(surface_image.image_index);
     }
   }
-
   auto stream = app_context_.device().get_graphics_stream();
   auto [cmd_list, res] = stream->new_command_list_unique();
   assert(res == RhiResult::success && "Failed to allocate command list");
-
-  bool color_clear = true;
-  std::vector<float> clear_colors = {background_color_[0], background_color_[1],
-                                     background_color_[2], 1};
   cmd_list->image_transition(image, ImageLayout::undefined,
                              ImageLayout::color_attachment);
-  auto depth_image = swap_chain_.depth_allocation();
-
-  for (auto renderable : render_queue_) {
-    renderable->record_prepass_this_frame_commands(cmd_list.get());
-  }
-
-  cmd_list->begin_renderpass(
-      /*x0=*/0, /*y0=*/0, /*x1=*/swap_chain_.width(),
-      /*y1=*/swap_chain_.height(), /*num_color_attachments=*/1, &image,
-      &color_clear, &clear_colors, &depth_image,
-      /*depth_clear=*/true);
-
-  const auto &render_viewport =
-      app_context_.window_layout().framebuffer_render_viewport;
-  if (render_viewport.width() > 0 && render_viewport.height() > 0) {
-    cmd_list->set_raster_viewport_and_scissor(
-        render_viewport.x0, render_viewport.y0, render_viewport.x1,
-        render_viewport.y1);
-    for (auto renderable : render_queue_) {
-      renderable->record_this_frame_commands(cmd_list.get());
-    }
-  }
-
-  if (app_context_.config.ggui_arch == Arch::vulkan) {
-    Gui *gui = static_cast<Gui *>(gui_base);
-    if (gui != nullptr && gui->has_widgets()) {
-      VkRenderPass pass = static_cast<VulkanCommandList *>(cmd_list.get())
-                              ->current_renderpass()
-                              ->renderpass;
-
-      if (gui->render_pass() == VK_NULL_HANDLE) {
-        gui->init_render_resources(pass);
-      } else if (gui->render_pass() != pass) {
-        gui->cleanup_render_resources();
-        gui->init_render_resources(pass);
-      }
-      gui->draw(cmd_list.get());
-    } else if (gui != nullptr) {
-      gui->end_frame();
-    }
-  }
-#ifdef TI_WITH_METAL
-  else if (app_context_.config.ggui_arch == Arch::metal) {
-    GuiMetal *gui = static_cast<GuiMetal *>(gui_base);
-    if (gui != nullptr && gui->has_widgets()) {
-
-      auto mtl_cmd_list = static_cast<MetalCommandList *>(cmd_list.get());
-
-      MTLRenderPassDescriptor *pass = mtl_cmd_list->create_render_pass_desc(
-          false, mtl_cmd_list->is_renderpass_active());
-      mtl_cmd_list->set_renderpass_active();
-
-      gui->init_render_resources(pass);
-      gui->draw(cmd_list.get());
-    } else if (gui != nullptr) {
-      gui->end_frame();
-    }
-  }
-#endif
-  else {
-    TI_NOT_IMPLEMENTED;
-  }
-
-  cmd_list->end_renderpass();
+  record_renderpass(cmd_list.get(), image, swap_chain_.depth_allocation(),
+                    gui_base);
 
   std::vector<StreamSemaphore> wait_semaphores;
 

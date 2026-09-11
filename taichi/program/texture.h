@@ -83,6 +83,10 @@ class TI_DLL_EXPORT Texture {
     return mip_levels_;
   }
 
+  ImageDimension get_dimension() const noexcept {
+    return dimension_;
+  }
+
   std::array<int, 3> get_mip_size(int level) const;
 
  private:

@@ -322,6 +322,8 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
 
     recording = raster.record()  # 固定 draw topology 与 resource binding
     recording.execute()          # 无 host readback 的 graphics submission
+    color = raster.color_texture # 受管 RGBA8，可直接被 kernel 采样
+    depth = raster.depth_texture # 受管 D32F，reverse-Z，清屏值为 0
     rgba = raster.color_numpy()  # 单独、显式的同步 readback
 
     builder = ti.graph.GraphBuilder()
@@ -330,14 +332,29 @@ with ti.hardware.raster.RasterPass((1280, 720)) as raster:
 ```
 
 还支持 `mesh_instance()`、`particles()`、`lines()`、`point_light()` 与 `clear()`。
-recording 绑定同一 resource object，但 replay 会读取其最新内容。当前只支持 Vulkan、
-隐藏窗口的 provider-owned color/depth target 与 GGUI 内建 shader；一次 execution 只能被
-`color_numpy()` 或 `depth_numpy()` 之一消费。该对象是 Python native executable，不能在
+recording 绑定同一 resource object，但 replay 会读取其最新内容。当前只支持 Vulkan，
+沿用 GGUI 内建 shader，输出为 Program-owned、单 mip 的二维 RGBA8/D32F Texture。
+可用 `color_target=` / `depth_target=` 传入同一 runtime、相同分辨率和格式的存活 Texture。
+附件在构造时固定；更换附件需新建 pass，不保留第二套隐藏 framebuffer。
+
+输出 Texture 可提前绑定，执行后内容有效，后续 Graph kernel 或低层 graphics 可直接消费，
+不经 readback。`destroy()` 后持有的 Texture 引用仍有效，直到 runtime reset。
+depth 为 reverse-Z，清屏值 **0**，不是世界空间距离。Texture 沿用 Vulkan 坐标约定；
+显式 `color_numpy()` / `depth_numpy()` 保持原有 width-first host 布局，相对原始 Texture
+fetch 翻转 y 轴；一次 execution 允许其中一次 host observation。
+不包含 HDR、picking ID 或自动生成 mip。显存报告统计两张图像的逻辑分配字节；GGUI draw
+buffer、驱动对齐与 pipeline 字节仍为 unknown。该对象是 Python native executable，不能在
 kernel 内调用。显式 root `GraphBuilder.append_native(..., admission="explicit")` 会把它记录为
 opaque segmented node，保持顺序与 lifetime，但不会把 GGUI helper dispatch 融入 enclosing
-backend Graph。`admission="auto"`、structured Graph region 与 AOT 继续拒绝，直到 helper
-dispatch 和 provider-owned output binding 并入精确 effect contract。该 D0 API 不新增依赖或
-wheel 变体。
+backend Graph。recording 的 effects 已声明 color/depth 写入，但 `admission="auto"`、
+structured Graph region 与 AOT 仍拒绝这条分段 GGUI 路径；受管输出不等于 helper dispatch
+已支持 backend capture。该 API 不新增依赖或 wheel 变体。
+
+`record()` 在准备阶段分配可复用的 device VBO/index/transform staging 并编译 packing helper。
+replay 在设备端读取 field/ndarray 的原位更新，不再让几何数据经 NumPy 往返；缺少 mesh normals
+时在设备端沿用等权面法线算法生成。recording 的显存报告另外统计这些准备缓冲。
+host NumPy 几何只支持直接执行；用于 Graph 时请先上传到 device storage。
+显式 execute 换绑定会新建准备缓冲；反复提交应保留固定绑定的 recording。
 
 ### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3 开发中）
 

@@ -17,6 +17,9 @@ class TI_DLL_EXPORT SwapChain {
   taichi::lang::DeviceAllocation depth_allocation();
 
   void resize(uint32_t width, uint32_t height);
+  // Cold transition to caller-owned offscreen attachments. Dimensions remain
+  // available to existing GGUI draw preparation; no swapchain is used afterward.
+  void release_default_attachments();
 
   bool needs_swapchain_recreate() const;
   bool device_lost() const;

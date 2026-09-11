@@ -67,6 +67,13 @@ void SwapChain::resize(uint32_t width, uint32_t height) {
   create_image_resources();
 }
 
+void SwapChain::release_default_attachments() {
+  screenshot_buffer_.reset();
+  depth_buffer_.reset();
+  depth_allocation_.reset();
+  surface_.reset();
+}
+
 bool SwapChain::needs_swapchain_recreate() const {
   auto *surface = dynamic_cast<const VulkanSurface *>(surface_.get());
   return surface && surface->needs_swapchain_recreate();
@@ -163,6 +170,7 @@ uint32_t SwapChain::height() {
   return curr_height_;
 }
 taichi::lang::Surface &SwapChain::surface() {
+  TI_ERROR_IF(!surface_, "Offscreen runtime targets have no presentation surface");
   return *(surface_.get());
 }
 

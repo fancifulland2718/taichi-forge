@@ -42,6 +42,8 @@ class Window final : public WindowBase {
 
   void begin_offscreen_frame();
   bool render_offscreen_frame();
+  void set_offscreen_targets(taichi::lang::Texture *color,
+                            taichi::lang::Texture *depth);
 
   CanvasBase *get_canvas() override;
   SceneBase *get_scene() override;

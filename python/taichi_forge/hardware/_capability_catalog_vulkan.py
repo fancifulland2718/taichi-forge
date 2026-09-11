@@ -187,10 +187,10 @@ def vulkan_command_operations(_operation):
             "provider_owned",
             "existing_public",
             activation_mode="explicit_hardware_api",
-            resource_effects=("read:geometry", "write:hidden_color_depth"),
+            resource_effects=("read:geometry", "write:managed_color_depth_textures"),
             lifetime_policy="resource_generation",
             update_policy="immutable",
-            dtypes=("vertex:f32", "index:i32", "color:f32"),
+            dtypes=("vertex:f32", "index:i32", "color:rgba8", "depth:depth32f_reverse_z"),
             shapes_or_tiles=("2D offscreen target",),
             layouts=("mesh", "mesh_instance", "particles", "lines"),
             deterministic=False,
@@ -201,7 +201,9 @@ def vulkan_command_operations(_operation):
             public_api="ti.hardware.raster.RasterPass",
             notes=(
                 "Compatibility and qualification adapter only; direct Python and explicit segmented root-Graph execution are supported.",
-                "Its GGUI scene semantics and hidden attachments are not the Forge low-level graphics abstraction.",
+                "Managed single-level RGBA8 color and reverse-Z D32F depth outputs can be consumed on device and outlive the pass; caller-provided matching Texture targets are accepted.",
+                "GGUI vertex preparation and graphics submission remain segmented; automatic admission and structured capture are not supported.",
+                "Fixed device geometry uses prepared VBO/index/transform staging without host readback; NumPy geometry remains direct-execution only.",
             ),
         ),
         _operation(

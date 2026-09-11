@@ -794,6 +794,11 @@ struct PyWindow {
         ->render_offscreen_frame();
   }
 
+  void set_offscreen_targets(Texture *color, Texture *depth) {
+    static_cast<vulkan::Window *>(window.get())
+        ->set_offscreen_targets(color, depth);
+  }
+
   bool is_headless_display() const {
     return headless_display_;
   }
@@ -905,6 +910,7 @@ void export_ggui(py::module &m) {
       .def("can_render_frame", &PyWindow::can_render_frame)
       .def("_begin_offscreen_frame", &PyWindow::begin_offscreen_frame)
       .def("_render_offscreen_frame", &PyWindow::render_offscreen_frame)
+      .def("_set_offscreen_targets", &PyWindow::set_offscreen_targets)
       .def("is_headless_display", &PyWindow::is_headless_display)
       .def("record_display_frame_accepted",
            &PyWindow::record_display_frame_accepted,

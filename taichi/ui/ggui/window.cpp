@@ -141,6 +141,13 @@ bool Window::render_offscreen_frame() {
   return draw_frame(/*blocking_acquire=*/true);
 }
 
+void Window::set_offscreen_targets(taichi::lang::Texture *color,
+                                  taichi::lang::Texture *depth) {
+  TI_ERROR_IF(config_.show_window || drawn_frame_,
+              "Runtime render targets require a new hidden window");
+  renderer_->set_offscreen_targets(color, depth);
+}
+
 CanvasBase *Window::get_canvas() {
   return canvas_.get();
 }
