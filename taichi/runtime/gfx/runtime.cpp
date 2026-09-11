@@ -5998,7 +5998,7 @@ void GfxRuntime::enqueue_compute_op_lambda(
   }
 }
 
-void GfxRuntime::enqueue_graphics_op_lambda(
+StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs,
     const std::vector<std::uint64_t> &replay_key) {
@@ -6020,7 +6020,6 @@ void GfxRuntime::enqueue_graphics_op_lambda(
   if (StreamSemaphore flushed = flush_if_pending()) {
     latest_compute_completion_ = std::move(flushed);
   }
-
   Stream *graphics_stream = graphics_device->get_graphics_stream();
   const bool replay_requested = !replay_key.empty();
   if (!replay_requested && !retained_graphics_replay_.key.empty()) {
@@ -6162,6 +6161,11 @@ void GfxRuntime::enqueue_graphics_op_lambda(
     }
   }
 
+  // Publish a batched producer immediately before its graphics consumer, after
+  // recording the latter's commands. This preserves cross-queue ordering
+  // without putting host command construction into the GPU's dependency gap.
+  // Neither the enclosing transaction nor device execution is waited here.
+  device_->get_compute_stream()->flush_submission_batch();
   std::vector<StreamSemaphore> graphics_waits;
   if (latest_compute_completion_) {
     graphics_waits.push_back(latest_compute_completion_);
@@ -6220,6 +6224,7 @@ void GfxRuntime::enqueue_graphics_op_lambda(
   }
   ++retained_graphics_replay_.bridge_submissions;
   graphics_submission_used_ = true;
+  return latest_compute_completion_;
 }
 
 void GfxRuntime::invalidate_graphics_command_replay_locked(

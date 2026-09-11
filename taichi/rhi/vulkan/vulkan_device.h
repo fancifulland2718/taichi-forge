@@ -804,6 +804,7 @@ class VulkanStream : public Stream {
 
   void begin_submission_batch() override;
   StreamSemaphore end_submission_batch() override;
+  StreamSemaphore flush_submission_batch() override;
   StreamGpuTiming begin_gpu_timing() override;
   void end_gpu_timing(const StreamGpuTiming &timing) override;
   StreamGpuTiming begin_gpu_timing_inline(CommandList *cmdlist) override;
@@ -831,6 +832,7 @@ class VulkanStream : public Stream {
   };
 
   void retire_completed_cmdbuffers();
+  StreamSemaphore flush_submission_batch_locked();
   void apply_in_flight_backpressure();
 
   VulkanDevice &device_;

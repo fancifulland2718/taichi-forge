@@ -19082,6 +19082,7 @@ class Graph:
         runtime_owner_retained = False
         submission_instance = self._instance
         workspace_lane_index = 0
+        transaction = None
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
@@ -19250,6 +19251,10 @@ class Graph:
                     )
                     runtime_owner_retained = True
         except BaseException:
+            # A retained Python traceback otherwise keeps the native batch
+            # open while lease cancellation or caller teardown tries to wait.
+            # Its destructor publishes already-enqueued work without waiting.
+            transaction = None
             if observation_lease is not None:
                 observation_lease.cancel()
             if telemetry_lease is not None:

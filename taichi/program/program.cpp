@@ -22541,7 +22541,7 @@ void Program::enqueue_compute_op_lambda(
   program_impl_->enqueue_compute_op_lambda(op, image_refs);
 }
 
-void Program::enqueue_graphics_op_lambda(
+StreamSemaphore Program::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs,
     const std::vector<std::uint64_t> &replay_key) {
@@ -22552,8 +22552,8 @@ void Program::enqueue_graphics_op_lambda(
               "Graphics commands cannot be nested into a compute native "
               "command recording.");
 #endif
-  program_impl_->enqueue_graphics_op_lambda(std::move(op), image_refs,
-                                            replay_key);
+  return program_impl_->enqueue_graphics_op_lambda(std::move(op), image_refs,
+                                                   replay_key);
 }
 
 }  // namespace taichi::lang

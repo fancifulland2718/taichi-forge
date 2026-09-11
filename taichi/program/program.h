@@ -3929,7 +3929,7 @@ class TI_DLL_EXPORT Program {
    * The GfxRuntime implementation establishes compute -> graphics -> compute
    * semaphore ordering even when Vulkan uses distinct queue families.
    */
-  void enqueue_graphics_op_lambda(
+  StreamSemaphore enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs,
       const std::vector<std::uint64_t> &replay_key = {});

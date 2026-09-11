@@ -589,8 +589,9 @@ def test_vulkan_bindless_buffer_table_executes_and_rebinds_graph_generation():
         assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 
 
+@pytest.mark.parametrize("entrypoint", ("run", "submit"))
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_vulkan_graphics_draw_executes_directly_and_through_graph():
+def test_vulkan_graphics_draw_executes_directly_and_through_graph(entrypoint):
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")
 
@@ -617,7 +618,16 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
         ("target", GraphAccess.WRITE),
         ("vertices", GraphAccess.READ),
     )
+
+    @ti.kernel
+    def tint_vertices(values: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in range(3):
+            values[i * 5 + 2] = 1.0
+            values[i * 5 + 3] = 0.0
+            values[i * 5 + 4] = 0.0
+
     builder = ti.graph.GraphBuilder()
+    builder.dispatch(tint_vertices, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "vertices", ti.f32, ndim=1))
     builder.append_native(recording, admission="auto")
     graph = builder.compile()
     graph_color = ti.Texture(ti.Format.rgba8, (64, 64))
@@ -630,10 +640,11 @@ def test_vulkan_graphics_draw_executes_directly_and_through_graph():
     ti.sync()
     assert _texture_rgb(graph_color)[2, 2].max() > 32
 
-    graph.run({"target": graph_color, "vertices": vertices})
+    getattr(graph, entrypoint)({"target": graph_color, "vertices": vertices})
     ti.sync()
     graph_image = _texture_rgb(graph_color)
     assert graph_image[32, 32].max() > 32
+    assert graph_image[32, 32, 1:].max() == 0
     assert graph_image[2, 2].max() == 0
     assert graph._debug_info["optimization"]["backend_command_nodes"] == 1
 

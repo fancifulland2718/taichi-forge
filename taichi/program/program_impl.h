@@ -177,7 +177,7 @@ class ProgramImpl {
     TI_NOT_IMPLEMENTED;
   }
 
-  virtual void enqueue_graphics_op_lambda(
+  virtual StreamSemaphore enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs,
       const std::vector<std::uint64_t> &replay_key = {}) {

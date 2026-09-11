@@ -197,11 +197,12 @@ void VulkanProgramImpl::enqueue_compute_op_lambda(
   runtime_->enqueue_compute_op_lambda(op, image_refs);
 }
 
-void VulkanProgramImpl::enqueue_graphics_op_lambda(
+StreamSemaphore VulkanProgramImpl::enqueue_graphics_op_lambda(
     std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
     const std::vector<ComputeOpImageRef> &image_refs,
     const std::vector<std::uint64_t> &replay_key) {
-  runtime_->enqueue_graphics_op_lambda(std::move(op), image_refs, replay_key);
+  return runtime_->enqueue_graphics_op_lambda(std::move(op), image_refs,
+                                              replay_key);
 }
 
 void VulkanProgramImpl::invalidate_graphics_command_replay() {

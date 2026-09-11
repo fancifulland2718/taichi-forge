@@ -864,6 +864,12 @@ class RHI_DLL_EXPORT Stream {
     return nullptr;
   }
 
+  // Publish pending work without closing the caller's batch or waiting for
+  // device completion. Cross-queue consumers need a submitted signal point.
+  virtual StreamSemaphore flush_submission_batch() {
+    return nullptr;
+  }
+
   // Optional diagnostic timing scope. Implementations must enqueue both
   // boundaries in stream order and retain independent native resources for
   // every in-flight scope. The default keeps unsupported backends honest.

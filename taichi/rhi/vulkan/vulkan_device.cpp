@@ -3450,6 +3450,17 @@ StreamSemaphore VulkanStream::end_submission_batch() {
   if (--submission_batch_depth_ != 0) {
     return nullptr;
   }
+  return flush_submission_batch_locked();
+}
+
+StreamSemaphore VulkanStream::flush_submission_batch() {
+  device_.throw_if_backend_submission_disallowed(
+      "Vulkan submission batch flush");
+  std::lock_guard<std::mutex> submission_lock(submission_mutex_);
+  return flush_submission_batch_locked();
+}
+
+StreamSemaphore VulkanStream::flush_submission_batch_locked() {
   if (pending_batch_submissions_.empty()) {
     submission_batch_fence_.reset();
     return std::exchange(submission_batch_completion_, nullptr);
