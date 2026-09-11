@@ -5123,7 +5123,19 @@ class _GraphRunContext:
             flattened = self._last_flattened
         else:
             flattened = {}
-            for k, v in args.items():
+            previous_signatures = {
+                entry[0]: entry for entry in (self._last_arg_signature or ())
+            }
+            previous_flattened = self._last_flattened or {}
+            for entry, (k, v) in zip(signature, args.items()):
+                # A new result/terminal buffer must not force every unchanged
+                # workspace/provider argument to rebuild its storage view.
+                # Reuse the same generation-qualified identity as the whole-
+                # frame fast path, and retain only the latest frame. Dynamic
+                # scalar/matrix values are still refreshed below.
+                if previous_signatures.get(k) == entry and k in previous_flattened:
+                    flattened[k] = previous_flattened[k]
+                    continue
                 if isinstance(v, DeviceExtent):
                     state = v.state
                     if runtime_storage_backend:

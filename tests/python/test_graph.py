@@ -3248,6 +3248,70 @@ def test_fixed_binding_frame_publication_and_execution(fixed_kind, monkeypatch):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
+def test_graph_partial_frame_rebind_preserves_unchanged_storage(monkeypatch):
+    from taichi_forge.graph._graph import _GraphRunContext
+    from taichi_forge.graph._native import ProviderOwnedNdarrayBinding
+    from taichi_forge.lang._ndarray import ScalarNdarray
+
+    workspace = ti.ndarray(ti.i32, shape=8)
+    first_output = ti.ndarray(ti.i32, shape=8)
+    next_output = ti.ndarray(ti.i32, shape=8)
+    provider = ProviderOwnedNdarrayBinding(workspace.arr, workspace)
+    field = ti.field(ti.i32, shape=8)
+    field.fill(3)
+    matrix = ti.Vector([1, 2])
+    calls = []
+    original = ScalarNdarray._runtime_storage_argument
+
+    def record_argument(self, *args, **kwargs):
+        calls.append(self)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(ScalarNdarray, "_runtime_storage_argument", record_argument)
+    context = _GraphRunContext()
+
+    def flatten(arguments):
+        context.begin(arguments)
+        try:
+            return context.flattened_args()
+        finally:
+            context.end()
+
+    first = flatten(
+        dict(work=workspace, out=first_output, fixed=provider,
+             field=field, scale=2, matrix=matrix)
+    )
+    assert calls == [workspace, first_output]
+    calls.clear()
+    matrix[0] = 7
+    # Reordered mappings, newly allocated outputs and updated scalar values
+    # must not reconstruct unchanged resource descriptors.
+    second = flatten(
+        dict(scale=5, matrix=matrix, out=next_output, field=field,
+             fixed=provider, work=workspace)
+    )
+    assert calls == [next_output]
+    assert second["work"] is first["work"]
+    assert second["fixed"] is first["fixed"]
+    assert second["field"] is first["field"]
+    assert second["out"][0] is next_output.arr
+    assert second["scale"] == 5 and second["matrix"][0] == 7
+
+    calls.clear()
+    # Failed preparation does not publish a partial cache, and removing a slot
+    # evicts its old descriptor instead of retaining historical generations.
+    with pytest.raises(TaichiRuntimeError, match="runtime arguments but got"):
+        flatten(dict(work=workspace, invalid=object()))
+    assert flatten(dict(work=workspace))["work"] is first["work"]
+    assert tuple(context._last_flattened) == ("work",)
+    assert calls == []
+    restored = flatten(dict(work=workspace, out=first_output, scale=9))
+    assert calls == [first_output]
+    assert restored["out"][0] is first_output.arr
+    assert restored["scale"] == 9
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_mixed_recordable_native_node_lowers_to_one_backend_region():
     @ti.kernel
     def add_one(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
