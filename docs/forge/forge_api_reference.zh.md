@@ -1470,7 +1470,13 @@ graph.run({"slot": 3})
 - ndarray/texture 可在 `template_args` 中提供 compile exemplar，但仍须有对应的
   `ti.graph.Arg`，并在每次 `run()` 中传入真实 runtime resource；
 - ndarray exemplar 必须与 symbolic Arg 的 dtype、ndim 和 element shape 一致；
-- Graph 只保留 compiled kernel，不为 `template_args` 额外保留 solver 强引用。
+- CUDA memory/offload recipe 的延迟生成源保留 `template_args` 浅快照（包括 `self`），
+  用于候选编译，不复制或序列化对象及 Field 存储。搜索期间保持 definition-time 属性不变；
+  候选语义改变时会与冻结 baseline 比较并拒绝。Field 内容可以原位更新。
+- CUDA complete-recipe 搜索支持模板专门化后的 ndarray stencil，以及包含 `self.field` 的
+  dense Field 严格逐点 range-phase fusion。Field staging、sparse template traversal、跨 lane
+  融合及缺少别名证明的 captured Field/runtime ndarray 混合融合暂不在该子集内，baseline
+  执行不受影响。模板参数不是新的 CompileIQ 搜索轴，provider 使用专门化后的 IR。
 - `kernel` 通常是 decorated primal kernel；也可传入显式 `kernel.grad` 来构造手工管理的
   gradient Graph，但必须在 `ti.ad.Tape()` / `ti.ad.FwdMode()` 之外运行。
 - `label` 是可选调用标签，例如 `"sweep=3/color=red"`。标签保存在 Graph dispatch 上，

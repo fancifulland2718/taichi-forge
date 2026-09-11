@@ -138,7 +138,10 @@ class Kernel;
 //  31 - JIT Graph acceleration-structure resources (2026-09). Retain AS reads
 //       in kernel Graph metadata; old payloads lack this explicit dependency.
 //       Existing opaque intrinsic blockers are preserved.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 31;
+//  32 - Exact offload fusion rejects mixed captured-field/external storage
+//       without a Graph alias contract. Old fused artifacts must not bypass
+//       this compile-time proof, even when the optimized kernel key matches.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 32;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

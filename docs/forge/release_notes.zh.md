@@ -43,6 +43,10 @@ runtime build identity `c268ca5671e8`；`0.4.25` 仍是最后一个公开的 `0.
 
 ## 待发布 {#unreleased}
 
+- CUDA whole-Graph memory/offload provider 保留模板专门化输入，可为合格 ndarray stencil
+  与包含 `self.field` 的 dense Field 逐点阶段生成完整物理候选。编译期检查冻结语义与
+  field/ndarray 混合别名，不新增 replay 校验或同步；cache schema 32 使旧 offload 产物失效。
+
 - 完成 Forge-owned whole-Graph recipe 工作流。冻结的 `GraphDefinition` 现在可接入版本化内建或
   外部 provider，把兼容 fragment 组合为完整物理 recipe，并通过魔改 CompileIQ V2 协议进行
   survivor-driven staged search。显式 workload、evaluation、backend-environment、budget 与

@@ -233,7 +233,7 @@ def test_offload_phase_fusion_fails_closed_for_different_constant_ranges():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_offload_phase_fusion_fails_closed_for_block_local_phases():
+def test_offload_phase_fusion_keeps_dense_range_field_values_with_block_local_hint():
     count = 1 << 12
     values = ti.field(ti.i32, shape=count)
 
@@ -253,8 +253,16 @@ def test_offload_phase_fusion_fails_closed_for_block_local_phases():
     )
     assert len(ranges) == 2
     plan = baseline.with_fused_task_groups(ranges)
-    with pytest.raises(RuntimeError, match="block|unsupported global side effect"):
-        _bind_offload_execution_plan(block_staged_phases, plan).report()
+    # block_local is a struct-for hint; lowering a range-for carries no BLS
+    # allocation. The old failure came from dense GlobalPtr activation being
+    # misclassified as an opaque side effect, not from actual shared storage.
+    fused = _bind_offload_execution_plan(block_staged_phases, plan)
+    report = fused.report()
+    assert len(report.tasks) == 1
+    fused()
+    np.testing.assert_array_equal(
+        values.to_numpy(), np.arange(count, dtype=np.int32) * 2 + 1
+    )
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

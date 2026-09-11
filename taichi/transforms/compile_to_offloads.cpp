@@ -185,6 +185,13 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
     check_pointer(stmt->dest);
   }
 
+  void visit(GlobalPtrStmt *stmt) override {
+    // Dense field stores retain an activation flag in this pre-lowering IR,
+    // but an all-dense path cannot allocate or change an active set. Apply
+    // the same exact-index proof instead of treating it as an opaque effect.
+    check_pointer(stmt);
+  }
+
   void visit(AtomicOpStmt *stmt) override {
     if (!offload_phase_thread_private_pointer(stmt->dest)) {
       reject("atomic or cross-thread read-modify-write effect");
@@ -211,6 +218,14 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
     return reason_;
   }
 
+  bool accesses_external() const {
+    return accesses_external_;
+  }
+
+  bool accesses_field() const {
+    return accesses_field_;
+  }
+
  private:
   bool exact_leading_index(const std::vector<Stmt *> &indices, int ndim) const {
     if (ndim < 1 || indices.size() < static_cast<std::size_t>(ndim)) {
@@ -223,17 +238,18 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
   void check_pointer(Stmt *pointer) {
     pointer = offload_phase_pointer_origin(pointer);
     if (auto *external = pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
+      accesses_external_ = true;
       if (!exact_leading_index(external->indices, external->ndim)) {
         reject("non-pointwise external access");
       }
       return;
     }
     if (auto *global = pointer ? pointer->cast<GlobalPtrStmt>() : nullptr) {
+      accesses_field_ = true;
       auto *index = global->indices.size() == 1
                         ? global->indices.front()->cast<LoopIndexStmt>()
                         : nullptr;
       if (global->snode == nullptr || !global->snode->is_path_all_dense ||
-          (global->activate && !global->snode->is_path_all_dense) ||
           index == nullptr || index->loop != task_ || index->index != 0) {
         reject("non-pointwise or sparse field access");
       }
@@ -252,6 +268,8 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
 
   OffloadedStmt *task_{nullptr};
   std::string reason_;
+  bool accesses_external_{false};
+  bool accesses_field_{false};
 };
 
 class OffloadLoopIndexRebaser final : public BasicStmtVisitor {
@@ -287,6 +305,8 @@ std::string offload_phase_fusion_blocker(
     const std::vector<OffloadedStmt *> &tasks,
     const std::vector<int> &group) {
   const auto *first = tasks[group.front()];
+  bool accesses_external = false;
+  bool accesses_field = false;
   for (const int index : group) {
     const auto *task = tasks[index];
     if (task->task_type != OffloadedStmt::TaskType::range_for) {
@@ -314,6 +334,15 @@ std::string offload_phase_fusion_blocker(
     if (!checker.qualified()) {
       return checker.reason();
     }
+    accesses_external |= checker.accesses_external();
+    accesses_field |= checker.accesses_field();
+  }
+  // A runtime ndarray may be a zero-copy view into a captured field at a
+  // different offset. Pointwise indices alone do not prove cross-lane freedom
+  // across these two address spaces. Keep this decision at compilation, until
+  // Graph can supply an exact external-to-field disjointness contract.
+  if (accesses_external && accesses_field) {
+    return "mixed field and external memory requires a Graph alias contract";
   }
   return "";
 }

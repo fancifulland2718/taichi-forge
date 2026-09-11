@@ -527,7 +527,7 @@ def test_complete_recipe_composes_fusion_and_memory_without_environment(monkeypa
         catalog.provider_set.provider_for_fragment_namespace(memory.provider_namespace),
         GraphMemoryRecipeProvider,
     )
-    assert memory.provider_domain_version == "graph-memory-domain-v1"
+    assert memory.provider_domain_version == "graph-memory-domain-v2"
     assert memory.assembly_provider_namespace == (
         GraphRuntimeAssemblyProvider.descriptor.namespace
     )

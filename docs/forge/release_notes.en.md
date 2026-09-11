@@ -47,6 +47,13 @@ grouped under the behavior they shipped.
 
 ## Unreleased
 
+- CUDA whole-Graph memory/offload providers now preserve template specialization
+  inputs. Qualified ndarray stencils and pointwise dense-Field phases, including
+  `self.field`, can generate physical recipe candidates. Compile-time checks
+  retain baseline semantics and exclude unproved mixed Field/ndarray aliasing;
+  replay gains no new validation or synchronization. Old offload artifacts are
+  invalidated by cache schema 32.
+
 - Completed the Forge-owned whole-Graph recipe workflow. A frozen
   `GraphDefinition` now accepts versioned built-in or external providers,
   composes compatible fragments into complete physical recipes, and performs

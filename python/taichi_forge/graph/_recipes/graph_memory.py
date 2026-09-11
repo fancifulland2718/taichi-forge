@@ -16,8 +16,8 @@ class GraphMemoryRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = GraphRecipeProviderDescriptor(
         namespace="taichi_forge.graph.graph_memory",
         provider_version="complete-graph-family-v1",
-        domain_version="graph-memory-domain-v1",
-        semantic_fingerprint="graph-memory-fragment-generation-v1",
+        domain_version="graph-memory-domain-v2",
+        semantic_fingerprint="template-specialized-graph-memory-v2",
         assembly_protocols=(RUNTIME_GRAPH_ASSEMBLY_V1,),
         capabilities=("graph-memory-plan", "typed-runtime-fragment"),
         fragment_key_schema="graph_memory:source:choice.v1",

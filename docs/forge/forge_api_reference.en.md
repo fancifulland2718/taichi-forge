@@ -1753,8 +1753,17 @@ Contract:
   `run()` call.
 - An ndarray exemplar must match the symbolic Arg's dtype, ndim, and element
   shape.
-- The Graph retains the compiled kernel, not an additional strong solver
-  reference from `template_args`.
+- Lazy CUDA memory/offload recipe sources retain a shallow snapshot of
+  `template_args` (including `self`) for candidate compilation. No object or
+  Field storage is cloned or serialized. Keep definition-time attributes
+  unchanged while searching; changed candidate semantics are rejected against
+  the frozen baseline. Changing Field contents in place is supported.
+- CUDA complete-recipe search supports template-specialized ndarray stencils
+  and exact pointwise dense-Field range-phase fusion, including `self.field`.
+  Field staging, sparse template traversal, cross-lane phase fusion, and mixed
+  captured-Field/runtime-ndarray fusion without a proven alias contract remain
+  outside this subset. Their baseline execution is unaffected. Template
+  parameters are not new CompileIQ axes; providers operate on specialized IR.
 - `kernel` is normally a decorated primal kernel. An explicit `kernel.grad`
   object is also accepted for a manually managed gradient Graph; run that
   Graph outside `ti.ad.Tape()` / `ti.ad.FwdMode()`.

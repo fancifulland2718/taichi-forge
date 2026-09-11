@@ -42,6 +42,8 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "offload_phase_fusion",
         capabilities=("offload-phase-fusion", "typed-runtime-fragment"),
+        domain_version="template-specialized-offload-fusion-v2",
+        semantic_fingerprint="exact-pointwise-separated-address-spaces-v2",
     )
 
     def fragments(self, definition):

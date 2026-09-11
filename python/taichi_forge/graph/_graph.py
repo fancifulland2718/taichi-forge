@@ -13704,12 +13704,22 @@ def gen_cpp_kernel(
 ):
     execution_plan = None
     if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
-        if kernel_fn._bound_args:
-            raise TaichiCompilationError(
-                "Graph task-indexed execution plans do not support bound "
-                "class-kernel instances"
-            )
         kernel = kernel_fn._kernel
+        if kernel_fn._bound_args:
+            template_args = {} if template_args is None else dict(template_args)
+            for argument, value in zip(kernel.arguments, kernel_fn._bound_args):
+                if not isinstance(argument.annotation, kernel_impl.template):
+                    raise TaichiCompilationError(
+                        "Bound Graph execution-plan arguments must be templates"
+                    )
+                if (
+                    argument.name in template_args
+                    and template_args[argument.name] is not value
+                ):
+                    raise TaichiCompilationError(
+                        "Graph execution-plan template owner differs from its bound kernel"
+                    )
+                template_args[argument.name] = value
         execution_plan = kernel_fn.plan
         if execution_plan.requires_graph_memory and not allow_graph_memory_recipe:
             raise TaichiCompilationError(
@@ -14638,8 +14648,14 @@ def _graph_memory_recipe_manifest(
 class _GraphMemoryRecipeSource:
     """Frozen Graph-definition lineage with a lazy physical candidate cache."""
 
-    def __init__(self, kernel_fn, args, label, baseline_kernel_cpp):
+    def __init__(
+        self, kernel_fn, args, label, baseline_kernel_cpp, template_args=None
+    ):
         self.kernel_fn = kernel_fn
+        # Preserve the exact specialization inputs without serializing self or
+        # cloning application resources. Candidate IR/manifest validation still
+        # has to match the frozen baseline's semantic identity.
+        self.template_args = None if template_args is None else dict(template_args)
         self.args = tuple(args)
         self.label = label
         self.baseline_kernel_cpp = baseline_kernel_cpp
@@ -14654,7 +14670,7 @@ class _GraphMemoryRecipeSource:
 
     @classmethod
     def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
-        if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
+        if impl.current_cfg().arch != _ti_core.Arch.cuda:
             return None
         if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
             return None
@@ -14671,7 +14687,7 @@ class _GraphMemoryRecipeSource:
             # shared-memory specialization.
             return None
 
-        return cls(kernel_fn, args, label, baseline_kernel_cpp)
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, template_args)
 
     def _prepare_definition(self):
         if self.direct_manifest is not None:
@@ -14732,6 +14748,7 @@ class _GraphMemoryRecipeSource:
         staged_kernel_cpp = gen_cpp_kernel(
             staged_binding,
             self.args,
+            template_args=self.template_args,
             allow_graph_memory_recipe=True,
         )
         contracts, layout_requirements, staged_sources = _graph_shared_staged_contract(
@@ -15164,8 +15181,11 @@ def _graph_offload_fusion_recipe_manifest(
 class _GraphOffloadFusionRecipeSource:
     """Graph-owned compiler-IR topology domain for one semantic dispatch."""
 
-    def __init__(self, kernel_fn, args, label, baseline_kernel_cpp, manifests):
+    def __init__(
+        self, kernel_fn, args, label, baseline_kernel_cpp, manifests, template_args=None
+    ):
         self.kernel_fn = kernel_fn
+        self.template_args = None if template_args is None else dict(template_args)
         self.args = tuple(args)
         self.label = label
         self.baseline_kernel_cpp = baseline_kernel_cpp
@@ -15181,7 +15201,7 @@ class _GraphOffloadFusionRecipeSource:
 
     @classmethod
     def try_create(cls, kernel_fn, args, label, baseline_kernel_cpp, template_args):
-        if impl.current_cfg().arch != _ti_core.Arch.cuda or template_args:
+        if impl.current_cfg().arch != _ti_core.Arch.cuda:
             return None
         if isinstance(kernel_fn, kernel_impl._OffloadExecutionPlanBinding):
             return None
@@ -15191,7 +15211,7 @@ class _GraphOffloadFusionRecipeSource:
             manifests = _kernel_task_manifests(baseline_kernel_cpp)
         except (RuntimeError, TaichiRuntimeError):
             return None
-        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests)
+        return cls(kernel_fn, args, label, baseline_kernel_cpp, manifests, template_args)
 
     def _prepare_definition(self):
         if self.direct_manifest is not None:
@@ -15224,7 +15244,9 @@ class _GraphOffloadFusionRecipeSource:
         self._prepare_definition()
         plan = self.baseline_plan.with_fused_task_groups(*groups)
         binding = _bind_offload_execution_plan(self.kernel_fn, plan)
-        kernel_cpp = gen_cpp_kernel(binding, self.args)
+        kernel_cpp = gen_cpp_kernel(
+            binding, self.args, template_args=self.template_args
+        )
         manifests = _kernel_task_manifests(kernel_cpp)
         plan.validate_materialization(manifests)
         manifest = _graph_offload_fusion_recipe_manifest(
