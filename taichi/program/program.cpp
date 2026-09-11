@@ -9272,7 +9272,7 @@ Ndarray *Program::create_ndarray_impl(
   }
 
   auto arr = std::make_unique<Ndarray>(this, type, shape, layout, dbg_info,
-                                       host_read, allocator);
+                                       host_read, allocator, zero_fill);
   Ndarray *view = arr.get();
   std::unique_lock<std::mutex> lock(ndarray_lifecycle_mutex_);
   auto [result, handle] =

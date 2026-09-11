@@ -39,6 +39,18 @@ Ndarray::Ndarray(Program *prog,
                  const DebugInfo &dbg_info_,
                  bool host_read,
                  const std::function<DeviceAllocation(std::size_t)> &allocator)
+    : Ndarray(prog, type, shape_, layout_, dbg_info_, host_read, allocator,
+              /*zero_fill=*/true) {
+}
+
+Ndarray::Ndarray(Program *prog,
+                 const DataType type,
+                 const std::vector<int> &shape_,
+                 ExternalArrayLayout layout_,
+                 const DebugInfo &dbg_info_,
+                 bool host_read,
+                 const std::function<DeviceAllocation(std::size_t)> &allocator,
+                 bool zero_fill)
     : dtype(type),
       shape(shape_),
       layout(layout_),
@@ -88,7 +100,7 @@ Ndarray::Ndarray(Program *prog,
         nelement_ * element_size_, usage);
   } else {
     ndarray_alloc_ = prog->allocate_memory_on_device(
-        nelement_ * element_size_, prog->result_buffer, usage);
+        nelement_ * element_size_, prog->result_buffer, usage, zero_fill);
   }
 }
 

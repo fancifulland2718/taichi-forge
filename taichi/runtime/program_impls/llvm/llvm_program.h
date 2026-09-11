@@ -139,6 +139,14 @@ class LlvmProgramImpl : public ProgramImpl {
     return runtime_exec_->allocate_memory_on_device(alloc_size, result_buffer);
   }
 
+  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                             uint64 *result_buffer,
+                                             AllocUsage usage,
+                                             bool zero_fill) override {
+    return runtime_exec_->allocate_memory_on_device(alloc_size, result_buffer,
+                                                    zero_fill);
+  }
+
   Device *get_compute_device() override {
     return runtime_exec_->get_compute_device();
   }

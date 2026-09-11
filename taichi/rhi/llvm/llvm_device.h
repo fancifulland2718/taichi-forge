@@ -14,6 +14,7 @@ class LlvmDevice : public Device {
     LLVMRuntime *runtime{nullptr};
     uint64 *result_buffer{nullptr};
     bool use_memory_pool{false};
+    bool zero_fill{true};
   };
 
   Arch arch() const override {

@@ -1021,6 +1021,13 @@ class TI_DLL_EXPORT Program {
     return program_impl_->allocate_memory_on_device(alloc_size, result_buffer,
                                                    usage);
   }
+  DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                             uint64 *result_buffer,
+                                             AllocUsage usage,
+                                             bool zero_fill) {
+    return program_impl_->allocate_memory_on_device(alloc_size, result_buffer,
+                                                    usage, zero_fill);
+  }
   DeviceAllocation allocate_host_read_memory_on_device(
       std::size_t alloc_size,
       AllocUsage usage);

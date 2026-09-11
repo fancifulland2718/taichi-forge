@@ -1335,14 +1335,15 @@ ThreadPool *LlvmRuntimeExecutor::get_cpu_thread_pool() {
 
 DeviceAllocation LlvmRuntimeExecutor::allocate_memory_on_device(
     std::size_t alloc_size,
-    uint64 *result_buffer) {
+    uint64 *result_buffer,
+    bool zero_fill) {
   auto devalloc = llvm_device()->allocate_memory_runtime(
       {{alloc_size, /*host_write=*/false, /*host_read=*/false,
         /*export_sharing=*/false, AllocUsage::Storage},
        get_runtime_jit_module(),
        get_llvm_runtime(),
        result_buffer,
-       use_device_memory_pool()});
+       use_device_memory_pool(), zero_fill});
 
   TI_ASSERT(allocated_runtime_memory_allocs_.find(devalloc.alloc_id) ==
             allocated_runtime_memory_allocs_.end());

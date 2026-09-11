@@ -931,19 +931,42 @@ def test_ndarray_native_zero_fill():
     n = 17
 
     scalar = ti.ndarray(ti.f64, shape=n)
+    np.testing.assert_array_equal(scalar.to_numpy(), 0.0)
     scalar.fill(3.5)
     scalar.fill(0.0)
     assert (scalar.to_numpy() == np.zeros((n,), dtype=np.float64)).all()
 
     vec = ti.Vector.ndarray(3, ti.f32, shape=n)
+    np.testing.assert_array_equal(vec.to_numpy(), 0.0)
     vec.fill(2.0)
     vec.fill(0)
     assert (vec.to_numpy() == np.zeros((n, 3), dtype=np.float32)).all()
 
     mat = ti.Matrix.ndarray(2, 2, ti.i32, shape=n)
+    np.testing.assert_array_equal(mat.to_numpy(), 0)
     mat.fill(5)
     mat.fill(0)
     assert (mat.to_numpy() == np.zeros((n, 2, 2), dtype=np.int32)).all()
+
+    from taichi_forge.lang._ndarray import ScalarNdarray
+
+    @ti.kernel
+    def overwrite(values: ti.types.ndarray(ti.i32, ndim=1)):
+        for index in values:
+            values[index] = 3 * index - 17
+
+    # Scratch does not promise initial contents, but keeps ordinary resource
+    # ownership and supports explicit writes/fill. Public allocations remain
+    # zero-initialized even when interleaved with private scratch allocations.
+    scratch = ScalarNdarray._private_scratch_storage(ti.i32, (2051,))
+    overwrite(scratch)
+    np.testing.assert_array_equal(
+        scratch.to_numpy(), 3 * np.arange(2051, dtype=np.int32) - 17
+    )
+    fresh = ti.ndarray(ti.i32, shape=2051)
+    np.testing.assert_array_equal(fresh.to_numpy(), 0)
+    scratch.fill(0)
+    np.testing.assert_array_equal(scratch.to_numpy(), 0)
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], exclude=[(ti.vulkan, "Darwin")])

@@ -37,6 +37,15 @@ class TI_DLL_EXPORT Ndarray {
           bool host_read,
           const std::function<DeviceAllocation(std::size_t)> &allocator);
 
+  Ndarray(Program *prog,
+          DataType type,
+          const std::vector<int> &shape,
+          ExternalArrayLayout layout,
+          const DebugInfo &dbg_info,
+          bool host_read,
+          const std::function<DeviceAllocation(std::size_t)> &allocator,
+          bool zero_fill);
+
   /* Constructs a Ndarray from an existing DeviceAllocation.
    * It doesn't handle the allocation and deallocation.
    * You can see a Ndarray as a view or interpretation of DeviceAllocation

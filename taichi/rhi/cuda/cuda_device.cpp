@@ -206,7 +206,7 @@ DeviceAllocation CudaDevice::allocate_memory_runtime(
     } else {
       ptr = DeviceMemoryPool::get_instance().allocate_with_cache(this, params);
     }
-    if (ptr != nullptr) {
+    if (ptr != nullptr && params.zero_fill) {
       CUDADriver::get_instance().memset(ptr, 0, size);
     }
   }

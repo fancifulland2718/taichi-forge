@@ -146,6 +146,15 @@ class ProgramImpl {
     return allocate_memory_on_device(alloc_size, result_buffer);
   }
 
+  // Backends which already return uninitialized storage may retain their
+  // existing allocator. Zero filling of public ndarrays is owned by Program.
+  virtual DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
+                                                     uint64 *result_buffer,
+                                                     AllocUsage usage,
+                                                     bool zero_fill) {
+    return allocate_memory_on_device(alloc_size, result_buffer, usage);
+  }
+
   virtual bool used_in_kernel(DeviceAllocationId) {
     return false;
   }

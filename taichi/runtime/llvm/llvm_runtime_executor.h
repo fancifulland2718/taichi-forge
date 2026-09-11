@@ -59,7 +59,8 @@ class LlvmRuntimeExecutor {
 
   // Ndarray and ArgPack Allocation
   DeviceAllocation allocate_memory_on_device(std::size_t alloc_size,
-                                             uint64 *result_buffer);
+                                             uint64 *result_buffer,
+                                             bool zero_fill = true);
 
   void deallocate_memory_on_device(DeviceAllocation handle);
 
