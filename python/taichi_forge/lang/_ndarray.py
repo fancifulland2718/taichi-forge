@@ -681,17 +681,23 @@ class ScalarNdarray(Ndarray):
         self.element_type = dtype
 
     @classmethod
-    def _private_scratch_storage(cls, dtype, arr_shape):
+    def _private_scratch_storage(cls, dtype, arr_shape, *, dbg_info=None):
         """Uninitialized provider scratch with ordinary runtime ownership.
 
         Internal callers must overwrite the full range before its first read.
         Public ndarray construction keeps its zero-initialization contract.
+        A prepared owner may supply its allocation provenance without collecting
+        a new Python stack for every scratch instance.
         """
         value = cls.__new__(cls)
         Ndarray.__init__(value)
         value.dtype = cook_dtype(dtype)
         value.arr = impl.get_runtime().prog.create_ndarray(
-            value.dtype, arr_shape, layout=Layout.NULL, zero_fill=False
+            value.dtype,
+            arr_shape,
+            layout=Layout.NULL,
+            zero_fill=False,
+            dbg_info=_ti_core.DebugInfo() if dbg_info is None else dbg_info,
         )
         value._register_runtime_object()
         value.shape = tuple(value.arr.shape)

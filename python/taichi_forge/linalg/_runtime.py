@@ -40,6 +40,7 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.impl import get_runtime
 from taichi_forge.lang.matrix import MatrixField
+from taichi_forge.lang.util import get_traceback
 from taichi_forge.lang._storage_view import (
     DenseNdarrayView,
     _flatten_storage_to_scalar_vector,
@@ -390,11 +391,21 @@ class SolveGraphTerminalPacket:
         self._initialized = bool(initialize)
         self._snapshot_recorded = False
         self._snapshot_lock = threading.Lock()
-        self.state = ScalarNdarray(i32, (4,))
-        self.metrics = ScalarNdarray(f32, (4,))
         if initialize:
+            self.state = ScalarNdarray(i32, (4,))
+            self.metrics = ScalarNdarray(f32, (4,))
             self.state.fill(0)
             self.metrics.fill(0)
+        else:
+            # Every solve publishes all eight terminal words, including the
+            # zero-iteration path. Keep storage submission-owned, but reuse
+            # the prepared action's provenance and avoid redundant zeroing.
+            self.state = ScalarNdarray._private_scratch_storage(
+                i32, (4,), dbg_info=terminal._allocation_debug_info
+            )
+            self.metrics = ScalarNdarray._private_scratch_storage(
+                f32, (4,), dbg_info=terminal._allocation_debug_info
+            )
         self._arguments = MappingProxyType(
             {
                 terminal.state.name: self.state,
@@ -486,6 +497,7 @@ class SolveGraphTerminal:
         self.state = Arg(ArgKind.NDARRAY, state_name, i32, ndim=1)
         self.metrics = Arg(ArgKind.NDARRAY, metrics_name, f32, ndim=1)
         self._action_record = action_record
+        self._allocation_debug_info = _ti_core.DebugInfo(get_traceback())
 
     def allocate(self, *, initialize=True):
         """Allocate one independently submitable runtime terminal packet."""

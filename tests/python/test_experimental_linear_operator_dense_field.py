@@ -438,7 +438,7 @@ def test_solve_plan_graph_action_statistics_reject_stale_runtime():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
+def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane(monkeypatch):
     size = 64
     options = {}
     if impl.current_cfg().arch in (ti.cuda, ti.vulkan):
@@ -523,6 +523,38 @@ def test_solve_plan_submit_owns_terminal_ticket_and_workspace_lane():
             "with_initial_guess",
         }
         assert final_stats["persistent_internal_storage_bytes"] > size * 4
+
+        # Prepared submissions retain independent terminal storage without
+        # rebuilding allocation tracebacks. Later zero-iteration publication
+        # must neither inherit stale terminal words nor overwrite old packets.
+        from taichi_forge.lang import _ndarray
+        from taichi_forge.linalg import _runtime
+
+        zero_rhs = ti.ndarray(ti.f32, shape=size)
+        zero_out = ti.ndarray(ti.f32, shape=size)
+        zero_rhs.fill(0.0)
+        cached = plan._submission_graphs[False]
+        old_snapshot = submission.terminal_packet.snapshot()
+
+        def unexpected_traceback(*args, **kwargs):
+            raise AssertionError("prepared terminal allocation collected a stack")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(_ndarray, "get_traceback", unexpected_traceback)
+            patch.setattr(_runtime, "get_traceback", unexpected_traceback)
+            unsubmitted = cached["action"].allocate_terminal(initialize=False)
+            with pytest.raises(RuntimeError, match="has not been submitted"):
+                unsubmitted.snapshot()
+            zero = plan.submit(zero_rhs, out=zero_out, workspace_lane=0)
+        zero_result = zero.result()
+        assert zero_result.converged and zero_result.iterations == 0
+        assert not zero_result.breakdown
+        assert zero_result.initial_residual_norm == 0.0
+        assert zero_result.residual_norm == 0.0
+        assert zero.terminal_packet.state is not submission.terminal_packet.state
+        assert zero.terminal_packet.metrics is not submission.terminal_packet.metrics
+        assert submission.terminal_packet.snapshot() == old_snapshot
+        np.testing.assert_array_equal(zero_out.to_numpy(), 0.0)
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
