@@ -18296,6 +18296,15 @@ class Graph:
         self._submission_lane = _new_submission_lane("graph")
         self._execution_definition = self._spec.execution_definition
         self._execution_arch = _ti_core.arch_name(impl.current_cfg().arch)
+        # Immutable dispatch choice, not a resource/lifetime certificate. run()
+        # can choose submit() after reset without dereferencing the retired spec;
+        # submit's existing locked validation remains the only safety boundary.
+        self._run_via_native_submission = (
+            self._contains_structured_control_value
+            and self._spec.max_structured_depth > 1
+            and self._spec.supports_native_structured_submission
+            and self._execution_arch in ("cuda", "vulkan")
+        )
         self._qualified_fusion_selector = (
             None
             if getattr(self._spec, "_disable_qualified_fusion_selector", False)
@@ -18919,13 +18928,7 @@ class Graph:
         """
         if not isinstance(trace, bool):
             raise TaichiRuntimeError("Graph.run() trace must be a bool")
-        if (
-            not trace
-            and self._contains_structured_control_value
-            and self._spec.max_structured_depth > 1
-            and self._spec.supports_native_structured_submission
-            and impl.current_cfg().arch in (_ti_core.Arch.cuda, _ti_core.Arch.vulkan)
-        ):
+        if not trace and self._run_via_native_submission:
             # Production depth-2 execution is a single backend transaction.
             # Reusing submit's qualified native path avoids the portable
             # per-iteration host observations without enabling telemetry or
@@ -19054,14 +19057,6 @@ class Graph:
         telemetry = _normalize_submission_telemetry_mode(telemetry)
         telemetry_enabled = telemetry is not False
         timestamp_telemetry = telemetry == "timestamps"
-        if (
-            self._contains_structured_control_value
-            and not self._spec.supports_native_structured_submission
-        ):
-            raise TaichiRuntimeError(
-                "Graph.submit() supports structured control only when every "
-                "region has a submission-capable backend lowering"
-            )
         runtime = impl.pytaichi
         # Admission may wait. Runtime arguments are intentionally snapshotted
         # and validated only after that wait: the post-admission transaction is
@@ -19089,6 +19084,14 @@ class Graph:
         try:
             with self._lifecycle_lock:
                 self._check_runtime_valid()
+                if (
+                    self._contains_structured_control_value
+                    and not self._spec.supports_native_structured_submission
+                ):
+                    raise TaichiRuntimeError(
+                        "Graph.submit() supports structured control only when every "
+                        "region has a submission-capable backend lowering"
+                    )
                 if runtime is not impl.pytaichi:
                     raise TaichiRuntimeError(
                         "This graph was compiled before ti.reset() or a "

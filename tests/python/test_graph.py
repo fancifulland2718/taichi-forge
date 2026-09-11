@@ -4732,6 +4732,26 @@ def test_nested_structured_while_is_exact_and_reports_stable_paths(monkeypatch):
         == 2
     )
 
+    # Retained raw and published arguments must report the Graph lifecycle,
+    # before either ordinary/trace dispatch or submit consults its retired spec.
+    bound_args = {**args, "outer_target": 3, "inner_target": 2}
+    binding = graph.bind(bound_args)
+    arch = ti.lang.impl.current_cfg().arch
+    ti.reset()
+    for reinitialized in (False, True):
+        if reinitialized:
+            ti.init(arch=arch, enable_fallback=False)
+        for values in (bound_args, binding):
+            for execute in (
+                graph.run,
+                lambda value: graph.run(value, trace=True),
+                graph.submit,
+            ):
+                with pytest.raises(
+                    TaichiRuntimeError, match="closed|compiled before ti.reset"
+                ):
+                    execute(values)
+
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
