@@ -14,6 +14,7 @@ from tests import test_utils
 
 
 _OPERATION_IDS = (
+    "image.downsample.spd",
     "sort.radix.fidelityfx",
     "runtime.buffer_commands.vulkan",
     "image.copy.vulkan",

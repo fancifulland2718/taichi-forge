@@ -188,6 +188,7 @@ struct VulkanRayGeometryCommand {
 class CudaFftPlan;
 class VulkanFftPlan;
 class VulkanParallelSortPlan;
+class VulkanSpdPlan;
 class CudaCudssPlan;
 class VulkanTriangleRayScene;
 class VulkanRayResource;
@@ -1460,6 +1461,15 @@ class TI_DLL_EXPORT Program {
   vulkan_parallel_sort_plan_statistics(std::uint64_t handle);
   void destroy_vulkan_parallel_sort_plan(std::uint64_t handle);
   void vulkan_clear_parallel_sort_plans();
+  std::uint64_t create_vulkan_spd_plan(
+      Texture *source, Texture *output, const std::vector<std::uint32_t> &shader);
+  void vulkan_spd_execute(std::uint64_t handle);
+  std::unordered_map<std::string, std::uint64_t>
+  vulkan_spd_plan_statistics(std::uint64_t handle);
+  void destroy_vulkan_spd_plan(std::uint64_t handle);
+  void vulkan_clear_spd_plans();
+  std::shared_ptr<gfx::ExternalGraphCommand> vulkan_spd_graph_command(
+      std::uint64_t handle, const std::string &source, const std::string &output);
   std::shared_ptr<gfx::ExternalGraphCommand> vulkan_fft_graph_command(
       std::uint64_t handle, const std::string &binding_name);
   std::shared_ptr<gfx::FixedGraphRecording> create_vulkan_graph_recording(
@@ -4381,6 +4391,8 @@ class TI_DLL_EXPORT Program {
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanParallelSortPlan>>
       vulkan_parallel_sort_plans_;
   std::uint64_t next_vulkan_parallel_sort_plan_handle_{1};
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanSpdPlan>> vulkan_spd_plans_;
+  std::uint64_t next_vulkan_spd_plan_handle_{1};
   std::unordered_map<std::uint64_t, std::shared_ptr<CudaFftPlan>>
       cuda_cufft_plans_;
   std::unordered_map<std::string, std::weak_ptr<CudaFftPlan>>

@@ -12,8 +12,10 @@ from taichi_forge.hardware._image import (
     copy_buffer_to_image,
     copy_image_to_buffer,
 )
+from taichi_forge.hardware._spd import VulkanSpdPlan
 
 __all__ = [
+    "VulkanSpdPlan",
     "VulkanBufferImageLayout",
     "VulkanBufferToImageRecording",
     "VulkanImageBlitRecording",

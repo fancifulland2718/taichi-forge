@@ -1,0 +1,53 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Forge-owned callbacks for unmodified standalone FidelityFX SPD 2.0 headers.
+// Headers and glslangValidator are explicitly supplied by the application.
+#define A_GPU
+#define A_GLSL
+#define SPD_NO_WAVE_OPERATIONS
+#include "ffx_a.h"
+
+layout(local_size_x=256, local_size_y=1, local_size_z=1) in;
+layout(set=0, binding=0, @SOURCE_FORMAT@) readonly uniform image2D sourceImage;
+layout(std430, set=0, binding=1) coherent buffer Counter { uint value; } globalCounter;
+@OUTPUT_DECLARATIONS@
+layout(push_constant) uniform Parameters { uint levels; uint groups; } parameters;
+
+shared uint completedGroups;
+shared vec4 intermediate[16][16];
+
+vec4 SpdLoadSourceImage(ivec2 p, uint slice) {
+    return imageLoad(sourceImage, clamp(p, ivec2(0), imageSize(sourceImage) - 1));
+}
+vec4 SpdLoad(ivec2 p, uint slice) {
+    @MIP5_LOAD@
+}
+void SpdStore(ivec2 p, vec4 value, uint mip, uint slice) {
+    switch (mip) {
+        @OUTPUT_STORES@
+    }
+}
+void SpdIncreaseAtomicCounter(uint slice) {
+    // The single lane publishing mip 5 also publishes the completion counter.
+    memoryBarrierImage();
+    completedGroups = atomicAdd(globalCounter.value, 1u);
+}
+uint SpdGetAtomicCounter() {
+    // Acquire coherent image writes once after observing group completion,
+    // not before every subsequent mip-5 load in the finishing workgroup.
+    memoryBarrierImage();
+    return completedGroups;
+}
+void SpdResetAtomicCounter(uint slice) {
+    if (gl_LocalInvocationIndex == 0u) atomicExchange(globalCounter.value, 0u);
+}
+vec4 SpdLoadIntermediate(uint x, uint y) { return intermediate[x][y]; }
+void SpdStoreIntermediate(uint x, uint y, vec4 value) { intermediate[x][y] = value; }
+vec4 SpdReduce4(vec4 v0, vec4 v1, vec4 v2, vec4 v3) { return @REDUCTION@; }
+
+#include "ffx_spd.h"
+
+void main() {
+    SpdDownsample(gl_WorkGroupID.xy, gl_LocalInvocationIndex, parameters.levels, parameters.groups, 0u);
+}

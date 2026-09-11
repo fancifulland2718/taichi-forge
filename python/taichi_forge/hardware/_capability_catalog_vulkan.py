@@ -4,6 +4,48 @@
 def vulkan_command_operations(_operation):
     return (
         _operation(
+            "image.downsample.spd",
+            "image.downsample",
+            "fidelityfx_spd",
+            ("vulkan",),
+            "core",
+            "compute_native",
+            "native_command",
+            "implementation_defined",
+            ("python", "graph"),
+            "native_command",
+            "root_ordered",
+            "runtime_ordered",
+            "provider_owned",
+            "existing_public",
+            activation_mode="explicit_hardware_api",
+            resource_effects=("read:source_level_0", "write:output_mip_chain"),
+            lifetime_policy="resource_generation",
+            update_policy="immutable",
+            dtypes=("R32F to R32F", "RGBA8/RGBA32F to RGBA32F"),
+            shapes_or_tiles=(
+                "2D 2..4096 source dimensions",
+                "half-size output; no extra 1D tail",
+            ),
+            numeric_contracts=(
+                "FP32 mean/min/max",
+                "floor-cropped pyramid; finite inputs; no gamma conversion",
+            ),
+            deterministic=True,
+            requirements=(
+                "explicit standalone SPD 2.0 header directory",
+                "explicit glslangValidator executable",
+                "Vulkan 256-thread compute group and enough storage-image descriptors",
+            ),
+            public_api="ti.hardware.image.VulkanSpdPlan",
+            notes=(
+                "Forge owns callbacks, JIT and retained commands; vendor source and compiler are caller-installed.",
+                "One dispatch, four-byte counter initialized once and reset by the shader; no host readback.",
+                "Root Graph and inline native-image binding-frame recipes; no automatic downsampling or bare library search axis.",
+                "Source/output textures remain caller-owned; driver memory is not included in the four-byte workspace.",
+            ),
+        ),
+        _operation(
             "sort.radix.fidelityfx",
             "sort.radix",
             "fidelityfx_parallel_sort",
@@ -101,8 +143,8 @@ def vulkan_command_operations(_operation):
                 "dedicated-hardware acceleration.",
                 "Image copy requires matching formats; region extents may differ "
                 "for blit only. Depth/stencil and aliases are rejected.",
-                "Current Texture resources expose one mip and one layer; descriptors "
-                "carry subresource identity and fail closed for unsupported slices.",
+                "Managed 2D Texture resources support explicit mip levels and one layer; descriptors "
+                "carry subresource identity and reject unsupported slices.",
             ),
         ),
         _operation(
@@ -190,7 +232,12 @@ def vulkan_command_operations(_operation):
             resource_effects=("read:geometry", "write:managed_color_depth_textures"),
             lifetime_policy="resource_generation",
             update_policy="immutable",
-            dtypes=("vertex:f32", "index:i32", "color:rgba8", "depth:depth32f_reverse_z"),
+            dtypes=(
+                "vertex:f32",
+                "index:i32",
+                "color:rgba8",
+                "depth:depth32f_reverse_z",
+            ),
             shapes_or_tiles=("2D offscreen target",),
             layouts=("mesh", "mesh_instance", "particles", "lines"),
             deterministic=False,

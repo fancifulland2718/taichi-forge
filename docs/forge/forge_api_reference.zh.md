@@ -280,6 +280,40 @@ queue bridge 保留，并不把 draw 合入同一 secondary command。二维纹�
 此路线。ordinary Vulkan Graph 行为不变；选择此完整 recipe 用 retained command/descriptor 和
 device barrier 换取较低 host 准备成本，不保证 device 加速。
 
+### `ti.hardware.image.VulkanSpdPlan`：显式 single-pass downsampling
+
+```python
+source = raster.color_texture  # 或受管 RGBA32F 二维 Texture；R32F source 要用 R32F output
+levels = min(source.shape).bit_length() - 1
+output = ti.Texture(ti.Format.rgba32f, tuple(n // 2 for n in source.shape),
+                    mip_levels=levels)
+with ti.hardware.image.VulkanSpdPlan(
+    source, output, reduction="mean",
+    source_path="/path/to/FidelityFX-SPD/ffx-spd",
+    compiler_path="/path/to/glslangValidator",
+) as plan:
+    plan.run()  # 异步，无 readback，不复制 source 基础层
+    # builder.append_native(plan.record(source="color", output="pyramid"))
+```
+
+应用显式安装 [standalone SPD v2.0](https://github.com/GPUOpen-Effects/FidelityFX-SPD/tree/v2.0)
+和 glslangValidator。Forge 只提供 callback、冷 JIT 与 native adapter，不打包 vendor SDK/runtime
+或编译器。statistics 保存实际 source/compiler/shader hash；被动能力报告与 replay 不查找或编译依赖。
+
+支持宽高 2..4096 的二维 R32F、RGBA8 UNORM、RGBA32F source；独立 output 的基础层为 source 宽高
+各除二取整，对应 R32F 或 RGBA32F。output 只包含生成的 mip，不包含 source 副本。`mean`、`min`、
+`max` 对有限输入按分量执行 FP32 归约，无颜色空间转换或 NaN 传播保证；每级裁去奇数末行/列。
+level 数不超过 `floor(log2(min(width,height)))`，不含短边已为 1 后的额外一维尾链、array layer 或子矩形。
+
+一次 dispatch 写入全部分配的 output levels。四字节 counter 仅创建时设备清零、执行后由 shader
+复位；依赖与 image layout transition 仍为 device command。workspace 报告不含调用方 Texture、driver
+对象或对齐字节。close 禁止新的 plan 调用，排队命令继续保留资源，调用方输出 Texture 仍可使用。
+
+`record()` 是可 auto admission 的固定绑定 root native node；whole-Graph binding-frame recipe 可将
+它与合格 kernel 一起内联录制，并在 bind 边界闭合 image layout cycle。普通 root 执行仍可用，但分段
+native 路径本身不等于完整录图。不新增自动生成 mip、CompileIQ 裸库轴、AOT 或结构化 control region
+支持；采用时应计入真实 consumer、输入转换及 host/device/显存的完整成本。
+
 ### `ti.hardware.graphics.VulkanGraphicsPipeline`（0.6.3 开发中）
 
 这是 renderer-neutral 的底层 Vulkan 光栅接口。调用方提供 SPIR-V shader binary、精确

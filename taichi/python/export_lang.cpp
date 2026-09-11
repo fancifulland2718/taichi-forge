@@ -3258,6 +3258,19 @@ void export_lang(py::module &m) {
       .def("_vulkan_parallel_sort_execute",
            &Program::vulkan_parallel_sort_execute,
            py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_spd_plan",
+           tracked_native_program_method(&Program::create_vulkan_spd_plan),
+           py::arg("source"), py::arg("output"), py::arg("shader"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_spd_execute", &Program::vulkan_spd_execute,
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_spd_plan_statistics", &Program::vulkan_spd_plan_statistics,
+           py::arg("handle"))
+      .def("_vulkan_spd_graph_command", &Program::vulkan_spd_graph_command,
+           py::arg("handle"), py::arg("source"), py::arg("output"))
+      .def("_destroy_vulkan_spd_plan",
+           tracked_native_program_method(&Program::destroy_vulkan_spd_plan),
+           py::arg("handle"), py::call_guard<py::gil_scoped_release>())
       .def("_vulkan_parallel_sort_plan_statistics",
            &Program::vulkan_parallel_sort_plan_statistics, py::arg("handle"))
       .def("_destroy_vulkan_parallel_sort_plan",

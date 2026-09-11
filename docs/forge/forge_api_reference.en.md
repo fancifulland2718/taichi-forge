@@ -356,6 +356,50 @@ outside this route. Ordinary Vulkan Graph execution is unchanged; selecting this
 complete recipe trades retained commands/descriptors and device barriers for
 lower host preparation cost, not guaranteed device acceleration.
 
+### `ti.hardware.image.VulkanSpdPlan` (explicit single-pass downsampling)
+
+```python
+source = raster.color_texture  # Or a managed RGBA32F 2D Texture; use R32F output for R32F source.
+levels = min(source.shape).bit_length() - 1
+output = ti.Texture(ti.Format.rgba32f, tuple(n // 2 for n in source.shape),
+                    mip_levels=levels)
+with ti.hardware.image.VulkanSpdPlan(
+    source, output, reduction="mean",
+    source_path="/path/to/FidelityFX-SPD/ffx-spd",
+    compiler_path="/path/to/glslangValidator",
+) as plan:
+    plan.run()  # Asynchronous; no readback or base-level copy.
+    # builder.append_native(plan.record(source="color", output="pyramid"))
+```
+
+Install [standalone SPD v2.0](https://github.com/GPUOpen-Effects/FidelityFX-SPD/tree/v2.0)
+and glslangValidator explicitly. Forge supplies its callbacks, cold JIT and
+native adapter, not the vendor SDK/runtime or compiler. Statistics record the
+actual source/compiler/shader hashes; no dependency is discovered or compiled
+during passive capability reporting or replay.
+
+Supported sources are 2D R32F, RGBA8 UNORM and RGBA32F, with width/height in
+2..4096. The distinct output's base extent is half-size (floor), in R32F or
+RGBA32F respectively. It contains only the generated levels, not a copy of
+the source. `mean`, `min` and `max` reduce finite values componentwise in FP32;
+no color-space conversion or NaN propagation contract is added. Odd trailing
+rows/columns are cropped. Levels must not exceed `floor(log2(min(width,height)))`:
+additional one-dimensional tails, array layers and rectangles are not supported.
+
+One dispatch writes every allocated output level. A four-byte counter is
+initialized once on-device and reset by the shader; dependencies and image
+layout transitions remain device commands. Workspace reporting excludes the
+caller textures and opaque driver allocations. Close stops new plan calls;
+pending commands retain resources and caller output textures remain usable.
+
+`record()` provides an automatically admissible, fixed-binding root native
+node. Whole-Graph binding-frame recipes can inline it with eligible kernels
+and close the image-layout cycle at bind time. Ordinary root execution remains
+available; the native-only path is not itself one enclosing replay. This adds
+no automatic mip generation, raw CompileIQ library axis, AOT or structured
+control-region promise. Choose using complete host/device/memory measurements,
+including the consumers and any input conversion.
+
 ### `ti.hardware.graphics.VulkanGraphicsPipeline` (0.6.3 in development)
 
 This is the low-level, renderer-neutral Vulkan raster interface. The caller
