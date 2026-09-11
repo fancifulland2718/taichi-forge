@@ -26,6 +26,32 @@ def _encode_boundaries(observation):
     return json.dumps(observation, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
+def _execution_boundary(graph):
+    """Bounded passive route facts; no profiling, synchronization or counters."""
+    snapshot = getattr(graph, "execution_stats", None)
+    if not callable(snapshot):
+        return {"status": "unavailable"}
+    try:
+        report = snapshot()
+        return {
+            "status": "snapshot",
+            "scope": "passive_boundary_snapshot_not_whole_trial_trace",
+            "execution_path": report.execution_path,
+            "fallback_reason": report.fallback_reason,
+            "cgraph_segment_count": report.cgraph_segment_count,
+            "native_node_count": report.native_node_count,
+            "backend_graph_segments": report.backend_graph_segments,
+            "backend_replay_segments": report.backend_replay_segments,
+            "ordinary_fallback_segments": report.ordinary_fallback_segments,
+            "counters_complete": report.counters_complete,
+        }
+    except Exception as error:
+        # Optional diagnostics cannot turn a successful evaluator into failure
+        # or replace its original exception. External executors may lack this
+        # Forge-owned snapshot contract.
+        return {"status": "unavailable", "error_type": type(error).__name__}
+
+
 def _trial_boundaries(records):
     by_recipe = {}
     # Retain failed trials and earlier fidelities as well as successful final
@@ -81,4 +107,36 @@ def _boundary_markdown(annotations):
             "Those require explicitly defined caller metrics and evidence of a positive steady-state saving.",
         ]
     )
+    routes = []
+    for annotation in annotations:
+        snapshots = [trial.get("execution_after_evaluator") for trial in annotation.get("trial_boundaries", ())]
+        observed = [item for item in snapshots if item is not None and item["status"] == "snapshot"]
+        if observed:
+            routes.append(
+                {
+                    "recipe_id": annotation["recipe_id"],
+                    "observed_paths": sorted({item["execution_path"] for item in observed}),
+                    "fallback_reasons": sorted({item["fallback_reason"] for item in observed}),
+                    "native_node_counts": sorted({item["native_node_count"] for item in observed}),
+                    "backend_replay_segment_counts": sorted({item["backend_replay_segments"] for item in observed}),
+                    "snapshot_count": len(observed),
+                    "trial_count": len(snapshots),
+                }
+            )
+    if routes:
+        lines.extend(
+            [
+                "",
+                "## Execution boundary snapshots",
+                "",
+                "Passive post-evaluator state is not a whole-trial trace. Native runtime-ordered nodes and "
+                "mixed segments do not imply an incorrect fallback; compare the intended plan and named costs. "
+                "Missing snapshots are unavailable, not ordinary execution or zero synchronization. "
+                "Snapshots never enable replay counters; use explicit telemetry or Nsight for event attribution.",
+                "",
+                "```json",
+                json.dumps(routes, sort_keys=True, indent=2),
+                "```",
+            ]
+        )
     return lines

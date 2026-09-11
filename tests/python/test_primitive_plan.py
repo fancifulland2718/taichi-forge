@@ -1016,6 +1016,11 @@ def test_graph_field_only_segment_native_sort_and_runtime_segment():
         segment.dispatch_count for segment in initial_report.segments
     ] == [2, 0, 1]
 
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        # execution_stats is passive. Opt into the private diagnostic counters
+        # explicitly before asserting capture/replay counts below.
+        _ = graph._instance.debug_graph_stats
+
     order = np.argsort(base_keys, kind="stable")
     for initial_state, scale in ((0, 3), (7, -2)):
         state[None] = initial_state

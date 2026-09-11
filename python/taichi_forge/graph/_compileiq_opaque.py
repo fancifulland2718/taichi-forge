@@ -754,7 +754,7 @@ class _CompleteGraphRecipeSearchSessionV2:
         return provenance
 
     def _evaluate(self, request):
-        from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _resource_boundary
+        from taichi_forge.graph._trial_observations import _MEMORY_SCOPE, _resource_boundary, _execution_boundary
 
         recipe = self._plans._catalog.entry(request.recipe_id).recipe
         observation = {
@@ -763,9 +763,11 @@ class _CompleteGraphRecipeSearchSessionV2:
             "after_materialization": None,
             "after_evaluator": None,
             "after_evaluator_status": "not_run",
+            "execution_after_evaluator": None,
             "host_wall_seconds": {
                 "materialization": None,
                 "evaluator": None,
+                "execution_snapshot": None,
                 "post_evaluator_observation": None,
                 "cleanup": None,
             },
@@ -815,6 +817,9 @@ class _CompleteGraphRecipeSearchSessionV2:
             objective_error = error
             observation["after_evaluator_status"] = "objective_failed"
         timings["evaluator"] = perf_counter() - started
+        started = perf_counter()
+        observation["execution_after_evaluator"] = _execution_boundary(materialized.executor)
+        timings["execution_snapshot"] = perf_counter() - started
         if objective_error is None:
             from taichi_forge.graph._report_costs import _ReportedMetrics
 

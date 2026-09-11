@@ -75,6 +75,14 @@ def test_template_field_offload_recipe_preserves_owner_and_live_contents():
     decision = session.run(evaluate)
     assert decision.status == "selected"
     assert "offload_phase_fusion" in decision.selection.manifest.families
+    for annotation in decision.report.recipe_annotations:
+        for trial in annotation["trial_boundaries"]:
+            route = trial["execution_after_evaluator"]
+            assert route["status"] == "snapshot"
+            assert route["backend_graph_segments"] == 1
+            assert route["ordinary_fallback_segments"] == 0
+            assert route["native_node_count"] == 0
+    assert "Execution boundary snapshots" in decision.report.to_markdown()
     rebuilt = ti.graph.GraphBuilder()
     rebuilt.dispatch(work.phases, template_args={"self": work, "scale": 2})
     resolved = rebuilt.freeze().resolve_recipe(decision.selection_artifact)
@@ -144,6 +152,18 @@ def test_template_mixed_field_external_offload_requires_alias_proof():
     assert not _family(catalog, "offload_phase_fusion")
     source = definition._runtime_spec._graph_offload_fusion_sources[0]
     assert "mixed field and external memory requires a Graph alias contract" in source.candidate_failure
+    observations = catalog.discovery_report()["providers"]
+    explanation = next(
+        item["provider_explanation"]
+        for item in observations
+        if item["provider_namespace"] == "taichi_forge.graph.offload_phase_fusion"
+    )
+    assert explanation["status"] == "sources_inspected"
+    assert explanation["sources"][0]["status"] == "candidate_generation_rejected"
+    assert "Graph alias contract" in explanation["sources"][0]["generation_rejections"][0]["reason"]
+    # Reporting must read the frozen observation, not call the lazy compiler.
+    source.candidates = lambda: pytest.fail("discovery report recompiled a source")
+    assert catalog.discovery_report()["providers"] == observations
     # Lack of a fusion proof does not reject or modify the ordinary baseline.
     with definition.materialization_context() as context:
         baseline = context.materialize(catalog.baseline.recipe)

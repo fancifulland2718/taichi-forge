@@ -918,6 +918,58 @@ not all possible combinations. Measured failures, Pareto nonselection and budget
 incompleteness remain in their existing report sections. None of these diagnostic
 fields changes eligibility, the search budget or replay behavior.
 
+Built-in memory/offload/sparse providers now explain their registered dispatch
+sources: unsupported backend, no eligible registered source, no transform
+candidate, candidate-generation rejection, or generated candidates. Each attempted
+source retains its compiler/preflight rejection and task kinds. A registration
+miss is not proof that every possible implementation is unsupported; an unknown
+reason stays unknown. Template-specialized memory/offload candidates keep the same
+compiler semantics checks as non-template candidates.
+
+Use the report sections according to what they actually establish:
+
+| Question | Evidence |
+| --- | --- |
+| Why was no candidate generated? | `recipe_discovery.providers[].provider_explanation` |
+| Why did a combination fail or collapse? | Composition rejections and planned-physical duplicates |
+| Did a trial fail to materialize, evaluate, observe or clean up? | CompileIQ trial failure category/code and `trial_boundaries` |
+| Did execution use capture/replay, ordinary or native-ordered segments? | `trial_boundaries[].execution_after_evaluator` and explicit timeline evidence |
+| Was a correct candidate slower or unselected? | Comparable metric observations, Pareto and selection reason, not discovery status |
+
+Execution snapshots are passive post-evaluator state, not a trace of every run.
+They preserve path/fallback reason, Graph/native segment counts and counter
+completeness. Capture is not replay, a mixed/native boundary is not automatically
+a regression, and disabled counters cannot prove zero replays or synchronizations.
+Unsupported external executors return `unavailable`; optional route diagnostics
+do not replace evaluator errors. Snapshots and their host cost are taken only at
+trial boundaries, retained through checkpoint/resume, and summarized in Markdown.
+
+For close candidates, first use the existing `repeat_count` and explicit resume
+budget under the same workload/evaluation contract. An optional *post-search*
+ABBA/BAAB check can distinguish small gains from process/order drift:
+
+```python
+with definition.materialization_context() as context:
+    graphs = {
+        "A": definition.materialize(context=context).executor,
+        "B": definition.materialize(decision.selection, context=context).executor,
+    }
+    observations = []
+    # Caller hooks: prepare/warm both plans and restore equivalent mutable state.
+    prepare_and_warm(graphs)
+    for order in ("ABBA", "BAAB"):
+        for name in order:
+            restore_inputs_and_control_state(graphs[name])  # outside timing
+            observations.append({"case": name, **measure_block(graphs[name])})
+```
+
+`measure_block` must define device/host/completion boundaries and correctness;
+Forge cannot infer those for an application. These extra checks consume their
+own explicit budget and are not silently counted as CompileIQ trials. Preserve
+raw values and order instead of replacing search metrics with normalized ratios.
+Two resident plans may change memory pressure; account for that separately from
+selected-only memory. There is no fixed speed threshold or automatic rejection.
+
 The public `definition.search_recipes()` entry accepts optional reporting-only
 cost metrics through `GraphEvaluationContract`. For example:
 

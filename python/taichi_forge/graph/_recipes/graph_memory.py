@@ -75,5 +75,17 @@ class GraphMemoryRecipeProvider(GraphRuntimeFragmentProvider):
 
         assembly.select_dispatch(source, rewrite_dispatch)
 
+    def explain_discovery(self, definition):
+        from taichi_forge.graph._recipes.discovery import dispatch_source_explanation
+
+        return dispatch_source_explanation(
+            definition,
+            definition._runtime_spec._graph_memory_sources,
+            supported_scope=(
+                "CUDA single-range ndarray stencil with distinct read/write roles; "
+                "templates supported; captured-field staging not supported"
+            ),
+        )
+
 
 __all__ = ["GraphMemoryRecipeProvider"]

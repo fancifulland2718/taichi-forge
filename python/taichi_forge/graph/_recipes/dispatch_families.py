@@ -69,6 +69,18 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
 
         assembly.select_dispatch(source, rewrite_dispatch)
 
+    def explain_discovery(self, definition):
+        from taichi_forge.graph._recipes.discovery import dispatch_source_explanation
+
+        return dispatch_source_explanation(
+            definition,
+            definition._runtime_spec._graph_offload_fusion_sources,
+            supported_scope=(
+                "CUDA exact-pointwise constant range phases; templates supported; "
+                "mixed field/external alias proof required"
+            ),
+        )
+
 
 class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
@@ -103,6 +115,15 @@ class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
             return kernel, (), ()
 
         assembly.select_dispatch(source, rewrite_dispatch)
+
+    def explain_discovery(self, definition):
+        from taichi_forge.graph._recipes.discovery import dispatch_source_explanation
+
+        return dispatch_source_explanation(
+            definition,
+            definition._runtime_spec._graph_sparse_traversal_sources,
+            supported_scope="CUDA listgen with a smaller known parent-capacity bound; template arguments not supported",
+        )
 
 
 __all__ = [

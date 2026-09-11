@@ -713,6 +713,44 @@ provider 解释、被拒绝的组合尝试和 planned-physical 重复项。`cata
 未知：可能是只负责装配，也可能是不匹配的 Graph 语义。拒绝次数是本 session（含有界 exact probe）的尝试数，
 不是所有可能组合。实测失败、Pareto 未选中和预算不完整仍使用报告原有字段；诊断不改变准入、预算或 replay。
 
+内建 memory/offload/sparse provider 会解释已注册的 dispatch source：不支持的后端、没有合格注册源、
+没有可转换候选、候选生成拒绝或已生成候选，并保留 task kinds 与编译器/preflight 原因。
+注册链路没有来源不等于所有实现都不可能支持；未知原因不猜测。模板候选仍经过相同编译期语义证明。
+
+| 要判断的问题 | 应读的证据 |
+| --- | --- |
+| 为什么没生成候选 | `recipe_discovery.providers[].provider_explanation` |
+| 为什么组合失败或物理重复 | composition rejections、planned-physical duplicates |
+| 物化、评价、观测、释放是否失败 | CompileIQ trial failure category/code 与 `trial_boundaries` |
+| 实际 capture/replay、ordinary、native-ordered 边界 | `trial_boundaries[].execution_after_evaluator`，必要时显式 timeline |
+| 正确候选是否更慢或未选中 | 可比较指标、Pareto 与 selection reason，不能看 discovery 状态下结论 |
+
+执行快照只代表 evaluator 之后的被动状态，不是逐次运行的完整 trace。它保存 path/fallback reason、
+Graph/native segment 数及计数完整性。capture 不等于 replay；mixed/native 边界不自动表示退化；
+关闭的计数不能证明零 replay 或零同步。外部 executor 不提供该接口时为 unavailable，诊断失败不替换
+原 evaluator 错误。仅在 trial 边界采集并单独记录 host 成本，经 checkpoint/resume 保留，Markdown 同源显示。
+
+收益接近时先使用已有 `repeat_count` 和显式 resume 预算，保持 workload/evaluation 合同相同。
+可选的搜索后 ABBA/BAAB 复核模板如下，不新增搜索门禁：
+
+```python
+with definition.materialization_context() as context:
+    graphs = {
+        "A": definition.materialize(context=context).executor,
+        "B": definition.materialize(decision.selection, context=context).executor,
+    }
+    observations = []
+    prepare_and_warm(graphs)  # 调用者准备、预热两种方案
+    for order in ("ABBA", "BAAB"):
+        for name in order:
+            restore_inputs_and_control_state(graphs[name])  # 计时外恢复等价可变状态
+            observations.append({"case": name, **measure_block(graphs[name])})
+```
+
+`measure_block` 由应用明确 device/host/完成边界与正确性。额外复核使用自己的显式预算，不暗中计为
+CompileIQ trial；保留原始值与顺序，不用归一化比率覆写搜索指标。两个常驻方案可能改变显存压力，
+需与 selected-only 显存分别记录。没有固定加速阈值或自动淘汰。
+
 公共 `definition.search_recipes()` 可以通过 `GraphEvaluationContract` 声明只用于报告的成本指标：
 
 ```python

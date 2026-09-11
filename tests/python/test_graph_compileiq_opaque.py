@@ -20,6 +20,18 @@ from tests import test_utils
 _ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_optional_execution_snapshot_does_not_replace_execution_failure():
+    from taichi_forge.graph._trial_observations import _execution_boundary
+
+    def unavailable():
+        raise RuntimeError("external executor cannot expose a route")
+
+    assert _execution_boundary(SimpleNamespace(execution_stats=unavailable)) == {
+        "status": "unavailable", "error_type": "RuntimeError"
+    }
+    assert _execution_boundary(object()) == {"status": "unavailable"}
+
+
 @pytest.mark.parametrize("failure_phase", (None, "materialization", "objective", "observation", "cleanup", "protocol"))
 def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(monkeypatch, failure_phase):
     from compileiq.forge_support import TrialCleanupV2, TrialFailureV2, TrialOutcomeV2
@@ -56,7 +68,11 @@ def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(
 
     def materialize(*args, **kwargs):
         enter("materialization")
-        return SimpleNamespace(manifest=manifest(16), executor=object(), close=lambda: enter("cleanup"))
+        return SimpleNamespace(
+            manifest=manifest(16),
+            executor=SimpleNamespace(definition=session._plans._definition),
+            close=lambda: enter("cleanup"),
+        )
 
     def evaluate(*args):
         enter("objective")
@@ -102,7 +118,10 @@ def test_trial_boundary_evidence_survives_each_failure_without_inventing_memory(
         assert observation["after_evaluator_status"] == "not_run"
         assert timings["evaluator"] is None
         assert timings["cleanup"] is None
+        assert observation["execution_after_evaluator"] is None
     else:
+        assert observation["execution_after_evaluator"] == {"status": "unavailable"}
+        assert timings["execution_snapshot"] >= 0
         assert observation["after_materialization"]["persistent_allocated_bytes"] == 16
         assert events == (
             ["materialization", "objective"] + ([] if failure_phase == "objective" else ["observation"]) + ["cleanup"]
