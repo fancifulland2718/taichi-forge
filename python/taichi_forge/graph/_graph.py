@@ -6075,6 +6075,8 @@ class _CompiledSequentialRegionNode:
         name,
         ir_node,
         definition_sequences=(),
+        definition_region_kinds=(),
+        definition_repetitions=1,
     ):
         self.nodes = tuple(nodes)
         if not self.nodes:
@@ -6087,6 +6089,8 @@ class _CompiledSequentialRegionNode:
             _GraphSequentialRecipeSnapshot(sequence)
             for sequence in definition_sequences
         )
+        self.definition_region_kinds = tuple(definition_region_kinds)
+        self.definition_repetitions = definition_repetitions
 
         self.definition_children = tuple(
             _sequence_structured_nodes(sequence) for sequence in definition_sequences
@@ -6323,6 +6327,8 @@ def _compile_sequential_runtime_node(
         name=name,
         ir_node=SequentialRegion(tuple(ir_nodes), name=name),
         definition_sequences=sequences,
+        definition_region_kinds=region_kinds,
+        definition_repetitions=repetitions,
     )
 
 
@@ -6658,6 +6664,9 @@ class _CompiledWhileGraphNode:
             )
         )
         requested_compound_chunk_limit = _structured_chunk_limit(arch, chunk_size, True)
+        # Preserve the caller's declaration for recipe reconstruction. The
+        # derived portable chunk_limit can differ from the native compound one.
+        self._definition_chunk_size = chunk_size
         self.chunk_limit = (
             1
             if self._has_nested_control
@@ -10889,7 +10898,10 @@ def _clone_control_recipe_runtime_node(node, control_recipe):
         return _compile_sequential_runtime_node(
             sequences,
             name=node.name,
-            region_kind=node.region_kind,
+            # nested_sequential labels the container, not the qualification
+            # region of its original actions (root/condition/body/etc.).
+            region_kinds=node.definition_region_kinds,
+            repetitions=node.definition_repetitions,
         )
     raise TaichiRuntimeError("unknown structured-control recipe container")
 
@@ -10918,7 +10930,7 @@ def _clone_structured_recipe_node(node, control_recipe):
             max_iterations=node.max_iterations,
             counter=node.counter,
             status=node.status,
-            chunk_size=node.chunk_limit,
+            chunk_size=node._definition_chunk_size,
             vulkan_first_chunk_strategy=node.vulkan_first_chunk_strategy,
             masked_execution=node.masked_execution,
             lowering_mode=node.lowering_mode,
