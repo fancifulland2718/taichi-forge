@@ -25,6 +25,8 @@ def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
     assert manifest["compiler_compatibility"]["runtime"]
     assert manifest["compiler_compatibility"]["shim"]
     assert manifest["features"]["cpu"] is True
+    # This is a build fact, not a graphics-device or window-system probe.
+    assert manifest["features"]["ggui"] is bool(ti._lib.core.GGUI_AVAILABLE)
     with pytest.raises(TypeError):
         manifest["native_abi_revision"] = 0
     with pytest.raises(TypeError):

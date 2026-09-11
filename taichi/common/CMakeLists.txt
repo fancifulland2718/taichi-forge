@@ -3,6 +3,11 @@
 ti_add_native_library(taichi_common)
 # These facts must come from the native library, not the independently built
 # Python shim's CMake options. No Toolkit headers or linkage are added here.
+if (TI_WITH_GGUI)
+  # UI/pybind use target-private GGUI definitions. The bootstrap lives in
+  # taichi_common and must report the same native build option independently.
+  target_compile_definitions(taichi_common PRIVATE TI_WITH_GGUI)
+endif()
 if (TI_WITH_CUDA AND TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE)
   target_compile_definitions(taichi_common PRIVATE TI_FORGE_BUILD_TOOLKIT_REFERENCE)
 endif()
