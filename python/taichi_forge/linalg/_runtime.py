@@ -2175,6 +2175,13 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
         )
         self._fallback_operator = operator.adjoint() if adjoint else operator
         self._graph_binding_views = {}
+        # One immutable publication per executable, never a history of provider
+        # generations. Submission owners pin the exact record they received.
+        self._provider_binding_cache = (
+            self._expected_stamp,
+            self._record,
+            PreparedGraphBindings(MappingProxyType(fixed), (self._record,)),
+        )
 
     def run(self, runtime_args):
         self._fallback_operator.apply(
@@ -2271,7 +2278,14 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
 
     def _current_compatible_record(self):
         self._operator._ensure_valid()
+        current = tuple(self._operator._handle._resource_stamp())
+        cached = self._provider_binding_cache
+        if current == cached[0]:
+            return cached[1]
         record = self._operator._handle._recordable_kernel(self._adjoint)
+        # Use the acquired record's stamp: a publication may advance between
+        # the initial stamp query and acquisition, but bindings and owner must
+        # always come from the same generation.
         current = tuple(record._resource_stamp())
         if current[:4] != self._expected_stamp[:4]:
             raise TaichiRuntimeError(
@@ -2281,10 +2295,14 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
             raise TaichiRuntimeError(
                 "LinearOperator recordable action schema changed; rebuild the Graph"
             )
+        self._provider_binding_cache = (current, record, None)
         return record
 
     def _bind_provider_generation(self):
         record = self._current_compatible_record()
+        cached = self._provider_binding_cache
+        if cached[1] is record and cached[2] is not None:
+            return cached[2]
         replacements = {}
         fixed_i32 = dict(record._fixed_i32)
         fixed_ndarrays = dict(record._fixed_ndarrays)
@@ -2306,7 +2324,11 @@ class _LinearOperatorGraphExecutable(NativeGraphExecutable):
                     fixed_ndarrays[source_name], record
                 )
             replacements[private_name] = value
-        return PreparedGraphBindings(replacements, (record,))
+        prepared = PreparedGraphBindings(MappingProxyType(replacements), (record,))
+        self._provider_binding_cache = (
+            tuple(record._resource_stamp()), record, prepared
+        )
+        return prepared
 
     def validate_graph_lifetime(self):
         self._current_compatible_record()

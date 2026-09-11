@@ -136,7 +136,23 @@ def _dense_2x2_operator(values):
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_linear_operator_graph_action_reuses_provider_generation_and_dense_storage():
+def test_linear_operator_graph_action_reuses_provider_generation_and_dense_storage(
+    monkeypatch,
+):
+    from taichi_forge.linalg._runtime import _LinearOperatorGraphExecutable
+
+    schema_builds = []
+    original_signature = _LinearOperatorGraphExecutable._compatible_record_signature
+
+    def track_signature(record):
+        schema_builds.append(tuple(record._resource_stamp()))
+        return original_signature(record)
+
+    monkeypatch.setattr(
+        _LinearOperatorGraphExecutable,
+        "_compatible_record_signature",
+        staticmethod(track_signature),
+    )
     operator = _diagonal_operator([2.0, 3.0, 5.0, 7.0])
     first_record = operator._handle._recordable_kernel()
     second_record = operator._handle._recordable_kernel()
@@ -162,11 +178,13 @@ def test_linear_operator_graph_action_reuses_provider_generation_and_dense_stora
     assert graph._instance_debug_info == {"kind": "mixed_backend_region"}
     assert graph._debug_info["native_count"] == 1
     assert graph._debug_info["nodes"][0]["kind"] == "recordable_provider"
+    prepared_schema_count = len(schema_builds)
 
     input_field = ti.field(ti.f32, shape=(2, 2))
     output_field = ti.field(ti.f32, shape=(2, 2))
     input_field.from_numpy(values.reshape(2, 2))
     graph.run({"input": input_field, "output": output_field})
+    assert len(schema_builds) == prepared_schema_count
     np.testing.assert_allclose(
         output_field.to_numpy().reshape(-1),
         values * np.asarray([2.0, 3.0, 5.0, 7.0], dtype=np.float32),
@@ -187,6 +205,10 @@ def test_linear_operator_graph_action_reuses_provider_generation_and_dense_stora
         output_array.to_numpy(),
         values * np.asarray([4.0, 6.0, 10.0, 14.0], dtype=np.float32),
     )
+    assert len(schema_builds) > prepared_schema_count
+    rebound_schema_count = len(schema_builds)
+    graph.run({"input": input_array, "output": output_array})
+    assert len(schema_builds) == rebound_schema_count
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
