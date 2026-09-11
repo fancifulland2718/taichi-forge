@@ -134,8 +134,9 @@ struct TaskAttributes {
     std::vector<int> arg_id;
     int binding{0};
     bool is_storage{false};
+    int lod{0};
 
-    TI_IO_DEF(arg_id, binding, is_storage);
+    TI_IO_DEF(arg_id, binding, is_storage, lod);
   };
 
   struct AccelerationStructureBind {

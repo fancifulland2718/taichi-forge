@@ -76,13 +76,17 @@ std::vector<int> Callable::insert_pointer_param(const DataType &dt,
 
 std::vector<int> Callable::insert_rw_texture_param(int total_dim,
                                                    BufferFormat format,
-                                                   const std::string &name) {
+                                                   const std::string &name,
+                                                   int lod) {
+  TI_ERROR_IF(lod < 0 || lod > 30,
+              "Storage texture mip level must be in [0, 30]");
   // FIXME: we shouldn't abuse is_array for texture parameters
   auto *type = TypeFactory::get_instance().get_rwtexture_struct_type();
   auto p = Parameter(type, /*is_array=*/true, false, 0, total_dim,
                      std::vector<int>{}, format);
   p.name = name;
   p.ptype = ParameterType::kRWTexture;
+  p.texture_lod = lod;
   return add_parameter(p);
 }
 

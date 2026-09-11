@@ -2,6 +2,9 @@ import numpy as np
 import pytest
 
 import taichi_forge as ti
+from taichi_forge._lib import core
+from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
 from tests import test_utils
 
 
@@ -112,3 +115,128 @@ def test_mip_contract_rejects_out_of_chain_or_out_of_level_extent():
         ti.hardware.image.VulkanBufferToImageRecording(
             image_region=ti.hardware.image.VulkanImageRegion(mip_level=3, extent=(1, 1))
         ).execute({"source": buffer, "destination": image})
+
+
+def _mip_reduction(level):
+    @ti.kernel
+    def reduce(
+        source: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=level),
+        destination: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32f, lod=level + 1),
+    ):
+        # Iteration and .shape must refer to the bound mip, not the allocation.
+        for x, y in destination:
+            total = 0.0
+            for dx, dy in ti.static(ti.ndrange(2, 2)):
+                total += source.load(ti.Vector([x * 2 + dx, y * 2 + dy])).x
+            destination.store(ti.Vector([x, y]), ti.Vector([total * 0.25, 0.0, 0.0, 0.0]))
+
+    return reduce
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_storage_mip_views_compose_and_replay_without_new_allocations(monkeypatch):
+    from taichi_forge.lang import impl
+
+    image = ti.Texture(ti.Format.r32f, (15, 9), mip_levels=4)
+    source = ti.ndarray(ti.f32, shape=15 * 9)
+    upload = ti.hardware.image.VulkanBufferToImageRecording()
+    output = ti.ndarray(ti.f32, shape=4)
+    reductions = [_mip_reduction(i) for i in range(3)]
+
+    @ti.kernel
+    def sample(texture: ti.types.texture(num_dimensions=2), result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in range(4):
+            result[i] = texture.fetch(ti.Vector([0, 0]), i).x
+
+    builder = ti.graph.GraphBuilder()
+    args = [ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, f"mip{i}", fmt=ti.Format.r32f, ndim=2) for i in range(4)]
+    for i, reduction in enumerate(reductions):
+        builder.dispatch(reduction, args[i], args[i + 1])
+    builder.dispatch(
+        sample,
+        ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "sampled", ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1),
+    )
+    definition = builder.freeze()
+    providers = (GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
+    catalog = definition.recipe_catalog(providers=providers)
+    recipe = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+    values = {f"mip{i}": image for i in range(4)}
+    values.update(sampled=image, output=output)
+
+    def reference(host):
+        expected = [host[0, 0]]
+        for _ in range(3):
+            height, width = host.shape
+            host = (
+                sum(host[dy : height // 2 * 2 : 2, dx : width // 2 * 2 : 2] for dx in range(2) for dy in range(2))
+                * 0.25
+            )
+            expected.append(host[0, 0])
+        return expected
+
+    with definition.materialization_context(provider_set=catalog.provider_set) as context:
+        with context.materialize(recipe) as materialized:
+            graph = materialized.executor
+            binding = graph.bind(values)
+            frame = binding._version.execution_frame
+            assert frame.uses_secondary_commands()
+            argument_bytes = frame.argument_bytes()
+            too_short = ti.Texture(ti.Format.r32f, (15, 9), mip_levels=3)
+            old_version = binding._version
+            with pytest.raises(RuntimeError, match="mip level"):
+                binding.update(mip3=too_short)
+            assert binding._version is old_version
+            too_short._delete_runtime_texture()
+
+            def unexpected(*args, **kwargs):
+                raise AssertionError("Mip replay must not reconstruct its storage views")
+
+            monkeypatch.setattr(core, "_prepare_vulkan_graph_recording", unexpected)
+            for offset in (0, 100, 200):
+                host = np.arange(15 * 9, dtype=np.float32).reshape(9, 15) + offset
+                source.from_numpy(host.ravel())
+                upload.execute({"source": source, "destination": image})
+                graph.run(binding)
+                np.testing.assert_allclose(output.to_numpy(), reference(host))
+                assert frame.argument_bytes() == argument_bytes
+            # A prepared frame owns the one allocation, not one owner per mip.
+            before = dict(impl.get_runtime().prog._debug_texture_resource_stats())
+            image._delete_runtime_texture()
+            graph.run(binding)
+        np.testing.assert_allclose(output.to_numpy(), reference(host))
+    after = dict(impl.get_runtime().prog._debug_texture_resource_stats())
+    assert after["released_total"] == before["released_total"] + 1
+    assert after["release_errors"] == after["retiring"] == after["inflight"] == 0
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_storage_view_lod_is_part_of_compilation_identity_and_bound_extent():
+    @ti.kernel
+    def write(image: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.r32u, lod=1)):
+        for x, y in image:
+            image.store(ti.Vector([x, y]), ti.Vector([ti.cast(image.shape[0] * 100 + x * 10 + y, ti.u32), 0, 0, 0]))
+
+    image = ti.Texture(ti.Format.r32u, (7, 5), mip_levels=3)
+    write(image)
+    output = ti.ndarray(ti.u32, shape=6)
+    ti.hardware.image.VulkanImageToBufferRecording(
+        image_region=ti.hardware.image.VulkanImageRegion(mip_level=1)
+    ).execute({"source": image, "destination": output})
+    np.testing.assert_array_equal(output.to_numpy(), [300, 310, 320, 301, 311, 321])
+    too_short = ti.Texture(ti.Format.r32u, (7, 5))
+    with pytest.raises(RuntimeError, match="mip level"):
+        write(too_short)
+
+    def definition(level):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            _mip_reduction(level),
+            ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, "source", fmt=ti.Format.r32f, ndim=2),
+            ti.graph.Arg(ti.graph.ArgKind.RWTEXTURE, "destination", fmt=ti.Format.r32f, ndim=2),
+        )
+        return builder.freeze()
+
+    first, different, equivalent = definition(0), definition(1), definition(0)
+    assert first.semantic_graph_id != different.semantic_graph_id
+    assert first.semantic_graph_id == equivalent.semantic_graph_id

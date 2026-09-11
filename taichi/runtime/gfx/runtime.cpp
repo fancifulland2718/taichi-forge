@@ -2165,7 +2165,7 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       DeviceAllocation texture = textures.at(bind.arg_id);
       if (bind.is_storage) {
         transition_image(texture, ImageLayout::shader_read_write);
-        bindings->rw_image(bind.binding, texture, 0);
+        bindings->rw_image(bind.binding, texture, bind.lod);
       } else {
         transition_image(texture, ImageLayout::shader_read);
         const auto sampler = image_sampler_configs_.find(texture.alloc_id);
@@ -2830,7 +2830,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
           previous->second = layout;
         }
         if (bind.is_storage) {
-          resources->rw_image(bind.binding, image, 0);
+          resources->rw_image(bind.binding, image, bind.lod);
         } else {
           resources->image(bind.binding, image,
                             image_sampler_configs_.at(image.alloc_id));

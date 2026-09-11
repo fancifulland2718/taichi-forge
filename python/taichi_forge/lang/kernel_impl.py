@@ -789,9 +789,12 @@ class TaichiCallableTemplateMapper:
                 raise TaichiRuntimeTypeError(
                     f"RWTextureType format mismatch for argument {arg_name}: expected {descriptor.fmt}, got {arg.fmt}"
                 )
-            # (penguinliong) '0' is the assumed LOD level. We currently don't
-            # support mip-mapping.
-            return arg.num_dims, arg.fmt, 0
+            if anno.lod and impl.current_cfg().arch != _ti_core.Arch.vulkan:
+                raise TaichiRuntimeTypeError("Nonzero rw_texture lod requires the Vulkan backend")
+            # The annotation defines the immutable storage view. Its extent is
+            # validated against the actual allocation when publishing a binding;
+            # Graph compilation uses a small dummy Texture, not a full mip chain.
+            return arg.num_dims, arg.fmt, anno.lod
         if isinstance(anno, ndarray_type.NdarrayType):
             from taichi_forge.lang._storage_view import (
                 DenseNdarrayView,

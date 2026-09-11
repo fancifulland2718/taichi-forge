@@ -44,7 +44,7 @@ def kernel_intrinsic_operations(_operation):
             notes=(
                 "sample_lod uses immutable per-texture min/mag filter and U/V/W "
                 "address modes; Vulkan sampler objects are cached per device.",
-                "The current one-mip contract uses normalized coordinates and exposes no anisotropy or comparison mode.",
+                "2D Vulkan Textures can allocate explicit mip chains; sampled views span the chain and rw_texture(lod=N) binds one allocated level. Other dimensions remain single-level. No automatic mip generation, anisotropy or comparison mode.",
                 "fetch uses integer texel coordinates and ignores sampler configuration.",
                 "Capable runtimes offer complete-recipe immutable secondary frames for sampled/storage images; closed layout cycles preserve upload and graphics ordering without per-image scans on unchanged replay. Ordinary Graph execution is unchanged.",
             ),

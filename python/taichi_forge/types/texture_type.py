@@ -1,3 +1,5 @@
+import operator
+
 from taichi_forge.lang.enums import Format
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.types.primitive_types import f16, f32, i8, i16, i32, u8, u16, u32
@@ -98,7 +100,7 @@ class RWTextureType:
 
     Args:
         num_dimensions (int): Number of dimensions. For examples for a 2D texture this should be `2`.
-        lod (float): Specifies the explicit level-of-detail.
+        lod (int): Allocated mip level bound as a storage image (2D Vulkan for nonzero levels).
         fmt (ti.Format): Color format of texture
     """
 
@@ -108,6 +110,16 @@ class RWTextureType:
             raise TaichiCompilationError("fmt is required for rw_texture type")
         else:
             self.fmt = fmt
+        if isinstance(lod, bool):
+            raise TaichiCompilationError("rw_texture lod must be an integer mip level")
+        try:
+            lod = operator.index(lod)
+        except TypeError as exc:
+            raise TaichiCompilationError("rw_texture lod must be an integer mip level") from exc
+        if not 0 <= lod <= 30:
+            raise TaichiCompilationError("rw_texture lod must be in [0, 30]")
+        if lod and num_dimensions != 2:
+            raise TaichiCompilationError("Nonzero rw_texture lod currently requires a 2D texture")
         self.lod = lod
 
 

@@ -601,6 +601,8 @@ void LaunchContextBuilder::set_arg_texture(const std::vector<int> &arg_id,
 
 void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,
                                               const Texture &tex) {
+  const auto shape =
+      tex.get_mip_size(kernel_->nested_parameters.at(arg_id).texture_lod);
   if (Program *owner = tex.owning_program()) {
     TextureResourceRef ref;
     ref.arg_offset = args_type->get_element_offset(arg_id);
@@ -612,7 +614,7 @@ void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,
     texture_ptrs.push_back(std::move(ref));
   }
   intptr_t ptr = tex.get_device_allocation_ptr_as_int();
-  set_arg_rw_texture_impl(arg_id, ptr, tex.get_size());
+  set_arg_rw_texture_impl(arg_id, ptr, shape);
 }
 
 void LaunchContextBuilder::set_arg_acceleration_structure(

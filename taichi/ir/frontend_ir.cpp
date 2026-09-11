@@ -1378,10 +1378,17 @@ void ExternalTensorShapeAlongAxisExpression::type_check(const CompileConfig *) {
 }
 
 void ExternalTensorShapeAlongAxisExpression::flatten(FlattenContext *ctx) {
-  auto temp = ptr.cast<ExternalTensorExpression>();
-  TI_ASSERT(0 <= axis && axis < temp->ndim);
-  ctx->push_back<ExternalTensorShapeAlongAxisStmt>(axis, temp->arg_id,
-                                                   dbg_info);
+  if (ptr.is<TexturePtrExpression>()) {
+    const auto texture = ptr.cast<TexturePtrExpression>();
+    TI_ASSERT(0 <= axis && axis < texture->num_dims);
+    ctx->push_back<ExternalTensorShapeAlongAxisStmt>(axis, texture->arg_id,
+                                                     dbg_info);
+  } else {
+    const auto tensor = ptr.cast<ExternalTensorExpression>();
+    TI_ASSERT(0 <= axis && axis < tensor->ndim);
+    ctx->push_back<ExternalTensorShapeAlongAxisStmt>(axis, tensor->arg_id,
+                                                     dbg_info);
+  }
   stmt = ctx->back_stmt();
 }
 

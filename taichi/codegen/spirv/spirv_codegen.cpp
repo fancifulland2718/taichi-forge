@@ -4215,6 +4215,7 @@ class TaskCodegen : public IRVisitor {
         bind.arg_id = arg_id;
         bind.binding = binding;
         bind.is_storage = true;
+        bind.lod = stmt->lod;
         texture_binds_.push_back(bind);
         argid_to_tex_value_[arg_id] = val;
       } else {

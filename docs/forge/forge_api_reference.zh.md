@@ -255,7 +255,11 @@ filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_re
 `from_field()` 便利上传仍写第零级，保留已初始化的高层。Vulkan buffer-image copy 是 x 最快的
 原始 texel 搬运，并不把 NumPy `(height, width, channels)` 自动转置为逻辑 `(x, y)` 数组。
 mip 便利上传要求匹配的紧密 texel；field 目前限定匹配的 root-dense 存储，其他布局需显式转换。
-此 allocation/transfer 纵切不包含 array layer、自动生成 mip 或非零 storage-image LOD 绑定。
+`ti.types.rw_texture(num_dimensions=2, fmt=fmt, lod=N)` 将已分配的单级绑定为 storage view；
+`.shape` 和迭代范围均使用该级尺寸。LOD 是编译期元数据，不是 replay 参数；sampled 参数使用
+整条 mip 链视图。同一 task 可绑定同一 allocation 的不同 storage view，但调用方仍须避免数据竞争。
+发布绑定前验证所需层级，沿用 Texture owner，不为每个 view 分配图像。暂不开放 array layer、
+自动生成 mip 和限制 sampled-view 层级范围的接口。
 CUDA 也支持基于 Driver API array/texture object 的显式 sampled texture，并支持保留确切
 sampler generation 生命周期的 cached Graph capture。固定 `Graph.bind()` 在发布前验证
 Texture 类型和维度；原位上传保持 capture，替换 Texture 使用另一有界 executable slot 或
@@ -271,8 +275,8 @@ immutable secondary-command frame。sampled/storage image 复用 Program owner�
 发布时准备参数、descriptor 和命令。录制包含闭合的 image layout 周期；上传、普通 kernel 或
 graphics 改变布局后，下次执行补必要入口转换，布局未变时不扫描 image binding 或重新上传参数。
 graphics 输出可直接进入已录制的 compute 消费者，无需 host readback；既有 graphics/compute
-queue bridge 保留，并不把 draw 合入同一 secondary command。当前覆盖单 mip 二维纹理组合，
-同一 task 内同一 image 的 sampled/storage 双重别名、AS 参数、SNode 和 texture AOT 不属于
+queue bridge 保留，并不把 draw 合入同一 secondary command。二维纹理组合包括整链采样和固定 storage mip view，
+同一 task 内同一 image 的 sampled/storage 双重别名、SNode 和 texture AOT 不属于
 此路线。ordinary Vulkan Graph 行为不变；选择此完整 recipe 用 retained command/descriptor 和
 device barrier 换取较低 host 准备成本，不保证 device 加速。
 

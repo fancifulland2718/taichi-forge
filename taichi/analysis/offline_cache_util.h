@@ -141,7 +141,9 @@ class Kernel;
 //  32 - Exact offload fusion rejects mixed captured-field/external storage
 //       without a Graph alias contract. Old fused artifacts must not bypass
 //       this compile-time proof, even when the optimized kernel key matches.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 32;
+//  33 - Storage texture views retain mip level in callable parameters and
+//       SPIR-V descriptor metadata; old artifacts silently bound level zero.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 33;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

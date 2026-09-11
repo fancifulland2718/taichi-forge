@@ -23,6 +23,7 @@ class TI_DLL_EXPORT CallableBase {
     bool needs_grad{false};  // TODO: reorder for better alignment
     std::vector<int> element_shape{};
     ParameterType ptype{ParameterType::kUnknown};
+    int texture_lod{0};
     TI_IO_DEF(is_array,
               is_argpack,
               total_dim,
@@ -30,13 +31,14 @@ class TI_DLL_EXPORT CallableBase {
               dt_,
               needs_grad,
               element_shape,
-              ptype);
+              ptype,
+              texture_lod);
 
     bool operator==(const Parameter &o) const {
       return is_array == o.is_array && total_dim == o.total_dim &&
              format == o.format && dt_ == o.dt_ && needs_grad == o.needs_grad &&
              element_shape == o.element_shape && ptype == o.ptype &&
-             is_argpack == o.is_argpack;
+             is_argpack == o.is_argpack && texture_lod == o.texture_lod;
     }
 
     /* [arguments with TensorType]
@@ -158,7 +160,8 @@ class TI_DLL_EXPORT Callable : public CallableBase {
                                         const std::string &name = "");
   std::vector<int> insert_rw_texture_param(int total_dim,
                                            BufferFormat format,
-                                           const std::string &name = "");
+                                           const std::string &name = "",
+                                           int lod = 0);
   std::vector<int> insert_acceleration_structure_param(
       const std::string &name = "");
 

@@ -318,8 +318,14 @@ levels. Vulkan buffer-image transfers are raw, x-fastest texels; a NumPy
 `(height, width, channels)` buffer is not a logical `(x, y)` array transpose.
 Mipped convenience uploads require matching tightly packed texels; field uploads
 currently accept matching root-dense storage. Repacking unsupported layouts is
-explicit. Array layers, automatic mip generation and nonzero storage-image LOD
-binding are not included in this allocation/transfer slice.
+explicit. `ti.types.rw_texture(num_dimensions=2, fmt=fmt, lod=N)` binds exactly one
+allocated level as a storage view; `.shape` and iteration use that level's extent.
+The LOD is compile-time metadata, not a replay parameter. Sampled arguments retain
+the full-chain view. Distinct storage views may use the same allocation in one
+task, but callers remain responsible for race-free accesses. Bindings validate
+allocated levels before publication and retain the existing Texture owner, not
+one allocation per view. Array layers, automatic mip generation and restricted
+sampled-view ranges are not exposed.
 Ordinary field or ndarray access is never converted to texture sampling. CUDA
 also supports explicit sampled textures over Driver-API arrays/texture objects,
 including cached Graph capture with generation-owned sampler lifetimes. Fixed
@@ -344,8 +350,8 @@ transition on the next execution, but unchanged replay does not scan image
 bindings or reupload arguments. Graphics output can therefore feed the recorded
 compute consumer without a host readback; the existing graphics/compute queue
 bridge remains. This does not add graphics draws to the same secondary command.
-One-mip 2D texture composition is covered. Simultaneous sampled/storage aliasing
-of one image within one task, AS arguments, SNode bindings and texture AOT remain
+2D texture composition includes full-chain sampling and fixed storage mip views.
+Simultaneous sampled/storage aliasing of one image within one task, SNode bindings and texture AOT remain
 outside this route. Ordinary Vulkan Graph execution is unchanged; selecting this
 complete recipe trades retained commands/descriptors and device barriers for
 lower host preparation cost, not guaranteed device acceleration.
