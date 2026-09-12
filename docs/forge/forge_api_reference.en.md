@@ -267,9 +267,47 @@ extents, depth/stencil images, stale runtimes, and non-Vulkan backends fail
 closed. It records the native Vulkan image-copy path, but Vulkan does not
 promise which physical engine executes a copy, so the catalog labels hardware
 acceleration `implementation_defined` rather than claiming a dedicated copy
-unit. Offset/region copies, buffer-image transfers, blits, and raw public
-layout transitions remain deferred until their bounds, format, and effect
-contracts are complete. No dependency or wheel variant is added.
+unit. `VulkanImageRegion` selects offset, extent and allocated mip level for
+copies and blits. Raw layout transitions are managed by the recording; array
+layers and depth/stencil transfers are not supported. No dependency or wheel
+variant is added.
+
+### Dense storage and Vulkan image transfers
+
+`copy_buffer_to_image(image, pixels, ...)` and
+`copy_image_to_buffer(pixels, image, ...)` accept program-owned ndarrays or
+compact dense field/views. These are byte copies: no packing, type conversion,
+axis transpose or hidden staging. Texels are x-fastest, then y, then z. For a
+2D RGBA32F image, scalar storage shaped `(height, width, 4)` has this layout;
+an application field shaped `(width, height, 4)` must not be treated as equivalent.
+
+```python
+pixels = ti.field(ti.f32, shape=(height, width, 4))
+image = ti.Texture(ti.Format.rgba32f, (width, height))
+upload = ti.hardware.image.VulkanBufferToImageRecording(
+    source="pixels", destination="image",
+    buffer_layout=ti.hardware.image.VulkanBufferImageLayout(row_length=width),
+)
+builder = ti.graph.GraphBuilder()
+builder.append_native(upload, admission="auto")
+graph = builder.compile()
+bindings = graph.bind({"pixels": ti.experimental.ndarray_view(pixels), "image": image})
+graph.run(bindings)  # Reads current device contents; does not wait for the host.
+# Update pixels in place and reuse bindings; close graph when finished.
+```
+
+`VulkanImageToBufferRecording` provides the reverse transfer. `byte_offset` is
+relative to the supplied buffer view; `row_length` and `image_height` are in
+texels (zero means tightly packed). The region must fit the image and the final
+accessed byte must fit the view. View/base offsets must satisfy the image texel
+block alignment. Noncompact/overlapping views and read-only destinations are
+rejected, not silently packed. Bytes outside the copied region remain untouched.
+
+Binding publication prepares layout and ranges once. Keep resource owners alive;
+tree destruction and runtime reset invalidate affected bindings. These transfers
+use runtime-ordered native **rerecording**, not immutable Vulkan binding frames.
+Combining them with a sampled kernel preserves ordering but does not promise an
+immutable backend replay for the whole graph.
 
 ### Vulkan `ti.Texture` hardware-sampling qualification (0.6.3 in development)
 
@@ -510,6 +548,32 @@ transform, an 8-bit mask, and a 24-bit custom index. TLAS build/refit preserves
 the number and order of referenced BLAS resources; BLAS refit is vertex-only
 and preserves vertex count and index topology. Batch query reads the TLAS and
 writes caller-owned hits without host readback.
+
+For fixed topology with **device-produced transforms**, use
+`tlas.refit_transforms(transforms)` or `tlas.record_refit_transforms()`:
+
+```python
+# transforms: compact f32 scalar (N, 3, 4)/(N, 12), or AOS matrix-3x4 (N,).
+builder = ti.graph.GraphBuilder()
+builder.append_native(tlas.record_refit_transforms(), admission="auto")
+builder.append_native(tlas.record_typed(ray_count), admission="auto")
+graph = builder.compile()
+bindings = graph.bind(dict(transforms=transforms, rays=rays,
+                           hits=hits, hit_indices=hit_indices))
+graph.run(bindings)
+```
+
+The transform producer must supply finite row-major matrices with an invertible
+upper 3x3. Forge does not read them back to validate values. Ndarrays and compact
+dense field/views are supported; changing the count/layout requires a new binding.
+The GPU updates transforms in the retained instance buffer, then refits the TLAS;
+mask, custom index, BLAS order and topology remain unchanged. To change those
+metadata, use the existing host `RayInstance` route. The recording reuses existing
+instance/scratch allocations, adds a packing dispatch, and is runtime-ordered
+native rerecording, not immutable Graph replay. Keep the TLAS and input owners
+alive; closing the TLAS, destroying an input tree or resetting the runtime makes
+its prepared execution unavailable. OptiX is a separate provider and does not
+inherit this Vulkan API.
 
 `TriangleScene` remains the single identity-instance compatibility wrapper:
 

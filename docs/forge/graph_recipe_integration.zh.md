@@ -221,6 +221,22 @@ provider 解释、被拒绝的组合尝试和 planned-physical 重复项。`cata
 没有可转换候选、候选生成拒绝或已生成候选，并保留 task kinds 与编译器/preflight 原因。
 注册链路没有来源不等于所有实现都不可能支持；未知原因不猜测。模板候选仍经过相同编译期语义证明。
 
+memory/offload 解释按 region ID/path 区分每次 dispatch，包括同一 kernel 的重复调用。
+`baseline_tasks`、`generation_rejections`、`domain_exclusions` 给出实际 task range 与合法性原因；
+`unregistered_regions` 解释后端/签名排除。例如，不同循环域或读取其他 lane 结果的树层级归约，
+不能直接套用 pointwise fusion；捕获的 field 也不会自动变成 symbolic shared-staging buffer。
+预期的变换拒绝保留在报告中，不再输出 ERROR 日志；非预期编译器错误仍正常传播。
+
+catalog 序号不是策略身份：Graph 或 provider set 改变后，同一 alternative 序号可能对应
+不同 region 或物理选择。应检查 recipe manifest 的 fragments 与覆盖范围；持久化 selection
+artifact 后按适用性合同重新解析。单 region alternative 不会自动替换所有重复 region。
+
+Vulkan immutable binding-frame recipe 可同时保留 kernel 捕获的固定 dense SNodeTree 和
+Texture/AS 绑定。整个依赖树必须只有 root/dense/place，含 sparse/packed sibling 的树仍不准入。
+freeze/materialize/bind 阶段验证结构并保留 root；销毁相关树使其 frame 失效，无关 fixed frame
+可以继续执行。这不意味着任意 native recording 都成为 immutable，也不把所有 field layout
+开放为 runtime ndarray ABI。应查看所选 recipe 的 physical submission mode，而不只看图中是否用了 hardware API。
+
 | 要判断的问题 | 应读的证据 |
 | --- | --- |
 | 为什么没生成候选 | `recipe_discovery.providers[].provider_explanation` |

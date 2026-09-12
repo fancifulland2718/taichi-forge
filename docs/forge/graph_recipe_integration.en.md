@@ -255,6 +255,30 @@ miss is not proof that every possible implementation is unsupported; an unknown
 reason stays unknown. Template-specialized memory/offload candidates keep the same
 compiler semantics checks as non-template candidates.
 
+Memory/offload explanations identify each dispatch occurrence by region ID and
+path, including repeated calls to the same kernel. Inspect `baseline_tasks`,
+`generation_rejections` and `domain_exclusions` for the actual task ranges and
+legality reason; `unregistered_regions` explains backend/signature exclusions.
+For example, unequal loop domains or a tree level reading values produced by
+other lanes cannot be treated as pointwise fusion. Captured fields are not
+automatically symbolic shared-staging buffers. Expected transformation rejection
+is reported here without an ERROR log; unexpected compiler errors still propagate.
+
+Catalog positions are not strategy identities: the same alternative index can
+refer to a different region or physical choice after the graph or provider set
+changes. Use the recipe manifest to inspect its fragments and covered regions;
+persist a selection artifact and resolve it under the documented applicability
+contract. A single-region alternative does not change every repeated region.
+
+On Vulkan, immutable binding-frame recipes can retain kernel-captured fixed dense
+SNode trees together with Texture/acceleration-structure bindings. The complete
+dependent tree must contain only root/dense/place nodes; sparse/packed siblings
+exclude that tree. Freeze/materialize/bind validates structure and retains roots.
+Destroying an affected tree invalidates its frames; unrelated fixed frames remain
+usable. This does not make arbitrary native recordings immutable or expand the
+runtime ndarray ABI to every field layout. Check the selected recipe's physical
+submission mode, not just whether a Graph contains a hardware API.
+
 Use the report sections according to what they actually establish:
 
 | Question | Evidence |

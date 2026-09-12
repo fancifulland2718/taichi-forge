@@ -217,9 +217,41 @@ recording 精确声明 source READ 与 destination WRITE，在异步 submission 
 Texture lease，并在不 readback host 的情况下与前后 kernel 排序。alias、format/extent
 不同、depth/stencil image、旧 runtime 与非 Vulkan backend 都 fail closed。它记录真实
 Vulkan image-copy path，但 Vulkan 不保证 copy 由哪一种物理 engine 执行，因此 catalog 将
-hardware acceleration 标为 `implementation_defined`，不声称专用 copy unit。offset/region
-copy、buffer-image transfer、blit 与公开 raw layout transition 等待 bounds、format 和
-effect 合同闭合后再实现。该路线不新增依赖或 wheel 变体。
+hardware acceleration 标为 `implementation_defined`，不声称专用 copy unit。
+`VulkanImageRegion` 可指定 copy/blit 的 offset、extent 与已分配 mip；layout transition
+由 recording 管理。目前不支持 array layer 和 depth/stencil transfer，不新增依赖或 wheel 变体。
+
+### Dense storage 与 Vulkan 图像传输
+
+`copy_buffer_to_image(image, pixels, ...)` 与 `copy_image_to_buffer(pixels, image, ...)`
+接受 Program-owned ndarray 或合格 compact dense field/view。这里是原始字节复制，
+不会隐式 packing、转换 dtype、转置轴或分配 staging。texel 的顺序是 x 最快、然后 y、z。
+二维 RGBA32F 对应 scalar `(height, width, 4)` 布局，不能把应用中的 `(width, height, 4)`
+直接当作等价存储。
+
+```python
+pixels = ti.field(ti.f32, shape=(height, width, 4))
+image = ti.Texture(ti.Format.rgba32f, (width, height))
+upload = ti.hardware.image.VulkanBufferToImageRecording(
+    source="pixels", destination="image",
+    buffer_layout=ti.hardware.image.VulkanBufferImageLayout(row_length=width),
+)
+builder = ti.graph.GraphBuilder()
+builder.append_native(upload, admission="auto")
+graph = builder.compile()
+bindings = graph.bind({"pixels": ti.experimental.ndarray_view(pixels), "image": image})
+graph.run(bindings)  # 读取设备端当前内容，不等待 host。
+# pixels 原位更新后可以继续复用 bindings；结束后关闭 graph。
+```
+
+反向传输使用 `VulkanImageToBufferRecording`。`byte_offset` 相对传入的 buffer view；
+`row_length`、`image_height` 以 texel 为单位，零表示紧密排列。区域必须落在 image 内，
+最后访问的字节必须落在 view 内；view/base offset 满足 image texel block 对齐。
+非连续、重叠 view 或只读 destination 被拒绝，不会偷偷转换。复制区域之外的字节保持不变。
+
+Graph 绑定发布时准备固定 layout/range。须保持资源 owner 存活；tree 销毁或 runtime reset
+使关联绑定失效。这些传输使用 runtime-ordered native **重录**，不是 immutable Vulkan
+binding frame。与采样 kernel 组合能保持设备顺序，但不承诺整图采用 immutable backend replay。
 
 ### Vulkan `ti.Texture` 硬件采样资格（0.6.3 开发中）
 
@@ -413,6 +445,28 @@ with ti.hardware.ray.TriangleBLAS(vertices, indices) as blas:
 custom index。TLAS build/refit 保持所引用 BLAS 的数量与顺序；BLAS refit 只更新 vertex，
 保持 vertex count 与 index topology。batch query 读取 TLAS、写入调用方持有的 hit，且不做
 host readback。
+
+固定拓扑但变换由设备产生时，使用 `tlas.refit_transforms(transforms)` 或
+`tlas.record_refit_transforms()`：
+
+```python
+# transforms: compact f32 scalar (N,3,4)/(N,12)，或 AOS matrix-3x4 (N,)。
+builder = ti.graph.GraphBuilder()
+builder.append_native(tlas.record_refit_transforms(), admission="auto")
+builder.append_native(tlas.record_typed(ray_count), admission="auto")
+graph = builder.compile()
+bindings = graph.bind(dict(transforms=transforms, rays=rays,
+                           hits=hits, hit_indices=hit_indices))
+graph.run(bindings)
+```
+
+producer 应保证 row-major 变换为有限值且上部 3×3 可逆；Forge 不回读验证这些数值。
+支持 ndarray 和 compact dense field/view，count/layout 改变需要重新绑定。
+GPU 原位更新已有 instance buffer 的 transform，再 refit TLAS；mask、custom index、
+BLAS 顺序与拓扑不变，修改这些元数据仍用 host `RayInstance` 路线。
+该 recording 复用已有 instance/scratch 分配，增加一次 packing dispatch，采用 runtime-ordered
+native 重录，不是 immutable Graph replay。保持 TLAS 和输入 owner 存活；关闭 TLAS、销毁输入
+tree 或 runtime reset 后原准备执行不可再用。这是 Vulkan API，不意味着 OptiX 自动具备同一接口。
 
 `TriangleScene` 保留为单 identity instance 的兼容 wrapper：
 
