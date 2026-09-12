@@ -1342,9 +1342,11 @@ if(TI_WITH_PYTHON)
 
             install(TARGETS ${CORE_PYTHON_RUNTIME_LIBRARY_NAME}
                     RUNTIME DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                            COMPONENT runtime
                     LIBRARY DESTINATION ${INSTALL_LIB_DIR}/runtime_native
+                            COMPONENT runtime
                     ARCHIVE DESTINATION ${INSTALL_LIB_DIR}/runtime_native
-                    COMPONENT runtime)
+                            COMPONENT runtime)
             if(MSVC OR LINUX OR APPLE)
                 install(FILES "${_ti_runtime_export_manifest}"
                     DESTINATION ${INSTALL_LIB_DIR}/runtime_native
@@ -1425,8 +1427,9 @@ if(TI_WITH_PYTHON)
 
     install(TARGETS ${CORE_WITH_PYBIND_LIBRARY_NAME}
             RUNTIME DESTINATION ${INSTALL_LIB_DIR}/core
+                    COMPONENT python
             LIBRARY DESTINATION ${INSTALL_LIB_DIR}/core
-            COMPONENT python)
+                    COMPONENT python)
 endif()
 
 # Runtime bitcode belongs to taichi-forge-runtime. A shim build that links a
