@@ -1,0 +1,28 @@
+#version 450
+
+// VkAccelerationStructureInstanceKHR: 12 row-major f32 transform words,
+// followed by custom index/mask, SBT offset/flags and the 64-bit BLAS address.
+// The fixed metadata is initialized by the owner's ordinary host build.
+layout(local_size_x = 128) in;
+layout(set = 0, binding = 0, std430) readonly buffer Transforms {
+  uint words[];
+} transforms;
+layout(set = 0, binding = 1, std430) buffer Instances {
+  uint words[];
+} instances;
+layout(push_constant) uniform Parameters {
+  uint count;
+  uint source_word_offset;
+} parameters;
+
+void main() {
+  uint index = gl_GlobalInvocationID.x;
+  if (index >= parameters.count) {
+    return;
+  }
+  uint source = parameters.source_word_offset + index * 12;
+  uint destination = index * 16;
+  for (uint word = 0; word < 12; ++word) {
+    instances.words[destination + word] = transforms.words[source + word];
+  }
+}

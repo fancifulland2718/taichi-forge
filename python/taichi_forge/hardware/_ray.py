@@ -862,6 +862,120 @@ class VulkanTLASRefitRecording(_VulkanTLASRecording):
         super().__init__(tlas, instances, update=True)
 
 
+@instrument_hardware_recording("ray.as_refit.vulkan")
+class VulkanTLASTransformRecording(BackendCommandRecording):
+    """Pack device transforms and refit a TLAS with fixed instance topology."""
+
+    def __init__(self, tlas, *, transforms="transforms"):
+        if not isinstance(tlas, InstanceTLAS):
+            raise TypeError("Vulkan TLAS transform recording requires an InstanceTLAS")
+        if not isinstance(transforms, str) or not transforms:
+            raise ValueError("Vulkan TLAS transform binding must be a nonempty string")
+        super().__init__(
+            backend="vulkan",
+            binding_names=(transforms,),
+            command_count=2,
+            queue="compute",
+            stream_binding="runtime_ordered",
+            barrier_policy="internal",
+            workspace_ownership="provider_generation",
+            replay_mode="rerecord",
+            no_host_readback=True,
+        )
+        object.__setattr__(self, "tlas", tlas)
+        object.__setattr__(self, "transforms", transforms)
+        object.__setattr__(
+            self,
+            "_effects",
+            (
+                ResourceEffect(transforms, GraphAccess.READ),
+                *(
+                    static_resource_effect(blas._effect_name, GraphAccess.READ)
+                    for blas in dict.fromkeys(tlas._topology)
+                ),
+                static_resource_effect(tlas._effect_name, GraphAccess.WRITE),
+            ),
+        )
+
+    @property
+    def resource_effects(self):
+        return self._effects
+
+    def _binding_description(self, bindings):
+        description = describe_storage(bindings[self.transforms])
+        if not description.supported:
+            raise TaichiRuntimeError(
+                "Vulkan TLAS transforms require describable dense storage: "
+                f"{description.failure_reason}"
+            )
+        descriptor = description.descriptor
+        if descriptor.scalar_type != f32:
+            raise TaichiRuntimeError("Vulkan TLAS transforms require dtype f32")
+        shape = tuple(descriptor.index_shape)
+        element = tuple(descriptor.element_shape)
+        count = self.tlas.instance_count
+        if not (
+            (element == () and shape in ((count, 3, 4), (count, 12)))
+            or (element == (3, 4) and shape == (count,))
+        ):
+            raise TaichiRuntimeError(
+                "Vulkan TLAS transforms require scalar shape (N, 3, 4) or "
+                "(N, 12), or AOS matrix-3x4 shape (N,), with N equal to the "
+                "fixed instance count"
+            )
+        return description
+
+    def validate_graph_bindings(self, bindings):
+        self._binding_description(bindings)
+
+    def validate_graph_lifetime(self):
+        self.tlas._validate_lifetime()
+
+    def _prepare_packet(self, bindings):
+        validate_exact_bindings(self, bindings, "Vulkan TLAS transforms")
+        self.validate_graph_lifetime()
+        description = self._binding_description(bindings)
+        command = self.tlas._runtime_prog._prepare_vulkan_tlas_transforms(
+            self.tlas._handle, description.descriptor, self.tlas.instance_count
+        )
+        value = bindings[self.transforms]
+        return _PreparedRayCommand(
+            command,
+            (value, description, *((value.arr,) if isinstance(value, Ndarray) else ())),
+        )
+
+    def prepare_graph_execute(self, bindings):
+        return partial(self.execute, self._prepare_packet(bindings))
+
+    def execute(self, bindings):
+        packet = (
+            bindings
+            if isinstance(bindings, _PreparedRayCommand)
+            else self._prepare_packet(bindings)
+        )
+        with hardware_failure_phase("provider_execution_failure"):
+            return self.tlas._runtime_prog._execute_vulkan_tlas_transforms(
+                packet.command
+            )
+
+    def memory_report(self):
+        return self.tlas.memory_report()
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            lifetime_leases=lambda item: (item.tlas,),
+            debug_info=lambda item: {
+                "kind": "vulkan_instance_tlas_device_transforms",
+                "instance_count": item.tlas.instance_count,
+                "topology_fixed": True,
+                "transform_layout": "row_major_f32_3x4",
+                "instance_packing": "device",
+            },
+            publish_time_binding_validation_stable=True,
+        )
+
+
 @dataclass(frozen=True)
 class _KernelAccelerationStructureDescriptor:
     """Generation-qualified internal contract for a kernel-visible TLAS.
@@ -979,6 +1093,30 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         recording = self.record_refit(instances)
         recording.execute({})
         self._instances = recording.instances
+        return self
+
+    def record_refit_transforms(self, *, transforms="transforms"):
+        """Record device transform packing followed by a fixed-topology refit.
+
+        The binding accepts compact f32 scalar ``(N, 3, 4)`` / ``(N, 12)``
+        storage or AOS matrix-3x4 ``(N,)`` storage, including dense fields and
+        managed subrange views. N must equal :attr:`instance_count`.
+        Matrices are row-major affine transforms. Producers must supply finite
+        values and an invertible upper 3x3; values are not read back or scanned.
+
+        BLAS references, order, masks and custom indices remain those of the
+        preceding build/refit. Only the transform words of the retained Vulkan
+        instance descriptors are overwritten. Packing and AS scratch belong to
+        the existing TLAS; transform storage remains caller-owned. Host
+        :meth:`build` and :meth:`refit` still use captured RayInstance values;
+        they do not retrieve these device transforms.
+        """
+        self._validate_lifetime()
+        return VulkanTLASTransformRecording(self, transforms=transforms)
+
+    def refit_transforms(self, transforms):
+        """Update transforms from managed device storage without host readback."""
+        self.record_refit_transforms().execute({"transforms": transforms})
         return self
 
     def record(self, ray_count, *, rays="rays", hits="hits"):
@@ -1164,5 +1302,6 @@ __all__ = [
     "VulkanRayRefitRecording",
     "VulkanTLASBuildRecording",
     "VulkanTLASRefitRecording",
+    "VulkanTLASTransformRecording",
     "is_available",
 ]

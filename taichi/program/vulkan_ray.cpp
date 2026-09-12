@@ -4,9 +4,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 
 #if defined(TI_WITH_VULKAN)
@@ -73,6 +75,13 @@ static const std::uint32_t kRayQueryTrianglesSubrangeSpv[] =
 static const std::uint32_t kRayQueryTrianglesTypedSubrangeSpv[] =
 #include "taichi/program/vulkan_sort_shaders/ray_query_triangles_typed_subrange.comp.spv.h"
     ;
+
+static const std::uint32_t kRayInstanceTransformsSpv[] =
+#include "taichi/program/vulkan_sort_shaders/ray_instance_transforms.comp.spv.h"
+    ;
+
+static_assert(sizeof(VkAccelerationStructureInstanceKHR) == 16 * sizeof(float));
+static_assert(offsetof(VkAccelerationStructureInstanceKHR, transform) == 0);
 
 // Scene and independent TLAS share query code, but each owns its pipelines and
 // resource sets. The owner's existing mutex protects prepare and record.
@@ -989,12 +998,22 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                                   "instance input");
     instance_buffer_ = allocate(
         instance_bytes_, AllocUsage::AccelerationStructureBuildInput |
-                             AllocUsage::DeviceAddress);
+                             AllocUsage::DeviceAddress | AllocUsage::Storage);
     create_acceleration_structure();
     create_query_pipeline();
+    // Instance topology remains ordered, but repeated instances of one BLAS
+    // need only one set of lifetime references in each recorded command.
+    std::unordered_set<VulkanTriangleBlasResource *> retained;
+    for (const auto &blas : blases_) {
+      if (retained.insert(blas.get()).second) {
+        retained_blases_.push_back(blas);
+      }
+    }
   }
 
   ~VulkanInstanceTlasResource() override {
+    transform_bindings_.reset();
+    transform_pipeline_.reset();
     query_.clear();
     tlas_.reset();
     release(scratch_);
@@ -1081,28 +1100,79 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1,
         &input_barrier, 0, nullptr, 0, nullptr);
 
-    const auto geometry = make_geometry();
-    auto build = make_build_info(
-        geometry, update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
-                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
-    const VkAccelerationStructureBuildRangeInfoKHR range{
-        static_cast<std::uint32_t>(instances.size()), 0, 0, 0};
-    const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
-    cmd_build_(command_buffer->buffer, 1, &build, ranges);
+    record_acceleration_structure(command_buffer, update);
+    initialized_ = true;
+  }
 
-    VkMemoryBarrier query_barrier{};
-    query_barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    query_barrier.srcAccessMask =
-        VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
-    query_barrier.dstAccessMask =
-        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+  void prepare_transforms() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (transform_pipeline_) {
+      return;
+    }
+    PipelineSourceDesc source{PipelineSourceType::spirv_binary,
+                              kRayInstanceTransformsSpv,
+                              sizeof(kRayInstanceTransformsSpv),
+                              PipelineStageType::compute};
+    auto [pipeline, result] = device_->create_pipeline_unique(
+        source, "vulkan_ray_instance_transforms");
+    TI_ERROR_IF(result != RhiResult::success || !pipeline,
+                "Failed to create Vulkan TLAS transform pipeline: {}.", result);
+    std::unique_ptr<ShaderResourceSet> bindings(device_->create_resource_set());
+    transform_pipeline_ = std::move(pipeline);
+    transform_bindings_ = std::move(bindings);
+  }
+
+  void record_transforms(CommandList *commands,
+                         const VulkanTLASTransformCommand &packet) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(!initialized_,
+                "Vulkan TLAS device transforms require an initial host build.");
+    auto *vk_commands = static_cast<vulkan::VulkanCommandList *>(commands);
+    const auto command_buffer = vk_commands->vk_command_buffer();
+    // Publish device producers and order reuse of the instance input, TLAS and
+    // scratch after prior builds/queries, including repeated Graph executions.
+    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    reuse.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT |
+                          VK_ACCESS_TRANSFER_WRITE_BIT |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    reuse.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                          VK_ACCESS_SHADER_WRITE_BIT |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                          VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     vkCmdPipelineBarrier(
         command_buffer->buffer,
-        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-        0, 1, &query_barrier, 0, nullptr, 0, nullptr);
-    retain(command_buffer);
+        0, 1, &reuse, 0, nullptr, 0, nullptr);
+
+    transform_bindings_->rw_buffer(0, packet.shader_binding.pointer,
+                                    packet.shader_binding.bytes);
+    transform_bindings_->rw_buffer(1, instance_buffer_.get_ptr(), instance_bytes_);
+    commands->bind_pipeline(transform_pipeline_.get());
+    const auto bind_result =
+        commands->bind_shader_resources(transform_bindings_.get(), 0);
+    TI_ERROR_IF(bind_result != RhiResult::success,
+                "Failed to bind Vulkan TLAS transform resources: {}.",
+                bind_result);
+    vk_commands->push_constants(packet.parameters.data(),
+                                sizeof(packet.parameters));
+    const auto dispatch_result = commands->dispatch(static_cast<std::uint32_t>(
+        (blases_.size() + kRayQueryWorkgroupSize - 1) / kRayQueryWorkgroupSize));
+    TI_ERROR_IF(dispatch_result != RhiResult::success,
+                "Failed to dispatch Vulkan TLAS transform packing: {}.",
+                dispatch_result);
+
+    VkMemoryBarrier packed{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    packed.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    packed.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        command_buffer->buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR, 0, 1, &packed,
+        0, nullptr, 0, nullptr);
+    record_acceleration_structure(command_buffer, true);
   }
 
   void prepare_query_variant(unsigned variant) {
@@ -1132,6 +1202,29 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   }
 
  private:
+  void record_acceleration_structure(
+      const vkapi::IVkCommandBuffer &command_buffer, bool update) {
+    const auto geometry = make_geometry();
+    auto build = make_build_info(
+        geometry, update ? VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR
+                         : VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR);
+    const VkAccelerationStructureBuildRangeInfoKHR range{
+        static_cast<std::uint32_t>(blases_.size()), 0, 0, 0};
+    const VkAccelerationStructureBuildRangeInfoKHR *ranges[] = {&range};
+    cmd_build_(command_buffer->buffer, 1, &build, ranges);
+
+    VkMemoryBarrier query_barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    query_barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    query_barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(
+        command_buffer->buffer,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        0, 1, &query_barrier, 0, nullptr, 0, nullptr);
+    retain(command_buffer);
+  }
+
   DeviceAllocation allocate(std::size_t bytes, AllocUsage usage) {
     Device::AllocParams params;
     params.size = bytes;
@@ -1242,7 +1335,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
           device_->get_vkbuffer(allocation.get_ptr()));
     }
     command_buffer->refs.push_back(tlas_);
-    for (const auto &blas : blases_) {
+    for (const auto &blas : retained_blases_) {
       blas->retain(command_buffer);
     }
   }
@@ -1250,6 +1343,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   Program *program_{nullptr};
   vulkan::VulkanDevice *device_{nullptr};
   std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases_;
+  std::vector<std::shared_ptr<VulkanTriangleBlasResource>> retained_blases_;
   std::size_t instance_bytes_{0};
   std::size_t storage_bytes_{0};
   std::size_t scratch_bytes_{0};
@@ -1259,6 +1353,9 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   DeviceAllocation scratch_{kDeviceNullAllocation};
   vkapi::IVkAccelerationStructureKHR tlas_{nullptr};
   RayQueryPipelines query_;
+  std::unique_ptr<Pipeline> transform_pipeline_;
+  std::unique_ptr<ShaderResourceSet> transform_bindings_;
+  bool initialized_{false};
   PFN_vkGetAccelerationStructureBuildSizesKHR get_build_sizes_{nullptr};
   PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_{nullptr};
   std::mutex mutex_;
@@ -1692,6 +1789,93 @@ std::size_t Program::vulkan_instance_tlas_build(
   return 0;
 }
 
+VulkanTLASTransformCommand Program::prepare_vulkan_tlas_transforms(
+    std::uint64_t handle,
+    const storage::DenseStorageDescriptor &transforms,
+    std::size_t instance_count) {
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan || instance_count == 0 ||
+                  instance_count > (std::numeric_limits<std::uint32_t>::max)(),
+              "Vulkan TLAS transforms require Vulkan storage and a positive "
+              "uint32 instance count.");
+  const auto shape = transforms.index_shape();
+  const auto element = transforms.element_shape();
+  const auto count = static_cast<std::int64_t>(instance_count);
+  const bool scalar = element.empty() &&
+                      (shape == std::vector<std::int64_t>{count, 3, 4} ||
+                       shape == std::vector<std::int64_t>{count, 12});
+  const bool matrix = element == std::vector<std::int64_t>{3, 4} &&
+                      shape == std::vector<std::int64_t>{count};
+  TI_ERROR_IF(transforms.scalar_type() != PrimitiveType::f32 ||
+                  (!scalar && !matrix),
+              "Vulkan TLAS transforms require f32 scalar (N, 3, 4)/(N, 12) "
+              "or AOS matrix-3x4 (N,) storage with the fixed instance count.");
+  VulkanTLASTransformCommand packet;
+  packet.storage = prepare_native_storage({&transforms}, {false});
+  packet.handle = handle;
+  const auto &binding = packet.storage->binding(0);
+  TI_ERROR_IF(binding.bytes != checked_mul(instance_count, 12 * sizeof(float),
+                                           "transform bytes") ||
+                  (binding.pointer.offset & 3u),
+              "Vulkan TLAS transforms require compact four-byte-aligned storage.");
+  auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
+  const auto &limits = device->get_vk_physical_device_props().limits;
+  TI_ERROR_IF((instance_count + kRayQueryWorkgroupSize - 1) /
+                      kRayQueryWorkgroupSize >
+                  limits.maxComputeWorkGroupCount[0],
+              "Vulkan TLAS instance count exceeds the device dispatch limit.");
+  const auto alignment =
+      std::max<VkDeviceSize>(4, limits.minStorageBufferOffsetAlignment);
+  const auto remainder = binding.pointer.offset % alignment;
+  TI_ERROR_IF(remainder > limits.maxStorageBufferRange ||
+                  binding.bytes > limits.maxStorageBufferRange - remainder ||
+                  checked_mul(instance_count,
+                              sizeof(VkAccelerationStructureInstanceKHR),
+                              "packed instance bytes") >
+                      limits.maxStorageBufferRange,
+              "Vulkan TLAS transforms exceed maxStorageBufferRange.");
+  packet.shader_binding = binding;
+  packet.shader_binding.pointer.offset -= remainder;
+  packet.shader_binding.bytes += remainder;
+  packet.parameters = {static_cast<std::uint32_t>(instance_count),
+                        static_cast<std::uint32_t>(remainder / sizeof(float))};
+
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  const auto found = vulkan_ray_resources_.find(handle);
+  TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+              "Vulkan instance TLAS handle is stale or closed.");
+  const auto resource =
+      std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
+  TI_ERROR_IF(instance_count != resource->instance_count(),
+              "Vulkan TLAS transforms must preserve the fixed instance count.");
+  resource->prepare_transforms();
+  return packet;
+}
+
+std::size_t Program::execute_vulkan_tlas_transforms(
+    const VulkanTLASTransformCommand &packet) {
+  with_prepared_native_storage(*packet.storage, [&] {
+    std::shared_ptr<VulkanInstanceTlasResource> resource;
+    {
+      std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+      const auto found = vulkan_ray_resources_.find(packet.handle);
+      TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+                  "Vulkan instance TLAS handle is stale or closed.");
+      resource =
+          std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+    }
+    TI_ERROR_IF(!resource, "Vulkan ray resource is not an instance TLAS.");
+    enqueue_compute_op_lambda(
+        [resource, packet](Device *, CommandList *commands) {
+          resource->record_transforms(commands, packet);
+        },
+        {});
+    mark_runtime_submission_pending();
+  });
+  return 0;
+}
+
 std::size_t Program::vulkan_instance_tlas_query(std::uint64_t handle,
                                                 Ndarray *rays,
                                                 Ndarray *hits,
@@ -1951,6 +2135,18 @@ std::size_t Program::vulkan_instance_tlas_build(
     const std::vector<VulkanRayInstanceInfo> &,
     bool) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+VulkanTLASTransformCommand Program::prepare_vulkan_tlas_transforms(
+    std::uint64_t,
+    const storage::DenseStorageDescriptor &,
+    std::size_t) {
+  TI_ERROR("Vulkan TLAS transforms require TI_WITH_VULKAN=ON.");
+}
+
+std::size_t Program::execute_vulkan_tlas_transforms(
+    const VulkanTLASTransformCommand &) {
+  TI_ERROR("Vulkan TLAS transforms require TI_WITH_VULKAN=ON.");
 }
 
 std::size_t Program::vulkan_instance_tlas_query(std::uint64_t,

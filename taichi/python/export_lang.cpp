@@ -1299,6 +1299,7 @@ void export_lang(py::module &m) {
 
   py::class_<VulkanRayQueryCommand>(m, "_VulkanRayQueryCommand");
   py::class_<VulkanRayGeometryCommand>(m, "_VulkanRayGeometryCommand");
+  py::class_<VulkanTLASTransformCommand>(m, "_VulkanTLASTransformCommand");
   py::class_<PreparedVulkanBufferCommands>(m, "_PreparedVulkanBufferCommands");
   py::class_<PreparedPrimitiveSort, std::shared_ptr<PreparedPrimitiveSort>>(
       m, "_PreparedPrimitiveSort");
@@ -3214,6 +3215,13 @@ void export_lang(py::module &m) {
            tracked_native_program_method(&Program::vulkan_instance_tlas_build),
            py::arg("handle"), py::arg("instances"), py::arg("update"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_prepare_vulkan_tlas_transforms",
+           &Program::prepare_vulkan_tlas_transforms,
+           py::arg("handle"), py::arg("transforms"), py::arg("instance_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_execute_vulkan_tlas_transforms",
+           tracked_native_program_method(&Program::execute_vulkan_tlas_transforms),
+           py::arg("command"), py::call_guard<py::gil_scoped_release>())
       .def("_vulkan_instance_tlas_query",
            tracked_native_program_method(&Program::vulkan_instance_tlas_query),
            py::arg("handle"), py::arg("rays"), py::arg("hits"),

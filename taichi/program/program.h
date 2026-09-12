@@ -185,6 +185,14 @@ struct VulkanRayGeometryCommand {
   bool independent_blas{false};
   bool update{true};
 };
+
+struct VulkanTLASTransformCommand {
+  std::shared_ptr<PreparedNativeStorage> storage;
+  std::uint64_t handle{0};
+  PreparedNativeStorage::Binding shader_binding{};
+  std::array<std::uint32_t, 2> parameters{};
+};
+
 class CudaFftPlan;
 class VulkanFftPlan;
 class VulkanParallelSortPlan;
@@ -1402,6 +1410,13 @@ class TI_DLL_EXPORT Program {
       std::size_t triangle_count);
   std::size_t execute_vulkan_ray_geometry(
       const VulkanRayGeometryCommand &command);
+
+  VulkanTLASTransformCommand prepare_vulkan_tlas_transforms(
+      std::uint64_t handle,
+      const storage::DenseStorageDescriptor &transforms,
+      std::size_t instance_count);
+  std::size_t execute_vulkan_tlas_transforms(
+      const VulkanTLASTransformCommand &command);
 
   VulkanTriangleRaySceneMemoryStatistics
   vulkan_triangle_ray_scene_memory_statistics(std::uint64_t handle);

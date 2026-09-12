@@ -561,6 +561,8 @@ if (TI_WITH_VULKAN)
         ray_query_triangles_subrange.comp.spv.h vulkan1.2 "-DSUBRANGE")
     ti_vulkan_builtin_shader(ray_query_triangles.comp
         ray_query_triangles_typed_subrange.comp.spv.h vulkan1.2 "-DTYPED_HITS" "-DSUBRANGE")
+    ti_vulkan_builtin_shader(ray_instance_transforms.comp
+        ray_instance_transforms.comp.spv.h vulkan1.2)
 
     foreach(shift 0 4 8 12 16 20 24 28)
         ti_vulkan_sort_shader(rank_hist.comp

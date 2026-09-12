@@ -11,6 +11,7 @@ from taichi_forge.hardware._ray import (
     VulkanRayRefitRecording,
     VulkanTLASBuildRecording,
     VulkanTLASRefitRecording,
+    VulkanTLASTransformRecording,
     is_available,
 )
 from taichi_forge.hardware._optix import (
@@ -37,6 +38,7 @@ __all__ = [
     "VulkanRayRefitRecording",
     "VulkanTLASBuildRecording",
     "VulkanTLASRefitRecording",
+    "VulkanTLASTransformRecording",
     "is_available",
     "is_optix_loaded",
     "load_optix_provider",
