@@ -1,8 +1,8 @@
 # Dense Field Graph
 
-> 首次公开于 `0.5.0`；版本归属见[版本更新说明](release_notes.zh.md)。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
-Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述已发布的 `0.6.2` 发行合同，用于编译和 replay 闭包引用或通过
+Dense Field Graph 首次公开于 Taichi Forge `0.5.0`，本文描述当前源码 API，用于编译和 replay 闭包引用或通过
 runtime 参数接收 dense `ti.field`、vector Field 与 matrix Field 的 kernel。静态 Field
 binding 与 runtime dense-storage binding 使用同一套公开 `ti.graph.GraphBuilder` API，
 且都不复制 Field payload。
@@ -215,29 +215,15 @@ layout fingerprint、replay eligibility、execution/fallback path、
 应用不应使用私有 `_graph_stats` storage。由于 driver 可能保留 Python 无法枚举的资源，
 仍须同时检查 GPU memory、host RSS、graph/tree churn 与 reset 测量。
 
-## 性能与内存证据
+## 性能与内存
 
-测量前应 warm up kernel 与 Graph，在相同边界同步，与 direct dispatch 校验结果，并同时
-报告 median 和 trial range。relative range 超过 5% 时只作为观察结果。
+资源布局不变时复用已编译 Graph 和已发布绑定。以包含提交及必要完成等待的完整应用步骤
+比较 Graph 与直接 kernel 调用，并将首次准备和重复执行分开。小规模可能受 host 固定成本限制，
+大规模可能受 device 计算或访存限制，不能用单个微测试推断总体收益。
 
-2026-07-14 的一次 Windows fresh-process 测试使用四个异构 block、每 block 八个同构
-environment、256 base items、10 次 warmup、200 rounds 和 5 个 CPU trial。中位吞吐为
-direct 482.441、Graph 673.679 block invocation/s，即 **+39.64%**。direct 与 Graph
-range 分别为 0.71% 和 2.77%，通过 5% 正式门槛。steady RSS 中位数分别为
-118.45 MiB 与 119.16 MiB。
-
-更早的同配置测试在 Vulkan 上测得 **+270.71%**。CUDA 测得 16.27x 的收益方向，但
-trial range 超过 5%，因此只能作为观察结果，不能作为可移植承诺。
-
-跨线程 Graph/AD 状态机不增加 per-Graph 持久存储。刻意为空的 CPU Graph 微基准相对
-去掉 AD 安全检查的内部 baseline 测得 127 ns/run 中位 host 开销（5.29%，两侧 range
-1.73%/1.97%）。这是近零工作量下的最坏百分比；上面的四 block 代表性结果仍保持既有
-约 40% Graph-over-direct 收益。考虑到绝对开销和新增 ABI 复杂度，目前没有理由把该
-检查下沉到 native code。
-
-Graph 最适合稳定、重复的 dispatch topology。若 topology 或 Field layout 每帧变化，
-或一个大 kernel 已占据主要 launch 成本，收益会降低。固定 Vulkan replay capacity 可
-限制持久资源；无界增长可能明显增加 driver memory，却没有可重复吞吐收益。
+分别记录 host 内存和 device 存储；计入同时存活的 Graph、绑定和应用缓冲区。
+申请字节数不等于分配器保留量或驱动占用。参见
+[测量说明](graph_runtime_optimization.zh.md#性能与显存权衡)。
 
 ## 编译与启动
 
@@ -248,17 +234,11 @@ finalize，以及适用时的首次 capture/record。steady-state replay 测量�
 signature；不要提前编译所有可能的域随机化组合。各阶段含义与 advanced optimization
 权衡见[编译与高级优化权衡](compilation_tradeoffs.zh.md)。
 
-## 验证与 Linux 状态
+## 平台支持
 
-Windows 验证覆盖 CPU、CUDA 与 Vulkan dense runtime 路径，包括 integer exact、
-f32/f64 tolerance、AOS/SOA、多个 tree、混合 runtime 参数、生命周期失效、并发提交、
-automatic-AD 拒绝和显式 grad-kernel Graph。
-
-Linux 代码路径保持 platform-neutral，但正式 Linux 声明仍需真实 GCC/Clang build、CPU
-multi-block、CUDA Driver-only 与 Toolkit-OFF 零参数 capture、Vulkan validation 加
-headless/headed replay、sanitizer、long churn，以及 allocator-specific
-RSS/VRAM/reset 测量。独立跟踪见
-[Linux 复测状态](linux_revalidation.zh.md)。
+选择 replay 前核对已安装 runtime 和后端能力。CPU 或 Windows 上执行成功不代表其他驱动或
+平台已验证。安装排错参见 [Linux 环境说明](linux_revalidation.zh.md)。
+请验证应用实际使用的布局、数值容差和同步边界。
 
 ## 相关文档
 

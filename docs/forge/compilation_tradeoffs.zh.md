@@ -2,8 +2,7 @@
 
 [English](compilation_tradeoffs.en.md)
 
-> 本文是面向已发布 `0.6.2` 的操作建议；其中大部分编译控制早于 `0.5.0`。
-> 功能历史见[版本更新说明](release_notes.zh.md)。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
 本文说明如何缩短 Taichi Forge 冷编译，同时避免悄悄牺牲生产吞吐、数值可信度或
 自动微分覆盖。缓存与复用机制见[编译与缓存说明](cache_compile.zh.md)，完整 Forge
@@ -56,11 +55,6 @@ Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以
   traversal 或 reduction 的全局默认值。
 - 必须重跑数值和梯度检查。关闭优化应保持语言语义，但 instruction selection 与浮点
   reassociation 机会变化可能改变舍入和所需 tolerance。
-
-在本机一次 fixed-topology 堆叠方块 CPU 冷启动 workload 中，关闭 advanced optimization
-将端到端时间从约 77 秒降到 19 秒，最大的 kernel 从约 43.5 秒降到约 3.0 秒。这只是特定机器和
-源码 revision 的诊断数据，不是跨平台性能承诺；生产决策仍需 warm runtime、结果和 AD
-测量。
 
 ## 优先局部 tier，而不是全局关闭
 

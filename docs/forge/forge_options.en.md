@@ -1,8 +1,6 @@
 # Taichi Forge — Compile, Runtime, Architecture & Modernization Options
 
-> Applies to the published **Taichi Forge 0.6.2 release contract**. Every option listed here is **opt-in** unless explicitly noted; defaults preserve upstream Taichi 1.7.4 behaviour wherever a feature is not intentionally enabled by Forge.
-> Option introduction versions are indexed in [release notes](release_notes.en.md);
-> this current-contract page does not reclassify older options as `0.5.0` work.
+> Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
 This document is the single canonical reference for Forge-specific knobs and toolchain changes. Only options in the supported sections should be surfaced by applications. Section 2.9 records retired, compatibility-only, and validation-only names so old configurations fail or migrate clearly; listing a name there is not a support recommendation. For a module-oriented list of Forge-only API symbols, see [Forge API reference](forge_api_reference.en.md).
 

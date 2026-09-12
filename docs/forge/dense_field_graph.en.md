@@ -1,9 +1,9 @@
 # Dense Field Graph
 
-> First available in `0.5.0`; see [release notes](release_notes.en.md).
+> Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
 Dense Field Graph first shipped in Taichi Forge `0.5.0`; this page describes
-the published `0.6.2` release contract for compiling and
+the current source API for compiling and
 replaying kernels that either close over or receive dense `ti.field`, vector
 fields, and matrix fields as runtime arguments. Static Field bindings and
 runtime dense-storage bindings use the same public `ti.graph.GraphBuilder` API
@@ -247,36 +247,17 @@ Do not use private `_graph_stats` storage as an application API. GPU memory,
 host RSS, graph/tree churn, and reset measurements are still needed because a
 driver may retain resources that Python cannot enumerate.
 
-## Performance and memory evidence
+## Performance and memory
 
-Measure after kernel and Graph warm-up, synchronize at identical boundaries,
-compare results with direct dispatch, and report both median and trial range.
-A relative range above 5% remains observational.
+Reuse a compiled Graph and published bindings while resource layout is stable.
+Measure a complete application step, including submission and required completion,
+against direct kernel calls. Separate cold preparation from repeated execution.
+Small workloads may remain host-bound; larger workloads may be device-bound.
 
-A Windows fresh-process test on 2026-07-14 used four heterogeneous blocks,
-eight homogeneous environments per block, 256 base items, ten warmups, 200
-rounds, and five CPU trials. Median throughput was 482.441 direct versus
-673.679 Graph block invocations/s, or **+39.64%**. Direct and Graph ranges were
-0.71% and 2.77%, so the result passed the 5% formal gate. Median steady RSS was
-118.45 MiB direct and 119.16 MiB Graph.
-
-Earlier matching tests measured **+270.71%** on Vulkan. CUDA measured a 16.27x
-directional gain, but its trial ranges exceeded 5%, so that result remains
-observational rather than a portable claim.
-
-The cross-thread Graph/AD state machine adds no persistent per-Graph storage.
-An intentionally empty CPU Graph microbenchmark measured a 127 ns/run median
-host overhead versus an internal baseline without AD safety checks (5.29%,
-1.73%/1.97% ranges). This is a worst-case percentage for near-zero work; the
-representative four-block result above retained the established roughly 40%
-Graph-over-direct gain. Moving this check into native code is not currently
-justified by the absolute cost and added ABI complexity.
-
-Graph is most useful for stable repeated dispatch topology. It is less useful
-when topology or Field layout changes every frame, or when one large kernel
-already dominates launch overhead. A fixed Vulkan replay capacity bounds
-persistent resources; unbounded growth can consume much more driver memory
-without repeatable throughput benefit.
+Report host memory and device storage separately. Count overlapping live Graphs,
+binding sets and application buffers; a requested allocation size is not the
+same as allocator reservation or driver memory. See
+[measurement guidance](graph_runtime_optimization.en.md#performance-and-memory-trade-offs).
 
 ## Compilation and startup
 
@@ -290,19 +271,12 @@ domain-randomization combination. For phase-level interpretation and advanced
 optimization trade-offs, see
 [Compilation and advanced-optimization trade-offs](compilation_tradeoffs.en.md).
 
-## Validation and Linux status
+## Platform support
 
-Windows validation covers CPU, CUDA, and Vulkan dense runtime paths, including
-integer exactness, f32/f64 tolerances, AOS/SOA, multiple trees, mixed runtime
-arguments, lifecycle invalidation, concurrent submission, automatic-AD
-rejection, and explicit grad-kernel Graphs.
-
-Linux code paths were kept platform-neutral, but Linux release claims still
-require real GCC/Clang builds, CPU multi-block runs, CUDA Driver-only and
-Toolkit-OFF zero-argument capture, Vulkan validation plus headless/headed
-replay, sanitizer coverage, long churn, and allocator-specific RSS/VRAM/reset
-measurements. Track these separately in
-[Linux revalidation status](linux_revalidation.en.md).
+Check the installed runtime and backend capabilities before choosing replay.
+A successful CPU or Windows run does not establish support for another driver
+or platform. For installation troubleshooting, see [Linux setup](linux_revalidation.en.md).
+Validate the layouts, numerical tolerances and synchronization used by your application.
 
 ## Related documents
 

@@ -1,6 +1,6 @@
 # Taichi Forge 稀疏布局选择指南
 
-> 适用于已发布的 Taichi Forge **0.6.2 发行合同**。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
 [English version](sparse_layout_selection.en.md)
 

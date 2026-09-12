@@ -1,7 +1,7 @@
 # Parallel Sort API
 
 The Forge native sort dispatcher first shipped in 0.4.0. This page describes
-the published 0.6.2 API and backend-selection contract; the compatible legacy
+the current source API and backend-selection contract; the compatible legacy
 `parallel_sort()` entry point predates Forge.
 
 Taichi Forge keeps the vanilla-compatible entry point:
@@ -86,5 +86,5 @@ Unsupported combinations still sort correctly through the host stable fallback u
   policy, duplicate-key payload stability, dense fields, two histogram levels,
   and multiple host submitters. It prioritizes one-wheel distribution,
   low-PTX compatibility, and asynchronous execution; it does not claim CUB
-  throughput parity. See [Native Algorithms](native_algorithms.en.md#current-cuda-performance-evidence-and-boundary)
+  throughput parity. See [Native Algorithms](native_algorithms.en.md)
   for the current unified measurement.

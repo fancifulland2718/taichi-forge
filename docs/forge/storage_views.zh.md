@@ -1,6 +1,6 @@
 # 实验性 Dense Storage 零拷贝视图
 
-> 该 API 首次公开于 Taichi Forge `0.6.0`；本文说明已发布的 `0.6.2` 发行合同。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
 Taichi Forge 可以把经过资格验证、由 runtime 持有的 dense storage 直接接入现有
 `ti.types.ndarray(...)` kernel ABI，不分配第二份 buffer。该入口是显式的实验性 API：
@@ -29,7 +29,7 @@ view 创建和提交不会执行 pack、copy，也不会分配临时 storage。k
 
 ## API
 
-```python
+```text
 ti.experimental.ndarray_view(
     source,
     *,

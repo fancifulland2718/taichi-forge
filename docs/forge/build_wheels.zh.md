@@ -22,30 +22,14 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 pybind shim 仍是 per-CPython-minor wheel。`pyproject.toml` 中 `wheel.py-api = ""`，因此
 shim 暂不发布 `abi3` wheel。
 
-### 原生私有 ABI 边界
+### Runtime 与 shim 兼容性
 
-两类 wheel 之间的原生链接面属于包内私有 ABI，不是公开 C++ SDK ABI。runtime 构建会根据
-shim 的真实引用推导精确符号闭包，并在原生库旁安装 `taichi_runtime.exports.json`。Windows
-通过 `.def` 应用该闭包，Linux 使用 ELF version script，启用 split-runtime 的 macOS 源码构建
-使用 exported-symbols list。Taichi RTTI/ODR identity 只有在 shim 真实 import 时才进入闭包；已经由
-shim 自己定义的 identity 不会被推测性导出。ELF 与 Mach-O 会把其余 definition 全部转为 local。
-Windows 则将生成的闭包与源码显式标记为 `dllexport` 的 Taichi declaration 合并；MSVC 依赖这些声明为
-独立编译的 shim 生成 class special member 与 vtable。链接后审计允许这组有界的 Taichi-owned 导出，
-但拒绝 bundled third-party owner 并强制 export safety cap。公开 wheel workflow 当前只资格化 Windows
-与 Linux，这里不构成发布 macOS wheel 的声明。
+使用 Python 包依赖元数据要求的 runtime wheel。源码构建时，以目标 runtime 产物链接 shim，
+并运行仓库提供的 wheel 校验工具。包版本与 native ABI 兼容性决定配对；
+不要求 Git commit 相同，也不能仅凭 commit 相同认定兼容。
+runtime/shim 链接边界不是公共 C++ SDK。
 
-Linux shim 显式保留指向 `libtaichi_runtime.so` 的 `DT_NEEDED`，并以包相对 `RUNPATH`
-定位 `taichi-forge-runtime`。loader 将 runtime 和可选的包内 CUDART 保持在
-`RTLD_LOCAL` 作用域，避免 LLVM、SPIR-V、UI、allocator 等实现符号进入进程级查找域，
-同时维持 shim 与其直接依赖所共享的 C++ 类型身份。
-
-runtime 与 shim 的源码 commit 可以不同。shim 会直接链接同一 package version 已构建或已发布的 runtime
-wheel；这次链接和 private-ABI manifest 才是兼容性门槛。validator 因此检查 package version、ABI
-revision、规范化 export closure 与最终 binary audit，而不要求两个 Git identity 相同。
-
-POSIX loader 还会在加载 runtime 前检查 manifest 选出的少量 Taichi-owned private ABI 符号。若
-embedder 已把不兼容 Taichi ABI 放入进程全局域，import 会 fail closed，而不是允许全局定义抢占包内
-依赖。该检查只发生在 import，不进入 kernel 或 Graph launch 路径。
+在源码目录外测试已安装 wheel，并清除开发路径覆盖。记录构建输入与依赖，方便其他开发者复现产物。
 
 ## 通用规则
 

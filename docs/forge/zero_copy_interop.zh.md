@@ -1,7 +1,6 @@
 # Dense Storage 零拷贝与互操作
 
-> 统一 runtime-storage 与 managed interop 合同首次公开于 Taichi Forge `0.6.0`；
-> 本文说明已发布的 `0.6.2` 发行合同。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
 Taichi Forge 通过统一 runtime-storage 协议描述已有 dense memory，而不新增另一种 Tensor。该协议把五类问题分开处理：
 
@@ -142,39 +141,14 @@ print(stats["last_render_zero_copy"])
   协议。历史 provider 无法满足该协议时，继续使用已有 adapter 行为；显式 interop
   入口都是严格 API，绝不会 fallback 到 copy。
 
-## 已验证性能
+## 测量互通成本
 
-以下 Windows 数据使用 RTX 5090（driver 610.62）、offscreen Vulkan GGUI sink、3 轮各 120 个 warm frame，并验证输出逐字节相同。时间均为每帧：
+零拷贝描述的是存储路径，不保证更低延迟。测量实际应用时应包含所有权交接、packing、
+同步和呈现成本；分配仍有效时复用导入 view，每次调用重建会计入准备成本。
+对比时保持布局与完成边界一致。
 
-| 2048 x 2048 RGBA frame | 既有 staging path | Shared allocation path | 变化 |
-| --- | ---: | ---: | ---: |
-| `canvas.set_image()` median | 382.15 us | 351.55 us | -8.0% |
-| `canvas.set_image()` p95 | 440.20 us | 415.90 us | -5.5% |
-| 完整 set-image/show loop median | 487.61 us | 457.40 us | -6.2% |
-| RGBA pack kernel mean | 43.06 us | 42.00 us | -2.4% |
-
-512 x 512 时，完整 loop 基本持平（staged 434.31 us，shared 432.68 us），因为 1 MiB frame 主要受 Python 与 kernel-launch 固定开销支配。Shared path 主要移除 transfer 与 synchronization 工作，不会减少应用侧 pack-kernel launch 次数。
-
-对于单元素 CPU kernel，既有 NumPy direct ABI 仍是固定开销最低的兼容路径。复用的显式 managed DLPack view 平均 53.47 us，既有 direct binding 为 52.25 us（+2.3%），前者额外提供明确的受管生命周期。需要可复用 ownership 和跨框架协议集成时使用显式 view；同步 CPU 调用继续直接传 NumPy array 即可。
-
-内部 GGUI Vulkan-CUDA shared-display importer 也已替换为公开 provider 所使用的同一个
-raw-handle import core。在 Windows RTX 5090 上以 2048 x 2048 offscreen workload 做
-A-B-B-A 对比；除 importer 外二进制相同，每轮 warm-up 1 秒、测量 5 秒：
-
-| 并发 CUDA Graph + Vulkan display | 旧 importer | 统一 importer | 变化 |
-| --- | ---: | ---: | ---: |
-| 两轮 display throughput 均值 | 1661.93 FPS | 1685.02 FPS | +1.4% |
-| 两轮 frame-submit p95 均值 | 0.832 ms | 0.815 ms | -2.1% |
-| 每进程 dedicated GPU-memory 峰值 | 967.04 MiB | 967.04 MiB | 无变化 |
-| 每进程 shared GPU-memory 峰值 | 132.57 MiB | 132.57 MiB | 无变化 |
-| 进程 RSS 峰值 | 403.75 MiB | 403.93 MiB | +0.18 MiB |
-
-小幅 timing 差异只作为“无性能回退”，不宣称确定加速。allocation、mapping 与两个
-semaphore 的 GPU resource topology 没有变化；统一 core 增加 device identity、handle
-ownership、runtime/stream-domain 校验和完整的 best-effort cleanup。修改后 5 次独立
-并发运行均未出现 shared-display ownership 失败。
-
-这些数值只资格化上述 Windows 配置，不外推到所有设备与 driver。
+通过显示统计区分共享与 staging 提交，分别记录独占/共享 GPU 内存和 host 内存。
+不能仅凭指针相同或 capability 查询就认定实际执行没有传输。
 
 ## 支持边界
 

@@ -25,42 +25,17 @@ dependency. The public import path remains `import taichi_forge`.
 The pybind shim is still per-CPython-minor. `pyproject.toml` currently sets
 `wheel.py-api = ""`; the project does not publish `abi3` shim wheels.
 
-### Private native ABI boundary
+### Runtime and shim compatibility
 
-The native link surface between the two wheel families is package-private. It
-is not a public C++ SDK ABI. The runtime build derives the exact shim-reachable
-symbol closure and installs `taichi_runtime.exports.json` beside the native
-library. Windows applies that closure through a `.def` file, Linux through an
-ELF version script, and split-runtime macOS source builds through an
-exported-symbols list. Required Taichi RTTI/ODR identities are included only
-when the shim actually imports them; definitions already owned by the shim are
-not exported speculatively. ELF and Mach-O localize every other definition.
-On Windows, the generated closure is combined with Taichi declarations that
-are explicitly marked `dllexport`: MSVC uses those declarations to emit class
-special members and vtables required by an independently compiled shim. The
-post-link audit permits this bounded Taichi-owned set but rejects bundled
-third-party owners and enforces the export safety cap. The public wheel workflow
-currently qualifies Windows and Linux; this statement does not announce a
-macOS wheel.
+Use the runtime wheel required by the Python package's dependency metadata.
+For source builds, link the shim against the intended runtime artifact and run
+the supplied wheel validators. Package version and native ABI compatibility
+determine pairing; equal Git commits are neither required nor sufficient.
+The runtime/shim link is not a public C++ SDK.
 
-The Linux shim has an explicit `DT_NEEDED` edge to `libtaichi_runtime.so` and a
-package-relative `RUNPATH` into `taichi-forge-runtime`. The loader keeps both
-the runtime and an optional packaged CUDART in `RTLD_LOCAL` scope. This prevents
-LLVM, SPIR-V, UI, allocator, and other implementation symbols from entering the
-process-wide lookup domain while preserving the C++ identity shared by the shim
-and its direct dependency.
-
-Runtime and shim source commits need not be identical. A shim is built by
-linking against an already-built or published runtime wheel of the same package version;
-that link plus the private-ABI manifest is the compatibility gate. Validators
-therefore compare package version, ABI revision, canonical export closure, and
-the final binary audit rather than requiring equal Git identities.
-
-On POSIX, the loader also checks a small manifest-selected set of Taichi-owned
-private ABI symbols before loading the runtime. If an embedder has already made
-an incompatible Taichi ABI process-global, import fails closed instead of
-allowing the global definition to preempt the package-private dependency. This
-check is import-time only and does not enter kernel or Graph launch paths.
+Test installed wheels from outside the source checkout with development path
+overrides removed. Keep build inputs and dependencies recorded so another
+developer can reproduce the artifact.
 
 ## Common Rules
 

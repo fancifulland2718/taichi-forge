@@ -1,6 +1,6 @@
 # Sparse SNode on Vulkan — 使用指南
 
-> Vulkan sparse SNode 支持在历史 Forge 0.3.0–0.3.2 版本中逐步引入，在 0.3.12 前后完善，并于 0.3.13 加入实验性 `hash`。本文说明已发布的 0.6.2 发行合同，不表示这些能力都是 0.6.2 新增。受 PyPI 项目容量限制，部分历史 wheel 可能已不再保留。
+> 适用范围：当前源码。参见[版本说明](index.zh.md#版本与安装)。
 
 ---
 
@@ -52,49 +52,6 @@ fill()
 | 环境变量 | 取值 | 默认 | 作用 |
 |---|---|---|---|
 | `TI_VULKAN_POOL_FRACTION` | `(0.0, 1.0]` | `1.0` | 缩减每个 pointer SNode 的物理 cell pool 容量 = `max(num_cells_per_container, round(total_cells × fraction))`。详见 §3.2。非法 / `≤0` / `>1` 自动回退 `1.0`。 |
-
----
-
-## ⚠️ 已知正确性 / 稳定性问题
-
-> **历史上 Vulkan 稀疏 SNode 曾在两条语义合同上偏离 LLVM cpu/cuda 后端，目前两条均已修复：**
-> 1. ✅ 已修复（0.3.1）：inactive 稀疏 cell 读返回 dtype 零值。
-> 2. ✅ 已修复（0.3.2，2026-05-02）：3D pointer **全激活**触发 device-lost 已通过 deterministic-slot codegen 路径解决；详情见下方 Bug 2。
-
-### ✅ 已修复 Bug 1（0.3.1，2026-04-30）：inactive 稀疏 cell 读返回 0
-
-LLVM cpu/cuda 后端：读取 inactive 稀疏 cell **保证返回该 dtype 的零值**（路由到 `ambient_val_addr` 这块独立只读零内存）。这是 SDF 查找、ray-march、邻域采样代码可以「无脑写」的语义基础。
-
-**0.3.0 行为（已被替换）**：inactive 读路由到 pool 第 0 号槽的真实地址。一旦 cell-0 被任何 kernel 合法激活并写入，**所有 inactive 读都会返回 cell-0 的真实数据**——典型表现：SDF ray-march 在空 voxel 读到 > 500 的脏值。
-
-**0.3.1 修复**：[`spirv_codegen.cpp` `pointer_lookup_or_activate(do_activate=false)`](../../taichi/codegen/spirv/spirv_codegen.cpp) 现把 inactive 读重定向到 root buffer 末尾的 ambient zone（per pointer SNode 一段 `cell_stride` 字节零内存，启动时 memset 零）。三后端 inactive 读字节等价返回 0。验收脚本：[tests/p4/g10_inactive_read_zero.py](../../tests/p4/g10_inactive_read_zero.py)。CMake 选项 `TI_VULKAN_POINTER_AMBIENT_ZONE`（默认 ON）控制此路径；OFF 时还原 0.3.0 slot-0 fallback。
-
-### ✅ 已修复 Bug 2（0.3.2，2026-05-02）：3D pointer **全激活** device-lost
-
-**历史触发条件（任一不满足即 PASS，已全部失效）**：
-
-1. SNode 树包含 3D pointer 层（`ti.root.pointer(ti.ijk, ...)` 或 `pointer.pointer.dense(ti.ijk, ...)`）；
-2. **同一帧内** pointer 容器中的**全部 cell**都被首次写入（首次写隐含 activate）；
-3. 紧接着有 listgen 依赖 kernel：struct-for（`for i,j,k in field:`）/ `to_numpy()` / 读该字段的另一 kernel / 二次 ndrange 全扫；
-4. 单 pointer cell 上预期 ≥64 个并发线程同时首次写入。
-
-**历史症状**：写入 kernel 完成（`atomic_add` 计数正确）但下一个 dispatch 触发 `RHI Error: (-4) vkQueueSubmit failed` / Windows 下进程 abort code `0xC0000409`。
-
-**0.3.2 修复（deterministic-slot codegen）**：观察到默认 `pool_capacity == total_num_cells_from_root`（与 outer cell 数完全相等）后，pointer activation 不再需要原子分配——为每个 outer cell 静态指派一个唯一池槽 `new_slot = idx_u32 + 1 ∈ [1, capacity]`。SPIR-V 端单条 `OpAtomicCompareExchange(slot, 0, new_slot)` 替换原 `CAS-marker + atomicIAdd(watermark) + atomicStore + 结构化 spin-loop` 四指令链；所有线程对同一 outer cell 计算同一 `new_slot`，无 spin、无 watermark 竞争，**warp-lockstep 死锁路径从根上消失**。
-
-验收脚本：[tests/p4/g10p1_user_repro.py](../../tests/p4/g10p1_user_repro.py)（5 次连跑 Vulkan rc=0、cpu/cuda/vulkan sum 三后端 ±1e-5 等价）。
-
-**启用门**：CompileConfig `vulkan_pointer_deterministic_slot`（默认 **`True`**，即 `ti.init(arch=ti.vulkan, vulkan_sparse_experimental=True)` 自动生效）。下列三种情况自动 fallback 到旧 CasMarker 路径（与 0.3.1 字节等价）：
-- `vk_max_active` hint 把 capacity 收紧到 `< worst_capacity`；
-- `vulkan_pointer_max_chunks > 1` 触发 chunked allocator；
-- 多实例 SNode（`num_cells_per_container != total_num_cells_from_root`，例如某些深度嵌套 SNode 树）。
-
-**回退手段**：`ti.init(vulkan_pointer_deterministic_slot=False)` 显式关闭，恢复 0.3.1 行为；与 0.3.2 落地前字节等价。
-
-### 当前对 Vulkan 稀疏 SNode 的推荐
-
-- ✅ 全面适合：MPM / SPH / brick 渲染等 atomic_add scatter；小活跃集 + 密集计算；嵌套 pointer 树（如 OpenVDB-like B+ 树）；3D pointer **全激活** "先 fill 后 reduce" 工作流（**0.3.2 起新增支持**）。
-- ✅ brick-scatter 模式仍是默认推荐写法（性能更好、内存连续访问），但不再是规避 Bug 2 的必要手段。
 
 ---
 
@@ -202,35 +159,10 @@ blk.dense(ti.ij, 8).place(x)
 
 ---
 
-## 4. 验证矩阵
+## 4. 验证实际工作负载
 
-本 fork 已在 cpu / cuda / vulkan **三后端等价回归**：
-
-| 测试 | 覆盖点 |
-|---|---|
-| `tests/p4/vulkan_pointer_smoke.py` | 基础 activate/lookup |
-| `tests/p4/vulkan_pointer_race.py` | 多线程 race-to-activate |
-| `tests/p4/vulkan_pointer_recycle.py` | freelist 回收 32 cycle |
-| `tests/p4/vulkan_pointer_listgen.py` | struct-for |
-| `tests/p4/vulkan_pointer_deactivate_all.py` | 全量 deactivate + 复活 |
-| `tests/p4/vulkan_pointer_ported.py` | vanilla pointer test 三后端等价 |
-| `tests/p4/vulkan_bitmasked_ported.py` | bitmasked 全套 |
-| `tests/p4/vulkan_dynamic_basic.py` | dynamic basic / cycle / is_active |
-| `tests/p4/g2_pool_fraction.py` | `TI_VULKAN_POOL_FRACTION=0.25` 三后端等价 |
-| `tests/p4/g4_probe.py` | dynamic flat-array 协议 |
-| `tests/p4/g8_cache_compat.py` | offline cache fresh / hit / corrupt-recover |
-| `tests/p4/c1_jit_capacity.py` | `vk_max_active` 4 级 fallback 容量决议 |
-| `tests/p4/c1_nested_pointer_pointer_dense.py` | 嵌套 `pointer.pointer.dense` 三后端等价（含 hint） |
-| `tests/p4/g10p1_user_repro.py` | Bug 2 全激活 device-lost 回归 guard（0.3.2 起 PASS） |
-
-跑法（PowerShell）：
-
-```powershell
-$env:PYTHONPATH = 'D:\taichi\python'
-python tests\p4\vulkan_pointer_smoke.py
-```
-
----
+使用代表性输入检查激活/去激活、非活跃位置读取、峰值容量和遍历结果。
+小示例成功不能证明完整应用的容量足够。排查错误结果或 device lost 时保留诊断信息。
 
 ## 5. 排错
 
@@ -291,31 +223,11 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 
 ---
 
-## 8. LLVM CPU/CUDA runtime-directory 边界
+## 8. CPU/CUDA 生命周期与内存
 
-Forge 0.6.1 移除了过去用编译期常量限制 LLVM CPU/CUDA Program 的全局固定
-SNode/SNodeTree runtime 表。生成的 kernel 现在通过带 generation 的 tree directory 与
-tree-local node index 寻址。Program directory 在 SNodeTree materialization 边界按几何级
-增长；每棵树在自己的 root allocation 中持有一个精确尺寸 runtime-state block。销毁树时会
-先注销对应 generation，再释放 allocation，因此复用同一个数值 tree id 不会绑定 stale
-kernel 或 resource。
-
-这表示不再声明一个固定的数值 SNode-count ceiling，但不表示内存无限或 materialization
-免费。当前 64-bit LLVM runtime 中每个 node 占 48 bytes，另有 40-byte tree header；root
-allocation 仍保持 page alignment。Program directory 会在 runtime reset 前保留 peak
-power-of-two capacity（64-bit build 每项 8 bytes）。扩容是低频 lifecycle synchronization
-boundary；稳态 kernel lookup 保持 constant-time，也不产生 host readback。
-
-CPU/CUDA 资格覆盖超过 1,024 的全局 id、4,098-node dense/pointer/dynamic/hash 混合树、
-513 棵 live tree、deactivation、销毁与 generation-safe id 复用。AMDGPU 共用 LLVM
-representation，但未进入本矩阵资格范围。Vulkan 不使用该 directory，继续遵循本文描述的
-独立 sparse-runtime 合同。
-
-可以用 `benchmarks/snode_runtime_directory_bench.py` 复现 scaling、lifecycle 与精确内存
-inventory。逐树诊断字段 `runtime_state_reserved_bytes` 已包含在
-`root_reserved_bytes` 中，两者相加会重复计数。
-
----
+CPU/CUDA 与 Vulkan 的稀疏存储实现不同，不应跨后端照搬容量假设。
+销毁树会使相关 Graph 和 kernel 资源绑定失效，替换树或 reset 后应重新建立这些对象。
+诊断字段 `runtime_state_reserved_bytes` 已包含在 `root_reserved_bytes` 中，不能重复相加。
 
 ## 9. 兼容性与版本
 

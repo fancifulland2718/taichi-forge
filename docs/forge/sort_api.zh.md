@@ -1,6 +1,6 @@
 # 并行排序 API
 
-Forge native sort dispatcher 首次发布于 0.4.0。本文说明已发布的 0.6.2 API 与后端选择
+Forge native sort dispatcher 首次发布于 0.4.0。本文说明当前源码API 与后端选择
 合同；兼容入口 `parallel_sort()` 早于 Forge 即已存在。
 
 Taichi Forge 保留与标准 Taichi 兼容的入口：
@@ -77,4 +77,4 @@ Vulkan native fast path：
 - CUDA driver-only sort 已通过所有公开 key dtype、NaN bitwise、重复 key/payload stability、
   dense field、两层 histogram 和多 host submitter 回归。它优先保证单一 wheel、旧 PTX
   兼容面和异步执行，并不声称达到 CUB 吞吐；当前统一性能证据见
-  [Native 算法](native_algorithms.zh.md#当前-cuda-性能证据与边界)。
+  [Native 算法](native_algorithms.zh.md)。

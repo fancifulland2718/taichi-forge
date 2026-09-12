@@ -1,7 +1,6 @@
 # 稀疏 Runtime 与线性代数
 
-> 本文介绍已发布 Taichi Forge 0.6.2 的稀疏存储、装配、算子、求解器、后端支持与生命周期
-> 规则。
+> 适用范围：当前源码文档。请按安装版本核对[版本与安装说明](index.zh.md#版本与安装)。
 
 [English version](sparse_runtime_and_linear_algebra.en.md)
 

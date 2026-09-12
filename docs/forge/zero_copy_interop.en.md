@@ -1,7 +1,6 @@
 # Zero-Copy Dense Storage and Interoperability
 
-> The unified runtime-storage and managed-interop contract first shipped in
-> Taichi Forge `0.6.0`; this page describes the published `0.6.2` release contract.
+> Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
 Taichi Forge uses one runtime-storage protocol to describe existing dense memory without introducing another tensor type. The protocol separates five concerns:
 
@@ -146,42 +145,16 @@ The historical external-array APIs remain source compatible. Their implementatio
   available. Explicit interop entry points are strict and never fall back to a
   copy.
 
-## Qualified performance
+## Measuring interoperability cost
 
-The following Windows measurements used an RTX 5090 (driver 610.62), an offscreen Vulkan GGUI sink, three trials of 120 warm frames, and byte-identical output. Times are per frame.
+Zero-copy describes a storage path, not a latency guarantee. Include ownership
+handoffs, packing, synchronization and presentation in the application's measured
+window. Reuse imported views while the allocation is valid; recreating them per
+call includes setup cost. Compare like-for-like layouts and completion boundaries.
 
-| 2048 x 2048 RGBA frame | Established staged path | Shared allocation path | Change |
-| --- | ---: | ---: | ---: |
-| `canvas.set_image()` median | 382.15 us | 351.55 us | -8.0% |
-| `canvas.set_image()` p95 | 440.20 us | 415.90 us | -5.5% |
-| Complete set-image/show loop median | 487.61 us | 457.40 us | -6.2% |
-| RGBA pack kernel mean | 43.06 us | 42.00 us | -2.4% |
-
-At 512 x 512, complete-loop time was effectively neutral (434.31 us staged versus 432.68 us shared) because Python and kernel-launch fixed costs dominate a 1 MiB frame. The shared path primarily removes transfer and synchronization work; it does not reduce the number of application pack-kernel launches.
-
-For one-element CPU kernels, the historical direct NumPy ABI remains the lowest-overhead compatibility path. A reused explicit managed DLPack view measured 53.47 us mean versus 52.25 us for the historical direct binding (+2.3%), while providing explicit managed lifetime. Choose the explicit view when reusable ownership and cross-framework protocol integration matter; ordinary NumPy arguments remain appropriate for synchronous CPU calls.
-
-The internal GGUI Vulkan-CUDA shared-display importer was also replaced by the
-same raw-handle import core used by the public provider. A Windows RTX 5090
-offscreen A-B-B-A comparison at 2048 x 2048 used identical binaries outside
-the importer, one second of warm-up, and five measured seconds per sample:
-
-| Concurrent CUDA Graph + Vulkan display | Legacy importer | Unified importer | Change |
-| --- | ---: | ---: | ---: |
-| Display throughput, mean of two samples | 1661.93 FPS | 1685.02 FPS | +1.4% |
-| Frame-submit p95, mean of two samples | 0.832 ms | 0.815 ms | -2.1% |
-| Per-process dedicated GPU-memory peak | 967.04 MiB | 967.04 MiB | no change |
-| Per-process shared GPU-memory peak | 132.57 MiB | 132.57 MiB | no change |
-| Process RSS peak | 403.75 MiB | 403.93 MiB | +0.18 MiB |
-
-The small timing difference is treated as no regression rather than a claimed
-speedup. The allocation, mapping, and two-semaphore GPU resource topology is
-unchanged; the unified core adds checked device identity, handle ownership,
-runtime/stream-domain validation, and complete best-effort cleanup. Five
-independent post-change concurrency runs completed without the shared-display
-ownership failure.
-
-These figures qualify the stated Windows configuration, not all devices or driver versions.
+Use display statistics to distinguish shared and staged submissions. Measure
+dedicated/shared GPU memory and host memory separately; do not infer transfer-free
+execution from a pointer or capability query alone.
 
 ## Support boundary
 

@@ -2,9 +2,7 @@
 
 [中文](compilation_tradeoffs.zh.md)
 
-> This is published `0.6.2` release guidance for compile controls that
-> largely predate `0.5.0`. Feature history is indexed in
-> [release notes](release_notes.en.md).
+> Scope: current source documentation. Check [version and installation guidance](index.en.md#versions-and-installation) for your installed release.
 
 This guide explains how to shorten Taichi Forge cold compilation without
 quietly trading away production throughput, numerical confidence, or
@@ -69,13 +67,6 @@ performance is unchanged:
   language semantics, but different instruction selection and floating-point
   reassociation opportunities can change rounding and tolerance requirements.
 
-On one local fixed-topology stacked-cube CPU cold run, disabling advanced
-optimization reduced end-to-end startup from about 77 seconds to 19 seconds; the largest
-kernel fell from roughly 43.5 seconds to 3.0 seconds. This is a diagnostic data
-point for one machine and source revision, not a cross-platform performance
-claim. The production decision still requires warm runtime, result, and AD
-measurements.
-
 ## Prefer local tiering before a global switch
 
 Keep the program at `balanced`, then mark only cold or low-duty kernels:
@@ -134,9 +125,7 @@ benefits from optimized code.
 ## Graph replay
 
 Graph replay has backend-specific capacity, lifetime, failure-recovery,
-diagnostic, and memory policies. In particular, Vulkan deliberately keeps a
-fixed eight-slot ring after elastic-capacity experiments showed an unfavorable
-memory trade-off, while CUDA distinguishes structural capture rejection from
+diagnostic, and memory policies. In particular, Vulkan uses bounded in-flight replay storage, while CUDA distinguishes structural capture rejection from
 transient failures and context-fatal errors.
 
 These policies, their measurements, and the public `Graph.execution_stats()`
