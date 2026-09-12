@@ -46,6 +46,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS = 1ull << 8,
   TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS = 1ull << 9,
   TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE = 1ull << 10,
+  TI_FORGE_OPTIX_FEATURE_ALPHA_MASK = 1ull << 11,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -95,6 +96,31 @@ typedef struct TiForgeOptixTypedTraceDesc {
   uint64_t hit_indices;
   uint64_t cuda_stream;
 } TiForgeOptixTypedTraceDesc;
+
+// Per-instance mask table, retained by the caller. A zero texture means opaque.
+// uvs is packed float2 per GAS vertex; indices is the GAS's packed uint3 array.
+// texture is a normalized-coordinate, float-returning CUDA texture object.
+typedef struct TiForgeOptixAlphaMask {
+  uint64_t uvs;
+  uint64_t indices;
+  uint64_t texture;
+  float cutoff;
+  uint32_t channel;
+} TiForgeOptixAlphaMask;
+
+typedef struct TiForgeOptixAlphaTraceDesc {
+  uint32_t struct_size;
+  uint32_t ray_count;
+  uint64_t rays;
+  uint64_t hits;
+  uint64_t hit_indices;
+  uint64_t cuda_stream;
+  uint64_t masks;
+  // Caller-owned 48-byte device launch-parameter workspace, stream ordered.
+  uint64_t launch_params;
+  uint32_t mask_count;
+  uint32_t any_hit;
+} TiForgeOptixAlphaTraceDesc;
 
 typedef struct TiForgeOptixSceneMemory {
   uint32_t struct_size;
@@ -203,6 +229,13 @@ typedef TiForgeOptixResult (*TiForgeOptixGetInstanceSceneMemoryFn)(
 typedef TiForgeOptixResult (*TiForgeOptixDestroyInstanceSceneFn)(
     TiForgeOptixInstanceScene scene);
 
+typedef TiForgeOptixResult (*TiForgeOptixTraceAlphaFn)(
+    TiForgeOptixTriangleScene scene,
+    const TiForgeOptixAlphaTraceDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixTraceInstanceAlphaFn)(
+    TiForgeOptixInstanceScene scene,
+    const TiForgeOptixAlphaTraceDesc *desc);
+
 typedef struct TiForgeOptixProviderApi {
   uint32_t struct_size;
   uint32_t provider_abi_version;
@@ -229,6 +262,9 @@ typedef struct TiForgeOptixProviderApi {
   TiForgeOptixTraceInstanceSceneTypedFn trace_instance_scene_typed;
   TiForgeOptixGetInstanceSceneMemoryFn get_instance_scene_memory;
   TiForgeOptixDestroyInstanceSceneFn destroy_instance_scene;
+  TiForgeOptixPrepareTypedFn prepare_alpha;
+  TiForgeOptixTraceAlphaFn trace_alpha;
+  TiForgeOptixTraceInstanceAlphaFn trace_instance_alpha;
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(

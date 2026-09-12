@@ -1309,7 +1309,9 @@ void export_lang(py::module &m) {
   py::class_<PreparedPrimitiveCompact, std::shared_ptr<PreparedPrimitiveCompact>>(
       m, "_PreparedPrimitiveCompact");
   py::class_<PreparedExternalCudaStorage>(m, "_PreparedExternalCudaStorage")
-      .def_readonly("pointers", &PreparedExternalCudaStorage::pointers);
+      .def_readonly("pointers", &PreparedExternalCudaStorage::pointers)
+      .def_readonly("texture_objects",
+                    &PreparedExternalCudaStorage::texture_objects);
 
   py::class_<PreparedVulkanGraphicsPass, std::shared_ptr<PreparedVulkanGraphicsPass>>(
       m, "_PreparedVulkanGraphicsPass");
@@ -2185,7 +2187,9 @@ void export_lang(py::module &m) {
       .def("_begin_external_cuda_submission",
            &Program::begin_external_cuda_submission)
       .def("_prepare_external_cuda_storage",
-           &Program::prepare_external_cuda_storage)
+           &Program::prepare_external_cuda_storage,
+           py::arg("descriptors"), py::arg("writable"),
+           py::arg("textures") = std::vector<const Texture *>{})
       .def("_invoke_external_cuda_prepared",
            &Program::invoke_external_cuda_prepared)
       .def("_debug_runtime_completion_stats",

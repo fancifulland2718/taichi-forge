@@ -62,7 +62,24 @@ struct LaunchParams {
   HitRecord *hits;
   OptixTraversableHandle traversable;
   PackedUint4 *hit_indices;
+#if TI_FORGE_OPTIX_TYPED == 2
+  const struct AlphaMask *masks;
+  unsigned int any_hit;
+  unsigned int reserved;
+#endif
 };
+
+#if TI_FORGE_OPTIX_TYPED == 2
+struct AlphaMask {
+  const float *uvs;
+  const unsigned int *indices;
+  cudaTextureObject_t texture;
+  float cutoff;
+  unsigned int channel;
+};
+static_assert(sizeof(AlphaMask) == 32, "Alpha-mask wire layout changed");
+static_assert(sizeof(LaunchParams) == 48, "Alpha launch wire layout changed");
+#endif
 
 extern "C" __constant__ LaunchParams params;
 
@@ -103,13 +120,20 @@ extern "C" __global__ void __raygen__forge_batch_ray_typed() {
   unsigned int t = __float_as_uint(-1.0f);
   unsigned int primitive = ~0u, instance = ~0u, custom = ~0u;
   unsigned int u = 0, v = 0, hit = 0;
+  unsigned int flags = OPTIX_RAY_FLAG_DISABLE_ANYHIT;
+#if TI_FORGE_OPTIX_TYPED == 2
+  flags = OPTIX_RAY_FLAG_ENFORCE_ANYHIT;
+  if (params.any_hit) {
+    flags |= OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT;
+  }
+#endif
   optixTrace(
       params.traversable,
       make_float3(ray.origin_tmin.x, ray.origin_tmin.y, ray.origin_tmin.z),
       make_float3(ray.direction_tmax.x, ray.direction_tmax.y,
                   ray.direction_tmax.z),
       ray.origin_tmin.w, ray.direction_tmax.w, 0.0f, OptixVisibilityMask(0xff),
-      OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0, 1, 0, t, primitive, instance, custom, u,
+      flags, 0, 1, 0, t, primitive, instance, custom, u,
       v, hit);
   params.hits[index].value = make_float4(__uint_as_float(t), __uint_as_float(u),
                                          __uint_as_float(v), 0.0f);
@@ -126,6 +150,32 @@ extern "C" __global__ void __closesthit__forge_batch_ray_typed() {
   optixSetPayload_5(__float_as_uint(barycentrics.y));
   optixSetPayload_6(1u);
 }
+
+#if TI_FORGE_OPTIX_TYPED == 2
+extern "C" __global__ void __anyhit__forge_alpha_mask() {
+  const AlphaMask mask = params.masks[optixGetInstanceIndex()];
+  if (!mask.texture) {
+    return;
+  }
+  const unsigned int *triangle = mask.indices + 3u * optixGetPrimitiveIndex();
+  const float *a = mask.uvs + 2u * triangle[0];
+  const float *b = mask.uvs + 2u * triangle[1];
+  const float *c = mask.uvs + 2u * triangle[2];
+  const float2 bary = optixGetTriangleBarycentrics();
+  const float w = 1.0f - bary.x - bary.y;
+  const float u = w * a[0] + bary.x * b[0] + bary.y * c[0];
+  const float v = w * a[1] + bary.x * b[1] + bary.y * c[1];
+  // Match Forge Texture.sample_lod: logical axis 0 is the outer array axis,
+  // while CUDA's texture x coordinate addresses the innermost array axis.
+  const float4 sample = tex2D<float4>(mask.texture, v, u);
+  const float alpha = mask.channel == 0 ? sample.x :
+                      mask.channel == 1 ? sample.y :
+                      mask.channel == 2 ? sample.z : sample.w;
+  if (!(alpha >= mask.cutoff)) {
+    optixIgnoreIntersection();
+  }
+}
+#endif
 #endif
 
 #endif  // TI_FORGE_OPTIX_TRANSFORM_PACK

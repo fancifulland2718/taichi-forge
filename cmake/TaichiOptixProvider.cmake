@@ -83,8 +83,9 @@ function(_ti_add_optix_provider target_name root)
     endif()
     set(_ptx_headers)
     # Keep the legacy four-payload module independent from typed-hit payloads.
-    # Both artifacts retain the same portable PTX version and target contract.
-    foreach(_typed IN ITEMS 0 1)
+    # The optional alpha-mask module (2) also uses typed hits. All three keep
+    # the same portable PTX version and target contract.
+    foreach(_typed IN ITEMS 0 1 2)
         set(_ptx "${_generated_dir}/device_program_${_typed}.ptx")
         set(_ptx_header "${_generated_dir}/device_program_${_typed}_ptx.h")
         list(APPEND _ptx_headers "${_ptx_header}")

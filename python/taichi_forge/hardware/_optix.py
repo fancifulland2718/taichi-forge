@@ -28,6 +28,7 @@ from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._storage_view import describe_storage
+from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
 from taichi_forge.types.primitive_types import f32, i32, u32
 
@@ -45,6 +46,7 @@ _WORD_ALIGNED_QUERY_STORAGE = 1 << 7
 _SHARED_TRIANGLE_GAS = 1 << 8
 _MULTI_INSTANCE_IAS = 1 << 9
 _DEVICE_INSTANCE_TRANSFORM_UPDATE = 1 << 10
+_ALPHA_MASK = 1 << 11
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -150,6 +152,25 @@ class _TypedTraceDesc(ctypes.Structure):
     ]
 
 
+class _AlphaTraceDesc(ctypes.Structure):
+    _fields_ = _TypedTraceDesc._fields_ + [
+        ("masks", ctypes.c_uint64),
+        ("launch_params", ctypes.c_uint64),
+        ("mask_count", ctypes.c_uint32),
+        ("any_hit", ctypes.c_uint32),
+    ]
+
+
+class _AlphaMask(ctypes.Structure):
+    _fields_ = [
+        ("uvs", ctypes.c_uint64),
+        ("indices", ctypes.c_uint64),
+        ("texture", ctypes.c_uint64),
+        ("cutoff", ctypes.c_float),
+        ("channel", ctypes.c_uint32),
+    ]
+
+
 class _InstanceDesc(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
@@ -239,6 +260,9 @@ _DestroyInstanceScene = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 _GetLastError = ctypes.CFUNCTYPE(
     ctypes.c_size_t, ctypes.POINTER(ctypes.c_char), ctypes.c_size_t
 )
+_TraceAlpha = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_AlphaTraceDesc)
+)
 
 
 class _ProviderApi(ctypes.Structure):
@@ -267,6 +291,9 @@ class _ProviderApi(ctypes.Structure):
         ("trace_instance_scene_typed", _TraceInstanceSceneTyped),
         ("get_instance_scene_memory", _GetInstanceSceneMemory),
         ("destroy_instance_scene", _DestroyInstanceScene),
+        ("prepare_alpha", _PrepareTyped),
+        ("trace_alpha", _TraceAlpha),
+        ("trace_instance_alpha", _TraceAlpha),
     ]
 
 
@@ -533,8 +560,8 @@ def passive_status():
     }
 
 
-def _ray_storage(value, width, dtypes, name):
-    description = describe_storage(value)
+def _ray_storage(value, width, dtypes, name, *, access="readwrite"):
+    description = describe_storage(value, access=access)
     descriptor = description.descriptor
     if descriptor is None or not description.supported:
         raise TaichiRuntimeError(f"OptiX ray {name} requires canonical dense storage")
@@ -617,14 +644,17 @@ class _PreparedOptixCall:
             )
 
 
-def _prepare_storage(owner, values, descriptions, writable):
+def _prepare_storage(owner, values, descriptions, writable, textures=()):
     packet = owner._runtime_prog._prepare_external_cuda_storage(
-        tuple(item.descriptor for item in descriptions), writable
+        tuple(item.descriptor for item in descriptions),
+        writable,
+        tuple(texture.tex for texture in textures),
     )
     owners = (
         *values,
         *descriptions,
         *(value.arr for value in values if isinstance(value, Ndarray)),
+        *textures,
     )
     return packet, owners
 
@@ -707,6 +737,7 @@ class OptixProvider:
         self._scenes = weakref.WeakSet()
         self._gases = weakref.WeakSet()
         self._typed_prepared = False
+        self._alpha_prepared = False
         self._shared_pipeline_sbt_bytes = 0
         info = loaded.api.info
         self.identity = MappingProxyType(
@@ -788,6 +819,33 @@ class OptixProvider:
             self, "OptixProvider belongs to a previous Taichi runtime generation"
         )
 
+    def _prepare_alpha(self, scene):
+        self._validate_lifetime()
+        if self._alpha_prepared:
+            return
+        api = self._loaded.api
+        if not int(api.info.features) & _ALPHA_MASK or not all(
+            _api_has(api, name)
+            for name in ("prepare_alpha", "trace_alpha", "trace_instance_alpha")
+        ):
+            raise TaichiRuntimeError(
+                "OptiX adapter does not support alpha masks; use a newer Forge adapter"
+            )
+        with hardware_failure_phase("provider_plan_failure"):
+            scope = self._runtime_prog._begin_external_cuda_submission()
+            try:
+                scene._validate_lifetime()
+                _invoke_checked(api, api.prepare_alpha, self._context)
+                memory = _SceneMemory()
+                memory.struct_size = ctypes.sizeof(memory)
+                _invoke_checked(
+                    api, scene._memory_function, scene._scene, ctypes.byref(memory)
+                )
+                self._shared_pipeline_sbt_bytes = int(memory.shared_pipeline_sbt_bytes)
+            finally:
+                del scope
+        self._alpha_prepared = True
+
     def close(self):
         if self._context is None:
             return None
@@ -818,11 +876,59 @@ class OptixProvider:
         return False
 
 
+@dataclass(frozen=True)
+class OptixAlphaMask:
+    """One instance's alpha rule using named UV and Texture Graph bindings.
+
+    UVs are packed f32 pairs per GAS vertex. The texture is CUDA 2D r32f or
+    rgba32f, sampled at normalized interpolated UVs with its existing sampler.
+    A candidate is accepted when the selected channel is >= cutoff. No mip,
+    arbitrary callback, blending or multi-layer transmission is implied.
+    UV axes match Texture.sample_lod, including non-square uploads. UV values
+    must be finite; GAS triangle indices must remain unchanged. Update UV or
+    texel values in place using normal device ordering; replace resources by
+    rebinding. None entries in the query's mask tuple accept unconditionally,
+    but still participate in the filtered traversal (not the opaque fast path).
+    """
+
+    uvs: str
+    texture: str
+    cutoff: float = 0.5
+    channel: int = 3
+
+    def __post_init__(self):
+        if any(
+            not isinstance(name, str) or not name for name in (self.uvs, self.texture)
+        ):
+            raise ValueError("OptiX alpha bindings must be nonempty names")
+        if self.uvs == self.texture:
+            raise ValueError("OptiX UV and texture bindings must differ")
+        if isinstance(self.cutoff, bool) or not isinstance(self.cutoff, (float, int)):
+            raise TypeError("OptiX alpha cutoff must be a real number")
+        if not math.isfinite(self.cutoff) or not 0 <= self.cutoff <= 1:
+            raise ValueError("OptiX alpha cutoff must be finite and in [0, 1]")
+        if isinstance(self.channel, bool) or not isinstance(self.channel, int):
+            raise TypeError("OptiX alpha channel must be an integer")
+        if not 0 <= self.channel <= 3:
+            raise ValueError("OptiX alpha channel must be in [0, 3]")
+        object.__setattr__(self, "cutoff", float(ctypes.c_float(self.cutoff).value))
+
+
 @instrument_hardware_recording("ray.query.batch.optix")
 class OptixRayQueryRecording(BackendCommandRecording):
     """One runtime-ordered OptiX launch against a fixed scene generation."""
 
-    def __init__(self, scene, ray_count, *, rays="rays", hits="hits", hit_indices=None):
+    def __init__(
+        self,
+        scene,
+        ray_count,
+        *,
+        rays="rays",
+        hits="hits",
+        hit_indices=None,
+        alpha_masks=None,
+        any_hit=False,
+    ):
         if not isinstance(scene, (OptixTriangleScene, OptixInstanceScene)):
             raise TypeError("OptiX ray query recording requires an OptiX scene")
         if (
@@ -836,6 +942,29 @@ class OptixRayQueryRecording(BackendCommandRecording):
             raise ValueError("OptiX ray bindings must be nonempty strings")
         if len(set(names)) != len(names):
             raise ValueError("OptiX ray bindings must be unique")
+        if not isinstance(any_hit, bool):
+            raise TypeError("OptiX any_hit must be a bool")
+        if alpha_masks is None:
+            if any_hit:
+                raise ValueError("OptiX any_hit requires an explicit alpha-mask query")
+        else:
+            if hit_indices is None:
+                raise ValueError("OptiX alpha masks require typed hits")
+            alpha_masks = tuple(alpha_masks)
+            count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
+            if len(alpha_masks) != count:
+                raise ValueError("OptiX alpha masks must match the instance count")
+            mask_names = []
+            for mask in alpha_masks:
+                if mask is not None:
+                    if not isinstance(mask, OptixAlphaMask):
+                        raise TypeError(
+                            "OptiX alpha entries must be OptixAlphaMask or None"
+                        )
+                    mask_names.extend((mask.uvs, mask.texture))
+            if set(names).intersection(mask_names):
+                raise ValueError("OptiX alpha bindings must not reuse ray/hit names")
+            names += tuple(dict.fromkeys(mask_names))
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -852,7 +981,11 @@ class OptixRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "rays", rays)
         object.__setattr__(self, "hits", hits)
         object.__setattr__(self, "hit_indices", hit_indices)
-        if hit_indices is not None:
+        object.__setattr__(self, "alpha_masks", alpha_masks)
+        object.__setattr__(self, "any_hit", any_hit)
+        if alpha_masks is not None:
+            scene.provider._prepare_alpha(scene)
+        elif hit_indices is not None:
             scene.provider._prepare_typed(scene)
 
     @property
@@ -864,6 +997,16 @@ class OptixRayQueryRecording(BackendCommandRecording):
         )
         if self.hit_indices is not None:
             effects += (ResourceEffect(self.hit_indices, GraphAccess.WRITE),)
+        if self.alpha_masks is not None:
+            mask_names = dict.fromkeys(
+                name
+                for mask in self.alpha_masks
+                if mask is not None
+                for name in (mask.uvs, mask.texture)
+            )
+            effects += tuple(
+                ResourceEffect(name, GraphAccess.READ) for name in mask_names
+            )
         return effects
 
     def execute(self, bindings):
@@ -885,11 +1028,55 @@ class OptixRayQueryRecording(BackendCommandRecording):
 
     def validate_graph_bindings(self, bindings):
         self._binding_descriptions(bindings)
+        if self.alpha_masks is not None:
+            self._mask_bindings(bindings)
+
+    def _mask_bindings(self, bindings):
+        from taichi_forge._lib import core
+
+        values, descriptions, textures = [], [], []
+        for index, mask in enumerate(self.alpha_masks):
+            if mask is None:
+                continue
+            gas = (
+                self.scene._instances[index].gas
+                if isinstance(self.scene, OptixInstanceScene)
+                else self.scene
+            )
+            uvs = bindings[mask.uvs]
+            description, count = _ray_storage(uvs, 2, (f32,), mask.uvs, access="read")
+            if count != gas.vertex_count:
+                raise TaichiRuntimeError("OptiX alpha UV count must match GAS vertices")
+            texture = bindings[mask.texture]
+            if (
+                not isinstance(texture, Texture)
+                or texture.tex is None
+                or texture._runtime_prog is not self.scene._runtime_prog
+            ):
+                raise TaichiRuntimeError(
+                    "OptiX alpha texture must belong to this CUDA runtime"
+                )
+            if (
+                texture.num_dims != 2
+                or texture.mip_levels != 1
+                or texture.fmt not in (core.Format.r32f, core.Format.rgba32f)
+            ):
+                raise TaichiRuntimeError(
+                    "OptiX alpha requires a single-level 2D r32f/rgba32f texture"
+                )
+            if texture.fmt == core.Format.r32f and mask.channel != 0:
+                raise ValueError("OptiX r32f alpha textures require channel=0")
+            values.extend((uvs, gas._indices))
+            descriptions.extend((description, gas._indices_description))
+            textures.append(texture)
+        return values, descriptions, textures
 
     def prepare_graph_execute(self, bindings):
         validate_exact_bindings(self, bindings, "OptiX ray query")
         self.validate_graph_lifetime()
         descriptions = self._binding_descriptions(bindings)
+        if self.alpha_masks is not None:
+            return self._prepare_alpha_execute(bindings, descriptions)
         values = tuple(bindings[name] for name in self.binding_names)
         storage, owners = _prepare_storage(
             self.scene, values, descriptions, (False, *([True] * (len(values) - 1)))
@@ -918,18 +1105,130 @@ class OptixRayQueryRecording(BackendCommandRecording):
     def validate_graph_lifetime(self):
         self.scene._validate_lifetime()
 
+    def _prepare_alpha_execute(self, bindings, descriptions):
+        import numpy as np
+        from taichi_forge.lang._ndarray import ScalarNdarray
+        from taichi_forge.types.primitive_types import u64
+
+        mask_values, mask_descriptions, textures = self._mask_bindings(bindings)
+        # One retained allocation: 48 bytes of launch parameters, then one
+        # 32-byte record per instance. Neither table nor pointers rebuild on run.
+        workspace = ScalarNdarray(u64, (6 + 4 * len(self.alpha_masks),))
+        workspace_description = describe_storage(workspace)
+        values = (
+            bindings[self.rays],
+            bindings[self.hits],
+            bindings[self.hit_indices],
+            *mask_values,
+            workspace,
+        )
+        descriptions = (*descriptions, *mask_descriptions, workspace_description)
+        storage, owners = _prepare_storage(
+            self.scene,
+            values,
+            descriptions,
+            (False, True, True, *([False] * len(mask_values)), True),
+            textures,
+        )
+        masks = (_AlphaMask * len(self.alpha_masks))()
+        active = 0
+        for index, mask in enumerate(self.alpha_masks):
+            if mask is not None:
+                masks[index] = _AlphaMask(
+                    storage.pointers[3 + 2 * active],
+                    storage.pointers[4 + 2 * active],
+                    storage.texture_objects[active],
+                    mask.cutoff,
+                    mask.channel,
+                )
+                active += 1
+        host = np.zeros(6 + 4 * len(self.alpha_masks), dtype=np.uint64)
+        host[6:] = np.frombuffer(bytes(masks), dtype=np.uint64)
+        workspace.from_numpy(host)
+        api = self.scene.provider._loaded.api
+        function = (
+            api.trace_instance_alpha
+            if isinstance(self.scene, OptixInstanceScene)
+            else api.trace_alpha
+        )
+        desc = _AlphaTraceDesc(
+            ctypes.sizeof(_AlphaTraceDesc),
+            self.ray_count,
+            *storage.pointers[:3],
+            0,
+            storage.pointers[-1] + 48,
+            storage.pointers[-1],
+            len(self.alpha_masks),
+            int(self.any_hit),
+        )
+        return _PreparedOptixCall(
+            self.scene,
+            storage,
+            partial(
+                _invoke_checked, api, function, self.scene._scene, ctypes.byref(desc)
+            ),
+            owners,
+        )
+
     def memory_report(self):
-        return self.scene.memory_report()
+        report = self.scene.memory_report()
+        if self.alpha_masks is None:
+            return report
+        return make_memory_report(
+            report.provider,
+            report.backend,
+            (
+                *report.components,
+                HardwareMemoryComponent(
+                    "alpha_workspace_per_prepared_binding",
+                    48 + 32 * len(self.alpha_masks),
+                    True,
+                    "provider_generation",
+                    "runtime",
+                    resident=False,
+                ),
+            ),
+            lifecycle_state=report.lifecycle_state,
+            ownership_scope=report.ownership_scope,
+        )
 
     def _as_graph_native_node(self):
         return native_recording_node(
             self,
+            runtime_bindings=lambda item: tuple(
+                (
+                    name,
+                    (
+                        "texture"
+                        if item.alpha_masks is not None
+                        and any(
+                            mask is not None and mask.texture == name
+                            for mask in item.alpha_masks
+                        )
+                        else "ndarray"
+                    ),
+                )
+                for name in item.binding_names
+            ),
             lifetime_leases=lambda item: (item.scene, item.scene.provider),
             debug_info=lambda item: {
                 "kind": item.scene._query_kind,
                 "ray_count": item.ray_count,
                 "provider_abi": PROVIDER_ABI_NAME,
                 "hit_layout": "legacy_float4" if item.hit_indices is None else "typed",
+                "alpha_masks": (
+                    None
+                    if item.alpha_masks is None
+                    else tuple(
+                        (
+                            None
+                            if mask is None
+                            else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
+                        )
+                        for mask in item.alpha_masks
+                    )
+                ),
+                "any_accepted_hit": item.any_hit,
             },
             publish_time_binding_validation_stable=True,
         )
@@ -1553,13 +1852,30 @@ class OptixInstanceScene:
         return hits
 
     def record_typed(
-        self, ray_count, *, rays="rays", hits="hits", hit_indices="hit_indices"
+        self,
+        ray_count,
+        *,
+        rays="rays",
+        hits="hits",
+        hit_indices="hit_indices",
+        alpha_masks=None,
+        any_hit=False,
     ):
-        """Record typed primitive, instance ordinal, custom index and hit."""
+        """Record typed hits, optionally filtering each instance's alpha mask.
+
+        alpha_masks is a fixed tuple of OptixAlphaMask or None per instance.
+        any_hit returns the first accepted intersection, not necessarily nearest.
+        """
 
         self._validate_lifetime()
         return OptixRayQueryRecording(
-            self, ray_count, rays=rays, hits=hits, hit_indices=hit_indices
+            self,
+            ray_count,
+            rays=rays,
+            hits=hits,
+            hit_indices=hit_indices,
+            alpha_masks=alpha_masks,
+            any_hit=any_hit,
         )
 
     def trace_typed(self, rays, hits, hit_indices):
@@ -1773,7 +2089,14 @@ class OptixTriangleScene:
         return hits
 
     def record_typed(
-        self, ray_count, *, rays="rays", hits="hits", hit_indices="hit_indices"
+        self,
+        ray_count,
+        *,
+        rays="rays",
+        hits="hits",
+        hit_indices="hit_indices",
+        alpha_masks=None,
+        any_hit=False,
     ):
         """Record f32 (t,u,v,0) and i32/u32 (primitive,instance,custom,hit).
 
@@ -1784,7 +2107,13 @@ class OptixTriangleScene:
         """
         self._validate_lifetime()
         return OptixRayQueryRecording(
-            self, ray_count, rays=rays, hits=hits, hit_indices=hit_indices
+            self,
+            ray_count,
+            rays=rays,
+            hits=hits,
+            hit_indices=hit_indices,
+            alpha_masks=alpha_masks,
+            any_hit=any_hit,
         )
 
     def trace_typed(self, rays, hits, hit_indices):

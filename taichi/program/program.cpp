@@ -9664,7 +9664,8 @@ Program::begin_external_cuda_submission() {
 
 PreparedExternalCudaStorage Program::prepare_external_cuda_storage(
     const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
-    const std::vector<bool> &writable) {
+    const std::vector<bool> &writable,
+    const std::vector<const Texture *> &textures) {
   TI_ERROR_IF(compile_config().arch != Arch::cuda,
               "External CUDA storage requires the CUDA backend");
   // Hold both lifetime boundaries through pointer resolution. Preparing a
@@ -9693,6 +9694,17 @@ PreparedExternalCudaStorage Program::prepare_external_cuda_storage(
                   "External CUDA writable storage ranges must not overlap");
     }
   }
+  for (const auto *texture : textures) {
+    const auto found = texture_views_.find(texture);
+    TI_ERROR_IF(found == texture_views_.end() || !texture->is_cuda_texture(),
+                "External CUDA texture belongs to another or retired runtime");
+    packet.texture_objects.push_back(texture->get_cuda_texture_object());
+    const auto handle = found->second.handle;
+    if (std::find(packet.texture_handles.begin(), packet.texture_handles.end(),
+                  handle) == packet.texture_handles.end()) {
+      packet.texture_handles.push_back(handle);
+    }
+  }
   return packet;
 }
 
@@ -9700,6 +9712,27 @@ void Program::invoke_external_cuda_prepared(
     const PreparedExternalCudaStorage &packet,
     const std::function<void()> &invoke) {
   with_prepared_native_storage(*packet.storage, [&] {
+    if (!packet.texture_handles.empty()) {
+      TextureLaunchLeases texture_leases;
+      for (const auto handle : packet.texture_handles) {
+        TI_ERROR_IF(handle.index >= texture_view_slots_.size(),
+                    "Prepared external storage references a retired Texture");
+        const auto &slot = texture_view_slots_[handle.index];
+        TI_ERROR_IF(slot.handle != handle || !slot.view,
+                    "Prepared external storage references a retired Texture");
+        if (texture_inflight_leases_.find(texture_lease_key(handle)) ==
+            texture_inflight_leases_.end()) {
+          const auto found = texture_views_.find(slot.view);
+          TI_ASSERT(found != texture_views_.end());
+          auto lease = found->second.lease.clone();
+          TI_ERROR_IF(!lease, "Cannot retain prepared external Texture");
+          texture_leases.add(std::move(lease));
+        }
+      }
+      if (!texture_leases.empty()) {
+        pin_texture_launch_leases(texture_leases);
+      }
+    }
     // Resource generations are checked and pinned before the adapter can
     // enqueue work, including a partially successful call that then fails.
     mark_runtime_submission(RuntimeSubmissionKind::kNative);

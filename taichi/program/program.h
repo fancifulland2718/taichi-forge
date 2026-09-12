@@ -134,6 +134,8 @@ class PreparedPrimitiveCompact;
 struct PreparedExternalCudaStorage {
   std::shared_ptr<PreparedNativeStorage> storage;
   std::vector<std::uintptr_t> pointers;
+  std::vector<std::uint64_t> texture_objects;
+  std::vector<RuntimeResourceHandle> texture_handles;
 };
 
 enum class VulkanBufferCommandKind : std::uint8_t {
@@ -1010,7 +1012,8 @@ class TI_DLL_EXPORT Program {
   begin_external_cuda_submission();
   PreparedExternalCudaStorage prepare_external_cuda_storage(
       const std::vector<const storage::DenseStorageDescriptor *> &descriptors,
-      const std::vector<bool> &writable);
+      const std::vector<bool> &writable,
+      const std::vector<const Texture *> &textures = {});
   void invoke_external_cuda_prepared(const PreparedExternalCudaStorage &packet,
                                      const std::function<void()> &invoke);
 

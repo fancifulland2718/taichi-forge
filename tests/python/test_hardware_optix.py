@@ -331,7 +331,6 @@ def test_optix_adapters_are_one_pinned_runtime_wheel_component():
     assert "#include <optix" not in abi.lower()
     assert _optix.SUPPORTED_OPTIX_ABIS == (93, 105, 118)
     assert "OPTIX_ABI_VERSION == 118" in provider
-    assert "pipelineLaunchParamsSizeInBytes = sizeof(LaunchParams)" in provider
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
@@ -353,6 +352,7 @@ def test_optix_provider_load_failure_has_explicit_phase(monkeypatch):
 def test_optix_load_falls_back_only_when_newer_runtime_abi_is_unavailable(
     monkeypatch,
 ):
+    monkeypatch.delenv("TAICHI_FORGE_OPTIX_LIBRARY", raising=False)
     abi118 = _FakeOptixLibrary(optix_abi=118, context_result=_optix._OPTIX_UNAVAILABLE)
     abi105 = _FakeOptixLibrary(optix_abi=105)
     libraries = {"abi118.dll": abi118, "abi105.dll": abi105}
