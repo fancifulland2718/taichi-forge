@@ -122,7 +122,9 @@ extern "C" __global__ void __raygen__forge_batch_ray_typed() {
   unsigned int u = 0, v = 0, hit = 0;
   unsigned int flags = OPTIX_RAY_FLAG_DISABLE_ANYHIT;
 #if TI_FORGE_OPTIX_TYPED == 2
-  flags = OPTIX_RAY_FLAG_ENFORCE_ANYHIT;
+  // The IAS decides which instances need filtering. Opaque rays above still
+  // override that state; alpha rays must not force opaque instances into AH.
+  flags = OPTIX_RAY_FLAG_NONE;
   if (params.any_hit) {
     flags |= OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT;
   }

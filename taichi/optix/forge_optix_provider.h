@@ -47,6 +47,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS = 1ull << 9,
   TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE = 1ull << 10,
   TI_FORGE_OPTIX_FEATURE_ALPHA_MASK = 1ull << 11,
+  TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY = 1ull << 12,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -140,6 +141,8 @@ typedef void *TiForgeOptixInstanceScene;
 
 // Cold fixed-topology metadata. transform is a row-major affine 3x4 matrix.
 // custom_index and visibility_mask are limited to 24 and 8 bits respectively.
+// With INSTANCE_OPACITY, reserved bit 0 declares an always-opaque instance.
+// A zero word preserves dynamic alpha-mask eligibility. All other bits are zero.
 typedef struct TiForgeOptixInstanceDesc {
   uint32_t struct_size;
   uint32_t reserved;

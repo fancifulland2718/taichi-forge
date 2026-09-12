@@ -47,6 +47,7 @@ _SHARED_TRIANGLE_GAS = 1 << 8
 _MULTI_INSTANCE_IAS = 1 << 9
 _DEVICE_INSTANCE_TRANSFORM_UPDATE = 1 << 10
 _ALPHA_MASK = 1 << 11
+_INSTANCE_OPACITY = 1 << 12
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -955,16 +956,27 @@ class OptixRayQueryRecording(BackendCommandRecording):
             if len(alpha_masks) != count:
                 raise ValueError("OptiX alpha masks must match the instance count")
             mask_names = []
-            for mask in alpha_masks:
+            for index, mask in enumerate(alpha_masks):
                 if mask is not None:
                     if not isinstance(mask, OptixAlphaMask):
                         raise TypeError(
                             "OptiX alpha entries must be OptixAlphaMask or None"
                         )
+                    if (
+                        isinstance(scene, OptixInstanceScene)
+                        and scene._instances[index].opaque
+                    ):
+                        raise ValueError(
+                            "OptiX opaque instances cannot use an alpha mask"
+                        )
                     mask_names.extend((mask.uvs, mask.texture))
             if set(names).intersection(mask_names):
                 raise ValueError("OptiX alpha bindings must not reuse ray/hit names")
             names += tuple(dict.fromkeys(mask_names))
+            if not mask_names and not any_hit:
+                # Exactly the same closest-hit semantics as the opaque route;
+                # no mask pipeline/table/workspace is needed for this request.
+                alpha_masks = None
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -1229,6 +1241,11 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     )
                 ),
                 "any_accepted_hit": item.any_hit,
+                "opaque_instances": (
+                    tuple(instance.opaque for instance in item.scene._instances)
+                    if isinstance(item.scene, OptixInstanceScene)
+                    else ()
+                ),
             },
             publish_time_binding_validation_stable=True,
         )
@@ -1720,14 +1737,22 @@ class OptixTriangleGAS:
 
 @dataclass(frozen=True)
 class OptixRayInstance:
-    """One cold fixed-topology OptiX IAS instance descriptor."""
+    """One cold fixed-topology OptiX IAS instance descriptor.
+
+    ``opaque=True`` promises that no query will alpha-filter this instance,
+    allowing hardware traversal to bypass any-hit. The default keeps query-
+    owned masks available. Opaque queries bypass any-hit in either case.
+    """
 
     gas: OptixTriangleGAS
     transform: tuple = _IDENTITY_TRANSFORM_3X4
     mask: int = 0xFF
     custom_index: int = 0
+    opaque: bool = False
 
     def __post_init__(self):
+        if not isinstance(self.opaque, bool):
+            raise TypeError("OptiX instance opaque must be a bool")
         if not isinstance(self.gas, OptixTriangleGAS):
             raise TypeError("OptiX ray instance gas must be an OptixTriangleGAS")
         if isinstance(self.mask, bool) or not isinstance(self.mask, int):
@@ -1773,9 +1798,17 @@ class OptixInstanceScene:
                 raise TaichiRuntimeError(
                     "OptiX instance scene and all GAS resources must share one provider"
                 )
+            if (
+                instance.opaque
+                and not int(provider._loaded.api.info.features) & _INSTANCE_OPACITY
+            ):
+                raise TaichiRuntimeError(
+                    "OptiX adapter does not support instance opacity"
+                )
         native = (_InstanceDesc * len(normalized))()
         for index, instance in enumerate(normalized):
             native[index].struct_size = ctypes.sizeof(_InstanceDesc)
+            native[index].reserved = int(instance.opaque)
             native[index].gas = instance.gas._gas
             native[index].transform[:] = instance.transform
             native[index].custom_index = instance.custom_index

@@ -227,3 +227,97 @@ def test_optix_alpha_mask_metadata_and_suffix():
         ti.hardware.ray.OptixAlphaMask("uvs", "alpha", channel=4)
     assert ctypes.sizeof(_optix._AlphaMask) == 32
     assert _optix._AlphaTraceDesc.masks.offset == ctypes.sizeof(_optix._TypedTraceDesc)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_optix_instance_opacity_preserves_mask_queries_and_device_refit():
+    provider = _provider()
+    gas = scene = None
+    try:
+        if not int(provider.identity["feature_bits"]) & _optix._INSTANCE_OPACITY:
+            pytest.skip("OptiX instance opacity adapter unavailable")
+        vertices = ti.ndarray(ti.f32, (3, 3))
+        vertices.from_numpy(np.array([[0, 0, 1], [1, 0, 1], [0, 1, 1]], np.float32))
+        indices = ti.ndarray(ti.i32, (1, 3))
+        indices.from_numpy(np.array([[0, 1, 2]], np.int32))
+        gas = provider.triangle_gas(vertices, indices)
+        front = ti.hardware.ray.OptixRayInstance(gas, custom_index=13)
+        back = ti.hardware.ray.OptixRayInstance(
+            gas,
+            transform=(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1),
+            custom_index=29,
+            opaque=True,
+        )
+        with pytest.raises(TypeError, match="opaque"):
+            ti.hardware.ray.OptixRayInstance(gas, opaque=1)
+        api = provider._loaded.api
+        features = api.info.features
+        api.info.features &= ~_optix._INSTANCE_OPACITY
+        try:
+            with pytest.raises(RuntimeError, match="instance opacity"):
+                provider.instance_scene((front, back))
+        finally:
+            api.info.features = features
+        scene = provider.instance_scene((front, back))
+        count = 32
+        rays = ti.ndarray(ti.f32, (count, 8))
+        rays.from_numpy(
+            np.tile(np.array([0.2, 0.2, 2, 0, 0, 0, -1, 10], np.float32), (count, 1))
+        )
+        hits, ids = ti.ndarray(ti.f32, (count, 4)), ti.ndarray(ti.u32, (count, 4))
+        bindings = dict(rays=rays, hits=hits, hit_indices=ids)
+        opaque = scene.record_typed(count, alpha_masks=(None, None))
+        assert opaque.alpha_masks is None
+        assert not provider._alpha_prepared
+        opaque.prepare_graph_execute(bindings)()
+        np.testing.assert_array_equal(ids.to_numpy()[:, 2], 13)
+        uvs = ti.ndarray(ti.f32, (3, 2))
+        uvs.fill(0.25)
+        pixels = ti.ndarray(ti.f32, (2, 2))
+        pixels.fill(0)
+        texture = ti.Texture(ti.Format.r32f, (2, 2))
+        texture.from_ndarray(pixels)
+        mask = ti.hardware.ray.OptixAlphaMask("uvs", "alpha", channel=0)
+        with pytest.raises(ValueError, match="opaque instances"):
+            scene.record_typed(count, alpha_masks=(mask, mask))
+        bindings.update(uvs=uvs, alpha=texture)
+        nearest = scene.record_typed(
+            count, alpha_masks=(mask, None)
+        ).prepare_graph_execute(bindings)
+        any_hit = scene.record_typed(
+            count, alpha_masks=(mask, None), any_hit=True
+        ).prepare_graph_execute(bindings)
+        transforms = ti.ndarray(ti.f32, (2, 12))
+
+        @ti.kernel
+        def move(t: ti.types.ndarray(ti.f32, ndim=2), offset: ti.f32):
+            for i in range(2):
+                for j in ti.static(range(12)):
+                    t[i, j] = 1.0 if j == 0 or j == 5 or j == 10 else 0.0
+                t[i, 11] = 0.0 if i == 0 else offset
+
+        refit = scene.record_refit_transforms().prepare_graph_execute(
+            dict(transforms=transforms)
+        )
+        for offset in (-1.0, -2.0):
+            move(transforms, offset)
+            refit()
+            for execute in (nearest, any_hit):
+                execute()
+                np.testing.assert_array_equal(
+                    ids.to_numpy(), np.tile([0, 1, 29, 1], (count, 1))
+                )
+                np.testing.assert_allclose(hits.to_numpy()[:, 0], 1.0 - offset)
+        pixels.fill(1)
+        texture.from_ndarray(pixels)
+        nearest()
+        np.testing.assert_array_equal(ids.to_numpy()[:, 2], 13)
+        scene.close()
+        with pytest.raises(RuntimeError, match="closed"):
+            nearest()
+    finally:
+        if scene is not None:
+            scene.close()
+        if gas is not None:
+            gas.close()
+        provider.close()

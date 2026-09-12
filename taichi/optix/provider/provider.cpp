@@ -43,7 +43,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -55,7 +55,8 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE |
-                               TI_FORGE_OPTIX_FEATURE_ALPHA_MASK;
+                               TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
+                               TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY;
 
 void clear_error_state() {
   last_error.clear();
@@ -651,7 +652,9 @@ TiForgeOptixResult create_ias(Scene *scene, CUstream stream) {
   host_instance.instanceId = 0;
   host_instance.sbtOffset = 0;
   host_instance.visibilityMask = 0xff;
-  host_instance.flags = OPTIX_INSTANCE_FLAG_NONE;
+  // Preserve query-owned alpha eligibility without changing the GAS layout.
+  // Opaque queries use RAY_FLAG_DISABLE_ANYHIT, which overrides this flag.
+  host_instance.flags = OPTIX_INSTANCE_FLAG_ENFORCE_ANYHIT;
   host_instance.traversableHandle = scene->gas_handle;
 
   auto result = scene->instance.allocate(sizeof(host_instance));
@@ -947,6 +950,7 @@ TiForgeOptixResult create_instance_scene(
     if (gas == nullptr || gas->context != context ||
         !gas->owner_live.load(std::memory_order_acquire) ||
         source.custom_index > 0xffffffu || source.visibility_mask > 0xffu ||
+        (source.reserved & ~1u) != 0 ||
         !valid_affine_transform(source.transform)) {
       delete scene;
       return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
@@ -960,7 +964,9 @@ TiForgeOptixResult create_instance_scene(
     destination.instanceId = source.custom_index;
     destination.sbtOffset = 0;
     destination.visibilityMask = source.visibility_mask;
-    destination.flags = OPTIX_INSTANCE_FLAG_NONE;
+    destination.flags = (source.reserved & 1u)
+                            ? OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT
+                            : OPTIX_INSTANCE_FLAG_ENFORCE_ANYHIT;
     destination.traversableHandle = gas->gas_handle;
     scene->gas_refs.push_back(gas);
   }
