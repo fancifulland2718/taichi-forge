@@ -21,17 +21,20 @@ endif ()
 
 # Do not enable lto for APPLE since it made linking extremely slow.
 if (WIN32)
+    # Configuration flags already contain optimization/debug/NDEBUG defaults
+    # and caller overrides. Append link-time options; do not replace them with
+    # the global flags (which CMake also adds independently).
     if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS} -flto=thin")
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} -flto=thin")
+        string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " -flto=thin")
+        string(APPEND CMAKE_CXX_FLAGS_RELEASE " -flto=thin")
     elseif (MSVC)
-        set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS} /Gy")
-        set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} /Gy")
+        string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " /Gy")
+        string(APPEND CMAKE_CXX_FLAGS_RELEASE " /Gy")
         if (TI_WITH_LTO)
-            set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS} /GL")
-            set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS} /GL")
-            set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS} /LTCG")
-            set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS} /LTCG")
+            string(APPEND CMAKE_CXX_FLAGS_RELWITHDEBINFO " /GL")
+            string(APPEND CMAKE_CXX_FLAGS_RELEASE " /GL")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO " /LTCG")
+            string(APPEND CMAKE_EXE_LINKER_FLAGS_RELEASE " /LTCG")
         endif()
     endif()
 endif()
