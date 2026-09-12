@@ -193,6 +193,15 @@ struct VulkanTLASTransformCommand {
   std::array<std::uint32_t, 2> parameters{};
 };
 
+// Layout and byte ranges are frozen at preparation, not rebuilt on replay.
+struct PreparedVulkanBufferImageCopy {
+  std::shared_ptr<PreparedNativeStorage> storage;
+  RuntimeResourceHandle texture_handle;
+  DeviceAllocation image;
+  DevicePtr buffer;
+  BufferImageCopyParams parameters{};
+  bool to_image{false};
+};
 class CudaFftPlan;
 class VulkanFftPlan;
 class VulkanParallelSortPlan;
@@ -1214,6 +1223,21 @@ class TI_DLL_EXPORT Program {
       std::uint32_t image_mip_level,
       std::uint32_t image_base_layer,
       std::uint32_t image_layer_count);
+
+  PreparedVulkanBufferImageCopy prepare_vulkan_buffer_image_copy(
+      Texture *texture,
+      const storage::DenseStorageDescriptor &buffer,
+      bool to_image,
+      std::size_t buffer_offset,
+      std::uint32_t buffer_row_length,
+      std::uint32_t buffer_image_height,
+      std::vector<int> image_offset,
+      std::vector<int> image_extent,
+      std::uint32_t image_mip_level,
+      std::uint32_t image_base_layer,
+      std::uint32_t image_layer_count);
+  void execute_vulkan_buffer_image_copy(
+      const PreparedVulkanBufferImageCopy &command);
 
   void vulkan_copy_texture_to_ndarray(
       Ndarray *destination,

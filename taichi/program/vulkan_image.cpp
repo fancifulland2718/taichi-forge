@@ -1,4 +1,5 @@
 #include "taichi/program/program.h"
+#include "taichi/program/storage_view.h"
 
 #include <array>
 #include <limits>
@@ -67,15 +68,6 @@ std::size_t texture_texel_bytes(Texture *texture) {
   const auto [type, channels] =
       buffer_format2type_channels(texture->get_buffer_format());
   return static_cast<std::size_t>(data_type_size(type)) * channels;
-}
-
-std::size_t ndarray_storage_bytes(Ndarray *ndarray, const char *name) {
-  const std::size_t elements = ndarray->get_nelement();
-  const std::size_t element_bytes = ndarray->get_element_size();
-  const auto max_size = (std::numeric_limits<std::size_t>::max)();
-  TI_ERROR_IF(element_bytes != 0 && elements > max_size / element_bytes,
-              "Vulkan {} ndarray byte size overflows size_t.", name);
-  return elements * element_bytes;
 }
 
 std::size_t required_buffer_image_bytes(
@@ -230,48 +222,15 @@ void Program::vulkan_copy_ndarray_to_texture(
     std::uint32_t image_mip_level,
     std::uint32_t image_base_layer,
     std::uint32_t image_layer_count) {
-  auto submission_guard = acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan || !program_impl_,
-              "Vulkan buffer-to-image copy requires the Vulkan backend.");
-  validate_color_texture(this, destination, "buffer-copy destination");
   TI_ERROR_IF(source == nullptr || source->owning_program() != this,
               "Vulkan buffer-copy source must be an active-runtime ndarray.");
-  const auto image_offset = checked_image_coordinates(
-      image_offset_values, "buffer-copy image offset", false);
-  const auto image_extent = checked_image_coordinates(
-      image_extent_values, "buffer-copy image extent", true);
-  validate_texture_region(destination, image_offset, image_extent,
-                          image_mip_level, image_base_layer, image_layer_count,
-                          "buffer-copy destination");
-  const std::size_t required_bytes = required_buffer_image_bytes(
-      buffer_offset, buffer_row_length, buffer_image_height, image_extent,
-      texture_texel_bytes(destination));
-  const std::size_t available_bytes =
-      ndarray_storage_bytes(source, "buffer-to-image source");
-  TI_ERROR_IF(required_bytes > available_bytes,
-              "Vulkan buffer-to-image source ndarray is too small for the "
-              "declared layout and region.");
-
-  auto texture_leases = acquire_texture_leases({destination});
-  auto ndarray_leases = acquire_ndarray_leases({source});
-  const auto destination_allocation = destination->get_device_allocation();
-  const auto source_allocation = source->get_device_allocation();
-  const auto params = make_buffer_image_params(
-      buffer_row_length, buffer_image_height, image_offset, image_extent,
-      image_mip_level, image_base_layer, image_layer_count);
-  enqueue_compute_op_lambda(
-      [destination_allocation, source_allocation, buffer_offset,
-       params](Device *, CommandList *commands) {
-        commands->buffer_barrier(source_allocation);
-        commands->buffer_to_image(
-            destination_allocation, source_allocation.get_ptr(buffer_offset),
-            ImageLayout::transfer_dst, params);
-      },
-      {{destination_allocation, ImageLayout::transfer_dst,
-        ImageLayout::shader_read}});
-  mark_runtime_submission_pending();
-  pin_texture_launch_leases(texture_leases);
-  pin_ndarray_launch_leases(ndarray_leases);
+  const auto description = storage::describe_ndarray_storage(*source);
+  TI_ERROR_IF(!description, "Vulkan image source requires dense storage.");
+  execute_vulkan_buffer_image_copy(prepare_vulkan_buffer_image_copy(
+      destination, *description.descriptor, true, buffer_offset, buffer_row_length,
+      buffer_image_height, std::move(image_offset_values),
+      std::move(image_extent_values), image_mip_level, image_base_layer,
+      image_layer_count));
 }
 
 void Program::vulkan_copy_texture_to_ndarray(
@@ -285,49 +244,98 @@ void Program::vulkan_copy_texture_to_ndarray(
     std::uint32_t image_mip_level,
     std::uint32_t image_base_layer,
     std::uint32_t image_layer_count) {
-  auto submission_guard = acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(compile_config().arch != Arch::vulkan || !program_impl_,
-              "Vulkan image-to-buffer copy requires the Vulkan backend.");
-  validate_color_texture(this, source, "buffer-copy source");
   TI_ERROR_IF(destination == nullptr || destination->owning_program() != this,
               "Vulkan buffer-copy destination must be an active-runtime "
               "ndarray.");
+  const auto description = storage::describe_ndarray_storage(*destination);
+  TI_ERROR_IF(!description, "Vulkan image destination requires dense storage.");
+  execute_vulkan_buffer_image_copy(prepare_vulkan_buffer_image_copy(
+      source, *description.descriptor, false, buffer_offset, buffer_row_length,
+      buffer_image_height, std::move(image_offset_values),
+      std::move(image_extent_values), image_mip_level, image_base_layer,
+      image_layer_count));
+}
+
+PreparedVulkanBufferImageCopy Program::prepare_vulkan_buffer_image_copy(
+    Texture *texture,
+    const storage::DenseStorageDescriptor &buffer,
+    bool to_image,
+    std::size_t buffer_offset,
+    std::uint32_t buffer_row_length,
+    std::uint32_t buffer_image_height,
+    std::vector<int> image_offset_values,
+    std::vector<int> image_extent_values,
+    std::uint32_t image_mip_level,
+    std::uint32_t image_base_layer,
+    std::uint32_t image_layer_count) {
+  // Resolve storage before taking the texture submission gate, keeping the
+  // existing lifecycle -> submission lock order for dense SNode owners.
+  auto storage = prepare_native_storage({&buffer}, {!to_image});
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(compile_config().arch != Arch::vulkan || !program_impl_,
+              "Vulkan buffer-image copy requires the Vulkan backend.");
+  validate_color_texture(this, texture, "buffer-copy image");
   const auto image_offset = checked_image_coordinates(
       image_offset_values, "buffer-copy image offset", false);
   const auto image_extent = checked_image_coordinates(
       image_extent_values, "buffer-copy image extent", true);
-  validate_texture_region(source, image_offset, image_extent, image_mip_level,
+  validate_texture_region(texture, image_offset, image_extent, image_mip_level,
                           image_base_layer, image_layer_count,
-                          "buffer-copy source");
+                          "buffer-copy image");
+  const auto texel_bytes = texture_texel_bytes(texture);
   const std::size_t required_bytes = required_buffer_image_bytes(
       buffer_offset, buffer_row_length, buffer_image_height, image_extent,
-      texture_texel_bytes(source));
-  const std::size_t available_bytes =
-      ndarray_storage_bytes(destination, "image-to-buffer destination");
-  TI_ERROR_IF(required_bytes > available_bytes,
-              "Vulkan image-to-buffer destination ndarray is too small for "
+      texel_bytes);
+  const auto binding = storage->binding(0);
+  TI_ERROR_IF(required_bytes > binding.bytes,
+              "Vulkan buffer-image dense storage is too small for "
               "the declared layout and region.");
-
-  auto texture_leases = acquire_texture_leases({source});
-  auto ndarray_leases = acquire_ndarray_leases({destination});
-  const auto destination_allocation = destination->get_device_allocation();
-  const auto source_allocation = source->get_device_allocation();
-  const auto params = make_buffer_image_params(
+  TI_ERROR_IF(binding.pointer.offset % texel_bytes != 0,
+              "Vulkan buffer-image dense range must be aligned to the image "
+              "texel block size.");
+  PreparedVulkanBufferImageCopy packet;
+  packet.storage = std::move(storage);
+  packet.texture_handle = texture->runtime_resource_handle();
+  packet.image = texture->get_device_allocation();
+  packet.buffer = binding.pointer;
+  packet.buffer.offset += buffer_offset;
+  packet.to_image = to_image;
+  packet.parameters = make_buffer_image_params(
       buffer_row_length, buffer_image_height, image_offset, image_extent,
       image_mip_level, image_base_layer, image_layer_count);
-  enqueue_compute_op_lambda(
-      [destination_allocation, source_allocation, buffer_offset,
-       params](Device *, CommandList *commands) {
-        commands->image_to_buffer(destination_allocation.get_ptr(buffer_offset),
-                                  source_allocation,
-                                  ImageLayout::transfer_src, params);
-        commands->buffer_barrier(destination_allocation);
-      },
-      {{source_allocation, ImageLayout::transfer_src,
-        ImageLayout::shader_read}});
-  mark_runtime_submission_pending();
-  pin_texture_launch_leases(texture_leases);
-  pin_ndarray_launch_leases(ndarray_leases);
+  return packet;
+}
+
+void Program::execute_vulkan_buffer_image_copy(
+    const PreparedVulkanBufferImageCopy &packet) {
+  with_prepared_native_storage(*packet.storage, [&] {
+    const auto handle = packet.texture_handle;
+    TI_ERROR_IF(handle.index >= texture_view_slots_.size(),
+                "Prepared image transfer references a retired Texture.");
+    const auto &slot = texture_view_slots_[handle.index];
+    TI_ERROR_IF(slot.handle != handle || !slot.view,
+                "Prepared image transfer references a retired Texture.");
+    auto leases = acquire_texture_leases({slot.view});
+    pin_texture_launch_leases(leases);
+    const auto image = packet.image;
+    const auto buffer = packet.buffer;
+    const auto params = packet.parameters;
+    const auto to_image = packet.to_image;
+    const auto layout =
+        to_image ? ImageLayout::transfer_dst : ImageLayout::transfer_src;
+    enqueue_compute_op_lambda(
+        [image, buffer, params, to_image, layout](Device *, CommandList *commands) {
+          if (to_image) {
+            commands->buffer_barrier(buffer);
+            commands->buffer_to_image(image, buffer, layout, params);
+          } else {
+            commands->image_to_buffer(buffer, image, layout, params);
+            commands->buffer_barrier(buffer);
+          }
+        },
+        {{image, layout, ImageLayout::shader_read}});
+    mark_runtime_submission_pending();
+  });
 }
 
 void Program::vulkan_blit_texture(
@@ -423,6 +431,18 @@ std::size_t Program::debug_vulkan_image_sampler_cache_size() {
 #else
 
 namespace taichi::lang {
+
+PreparedVulkanBufferImageCopy Program::prepare_vulkan_buffer_image_copy(
+    Texture *, const storage::DenseStorageDescriptor &, bool, std::size_t,
+    std::uint32_t, std::uint32_t, std::vector<int>, std::vector<int>,
+    std::uint32_t, std::uint32_t, std::uint32_t) {
+  TI_ERROR("Vulkan buffer-image copy is unavailable in this build.");
+}
+
+void Program::execute_vulkan_buffer_image_copy(
+    const PreparedVulkanBufferImageCopy &) {
+  TI_ERROR("Vulkan buffer-image copy is unavailable in this build.");
+}
 
 void Program::vulkan_copy_texture(Texture *, Texture *) {
   TI_ERROR("Vulkan texture copy is unavailable in this build.");

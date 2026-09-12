@@ -6,6 +6,94 @@ from taichi_forge.graph._ir import GraphAccess
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@pytest.mark.parametrize("source_kind", ["scalar_field", "vector_array"])
+def test_buffer_image_dense_ranges_prepare_once_and_preserve_padding(
+    source_kind, monkeypatch
+):
+    width, height, pitch = 3, 2, 5
+    texture = ti.Texture(ti.Format.rgba32f, (width, height))
+    if source_kind == "scalar_field":
+        field = ti.field(ti.f32)
+        fields = ti.FieldsBuilder()
+        fields.dense(ti.ij, (12, 4)).place(field)
+        tree = fields.finalize()
+        field.fill(-11)
+        source = ti.experimental.ndarray_view(
+            field, slices=(slice(1, 11), slice(None))
+        )
+    else:
+        field = ti.Vector.ndarray(4, ti.f32, shape=12)
+        field.fill(-11)
+        source = ti.experimental.ndarray_view(field, slices=(slice(1, 11),))
+    destination = ti.field(ti.f32, shape=(12, 4))
+    destination.fill(-99)
+    target = ti.experimental.ndarray_view(
+        destination, slices=(slice(1, 11), slice(None))
+    )
+    layout = ti.hardware.image.VulkanBufferImageLayout(row_length=pitch)
+    upload = ti.hardware.image.VulkanBufferToImageRecording(
+        source="pixels", destination="image", buffer_layout=layout
+    )
+    download = ti.hardware.image.VulkanImageToBufferRecording(
+        source="image", destination="result", buffer_layout=layout
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(upload, admission="auto")
+    builder.append_native(download, admission="auto")
+    graph = builder.compile()
+    bindings = graph.bind({"pixels": source, "image": texture, "result": target})
+
+    def unexpected_prepare(*args, **kwargs):
+        raise AssertionError("image layout/descriptor preparation entered replay")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(type(upload), "_prepare_packet", unexpected_prepare)
+        patched.setattr(type(download), "_prepare_packet", unexpected_prepare)
+        for base in (0, 100, 200):
+            values = np.arange(48, dtype=np.float32).reshape(12, 4) + base
+            field.from_numpy(values)
+            graph.run(bindings)
+            expected = np.full((12, 4), -99, dtype=np.float32)
+            for row in range(height):
+                start = 1 + row * pitch
+                expected[start:start + width] = values[start:start + width]
+            np.testing.assert_array_equal(destination.to_numpy(), expected)
+    if source_kind == "scalar_field":
+        tree.destroy()
+        with pytest.raises(RuntimeError, match="destroyed|retired|invalid|SNodeTree"):
+            graph.run(bindings)
+    graph.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_buffer_image_dense_layout_rejection_preserves_existing_binding():
+    field = ti.field(ti.f32, shape=16)
+    field.from_numpy(np.arange(16, dtype=np.float32))
+    texture = ti.Texture(ti.Format.r32f, (4, 2))
+    output = ti.ndarray(ti.f32, 8)
+    source = ti.experimental.ndarray_view(field, slices=(slice(2, 10),))
+    upload = ti.hardware.image.VulkanBufferToImageRecording()
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(upload, admission="auto")
+    graph = builder.compile()
+    bindings = graph.bind({"source": source, "destination": texture})
+    revision = bindings.revision
+    for view, reason in (
+        (ti.experimental.ndarray_view(field, slices=(slice(0, 16, 2),)), "compact"),
+        (ti.experimental.ndarray_view(field, slices=(slice(0, 2),)), "too small"),
+    ):
+        with pytest.raises(RuntimeError, match=reason):
+            bindings.update(source=view)
+        assert bindings.revision == revision
+    graph.run(bindings)
+    ti.hardware.image.copy_image_to_buffer(output, texture)
+    np.testing.assert_array_equal(output.to_numpy(), np.arange(2, 10))
+    ti.reset()
+    with pytest.raises(RuntimeError, match="compiled before ti.reset"):
+        graph.run(bindings)
+
+
 @test_utils.test(arch=ti.cpu)
 def test_vulkan_image_copy_rejects_non_vulkan_runtime():
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):

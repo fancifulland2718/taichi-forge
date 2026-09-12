@@ -1,6 +1,7 @@
 """Low-level runtime-ordered Vulkan image transfer commands."""
 
 from dataclasses import dataclass
+from functools import partial
 
 from taichi_forge._hardware_telemetry import (
     hardware_failure_phase,
@@ -16,6 +17,7 @@ from taichi_forge.hardware._native_adapter import (
 from taichi_forge.hardware._runtime import active_backend
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
+from taichi_forge.lang._storage_view import describe_storage
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang.exception import TaichiRuntimeError
 
@@ -285,8 +287,90 @@ class VulkanImageCopyRecording(_VulkanImageTransferRecording):
         return "vulkan_image_copy"
 
 
-class VulkanBufferToImageRecording(_VulkanImageTransferRecording):
-    """One raw ndarray-buffer to color-image region transfer."""
+@dataclass(frozen=True)
+class _PreparedBufferImageCopy:
+    command: object
+    destination: object
+    owners: tuple
+
+
+class _VulkanBufferImageRecording(_VulkanImageTransferRecording):
+    """Cold byte-range bindings; native leases remain the execution boundary."""
+
+    def _describe_bindings(self, bindings):
+        texture_name = self.destination if self._to_image else self.source
+        buffer_name = self.source if self._to_image else self.destination
+        texture = bindings[texture_name]
+        if not isinstance(texture, Texture):
+            raise TaichiRuntimeError(
+                f"Vulkan image binding {texture_name!r} must be a Taichi texture"
+            )
+        value = bindings[buffer_name]
+        description = describe_storage(value)
+        if not description.supported:
+            raise TaichiRuntimeError(
+                f"Vulkan image binding {buffer_name!r} requires dense storage: "
+                f"{description.failure_reason}"
+            )
+        return texture, value, description
+
+    def validate_graph_bindings(self, bindings):
+        self._describe_bindings(bindings)
+
+    def _prepare_packet(self, bindings):
+        validate_exact_bindings(self, bindings, "Vulkan image")
+        self.validate_graph_lifetime()
+        texture, value, description = self._describe_bindings(bindings)
+        command = self._runtime_prog._prepare_vulkan_buffer_image_copy(
+            texture.tex,
+            description.descriptor,
+            self._to_image,
+            self.buffer_layout.byte_offset,
+            self.buffer_layout.row_length,
+            self.buffer_layout.image_height,
+            self.image_region.offset,
+            self.image_region.resolved_extent(texture),
+            self.image_region.mip_level,
+            self.image_region.base_layer,
+            self.image_region.layer_count,
+        )
+        return _PreparedBufferImageCopy(
+            command,
+            bindings[self.destination],
+            (texture, texture.tex, value, description,
+             *((value.arr,) if isinstance(value, Ndarray) else ())),
+        )
+
+    def execute(self, bindings):
+        packet = (bindings if isinstance(bindings, _PreparedBufferImageCopy)
+                  else self._prepare_packet(bindings))
+        with hardware_failure_phase("provider_execution_failure"):
+            self._runtime_prog._execute_vulkan_buffer_image_copy(packet.command)
+        return packet.destination
+
+    def prepare_graph_execute(self, bindings):
+        return partial(self.execute, self._prepare_packet(bindings))
+
+    def _as_graph_native_node(self):
+        return native_recording_node(
+            self,
+            runtime_bindings=lambda item: item._binding_kinds,
+            debug_info=lambda item: {"kind": item.debug_kind},
+            publish_time_binding_validation_stable=True,
+        )
+
+
+class VulkanBufferToImageRecording(_VulkanBufferImageRecording):
+    """Copy a compact dense byte range to a color-image region.
+
+    Supports program-owned ndarrays and qualified dense field/views, without
+    packing or dtype conversion. Layout is raw texels: x varies fastest, then
+    y, then z; row_length/image_height are in texels and byte_offset is relative
+    to the supplied view. A bound Graph prepares layout/ranges once; in-place
+    data updates are visible on its next execution. Strided views are rejected.
+    """
+
+    _to_image = True
 
     def __init__(
         self,
@@ -317,31 +401,20 @@ class VulkanBufferToImageRecording(_VulkanImageTransferRecording):
             ),
         )
 
-    def _execute(self, bindings):
-        source = bindings[self.source]
-        destination = bindings[self.destination]
-        extent = self.image_region.resolved_extent(destination)
-        self._runtime_prog._vulkan_copy_ndarray_to_texture(
-            destination.tex,
-            source.arr,
-            self.buffer_layout.byte_offset,
-            self.buffer_layout.row_length,
-            self.buffer_layout.image_height,
-            self.image_region.offset,
-            extent,
-            self.image_region.mip_level,
-            self.image_region.base_layer,
-            self.image_region.layer_count,
-        )
-        return destination
-
     @property
     def debug_kind(self):
         return "vulkan_buffer_to_image"
 
 
-class VulkanImageToBufferRecording(_VulkanImageTransferRecording):
-    """One color-image region to raw ndarray-buffer transfer."""
+class VulkanImageToBufferRecording(_VulkanBufferImageRecording):
+    """Copy a color-image region into writable compact dense storage.
+
+    Uses the raw texel layout of :class:`VulkanBufferToImageRecording`; bytes
+    outside the specified region are preserved. Graph execution is a prepared
+    runtime-ordered native command, not an immutable Vulkan binding frame.
+    """
+
+    _to_image = False
 
     def __init__(
         self,
@@ -371,24 +444,6 @@ class VulkanImageToBufferRecording(_VulkanImageTransferRecording):
                 subresource=self.buffer_layout.effect_scope(),
             ),
         )
-
-    def _execute(self, bindings):
-        source = bindings[self.source]
-        destination = bindings[self.destination]
-        extent = self.image_region.resolved_extent(source)
-        self._runtime_prog._vulkan_copy_texture_to_ndarray(
-            destination.arr,
-            source.tex,
-            self.buffer_layout.byte_offset,
-            self.buffer_layout.row_length,
-            self.buffer_layout.image_height,
-            self.image_region.offset,
-            extent,
-            self.image_region.mip_level,
-            self.image_region.base_layer,
-            self.image_region.layer_count,
-        )
-        return destination
 
     @property
     def debug_kind(self):

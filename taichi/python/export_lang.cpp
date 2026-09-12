@@ -1301,6 +1301,7 @@ void export_lang(py::module &m) {
   py::class_<VulkanRayGeometryCommand>(m, "_VulkanRayGeometryCommand");
   py::class_<VulkanTLASTransformCommand>(m, "_VulkanTLASTransformCommand");
   py::class_<PreparedVulkanBufferCommands>(m, "_PreparedVulkanBufferCommands");
+  py::class_<PreparedVulkanBufferImageCopy>(m, "_PreparedVulkanBufferImageCopy");
   py::class_<PreparedPrimitiveSort, std::shared_ptr<PreparedPrimitiveSort>>(
       m, "_PreparedPrimitiveSort");
   py::class_<PreparedPrimitiveCompact, std::shared_ptr<PreparedPrimitiveCompact>>(
@@ -2700,6 +2701,18 @@ void export_lang(py::module &m) {
            py::arg("image_extent"), py::arg("image_mip_level"),
            py::arg("image_base_layer"), py::arg("image_layer_count"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_prepare_vulkan_buffer_image_copy",
+           &Program::prepare_vulkan_buffer_image_copy,
+           py::arg("texture"), py::arg("buffer"), py::arg("to_image"),
+           py::arg("buffer_offset"), py::arg("buffer_row_length"),
+           py::arg("buffer_image_height"), py::arg("image_offset"),
+           py::arg("image_extent"), py::arg("image_mip_level"),
+           py::arg("image_base_layer"), py::arg("image_layer_count"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_execute_vulkan_buffer_image_copy",
+           tracked_native_program_method(
+               &Program::execute_vulkan_buffer_image_copy),
+           py::arg("command"), py::call_guard<py::gil_scoped_release>())
       .def("_vulkan_copy_texture_to_ndarray",
            tracked_native_program_method(
                &Program::vulkan_copy_texture_to_ndarray),
