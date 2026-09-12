@@ -39,7 +39,7 @@ def _accept_material(
     return mode == 2 or (mode == 1 and alpha.sample_lod(uv, 0.0).x >= 0.5)
 
 
-@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@test_utils.test(arch=ti.vulkan, offline_cache=False, print_ir=True)
 def test_filtered_ray_nearest_any_mask_updates_and_graph_lifetime():
     blas, scene = _layers()
     materials = ti.ndarray(ti.i32, 3)

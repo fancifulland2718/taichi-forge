@@ -105,7 +105,7 @@ class IRPrinter : public IRVisitor {
 
   void visit(FrontendExprStmt *stmt) override {
     if (stmt->val) {
-      stmt->val->accept(expr_printer_);
+      print("{}", expr_to_string(stmt->val));
     }
     dbg_info_printer_(stmt);
   }
