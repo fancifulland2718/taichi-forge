@@ -126,14 +126,13 @@ CUDA capture。报告分别显示私有 flags 与最近观测到的共享 native
 
 ## CompileIQ 边界
 
-`0.6.3` 不公开算法级 CompileIQ 搜索入口。reduce provider 与 segmented-scan 的历史离线搜索器
-保留为私有资格化工具，用于审计既有正负证据；它们不是算法公共合同，也不会成为新的 provider
-路由层。应用应继续使用上面的普通 primitive、显式 `method=` 或现有 `method="auto"`。
+使用公共 whole-Graph 流程：`definition = builder.freeze()`，
+随后 `definition.search_recipes(...)`。它要求维护版 CompileIQ fork，评价完整 recipe。
+安装、评价、报告及恢复见 [recipe 接入](graph_recipe_integration.zh.md)。
 
-公开的 CompileIQ 入口归 Graph 所有：`ti.graph.compileiq_recipe_search(graph)` 只搜索 Forge 已证明
-合法且可精确物化的完整 Graph execution recipe。CompileIQ 不接收 provider、block size、workgroup
-shape、PTXAS flag 或 segment offset 等裸轴。搜索和资格化保持离线，不修改 primitive 默认值；
-compile/search build 时间只作诊断，不是准入门禁。
+普通 primitive 保持 `method="auto"` 与显式 method 行为。
+不提供算法级 CompileIQ API，也不搜索裸 block/provider/segment-offset 参数。
+只有对应 Graph provider 支持完整语义与资源合同时，primitive 才能成为完整 recipe 的一部分。
 
 ## 机器可读 capability 合同
 
@@ -197,41 +196,14 @@ dependency class 的发行证据。
 
 driver-only 消除了 CUDA Runtime 动态库依赖，但本身不能证明最低 NVIDIA driver 已降低。
 PTX 是否可加载以及任何 driver 下限声明，仍必须在目标旧 driver 上真实执行。当前构建边界见
-[构建 Wheel](build_wheels.zh.md)，Linux 和旧 driver 的待补证据见
-[Linux 复测状态](linux_revalidation.zh.md)。
+[构建 Wheel](build_wheels.zh.md)，Linux 环境说明见
+[Linux 安装与排错](linux_revalidation.zh.md)。
 
-### CUDA 0.6.0 历史性能快照与当前边界
+### 性能测量
 
-下表是 0.6.0 资格快照，不代表之后每个 `master` 优化的测量结果。数据来自 Windows
-开发机（RTX 5090、driver 610.62、Python 3.10.11）上的 1,048,576 个 i32 item：每项
-30 个 sample，每个 sample 批量提交 20 次后同步并折算单次 median；测量前 idle guard
-确认没有其它 Python 或 GPU compute process。CUB 只来自不发布的 CUDA 13.2 reference
-build，正确性另由 NumPy oracle 验证。
-
-| Primitive | driver-only median | CUB reference median | 相对吞吐 | 资格参考线 | driver workspace |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
-| reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
-| histogram-256 | 0.1243 ms | 0.1215 ms | 97.7% | 90% | 0 |
-| stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
-| stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
-
-按表中的资格参考线，histogram 和 compact 当时达到参考值，scan、reduce 和 sort 没有。
-标准 wheel 仍选择正确、异步且 driver-only 的 Forge provider，因为 CUB 不属于发行依赖，
-host round-trip 也不适合作为 GPU 热路径默认值。这不是与 CUB 等速的声明，也不是跨设备、
-跨驱动性能保证。
-
-成对的 0.6.1 release-candidate wheel 保持相同的 1024-item tiled scan、fused tiled
-compact rank 和稳定分层
-4-bit LSD radix 合同，但在 radix histogram 顶层已经能由一个 scan tile 完成时立即终止
-hierarchy。在表中 1,048,576-item 的规模上，32-bit sort 的 histogram-scan launch 会从
-16 降为 8，histogram uniform-add launch 从 8 降为 0，workspace 不增长。上表 timing
-不能重新标成 0.6.1 结果。另一次 wheel-to-wheel 测试在同一 RTX 5090/610.62 系统上对比
-公开 0.6.0 wheel（`dbc683028`）与成对的 0.6.1 release-candidate wheel：每只 wheel 分别启动
-三个新进程，每个进程 10 次 warmup、100 次逐次同步 native sort。process median 再取
-median 后分别为 0.51245 ms 和 0.36455 ms，延迟降低 28.9%；报告的 peak workspace 从
-29,426,176 B 降为 29,425,664 B。安装 wheel 后的 13 个 CUDA dtype/payload 与大 hierarchy
-稳定性用例全部通过。该配对测试的同步方法与历史表不同，因此用于补充而不是改写上表快照。
+按实际 capacity、活跃数量、key 分布及 payload 布局测量完整 primitive pipeline，
+保持相同的同步边界。单独 warmup，复用 workspace，分别报告 host 提交、device 工作和保留内存。
+native 执行与 Graph recording 的固定成本不同，不能保证所有规模都加速。
 
 ## 数据合同
 
@@ -278,11 +250,6 @@ recipe，因此它仍是 segmented native 诊断路线：`admission="auto"` 会�
 scatter 会把 indirect packet 与 count 一起发布，删除一次 preparation dispatch。CPU/CUDA
 不消费该 packet；CUDA 独立使用 exact logical range，并可选择 12.4+ adaptive physical
 control。
-
-在当前 Windows 资格机器上，10% active prefix 的 compact-to-scan chain 相对在两个操作间
-显式调用 `DeviceExtent.snapshot()` 的同一 chain，CPU、CUDA、Vulkan 分别快 1.05x、
-1.32x、1.90x。这是消除同步的测量结果，不是跨设备吞吐保证。带执行末端同步的成对基准为
-`benchmarks/dynamic_workload_bench.py`。
 
 ## Device-resident worklist
 
@@ -343,9 +310,7 @@ strategy="auto", key_capacity=..., output_shape="compact_winner_list")` 将 conf
 integer domain 可使用确定性的 `dense_atomic` arbitration；其他情况由 `radix_grouped` 使用
 backend native stable-sort provider。两条路线都按 priority、ordinal、source index 处理 tie。
 dense 路线把越界 key 记为 rejected + overflow；radix winner reduction 扫描每个 sorted key
-run，由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。可用
-`benchmarks/device_worklist_conflict_bench.py` 做同输入配对资格；脚本会验证 parity，并报告
-raw sample/CV 与 workspace accounting。
+run，由一个或少数超长 run 主导的分布并行度更低，应单独做性能资格。比较策略时保持输入一致，并计入 workspace 成本。
 若 consumer 只需要逐 key ownership，可在 `dense_atomic`、`telemetry=False` 下请求
 `output_shape="dense_winner_table"`。结果是长度为 `key_capacity` 的 source-index table，空 key
 为 `0x7fffffff`；不会生成 compact extent、winner list、scan 或 compact materialization。
@@ -454,19 +419,6 @@ library 依赖。Unique 的最低可复用 scratch 为 4 bytes/item，RLE 为 12
 另加 compact provider 的临时空间。`RunLengthWorkspace` 可以复用但不可并发共享；
 CPU、CUDA、Vulkan 已用两个 Python submission thread 和独立 workspace 做压力回归。
 
-Windows 开发机（Ryzen 9 9950X、RTX 5090 driver 610.62）上，1,048,576 个 i32 key、
-262,144 个 run 的实测如下：
-
-| 后端 | public RLE | PrimitiveSequence Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 4.85 ms | 4.22 ms | 4.98 ms | 1.03x |
-| CUDA | 0.418 ms | 0.456 ms | 12.19 ms | 29.2x |
-| Vulkan | 0.643 ms | 0.632 ms | 16.03 ms | 24.9x |
-
-compile/warmup 不计时，workspace 已复用，测量前没有其他 Python/GPU compute
-process。这是开发证据，不是跨驱动性能保证。CUDA Graph 差异约 38 microseconds，
-记录为通用 native-node replay 开销；当前实现不为此增加 RLE 专用路径。
-
 ## 可复用 Segmented Reduce 与 Scan
 
 Forge 用可复用 `SegmentedLayout` 表达固定容量 dense topology：
@@ -517,44 +469,6 @@ topology 内存由 `layout.topology_bytes` 单独报告：每个 capacity item 4
 serial scan 的 scratch 为零；global scan 可持有 provider storage 与每 segment
 一个 base value。不可变 layout 可跨 Python submission thread 共享，但每个
 producer/Graph 必须使用独立 workspace。
-
-Windows 开发机的代表 workload 为 1,048,576 items、4,096 个长度 256 的 segment；
-每项取 5 个 trial 的 median，每 trial 20 次 hot replay，复用 layout/workspace，
-compile/warmup 不计时。GPU 仅在确认没有其他 Python/GPU compute process 时测量。
-
-| 后端 | reduce public | reduce Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.770 ms | 0.805 ms | 1.003 ms | 1.30x |
-| CUDA | 0.0756 ms | 0.0736 ms | 2.881 ms | 38.1x |
-| Vulkan | 0.0751 ms | 0.0716 ms | 4.538 ms | 60.4x |
-
-| 后端 | i32 scan public | i32 scan Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.500 ms | 0.495 ms | 3.108 ms | 6.22x |
-| CUDA | 0.165 ms | 0.161 ms | 6.304 ms | 38.3x |
-| Vulkan | 0.176 ms | 0.187 ms | 8.859 ms | 50.3x |
-
-| 后端 | f32 scan public | f32 scan Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.604 ms | 0.516 ms | 3.714 ms | 6.15x |
-| CUDA | 0.146 ms | 0.161 ms | 8.008 ms | 54.9x |
-| Vulkan | 0.167 ms | 0.197 ms | 10.237 ms | 61.2x |
-
-不可变 topology 占 4,210,692 bytes；一次性构建/上传在 CPU、CUDA、Vulkan 上分别为
-10.67 ms、17.40 ms、32.56 ms。短分段 scan scratch 为零；CPU grouped reduce
-持有 262,144 bytes，实测 CUDA/Vulkan grouped provider 没有 Python-owned scratch。
-
-为避免只对短 workload 过拟合，只增加了一个 64 segment、每 segment 16,384 items
-的反例：
-
-| 后端 | 显式 global scan | 显式 serial | 实测优选 |
-| --- | ---: | ---: | --- |
-| CPU | 5.984 ms | 0.586 ms | serial，10.2x |
-| CUDA | 0.871 ms | 1.800 ms | global，2.07x |
-| Vulkan | 3.855 ms | 1.597 ms | serial，2.41x |
-
-这些历史结果描述普通 API 的粗粒度 backend 分派，不是阈值扫参、跨 driver 保证，
-也不能作为否定新 whole-Graph 实现的依据。
 
 `GraphBuilder.segmented_scan()` 对固定、互不重叠的 1D i32/u32 ndarray 与不可变
 segment layout 提供独立的 CUDA 完整 recipe 域。默认 provider 保留 serial、shared-memory

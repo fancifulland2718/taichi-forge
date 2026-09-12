@@ -17,14 +17,14 @@ APIs for the bounded operations below; discovery probes remain non-executing.
 
 | Library | Forge status | Installation owner | Forge discovery | Call position |
 | --- | --- | --- | --- | --- |
-| cuBLAS | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cublas")` | Direct Python or root Graph; not kernel-callable |
+| cuBLAS | Registered provider | User CUDA environment | `ti.hardware.probe("cublas")` | Direct Python or root Graph; not kernel-callable |
 | cuSOLVERDn | Explicit device Cholesky | User CUDA environment | `ti.hardware.probe("cusolverdn")` | Fixed buffers, optional retained CUDA Graph/root command; no automatic selection or built-in solver recipe generator |
-| cuSPARSE | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cusparse")` | Domain auto/explicit or root Graph; not kernel-callable |
-| cuFFT | Registered D1 provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
+| cuSPARSE | Registered provider | User CUDA environment | `ti.hardware.probe("cusparse")` | Domain auto/explicit or root Graph; not kernel-callable |
+| cuFFT | Registered provider | User CUDA environment | `ti.hardware.probe("cufft")` | Explicit plan or root Graph; not kernel-callable |
 | VkFFT 1.3.4 | Optional ABI1 Vulkan JIT adapter | Current runtime build configuration; older artifacts may omit it | `ti.hardware.probe("vkfft")` or explicit library path | Fixed-storage plan/root Graph; explicit batch and whole-Graph secondary recipes with matching extensions |
 | cuDSS 0.8.x | Registered bundled-adapter ABI | Forge adapter; user vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | Domain auto/explicit or root Graph; not kernel-callable |
 | OptiX ABI 93/105/118 | Registered bundled-adapter ABI | Forge adapter; user/driver vendor runtime | `ti.hardware.probe("optix", library_path=...)` | Explicit scene/launch or root Graph; not kernel-callable |
-| Vulkan driver/ICD | D0 backend dependency, not a D1 provider | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
+| Vulkan driver/ICD | Backend driver dependency | OS/GPU driver installation | `ti.init(arch=ti.vulkan)` plus capability queries | Kernel and documented native Vulkan APIs |
 | cuSPARSELt 0.8.x-0.9.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | Retained FP16 2:4 capture and complete shared-A matmul recipes; no kernel intrinsic or automatic rewrite |
 | cuTENSOR 2.0.x-2.7.x | Registered bundled-adapter ABI | Forge adapter; user optional package | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | Retained root Graph capture and complete contraction dataflows; no kernel intrinsic or implicit auto rewrite |
 | AmgX stable C API | Registered bundled-adapter ABI | Forge adapter; user source build | `ti.hardware.probe(...)` or `ti.hardware.linalg.AmgxProvider` | Host CSR topology, host/device values and vectors; no Graph/kernel/auto route |
@@ -47,7 +47,7 @@ vendor release, driver, GPU, or workload. A library being executable or recordab
 does not imply that its algorithms are exposed as CompileIQ search axes.
 
 `ti.hardware.capability(operation_id).to_dict()["recipe_search"]` reports static
-semantic/provider entry points and their narrower scope, independently of expert
+semantic/provider entry points and their narrower scope, independently of explicit
 execution and `graph_integration`. It does not load the optional library or certify
 the current workload. `no_builtin_entry_declared` means no built-in complete-recipe
 entry is declared for that operation; it does not prohibit application providers.
@@ -65,7 +65,7 @@ entry is declared for that operation; it does not prohibit application providers
 | Other cuSPARSE / cuFFT / cuDSS expert operations | Existing explicit plans and documented root Graph recording | Recording alone does not provide a recipe generator. cuDSS root ordering must not be described as CUDA Graph capture. |
 | Shared-pattern sparse-solve region | `ti.linalg.record_sparse_solve(...)`, then `operation.prepare()` | Explicit `ti.hardware.linalg.SparseSolveRecipeProvider()` searches complete ordering/factor lifecycles with Graph-owned capture; separate from legacy root-ordered cuDSS recording. |
 | Vulkan VkFFT | Fixed-storage plan/root Graph; explicit `VulkanFftRecipeProvider` | Batch scratch reuse plus Vulkan immutable secondary Graph recording; not CUDA binding frames or a vendor route axis. |
-| cuBLASLt matmul region | `ti.linalg.record_matmul(...)`, then `operation.prepare()` | CUDA compact scalar-f32, fixed shape and optional strided batch. Explicit `ti.hardware.linalg.MatmulRecipeProvider()` composes frozen algorithm/workspace choices, real operand packing, and separate/fused ReLU. The expert retained-plan API remains private. |
+| cuBLASLt matmul region | `ti.linalg.record_matmul(...)`, then `operation.prepare()` | CUDA compact scalar-f32, fixed shape and optional strided batch. Explicit `ti.hardware.linalg.MatmulRecipeProvider()` composes frozen algorithm/workspace choices, real operand packing, and separate/fused ReLU. Use the public operation/provider APIs above. |
 | cuTENSOR contraction region | `ti.linalg.record_contraction(...)`, then `operation.prepare()` | Explicit `ti.hardware.tensor.ContractionRecipeProvider()` composes real input permutations and vendor/separate epilogues; includes retained workspace and immutable binding frames. |
 | cuSPARSELt shared-A region | `ti.linalg.record_sparse_matmul(...)`, then `operation.prepare()` | Explicit `ti.hardware.tensor.SparseMatmulRecipeProvider()` searches frozen algorithm/resource/epilogue dataflows; current A is compressed once per invocation, not cached across replays. |
 | AmgX | Explicit provider plans described below | No complete-recipe provider or general Graph recording route is currently exposed. |
@@ -363,115 +363,33 @@ Vulkan-versioned Forge wheel. Any future external Vulkan library must define
 its own provider ABI and lifetime contract instead of being loaded implicitly
 because the SDK is present.
 
-### Optional CUDA compilation providers
+### Optional CUDA compilation and recipe search
 
-The default Forge CUDA-kernel route still submits PTX to the CUDA Driver JIT.
-It requires no CUDA Toolkit and starts no external process. A deployment that
-needs offline cubins or compiler-level experimental optimization can select an
-external `ptxas` before startup:
+Ordinary Forge CUDA kernels use the Driver JIT and do not start an external
+compiler. If your deployment explicitly needs an external PTX assembler,
+configure it before initialization:
 
 ```powershell
 $env:TI_CUDA_PTXAS_MODE = "external"
-$env:TI_CUDA_PTXAS_PATH = "C:\CUDA\bin\ptxas.exe"
-$env:TI_CUDA_ARTIFACT_CACHE_PATH = "D:\cache\taichi-cuda-artifacts"
+$env:TI_CUDA_PTXAS_PATH = "C:\vendor\cuda\bin\ptxas.exe"
 ```
 
-On Linux, set `TI_CUDA_PTXAS_PATH` to an absolute path or make `ptxas`
-resolvable from the current process's `PATH`. Forge packages no `ptxas`, CUDA
-Toolkit, CompileIQ, or Python optimizer in its wheel. The application
-environment owns every such tool and version. Other compilation-provider
-variables do not change the default Driver JIT route unless
-`TI_CUDA_PTXAS_MODE=external` is set.
+The application supplies a compiler compatible with its GPU and driver.
+Compilation/cache setup is distinct from steady execution. An explicitly
+requested compiler failure is an error, not an instruction to silently choose
+another implementation. Do not change compilation-provider settings while the
+runtime is live; finish outstanding work and create a fresh runtime.
 
-| Variable | Contract |
-| --- | --- |
-| `TI_CUDA_PTXAS_MODE` | `driver` (default) or `external` |
-| `TI_CUDA_PTXAS_PATH` | Optional absolute `ptxas` path; otherwise use `PATH` |
-| `TI_CUDA_ARTIFACT_CACHE_PATH` | Persistent root for cubins, checksums, locks, and worker manifests |
-| `TI_CUDA_PTXAS_TIMEOUT_SECONDS` | Bounded timeout for each cache-miss `ptxas` process; default 60 seconds |
-| `TI_CUDA_PTXAS_ACF_PATH` | Optional static Advanced Controls File; mutually exclusive with a worker |
-| `TI_CUDA_COMPILEIQ_WORKER` | Optional user worker executable or Python script |
-| `TI_CUDA_COMPILEIQ_PYTHON` | Separate Python used to run a worker script; it may differ from Forge Python |
-| `TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS` | Bounded timeout for each cache-miss worker; default 3600 seconds |
+Complete Graph recipe search is a separate public workflow. Install a compatible
+wheel from the [maintained CompileIQ fork](https://github.com/fancifulland2718/CompileIQ)
+in the same Python environment as Forge. A generic upstream `pip install compileiq`
+is not a substitute. The fork supports Python 3.10–3.14; required protocol/API
+capabilities determine compatibility, not equality with a Git commit.
 
-Set every variable before `ti.init()`. After the first module load in a CUDA
-session, Forge rejects a change in provider identity. To change configuration,
-retire old work, call `ti.reset()`, and initialize with the new values. Cache
-keys bind the PTX, GPU target, compiler options, Forge artifact schema, `ptxas`
-content and version, and the ACF/worker identity. A cache hit loads the verified
-cubin without starting the worker or `ptxas` again. Initial binary hashing, the
-worker, and `ptxas` are fixed compilation costs, not scale-dependent kernel
-execution costs.
-
-CUDA Advanced Controls Files are applied through `ptxas --apply-controls` and
-therefore require `ptxas` 13.3 or newer. A static ACF is appropriate for a
-fixed, offline-qualified kernel family. ACF is an experimental compiler
-control, so the application must retain its numerical oracle, compile timeout,
-target GPU, and `ptxas` version, and disable the configuration after any
-compile or validation failure. Forge does not silently execute another
-explicit provider after a failure.
-
-For the external PTXAS/ACF process route described in this section, CompileIQ
-is not imported into the Forge application. Install the selected upstream
-release in a separate supported Python environment and supply a
-workload-specific worker:
-
-```powershell
-py -3.11 -m venv C:\venvs\compileiq
-C:\venvs\compileiq\Scripts\python.exe -m pip install compileiq
-$env:TI_CUDA_PTXAS_MODE = "external"
-$env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
-$env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
-```
-
-The selected upstream CompileIQ release may have a narrower Python support
-range than Forge. Recheck its Python and CUDA/`ptxas` support table during
-deployment. This separate-interpreter constraint does not change the Python
-support matrix of the Forge wheel itself.
-
-This process worker is distinct from `ti.graph.compileiq_recipe_search()`.
-That optional offline Graph-recipe API requires the modified fork's compatible
-V2 complete-recipe capability and main-thread staged-search worker. Acceptance
-is based on the protocol epoch, required schemas/API, and self-consistent core
-and capability identities; it is not tied to one fork commit or wheel hash.
-Forge records the installed Python-source identity and binds it to checkpoints,
-so source drift invalidates resume evidence. The qualified fork supports Python
-3.10--3.14. A generic upstream installation or the external JSON worker above
-is not a substitute for this API. Task-indexed kernel/offload search remains
-private qualification infrastructure and is not a public API.
-
-Forge invokes the versioned JSON v1 process protocol as:
-
-```text
-PYTHON WORKER --request REQUEST.json --response RESPONSE.json
-```
-
-The request contains a temporary PTX path, artifact key, target, entry
-manifest, compiler options, and the exact `ptxas` identity. The worker must
-atomically write one of these responses:
-
-```json
-{"schema_version": 1, "status": "pass"}
-```
-
-or:
-
-```json
-{
-  "schema_version": 1,
-  "status": "ok",
-  "acf_path": "C:/absolute/path/controls.acf",
-  "acf_sha256": "EXPECTED_SHA256"
-}
-```
-
-`pass` uses ordinary external `ptxas` for this artifact. `ok` verifies and
-copies the ACF before invoking `ptxas`. The worker owns representative inputs,
-the objective, and correctness and lifecycle gates. Forge has only PTX and
-static options during compilation; it does not know an arbitrary kernel's
-production inputs or physical invariants and therefore does not run global
-autotuning on the application's behalf. A nonzero worker exit, timeout,
-invalid JSON/status/path/checksum, or unsupported `ptxas` fails closed.
+Use `definition.search_recipes(engine="compileiq", ...)`, as shown in
+[recipe integration](graph_recipe_integration.en.md). This searches complete
+execution plans, not PTXAS flags, library names or individual kernel parameters.
+Optional Toolkit source addons have their own build/runtime requirements below.
 
 ## Registered providers from the user environment
 
@@ -518,9 +436,7 @@ when the application's accuracy requires it.
 unknown vendor/driver residency; `plan.host_workspace_bytes` reports host
 workspace, and caller arrays are excluded. Calls use Forge's existing ordered
 CUDA submission/lifetime boundary. This path is not kernel-callable or a
-CompileIQ recipe axis, and does not change runtime auto. Local
-execution evidence covers Windows, cuSOLVER 12.1.0, RTX 5090; other library/driver
-combinations are not implied qualified. See NVIDIA's [generic Cholesky contract](https://docs.nvidia.com/cuda/cusolver/index.html#cusolverdnxpotrf).
+CompileIQ recipe axis, and does not change runtime auto. See NVIDIA's [generic Cholesky contract](https://docs.nvidia.com/cuda/cusolver/index.html#cusolverdnxpotrf).
 
 After submitting `binding.factor()`, use `captured = binding.capture(mode="solve")`
 and `captured.run()` to reuse factors with current RHS data. Alternatively,
@@ -1247,10 +1163,8 @@ uploading the previous output again. Other solves on the same solver replace
 this state; editing the caller output does not change it. To restart with a
 caller-provided guess, create a new binding. This opt-in requires the adapter's
 retained-guess capability, not a patched AmgX library. It is a numerical policy:
-warm starts may change iteration count compared with zero starts. Comparing the
-same warm-start sequence on local f32 tests removed one 4 MiB D2D copy at 1M
-unknowns without changing iterations; it did **not** demonstrate reliable total
-speedup or fewer vendor synchronizations. No vendor workspace is eliminated.
+warm starts may change iteration count compared with zero starts. Reusing the initial guess avoids that vector copy, but does not eliminate vendor
+workspace or guarantee fewer synchronizations or faster solves.
 
 AmgX resource destruction releases process-wide pools and math handles. Forge
 therefore retires solver matrices/vectors immediately but holds resource/config
@@ -1271,9 +1185,6 @@ workspace still contribute to VRAM.
 
 Forge owns the thin adapter, buffer/lifetime integration, and its diagnostic
 call policy, not an AmgX fork.
-Local Windows checks with unmodified AmgX 2.5.0 exercised f32/f64 device inputs,
-coefficient updates, and subsequent GPU consumers. Traces showed reduced bulk
-host/device transfers, not a faster Krylov algorithm or lower vendor workspace.
 AMG coefficient setup can still allocate temporary storage and synchronize
 internally even when inputs reside on the GPU. These vendor costs do not imply
 that Forge requires patched libraries or changes the caller's solver settings.
@@ -1315,33 +1226,6 @@ Recommended physics starting points:
 - Store the exact JSON configuration with the deployment. AmgX's large tuning
   surface makes a library-version-only performance claim meaningless.
 
-## Unregistered candidate: NCCL
-
-NCCL is intentionally not part of this adapter mount and has no Forge probe or
-execution API.
-
-### NCCL recommended configuration
-
-NCCL is relevant only to multi-GPU or multi-node communication. It does not
-accelerate a single-GPU kernel. The recommended Forge candidate scope is Linux,
-where NVIDIA's install guide supplies `libnccl2` and `libnccl-dev` packages:
-
-```bash
-sudo apt install libnccl2 libnccl-dev
-```
-
-An unpinned repository install may upgrade CUDA. Pin the NCCL/CUDA package
-versions when preserving an older application stack. An adapter should retain
-one communicator per participating device/process group, bind collectives to
-explicit CUDA streams, propagate asynchronous errors, and abort/close every
-communicator on partial initialization failure.
-
-Physics candidates include halo exchange, distributed vector reductions, dot
-products, and coarse-grid/global synchronization in an already partitioned
-solver. Admission must measure communication and synchronization with the
-actual PCIe/NVLink/network topology. A local compute microbenchmark cannot
-qualify NCCL.
-
 ## Troubleshooting
 
 | Symptom | Check | Required action |
@@ -1360,25 +1244,16 @@ also check the host thread/executable stack reserve. Treat a larger reserve as
 a provider-version-specific deployment workaround, not as a Forge runtime
 requirement.
 
-## Deployment acceptance checklist
+## Before using a provider in an application
 
-Before enabling an external provider in production, retain evidence for all of
-the following:
+Keep the library's version and resolved path with your environment configuration.
+Check the actual operation's shape, dtype, layout and numerical policy, including
+solver residuals or precision changes. Probe success alone does not validate these.
 
-- exact Forge build/runtime identity and active backend;
-- GPU UUID/architecture and driver version;
-- provider package version, shared-library content identity, and transitive
-  dependency family;
-- operation shape, dtype, layout, topology, and reuse/update policy;
-- numerical oracle or solver residual/convergence gate;
-- setup and steady-state timings with explicit synchronization;
-- worst-case result and variability, not only the best or median sample;
-- provider-owned, workspace, compressed/factor, and peak memory budget;
-- resource close/reset behavior and in-flight submission lifetime.
-
-Do not turn a local benchmark into an automatic global heuristic. Automatic
-selection requires an exact-scope, fail-closed admission contract; otherwise
-keep the provider explicit.
+Prepare once when the API permits reuse; measure setup and complete repeated
+execution separately. Include packing, copies, synchronization and retained
+workspace. Close plans in their documented ownership order. Capture/replay,
+root ordering and whole-recipe search are distinct capabilities.
 
 ## Optional Vulkan FFT plans
 
@@ -1423,7 +1298,7 @@ or qualifying a device/workload. Passive reports inspect only known open plans.
 
 This slice supports in-place compact C2C f32, rank 1--3 and explicit batching.
 Dimensions may contain only prime factors 2, 3, 5, 7, 11 and 13; larger factors
-await upstream error-cleanup qualification, not a speed threshold. The default
+are not supported by this adapter. The default
 `normalization="none"` leaves both directions unnormalized; `"inverse"` divides
 the inverse by the transform volume. Storage, shape, direction and normalization
 are frozen per plan. A Graph binding must reference the original array.
@@ -1478,9 +1353,7 @@ before search/resolve. This is not FFT binary serialization, a global plan cache
 or zero-cost baseline restoration. Concurrent materialized Graphs own independent
 plans; close/drop unused Graph owners to release their plan leases. Caller
 baseline allocations, plan-requested scratch, per-binding argument bytes and
-unknown driver command/pipeline memory are distinct costs. Windows local tests
-cover the implementation; Linux and production performance are not qualified by
-those tests. Ordinary runtime selection is unchanged.
+unknown driver command/pipeline memory are distinct costs. Ordinary runtime selection is unchanged.
 
 ## Explicit FidelityFX Parallel Sort (Vulkan)
 
@@ -1522,9 +1395,8 @@ Pipelines, descriptors, workspace, and the secondary sequence are prepared once.
 The default keeps forty dispatches. Explicit `fuse_prefix=True` records 24
 dispatches/25 barriers using a Forge-owned shared-memory histogram prefix, at
 the cost of another histogram-sized scratch table. It changes a complete stage
-strategy, not the upstream sort or launch parameters. Local RTX measurements
-improved small/medium histograms, but large histograms lost prefix parallelism;
-the local AMD result also did not establish a stable benefit. Benchmark the
+strategy, not the upstream sort or launch parameters. Prefix fusion can reduce scheduling work but can lose parallelism for large
+histograms. Benchmark the
 actual size/device before opting in. Neither the default nor ordinary sort is
 changed, and older bridges explicitly reject this optional strategy.
 Root Graphs retain a host call per sort action; this is not
@@ -1538,9 +1410,8 @@ Requested workspace is one key scratch, optional payload scratch, and compact
 histogram/scan tables; reports exclude caller storage, allocator padding, opaque
 driver allocations and physical VRAM peak. The lower workspace and retained host
 recording can trade off against more device work than Forge's default radix8
-implementation. Local Windows comparisons found device regressions, so ordinary
-`ti.algorithms.sort` remains unchanged. No production speedup, AMD-wide advantage,
-Linux qualification, or complete-recipe search support is implied.
+implementation. Ordinary `ti.algorithms.sort` remains unchanged. This explicit plan does not
+provide a complete-recipe search provider or guarantee a faster sort.
 
 ## CUTLASS C++ complete matmul addon
 
@@ -1579,7 +1450,7 @@ Strategies exceeding it are not generated. More partitions can increase global
 memory traffic and reduction work enough to outweigh the parallelism benefit.
 
 Building requires caller-owned CUTLASS C++ sources, compatible CUDA Toolkit/NVCC,
-and a host compiler. Windows local checks used CUTLASS 4.6.2. For example, from an
+and a host compiler. The example below uses CUTLASS 4.6.2. From an
 MSVC-configured shell in a source checkout:
 
 ```powershell
@@ -1633,9 +1504,8 @@ Library/ABI/shape/alias checks, scratch allocation, and C ABI calls occur during
 preparation, binding, or capture, not steady replay. Replay has no Python provider
 callback or added synchronization. Requested scratch is not total VRAM: driver
 module state remains unknown, and the runtime allocator may retain a retired
-trial's high-water allocation for reuse. Local evidence shows size-dependent
-tradeoffs, not superiority over all cuBLASLt strategies. Defaults are unchanged;
-no Linux, release-qualification, or production-acceleration claim is added.
+trial's high-water allocation for reuse. Performance depends on shape, device and reuse count. Compare the complete
+operation with the available alternatives; ordinary defaults are unchanged.
 
 ## Official references
 

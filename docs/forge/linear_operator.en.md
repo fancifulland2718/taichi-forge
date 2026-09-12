@@ -15,6 +15,21 @@ objects such as `SolvePlan`, `PreconditionerPlan`, and `BatchedSolvePlan`
 remain under `ti.linalg.experimental`; their backend and numerical support
 boundaries are documented separately below.
 
+
+## Choose an entry point
+
+| Need | API and ownership |
+| --- | --- |
+| Repeated apply with fixed bindings | `operator.prepare_apply(...)`; keep the prepared owner alive |
+| Embed an apply in a Graph | `operator.graph_action(...)`; the Graph owns its recorded execution |
+| Solve a system repeatedly | `ti.linalg.experimental.SolvePlan`; choose a method from declared mathematical traits |
+| Observe accuracy or cost | Explicit qualification/report functions; do not put them in the repeated loop |
+
+Check the sections below for exact signatures and supported providers.
+Prepare layout and topology once, update values only through the documented
+generation/update APIs, and do not reuse a plan after runtime reset.
+
+
 ## Core model
 
 A `LinearOperator` represents `y = A x` with:
@@ -1257,15 +1272,6 @@ observation interval. The faster choice depends on vector size, operator cost, i
 count, driver, and backend. Unsupported policies and intervals fail during
 plan construction; they do not silently fall back.
 
-Use `benchmarks/linear_operator_graph_krylov_bench.py` to qualify the complete
-f32 compiled-kernel CG boundary. It reports plan construction, first solve,
-warm synchronous solve completion, terminal observation, true residual,
-maximum solution error, logical/executed iterations, host observations, and
-kernel-profiler visibility. Select one or more policies with `--policies`;
-CUDA or Vulkan runs should be performed on an otherwise idle device. Kernel
-time is reported as unavailable rather than inferred when a backend profiler
-cannot see inside a captured Graph.
-
 `plan.execution_capabilities()` reports the policy matrix and a structured
 reason for unavailable conditional execution, together with the selected
 `default_execution_policy`.
@@ -1434,13 +1440,6 @@ immutable per-ticket logical/executed/provider work, active efficiency,
 available encoded/masked counts, backend Graph launches, physical queue
 submissions, and non-inferred timing fields. Telemetry is opt-in; unavailable
 backend counters remain `None`.
-
-Use `benchmarks/batched_graph_pcg_bench.py` to compare policies and
-preconditioner quality with interleaved samples; it also checks steady runtime,
-host-pool, and device-pool state after warmup. Use
-`linear_operator_graph_rebind_bench.py` for generation churn and
-`linear_operator_shifted_bench.py` for shifted-versus-explicit-identity
-lowering. These are local qualification tools, not fixed performance promises.
 
 ### Asynchronous fixed-budget or device-convergent submission
 
@@ -1716,9 +1715,7 @@ the plan counters and output supplied to it. Use a dedicated plan/workspace for
 performance evidence, especially when measuring an asynchronous batch or a
 shared pacer. The function returns detached evidence and never writes files.
 
-The API is covered by backend correctness, lifecycle, trait, composition, 10k
-approved-generation churn, and solver regression tests. Application production
-qualification remains workload-specific: validate operator semantics,
+Application validation remains workload-specific: validate operator semantics,
 conditioning, tolerances, preconditioner suitability, failure handling, memory
 budgets, and backend driver behavior on representative physical and
 non-physical systems.

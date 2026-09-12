@@ -152,20 +152,16 @@ should not be used as portability promises across all backends.
 
 ## CompileIQ boundary
 
-Forge 0.6.3 does not expose algorithm-level CompileIQ search entry points. The
-historical reduce-provider and segmented-scan offline searchers remain private
-qualification tools for auditing their existing positive and negative
-evidence. They are not algorithm API contracts and do not form a new provider
-routing layer. Applications should continue to use the ordinary primitives,
-explicit `method=`, or their existing `method="auto"` behavior.
+Use the public whole-Graph workflow:
+`definition = builder.freeze()`, then `definition.search_recipes(...)`.
+It requires the maintained CompileIQ fork and evaluates complete recipes.
+See [recipe integration](graph_recipe_integration.en.md) for installation,
+evaluation, reports and restoration.
 
-The public CompileIQ entry point is Graph-owned:
-`ti.graph.compileiq_recipe_search(graph)` searches only complete Graph execution
-recipes that Forge has proven legal and can materialize exactly. CompileIQ does
-not receive raw provider, block-size, workgroup-shape, PTXAS-flag, or segment-
-offset axes. Search and qualification remain offline and do not change
-primitive defaults; compile/search build time is diagnostic only and is not an
-admission gate.
+Ordinary primitives retain their `method="auto"` and explicit-method behavior.
+There is no algorithm-level CompileIQ API or raw block/provider/segment-offset
+search. A primitive can contribute to a complete recipe only when its Graph
+provider supports the full semantic and resource contract.
 
 ## Machine-readable capability contract
 
@@ -241,49 +237,15 @@ Driver-only removes the CUDA Runtime library dependency but does not by itself
 prove a lower minimum NVIDIA driver. PTX acceptance and every claimed driver
 floor still require execution on the target driver. See
 [Building wheels](build_wheels.en.md) for the current build boundary and
-[Linux revalidation](linux_revalidation.en.md) for outstanding Linux and
-older-driver evidence.
+[Linux revalidation](linux_revalidation.en.md) for platform setup.
 
-### CUDA 0.6.0 historical performance snapshot and current boundary
+### Performance guidance
 
-The table below is the 0.6.0 qualification snapshot, not a measurement of every
-later `master` optimization. It is one unified hot-path result from the Windows
-development host (RTX 5090, driver 610.62, Python 3.10.11) at 1,048,576 i32
-items. Each entry is the per-call median of 30 samples, with 20 submissions per
-sample before synchronization. The idle guard found no other Python or GPU
-compute process. CUB came only from the non-publishing CUDA 13.2 reference
-build; correctness was checked separately against NumPy oracles.
-
-| Primitive | driver-only median | CUB reference median | Relative throughput | Qualification reference | Driver workspace |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| scan | 0.0272 ms | 0.0190 ms | 69.8% | 90% | 4 KiB |
-| reduce-sum | 0.0228 ms | 0.0193 ms | 84.6% | 90% | 4 KiB |
-| histogram-256 | 0.1243 ms | 0.1215 ms | 97.7% | 90% | 0 |
-| stable compact | 0.0279 ms | 0.0228 ms | 81.8% | 80% | 4.00 MiB |
-| stable i32 key/value sort | 0.4883 ms | 0.1491 ms | 30.5% | 80% | 28.06 MiB |
-
-Against the qualification references in the table, histogram and compact met
-the reference while scan, reduce, and sort did not. Standard wheels still
-select the correct, asynchronous, driver-only Forge provider because CUB is not
-a release dependency and a host round trip is not a suitable GPU hot-path
-default. This is not a claim of CUB parity and is not a cross-device or
-cross-driver guarantee.
-
-The paired 0.6.1 release-candidate wheels retain the same 1,024-item tiled
-scan, fused tiled compact ranks, and stable hierarchical 4-bit LSD radix
-contract, but stop the radix histogram hierarchy as soon as its top level fits
-one scan tile. At the table's
-1,048,576-item size, that statically reduces a 32-bit sort from 16 to 8
-histogram-scan launches and from 8 to 0 histogram uniform-add launches, with no
-workspace growth. A separate wheel-to-wheel test used the public 0.6.0 wheels
-(`dbc683028`) and paired 0.6.1 release-candidate wheels on the same RTX
-5090/610.62 system. Three fresh processes per wheel each ran ten warmups and 100
-end-synchronized native sorts. The median of process medians was 0.51245 ms for
-0.6.0 and 0.36455 ms for 0.6.1, a 28.9% latency reduction; reported peak
-workspace changed from 29,426,176 to 29,425,664 bytes. Thirteen installed-wheel
-CUDA dtype/payload and large-hierarchy stability cases passed. This paired
-result uses a different synchronization protocol from the historical table and
-therefore supplements rather than rewrites that snapshot.
+Measure a complete primitive pipeline with the actual capacity, active count,
+key distribution and payload layout. Compare equivalent synchronization boundaries.
+Warm up separately, reuse workspaces, and report host submission, device work and
+retained memory. Native execution and Graph recording can have different fixed
+costs; neither guarantees a speedup at every scale.
 
 ## Data Contracts
 
@@ -342,13 +304,6 @@ and pass it to both compact and `dispatch_bounded()`: the compact scatter then
 publishes the indirect packet with its count, removing one preparation
 dispatch. CPU/CUDA do not consume this packet; CUDA independently uses its
 exact logical range and may select 12.4+ adaptive physical control.
-
-On the current Windows qualification machine, a compact-to-scan chain with a
-10% active prefix was 1.05x faster on CPU, 1.32x on CUDA, and 1.90x on Vulkan
-than the same chain with an explicit `DeviceExtent.snapshot()` between the two
-operations. These are synchronization-elimination measurements, not portable
-throughput guarantees. The paired, end-synchronized harness is
-`benchmarks/dynamic_workload_bench.py`.
 
 ## Device-resident worklists
 
@@ -424,9 +379,7 @@ the backend native stable-sort provider. Equal priority is resolved by ordinal
 and then source index in both strategies. Dense arbitration rejects
 out-of-domain keys with overflow, while radix winner reduction scans each
 sorted key run. A distribution dominated by one or a few very long radix runs
-has lower parallelism and should be benchmarked separately. Use
-`benchmarks/device_worklist_conflict_bench.py` for paired, identical-input
-strategy qualification with parity, raw samples/CV, and workspace accounting.
+has lower parallelism and should be benchmarked separately. Compare strategies with identical inputs and include workspace costs.
 When only per-key ownership is consumed, request
 `output_shape="dense_winner_table"` with `dense_atomic` and
 `telemetry=False`. The result is a `key_capacity`-sized source-index table with
@@ -573,21 +526,6 @@ compact provider's temporary storage. A `RunLengthWorkspace` is reusable but
 not concurrently shareable; independent workspaces were stress-tested from two
 Python submission threads on CPU, CUDA, and Vulkan.
 
-On the Windows development machine (Ryzen 9 9950X, RTX 5090 driver 610.62),
-1,048,576 i32 keys with 262,144 runs measured:
-
-| backend | public RLE | PrimitiveSequence Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 4.85 ms | 4.22 ms | 4.98 ms | 1.03x |
-| CUDA | 0.418 ms | 0.456 ms | 12.19 ms | 29.2x |
-| Vulkan | 0.643 ms | 0.632 ms | 16.03 ms | 24.9x |
-
-Compilation/warmup was outside timing, workspaces were reused, and no other
-Python/GPU compute process was active. These are development measurements, not
-cross-driver guarantees. The CUDA Graph delta is about 38 microseconds and is
-recorded as general native-node replay overhead; the current implementation
-does not add an RLE-specific path for it.
-
 ## Reusable Segmented Reduce and Scan
 
 Forge represents fixed-capacity dense topology with a reusable
@@ -647,47 +585,6 @@ and peak report only reusable execution scratch. Short serial scan needs zero
 scratch; global scan can retain provider storage and one base value per
 segment. Immutable layouts may be shared across Python submission threads, but
 each producer/Graph needs an independent workspace.
-
-On the Windows development machine, the representative workload is 1,048,576
-items, 4,096 segments of length 256, five median trials with 20 hot replays
-per trial, reused layout/workspaces, and compilation/warmup excluded. GPU
-measurements are taken only with no other Python/GPU compute process active.
-
-| backend | reduce public | reduce Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.770 ms | 0.805 ms | 1.003 ms | 1.30x |
-| CUDA | 0.0756 ms | 0.0736 ms | 2.881 ms | 38.1x |
-| Vulkan | 0.0751 ms | 0.0716 ms | 4.538 ms | 60.4x |
-
-| backend | i32 scan public | i32 scan Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.500 ms | 0.495 ms | 3.108 ms | 6.22x |
-| CUDA | 0.165 ms | 0.161 ms | 6.304 ms | 38.3x |
-| Vulkan | 0.176 ms | 0.187 ms | 8.859 ms | 50.3x |
-
-| backend | f32 scan public | f32 scan Graph | host round-trip | host/public |
-| --- | ---: | ---: | ---: | ---: |
-| CPU | 0.604 ms | 0.516 ms | 3.714 ms | 6.15x |
-| CUDA | 0.146 ms | 0.161 ms | 8.008 ms | 54.9x |
-| Vulkan | 0.167 ms | 0.197 ms | 10.237 ms | 61.2x |
-
-The immutable topology occupies 4,210,692 bytes. Its one-time build/upload was
-10.67 ms on CPU, 17.40 ms on CUDA, and 32.56 ms on Vulkan. Short scan scratch
-was zero; CPU grouped reduce retained 262,144 bytes, while the measured
-CUDA/Vulkan grouped providers retained no Python-owned scratch.
-
-A single counterexample with 64 segments of length 16,384 was used to prevent
-short-workload overfitting:
-
-| backend | explicit global scan | explicit serial | measured preference |
-| --- | ---: | ---: | --- |
-| CPU | 5.984 ms | 0.586 ms | serial, 10.2x |
-| CUDA | 0.871 ms | 1.800 ms | global, 2.07x |
-| Vulkan | 3.855 ms | 1.597 ms | serial, 2.41x |
-
-These historical measurements describe the coarse ordinary API dispatch;
-they are not a threshold sweep, a cross-driver guarantee, or evidence against
-new whole-Graph implementations.
 
 `GraphBuilder.segmented_scan()` has a separate CUDA complete-recipe domain for
 fixed, disjoint 1D i32/u32 arrays and immutable segment layouts. The default

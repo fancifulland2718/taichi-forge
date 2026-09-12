@@ -14,14 +14,14 @@ retained-provider API，而 discovery probe 始终不执行算法。
 
 | Library | Forge 状态 | 安装责任方 | Forge 发现方式 | 调用位置 |
 | --- | --- | --- | --- | --- |
-| cuBLAS | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cublas")` | direct Python 或 root Graph；不能在 kernel 内调用 |
+| cuBLAS | 已注册 provider | 用户 CUDA 环境 | `ti.hardware.probe("cublas")` | direct Python 或 root Graph；不能在 kernel 内调用 |
 | cuSOLVERDn | 显式 device Cholesky | 用户 CUDA 环境 | `ti.hardware.probe("cusolverdn")` | 固定绑定、可选 retained CUDA Graph/root command；无自动选择或内建 solver recipe generator |
-| cuSPARSE | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
-| cuFFT | 已注册 D1 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
+| cuSPARSE | 已注册 provider | 用户 CUDA 环境 | `ti.hardware.probe("cusparse")` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
+| cuFFT | 已注册 provider | 用户 CUDA 环境 | `ti.hardware.probe("cufft")` | 显式 plan 或 root Graph；不能在 kernel 内调用 |
 | VkFFT 1.3.4 | 可选 ABI1 Vulkan JIT adapter | 当前 runtime 构建配置包含，旧产物可能没有 | `ti.hardware.probe("vkfft")` 或显式路径 | 固定存储计划/root Graph；匹配扩展支持显式 batch 与完整 Graph secondary recipe |
 | cuDSS 0.8.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户提供 vendor runtime | `ti.hardware.probe("cudss", library_path=...)` | 领域级 auto/explicit 或 root Graph；不能在 kernel 内调用 |
 | OptiX ABI 93/105/118 | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户/driver 提供 vendor runtime | `ti.hardware.probe("optix", library_path=...)` | 显式 scene/launch 或 root Graph；不能在 kernel 内调用 |
-| Vulkan driver/ICD | D0 backend 依赖，不是 D1 provider | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
+| Vulkan driver/ICD | 后端驱动依赖 | OS/GPU driver 安装 | `ti.init(arch=ti.vulkan)` 加 capability query | kernel 与已公开 native Vulkan API |
 | cuSPARSELt 0.8.x-0.9.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CusparseLtProvider` / `ti.linalg.record_sparse_matmul` | retained FP16 2:4 capture 与完整 shared-A matmul recipe；无 kernel intrinsic 或自动 rewrite |
 | cuTENSOR 2.0.x-2.7.x | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户安装可选包 | `ti.hardware.tensor.CutensorProvider` / `ti.linalg.record_contraction` | retained root Graph capture 与完整 contraction 数据流；无 kernel intrinsic 或隐式 auto rewrite |
 | AmgX stable C API | 已注册 bundled-adapter ABI | Forge 提供 adapter；用户源码构建 | `ti.hardware.probe(...)` 或 `ti.hardware.linalg.AmgxProvider` | host CSR 拓扑，host/device 数值与向量；无 Graph/kernel/auto 路线 |
@@ -57,7 +57,7 @@ cuTENSOR、AmgX 或 NCCL 绝不会触发 compiler rewrite。
 | Vulkan VkFFT | 固定存储计划/root Graph；显式 `VulkanFftRecipeProvider` | batch scratch 复用与 Vulkan 不可变 secondary Graph；不是 CUDA binding frame 或 vendor 路由轴。 |
 | 其他 cuSPARSE / cuFFT / cuDSS expert operation | 既有显式 plan 和已说明的 root Graph recording | recording 本身不提供 recipe generator；cuDSS root 有序调用不能描述成 CUDA Graph capture。 |
 | 共享 pattern 的 sparse-solve region | `ti.linalg.record_sparse_solve(...)`，然后 `operation.prepare()` | 显式 `ti.hardware.linalg.SparseSolveRecipeProvider()` 搜索完整排序/factor 生命周期及 Graph-owned capture；与旧 cuDSS root 有序录制分开。 |
-| cuBLASLt matmul region | `ti.linalg.record_matmul(...)`，随后 `operation.prepare()` | CUDA 紧凑 scalar-f32、固定形状及可选 strided batch。显式 `ti.hardware.linalg.MatmulRecipeProvider()` 组合冻结算法/workspace、真实输入打包、独立/融合 ReLU；专家 retained-plan API 仍为私有。 |
+| cuBLASLt matmul region | `ti.linalg.record_matmul(...)`，随后 `operation.prepare()` | CUDA 紧凑 scalar-f32、固定形状及可选 strided batch。显式 `ti.hardware.linalg.MatmulRecipeProvider()` 组合冻结算法/workspace、真实输入打包、独立/融合 ReLU；通过上述公共 operation/provider API 接入。 |
 | cuTENSOR contraction region | `ti.linalg.record_contraction(...)`，然后 `operation.prepare()` | 显式 `ti.hardware.tensor.ContractionRecipeProvider()` 组合真实输入重排与 vendor/separate epilogue，持有 workspace 并支持 immutable binding frames。 |
 | cuSPARSELt shared-A region | `ti.linalg.record_sparse_matmul(...)`，然后 `operation.prepare()` | 显式 `ti.hardware.tensor.SparseMatmulRecipeProvider()` 搜索冻结的算法/资源/epilogue 数据流；当前 A 每 invocation 压缩一次，不做跨 replay 值缓存。 |
 | AmgX | 下文的显式 provider plan | 当前没有公开 complete-recipe provider 或通用 Graph recording 路线。 |
@@ -270,96 +270,28 @@ Vulkan SDK 是提供 header、tool 与 validation 的源码构建/开发依赖�
 也不能成为创建 Vulkan-versioned Forge wheel 的理由。未来任何 external Vulkan library 都
 必须定义自己的 provider ABI 与 lifetime 合同，不能仅因环境中存在 SDK 就被隐式加载。
 
-### 可选 CUDA 编译 provider
+### 可选 CUDA 编译与 recipe 搜索
 
-Forge 的默认 CUDA kernel 路线仍把 PTX 交给 CUDA Driver JIT，不要求 CUDA Toolkit，也不
-执行外部程序。需要离线 cubin 或编译器级实验优化的部署，可以在启动前选择外部 `ptxas`：
+普通 Forge CUDA kernel 使用 Driver JIT，不启动外部编译器。部署确需外部 PTX assembler 时，
+在初始化前显式配置：
 
 ```powershell
 $env:TI_CUDA_PTXAS_MODE = "external"
-$env:TI_CUDA_PTXAS_PATH = "C:\CUDA\bin\ptxas.exe"
-$env:TI_CUDA_ARTIFACT_CACHE_PATH = "D:\cache\taichi-cuda-artifacts"
+$env:TI_CUDA_PTXAS_PATH = "C:\vendor\cuda\bin\ptxas.exe"
 ```
 
-Linux 可以把 `TI_CUDA_PTXAS_PATH` 设为绝对路径，或让 `ptxas` 可由当前 process 的 `PATH`
-解析。Forge 不把 `ptxas`、CUDA Toolkit、CompileIQ 或 Python 优化包放进 wheel；这些工具
-及其版本均由应用环境管理。未设置 `TI_CUDA_PTXAS_MODE=external` 时，其它编译 provider
-变量不会改变默认 Driver JIT 路线。
+编译器由应用提供，需与 GPU 和驱动兼容。编译/缓存准备与稳态执行是不同成本；
+显式请求的编译器失败会报错，不会静默换实现。runtime 存活时不要切换编译 provider；
+先完成在途工作，再建立新 runtime。
 
-| 变量 | 合同 |
-| --- | --- |
-| `TI_CUDA_PTXAS_MODE` | `driver`（默认）或 `external` |
-| `TI_CUDA_PTXAS_PATH` | 可选的 `ptxas` 绝对路径；省略时使用 `PATH` |
-| `TI_CUDA_ARTIFACT_CACHE_PATH` | cubin、校验和、lock 与 worker manifest 的持久 cache 根目录 |
-| `TI_CUDA_PTXAS_TIMEOUT_SECONDS` | 单次 cache-miss `ptxas` process 的有界 timeout，默认 60 秒 |
-| `TI_CUDA_PTXAS_ACF_PATH` | 可选的静态 Advanced Controls File；与 worker 二选一 |
-| `TI_CUDA_COMPILEIQ_WORKER` | 可选的用户 worker executable 或 Python script |
-| `TI_CUDA_COMPILEIQ_PYTHON` | 执行 worker script 的独立 Python，可与 Forge Python 不同 |
-| `TI_CUDA_COMPILEIQ_TIMEOUT_SECONDS` | 单次 cache-miss worker 的有界 timeout，默认 3600 秒 |
+完整 Graph recipe 搜索是独立的公共流程。请在 Forge 所在 Python 环境安装
+[维护版 CompileIQ fork](https://github.com/fancifulland2718/CompileIQ) 的兼容 wheel。
+普通上游 `pip install compileiq` 不能替代它。fork 支持 Python 3.10–3.14；
+兼容性由所需协议/API 能力决定，不与某个 Git commit 绑定。
 
-所有变量必须在 `ti.init()` 前确定。同一个 CUDA session 首次加载 module 后，Forge 会拒绝
-切换 provider identity；需要改变配置时先让旧 work 完成，调用 `ti.reset()`，再用新配置
-初始化。cache key 绑定 PTX、GPU target、编译选项、Forge artifact schema、`ptxas` 内容与
-版本，以及 ACF/worker identity。cache hit 直接加载已校验 cubin，不重复启动 worker 或
-`ptxas`；首次 binary hash、worker 与 `ptxas` 都属于固定编译成本，不属于 kernel 的规模
-相关执行成本。
-
-CUDA Advanced Controls File 通过 `ptxas --apply-controls` 应用，因此要求 `ptxas` 13.3 或
-更新版本。静态 ACF 适合已离线资格化的固定 kernel family。由于 ACF 是实验性 compiler
-control，应用必须保留数值 oracle、compile timeout、目标 GPU 和 `ptxas` 版本，并在任何
-compile/校验失败时停用该配置；Forge 不会在失败后静默执行另一个显式 provider。
-
-对于本节的 external PTXAS/ACF process 路线，CompileIQ 不导入 Forge application；用户应在
-独立、受支持的 Python 环境中安装选定的上游 release，并提供 workload-specific worker：
-
-```powershell
-py -3.11 -m venv C:\venvs\compileiq
-C:\venvs\compileiq\Scripts\python.exe -m pip install compileiq
-$env:TI_CUDA_PTXAS_MODE = "external"
-$env:TI_CUDA_COMPILEIQ_WORKER = "D:\app\forge_compileiq_worker.py"
-$env:TI_CUDA_COMPILEIQ_PYTHON = "C:\venvs\compileiq\Scripts\python.exe"
-```
-
-所选上游 CompileIQ release 的 Python 支持范围可能窄于 Forge；部署时必须重新核对其 Python
-与 CUDA/`ptxas` support table。这个独立解释器约束不会改变 Forge wheel 自身的 Python
-支持矩阵。
-
-这个 process worker 与 `ti.graph.compileiq_recipe_search()` 不同。后者是可选离线 Graph recipe
-API，要求魔改 fork 提供兼容的 V2 完整 recipe capability 与 main-thread staged-search worker。
-接受条件是协议 epoch、必需 schema/API 以及自洽的 core/capability identity，不绑定某个 fork
-commit 或 wheel hash。Forge 会记录已安装 Python-source identity 并绑定 checkpoint，源码漂移会
-使 resume 证据失效。该资格化 fork 支持 Python 3.10--3.14；普通上游安装或上述 external JSON
-worker 都不能替代它。按 task 索引的 kernel/offload 搜索仅保留为私有资格化基础，不属于公共 API。
-
-Forge 使用 versioned JSON v1 process protocol 调用：
-
-```text
-PYTHON WORKER --request REQUEST.json --response RESPONSE.json
-```
-
-request 包含 PTX 临时路径、artifact key、target、entry manifest、编译选项和精确 `ptxas`
-identity。worker 必须原子写出以下一种 response：
-
-```json
-{"schema_version": 1, "status": "pass"}
-```
-
-或：
-
-```json
-{
-  "schema_version": 1,
-  "status": "ok",
-  "acf_path": "C:/absolute/path/controls.acf",
-  "acf_sha256": "EXPECTED_SHA256"
-}
-```
-
-`pass` 表示该 artifact 使用普通 external `ptxas`；`ok` 表示先校验并复制 ACF，再调用
-`ptxas`。worker 必须自己定义代表性输入、目标函数、正确性与生命周期 gate。Forge 只在
-compile 阶段拥有 PTX 和静态选项，并不了解任意 kernel 的生产输入或物理不变量，因此不会
-自动替应用运行全局 autotuning。worker 非零退出、timeout、非法 JSON/status/path/checksum
-或不支持的 `ptxas` 都 fail closed。
+使用 `definition.search_recipes(engine="compileiq", ...)`，完整用法见
+[recipe 接入](graph_recipe_integration.zh.md)。搜索对象是完整执行方案，不是 PTXAS 参数、
+库名或单 kernel 参数。可选 Toolkit 源码 addon 的构建/运行要求另见下文。
 
 ## 用户环境中的已注册 provider
 
@@ -396,8 +328,7 @@ API 成功返回**不代表**矩阵正定或残差足够小。consumer 需尊重
 `plan.memory_report()` 区分私有 factor/workspace/status 请求字节与未知 vendor/driver 驻留；
 `plan.host_workspace_bytes` 单独报告 host workspace，不计入 caller arrays。执行复用 Forge 既有有序 CUDA
 submission/lifetime 边界。目前不支持 kernel 内调用或 CompileIQ recipe axis，也不改变
-runtime auto。本机执行证据为 Windows、cuSOLVER 12.1.0、RTX 5090，不暗示其他组合已资格化。
-数值合同参见 NVIDIA [generic Cholesky 文档](https://docs.nvidia.com/cuda/cusolver/index.html#cusolverdnxpotrf)。
+runtime auto。数值合同参见 NVIDIA [generic Cholesky 文档](https://docs.nvidia.com/cuda/cusolver/index.html#cusolverdnxpotrf)。
 
 固定工作可显式冷录制，减少重复 vendor 提交：
 
@@ -994,8 +925,8 @@ bind 时检查 dtype、shape 和 runtime owner 并持有数组，后续使用数
 `bind_device(..., retain_initial_guess=True)` 首次按 `zero_initial_guess` 初始化，之后复用 solver 内部上次的解，
 省去再次上传输出。其他对同一 solver 的 solve 会替换该状态；修改调用者 output 不会改变内部初值。
 需重新使用调用者初值时创建新 binding。该显式策略需要 adapter 的 retained-guess capability，不需魔改 AmgX。
-warm start 相比零初值可能改变迭代数。本机相同 warm-start 序列在百万 f32 未知量下少一次 4 MiB D2D，
-迭代数相同，但未证明稳定总加速或更少 vendor 同步，也未减少 vendor workspace。
+warm start 相比零初值可能改变迭代数。复用初值可省去该向量拷贝，但不减少 vendor workspace，
+也不保证更少同步或更快求解。
 
 AmgX resource 析构会释放进程级内存池及数学库 handle。Forge 立即退役 solver 的矩阵/向量，但将 resource/config
 owner 保留到最后一个活跃 solver lease 结束（包括不同 provider 对象），避免关闭一个 solver 破坏另一个。
@@ -1025,9 +956,7 @@ assert info["residual_norm"] is None  # 明确缺测，不是0或缓存残差
 不收敛也不会伪装成成功。这是观测策略，不是算法或 CompileIQ 搜索轴。旧 Forge adapter 的默认路径继续可用；
 不支持显式关闭时，创建 solver 根据 adapter capability bit 明确拒绝，不绑定 Forge commit，也不要求魔改 AmgX。
 
-Forge 拥有薄 adapter、buffer/生命周期接入及其诊断调用策略，不维护 AmgX fork。本机 Windows 使用未经修改的 AmgX 2.5.0
-检查了 f32/f64 device 输入、系数更新及后续 GPU 消费；trace 显示收益来自减少大数组 host/device 往返，
-不是 Krylov 算法加速或 vendor workspace 减少。即使输入驻留 GPU，AMG 系数 setup 内部仍可能分配临时空间和
+Forge 提供薄 adapter、buffer/生命周期接入与诊断，不要求修改 AmgX。即使输入驻留 GPU，AMG 系数 setup 内部仍可能分配临时空间和
 同步。这些 vendor 成本不意味着 Forge 要求魔改外部库，也不会使 Forge 自动修改调用者的 solver 配置。
 
 `replace_coefficients()` 在替换数值后总会刷新 solver setup。vendor 导出可选/已弃用的
@@ -1060,30 +989,6 @@ resource 时 provider close 会失败。显式选择后的 load、数值和 life
 - 随部署保存精确 JSON configuration。AmgX tuning surface 很大，只按 library version
   宣称性能没有意义。
 
-## 未注册候选：NCCL
-
-本次 adapter 挂载明确不包含 NCCL；它目前没有 Forge probe 或执行 API。
-
-### NCCL 推荐配置
-
-NCCL 只与 multi-GPU 或 multi-node communication 有关，不能加速 single-GPU kernel。
-Forge 推荐的候选范围为 Linux；NVIDIA install guide 在 Linux 上提供 `libnccl2` 与
-`libnccl-dev` package：
-
-```bash
-sudo apt install libnccl2 libnccl-dev
-```
-
-未 pin 的 repository install 可能升级 CUDA。需要保留旧应用栈时，应 pin NCCL/CUDA
-package version。adapter 应为每个参与 device/process group 保留 communicator，把 collective
-绑定到显式 CUDA stream，传播 asynchronous error，并在部分初始化失败时 abort/close 所有
-communicator。
-
-physics candidate 包括 halo exchange、distributed vector reduction、dot product，以及已
-partition solver 中的 coarse-grid/global synchronization。admission 必须在实际
-PCIe/NVLink/network topology 下测量 communication 与 synchronization；本地 compute
-microbenchmark 不能资格化 NCCL。
-
 ## 故障排查
 
 | 现象 | 检查项 | 必须采取的动作 |
@@ -1101,22 +1006,14 @@ microbenchmark 不能资格化 NCCL。
 thread/executable stack reserve。增大 reserve 只能视为特定 provider version 的部署
 workaround，不能写成 Forge runtime requirement。
 
-## 部署验收清单
+## 应用接入前的注意事项
 
-在生产环境启用 external provider 前，应为以下内容保留证据：
+在环境配置中记录库版本与实际解析路径，核对操作的 shape、dtype、layout 和数值策略，
+包括求解 residual 或精度变化。probe 成功不能验证这些条件。
 
-- 精确 Forge build/runtime identity 与 active backend；
-- GPU UUID/architecture 与 driver version；
-- provider package version、shared-library content identity 与 transitive dependency family；
-- operation shape、dtype、layout、topology 与 reuse/update policy；
-- numerical oracle 或 solver residual/convergence gate；
-- 带显式 synchronization 的 setup 与 steady-state timing；
-- worst-case 结果和 variability，而不仅是最好值或 median；
-- provider-owned、workspace、compressed/factor 与 peak memory budget；
-- resource close/reset 行为与 in-flight submission lifetime。
-
-不要把本地 benchmark 直接变成全局自动 heuristic。automatic selection 必须建立
-exact-scope、fail-closed admission 合同；否则应保持 provider 显式选择。
+API 允许时一次准备、重复使用；分别测量准备成本与完整重复执行，计入 packing、拷贝、
+同步及保留 workspace。按文档的所有权顺序关闭 plan。
+capture/replay、root 有序执行与 whole-recipe 搜索是不同能力。
 
 ## 可选 Vulkan FFT 计划
 
@@ -1192,8 +1089,7 @@ batch recipe 要求 adapter 的 optional recipe extension；完整录制还要�
 允许在 freeze 后、搜索/解析前关闭这些原计划。这不是 FFT 二进制序列化、全局 plan cache，也不承诺零成本
 baseline 恢复。并存的已物化 Graph 各自拥有独立计划；关闭/释放不用的 Graph owner 才会释放其 plan lease。
 调用者 baseline 分配、plan 请求的 scratch、
-每绑定参数 bytes 与未知 driver command/pipeline 内存是不同成本。当前实现证据仅为 Windows 本地测试，
-不据此声明 Linux 或生产加速；普通 runtime 默认选择不变。
+每绑定参数 bytes 与未知 driver command/pipeline 内存是不同成本。普通 runtime 默认选择不变，实际性能需按应用的环境与规模测量。
 
 ## 显式 FidelityFX Parallel Sort（Vulkan）
 
@@ -1227,7 +1123,7 @@ Forge 提供 MIT FidelityFX Parallel Sort 源码及自有绑定；调用者显�
 管线、descriptor、workspace 和 secondary sequence 一次准备，默认仍为 40 dispatch。
 显式 `fuse_prefix=True` 使用 Forge 自有 shared-memory histogram prefix，改为 24 dispatch / 25 barrier，
 代价是另一份 histogram 大小的 scratch。它改变完整阶段策略，不改上游 sort 或开放 launch 参数。
-本机 RTX 的小/中直方图有收益，但大直方图会损失前缀并行度；本机 AMD 也未证明稳定收益，需按实际规模/设备选择。
+前缀融合可能减少提交，但大直方图可能损失并行度；需按实际规模与设备选择。
 默认计划和普通 sort 都不变；旧 bridge 对该可选策略在创建边界明确拒绝。
 Root Graph 每个 sort action 仍有一次
 host 调用；这不是 enclosing Graph capture，也不增加 CompileIQ 固定 sort/provider 路由轴。发布绑定要求原数组；
@@ -1264,8 +1160,8 @@ addon 源码/二进制 identity 会变化，C ABI 和 workspace 合同不变；�
 这些大小描述当前实现，不是稳定的 kernel 配置 API。`workspace_limit_bytes` 是显式候选资源预算，默认
 32 MiB；超过预算的方案不生成。更多分区不保证更快，额外的部分积写入/读取和归约可能成为主要成本。
 
-构建需要调用者提供 CUTLASS C++ 源码、兼容的 CUDA Toolkit/NVCC 与 host compiler；Windows 本地检查使用
-CUTLASS 4.6.2。在配置好 MSVC 的 shell 中，例如：
+构建需要调用者提供 CUTLASS C++ 源码、兼容的 CUDA Toolkit/NVCC 与 host compiler；以下示例使用
+CUTLASS 4.6.2。在配置好 MSVC 的 shell 中执行：
 
 ```powershell
 python python/taichi_forge/hardware/source_providers/cutlass/build.py `

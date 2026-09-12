@@ -13,6 +13,20 @@ qualification 是公开的 `ti.linalg` API。`SolvePlan`、`PreconditionerPlan` 
 `BatchedSolvePlan` 等求解执行对象仍位于 `ti.linalg.experimental`；下文分别说明其 backend
 和数值支持边界。
 
+
+## 选择入口
+
+| 需求 | API 与所有权 |
+| --- | --- |
+| 固定绑定的重复 apply | `operator.prepare_apply(...)`，保留 prepared owner |
+| 把 apply 放入 Graph | `operator.graph_action(...)`，由 Graph 管理录制执行 |
+| 重复求解系统 | `ti.linalg.experimental.SolvePlan`，根据数学性质选方法 |
+| 观察精度与成本 | 显式 qualification/report 函数，不放入重复执行循环 |
+
+精确签名与 provider 支持范围见下文。布局、拓扑尽量一次准备，
+数值只通过已说明的 generation/update API 更新；runtime reset 后不能复用旧 plan。
+
+
 ## 核心模型
 
 一个 `LinearOperator` 表示 `y = A x`，包含：
@@ -1057,13 +1071,6 @@ tail。Vulkan fixed-budget execution 可以执行完整的 `max_iterations`，�
 较快选择取决于 vector size、operator 成本、iteration count、driver 与 backend。
 不受支持的 policy 或 interval 会在 plan 构造时失败，不会静默 fallback。
 
-可使用 `benchmarks/linear_operator_graph_krylov_bench.py` 对完整的 f32
-compiled-kernel CG 边界做资格检查。该脚本分别报告 plan construction、first solve、warm
-同步 solve completion、terminal observation、真实 residual、最大 solution error、逻辑/执行
-迭代、host observation 与 kernel-profiler 可见性；通过 `--policies` 选择一个或多个策略。
-CUDA/Vulkan 测量应在目标 GPU 空闲时执行。profiler 无法观察 captured Graph 内部时，
-kernel 时间会明确报告为不可用，不做推测。
-
 `plan.execution_capabilities()` 返回执行策略矩阵、条件执行不可用时的结构化原因，
 以及当前选定的 `default_execution_policy`。
 `automatic_solver_batching` 对象报告 matrix-free Kernel/Graph host-check 是否自动选中、
@@ -1195,12 +1202,6 @@ build/submission 数、logical stop counter 与可用 structured-control telemet
 logical/executed/provider work、active efficiency、可用 encoded/masked count、backend Graph
 launch、physical queue submission 与不做推测的 timing 字段。telemetry 为 opt-in；backend
 无法提供的 counter 保持 `None`。
-
-使用 `benchmarks/batched_graph_pcg_bench.py` 以交错样本比较 policy 与 preconditioner
-质量；脚本还会检查 warmup 后 runtime、host pool 与 device pool 是否稳定。
-`linear_operator_graph_rebind_bench.py` 用于 generation churn，
-`linear_operator_shifted_bench.py` 用于 shifted 与显式 identity lowering 对照。这些是本地
-资格工具，不是固定性能承诺。
 
 ### 异步 fixed-budget 或 device-convergent submission
 
@@ -1435,9 +1436,7 @@ efficiency、chunk direct/replay counter、transfer、plan resource 和进程全
 apply 来计算独立真实残差；因此会改变 plan counter 和传入的 output。性能证据应使用专用 plan/workspace，
 尤其不要让异步 batch 或共享 pacer 的资格运行污染生产调度。函数只返回 detached evidence，不写文件。
 
-API 已覆盖 backend correctness、lifecycle、trait、composition、10k approved-generation
-churn 和 solver regression。
-应用的生产资格验证仍由 workload 决定：应在具有代表性的物理与非物理系统上验证
+应用验证仍由 workload 决定：应在具有代表性的物理与非物理系统上验证
 operator 语义、conditioning、tolerance、preconditioner 适用性、失败处理、内存预算和
 backend driver 行为。
 
