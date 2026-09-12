@@ -237,6 +237,16 @@ freeze/materialize/bind 阶段验证结构并保留 root；销毁相关树使其
 可以继续执行。这不意味着任意 native recording 都成为 immutable，也不把所有 field layout
 开放为 runtime ndarray ABI。应查看所选 recipe 的 physical submission mode，而不只看图中是否用了 hardware API。
 
+默认 recipe providers 还会为包含可复用计算段和 prepared、runtime-ordered graphics pass 的平坦 Vulkan 图
+提供分段绑定方案。通过 `definition.search_recipes(...)` 搜索，物化选择后使用 `graph.bind(...)`，并重复调用
+`graph.submit(bindings).wait()`。计算参数与 secondary commands 在绑定发布时准备；绘制段仍保留自己的队列
+顺序、image transition 和录制模式，不能理解成完整 draw-command replay。普通 `builder.compile()` 行为不变。
+
+数据原位更新不要求重新绑定；替换资源或标量参数使用 `bindings.update(...)`，更新失败时旧绑定仍可用。
+直接传字典会在每次执行时准备临时 frame，测量时需要包括这部分成本。准备时间和持久参数/命令存储是额外代价，
+应比较完整 producer/draw/consumer 窗口。关闭 pipeline 仍会使相关绘制失效；关闭 Graph 或 reset runtime
+会释放其 prepared frames。纯绘制图、host-readback action 和使用外部 stream 的 action 不获得此候选。
+
 | 要判断的问题 | 应读的证据 |
 | --- | --- |
 | 为什么没生成候选 | `recipe_discovery.providers[].provider_explanation` |

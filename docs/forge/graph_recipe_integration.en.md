@@ -279,6 +279,24 @@ usable. This does not make arbitrary native recordings immutable or expand the
 runtime ndarray ABI to every field layout. Check the selected recipe's physical
 submission mode, not just whether a Graph contains a hardware API.
 
+The default recipe providers also offer a segmented Vulkan binding plan for a
+flat graph containing reusable compute work and prepared, runtime-ordered
+graphics passes. Search it through `definition.search_recipes(...)`; on the
+materialized selection, use `graph.bind(...)` and reuse that binding with
+`graph.submit(bindings).wait()`. Compute arguments and secondary commands are
+prepared at binding publication. Graphics passes keep their own queue ordering,
+image transitions and recorded execution mode: this is not full draw-command
+replay. Ordinary `builder.compile()` behavior is unchanged.
+
+Updating data in place does not require rebinding. Replacing resources or scalar
+arguments uses `bindings.update(...)`; a failed update leaves the old binding
+usable. Raw dictionary calls prepare temporary frames on each call, so include
+that cost when measuring them. Retained argument/command storage and initial
+preparation are trade-offs; compare the complete producer/draw/consumer window.
+Closing a pipeline still invalidates its draws, and closing the graph or resetting
+the runtime retires the prepared frames. Pure graphics graphs, host-readback
+actions and actions using external streams do not gain this candidate.
+
 Use the report sections according to what they actually establish:
 
 | Question | Evidence |

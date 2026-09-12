@@ -190,16 +190,18 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-secondary-image-recording",
             "vulkan-readonly-tlas-recording",
             "vulkan-fixed-dense-root-retention",
+            "vulkan-ordered-graphics-boundaries",
         ),
-        domain_version="immutable-binding-frame-domain-v9",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-binding-resources-v9",
+        domain_version="immutable-binding-frame-domain-v10",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-graphics-boundaries-v10",
     )
 
     def fragments(self, definition):
         spec = definition._runtime_spec
         vulkan = definition.backend == "vulkan"
+        boundaries = ()
         if vulkan:
-            from taichi_forge.graph._recipes.vulkan_binding_frames import eligible
+            from taichi_forge.graph._recipes.vulkan_binding_frames import eligible, prepared_boundaries
 
             # Some existing providers own their whole-Graph submission recipe.
             # Preserve that identity without knowing any hardware family here.
@@ -212,6 +214,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 for node in spec.nodes
             ) or not eligible(spec, definition.backend):
                 return ()
+            boundaries = prepared_boundaries(spec)
         elif not _eligible(spec, definition.backend):
             return ()
         native = bool(spec.native_count)
@@ -235,7 +238,26 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                             "workspace_lanes": 1,
                             **(
                                 {
-                                    "submission": "embedded_secondary_commands",
+                                    "submission": (
+                                        "secondary_compute_segments_with_ordered_graphics"
+                                        if boundaries
+                                        else "embedded_secondary_commands"
+                                    ),
+                                    **(
+                                        {
+                                            "ordered_boundaries": tuple(
+                                                {
+                                                    "node_index": spec.nodes.index(node),
+                                                    **node.recordable_action.backend_command_recording.to_dict(),
+                                                }
+                                                for node in boundaries
+                                            ),
+                                            "graphics_parameters": "prepared_per_binding",
+                                            "graphics_commands": "original_recording_replay_mode",
+                                        }
+                                        if boundaries
+                                        else {}
+                                    ),
                                     "image_layouts": "closed_cycle_with_entry_repair_after_layout_change",
                                     "binding_transition": "select_immutable_secondary",
                                     "snode_dependencies": "fixed_dense_roots_retained_until_parent_command_retirement",
@@ -249,7 +271,17 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                                     "completion_events": "reuse_observed_peak_until_executor_close",
                                 }
                             ),
-                            **({"provider_parameters": "captured_per_binding_fixed_plan"} if native else {}),
+                            **(
+                                {
+                                    "provider_parameters": (
+                                        "prepared_per_binding_with_ordered_boundaries"
+                                        if boundaries
+                                        else "captured_per_binding_fixed_plan"
+                                    )
+                                }
+                                if native
+                                else {}
+                            ),
                         },
                     ),
                 ),
@@ -277,6 +309,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     "prepare arguments, descriptors and secondary commands at binding publication",
                     "retain buffer/image/TLAS, BLAS and fixed dense roots until frame and parent command retirement",
                     "record a closed image-layout cycle; repair entry layouts only after layout changes",
+                    "split reusable compute segments at qualified prepared graphics actions; keep their original queues and replay modes",
                 ),
                 "limitations": (
                     "flat Vulkan kernel/native Graph, one workspace lane; only fixed dense SNode trees and no external synchronization domains",
@@ -284,6 +317,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     "managed 2D storage mip views; simultaneous sampled/storage alias in one task is unavailable",
                     "raw mapping calls include argument preparation; use Graph.bind to amortize it",
                     "uploads and intervening graphics operations retain their existing explicit boundaries",
+                    "prepared graphics actions are not immutable draw-command replay; no host-readback or explicit-stream actions enter this recipe",
                     "driver-owned command/descriptor memory remains opaque; benefit requires workload measurements",
                 ),
             }
