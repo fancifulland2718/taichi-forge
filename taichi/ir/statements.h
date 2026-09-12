@@ -1779,6 +1779,8 @@ class TexturePtrStmt : public Stmt {
   // Optional, for storage textures
   BufferFormat format{0};
   int lod{0};
+  int collection_capacity{0};
+  Stmt *collection_index{nullptr};
 
   explicit TexturePtrStmt(Stmt *stmt,
                           int dimensions,
@@ -1797,6 +1799,20 @@ class TexturePtrStmt : public Stmt {
 
   explicit TexturePtrStmt(Stmt *stmt,
                           int dimensions,
+                          int collection_capacity,
+                          Stmt *collection_index,
+                          const DebugInfo &dbg_info = DebugInfo())
+      : Stmt(dbg_info),
+        arg_load_stmt(stmt),
+        dimensions(dimensions),
+        is_storage(false),
+        collection_capacity(collection_capacity),
+        collection_index(collection_index) {
+    TI_STMT_REG_FIELDS;
+  }
+
+  explicit TexturePtrStmt(Stmt *stmt,
+                          int dimensions,
                           const DebugInfo &dbg_info = DebugInfo())
       : Stmt(dbg_info),
         arg_load_stmt(stmt),
@@ -1805,7 +1821,13 @@ class TexturePtrStmt : public Stmt {
     TI_STMT_REG_FIELDS;
   }
 
-  TI_STMT_DEF_FIELDS(arg_load_stmt, dimensions, is_storage, format, lod);
+  TI_STMT_DEF_FIELDS(arg_load_stmt,
+                     dimensions,
+                     is_storage,
+                     format,
+                     lod,
+                     collection_capacity,
+                     collection_index);
   TI_DEFINE_ACCEPT_AND_CLONE
 };
 

@@ -184,14 +184,36 @@ void ArgLoadExpression::flatten(FlattenContext *ctx) {
 }
 
 void TexturePtrExpression::type_check(const CompileConfig *config) {
+  if (collection_capacity <= 0) {
+    return;
+  }
+  if (config->arch != Arch::vulkan) {
+    ErrorEmitter(TaichiTypeError(), this,
+                 "TextureCollection kernel arguments require Vulkan");
+  }
+  TI_ASSERT_TYPE_CHECKED(collection_index);
+  const auto index_type = collection_index.get_rvalue_type();
+  if (index_type != PrimitiveType::i32 && index_type != PrimitiveType::u32) {
+    ErrorEmitter(TaichiTypeError(), this,
+                 fmt::format("TextureCollection index must be i32 or u32, got "
+                             "{}",
+                             index_type->to_string()));
+  }
 }
 
 void TexturePtrExpression::flatten(FlattenContext *ctx) {
   ctx->push_back<ArgLoadStmt>(arg_id, PrimitiveType::f32, /*is_ptr=*/true,
                               /*create_load=*/true, /*arg_depth=*/arg_depth,
                               dbg_info);
-  ctx->push_back<TexturePtrStmt>(ctx->back_stmt(), num_dims, is_storage, format,
-                                 lod, dbg_info);
+  auto *arg_load = ctx->back_stmt();
+  if (collection_capacity > 0) {
+    auto *index = flatten_rvalue(collection_index, ctx);
+    ctx->push_back<TexturePtrStmt>(arg_load, num_dims, collection_capacity,
+                                   index, dbg_info);
+  } else {
+    ctx->push_back<TexturePtrStmt>(arg_load, num_dims, is_storage, format, lod,
+                                   dbg_info);
+  }
   stmt = ctx->back_stmt();
 }
 

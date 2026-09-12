@@ -74,6 +74,25 @@ _RW_TEXTURE_UNSIGNED_INTEGER_FORMATS = frozenset(
     }
 )
 
+_FLOAT_SAMPLED_TEXTURE_FORMATS = (
+    frozenset(FORMAT2TY_CH)
+    - _RW_TEXTURE_SIGNED_INTEGER_FORMATS
+    - _RW_TEXTURE_UNSIGNED_INTEGER_FORMATS
+) | frozenset(
+    {
+        Format.rgba8srgb,
+        Format.bgra8,
+        Format.bgra8srgb,
+        Format.depth16,
+        Format.depth32f,
+    }
+)
+
+
+def is_float_sampled_texture_format(fmt):
+    """Whether sampling exposes normalized/floating-point shader values."""
+    return fmt in _FLOAT_SAMPLED_TEXTURE_FORMATS
+
 
 def rw_texture_sampled_type(fmt):
     """Returns the shader-visible scalar type for storage image load/store."""
@@ -93,6 +112,36 @@ class TextureType:
 
     def __init__(self, num_dimensions):
         self.num_dimensions = num_dimensions
+
+
+class TextureCollectionType:
+    """Type annotation for a fixed-capacity sampled texture collection."""
+
+    def __init__(self, ndim, capacity):
+        if isinstance(ndim, bool):
+            raise TaichiCompilationError("texture_collection ndim must be an integer")
+        if isinstance(capacity, bool):
+            raise TaichiCompilationError("texture_collection capacity must be an integer")
+        try:
+            ndim = operator.index(ndim)
+        except TypeError as exc:
+            raise TaichiCompilationError(
+                "texture_collection ndim must be an integer"
+            ) from exc
+        try:
+            capacity = operator.index(capacity)
+        except TypeError as exc:
+            raise TaichiCompilationError(
+                "texture_collection capacity must be an integer"
+            ) from exc
+        if not 1 <= ndim <= 3:
+            raise TaichiCompilationError("texture_collection ndim must be in [1, 3]")
+        if not 1 <= capacity <= 0x7FFFFFFF:
+            raise TaichiCompilationError(
+                "texture_collection capacity must be in [1, 2^31 - 1]"
+            )
+        self.num_dimensions = ndim
+        self.capacity = capacity
 
 
 class RWTextureType:
@@ -124,8 +173,9 @@ class RWTextureType:
 
 
 texture = TextureType
+texture_collection = TextureCollectionType
 rw_texture = RWTextureType
 """Alias for :class:`~taichi_forge.types.ndarray_type.TextureType`.
 """
 
-__all__ = ["texture", "rw_texture"]
+__all__ = ["texture", "texture_collection", "rw_texture"]

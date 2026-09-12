@@ -90,6 +90,31 @@ std::vector<int> Callable::insert_rw_texture_param(int total_dim,
   return add_parameter(p);
 }
 
+std::vector<int> Callable::insert_texture_collection_param(
+    int total_dim, int capacity, const std::string &name) {
+  TI_ERROR_IF(
+      arch != Arch::vulkan || total_dim < 1 || total_dim > 3 || capacity < 1,
+      "TextureCollection requires Vulkan, ndim in [1, 3], and positive "
+      "capacity");
+  const auto caps = program->get_device_caps();
+  TI_ERROR_IF(
+      !caps.get(DeviceCapability::
+                    spirv_has_sampled_image_array_non_uniform_indexing) ||
+          capacity > caps.get(
+                         DeviceCapability::max_sampled_texture_collection_size),
+      "TextureCollection exceeds the supported sampled-image descriptor "
+      "capacity");
+  auto *type = TypeFactory::get_instance().get_rwtexture_struct_type();
+  // Reuse the existing serialized Parameter layout. Collection capacity is
+  // immutable compile-time metadata, represented by element_shape[0], rather
+  // than adding a field that would invalidate old offline-cache records.
+  auto p = Parameter(type, true, false, 0, total_dim,
+                     std::vector<int>{capacity});
+  p.name = name;
+  p.ptype = ParameterType::kTextureCollection;
+  return add_parameter(p);
+}
+
 std::vector<int> Callable::insert_acceleration_structure_param(
     const std::string &name) {
   // Resource arguments participate in the same out-of-band runtime-array

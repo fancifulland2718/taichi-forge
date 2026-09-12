@@ -8,7 +8,10 @@ from taichi_forge.lang.matrix import Matrix
 from taichi_forge.lang.util import taichi_scope
 from taichi_forge.types import vector
 from taichi_forge.types.primitive_types import f32
-from taichi_forge.types.texture_type import rw_texture_sampled_type
+from taichi_forge.types.texture_type import (
+    is_float_sampled_texture_format,
+    rw_texture_sampled_type,
+)
 
 
 def _get_entries(mat):
@@ -45,6 +48,30 @@ class TextureSampler:
         b = impl.call_internal("composite_extract_2", v, with_runtime_context=False)
         a = impl.call_internal("composite_extract_3", v, with_runtime_context=False)
         return vector(4, f32)([r, g, b, a])
+
+
+class TextureCollectionAccessor:
+    """Kernel-scope view of one fixed-capacity sampled texture table."""
+
+    def __init__(self, arg_id, num_dims, capacity) -> None:
+        self.arg_id = arg_id
+        self.num_dims = num_dims
+        self.capacity = capacity
+
+    @taichi_scope
+    def __getitem__(self, index):
+        index = Expr(index)
+        dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+        ptr_expr = _ti_core.make_texture_collection_ptr_expr(
+            self.arg_id,
+            self.num_dims,
+            0,
+            self.capacity,
+            index.ptr,
+            dbg_info,
+        )
+        ptr_expr.type_check(impl.get_runtime().prog.config())
+        return TextureSampler(ptr_expr, self.num_dims)
 
 
 class RWTextureAccessor:
@@ -233,6 +260,7 @@ class Texture:
         """
         self.tex.from_snode(field.snode.ptr)
 
+
     def _device_allocation_ptr(self):
         return self.tex.device_allocation_ptr()
 
@@ -276,3 +304,68 @@ class Texture:
 
         save_texture_to_numpy(self, res)
         return Image.fromarray(res).rotate(270, expand=True)
+
+
+class TextureCollection:
+    """Immutable fixed-capacity collection of managed Vulkan textures.
+
+    Replacing a member is expressed by constructing a new collection and, for
+    Graph execution, explicitly publishing that collection through ``bind`` or
+    ``GraphBindingSet.update``.
+    """
+
+    def __init__(self, textures):
+        try:
+            members = tuple(textures)
+        except TypeError as exc:
+            raise TypeError("TextureCollection members must be iterable") from exc
+        if not members:
+            raise ValueError("TextureCollection requires at least one member")
+        if any(not isinstance(texture, Texture) for texture in members):
+            raise TypeError("TextureCollection members must all be Textures")
+        if any(texture.tex is None for texture in members):
+            raise RuntimeError("TextureCollection members must be live Textures")
+        owner = members[0]._runtime_prog
+        if owner is None or any(
+            texture._runtime_prog is not owner for texture in members
+        ):
+            raise RuntimeError(
+                "TextureCollection members must belong to one Taichi runtime"
+            )
+        ndim = members[0].num_dims
+        if any(texture.num_dims != ndim for texture in members):
+            raise ValueError(
+                "TextureCollection members must have the same dimensionality"
+            )
+        if any(
+            not is_float_sampled_texture_format(texture.fmt)
+            for texture in members
+        ):
+            raise ValueError(
+                "TextureCollection requires floating-point or normalized sampled formats"
+            )
+
+        self._members = members
+        self._runtime_prog = owner
+        self.collection = _ti_core.TextureCollection(
+            [texture.tex for texture in members]
+        )
+        self.num_dims = ndim
+        self.capacity = len(members)
+        self._snapshot_id = self.collection.snapshot_id()
+        impl.get_runtime().register_runtime_object(self)
+
+    @property
+    def members(self):
+        return self._members
+
+    @property
+    def snapshot_id(self):
+        return self._snapshot_id
+
+    def _invalidate_runtime(self):
+        self.collection = None
+        self._runtime_prog = None
+
+
+__all__ = ["Texture", "TextureCollection"]

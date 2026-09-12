@@ -29,6 +29,7 @@ namespace taichi::lang {
 class AotModuleBuilder;
 class Ndarray;
 class Texture;
+class TextureCollection;
 class Matrix;
 class Kernel;
 class CompiledKernelData;
@@ -49,7 +50,8 @@ enum class ArgKind {
   kTexture,
   kRWTexture,
   kUnknown,
-  kAccelerationStructure
+  kAccelerationStructure,
+  kTextureCollection
 };
 
 /**
@@ -115,7 +117,8 @@ struct Arg {
       TI_ERROR_IF(tag == ArgKind::kScalar,
                   "Scalar Graph argument {} cannot use a TensorType dtype",
                   name);
-      TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture,
+      TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture ||
+                      tag == ArgKind::kTextureCollection,
                   "Texture Graph arguments cannot use a TensorType dtype");
       const auto inferred_shape = dtype->as<TensorType>()->get_shape();
       TI_ERROR_IF(inferred_shape.empty() || inferred_shape.size() > 2,
@@ -140,7 +143,8 @@ struct Arg {
   }
 
   DataType element_dtype() const {
-    TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture,
+    TI_ERROR_IF(tag == ArgKind::kTexture || tag == ArgKind::kRWTexture ||
+                    tag == ArgKind::kTextureCollection,
                 "Texture Graph arguments do not expose an element dtype");
     DataType scalar_dtype = dtype();
     if (element_shape.empty()) {
@@ -201,6 +205,11 @@ struct TI_DLL_EXPORT IValue {
 
   static IValue create(const Texture &tex) {
     return IValue(reinterpret_cast<intptr_t>(&tex), ArgKind::kTexture);
+  }
+
+  static IValue create(const TextureCollection &textures) {
+    return IValue(reinterpret_cast<intptr_t>(&textures),
+                  ArgKind::kTextureCollection);
   }
 
   static IValue create(const Matrix &matrix) {

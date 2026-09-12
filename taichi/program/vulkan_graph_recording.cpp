@@ -167,6 +167,24 @@ Program::create_vulkan_graph_recording(
                   "Prepared Vulkan Graph AS belongs to another Program: {}", name);
       // The existing kernel binding retains TLAS, BLAS and all backing Vulkan
       // objects in the recorded command, independently of the open handle table.
+    } else if (value.tag == aot::ArgKind::kTextureCollection) {
+      const auto *collection =
+          reinterpret_cast<const TextureCollection *>(value.val);
+      TI_ERROR_IF(!collection || collection->owning_program() != this,
+                  "Prepared Vulkan Graph TextureCollection belongs to another "
+                  "Program: {}",
+                  name);
+      // This is cold recording preparation. Retain every member once; the
+      // immutable recorded descriptor array and leases are reused without a
+      // member scan on each replay.
+      for (const auto &member : collection->members()) {
+        TI_ERROR_IF(member.texture == nullptr ||
+                        member.texture->is_cuda_texture(),
+                    "Prepared Vulkan Graph requires Vulkan "
+                    "TextureCollection members: {}",
+                    name);
+        textures->push_back(acquire_texture_external_lease(member.texture));
+      }
     } else if (value.tag == aot::ArgKind::kTexture) {
       const auto *texture = reinterpret_cast<const Texture *>(value.val);
       TI_ERROR_IF(!texture || texture->owning_program() != this ||

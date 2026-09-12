@@ -617,6 +617,34 @@ void LaunchContextBuilder::set_arg_rw_texture(const std::vector<int> &arg_id,
   set_arg_rw_texture_impl(arg_id, ptr, shape);
 }
 
+void LaunchContextBuilder::set_arg_texture_collection(
+    const std::vector<int> &arg_id, const TextureCollection &collection) {
+  const auto &param = kernel_->nested_parameters.at(arg_id);
+  TI_ERROR_IF(param.ptype != ParameterType::kTextureCollection ||
+                  param.element_shape !=
+                      std::vector<int>{collection.capacity()} ||
+                  param.total_dim != collection.num_dimensions(),
+              "TextureCollection does not match the kernel dimension/capacity");
+  const int offset = args_type->get_element_offset(arg_id);
+  std::vector<DeviceAllocation> allocations;
+  allocations.reserve(collection.members().size());
+  for (const auto &member : collection.members()) {
+    allocations.push_back(member.allocation);
+  }
+  // Replace the complete slot. No member pointer is dereferenced here: the
+  // Program resolves the copied registry handles under its submission guard.
+  texture_ptrs.erase(std::remove_if(texture_ptrs.begin(), texture_ptrs.end(),
+                                   [offset](const auto &ref) { return ref.arg_offset == offset; }),
+                     texture_ptrs.end());
+  for (const auto &member : collection.members()) {
+    texture_ptrs.push_back({offset, collection.owning_program(), member.texture,
+                            member.handle});
+  }
+  texture_collections[arg_id] = std::move(allocations);
+  texture_collection_snapshot_ids[arg_id] = collection.snapshot_id();
+  set_array_device_allocation_type(arg_id, DevAllocType::kTextureCollection);
+}
+
 void LaunchContextBuilder::set_arg_acceleration_structure(
     const std::vector<int> &arg_id,
     Program *owner,

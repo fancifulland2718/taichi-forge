@@ -41,7 +41,15 @@ class ExpressionHumanFriendlyPrinter : public ExpressionPrinter {
   }
 
   void visit(TexturePtrExpression *expr) override {
-    emit(fmt::format("(Texture *)(arg[{}])", fmt::join(expr->arg_id, ", ")));
+    if (expr->collection_capacity > 0) {
+      emit(fmt::format("(TextureCollection *)(arg[{}])[",
+                       fmt::join(expr->arg_id, ", ")));
+      expr->collection_index->accept(this);
+      emit("]");
+    } else {
+      emit(fmt::format("(Texture *)(arg[{}])",
+                       fmt::join(expr->arg_id, ", ")));
+    }
   }
 
   void visit(TextureOpExpression *expr) override {

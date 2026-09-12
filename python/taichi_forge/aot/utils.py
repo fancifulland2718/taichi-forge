@@ -1,7 +1,7 @@
 from typing import Any
 
 from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
-from taichi_forge.lang._texture import Texture
+from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.enums import Format
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import (
@@ -19,7 +19,11 @@ from taichi_forge.types._argument_descriptor import (
     describe_symbolic_arg,
     python_compound_type,
 )
-from taichi_forge.types.texture_type import RWTextureType, TextureType
+from taichi_forge.types.texture_type import (
+    RWTextureType,
+    TextureCollectionType,
+    TextureType,
+)
 from taichi_forge.types.ray_type import AccelerationStructureType
 
 template_types = (NdarrayType, TextureType, template)
@@ -38,6 +42,23 @@ def reject_acceleration_structure_arguments(kernel, integration):
     if names:
         raise TaichiCompilationError(
             "Vulkan acceleration-structure kernel arguments are JIT-only; "
+            f"{integration} does not support them (arguments: "
+            + ", ".join(names)
+            + ")"
+        )
+
+
+def reject_texture_collection_arguments(kernel, integration):
+    """Fail closed until the serialized AOT ABI carries descriptor tables."""
+
+    names = [
+        arg.name
+        for arg in kernel.arguments
+        if isinstance(arg.annotation, TextureCollectionType)
+    ]
+    if names:
+        raise TaichiCompilationError(
+            "TextureCollection kernel arguments are JIT-only; "
             f"{integration} does not support them (arguments: "
             + ", ".join(names)
             + ")"
@@ -136,6 +157,26 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
                     f"ndim={actual.ndim}."
                 )
         return Texture(Format.rgba8, (2,) * anno.num_dimensions)
+    if isinstance(anno, TextureCollectionType):
+        if has_symbolic_arg:
+            expected = describe_annotation(anno)
+            actual = describe_symbolic_arg(symbolic_arg)
+            if (
+                actual.kind != "texture_collection"
+                or actual.ndim != expected.ndim
+                or actual.capacity != expected.capacity
+            ):
+                raise TaichiCompilationError(
+                    f"TextureCollection descriptor mismatch for argument {arg.name}: "
+                    f"expected ndim={expected.ndim}, capacity={expected.capacity}; "
+                    f"got {actual.kind}, ndim={actual.ndim}, capacity={actual.capacity}."
+                )
+        # Compilation needs the immutable capacity/type specialization, not N
+        # distinct images. Repeating one live dummy avoids allocating up to a
+        # device-limit number of images while still constructing a real fixed
+        # descriptor snapshot for JIT Graph compilation.
+        dummy = Texture(Format.rgba8, (2,) * anno.num_dimensions)
+        return TextureCollection((dummy,) * anno.capacity)
     if isinstance(anno, MatrixType):
         if has_symbolic_arg:
             expected = describe_annotation(anno).element

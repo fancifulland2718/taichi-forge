@@ -308,6 +308,39 @@ queue bridge 保留，并不把 draw 合入同一 secondary command。二维纹�
 此路线。ordinary Vulkan Graph 行为不变；选择此完整 recipe 用 retained command/descriptor 和
 device barrier 换取较低 host 准备成本，不保证 device 加速。
 
+### `ti.TextureCollection`：设备索引的采样纹理集合
+
+在支持 sampled-image nonuniform indexing 的 Vulkan 设备上，固定、非空的受管纹理 tuple
+可通过一个 descriptor array 进入 kernel：
+
+```python
+table = ti.TextureCollection((albedo_a, albedo_b, albedo_c))
+
+@ti.kernel
+def lookup(textures: ti.types.texture_collection(ndim=2, capacity=3),
+           indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+           result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+    for i in result:
+        result[i] = textures[indices[i]].sample_lod(ti.Vector([0.5, 0.5]), 0.0).x
+
+lookup(table, indices, result)
+```
+
+调用者保证 `0 <= index < capacity`，Forge 不扫描设备索引，也不把非法索引静默 clamp。
+成员须来自同一 runtime、仍存活、维数一致，并使用浮点或归一化采样格式；尺寸和 sampler 可不同。
+capacity 是 kernel 专门化的一部分，受设备 combined sampler/image descriptor 限值和其他绑定总量约束。
+暂不支持整数格式或通过集合进行 store。
+
+Graph 参数使用 `ti.graph.Arg(ti.graph.ArgKind.TEXTURE_COLLECTION, "textures", ndim=2, capacity=3)`。
+原位上传保留集合；成员替换需创建新集合并显式 `bindings.update(textures=new_table)`。
+`snapshot_id` 是进程内资源实例身份，不是可移植 recipe 或执行方案身份。runtime reset 后不得复用。
+此能力限 Vulkan JIT，不表示 CUDA/AOT 支持，也不保证比 buffer 查表更快；尤其大量小纹理应测完整消费者的提交成本。
+
+重复完整图还可使用支持集合的 Vulkan immutable binding-frame recipe。经完整 Graph 搜索选择并物化后，
+`graph.bind(...)` 保留 descriptor table 和成员租约，未改变的 frame 复用 secondary commands。
+ordinary Graph 保留保守资源路径；仅使用稳定 `GraphBindingSet` 不代表已经选择该物理 recipe，
+应以物化报告确认实际执行方式。
+
 ### `ti.hardware.image.VulkanSpdPlan`：显式 single-pass downsampling
 
 ```python

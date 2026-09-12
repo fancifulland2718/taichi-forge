@@ -225,6 +225,14 @@ class RHI_DLL_EXPORT ShaderResourceSet {
     RHI_NOT_IMPLEMENTED;
   }
 
+  /** Bind a fixed array of sampled images under one descriptor binding. */
+  virtual ShaderResourceSet &image_array(
+      uint32_t binding,
+      const std::vector<DeviceAllocation> &allocs,
+      const std::vector<ImageSamplerConfig> &sampler_configs) {
+    RHI_NOT_IMPLEMENTED;
+  }
+
   /**
    * Bind a RW image resource (UAV / Storage Image)
    * @params binding The binding index of the resource

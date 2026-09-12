@@ -5402,6 +5402,14 @@ void export_lang(py::module &m) {
       .def("from_ndarray", &Texture::from_ndarray)
       .def("from_snode", &Texture::from_snode);
 
+  py::class_<TextureCollection>(m, "TextureCollection")
+      .def(py::init<const std::vector<Texture *> &>())
+      .def("owning_program", &TextureCollection::owning_program,
+           py::return_value_policy::reference)
+      .def("num_dimensions", &TextureCollection::num_dimensions)
+      .def("capacity", &TextureCollection::capacity)
+      .def("snapshot_id", &TextureCollection::snapshot_id);
+
   py::enum_<aot::ArgKind>(m, "ArgKind")
       .value("SCALAR", aot::ArgKind::kScalar)
       .value("NDARRAY", aot::ArgKind::kNdarray)
@@ -5411,6 +5419,7 @@ void export_lang(py::module &m) {
       .value("TEXTURE", aot::ArgKind::kTexture)
       .value("RWTEXTURE", aot::ArgKind::kRWTexture)
       .value("ACCELERATION_STRUCTURE", aot::ArgKind::kAccelerationStructure)
+      .value("TEXTURE_COLLECTION", aot::ArgKind::kTextureCollection)
       .export_values();
 
   py::class_<aot::Arg>(m, "Arg")
@@ -5743,6 +5752,9 @@ void export_lang(py::module &m) {
             auto handle = binding[1].template cast<std::uint64_t>();
             args.insert(
                 {arg_name, aot::IValue::acceleration_structure(owner, handle)});
+          } else if (tag == aot::ArgKind::kTextureCollection) {
+            auto &val = pyarg.template cast<TextureCollection &>();
+            args.insert({arg_name, aot::IValue::create(val)});
           } else if (tag == aot::ArgKind::kTexture ||
                      tag == aot::ArgKind::kRWTexture) {
             auto &val = pyarg.template cast<Texture &>();
@@ -6853,6 +6865,7 @@ void export_lang(py::module &m) {
       .def("insert_arr_param", &Kernel::insert_arr_param)
       .def("insert_ndarray_param", &Kernel::insert_ndarray_param)
       .def("insert_texture_param", &Kernel::insert_texture_param)
+      .def("insert_texture_collection_param", &Kernel::insert_texture_collection_param)
       .def("insert_pointer_param", &Kernel::insert_pointer_param)
       .def("insert_rw_texture_param", &Kernel::insert_rw_texture_param)
       .def("insert_acceleration_structure_param",
@@ -6925,6 +6938,7 @@ void export_lang(py::module &m) {
                                                generation});
            })
       .def("set_arg_texture", &LaunchContextBuilder::set_arg_texture)
+      .def("set_arg_texture_collection", &LaunchContextBuilder::set_arg_texture_collection)
       .def("set_arg_acceleration_structure",
            &LaunchContextBuilder::set_arg_acceleration_structure)
       .def("_debug_set_texture_resource_handle",
@@ -6949,6 +6963,7 @@ void export_lang(py::module &m) {
       .def("insert_arr_param", &Function::insert_arr_param)
       .def("insert_ndarray_param", &Function::insert_ndarray_param)
       .def("insert_texture_param", &Function::insert_texture_param)
+      .def("insert_texture_collection_param", &Function::insert_texture_collection_param)
       .def("insert_pointer_param", &Function::insert_pointer_param)
       .def("insert_rw_texture_param", &Function::insert_rw_texture_param)
       .def("insert_acceleration_structure_param",
@@ -7225,6 +7240,9 @@ void export_lang(py::module &m) {
   m.def("make_texture_ptr_expr",
         Expr::make<TexturePtrExpression, const std::vector<int> &, int, int,
                    const DebugInfo &>);
+  m.def("make_texture_collection_ptr_expr",
+        Expr::make<TexturePtrExpression, const std::vector<int> &, int, int,
+                   int, const Expr &, const DebugInfo &>);
   m.def("make_rw_texture_ptr_expr",
         Expr::make<TexturePtrExpression, const std::vector<int> &, int, int,
                    const BufferFormat &, int, const DebugInfo &>);

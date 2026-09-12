@@ -41,6 +41,9 @@ PER_DEVICE_CAPABILITY(spirv_has_cooperative_matrix)
 // compute capability 8.6 is 86, and PTX ISA 7.1 is 71.
 PER_DEVICE_CAPABILITY(cuda_compute_capability)
 PER_DEVICE_CAPABILITY(cuda_ptx_version)
+// Append-only: DeviceCapability ordinals are persisted in AOT/cache metadata.
+PER_DEVICE_CAPABILITY(spirv_has_sampled_image_array_non_uniform_indexing)
+PER_DEVICE_CAPABILITY(max_sampled_texture_collection_size)
 #endif
 
 #ifdef PER_BUFFER_FORMAT

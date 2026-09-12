@@ -16,6 +16,7 @@ from taichi_forge.aot.utils import (
     produce_injected_args,
     produce_injected_args_from_template,
     reject_acceleration_structure_arguments,
+    reject_texture_collection_arguments,
 )
 from taichi_forge.lang import impl, kernel_impl
 from taichi_forge.lang._ndarray import Ndarray, StructNdarray
@@ -121,6 +122,7 @@ class KernelTemplate:
         kernel = self._kernel_fn._primal
         assert isinstance(kernel, kernel_impl.Kernel)
         reject_acceleration_structure_arguments(kernel, "AOT kernel templates")
+        reject_texture_collection_arguments(kernel, "AOT kernel templates")
         injected_args = []
         key_p = ""
         required = {
@@ -281,6 +283,7 @@ class Module:
         kernel = kernel_fn._primal
         assert isinstance(kernel, kernel_impl.Kernel)
         reject_acceleration_structure_arguments(kernel, "AOT Module.add_kernel()")
+        reject_texture_collection_arguments(kernel, "AOT Module.add_kernel()")
         if template_args is not None:
             injected_args = produce_injected_args_from_template(kernel, template_args)
         else:

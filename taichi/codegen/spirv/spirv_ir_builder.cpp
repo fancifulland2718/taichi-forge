@@ -1096,6 +1096,67 @@ Value IRBuilder::texture_argument(int num_channels,
   return val;
 }
 
+Value IRBuilder::texture_array_argument(int num_channels,
+                                        int num_dimensions,
+                                        uint32_t descriptor_set,
+                                        uint32_t binding,
+                                        uint32_t array_count) {
+  (void)num_channels;
+  TI_ASSERT(array_count > 0);
+  TI_ERROR_IF(
+      !caps_->get(
+          cap::spirv_has_sampled_image_array_non_uniform_indexing),
+      "Sampled-image descriptor array non-uniform indexing is unavailable");
+  declare_capability(spv::CapabilityShaderNonUniform);
+  declare_capability(spv::CapabilitySampledImageArrayNonUniformIndexing);
+  declare_extension("SPV_EXT_descriptor_indexing");
+
+  const auto texture_type =
+      get_sampled_image_type(f32_type(), num_dimensions);
+  SType array_type;
+  array_type.id = id_counter_++;
+  array_type.flag = TypeKind::kPtr;
+  array_type.element_type_id = texture_type.id;
+  const Value count = uint_immediate_number(t_uint32_, array_count);
+  ib_.begin(spv::OpTypeArray)
+      .add_seq(array_type, texture_type, count)
+      .commit(&global_);
+
+  const auto array_ptr_type =
+      get_pointer_type(array_type, spv::StorageClassUniformConstant);
+  Value val = new_value(array_ptr_type, ValueKind::kTexture);
+  ib_.begin(spv::OpVariable)
+      .add_seq(array_ptr_type, val, spv::StorageClassUniformConstant)
+      .commit(&global_);
+  decorate(spv::OpDecorate, val, spv::DecorationDescriptorSet,
+           descriptor_set);
+  decorate(spv::OpDecorate, val, spv::DecorationBinding, binding);
+  debug_name(spv::OpName, val, "texture_collection");
+  global_values.push_back(val);
+  return val;
+}
+
+Value IRBuilder::texture_array_access(Value texture_array,
+                                      Value index,
+                                      int num_dimensions) {
+  const auto texture_type =
+      get_sampled_image_type(f32_type(), num_dimensions);
+  const auto element_ptr_type =
+      get_pointer_type(texture_type, spv::StorageClassUniformConstant);
+  index = cast(t_uint32_, index);
+  // The resource operand (not merely the arithmetic index) is the normative
+  // NonUniform decoration target. Redundantly decorating the index also keeps
+  // compatibility with older drivers that consumed the early extension form.
+  decorate(spv::OpDecorate, index, spv::DecorationNonUniform);
+  Value element =
+      new_value(element_ptr_type, ValueKind::kNonUniformTexturePtr);
+  ib_.begin(spv::OpAccessChain)
+      .add_seq(element_ptr_type, element, texture_array, index)
+      .commit(&function_);
+  decorate(spv::OpDecorate, element, spv::DecorationNonUniform);
+  return element;
+}
+
 Value IRBuilder::storage_image_argument(int num_channels,
                                         int num_dimensions,
                                         uint32_t descriptor_set,
@@ -1395,6 +1456,9 @@ Value IRBuilder::sample_texture(Value texture_var,
                                 Value lod) {
   auto image = this->load_variable(
       texture_var, this->get_sampled_image_type(f32_type(), args.size()));
+  if (texture_var.flag == ValueKind::kNonUniformTexturePtr) {
+    decorate(spv::OpDecorate, image, spv::DecorationNonUniform);
+  }
   Value uv;
   if (args.size() == 1) {
     uv = args[0];
@@ -1417,6 +1481,9 @@ Value IRBuilder::fetch_texel(Value texture_var,
                              Value lod) {
   auto sampled_image = this->load_variable(
       texture_var, this->get_sampled_image_type(f32_type(), args.size()));
+  if (texture_var.flag == ValueKind::kNonUniformTexturePtr) {
+    decorate(spv::OpDecorate, sampled_image, spv::DecorationNonUniform);
+  }
 
   // OpImageFetch requires operand with OpImageType
   // We have to extract the underlying OpImage from OpSampledImage here
@@ -1830,6 +1897,7 @@ Value IRBuilder::alloca_workgroup_array(const SType &arr_type) {
 Value IRBuilder::load_variable(Value pointer, const SType &res_type) {
   TI_ASSERT(pointer.flag == ValueKind::kVariablePtr ||
             pointer.flag == ValueKind::kStructArrayPtr ||
+            pointer.flag == ValueKind::kNonUniformTexturePtr ||
             pointer.flag == ValueKind::kPhysicalPtr);
   Value ret = new_value(res_type, ValueKind::kNormal);
   if (pointer.flag == ValueKind::kPhysicalPtr) {

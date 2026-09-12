@@ -92,6 +92,10 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     emit(expr->is_storage);
     emit(expr->format);
     emit(expr->lod);
+    emit(expr->collection_capacity);
+    if (expr->collection_capacity > 0) {
+      emit(expr->collection_index);
+    }
   }
 
   void visit(TextureOpExpression *expr) override {

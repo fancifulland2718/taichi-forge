@@ -3,7 +3,11 @@ import inspect
 import taichi_forge.lang
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl, ops
-from taichi_forge.lang._texture import RWTextureAccessor, TextureSampler
+from taichi_forge.lang._texture import (
+    RWTextureAccessor,
+    TextureCollectionAccessor,
+    TextureSampler,
+)
 from taichi_forge.lang._ray_query import AccelerationStructureAccessor
 from taichi_forge.lang.any_array import AnyArray
 from taichi_forge.lang.expr import Expr
@@ -187,6 +191,13 @@ def decl_texture_arg(num_dimensions, name):
     arg_id = impl.get_runtime().compiling_callable.insert_texture_param(num_dimensions, name)
     dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
     return TextureSampler(_ti_core.make_texture_ptr_expr(arg_id, num_dimensions, 0, dbg_info), num_dimensions)
+
+
+def decl_texture_collection_arg(num_dimensions, capacity, name):
+    arg_id = impl.get_runtime().compiling_callable.insert_texture_collection_param(
+        num_dimensions, capacity, name
+    )
+    return TextureCollectionAccessor(arg_id, num_dimensions, capacity)
 
 
 def decl_rw_texture_arg(num_dimensions, buffer_format, lod, name):

@@ -79,6 +79,7 @@ class ArgumentTypeDescriptor:
     ndim: Optional[int] = None
     needs_grad: Optional[bool] = None
     fmt: object = None
+    capacity: Optional[int] = None
 
     def structural_key(self):
         return (
@@ -87,6 +88,7 @@ class ArgumentTypeDescriptor:
             self.ndim,
             self.needs_grad,
             str(self.fmt) if self.fmt is not None else None,
+            self.capacity,
         )
 
 
@@ -134,7 +136,11 @@ def describe_annotation(annotation):
     from taichi_forge.lang.struct import StructType
     from taichi_forge.types.ndarray_type import NdarrayType
     from taichi_forge.types.ray_type import AccelerationStructureType
-    from taichi_forge.types.texture_type import RWTextureType, TextureType
+    from taichi_forge.types.texture_type import (
+        RWTextureType,
+        TextureCollectionType,
+        TextureType,
+    )
 
     if isinstance(annotation, NdarrayType):
         return ArgumentTypeDescriptor(
@@ -150,6 +156,12 @@ def describe_annotation(annotation):
     if isinstance(annotation, TextureType):
         return ArgumentTypeDescriptor(
             "texture", ndim=annotation.num_dimensions
+        )
+    if isinstance(annotation, TextureCollectionType):
+        return ArgumentTypeDescriptor(
+            "texture_collection",
+            ndim=annotation.num_dimensions,
+            capacity=annotation.capacity,
         )
     if isinstance(annotation, AccelerationStructureType):
         return ArgumentTypeDescriptor("acceleration_structure")
@@ -184,6 +196,12 @@ def describe_symbolic_arg(symbolic_arg):
     if tag == _ti_core.ArgKind.TEXTURE:
         return ArgumentTypeDescriptor(
             "texture", ndim=len(symbolic_arg.texture_shape)
+        )
+    if tag == getattr(_ti_core.ArgKind, "TEXTURE_COLLECTION", None):
+        return ArgumentTypeDescriptor(
+            "texture_collection",
+            ndim=symbolic_arg.field_dim,
+            capacity=symbolic_arg.element_shape[0],
         )
     if tag == _ti_core.ArgKind.RWTEXTURE:
         from taichi_forge.types.texture_type import TY_CH2FORMAT

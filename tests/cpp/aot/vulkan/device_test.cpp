@@ -51,6 +51,25 @@ bool spirv_contains_string(const std::vector<uint32_t> &module,
   return bytes.find(expected) != std::string_view::npos;
 }
 
+std::size_t spirv_decoration_count(const std::vector<uint32_t> &module,
+                                   spv::Decoration expected) {
+  std::size_t count = 0;
+  for (std::size_t offset = 5; offset < module.size();) {
+    const uint32_t instruction = module[offset];
+    const uint32_t word_count = instruction >> 16;
+    const uint32_t opcode = instruction & 0xffffu;
+    if (word_count == 0 || offset + word_count > module.size()) {
+      break;
+    }
+    if (opcode == spv::OpDecorate && word_count >= 3 &&
+        module[offset + 2] == static_cast<uint32_t>(expected)) {
+      ++count;
+    }
+    offset += word_count;
+  }
+  return count;
+}
+
 std::vector<uint32_t> make_spirv_header(
     const DeviceCapabilityConfig &caps) {
   spirv::IRBuilder builder(Arch::vulkan, &caps);
@@ -302,6 +321,43 @@ TEST(VulkanDeviceCapabilityTest, ImageTypesDeclareRequiredCapabilities) {
   EXPECT_TRUE(capabilities.count(spv::CapabilityImage1D));
   EXPECT_TRUE(
       capabilities.count(spv::CapabilityStorageImageExtendedFormats));
+}
+
+TEST(VulkanDeviceCapabilityTest,
+     SampledImageArrayMarksDynamicResourceNonUniform) {
+  DeviceCapabilityConfig caps;
+  caps.set(DeviceCapability::spirv_version, 0x10300);
+  caps.set(DeviceCapability::
+               spirv_has_sampled_image_array_non_uniform_indexing,
+           true);
+
+  spirv::IRBuilder builder(Arch::vulkan, &caps);
+  builder.init_header();
+  const auto textures = builder.texture_array_argument(
+      /*num_channels=*/4, /*num_dimensions=*/2, /*descriptor_set=*/0,
+      /*binding=*/0, /*array_count=*/3);
+  const auto function = builder.new_function();
+  builder.start_function(function);
+  const auto lane = builder.get_global_invocation_id(0);
+  const auto selected = builder.texture_array_access(
+      textures, lane, /*num_dimensions=*/2);
+  const auto float_zero =
+      builder.float_immediate_number(builder.f32_type(), 0.0);
+  const auto int_zero = builder.int_immediate_number(builder.i32_type(), 0);
+  builder.sample_texture(selected, {float_zero, float_zero}, float_zero);
+  builder.fetch_texel(selected, {int_zero, int_zero}, int_zero);
+  builder.make_inst(spv::OpReturn);
+  builder.make_inst(spv::OpFunctionEnd);
+  builder.commit_kernel_function(function, "main", {}, {1, 1, 1});
+
+  const auto module = builder.finalize();
+  const auto capabilities = spirv_capabilities(module);
+  EXPECT_TRUE(capabilities.count(spv::CapabilityShaderNonUniform));
+  EXPECT_TRUE(
+      capabilities.count(spv::CapabilitySampledImageArrayNonUniformIndexing));
+  EXPECT_TRUE(spirv_contains_string(module, "SPV_EXT_descriptor_indexing"));
+  // Index, selected pointer, and both loaded sampled-image operands.
+  EXPECT_GE(spirv_decoration_count(module, spv::DecorationNonUniform), 4u);
 }
 
 TEST(VulkanDeviceTest, ConcurrentQueueSubmissions) {
@@ -732,6 +788,44 @@ TEST(VulkanDeviceTest, ConcurrentDescriptorAndRenderPassCreation) {
     EXPECT_EQ(renderpasses[i], renderpasses[0]);
   }
   device->wait_idle();
+}
+
+TEST(VulkanDescriptorSetTest, LargeSampledImageArrayGetsAdequatePool) {
+  if (!vulkan::is_vulkan_api_available()) {
+    return;
+  }
+
+  vulkan::VulkanDeviceCreator::Params params;
+  params.api_version = std::nullopt;
+  auto creator = std::make_unique<vulkan::VulkanDeviceCreator>(params);
+  auto *device = static_cast<vulkan::VulkanDevice *>(creator->device());
+  constexpr std::uint32_t kArrayDescriptorCount = 257;
+  constexpr std::uint32_t kTotalDescriptorCount = kArrayDescriptorCount + 1;
+  if (device->vk_caps().max_per_stage_descriptor_sampled_images <
+          kTotalDescriptorCount ||
+      device->vk_caps().max_descriptor_set_sampled_images <
+          kTotalDescriptorCount ||
+      device->vk_caps().max_per_stage_descriptor_samplers <
+          kTotalDescriptorCount ||
+      device->vk_caps().max_descriptor_set_samplers < kTotalDescriptorCount ||
+      device->vk_caps().max_per_stage_resources < kTotalDescriptorCount) {
+    return;
+  }
+
+  vulkan::VulkanResourceSet resource_set(device);
+  resource_set.image_array(
+      0,
+      std::vector<DeviceAllocation>(kArrayDescriptorCount,
+                                    kDeviceNullAllocation),
+      std::vector<ImageSamplerConfig>(kArrayDescriptorCount));
+  resource_set.image(1, kDeviceNullAllocation, {});
+  auto layout = device->get_desc_set_layout(resource_set);
+  ASSERT_NE(layout, nullptr);
+  auto [status, descriptor_set] =
+      device->alloc_desc_set(layout, resource_set);
+  EXPECT_EQ(status, RhiResult::success);
+  ASSERT_NE(descriptor_set, nullptr);
+  EXPECT_NE(descriptor_set->set, VK_NULL_HANDLE);
 }
 
 TEST(VulkanDescriptorSetTest, DirtyResourceSetDoesNotMutateRecordedSet) {

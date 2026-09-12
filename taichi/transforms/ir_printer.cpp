@@ -533,7 +533,13 @@ class IRPrinter : public IRVisitor {
   }
 
   void visit(TexturePtrStmt *stmt) override {
-    print("<*Texture> {} = {}", stmt->name(), stmt->arg_load_stmt->name());
+    if (stmt->collection_capacity > 0) {
+      print("<*TextureCollection[{}]> {} = {}[{}]",
+            stmt->collection_capacity, stmt->name(),
+            stmt->arg_load_stmt->name(), stmt->collection_index->name());
+    } else {
+      print("<*Texture> {} = {}", stmt->name(), stmt->arg_load_stmt->name());
+    }
     dbg_info_printer_(stmt);
   }
 

@@ -347,6 +347,37 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
         result == SPV_REFLECT_RESULT_SUCCESS,
         std::runtime_error("spvReflectEnumerateDescriptorSets failed"));
 
+    std::uint64_t stage_sampled_images = 0;
+    std::uint64_t stage_resources = 0;
+    for (const SpvReflectDescriptorSet *desc_set : desc_sets) {
+      for (std::uint32_t i = 0; i < desc_set->binding_count; ++i) {
+        const SpvReflectDescriptorBinding *binding = desc_set->bindings[i];
+        RHI_THROW_UNLESS(
+            binding->count > 0,
+            std::invalid_argument(
+                "Runtime-sized descriptor arrays require an explicit "
+                "variable-count provider"));
+        stage_resources += binding->count;
+        if (binding->descriptor_type ==
+            SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+          stage_sampled_images += binding->count;
+        }
+      }
+    }
+    const auto &limits = ti_device_.vk_caps();
+    RHI_THROW_UNLESS(
+        stage_sampled_images <= limits.max_per_stage_descriptor_sampled_images &&
+            stage_sampled_images <= limits.max_descriptor_set_sampled_images &&
+            stage_sampled_images <= limits.max_per_stage_descriptor_samplers &&
+            stage_sampled_images <= limits.max_descriptor_set_samplers,
+        std::invalid_argument(
+            "Shader combined image-sampler descriptors exceed Vulkan device "
+            "limits"));
+    RHI_THROW_UNLESS(
+        stage_resources <= limits.max_per_stage_resources,
+        std::invalid_argument(
+            "Shader descriptor resources exceed the Vulkan per-stage limit"));
+
     for (SpvReflectDescriptorSet *desc_set : desc_sets) {
       uint32_t set_index = desc_set->set;
       if (set_templates_.find(set_index) == set_templates_.end()) {
@@ -377,7 +408,15 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
           set.buffer(desc_binding->binding, kDeviceNullPtr, 0);
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
-          set.image(desc_binding->binding, kDeviceNullAllocation, {});
+          if (desc_binding->count > 1) {
+            set.image_array(
+                desc_binding->binding,
+                std::vector<DeviceAllocation>(desc_binding->count,
+                                              kDeviceNullAllocation),
+                std::vector<ImageSamplerConfig>(desc_binding->count));
+          } else {
+            set.image(desc_binding->binding, kDeviceNullAllocation, {});
+          }
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_IMAGE) {
           set.rw_image(desc_binding->binding, kDeviceNullAllocation, {});
@@ -813,6 +852,31 @@ ShaderResourceSet &VulkanResourceSet::rw_buffer_array(
   return *this;
 }
 
+ShaderResourceSet &VulkanResourceSet::image_array(
+    uint32_t binding,
+    const std::vector<DeviceAllocation> &allocs,
+    const std::vector<ImageSamplerConfig> &sampler_configs) {
+  RHI_THROW_UNLESS(
+      !allocs.empty() && allocs.size() == sampler_configs.size(),
+      std::invalid_argument(
+          "Sampled-image descriptor arrays require matching nonempty "
+          "allocations and sampler configurations"));
+  TextureArray array;
+  array.textures.reserve(allocs.size());
+  for (std::size_t i = 0; i < allocs.size(); ++i) {
+    vkapi::IVkSampler sampler = nullptr;
+    vkapi::IVkImageView view = nullptr;
+    if (allocs[i] != kDeviceNullAllocation) {
+      sampler = device_->get_sampler(sampler_configs[i]);
+      view = device_->get_vk_imageview(allocs[i]);
+    }
+    array.textures.push_back({view, sampler});
+  }
+  set_binding(binding, {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                        std::move(array)});
+  return *this;
+}
+
 VulkanResourceSet &VulkanResourceSet::acceleration_structure(
     uint32_t binding,
     vkapi::IVkAccelerationStructureKHR acceleration_structure) {
@@ -882,7 +946,7 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
 
   if (!set_) {
     // If set_ is null, create a new one
-    auto [status, new_set] = device_->alloc_desc_set(layout_);
+    auto [status, new_set] = device_->alloc_desc_set(layout_, *this);
     if (status != RhiResult::success) {
       return {status, nullptr};
     }
@@ -898,6 +962,7 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
   // memory across emplaces so VkWriteDescriptorSet::pBufferInfo remains
   // valid until vkUpdateDescriptorSets.
   std::list<std::vector<VkDescriptorBufferInfo>> buffer_array_infos;
+  std::list<std::vector<VkDescriptorImageInfo>> image_array_infos;
   std::vector<VkWriteDescriptorSet> desc_writes;
 
   {
@@ -965,6 +1030,24 @@ RhiReturn<vkapi::IVkDescriptorSet> VulkanResourceSet::finalize_impl(
         if (tex->sampler) {
           set_->ref_binding_objs.push_back(tex->sampler);
         }
+      } else if (TextureArray *array =
+                     std::get_if<TextureArray>(&resource)) {
+        auto &infos = image_array_infos.emplace_back();
+        infos.resize(array->textures.size());
+        for (std::size_t i = 0; i < array->textures.size(); ++i) {
+          const auto &tex = array->textures[i];
+          infos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          infos[i].imageView = tex.view ? tex.view->view : VK_NULL_HANDLE;
+          infos[i].sampler = tex.sampler ? tex.sampler->sampler : VK_NULL_HANDLE;
+          if (tex.view) {
+            set_->ref_binding_objs.push_back(tex.view);
+          }
+          if (tex.sampler) {
+            set_->ref_binding_objs.push_back(tex.sampler);
+          }
+        }
+        write.descriptorCount = static_cast<std::uint32_t>(infos.size());
+        write.pImageInfo = infos.data();
       } else if (BufferArray *ba = std::get_if<BufferArray>(&resource)) {
         // C-2.5: emit N contiguous VkDescriptorBufferInfo entries; each
         // buffer is bound with offset=0, range=VK_WHOLE_SIZE. Empty array
@@ -4154,19 +4237,29 @@ bool VulkanDevice::should_touch_desc_set_cache_lru_locked() const {
 }
 
 RhiReturn<vkapi::IVkDescriptorSet> VulkanDevice::alloc_desc_set(
-    vkapi::IVkDescriptorSetLayout layout) {
+    vkapi::IVkDescriptorSetLayout layout,
+    const VulkanResourceSet &required_resources) {
   std::lock_guard<std::mutex> lock(descriptor_pool_mutex_);
-  // This returns nullptr if can't allocate (OOM or pool is full)
-  vkapi::IVkDescriptorSet set =
-      vkapi::allocate_descriptor_sets(desc_pool_, layout);
+  const auto allocate = [&]() {
+    auto set = vkapi::allocate_descriptor_sets(desc_pool_, layout);
+    if (set == nullptr || set->set == VK_NULL_HANDLE) {
+      return vkapi::IVkDescriptorSet{};
+    }
+    return set;
+  };
+  // This returns nullptr if the pool is full or cannot satisfy this layout.
+  vkapi::IVkDescriptorSet set = allocate();
 
   if (set == nullptr) {
-    RhiResult status = new_descriptor_pool_locked();
+    RhiResult status = new_descriptor_pool_locked(&required_resources);
     // Allocating new descriptor pool failed
     if (status != RhiResult::success) {
       return {status, nullptr};
     }
-    set = vkapi::allocate_descriptor_sets(desc_pool_, layout);
+    set = allocate();
+    if (set == nullptr) {
+      return {RhiResult::out_of_memory, nullptr};
+    }
   }
 
   return {RhiResult::success, set};
@@ -4268,7 +4361,8 @@ void VulkanDevice::create_vma_allocator() {
   vmaCreateAllocator(&allocatorInfo, &allocator_export_);
 }
 
-RhiResult VulkanDevice::new_descriptor_pool_locked() {
+RhiResult VulkanDevice::new_descriptor_pool_locked(
+    const VulkanResourceSet *required_resources) {
   std::vector<VkDescriptorPoolSize> pool_sizes{
       {VK_DESCRIPTOR_TYPE_SAMPLER, 64},
       {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 256},
@@ -4284,6 +4378,37 @@ RhiResult VulkanDevice::new_descriptor_pool_locked() {
   if (vk_caps().acceleration_structure) {
     pool_sizes.push_back(
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 64});
+  }
+  if (required_resources != nullptr) {
+    std::map<VkDescriptorType, std::uint64_t> required_counts;
+    for (const auto &[binding, resource] :
+         required_resources->get_bindings()) {
+      (void)binding;
+      const auto descriptor_count =
+          VulkanResourceSet::descriptor_count(resource);
+      if (descriptor_count == 0) {
+        return RhiResult::invalid_usage;
+      }
+      required_counts[resource.type] += descriptor_count;
+    }
+    for (const auto &[type, required_count] : required_counts) {
+      if (required_count >
+          (std::numeric_limits<std::uint32_t>::max)()) {
+        return RhiResult::invalid_usage;
+      }
+      const auto pool_size = std::find_if(
+          pool_sizes.begin(), pool_sizes.end(), [&](const auto &candidate) {
+            return candidate.type == type;
+          });
+      if (pool_size == pool_sizes.end()) {
+        pool_sizes.push_back(
+            {type, static_cast<std::uint32_t>(required_count)});
+      } else {
+        pool_size->descriptorCount = std::max(
+            pool_size->descriptorCount,
+            static_cast<std::uint32_t>(required_count));
+      }
+    }
   }
   VkDescriptorPoolCreateInfo pool_info = {};
   pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;

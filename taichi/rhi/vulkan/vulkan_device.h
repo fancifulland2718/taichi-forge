@@ -140,6 +140,18 @@ class VulkanResourceSet : public ShaderResourceSet {
     }
   };
 
+  struct TextureArray {
+    std::vector<Texture> textures;
+
+    bool operator==(const TextureArray &rhs) const {
+      return textures == rhs.textures;
+    }
+
+    bool operator!=(const TextureArray &rhs) const {
+      return !(*this == rhs);
+    }
+  };
+
   // C-2.5 (2026-05): descriptor array of storage buffers. Each entry maps
   // to one VkDescriptorBufferInfo with offset=0, range=VK_WHOLE_SIZE; the
   // SPIR-V side accesses chunk[k] via OpAccessChain on the array variable.
@@ -178,8 +190,13 @@ class VulkanResourceSet : public ShaderResourceSet {
 
   struct Binding {
     VkDescriptorType type{VK_DESCRIPTOR_TYPE_MAX_ENUM};
-    std::variant<Buffer, Image, Texture, BufferArray, AccelerationStructure> res{
-        Buffer()};
+    std::variant<Buffer,
+                 Image,
+                 Texture,
+                 TextureArray,
+                 BufferArray,
+                 AccelerationStructure>
+        res{Buffer()};
 
     bool operator==(const Binding &other) const {
       return other.type == type && other.res == res;
@@ -201,6 +218,13 @@ class VulkanResourceSet : public ShaderResourceSet {
       } else if (const Texture *tex = std::get_if<Texture>(&res)) {
         rhi_impl::hash_combine(hash, (void *)tex->view.get());
         rhi_impl::hash_combine(hash, (void *)tex->sampler.get());
+      } else if (const TextureArray *array =
+                     std::get_if<TextureArray>(&res)) {
+        rhi_impl::hash_combine(hash, array->textures.size());
+        for (const auto &tex : array->textures) {
+          rhi_impl::hash_combine(hash, (void *)tex.view.get());
+          rhi_impl::hash_combine(hash, (void *)tex.sampler.get());
+        }
       } else if (const BufferArray *ba = std::get_if<BufferArray>(&res)) {
         rhi_impl::hash_combine(hash, ba->buffers.size());
         for (const auto &b : ba->buffers) {
@@ -216,6 +240,9 @@ class VulkanResourceSet : public ShaderResourceSet {
   };
 
   static uint32_t descriptor_count(const Binding &binding) {
+    if (const auto *array = std::get_if<TextureArray>(&binding.res)) {
+      return static_cast<uint32_t>(array->textures.size());
+    }
     if (const auto *array = std::get_if<BufferArray>(&binding.res)) {
       return static_cast<uint32_t>(array->buffers.size());
     }
@@ -294,6 +321,10 @@ class VulkanResourceSet : public ShaderResourceSet {
   ShaderResourceSet &image(uint32_t binding,
                            DeviceAllocation alloc,
                            ImageSamplerConfig sampler_config) final;
+  ShaderResourceSet &image_array(
+      uint32_t binding,
+      const std::vector<DeviceAllocation> &allocs,
+      const std::vector<ImageSamplerConfig> &sampler_configs) final;
   ShaderResourceSet &rw_image(uint32_t binding,
                               DeviceAllocation alloc,
                               int lod) final;
@@ -868,6 +899,10 @@ struct VulkanCapabilities {
   // 0 = not yet probed.
   uint32_t max_per_stage_descriptor_storage_buffers{0};
   uint32_t max_descriptor_set_storage_buffers{0};
+  uint32_t max_per_stage_descriptor_sampled_images{0};
+  uint32_t max_descriptor_set_sampled_images{0};
+  uint32_t max_per_stage_descriptor_samplers{0};
+  uint32_t max_descriptor_set_samplers{0};
   uint32_t max_per_stage_resources{0};
   bool physical_device_features2{false};
   bool external_memory{false};
@@ -880,6 +915,7 @@ struct VulkanCapabilities {
   bool descriptor_update_after_bind{false};
   bool descriptor_indexing{false};
   bool descriptor_storage_buffer_array_non_uniform_indexing{false};
+  bool descriptor_sampled_image_array_non_uniform_indexing{false};
   bool descriptor_storage_buffer_update_after_bind{false};
   bool descriptor_binding_partially_bound{false};
   bool descriptor_binding_variable_count{false};
@@ -1106,7 +1142,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   vkapi::IVkDescriptorSetLayout get_desc_set_layout(VulkanResourceSet &set);
   rhi_impl::RhiReturn<vkapi::IVkDescriptorSet> alloc_desc_set(
-      vkapi::IVkDescriptorSetLayout layout);
+      vkapi::IVkDescriptorSetLayout layout,
+      const VulkanResourceSet &required_resources);
 
   constexpr VulkanCapabilities &vk_caps() {
     return vk_caps_;
@@ -1228,7 +1265,8 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
   void create_vma_allocator();
-  [[nodiscard]] RhiResult new_descriptor_pool_locked();
+  [[nodiscard]] RhiResult new_descriptor_pool_locked(
+      const VulkanResourceSet *required_resources = nullptr);
   void update_descriptor_sets_locked(
       const std::vector<VkWriteDescriptorSet> &desc_writes);
   bool should_touch_desc_set_cache_lru_locked() const;

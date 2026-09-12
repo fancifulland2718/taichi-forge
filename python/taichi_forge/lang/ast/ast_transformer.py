@@ -696,6 +696,11 @@ class ASTTransformer(Builder):
                 )
             if isinstance(annotation, texture_type.TextureType):
                 return False, (kernel_arguments.decl_texture_arg, (arg_features[0], full_name))
+            if isinstance(annotation, texture_type.TextureCollectionType):
+                return False, (
+                    kernel_arguments.decl_texture_collection_arg,
+                    (arg_features[0], arg_features[1], full_name),
+                )
             if isinstance(annotation, texture_type.RWTextureType):
                 return False, (
                     kernel_arguments.decl_rw_texture_arg,

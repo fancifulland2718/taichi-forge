@@ -4201,6 +4201,37 @@ class TaskCodegen : public IRVisitor {
     spirv::Value val;
 
     auto arg_id = stmt->arg_load_stmt->as<ArgLoadStmt>()->arg_id;
+    if (stmt->collection_capacity > 0) {
+      spirv::Value array;
+      const auto found = argid_to_tex_value_.find(arg_id);
+      if (found != argid_to_tex_value_.end()) {
+        array = found->second;
+      } else {
+        const std::uint32_t capacity =
+            static_cast<std::uint32_t>(stmt->collection_capacity);
+        const std::uint64_t limit = caps_->get(
+            DeviceCapability::max_sampled_texture_collection_size);
+        TI_ERROR_IF(
+            !caps_->get(DeviceCapability::
+                            spirv_has_sampled_image_array_non_uniform_indexing) ||
+                limit == 0 || sampled_image_descriptor_count_ + capacity > limit,
+            "Kernel sampled-image descriptors exceed the Vulkan device limit");
+        const int binding = binding_head_++;
+        array = ir_->texture_array_argument(
+            /*num_channels=*/4, stmt->dimensions, /*descriptor_set=*/0, binding,
+            capacity);
+        TextureBind bind;
+        bind.arg_id = arg_id;
+        bind.binding = binding;
+        texture_binds_.push_back(bind);
+        argid_to_tex_value_[arg_id] = array;
+        sampled_image_descriptor_count_ += capacity;
+      }
+      auto index = ir_->query_value(stmt->collection_index->raw_name());
+      val = ir_->texture_array_access(array, index, stmt->dimensions);
+      ir_->register_value(stmt->raw_name(), val);
+      return;
+    }
     if (argid_to_tex_value_.find(arg_id) != argid_to_tex_value_.end()) {
       val = argid_to_tex_value_.at(arg_id);
     } else {
@@ -4219,6 +4250,11 @@ class TaskCodegen : public IRVisitor {
         texture_binds_.push_back(bind);
         argid_to_tex_value_[arg_id] = val;
       } else {
+        const std::uint64_t limit = caps_->get(
+            DeviceCapability::max_sampled_texture_collection_size);
+        TI_ERROR_IF(limit != 0 && sampled_image_descriptor_count_ + 1 > limit,
+                    "Kernel sampled-image descriptors exceed the Vulkan "
+                    "device limit");
         int binding = binding_head_++;
         val = ir_->texture_argument(/*num_channels=*/4, stmt->dimensions,
                                     /*descriptor_set=*/0, binding);
@@ -4227,6 +4263,7 @@ class TaskCodegen : public IRVisitor {
         bind.binding = binding;
         texture_binds_.push_back(bind);
         argid_to_tex_value_[arg_id] = val;
+        ++sampled_image_descriptor_count_;
       }
     }
 
@@ -7342,6 +7379,7 @@ class TaskCodegen : public IRVisitor {
     std::unordered_map<BufferInfo, uint32_t, BufferInfoHasher>
       buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
+  std::uint64_t sampled_image_descriptor_count_{0};
   std::vector<AccelerationStructureBind> acceleration_structure_binds_;
   std::unordered_map<std::vector<int>,
                      spirv::Value,

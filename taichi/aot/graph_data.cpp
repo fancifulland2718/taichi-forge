@@ -170,6 +170,17 @@ GraphRuntimeResourceViews graph_runtime_resource_views(
       continue;
     }
     if (value.tag != ArgKind::kTexture) {
+      if (value.tag == ArgKind::kTextureCollection) {
+        const auto *collection =
+            reinterpret_cast<const TextureCollection *>(value.val);
+        TI_ERROR_IF(collection == nullptr ||
+                        (expected_program != nullptr &&
+                         collection->owning_program() != expected_program),
+                    "Graph TextureCollection must belong to the Graph's Program");
+        for (const auto &member : collection->members()) {
+          views.textures.add(member.texture);
+        }
+      }
       continue;
     }
     auto *view = reinterpret_cast<const Texture *>(value.val);
@@ -200,6 +211,7 @@ bool graph_has_runtime_resource_declarations(
   return std::any_of(args.begin(), args.end(), [](const auto &entry) {
     return entry.second.tag == ArgKind::kNdarray ||
            entry.second.tag == ArgKind::kTexture ||
+           entry.second.tag == ArgKind::kTextureCollection ||
            entry.second.tag == ArgKind::kAccelerationStructure;
   });
 }
@@ -247,6 +259,13 @@ CompiledGraphRuntimeResourceIdentity runtime_resource_identity(
     if (array != nullptr) {
       identity.handle = array->runtime_resource_handle();
     }
+  } else if (value.tag == ArgKind::kTextureCollection) {
+    const auto *collection =
+        reinterpret_cast<const TextureCollection *>(value.val);
+    identity.object = collection;
+    if (collection != nullptr) {
+      identity.opaque_handle = collection->snapshot_id();
+    }
   } else if (value.tag == ArgKind::kTexture) {
     auto *texture = reinterpret_cast<Texture *>(value.val);
     identity.object = texture;
@@ -267,6 +286,7 @@ bool runtime_binding_plan_matches(
   std::size_t resource_count = 0;
   for (const auto &[name, value] : args) {
     if (value.tag != ArgKind::kNdarray && value.tag != ArgKind::kTexture &&
+        value.tag != ArgKind::kTextureCollection &&
         value.tag != ArgKind::kAccelerationStructure) {
       continue;
     }
@@ -300,6 +320,7 @@ void rebuild_runtime_binding_plan(
   plan.revision = revision;
   for (const auto &[name, value] : args) {
     if (value.tag != ArgKind::kNdarray && value.tag != ArgKind::kTexture &&
+        value.tag != ArgKind::kTextureCollection &&
         value.tag != ArgKind::kAccelerationStructure) {
       continue;
     }
@@ -310,6 +331,16 @@ void rebuild_runtime_binding_plan(
       auto *array = reinterpret_cast<Ndarray *>(value.val);
       if (array != nullptr && array->owning_program() != nullptr) {
         append_unique_resource(plan.ndarrays, array);
+      }
+    } else if (value.tag == ArgKind::kTextureCollection) {
+      const auto *collection =
+          reinterpret_cast<const TextureCollection *>(value.val);
+      TI_ERROR_IF(collection == nullptr ||
+                      collection->owning_program() != program,
+                  "Graph TextureCollection must belong to the Graph's Program");
+      for (const auto &member : collection->members()) {
+        append_unique_resource(plan.textures,
+                               const_cast<Texture *>(member.texture));
       }
     } else if (value.tag == ArgKind::kTexture) {
       auto *texture = reinterpret_cast<Texture *>(value.val);
@@ -5519,6 +5550,7 @@ make_vulkan_graph_argument_signature(
   std::vector<VulkanGraphArgumentSignatureEntry> signature;
   for (const auto &[name, value] : args) {
     if (value.tag == ArgKind::kNdarray || value.tag == ArgKind::kTexture ||
+        value.tag == ArgKind::kTextureCollection ||
         value.tag == ArgKind::kAccelerationStructure) {
       continue;
     }
@@ -6245,6 +6277,8 @@ void CompiledGraph::run(
   for (const auto &entry : args) {
     TI_ERROR_IF(entry.second.tag == ArgKind::kAccelerationStructure,
                 "AOT Graph does not support JIT-only acceleration structures");
+    TI_ERROR_IF(entry.second.tag == ArgKind::kTextureCollection,
+                "AOT Graph does not support JIT-only TextureCollection bindings");
   }
   for (const auto &dispatch : dispatches) {
     TI_ASSERT(dispatch.compiled_kernel);
@@ -7876,6 +7910,19 @@ void CompiledGraph::init_runtime_context(
     } else if (symbolic_arg.tag == aot::ArgKind::kAccelerationStructure) {
       TI_ASSERT(ival.tag == aot::ArgKind::kAccelerationStructure);
       ctx.set_arg_acceleration_structure(arg_id, ival.resource_owner, ival.val);
+    } else if (symbolic_arg.tag == aot::ArgKind::kTextureCollection) {
+      TI_ERROR_IF(ival.tag != aot::ArgKind::kTextureCollection,
+                  "Graph argument {} requires a TextureCollection",
+                  symbolic_arg.name);
+      const auto *textures =
+          reinterpret_cast<const TextureCollection *>(ival.val);
+      TI_ERROR_IF(textures == nullptr ||
+                      symbolic_arg.element_shape.size() != 1 ||
+                      symbolic_arg.element_shape.front() != textures->capacity() ||
+                      symbolic_arg.field_dim != textures->num_dimensions(),
+                  "Graph TextureCollection {} does not match its declared "
+                  "dimension and capacity", symbolic_arg.name);
+      ctx.set_arg_texture_collection(arg_id, *textures);
     } else if (symbolic_arg.tag == aot::ArgKind::kTexture) {
       TI_ASSERT(ival.tag == aot::ArgKind::kTexture);
       Texture *tex = reinterpret_cast<Texture *>(ival.val);

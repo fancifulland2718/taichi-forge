@@ -156,6 +156,8 @@ class TI_DLL_EXPORT Callable : public CallableBase {
                                         bool needs_grad = false);
   std::vector<int> insert_texture_param(int total_dim,
                                         const std::string &name = "");
+  std::vector<int> insert_texture_collection_param(
+      int total_dim, int capacity, const std::string &name = "");
   std::vector<int> insert_pointer_param(const DataType &dt,
                                         const std::string &name = "");
   std::vector<int> insert_rw_texture_param(int total_dim,

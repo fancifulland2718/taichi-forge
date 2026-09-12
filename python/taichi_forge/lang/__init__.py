@@ -1,7 +1,7 @@
 from taichi_forge.lang import impl, simt
 from taichi_forge.lang._ndarray import *
 from taichi_forge.lang._ndrange import ndrange
-from taichi_forge.lang._texture import Texture
+from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.enums import DeviceCapability, Format, Layout
 from taichi_forge.lang.exception import *
 from taichi_forge.lang.field import *

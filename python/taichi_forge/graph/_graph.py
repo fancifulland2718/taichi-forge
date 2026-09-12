@@ -29,7 +29,7 @@ from taichi_forge.lang._storage_view import (
     ndarray_view,
     validate_storage_owner,
 )
-from taichi_forge.lang._texture import Texture
+from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiRuntimeError
 from taichi_forge.lang.field import ScalarField
 from taichi_forge.lang.util import to_numpy_type
@@ -5125,6 +5125,13 @@ class _GraphRunContext:
                         "Cannot submit a Texture to Graph.run() after its Taichi runtime has been reset"
                     )
                 signature.append((k, "texture", id(v), id(v.tex)))
+            elif isinstance(v, TextureCollection):
+                if v.collection is None:
+                    raise TaichiRuntimeError(
+                        "Cannot submit a TextureCollection to Graph.run() after "
+                        "its Taichi runtime has been reset"
+                    )
+                signature.append((k, "texture_collection", v.snapshot_id))
             elif isinstance(v, _AccelerationStructureResource):
                 v._validate_lifetime()
                 if v._runtime_prog is not impl.get_runtime().prog:
@@ -5144,6 +5151,7 @@ class _GraphRunContext:
                 raise TaichiRuntimeError(
                     "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "
                     "canonical dense Field, DenseNdarrayView, Texture, "
+                    "TextureCollection, "
                     "and InstanceTLAS are supported "
                     "as "
                     f"runtime arguments but got {type(v)}"
@@ -5206,6 +5214,8 @@ class _GraphRunContext:
                     flattened[k] = (view, runtime_argument)
                 elif isinstance(v, Texture):
                     flattened[k] = v.tex
+                elif isinstance(v, TextureCollection):
+                    flattened[k] = v.collection
                 elif isinstance(v, _AccelerationStructureResource):
                     flattened[k] = (
                         v._runtime_prog, v._kernel_resource_descriptor().handle
@@ -10032,9 +10042,18 @@ def _graph_resource_binding_requirements(nodes):
             if arg.tag in (
                 ArgKind.TEXTURE,
                 ArgKind.RWTEXTURE,
+                getattr(ArgKind, "TEXTURE_COLLECTION", None),
                 getattr(ArgKind, "ACCELERATION_STRUCTURE", None),
             ):
-                key = (arg.name, int(arg.tag), len(arg.texture_shape))
+                if arg.tag == getattr(ArgKind, "TEXTURE_COLLECTION", None):
+                    key = (
+                        arg.name,
+                        int(arg.tag),
+                        arg.field_dim,
+                        tuple(arg.element_shape),
+                    )
+                else:
+                    key = (arg.name, int(arg.tag), len(arg.texture_shape))
                 if arg.tag == ArgKind.RWTEXTURE:
                     key += (str(arg.channel_format()), arg.num_channels, str(arg.texture_format))
                 requirements[key] = arg
@@ -11246,7 +11265,12 @@ class _GraphSpec:
         self._texture_binding_requirements = tuple(
             arg
             for arg in resource_requirements
-            if arg.tag in (ArgKind.TEXTURE, ArgKind.RWTEXTURE)
+            if arg.tag
+            in (
+                ArgKind.TEXTURE,
+                ArgKind.RWTEXTURE,
+                getattr(ArgKind, "TEXTURE_COLLECTION", None),
+            )
         )
         self._acceleration_structure_binding_requirements = tuple(
             arg
@@ -11954,12 +11978,21 @@ class _GraphSpec:
         if isinstance(value, Matrix) and value.is_host_access:
             return f"volatile_host_matrix:{name}"
         if isinstance(
-            value, (int, float, Matrix, Ndarray, Texture, _AccelerationStructureResource)
+            value,
+            (
+                int,
+                float,
+                Matrix,
+                Ndarray,
+                Texture,
+                TextureCollection,
+                _AccelerationStructureResource,
+            ),
         ):
             return None
         raise TaichiRuntimeError(
             "Only Python scalars, ti.Matrix, ti.Ndarray, DeviceExtent, "
-            "canonical dense Field, DenseNdarrayView, Texture, "
+            "canonical dense Field, DenseNdarrayView, Texture, TextureCollection, "
             "and InstanceTLAS are supported "
             "as Graph runtime arguments but got "
             f"{type(value)} for {name!r}"
@@ -12012,6 +12045,30 @@ class _GraphSpec:
             if arg.name not in snapshot:
                 continue  # Provider-owned overlays are resolved by their owner.
             value = snapshot[arg.name]
+            if arg.tag == getattr(ArgKind, "TEXTURE_COLLECTION", None):
+                if (
+                    not isinstance(value, TextureCollection)
+                    or value.collection is None
+                ):
+                    raise TaichiRuntimeError(
+                        f"Graph argument {arg.name!r} requires a live "
+                        "TextureCollection"
+                    )
+                if value._runtime_prog is not impl.get_runtime().prog:
+                    raise TaichiRuntimeError(
+                        "Graph TextureCollection belongs to another runtime"
+                    )
+                if value.num_dims != arg.field_dim:
+                    raise TaichiRuntimeError(
+                        f"Graph TextureCollection {arg.name!r} has the wrong "
+                        "dimensionality"
+                    )
+                if tuple(arg.element_shape) != (value.capacity,):
+                    raise TaichiRuntimeError(
+                        f"Graph TextureCollection {arg.name!r} has the wrong "
+                        "capacity"
+                    )
+                continue
             if not isinstance(value, Texture) or value.tex is None:
                 raise TaichiRuntimeError(
                     f"Graph argument {arg.name!r} requires a live Texture"
@@ -15666,6 +15723,7 @@ def _dispatch_ir_node(
                 ArgKind.SCALAR,
                 ArgKind.MATRIX,
                 ArgKind.TEXTURE,
+                getattr(ArgKind, "TEXTURE_COLLECTION", None),
                 getattr(ArgKind, "ACCELERATION_STRUCTURE", None),
             )
             else GraphAccess.READ_WRITE
@@ -20024,6 +20082,29 @@ def _make_arg_texture(kwargs: Dict[str, Any]):
     return _ti_core.Arg(ArgKind.TEXTURE, name, impl.f32, 4, [2] * ndim)
 
 
+def _make_arg_texture_collection(kwargs: Dict[str, Any]):
+    allowed_kwargs = ["tag", "name", "ndim", "capacity"]
+    _check_args(kwargs, allowed_kwargs)
+    name = kwargs["name"]
+    ndim = kwargs["ndim"]
+    capacity = kwargs["capacity"]
+    if isinstance(ndim, bool) or not isinstance(ndim, int) or not 1 <= ndim <= 3:
+        raise TaichiRuntimeError(
+            "Tag ArgKind.TEXTURE_COLLECTION requires ndim in [1, 3]."
+        )
+    if (
+        isinstance(capacity, bool)
+        or not isinstance(capacity, int)
+        or not 1 <= capacity <= 0x7FFFFFFF
+    ):
+        raise TaichiRuntimeError(
+            "Tag ArgKind.TEXTURE_COLLECTION requires capacity in [1, 2^31 - 1]."
+        )
+    return _ti_core.Arg(
+        ArgKind.TEXTURE_COLLECTION, name, impl.f32, ndim, [capacity]
+    )
+
+
 def _make_arg_rwtexture(kwargs: Dict[str, Any]):
     allowed_kwargs = [
         "tag",
@@ -20061,6 +20142,8 @@ def _make_arg(kwargs: Dict[str, Any]):
         ArgKind.RWTEXTURE: _make_arg_rwtexture,
     }
     tag = kwargs["tag"]
+    if tag == getattr(ArgKind, "TEXTURE_COLLECTION", None):
+        return _make_arg_texture_collection(kwargs)
     if tag == getattr(ArgKind, "ACCELERATION_STRUCTURE", None):
         return _make_arg_acceleration_structure(kwargs)
     return proc[tag](kwargs)
@@ -20078,6 +20161,7 @@ def _kwarg_rewriter(args, kwargs):
             6: "channel_format",
             7: "shape",
             8: "num_channels",
+            9: "capacity",
         }
         if i in rewrite_map:
             kwargs[rewrite_map[i]] = arg

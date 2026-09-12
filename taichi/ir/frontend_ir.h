@@ -387,6 +387,10 @@ class TexturePtrExpression : public Expression {
   // Optional, for storage textures
   BufferFormat format{BufferFormat::unknown};
   int lod{0};
+  // Sampled descriptor-array metadata. A positive capacity distinguishes a
+  // TextureCollection element from a single Texture pointer.
+  int collection_capacity{0};
+  Expr collection_index;
 
   explicit TexturePtrExpression(const std::vector<int> &arg_id,
                                 int num_dims,
@@ -414,6 +418,23 @@ class TexturePtrExpression : public Expression {
         arg_depth(arg_depth),
         format(format),
         lod(lod) {
+  }
+
+  TexturePtrExpression(const std::vector<int> &arg_id,
+                       int num_dims,
+                       int arg_depth,
+                       int collection_capacity,
+                       Expr collection_index,
+                       const DebugInfo &dbg_info = DebugInfo())
+      : Expression(dbg_info),
+        arg_id(arg_id),
+        num_dims(num_dims),
+        is_storage(false),
+        arg_depth(arg_depth),
+        format(BufferFormat::rgba8),
+        lod(0),
+        collection_capacity(collection_capacity),
+        collection_index(std::move(collection_index)) {
   }
 
   void type_check(const CompileConfig *config) override;

@@ -24,6 +24,7 @@ class LaunchContextBuilder {
     kArgPack = 4,
     kDenseStorage = 5,
     kAccelerationStructure = 6,
+    kTextureCollection = 7,
   };
 
   struct NdarrayResourceRef {
@@ -44,6 +45,15 @@ class LaunchContextBuilder {
     const Texture *texture{nullptr};
     RuntimeResourceHandle handle;
   };
+
+  std::unordered_map<std::vector<int>, std::vector<DeviceAllocation>,
+                     hashing::Hasher<std::vector<int>>> texture_collections;
+  std::unordered_map<std::vector<int>, std::uint64_t,
+                     hashing::Hasher<std::vector<int>>>
+      texture_collection_snapshot_ids;
+
+  void set_arg_texture_collection(const std::vector<int> &arg_id,
+                                   const TextureCollection &collection);
 
   struct DenseStorageResourceRef {
     int arg_offset{-1};

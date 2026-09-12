@@ -670,6 +670,7 @@ class TaichiCallableTemplateMapper:
                 template,
                 ArgPackType,
                 texture_type.TextureType,
+                texture_type.TextureCollectionType,
                 texture_type.RWTextureType,
                 ndarray_type.NdarrayType,
                 sparse_matrix_builder,
@@ -775,6 +776,26 @@ class TaichiCallableTemplateMapper:
                     f"expected a floating-point or normalized format, got {arg.fmt}"
                 )
             return (arg.num_dims,)
+        if isinstance(anno, texture_type.TextureCollectionType):
+            if not isinstance(arg, taichi_forge.lang._texture.TextureCollection):
+                raise TaichiRuntimeTypeError(
+                    f"Argument {arg_name} must be a TextureCollection, got {type(arg)}"
+                )
+            if arg.collection is None:
+                raise TaichiRuntimeTypeError(
+                    f"TextureCollection argument {arg_name} belongs to a reset runtime"
+                )
+            if arg.num_dims != anno.num_dimensions:
+                raise TaichiRuntimeTypeError(
+                    f"TextureCollection dimension mismatch for argument {arg_name}: "
+                    f"expected {anno.num_dimensions}, got {arg.num_dims}"
+                )
+            if arg.capacity != anno.capacity:
+                raise TaichiRuntimeTypeError(
+                    f"TextureCollection capacity mismatch for argument {arg_name}: "
+                    f"expected {anno.capacity}, got {arg.capacity}"
+                )
+            return (arg.num_dims, arg.capacity)
         if isinstance(anno, texture_type.RWTextureType):
             descriptor = describe_annotation(anno)
             if not isinstance(arg, taichi_forge.lang._texture.Texture):
@@ -1517,6 +1538,7 @@ class Kernel:
                         template,
                         ndarray_type.NdarrayType,
                         texture_type.TextureType,
+                        texture_type.TextureCollectionType,
                         texture_type.RWTextureType,
                         ray_type.AccelerationStructureType,
                     ),
@@ -1811,6 +1833,17 @@ class Kernel:
                     "Cannot submit a Texture after its Taichi runtime has been reset"
                 )
             launch_ctx.set_arg_texture(indices, v.tex)
+
+        def set_arg_texture_collection(indices, v):
+            if v.collection is None:
+                raise TaichiRuntimeError(
+                    "Cannot submit a TextureCollection after its Taichi runtime has been reset"
+                )
+            if v._runtime_prog is not impl.get_runtime().prog:
+                raise TaichiRuntimeError(
+                    "TextureCollection belongs to a different Taichi runtime"
+                )
+            launch_ctx.set_arg_texture_collection(indices, v.collection)
 
         def set_arg_rw_texture(indices, v):
             if v.tex is None:
@@ -2164,6 +2197,15 @@ class Kernel:
                     set_later_list.append((set_arg_texture, (v,)))
                     return 0
                 set_arg_texture(indices, v)
+                return 1
+            if isinstance(needed, texture_type.TextureCollectionType) and isinstance(
+                v, taichi_forge.lang._texture.TextureCollection
+            ):
+                if in_argpack:
+                    raise TaichiRuntimeTypeError(
+                        "TextureCollection is not supported inside ArgPack"
+                    )
+                set_arg_texture_collection(indices, v)
                 return 1
             if isinstance(needed, texture_type.RWTextureType) and isinstance(
                 v, taichi_forge.lang._texture.Texture
@@ -4297,7 +4339,7 @@ def _kernel_impl(_func, level_of_class_stackframe, verbose=False, opt_level=None
             try:
                 return primal(*args, **kwargs)
             except (TaichiCompilationError, TaichiRuntimeError) as e:
-                if impl.get_runtime().print_full_traceback:
+                if getattr(impl.get_runtime(), "print_full_traceback", False):
                     raise e
                 raise type(e)("\n" + str(e)) from None
 

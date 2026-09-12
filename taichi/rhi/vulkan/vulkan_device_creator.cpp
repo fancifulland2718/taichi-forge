@@ -609,6 +609,14 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       physical_device_properties.limits.maxPerStageDescriptorStorageBuffers;
   ti_device_->vk_caps().max_descriptor_set_storage_buffers =
       physical_device_properties.limits.maxDescriptorSetStorageBuffers;
+  ti_device_->vk_caps().max_per_stage_descriptor_sampled_images =
+      physical_device_properties.limits.maxPerStageDescriptorSampledImages;
+  ti_device_->vk_caps().max_descriptor_set_sampled_images =
+      physical_device_properties.limits.maxDescriptorSetSampledImages;
+  ti_device_->vk_caps().max_per_stage_descriptor_samplers =
+      physical_device_properties.limits.maxPerStageDescriptorSamplers;
+  ti_device_->vk_caps().max_descriptor_set_samplers =
+      physical_device_properties.limits.maxDescriptorSetSamplers;
   ti_device_->vk_caps().max_per_stage_resources =
       physical_device_properties.limits.maxPerStageResources;
   if (vk_api_version >= VK_API_VERSION_1_3) {
@@ -1221,6 +1229,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
           .descriptor_storage_buffer_array_non_uniform_indexing =
           supported_descriptor_indexing
               .shaderStorageBufferArrayNonUniformIndexing;
+      descriptor_caps.descriptor_sampled_image_array_non_uniform_indexing =
+          supported_descriptor_indexing
+              .shaderSampledImageArrayNonUniformIndexing;
       descriptor_caps.descriptor_storage_buffer_update_after_bind =
           supported_descriptor_indexing
               .descriptorBindingStorageBufferUpdateAfterBind;
@@ -1264,6 +1275,9 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
           .shaderStorageBufferArrayNonUniformIndexing =
           supported_descriptor_indexing
               .shaderStorageBufferArrayNonUniformIndexing;
+      descriptor_indexing_feature.shaderSampledImageArrayNonUniformIndexing =
+          supported_descriptor_indexing
+              .shaderSampledImageArrayNonUniformIndexing;
       descriptor_indexing_feature
           .descriptorBindingStorageBufferUpdateAfterBind =
           supported_descriptor_indexing
@@ -1286,6 +1300,23 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       }
       *pNextEnd = &descriptor_indexing_feature;
       pNextEnd = &descriptor_indexing_feature.pNext;
+
+      if (descriptor_caps
+              .descriptor_sampled_image_array_non_uniform_indexing) {
+        const std::uint32_t collection_limit =
+            std::min({descriptor_caps.max_per_stage_descriptor_sampled_images,
+                      descriptor_caps.max_descriptor_set_sampled_images,
+                      descriptor_caps.max_per_stage_descriptor_samplers,
+                      descriptor_caps.max_descriptor_set_samplers,
+                      descriptor_caps.max_per_stage_resources});
+        if (collection_limit > 0) {
+          caps.set(DeviceCapability::
+                       spirv_has_sampled_image_array_non_uniform_indexing,
+                   true);
+          caps.set(DeviceCapability::max_sampled_texture_collection_size,
+                   collection_limit);
+        }
+      }
     }
 
     // Mesh and task shaders are a graphics-provider specialization. Keep the

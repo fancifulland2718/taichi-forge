@@ -1961,6 +1961,11 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           } else if (alloc_type ==
                      LaunchContextBuilder::DevAllocType::kRWTexture) {
             textures[indices] = devalloc;
+          } else if (alloc_type ==
+                     LaunchContextBuilder::DevAllocType::kTextureCollection) {
+            // A collection is represented by one fixed descriptor array, not
+            // by an address stored in the kernel argument buffer. Its member
+            // allocations are consumed below when the resource set is built.
           } else {
             TI_NOT_IMPLEMENTED;
           }
@@ -2174,6 +2179,23 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
 
     for (auto &bind : attribs.texture_binds) {
+      const auto collection = host_ctx.texture_collections.find(bind.arg_id);
+      if (collection != host_ctx.texture_collections.end()) {
+        TI_ERROR_IF(bind.is_storage || collection->second.empty(),
+                    "TextureCollection only supports nonempty sampled-image "
+                    "descriptor arrays");
+        std::vector<ImageSamplerConfig> samplers;
+        samplers.reserve(collection->second.size());
+        for (const auto texture : collection->second) {
+          transition_image(texture, ImageLayout::shader_read);
+          const auto sampler = image_sampler_configs_.find(texture.alloc_id);
+          TI_ERROR_IF(sampler == image_sampler_configs_.end(),
+                      "TextureCollection member is not a tracked image");
+          samplers.push_back(sampler->second);
+        }
+        bindings->image_array(bind.binding, collection->second, samplers);
+        continue;
+      }
       DeviceAllocation texture = textures.at(bind.arg_id);
       if (bind.is_storage) {
         transition_image(texture, ImageLayout::shader_read_write);
@@ -2339,6 +2361,8 @@ bool GfxRuntime::GraphReplayExecutable::refresh_prepared_cache(
             pd.host_ctx->device_allocation_type[array_arg.indices];
         if (alloc_type == LaunchContextBuilder::DevAllocType::kTexture ||
             alloc_type == LaunchContextBuilder::DevAllocType::kRWTexture ||
+            alloc_type ==
+                LaunchContextBuilder::DevAllocType::kTextureCollection ||
             alloc_type ==
                 LaunchContextBuilder::DevAllocType::kAccelerationStructure) {
           continue;
@@ -2743,6 +2767,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                       kind != LaunchContextBuilder::DevAllocType::kDenseStorage &&
                       kind != LaunchContextBuilder::DevAllocType::kTexture &&
                       kind != LaunchContextBuilder::DevAllocType::kRWTexture &&
+                      kind != LaunchContextBuilder::DevAllocType::
+                                  kTextureCollection &&
                       kind !=
                           LaunchContextBuilder::DevAllocType::kAccelerationStructure,
                   "Prepared Vulkan Graph requires owned device resources");
@@ -2843,6 +2869,44 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       }
       std::unordered_map<DeviceAllocationId, ImageLayout> task_images;
       for (const auto &bind : tasks[i].texture_binds) {
+        const auto collection =
+            pd.host_ctx->texture_collections.find(bind.arg_id);
+        if (collection != pd.host_ctx->texture_collections.end()) {
+          TI_ERROR_IF(bind.is_storage || collection->second.empty(),
+                      "Prepared Vulkan Graph TextureCollection must be a "
+                      "nonempty sampled-image descriptor array");
+          std::vector<ImageSamplerConfig> samplers;
+          samplers.reserve(collection->second.size());
+          for (const auto image : collection->second) {
+            TI_ERROR_IF(image.device != device_ ||
+                            last_image_layouts_.find(image.alloc_id) ==
+                                last_image_layouts_.end(),
+                        "Prepared Vulkan Graph TextureCollection member is "
+                        "not owned by this device");
+            const auto [usage, inserted] =
+                task_images.emplace(image.alloc_id, ImageLayout::shader_read);
+            TI_ERROR_IF(!inserted &&
+                            usage->second != ImageLayout::shader_read,
+                        "Prepared Vulkan Graph cannot bind one image as both "
+                        "sampled and storage in the same task");
+            const auto [previous, first_use] = recorded_image_layouts.emplace(
+                image.alloc_id, ImageLayout::shader_read);
+            if (first_use) {
+              entry_images.emplace_back(image, ImageLayout::shader_read);
+            } else if (previous->second != ImageLayout::shader_read) {
+              commands->image_transition(image, previous->second,
+                                         ImageLayout::shader_read);
+              previous->second = ImageLayout::shader_read;
+            }
+            const auto sampler = image_sampler_configs_.find(image.alloc_id);
+            TI_ERROR_IF(sampler == image_sampler_configs_.end(),
+                        "Prepared Vulkan Graph TextureCollection member has "
+                        "no sampler configuration");
+            samplers.push_back(sampler->second);
+          }
+          resources->image_array(bind.binding, collection->second, samplers);
+          continue;
+        }
         const auto found = pd.host_ctx->array_ptrs.find(bind.arg_id);
         TI_ERROR_IF(found == pd.host_ctx->array_ptrs.end() || !found->second,
                     "Prepared Vulkan Graph image is unbound");

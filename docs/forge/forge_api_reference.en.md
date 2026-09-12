@@ -385,6 +385,47 @@ outside this route. Ordinary Vulkan Graph execution is unchanged; selecting this
 complete recipe trades retained commands/descriptors and device barriers for
 lower host preparation cost, not guaranteed device acceleration.
 
+### `ti.TextureCollection`: device-indexed sampled textures
+
+On Vulkan devices with sampled-image nonuniform indexing, a collection binds a
+fixed, nonempty tuple of managed textures to one kernel descriptor array:
+
+```python
+table = ti.TextureCollection((albedo_a, albedo_b, albedo_c))
+
+@ti.kernel
+def lookup(textures: ti.types.texture_collection(ndim=2, capacity=3),
+           indices: ti.types.ndarray(dtype=ti.i32, ndim=1),
+           result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+    for i in result:
+        result[i] = textures[indices[i]].sample_lod(ti.Vector([0.5, 0.5]), 0.0).x
+
+lookup(table, indices, result)
+```
+
+Every index must satisfy `0 <= index < capacity`; Forge does not scan device
+indices or clamp invalid values. Members must be live textures from the same
+runtime, with equal dimensionality and floating/normalized sampled formats.
+Sizes and samplers may differ. Capacity is part of kernel specialization and
+is bounded by the device's combined sampler/image descriptor limits, including
+other bindings. Integer formats and collection stores are not supported.
+
+Graph dispatch uses `ti.graph.Arg(ti.graph.ArgKind.TEXTURE_COLLECTION,
+"textures", ndim=2, capacity=3)`. Uploading new contents preserves a collection;
+replacing membership creates a new collection and requires explicit
+`bindings.update(textures=new_table)`. Its `snapshot_id` identifies that local
+resource instance, not a portable recipe or executable plan. Do not reuse the
+collection after runtime reset. This is Vulkan JIT support, not CUDA, AOT, or
+an automatically faster replacement for buffer lookup. Measure the complete
+consumer, especially when many tiny textures make submission cost significant.
+
+For repeated complete graphs, the Vulkan immutable binding-frame recipe also
+accepts collections. Selecting that recipe through complete-Graph search and
+materializing it lets `graph.bind(...)` retain the descriptor table and member
+leases; unchanged frames reuse secondary commands. Ordinary Graph execution
+keeps its conservative resource path. A stable `GraphBindingSet` alone does not
+mean this physical recipe was selected; inspect the materialization report.
+
 ### `ti.hardware.image.VulkanSpdPlan` (explicit single-pass downsampling)
 
 ```python

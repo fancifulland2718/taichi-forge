@@ -80,6 +80,10 @@ enum class ValueKind {
   // OpAccessChain (chunk_idx, struct_member=0, slot_word_idx).
   kChunkedArrayPtr,
   kVariablePtr,
+  // Pointer to one non-uniformly selected element of a fixed sampled-image
+  // descriptor array. Sampling decorates the loaded sampled image as required
+  // by the Vulkan SPIR-V environment.
+  kNonUniformTexturePtr,
   kPhysicalPtr,
   kTexture,
   kFunction,
@@ -410,6 +414,14 @@ class IRBuilder {
                          int num_dimensions,
                          uint32_t descriptor_set,
                          uint32_t binding);
+  Value texture_array_argument(int num_channels,
+                               int num_dimensions,
+                               uint32_t descriptor_set,
+                               uint32_t binding,
+                               uint32_t array_count);
+  Value texture_array_access(Value texture_array,
+                             Value index,
+                             int num_dimensions);
 
   Value storage_image_argument(int num_channels,
                                int num_dimensions,

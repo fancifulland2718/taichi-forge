@@ -1,4 +1,7 @@
 #include "taichi/program/texture.h"
+
+#include <atomic>
+#include <limits>
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program.h"
 #include "taichi/rhi/device.h"
@@ -13,6 +16,85 @@
 #endif
 
 namespace taichi::lang {
+
+bool is_float_sampled_texture_format(BufferFormat format) {
+  switch (format) {
+    case BufferFormat::r8:
+    case BufferFormat::rg8:
+    case BufferFormat::rgba8:
+    case BufferFormat::rgba8srgb:
+    case BufferFormat::bgra8:
+    case BufferFormat::bgra8srgb:
+    case BufferFormat::r16:
+    case BufferFormat::rg16:
+    case BufferFormat::rgb16:
+    case BufferFormat::rgba16:
+    case BufferFormat::r16f:
+    case BufferFormat::rg16f:
+    case BufferFormat::rgb16f:
+    case BufferFormat::rgba16f:
+    case BufferFormat::r32f:
+    case BufferFormat::rg32f:
+    case BufferFormat::rgb32f:
+    case BufferFormat::rgba32f:
+    case BufferFormat::depth16:
+    case BufferFormat::depth32f:
+      return true;
+    default:
+      return false;
+  }
+}
+
+namespace {
+
+std::atomic<std::uint64_t> next_texture_collection_snapshot_id{1};
+
+std::uint64_t allocate_texture_collection_snapshot_id() {
+  auto next = next_texture_collection_snapshot_id.load(
+      std::memory_order_relaxed);
+  for (;;) {
+    TI_ERROR_IF(next == 0 ||
+                    next == (std::numeric_limits<std::uint64_t>::max)(),
+                "TextureCollection snapshot identity space was exhausted");
+    if (next_texture_collection_snapshot_id.compare_exchange_weak(
+            next, next + 1, std::memory_order_relaxed,
+            std::memory_order_relaxed)) {
+      return next;
+    }
+  }
+}
+
+}  // namespace
+
+TextureCollection::TextureCollection(const std::vector<Texture *> &textures) {
+  TI_ERROR_IF(textures.empty() || textures.front() == nullptr,
+              "TextureCollection requires live Texture members");
+  owner_ = textures.front()->owning_program();
+  TI_ERROR_IF(owner_ == nullptr || owner_->compile_config().arch != Arch::vulkan,
+              "TextureCollection requires managed Vulkan textures");
+  const auto caps = owner_->get_device_caps();
+  TI_ERROR_IF(!caps.get(DeviceCapability::
+                            spirv_has_sampled_image_array_non_uniform_indexing),
+              "TextureCollection requires sampled-image non-uniform indexing");
+  TI_ERROR_IF(textures.size() >
+                  caps.get(DeviceCapability::
+                               max_sampled_texture_collection_size),
+              "TextureCollection exceeds the device sampled-image descriptor limit");
+  num_dimensions_ = static_cast<int>(textures.front()->get_dimension()) + 1;
+  members_.reserve(textures.size());
+  for (const auto *texture : textures) {
+    TI_ERROR_IF(texture == nullptr || texture->owning_program() != owner_ ||
+                    !texture->runtime_resource_handle(),
+                "TextureCollection members must be live textures from one Program");
+    TI_ERROR_IF(texture->get_dimension() != textures.front()->get_dimension(),
+                "TextureCollection members must have the same dimensionality");
+    TI_ERROR_IF(!is_float_sampled_texture_format(texture->get_buffer_format()),
+                "TextureCollection requires floating-point or normalized sampled formats");
+    members_.push_back({texture, texture->runtime_resource_handle(),
+                        texture->get_device_allocation()});
+  }
+  snapshot_id_ = allocate_texture_collection_snapshot_id();
+}
 
 struct Texture::CudaTextureResource {
 #ifdef TI_WITH_CUDA

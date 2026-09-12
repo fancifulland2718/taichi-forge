@@ -16,6 +16,9 @@ class Ndarray;
 class SNode;
 
 std::pair<DataType, uint32_t> buffer_format2type_channels(BufferFormat format);
+// Combined samplers expose normalized/floating formats as f32. This includes
+// sampled-only formats not accepted by the storage-image load/store contract.
+bool is_float_sampled_texture_format(BufferFormat format);
 // Storage images expose 32-bit shader values even when the backing image uses
 // 8- or 16-bit integer channels. Normalized and floating-point formats expose
 // f32, signed integer formats expose i32, and unsigned integer formats expose
@@ -114,6 +117,32 @@ class TI_DLL_EXPORT Texture {
   // Immutable after Program registry publication. Kernel/Graph/GGUI binding
   // copies this identity and validates it before dereferencing texture_alloc_.
   RuntimeResourceHandle runtime_resource_handle_;
+};
+
+// Immutable membership snapshot. The Python owner retains the Texture objects;
+// launch/Graph admission retains their existing generation-qualified leases.
+class TI_DLL_EXPORT TextureCollection {
+ public:
+  struct Member {
+    const Texture *texture;
+    RuntimeResourceHandle handle;
+    DeviceAllocation allocation;
+  };
+
+  explicit TextureCollection(const std::vector<Texture *> &textures);
+  Program *owning_program() const noexcept { return owner_; }
+  int num_dimensions() const noexcept { return num_dimensions_; }
+  int capacity() const noexcept { return static_cast<int>(members_.size()); }
+  std::uint64_t snapshot_id() const noexcept { return snapshot_id_; }
+  const std::vector<Member> &members() const noexcept { return members_; }
+
+ private:
+  Program *owner_{nullptr};
+  int num_dimensions_{0};
+  std::vector<Member> members_;
+  // Process-monotonic immutable identity. Graph caches use this instead of the
+  // C++/Python object address, which may be reused after collection retirement.
+  std::uint64_t snapshot_id_{0};
 };
 
 }  // namespace taichi::lang
