@@ -27,6 +27,11 @@ class TI_DLL_EXPORT ExternalGraphCommand {
   virtual bool supports_inline_recording() const {
     return false;
   }
+  // Static dense storage owners, resolved during cold command preparation.
+  // The enclosing recorder retains roots and retires on tree destruction.
+  virtual std::vector<SNodeTreeDependency> snode_tree_dependencies() const {
+    return {};
+  }
 };
 
 struct GraphRecordingSource {
@@ -38,8 +43,11 @@ class GraphReplayRegistration;
 class TI_DLL_EXPORT FixedGraphRecording {
  public:
   FixedGraphRecording(Program &program,
-                      std::unique_ptr<GraphReplayRegistration> registration);
+                      std::unique_ptr<GraphReplayRegistration> registration,
+                      bool has_snode_tree_dependencies);
   ~FixedGraphRecording();
+  static bool supports_snode_tree_dependencies(Program &program,
+                                              const aot::CompiledGraph &graph);
   void run();
   void close();
   std::uint64_t argument_bytes() const;
@@ -47,6 +55,7 @@ class TI_DLL_EXPORT FixedGraphRecording {
 
  private:
   Program *program_;
+  bool has_snode_tree_dependencies_{false};
   mutable std::mutex mutex_;
   std::unique_ptr<GraphReplayRegistration> registration_;
 };

@@ -189,9 +189,10 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "sampled-texture-resource-retention",
             "vulkan-secondary-image-recording",
             "vulkan-readonly-tlas-recording",
+            "vulkan-fixed-dense-root-retention",
         ),
-        domain_version="immutable-binding-frame-domain-v8",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-binding-resources-v8",
+        domain_version="immutable-binding-frame-domain-v9",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-binding-resources-v9",
     )
 
     def fragments(self, definition):
@@ -237,6 +238,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                                     "submission": "embedded_secondary_commands",
                                     "image_layouts": "closed_cycle_with_entry_repair_after_layout_change",
                                     "binding_transition": "select_immutable_secondary",
+                                    "snode_dependencies": "fixed_dense_roots_retained_until_parent_command_retirement",
+                                    "snode_invalidation": "tree_destroy_retires_dependent_frames",
                                 }
                                 if vulkan
                                 else {
@@ -272,11 +275,11 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 "display_name": "Whole-Graph immutable Vulkan binding frames",
                 "changes": (
                     "prepare arguments, descriptors and secondary commands at binding publication",
-                    "retain buffer/image/TLAS and BLAS resources until frame and parent command retirement",
+                    "retain buffer/image/TLAS, BLAS and fixed dense roots until frame and parent command retirement",
                     "record a closed image-layout cycle; repair entry layouts only after layout changes",
                 ),
                 "limitations": (
-                    "flat Vulkan kernel/native Graph, one workspace lane; no SNode or external synchronization domains",
+                    "flat Vulkan kernel/native Graph, one workspace lane; only fixed dense SNode trees and no external synchronization domains",
                     "TLAS bindings are read-only; AS builds/refits use their existing ordered commands outside the frame",
                     "managed 2D storage mip views; simultaneous sampled/storage alias in one task is unavailable",
                     "raw mapping calls include argument preparation; use Graph.bind to amortize it",

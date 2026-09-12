@@ -5919,6 +5919,9 @@ void export_lang(py::module &m) {
       .def_static("supports_texture_bindings", [] { return true; })
       .def_static("supports_acceleration_structure_bindings",
                   [] { return true; })
+      .def_static("supports_snode_tree_dependencies",
+                  &gfx::FixedGraphRecording::supports_snode_tree_dependencies,
+                  py::call_guard<py::gil_scoped_release>())
       .def("run", &gfx::FixedGraphRecording::run, py::call_guard<py::gil_scoped_release>())
       .def("close", &gfx::FixedGraphRecording::close, py::call_guard<py::gil_scoped_release>())
       .def("argument_bytes", &gfx::FixedGraphRecording::argument_bytes,

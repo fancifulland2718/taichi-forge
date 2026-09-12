@@ -1742,11 +1742,23 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
 
 void GfxRuntime::retire_snode_tree_kernels(int tree_id) {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
-  // Graph replay executables cache raw CompiledTaichiKernel pointers. The
-  // Program destroy transaction synchronized the device before entering here,
-  // so dropping every replay recording is safe. Registrations remain alive;
-  // unrelated graphs simply record again on their next run.
-  graph_replay_states_.clear();
+  // Ordinary replay caches contain raw CompiledTaichiKernel pointers and can
+  // rebuild after this synchronized retirement. Immutable frames instead own
+  // their commands and exact static roots; keep unrelated frames executable
+  // because their publication contract has no rerecord fallback. Retiring
+  // states are complete now, so none of the intrusive queue must survive.
+  for (auto state = graph_replay_states_.begin();
+       state != graph_replay_states_.end();) {
+    const auto &fixed_trees = state->second.fixed_snode_tree_ids;
+    const bool affected = std::binary_search(fixed_trees.begin(),
+                                              fixed_trees.end(), tree_id);
+    if (!state->second.fixed_submit || state->second.retirement_requested ||
+        affected) {
+      state = graph_replay_states_.erase(state);
+    } else {
+      ++state;
+    }
+  }
   graph_replay_retirement_head_ = 0;
   graph_replay_retirement_tail_ = 0;
   graph_replay_retirement_count_ = 0;
@@ -2455,6 +2467,7 @@ GfxRuntime::GraphReplayExecutable::known_persistent_argument_bytes() const {
 
 void GfxRuntime::GraphReplayState::reset() {
   fixed_submit = {};
+  fixed_snode_tree_ids.clear();
   fixed_argument_bytes = 0;
   fixed_secondary = false;
   executable.reset();
@@ -2681,7 +2694,8 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
 
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
-    std::vector<std::shared_ptr<void>> owners) {
+    std::vector<std::shared_ptr<void>> owners,
+    std::vector<int> snode_tree_ids) {
   // On a cold failure release the host API lock before registration retirement
   // (registry -> runtime is also the order used by reset and late destruction).
   auto registration = register_graph_replay(1);
@@ -2697,6 +2711,14 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   auto payload = std::make_shared<GraphReplayExecutable::Slot>();
   auto &slot = *payload;
   slot.retained_owners = std::move(owners);
+  for (const int tree_id : snode_tree_ids) {
+    TI_ERROR_IF(tree_id < 0 ||
+                    static_cast<std::size_t>(tree_id) >= root_buffers_.size() ||
+                    !root_buffers_[tree_id],
+                "Prepared Vulkan Graph SNodeTree root {} is unavailable", tree_id);
+    slot.retained_owners.push_back(root_buffers_[tree_id]);
+  }
+  state.fixed_snode_tree_ids = std::move(snode_tree_ids);
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
   std::vector<ImageBinding> entry_images;
@@ -2932,7 +2954,13 @@ void GfxRuntime::launch_prepared_graph(std::uint64_t replay_key) {
   // descriptor updates, per-dispatch preparation, observation or ready-slot
   // poll. Same ordered queue permits simultaneous reuse of the immutable
   // command list.
-  graph_replay_states_.at(replay_key).fixed_submit();
+  const auto state = graph_replay_states_.find(replay_key);
+  TI_ERROR_IF(state == graph_replay_states_.end() ||
+                  state->second.retirement_requested ||
+                  !state->second.fixed_submit,
+              "Prepared Vulkan Graph is retired or references a destroyed "
+              "SNodeTree; rebuild the Graph");
+  state->second.fixed_submit();
 }
 
 bool GfxRuntime::try_launch_graph(
@@ -5960,6 +5988,20 @@ void GfxRuntime::remove_root_buffer(int root_id) {
                   static_cast<std::size_t>(root_id) >= root_buffers_.size() ||
                   !root_buffers_[root_id],
               "Cannot remove missing root buffer id {}.", root_id);
+  // Tree destruction is a cold synchronized transaction. Retire only frames
+  // that reference this root before making its ID available for reuse. Any
+  // already recorded parent command independently owns its retained payload.
+  std::vector<std::uint64_t> dependent_recordings;
+  for (const auto &[replay_key, state] : graph_replay_states_) {
+    if (std::find(state.fixed_snode_tree_ids.begin(),
+                  state.fixed_snode_tree_ids.end(), root_id) !=
+        state.fixed_snode_tree_ids.end()) {
+      dependent_recordings.push_back(replay_key);
+    }
+  }
+  for (const auto replay_key : dependent_recordings) {
+    retire_graph_replay(replay_key);
+  }
   root_buffers_size_map_.erase(root_buffers_[root_id].get());
   root_buffers_[root_id].reset();
   hash_overflow_watches_.erase(

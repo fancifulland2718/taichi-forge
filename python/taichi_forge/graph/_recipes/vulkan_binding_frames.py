@@ -15,7 +15,6 @@ def eligible(spec, backend):
         or config.arch != core.Arch.vulkan
         or config.debug
         or config.kernel_profiler
-        or spec.snode_tree_dependency_info
         or spec.runtime_lifetime_leases
         or not hasattr(core, "_prepare_vulkan_graph_recording")
     ):
@@ -45,6 +44,13 @@ def eligible(spec, backend):
                 or any(op[0] != "dispatch" for op in node.recipe_operations)
             ):
                 return False
+            if node.snode_tree_dependency_info:
+                native = getattr(core, "_VulkanFixedGraphRecording", None)
+                supports_trees = getattr(native, "supports_snode_tree_dependencies", None)
+                if supports_trees is None or not supports_trees(
+                    impl.get_runtime().prog, node.compiled_graph
+                ):
+                    return False
         elif isinstance(node, _CompiledNativeGraphNode):
             recording = getattr(node.executable, "_recording", None)
             if not callable(

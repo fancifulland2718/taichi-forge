@@ -493,6 +493,9 @@ class TI_DLL_EXPORT GfxRuntime {
   struct GraphReplayState {
     GraphReplayExecutable executable;
     std::function<void()> fixed_submit;
+    // Cold invalidation index. These roots are pinned by the command payload;
+    // replay never revalidates or traverses the tree list.
+    std::vector<int> fixed_snode_tree_ids;
     std::uint64_t fixed_argument_bytes{0};
     bool fixed_secondary{false};
     uint64_t attempts{0};
@@ -534,7 +537,8 @@ class TI_DLL_EXPORT GfxRuntime {
       const GraphReplayRegistration &registration) const;
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_graph(
       const std::vector<GraphRecordingOperation> &operations,
-      std::vector<std::shared_ptr<void>> owners);
+      std::vector<std::shared_ptr<void>> owners,
+      std::vector<int> snode_tree_ids = {});
   void launch_prepared_graph(std::uint64_t replay_key);
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
@@ -709,7 +713,9 @@ class TI_DLL_EXPORT GfxRuntime {
 
   std::unique_ptr<PipelineCache> backend_cache_{nullptr};
 
-  std::vector<std::unique_ptr<DeviceAllocationGuard>> root_buffers_;
+  // Fixed Graph command payloads share root allocations until their last
+  // parent command retires, independently of the active tree table.
+  std::vector<std::shared_ptr<DeviceAllocationGuard>> root_buffers_;
 #if defined(TI_WITH_VULKAN_POINTER)
   // 路线 B B-1（2026-04-30）：每棵 SNode tree 上每个 pointer SNode 对应
   // 一个 DeviceNodeAllocator。outer key = root_id（与 root_buffers_ 同步），

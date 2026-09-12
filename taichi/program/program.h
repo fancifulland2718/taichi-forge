@@ -713,6 +713,10 @@ class TI_DLL_EXPORT Program {
       const std::vector<SNodeTreeDependency> &dependencies,
       const char *consumer = "Graph") const;
 
+  // Caller holds the SNodeTree lifecycle read guard.
+  bool snode_tree_dependencies_are_fixed_dense(
+      const std::vector<SNodeTreeDependency> &dependencies) const;
+
   std::uint64_t snode_tree_mutation_epoch() const {
     return snode_tree_mutation_epoch_.load(std::memory_order_acquire);
   }

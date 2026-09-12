@@ -1,7 +1,33 @@
+#include <algorithm>
+
 #include "taichi/program/program.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
 #include "taichi/runtime/gfx/graph_recording.h"
+
+namespace taichi::lang {
+namespace {
+bool is_fixed_dense_tree(const SNode &node) {
+  if (node.type != SNodeType::root && node.type != SNodeType::dense &&
+      node.type != SNodeType::place) {
+    return false;
+  }
+  return std::all_of(node.ch.begin(), node.ch.end(), [](const auto &child) {
+    return is_fixed_dense_tree(*child);
+  });
+}
+}  // namespace
+
+bool Program::snode_tree_dependencies_are_fixed_dense(
+    const std::vector<SNodeTreeDependency> &dependencies) const {
+  validate_snode_tree_dependencies(dependencies, "Prepared Vulkan Graph");
+  return std::all_of(dependencies.begin(), dependencies.end(),
+                     [this](const auto &dependency) {
+                       return is_fixed_dense_tree(
+                           *snode_trees_[dependency.tree_id]->root());
+                     });
+}
+}  // namespace taichi::lang
 
 #ifdef TI_WITH_VULKAN
 #include "taichi/runtime/gfx/kernel_launcher.h"
@@ -54,11 +80,32 @@ aot::CompiledGraph graph_recording_argument_schema(
 
 FixedGraphRecording::FixedGraphRecording(
     Program &program,
-    std::unique_ptr<GraphReplayRegistration> registration)
-    : program_(&program), registration_(std::move(registration)) {
+    std::unique_ptr<GraphReplayRegistration> registration,
+    bool has_snode_tree_dependencies)
+    : program_(&program),
+      has_snode_tree_dependencies_(has_snode_tree_dependencies),
+      registration_(std::move(registration)) {
 }
 FixedGraphRecording::~FixedGraphRecording() = default;
+bool FixedGraphRecording::supports_snode_tree_dependencies(
+    Program &program,
+    const aot::CompiledGraph &graph) {
+  auto guard = program.acquire_snode_tree_lifecycle_read_guard();
+  const bool fixed_dense = program.snode_tree_dependencies_are_fixed_dense(
+      graph.snode_tree_dependencies);
+  for (const auto &dispatch : graph.dispatches) {
+    TI_ERROR_IF(!dispatch.ti_kernel || dispatch.ti_kernel->program != &program,
+                "Prepared Vulkan Graph source belongs to another runtime");
+  }
+  return fixed_dense;
+}
 void FixedGraphRecording::run() {
+  // Tree destruction owns the writer through its device completion and root
+  // retirement transaction. No dependency traversal occurs during replay.
+  std::optional<Program::SNodeTreeLifecycleReadGuard> tree_guard;
+  if (has_snode_tree_dependencies_) {
+    tree_guard.emplace(program_->acquire_snode_tree_lifecycle_read_guard());
+  }
   auto guard = program_->acquire_runtime_resource_submission_guard();
   std::lock_guard<std::mutex> lock(mutex_);
   TI_ERROR_IF(!registration_, "Prepared Vulkan Graph is closed");
@@ -86,6 +133,7 @@ std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &sources,
     const std::unordered_map<std::string, aot::IValue> &args) {
+  auto tree_guard = acquire_snode_tree_lifecycle_read_guard();
   auto scope = acquire_runtime_resource_graph_scope();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan || compile_config().debug ||
                   compile_config().kernel_profiler,
@@ -139,14 +187,23 @@ Program::create_vulkan_graph_recording(
       std::make_shared<NdarrayLaunchLeases>(acquire_ndarray_leases(arrays)));
   std::vector<std::unique_ptr<LaunchContextBuilder>> contexts;
   std::vector<gfx::GfxRuntime::GraphRecordingOperation> operations;
+  std::vector<int> tree_ids;
+  auto retain_dependencies = [&](const auto &dependencies) {
+    TI_ERROR_IF(!snode_tree_dependencies_are_fixed_dense(dependencies),
+                "Prepared Vulkan Graph requires fixed dense SNodeTree "
+                "dependencies; sparse or packed trees are unsupported");
+    for (const auto &dependency : dependencies) {
+      tree_ids.push_back(dependency.tree_id);
+    }
+  };
   for (const auto &source : sources) {
     if (const auto *graph_pointer =
             std::get_if<aot::CompiledGraph *>(&source.value)) {
       const auto &graph = **graph_pointer;
-      TI_ERROR_IF(!graph.snode_tree_dependencies.empty() ||
-                      graph.has_indirect_dispatches() ||
+      TI_ERROR_IF(graph.has_indirect_dispatches() ||
                       graph.has_cuda_parallel_dispatch_groups(),
-                  "Prepared Vulkan Graph requires flat segments without SNode dependencies");
+                  "Prepared Vulkan Graph requires flat fixed-dispatch segments");
+      retain_dependencies(graph.snode_tree_dependencies);
       // Retain synthetic kernels and their compiled payloads independently of
       // Python builders and subsequent compilation-cache eviction.
       for (auto &kernel : graph.owned_jit_kernels) {
@@ -157,8 +214,7 @@ Program::create_vulkan_graph_recording(
                         dispatch.ti_kernel->program != this ||
                         dispatch.cuda_capture_command ||
                         dispatch.cuda_bounded_dispatch ||
-                        dispatch.cpu_bounded_dispatch ||
-                        !dispatch.snode_tree_dependencies.empty(),
+                        dispatch.cpu_bounded_dispatch,
                     "Prepared Vulkan Graph cannot lower this dispatch");
         auto kernel = compile_kernel_execution_handle(
             compile_config(), get_device_caps(), *dispatch.ti_kernel);
@@ -177,6 +233,7 @@ Program::create_vulkan_graph_recording(
       const auto &command =
           std::get<std::shared_ptr<gfx::ExternalGraphCommand>>(source.value);
       command->validate(*this, args);
+      retain_dependencies(command->snode_tree_dependencies());
       owners.push_back(command);
       operations.push_back(
           {{}, [command](Device *device, CommandList *commands) {
@@ -184,10 +241,14 @@ Program::create_vulkan_graph_recording(
            }, command->supports_inline_recording(), command->image_uses()});
     }
   }
-  auto registration =
-      launcher->runtime()->prepare_fixed_graph(operations, std::move(owners));
+  std::sort(tree_ids.begin(), tree_ids.end());
+  tree_ids.erase(std::unique(tree_ids.begin(), tree_ids.end()), tree_ids.end());
+  const bool has_tree_dependencies = !tree_ids.empty();
+  auto registration = launcher->runtime()->prepare_fixed_graph(
+      operations, std::move(owners), std::move(tree_ids));
   return std::make_shared<gfx::FixedGraphRecording>(*this,
-                                                    std::move(registration));
+                                                    std::move(registration),
+                                                    has_tree_dependencies);
 }
 }  // namespace taichi::lang
 #else
