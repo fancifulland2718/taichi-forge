@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 #include <new>
 #include <string>
+#include <vector>
 
 #include <cuda.h>
 #include <optix.h>
@@ -18,6 +20,7 @@
 
 #include "device_program_0_ptx.h"
 #include "device_program_1_ptx.h"
+#include "instance_transform_pack_ptx.h"
 
 #if OPTIX_ABI_VERSION != 93 && OPTIX_ABI_VERSION != 105 && \
     OPTIX_ABI_VERSION != 118
@@ -39,7 +42,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -47,7 +50,10 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_RUNTIME_ORDERED_STREAM |
                                TI_FORGE_OPTIX_FEATURE_EXACT_DEVICE_MEMORY |
                                TI_FORGE_OPTIX_FEATURE_TYPED_HITS |
-                               TI_FORGE_OPTIX_FEATURE_WORD_ALIGNED_QUERY_STORAGE;
+                               TI_FORGE_OPTIX_FEATURE_WORD_ALIGNED_QUERY_STORAGE |
+                               TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS |
+                               TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS |
+                               TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE;
 
 void clear_error_state() {
   last_error.clear();
@@ -151,11 +157,15 @@ struct RayPipeline {
 struct Context {
   CUcontext cuda_context{nullptr};
   OptixDeviceContext optix_context{nullptr};
+  CUmodule transform_module{nullptr};
+  CUfunction transform_pack{nullptr};
   RayPipeline legacy;
   RayPipeline typed;
   std::atomic<bool> typed_ready{false};
   std::mutex prepare_mutex;
   std::atomic<std::size_t> scene_count{0};
+  std::atomic<std::size_t> gas_count{0};
+  std::atomic<std::size_t> instance_scene_count{0};
 };
 
 struct LaunchParams {
@@ -177,6 +187,30 @@ struct Scene {
   DeviceBuffer instance;
   DeviceBuffer launch_params;
   OptixTraversableHandle gas_handle{0};
+  OptixTraversableHandle ias_handle{0};
+};
+
+struct TriangleGas {
+  Context *context{nullptr};
+  uint32_t vertex_count{0};
+  uint32_t triangle_count{0};
+  bool allow_update{false};
+  std::atomic<bool> owner_live{true};
+  std::atomic<std::size_t> instance_ref_count{0};
+  DeviceBuffer gas;
+  DeviceBuffer scratch;
+  OptixTraversableHandle gas_handle{0};
+};
+
+struct InstanceScene {
+  Context *context{nullptr};
+  uint32_t instance_count{0};
+  bool allow_update{false};
+  std::vector<TriangleGas *> gas_refs;
+  DeviceBuffer ias;
+  DeviceBuffer scratch;
+  DeviceBuffer instance;
+  DeviceBuffer launch_params;
   OptixTraversableHandle ias_handle{0};
 };
 
@@ -458,6 +492,35 @@ void destroy_pipeline(RayPipeline *context) {
   context->hitgroup_record.reset();
 }
 
+TiForgeOptixResult create_transform_module(Context *context) {
+  auto result = cuda_check(
+      cuModuleLoadData(&context->transform_module,
+                       ti_forge_optix_instance_transform_pack_ptx),
+      "cuModuleLoadData(instance transform pack)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    context->transform_module = nullptr;
+    return result;
+  }
+  result = cuda_check(
+      cuModuleGetFunction(&context->transform_pack, context->transform_module,
+                          "forge_pack_instance_transforms"),
+      "cuModuleGetFunction(forge_pack_instance_transforms)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    cuModuleUnload(context->transform_module);
+    context->transform_module = nullptr;
+    context->transform_pack = nullptr;
+  }
+  return result;
+}
+
+void destroy_transform_module(Context *context) {
+  context->transform_pack = nullptr;
+  if (context->transform_module != nullptr) {
+    cuModuleUnload(context->transform_module);
+    context->transform_module = nullptr;
+  }
+}
+
 TiForgeOptixResult prepare_typed(TiForgeOptixContext raw_context) {
   clear_error_state();
   auto *context = static_cast<Context *>(raw_context);
@@ -600,6 +663,377 @@ TiForgeOptixResult create_ias(Scene *scene, CUstream stream) {
   return result;
 }
 
+std::size_t shared_pipeline_sbt_bytes(Context *context) {
+  std::lock_guard<std::mutex> lock(context->prepare_mutex);
+  return context->legacy.raygen_record.bytes + context->legacy.miss_record.bytes +
+         context->legacy.hitgroup_record.bytes +
+         context->typed.raygen_record.bytes + context->typed.miss_record.bytes +
+         context->typed.hitgroup_record.bytes;
+}
+
+void initialize_memory_result(TiForgeOptixSceneMemory *memory) {
+  memory->reserved = 0;
+  memory->gas_bytes = 0;
+  memory->ias_bytes = 0;
+  memory->build_update_scratch_bytes = 0;
+  memory->instance_bytes = 0;
+  memory->launch_params_bytes = 0;
+  memory->shared_pipeline_sbt_bytes = 0;
+}
+
+bool valid_affine_transform(const float transform[12]) {
+  for (unsigned int i = 0; i < 12; ++i) {
+    if (!std::isfinite(transform[i])) {
+      return false;
+    }
+  }
+  const double a = transform[0], b = transform[1], c = transform[2];
+  const double d = transform[4], e = transform[5], f = transform[6];
+  const double g = transform[8], h = transform[9], i = transform[10];
+  const double determinant =
+      a * (e * i - f * h) - b * (d * i - f * g) +
+      c * (d * h - e * g);
+  return std::isfinite(determinant) && determinant != 0.0;
+}
+
+void delete_triangle_gas(TriangleGas *gas) {
+  gas->gas_handle = 0;
+  gas->scratch.reset();
+  gas->gas.reset();
+  gas->context->gas_count.fetch_sub(1);
+  delete gas;
+}
+
+void release_triangle_gas_reference(TriangleGas *gas) {
+  const auto previous = gas->instance_ref_count.fetch_sub(1);
+  if (previous == 1 && !gas->owner_live.load(std::memory_order_acquire)) {
+    delete_triangle_gas(gas);
+  }
+}
+
+void release_instance_references(InstanceScene *scene) {
+  for (auto *gas : scene->gas_refs) {
+    release_triangle_gas_reference(gas);
+  }
+  scene->gas_refs.clear();
+}
+
+TiForgeOptixResult create_triangle_gas(
+    TiForgeOptixContext raw_context,
+    const TiForgeOptixTriangleSceneDesc *desc,
+    TiForgeOptixTriangleGas *out_gas) {
+  clear_error_state();
+  auto *context = static_cast<Context *>(raw_context);
+  if (context == nullptr || desc == nullptr || out_gas == nullptr ||
+      desc->struct_size < sizeof(*desc) || desc->vertex_count == 0 ||
+      desc->triangle_count == 0 || desc->vertices == 0 || desc->indices == 0) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OptiX triangle GAS descriptor");
+  }
+  *out_gas = nullptr;
+  auto *gas = new (std::nothrow) TriangleGas;
+  if (gas == nullptr) {
+    return fail(TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY,
+                "failed to allocate the Forge OptiX triangle GAS");
+  }
+  gas->context = context;
+  gas->vertex_count = desc->vertex_count;
+  gas->triangle_count = desc->triangle_count;
+  gas->allow_update = desc->allow_update != 0;
+
+  CUdeviceptr vertex_buffer = 0;
+  unsigned int geometry_flags = 0;
+  auto input = triangle_build_input(*desc, &vertex_buffer, &geometry_flags);
+  auto options = build_options(gas->allow_update, OPTIX_BUILD_OPERATION_BUILD);
+  OptixAccelBufferSizes sizes{};
+  auto result = optix_check(
+      optixAccelComputeMemoryUsage(context->optix_context, &options, &input, 1,
+                                   &sizes),
+      "optixAccelComputeMemoryUsage(shared GAS)");
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = gas->gas.allocate(sizes.outputSizeInBytes);
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = gas->scratch.allocate(
+        std::max(sizes.tempSizeInBytes, sizes.tempUpdateSizeInBytes));
+  }
+  const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  bool build_may_be_enqueued = false;
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    build_may_be_enqueued = true;
+    result = optix_check(
+        optixAccelBuild(context->optix_context, stream, &options, &input, 1,
+                        gas->scratch.pointer, gas->scratch.bytes,
+                        gas->gas.pointer, gas->gas.bytes, &gas->gas_handle,
+                        nullptr, 0),
+        "optixAccelBuild(shared GAS)");
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = cuda_check(cuStreamSynchronize(stream),
+                        "cuStreamSynchronize(shared GAS build)");
+  }
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    if (build_may_be_enqueued) {
+      const auto rollback_result = cuda_check(
+          cuStreamSynchronize(stream),
+          "cuStreamSynchronize(shared GAS build rollback)");
+      if (rollback_result != TI_FORGE_OPTIX_SUCCESS) {
+        result = rollback_result;
+      }
+    }
+    delete gas;
+    return result;
+  }
+  if (!gas->allow_update) {
+    gas->scratch.reset();
+  }
+  context->gas_count.fetch_add(1);
+  *out_gas = gas;
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult update_triangle_gas(
+    TiForgeOptixTriangleGas raw_gas,
+    const TiForgeOptixTriangleSceneDesc *desc) {
+  clear_error_state();
+  auto *gas = static_cast<TriangleGas *>(raw_gas);
+  if (gas == nullptr || desc == nullptr || desc->struct_size < sizeof(*desc) ||
+      desc->vertex_count != gas->vertex_count ||
+      desc->triangle_count != gas->triangle_count || desc->vertices == 0 ||
+      desc->indices == 0 || !gas->owner_live.load(std::memory_order_acquire)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "OptiX shared GAS update must preserve geometry shape");
+  }
+  if (!gas->allow_update) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "OptiX shared GAS was not created with update support");
+  }
+  CUdeviceptr vertex_buffer = 0;
+  unsigned int geometry_flags = 0;
+  auto input = triangle_build_input(*desc, &vertex_buffer, &geometry_flags);
+  auto options = build_options(true, OPTIX_BUILD_OPERATION_UPDATE);
+  return optix_check(
+      optixAccelBuild(gas->context->optix_context,
+                      reinterpret_cast<CUstream>(desc->cuda_stream), &options,
+                      &input, 1, gas->scratch.pointer, gas->scratch.bytes,
+                      gas->gas.pointer, gas->gas.bytes, &gas->gas_handle,
+                      nullptr, 0),
+      "optixAccelBuild(shared GAS update)");
+}
+
+TiForgeOptixResult get_triangle_gas_memory(
+    TiForgeOptixTriangleGas raw_gas,
+    TiForgeOptixSceneMemory *out_memory) {
+  clear_error_state();
+  auto *gas = static_cast<TriangleGas *>(raw_gas);
+  if (gas == nullptr || out_memory == nullptr ||
+      out_memory->struct_size < sizeof(*out_memory) ||
+      !gas->owner_live.load(std::memory_order_acquire)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OptiX shared GAS memory query");
+  }
+  initialize_memory_result(out_memory);
+  out_memory->gas_bytes = gas->gas.bytes;
+  out_memory->build_update_scratch_bytes = gas->scratch.bytes;
+  out_memory->shared_pipeline_sbt_bytes =
+      shared_pipeline_sbt_bytes(gas->context);
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult destroy_triangle_gas(TiForgeOptixTriangleGas raw_gas) {
+  clear_error_state();
+  auto *gas = static_cast<TriangleGas *>(raw_gas);
+  if (gas == nullptr) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "OptiX triangle GAS is null");
+  }
+  if (!gas->owner_live.exchange(false, std::memory_order_acq_rel)) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "OptiX triangle GAS owner was already released");
+  }
+  if (gas->instance_ref_count.load(std::memory_order_acquire) == 0) {
+    const auto result =
+        cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(shared GAS destroy)");
+    if (result != TI_FORGE_OPTIX_SUCCESS) {
+      gas->owner_live.store(true, std::memory_order_release);
+      return result;
+    }
+    delete_triangle_gas(gas);
+  }
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult create_instance_scene(
+    TiForgeOptixContext raw_context,
+    const TiForgeOptixInstanceSceneDesc *desc,
+    TiForgeOptixInstanceScene *out_scene) {
+  clear_error_state();
+  auto *context = static_cast<Context *>(raw_context);
+  if (context == nullptr || desc == nullptr || out_scene == nullptr ||
+      desc->struct_size < sizeof(*desc) || desc->instance_count == 0 ||
+      desc->instances == nullptr) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OptiX instance scene descriptor");
+  }
+  *out_scene = nullptr;
+  auto *scene = new (std::nothrow) InstanceScene;
+  if (scene == nullptr) {
+    return fail(TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY,
+                "failed to allocate the Forge OptiX instance scene");
+  }
+  scene->context = context;
+  scene->instance_count = desc->instance_count;
+  scene->allow_update = desc->allow_update != 0;
+  std::vector<OptixInstance> host_instances;
+  try {
+    host_instances.resize(desc->instance_count);
+    scene->gas_refs.reserve(desc->instance_count);
+  } catch (const std::bad_alloc &) {
+    delete scene;
+    return fail(TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY,
+                "failed to allocate OptiX instance metadata");
+  }
+  for (uint32_t index = 0; index < desc->instance_count; ++index) {
+    const auto &source = desc->instances[index];
+    if (source.struct_size < sizeof(source)) {
+      delete scene;
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "OptiX instance metadata is truncated");
+    }
+    auto *gas = static_cast<TriangleGas *>(source.gas);
+    if (gas == nullptr || gas->context != context ||
+        !gas->owner_live.load(std::memory_order_acquire) ||
+        source.custom_index > 0xffffffu || source.visibility_mask > 0xffu ||
+        !valid_affine_transform(source.transform)) {
+      delete scene;
+      return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                  "OptiX instances require live same-context GAS handles, "
+                  "finite invertible transforms, 24-bit custom indices and "
+                  "8-bit visibility masks");
+    }
+    auto &destination = host_instances[index];
+    std::memcpy(destination.transform, source.transform,
+                sizeof(destination.transform));
+    destination.instanceId = source.custom_index;
+    destination.sbtOffset = 0;
+    destination.visibilityMask = source.visibility_mask;
+    destination.flags = OPTIX_INSTANCE_FLAG_NONE;
+    destination.traversableHandle = gas->gas_handle;
+    scene->gas_refs.push_back(gas);
+  }
+  for (auto *gas : scene->gas_refs) {
+    gas->instance_ref_count.fetch_add(1);
+  }
+
+  auto result = scene->launch_params.allocate(sizeof(LaunchParams));
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = scene->instance.allocate(host_instances.size() * sizeof(OptixInstance));
+  }
+  const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  bool copy_may_be_enqueued = false;
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    copy_may_be_enqueued = true;
+    result = cuda_check(
+        cuMemcpyHtoDAsync(scene->instance.pointer, host_instances.data(),
+                          scene->instance.bytes, stream),
+        "cuMemcpyHtoDAsync(shared GAS instances)");
+  }
+  OptixBuildInput input{};
+  input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+  input.instanceArray.instances = scene->instance.pointer;
+  input.instanceArray.numInstances = scene->instance_count;
+  const auto options =
+      build_options(scene->allow_update, OPTIX_BUILD_OPERATION_BUILD);
+  OptixAccelBufferSizes sizes{};
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = optix_check(
+        optixAccelComputeMemoryUsage(context->optix_context, &options, &input,
+                                     1, &sizes),
+        "optixAccelComputeMemoryUsage(multi-instance IAS)");
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = scene->scratch.allocate(
+        std::max(sizes.tempSizeInBytes, sizes.tempUpdateSizeInBytes));
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = scene->ias.allocate(sizes.outputSizeInBytes);
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = optix_check(
+        optixAccelBuild(context->optix_context, stream, &options, &input, 1,
+                        scene->scratch.pointer, scene->scratch.bytes,
+                        scene->ias.pointer, scene->ias.bytes,
+                        &scene->ias_handle, nullptr, 0),
+        "optixAccelBuild(multi-instance IAS)");
+  }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = cuda_check(cuStreamSynchronize(stream),
+                        "cuStreamSynchronize(instance scene build)");
+  }
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    if (copy_may_be_enqueued) {
+      const auto rollback_result = cuda_check(
+          cuStreamSynchronize(stream),
+          "cuStreamSynchronize(instance scene build rollback)");
+      if (rollback_result != TI_FORGE_OPTIX_SUCCESS) {
+        result = rollback_result;
+      }
+    }
+    release_instance_references(scene);
+    delete scene;
+    return result;
+  }
+  if (!scene->allow_update) {
+    scene->scratch.reset();
+  }
+  context->instance_scene_count.fetch_add(1);
+  *out_scene = scene;
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult update_instance_scene(
+    TiForgeOptixInstanceScene raw_scene,
+    const TiForgeOptixInstanceUpdateDesc *desc) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  if (scene == nullptr || desc == nullptr || desc->struct_size < sizeof(*desc) ||
+      desc->instance_count != scene->instance_count) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "OptiX instance update must preserve the fixed instance count");
+  }
+  if (!scene->allow_update) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "OptiX instance scene was not created with update support");
+  }
+  const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  if (desc->transforms != 0) {
+    CUdeviceptr transforms = static_cast<CUdeviceptr>(desc->transforms);
+    CUdeviceptr instances = scene->instance.pointer;
+    uint32_t count = scene->instance_count;
+    void *arguments[] = {&transforms, &count, &instances};
+    const uint32_t block_size = 256;
+    const uint32_t grid_size = (count - 1) / block_size + 1;
+    auto result = cuda_check(
+        cuLaunchKernel(scene->context->transform_pack, grid_size, 1, 1,
+                       block_size, 1, 1, 0, stream, arguments, nullptr),
+        "cuLaunchKernel(instance transform pack)");
+    if (result != TI_FORGE_OPTIX_SUCCESS) {
+      return result;
+    }
+  }
+  OptixBuildInput input{};
+  input.type = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
+  input.instanceArray.instances = scene->instance.pointer;
+  input.instanceArray.numInstances = scene->instance_count;
+  const auto options = build_options(true, OPTIX_BUILD_OPERATION_UPDATE);
+  return optix_check(
+      optixAccelBuild(scene->context->optix_context, stream, &options, &input, 1,
+                      scene->scratch.pointer, scene->scratch.bytes,
+                      scene->ias.pointer, scene->ias.bytes, &scene->ias_handle,
+                      nullptr, 0),
+      "optixAccelBuild(multi-instance IAS update)");
+}
+
 TiForgeOptixResult create_context(const TiForgeOptixContextDesc *desc,
                                   TiForgeOptixContext *out_context) {
   clear_error_state();
@@ -640,7 +1074,11 @@ TiForgeOptixResult create_context(const TiForgeOptixContextDesc *desc,
   if (result == TI_FORGE_OPTIX_SUCCESS) {
     result = create_pipeline(context, &context->legacy, false);
   }
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    result = create_transform_module(context);
+  }
   if (result != TI_FORGE_OPTIX_SUCCESS) {
+    destroy_transform_module(context);
     destroy_pipeline(&context->legacy);
     if (context->optix_context != nullptr) {
       optixDeviceContextDestroy(context->optix_context);
@@ -660,11 +1098,16 @@ TiForgeOptixResult destroy_context(TiForgeOptixContext raw_context) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "OptiX context is null");
   }
-  if (context->scene_count.load() != 0) {
+  if (context->scene_count.load() != 0 || context->gas_count.load() != 0 ||
+      context->instance_scene_count.load() != 0) {
     return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
-                "OptiX context still owns live triangle scenes");
+                "OptiX context still owns live acceleration structures");
   }
-  cuCtxSynchronize();
+  auto result = cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(context destroy)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    return result;
+  }
+  destroy_transform_module(context);
   destroy_pipeline(&context->typed);
   destroy_pipeline(&context->legacy);
   if (context->optix_context != nullptr) {
@@ -817,6 +1260,106 @@ TiForgeOptixResult trace_typed(TiForgeOptixTriangleScene raw_scene,
       "optixLaunch(typed)");
 }
 
+TiForgeOptixResult trace_instance_scene(
+    TiForgeOptixInstanceScene raw_scene,
+    const TiForgeOptixTraceDesc *desc) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  if (scene == nullptr || desc == nullptr || desc->struct_size < sizeof(*desc) ||
+      desc->ray_count == 0 || desc->rays == 0 || desc->hits == 0) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OptiX instance trace descriptor");
+  }
+  const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  const LaunchParams params{static_cast<CUdeviceptr>(desc->rays),
+                            static_cast<CUdeviceptr>(desc->hits),
+                            scene->ias_handle, 0};
+  auto result = cuda_check(cuMemcpyHtoDAsync(scene->launch_params.pointer,
+                                             &params, sizeof(params), stream),
+                           "cuMemcpyHtoDAsync(instance launch params)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    return result;
+  }
+  return optix_check(
+      optixLaunch(scene->context->legacy.pipeline, stream,
+                  scene->launch_params.pointer, sizeof(params),
+                  &scene->context->legacy.sbt, desc->ray_count, 1, 1),
+      "optixLaunch(instance scene)");
+}
+
+TiForgeOptixResult trace_instance_scene_typed(
+    TiForgeOptixInstanceScene raw_scene,
+    const TiForgeOptixTypedTraceDesc *desc) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  if (scene == nullptr || desc == nullptr || desc->struct_size < sizeof(*desc) ||
+      desc->ray_count == 0 || desc->rays == 0 || desc->hits == 0 ||
+      desc->hit_indices == 0 ||
+      !scene->context->typed_ready.load(std::memory_order_acquire)) {
+    return fail(
+        TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+        "OptiX typed instance trace requires a prepared pipeline and valid storage");
+  }
+  const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  const LaunchParams params{desc->rays, desc->hits, scene->ias_handle,
+                            desc->hit_indices};
+  auto result = cuda_check(cuMemcpyHtoDAsync(scene->launch_params.pointer,
+                                             &params, sizeof(params), stream),
+                           "cuMemcpyHtoDAsync(typed instance launch params)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    return result;
+  }
+  return optix_check(
+      optixLaunch(scene->context->typed.pipeline, stream,
+                  scene->launch_params.pointer, sizeof(params),
+                  &scene->context->typed.sbt, desc->ray_count, 1, 1),
+      "optixLaunch(typed instance scene)");
+}
+
+TiForgeOptixResult get_instance_scene_memory(
+    TiForgeOptixInstanceScene raw_scene,
+    TiForgeOptixSceneMemory *out_memory) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  if (scene == nullptr || out_memory == nullptr ||
+      out_memory->struct_size < sizeof(*out_memory)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OptiX instance scene memory query");
+  }
+  initialize_memory_result(out_memory);
+  out_memory->ias_bytes = scene->ias.bytes;
+  out_memory->build_update_scratch_bytes = scene->scratch.bytes;
+  out_memory->instance_bytes = scene->instance.bytes;
+  out_memory->launch_params_bytes = scene->launch_params.bytes;
+  out_memory->shared_pipeline_sbt_bytes =
+      shared_pipeline_sbt_bytes(scene->context);
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult destroy_instance_scene(
+    TiForgeOptixInstanceScene raw_scene) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  if (scene == nullptr) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "OptiX instance scene is null");
+  }
+  auto result =
+      cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(instance scene destroy)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    return result;
+  }
+  scene->ias_handle = 0;
+  scene->launch_params.reset();
+  scene->ias.reset();
+  scene->scratch.reset();
+  scene->instance.reset();
+  release_instance_references(scene);
+  scene->context->instance_scene_count.fetch_sub(1);
+  delete scene;
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
 TiForgeOptixResult get_scene_memory(TiForgeOptixTriangleScene raw_scene,
                                     TiForgeOptixSceneMemory *out_memory) {
   clear_error_state();
@@ -826,8 +1369,7 @@ TiForgeOptixResult get_scene_memory(TiForgeOptixTriangleScene raw_scene,
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "invalid OptiX scene memory query");
   }
-  out_memory->reserved = 0;
-  std::lock_guard<std::mutex> lock(scene->context->prepare_mutex);
+  initialize_memory_result(out_memory);
   out_memory->gas_bytes = scene->gas.bytes;
   out_memory->ias_bytes = scene->ias.bytes;
   out_memory->build_update_scratch_bytes =
@@ -835,9 +1377,7 @@ TiForgeOptixResult get_scene_memory(TiForgeOptixTriangleScene raw_scene,
   out_memory->instance_bytes = scene->instance.bytes;
   out_memory->launch_params_bytes = scene->launch_params.bytes;
   out_memory->shared_pipeline_sbt_bytes =
-      scene->context->legacy.raygen_record.bytes + scene->context->legacy.miss_record.bytes +
-      scene->context->legacy.hitgroup_record.bytes + scene->context->typed.raygen_record.bytes +
-      scene->context->typed.miss_record.bytes + scene->context->typed.hitgroup_record.bytes;
+      shared_pipeline_sbt_bytes(scene->context);
   return TI_FORGE_OPTIX_SUCCESS;
 }
 
@@ -849,7 +1389,11 @@ TiForgeOptixResult destroy_triangle_scene(
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "OptiX triangle scene is null");
   }
-  cuCtxSynchronize();
+  auto result =
+      cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(triangle scene destroy)");
+  if (result != TI_FORGE_OPTIX_SUCCESS) {
+    return result;
+  }
   scene->context->scene_count.fetch_sub(1);
   delete scene;
   return TI_FORGE_OPTIX_SUCCESS;
@@ -905,6 +1449,16 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->get_last_error = get_last_error;
   out_api->prepare_typed = prepare_typed;
   out_api->trace_typed = trace_typed;
+  out_api->create_triangle_gas = create_triangle_gas;
+  out_api->update_triangle_gas = update_triangle_gas;
+  out_api->get_triangle_gas_memory = get_triangle_gas_memory;
+  out_api->destroy_triangle_gas = destroy_triangle_gas;
+  out_api->create_instance_scene = create_instance_scene;
+  out_api->update_instance_scene = update_instance_scene;
+  out_api->trace_instance_scene = trace_instance_scene;
+  out_api->trace_instance_scene_typed = trace_instance_scene_typed;
+  out_api->get_instance_scene_memory = get_instance_scene_memory;
+  out_api->destroy_instance_scene = destroy_instance_scene;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

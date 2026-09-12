@@ -43,6 +43,9 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_EXACT_DEVICE_MEMORY = 1ull << 5,
   TI_FORGE_OPTIX_FEATURE_TYPED_HITS = 1ull << 6,
   TI_FORGE_OPTIX_FEATURE_WORD_ALIGNED_QUERY_STORAGE = 1ull << 7,
+  TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS = 1ull << 8,
+  TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS = 1ull << 9,
+  TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE = 1ull << 10,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -106,6 +109,39 @@ typedef struct TiForgeOptixSceneMemory {
 
 typedef void *TiForgeOptixContext;
 typedef void *TiForgeOptixTriangleScene;
+typedef void *TiForgeOptixTriangleGas;
+typedef void *TiForgeOptixInstanceScene;
+
+// Cold fixed-topology metadata. transform is a row-major affine 3x4 matrix.
+// custom_index and visibility_mask are limited to 24 and 8 bits respectively.
+typedef struct TiForgeOptixInstanceDesc {
+  uint32_t struct_size;
+  uint32_t reserved;
+  TiForgeOptixTriangleGas gas;
+  float transform[12];
+  uint32_t custom_index;
+  uint32_t visibility_mask;
+} TiForgeOptixInstanceDesc;
+
+typedef struct TiForgeOptixInstanceSceneDesc {
+  uint32_t struct_size;
+  uint32_t instance_count;
+  uint32_t allow_update;
+  uint32_t reserved;
+  const TiForgeOptixInstanceDesc *instances;
+  uint64_t cuda_stream;
+} TiForgeOptixInstanceSceneDesc;
+
+// transforms is optional device storage containing instance_count tightly
+// packed row-major f32 3x4 matrices. A null pointer performs a bounds-only IAS
+// update after a referenced GAS update. Non-null values are supplied under the
+// finite, invertible affine-matrix contract and are never read back by Forge.
+typedef struct TiForgeOptixInstanceUpdateDesc {
+  uint32_t struct_size;
+  uint32_t instance_count;
+  uint64_t transforms;
+  uint64_t cuda_stream;
+} TiForgeOptixInstanceUpdateDesc;
 
 typedef TiForgeOptixResult (*TiForgeOptixProbeRuntimeFn)(
     const char *library_path);
@@ -136,6 +172,36 @@ typedef TiForgeOptixResult (*TiForgeOptixPrepareTypedFn)(
 typedef TiForgeOptixResult (*TiForgeOptixTraceTypedFn)(
     TiForgeOptixTriangleScene scene,
     const TiForgeOptixTypedTraceDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixCreateTriangleGasFn)(
+    TiForgeOptixContext context,
+    const TiForgeOptixTriangleSceneDesc *desc,
+    TiForgeOptixTriangleGas *out_gas);
+typedef TiForgeOptixResult (*TiForgeOptixUpdateTriangleGasFn)(
+    TiForgeOptixTriangleGas gas,
+    const TiForgeOptixTriangleSceneDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixGetTriangleGasMemoryFn)(
+    TiForgeOptixTriangleGas gas,
+    TiForgeOptixSceneMemory *out_memory);
+typedef TiForgeOptixResult (*TiForgeOptixDestroyTriangleGasFn)(
+    TiForgeOptixTriangleGas gas);
+typedef TiForgeOptixResult (*TiForgeOptixCreateInstanceSceneFn)(
+    TiForgeOptixContext context,
+    const TiForgeOptixInstanceSceneDesc *desc,
+    TiForgeOptixInstanceScene *out_scene);
+typedef TiForgeOptixResult (*TiForgeOptixUpdateInstanceSceneFn)(
+    TiForgeOptixInstanceScene scene,
+    const TiForgeOptixInstanceUpdateDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixTraceInstanceSceneFn)(
+    TiForgeOptixInstanceScene scene,
+    const TiForgeOptixTraceDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixTraceInstanceSceneTypedFn)(
+    TiForgeOptixInstanceScene scene,
+    const TiForgeOptixTypedTraceDesc *desc);
+typedef TiForgeOptixResult (*TiForgeOptixGetInstanceSceneMemoryFn)(
+    TiForgeOptixInstanceScene scene,
+    TiForgeOptixSceneMemory *out_memory);
+typedef TiForgeOptixResult (*TiForgeOptixDestroyInstanceSceneFn)(
+    TiForgeOptixInstanceScene scene);
 
 typedef struct TiForgeOptixProviderApi {
   uint32_t struct_size;
@@ -153,6 +219,16 @@ typedef struct TiForgeOptixProviderApi {
   // Optional ABI-1 suffix. Callers negotiate via struct_size + feature bits.
   TiForgeOptixPrepareTypedFn prepare_typed;
   TiForgeOptixTraceTypedFn trace_typed;
+  TiForgeOptixCreateTriangleGasFn create_triangle_gas;
+  TiForgeOptixUpdateTriangleGasFn update_triangle_gas;
+  TiForgeOptixGetTriangleGasMemoryFn get_triangle_gas_memory;
+  TiForgeOptixDestroyTriangleGasFn destroy_triangle_gas;
+  TiForgeOptixCreateInstanceSceneFn create_instance_scene;
+  TiForgeOptixUpdateInstanceSceneFn update_instance_scene;
+  TiForgeOptixTraceInstanceSceneFn trace_instance_scene;
+  TiForgeOptixTraceInstanceSceneTypedFn trace_instance_scene_typed;
+  TiForgeOptixGetInstanceSceneMemoryFn get_instance_scene_memory;
+  TiForgeOptixDestroyInstanceSceneFn destroy_instance_scene;
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(

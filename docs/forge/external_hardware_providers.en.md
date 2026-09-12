@@ -677,9 +677,12 @@ Runtime discovery uses this order:
 3. the standard NVIDIA driver search implemented by the OptiX loader.
 
 An explicit path is exclusive and is useful for containers or nonstandard
-driver layouts. It always identifies the vendor runtime; Forge adapters are an
-internal runtime-wheel resource and cannot be overridden through the public
-API. `probe()` transiently loads the adapter and vendor runtime to check the
+driver layouts. It always identifies the vendor runtime. By default Forge uses
+the adapters in its runtime wheel. For an explicitly built Forge adapter,
+`load_optix_provider(library_path=..., provider_path=...)` accepts a separate
+adapter path; it must implement the Forge provider ABI and is not a vendor
+runtime path. Omitting it preserves normal wheel discovery. `probe()`
+transiently loads the adapter and vendor runtime to check the
 exact ABI, but it does not create or retain a CUDA or OptiX context.
 
 ```python
@@ -722,6 +725,49 @@ bindings once; in-place content changes remain visible, while storage replacemen
 requires bind/update. Read/write ranges may not overlap. No field-to-ndarray
 conversion allocation is inserted. Execution remains runtime-ordered native
 commands, not CUDA Graph capture or kernel-inline OptiX.
+
+For repeated meshes, `provider.triangle_gas(vertices, indices)` creates one
+shared acceleration structure. `provider.instance_scene(instances)` builds a
+fixed-order IAS from `ti.hardware.ray.OptixRayInstance` values:
+
+```python
+with provider.triangle_gas(vertices, indices) as gas:
+    instances = (
+        ti.hardware.ray.OptixRayInstance(gas, custom_index=12),
+        ti.hardware.ray.OptixRayInstance(
+            gas, transform=(1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0), custom_index=34
+        ),
+    )
+    with provider.instance_scene(instances) as scene:
+        update = scene.record_refit_transforms(transforms="transforms")
+        query = scene.record_typed(N, rays="rays", hits="hits", hit_indices="indices")
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(update, admission="auto")
+        builder.append_native(query, admission="auto")
+        graph = builder.compile()
+        bindings = graph.bind(dict(transforms=transforms, rays=rays,
+                                   hits=hits, indices=hit_indices))
+        graph.run(bindings)
+        ti.sync()
+        graph.close()
+```
+
+Transforms accept compact f32 `(instance_count, 3, 4)` or `(instance_count, 12)`
+storage, including qualified dense views and AOS matrix-3x4 storage. A device
+producer may update the same storage in place before the recording. Each matrix
+must be finite and have an invertible upper 3x3; execution does not read back or
+scan those values. Instance order, GAS references, masks (8 bits), and custom
+indices (24 bits) remain fixed; recreate the scene to change them. Geometry
+updates use `gas.record_refit()`, followed by `scene.record_refit()` for every
+affected IAS before querying. A transform refit also refreshes the IAS bounds.
+
+The typed instance index is the IAS ordinal, not the custom index. Shared GAS
+memory is reported by the GAS; each scene reports its own IAS and scratch
+without counting the GAS again. Close graphs/scenes before GAS/provider;
+do not reuse them after reset. Older adapters can still run their supported
+triangle-scene paths, but reject these optional instance features explicitly.
+These are runtime-ordered native Graph actions, not CUDA Graph capture, and do
+not add a hardware-specific search axis to CompileIQ.
 
 `scene.record_typed(N, rays="rays", hits="hits", hit_indices="hit_indices")`
 (or `scene.trace_typed(rays, hits, hit_indices)`) writes two caller-owned outputs:

@@ -15,20 +15,30 @@ from taichi_forge.hardware._ray import (
     is_available,
 )
 from taichi_forge.hardware._optix import (
+    OptixGASRefitRecording,
+    OptixInstanceRefitRecording,
+    OptixInstanceScene,
     OptixProvider,
+    OptixRayInstance,
     OptixRayQueryRecording,
     OptixRayRefitRecording,
     OptixTriangleScene,
+    OptixTriangleGAS,
     is_loaded as is_optix_loaded,
     load_provider as load_optix_provider,
 )
 
 __all__ = [
     "InstanceTLAS",
+    "OptixGASRefitRecording",
+    "OptixInstanceRefitRecording",
+    "OptixInstanceScene",
     "OptixProvider",
+    "OptixRayInstance",
     "OptixRayQueryRecording",
     "OptixRayRefitRecording",
     "OptixTriangleScene",
+    "OptixTriangleGAS",
     "RayInstance",
     "TriangleBLAS",
     "TriangleScene",

@@ -114,6 +114,37 @@ function(_ti_add_optix_provider target_name root)
             VERBATIM)
     endforeach()
 
+    # A separate CUDA-driver module packs device-produced f32 3x4 matrices
+    # into retained OptixInstance records. Keeping it separate avoids loading
+    # OptiX device intrinsics through cuModuleLoadData and preserves the same
+    # pinned PTX/toolkit contract as the trace modules.
+    set(_pack_ptx "${_generated_dir}/instance_transform_pack.ptx")
+    set(_pack_ptx_header "${_generated_dir}/instance_transform_pack_ptx.h")
+    list(APPEND _ptx_headers "${_pack_ptx_header}")
+    add_custom_command(
+        OUTPUT "${_pack_ptx}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_generated_dir}"
+        COMMAND "${CUDAToolkit_NVCC_EXECUTABLE}"
+                ${_ptx_host_options}
+                --ptx --std=c++17 --use_fast_math
+                --gpu-architecture=compute_75
+                -DTI_FORGE_OPTIX_TRANSFORM_PACK=1
+                "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
+                -o "${_pack_ptx}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/device_program.cu"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${_pack_ptx_header}"
+        COMMAND ${CMAKE_COMMAND}
+                "-DINPUT_FILE=${_pack_ptx}"
+                "-DOUTPUT_FILE=${_pack_ptx_header}"
+                "-DSYMBOL_NAME=ti_forge_optix_instance_transform_pack_ptx"
+                "-DEXPECTED_PTX_VERSION=${_ti_optix_expected_ptx_version}"
+                "-DEXPECTED_PTX_TARGET=sm_75"
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
+        DEPENDS "${_pack_ptx}" "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedText.cmake"
+        VERBATIM)
+
     add_library(${target_name} SHARED
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/provider.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"

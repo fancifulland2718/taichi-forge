@@ -529,7 +529,10 @@ runtime 发现顺序如下：
 3. OptiX loader 实现的标准 NVIDIA driver 搜索路径。
 
 显式路径是唯一候选，适用于 container 或非标准 driver layout。它始终表示 vendor
-runtime；Forge adapter 是 runtime wheel 的内部资源，不能通过公开 API 覆盖。`probe()`
+runtime。默认使用 runtime wheel 内的 Forge adapter；若显式构建了 Forge adapter，
+可通过 `load_optix_provider(library_path=..., provider_path=...)` 单独指定 adapter 路径。
+该文件必须实现 Forge provider ABI，不能把 vendor runtime 路径当成 adapter 路径；
+省略 `provider_path` 时仍使用原 wheel 发现规则。`probe()`
 会瞬时加载 adapter 与 vendor runtime 来核对精确 ABI，但不会创建或保留 CUDA/OptiX
 context。
 
@@ -567,6 +570,42 @@ scene 构建/refit 与查询可消费 compact program-owned ndarray、dense fiel
 `(N,4)` 或 AOS vector-4。固定 `graph.bind(...)` 在准备时验证并解析绑定；原位内容更新可直接
 消费，替换存储需 bind/update。读写范围不得重叠，不插入 field→ndarray 转换分配。
 当前仍是 runtime-ordered native commands，不是 CUDA Graph capture 或 kernel-inline OptiX。
+
+重复网格可使用 `provider.triangle_gas(vertices, indices)` 创建共享 GAS，再通过
+`provider.instance_scene(instances)` 将多个 `ti.hardware.ray.OptixRayInstance` 放入固定顺序的 IAS：
+
+```python
+with provider.triangle_gas(vertices, indices) as gas:
+    instances = (
+        ti.hardware.ray.OptixRayInstance(gas, custom_index=12),
+        ti.hardware.ray.OptixRayInstance(
+            gas, transform=(1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0), custom_index=34
+        ),
+    )
+    with provider.instance_scene(instances) as scene:
+        update = scene.record_refit_transforms(transforms="transforms")
+        query = scene.record_typed(N, rays="rays", hits="hits", hit_indices="indices")
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(update, admission="auto")
+        builder.append_native(query, admission="auto")
+        graph = builder.compile()
+        bindings = graph.bind(dict(transforms=transforms, rays=rays,
+                                   hits=hits, indices=hit_indices))
+        graph.run(bindings)
+        ti.sync()
+        graph.close()
+```
+
+变换接受紧凑 f32 `(instance_count, 3, 4)` 或 `(instance_count, 12)`，包括合格 dense view 和
+AOS matrix-3x4。device producer 可在 recording 前原位更新。每个矩阵须有限且左上 3×3 可逆；
+执行时不回读或逐值扫描。实例顺序、GAS 引用、8-bit mask、24-bit custom index 固定，改变它们需重建 scene。
+更新几何时先执行 `gas.record_refit()`，再对每个受影响的 IAS 执行 `scene.record_refit()`，最后查询；
+变换 refit 也会更新 IAS bounds。
+
+typed instance index 是 IAS 中的序号，不是 custom index。共享 GAS 显存由 GAS 自己报告，
+scene 只报告其 IAS/scratch，不重复计入 GAS。先关闭 Graph/scene，再关闭 GAS/provider；reset 后不得复用。
+旧 adapter 仍可运行其支持的 triangle-scene 路径，但会明确拒绝可选的新实例功能。这些是 runtime-ordered
+native Graph action，不是 CUDA Graph capture，也不为 CompileIQ 增加硬件裸搜索轴。
 
 `scene.record_typed(N, rays="rays", hits="hits", hit_indices="hit_indices")`
 或 `scene.trace_typed(rays, hits, hit_indices)` 写入两个 caller-owned 输出：

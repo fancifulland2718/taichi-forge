@@ -1,3 +1,36 @@
+#if TI_FORGE_OPTIX_TRANSFORM_PACK
+
+struct OptixInstanceWire {
+  float transform[12];
+  unsigned int instance_id;
+  unsigned int sbt_offset;
+  unsigned int visibility_mask;
+  unsigned int flags;
+  unsigned long long traversable;
+  unsigned int pad[2];
+};
+
+static_assert(sizeof(OptixInstanceWire) == 80,
+              "OptixInstance wire layout must remain 80 bytes");
+
+extern "C" __global__ void forge_pack_instance_transforms(
+    const float *transforms,
+    unsigned int instance_count,
+    OptixInstanceWire *instances) {
+  const unsigned int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= instance_count) {
+    return;
+  }
+  const float *source = transforms + 12u * index;
+  float *destination = instances[index].transform;
+#pragma unroll
+  for (unsigned int word = 0; word < 12; ++word) {
+    destination[word] = source[word];
+  }
+}
+
+#else
+
 #include <optix.h>
 #include <optix_device.h>
 
@@ -94,3 +127,5 @@ extern "C" __global__ void __closesthit__forge_batch_ray_typed() {
   optixSetPayload_6(1u);
 }
 #endif
+
+#endif  // TI_FORGE_OPTIX_TRANSFORM_PACK
