@@ -665,7 +665,20 @@ Graph 绑定时一次准备材质表、指针与参数缓冲。UV/texel 原位�
 不是所有同时保留 binding 的总量，也不是 driver 实际驻留。保持资源/scene/provider 存活，
 先关闭 Graph 再关闭 scene；资源退役或 runtime reset 后不能继续使用。
 
-即使 `None` 条目也有 filtered traversal 成本。无需过滤时保留原 opaque query，评价完整渲染或
+默认实例允许 query 自行提供 mask；此时 `None` 条目仍会进入 any-hit 后接受。若实例始终不透明，
+可以在创建 IAS 时声明：
+
+```python
+opaque_instance = ti.hardware.ray.OptixRayInstance(gas, opaque=True)
+```
+
+即使同一 query 含其他 alpha 实例，硬件也会绕过该实例的 any-hit；其 mask 条目只能为 `None`。
+这是不可变的场景语义，不会自动扫描纹理来分类；transform/refit 保留该属性，改变属性需创建新 IAS，
+但 GAS 可以继续共用。缺少 instance-opacity 能力的旧 adapter 在场景创建时拒绝该声明。
+全 `None` 的最近命中查询会规范化到既有 typed opaque 路线，不分配 alpha table/workspace；
+`any_hit=True` 仍保留首个接受命中的语义。
+
+无需过滤时保留原 opaque query，评价完整渲染或
 阴影窗口而不只看 query 时间。缺少 alpha-mask 能力的旧 adapter 会在准备时拒绝，不偷偷改为 opaque。
 wheel 仍只包含 Forge adapter 和嵌入设备程序，NVIDIA runtime 由外部环境提供，不新增用户 Toolkit 要求。
 

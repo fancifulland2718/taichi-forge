@@ -840,9 +840,25 @@ per-binding request, not the number of simultaneously retained bindings or
 opaque driver residency. Keep resources/scene/provider live and close the
 Graph before the scene. Retired resources or runtime reset invalidate use.
 
-Filtered traversal has a cost even for `None` entries. Keep the original
-opaque query when filtering is unnecessary, and evaluate the full render or
-shadow window rather than only query time. Older adapters that lack alpha-mask
+By default, instances remain eligible for query-owned masks; their `None`
+entries still enter any-hit before accepting. If an instance is always opaque,
+declare it when constructing the IAS:
+
+```python
+opaque_instance = ti.hardware.ray.OptixRayInstance(gas, opaque=True)
+```
+
+Hardware then bypasses any-hit for that instance, even in a mixed alpha query.
+Only `None` is legal for its mask entry. This is immutable scene semantics,
+not an automatically inferred texture classification: transform/refit updates
+preserve it, and changing it requires a new IAS (the GAS can be shared).
+Older adapters without instance-opacity support reject this declaration at
+scene construction. An all-`None` closest query is normalized to the existing
+opaque typed route, without an alpha table/workspace; `any_hit=True` retains
+its first-accepted semantics.
+
+Keep the original opaque query when filtering is unnecessary, and evaluate the
+full render or shadow window rather than only query time. Older adapters that lack alpha-mask
 support reject preparation; they do not silently run an opaque query. The
 wheel contains Forge's adapter and embedded device programs only; NVIDIA's
 runtime remains externally configured, with no new user Toolkit requirement.
