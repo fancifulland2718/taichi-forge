@@ -39,14 +39,6 @@ def fill():
 fill()
 ```
 
-可选构建期开关（默认全 ON，仅在排查回归时使用）：
-
-| CMake 选项 | 默认 | 用途 |
-|---|---|---|
-| `TI_VULKAN_POINTER` | ON | 总开关：关闭后 pointer / bitmasked 在 Vulkan 上回退到 vanilla 行为（`TI_NOT_IMPLEMENTED`）。 |
-| `TI_VULKAN_DYNAMIC` | ON | dynamic SNode 总开关。OFF 时 `dynamic` 在 Vulkan 上 `TI_NOT_IMPLEMENTED`。 |
-| `TI_VULKAN_POINTER_POOL_FRACTION` | ON | 启用 `TI_VULKAN_POOL_FRACTION` 环境变量（见 §3.2）。OFF 时该 env var 完全被忽略，capacity 按最坏情况预留。 |
-
 ### 2.1 运行期 env var
 
 | 环境变量 | 取值 | 默认 | 作用 |
@@ -115,11 +107,9 @@ Vulkan 上的 `dynamic` 使用 **flat-array + length 后缀** 协议：
 - 不支持 chunk 链；总容量 = 编译期静态 N。
 - 超过 N 的 append 会被地址钳制，并在下一个同步边界报错。
 
-数值结果与 LLVM 完全等价（已通过完整回归集验证）。
-
 ### 3.4 SPIR-V warp lockstep 限制
 
-任何"基于 spin 等 winner 写完 slot"的协议（pointer / dynamic 的 race-to-activate）都会受 SPIR-V `OpLoopMerge` + GPU warp lockstep 影响。本 fork 的实现已在 NVIDIA / AMD / Intel iGPU 上验证稳定。如在新硬件上撞到 hang，请打开 issue 附 GPU 型号与 driver 版本。
+任何"基于 spin 等 winner 写完 slot"的协议（pointer / dynamic 的 race-to-activate）都会受 SPIR-V `OpLoopMerge` + GPU warp lockstep 影响。具体行为取决于设备和驱动。如在新硬件上撞到 hang，请打开 issue 附 GPU 型号与 driver 版本。
 
 ### 3.5 不支持
 
@@ -130,9 +120,9 @@ Vulkan 上的 `dynamic` 使用 **flat-array + length 后缀** 协议：
 
 ### 3.6 Listgen 顺序非合同
 
-LLVM 后端 struct-for（`for I in field:`）按 SNode 树拓扑序遍历活跃 cell；Vulkan 后端只保证**覆盖所有当前活跃 cell**，不保证遍历顺序。如果你的 reduce kernel 依赖确定遍历顺序（例如 `for i in field: result[0] += i.id`），不同后端的中间累加路径**可能给出不同浮点字节**（最终值在 1e-5 容差内等价，但不字节等价）。
+LLVM 后端 struct-for（`for I in field:`）按 SNode 树拓扑序遍历活跃 cell；Vulkan 后端只保证**覆盖所有当前活跃 cell**，不保证遍历顺序。如果你的 reduce kernel 依赖确定遍历顺序（例如 `for i in field: result[0] += i.id`），不同后端的中间累加路径**可能给出不同浮点字节**。
 
-规避：用 `ti.atomic_add` 或在 reduce 前先排序。
+原子加能防止更新丢失，但不能保证浮点累加顺序确定。若需要可复现结果，应明确排序和归约策略，并检查所需数值容差。
 
 ### 3.7 显式声明 Vulkan pointer 容量：`vk_max_active`
 
@@ -202,24 +192,29 @@ ti.root.hash(ti.ij, (4096, 4096), expected_active=8192).place(x)
 
 ## 7. 关于 `quant_array` / `bit_struct`
 
-`quant_array`（位打包整数 / 定点字段）与 `bit_struct`（位打包复合结构）在 vanilla taichi 中**仅 LLVM 后端可用**。Forge 0.3.0 在 Vulkan 后端上提供**实验性 codegen**：
+Vulkan 量化字段仍是实验功能，需要显式开启：
 
-- 前端 extension 闸门需主动启用：`ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` 或 env var `TI_VULKAN_QUANT=1`（详见 [forge_options.zh.md](forge_options.zh.md) §3）。默认 OFF，行为与 vanilla 1.7.4 完全一致（quant 路径在 codegen 入口直接 `TI_ERROR`）。
-- 闸门 ON 后已支持的能力：
-  - **`quant_array`**：`QuantInt` / `QuantFixed` 子字段的**读 + 写（含多线程并发 `ti.atomic_add` 经 SPIR-V `OpAtomicCompareExchange` 自旋 RMW）**，与 cpu / cuda 后端**字节等价**；
-  - **`bit_struct` / `BitpackedFields(max_num_bits=32 或 64)`**：多字段同字 RMW 写（IR pass `optimize_bit_struct_stores` 在 `quant_opt_atomic_demotion=ON` 默认下合并为单条 `BitStructStoreStmt`；`is_atomic == true` 残留路径用 CAS-loop 真原子写），与 cpu / cuda 后端**字节等价**。MPM 风格 11/11/10 quant_fixed 粒子位置打包基线 [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py) 三后端 max_err 全为 9.77e-4 ≤ bound 1.95e-3；并发原子加 race 基线 [tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py) N=1024、K=64 路并发同字争用，三后端 max_err 全为 3.94e-3 ≤ bound 1.57e-2。
-  - **原子加** `ti.atomic_add(quant_field, delta)`：仅 `AtomicOpType::add`，physical_type 须为 i32 或 i64（与 LLVM `quant_type_atomic` 限制对齐）。返回值为输入 `delta`（非旧值）——quant 字段上的 `atomic_add` 用户代码极少消费返回值，省去 dequant 旁路代价。
-- **尚未支持**：
-  - **`QuantFloat` 共享指数**（`ti.types.quant.float(...)` + `BitpackedFields(shared_exponent=True)`）：visitor 入口处 `TI_NOT_IMPLEMENTED`。**显式暂缓**：本 fork 本身未需求 shared-exponent（原始诉求是 quant_fixed），且该路径 float 位操作跨驱动微妙差异风险高。生产负载如需使用，请继续走 LLVM cpu / cuda 后端。
-  - **非 add 的原子操作**（`atomic_min` / `max` / `bit_and` / `bit_or` / `bit_xor`）到量化字段：与 LLVM 后端一致地不支持（vanilla 设计决定，不是 Vulkan 后端的回退）。
-- 未实现点会抛出带详细位置的 `TI_NOT_IMPLEMENTED` / `TI_ERROR`，不会静默误编译。
+```python
+ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)
+```
 
-变通方案（闸门 OFF 或命中未实现 codegen 点时）：
+也可以设置环境变量 `TI_VULKAN_QUANT=1`。参见[配置指南](forge_options.zh.md)。
 
-- 用 `ti.f16` 半精度作为简易量化；
-- 在 `ti.u32` 字段上手工位运算打包。
+支持范围包括量化整数/定点字段读写、`BitpackedFields(max_num_bits=32 或 64)`，
+以及采用 32/64 位物理存储的 `ti.atomic_add`。64 位原子操作还取决于设备能力。
+此路径不支持共享指数的量化浮点，也不支持量化字段上的非 add 原子操作。
 
-回归基线脚本：[tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py)（`bit_struct` MPM 风格 11/11/10 打包）、[tests/p4/g9_quant_array_baseline.py](../../tests/p4/g9_quant_array_baseline.py)（`quant_array` 8-bit 单字段）、[tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py)（atomic_add 多线程同字争用）。
+需要特别注意：
+
+- 当前实验性量化 `atomic_add` 返回输入的 delta，**不是写入前的旧值**。
+  不要把它作为普通原子操作的旧值返回使用。
+- 位宽和缩放必须覆盖完整输入及累加范围；打包原子加的溢出可能影响同一物理字中的相邻成员。
+- 同一物理字中的成员不能视为互不相关的并发非原子写入。
+  应使用适用的原子操作，或确保该物理字由同一个线程负责写入。
+- 量化会改变精度。应检查应用级误差和溢出，不能假定跨后端逐字节等价。
+
+不支持的情况可以改用设备支持的普通字段类型，或 CPU/CUDA 上受支持的量化路径。
+手工整数打包同样需要明确的数值范围和并发设计。
 
 ---
 
@@ -234,7 +229,7 @@ CPU/CUDA 与 Vulkan 的稀疏存储实现不同，不应跨后端照搬容量假
 - **API 兼容**：所有公开 Python API（`ti.root.pointer/.dense/.bitmasked/.dynamic/.place`、`ti.activate/.deactivate/.is_active/.length/.append`、`ti.root.deactivate_all` 等）行为与 vanilla 1.7.4 在 LLVM 后端上**严格一致**。Vulkan 上多出的 SNode 类型只新增可用性，不破坏现有用法。
 - **Offline cache**：cache key 已纳入 SNode tree 结构 hash，pool fraction / dynamic 协议变更**自动**触发缓存失效。
 - **C-API**：sparse SNode 的 root buffer 布局通过既有 `c_api/include/` 接口暴露，AOT 产物格式不变。
-- **Wheel 二进制**：默认 build 已 ON 全部稀疏 SNode 后端能力（pointer / bitmasked / dynamic / quant 实验闸门）；用户无需额外编译参数。
+- **Wheel 二进制**：标准 Vulkan 构建包含稀疏支持，量化字段仍需按 §7 显式开启；自定义构建可能裁剪能力。
 
 ---
 
@@ -242,4 +237,3 @@ CPU/CUDA 与 Vulkan 的稀疏存储实现不同，不应跨后端照搬容量假
 
 - 稀疏布局选择指南：[sparse_layout_selection.zh.md](sparse_layout_selection.zh.md)
 - 本 fork 新增编译/运行时/架构/现代化选项一览：[forge_options.zh.md](forge_options.zh.md)
-- 测试代码：本仓库 `tests/p4/vulkan_*.py` 与 `tests/p4/g*.py`

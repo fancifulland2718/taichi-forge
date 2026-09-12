@@ -109,25 +109,21 @@ Forge 默认从已物化的 SNode 树推导 CUDA sparse SNode pool，并在同�
 
 ### 2.9 已删除、仅兼容保留与仅供验证的设置
 
-以下名称只用于说明旧配置和历史实验，不应由应用或引擎暴露。
+以下名称用于迁移旧配置，不应由应用或引擎暴露。
 
 | 名称 | 当前行为 | 必须采取的操作 |
 |---|---|---|
-| `use_fused_passes`、`fused_pass_verify` | 已在公开 0.4.23 基线前随低 ROI 的 `pipeline_dirty` 实验一起物理删除；当前 wheel 会把它们作为未知 `ti.init` 参数拒绝。 | 从配置中删除；稳定管线会始终执行必要的 simplify 路径。 |
+| `use_fused_passes`、`fused_pass_verify` | 已不再接受；当前 wheel 会把它们作为未知 `ti.init` 参数拒绝。 | 从应用配置中删除。 |
 | `spv_opt_level` | 不是当前 Python/CompileConfig 字段，wheel 会直接拒绝；实现中的低层字段名是 `external_optimization_level`。 | 使用 `compile_tier`，不要在应用代码中把旧名称机械改成低层字段。 |
 | `skip-loop-unroll`、`skip_loop_unroll` | 不是可接受的 `ti.init` 名称；当前原始实验字段是 `spirv_skip_loop_unroll`。 | 删除，不要转换成引擎配置。 |
 | `vulkan_listgen_lite_barrier` | 仅作为 deprecated no-op 兼容字段被接受；当前窄 barrier 路径属于 `vulkan_dispatch_cache`。 | 删除；调整该值没有受支持的效果。 |
-| `vulkan_launch_buffer_pool`、`vulkan_launch_buffer_pool_capacity` | 被接受但已是 deprecated no-op。旧独立 pool 因 ROI 很低而移除，并由 fence-safe GFX context 处理替代。 | 删除，不要调整 capacity。 |
+| `vulkan_launch_buffer_pool`、`vulkan_launch_buffer_pool_capacity` | 仅作为 deprecated no-op 兼容字段被接受。 | 删除，不要调整 capacity。 |
 
-以下字段仍为编译器实验保留，但公开命名、cache 合同或跨 driver 证据不足以支持生产配置：
-
-| 名称 | 当前实现合同 | 生产建议 |
-|---|---|---|
-| `external_optimization_level` | 原始 SPIR-V optimizer 等级，默认 `3`，进入 offline-cache key；`compile_tier="fast"` 会覆盖为 level `0`。 | 应用保持使用 `compile_tier`；不要通过应用或引擎配置暴露该字段。 |
-| `spirv_disabled_passes` | 默认 `[]`；会改变 SPIR-V，并使用排序后的独立 cache key。当前内部 pass ID 区分大小写，例如 `LoopUnroll`，但该词表不是稳定公开 API。 | 在命名与跨 driver 验证完成前保持空列表。 |
-| `spirv_skip_loop_unroll` | 默认 `False`；会改变 optimizer chain 与 SPIR-V，但当前没有进入 offline-cache key。 | 保持 `False`；不要暴露，也不要用于生产/offline-cache workload。 |
-| `spirv_adaptive_opt`、`spirv_adaptive_opt_threshold` | 默认 `False` / `64`，有独立 cache key，但会按 task 形态改变 optimizer chain。 | 仅供验证和 benchmark，等待 driver matrix 收敛。 |
-| `cache_loop_invariant_global_vars` | 默认 `False`；只对窄 workload 改变 IR，当前没有进入 offline-cache key。历史测量显示 cold-compile 成本明显，而物理运行收益有限。 | 保持 `False`，不要作为通用性能开关暴露。 |
+`external_optimization_level`、`spirv_disabled_passes`、
+`spirv_skip_loop_unroll`、`spirv_adaptive_opt`、
+`spirv_adaptive_opt_threshold` 和 `cache_loop_invariant_global_vars`
+等编译器实现字段不属于受支持的应用配置。保持默认值，编译时间调优使用
+`compile_tier`；不能因源码版本中存在这些字段，就假定其缓存与兼容性合同稳定。
 
 ---
 

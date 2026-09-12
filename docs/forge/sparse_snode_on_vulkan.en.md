@@ -107,8 +107,6 @@ The Vulkan `dynamic` uses a **flat-array + length-suffix** protocol:
 - No chunk list. Total capacity equals the static `N`.
 - Appends past `N` are address-clamped and reported at the next synchronization boundary.
 
-Numerical results match LLVM exactly across the regression suite.
-
 ### 3.4 SPIR-V warp-lockstep limitation
 
 Any "spin until winner finishes the slot" protocol (race-to-activate on `pointer` / `dynamic`) is sensitive to the SPIR-V `OpLoopMerge` + GPU warp-lockstep behaviour. Behavior depends on the device and driver. Please file an issue with GPU model + driver version if you hit a hang on a new platform.
@@ -122,9 +120,9 @@ Any "spin until winner finishes the slot" protocol (race-to-activate on `pointer
 
 ### 3.6 Listgen iteration order is not a contract
 
-The LLVM backend traverses active cells in struct-for (`for I in field:`) following the SNode tree topology. The Vulkan backend only guarantees that **every currently-active cell is visited**; the visit order is unspecified. If your reduce kernel depends on a deterministic iteration order (e.g. `for i in field: result[0] += i.id`), the intermediate accumulation path may differ between backends and produce **non-byte-equal floating-point results** (final values still agree within 1e-5).
+The LLVM backend traverses active cells in struct-for (`for I in field:`) following the SNode tree topology. The Vulkan backend only guarantees that **every currently-active cell is visited**; the visit order is unspecified. If your reduce kernel depends on a deterministic iteration order (e.g. `for i in field: result[0] += i.id`), the intermediate accumulation path may differ between backends and produce **non-byte-equal floating-point results**.
 
-Workaround: use `ti.atomic_add`, or sort before reducing.
+Atomic addition prevents lost updates but does not make floating-point summation order deterministic. If reproducibility is required, define an explicit ordering and reduction strategy, and test the relevant numerical tolerance.
 
 ### 3.7 Declaring a Vulkan pointer capacity: `vk_max_active`
 
@@ -198,22 +196,37 @@ Full API, supported topologies, tuning knobs, and migration notes: [hash_snode.e
 
 ## 7. About `quant_array` / `bit_struct`
 
-`quant_array` (bit-packed integer / fixed-point fields) and `bit_struct` (compound bit-packed structs) are **LLVM-only in vanilla taichi**. Forge 0.3.0 ships **experimental codegen** on Vulkan:
+Quantized Vulkan fields are experimental and require explicit opt-in:
 
-- The frontend extension gate is opt-in via `ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)` or the env var `TI_VULKAN_QUANT=1` (see [forge_options.en.md](forge_options.en.md) §3). Default is OFF and behaves identically to vanilla 1.7.4 (the quant codegen entry points raise `TI_ERROR` immediately).
-- Supported with the gate ON:
-  - **`quant_array`**: `QuantInt` / `QuantFixed` member **read + write (including multi-threaded concurrent `ti.atomic_add` via a SPIR-V `OpAtomicCompareExchange` spin RMW)**, byte-equivalent to the cpu / cuda backends.
-  - **`bit_struct` / `BitpackedFields(max_num_bits=32 or 64)`**: multi-field same-word RMW write (the `optimize_bit_struct_stores` IR pass coalesces per-field stores into a single `BitStructStoreStmt` under the default `quant_opt_atomic_demotion=ON`; the residual `is_atomic == true` path uses the same CAS-loop), byte-equivalent to cpu / cuda. The MPM-style 11/11/10 quant_fixed packed-position baseline [tests/p4/g9_quant_baseline.py](../../tests/p4/g9_quant_baseline.py) reports `max_err = 9.77e-4 ≤ bound 1.95e-3` on all three backends; the concurrent-atomic-add race baseline [tests/p4/g9_quant_atomic_race.py](../../tests/p4/g9_quant_atomic_race.py) (N=1024, K=64-way same-word contention) reports `max_err = 3.94e-3 ≤ bound 1.57e-2` on all three.
-  - **Atomic add** `ti.atomic_add(quant_field, delta)`: only `AtomicOpType::add` is implemented; physical_type must be i32 or i64 (matches the LLVM `quant_type_atomic` constraint). The SSA return value is the input `delta` (not the old field) — almost no user code consumes the return value of an `atomic_add` on a quant member, so the dequant round-trip is skipped.
-- **Not yet supported**:
-  - **`QuantFloat` shared-exponent** (`ti.types.quant.float(...)` + `BitpackedFields(shared_exponent=True)`): `TI_NOT_IMPLEMENTED` at the visitor entry. **Explicitly deferred**: this fork has no shared-exponent demo driving it (the original requirement is quant_fixed) and the float bit-manipulation path carries non-trivial cross-driver rounding/denormal risk. Production workloads that need it should keep using the LLVM cpu / cuda backend.
-  - **Non-add atomic ops** (`atomic_min` / `max` / `bit_and` / `bit_or` / `bit_xor`) on quantized fields: same restriction as the LLVM backend (a vanilla design decision, not a Vulkan-side regression).
-- Unsupported sites raise a clear `TI_NOT_IMPLEMENTED` / `TI_ERROR` pointing at the offending statement, never a silent miscompile.
+```python
+ti.init(arch=ti.vulkan, vulkan_quant_experimental=True)
+```
 
-Workarounds when the gate is OFF or when an unsupported codegen site is hit:
+The environment alternative is `TI_VULKAN_QUANT=1`. See the
+[configuration guide](forge_options.en.md).
 
-- Use `ti.f16` (half precision) as a poor man's quantization.
-- Pack manually with bit operations on `ti.u32` fields.
+Supported cases include quantized integer/fixed-point reads and writes,
+`BitpackedFields(max_num_bits=32 or 64)`, and `ti.atomic_add` with 32- or
+64-bit physical storage. Availability of 64-bit atomics also depends on the
+device. Shared-exponent quantized floats and non-add atomic operations on
+quantized fields are not supported on this path.
+
+Important correctness limits:
+
+- The current experimental quantized `atomic_add` returns the input delta,
+  **not the previous stored value**. Do not consume it as an ordinary atomic
+  return value.
+- Choose bit widths and scaling for the full input and accumulated range.
+  Overflow in a packed atomic addition can affect adjacent packed members.
+- Concurrent non-atomic writes to members sharing one physical word are not
+  independent. Use an appropriate supported atomic operation or ensure that
+  one thread owns writes to that word.
+- Quantization changes precision. Check application-level error and overflow,
+  rather than assuming byte-identical results across backends.
+
+For unsupported cases, use an unquantized field type supported by the device,
+or a supported CPU/CUDA quantized path. Manually packing integers still
+requires an explicit range and concurrency design.
 
 ---
 
@@ -230,7 +243,7 @@ runtime reset. Diagnostic `runtime_state_reserved_bytes` is included in
 - **API**: every public Python API (`ti.root.pointer/.dense/.bitmasked/.dynamic/.place`, `ti.activate/.deactivate/.is_active/.length/.append`, `ti.root.deactivate_all`, etc.) preserves vanilla 1.7.4 semantics on the LLVM backends. The newly available SNode types on Vulkan only add reach; nothing existing is broken.
 - **Offline cache**: cache keys already include the SNode-tree structural hash, so changes such as the pool fraction or the dynamic protocol invalidate the cache automatically.
 - **C-API**: sparse SNode root-buffer layouts are exposed through the existing `c_api/include/` headers; AOT artefact format is unchanged.
-- **Wheel**: the published binary wheel ships every sparse-SNode capability of this backend (pointer / bitmasked / dynamic / experimental quant) enabled by default. No additional build flags are required.
+- **Wheel**: standard Vulkan builds include sparse support. Quantized fields still require the explicit runtime opt-in described in §7; a custom build may omit a capability.
 
 ---
 
@@ -238,4 +251,3 @@ runtime reset. Diagnostic `runtime_state_reserved_bytes` is included in
 
 - Sparse layout selection: [sparse_layout_selection.en.md](sparse_layout_selection.en.md)
 - New compile-time / run-time / architecture / modernization options in this fork: [forge_options.en.md](forge_options.en.md)
-- Tests: `tests/p4/vulkan_*.py` and `tests/p4/g*.py` in this repository.

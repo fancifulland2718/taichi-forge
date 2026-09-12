@@ -109,28 +109,22 @@ Both flags default OFF and are bit-identical to the legacy path when off. Enabli
 
 ### 2.9 Retired, compatibility-only, and validation-only settings
 
-These names are documented only to make old configuration files and research
-results unambiguous. Applications and engines should not expose them.
+These names are listed to help migrate old configuration files. Applications and engines should not expose them.
 
 | Name | Current behavior | Required action |
 |---|---|---|
-| `use_fused_passes`, `fused_pass_verify` | Removed before the 0.4.23 public baseline together with the low-ROI `pipeline_dirty` experiment. Current wheels reject them as unknown `ti.init` arguments. | Delete them. The stable pipeline always runs the required simplification path. |
+| `use_fused_passes`, `fused_pass_verify` | No longer accepted; current wheels reject them as unknown `ti.init` arguments. | Delete them from application configuration. |
 | `spv_opt_level` | Not a current Python/CompileConfig field; current wheels reject it. The implementation's raw field is `external_optimization_level`. | Use `compile_tier`. Do not rename the old setting to the raw field in application code. |
 | `skip-loop-unroll`, `skip_loop_unroll` | Not accepted `ti.init` names. The current raw experiment is `spirv_skip_loop_unroll`. | Delete them; do not translate them into engine configuration. |
 | `vulkan_listgen_lite_barrier` | Accepted only as a deprecated no-op compatibility field. The active narrow-barrier path belongs to `vulkan_dispatch_cache`. | Delete it; changing the value has no supported effect. |
-| `vulkan_launch_buffer_pool`, `vulkan_launch_buffer_pool_capacity` | Accepted deprecated no-op fields. The old standalone pool was removed for negligible ROI and superseded by fence-safe GFX context handling. | Delete them; do not tune the capacity. |
+| `vulkan_launch_buffer_pool`, `vulkan_launch_buffer_pool_capacity` | Accepted as deprecated no-op fields. | Delete them; do not tune the capacity. |
 
-The following fields still exist for compiler experiments, but their public
-naming, cache contract, or cross-driver evidence is not strong enough for
-production configuration:
-
-| Name | Current implementation contract | Production guidance |
-|---|---|---|
-| `external_optimization_level` | Raw SPIR-V optimizer level, default `3`; serialized in the offline-cache key. `compile_tier="fast"` overrides it to level `0`. | Keep application code on `compile_tier`; do not expose this field through application or engine configuration. |
-| `spirv_disabled_passes` | Default `[]`; changes emitted SPIR-V and uses a sorted, cache-isolated list. Current internal pass IDs are case-sensitive (for example `LoopUnroll`), but that vocabulary is not a stable public API. | Keep empty until naming and cross-driver validation are finalized. |
-| `spirv_skip_loop_unroll` | Default `False`; changes the optimizer chain and emitted SPIR-V, but is currently not represented in the offline-cache key. | Keep `False`; do not expose or use it with production/offline-cache workloads. |
-| `spirv_adaptive_opt`, `spirv_adaptive_opt_threshold` | Default `False` / `64`; cache-key isolated, but changes the optimizer chain by task shape. | Validation and benchmarking only until the driver matrix converges. |
-| `cache_loop_invariant_global_vars` | Default `False`; changes IR for a narrow workload and is currently not represented in the offline-cache key. Prior measurements showed cold-compile cost with limited physics-runtime benefit. | Keep `False`; do not expose it as a general performance knob. |
+Compiler implementation fields such as `external_optimization_level`,
+`spirv_disabled_passes`, `spirv_skip_loop_unroll`, `spirv_adaptive_opt`,
+`spirv_adaptive_opt_threshold`, and `cache_loop_invariant_global_vars`
+are not supported application configuration. Leave them at defaults; use
+`compile_tier` for supported compile-time tuning instead. Do not infer a
+stable cache or compatibility contract from their presence in a source build.
 
 ---
 

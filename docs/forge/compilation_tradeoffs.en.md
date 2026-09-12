@@ -104,14 +104,8 @@ benefits from optimized code.
 - Keep application-level Vulkan optimization control on `compile_tier`.
   `spv_opt_level` is rejected, while `external_optimization_level` is a raw
   implementation field and should not be exposed by an engine.
-- `spirv_disabled_passes`, `spirv_skip_loop_unroll`, and adaptive SPIR-V
-  optimization remain validation-only. Pass IDs are internal and
-  case-sensitive; more importantly, the skip-loop flag is not yet isolated in
-  the offline-cache key. Keep their defaults until naming, cache semantics,
-  and the cross-driver matrix converge.
-- Keep `cache_loop_invariant_global_vars=False`: it changes IR without a
-  dedicated cache identity and has shown limited runtime ROI for physics
-  workloads relative to its cold-compile cost.
+- Leave compiler implementation fields at defaults. They are not supported
+  application tuning APIs; see the [configuration migration notes](forge_options.en.md#29-retired-compatibility-only-and-validation-only-settings).
 - Remove retired/no-op settings such as `use_fused_passes`,
   `vulkan_listgen_lite_barrier`, and `vulkan_launch_buffer_pool` from
   application configuration instead of carrying version-specific branches.
@@ -128,7 +122,7 @@ Graph replay has backend-specific capacity, lifetime, failure-recovery,
 diagnostic, and memory policies. In particular, Vulkan uses bounded in-flight replay storage, while CUDA distinguishes structural capture rejection from
 transient failures and context-fatal errors.
 
-These policies, their measurements, and the public `Graph.execution_stats()`
+These policies and the public `Graph.execution_stats()`
 schema are maintained in
 [Graph runtime and optimization](graph_runtime_optimization.en.md). Keeping
 the details there avoids making this general compilation guide a second,
@@ -138,9 +132,9 @@ are in [Dense Field Graph](dense_field_graph.en.md).
 
 ## Numerical and autodiff validation
 
-For every production profile, test at least:
+For each deployment profile, choose relevant checks for the backends and features you use:
 
-- CPU, CUDA, and Vulkan primal outputs against a trusted reference with stated
+- Primal outputs on the deployed backends against a trusted reference with stated
   absolute and relative tolerances;
 - long-horizon drift, invariants, NaN/Inf behavior, and deterministic seeds;
 - reverse- and forward-mode gradients used by the application, including

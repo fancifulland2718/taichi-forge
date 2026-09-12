@@ -15,7 +15,7 @@ Forge 将可安全复用的前端信息与各后端编译产物分离。目标�
 | `ti.parallel_compile(kernels)` | `compile_kernels(...)` 的别名。 |
 | `ti.compile_profile()` | Python 和后端编译耗时 profiling 的 context manager。 |
 | `ti cache warmup script.py [-- script_args]` | 强制开启 offline cache 跑一次脚本，写入磁盘 cache。 |
-| `@ti.kernel(opt_level="fast"|"balanced"|"full")` | 单个 kernel 的 compile-tier 覆盖。 |
+| `@ti.kernel(opt_level="fast"\|"balanced"\|"full")` | 单个 kernel 的 compile-tier 覆盖。 |
 | `ti.init(compile_tier=...)` | Program 级 compile-tier 选择。 |
 
 ## 缓存复用规则

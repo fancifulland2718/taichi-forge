@@ -1,7 +1,6 @@
 # LinearOperator and Experimental SolvePlan
 
-> This page describes the published Taichi Forge `0.6.2` release contract; see
-> [release notes](release_notes.en.md) for version attribution.
+> Scope: current source. See [version guidance](index.en.md#versions-and-installation).
 
 `ti.linalg.LinearOperator` provides a runtime-bound linear-map abstraction for
 stored sparse matrices, compiled Taichi kernels, and compiled Graphs. It is a

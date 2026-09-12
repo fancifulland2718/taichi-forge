@@ -17,7 +17,7 @@ points, see [Forge API reference](forge_api_reference.en.md).
 | `ti.parallel_compile(kernels)` | Alias for `compile_kernels(...)`. |
 | `ti.compile_profile()` | Context manager for Python and backend compile-time profiling. |
 | `ti cache warmup script.py [-- script_args]` | Run a script once with offline cache enabled to populate disk cache entries. |
-| `@ti.kernel(opt_level="fast"|"balanced"|"full")` | Per-kernel compile-tier override. |
+| `@ti.kernel(opt_level="fast"\|"balanced"\|"full")` | Per-kernel compile-tier override. |
 | `ti.init(compile_tier=...)` | Program-level compile-tier selection. |
 
 ## Cache Reuse Rules

@@ -89,11 +89,8 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
   内存。
 - 应用层 Vulkan 优化只使用 `compile_tier`。`spv_opt_level` 会被拒绝；
   `external_optimization_level` 是实现层原始字段，不应由引擎暴露。
-- `spirv_disabled_passes`、`spirv_skip_loop_unroll` 与 adaptive SPIR-V optimization
-  仍只供验证。pass ID 是区分大小写的内部名称；更重要的是 skip-loop flag 尚未进入
-  offline-cache key。在命名、cache 语义和跨 driver matrix 收敛前保持默认值。
-- 保持 `cache_loop_invariant_global_vars=False`：它会改变 IR，却没有独立 cache
-  identity；历史测量中，相对 cold-compile 成本，它对物理 workload 的运行期 ROI 有限。
+- 编译器实现字段保持默认值，不作为应用调优 API。旧配置处理参见
+  [配置迁移说明](forge_options.zh.md#29-已删除仅兼容保留与仅供验证的设置)。
 - `use_fused_passes`、`vulkan_listgen_lite_barrier`、
   `vulkan_launch_buffer_pool` 等已删除/no-op 设置应直接从应用配置移除，不要维护
   按版本分支。
@@ -105,10 +102,10 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
 ## Graph replay
 
 Graph replay 包含后端特定的容量、生命周期、失败恢复、诊断与显存策略。例如，Vulkan
-在弹性容量实验显示显存权衡不理想后，有意保留固定 8-slot ring；CUDA 则区分结构性
+使用有界的在途 replay 存储；CUDA 则区分结构性
 capture 拒绝、暂态失败与 context-fatal 错误。
 
-这些策略、测量结果及公开 `Graph.execution_stats()` schema 统一维护在
+这些策略及公开 `Graph.execution_stats()` schema 统一维护在
 [Graph Runtime 与优化](graph_runtime_optimization.zh.md)。集中维护可以避免这份通用编译
 指南变成第二份、以后可能漂移的 graph 规范。
 Dense Field 专属编译扩展、prewarm 与静态 binding 权衡见
@@ -116,9 +113,9 @@ Dense Field 专属编译扩展、prewarm 与静态 binding 权衡见
 
 ## 数值与自动微分验证
 
-每个生产 profile 至少应覆盖：
+每个部署配置应根据实际使用的后端与功能选择相关检查：
 
-- CPU、CUDA、Vulkan primal output 对可信 reference 的绝对/相对误差；
+- 实际部署后端的 primal output 对可信 reference 的绝对/相对误差；
 - 长时间 drift、守恒量、NaN/Inf 行为和确定性 seed；
 - 应用实际使用的 reverse/forward AD，以及非光滑点附近的 finite difference；
 - 明确的 primal-only Graph 边界：active Tape/FwdMode 必须清晰失败，手工 dispatch 的
