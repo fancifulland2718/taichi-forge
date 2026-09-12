@@ -560,6 +560,9 @@ class VulkanCommandList : public CommandList {
   // the caller can record an explicit post-pass transition. Swapchain callers
   // retain the historical present-src default.
   void set_next_renderpass_color_final_layout(ImageLayout layout);
+  void set_next_renderpass_depth_clear_value(float value) {
+    next_depth_clear_value_ = value;
+  }
   void end_renderpass() override;
   void set_raster_viewport_and_scissor(int x0,
                                        int y0,
@@ -673,6 +676,7 @@ class VulkanCommandList : public CommandList {
   // Renderpass & raster pipeline
   std::vector<vkapi::IVkImage> current_dynamic_targets_;
   VulkanRenderPassDesc current_renderpass_desc_;
+  float next_depth_clear_value_{0.0f};
   vkapi::IVkRenderPass current_renderpass_{VK_NULL_HANDLE};
   vkapi::IVkFramebuffer current_framebuffer_{VK_NULL_HANDLE};
   int32_t viewport_x_{0}, viewport_y_{0};

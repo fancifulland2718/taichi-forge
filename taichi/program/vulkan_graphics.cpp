@@ -1,6 +1,7 @@
 #include "taichi/program/program.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -306,7 +307,8 @@ class VulkanGraphicsPipelineResource {
       bool depth_test,
       bool depth_write,
       bool blending,
-      const std::string &name)
+      const std::string &name,
+      const RasterDepthParams &depth_params)
       : program_(program), bindings_(vertex_bindings) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan graphics pipeline requires a live Program.");
@@ -387,6 +389,7 @@ class VulkanGraphicsPipelineResource {
     params.back_face_cull = back_face_cull;
     params.depth_test = depth_test;
     params.depth_write = depth_write;
+    params.depth = depth_params;
     if (blending) {
       params.blending.emplace_back();
     }
@@ -408,7 +411,8 @@ class VulkanGraphicsPipelineResource {
       bool depth_test,
       bool depth_write,
       bool blending,
-      const std::string &name)
+      const std::string &name,
+      const RasterDepthParams &depth_params)
       : program_(program), mesh_pipeline_(true), task_shader_(!task_spirv.empty()) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan mesh pipeline requires a live Program.");
@@ -460,6 +464,7 @@ class VulkanGraphicsPipelineResource {
     params.back_face_cull = back_face_cull;
     params.depth_test = depth_test;
     params.depth_write = depth_write;
+    params.depth = depth_params;
     if (blending) {
       params.blending.emplace_back();
     }
@@ -691,14 +696,15 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
     bool depth_test,
     bool depth_write,
     bool blending,
-    const std::string &name) {
+    const std::string &name,
+    const RasterDepthParams &depth_params) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(),
               "Vulkan graphics pipelines require the Vulkan backend.");
   auto resource = std::make_shared<VulkanGraphicsPipelineResource>(
       this, vertex_spirv, fragment_spirv, vertex_bindings, vertex_attributes,
       topology, polygon_mode, front_face_cull, back_face_cull, depth_test,
-      depth_write, blending, name);
+      depth_write, blending, name, depth_params);
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
               "Vulkan graphics pipeline handle space exhausted.");
@@ -718,14 +724,15 @@ std::uint64_t Program::create_vulkan_mesh_pipeline(
     bool depth_test,
     bool depth_write,
     bool blending,
-    const std::string &name) {
+    const std::string &name,
+    const RasterDepthParams &depth_params) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(),
               "Vulkan mesh pipelines require the Vulkan backend.");
   auto resource = std::make_shared<VulkanGraphicsPipelineResource>(
       this, task_spirv, mesh_spirv, fragment_spirv, topology, polygon_mode,
       front_face_cull, back_face_cull, depth_test, depth_write, blending,
-      name);
+      name, depth_params);
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
               "Vulkan graphics pipeline handle space exhausted.");
@@ -748,6 +755,7 @@ std::size_t Program::vulkan_graphics_draw(
   command.draw = draw;
   VulkanGraphicsPassInfo pass;
   pass.clear_color = draw.clear_color;
+  pass.clear_depth = draw.clear_depth;
   pass.viewport = draw.viewport;
   return vulkan_graphics_pass(color, depth, {std::move(command)}, pass);
 }
@@ -790,6 +798,9 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     TI_ERROR_IF(depth->get_buffer_format() != BufferFormat::depth32f,
                 "Vulkan graphics P0 depth attachments require depth32f.");
   }
+  TI_ERROR_IF(!std::isfinite(pass.clear_depth) || pass.clear_depth < 0.0f ||
+                  pass.clear_depth > 1.0f,
+              "Vulkan graphics clear_depth must be finite and in [0, 1].");
   std::array<std::uint32_t, 4> viewport = pass.viewport;
   if (viewport[2] == 0 && viewport[3] == 0) {
     viewport = {0, 0, static_cast<std::uint32_t>(color_size[0]),
@@ -1176,6 +1187,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
     replay_key.push_back(static_cast<std::uint64_t>(width));
     replay_key.push_back(static_cast<std::uint64_t>(height));
+    replay_key.push_back(graphics_float_bits(pass.clear_depth));
     for (const auto component : pass.clear_color) {
       replay_key.push_back(graphics_float_bits(component));
     }
@@ -1346,6 +1358,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
             static_cast<vulkan::VulkanCommandList *>(commands);
         vulkan_commands->set_next_renderpass_color_final_layout(
             ImageLayout::color_attachment);
+        vulkan_commands->set_next_renderpass_depth_clear_value(pass.clear_depth);
         bool clear = pass.color_clear;
         std::vector<float> clear_color(pass.clear_color.begin(),
                                        pass.clear_color.end());
@@ -1735,7 +1748,8 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
     bool,
     bool,
     bool,
-    const std::string &) {
+    const std::string &,
+    const RasterDepthParams &) {
   TI_ERROR("Vulkan graphics pipelines are unavailable in this build.");
 }
 
@@ -1750,7 +1764,8 @@ std::uint64_t Program::create_vulkan_mesh_pipeline(
     bool,
     bool,
     bool,
-    const std::string &) {
+    const std::string &,
+    const RasterDepthParams &) {
   TI_ERROR("Vulkan mesh pipelines are unavailable in this build.");
 }
 

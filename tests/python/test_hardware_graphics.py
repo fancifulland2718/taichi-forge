@@ -47,7 +47,7 @@ def _triangle_pipeline():
     )
 
 
-def _depth_triangle_pipeline(*, enabled):
+def _depth_triangle_pipeline(*, enabled, **depth_state):
     vertex_path = (
         Path(__file__).parent / "assets" / "hardware_graphics_depth.vert.spv.h"
     )
@@ -66,7 +66,99 @@ def _depth_triangle_pipeline(*, enabled):
         ),
         depth_test=enabled,
         depth_write=enabled,
+        **depth_state,
     )
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_depth_compare_clear_and_equal_depth_rules():
+    vertices = _overlapping_depth_vertices()
+    color = ti.Texture(ti.Format.rgba8, (64, 64))
+    depth = ti.Texture(ti.Format.depth32f, (64, 64))
+    cases = (
+        ("greater_equal", 0.0, 1), ("greater", 0.0, 1),
+        ("less", 1.0, 0), ("less_equal", 1.0, 0),
+        ("equal", 0.75, 1), ("not_equal", 0.75, 0),
+        ("never", 0.0, None), ("always", 0.0, 0),
+    )
+    for compare, clear, channel in cases:
+        with _depth_triangle_pipeline(enabled=True, depth_compare=compare) as pipeline:
+            pipeline.draw(color, {0: vertices}, depth=depth,
+                          draw=ti.hardware.graphics.Draw(6), clear_depth=clear)
+            ti.sync()
+            pixel = _texture_rgb(color)[32, 32]
+            if channel is None:
+                assert pixel.max() == 0
+            else:
+                assert pixel[channel] > 200 and pixel[1 - channel] < 2
+
+    equal = vertices.to_numpy().reshape(6, 6)
+    equal[:, 2] = 0.5
+    vertices.from_numpy(equal.reshape(-1))
+    for compare, channel in (("greater", 1), ("greater_equal", 0)):
+        with _depth_triangle_pipeline(enabled=True, depth_compare=compare) as pipeline:
+            pipeline.draw(color, {0: vertices}, depth=depth,
+                          draw=ti.hardware.graphics.Draw(6))
+            ti.sync()
+            assert _texture_rgb(color)[32, 32, channel] > 200
+
+    for kwargs in ({"depth_compare": "auto"}, {"depth_bias_constant": float("nan")},
+                   {"depth_bias_slope": 1e100}):
+        with pytest.raises(ValueError):
+            _depth_triangle_pipeline(enabled=True, **kwargs)
+    with _depth_triangle_pipeline(enabled=True) as pipeline:
+        for clear in (-0.1, 1.1, float("inf")):
+            with pytest.raises(ValueError, match="clear_depth"):
+                pipeline.record(ti.hardware.graphics.Draw(3),
+                                vertex_buffers={0: "vertices"}, clear_depth=clear)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_depth_bias_bound_pass_and_resource_replacement():
+    vertices = _overlapping_depth_vertices()
+    values = vertices.to_numpy().reshape(6, 6)
+    # Identical sloped geometry, first green then red: strict comparison alone
+    # keeps green. Positive constant/slope bias lets the second draw pass.
+    values[:, 2] = np.tile([0.4, 0.6, 0.5], 2)
+    vertices.from_numpy(values.reshape(-1))
+    for bias in ({"depth_bias_constant": 65536.0}, {"depth_bias_slope": 1.0}):
+        with _depth_triangle_pipeline(enabled=True, depth_compare="greater") as first, \
+                _depth_triangle_pipeline(enabled=True, depth_compare="greater", **bias) as second:
+            recording = first.record_pass((
+                first.pass_draw(ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"}),
+                second.pass_draw(ti.hardware.graphics.Draw(3, first_vertex=3),
+                                 vertex_buffers={0: "vertices"}),
+            ), depth="depth")
+            builder = ti.graph.GraphBuilder()
+            builder.append_native(recording, admission="auto")
+            graph = builder.compile()
+            for _ in range(2):
+                color = ti.Texture(ti.Format.rgba8, (64, 64))
+                depth = ti.Texture(ti.Format.depth32f, (64, 64))
+                bound = graph.bind({"color": color, "depth": depth, "vertices": vertices})
+                for _ in range(3):
+                    graph.run(bound)
+                ti.sync()
+                assert _texture_rgb(color)[32, 32, 0] > 200
+            graph.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graphics_prepared_clear_depth_is_not_reused_across_passes(monkeypatch):
+    monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
+    vertices = _overlapping_depth_vertices()
+    color = ti.Texture(ti.Format.rgba8, (64, 64))
+    depth = ti.Texture(ti.Format.depth32f, (64, 64))
+    with _depth_triangle_pipeline(enabled=True) as pipeline:
+        draw = pipeline.pass_draw(ti.hardware.graphics.Draw(6), vertex_buffers={0: "vertices"})
+        packets = [pipeline.record_pass((draw,), depth="depth", clear_depth=value)
+                   .prepare_graph_execute({"color": color, "depth": depth, "vertices": vertices})
+                   for value in (0.0, 1.0)]
+        for slot in (0, 1, 0, 1):
+            packets[slot]()
+            ti.sync()
+            pixel = _texture_rgb(color)[32, 32]
+            assert (pixel[1] > 200) if slot == 0 else (pixel.max() == 0)
 
 
 def _instanced_triangle_pipeline():

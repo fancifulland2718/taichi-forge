@@ -641,7 +641,16 @@ void VulkanPipeline::create_graphics_pipeline(
     rasterizer.cullMode |= VK_CULL_MODE_BACK_BIT;
   }
   rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-  rasterizer.depthBiasEnable = VK_FALSE;
+  const auto &depth = raster_params.depth;
+  TI_ERROR_IF(!std::isfinite(depth.bias_constant) ||
+                  !std::isfinite(depth.bias_slope),
+              "Vulkan depth bias must be finite.");
+  rasterizer.depthBiasEnable =
+      depth.bias_constant != 0.0f || depth.bias_slope != 0.0f;
+  rasterizer.depthBiasConstantFactor = depth.bias_constant;
+  rasterizer.depthBiasSlopeFactor = depth.bias_slope;
+  // Nonzero clamp requires a separately enabled device feature. Not exposed.
+  rasterizer.depthBiasClamp = 0.0f;
 
   VkPipelineMultisampleStateCreateInfo &multisampling =
       graphics_pipeline_template_->multisampling;
@@ -656,7 +665,15 @@ void VulkanPipeline::create_graphics_pipeline(
       VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
   depth_stencil.depthTestEnable = raster_params.depth_test;
   depth_stencil.depthWriteEnable = raster_params.depth_write;
-  depth_stencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;
+  static constexpr VkCompareOp compare_ops[] = {
+      VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL,
+      VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER,
+      VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL,
+      VK_COMPARE_OP_ALWAYS};
+  const int compare_index = static_cast<int>(depth.compare_op);
+  TI_ERROR_IF(compare_index < 0 || compare_index >= 8,
+              "Unsupported Vulkan depth comparison.");
+  depth_stencil.depthCompareOp = compare_ops[compare_index];
   depth_stencil.depthBoundsTestEnable = VK_FALSE;
   depth_stencil.stencilTestEnable = VK_FALSE;
 
@@ -1633,6 +1650,8 @@ void VulkanCommandList::begin_renderpass(int x0,
   VulkanRenderPassDesc &rp_desc = current_renderpass_desc_;
   current_renderpass_desc_.color_attachments.clear();
   rp_desc.clear_depth = depth_clear;
+  const float clear_depth_value = next_depth_clear_value_;
+  next_depth_clear_value_ = 0.0f;
 
   VkRect2D render_area{/*offset*/ {x0, y0},
                        /*extent*/ {uint32_t(x1 - x0), uint32_t(y1 - y0)}};
@@ -1703,7 +1722,7 @@ void VulkanCommandList::begin_renderpass(int x0,
       depth_attachment_info.loadOp = depth_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                                  : VK_ATTACHMENT_LOAD_OP_LOAD;
       depth_attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-      depth_attachment_info.clearValue.depthStencil = {0.0, 0};
+      depth_attachment_info.clearValue.depthStencil = {clear_depth_value, 0};
 
       render_info.pDepthAttachment = &depth_attachment_info;
 
@@ -1746,7 +1765,7 @@ void VulkanCommandList::begin_renderpass(int x0,
     auto [depth_image, depth_view, depth_format] =
         ti_device_->get_vk_image(*depth_attachment);
     clear_values[num_color_attachments].depthStencil =
-        VkClearDepthStencilValue{0.0, 0};
+        VkClearDepthStencilValue{clear_depth_value, 0};
     fb_desc.attachments.push_back(depth_view);
   }
 

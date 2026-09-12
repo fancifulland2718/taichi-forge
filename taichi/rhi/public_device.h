@@ -1370,6 +1370,23 @@ struct BlendingParams {
   BlendFunc alpha;
 };
 
+enum class DepthCompareOp {
+  never,
+  less,
+  equal,
+  less_equal,
+  greater,
+  not_equal,
+  greater_equal,
+  always
+};
+
+struct RasterDepthParams {
+  DepthCompareOp compare_op{DepthCompareOp::greater_equal};
+  float bias_constant{0.0f};
+  float bias_slope{0.0f};
+};
+
 struct RasterParams {
   TopologyType prim_topology{TopologyType::Triangles};
   PolygonMode polygon_mode{PolygonMode::Fill};
@@ -1377,6 +1394,7 @@ struct RasterParams {
   bool back_face_cull{false};
   bool depth_test{false};
   bool depth_write{false};
+  RasterDepthParams depth{};
   std::vector<BlendingParams> blending{};
 };
 

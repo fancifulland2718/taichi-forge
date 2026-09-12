@@ -7,6 +7,8 @@ pipeline object and runtime ordering needed to record the draw.
 
 from dataclasses import dataclass
 from functools import partial
+import math
+from numbers import Real
 import os
 from types import MappingProxyType
 
@@ -34,6 +36,11 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 _TOPOLOGIES = {"triangles": 0, "lines": 1, "points": 2}
 _POLYGON_MODES = {"fill": 0, "line": 1, "point": 2}
+_DEPTH_COMPARE_OPS = {
+    name: index for index, name in enumerate(
+        ("never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always")
+    )
+}
 _CULL_MODES = {
     "none": (False, False),
     "front": (True, False),
@@ -43,6 +50,31 @@ _ATTACHMENT_LOAD_OPS = frozenset(("clear", "load"))
 _ATTACHMENT_STORE_OPS = frozenset(("store",))
 _SHADER_BUFFER_KINDS = frozenset(("uniform", "storage"))
 _SHADER_BUFFER_ACCESSES = frozenset(("read", "write", "read_write"))
+
+
+def _finite_f32(value, name):
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise TypeError(f"{name} must be a real number")
+    value = float(value)
+    if not math.isfinite(value) or abs(value) > 3.4028234663852886e38:
+        raise ValueError(f"{name} must be finite and representable as f32")
+    return value
+
+
+def _clear_depth(value):
+    value = _finite_f32(value, "clear_depth")
+    if not 0.0 <= value <= 1.0:
+        raise ValueError("clear_depth must be in [0, 1]")
+    return value
+
+
+def _depth_params(compare, constant, slope):
+    try:
+        compare = _DEPTH_COMPARE_OPS[compare]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("unsupported graphics depth_compare") from exc
+    return (compare, _finite_f32(constant, "depth_bias_constant"),
+            _finite_f32(slope, "depth_bias_slope"))
 
 
 def _u32(value, name, *, positive=False):
@@ -454,6 +486,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         depth=None,
         index_buffer=None,
         clear_color=(0.0, 0.0, 0.0, 1.0),
+        clear_depth=0.0,
         viewport=None,
     ):
         if not isinstance(pipeline, VulkanGraphicsPipeline):
@@ -558,6 +591,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "index_buffer", index_buffer)
         object.__setattr__(self, "clear_color", clear_color)
+        object.__setattr__(self, "clear_depth", _clear_depth(clear_depth))
         object.__setattr__(self, "viewport", viewport)
 
     @property
@@ -631,6 +665,7 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
                 self.viewport,
                 self._experimental_retained_replay
                 and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
+                self.clear_depth,
             )
         return color
 
@@ -690,6 +725,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         depth_load_op="clear",
         depth_store_op="store",
         clear_color=(0.0, 0.0, 0.0, 1.0),
+        clear_depth=0.0,
         viewport=None,
     ):
         draws = tuple(draws)
@@ -837,6 +873,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         object.__setattr__(self, "depth_load_op", depth_load_op)
         object.__setattr__(self, "depth_store_op", depth_store_op)
         object.__setattr__(self, "clear_color", clear_color)
+        object.__setattr__(self, "clear_depth", _clear_depth(clear_depth))
         object.__setattr__(self, "viewport", viewport)
         object.__setattr__(
             self,
@@ -986,6 +1023,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 self.viewport,
                 self._experimental_retained_replay
                 and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
+                self.clear_depth,
             )
         owners = tuple(bindings[name] for name in self.binding_names)
         native_owners = tuple(
@@ -1106,6 +1144,9 @@ class VulkanGraphicsPipeline:
         cull_mode="none",
         depth_test=False,
         depth_write=False,
+        depth_compare="greater_equal",
+        depth_bias_constant=0.0,
+        depth_bias_slope=0.0,
         blending=False,
         name="",
     ):
@@ -1182,6 +1223,7 @@ class VulkanGraphicsPipeline:
         if not isinstance(name, str):
             raise TypeError("name must be a string")
 
+        depth_params = _depth_params(depth_compare, depth_bias_constant, depth_bias_slope)
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self.vertex_bindings = vertex_bindings
@@ -1211,6 +1253,7 @@ class VulkanGraphicsPipeline:
                     bool(depth_write),
                     bool(blending),
                     name,
+                    *depth_params,
                 )
             )
 
@@ -1261,6 +1304,7 @@ class VulkanGraphicsPipeline:
         depth=None,
         index_buffer=None,
         clear_color=(0.0, 0.0, 0.0, 1.0),
+        clear_depth=0.0,
         viewport=None,
     ):
         symbolic_vertices = {binding: f"vertex_{binding}" for binding in vertex_buffers}
@@ -1271,6 +1315,7 @@ class VulkanGraphicsPipeline:
             vertex_buffers=symbolic_vertices,
             index_buffer=None if index_buffer is None else "index",
             clear_color=clear_color,
+            clear_depth=clear_depth,
             viewport=viewport,
         )
         bindings = {"color": color}
@@ -1359,6 +1404,9 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         cull_mode="none",
         depth_test=False,
         depth_write=False,
+        depth_compare="greater_equal",
+        depth_bias_constant=0.0,
+        depth_bias_slope=0.0,
         blending=False,
         name="",
     ):
@@ -1429,6 +1477,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         if not isinstance(name, str):
             raise TypeError("name must be a string")
 
+        depth_params = _depth_params(depth_compare, depth_bias_constant, depth_bias_slope)
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         self.vertex_bindings = ()
@@ -1451,6 +1500,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
                     bool(depth_write),
                     bool(blending),
                     name,
+                    *depth_params,
                 )
             )
 

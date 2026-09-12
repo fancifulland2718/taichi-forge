@@ -250,6 +250,7 @@ struct VulkanGraphicsVertexAttribute {
 };
 
 struct VulkanGraphicsDrawInfo {
+  float clear_depth{0.0f};
   std::uint32_t element_count{0};
   std::uint32_t instance_count{1};
   std::uint32_t first_vertex{0};
@@ -308,6 +309,7 @@ struct VulkanGraphicsDrawCommand {
 };
 
 struct VulkanGraphicsPassInfo {
+  float clear_depth{0.0f};
   bool color_clear{true};
   bool depth_clear{true};
   bool retained_replay{false};
@@ -1377,7 +1379,8 @@ class TI_DLL_EXPORT Program {
       bool depth_test,
       bool depth_write,
       bool blending,
-      const std::string &name);
+      const std::string &name,
+      const RasterDepthParams &depth_params);
 
   std::uint64_t create_vulkan_mesh_pipeline(
       const std::vector<std::uint32_t> &task_spirv,
@@ -1390,7 +1393,8 @@ class TI_DLL_EXPORT Program {
       bool depth_test,
       bool depth_write,
       bool blending,
-      const std::string &name);
+      const std::string &name,
+      const RasterDepthParams &depth_params);
 
   std::size_t vulkan_graphics_draw(
       std::uint64_t handle,
