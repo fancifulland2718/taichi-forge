@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -3807,6 +3808,28 @@ vkapi::IVkSampler VulkanDevice::get_sampler(
     }
   }
 
+  const auto &limits = get_vk_physical_device_props().limits;
+  TI_ERROR_IF(!std::isfinite(config.lod_bias) ||
+                  !std::isfinite(config.min_lod) ||
+                  !std::isfinite(config.max_lod) ||
+                  !std::isfinite(config.max_anisotropy),
+              "Sampler LOD and anisotropy values must be finite");
+  TI_ERROR_IF(config.min_lod < 0.0f ||
+                  (config.max_lod != -1.0f &&
+                   config.max_lod < config.min_lod) ||
+                  (config.max_lod == -1.0f &&
+                   config.min_lod > VK_LOD_CLAMP_NONE),
+              "Sampler LOD clamps require 0 <= min_lod <= max_lod");
+  TI_ERROR_IF(std::abs(config.lod_bias) > limits.maxSamplerLodBias,
+              "Sampler lod_bias exceeds device maxSamplerLodBias ({})",
+              limits.maxSamplerLodBias);
+  TI_ERROR_IF(config.max_anisotropy < 1.0f ||
+                  config.max_anisotropy > limits.maxSamplerAnisotropy,
+              "Sampler max_anisotropy must be within [1, {}] on this device",
+              limits.maxSamplerAnisotropy);
+  TI_ERROR_IF(config.max_anisotropy > 1.0f && !vk_caps().sampler_anisotropy,
+              "Sampler anisotropy is not enabled on this Vulkan device");
+
   const auto to_filter = [](ImageFilter filter) {
     return filter == ImageFilter::nearest ? VK_FILTER_NEAREST
                                           : VK_FILTER_LINEAR;
@@ -3830,13 +3853,19 @@ vkapi::IVkSampler VulkanDevice::get_sampler(
   sampler_info.addressModeU = to_address_mode(config.address_mode_u);
   sampler_info.addressModeV = to_address_mode(config.address_mode_v);
   sampler_info.addressModeW = to_address_mode(config.address_mode_w);
-  sampler_info.anisotropyEnable = VK_FALSE;
+  sampler_info.anisotropyEnable = config.max_anisotropy > 1.0f;
+  sampler_info.maxAnisotropy = config.max_anisotropy;
   sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
   sampler_info.unnormalizedCoordinates = VK_FALSE;
   sampler_info.compareEnable = VK_FALSE;
   sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
-  sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-  sampler_info.maxLod = VK_LOD_CLAMP_NONE;
+  sampler_info.mipmapMode = config.mip_filter == ImageFilter::linear
+                                ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+  sampler_info.mipLodBias = config.lod_bias;
+  sampler_info.minLod = config.min_lod;
+  sampler_info.maxLod =
+      config.max_lod == -1.0f ? VK_LOD_CLAMP_NONE : config.max_lod;
 
   auto sampler = vkapi::create_sampler(device_, sampler_info);
   image_samplers_.emplace_back(config, sampler);
@@ -3905,6 +3934,23 @@ vkapi::IVkImageView VulkanDevice::get_vk_lod_imageview(
 }
 
 DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
+  // Reject unsupported explicit sampling state before registering an image.
+  // Existing storage-only images keep their default sampler behavior.
+  if (params.sampler_config.has_extended_sampling()) {
+    if (params.sampler_config.mip_filter == ImageFilter::linear ||
+        params.sampler_config.max_anisotropy > 1.0f) {
+      const auto [result, format] = buffer_format_ti_to_vk(params.format);
+      TI_ERROR_IF(result != RhiResult::success,
+                  "Unsupported Vulkan sampler image format");
+      VkFormatProperties properties{};
+      vkGetPhysicalDeviceFormatProperties(physical_device_, format, &properties);
+      TI_ERROR_IF(!(properties.optimalTilingFeatures &
+                    VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT),
+                  "Vulkan image format does not support linear mip or "
+                  "anisotropic filtering");
+    }
+    get_sampler(params.sampler_config);
+  }
   const auto num_mip_levels = params.mip_levels;
   uint32_t max_mip_levels = 0;
   for (auto extent = std::max({params.x, params.y, params.z}); extent > 0;

@@ -1003,7 +1003,7 @@ def test_shim_retains_explicit_linux_runtime_handle(monkeypatch, tmp_path):
             ).contents
             contract.struct_size = output_size
             contract.manifest_schema_version = 1
-            contract.native_abi_revision = 2
+            contract.native_abi_revision = runtime_utils.FORGE_NATIVE_ABI_REVISION
             contract.runtime_statistics_schema_version = 3
             contract.feature_bitmap = 1
             contract.compiler_abi = b"test-cxxabi"
@@ -1060,7 +1060,10 @@ def test_split_runtime_bootstrap_rejects_missing_or_mismatched_contract():
     class Handle:
         taichi_forge_runtime_bootstrap_v1 = Probe()
 
-    with pytest.raises(ImportError, match="required_native_abi=2"):
+    with pytest.raises(
+        ImportError,
+        match=f"required_native_abi={runtime_utils.FORGE_NATIVE_ABI_REVISION}",
+    ):
         runtime_utils._validate_native_runtime_bootstrap(Handle(), path)
 
 

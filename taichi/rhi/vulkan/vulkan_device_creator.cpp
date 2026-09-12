@@ -827,6 +827,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceFeatures device_supported_features;
   vkGetPhysicalDeviceFeatures(physical_device_, &device_supported_features);
 
+  if (device_supported_features.samplerAnisotropy) {
+    device_features.samplerAnisotropy = true;
+    ti_device_->vk_caps().sampler_anisotropy = true;
+  }
   if (device_supported_features.shaderInt16) {
     device_features.shaderInt16 = true;
     caps.set(DeviceCapability::spirv_has_int16, true);

@@ -9,13 +9,14 @@ import pytest
 import taichi_forge as ti
 from taichi_forge import _contracts as runtime_contracts
 from taichi_forge import runtime as runtime_api
+from taichi_forge._contract_constants import FORGE_NATIVE_ABI_REVISION
 from tests import test_utils
 
 
 def test_runtime_contract_manifest_is_immutable_and_source_agnostic():
     manifest = ti.validate_runtime_contract(require_native_manifest=True)
     assert manifest["schema_version"] == 1
-    assert manifest["native_abi_revision"] == 2
+    assert manifest["native_abi_revision"] == FORGE_NATIVE_ABI_REVISION
     assert manifest["native_abi_revision"] == manifest["required_native_abi_revision"]
     assert manifest["schemas"]["dynamic_work"] == 5
     assert manifest["schemas"]["structured_control"] == 5

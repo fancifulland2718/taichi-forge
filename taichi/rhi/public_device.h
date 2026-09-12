@@ -150,21 +150,33 @@ enum class ImageAddressMode : uint8_t {
   clamp_to_edge,
 };
 
-// Immutable sampled-image binding state. Taichi textures currently expose one
-// mip level and normalized coordinates, so mip/compare/anisotropy controls are
-// intentionally not part of this first portable contract.
+// Immutable normalized-coordinate sampling state. Extended controls are
+// backend-qualified at resource creation, never interpreted during replay.
 struct ImageSamplerConfig {
   ImageFilter min_filter{ImageFilter::linear};
   ImageFilter mag_filter{ImageFilter::linear};
   ImageAddressMode address_mode_u{ImageAddressMode::repeat};
   ImageAddressMode address_mode_v{ImageAddressMode::repeat};
   ImageAddressMode address_mode_w{ImageAddressMode::repeat};
+  ImageFilter mip_filter{ImageFilter::nearest};
+  float lod_bias{0.0f};
+  float min_lod{0.0f};
+  float max_lod{-1.0f};  // -1 means no upper clamp.
+  float max_anisotropy{1.0f};
+
+  bool has_extended_sampling() const {
+    return mip_filter != ImageFilter::nearest || lod_bias != 0.0f ||
+           min_lod != 0.0f || max_lod != -1.0f || max_anisotropy != 1.0f;
+  }
 
   bool operator==(const ImageSamplerConfig &other) const {
     return min_filter == other.min_filter && mag_filter == other.mag_filter &&
            address_mode_u == other.address_mode_u &&
            address_mode_v == other.address_mode_v &&
-           address_mode_w == other.address_mode_w;
+           address_mode_w == other.address_mode_w &&
+           mip_filter == other.mip_filter && lod_bias == other.lod_bias &&
+           min_lod == other.min_lod && max_lod == other.max_lod &&
+           max_anisotropy == other.max_anisotropy;
   }
 
   bool operator!=(const ImageSamplerConfig &other) const {

@@ -914,6 +914,7 @@ struct VulkanCapabilities {
   bool external_memory{false};
   bool external_semaphore{false};
   bool wide_line{false};
+  bool sampler_anisotropy{false};
   bool surface{false};
   bool present{false};
   bool dynamic_rendering{false};

@@ -19,6 +19,125 @@ def test_sampler_config_validation():
         _config(min_filter="cubic")
     with pytest.raises(TypeError, match="address_mode_u must be a string"):
         _config(address_mode_u=1)
+    assert _config().max_lod is None
+    assert _config(mip_filter="linear", max_lod=2) == _config(
+        mip_filter="linear", max_lod=2.0
+    )
+    for invalid in (
+        {"mip_filter": "cubic"},
+        {"lod_bias": float("nan")},
+        {"max_lod": float("inf")},
+        {"min_lod": -1},
+        {"min_lod": 2, "max_lod": 1},
+        {"max_anisotropy": 0.5},
+    ):
+        with pytest.raises(ValueError):
+            _config(**invalid)
+    with pytest.raises(TypeError, match="finite real"):
+        _config(max_anisotropy=True)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_sampler_mip_filter_clamps_and_retained_cache():
+    configs = (
+        _config(),
+        _config(mip_filter="linear"),
+        _config(min_lod=2, max_lod=2),
+        _config(mip_filter="linear", max_lod=1.5),
+    )
+    images = [
+        ti.Texture(ti.Format.r32f, (8, 4), mip_levels=4, sampler=c) for c in configs
+    ]
+    output = ti.ndarray(ti.f32, shape=3)
+    levels = [
+        ti.ndarray(ti.f32, shape=max(1, 8 >> i) * max(1, 4 >> i)) for i in range(4)
+    ]
+    uploads = [
+        ti.hardware.image.VulkanBufferToImageRecording(
+            image_region=ti.hardware.image.VulkanImageRegion(mip_level=i)
+        )
+        for i in range(4)
+    ]
+
+    @ti.kernel
+    def sample(
+        texture: ti.types.texture(num_dimensions=2),
+        result: ti.types.ndarray(dtype=ti.f32, ndim=1),
+    ):
+        result[0] = texture.sample_lod(ti.Vector([0.5, 0.5]), 0.25).x
+        result[1] = texture.sample_lod(ti.Vector([0.5, 0.5]), 2.75).x
+        result[2] = texture.fetch(ti.Vector([0, 0]), 3).x
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        sample,
+        ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "image", ndim=2),
+        ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1),
+    )
+    graph = builder.compile()
+    bindings = [graph.bind({"image": image, "output": output}) for image in images]
+    expected = ((0, 3, 3), (0.25, 2.75, 3), (2, 2, 3), (0.25, 1.5, 3))
+    program = impl.get_runtime().prog
+    for base in (10, 30):
+        for i, level in enumerate(levels):
+            level.fill(base + i)
+            for image in images:
+                uploads[i].execute({"source": level, "destination": image})
+        for bound, values in zip(bindings, expected):
+            graph.run(bound)
+            np.testing.assert_allclose(
+                output.to_numpy(), np.array(values) + base, atol=1e-5
+            )
+        count = program._debug_vulkan_image_sampler_cache_size()
+        for bound in bindings:
+            graph.run(bound)
+        ti.sync()
+        assert program._debug_vulkan_image_sampler_cache_size() == count
+    graph.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_cuda_rejects_extended_sampler_state_instead_of_ignoring_it():
+    with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
+        ti.Texture(ti.Format.r32f, (4, 4), sampler=_config(mip_filter="linear"))
+    image = ti.Texture(ti.Format.r32f, (4, 4))
+    assert image.shape == (4, 4)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_anisotropic_sampler_executes_with_retained_texture():
+    try:
+        image = ti.Texture(ti.Format.r32f, (8, 4), sampler=_config(max_anisotropy=2))
+    except RuntimeError as error:
+        if "anisotropy is not enabled" in str(error) or "within [1, 1]" in str(error):
+            pytest.skip("Vulkan device has no anisotropic sampling feature")
+        raise
+    data = ti.ndarray(ti.f32, shape=(8, 4))
+    output = ti.ndarray(ti.f32, shape=1)
+
+    @ti.kernel
+    def sample(texture: ti.types.texture(num_dimensions=2),
+               result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] = texture.sample_lod(ti.Vector([0.5, 0.5]), 0.0).x
+
+    for value in (7, 19):
+        data.fill(value)
+        image.from_ndarray(data)
+        sample(image, output)
+        np.testing.assert_allclose(output.to_numpy(), [value])
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_sampler_rejects_unsupported_explicit_state_before_use():
+    with pytest.raises(RuntimeError, match="max_anisotropy"):
+        ti.Texture(ti.Format.r32f, (4, 4), sampler=_config(max_anisotropy=1e6))
+    with pytest.raises(RuntimeError, match="maxSamplerLodBias"):
+        ti.Texture(ti.Format.r32f, (4, 4), sampler=_config(lod_bias=1e6))
+    with pytest.raises(RuntimeError, match="linear mip"):
+        ti.Texture(ti.Format.r32u, (4, 4), sampler=_config(mip_filter="linear"))
+    # Failed creation must not poison the next ordinary allocation.
+    image = ti.Texture(ti.Format.r32f, (4, 4))
+    assert image.shape == (4, 4)
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

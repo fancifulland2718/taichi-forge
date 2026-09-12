@@ -5442,7 +5442,12 @@ void export_lang(py::module &m) {
       .def_readwrite("mag_filter", &ImageSamplerConfig::mag_filter)
       .def_readwrite("address_mode_u", &ImageSamplerConfig::address_mode_u)
       .def_readwrite("address_mode_v", &ImageSamplerConfig::address_mode_v)
-      .def_readwrite("address_mode_w", &ImageSamplerConfig::address_mode_w);
+      .def_readwrite("address_mode_w", &ImageSamplerConfig::address_mode_w)
+      .def_readwrite("mip_filter", &ImageSamplerConfig::mip_filter)
+      .def_readwrite("lod_bias", &ImageSamplerConfig::lod_bias)
+      .def_readwrite("min_lod", &ImageSamplerConfig::min_lod)
+      .def_readwrite("max_lod", &ImageSamplerConfig::max_lod)
+      .def_readwrite("max_anisotropy", &ImageSamplerConfig::max_anisotropy);
 
   py::class_<Texture>(m, "Texture")
       .def("device_allocation_ptr", &Texture::get_device_allocation_ptr_as_int)
