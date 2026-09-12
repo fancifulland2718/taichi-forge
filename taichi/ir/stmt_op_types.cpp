@@ -158,6 +158,7 @@ std::string texture_op_type_name(TextureOpType type) {
     REGISTER_TYPE(kFetchTexel);
     REGISTER_TYPE(kLoad);
     REGISTER_TYPE(kStore);
+    REGISTER_TYPE(kSampleGrad);
 
 #undef REGISTER_TYPE
     default:

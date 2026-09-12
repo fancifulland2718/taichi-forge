@@ -7304,7 +7304,7 @@ void export_lang(py::module &m) {
 
   auto &&texture =
       py::enum_<TextureOpType>(m, "TextureOpType", py::arithmetic());
-  for (int t = 0; t <= (int)TextureOpType::kStore; t++)
+  for (int t = 0; t <= (int)TextureOpType::kSampleGrad; t++)
     texture.value(texture_op_type_name(TextureOpType(t)).c_str(),
                   TextureOpType(t));
   texture.export_values();

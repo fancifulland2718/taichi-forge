@@ -38,6 +38,36 @@ class TextureSampler:
         return vector(4, f32)([r, g, b, a])
 
     @taichi_scope
+    def sample_grad(self, uv, duvdx, duvdy):
+        """Sample a 2D Vulkan texture with caller-provided UV derivatives.
+
+        Gradients are in normalized UV units per output pixel (or caller-defined
+        sample footprint), in the same axis order as ``uv``. No screen-space
+        derivatives are inferred in compute kernels. Sampler mip/LOD controls
+        and anisotropy apply; texture collections use this same operation.
+        """
+        coordinates = (uv, duvdx, duvdy)
+        for value in coordinates:
+            valid = (
+                value.get_shape() == (2,)
+                if isinstance(value, Expr) and value.is_tensor()
+                else isinstance(value, Matrix) and value.n == 2 and value.m == 1
+            )
+            if self.num_dims != 2 or not valid:
+                raise ValueError("sample_grad requires a 2D texture and three 2-component f32 vectors")
+        ast_builder = impl.get_runtime().compiling_callable.ast_builder()
+        dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+        args_group = make_expr_group(*(item for value in coordinates for item in _get_entries(value)))
+        value = ast_builder.make_texture_op_expr(
+            _ti_core.TextureOpType.kSampleGrad, self.ptr_expr, args_group, dbg_info
+        )
+        components = [
+            impl.call_internal(f"composite_extract_{i}", value, with_runtime_context=False)
+            for i in range(4)
+        ]
+        return vector(4, f32)(components)
+
+    @taichi_scope
     def fetch(self, index, lod):
         ast_builder = impl.get_runtime().compiling_callable.ast_builder()
         dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())

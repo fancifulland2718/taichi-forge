@@ -105,6 +105,73 @@ def test_cuda_rejects_extended_sampler_state_instead_of_ignoring_it():
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_sample_grad_non_square_collection_and_graph_updates():
+    images = [ti.Texture(ti.Format.r32f, (8, 4), mip_levels=4, sampler=config)
+              for config in (_config(mip_filter="linear"), _config(mip_filter="linear", lod_bias=1))]
+    try:
+        table = ti.TextureCollection(tuple(images))
+    except RuntimeError as error:
+        if "non-uniform indexing" in str(error):
+            pytest.skip("Vulkan sampled-image non-uniform indexing is unavailable")
+        raise
+    levels = [ti.ndarray(ti.f32, shape=max(1, 8 >> i) * max(1, 4 >> i)) for i in range(4)]
+    uploads = [ti.hardware.image.VulkanBufferToImageRecording(
+        image_region=ti.hardware.image.VulkanImageRegion(mip_level=i)) for i in range(4)]
+    output = ti.ndarray(ti.f32, shape=16)
+
+    @ti.kernel
+    def sample(texture: ti.types.texture(num_dimensions=2),
+               textures: ti.types.texture_collection(ndim=2, capacity=2),
+               result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        for i in range(8):
+            footprint = ti.cast(1 << (i % 3), ti.f32)
+            # Rotated axes and a non-square image catch derivative transposition.
+            dx = ti.Vector([0.0, footprint / 4.0])
+            dy = ti.Vector([footprint / 8.0, 0.0])
+            uv = ti.Vector([0.35, 0.6])
+            result[i] = texture.sample_grad(uv, dx, dy).x
+            result[8 + i] = textures[i % 2].sample_grad(uv, dx, dy).x
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(sample, ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "image", ndim=2),
+                     ti.graph.Arg(ti.graph.ArgKind.TEXTURE_COLLECTION, "table", ndim=2, capacity=2),
+                     ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "output", ti.f32, ndim=1))
+    graph = builder.compile()
+    bound = graph.bind({"image": images[0], "table": table, "output": output})
+    for base in (10, 40):
+        for slot, image in enumerate(images):
+            for i, (level, upload) in enumerate(zip(levels, uploads)):
+                level.fill(base + slot * 100 + i)
+                upload.execute({"source": level, "destination": image})
+        graph.run(bound)
+        expected = [base + i % 3 for i in range(8)]
+        expected += [base + (i % 2) * 100 + i % 3 + i % 2 for i in range(8)]
+        np.testing.assert_allclose(output.to_numpy(), expected, atol=1e-5)
+    graph.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_sample_grad_rejects_invalid_derivative_shape_and_type():
+    image = ti.Texture(ti.Format.r32f, (4, 4))
+    output = ti.ndarray(ti.f32, shape=1)
+
+    @ti.kernel
+    def wrong_shape(texture: ti.types.texture(num_dimensions=2),
+                    result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] = texture.sample_grad(ti.Vector([0.5, 0.5]), 0.1, ti.Vector([0.0, 0.1])).x
+
+    @ti.kernel
+    def wrong_type(texture: ti.types.texture(num_dimensions=2),
+                   result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] = texture.sample_grad(ti.Vector([0.5, 0.5]), ti.Vector([1, 0]), ti.Vector([0, 1])).x
+
+    with pytest.raises(ti.TaichiCompilationError, match="three 2-component"):
+        wrong_shape(image, output)
+    with pytest.raises(ti.TaichiCompilationError, match="must be f32"):
+        wrong_type(image, output)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_anisotropic_sampler_executes_with_retained_texture():
     try:
         image = ti.Texture(ti.Format.r32f, (8, 4), sampler=_config(max_anisotropy=2))

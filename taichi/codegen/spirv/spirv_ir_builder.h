@@ -459,6 +459,8 @@ class IRBuilder {
                        const std::vector<Value> &args,
                        Value lod);
 
+  Value sample_texture_grad(Value texture_var, const std::vector<Value> &args);
+
   Value fetch_texel(Value texture_var,
                     const std::vector<Value> &args,
                     Value lod);

@@ -1476,6 +1476,20 @@ Value IRBuilder::sample_texture(Value texture_var,
   return res_vec4;
 }
 
+Value IRBuilder::sample_texture_grad(Value texture_var,
+                                     const std::vector<Value> &args) {
+  TI_ASSERT(args.size() == 6);
+  auto image = load_variable(texture_var, get_sampled_image_type(f32_type(), 2));
+  if (texture_var.flag == ValueKind::kNonUniformTexturePtr) {
+    decorate(spv::OpDecorate, image, spv::DecorationNonUniform);
+  }
+  auto uv = make_value(spv::OpCompositeConstruct, t_v2_fp32_, args[0], args[1]);
+  auto dx = make_value(spv::OpCompositeConstruct, t_v2_fp32_, args[2], args[3]);
+  auto dy = make_value(spv::OpCompositeConstruct, t_v2_fp32_, args[4], args[5]);
+  return make_value(spv::OpImageSampleExplicitLod, t_v4_fp32_, image, uv,
+                    static_cast<uint32_t>(spv::ImageOperandsGradMask), dx, dy);
+}
+
 Value IRBuilder::fetch_texel(Value texture_var,
                              const std::vector<Value> &args,
                              Value lod) {

@@ -4273,7 +4273,14 @@ class TaskCodegen : public IRVisitor {
   void visit(TextureOpStmt *stmt) override {
     spirv::Value tex = ir_->query_value(stmt->texture_ptr->raw_name());
     spirv::Value val;
-    if (stmt->op == TextureOpType::kSampleLod ||
+    if (stmt->op == TextureOpType::kSampleGrad) {
+      std::vector<spirv::Value> args;
+      for (auto *arg : stmt->args) {
+        args.push_back(ir_->query_value(arg->raw_name()));
+      }
+      val = ir_->sample_texture_grad(tex, args);
+      ir_->register_value(stmt->raw_name(), val);
+    } else if (stmt->op == TextureOpType::kSampleLod ||
         stmt->op == TextureOpType::kFetchTexel) {
       // Texture Ops
       std::vector<spirv::Value> args;

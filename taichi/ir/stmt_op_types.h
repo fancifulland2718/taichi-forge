@@ -98,7 +98,8 @@ enum class TextureOpType : int {
   kSampleLod,
   kFetchTexel,
   kLoad,
-  kStore
+  kStore,
+  kSampleGrad
 };
 
 std::string texture_op_type_name(TextureOpType type);

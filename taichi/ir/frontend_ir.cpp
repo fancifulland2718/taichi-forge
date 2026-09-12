@@ -1297,6 +1297,22 @@ void TextureOpExpression::type_check(const CompileConfig *config) {
                         arg_type->to_string()));
       }
     }
+  } else if (op == TextureOpType::kSampleGrad) {
+    if (config->arch != Arch::vulkan || ptr->num_dims != 2 || ptr->is_storage) {
+      ErrorEmitter(TaichiTypeError(), this,
+                   "sample_grad currently requires a 2D Vulkan sampled texture");
+    }
+    if (args.size() != 6) {
+      ErrorEmitter(TaichiTypeError(), this,
+                   "sample_grad requires UV, dUVdx and dUVdy pairs");
+    }
+    for (int i = 0; i < args.size(); ++i) {
+      TI_ASSERT_TYPE_CHECKED(args[i]);
+      if (args[i].get_rvalue_type() != PrimitiveType::f32) {
+        ErrorEmitter(TaichiTypeError(), this,
+                     "All sample_grad coordinates and derivatives must be f32");
+      }
+    }
   } else if (op == TextureOpType::kFetchTexel) {
     // index, int LOD
     TI_ASSERT_INFO(args.size() == ptr->num_dims + 1,
