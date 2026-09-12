@@ -792,6 +792,61 @@ Word-aligned query storage is a separate adapter feature bit. Legacy adapters
 without that feature require 16-byte aligned ray/hit addresses, rejected at
 preparation if unmet; no misaligned access is passed to their old PTX.
 
+#### OptiX alpha-mask queries
+
+`record_typed(..., alpha_masks=..., any_hit=False)` optionally filters triangle
+hits in the OptiX device program. `alpha_masks` is a tuple in IAS instance order;
+a single triangle scene takes one entry. An entry is `OptixAlphaMask` or `None`
+(accept unconditionally). This does not execute arbitrary Taichi/Python functions.
+
+```python
+mask = ti.hardware.ray.OptixAlphaMask(
+    uvs="uvs", texture="alpha", cutoff=0.5, channel=3,
+)
+# This example's scene has two instances: masked first, opaque second.
+query = scene.record_typed(N, alpha_masks=(mask, None))
+builder = ti.graph.GraphBuilder()
+builder.append_native(query, admission="explicit")
+graph = builder.compile()
+bindings = graph.bind(dict(rays=rays, hits=hits, hit_indices=hit_indices,
+                           uvs=vertex_uvs, alpha=alpha_texture))
+graph.run(bindings)
+ti.sync()  # Only when the application needs completion/host observation.
+graph.close()
+```
+
+UVs are compact f32 pairs per GAS vertex, in scalar `(vertex_count, 2)` or
+AOS vector-2 storage, including qualified dense views. The GAS's original index
+array supplies each triangle; its topology/indices must remain unchanged.
+Texture bindings must be managed CUDA, single-level 2D `r32f` or `rgba32f`.
+Use `channel=0` for r32f; RGBA accepts 0..3. The cutoff is finite and in [0,1].
+The existing texture's min/mag filter and address state are used. UVs are
+normalized, finite, and use the same axis order as Forge `Texture.sample_lod`,
+including non-square uploads. Vulkan texture handles cannot be reused here.
+
+The device interpolates vertex UVs and accepts when the sampled channel is
+`>= cutoff`; a rejected hit continues traversal. The default returns the
+nearest accepted hit. `any_hit=True` returns the first accepted hit for
+occlusion, not necessarily the closest. Typed distance/barycentric/index and
+miss layouts remain unchanged. No mip/gradient alpha sampling, multi-layer
+transmission, material inference or automatic renderer selection is provided.
+
+Graph binding prepares the material table, pointers and parameter workspace
+once. Update UVs/texels in place with normal device ordering, or use
+`bindings.update(...)` to replace resources. Each prepared binding needs
+`48 + 32 * instance_count` bytes of workspace, in addition to caller resources
+and the shared pipeline/SBT. The recording memory report describes this
+per-binding request, not the number of simultaneously retained bindings or
+opaque driver residency. Keep resources/scene/provider live and close the
+Graph before the scene. Retired resources or runtime reset invalidate use.
+
+Filtered traversal has a cost even for `None` entries. Keep the original
+opaque query when filtering is unnecessary, and evaluate the full render or
+shadow window rather than only query time. Older adapters that lack alpha-mask
+support reject preparation; they do not silently run an opaque query. The
+wheel contains Forge's adapter and embedded device programs only; NVIDIA's
+runtime remains externally configured, with no new user Toolkit requirement.
+
 ## Explicit optional runtime execution providers
 
 The standard runtime wheel contains Forge-owned thin adapters for the following

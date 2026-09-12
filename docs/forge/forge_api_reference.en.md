@@ -309,14 +309,14 @@ use runtime-ordered native **rerecording**, not immutable Vulkan binding frames.
 Combining them with a sampled kernel preserves ordering but does not promise an
 immutable backend replay for the whole graph.
 
-### Vulkan `ti.Texture` hardware-sampling qualification (0.6.3 in development)
+### `ti.Texture`: sampling and mip control
 
 Explicit `ti.Texture.sample_lod()` and `fetch()` calls inside Vulkan kernels
 are automatically lowered to SPIR-V image/sampler instructions. Query the
 contract with `ti.hardware.capability("sampling.texture.vulkan")`. The current
 slice covers 1D/2D/3D sampled textures and format-matched `rw_texture` storage
-images. `ti.hardware.sampling.SamplerConfig` selects immutable min/mag filter
-and U/V/W address state at texture creation:
+images. `ti.hardware.sampling.SamplerConfig` selects immutable filtering,
+addressing and LOD state at texture creation:
 
 ```python
 sampler = ti.hardware.sampling.SamplerConfig(
@@ -334,12 +334,31 @@ objects are cached by immutable configuration. 2D Vulkan textures can explicitly
 allocate `ti.Texture(fmt, (width, height), mip_levels=N)`; the default remains one
 level. `mip_shape(level)` returns each allocated extent, rounding odd dimensions
 down and clamping to one. Levels are not populated automatically. Sampling uses
-normalized coordinates; anisotropy and comparison sampling are not exposed.
-Vulkan selects the nearest mip level. `min_filter="linear"` interpolates texels
-within that level; it does **not** enable trilinear interpolation between levels.
+normalized coordinates. Vulkan defaults to `mip_filter="nearest"`;
+`mip_filter="linear"` interpolates between levels. `min_filter="linear"` alone
+only interpolates texels within a level. Comparison sampling is not exposed.
 `sample_lod()` uses the sampler while exact integer-coordinate
 `fetch()` ignores it. Floating filtering does not promise cross-device
 bitwise determinism.
+
+Vulkan also accepts `lod_bias=0.0`, `min_lod=0.0`, `max_lod=None` (unbounded),
+and `max_anisotropy=1.0` (disabled). Requesting a value above the device limit,
+or anisotropy without the required feature, fails at texture creation; Forge
+does not silently reduce the requested quality. These extended settings and
+managed mip chains are not currently supported by the CUDA texture path.
+
+Inside a Vulkan kernel, `grid.sample_grad(uv, duvdx, duvdy)` supplies an explicit
+2D footprint. All three arguments are f32 vectors of length two; gradients are
+in normalized UV units per output sample, with the same axis order as `uv`.
+The application computes gradients; Forge does not infer screen-space
+derivatives. This method also works on a 2D `TextureCollection` member.
+Use explicit gradients for anisotropic footprints, or `sample_lod(uv, lod)`
+when the application already has an LOD. Populate all potentially accessed
+mips before sampling. Vulkan applies sampler bias and clamps to either the
+explicit or gradient-derived LOD, as defined by its
+[LOD operation](https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-level-of-detail-operation).
+Filter/LOD requirements are quality semantics, not
+parameters an optimizer may lower without caller consent.
 
 `ti.hardware.image.VulkanImageRegion(mip_level=N)` selects a level for explicit
 buffer/image copies or blits. Omitted extent means the remainder of that level,
@@ -558,6 +577,56 @@ not an immutable draw-command replay promise; normal graphics/compute queue
 bridges remain. Prepared host packets do not keep a closed pipeline executable
 or extend its lifetime beyond `ti.reset()`.
 
+#### Depth state and multiple color attachments
+
+Pipeline construction accepts `depth_test`, `depth_write`, `depth_compare`,
+`depth_bias_constant` and `depth_bias_slope`. Comparisons are `never`, `less`,
+`equal`, `less_equal`, `greater`, `not_equal`, `greater_equal`, and `always`.
+The existing default remains `greater_equal`, zero bias and reverse-Z clear
+`0.0`. A conventional depth path can request `depth_compare="less"` and pass
+`clear_depth=1.0` to `record_pass(...)`. Set the compare, clear, projection and
+write policy consistently; equal-depth primitive selection need not match a
+software renderer. Bias values are fixed pipeline state; bias clamp is not
+exposed.
+
+For MRT, fragment output locations must be consecutive from zero and match
+the number and numeric type of the supplied targets:
+
+```python
+gfx = ti.hardware.graphics
+# pipeline's fragment shader writes vec4 at location 0 and uint at location 1.
+recording = pipeline.record_pass(
+    (pipeline.pass_draw(gfx.Draw(3), vertex_buffers={0: "vertices"}),),
+    colors=(
+        gfx.ColorAttachment("hdr", clear_value=(0.0, 0.0, 0.0, 1.0)),
+        gfx.ColorAttachment("object_id", clear_value=(0xFFFFFFFF, 0, 0, 0)),
+    ),
+    depth="depth", clear_depth=0.0,
+)
+# Bind hdr=RGBA32F, object_id=R32U and depth=D32F textures of equal size.
+```
+
+`colors=` replaces the legacy single `color=`/color-clear arguments. Each
+`ColorAttachment` selects `load_op="clear"|"load"`, `store_op="store"`, and
+four typed clear components. Integer targets require integers within the
+format's range, without float conversion. Missing channels still use a
+four-component clear tuple. Pipeline `color_targets=(ColorTarget(...), ...)`
+optionally sets per-target `blending` and `write_mask` (RGBA bits 1/2/4/8;
+default 15). Defaults are no blending and all channels writable. Integer
+blending is rejected; differing target states require independent-blend
+support. Use legacy `blending=` or `color_targets=`, not both.
+
+Targets must be distinct live 2D single-level textures with compatible color
+attachment formats and equal extents. Aliasing sampled inputs with attachments,
+MSAA resolves, sparse output locations and mip/layer attachment views are not
+exposed. Limits are checked during preparation, not every draw. A prepared
+MRT call returns its color textures as a tuple; single-color calls keep their
+single-Texture result. Subsequent kernels can consume float targets through
+`Texture.fetch`, and integer IDs through a matching typed `rw_texture.load`
+(for example `fmt=ti.Format.r32u`). No readback or ID packing is necessary.
+Include all attachment bytes and complete producer/draw/consumer costs when
+comparing MRT with separate passes. MRT is not an automatic draw rewrite.
+
 ### `ti.hardware.raster.RasterPass` (0.6.3 in development)
 
 A compatibility and qualification adapter over the existing GGUI renderer:
@@ -767,6 +836,49 @@ host readback are added to immutable replay. Ordinary Graph execution is still
 available and does not implicitly switch to the recipe. AOT export rejects AS
 arguments instead of serializing process-local handles. The typed hit fields
 remain integer indices and f32 distances/barycentrics, not float-packed IDs.
+
+#### Vulkan inline candidate filtering
+
+`scene.trace_closest_filtered(origin, direction, accept, args=(), t_min=0.0,
+t_max=1e30, cull_mask=0xff)` returns the closest **accepted** triangle hit.
+`trace_any_filtered(...)` returns the first accepted hit for occlusion, not
+necessarily the closest. These methods run inside `@ti.kernel`; they do not
+change the batch `record_typed` or opaque `trace_closest` methods.
+
+The predicate is an inlined `@ti.func`, not a Python callback or `@ti.real_func`.
+For example, with one shared BLAS and three f32-vector2 UVs per primitive:
+
+```python
+@ti.func
+def accept_alpha(candidate: ti.template(), uvs: ti.template(), alpha: ti.template()):
+    base = 3 * ti.cast(candidate.primitive_index, ti.i32)
+    u, v = candidate.barycentric_u, candidate.barycentric_v
+    uv = (1.0 - u - v) * uvs[base] + u * uvs[base + 1] + v * uvs[base + 2]
+    return alpha.sample_lod(uv, 0.0).x >= 0.5
+
+# Inside a kernel with acceleration_structure, UV-array and Texture arguments:
+# hit = scene.trace_closest_filtered(origin, direction, accept_alpha,
+#                                    args=(uvs, alpha))
+# Use hit.hit before consuming hit.t or integer index fields.
+```
+
+The candidate exposes `primitive_index`, `instance_id` (TLAS ordinal),
+`instance_custom_index`, `geometry_index`, `t`, barycentrics and `front_face`.
+For distinct meshes, use these fields to select the application's UV/material
+region. Resource reads and private local computation are allowed; external or
+shared writes, random state, synchronization and nested queries are rejected
+at compilation. Candidates/query state cannot escape the predicate scope.
+Traversal order is unspecified: rejecting a candidate continues traversal,
+and accepting one does not assume it is nearest.
+
+Bind AS, UV/material arrays and textures through normal Graph arguments.
+In-place device updates are visible under normal ordering; replacement needs
+explicit rebinding. Filtered queries expose every triangle to the predicate,
+including triangles declared opaque in the AS. They may therefore cost more
+than the unchanged opaque fast path even when every hit is accepted. This is
+alpha-mask/occlusion support, not multi-layer transparency or an automatic
+material system. OptiX uses a separate bounded mask API described in the
+[external provider guide](external_hardware_providers.en.md#optix-alpha-mask-queries).
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3 in development)
 

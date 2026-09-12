@@ -626,6 +626,49 @@ pipeline memory 仍为 unknown。typed caller 输出为每 ray 32 bytes，旧布
 word-aligned query storage 使用独立 adapter feature bit。没有此能力的旧 adapter 要求
 ray/hit 地址按 16 bytes 对齐，不满足时在准备阶段拒绝，不把未对齐指针传给旧 PTX。
 
+#### OptiX alpha-mask 查询
+
+`record_typed(..., alpha_masks=..., any_hit=False)` 可在 OptiX 设备程序中过滤三角形命中。
+`alpha_masks` 是按 IAS 实例顺序排列的 tuple，单 triangle scene 提供一个元素；元素为
+`OptixAlphaMask` 或 `None`（无条件接受）。此接口不执行任意 Taichi/Python 函数。
+
+```python
+mask = ti.hardware.ray.OptixAlphaMask(
+    uvs="uvs", texture="alpha", cutoff=0.5, channel=3,
+)
+# 示例 scene 有两个实例：第一个使用 mask，第二个不透明。
+query = scene.record_typed(N, alpha_masks=(mask, None))
+builder = ti.graph.GraphBuilder()
+builder.append_native(query, admission="explicit")
+graph = builder.compile()
+bindings = graph.bind(dict(rays=rays, hits=hits, hit_indices=hit_indices,
+                           uvs=vertex_uvs, alpha=alpha_texture))
+graph.run(bindings)
+ti.sync()  # 仅在应用需要完成或 host 观察时同步。
+graph.close()
+```
+
+UV 使用每个 GAS vertex 一对紧凑 f32，支持 scalar `(vertex_count, 2)`、AOS vector-2
+以及合格 dense view。三角形沿用 GAS 原 index 数组，其拓扑/indices 必须保持不变。
+Texture 必须是受管 CUDA 单级二维 `r32f` 或 `rgba32f`；r32f 设置 `channel=0`，RGBA
+可选 0..3。cutoff 必须有限且在 [0,1]。采样沿用 Texture 的 min/mag filter 与寻址状态。
+UV 为有限 normalized 坐标，轴顺序同 Forge `Texture.sample_lod`，非方形上传也一致；
+不能把 Vulkan texture handle 直接用于此路径。
+
+设备插值 vertex UV，采样通道值 `>= cutoff` 时接受，拒绝后继续遍历。默认返回最近的已接受命中；
+`any_hit=True` 用于遮挡，返回首个接受命中而不保证最近。typed 距离/重心/整数索引与 miss 布局不变。
+不提供 mip/梯度 alpha 采样、多层透射、材质推断或自动渲染路线选择。
+
+Graph 绑定时一次准备材质表、指针与参数缓冲。UV/texel 原位更新遵循既有设备排序；资源替换用
+`bindings.update(...)`。每个 prepared binding 额外请求 `48 + 32 * instance_count` 字节，
+此外还有调用方资源和共用 pipeline/SBT。recording memory report 表示单 binding 请求量，
+不是所有同时保留 binding 的总量，也不是 driver 实际驻留。保持资源/scene/provider 存活，
+先关闭 Graph 再关闭 scene；资源退役或 runtime reset 后不能继续使用。
+
+即使 `None` 条目也有 filtered traversal 成本。无需过滤时保留原 opaque query，评价完整渲染或
+阴影窗口而不只看 query 时间。缺少 alpha-mask 能力的旧 adapter 会在准备时拒绝，不偷偷改为 opaque。
+wheel 仍只包含 Forge adapter 和嵌入设备程序，NVIDIA runtime 由外部环境提供，不新增用户 Toolkit 要求。
+
 ## 显式 optional runtime 执行 provider
 
 标准 runtime wheel 随附以下三个 Forge 自有薄 adapter。adapter 不包含也不链接 vendor

@@ -253,13 +253,13 @@ Graph 绑定发布时准备固定 layout/range。须保持资源 owner 存活；
 使关联绑定失效。这些传输使用 runtime-ordered native **重录**，不是 immutable Vulkan
 binding frame。与采样 kernel 组合能保持设备顺序，但不承诺整图采用 immutable backend replay。
 
-### Vulkan `ti.Texture` 硬件采样资格（0.6.3 开发中）
+### `ti.Texture`：采样与 mip 控制
 
 Vulkan kernel 内显式调用 `ti.Texture` 的 `sample_lod()` / `fetch()` 会由编译器自动
 lowering 到 SPIR-V image/sampler 指令，可在 `ti.hardware.capability(
 "sampling.texture.vulkan")` 查询合同。当前覆盖 1D/2D/3D sampled texture 和
 format-matched `rw_texture` storage image。`ti.hardware.sampling.SamplerConfig` 在创建
-texture 时选择 immutable min/mag filter 与 U/V/W address state：
+texture 时选择不可变的过滤、寻址和 LOD 状态：
 
 ```python
 sampler = ti.hardware.sampling.SamplerConfig(
@@ -275,11 +275,24 @@ filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_re
 `clamp_to_edge`；Vulkan sampler object 按 immutable 配置在 device 内缓存。二维 Vulkan texture
 可用 `ti.Texture(fmt, (width, height), mip_levels=N)` 显式分配 mip 链，默认仍为一级。
 `mip_shape(level)` 返回该级尺寸，奇数向下取整且最小为一；不会自动填充内容。
-采样使用 normalized coordinate，暂不公开 anisotropy 与 comparison sampling。
-Vulkan 选择最近的 mip 层级；`min_filter="linear"` 只在该级 texel 之间插值，
-**不代表**相邻 mip 层级之间的三线性插值。
+采样使用 normalized coordinate。Vulkan 默认 `mip_filter="nearest"`；显式
+`mip_filter="linear"` 才在相邻层级之间插值。`min_filter="linear"` 本身仅在单级 texel
+之间插值。暂不提供 comparison sampling。
 `sample_lod()` 使用 sampler，精确整数 coordinate 的 `fetch()` 忽略它；浮点 filtering 不
 承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为 texture。
+
+Vulkan 还接受 `lod_bias=0.0`、`min_lod=0.0`、`max_lod=None`（不限定上限）、
+`max_anisotropy=1.0`（关闭）。请求超出设备限值或设备不支持的各向异性过滤，会在创建 Texture
+时明确失败，不静默降低画质。这些扩展状态与受管 mip 链目前不适用于 CUDA texture 路径。
+
+Vulkan kernel 内可调用 `grid.sample_grad(uv, duvdx, duvdy)` 指定二维采样 footprint。
+三个参数均为长度二的 f32 vector；梯度单位是每个输出采样点对应的 normalized UV 变化，
+轴顺序与 `uv` 一致。应用负责提供梯度，Forge 不推断屏幕导数。二维 `TextureCollection`
+成员同样支持该方法。各向异性 footprint 使用显式梯度；已有 LOD 时使用 `sample_lod(uv, lod)`。
+采样前须填充所有可能访问的 mip。Vulkan 按其
+[LOD operation](https://docs.vulkan.org/spec/latest/chapters/textures.html#textures-level-of-detail-operation)
+对显式或梯度推导的 LOD 应用 sampler bias 和上下限。过滤/LOD 要求属于画质语义，优化器不得擅自降低。
+
 `ti.hardware.image.VulkanImageRegion(mip_level=N)` 为显式 buffer/image copy 或 blit 选择层级；
 省略 extent 时使用该级剩余范围，不是基础层尺寸。不带 region 的 copy 和 `from_ndarray()` /
 `from_field()` 便利上传仍写第零级，保留已初始化的高层。Vulkan buffer-image copy 是 x 最快的
@@ -448,6 +461,45 @@ kernel 生产纹理、draw 消费、后续 kernel 消费可按设备依赖顺序
 pipeline/runtime 生命周期仍受约束。执行是 native **rerecord** action，不承诺 immutable draw-command replay，
 既有 graphics/compute queue bridge 保留。准备好的 host packet 不会让已关闭 pipeline 继续可执行，
 也不会把 GPU pipeline 生命周期延长到 `ti.reset()` 之后。
+
+#### 深度状态与多颜色附件
+
+构造 pipeline 可设置 `depth_test`、`depth_write`、`depth_compare`、`depth_bias_constant`
+和 `depth_bias_slope`。比较可选 `never`、`less`、`equal`、`less_equal`、`greater`、
+`not_equal`、`greater_equal`、`always`；原默认仍是 `greater_equal`、零 bias、reverse-Z
+清除值 `0.0`。常规深度可用 `depth_compare="less"`，同时在 `record_pass(...)` 设置
+`clear_depth=1.0`。比较、清除、投影与写入策略须一致；等深面不承诺与软件渲染器选择同一 primitive。
+bias 是固定 pipeline state，暂不开放 bias clamp。
+
+多颜色附件按连续 fragment output location（从零开始）排列，数量和数值类型必须对应：
+
+```python
+gfx = ti.hardware.graphics
+# pipeline 的 fragment shader 在 location 0 写 vec4，在 location 1 写 uint。
+recording = pipeline.record_pass(
+    (pipeline.pass_draw(gfx.Draw(3), vertex_buffers={0: "vertices"}),),
+    colors=(
+        gfx.ColorAttachment("hdr", clear_value=(0.0, 0.0, 0.0, 1.0)),
+        gfx.ColorAttachment("object_id", clear_value=(0xFFFFFFFF, 0, 0, 0)),
+    ),
+    depth="depth", clear_depth=0.0,
+)
+# 绑定同尺寸的 RGBA32F hdr、R32U object_id 和 D32F depth Texture。
+```
+
+`colors=` 替代旧单 `color=` 及其 clear 参数。每个 `ColorAttachment` 可设置
+`load_op="clear"|"load"`、`store_op="store"` 和四分量 `clear_value`。整数格式必须使用
+格式范围内的整数，不经过 float 转换；即使单通道附件也提供四分量 clear tuple。
+pipeline 的 `color_targets=(ColorTarget(...), ...)` 可分别设置 `blending`、`write_mask`
+（RGBA 对应位 1/2/4/8，默认 15）。默认不混合、写所有通道；整数混合被拒绝，不同附件状态要求
+设备支持 independent blend。旧 `blending=` 与 `color_targets=` 不要同时使用。
+
+附件必须是互不相同、尺寸一致、格式可用的存活二维单级 Texture。不开放采样输入与附件别名、
+MSAA resolve、稀疏 output location、mip/layer 附件 view。准备阶段检查限值，不逐 draw 重验。
+多附件 prepared 调用返回按 location 排列的 Texture tuple；旧单附件调用仍返回单 Texture。
+后续 kernel 可用 `Texture.fetch` 消费浮点目标，用匹配格式的 `rw_texture.load` 读取整数 ID
+（如 `fmt=ti.Format.r32u`），无需 readback 或 ID 打包。比较多 pass 时计入所有附件显存及完整
+生产/draw/消费成本；MRT 不会自动改写普通 draw。
 
 ### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
 
@@ -623,6 +675,40 @@ immutable secondary-command recipe。`Graph.bind()` 一次准备 descriptor，�
 descriptor 检查或 host readback。ordinary Graph 仍可用，不隐式切换到此 recipe。AOT 明确
 拒绝 AS 参数，不序列化进程内句柄；typed hit 保持整数 index 与 f32 距离/重心坐标，不把 ID
 打包为浮点数。
+
+#### Vulkan inline 候选过滤
+
+kernel 内 `scene.trace_closest_filtered(origin, direction, accept, args=(), t_min=0.0,
+t_max=1e30, cull_mask=0xff)` 返回最近的**已接受**三角形命中；`trace_any_filtered(...)`
+用于遮挡，返回首个接受的命中，不保证最近。它们不改变 batch `record_typed` 或不透明
+`trace_closest` 的语义。
+
+predicate 必须是内联 `@ti.func`，不是 Python callback 或 `@ti.real_func`。例如一个共用 BLAS，
+每个 primitive 有三个 f32-vector2 UV：
+
+```python
+@ti.func
+def accept_alpha(candidate: ti.template(), uvs: ti.template(), alpha: ti.template()):
+    base = 3 * ti.cast(candidate.primitive_index, ti.i32)
+    u, v = candidate.barycentric_u, candidate.barycentric_v
+    uv = (1.0 - u - v) * uvs[base] + u * uvs[base + 1] + v * uvs[base + 2]
+    return alpha.sample_lod(uv, 0.0).x >= 0.5
+
+# 在含 acceleration_structure、UV array、Texture 参数的 kernel 内：
+# hit = scene.trace_closest_filtered(origin, direction, accept_alpha,
+#                                    args=(uvs, alpha))
+# 先判断 hit.hit，再消费 hit.t 和整数索引字段。
+```
+
+candidate 公开 `primitive_index`、`instance_id`（TLAS 序号）、`instance_custom_index`、
+`geometry_index`、`t`、重心坐标和 `front_face`。多个不同 mesh 时由应用据此选择 UV/材质区域。
+允许资源读取与私有局部计算；外部/共享写、随机状态、同步、嵌套 query 在编译期拒绝。
+candidate/query 状态不能逃逸 predicate 作用域，不能假定遍历顺序；拒绝继续，接受后仍可能找到更近命中。
+
+AS、UV/材质数组和纹理沿普通 Graph 参数绑定。原位设备更新遵循既有排序，替换资源需显式 rebind。
+过滤查询将所有三角形交给 predicate，包括 AS 中声明 opaque 的三角形；即使全部接受，也可能比原有
+不透明 fast path 更慢。这是 alpha-mask/遮挡能力，不是多层透明算法或自动材质系统。
+OptiX 使用独立的受限 mask API，见[外部 provider 文档](external_hardware_providers.zh.md#optix-alpha-mask-查询)。
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3 开发中）
 
