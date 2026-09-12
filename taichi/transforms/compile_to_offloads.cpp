@@ -1,5 +1,6 @@
 ﻿#include "taichi/ir/ir.h"
 #include "taichi/analysis/graph_kernel_metadata.h"
+#include "taichi/common/exceptions.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
 #include "taichi/ir/transforms.h"
@@ -376,9 +377,15 @@ void apply_exact_pointwise_offload_fusion(
   for (const auto &group : plan.fusion_groups) {
     const std::string blocker =
         offload_phase_fusion_blocker(source_tasks, group);
-    TI_ERROR_IF(!blocker.empty(),
-                "offload phase fusion rejected source tasks {}..{}: {}",
-                group.front(), group.back(), blocker);
+    if (!blocker.empty()) {
+      // Inapplicable candidates are normal during Graph recipe discovery.
+      // Keep the complete reason in the exception consumed by the structured
+      // report, without emitting an ERROR for a search that can still finish.
+      // Structural/compiler invariants above retain their TI_ERROR checks.
+      throw TaichiRuntimeError(fmt::format(
+          "offload phase fusion rejected source tasks {}..{}: {}",
+          group.front(), group.back(), blocker));
+    }
   }
 
   for (auto group_it = plan.fusion_groups.rbegin();
