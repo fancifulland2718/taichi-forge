@@ -288,6 +288,18 @@ prepared at binding publication. Graphics passes keep their own queue ordering,
 image transitions and recorded execution mode: this is not full draw-command
 replay. Ordinary `builder.compile()` behavior is unchanged.
 
+Prepared Vulkan compute actions can also remain ordered boundaries between
+retained compute segments. For example, a device transform producer, TLAS refit,
+typed ray query and hit consumer can form a complete recipe. The provider keeps
+its build/query barriers and native command recording; only the surrounding
+compute argument frames and commands are retained. This does not enable OptiX
+capture or change ordinary compilation. Availability requires stable prepared
+bindings, runtime-ordered compute/graphics execution, no host readback and
+supported resource lifetimes. Existing inline-recordable commands stay inline.
+Compute argument frames currently require Program ndarray owners; a field view
+accepted by a native action alone does not establish eligibility for a retained
+compute segment. Kernel-captured fixed dense roots are a separate supported case.
+
 Updating data in place does not require rebinding. Replacing resources or scalar
 arguments uses `bindings.update(...)`; a failed update leaves the old binding
 usable. Raw dictionary calls prepare temporary frames on each call, so include
@@ -296,6 +308,43 @@ preparation are trade-offs; compare the complete producer/draw/consumer window.
 Closing a pipeline still invalidates its draws, and closing the graph or resetting
 the runtime retires the prepared frames. Pure graphics graphs, host-readback
 actions and actions using external streams do not gain this candidate.
+
+### Reuse the binding, not only the recipe
+
+Materializing a recipe creates its executor; it does not publish a reusable
+argument frame. Keep the binding alongside the executor in your application
+session, including when a callback or scheduler invokes the Graph:
+
+```python
+graph = handle.executor  # Keep the materialization owner alive as well.
+bindings = graph.bind(arguments)  # Prepare once for this resource/scalar set.
+
+def render_frame():
+    update_inputs_on_device()  # Same allocations, updated contents.
+    graph.run(bindings)         # Enqueue; no implicit host completion wait.
+
+# When a resource or a scalar argument changes, publish a new version outside
+# the unchanged-binding loop. Include that preparation in resize/update costs.
+bindings.update(output=replacement_output)
+render_frame()
+ti.sync()  # Use the completion boundary required by the application.
+```
+
+Here `arguments`, `update_inputs_on_device` and `replacement_output` are
+application-owned. Do not rebuild the binding on every unchanged invocation.
+A wrapper calling `graph.run(dict(arguments))` still takes the raw-mapping path;
+keeping only the recipe ID, executor or Python dictionary does not enable frame
+reuse. A bound native action can reuse its prepared packet while still recording
+commands or crossing a queue boundary: binding reuse is not whole-Graph replay.
+
+Read `bindings.statistics()` outside the measured loop to inspect publication
+qualification and blockers. Its facts remain readable after close/reset, but do
+not establish that a retired Graph can execute. Compare candidates with the same
+input-update, packing, downstream-consumer and completion window. Separate
+single-frame latency from several frames amortized over one completion; CPU
+submission time and the remaining wait are not independent GPU timings. Retained
+parameters and commands can increase persistent memory even when submission gets
+faster. Keep the ordinary baseline when the complete window does not improve.
 
 Use the report sections according to what they actually establish:
 

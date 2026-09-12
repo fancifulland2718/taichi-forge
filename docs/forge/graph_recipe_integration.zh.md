@@ -242,10 +242,47 @@ freeze/materialize/bind 阶段验证结构并保留 root；销毁相关树使其
 `graph.submit(bindings).wait()`。计算参数与 secondary commands 在绑定发布时准备；绘制段仍保留自己的队列
 顺序、image transition 和录制模式，不能理解成完整 draw-command replay。普通 `builder.compile()` 行为不变。
 
+Prepared Vulkan compute action 也可以作为 retained 计算段之间的有序边界。例如设备变换 producer、
+TLAS refit、typed ray query 与命中 consumer 可以组成完整 recipe。provider 仍负责 build/query barrier 和
+native 命令录制，保留的是外围计算段的参数帧与命令；这不启用 OptiX capture，也不改变普通编译。
+准入要求稳定 prepared binding、runtime-ordered compute/graphics 执行、无 host readback 及支持的资源生命周期。
+已有可 inline 录制的命令仍保持 inline。计算参数帧目前要求 Program ndarray owner；native action 单独接受
+field view，不代表该 view 能用于 retained 计算段。kernel 捕获的固定 dense root 属于另一种已支持情形。
+
 数据原位更新不要求重新绑定；替换资源或标量参数使用 `bindings.update(...)`，更新失败时旧绑定仍可用。
 直接传字典会在每次执行时准备临时 frame，测量时需要包括这部分成本。准备时间和持久参数/命令存储是额外代价，
 应比较完整 producer/draw/consumer 窗口。关闭 pipeline 仍会使相关绘制失效；关闭 Graph 或 reset runtime
 会释放其 prepared frames。纯绘制图、host-readback action 和使用外部 stream 的 action 不获得此候选。
+
+### 不只保留 recipe，还要复用 binding
+
+物化 recipe 会创建 executor，但不等于已经发布可复用的参数帧。应用 session 应同时保留 executor 和 binding，
+通过回调或调度器调用 Graph 时也一样：
+
+```python
+graph = handle.executor  # 同时保持 materialization owner 存活。
+bindings = graph.bind(arguments)  # 为这组资源与标量准备一次。
+
+def render_frame():
+    update_inputs_on_device()  # 原分配不变，只更新设备内容。
+    graph.run(bindings)         # 入队，不隐式等待 host completion。
+
+# 资源或标量改变时发布新版本；不要在绑定未变化的循环中反复准备。
+# resize/update 的应用成本需要包含这次准备。
+bindings.update(output=replacement_output)
+render_frame()
+ti.sync()  # 按应用实际需求设置完成边界。
+```
+
+`arguments`、`update_inputs_on_device` 和 `replacement_output` 均由应用提供。
+包装器若仍调用 `graph.run(dict(arguments))`，走的仍是普通字典路径；只缓存 recipe ID、executor 或字典本身，
+不会启用执行帧复用。绑定后的 native action 可以复用 prepared packet，但仍可能需要录制命令或跨队列提交；
+binding 复用不等于完整 Graph replay。
+
+在计时循环外读取 `bindings.statistics()`，检查发布资格与阻碍原因。close/reset 后这些发布事实仍可读取，
+但不表示失效 Graph 仍能执行。比较候选时保持相同的输入更新、packing、后续消费和完成窗口；
+单帧延迟与多帧合并完成的摊销成本分开报告。CPU 提交耗时与剩余等待时间都不能单独作为 GPU 时间。
+保留参数和命令可能增加持久显存；提交变快也不等于整体更优，完整窗口无收益时保留普通 baseline。
 
 | 要判断的问题 | 应读的证据 |
 | --- | --- |
