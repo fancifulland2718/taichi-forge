@@ -10698,6 +10698,11 @@ class GraphBindingSet:
         return self
 
     def statistics(self):
+        """Inspect publication facts, including after the Graph is retired.
+
+        Qualification describes the published binding, not whether its Graph
+        is still executable. Execution and updates retain their lifetime checks.
+        """
         with self._lock:
             version = self._version
             memory_recipe_certificate = version.memory_recipe_certificate
@@ -10716,13 +10721,11 @@ class GraphBindingSet:
                         memory_recipe_certificate is not None
                         and memory_recipe_certificate.runtime_bindings
                     ),
-                    "memory_recipe_names": (
-                        self._graph._spec.memory_recipe_binding_names
-                    ),
+                    "memory_recipe_names": self._memory_recipe_names,
                     "control_publish_validated": (
                         control_binding_certificate is not None
                     ),
-                    "control_names": self._graph._spec.control_binding_plan.names,
+                    "control_names": self._control_names,
                     "live_retired_versions": len(self._retired_versions),
                 }
             )
@@ -18615,6 +18618,11 @@ class Graph:
             )
             with binding_set._lock:
                 binding_set._version = self._instance.prepare_binding_version(version)
+                # Keep only immutable report metadata, not the executable spec.
+                # close/reset releases the spec before callers may collect their
+                # final binding report. No work is added to repeat invocation.
+                binding_set._memory_recipe_names = self._spec.memory_recipe_binding_names
+                binding_set._control_names = self._spec.control_binding_plan.names
 
     def _update_binding_set(self, binding_set, values, *, replace_all):
         if not isinstance(values, Mapping):

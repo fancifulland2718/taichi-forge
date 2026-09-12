@@ -279,6 +279,29 @@ def test_graph_binding_set_reclaims_versions_without_a_hard_inflight_cap():
     assert out.to_numpy()[0] == 73
 
 
+@pytest.mark.parametrize("retirement", ["close", "reset"])
+@test_utils.test(arch=ti.cpu)
+def test_graph_binding_statistics_survive_retirement_without_permitting_execution(retirement):
+    graph = _scalar_fill_graph()
+    out = ti.ndarray(ti.i32, shape=1)
+    bindings = graph.bind({"value": 5, "out": out})
+    graph.run(bindings)
+    assert out.to_numpy()[0] == 5
+    before = dict(bindings.statistics())
+
+    if retirement == "close":
+        graph.close()
+    else:
+        ti.reset()
+
+    assert graph._spec is None
+    assert dict(bindings.statistics()) == before
+    with pytest.raises(TaichiRuntimeError):
+        graph.run(bindings)
+    with pytest.raises(TaichiRuntimeError):
+        bindings.update(value=6)
+
+
 @test_utils.test(arch=ti.cpu)
 def test_graph_binding_set_waiting_submission_is_rejected_by_runtime_reset():
     graph = _scalar_fill_graph()
