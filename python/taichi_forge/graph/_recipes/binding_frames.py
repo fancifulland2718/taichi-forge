@@ -191,9 +191,10 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-readonly-tlas-recording",
             "vulkan-fixed-dense-root-retention",
             "vulkan-ordered-graphics-boundaries",
+            "vulkan-ordered-compute-boundaries",
         ),
-        domain_version="immutable-binding-frame-domain-v10",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-graphics-boundaries-v10",
+        domain_version="immutable-binding-frame-domain-v11",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-ordered-boundaries-v11",
     )
 
     def fragments(self, definition):
@@ -218,6 +219,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
         elif not _eligible(spec, definition.backend):
             return ()
         native = bool(spec.native_count)
+        graphics_only = all(node.recordable_action.backend_command_recording.queue == "graphics" for node in boundaries)
         return (
             _fragment(
                 definition,
@@ -239,7 +241,11 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                             **(
                                 {
                                     "submission": (
-                                        "secondary_compute_segments_with_ordered_graphics"
+                                        (
+                                            "secondary_compute_segments_with_ordered_graphics"
+                                            if graphics_only
+                                            else "secondary_compute_segments_with_ordered_native"
+                                        )
                                         if boundaries
                                         else "embedded_secondary_commands"
                                     ),
@@ -252,8 +258,8 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                                                 }
                                                 for node in boundaries
                                             ),
-                                            "graphics_parameters": "prepared_per_binding",
-                                            "graphics_commands": "original_recording_replay_mode",
+                                            ("graphics_parameters" if graphics_only else "native_parameters"): "prepared_per_binding",
+                                            ("graphics_commands" if graphics_only else "native_commands"): "original_recording_replay_mode",
                                         }
                                         if boundaries
                                         else {}

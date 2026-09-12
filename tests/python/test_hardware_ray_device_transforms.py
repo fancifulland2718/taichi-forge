@@ -16,8 +16,9 @@ def _triangle_blas(z=0):
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 @pytest.mark.parametrize("storage_kind", ["ndarray", "field_range"])
+@pytest.mark.parametrize("binding_recipe", [False, True])
 def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
-    storage_kind, monkeypatch
+    storage_kind, binding_recipe, monkeypatch
 ):
     if not ti.hardware.ray.is_available():
         pytest.skip("Vulkan ray query is unavailable")
@@ -99,17 +100,45 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
         ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "hit_indices", ti.i32, ndim=2),
         ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "selected", ti.i32, ndim=1),
     )
-    graph = builder.compile()
-    bindings = graph.bind(
-        dict(
-            transforms=transforms,
-            shift=shift,
-            rays=rays,
-            hits=hits,
-            hit_indices=hit_indices,
-            selected=selected,
+    context = materialized = None
+    if binding_recipe:
+        from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+        from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+        definition = builder.freeze()
+        catalog = definition.recipe_catalog(
+            providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
         )
+        candidates = [entry.recipe for entry in catalog.entries() if entry.recipe.fragments]
+        assert len(candidates) == 1
+        context = definition.materialization_context(provider_set=catalog.provider_set)
+        materialized = context.materialize(candidates[0])
+        graph = materialized.executor
+        assert graph._instance.physical_submission_mode == "vulkan_secondary_frames_with_ordered_native"
+    else:
+        graph = builder.compile()
+    arguments = dict(
+        transforms=transforms,
+        shift=shift,
+        rays=rays,
+        hits=hits,
+        hit_indices=hit_indices,
+        selected=selected,
     )
+    if binding_recipe and storage_kind == "field_range":
+        # Prepared native actions accept qualified field views, but secondary
+        # compute argument images still require Program ndarray owners. Do not
+        # silently stage the view or claim the ordinary route was retained.
+        with pytest.raises(RuntimeError, match="Program ndarray owners"):
+            graph.bind(arguments)
+        graph.close()
+        materialized.close()
+        context.close()
+        tlas.close()
+        for blas in blases:
+            blas.close()
+        return
+    bindings = graph.bind(arguments)
     assert bindings.fast_path_qualified, bindings.statistics()
     np.testing.assert_array_equal(source.to_numpy(), 19)
     memory_after = dict(
@@ -186,6 +215,9 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
         with pytest.raises(RuntimeError, match="closed"):
             graph.run(bindings)
     graph.close()
+    if context is not None:
+        materialized.close()
+        context.close()
     tlas.close()
 
 

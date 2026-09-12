@@ -5,18 +5,20 @@ import weakref
 
 
 def prepared_boundaries(spec):
-    """Existing root actions that keep their own ordered graphics submission.
+    """Existing root actions that keep their own runtime-ordered submission.
 
     This is a cold recipe predicate, not an inline-recording claim. Reuse the
     existing prepared-action contract without importing a hardware family.
+    Prefer an existing inline command over introducing a new ordered boundary.
     """
     return tuple(
         node
         for node, recording in spec._native_preparers
         if recording.backend == "vulkan"
-        and recording.queue == "graphics"
+        and recording.queue in ("graphics", "compute")
         and recording.stream_binding == "runtime_ordered"
         and recording.no_host_readback
+        and not callable(getattr(recording, "_vulkan_graph_command", None))
         and not node.temporary_actions
         and getattr(node.executable, "graph_publish_time_binding_validation_stable", False) is True
     )
@@ -81,7 +83,7 @@ def eligible(spec, backend):
 
 
 class _SegmentedBindingFrame:
-    """One published frame; graphics actions retain their original owners.
+    """One published frame; ordered actions retain their original owners.
 
     Only the compute frames own recorded secondary commands. Closing releases
     those registrations through their existing retirement path, including work
@@ -123,7 +125,7 @@ class VulkanBindingFrameExecutor:
         if not eligible(spec, "vulkan"):
             raise ValueError(
                 "Vulkan binding frames require fixed dispatches, inline-recordable native plans "
-                "or prepared runtime-ordered graphics actions"
+                "or prepared runtime-ordered compute/graphics actions"
             )
         self._program = impl.get_runtime().prog
         self._prepare = core._prepare_vulkan_graph_recording
@@ -145,7 +147,11 @@ class VulkanBindingFrameExecutor:
             self._segments.append(tuple(sources))
         self._segmented = bool(boundaries)
         if self._segmented:
-            self.physical_submission_mode = "vulkan_secondary_frames_with_ordered_graphics"
+            self.physical_submission_mode = (
+                "vulkan_secondary_frames_with_ordered_graphics"
+                if all(node.recordable_action.backend_command_recording.queue == "graphics" for node in boundaries)
+                else "vulkan_secondary_frames_with_ordered_native"
+            )
         self._frames = weakref.WeakSet()
         self._context = _GraphRunContext()
         self._dispatch_count = spec.dispatch_count
@@ -225,7 +231,13 @@ class VulkanBindingFrameExecutor:
         result.update(
             backend="vulkan",
             last_path=(
-                "vulkan_prepared_compute_with_ordered_graphics" if self._segmented else "vulkan_prepared_binding_plan"
+                (
+                    "vulkan_prepared_compute_with_ordered_graphics"
+                    if self.physical_submission_mode == "vulkan_secondary_frames_with_ordered_graphics"
+                    else "vulkan_prepared_compute_with_ordered_native"
+                )
+                if self._segmented
+                else "vulkan_prepared_binding_plan"
             ),
             diagnostics_counters_complete=False,
             known_compiled_dispatches=self._dispatch_count,
