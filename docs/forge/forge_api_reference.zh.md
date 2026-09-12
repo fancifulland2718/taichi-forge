@@ -276,6 +276,8 @@ filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_re
 可用 `ti.Texture(fmt, (width, height), mip_levels=N)` 显式分配 mip 链，默认仍为一级。
 `mip_shape(level)` 返回该级尺寸，奇数向下取整且最小为一；不会自动填充内容。
 采样使用 normalized coordinate，暂不公开 anisotropy 与 comparison sampling。
+Vulkan 选择最近的 mip 层级；`min_filter="linear"` 只在该级 texel 之间插值，
+**不代表**相邻 mip 层级之间的三线性插值。
 `sample_lod()` 使用 sampler，精确整数 coordinate 的 `fetch()` 忽略它；浮点 filtering 不
 承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为 texture。
 `ti.hardware.image.VulkanImageRegion(mip_level=N)` 为显式 buffer/image copy 或 blit 选择层级；
@@ -365,6 +367,17 @@ with ti.hardware.image.VulkanSpdPlan(
 各除二取整，对应 R32F 或 RGBA32F。output 只包含生成的 mip，不包含 source 副本。`mean`、`min`、
 `max` 对有限输入按分量执行 FP32 归约，无颜色空间转换或 NaN 传播保证；每级裁去奇数末行/列。
 level 数不超过 `floor(log2(min(width,height)))`，不含短边已为 1 后的额外一维尾链、array layer 或子矩形。
+
+消费者需注意独立输出的 LOD 映射：`output` 的第 `k` 级对应原图的第 `k + 1` 级。
+需要原图第零级时另外绑定 `source`；该 plan 不会直接写入原 Texture 的一段 mip 子资源。
+复用 plan 要求 source/output 对象不变，允许原位更新内容；替换任一 Texture 需要重新创建
+plan 和 Graph 绑定，不能只修改现有 recording 的同名参数。
+
+color mip 应由应用提供线性光空间数值并确定 alpha 约定，RGBA8 UNORM 不意味着自动解码 sRGB。
+显存比较要包含输出 Texture：RGBA8 输入生成 RGBA32F 输出，不能套用同格式 mip 链的显存比例。
+多 pass 对照必须具有相同格式、层数、边界和 alpha 语义，并计入真实 mip 消费者。
+深度/Hi-Z 流程另行确定 forward/reverse-Z 与保守 min/max 约定；`reduction="mean"`
+不是通用的深度金字塔策略。
 
 一次 dispatch 写入全部分配的 output levels。四字节 counter 仅创建时设备清零、执行后由 shader
 复位；依赖与 image layout transition 仍为 device command。workspace 报告不含调用方 Texture、driver

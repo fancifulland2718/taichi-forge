@@ -30,9 +30,11 @@ def _choice(value, choices, label):
 class SamplerConfig:
     """Immutable filter and address state for ``Texture.sample_lod``.
 
-    Taichi textures currently expose one mip level and normalized coordinates.
-    ``Texture.fetch`` is an exact integer-coordinate operation and ignores this
-    sampler state.
+    Sampling uses normalized coordinates. Textures default to one mip level;
+    managed 2D Vulkan textures may allocate multiple levels explicitly. Vulkan
+    selects the nearest mip level: ``linear`` interpolates texels within that
+    level, not between levels. ``Texture.fetch`` uses exact integer coordinates
+    and ignores this sampler state.
     """
 
     min_filter: str = "linear"

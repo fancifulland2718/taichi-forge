@@ -16,6 +16,12 @@ Forge 与 fork 使用同一环境；vendor 库和编译器只为所选 provider 
 渲染还需要启用 graphics 的 runtime，headless 计算构建不提供窗口。
 参见[安装说明](index.zh.md#版本与安装)和[硬件依赖](external_hardware_providers.zh.md)。
 
+CUDA recipe discovery 可以在 template 专门化后合并相邻的常量范围阶段。等长阶段要求逐 lane
+访存；不等长阶段目前支持互不重叠、非 bit-packed dense field 的独立初始化，每段保留自身边界
+掩码。全局读取、跨段写同一 field、缺别名证明的外部内存和跨 lane 依赖不进入这条不等长路径。
+循环前后的串行工作仍保持串行。发现候选不会改变普通编译，也不保证融合更快；应测完整应用窗口，
+并保留 baseline。
+
 以下可运行示例使用 CUDA，演示 provider 与搜索 API，不是应用基准或加速承诺。
 
 ## 可运行示例与结果处理

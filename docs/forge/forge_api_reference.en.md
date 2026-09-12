@@ -335,6 +335,8 @@ allocate `ti.Texture(fmt, (width, height), mip_levels=N)`; the default remains o
 level. `mip_shape(level)` returns each allocated extent, rounding odd dimensions
 down and clamping to one. Levels are not populated automatically. Sampling uses
 normalized coordinates; anisotropy and comparison sampling are not exposed.
+Vulkan selects the nearest mip level. `min_filter="linear"` interpolates texels
+within that level; it does **not** enable trilinear interpolation between levels.
 `sample_lod()` uses the sampler while exact integer-coordinate
 `fetch()` ignores it. Floating filtering does not promise cross-device
 bitwise determinism.
@@ -455,6 +457,22 @@ the source. `mean`, `min` and `max` reduce finite values componentwise in FP32;
 no color-space conversion or NaN propagation contract is added. Odd trailing
 rows/columns are cropped. Levels must not exceed `floor(log2(min(width,height)))`:
 additional one-dimensional tails, array layers and rectangles are not supported.
+
+Consumer LODs must account for the separate output: `output` level `k` is
+the original image's level `k + 1`. Bind `source` separately when level zero is
+needed; this plan does not write a subresource range of the original texture.
+Reusing the plan requires the same source/output objects. In-place content
+updates are supported; replacing either texture requires a new plan and Graph
+binding, not just a different value for the existing recording's binding name.
+
+For color mipmaps, provide linear-light values and choose the alpha convention
+in the application. RGBA8 UNORM does not imply sRGB decoding. Include the output
+texture bytes in memory comparisons: RGBA8 input produces RGBA32F output, so the
+usual same-format pyramid storage ratio does not describe this conversion.
+Compare against a multi-pass chain with identical formats, levels, edge and
+alpha policies, including the actual mip consumer. Depth/Hi-Z consumers must
+separately define forward/reverse-Z and conservative min/max semantics;
+`reduction="mean"` is not a general depth-pyramid policy.
 
 One dispatch writes every allocated output level. A four-byte counter is
 initialized once on-device and reset by the shader; dependencies and image

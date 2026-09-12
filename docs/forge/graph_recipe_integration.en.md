@@ -20,6 +20,15 @@ graphics-enabled runtime; a headless compute build does not provide windows.
 See [installation](index.en.md#versions-and-installation) and
 [hardware dependencies](external_hardware_providers.en.md).
 
+CUDA recipe discovery can combine adjacent constant-range phases after template
+specialization. Equal-range phases require per-lane accesses. Unequal ranges
+currently support independent initialization of non-packed dense fields, with
+each phase guarded by its own bounds. Global reads, overlapping field writes,
+unproven external-memory aliases and cross-lane dependencies remain outside this
+unequal-range path. Serial work before/after the loops stays serial. Discovery
+does not change ordinary compilation or guarantee that fusion is faster; measure
+the complete application window and retain the baseline.
+
 The executable example below uses CUDA. It is a demonstration of the provider
 and search API, not an application benchmark or a promise of acceleration.
 
