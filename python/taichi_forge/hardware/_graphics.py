@@ -111,6 +111,59 @@ def _bytes(value, label):
 
 
 @dataclass(frozen=True)
+class ColorAttachment:
+    """A color output at its tuple position (fragment output location).
+
+    Clear values remain typed: use integers for integer textures. Only mip zero,
+    single-sample 2D attachments and ``store`` are currently supported.
+    """
+
+    name: str
+    load_op: str = "clear"
+    store_op: str = "store"
+    clear_value: tuple = (0, 0, 0, 1)
+
+    def __post_init__(self):
+        object.__setattr__(self, "name", _name(self.name, "color binding"))
+        if self.load_op not in _ATTACHMENT_LOAD_OPS:
+            raise ValueError("color load_op must be 'clear' or 'load'")
+        if self.store_op != "store":
+            raise ValueError("color attachments currently require store_op='store'")
+        values = tuple(self.clear_value)
+        if len(values) != 4 or any(not isinstance(x, Real) or not math.isfinite(x) for x in values):
+            raise ValueError("clear_value must contain four finite numbers")
+        object.__setattr__(self, "clear_value", values)
+
+
+@dataclass(frozen=True)
+class ColorTarget:
+    """Per-output fixed pipeline state. Bit 0..3 enables R/G/B/A writes.
+
+    Blending uses the existing source-alpha/one-minus-source-alpha equation;
+    integer ID targets must leave blending disabled.
+    """
+
+    blending: bool = False
+    write_mask: int = 15
+
+    def __post_init__(self):
+        if not isinstance(self.blending, bool):
+            raise TypeError("blending must be bool")
+        mask = _u32(self.write_mask, "color write_mask")
+        if mask > 15:
+            raise ValueError("color write_mask must be in [0, 15]")
+
+
+def _color_targets(values, blending):
+    if values is None:
+        return ()
+    targets = tuple(values)
+    if blending or not targets or not all(isinstance(x, ColorTarget) for x in targets):
+        raise ValueError("color_targets requires nonempty ColorTarget values and blending=False")
+    return tuple((x.blending, x.write_mask) for x in targets)
+
+
+@dataclass(frozen=True)
 class VertexBinding:
     """One Vulkan vertex-buffer binding declaration."""
 
@@ -719,6 +772,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         draws,
         *,
         color="color",
+        colors=None,
         depth=None,
         color_load_op="clear",
         color_store_op="store",
@@ -737,10 +791,25 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             item.pipeline._validate_lifetime()
         pipeline_handles = tuple(int(item.pipeline._handle) for item in draws)
 
-        color = _name(color, "color binding")
+        if colors is None:
+            colors = (ColorAttachment(color, color_load_op, color_store_op, clear_color),)
+        else:
+            colors = tuple(colors)
+            if (color != "color" or color_load_op != "clear" or color_store_op != "store"
+                    or tuple(clear_color) != (0.0, 0.0, 0.0, 1.0)):
+                raise ValueError("colors cannot be combined with single-color options")
+            if not colors or not all(isinstance(x, ColorAttachment) for x in colors):
+                raise TypeError("colors must contain ColorAttachment values")
+        color_names = tuple(x.name for x in colors)
+        if len(set(color_names)) != len(color_names):
+            raise ValueError("color attachment names must be distinct")
+        color = color_names[0]
+        color_load_op = colors[0].load_op
+        color_store_op = colors[0].store_op
+        clear_color = colors[0].clear_value
         if depth is not None:
             depth = _name(depth, "depth binding")
-            if depth == color:
+            if depth in color_names:
                 raise ValueError("color and depth bindings must be different")
         if color_load_op not in _ATTACHMENT_LOAD_OPS:
             raise ValueError("color_load_op must be 'clear' or 'load'")
@@ -751,9 +820,6 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         if depth_store_op not in _ATTACHMENT_STORE_OPS:
             raise ValueError("the current Vulkan RHI only supports depth store")
 
-        clear_color = tuple(float(component) for component in clear_color)
-        if len(clear_color) != 4:
-            raise ValueError("clear_color must contain four values")
         if viewport is None:
             viewport = (0, 0, 0, 0)
         else:
@@ -765,9 +831,10 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 raise ValueError("viewport must contain x, y, width, and height")
 
         effects = {}
-        effects[color] = (
-            GraphAccess.WRITE if color_load_op == "clear" else GraphAccess.READ_WRITE
-        )
+        for attachment in colors:
+            effects[attachment.name] = (
+                GraphAccess.WRITE if attachment.load_op == "clear" else GraphAccess.READ_WRITE
+            )
         if depth is not None:
             effects[depth] = (
                 GraphAccess.WRITE
@@ -778,7 +845,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         pipelines = []
         pipeline_ids = set()
         attachment_names = frozenset(
-            name for name in (color, depth) if name is not None
+            name for name in (*color_names, depth) if name is not None
         )
         for item in draws:
             if id(item.pipeline) not in pipeline_ids:
@@ -844,7 +911,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
 
         experimental_retained_replay = (
             os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1"
-            and color_load_op == "clear"
+            and all(x.load_op == "clear" for x in colors)
             and (depth is None or depth_load_op == "clear")
         )
         super().__init__(
@@ -867,6 +934,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         object.__setattr__(self, "_runtime_prog", runtime_prog)
         object.__setattr__(self, "_runtime_generation", int(impl.runtime_generation()))
         object.__setattr__(self, "color", color)
+        object.__setattr__(self, "colors", colors)
         object.__setattr__(self, "depth", depth)
         object.__setattr__(self, "color_load_op", color_load_op)
         object.__setattr__(self, "color_store_op", color_store_op)
@@ -889,9 +957,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         return self._resource_effects
 
     def validate_graph_bindings(self, bindings):
-        color = bindings[self.color]
+        colors = tuple(bindings[x.name] for x in self.colors)
         depth = None if self.depth is None else bindings[self.depth]
-        if not isinstance(color, Texture):
+        if not all(isinstance(x, Texture) for x in colors):
             raise TaichiRuntimeError("graphics color binding must be a Texture")
         if depth is not None and not isinstance(depth, Texture):
             raise TaichiRuntimeError("graphics depth binding must be a Texture")
@@ -899,7 +967,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             texture = bindings[name]
             if not isinstance(texture, Texture):
                 raise TaichiRuntimeError("graphics sampled-image bindings must be Textures")
-            if texture is color or texture is depth:
+            if any(texture is color for color in colors) or texture is depth:
                 raise TaichiRuntimeError("graphics sampled images cannot alias pass attachments")
         if any(not isinstance(bindings[name], Ndarray) for name in self._ndarray_names):
             raise TaichiRuntimeError(
@@ -1014,12 +1082,10 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
 
         with hardware_failure_phase("provider_plan_failure"):
             command = self._runtime_prog._prepare_vulkan_graphics_pass(
-                color.tex,
+                tuple((bindings[x.name].tex, x.load_op == "clear", x.clear_value) for x in self.colors),
                 None if depth is None else depth.tex,
                 tuple(raw_draws),
-                self.color_load_op == "clear",
                 depth is not None and self.depth_load_op == "clear",
-                self.clear_color,
                 self.viewport,
                 self._experimental_retained_replay
                 and os.environ.get("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF") == "1",
@@ -1030,7 +1096,8 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             owner.tex if isinstance(owner, Texture) else owner.arr
             for owner in owners
         )
-        return _PreparedGraphicsPass(command, color, owners + native_owners)
+        result = color if len(self.colors) == 1 else tuple(bindings[x.name] for x in self.colors)
+        return _PreparedGraphicsPass(command, result, owners + native_owners)
 
     def execute(self, bindings):
         packet = (bindings if isinstance(bindings, _PreparedGraphicsPass)
@@ -1105,6 +1172,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                     for declaration in pipeline.shader_buffer_bindings
                 ),
                 "color_load_op": item.color_load_op,
+                "color_attachments": tuple(
+                    (x.name, x.load_op, x.store_op, x.clear_value) for x in item.colors
+                ),
                 "depth_load_op": item.depth_load_op,
             },
             publish_time_binding_validation_stable=True,
@@ -1148,6 +1218,7 @@ class VulkanGraphicsPipeline:
         depth_bias_constant=0.0,
         depth_bias_slope=0.0,
         blending=False,
+        color_targets=None,
         name="",
     ):
         program = impl.get_runtime().prog
@@ -1254,6 +1325,7 @@ class VulkanGraphicsPipeline:
                     bool(blending),
                     name,
                     *depth_params,
+                    _color_targets(color_targets, blending),
                 )
             )
 
@@ -1409,6 +1481,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         depth_bias_slope=0.0,
         blending=False,
         name="",
+        color_targets=None,
     ):
         program = impl.get_runtime().prog
         if program is None:
@@ -1501,6 +1574,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
                     bool(blending),
                     name,
                     *depth_params,
+                    _color_targets(color_targets, blending),
                 )
             )
 
@@ -1639,6 +1713,8 @@ def is_mesh_shader_available(*, task_shader=False):
 
 
 __all__ = [
+    "ColorAttachment",
+    "ColorTarget",
     "Draw",
     "GraphicsPassDraw",
     "IndirectDraw",

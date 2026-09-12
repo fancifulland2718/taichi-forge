@@ -258,6 +258,16 @@ VulkanPipeline::VulkanPipeline(
   create_graphics_pipeline(raster_params, vertex_inputs, vertex_attrs);
 }
 
+void VulkanPipeline::validate_color_attachment_types(const std::vector<int> &types) const {
+  TI_ERROR_IF(!graphics_pipeline_template_ ||
+                  types != graphics_pipeline_template_->color_output_types,
+              "Color attachment count/numeric types must match consecutive fragment output locations");
+}
+
+bool VulkanPipeline::color_attachment_blends(std::size_t index) const {
+  return graphics_pipeline_template_->blend_attachments.at(index).blendEnable;
+}
+
 VulkanPipeline::~VulkanPipeline() {
   for (VkShaderModule shader_module : shader_modules_) {
     vkDestroyShaderModule(device_, shader_module, kNoVkAllocCallbacks);
@@ -469,7 +479,20 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
       for (auto var : variables) {
         // We want to remove auxiliary outputs such as frag depth
         if (static_cast<int>(var->built_in) == -1) {
-          render_target_count++;
+          TI_ERROR_IF(var->location >= ti_device_.vk_caps().max_color_attachments,
+                      "Fragment output location exceeds maxColorAttachments");
+          render_target_count = std::max(render_target_count, var->location + 1);
+        }
+      }
+
+      auto &output_types = graphics_pipeline_template_->color_output_types;
+      output_types.resize(render_target_count, 0);
+      for (const auto *var : variables) {
+        if (static_cast<int>(var->built_in) == -1) {
+          const auto flags = var->type_description->type_flags;
+          output_types[var->location] = (flags & SPV_REFLECT_TYPE_FLAG_FLOAT)
+              ? 1 : ((flags & SPV_REFLECT_TYPE_FLAG_INT)
+                         ? (var->numeric.scalar.signedness ? 2 : 3) : 0);
         }
       }
 
@@ -693,22 +716,15 @@ void VulkanPipeline::create_graphics_pipeline(
   color_blending.blendConstants[3] = 0.0f;
 
   if (raster_params.blending.size()) {
-    if (raster_params.blending.size() != color_blending.attachmentCount) {
-      std::array<char, 256> buf;
-      RHI_DEBUG_SNPRINTF(
-          buf.data(), buf.size(),
-          "RasterParams::blending (size=%u) must either be zero sized "
-          "or match the number of fragment shader outputs (size=%u).",
-          uint32_t(raster_params.blending.size()),
-          uint32_t(color_blending.attachmentCount));
-      RHI_LOG_ERROR(buf.data());
-      RHI_ASSERT(false);
-    }
+    TI_ERROR_IF(raster_params.blending.size() != color_blending.attachmentCount,
+                "Color target state count must match fragment output locations");
 
     for (int i = 0; i < raster_params.blending.size(); i++) {
       auto &state = graphics_pipeline_template_->blend_attachments[i];
       auto &ti_param = raster_params.blending[i];
       state.blendEnable = ti_param.enable;
+      TI_ERROR_IF(ti_param.write_mask > 15, "Invalid graphics color write mask");
+      state.colorWriteMask = ti_param.write_mask;
       if (ti_param.enable) {
         {
           auto [res, op] = blend_op_ti_to_vk(ti_param.color.op);
@@ -740,9 +756,6 @@ void VulkanPipeline::create_graphics_pipeline(
           RHI_ASSERT(res == RhiResult::success);
           state.dstAlphaBlendFactor = factor;
         }
-        state.colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
       }
     }
   }
@@ -768,6 +781,13 @@ void VulkanPipeline::create_graphics_pipeline(
   pipeline_info.pRasterizationState = &rasterizer;
   pipeline_info.pMultisampleState = &multisampling;
   pipeline_info.pDepthStencilState = &depth_stencil;
+  if (!ti_device_.vk_caps().independent_blend && color_blending.attachmentCount > 1) {
+    const auto &states = graphics_pipeline_template_->blend_attachments;
+    for (std::size_t i = 1; i < states.size(); ++i) {
+      TI_ERROR_IF(std::memcmp(&states[0], &states[i], sizeof(states[0])) != 0,
+                  "Different color target states require independentBlend");
+    }
+  }
   pipeline_info.pColorBlendState = &color_blending;
   pipeline_info.pDynamicState = &dynamic_state;
   pipeline_info.renderPass = VK_NULL_HANDLE;  // Filled in later
@@ -1647,6 +1667,34 @@ void VulkanCommandList::begin_renderpass(int x0,
                                          std::vector<float> *clear_colors,
                                          DeviceAllocation *depth_attachment,
                                          bool depth_clear) {
+  begin_renderpass_impl(x0, y0, x1, y1, num_color_attachments,
+                       color_attachments, color_clear, nullptr, clear_colors,
+                       depth_attachment, depth_clear);
+}
+
+void VulkanCommandList::begin_renderpass_typed(
+    int x0, int y0, int x1, int y1, uint32_t num_color_attachments,
+    const DeviceAllocation *color_attachments, const bool *color_clear,
+    const VkClearColorValue *clear_colors,
+    DeviceAllocation *depth_attachment, bool depth_clear) {
+  begin_renderpass_impl(x0, y0, x1, y1, num_color_attachments,
+                       color_attachments, color_clear, clear_colors, nullptr,
+                       depth_attachment, depth_clear);
+}
+
+void VulkanCommandList::begin_renderpass_impl(
+    int x0, int y0, int x1, int y1, uint32_t num_color_attachments,
+    const DeviceAllocation *color_attachments, const bool *color_clear,
+    const VkClearColorValue *clear_colors, const std::vector<float> *float_colors,
+    DeviceAllocation *depth_attachment, bool depth_clear) {
+  const auto clear_value = [&](uint32_t i) {
+    if (clear_colors) {
+      return clear_colors[i];
+    }
+    VkClearColorValue value{};
+    std::copy_n(float_colors[i].data(), 4, value.float32);
+    return value;
+  };
   VulkanRenderPassDesc &rp_desc = current_renderpass_desc_;
   current_renderpass_desc_.color_attachments.clear();
   rp_desc.clear_depth = depth_clear;
@@ -1685,9 +1733,7 @@ void VulkanCommandList::begin_renderpass(int x0,
           clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
       attachment_info.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
       if (clear) {
-        attachment_info.clearValue.color = {
-            {clear_colors[i][0], clear_colors[i][1], clear_colors[i][2],
-             clear_colors[i][3]}};
+        attachment_info.clearValue.color = clear_value(i);
       }
 
       current_dynamic_targets_.push_back(image);
@@ -1756,9 +1802,7 @@ void VulkanCommandList::begin_renderpass(int x0,
     auto [image, view, format] = ti_device_->get_vk_image(color_attachments[i]);
     rp_desc.color_attachments.emplace_back(format, color_clear[i]);
     fb_desc.attachments.push_back(view);
-    clear_values[i].color =
-        VkClearColorValue{{clear_colors[i][0], clear_colors[i][1],
-                           clear_colors[i][2], clear_colors[i][3]}};
+    clear_values[i].color = clear_value(i);
   }
 
   if (has_depth) {

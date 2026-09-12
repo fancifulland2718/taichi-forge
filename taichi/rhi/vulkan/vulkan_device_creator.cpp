@@ -827,6 +827,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   VkPhysicalDeviceFeatures device_supported_features;
   vkGetPhysicalDeviceFeatures(physical_device_, &device_supported_features);
 
+  device_features.independentBlend = device_supported_features.independentBlend;
+  ti_device_->vk_caps().independent_blend = device_features.independentBlend;
+  ti_device_->vk_caps().max_color_attachments = physical_device_properties.limits.maxColorAttachments;
+
   if (device_supported_features.samplerAnisotropy) {
     device_features.samplerAnisotropy = true;
     ti_device_->vk_caps().sampler_anisotropy = true;

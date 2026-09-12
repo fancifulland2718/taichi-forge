@@ -308,6 +308,13 @@ struct VulkanGraphicsDrawCommand {
   std::vector<VulkanGraphicsShaderImageBinding> shader_images;
 };
 
+struct VulkanGraphicsColorAttachment {
+  Texture *texture{nullptr};
+  bool clear{true};
+  // Typed payload matching the Texture format; integer IDs never pass through float32.
+  std::array<std::uint32_t, 4> clear_bits{};
+};
+
 struct VulkanGraphicsPassInfo {
   float clear_depth{0.0f};
   bool color_clear{true};
@@ -1380,7 +1387,8 @@ class TI_DLL_EXPORT Program {
       bool depth_write,
       bool blending,
       const std::string &name,
-      const RasterDepthParams &depth_params);
+      const RasterDepthParams &depth_params,
+      const std::vector<BlendingParams> &color_targets = {});
 
   std::uint64_t create_vulkan_mesh_pipeline(
       const std::vector<std::uint32_t> &task_spirv,
@@ -1394,7 +1402,8 @@ class TI_DLL_EXPORT Program {
       bool depth_write,
       bool blending,
       const std::string &name,
-      const RasterDepthParams &depth_params);
+      const RasterDepthParams &depth_params,
+      const std::vector<BlendingParams> &color_targets = {});
 
   std::size_t vulkan_graphics_draw(
       std::uint64_t handle,
@@ -1411,7 +1420,7 @@ class TI_DLL_EXPORT Program {
       const VulkanGraphicsPassInfo &pass);
 
   std::shared_ptr<PreparedVulkanGraphicsPass> prepare_vulkan_graphics_pass(
-      Texture *color,
+      const std::vector<VulkanGraphicsColorAttachment> &colors,
       Texture *depth,
       const std::vector<VulkanGraphicsDrawCommand> &commands,
       const VulkanGraphicsPassInfo &pass);

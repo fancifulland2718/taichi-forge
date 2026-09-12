@@ -1365,6 +1365,7 @@ struct BlendFunc {
 };
 
 struct BlendingParams {
+  std::uint32_t write_mask{15};
   bool enable{true};
   BlendFunc color;
   BlendFunc alpha;

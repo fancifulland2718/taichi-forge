@@ -458,6 +458,10 @@ class VulkanPipeline : public Pipeline {
     return graphics_pipeline_template_ != nullptr;
   }
 
+  // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
+  void validate_color_attachment_types(const std::vector<int> &types) const;
+  bool color_attachment_blends(std::size_t index) const;
+
   std::unordered_map<uint32_t, VulkanResourceSet> &
   get_resource_set_templates() {
     return set_templates_;
@@ -487,6 +491,7 @@ class VulkanPipeline : public Pipeline {
     VkPipelineDepthStencilStateCreateInfo depth_stencil{};
     VkPipelineColorBlendStateCreateInfo color_blending{};
     std::vector<VkPipelineColorBlendAttachmentState> blend_attachments{};
+    std::vector<int> color_output_types;
     std::vector<VkDynamicState> dynamic_state_enables = {
         VK_DYNAMIC_STATE_LINE_WIDTH, VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR};
@@ -555,6 +560,20 @@ class VulkanCommandList : public CommandList {
                         std::vector<float> *clear_colors,
                         DeviceAllocation *depth_attachment,
                         bool depth_clear) override;
+
+  void begin_renderpass_typed(int x0, int y0, int x1, int y1,
+                             uint32_t count, const DeviceAllocation *colors,
+                             const bool *clear, const VkClearColorValue *values,
+                             DeviceAllocation *depth, bool depth_clear);
+
+ private:
+  void begin_renderpass_impl(int x0, int y0, int x1, int y1,
+                            uint32_t count, const DeviceAllocation *colors,
+                            const bool *clear, const VkClearColorValue *values,
+                            const std::vector<float> *float_values,
+                            DeviceAllocation *depth, bool depth_clear);
+
+ public:
 
   // Offscreen render passes keep their color target in attachment layout so
   // the caller can record an explicit post-pass transition. Swapchain callers
@@ -919,6 +938,8 @@ struct VulkanCapabilities {
   bool external_semaphore{false};
   bool wide_line{false};
   bool sampler_anisotropy{false};
+  bool independent_blend{false};
+  std::uint32_t max_color_attachments{1};
   bool surface{false};
   bool present{false};
   bool dynamic_rendering{false};

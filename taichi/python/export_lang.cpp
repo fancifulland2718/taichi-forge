@@ -1,6 +1,7 @@
 // Bindings for the python frontend
 
 #include <cstddef>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -1312,6 +1313,48 @@ void export_lang(py::module &m) {
 
   py::class_<PreparedVulkanGraphicsPass, std::shared_ptr<PreparedVulkanGraphicsPass>>(
       m, "_PreparedVulkanGraphicsPass");
+  auto parse_graphics_color_targets = [](const std::vector<std::pair<bool, std::uint32_t>> &raw) {
+    std::vector<BlendingParams> targets;
+    for (const auto &[enabled, mask] : raw) {
+      BlendingParams target;
+      target.enable = enabled;
+      target.write_mask = mask;
+      targets.push_back(target);
+    }
+    return targets;
+  };
+  auto parse_graphics_colors = [](const py::sequence &raw) {
+    std::vector<VulkanGraphicsColorAttachment> colors;
+    for (const auto item_handle : raw) {
+      const auto item = py::cast<py::tuple>(item_handle);
+      TI_ERROR_IF(item.size() != 3, "Color attachment requires texture, load operation and clear values");
+      VulkanGraphicsColorAttachment color;
+      color.texture = py::cast<Texture *>(item[0]);
+      color.clear = py::cast<bool>(item[1]);
+      TI_ERROR_IF(!color.texture, "Color attachment texture is null");
+      const auto values = py::cast<py::tuple>(item[2]);
+      TI_ERROR_IF(values.size() != 4, "Color clear requires four values");
+      const auto format = color.texture->get_buffer_format();
+      const auto [type, channels] = buffer_format2type_channels(format);
+      for (std::size_t i = 0; i < 4; ++i) {
+        if (is_float_sampled_texture_format(format)) {
+          const float value = py::cast<float>(values[i]);
+          TI_ERROR_IF(!std::isfinite(value), "Floating color clear must be finite float32");
+          std::memcpy(&color.clear_bits[i], &value, sizeof(value));
+        } else {
+          TI_ERROR_IF(!py::isinstance<py::int_>(values[i]), "Integer texture clear requires integer values");
+          const std::int64_t value = py::cast<std::int64_t>(values[i]);
+          const auto bits = data_type_size(type) * 8;
+          const std::int64_t low = is_signed(type) ? -(std::int64_t(1) << (bits - 1)) : 0;
+          const std::int64_t high = (std::int64_t(1) << (bits - (is_signed(type) ? 1 : 0))) - 1;
+          TI_ERROR_IF(value < low || value > high, "Integer clear is outside the texture component range");
+          color.clear_bits[i] = static_cast<std::uint32_t>(value);
+        }
+      }
+      colors.push_back(color);
+    }
+    return colors;
+  };
   auto parse_vulkan_graphics_draws = [](const py::sequence &raw_draws) {
   std::vector<VulkanGraphicsDrawCommand> commands;
   commands.reserve(raw_draws.size());
@@ -2923,13 +2966,14 @@ void export_lang(py::module &m) {
            &Program::vulkan_mesh_shader_capabilities)
       .def(
           "_create_vulkan_graphics_pipeline",
-          [](Program *program, py::bytes vertex_bytes,
+          [parse_graphics_color_targets](Program *program, py::bytes vertex_bytes,
              py::bytes fragment_bytes, const py::sequence &raw_bindings,
              const py::sequence &raw_attributes, int topology,
              int polygon_mode, bool front_face_cull, bool back_face_cull,
              bool depth_test, bool depth_write, bool blending,
              const std::string &name, int depth_compare,
-             float depth_bias_constant, float depth_bias_slope) {
+             float depth_bias_constant, float depth_bias_slope,
+             const std::vector<std::pair<bool, std::uint32_t>> &raw_color_targets) {
             auto decode_spirv = [](py::bytes value, const char *stage) {
               const std::string bytes = py::cast<std::string>(value);
               TI_ERROR_IF(bytes.empty() ||
@@ -2968,13 +3012,14 @@ void export_lang(py::module &m) {
             }
             auto vertex_spirv = decode_spirv(vertex_bytes, "vertex");
             auto fragment_spirv = decode_spirv(fragment_bytes, "fragment");
+            auto color_targets = parse_graphics_color_targets(raw_color_targets);
             py::gil_scoped_release release;
             return program->create_vulkan_graphics_pipeline(
                 vertex_spirv, fragment_spirv, bindings, attributes, topology,
                 polygon_mode, front_face_cull, back_face_cull, depth_test,
                 depth_write, blending, name,
                 {static_cast<DepthCompareOp>(depth_compare),
-                 depth_bias_constant, depth_bias_slope});
+                 depth_bias_constant, depth_bias_slope}, color_targets);
           },
           py::arg("vertex_spirv"), py::arg("fragment_spirv"),
           py::arg("vertex_bindings"), py::arg("vertex_attributes"),
@@ -2983,14 +3028,15 @@ void export_lang(py::module &m) {
           py::arg("depth_test"), py::arg("depth_write"),
           py::arg("blending"), py::arg("name"),
           py::arg("depth_compare") = 6, py::arg("depth_bias_constant") = 0.0f,
-          py::arg("depth_bias_slope") = 0.0f)
+          py::arg("depth_bias_slope") = 0.0f, py::arg("color_targets") = py::tuple())
       .def(
           "_create_vulkan_mesh_pipeline",
-          [](Program *program, py::bytes task_bytes, py::bytes mesh_bytes,
+          [parse_graphics_color_targets](Program *program, py::bytes task_bytes, py::bytes mesh_bytes,
              py::bytes fragment_bytes, int topology, int polygon_mode,
              bool front_face_cull, bool back_face_cull, bool depth_test,
              bool depth_write, bool blending, const std::string &name,
-             int depth_compare, float depth_bias_constant, float depth_bias_slope) {
+             int depth_compare, float depth_bias_constant, float depth_bias_slope,
+             const std::vector<std::pair<bool, std::uint32_t>> &raw_color_targets) {
             auto decode_spirv = [](py::bytes value, const char *stage,
                                    bool optional) {
               const std::string bytes = py::cast<std::string>(value);
@@ -3010,13 +3056,14 @@ void export_lang(py::module &m) {
             auto mesh_spirv = decode_spirv(mesh_bytes, "mesh", false);
             auto fragment_spirv =
                 decode_spirv(fragment_bytes, "fragment", false);
+            auto color_targets = parse_graphics_color_targets(raw_color_targets);
             py::gil_scoped_release release;
             return program->create_vulkan_mesh_pipeline(
                 task_spirv, mesh_spirv, fragment_spirv, topology,
                 polygon_mode, front_face_cull, back_face_cull, depth_test,
                 depth_write, blending, name,
                 {static_cast<DepthCompareOp>(depth_compare),
-                 depth_bias_constant, depth_bias_slope});
+                 depth_bias_constant, depth_bias_slope}, color_targets);
           },
           py::arg("task_spirv"), py::arg("mesh_spirv"),
           py::arg("fragment_spirv"), py::arg("topology"),
@@ -3024,7 +3071,7 @@ void export_lang(py::module &m) {
           py::arg("back_face_cull"), py::arg("depth_test"),
           py::arg("depth_write"), py::arg("blending"), py::arg("name"),
           py::arg("depth_compare") = 6, py::arg("depth_bias_constant") = 0.0f,
-          py::arg("depth_bias_slope") = 0.0f)
+          py::arg("depth_bias_slope") = 0.0f, py::arg("color_targets") = py::tuple())
       .def(
           "_vulkan_graphics_draw",
           [](Program *program, std::uint64_t handle, Texture *color,
@@ -3110,25 +3157,22 @@ void export_lang(py::module &m) {
           py::arg("retained_replay") = false, py::arg("clear_depth") = 0.0f)
       .def(
           "_prepare_vulkan_graphics_pass",
-          [parse_vulkan_graphics_draws](Program *program, Texture *color, Texture *depth,
-             const py::sequence &raw_draws, bool color_clear,
-             bool depth_clear, const std::array<float, 4> &clear_color,
+          [parse_vulkan_graphics_draws, parse_graphics_colors](Program *program, const py::sequence &raw_colors, Texture *depth,
+             const py::sequence &raw_draws, bool depth_clear,
              const std::array<std::uint32_t, 4> &viewport, bool retained_replay,
              float clear_depth) {
             auto commands = parse_vulkan_graphics_draws(raw_draws);
+            auto colors = parse_graphics_colors(raw_colors);
             VulkanGraphicsPassInfo pass;
-            pass.color_clear = color_clear;
             pass.depth_clear = depth_clear;
             pass.clear_depth = clear_depth;
             pass.retained_replay = retained_replay;
-            pass.clear_color = clear_color;
             pass.viewport = viewport;
             py::gil_scoped_release release;
-            return program->prepare_vulkan_graphics_pass(color, depth, commands, pass);
+            return program->prepare_vulkan_graphics_pass(colors, depth, commands, pass);
           },
-          py::arg("color"), py::arg("depth"), py::arg("draws"),
-          py::arg("color_clear"), py::arg("depth_clear"),
-          py::arg("clear_color"), py::arg("viewport"),
+          py::arg("colors"), py::arg("depth"), py::arg("draws"),
+          py::arg("depth_clear"), py::arg("viewport"),
           py::arg("retained_replay") = false, py::arg("clear_depth") = 0.0f)
       .def("_execute_vulkan_graphics_pass",
            [](Program *program, const std::shared_ptr<PreparedVulkanGraphicsPass> &packet) {

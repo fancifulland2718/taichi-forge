@@ -308,7 +308,8 @@ class VulkanGraphicsPipelineResource {
       bool depth_write,
       bool blending,
       const std::string &name,
-      const RasterDepthParams &depth_params)
+      const RasterDepthParams &depth_params,
+      const std::vector<BlendingParams> &color_targets)
       : program_(program), bindings_(vertex_bindings) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan graphics pipeline requires a live Program.");
@@ -390,7 +391,8 @@ class VulkanGraphicsPipelineResource {
     params.depth_test = depth_test;
     params.depth_write = depth_write;
     params.depth = depth_params;
-    if (blending) {
+    params.blending = color_targets;
+    if (blending && color_targets.empty()) {
       params.blending.emplace_back();
     }
     pipeline_ = device->create_raster_pipeline(
@@ -412,7 +414,8 @@ class VulkanGraphicsPipelineResource {
       bool depth_write,
       bool blending,
       const std::string &name,
-      const RasterDepthParams &depth_params)
+      const RasterDepthParams &depth_params,
+      const std::vector<BlendingParams> &color_targets)
       : program_(program), mesh_pipeline_(true), task_shader_(!task_spirv.empty()) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan mesh pipeline requires a live Program.");
@@ -465,7 +468,8 @@ class VulkanGraphicsPipelineResource {
     params.depth_test = depth_test;
     params.depth_write = depth_write;
     params.depth = depth_params;
-    if (blending) {
+    params.blending = color_targets;
+    if (blending && color_targets.empty()) {
       params.blending.emplace_back();
     }
     pipeline_ = device->create_raster_pipeline(
@@ -697,14 +701,15 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
     bool depth_write,
     bool blending,
     const std::string &name,
-    const RasterDepthParams &depth_params) {
+    const RasterDepthParams &depth_params,
+    const std::vector<BlendingParams> &color_targets) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(),
               "Vulkan graphics pipelines require the Vulkan backend.");
   auto resource = std::make_shared<VulkanGraphicsPipelineResource>(
       this, vertex_spirv, fragment_spirv, vertex_bindings, vertex_attributes,
       topology, polygon_mode, front_face_cull, back_face_cull, depth_test,
-      depth_write, blending, name, depth_params);
+      depth_write, blending, name, depth_params, color_targets);
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
               "Vulkan graphics pipeline handle space exhausted.");
@@ -725,14 +730,15 @@ std::uint64_t Program::create_vulkan_mesh_pipeline(
     bool depth_write,
     bool blending,
     const std::string &name,
-    const RasterDepthParams &depth_params) {
+    const RasterDepthParams &depth_params,
+    const std::vector<BlendingParams> &color_targets) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(),
               "Vulkan mesh pipelines require the Vulkan backend.");
   auto resource = std::make_shared<VulkanGraphicsPipelineResource>(
       this, task_spirv, mesh_spirv, fragment_spirv, topology, polygon_mode,
       front_face_cull, back_face_cull, depth_test, depth_write, blending,
-      name, depth_params);
+      name, depth_params, color_targets);
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
   TI_ERROR_IF(next_vulkan_graphics_pipeline_handle_ == 0,
               "Vulkan graphics pipeline handle space exhausted.");
@@ -761,7 +767,7 @@ std::size_t Program::vulkan_graphics_draw(
 }
 
 std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pass(
-    Texture *color,
+    const std::vector<VulkanGraphicsColorAttachment> &colors,
     Texture *depth,
     const std::vector<VulkanGraphicsDrawCommand> &commands,
     const VulkanGraphicsPassInfo &pass) {
@@ -771,6 +777,11 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   auto &prepared = *packet->state;
   prepared.owner = this;
   prepared.generation = runtime_program_generation();
+  TI_ERROR_IF(!vulkan_graphics_pipeline_available(), "Graphics passes require Vulkan");
+  auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
+  TI_ERROR_IF(colors.empty() || colors.size() > device->vk_caps().max_color_attachments,
+              "Vulkan color attachment count exceeds the device limit");
+  Texture *color = colors.front().texture;
   TI_ERROR_IF(!color,
               "Vulkan graphics pass requires a color attachment Texture.");
   TI_ERROR_IF(commands.empty() || commands.size() > kMaximumPassDraws,
@@ -831,18 +842,61 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
   }
 
+  std::vector<DeviceAllocation> color_allocations;
+  std::vector<VkClearColorValue> clear_colors;
+  auto color_clears = std::shared_ptr<bool[]>(new bool[colors.size()]);
+  std::vector<int> color_types;
   std::vector<const Ndarray *> arrays;
-  std::vector<const Texture *> textures{color};
+  std::vector<const Texture *> textures;
+  for (std::size_t i = 0; i < colors.size(); ++i) {
+    const auto &attachment = colors[i];
+    const auto *target = attachment.texture;
+    TI_ERROR_IF(!target || target->owning_program() != this || target->get_size() != color_size,
+                "All color attachments must belong to this runtime and have the same 2D shape");
+    const auto allocation = target->get_device_allocation();
+    TI_ERROR_IF(target->get_mip_levels() != 1,
+                "Graphics attachments currently require single-level Texture views");
+    TI_ERROR_IF(std::find(color_allocations.begin(), color_allocations.end(), allocation) != color_allocations.end()
+                    || (depth && allocation == depth->get_device_allocation()),
+                "Graphics attachments must not alias");
+    const auto format = target->get_buffer_format();
+    TI_ERROR_IF(format == BufferFormat::depth16 || format == BufferFormat::depth24stencil8 ||
+                    format == BufferFormat::depth32f, "Color attachments cannot use depth formats");
+    const auto [type, channels] = buffer_format2type_channels(format);
+    color_types.push_back(is_float_sampled_texture_format(format) ? 1 : (is_signed(type) ? 2 : 3));
+    VkFormatProperties properties{};
+    const auto vk_format = std::get<2>(device->get_vk_image(allocation));
+    vkGetPhysicalDeviceFormatProperties(device->vk_physical_device(), vk_format, &properties);
+    TI_ERROR_IF((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) == 0,
+                "Texture format cannot be a color attachment on this device");
+    textures.push_back(target);
+    color_allocations.push_back(allocation);
+    color_clears[i] = attachment.clear;
+    VkClearColorValue value{};
+    std::memcpy(&value, attachment.clear_bits.data(), sizeof(value));
+    clear_colors.push_back(value);
+  }
   if (depth) {
     textures.push_back(depth);
   }
   std::vector<RecordedGraphicsDraw> recorded_draws;
   recorded_draws.reserve(commands.size());
-  auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
   for (std::size_t draw_index = 0; draw_index < commands.size(); ++draw_index) {
     const auto &command = commands[draw_index];
     const auto &draw = command.draw;
     const auto &resource = pipelines[draw_index];
+    auto *native_pipeline = static_cast<vulkan::VulkanPipeline *>(resource->pipeline());
+    native_pipeline->validate_color_attachment_types(color_types);
+    for (std::size_t i = 0; i < colors.size(); ++i) {
+      if (native_pipeline->color_attachment_blends(i)) {
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(device->vk_physical_device(),
+            std::get<2>(device->get_vk_image(color_allocations[i])), &properties);
+        TI_ERROR_IF(color_types[i] != 1 ||
+                        !(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT),
+                    "Blending requires a blendable floating-point or normalized color attachment");
+      }
+    }
     const bool mesh_draw = command.mesh.has_value();
     TI_ERROR_IF(mesh_draw != resource->mesh_pipeline(),
                 "Vulkan graphics pipeline and draw command kinds must agree.");
@@ -1142,7 +1196,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                   "Vulkan graphics sampled image must belong to this Program");
       const auto allocation = image->get_device_allocation();
       TI_ERROR_IF(allocation.device != device ||
-                      allocation == color->get_device_allocation() ||
+                      std::find(color_allocations.begin(), color_allocations.end(), allocation) != color_allocations.end() ||
                       (depth && allocation == depth->get_device_allocation()),
                   "Vulkan sampled images must be on this device and cannot "
                   "alias render-pass attachments");
@@ -1161,7 +1215,6 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
 
   auto ndarray_leases = acquire_ndarray_leases(arrays);
   auto texture_leases = acquire_texture_leases(textures);
-  const DeviceAllocation color_allocation = color->get_device_allocation();
   const DeviceAllocation depth_allocation =
       depth ? depth->get_device_allocation() : kDeviceNullAllocation;
   const int width = color_size[0];
@@ -1169,7 +1222,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
 
   std::vector<std::uint64_t> replay_key;
   const bool replay_eligible =
-      pass.retained_replay && pass.color_clear &&
+      pass.retained_replay && std::all_of(colors.begin(), colors.end(), [](const auto &x) { return x.clear; }) &&
       (depth == nullptr || pass.depth_clear) && !compile_config().debug &&
       !compile_config().kernel_profiler;
   if (replay_eligible) {
@@ -1178,9 +1231,16 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     // attachment collision and is deliberately not used.
     replay_key.reserve(32 + commands.size() * 32);
     replay_key.push_back(0x4652475250415353ull);  // "FRGRPASS"
-    replay_key.push_back(1);
+    replay_key.push_back(2);
     replay_key.push_back(reinterpret_cast<std::uintptr_t>(this));
-    append_graphics_allocation_key(replay_key, device, color_allocation);
+    replay_key.push_back(colors.size());
+    for (std::size_t i = 0; i < colors.size(); ++i) {
+      append_graphics_allocation_key(replay_key, device, color_allocations[i]);
+      replay_key.push_back(colors[i].clear);
+      for (const auto component : colors[i].clear_bits) {
+        replay_key.push_back(component);
+      }
+    }
     replay_key.push_back(depth == nullptr ? 0 : 1);
     if (depth != nullptr) {
       append_graphics_allocation_key(replay_key, device, depth_allocation);
@@ -1188,9 +1248,6 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     replay_key.push_back(static_cast<std::uint64_t>(width));
     replay_key.push_back(static_cast<std::uint64_t>(height));
     replay_key.push_back(graphics_float_bits(pass.clear_depth));
-    for (const auto component : pass.clear_color) {
-      replay_key.push_back(graphics_float_bits(component));
-    }
     for (const auto component : viewport) {
       replay_key.push_back(component);
     }
@@ -1349,7 +1406,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   prepared.record =
       [recorded_draws = std::move(recorded_draws),
        resource_lease, pass, viewport,
-       viewport_x_end, viewport_y_end, color_allocation, depth_allocation,
+       viewport_x_end, viewport_y_end, color_allocations, clear_colors, color_clears, depth_allocation,
        width, height](GraphicsDevice *, CommandList *commands) {
         auto resource_payload = resource_lease->acquire();
         TI_ERROR_IF(!resource_payload,
@@ -1359,10 +1416,6 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
         vulkan_commands->set_next_renderpass_color_final_layout(
             ImageLayout::color_attachment);
         vulkan_commands->set_next_renderpass_depth_clear_value(pass.clear_depth);
-        bool clear = pass.color_clear;
-        std::vector<float> clear_color(pass.clear_color.begin(),
-                                       pass.clear_color.end());
-        DeviceAllocation color_target = color_allocation;
         DeviceAllocation depth_target = depth_allocation;
         DeviceAllocation *depth_target_ptr =
             depth_target == kDeviceNullAllocation ? nullptr : &depth_target;
@@ -1393,8 +1446,8 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                 sizeof(std::uint32_t), indirect_transition);
           }
         }
-        commands->begin_renderpass(0, 0, width, height, 1, &color_target,
-                                   &clear, &clear_color, depth_target_ptr,
+        vulkan_commands->begin_renderpass_typed(0, 0, width, height, color_allocations.size(), color_allocations.data(),
+                                   color_clears.get(), clear_colors.data(), depth_target_ptr,
                                    depth_target_ptr != nullptr &&
                                        pass.depth_clear);
         commands->set_raster_viewport_and_scissor(
@@ -1488,14 +1541,12 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
         }
         commands->end_renderpass();
       };
-  prepared.images = depth ? std::vector<ComputeOpImageRef>{
-                  {color_allocation, ImageLayout::color_attachment,
-                   ImageLayout::shader_read},
-                  {depth_allocation, ImageLayout::depth_attachment,
-                   ImageLayout::shader_read}}
-            : std::vector<ComputeOpImageRef>{
-                  {color_allocation, ImageLayout::color_attachment,
-                   ImageLayout::shader_read}};
+  for (const auto allocation : color_allocations) {
+    prepared.images.push_back({allocation, ImageLayout::color_attachment, ImageLayout::shader_read});
+  }
+  if (depth) {
+    prepared.images.push_back({depth_allocation, ImageLayout::depth_attachment, ImageLayout::shader_read});
+  }
   auto append_handle = [](auto &handles, const auto handle) {
     if (std::find(handles.begin(), handles.end(), handle) == handles.end()) {
       handles.push_back(handle);
@@ -1507,7 +1558,8 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   for (const auto *texture : textures) {
     append_handle(prepared.textures, texture->runtime_resource_handle());
     const auto allocation = texture->get_device_allocation();
-    if (allocation == color_allocation || allocation == depth_allocation) {
+    if (std::find(color_allocations.begin(), color_allocations.end(), allocation) != color_allocations.end()
+        || allocation == depth_allocation) {
       continue;
     }
     if (std::none_of(prepared.images.begin(), prepared.images.end(),
@@ -1583,8 +1635,14 @@ std::size_t Program::vulkan_graphics_pass(
     Texture *color, Texture *depth,
     const std::vector<VulkanGraphicsDrawCommand> &commands,
     const VulkanGraphicsPassInfo &pass) {
+  VulkanGraphicsColorAttachment attachment;
+  attachment.texture = color;
+  attachment.clear = pass.color_clear;
+  std::memcpy(attachment.clear_bits.data(), pass.clear_color.data(), sizeof(attachment.clear_bits));
+  TI_ERROR_IF(color && !is_float_sampled_texture_format(color->get_buffer_format()),
+              "Integer graphics attachments require a typed record_pass ColorAttachment");
   return execute_vulkan_graphics_pass(
-      prepare_vulkan_graphics_pass(color, depth, commands, pass));
+      prepare_vulkan_graphics_pass({attachment}, depth, commands, pass));
 }
 
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
@@ -1749,7 +1807,7 @@ std::uint64_t Program::create_vulkan_graphics_pipeline(
     bool,
     bool,
     const std::string &,
-    const RasterDepthParams &) {
+    const RasterDepthParams &, const std::vector<BlendingParams> &) {
   TI_ERROR("Vulkan graphics pipelines are unavailable in this build.");
 }
 
@@ -1765,7 +1823,7 @@ std::uint64_t Program::create_vulkan_mesh_pipeline(
     bool,
     bool,
     const std::string &,
-    const RasterDepthParams &) {
+    const RasterDepthParams &, const std::vector<BlendingParams> &) {
   TI_ERROR("Vulkan mesh pipelines are unavailable in this build.");
 }
 
@@ -1791,7 +1849,7 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t) {
 }
 
 std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pass(
-    Texture *, Texture *, const std::vector<VulkanGraphicsDrawCommand> &,
+    const std::vector<VulkanGraphicsColorAttachment> &, Texture *, const std::vector<VulkanGraphicsDrawCommand> &,
     const VulkanGraphicsPassInfo &) {
   TI_ERROR("Vulkan graphics passes are unavailable in this build.");
 }
