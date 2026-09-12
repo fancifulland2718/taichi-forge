@@ -143,15 +143,57 @@ def test_sampled_graphics_prepared_packet_lifetime_and_reset():
     source = ti.Texture(ti.Format.rgba8, (16, 8))
     target = ti.Texture(ti.Format.rgba8, (16, 8))
     recording = _recording(pipeline)
+    program = impl.get_runtime().prog
+    before = dict(program._debug_vulkan_graphics_resource_stats())
+    queue_before = dict(program._debug_vulkan_queue_submission_stats())
     execute = recording.prepare_graph_execute(
         dict(source=source, target=target, vertices=vertices, uniform=uniform)
     )
+    queue_prepared = dict(program._debug_vulkan_queue_submission_stats())
+    assert (
+        queue_prepared["queue_submit_calls"] == queue_before["queue_submit_calls"]
+    )
+    assert (
+        queue_prepared["submitted_command_buffers"]
+        == queue_before["submitted_command_buffers"]
+    )
+    prepared = dict(program._debug_vulkan_graphics_resource_stats())
+    assert (
+        prepared["prepared_resource_leases"]
+        == before["prepared_resource_leases"] + 1
+    )
+    assert (
+        prepared["prepared_draw_resources"]
+        == before["prepared_draw_resources"] + 1
+    )
+    assert (
+        prepared["prepared_descriptor_sets"]
+        == before["prepared_descriptor_sets"] + 1
+    )
+    assert (
+        prepared["prepared_raster_resources"]
+        == before["prepared_raster_resources"] + 1
+    )
     execute()
+    execute()
+    replayed = dict(program._debug_vulkan_graphics_resource_stats())
+    for key in (
+        "prepared_resource_leases",
+        "prepared_draw_resources",
+        "prepared_descriptor_sets",
+        "prepared_raster_resources",
+    ):
+        assert replayed[key] == prepared[key]
     pipeline.close()
+    closed = dict(program._debug_vulkan_graphics_resource_stats())
+    assert closed["prepared_resource_leases"] == before["prepared_resource_leases"]
+    assert closed["prepared_draw_resources"] == before["prepared_draw_resources"]
+    assert closed["prepared_descriptor_sets"] == before["prepared_descriptor_sets"]
+    assert closed["prepared_raster_resources"] == before["prepared_raster_resources"]
     ti.sync()
     with pytest.raises((RuntimeError, ti.TaichiRuntimeError), match="closed|stale"):
         execute()
-    stats = dict(impl.get_runtime().prog._debug_vulkan_graphics_resource_stats())
+    stats = dict(program._debug_vulkan_graphics_resource_stats())
     assert stats["retiring"] == 0
     # Retained host packets must not own a device pipeline beyond reset.
     ti.reset()

@@ -63,6 +63,111 @@ struct RecordedGraphicsDraw {
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
 };
 
+struct PreparedVulkanGraphicsDrawResources {
+  std::vector<std::pair<std::uint32_t, std::unique_ptr<ShaderResourceSet>>>
+      shader_resource_sets;
+  std::unique_ptr<RasterResources> raster;
+};
+
+struct PreparedVulkanGraphicsResourcePayload {
+  std::vector<PreparedVulkanGraphicsDrawResources> draws;
+};
+
+class PreparedVulkanGraphicsResourceLease;
+
+struct PreparedVulkanGraphicsResourceStats {
+  std::unordered_set<const PreparedVulkanGraphicsResourceLease *> counted;
+  std::uint64_t leases{0};
+  std::uint64_t draws{0};
+  std::uint64_t descriptor_sets{0};
+  std::uint64_t raster_resources{0};
+};
+
+class PreparedVulkanGraphicsResourceLease {
+ public:
+  explicit PreparedVulkanGraphicsResourceLease(
+      std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> payload)
+      : payload_(std::move(payload)) {
+  }
+
+  std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> acquire() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return payload_;
+  }
+
+  void clear() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    payload_.reset();
+  }
+
+  void append_debug_stats(
+      PreparedVulkanGraphicsResourceStats &result) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!payload_ || !result.counted.insert(this).second) {
+      return;
+    }
+    ++result.leases;
+    result.draws += payload_->draws.size();
+    for (const auto &draw : payload_->draws) {
+      result.descriptor_sets += draw.shader_resource_sets.size();
+      result.raster_resources += draw.raster ? 1 : 0;
+    }
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> payload_;
+};
+
+class PreparedVulkanGraphicsResourceDomain {
+ public:
+  bool register_lease(
+      const std::shared_ptr<PreparedVulkanGraphicsResourceLease> &lease) {
+    TI_ERROR_IF(!lease,
+                "Prepared Vulkan graphics resource lease must not be null.");
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+      return false;
+    }
+    leases_.erase(std::remove_if(leases_.begin(), leases_.end(),
+                                 [](const auto &item) {
+                                   return item.expired();
+                                 }),
+                  leases_.end());
+    leases_.push_back(lease);
+    return true;
+  }
+
+  void close() noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (closed_) {
+      return;
+    }
+    closed_ = true;
+    for (const auto &item : leases_) {
+      if (auto lease = item.lock()) {
+        lease->clear();
+      }
+    }
+    leases_.clear();
+  }
+
+  void append_debug_stats(
+      PreparedVulkanGraphicsResourceStats &result) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto &item : leases_) {
+      if (auto lease = item.lock()) {
+        lease->append_debug_stats(result);
+      }
+    }
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  bool closed_{false};
+  std::vector<std::weak_ptr<PreparedVulkanGraphicsResourceLease>> leases_;
+};
+
 std::size_t vertex_format_bytes(BufferFormat format) {
   switch (format) {
     case BufferFormat::r8:
@@ -179,10 +284,15 @@ struct PreparedVulkanGraphicsPass::State {
   std::function<void(GraphicsDevice *, CommandList *)> record;
   std::vector<ComputeOpImageRef> images;
   std::vector<std::uint64_t> replay_key;
+  std::shared_ptr<PreparedVulkanGraphicsResourceLease> resources;
 };
 
 class VulkanGraphicsPipelineResource {
  public:
+  ~VulkanGraphicsPipelineResource() {
+    close_prepared_resources();
+  }
+
   VulkanGraphicsPipelineResource(
       Program *program,
       const std::vector<std::uint32_t> &vertex_spirv,
@@ -375,11 +485,26 @@ class VulkanGraphicsPipelineResource {
     return task_shader_;
   }
 
+  bool register_prepared_resources(
+      const std::shared_ptr<PreparedVulkanGraphicsResourceLease> &resources) {
+    return prepared_resource_domain_.register_lease(resources);
+  }
+
+  void close_prepared_resources() noexcept {
+    prepared_resource_domain_.close();
+  }
+
+  void append_prepared_resource_debug_stats(
+      PreparedVulkanGraphicsResourceStats &result) const {
+    prepared_resource_domain_.append_debug_stats(result);
+  }
+
  private:
   Program *program_{nullptr};
   std::vector<VulkanGraphicsVertexBinding> bindings_;
   bool mesh_pipeline_{false};
   bool task_shader_{false};
+  PreparedVulkanGraphicsResourceDomain prepared_resource_domain_;
   std::unique_ptr<Pipeline> pipeline_;
 };
 
@@ -523,10 +648,17 @@ std::unordered_map<std::string, std::uint64_t>
 Program::debug_vulkan_graphics_resource_stats() {
   std::uint64_t live = 0;
   std::uint64_t queued_for_completion = 0;
+  PreparedVulkanGraphicsResourceStats prepared;
   {
     std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
     live = vulkan_graphics_pipelines_.size();
     queued_for_completion = vulkan_graphics_pipeline_retirements_.size();
+    for (const auto &item : vulkan_graphics_pipelines_) {
+      item.second->append_prepared_resource_debug_stats(prepared);
+    }
+    for (const auto &resource : vulkan_graphics_pipeline_retirements_) {
+      resource->append_prepared_resource_debug_stats(prepared);
+    }
   }
   const auto completion_retained = runtime_completion_resource_count(
       kVulkanGraphicsPipelineResourceKind);
@@ -534,7 +666,11 @@ Program::debug_vulkan_graphics_resource_stats() {
       {"live", live},
       {"retiring", queued_for_completion + completion_retained},
       {"queued_for_completion", queued_for_completion},
-      {"completion_retained", completion_retained}};
+      {"completion_retained", completion_retained},
+      {"prepared_resource_leases", prepared.leases},
+      {"prepared_draw_resources", prepared.draws},
+      {"prepared_descriptor_sets", prepared.descriptor_sets},
+      {"prepared_raster_resources", prepared.raster_resources}};
   if (program_impl_) {
     const auto replay =
         program_impl_->debug_graphics_command_replay_stats();
@@ -1123,10 +1259,89 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
   }
 
+  auto resource_payload =
+      std::make_shared<PreparedVulkanGraphicsResourcePayload>();
+  resource_payload->draws.reserve(recorded_draws.size());
+  for (const auto &recorded : recorded_draws) {
+    PreparedVulkanGraphicsDrawResources draw_resources;
+    std::unordered_map<std::uint32_t, std::unique_ptr<ShaderResourceSet>>
+        resource_sets;
+    for (const auto &shader : recorded.shader_buffers) {
+      auto &resource_set = resource_sets[shader.set_index];
+      if (!resource_set) {
+        resource_set = device->create_resource_set_unique();
+        TI_ERROR_IF(!resource_set,
+                    "Vulkan graphics shader resource set creation failed.");
+      }
+      if (!shader.array_elements.empty()) {
+        resource_set->rw_buffer_array(shader.binding, shader.array_elements);
+      } else if (shader.storage) {
+        resource_set->rw_buffer(shader.binding, shader.allocation);
+      } else {
+        resource_set->buffer(shader.binding, shader.allocation);
+      }
+    }
+    for (const auto &image : recorded.shader_images) {
+      auto &resource_set = resource_sets[image.set_index];
+      if (!resource_set) {
+        resource_set = device->create_resource_set_unique();
+        TI_ERROR_IF(!resource_set,
+                    "Vulkan graphics shader resource set creation failed.");
+      }
+      resource_set->image(image.binding, image.allocation, image.sampler);
+    }
+    draw_resources.shader_resource_sets.reserve(resource_sets.size());
+    for (auto &[set_index, resource_set] : resource_sets) {
+      const RhiResult prepare_result =
+          resource_set->prepare_for_replay(/*patch_existing=*/false);
+      TI_ERROR_IF(
+          prepare_result != RhiResult::success,
+          "Vulkan graphics shader resource set {} preparation failed: "
+          "RhiResult({}).",
+          set_index, prepare_result);
+      draw_resources.shader_resource_sets.emplace_back(set_index,
+                                                        std::move(resource_set));
+    }
+    std::sort(draw_resources.shader_resource_sets.begin(),
+              draw_resources.shader_resource_sets.end(),
+              [](const auto &lhs, const auto &rhs) {
+                return lhs.first < rhs.first;
+              });
+    if (!recorded.mesh.has_value()) {
+      draw_resources.raster = device->create_raster_resources_unique();
+      TI_ERROR_IF(!draw_resources.raster,
+                  "Vulkan graphics raster resource creation failed.");
+      for (const auto &[binding, allocation] : recorded.vertex_buffers) {
+        draw_resources.raster->vertex_buffer(allocation.get_ptr(), binding);
+      }
+      if (recorded.draw.indexed) {
+        draw_resources.raster->index_buffer(recorded.index_buffer.get_ptr(),
+                                            32);
+      }
+    }
+    resource_payload->draws.push_back(std::move(draw_resources));
+  }
+  auto resource_lease =
+      std::make_shared<PreparedVulkanGraphicsResourceLease>(resource_payload);
+  std::unordered_set<const VulkanGraphicsPipelineResource *>
+      registered_pipelines;
+  for (const auto &pipeline : pipelines) {
+    if (!registered_pipelines.insert(pipeline.get()).second) {
+      continue;
+    }
+    TI_ERROR_IF(!pipeline->register_prepared_resources(resource_lease),
+                "Vulkan graphics pipeline closed during pass preparation.");
+  }
+  prepared.resources = resource_lease;
+
   prepared.record =
-      [recorded_draws = std::move(recorded_draws), pass, viewport,
+      [recorded_draws = std::move(recorded_draws),
+       resource_lease, pass, viewport,
        viewport_x_end, viewport_y_end, color_allocation, depth_allocation,
-       width, height](GraphicsDevice *graphics, CommandList *commands) {
+       width, height](GraphicsDevice *, CommandList *commands) {
+        auto resource_payload = resource_lease->acquire();
+        TI_ERROR_IF(!resource_payload,
+                    "Prepared Vulkan graphics resources are stale or closed.");
         auto *vulkan_commands =
             static_cast<vulkan::VulkanCommandList *>(commands);
         vulkan_commands->set_next_renderpass_color_final_layout(
@@ -1173,54 +1388,25 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
             static_cast<int>(viewport[0]), static_cast<int>(viewport[1]),
             static_cast<int>(viewport_x_end),
             static_cast<int>(viewport_y_end));
-        for (const auto &recorded : recorded_draws) {
-          std::unordered_map<std::uint32_t,
-                             std::unique_ptr<ShaderResourceSet>> resource_sets;
-          for (const auto &shader : recorded.shader_buffers) {
-            auto &resource_set = resource_sets[shader.set_index];
-            if (!resource_set) {
-              resource_set = graphics->create_resource_set_unique();
-            }
-            if (!shader.array_elements.empty()) {
-              resource_set->rw_buffer_array(shader.binding,
-                                            shader.array_elements);
-            } else if (shader.storage) {
-              resource_set->rw_buffer(shader.binding, shader.allocation);
-            } else {
-              resource_set->buffer(shader.binding, shader.allocation);
-            }
-          }
-
-          for (const auto &image : recorded.shader_images) {
-            auto &resource_set = resource_sets[image.set_index];
-            if (!resource_set) {
-              resource_set = graphics->create_resource_set_unique();
-            }
-            resource_set->image(image.binding, image.allocation, image.sampler);
-          }
-
+        for (std::size_t draw_index = 0; draw_index < recorded_draws.size();
+             ++draw_index) {
+          const auto &recorded = recorded_draws[draw_index];
+          const auto &draw_resources = resource_payload->draws[draw_index];
           auto pipeline = recorded.pipeline.lock();
           TI_ERROR_IF(!pipeline,
                       "Vulkan graphics pipeline closed or retired while recording");
           commands->bind_pipeline(pipeline->pipeline());
           if (!recorded.mesh.has_value()) {
-            auto raster = graphics->create_raster_resources_unique();
-            for (const auto &[binding, allocation] :
-                 recorded.vertex_buffers) {
-              raster->vertex_buffer(allocation.get_ptr(), binding);
-            }
-            if (recorded.draw.indexed) {
-              raster->index_buffer(recorded.index_buffer.get_ptr(), 32);
-            }
             const RhiResult raster_result =
-                commands->bind_raster_resources(raster.get());
+                commands->bind_raster_resources(draw_resources.raster.get());
             TI_ERROR_IF(
                 raster_result != RhiResult::success,
                 "Vulkan graphics raster resource binding failed: "
                 "RhiResult({}).",
                 raster_result);
           }
-          for (const auto &[set_index, resource_set] : resource_sets) {
+          for (const auto &[set_index, resource_set] :
+               draw_resources.shader_resource_sets) {
             const RhiResult shader_result =
                 commands->bind_shader_resources(resource_set.get(),
                                                  set_index);
@@ -1401,6 +1587,7 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
       resource = std::move(found->second);
       vulkan_graphics_pipelines_.erase(found);
     }
+    resource->close_prepared_resources();
     // A faulted backend rejects new completion submissions. Native command
     // buffers already carry their Vulkan object references through the stream,
     // so detach the host-side replay owner without attempting another wait or
@@ -1419,6 +1606,7 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
     }
     resource = found->second;
     vulkan_graphics_pipelines_.erase(found);
+    resource->close_prepared_resources();
     if (!runtime_has_fatal_fault() &&
         runtime_submission_pending_.load(std::memory_order_acquire)) {
       vulkan_graphics_pipeline_retirements_.push_back(std::move(resource));
@@ -1438,6 +1626,12 @@ void Program::vulkan_clear_graphics_pipelines() {
     program_impl_->invalidate_graphics_command_replay();
   }
   std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+  for (const auto &item : vulkan_graphics_pipelines_) {
+    item.second->close_prepared_resources();
+  }
+  for (const auto &resource : vulkan_graphics_pipeline_retirements_) {
+    resource->close_prepared_resources();
+  }
   vulkan_graphics_pipelines_.clear();
   vulkan_graphics_pipeline_retirements_.clear();
 }
@@ -1505,6 +1699,10 @@ Program::debug_vulkan_graphics_resource_stats() {
           {"retiring", 0},
           {"queued_for_completion", 0},
           {"completion_retained", 0},
+          {"prepared_resource_leases", 0},
+          {"prepared_draw_resources", 0},
+          {"prepared_descriptor_sets", 0},
+          {"prepared_raster_resources", 0},
           {"retained_replay_attempts", 0},
           {"retained_replay_prewarms", 0},
           {"retained_replay_records", 0},
