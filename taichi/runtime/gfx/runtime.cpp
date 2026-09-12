@@ -5601,6 +5601,21 @@ StreamSemaphore GfxRuntime::flush_if_pending() {
   return flush();
 }
 
+StreamSemaphore GfxRuntime::record_completion_semaphore() {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  // Program holds its completion writer and resource boundary here. The
+  // queue-tail check includes submissions from other thread-local streams,
+  // unlike reusing the token returned by an earlier end_submission_batch().
+  // Untracked native work or work on another queue cannot establish this
+  // match and keeps the existing marker path.
+  if (!current_cmdlist_ && latest_compute_completion_ &&
+      device_->get_compute_stream()->is_last_submission(
+          latest_compute_completion_)) {
+    return latest_compute_completion_;
+  }
+  return flush();
+}
+
 void GfxRuntime::begin_submission_batch() {
   // RuntimeSubmissionTransaction is thread-affine. Holding the recursive host
   // API lock across its calls prevents an unrelated producer from being

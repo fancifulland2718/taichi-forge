@@ -8206,11 +8206,12 @@ RuntimeCompletion Program::record_runtime_completion(
             std::move(gpu_timing),
             std::move(gpu_region_timings));
       } else if (compile_config().arch == Arch::vulkan) {
-        // A work epoch exists, so flush() intentionally records a fence even
-        // when the work came from a replay/native path outside current_cmdlist.
+        // Resolve completion while holding the writer boundary: an earlier
+        // transaction token may not cover resources submitted in the interim.
+        // Gfx reuses only a current queue fence, otherwise recording a marker.
         result = RuntimeCompletion::from_stream_semaphore(
             Arch::vulkan, runtime_completion_domain_, sequence,
-            program_impl_->flush(), runtime_fault_domain_,
+            program_impl_->record_completion_semaphore(), runtime_fault_domain_,
             std::move(gpu_timing), std::move(gpu_region_timings));
       } else {
         // F2's supported contract is CPU/CUDA/Vulkan. Other compiled backends

@@ -8,6 +8,40 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_graph_ticket_reuses_batch_fence_and_orders_following_work():
+    value = ti.ndarray(ti.i32, shape=4096)
+
+    @ti.kernel
+    def advance(dst: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in dst:
+            dst[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(advance, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "dst", ti.i32, ndim=1))
+    graph = builder.compile()
+    bindings = graph.bind(dict(dst=value))
+    value.fill(0)
+    graph.submit(bindings).wait()
+    program = impl.get_runtime().prog
+    before = dict(program._debug_vulkan_queue_submission_stats())
+    first = graph.submit(bindings)
+    after = dict(program._debug_vulkan_queue_submission_stats())
+    # One batched dispatch, no separate empty completion command/submit.
+    assert after["queue_submit_calls"] - before["queue_submit_calls"] == 1
+    assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 1
+    # The next pending kernel must be flushed, not covered by the old fence.
+    advance(value)
+    second = program._record_runtime_completion()
+    second.wait()
+    first.wait()
+    np.testing.assert_array_equal(value.to_numpy(), np.full(4096, 3, dtype=np.int32))
+    graph.close()
+    ti.reset()
+    first.wait()
+    assert first.done()
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_internal_runtime_completion_contract_and_resource_retirement():
     prog = impl.get_runtime().prog

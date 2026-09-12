@@ -33,6 +33,10 @@ class GfxProgramImpl : public ProgramImpl {
     return runtime_->flush();
   }
 
+  StreamSemaphore record_completion_semaphore() override {
+    return runtime_->record_completion_semaphore();
+  }
+
   void begin_runtime_submission_batch() override {
     runtime_->begin_submission_batch();
   }

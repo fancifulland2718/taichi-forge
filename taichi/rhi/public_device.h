@@ -878,6 +878,14 @@ class RHI_DLL_EXPORT Stream {
     return nullptr;
   }
 
+  // True only if this token's host fence covers the latest successfully
+  // submitted work on the underlying queue, across all of its host streams.
+  // Does not wait, publish pending work, or consume a binary semaphore.
+  // Callers must separately exclude unsubmitted work and concurrent producers.
+  virtual bool is_last_submission(const StreamSemaphore &completion) {
+    return false;
+  }
+
   // Optional diagnostic timing scope. Implementations must enqueue both
   // boundaries in stream order and retain independent native resources for
   // every in-flight scope. The default keeps unsupported backends honest.

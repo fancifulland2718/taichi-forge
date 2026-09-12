@@ -3223,6 +3223,16 @@ std::unique_lock<std::mutex> VulkanDevice::acquire_queue_lock(VkQueue queue) {
   return graphics_queue_lock_telemetry_.acquire(graphics_queue_mutex_);
 }
 
+std::weak_ptr<vkapi::DeviceObjVkFence> &VulkanDevice::queue_tail_fence_locked(
+    VkQueue queue) {
+  // Match acquire_queue_lock(): aliased compute/graphics queues share a tail.
+  if (queue == compute_queue_) {
+    return compute_queue_tail_fence_;
+  }
+  TI_ASSERT(queue == graphics_queue_);
+  return graphics_queue_tail_fence_;
+}
+
 VulkanRuntimeTelemetrySnapshot VulkanDevice::runtime_telemetry_snapshot()
     const noexcept {
   const auto compute = compute_queue_lock_telemetry_.snapshot();
@@ -3493,6 +3503,11 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
     auto queue_lock = device_.acquire_queue_lock(queue_);
     submit_result = vkQueueSubmit(queue_, /*submitCount=*/1, &submit_info,
                                   /*fence=*/fence->fence);
+    if (submit_result == VK_SUCCESS) {
+      device_.queue_tail_fence_locked(queue_) = fence;
+    } else {
+      device_.queue_tail_fence_locked(queue_).reset();
+    }
   }
   if (submit_result != VK_SUCCESS) {
     device_.raise_backend_error(
@@ -3543,6 +3558,17 @@ StreamSemaphore VulkanStream::flush_submission_batch() {
   return flush_submission_batch_locked();
 }
 
+bool VulkanStream::is_last_submission(const StreamSemaphore &completion) {
+  if (!completion) {
+    return false;
+  }
+  const auto &token =
+      static_cast<const VulkanStreamSemaphoreObject &>(*completion);
+  auto queue_lock = device_.acquire_queue_lock(queue_);
+  return token.fence_ref &&
+         device_.queue_tail_fence_locked(queue_).lock() == token.fence_ref;
+}
+
 StreamSemaphore VulkanStream::flush_submission_batch_locked() {
   if (pending_batch_submissions_.empty()) {
     submission_batch_fence_.reset();
@@ -3574,6 +3600,11 @@ StreamSemaphore VulkanStream::flush_submission_batch_locked() {
     submit_result = vkQueueSubmit(
         queue_, static_cast<std::uint32_t>(submit_infos.size()),
         submit_infos.data(), submission_batch_fence_->fence);
+    if (submit_result == VK_SUCCESS) {
+      device_.queue_tail_fence_locked(queue_) = submission_batch_fence_;
+    } else {
+      device_.queue_tail_fence_locked(queue_).reset();
+    }
   }
   if (submit_result != VK_SUCCESS) {
     pending_batch_submissions_.clear();
@@ -4890,6 +4921,9 @@ void VulkanSurface::present_surface_image(
   {
     auto queue_lock =
         device_->acquire_queue_lock(device_->graphics_queue());
+    // Presentation has no fence in our stream completion domain. This also
+    // invalidates the compute tail when both roles share the same queue.
+    device_->queue_tail_fence_locked(device_->graphics_queue()).reset();
     present_result = vkQueuePresentKHR(device_->graphics_queue(), &presentInfo);
   }
   handle_surface_result(present_result, "presenting a swapchain image");

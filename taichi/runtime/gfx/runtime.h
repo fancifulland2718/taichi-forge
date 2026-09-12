@@ -554,6 +554,7 @@ class TI_DLL_EXPORT GfxRuntime {
   void synchronize();
 
   StreamSemaphore flush();
+  StreamSemaphore record_completion_semaphore();
   StreamSemaphore flush_if_pending();
   void begin_submission_batch();
   StreamSemaphore end_submission_batch();

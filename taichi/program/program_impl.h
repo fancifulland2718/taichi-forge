@@ -92,6 +92,12 @@ class ProgramImpl {
     return nullptr;
   }
 
+  // Called inside Program's completion writer boundary. Backends may reuse
+  // a current host fence; ordinary flush() must still publish its own signal.
+  virtual StreamSemaphore record_completion_semaphore() {
+    return flush();
+  }
+
   virtual void begin_runtime_submission_batch() {
   }
 

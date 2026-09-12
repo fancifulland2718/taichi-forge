@@ -836,6 +836,7 @@ class VulkanStream : public Stream {
   void begin_submission_batch() override;
   StreamSemaphore end_submission_batch() override;
   StreamSemaphore flush_submission_batch() override;
+  bool is_last_submission(const StreamSemaphore &completion) override;
   StreamGpuTiming begin_gpu_timing() override;
   void end_gpu_timing(const StreamGpuTiming &timing) override;
   StreamGpuTiming begin_gpu_timing_inline(CommandList *cmdlist) override;
@@ -1080,7 +1081,11 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
 
   // Cold provider initialization may submit LUT uploads on the shared queue.
   std::unique_lock<std::mutex> acquire_external_compute_queue_lock() {
-    return acquire_queue_lock(compute_queue_);
+    auto lock = acquire_queue_lock(compute_queue_);
+    // The provider can submit without publishing a fence through VulkanStream.
+    // A previous runtime completion is no longer a known queue-tail witness.
+    queue_tail_fence_locked(compute_queue_).reset();
+    return lock;
   }
 
   std::tuple<VkDeviceMemory, size_t, size_t> get_vkmemory_offset_size(
@@ -1264,6 +1269,7 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   friend VulkanSurface;
 
   std::unique_lock<std::mutex> acquire_queue_lock(VkQueue queue);
+  std::weak_ptr<vkapi::DeviceObjVkFence> &queue_tail_fence_locked(VkQueue queue);
   void create_vma_allocator();
   [[nodiscard]] RhiResult new_descriptor_pool_locked(
       const VulkanResourceSet *required_resources = nullptr);
@@ -1284,11 +1290,13 @@ class TI_DLL_EXPORT VulkanDevice : public GraphicsDevice {
   uint32_t compute_queue_family_index_{0};
   std::mutex compute_queue_mutex_;
   VulkanQueueLockTelemetry compute_queue_lock_telemetry_;
+  std::weak_ptr<vkapi::DeviceObjVkFence> compute_queue_tail_fence_;
 
   VkQueue graphics_queue_{VK_NULL_HANDLE};
   uint32_t graphics_queue_family_index_{0};
   std::mutex graphics_queue_mutex_;
   VulkanQueueLockTelemetry graphics_queue_lock_telemetry_;
+  std::weak_ptr<vkapi::DeviceObjVkFence> graphics_queue_tail_fence_;
   BackendWaitTelemetry backend_wait_telemetry_;
   std::atomic<std::uint64_t> queue_submit_calls_{0};
   std::atomic<std::uint64_t> submitted_command_buffers_{0};
