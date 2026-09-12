@@ -304,6 +304,7 @@ class FrontendWhileStmt : public Stmt {
  public:
   Expr cond;
   std::unique_ptr<Block> body;
+  bool ray_query_filter{false};
 
   explicit FrontendWhileStmt(const Expr &cond, const DebugInfo &dbg_info)
       : Stmt(dbg_info), cond(cond) {
@@ -1138,6 +1139,7 @@ class ASTBuilder {
                     std::vector<std::optional<std::string>> formats,
                     const DebugInfo &dbg_info = DebugInfo());
   void begin_func(const std::string &funcid);
+  void begin_frontend_ray_query_filter(const Expr &cond, const DebugInfo &dbg_info);
   void end_func(const std::string &funcid);
   void begin_frontend_if(const Expr &cond,
                          const DebugInfo &dbg_info = DebugInfo());

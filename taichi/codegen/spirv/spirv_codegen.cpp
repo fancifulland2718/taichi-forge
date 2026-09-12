@@ -4325,7 +4325,9 @@ class TaskCodegen : public IRVisitor {
         task_ir_, [](Stmt *stmt) {
           const auto *call = stmt->cast<InternalFuncStmt>();
           return call != nullptr &&
-                 call->func_name == "vulkan_ray_query_closest";
+                 (call->func_name == "vulkan_ray_query_closest" ||
+                  call->func_name == "vulkan_ray_query_candidate" ||
+                  call->func_name == "vulkan_ray_query_committed");
         });
     for (Stmt *call : calls) {
       std::uint32_t mask = 0;
@@ -4364,15 +4366,37 @@ class TaskCodegen : public IRVisitor {
   void visit(InternalFuncStmt *stmt) override {
     spirv::Value val;
 
-    if (stmt->func_name == "vulkan_ray_query_closest") {
+    if (stmt->func_name == "vulkan_ray_query_closest" ||
+        stmt->func_name == "vulkan_ray_query_initialize") {
       std::vector<spirv::Value> args;
       args.reserve(stmt->args.size() - 1);
       for (std::size_t index = 1; index < stmt->args.size(); ++index) {
         args.push_back(ir_->query_value(stmt->args[index]->raw_name()));
       }
-      val = ir_->ray_query_closest(
-          ir_->query_value(stmt->args[0]->raw_name()), args, stmt->ret_type,
-          ray_query_result_masks_.at(stmt));
+      const auto acceleration = ir_->query_value(stmt->args[0]->raw_name());
+      val = stmt->func_name == "vulkan_ray_query_initialize"
+                ? ir_->ray_query_initialize(acceleration, args)
+                : ir_->ray_query_closest(acceleration, args, stmt->ret_type,
+                                         ray_query_result_masks_.at(stmt));
+    } else if (stmt->func_name == "vulkan_ray_query_proceed" ||
+               stmt->func_name == "vulkan_ray_query_candidate" ||
+               stmt->func_name == "vulkan_ray_query_committed" ||
+               stmt->func_name == "vulkan_ray_query_confirm") {
+      const auto *owner = stmt->args[0]->cast<InternalFuncStmt>();
+      TI_ERROR_IF(owner == nullptr ||
+                      owner->func_name != "vulkan_ray_query_initialize",
+                  "Vulkan query state must be a direct scoped SSA resource.");
+      const auto query = ir_->query_value(owner->raw_name());
+      if (stmt->func_name == "vulkan_ray_query_proceed") {
+        val = ir_->ray_query_proceed(query);
+      } else if (stmt->func_name == "vulkan_ray_query_confirm") {
+        ir_->ray_query_confirm(query);
+        val = ir_->int_immediate_number(ir_->i32_type(), 0);
+      } else {
+        val = ir_->ray_query_result(query, stmt->ret_type,
+                                    ray_query_result_masks_.at(stmt),
+                                    stmt->func_name == "vulkan_ray_query_committed");
+      }
     } else if (stmt->func_name ==
                "vulkan_cooperative_matrix_mma_f16_f32") {
       TI_ERROR_IF(

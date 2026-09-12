@@ -415,6 +415,14 @@ void Operations::init_internals() {
        {i32, "front_face"}});
   PLAIN_OP(vulkan_ray_query_closest, ray_hit_struct, false, f32_ptr, f32, f32,
            f32, f32, f32, f32, f32, f32, u32, u32);
+  // Pointer-valued SSA resource, never a numeric handle or an exposed lvalue.
+  // SPIR-V lowers it to function-local OpTypeRayQueryKHR storage.
+  PLAIN_OP(vulkan_ray_query_initialize, f32_ptr, false, f32_ptr, f32, f32,
+           f32, f32, f32, f32, f32, f32, u32, u32);
+  PLAIN_OP(vulkan_ray_query_proceed, i32, false, f32_ptr);
+  PLAIN_OP(vulkan_ray_query_candidate, ray_hit_struct, false, f32_ptr);
+  PLAIN_OP(vulkan_ray_query_confirm, i32_void, false, f32_ptr);
+  PLAIN_OP(vulkan_ray_query_committed, ray_hit_struct, false, f32_ptr);
   PLAIN_OP(vulkan_cooperative_matrix_mma_f16_f32, i32_void, false, f16_ptr,
            f16_ptr, f32_ptr, f32_ptr, i32, i32, i32, i32, i32);
 

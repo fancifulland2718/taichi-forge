@@ -76,3 +76,10 @@ PER_INTERNAL_OP(cuda_match_all_sync_i32)
 PER_INTERNAL_OP(cuda_active_mask)
 PER_INTERNAL_OP(warp_barrier)
 PER_INTERNAL_OP(cuda_graph_update_bounded_group)
+
+// Private SSA operations used only by the scoped Vulkan query frontend.
+PER_INTERNAL_OP(vulkan_ray_query_initialize)
+PER_INTERNAL_OP(vulkan_ray_query_proceed)
+PER_INTERNAL_OP(vulkan_ray_query_candidate)
+PER_INTERNAL_OP(vulkan_ray_query_confirm)
+PER_INTERNAL_OP(vulkan_ray_query_committed)

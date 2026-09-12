@@ -436,6 +436,12 @@ class IRBuilder {
                           const std::vector<Value> &args,
                           const DataType &result_type,
                           std::uint32_t result_member_mask);
+  Value ray_query_initialize(Value acceleration_structure,
+                             const std::vector<Value> &args);
+  Value ray_query_proceed(Value query);
+  void ray_query_confirm(Value query);
+  Value ray_query_result(Value query, const DataType &result_type,
+                         std::uint32_t result_member_mask, bool committed);
 
   SType cooperative_matrix_type(const SType &component_type,
                                 std::uint32_t rows,

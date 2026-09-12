@@ -124,6 +124,76 @@ class AccelerationStructureAccessor:
         self.ptr_expr = ptr_expr
 
     @taichi_scope
+    def trace_closest_filtered(self, origin, direction, accept, *, args=(),
+                               t_min=0.0, t_max=1.0e30, cull_mask=0xFF):
+        """Return the nearest triangle accepted by an inlined ``ti.func``.
+
+        ``accept(candidate, *args)`` must return a scalar truth value and may
+        only read resources. It can interpolate UVs and sample bound textures.
+        Every triangle is filtered, including geometry built as opaque. Use
+        ``trace_closest`` for the unfiltered opaque fast path. Candidate order
+        is unspecified; rejection continues the same device traversal.
+        """
+        return self._trace_filtered(origin, direction, accept, args, t_min,
+                                    t_max, cull_mask, False)
+
+    @taichi_scope
+    def trace_any_filtered(self, origin, direction, accept, *, args=(),
+                           t_min=0.0, t_max=1.0e30, cull_mask=0xFF):
+        """Return any accepted hit, terminating traversal for occlusion.
+
+        Use the returned ``hit`` member for shadow/occlusion tests. Unlike
+        ``trace_closest_filtered``, the accepted hit need not be nearest.
+        """
+        return self._trace_filtered(origin, direction, accept, args, t_min,
+                                    t_max, cull_mask, True)
+
+    @taichi_scope
+    def _trace_filtered(self, origin, direction, accept, args, t_min, t_max,
+                        cull_mask, any_hit):
+        if impl.default_cfg().arch != _ti_core.Arch.vulkan:
+            raise TypeError("filtered ray queries require the Vulkan backend")
+        if (not getattr(accept, "_is_taichi_function", False)
+                or getattr(accept, "_is_real_function", False)
+                or getattr(getattr(accept, "func", None), "pyfunc", True)):
+            raise TypeError("ray-query accept must be an inlined ti.func, not a Python callback")
+        builder = impl.get_runtime().compiling_callable.ast_builder()
+        debug = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+
+        def query_op(name, *values, materialize=True):
+            op = getattr(_ti_core.InternalOp, "vulkan_ray_query_" + name)
+            raw = Expr(_ti_core.insert_materialized_internal_func_call(op, make_expr_group(*values)))
+            if materialize:
+                builder.insert_expr_stmt(raw.ptr)
+            return raw
+
+        origin = [ops.cast(value, f32) for value in _vector3_entries(origin, "origin")]
+        direction = [ops.cast(value, f32) for value in _vector3_entries(direction, "direction")]
+        # NoOpaque forces triangle candidates even for an opaque BLAS. The
+        # first-hit bit terminates only after confirm, never after rejection.
+        query = query_op("initialize", self.ptr_expr, *origin, *direction,
+                         ops.cast(t_min, f32), ops.cast(t_max, f32),
+                         ops.cast(6 if any_hit else 2, u32), ops.cast(cull_mask, u32))
+        proceed = query_op("proceed", query, materialize=False)
+        builder.begin_frontend_ray_query_filter(proceed.ptr, debug)
+        try:
+            candidate = RayQueryHit(query_op("candidate", query))
+            accepted = ops.cast(accept(candidate, *args), i32)
+            builder.begin_frontend_if(accepted.ptr, debug)
+            builder.begin_frontend_if_true()
+            try:
+                query_op("confirm", query)
+            finally:
+                builder.pop_scope()
+            # Frontend control nodes own both branches, including an empty
+            # rejection branch; kernel cloning relies on this AST invariant.
+            builder.begin_frontend_if_false()
+            builder.pop_scope()
+        finally:
+            builder.pop_scope()
+        return RayQueryHit(query_op("committed", query))
+
+    @taichi_scope
     def trace_closest(
         self,
         origin,

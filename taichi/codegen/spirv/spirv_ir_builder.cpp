@@ -1209,10 +1209,8 @@ Value IRBuilder::acceleration_structure_argument(uint32_t descriptor_set,
   return value;
 }
 
-Value IRBuilder::ray_query_closest(Value acceleration_structure,
-                                   const std::vector<Value> &args,
-                                   const DataType &result_type,
-                                   std::uint32_t result_member_mask) {
+Value IRBuilder::ray_query_initialize(Value acceleration_structure,
+                                      const std::vector<Value> &args) {
   TI_ERROR_IF(args.size() != 10,
               "Vulkan ray-query closest-hit expects ten scalar operands");
   TI_ERROR_IF(!caps_->get(cap::spirv_has_ray_query),
@@ -1234,6 +1232,24 @@ Value IRBuilder::ray_query_closest(Value acceleration_structure,
   const Value query = alloca_variable(t_ray_query_);
   make_inst(spv::OpRayQueryInitializeKHR, query, accel, args[8], args[9],
             origin, args[6], direction, args[7]);
+  return query;
+}
+
+Value IRBuilder::ray_query_proceed(Value query) {
+  return select(make_value(spv::OpRayQueryProceedKHR, bool_type(), query),
+                int_immediate_number(i32_type(), 1),
+                int_immediate_number(i32_type(), 0));
+}
+
+void IRBuilder::ray_query_confirm(Value query) {
+  make_inst(spv::OpRayQueryConfirmIntersectionKHR, query);
+}
+
+Value IRBuilder::ray_query_closest(Value acceleration_structure,
+                                   const std::vector<Value> &args,
+                                   const DataType &result_type,
+                                   std::uint32_t result_member_mask) {
+  const Value query = ray_query_initialize(acceleration_structure, args);
 
   const Label loop_header = new_label();
   const Label loop_continue = new_label();
@@ -1249,16 +1265,25 @@ Value IRBuilder::ray_query_closest(Value acceleration_structure,
   make_inst(spv::OpBranch, loop_header);
   start_label(loop_merge);
 
+  return ray_query_result(query, result_type, result_member_mask, true);
+}
+
+Value IRBuilder::ray_query_result(Value query, const DataType &result_type,
+                                  std::uint32_t result_member_mask,
+                                  bool is_committed) {
   const Value committed = uint_immediate_number(
       u32_type(),
-      spv::RayQueryIntersectionRayQueryCommittedIntersectionKHR);
+      is_committed ? spv::RayQueryIntersectionRayQueryCommittedIntersectionKHR
+                   : spv::RayQueryIntersectionRayQueryCandidateIntersectionKHR);
   const Value intersection_type = make_value(
       spv::OpRayQueryGetIntersectionTypeKHR, u32_type(), query, committed);
   const Value hit = make_value(
       spv::OpIEqual, bool_type(), intersection_type,
       uint_immediate_number(
           u32_type(),
-          spv::RayQueryCommittedIntersectionTypeRayQueryCommittedIntersectionTriangleKHR));
+          is_committed
+              ? uint32_t(spv::RayQueryCommittedIntersectionTypeRayQueryCommittedIntersectionTriangleKHR)
+              : uint32_t(spv::RayQueryCandidateIntersectionTypeRayQueryCandidateIntersectionTriangleKHR)));
 
   const Value miss_t = float_immediate_number(f32_type(), -1.0);
   const Value miss_index = uint_immediate_number(u32_type(), 0xffffffffu);

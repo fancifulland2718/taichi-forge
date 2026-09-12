@@ -162,7 +162,8 @@ FrontendFuncDefStmt::FrontendFuncDefStmt(const FrontendFuncDefStmt &o)
 }
 
 FrontendWhileStmt::FrontendWhileStmt(const FrontendWhileStmt &o)
-    : Stmt(o.dbg_info), cond(o.cond), body(o.body->clone()) {
+    : Stmt(o.dbg_info), cond(o.cond), body(o.body->clone()),
+      ray_query_filter(o.ray_query_filter) {
 }
 
 void ArgLoadExpression::type_check(const CompileConfig *) {
@@ -1862,6 +1863,15 @@ void ASTBuilder::begin_frontend_while(const Expr &cond,
   auto stmt = stmt_unique.get();
   this->insert(std::move(stmt_unique));
   this->create_scope(stmt->body, While);
+}
+
+void ASTBuilder::begin_frontend_ray_query_filter(const Expr &cond,
+                                                const DebugInfo &dbg_info) {
+  auto stmt = std::make_unique<FrontendWhileStmt>(cond, dbg_info);
+  stmt->ray_query_filter = true;
+  auto *body_owner = stmt.get();
+  this->insert(std::move(stmt));
+  this->create_scope(body_owner->body, While);
 }
 
 void ASTBuilder::insert_break_stmt(const DebugInfo &dbg_info) {

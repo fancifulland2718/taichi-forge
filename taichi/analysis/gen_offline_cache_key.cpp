@@ -381,6 +381,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
   void visit(FrontendWhileStmt *stmt) override {
     emit(StmtOpCode::FrontendWhileStmt);
+    emit(stmt->ray_query_filter);
     emit(stmt->cond);
     emit(stmt->body.get());
   }

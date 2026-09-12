@@ -1144,6 +1144,7 @@ void export_lang(py::module &m) {
       .def("begin_frontend_mesh_for", &ASTBuilder::begin_frontend_mesh_for)
       .def("end_frontend_mesh_for", &ASTBuilder::pop_scope)
       .def("begin_frontend_while", &ASTBuilder::begin_frontend_while)
+      .def("begin_frontend_ray_query_filter", &ASTBuilder::begin_frontend_ray_query_filter)
       .def("insert_break_stmt", &ASTBuilder::insert_break_stmt)
       .def("insert_continue_stmt", &ASTBuilder::insert_continue_stmt)
       .def("insert_expr_stmt", &ASTBuilder::insert_expr_stmt)

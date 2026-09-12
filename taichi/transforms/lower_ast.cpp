@@ -160,6 +160,7 @@ class LowerAST : public IRVisitor {
   void visit(FrontendWhileStmt *stmt) override {
     // transform into a structure as
     // while (1) { cond; if (no active) break; original body...}
+    const bool ray_query_filter = stmt->ray_query_filter;
     auto cond = stmt->cond;
     auto fctx = make_flatten_ctx();
     auto cond_stmt = flatten_rvalue(cond, &fctx);
@@ -183,6 +184,65 @@ class LowerAST : public IRVisitor {
     auto pwhile = new_while.get();
     stmt->parent->replace_with(stmt, std::move(new_while));
     pwhile->accept(this);
+    if (ray_query_filter) {
+      // One cold compiler check over the inlined predicate. Resource reads stay
+      // in ordinary IR, so Graph effect discovery still sees their bindings.
+      const auto allocations = irpass::analysis::gather_statements(
+          pwhile->body.get(), [](Stmt *item) {
+            const auto *allocation = item->cast<AllocaStmt>();
+            return allocation != nullptr && !allocation->is_shared;
+          });
+      const std::unordered_set<Stmt *> local_allocations(allocations.begin(),
+                                                       allocations.end());
+      std::function<bool(Stmt *)> private_local = [&](Stmt *pointer) {
+        if (local_allocations.count(pointer)) {
+          return true;
+        }
+        if (auto *element = pointer->cast<MatrixPtrStmt>()) {
+          return private_local(element->origin);
+        }
+        if (auto *element = pointer->cast<GetElementStmt>()) {
+          return private_local(element->src);
+        }
+        if (auto *elements = pointer->cast<MatrixOfMatrixPtrStmt>()) {
+          return std::all_of(elements->stmts.begin(), elements->stmts.end(),
+                             private_local);
+        }
+        return false;
+      };
+      const auto invalid = irpass::analysis::gather_statements(
+          pwhile->body.get(), [&](Stmt *item) {
+            if (item->is<GlobalStoreStmt>() || item->is<PrintStmt>() ||
+                item->is<AssertStmt>() || item->is<SNodeOpStmt>() ||
+                item->is<ExternalFuncCallStmt>() || item->is<FuncCallStmt>() ||
+                item->is<RandStmt>()) {
+              return true;
+            }
+            if (auto *atomic = item->cast<AtomicOpStmt>()) {
+              return !private_local(atomic->dest);
+            }
+            if (auto *store = item->cast<LocalStoreStmt>()) {
+              return !private_local(store->dest);
+            }
+            if (auto *texture = item->cast<TextureOpStmt>()) {
+              return texture->op == TextureOpType::kStore;
+            }
+            if (auto *call = item->cast<InternalFuncStmt>()) {
+              const auto &name = call->func_name;
+              return name != "vulkan_ray_query_proceed" &&
+                     name != "vulkan_ray_query_candidate" &&
+                     name != "vulkan_ray_query_confirm" &&
+                     name != "composite_extract_0" &&
+                     name != "composite_extract_1" &&
+                     name != "composite_extract_2" &&
+                     name != "composite_extract_3";
+            }
+            return false;
+          });
+      TI_ERROR_IF(!invalid.empty(),
+                  "Ray-query accept predicates must be read-only: no global "
+                  "writes, random state, synchronization, or nested queries.");
+    }
     // insert an alloca for the mask
   }
 
