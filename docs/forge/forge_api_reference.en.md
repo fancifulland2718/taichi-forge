@@ -505,6 +505,41 @@ SPIR-V rather than adding a shader-toolchain dependency, and adds no official
 wheel variant. Driver-owned pipeline and shader-module memory is reported as
 opaque rather than estimated.
 
+For sampled images in caller-provided SPIR-V, add
+`shader_image_bindings=(ti.hardware.graphics.ShaderImageBinding(set_index=0, binding=0),)`
+to the pipeline and bind the corresponding scalar **combined image sampler**
+in a pass draw:
+
+```python
+draw = pipeline.pass_draw(
+    ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"},
+    shader_images={(0, 0): "source"},
+)
+recording = pipeline.record_pass((draw,), color="target")
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+bindings = graph.bind(dict(vertices=vertices, source=source_texture,
+                           target=color_target))
+graph.run(bindings)
+ti.sync()
+graph.close()
+```
+
+The texture supplies its sampler; the SPIR-V image type and descriptor layout
+must match the declarations. Buffer and image bindings cannot share a set/binding
+pair. The source is a managed floating/normalized color texture and cannot alias
+a pass attachment. Sampling a depth attachment, storage-image writes, and graphics
+descriptor arrays are not part of this interface. Kernel-produced textures,
+the draw, and later kernel consumers are ordered without a host readback.
+
+`Graph.bind()` prepares layout/range/descriptor metadata once. Updating data in
+place reuses it; resource replacement needs an explicit binding update. Pipeline
+and runtime lifetime checks still apply. Execution is a native **rerecord** action,
+not an immutable draw-command replay promise; normal graphics/compute queue
+bridges remain. Prepared host packets do not keep a closed pipeline executable
+or extend its lifetime beyond `ti.reset()`.
+
 ### `ti.hardware.raster.RasterPass` (0.6.3 in development)
 
 A compatibility and qualification adapter over the existing GGUI renderer:

@@ -1309,6 +1309,131 @@ void export_lang(py::module &m) {
   py::class_<PreparedExternalCudaStorage>(m, "_PreparedExternalCudaStorage")
       .def_readonly("pointers", &PreparedExternalCudaStorage::pointers);
 
+  py::class_<PreparedVulkanGraphicsPass, std::shared_ptr<PreparedVulkanGraphicsPass>>(
+      m, "_PreparedVulkanGraphicsPass");
+  auto parse_vulkan_graphics_draws = [](const py::sequence &raw_draws) {
+  std::vector<VulkanGraphicsDrawCommand> commands;
+  commands.reserve(raw_draws.size());
+  for (const py::handle raw : raw_draws) {
+    const py::tuple item = py::cast<py::tuple>(raw);
+    const bool mesh = item.size() == 8 || item.size() == 9;
+    const bool indirect = item.size() == 15 || item.size() == 16;
+    TI_ERROR_IF(item.size() != 13 && item.size() != 14 && !indirect && !mesh,
+                "Vulkan graphics pass draws require either the "
+                "13-field direct, 15-field indirect, or 8-field "
+                "mesh ABI.");
+    VulkanGraphicsDrawCommand command;
+    command.pipeline_handle = py::cast<std::uint64_t>(item[0]);
+    const py::sequence raw_vertex_buffers =
+        py::cast<py::sequence>(item[1]);
+    command.vertex_buffers.reserve(raw_vertex_buffers.size());
+    for (const py::handle raw_vertex : raw_vertex_buffers) {
+      const py::tuple vertex = py::cast<py::tuple>(raw_vertex);
+      TI_ERROR_IF(
+          vertex.size() != 2,
+          "Vulkan graphics vertex-buffer bindings require binding "
+          "and ndarray fields.");
+      command.vertex_buffers.emplace_back(
+          py::cast<std::uint32_t>(vertex[0]),
+          py::cast<Ndarray *>(vertex[1]));
+    }
+    command.index_buffer = py::cast<Ndarray *>(item[2]);
+    const py::sequence raw_shader_buffers =
+        py::cast<py::sequence>(item[3]);
+    command.shader_buffers.reserve(raw_shader_buffers.size());
+    for (const py::handle raw_shader : raw_shader_buffers) {
+      const py::tuple shader = py::cast<py::tuple>(raw_shader);
+      TI_ERROR_IF(
+          shader.size() != 4 && shader.size() != 5,
+          "Vulkan graphics shader-buffer bindings require either "
+          "the scalar or fixed-array descriptor ABI.");
+      VulkanGraphicsShaderBufferBinding shader_binding;
+      shader_binding.set_index =
+          py::cast<std::uint32_t>(shader[0]);
+      shader_binding.binding =
+          py::cast<std::uint32_t>(shader[1]);
+      shader_binding.storage = py::cast<bool>(shader[3]);
+      if (shader.size() == 5) {
+        TI_ERROR_IF(!py::cast<bool>(shader[4]),
+                    "Vulkan graphics fixed-array descriptor ABI "
+                    "requires its array marker.");
+        const py::sequence elements =
+            py::cast<py::sequence>(shader[2]);
+        shader_binding.array_elements.reserve(elements.size());
+        for (const py::handle element : elements) {
+          shader_binding.array_elements.push_back(
+              py::cast<Ndarray *>(element));
+        }
+      } else {
+        shader_binding.array = py::cast<Ndarray *>(shader[2]);
+      }
+      command.shader_buffers.push_back(
+          std::move(shader_binding));
+    }
+    if (mesh) {
+      TI_ERROR_IF(!py::cast<bool>(item[7]),
+                  "Vulkan graphics mesh ABI requires its mesh "
+                  "marker.");
+      command.mesh = VulkanGraphicsMeshDrawInfo{
+          py::cast<std::uint32_t>(item[4]),
+          py::cast<std::uint32_t>(item[5]),
+          py::cast<std::uint32_t>(item[6])};
+    } else if (indirect) {
+      VulkanGraphicsIndirectInfo indirect_info;
+      indirect_info.command_buffer = py::cast<Ndarray *>(item[4]);
+      indirect_info.count_buffer = py::cast<Ndarray *>(item[5]);
+      indirect_info.command_offset =
+          py::cast<std::uint32_t>(item[6]);
+      indirect_info.count_offset =
+          py::cast<std::uint32_t>(item[7]);
+      indirect_info.max_draw_count =
+          py::cast<std::uint32_t>(item[8]);
+      indirect_info.stride = py::cast<std::uint32_t>(item[9]);
+      indirect_info.vertex_record_limit =
+          py::cast<std::uint32_t>(item[10]);
+      indirect_info.instance_record_limit =
+          py::cast<std::uint32_t>(item[11]);
+      indirect_info.index_element_limit =
+          py::cast<std::uint32_t>(item[12]);
+      indirect_info.first_instance_may_be_nonzero =
+          py::cast<bool>(item[13]);
+      command.draw.indexed = py::cast<bool>(item[14]);
+      command.indirect = indirect_info;
+    } else {
+      command.draw.element_count =
+          py::cast<std::uint32_t>(item[4]);
+      command.draw.instance_count =
+          py::cast<std::uint32_t>(item[5]);
+      command.draw.first_vertex =
+          py::cast<std::uint32_t>(item[6]);
+      command.draw.first_index =
+          py::cast<std::uint32_t>(item[7]);
+      command.draw.first_instance =
+          py::cast<std::uint32_t>(item[8]);
+      command.draw.vertex_offset =
+          py::cast<std::int32_t>(item[9]);
+      command.draw.index_min =
+          py::cast<std::uint32_t>(item[10]);
+      command.draw.index_max =
+          py::cast<std::uint32_t>(item[11]);
+      command.draw.indexed = py::cast<bool>(item[12]);
+    }
+    const std::size_t payload_size = mesh ? 8 : (indirect ? 15 : 13);
+    if (item.size() == payload_size + 1) {
+      for (const py::handle raw_image : py::cast<py::sequence>(item[payload_size])) {
+        const auto image = py::cast<py::tuple>(raw_image);
+        TI_ERROR_IF(image.size() != 3,
+                    "Graphics sampled-image binding requires set, binding and Texture");
+        command.shader_images.push_back({py::cast<std::uint32_t>(image[0]),
+                                         py::cast<std::uint32_t>(image[1]),
+                                         py::cast<Texture *>(image[2])});
+      }
+    }
+    commands.push_back(std::move(command));
+  }
+  return commands;
+  };
+
   py::class_<Program>(m, "Program")
       .def(py::init<>())
       .def("config", &Program::compile_config,
@@ -2944,131 +3069,21 @@ void export_lang(py::module &m) {
           py::arg("clear_color"), py::arg("viewport"))
       .def(
           "_vulkan_graphics_pass",
-          [](Program *program, Texture *color, Texture *depth,
+          [parse_vulkan_graphics_draws](Program *program, Texture *color, Texture *depth,
              const py::sequence &raw_draws, bool color_clear,
              bool depth_clear, const std::array<float, 4> &clear_color,
-             const std::array<std::uint32_t, 4> &viewport,
-             bool retained_replay) {
-            std::vector<VulkanGraphicsDrawCommand> commands;
-            commands.reserve(raw_draws.size());
-            for (const py::handle raw : raw_draws) {
-              const py::tuple item = py::cast<py::tuple>(raw);
-              const bool mesh = item.size() == 8;
-              const bool indirect = item.size() == 15;
-              TI_ERROR_IF(item.size() != 13 && !indirect && !mesh,
-                          "Vulkan graphics pass draws require either the "
-                          "13-field direct, 15-field indirect, or 8-field "
-                          "mesh ABI.");
-              VulkanGraphicsDrawCommand command;
-              command.pipeline_handle = py::cast<std::uint64_t>(item[0]);
-              const py::sequence raw_vertex_buffers =
-                  py::cast<py::sequence>(item[1]);
-              command.vertex_buffers.reserve(raw_vertex_buffers.size());
-              for (const py::handle raw_vertex : raw_vertex_buffers) {
-                const py::tuple vertex = py::cast<py::tuple>(raw_vertex);
-                TI_ERROR_IF(
-                    vertex.size() != 2,
-                    "Vulkan graphics vertex-buffer bindings require binding "
-                    "and ndarray fields.");
-                command.vertex_buffers.emplace_back(
-                    py::cast<std::uint32_t>(vertex[0]),
-                    py::cast<Ndarray *>(vertex[1]));
-              }
-              command.index_buffer = py::cast<Ndarray *>(item[2]);
-              const py::sequence raw_shader_buffers =
-                  py::cast<py::sequence>(item[3]);
-              command.shader_buffers.reserve(raw_shader_buffers.size());
-              for (const py::handle raw_shader : raw_shader_buffers) {
-                const py::tuple shader = py::cast<py::tuple>(raw_shader);
-                TI_ERROR_IF(
-                    shader.size() != 4 && shader.size() != 5,
-                    "Vulkan graphics shader-buffer bindings require either "
-                    "the scalar or fixed-array descriptor ABI.");
-                VulkanGraphicsShaderBufferBinding shader_binding;
-                shader_binding.set_index =
-                    py::cast<std::uint32_t>(shader[0]);
-                shader_binding.binding =
-                    py::cast<std::uint32_t>(shader[1]);
-                shader_binding.storage = py::cast<bool>(shader[3]);
-                if (shader.size() == 5) {
-                  TI_ERROR_IF(!py::cast<bool>(shader[4]),
-                              "Vulkan graphics fixed-array descriptor ABI "
-                              "requires its array marker.");
-                  const py::sequence elements =
-                      py::cast<py::sequence>(shader[2]);
-                  shader_binding.array_elements.reserve(elements.size());
-                  for (const py::handle element : elements) {
-                    shader_binding.array_elements.push_back(
-                        py::cast<Ndarray *>(element));
-                  }
-                } else {
-                  shader_binding.array = py::cast<Ndarray *>(shader[2]);
-                }
-                command.shader_buffers.push_back(
-                    std::move(shader_binding));
-              }
-              if (mesh) {
-                TI_ERROR_IF(!py::cast<bool>(item[7]),
-                            "Vulkan graphics mesh ABI requires its mesh "
-                            "marker.");
-                command.mesh = VulkanGraphicsMeshDrawInfo{
-                    py::cast<std::uint32_t>(item[4]),
-                    py::cast<std::uint32_t>(item[5]),
-                    py::cast<std::uint32_t>(item[6])};
-              } else if (indirect) {
-                VulkanGraphicsIndirectInfo indirect_info;
-                indirect_info.command_buffer = py::cast<Ndarray *>(item[4]);
-                indirect_info.count_buffer = py::cast<Ndarray *>(item[5]);
-                indirect_info.command_offset =
-                    py::cast<std::uint32_t>(item[6]);
-                indirect_info.count_offset =
-                    py::cast<std::uint32_t>(item[7]);
-                indirect_info.max_draw_count =
-                    py::cast<std::uint32_t>(item[8]);
-                indirect_info.stride = py::cast<std::uint32_t>(item[9]);
-                indirect_info.vertex_record_limit =
-                    py::cast<std::uint32_t>(item[10]);
-                indirect_info.instance_record_limit =
-                    py::cast<std::uint32_t>(item[11]);
-                indirect_info.index_element_limit =
-                    py::cast<std::uint32_t>(item[12]);
-                indirect_info.first_instance_may_be_nonzero =
-                    py::cast<bool>(item[13]);
-                command.draw.indexed = py::cast<bool>(item[14]);
-                command.indirect = indirect_info;
-              } else {
-                command.draw.element_count =
-                    py::cast<std::uint32_t>(item[4]);
-                command.draw.instance_count =
-                    py::cast<std::uint32_t>(item[5]);
-                command.draw.first_vertex =
-                    py::cast<std::uint32_t>(item[6]);
-                command.draw.first_index =
-                    py::cast<std::uint32_t>(item[7]);
-                command.draw.first_instance =
-                    py::cast<std::uint32_t>(item[8]);
-                command.draw.vertex_offset =
-                    py::cast<std::int32_t>(item[9]);
-                command.draw.index_min =
-                    py::cast<std::uint32_t>(item[10]);
-                command.draw.index_max =
-                    py::cast<std::uint32_t>(item[11]);
-                command.draw.indexed = py::cast<bool>(item[12]);
-              }
-              commands.push_back(std::move(command));
-            }
+             const std::array<std::uint32_t, 4> &viewport, bool retained_replay) {
+            auto commands = parse_vulkan_graphics_draws(raw_draws);
             VulkanGraphicsPassInfo pass;
             pass.color_clear = color_clear;
             pass.depth_clear = depth_clear;
             pass.retained_replay = retained_replay;
             pass.clear_color = clear_color;
             pass.viewport = viewport;
+            py::gil_scoped_release release;
             try {
-              py::gil_scoped_release release;
-              const auto result = program->vulkan_graphics_pass(
-                  color, depth, commands, pass);
-              program->record_runtime_submission_stat(
-                  RuntimeSubmissionKind::kNative);
+              const auto result = program->vulkan_graphics_pass(color, depth, commands, pass);
+              program->record_runtime_submission_stat(RuntimeSubmissionKind::kNative);
               return result;
             } catch (...) {
               program->record_runtime_submission_failure();
@@ -3078,7 +3093,39 @@ void export_lang(py::module &m) {
           py::arg("color"), py::arg("depth"), py::arg("draws"),
           py::arg("color_clear"), py::arg("depth_clear"),
           py::arg("clear_color"), py::arg("viewport"),
-          py::arg("retained_replay"))
+          py::arg("retained_replay") = false)
+      .def(
+          "_prepare_vulkan_graphics_pass",
+          [parse_vulkan_graphics_draws](Program *program, Texture *color, Texture *depth,
+             const py::sequence &raw_draws, bool color_clear,
+             bool depth_clear, const std::array<float, 4> &clear_color,
+             const std::array<std::uint32_t, 4> &viewport, bool retained_replay) {
+            auto commands = parse_vulkan_graphics_draws(raw_draws);
+            VulkanGraphicsPassInfo pass;
+            pass.color_clear = color_clear;
+            pass.depth_clear = depth_clear;
+            pass.retained_replay = retained_replay;
+            pass.clear_color = clear_color;
+            pass.viewport = viewport;
+            py::gil_scoped_release release;
+            return program->prepare_vulkan_graphics_pass(color, depth, commands, pass);
+          },
+          py::arg("color"), py::arg("depth"), py::arg("draws"),
+          py::arg("color_clear"), py::arg("depth_clear"),
+          py::arg("clear_color"), py::arg("viewport"),
+          py::arg("retained_replay") = false)
+      .def("_execute_vulkan_graphics_pass",
+           [](Program *program, const std::shared_ptr<PreparedVulkanGraphicsPass> &packet) {
+             py::gil_scoped_release release;
+             try {
+               const auto result = program->execute_vulkan_graphics_pass(packet);
+               program->record_runtime_submission_stat(RuntimeSubmissionKind::kNative);
+               return result;
+             } catch (...) {
+               program->record_runtime_submission_failure();
+               throw;
+             }
+           }, py::arg("packet"))
       .def("_destroy_vulkan_graphics_pipeline",
            &Program::destroy_vulkan_graphics_pipeline, py::arg("handle"),
            py::call_guard<py::gil_scoped_release>())

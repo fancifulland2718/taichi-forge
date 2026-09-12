@@ -202,6 +202,11 @@ struct PreparedVulkanBufferImageCopy {
   BufferImageCopyParams parameters{};
   bool to_image{false};
 };
+
+struct PreparedVulkanGraphicsPass {
+  struct State;
+  std::shared_ptr<State> state;
+};
 class CudaFftPlan;
 class VulkanFftPlan;
 class VulkanParallelSortPlan;
@@ -266,6 +271,12 @@ struct VulkanGraphicsShaderBufferBinding {
   bool storage{false};
 };
 
+struct VulkanGraphicsShaderImageBinding {
+  std::uint32_t set_index{0};
+  std::uint32_t binding{0};
+  Texture *texture{nullptr};
+};
+
 struct VulkanGraphicsIndirectInfo {
   Ndarray *command_buffer{nullptr};
   Ndarray *count_buffer{nullptr};
@@ -293,6 +304,7 @@ struct VulkanGraphicsDrawCommand {
   VulkanGraphicsDrawInfo draw;
   std::optional<VulkanGraphicsIndirectInfo> indirect;
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
+  std::vector<VulkanGraphicsShaderImageBinding> shader_images;
 };
 
 struct VulkanGraphicsPassInfo {
@@ -1393,6 +1405,14 @@ class TI_DLL_EXPORT Program {
       Texture *depth,
       const std::vector<VulkanGraphicsDrawCommand> &commands,
       const VulkanGraphicsPassInfo &pass);
+
+  std::shared_ptr<PreparedVulkanGraphicsPass> prepare_vulkan_graphics_pass(
+      Texture *color,
+      Texture *depth,
+      const std::vector<VulkanGraphicsDrawCommand> &commands,
+      const VulkanGraphicsPassInfo &pass);
+  std::size_t execute_vulkan_graphics_pass(
+      const std::shared_ptr<PreparedVulkanGraphicsPass> &packet);
 
   void destroy_vulkan_graphics_pipeline(std::uint64_t handle);
 

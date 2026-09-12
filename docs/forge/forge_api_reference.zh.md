@@ -406,6 +406,36 @@ presentation 或 renderer policy。它只支持 Vulkan、不能在 `@ti.kernel` 
 SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。driver 持有的 pipeline
 与 shader-module 内存按 opaque memory 报告，不做虚假估算。
 
+调用方 SPIR-V 需要采样图像时，在 pipeline 中声明
+`shader_image_bindings=(ti.hardware.graphics.ShaderImageBinding(set_index=0, binding=0),)`，
+再通过 pass draw 绑定相应的 scalar **combined image sampler**：
+
+```python
+draw = pipeline.pass_draw(
+    ti.hardware.graphics.Draw(3), vertex_buffers={0: "vertices"},
+    shader_images={(0, 0): "source"},
+)
+recording = pipeline.record_pass((draw,), color="target")
+builder = ti.graph.GraphBuilder()
+builder.append_native(recording, admission="auto")
+graph = builder.compile()
+bindings = graph.bind(dict(vertices=vertices, source=source_texture,
+                           target=color_target))
+graph.run(bindings)
+ti.sync()
+graph.close()
+```
+
+sampler 由 Texture 提供，SPIR-V image 类型和 descriptor 布局须与声明一致；buffer/image 不能占用
+同一 set/binding。source 是受管浮点/归一化 color texture，不能与本 pass attachment 别名。
+本接口不包括 depth attachment 采样、storage-image 写入或 graphics descriptor array。
+kernel 生产纹理、draw 消费、后续 kernel 消费可按设备依赖顺序执行，无 host readback。
+
+`Graph.bind()` 一次准备 layout/range/descriptor 元数据，数据原位变化继续复用；资源替换需显式更新绑定。
+pipeline/runtime 生命周期仍受约束。执行是 native **rerecord** action，不承诺 immutable draw-command replay，
+既有 graphics/compute queue bridge 保留。准备好的 host packet 不会让已关闭 pipeline 继续可执行，
+也不会把 GPU pipeline 生命周期延长到 `ti.reset()` 之后。
+
 ### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
 
 现有 GGUI renderer 之上的兼容与资格验证 adapter：

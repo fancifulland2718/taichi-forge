@@ -32,6 +32,13 @@ struct RecordedGraphicsShaderBuffer {
   bool storage{false};
 };
 
+struct RecordedGraphicsShaderImage {
+  std::uint32_t set_index{0};
+  std::uint32_t binding{0};
+  DeviceAllocation allocation{kDeviceNullAllocation};
+  ImageSamplerConfig sampler{};
+};
+
 struct RecordedGraphicsIndirect {
   DeviceAllocation command_buffer{kDeviceNullAllocation};
   DeviceAllocation count_buffer{kDeviceNullAllocation};
@@ -46,10 +53,11 @@ struct RecordedGraphicsIndirect {
 };
 
 struct RecordedGraphicsDraw {
-  std::shared_ptr<VulkanGraphicsPipelineResource> pipeline;
+  std::weak_ptr<VulkanGraphicsPipelineResource> pipeline;
   std::vector<std::pair<std::uint32_t, DeviceAllocation>> vertex_buffers;
   DeviceAllocation index_buffer{kDeviceNullAllocation};
   std::vector<RecordedGraphicsShaderBuffer> shader_buffers;
+  std::vector<RecordedGraphicsShaderImage> shader_images;
   VulkanGraphicsDrawInfo draw;
   std::optional<RecordedGraphicsIndirect> indirect;
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
@@ -161,6 +169,17 @@ std::uint32_t graphics_float_bits(float value) {
 }
 
 }  // namespace
+
+struct PreparedVulkanGraphicsPass::State {
+  Program *owner{nullptr};
+  std::uint64_t generation{0};
+  std::vector<RuntimeResourceHandle> arrays;
+  std::vector<RuntimeResourceHandle> textures;
+  std::vector<std::uint64_t> pipelines;
+  std::function<void(GraphicsDevice *, CommandList *)> record;
+  std::vector<ComputeOpImageRef> images;
+  std::vector<std::uint64_t> replay_key;
+};
 
 class VulkanGraphicsPipelineResource {
  public:
@@ -597,12 +616,17 @@ std::size_t Program::vulkan_graphics_draw(
   return vulkan_graphics_pass(color, depth, {std::move(command)}, pass);
 }
 
-std::size_t Program::vulkan_graphics_pass(
+std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pass(
     Texture *color,
     Texture *depth,
     const std::vector<VulkanGraphicsDrawCommand> &commands,
     const VulkanGraphicsPassInfo &pass) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
+  auto packet = std::make_shared<PreparedVulkanGraphicsPass>();
+  packet->state = std::make_shared<PreparedVulkanGraphicsPass::State>();
+  auto &prepared = *packet->state;
+  prepared.owner = this;
+  prepared.generation = runtime_program_generation();
   TI_ERROR_IF(!color,
               "Vulkan graphics pass requires a color attachment Texture.");
   TI_ERROR_IF(commands.empty() || commands.size() > kMaximumPassDraws,
@@ -661,6 +685,10 @@ std::size_t Program::vulkan_graphics_pass(
   }
 
   std::vector<const Ndarray *> arrays;
+  std::vector<const Texture *> textures{color};
+  if (depth) {
+    textures.push_back(depth);
+  }
   std::vector<RecordedGraphicsDraw> recorded_draws;
   recorded_draws.reserve(commands.size());
   auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
@@ -956,14 +984,35 @@ std::size_t Program::vulkan_graphics_pass(
       recorded.shader_buffers.push_back(
           {shader.set_index, shader.binding, allocation, {}, shader.storage});
     }
+    for (const auto &shader : command.shader_images) {
+      const auto key = (static_cast<std::uint64_t>(shader.set_index) << 32) |
+                       shader.binding;
+      TI_ERROR_IF(!shader_bindings.insert(key).second,
+                  "Vulkan graphics descriptor set {} binding {} is duplicated",
+                  shader.set_index, shader.binding);
+      auto *image = shader.texture;
+      TI_ERROR_IF(image == nullptr || image->owning_program() != this,
+                  "Vulkan graphics sampled image must belong to this Program");
+      const auto allocation = image->get_device_allocation();
+      TI_ERROR_IF(allocation.device != device ||
+                      allocation == color->get_device_allocation() ||
+                      (depth && allocation == depth->get_device_allocation()),
+                  "Vulkan sampled images must be on this device and cannot "
+                  "alias render-pass attachments");
+      const auto format = image->get_buffer_format();
+      TI_ERROR_IF(format == BufferFormat::depth16 ||
+                      format == BufferFormat::depth24stencil8 ||
+                      format == BufferFormat::depth32f ||
+                      !is_float_sampled_texture_format(format),
+                  "Graphics sampled images require floating-point or normalized color textures");
+      textures.push_back(image);
+      recorded.shader_images.push_back(
+          {shader.set_index, shader.binding, allocation, image->sampler_config_});
+    }
     recorded_draws.push_back(std::move(recorded));
   }
 
   auto ndarray_leases = acquire_ndarray_leases(arrays);
-  std::vector<const Texture *> textures{color};
-  if (depth) {
-    textures.push_back(depth);
-  }
   auto texture_leases = acquire_texture_leases(textures);
   const DeviceAllocation color_allocation = color->get_device_allocation();
   const DeviceAllocation depth_allocation =
@@ -1034,6 +1083,12 @@ std::size_t Program::vulkan_graphics_pass(
           }
         }
       }
+      replay_key.push_back(recorded.shader_images.size());
+      for (const auto &image : recorded.shader_images) {
+        replay_key.push_back(image.set_index);
+        replay_key.push_back(image.binding);
+        append_graphics_allocation_key(replay_key, device, image.allocation);
+      }
       replay_key.push_back(recorded.indirect.has_value() ? 1 : 0);
       if (recorded.indirect.has_value()) {
         const auto &indirect = *recorded.indirect;
@@ -1068,7 +1123,7 @@ std::size_t Program::vulkan_graphics_pass(
     }
   }
 
-  enqueue_graphics_op_lambda(
+  prepared.record =
       [recorded_draws = std::move(recorded_draws), pass, viewport,
        viewport_x_end, viewport_y_end, color_allocation, depth_allocation,
        width, height](GraphicsDevice *graphics, CommandList *commands) {
@@ -1136,7 +1191,18 @@ std::size_t Program::vulkan_graphics_pass(
             }
           }
 
-          commands->bind_pipeline(recorded.pipeline->pipeline());
+          for (const auto &image : recorded.shader_images) {
+            auto &resource_set = resource_sets[image.set_index];
+            if (!resource_set) {
+              resource_set = graphics->create_resource_set_unique();
+            }
+            resource_set->image(image.binding, image.allocation, image.sampler);
+          }
+
+          auto pipeline = recorded.pipeline.lock();
+          TI_ERROR_IF(!pipeline,
+                      "Vulkan graphics pipeline closed or retired while recording");
+          commands->bind_pipeline(pipeline->pipeline());
           if (!recorded.mesh.has_value()) {
             auto raster = graphics->create_raster_resources_unique();
             for (const auto &[binding, allocation] :
@@ -1170,7 +1236,7 @@ std::size_t Program::vulkan_graphics_pass(
             const auto &mesh = *recorded.mesh;
             const RhiResult mesh_result = commands->draw_mesh_tasks(
                 mesh.group_count_x, mesh.group_count_y, mesh.group_count_z,
-                recorded.pipeline->task_shader());
+                pipeline->task_shader());
             TI_ERROR_IF(mesh_result != RhiResult::success,
                         "Vulkan mesh draw failed: RhiResult({}).",
                         mesh_result);
@@ -1222,20 +1288,104 @@ std::size_t Program::vulkan_graphics_pass(
           }
         }
         commands->end_renderpass();
-      },
-      depth ? std::vector<ComputeOpImageRef>{
+      };
+  prepared.images = depth ? std::vector<ComputeOpImageRef>{
                   {color_allocation, ImageLayout::color_attachment,
                    ImageLayout::shader_read},
                   {depth_allocation, ImageLayout::depth_attachment,
                    ImageLayout::shader_read}}
             : std::vector<ComputeOpImageRef>{
                   {color_allocation, ImageLayout::color_attachment,
-                   ImageLayout::shader_read}},
-      replay_key);
+                   ImageLayout::shader_read}};
+  auto append_handle = [](auto &handles, const auto handle) {
+    if (std::find(handles.begin(), handles.end(), handle) == handles.end()) {
+      handles.push_back(handle);
+    }
+  };
+  for (const auto *array : arrays) {
+    append_handle(prepared.arrays, array->runtime_resource_handle());
+  }
+  for (const auto *texture : textures) {
+    append_handle(prepared.textures, texture->runtime_resource_handle());
+    const auto allocation = texture->get_device_allocation();
+    if (allocation == color_allocation || allocation == depth_allocation) {
+      continue;
+    }
+    if (std::none_of(prepared.images.begin(), prepared.images.end(),
+                     [&](const auto &ref) { return ref.image == allocation; })) {
+      prepared.images.push_back({allocation, ImageLayout::shader_read,
+                                  ImageLayout::shader_read});
+    }
+  }
+  for (const auto &command : commands) {
+    append_handle(prepared.pipelines, command.pipeline_handle);
+  }
+  prepared.replay_key = std::move(replay_key);
+  return packet;
+}
+
+std::size_t Program::execute_vulkan_graphics_pass(
+    const std::shared_ptr<PreparedVulkanGraphicsPass> &packet) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!packet || !packet->state || packet->state->owner != this ||
+                  packet->state->generation != runtime_program_generation(),
+              "Prepared graphics pass belongs to another or retired runtime");
+  const auto &prepared = *packet->state;
+  {
+    std::lock_guard<std::mutex> lock(vulkan_graphics_pipeline_mutex_);
+    for (const auto handle : prepared.pipelines) {
+      TI_ERROR_IF(vulkan_graphics_pipelines_.find(handle) ==
+                      vulkan_graphics_pipelines_.end(),
+                  "Prepared graphics pipeline is stale or closed");
+    }
+  }
+  NdarrayLaunchLeases arrays;
+  for (const auto handle : prepared.arrays) {
+    TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
+                "Prepared graphics ndarray is retired");
+    const auto &slot = ndarray_view_slots_[handle.index];
+    TI_ERROR_IF(slot.handle != handle || !slot.view || !slot.resource,
+                "Prepared graphics ndarray is retired");
+    if (ndarray_inflight_leases_.find(ndarray_lease_key(handle)) ==
+        ndarray_inflight_leases_.end()) {
+      auto lease = slot.resource->lease.clone();
+      TI_ERROR_IF(!lease, "Cannot retain prepared graphics ndarray");
+      arrays.add(std::move(lease));
+    }
+  }
+  TextureLaunchLeases textures;
+  for (const auto handle : prepared.textures) {
+    TI_ERROR_IF(handle.index >= texture_view_slots_.size(),
+                "Prepared graphics texture is retired");
+    const auto &slot = texture_view_slots_[handle.index];
+    TI_ERROR_IF(slot.handle != handle || !slot.view,
+                "Prepared graphics texture is retired");
+    if (texture_inflight_leases_.find(texture_lease_key(handle)) ==
+        texture_inflight_leases_.end()) {
+      auto acquired = texture_resources_.acquire(handle);
+      TI_ERROR_IF(acquired.first != TextureResourceRegistry::Result::kSuccess,
+                  "Cannot retain prepared graphics texture");
+      textures.add(std::move(acquired.second));
+    }
+  }
+  // Lease acquisition is the existing lifetime boundary; layouts, ranges,
+  // descriptors and replay identity are not reconstructed on bound execution.
+  pin_ndarray_launch_leases(arrays);
+  pin_texture_launch_leases(textures);
+  // The graphics submission can succeed before its compute bridge fails.
+  // Publish pending work before entering that partially committing operation.
   mark_runtime_submission_pending();
-  pin_ndarray_launch_leases(ndarray_leases);
-  pin_texture_launch_leases(texture_leases);
+  enqueue_graphics_op_lambda(prepared.record, prepared.images,
+                              prepared.replay_key);
   return 0;
+}
+
+std::size_t Program::vulkan_graphics_pass(
+    Texture *color, Texture *depth,
+    const std::vector<VulkanGraphicsDrawCommand> &commands,
+    const VulkanGraphicsPassInfo &pass) {
+  return execute_vulkan_graphics_pass(
+      prepare_vulkan_graphics_pass(color, depth, commands, pass));
 }
 
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
@@ -1425,6 +1575,17 @@ std::size_t Program::vulkan_graphics_pass(
 }
 
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t) {
+}
+
+std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pass(
+    Texture *, Texture *, const std::vector<VulkanGraphicsDrawCommand> &,
+    const VulkanGraphicsPassInfo &) {
+  TI_ERROR("Vulkan graphics passes are unavailable in this build.");
+}
+
+std::size_t Program::execute_vulkan_graphics_pass(
+    const std::shared_ptr<PreparedVulkanGraphicsPass> &) {
+  TI_ERROR("Vulkan graphics passes are unavailable in this build.");
 }
 
 void Program::vulkan_clear_graphics_pipelines() {

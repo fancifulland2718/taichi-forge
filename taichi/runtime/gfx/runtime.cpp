@@ -6235,9 +6235,6 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     submitted_commands = retained_graphics_replay_
                              .slots[retained_slot_index]
                              .command_list.get();
-    for (const auto &ref : image_refs) {
-      set_tracked_image_layout(ref.image.alloc_id, ref.final_layout);
-    }
   } else {
     auto [new_commands, graphics_result] =
         graphics_stream->new_command_list_unique();
@@ -6262,7 +6259,6 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
         graphics_commands->image_transition(ref.image, ref.initial_layout,
                                             ref.final_layout);
       }
-      set_tracked_image_layout(ref.image.alloc_id, ref.final_layout);
     }
 
     if (record_retained) {
@@ -6294,6 +6290,9 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   try {
     graphics_completion =
         graphics_stream->submit(submitted_commands, graphics_waits);
+    // Submission already owns GPU resources even if the compute bridge below
+    // fails. Keep this completion domain visible to error/close synchronization.
+    graphics_submission_used_ = true;
     TI_ERROR_IF(!graphics_completion,
                 "Runtime graphics submission returned no completion token");
   } catch (...) {
@@ -6302,6 +6301,11 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
       invalidate_graphics_command_replay_locked();
     }
     throw;
+  }
+  // Recording a transition is not committing it. Publish image state only
+  // after successful submission, including when the later bridge fails.
+  for (const auto &ref : image_refs) {
+    set_tracked_image_layout(ref.image.alloc_id, ref.final_layout);
   }
   ++retained_graphics_replay_.graphics_submissions;
   if (record_retained) {
@@ -6343,7 +6347,6 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     throw;
   }
   ++retained_graphics_replay_.bridge_submissions;
-  graphics_submission_used_ = true;
   return latest_compute_completion_;
 }
 
