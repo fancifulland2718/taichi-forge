@@ -480,7 +480,7 @@ chunk carry、global correction，以及混合段长下的 bucketed 策略，同
 global-correction 策略使用 retained CUDA Graph 和独立的 Graph-bound scan scratch，普通 Program
 arena 增长/清理不影响录制。它只处理 `num_items`，保持未使用 capacity 不变；改变的是 host 提交
 与 scratch 生命周期，不改变数学求和或普通 primitive 的 `method="auto"`。录制、显存及首次编译
-代价见 [Graph runtime 优化](graph_runtime_optimization.zh.md#global-segmented-scan-的-retained-recording)。
+代价见 [Graph runtime 优化](#可复用-segmented-reduce-与-scan)。
 
 通过 `builder.freeze().search_recipes(...)` 按实际 workload 指标搜索，普通 `method="auto"`
 不变。这不等于任意相邻 producer/consumer kernel 融合：值语义、可见中间写入与跨语言下沉
@@ -503,8 +503,24 @@ partial 结果，精确 requested bytes 进入物理/资源报告，不冒称 dr
 通过 `builder.freeze().search_recipes(...)` 和已有选择/resolve 流程使用。短段可能更适合串行，长段
 可能受益于 partial/finalize 的并行度，但增加 scratch 与准备成本；不保证统一加速，不改变普通 auto，
 也不由该操作直接融合任意相邻 kernel。默认搜索还可发现
-[认证 pointwise 值 recipe](graph_runtime_optimization.zh.md#分段归约两侧的认证-pointwise-值融合)，
+[认证 pointwise 值 recipe](#分段归约两侧的-pointwise-融合)，
 仅处理有界 i32/u32 producer/consumer，保留所有可见 store。
+
+### 分段归约两侧的 pointwise 融合
+
+默认 CUDA complete-recipe provider 可在 `GraphBuilder.segmented_reduce()` 前后融合
+受支持的 pointwise producer/consumer。当前限紧凑一维 scalar i32/u32 数组和从零开始的精确范围，
+支持加、减、乘、cast、取负、位运算和 0–31 的常量 shift。
+浮点、random/atomic、条件 body、多 store、sparse/Field/view、任意函数调用及带 debug/bounds
+插桩的 kernel 不属于该融合合同。
+
+producer 输出必须就是 reduction values，consumer 输入必须就是 reduction 输出。
+发布绑定时确认身份、范围和不重叠写入；相邻 label 本身不能证明数据流。
+可观察的中间 store 与未使用 capacity 保持不变，不意味着删除应用可见的 temporary。
+
+provider 可把值转发与受支持的串行、协作或 partial/finalize 归约策略组合；
+只支持一条有序 workspace lane。应测完整 pipeline：长 segment 融合可能损失并行度，
+partial/finalize 则用更多 scratch 换取并行工作。搜索保留合法替代方案，普通 primitive 默认行为不变。
 
 ## Device-side 数值检查
 

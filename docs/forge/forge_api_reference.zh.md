@@ -1,15 +1,26 @@
 # Taichi Forge API 参考
 
-> 覆盖 **Taichi Forge 0.6.2 正式发行合同**与标记为 **0.6.3 开发中**的公开 API。
-> 本文只列 Forge-only 的公开 API 入口。
-> 加在 Taichi 兼容 API 里的新选项，例如 `ti.init(...)` 关键字参数和
-> `@ti.kernel(...)` 关键字选项，仍统一放在 [Forge 选项](forge_options.zh.md)。
-> API 首次公开版本统一见[版本更新说明](release_notes.zh.md)；experimental、开发中与
-> source-build-only 标记仍继续限定支持边界。
+[English](forge_api_reference.en.md) · [文档入口](index.zh.md)
 
-Taichi Forge 保留 vanilla Taichi 的 DSL 模型，同时增加了编译控制、native
-device primitive、graph replay、显示帧提交、稀疏布局实验能力和诊断 API。
-下面按模块列出调用位置、参数和当前边界。
+本文列出当前源码的公共符号、调用位置与支持边界；开发中/experimental 标记继续有效，
+请核对[安装版本说明](index.zh.md#版本与安装)。初始化和编译配置统一见 [Forge 选项](forge_options.zh.md)。
+
+## 导航
+
+| 需求 | 章节/指南 |
+| --- | --- |
+| hardware、texture、ray、graphics | [顶层 API](#taichi_forge-顶层-api)、[provider 配置](external_hardware_providers.zh.md) |
+| runtime 诊断 | [Runtime](#taichi_forgeruntime) |
+| sort、scan、reduce、prepared plan | [Algorithms](#taichi_forgealgorithms)、[使用指南](native_algorithms.zh.md) |
+| Graph 构建、控制与完成 | [Graph 执行指南](graph_runtime_optimization.zh.md) |
+| recipe 搜索、报告、续跑与恢复 | [接入指南](graph_recipe_integration.zh.md) |
+| 显示与 UI | [DisplayFrame](display_frame.zh.md) |
+| operator/solver | [使用指南](linear_operator.zh.md) |
+| AOT | [AOT API](#aot-api) |
+
+代码片段依赖正文中说明的应用对象；仅用于展示签名的块标记为 text。
+完整可运行示例见[快速开始](quickstart.zh.md)。
+
 
 ## `taichi_forge` 顶层 API
 
@@ -21,37 +32,22 @@ import taichi_forge as ti
 
 ### `ti.hardware` capability 与显式 probe（0.6.3 开发中）
 
-面向普通用户的稳定层只包含 `HardwareCapability`、`HardwareProviderStatus` 与
-`HardwareExecutionReport`。使用 `status(id)`、`provider_status(id)` 或
-`execution_report()` 读取 `available`、当前 `backend`、`selected_provider`/`selected`、
-硬件资格 `route` 和结构化 `reason`；这些被动查询绝不加载、启用、benchmark 或选择
-可选 provider。
+- `ti.hardware.status(operation_id)`、`provider_status(provider_id)`、
+  `execution_report()` 是被动查询，不加载、启用、benchmark 或选择可选 provider。
+- `operations()`、`capability(operation_id)`、`providers()`、`report()`
+  提供更详细的操作、资源、数值和部署合同。
+- `probe(provider_id, ...)` 显式检查库发现与受支持符号，不做数值测试、不创建 plan、不自动选择。
+- `graph_integration` 与 `recipe_search` 独立；`root_ordered` 表示按 Graph 顺序执行，
+  不代表 backend capture。
+- cuSPARSELt、cuTENSOR 提供文档列出的 recorded operation 与完整 recipe provider；
+  AmgX 仍是显式执行，没有通用 Graph 路径。不能由 probe 成功推断具体操作支持。
 
-`operations()`、`capability(operation_id)`、`providers()` 与 `report()` 是 schema-v4
-诊断合同，额外公开 dependency tier、workspace/lifetime/update policy、ABI、performance
-scope、resource effect 与 native fact 等专家信息。每个 operation 用 `activation_mode`
-区分 `explicit_hardware_api`、`explicit_kernel_intrinsic`、
-`domain_api_auto_provider` 与 `compiler_automatic`；独立的 `graph_integration` 字段取值为
-`inline`、`root_ordered`、`backend_recorded`、`stream_captured`、`opaque` 或
-`unsupported`。其中 `root_ordered` 只表示 Forge root Graph 保持顺序和 lifetime，并在
-replay 时再次调用 provider；它不表示 CUDA Graph capture 或持久 Vulkan command buffer。
+库版本、安装方式、操作边界与示例统一见[外部 provider](external_hardware_providers.zh.md)。
+安装库本身不会选择算法。
 
-`probe(provider_id)` 只允许显式探测 D1 `lazy_external` provider；cuBLAS、cuSPARSE 与
-cuFFT 使用瞬时 native handle 检查精确 symbol；cuDSS 通过 wheel 内 Forge adapter 瞬时
-加载并核对用户 vendor runtime。bundled adapter 同样检查 cuSPARSELt 0.8.x-0.9.x、
-cuTENSOR 2.0.x-2.7.x 与 AmgX stable C API。它们另有显式执行 provider object，但不提供
-automatic、Graph 或 kernel route。
-所有 probe handle 都在返回前关闭，不改变后续 selection。若实际算法此前已经 lazy-load
-某库，被动 report 会观察其 plan 状态，但绝不自行调用 loader。未知 operation/provider 和
-未实现的 probe 均 fail closed。
+### 核心 kernel 硬件路线（0.6.3）
 
-用户管理 library 的安装责任、版本绑定、loader 配置与推荐 selection gate 统一见
-[可选外部硬件 Provider 配置指南](external_hardware_providers.zh.md)。该指南会区分执行
-provider、非执行 probe 与 native-adapter 候选；安装 runtime 不会自动选择算法。
-
-### 核心 kernel 硬件路线（0.6.3 资格化）
-
-hardware catalog 也描述现有 D0 CUDA/Vulkan kernel 路线。它们不新增依赖、wheel
+hardware catalog 也描述现有 CUDA/Vulkan kernel 路线。它们不新增依赖、wheel
 变体、Python native executable 或 DSL 语法；调用位置本身就是合同的一部分：
 
 - `@ti.kernel` 内显式调用：`ti.atomic_*`、CUDA `ti.simt.warp`、Vulkan 已实现的
@@ -64,7 +60,7 @@ hardware catalog 也描述现有 D0 CUDA/Vulkan kernel 路线。它们不新增�
   subgroup ballot aggregation。两者都保留普通 atomic fallback，且没有公开调用入口。
 - 分层 selection：`ti.block_local` 是显式 cache hint，随后是否对合格的只读 copy 使用
   PTX `cp.async` 才是自动选择。当前 block-local 资格范围只覆盖受支持的 gather/read-cache
-  pattern；稀疏 pointer-SNode scatter/write-back 因 CUDA 正确性失败可稳定复现而明确排除。
+  pattern；稀疏 pointer-SNode scatter/write-back 不在支持范围内。
 
 所有这些 catalog entry 都使用 `hardware_acceleration="implementation_defined"`：codegen
 可能根据具体 operation/device 选择 native atomic、CAS、subgroup instruction 或 shared
@@ -72,7 +68,7 @@ memory。仅凭 API 名称不能证明使用了某条特定指令。
 
 ### `ti.hardware.linalg.gemm_f32`（0.6.3 开发中）
 
-面向 compact row-major f32 matrix 的显式 D1 cuBLAS provider：
+面向 compact row-major f32 matrix 的显式 cuBLAS provider：
 
 ```python
 if ti.hardware.linalg.is_available():  # 显式瞬时 provider probe
@@ -98,7 +94,7 @@ ABI 声明，不包含 Toolkit header、
 link dependency、bundled library、package dependency、新 build switch 或 wheel 变体。
 该 API 只支持 direct/root-Graph，不能在 kernel 内调用，也不会改写普通矩阵乘法。
 
-### CUDA sparse provider selection、显式 SpMV 与 cuDSS（0.6.3 资格化）
+### CUDA sparse provider selection、显式 SpMV 与 cuDSS（0.6.3）
 
 两个已有的 `ti.linalg` 领域 API 会在 CUDA 上自动选择可选 vendor library：
 
@@ -183,7 +179,7 @@ vendor runtime 就自动成为默认 provider。
 
 ### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
 
-这两个 D0 API 描述并一次性提交 Vulkan RHI buffer command sequence：`fill_u32()`、
+这两个 API 描述并一次性提交 Vulkan RHI buffer command sequence：`fill_u32()`、
 `copy()`、`buffer_barrier()` 与 `memory_barrier()`。可通过
 `recording.execute(bindings)` 手动执行，也可通过
 `GraphBuilder.append_native(recording, admission="auto")` 加入 root Graph。
@@ -198,11 +194,11 @@ vendor runtime 就自动成为默认 provider。
 runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 内调用，
 不支持 structured `Sequential` 或 AOT serialization，也不等于 RasterPass/AS provider。
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
-都会失败。该功能完全使用官方 wheel 已包含的 D0 runtime，不增加 wheel 发行矩阵。
+都会失败。该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
 
 ### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3 开发中）
 
-该 D0 底层命令把一个完整 Vulkan color `ti.Texture` 复制到 format 与 extent 相同的另一个
+该 底层命令把一个完整 Vulkan color `ti.Texture` 复制到 format 与 extent 相同的另一个
 Texture：
 
 ```python
@@ -392,7 +388,7 @@ host NumPy 几何只支持直接执行；用于 Graph 时请先上传到 device 
 
 ### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3 开发中）
 
-底层 D0 Vulkan 硬件 Ray Query API 将 fixed-topology triangle BLAS 与 fixed-order
+底层 Vulkan 硬件 Ray Query API 将 fixed-topology triangle BLAS 与 fixed-order
 instance TLAS 分离：
 
 ```python
@@ -500,7 +496,7 @@ descriptor 检查或 host readback。ordinary Graph 仍可用，不隐式切换�
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3 开发中）
 
-面向 C2C、R2C 与 C2R transform 的显式 D1 single-GPU cuFFT provider：
+面向 C2C、R2C 与 C2R transform 的显式 single-GPU cuFFT provider：
 
 ```python
 if ti.hardware.fft.is_available():  # 显式瞬时 provider probe
@@ -765,9 +761,7 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
 默认 host policy 从 16 MiB slab 开始，按几何级数增长到既有 1 GiB 上限；大于
 下一 slab 的单次请求使用按请求大小并包含必要对齐空间的 large mapping，且不推进后续
 小请求的增长序列。
-仅为发行诊断，可在 import/init Taichi 前设置
-`TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS=0`，恢复旧的固定 1 GiB slab。该环境变量只是
-内部回退门禁，不是稳定的 `ti.init` 参数或长期 allocator-control API。
+
 
 #### 内存增长与所有权边界
 
@@ -794,8 +788,7 @@ host 值；它仍是诊断 snapshot，不是 reset 或 allocator-control API。
 SNodeTree lifecycle churn 和真正产生 executable 的 kernel churn 是两个独立合同。
 反复 create/destroy 且 peak live topology 有界时，tree slot 会复用，tree metadata 保持有界。
 上述 root-dense 交集还会把编译基数收缩到 unique kernel/layout，而不是历史 generation 数；
-unsupported 交集仍会重复 frontend/backend 编译。短单测覆盖 bounded tree invariant，
-独立长时 qualification 覆盖 10,000 次 tree-only 与 executable-producing generation。
+unsupported 交集仍会重复 frontend/backend 编译。
 生命周期 telemetry 会区分历史 materialization、resident specialization、template hit、
 binding create、reclaim、retired/pinned handle 和 budget rejection。
 
@@ -897,9 +890,9 @@ CUDA device API、native Vulkan 代码 / shader 或 native CPU/C++ 实现；否�
 
 ### CompileIQ 边界（0.6.3 开发中）
 
-算法模块不公开独立 CompileIQ 搜索 builder。reduce provider 与 segmented-scan 的历史搜索实现只保留为
-私有资格化工具；普通 primitive、显式 `method=` 和 `method="auto"` 的合同不变。公开搜索入口为
-`ti.graph.compileiq_recipe_search(graph)`，并且只接受 Forge-owned 完整 Graph recipe。
+算法模块不提供独立 CompileIQ 搜索 API。通过 `definition.search_recipes(...)`
+搜索完整 Graph recipe；普通 primitive 保留显式 method 与 `auto` 合同。
+完整流程见[搜索、报告与复用](graph_recipe_integration.zh.md)。
 
 ### Primitive capability 查询
 
@@ -1601,7 +1594,7 @@ tuned(x, y)
 `block_dim` 接受 1 到 1024 中 2 的幂或 32 的倍数，与 Taichi 既有 loop configuration
 合同一致；device 或 kernel 资源限制仍可能拒绝 specialization。
 report 提供不可变 policy、backend、status/reason，以及包含 requested、selected、actual
-geometry 的 N0 task manifest。
+geometry 的 task manifest。
 `report.resources` 为每个 task 增加不可变 `TaskLaunchResourceReport`，报告编译期
 shared-memory 用量、已公开 backend block 上限的值与来源、代表性的几何合法 block，以及
 请求候选未被采用时的结构化原因。这些 block 只是探测候选，不是调优推荐。CUDA 的
@@ -1622,7 +1615,7 @@ GPU geometry。冷 CUDA/Vulkan policy specialization 必须在 Python 主线程�
 launch 路径，不分配 telemetry buffer。每个不同 policy 都是普通 compiled specialization，
 计入 runtime specialization budget 和 offline-cache identity，并且在 `ti.reset()` 后需要重新
 准备。block 调优取决于 backend 和 workload，应始终用执行末端同步的 `auto` 对照测量。
-可复现的成对基准脚本是 `benchmarks/task_launch_policy_bench.py`。
+
 
 ### 使用魔改 CompileIQ 搜索完整 Graph execution recipe
 
@@ -1689,13 +1682,11 @@ block、workgroup 或 backend 参数。精确 fusion partition、memory staging�
 recording topology 等底层决策继续供 Forge materializer 内部使用，并可在 fragment 兼容时组合。
 魔改 CompileIQ 边界只接收完整 opaque recipe token，所有物化仍经过 definition-owned 的事务 context。
 
-按 task 索引的 offload identity、物化和资格化实现保留为私有诊断基础，但不作为
-`ti.compileiq_offload_execution_plan_search` 公共 API。普通 kernel 继续使用源码合同和显式
-`TaskLaunchPolicy`；CompileIQ 不接收 workgroup、TLS、register 或 PTXAS 裸轴。
+CompileIQ 评价完整 recipe，不接收 workgroup、register 或 PTXAS 裸参数。
 
 魔改 CompileIQ wheel 按 V2 protocol/capability 合同接受，不绑定精确 fork commit 或 wheel hash。
 已安装 Python source identity 仍会记录并绑定 checkpoint，因此代码漂移会使 resume 失效，而不是
-静默复用测量；manifest 中的当前 commit 与 wheel SHA 只描述一个已验证 build。
+静默复用测量。
 
 ### 使用 `DeviceExtent` 表达设备端有界工作量
 
@@ -1884,8 +1875,7 @@ grouped route 使用一个 80-byte control 加每个 grouped payload 一个 8-by
 producer-owned Vulkan launch state 仍是 external 16-byte 兼容 state，并报告 internal packet
 为 0 byte。exact 物理工作量减少不等于无条件提速：轻量、standalone Vulkan payload 可能因
 packet preparation 与依赖成本而慢于 fixed Graph。应以完整 workload 同时对比 fixed Graph
-和 direct execution；成对基准脚本为 `benchmarks/dynamic_workload_bench.py` 与
-`benchmarks/device_worklist_bench.py`。
+和 direct execution。
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
@@ -1977,9 +1967,7 @@ predicate、counter、可选 status、迭代预算以及 Vulkan chunk size。所
 submission guard。其 structured command buffer 根据 allocation 级 effect 插入
 RAW/WAR/WAW barrier，并保留保守的 controller/global 边界。能力字段
 `compound_single_preparation` 与 `structured_barrier_policy` 会报告当前策略。
-`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0` 和
-`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` 是资格验证用的回退开关，可恢复旧的逐 chunk
-准备与逐 task eager barrier 路径。
+
 
 `portable` 强制 portable 路径；`native_required` 在当前 backend 无法履行原生合同时
 fail closed。portable 结构化 Graph 使用 `run()` 并明确拒绝 `submit()`。满足资格的 CUDA
@@ -2038,7 +2026,6 @@ measurement-path changed，不能当作正常执行 wall time 发布。
 | `Graph.prepare_telemetry(mode, *, slots=1)` | 在不执行 Graph、也不读取用户资源的前提下，显式分配一个到配置上限数量的有界 telemetry slot，并编译所需 packed snapshot kernel。`mode="timestamps"` 还会执行一次空 instrumented transaction，把 backend event/query 初始化移出首次测量提交。准备覆盖当前已物化 workspace lane；后续 lane 复用 compiled kernel，但自行物化有界 storage。`False` 不执行操作。 |
 | `SubmissionTicket.telemetry()` | 必要时等待，并在请求遥测时返回 immutable schema-v5 `GraphSubmissionTelemetry`；否则返回 `None`。region 报告包含 terminal counter、停止位置和 nested invocation count，`pipeline` 是 ticket-owned `GraphPipelineReport`。nullable GPU duration 不会从 host wall time 推测。 |
 | `SubmissionTicket.pipeline_report()` | 返回与 `ticket.telemetry().pipeline` 相同的 immutable pipeline 对象，必要时等待；未请求 telemetry 时返回 `None`。 |
-| `Graph._prewarm()` | 预热当前 runtime 的 backend plan；这是内部/高级入口，不改变 graph 参数合同。 |
 
 #### `GraphBindingSet`
 
@@ -2241,7 +2228,7 @@ requested bytes 变为零，但保留已知 capacity 供规划；属于旧 runti
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 
-位置：`taichi_forge.graph._graph`，在 Forge graph builder 上可用。
+在 `ti.graph.GraphBuilder` 上可用。
 
 向 graph 追加 Forge DSL-defined native node。
 
@@ -2577,7 +2564,7 @@ root.place(x)
 
 签名：
 
-```python
+```text
 hash(axes, dimensions, *, max_active=None, expected_active=None,
      capacity=None, hash_load_factor=None)
 ```

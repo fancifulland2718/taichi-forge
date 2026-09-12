@@ -83,8 +83,7 @@ planning，用于结构化控制、异步提交、device-driven dispatch 和 DSL
 - runtime graph 安全不能替代应用对共享仿真/渲染数据使用 snapshot、slot 或
   producer-consumer 协议。
 - 新引擎代码应使用 `template_args=` 绑定 `self`、Field 等 `ti.template()` 参数；Field
-  仍不进入每次 run 的字典。旧适配器直接写入 durable AOT plan 时，Forge 继续恢复真实
-  runtime 参数名，missing/unexpected key 的严格检查不变。
+  仍不进入每次 run 的字典。不要直接修改底层构图状态。
 - `Graph.run()` 是 primal-only；active `ti.ad.Tape()` 与 `ti.ad.FwdMode()` 会在提交前
   被拒绝，而不是静默漏记 gradient/dual。显式 `kernel.grad` Graph 可在这些 context 外
   手工运行。

@@ -105,8 +105,7 @@ The user-visible additions are:
   or producer-consumer protocol for shared simulation and rendering data.
 - New engine code should bind a `self`, Field, or another `ti.template()`
   argument through `template_args=`; the Field still does not enter each run's
-  dictionary. Legacy adapters that write directly to the durable AOT plan keep
-  exact runtime-argument discovery and strict missing/unexpected-key checks.
+  dictionary.
 - `Graph.run()` is primal-only. Active `ti.ad.Tape()` and
   `ti.ad.FwdMode()` are rejected before submission instead of silently losing
   gradient/dual recording. An explicit `kernel.grad` Graph may be run manually

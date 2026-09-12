@@ -1,32 +1,22 @@
-# 完整 Graph recipe：下游接入
+# 完整 Graph recipe：搜索、报告与复用
 
-[English](graph_recipe_integration.en.md)
+[English](graph_recipe_integration.en.md) · [文档入口](index.zh.md)
 
-本指南使用现有公开合同，不要求应用读取内部规划，也不代替应用正确性与生产测试。
+应用有稳定 Graph definition 和完整执行方案的 evaluator 时，可使用此流程。
+搜索是可选能力；普通 `builder.compile()` / `graph.run()` 不依赖 CompileIQ。
 
 ## 安装边界
 
-使用兼容的 `taichi-forge` CPython shim 和 `taichi-forge-runtime` Windows wheel；两者按 package
-version/private ABI 配对，不按 Git HEAD 配对。当前本地开发交付组合可以是 headless：仿真不依赖 GGUI，
-需要 `ti.ui` 窗口的测试则须选择启用 GGUI 的构建。具体产物由提供者说明，不从版本号推断所有可选能力。
-构建方式见[wheel 指南](build_wheels.zh.md)，库安装见[外部硬件配置](external_hardware_providers.zh.md)。
+安装 `taichi-forge` 及兼容 runtime，再安装
+[维护版 CompileIQ fork](https://github.com/fancifulland2718/CompileIQ) 中匹配 Python/平台的 wheel。
+不要用普通上游 `pip install compileiq` 替代。所需协议/API 能力决定兼容性；
+Git commit 用于记录来源，不是安装白名单。
 
-完整 Graph 搜索仅使用 [Forge 维护的 CompileIQ fork](https://github.com/fancifulland2718/CompileIQ)。
-从该 fork 提供的 Windows wheel 安装，而不是直接 `pip install compileiq` 安装基础版本：
+Forge 与 fork 使用同一环境；vendor 库和编译器只为所选 provider 配置。
+渲染还需要启用 graphics 的 runtime，headless 计算构建不提供窗口。
+参见[安装说明](index.zh.md#版本与安装)和[硬件依赖](external_hardware_providers.zh.md)。
 
-```powershell
-python -m pip install C:\artifacts\taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl
-python -m pip install C:\artifacts\taichi_forge-0.6.3-cp310-cp310-win_amd64.whl
-python -m pip install C:\artifacts\compileiq-<compatible-fork-wheel>.whl
-```
-
-路径和 Python tag 是示意，须替换为实际文件。Fork 按 V2 protocol/capability 接受，commit/hash 是来源事实，
-不是安装白名单。只运行已选 Graph 不需要启动 CompileIQ 搜索；历史测量适用性检查仍可能需要它。
-可选 vendor runtime、DXC、NVCC 等只为用到的 provider 配置，不安装整套库作为前提。
-
-在应用测试环境中明确安装这一组 shim、runtime 和 fork wheel，运行示例前确认实际 import 路径。
-安装包测试不要继承开发用的 `PYTHONPATH`、`TAICHI_NATIVE_RUNTIME_DIR` 或 `TAICHI_RUNTIME_DIR`
-覆盖。本地 headless 接入组合不是正式发布或渲染窗口资格；窗口测试需要启用 GGUI 的 runtime。
+以下可运行示例使用 CUDA，演示 provider 与搜索 API，不是应用基准或加速承诺。
 
 ## 可运行示例与结果处理
 
@@ -51,6 +41,116 @@ python -m taichi_forge.examples.graph.complete_recipe_provider --output restored
 完整报告与选择 artifact 不同；vendor operation 还可能需要单独保存 `preparation_artifact()`。
 新进程重新建立等价 Graph 和 provider，再调用 `check_recipe_applicability`、`resolve_recipe`。
 结构可恢复而历史测量不适用时，可以重新测量，不应伪称旧性能仍有效。无 Python executable/AOT 二进制反序列化。
+
+## 搜索并保存结果
+
+以下片段假设已经定义 `builder`、公共 `providers`、`evaluator(graph, recipe)`
+以及稳定的调用者上下文；上面的可运行示例提供了这些对象。
+
+```python
+from pathlib import Path
+import json
+
+definition = builder.freeze()
+target = ti.graph.GraphOptimizationTarget(objectives=(("wall_ns", "min"),))
+contracts = {
+    "workload_context": workload_context,
+    "evaluation_contract": evaluation_contract,
+    "backend_environment": backend_environment,
+}
+decision = definition.search_recipes(
+    engine="compileiq",
+    providers=providers,
+    target=target,
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=48, repeat_count=3),
+    **contracts,
+).run(evaluator)
+
+Path("report.json").write_text(decision.report.to_json(), encoding="utf8")
+Path("report.md").write_text(decision.report.to_markdown(), encoding="utf8")
+Path("checkpoint.json").write_text(
+    json.dumps(decision.checkpoint.to_dict(), indent=2), encoding="utf8"
+)
+if decision.status == "selected":
+    Path("selection.json").write_text(
+        json.dumps(decision.selection_artifact.to_dict(), indent=2), encoding="utf8"
+    )
+    with definition.materialize(decision.selection) as handle:
+        # handle 存活期间绑定并执行。
+        use_graph(handle.executor)
+```
+
+evaluator 只返回声明过的命名指标，结果无效时抛出错误。
+用 `GraphEvaluationContract` 说明单位、完成边界、输入恢复、warmup 与正确性，
+用 `GraphWorkloadContext` 描述 workload，
+用 `GraphBackendEnvironment` 描述实际 device/driver/library 环境。
+这三类对象接受 canonical JSON-safe 字典，不替应用推断语义或依赖。
+
+省略 `providers` 时使用默认集合；显式传入集合且仍需内建 provider 时，
+请与 `ti.graph.default_recipe_providers()` 合并。搜索和恢复使用同一集合。
+vendor operation 按其公共合同在 freeze 前准备。
+
+## 续跑搜索与恢复选择
+
+checkpoint 用于继续测量，selection 用于恢复执行选择，两者不是同一文件。
+新进程先重建等价 definition、provider 和上下文：
+
+```python
+checkpoint = json.loads(Path("checkpoint.json").read_text(encoding="utf8"))
+continued = definition.search_recipes(
+    engine="compileiq",
+    providers=providers,
+    target=target,
+    budget=ti.graph.GraphSearchBudget(evaluation_limit=96, repeat_count=3),
+    checkpoint=checkpoint,
+    **contracts,
+).run(evaluator)
+```
+
+恢复已保存的 selection：
+
+```python
+artifact = json.loads(Path("selection.json").read_text(encoding="utf8"))
+applicability = definition.check_recipe_applicability(
+    artifact, providers=providers, target=target, **contracts
+)
+print(applicability.to_dict())
+selection = definition.resolve_recipe(artifact, providers=providers)
+with definition.materialize(selection, providers=providers) as handle:
+    use_graph(handle.executor)
+```
+
+采用历史测量前检查 applicability。结构能恢复，不代表旧测量仍适用。
+Graph 语义、provider 版本、target、workload 或环境变化都可能使复用失效；
+不要吞掉 drift 错误，也不要把新测量写成旧证据。
+
+provider 要求时另存 operation preparation artifact。
+解析会从公共语义事实重新建立 plan，不反序列化任意 Python executable、运行中资源或 AOT 二进制。
+
+## 人类与 agent 如何读报告
+
+下表区分 Python report 属性与 JSON 路径。特别注意：`report.status` 表示底层
+CompileIQ 报告状态；判断 Forge 结果应使用 `decision.status` 或 JSON 的 `outcome.status`。
+
+| Python report 属性 | JSON 路径 | 用途 |
+| --- | --- | --- |
+| `outcome_status`、`next_action` | `outcome.status`、`outcome.next_action` | 应用选择、续跑、检查不可行或失败原因 |
+| `search_complete`、`termination_reason` | `search.complete`、`search.termination_reason` | 判断完成状态与预算耗尽 |
+| `recipe_discovery` | `reuse.context.recipe_discovery` | 生成解释、被拒组合与重复 |
+| `compileiq_report` | `compileiq_report` | 原始测量、失败、预算、stage 与 Pareto |
+| `selection_reason`、`pareto_tradeoffs` | `selection.reason`、`pareto.tradeoffs` | 选择理由与代价 |
+| `recipe_annotations`、`context` | `recipe_annotations`、`reuse.context` | 声明的变化与调用者/provider 事实 |
+| `reuse`、`checkpoint` | `reuse`、`checkpoint` | 适用性与续跑，不是运行中 Graph |
+
+旧报告可能没有 `context`。读取版本化字段前检查 JSON `schema`。
+报告的 `selection` 是摘要，不是可传给 `resolve_recipe()` 的独立 `selection_artifact`。
+
+程序以 JSON 为事实源，Markdown 由相同数据生成。
+provider 描述是声明，不是实测。“没有候选”“物化失败”“ordinary 执行”“正确但更慢”必须区分；
+选回 baseline 本身不是搜索失败。
+
+多 objective 保留 Pareto 比较，声明顺序确定性选择一个结果，不隐含全局加权。
+报告不证明所选 recipe 对所有输入都最快。
 
 ## 外部 provider 的职责
 
@@ -101,3 +201,114 @@ Nsight/NVML 仅显式采样，性能计时与诊断分开，不加每 replay 校
 
 目前 cuSOLVERDn、AmgX、Parallel Sort 的具体执行与 Graph 边界以
 [外部硬件指南](external_hardware_providers.zh.md) 为准；有执行 API 不等于有完整 recipe generator。
+
+
+## 报告上下文与可选生命周期成本
+
+`decision.report.context` 保留调用者给出的 workload/evaluation/backend facts、冻结 provider registry
+和 Forge 编译来源。recipe 注释保留冻结 fragment 配置、物理 task 及已有的数值/组件合同。
+这些信息用于解释适用范围，不代表 Forge 独立验证了所有 driver/library 组合、数值容差或生产 workload。
+此扩展之前产生的报告，其 `context` 为 `None`。
+
+`report.recipe_discovery`（也在 `report.context["recipe_discovery"]`）保留 provider fragment 数、可选
+provider 解释、被拒绝的组合尝试和 planned-physical 重复项。`catalog.discovery_report()` 被动读取相同
+冷生成观测，不重新 discovery 或 probe 库。provider 可实现可选的 `explain_discovery(definition)`，
+在 discovery 时返回 JSON-safe 事实；这些是 provider 声明，不是性能测量。没有解释的空 fragment 结果保持
+未知：可能是只负责装配，也可能是不匹配的 Graph 语义。拒绝次数是本 session（含有界 exact probe）的尝试数，
+不是所有可能组合。实测失败、Pareto 未选中和预算不完整仍使用报告原有字段；诊断不改变准入、预算或 replay。
+
+内建 memory/offload/sparse provider 会解释已注册的 dispatch source：不支持的后端、没有合格注册源、
+没有可转换候选、候选生成拒绝或已生成候选，并保留 task kinds 与编译器/preflight 原因。
+注册链路没有来源不等于所有实现都不可能支持；未知原因不猜测。模板候选仍经过相同编译期语义证明。
+
+| 要判断的问题 | 应读的证据 |
+| --- | --- |
+| 为什么没生成候选 | `recipe_discovery.providers[].provider_explanation` |
+| 为什么组合失败或物理重复 | composition rejections、planned-physical duplicates |
+| 物化、评价、观测、释放是否失败 | CompileIQ trial failure category/code 与 `trial_boundaries` |
+| 实际 capture/replay、ordinary、native-ordered 边界 | `trial_boundaries[].execution_after_evaluator`，必要时显式 timeline |
+| 正确候选是否更慢或未选中 | 可比较指标、Pareto 与 selection reason，不能看 discovery 状态下结论 |
+
+执行快照只代表 evaluator 之后的被动状态，不是逐次运行的完整 trace。它保存 path/fallback reason、
+Graph/native segment 数及计数完整性。capture 不等于 replay；mixed/native 边界不自动表示退化；
+关闭的计数不能证明零 replay 或零同步。外部 executor 不提供该接口时为 unavailable，诊断失败不替换
+原 evaluator 错误。仅在 trial 边界采集并单独记录 host 成本，经 checkpoint/resume 保留，Markdown 同源显示。
+
+收益接近时先使用已有 `repeat_count` 和显式 resume 预算，保持 workload/evaluation 合同相同。
+可选的搜索后 ABBA/BAAB 复核模板如下，不新增搜索门禁：
+
+```python
+with definition.materialization_context() as context:
+    graphs = {
+        "A": definition.materialize(context=context).executor,
+        "B": definition.materialize(decision.selection, context=context).executor,
+    }
+    observations = []
+    prepare_and_warm(graphs)  # 调用者准备、预热两种方案
+    for order in ("ABBA", "BAAB"):
+        for name in order:
+            restore_inputs_and_control_state(graphs[name])  # 计时外恢复等价可变状态
+            observations.append({"case": name, **measure_block(graphs[name])})
+```
+
+`measure_block` 由应用明确 device/host/完成边界与正确性。额外复核使用自己的显式预算，不暗中计为
+CompileIQ trial；保留原始值与顺序，不用归一化比率覆写搜索指标。两个常驻方案可能改变显存压力，
+需与 selected-only 显存分别记录。没有固定加速阈值或自动淘汰。
+
+公共 `definition.search_recipes()` 可以通过 `GraphEvaluationContract` 声明只用于报告的成本指标：
+
+```python
+evaluation_contract = ti.graph.GraphEvaluationContract({
+    "metric_definitions": {
+        "device_us": {
+            "unit": "us", "scope": "device_event_elapsed_including_idle_gaps",
+            "source": "CUDA events", "interval": "after warmup; 64 replays / 64",
+        },
+    },
+    "correctness": "application-owned reference and tolerance",
+    "synchronization": "application-defined completion boundaries",
+    "cost_profiles": {
+        "lifecycle": {
+            "scope": "end-to-end elapsed time for one Graph generation",
+            "unit": "ms",
+            "setup": "setup_ms",
+            "first": "first_ms",
+            "steady": "steady_ms",
+            "amortization_model": "setup_plus_first_plus_remaining_steady",
+        },
+    },
+})
+session = definition.search_recipes(
+    target=target, budget=budget, evaluation_contract=evaluation_contract,
+)
+# evaluator 除 target 指标外，返回自己测量的 setup_ms、first_ms、steady_ms。
+# Forge 不会根据这些名字推断或代测耗时。
+decision = session.run(evaluator)
+```
+
+可选的 `metric_definitions` 为具名 objective/constraint 声明 `unit`、`scope`、`source`、`interval`，
+并保留同步或 aggregation 等额外 JSON 事实；它不添加指标或自动插桩。JSON/Markdown 明确标识未声明口径，
+不由名字猜测含义。CUDA event 区间可能包含空隙，不等于 kernel 活跃时间；存在重叠 kernel 时还须说明活跃
+时间是求和还是区间并集。修改这些调用者事实会改变用于证据复用的 evaluation contract。
+
+cost profile 单位可为 `s`、`ms`、`us` 或 `ns`，同一个 profile 的各阶段共用单位。`scope` 必须说明实际测量范围；
+仅准备 binding 的耗时不一定等于完整 generation setup。setup/first/steady 映射可分别省略，缺测或 `None`
+表示不可得而不是零；提供的耗时必须有限且非负。声明的成本指标作为 opaque trial observation 保留，不会
+自动变成 CompileIQ objective/constraint；若调用者同时将它声明为 target，它仍正常参与该目标。未声明的
+额外返回指标仍会被拒绝。
+
+摊销模型须显式启用：`T(N) = setup + first + (N - 1) * steady`，`N >= 1`。首次执行替代一次稳态执行，
+setup 与 first 不应重叠。只有同 stage/fidelity 的完整且可行 baseline/candidate 证据可用于估算；缺测、
+无正向稳态收益或证据不可比时，不产生摊销次数。中位数估算与样本极值的算术边界分开，后者不是统计置信区间。
+范围重叠或单样本会明确标注，不构成自动采用门槛。host/device/end-to-end profile 不自动相加。
+
+Markdown 同时展示 recipe 注释中已有的 provider-owned `preparation_observation`。FFT 观测范围是计划创建；
+SpMM 观测范围是可能命中计划缓存的准备过程。共享初始化未单独拆分，selected-only restore 未测量。这些不是
+trial 指标、隔离冷启动或完整 Graph setup；baseline 缺测表示不可得，不是零。重复 fragment 可能共享计划，
+不能将时间或 workspace 跨 recipe 相加，也不能把 workspace 当作进程显存。它们不会自动填充 `cost_profiles`，
+也不会自动参与选择或摊销估算。
+
+JSON 保留原始成本观测（含失败 trial）与派生摘要，Markdown 由相同事实生成。搜索包装层的物化、evaluator
+总耗时和 cleanup wall time 是独立诊断，不替代调用者的 first/steady 测量。两处资源快照分别位于物化后与
+evaluator 结束后，不能观测所有中间分配或内存池 reservation。报告不在 steady Graph replay 中增加探测、
+同步或校验，也不会在 runtime `auto` 中自动启用某个 recipe。

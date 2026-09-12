@@ -600,7 +600,7 @@ The global-correction strategy uses a retained CUDA Graph with private,
 Graph-bound scan scratch; ordinary Program arena growth/clear does not affect
 it. Only `num_items` are processed, preserving unused capacity. This changes host
 submission and scratch lifetime, not the mathematical sum or the ordinary
-primitive's `method="auto"`. See [Graph runtime optimization](graph_runtime_optimization.en.md#retained-global-segmented-scan)
+primitive's `method="auto"`. See [Graph runtime optimization](#reusable-segmented-reduce-and-scan)
 for recording, memory and first-use compilation trade-offs.
 
 Search them through `builder.freeze().search_recipes(...)` and compare actual
@@ -635,8 +635,30 @@ workflow. Short segments can favor serial execution; long segments can favor
 the extra parallelism of partial/finalize at the cost of scratch and setup.
 There is no universal speedup or implicit ordinary-auto change. The operation
 itself does not fuse arbitrary neighbors; default search can additionally discover
-[certified pointwise value recipes](graph_runtime_optimization.en.md#certified-pointwise-values-around-segmented-reduction)
+[certified pointwise value recipes](#pointwise-fusion-around-segmented-reduction)
 for bounded i32/u32 producers/consumers, preserving all visible stores.
+
+### Pointwise fusion around segmented reduction
+
+Default CUDA complete-recipe providers can fuse a supported pointwise producer
+or consumer around `GraphBuilder.segmented_reduce()`. The current domain is
+compact 1D scalar i32/u32 arrays with exact zero-based ranges: addition,
+subtraction, multiplication, casts, negation, bitwise operations and constant
+shifts from 0 to 31. Floating point, random/atomic operations, conditional
+bodies, multiple stores, sparse/Field/view storage, arbitrary calls and
+debug/bounds-instrumented kernels are outside this fusion contract.
+
+The producer output must be the reduction values array; the consumer input
+must be its output array. Published bindings establish identity, range and
+disjoint-write requirements. Adjacent labels alone do not establish dataflow.
+Observable intermediate stores and unused capacity are preserved; fusion does
+not imply removing an application-visible temporary.
+
+The provider can combine value forwarding with supported serial, cooperative
+or partial/finalize reduction strategies. One ordered workspace lane is supported.
+Measure the complete pipeline: fused work can lose parallelism on long segments,
+while partial/finalize uses more scratch to expose more parallel work.
+Search retains legal alternatives without changing ordinary primitive defaults.
 
 ## Device-side Numeric Checks
 

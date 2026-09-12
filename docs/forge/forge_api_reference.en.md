@@ -1,18 +1,29 @@
 # Taichi Forge API Reference
 
-> Covers the **published Taichi Forge 0.6.2 contract** and public APIs marked
-> **0.6.3 in development**. This page lists Forge-only public API entry points.
-> New options added to Taichi-compatible APIs, such as
-> `ti.init(...)` keywords and `@ti.kernel(...)` keyword options, stay in
-> [Forge options](forge_options.en.md).
-> API introduction versions are indexed separately in
-> [release notes](release_notes.en.md). Experimental, in-development, and
-> source-build-only labels continue to limit support.
+[中文](forge_api_reference.zh.md) · [Documentation](index.en.md)
 
-Taichi Forge keeps the vanilla Taichi DSL model, but adds APIs for compile
-control, native device primitives, graph replay, display submission, sparse
-layout experiments, and diagnostics. The APIs below are grouped by module and
-list their call position, parameters, and current limits.
+This reference lists public symbols, call positions and support limits for the
+current source. Development/experimental labels still apply; check the
+[installed-version guidance](index.en.md#versions-and-installation).
+Initialization and compile options belong in [Forge options](forge_options.en.md).
+
+## Navigation
+
+| Need | Section / guide |
+| --- | --- |
+| Hardware, texture, ray and graphics | [Top-level APIs](#taichi_forge-top-level-apis), [provider setup](external_hardware_providers.en.md) |
+| Runtime diagnostics | [Runtime](#taichi_forgeruntime) |
+| Sort, scan, reductions and prepared plans | [Algorithms](#taichi_forgealgorithms), [usage guide](native_algorithms.en.md) |
+| Graph construction, control and completion | [Kernel and Graph APIs](#kernel-and-graph-apis), [execution guide](graph_runtime_optimization.en.md) |
+| Recipe search, report, resume and restore | [Integration guide](graph_recipe_integration.en.md) |
+| Display and UI | [UI](#taichi_forgeui) |
+| Operators and solvers | [Sparse linear algebra](#taichi_forgelinalg-sparse-linear-algebra), [usage guide](linear_operator.en.md) |
+| AOT | [AOT APIs](#aot-apis) |
+
+Code fragments assume the application objects named in their accompanying text.
+Signature-only blocks are marked as text. Use the [quick start](quickstart.en.md)
+for a complete executable example.
+
 
 ## `taichi_forge` Top-Level APIs
 
@@ -24,45 +35,26 @@ import taichi_forge as ti
 
 ### `ti.hardware` capabilities and explicit probes (0.6.3 in development)
 
-The stable ordinary-user layer consists of `HardwareCapability`,
-`HardwareProviderStatus`, and `HardwareExecutionReport`. Use `status(id)`,
-`provider_status(id)`, or `execution_report()` to read only `available`, active
-`backend`, `selected_provider`/`selected`, hardware qualification `route`, and
-the structured `reason`. These passive calls never load, enable, benchmark, or
-select an optional provider.
+- `ti.hardware.status(operation_id)`, `provider_status(provider_id)` and
+  `execution_report()` are passive queries. They do not load, enable, benchmark
+  or select an optional provider.
+- `operations()`, `capability(operation_id)`, `providers()` and `report()`
+  expose detailed operation, resource, numerical and deployment contracts.
+- `probe(provider_id, ...)` explicitly checks library discovery and supported
+  symbols. It is not a numerical test, plan creation or an automatic selection.
+- `graph_integration` and `recipe_search` are independent. A `root_ordered`
+  command executes in Graph order but is not necessarily backend-captured.
+- cuSPARSELt and cuTENSOR provide the documented recorded operations and complete
+  recipe providers; AmgX remains explicit execution without a general Graph route.
+  Do not infer operation support from a successful library probe.
 
-`operations()`, `capability(operation_id)`, `providers()`, and `report()` are
-schema-v4 diagnostic contracts. They additionally expose planner/provider
-details such as dependency tier, workspace/lifetime/update policy, ABI,
-performance scope, resource effects, and native facts. Every operation has an
-`activation_mode` that separates `explicit_hardware_api`,
-`explicit_kernel_intrinsic`, `domain_api_auto_provider`, and
-`compiler_automatic`. `graph_integration` independently reports `inline`,
-`root_ordered`, `backend_recorded`, `stream_captured`, `opaque`, or
-`unsupported`. In particular, `root_ordered` means that a Forge root Graph
-preserves ordering and lifetime while replay calls the provider again; it does
-not claim CUDA Graph capture or a persistent Vulkan command buffer.
+For supported library versions, installation, exact operation limits and examples,
+use [Optional external providers](external_hardware_providers.en.md).
+Library installation alone does not select an algorithm.
 
-`probe(provider_id)` explicitly probes a D1 `lazy_external` provider. The
-cuBLAS, cuSPARSE, and cuFFT probes check exact symbols through a transient
-native handle. cuDSS uses the wheel-internal Forge adapter to transiently load
-and validate the user vendor runtime. Bundled adapters similarly audit
-cuSPARSELt 0.8.x-0.9.x, cuTENSOR 2.0.x-2.7.x, and the AmgX stable C API. Their
-separate provider objects expose explicit execution plans, but no automatic,
-Graph, or kernel route. Probe handles close before return
-and no probe changes later selection. If an actual algorithm already owns a
-plan, passive reports observe that state without invoking the loader. Unknown
-operations/providers and unimplemented probes fail closed.
+### Core kernel hardware routes (0.6.3)
 
-Installation ownership, version binding, loader configuration, and recommended
-selection gates for user-managed libraries are documented in
-[Optional external hardware providers](external_hardware_providers.en.md).
-That guide distinguishes execution providers, non-executing probes, and
-native-adapter candidates; installing a runtime never selects an algorithm.
-
-### Core kernel hardware routes (0.6.3 qualification)
-
-The hardware catalog also describes existing D0 CUDA/Vulkan kernel routes.
+The hardware catalog also describes existing CUDA/Vulkan kernel routes.
 They add no dependency, wheel variant, Python native executable, or new DSL
 syntax. The call boundary is part of the contract:
 
@@ -79,8 +71,7 @@ syntax. The call boundary is part of the contract:
 - Layered selection: `ti.block_local` is an explicit cache hint, while the
   later choice of PTX `cp.async` for a qualified read-only copy is automatic.
   The current block-local qualification covers supported gather/read-cache
-  patterns; sparse pointer-SNode scatter/write-back is excluded after a
-  reproducible CUDA correctness failure.
+  patterns; sparse pointer-SNode scatter/write-back is excluded by the supported input contract.
 
 All catalog entries use `hardware_acceleration="implementation_defined"`:
 code generation may choose native atomics, CAS, subgroup instructions, or
@@ -89,7 +80,7 @@ is not evidence of a particular instruction.
 
 ### `ti.hardware.linalg.gemm_f32` (0.6.3 in development)
 
-An explicit D1 cuBLAS provider for compact row-major f32 matrices:
+An explicit cuBLAS provider for compact row-major f32 matrices:
 
 ```python
 if ti.hardware.linalg.is_available():  # explicit transient provider probe
@@ -118,7 +109,7 @@ Toolkit header, link dependency, bundled library, package dependency, build
 switch, or wheel variant. The API is direct/root-Graph only: it is not
 kernel-callable and ordinary matrix multiplication is never rewritten.
 
-### CUDA sparse provider selection, explicit SpMV, and cuDSS (0.6.3 qualification)
+### CUDA sparse provider selection, explicit SpMV, and cuDSS (0.6.3)
 
 Two existing `ti.linalg` domain APIs already select optional vendor libraries
 on CUDA:
@@ -230,7 +221,7 @@ numeric, and memory gates.
 
 ### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
 
-These D0 APIs describe and submit one Vulkan RHI buffer-command sequence:
+These APIs describe and submit one Vulkan RHI buffer-command sequence:
 `fill_u32()`, `copy()`, `buffer_barrier()`, and `memory_barrier()`. Execute it
 manually with `recording.execute(bindings)`, or append it to a root Graph with
 `GraphBuilder.append_native(recording, admission="auto")`.
@@ -249,12 +240,12 @@ and `rerecord` replay. It is not callable inside `@ti.kernel`, is not qualified
 inside a structured `Sequential` or for AOT serialization, and is not itself a
 RasterPass or AS provider. Bounds errors, overlapping copies, backend/device
 mismatches, Graph use after reset, and recordings over 4096 commands fail.
-The route uses only D0 runtime code already present in official wheels and does
+The route uses only runtime code already present in official wheels and does
 not add a wheel variant.
 
 ### `ti.hardware.image.VulkanImageCopyRecording` (0.6.3 in development)
 
-This D0 low-level command copies one complete, format- and extent-matched
+This low-level command copies one complete, format- and extent-matched
 Vulkan color `ti.Texture` into another:
 
 ```python
@@ -493,7 +484,7 @@ recording with fixed bindings for repeat submission.
 
 ### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3 in development)
 
-The low-level D0 Vulkan hardware ray-query API separates fixed-topology
+The low-level Vulkan hardware ray-query API separates fixed-topology
 triangle BLAS resources from a fixed-order instance TLAS:
 
 ```python
@@ -621,7 +612,7 @@ remain integer indices and f32 distances/barycentrics, not float-packed IDs.
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3 in development)
 
-An explicit D1 single-GPU cuFFT provider for C2C, R2C, and C2R transforms:
+An explicit single-GPU cuFFT provider for C2C, R2C, and C2R transforms:
 
 ```python
 if ti.hardware.fft.is_available():  # explicit transient provider probe
@@ -922,11 +913,7 @@ snapshot, not a reset or allocator-control API.
 The default host policy starts with a 16 MiB slab and grows geometrically up
 to the existing 1 GiB ceiling. A request larger than the next slab receives a
 request-sized, alignment-safe large mapping without advancing that sequence.
-For release
-diagnosis only, setting `TI_HOST_ALLOCATOR_ADAPTIVE_CHUNKS=0` before importing
-or initializing Taichi restores the legacy fixed-1-GiB slab policy. This
-environment switch is an internal rollback gate, not a stable `ti.init`
-option or a long-term allocator-control API.
+
 
 #### Memory growth and ownership boundaries
 
@@ -964,9 +951,7 @@ contracts. Repeated create/destroy cycles with a bounded peak live topology
 reuse tree slots and keep tree metadata bounded. The root-dense intersection
 above also makes compile cardinality follow unique kernel/layout identities,
 not historical generation count; unsupported intersections still repeat
-frontend/backend compilation. Short unit tests cover the bounded tree
-invariant, while longer qualification runs exercise 10,000 tree-only and
-executable-producing generations. Lifecycle telemetry distinguishes historical
+frontend/backend compilation.  Lifecycle telemetry distinguishes historical
 materializations, resident specializations, template hits, binding creation,
 reclaims, retired/pinned handles, and budget rejections.
 
@@ -1087,12 +1072,10 @@ Taichi helper kernels.
 
 ### CompileIQ boundary (0.6.3 in development)
 
-The algorithms module exposes no independent CompileIQ search builders. The
-historical reduce-provider and segmented-scan search implementations remain
-private qualification tools; ordinary primitives, explicit `method=`, and
-`method="auto"` keep their existing contracts. The public search entry point is
-`ti.graph.compileiq_recipe_search(graph)`, and it accepts only complete
-Forge-owned Graph recipes.
+The algorithms module has no independent CompileIQ search API. Use
+`definition.search_recipes(...)` for complete Graph recipes; ordinary
+primitives keep their explicit and `auto` contracts.
+See [search, reports and reuse](graph_recipe_integration.en.md).
 
 ### Primitive capability queries
 
@@ -1930,7 +1913,7 @@ a block size but preserves an explicit source-level
 fails before device enqueue. `block_dim` accepts values from 1 through 1024
 that are powers of two or multiples of 32, matching Taichi's existing loop
 configuration contract; device and kernel resource limits may still reject a specialization.
-The report exposes the immutable policy, backend, status/reason, and the N0
+The report exposes the immutable policy, backend, status/reason, and the
 task manifests containing requested, selected, and actual geometry.
 `report.resources` adds one immutable `TaskLaunchResourceReport` per task. It
 reports compile-time shared-memory use, the source and value of an exposed
@@ -1960,8 +1943,7 @@ launch path and allocate no telemetry buffer. Each distinct policy is a normal
 compiled specialization, participates in the runtime specialization budget
 and offline-cache identity, and must be prepared again after `ti.reset()`.
 Block tuning is backend- and workload-specific, so always compare against
-`auto` with end-of-work synchronization. The reproducible paired harness is
-`benchmarks/task_launch_policy_bench.py`.
+`auto` with end-of-work synchronization.
 
 ### Complete Graph execution-recipe search with modified CompileIQ
 
@@ -2040,17 +2022,12 @@ compatible. The modified CompileIQ boundary receives only complete opaque
 recipe tokens, and materialization always crosses the definition-owned
 transactional context.
 
-Task-indexed offload identities, materialization, and qualification remain
-private diagnostic infrastructure rather than a public
-`ti.compileiq_offload_execution_plan_search` API. Ordinary kernels continue to
-use source-owned contracts and explicit `TaskLaunchPolicy`; CompileIQ does not
-receive raw workgroup, TLS, register, or PTXAS axes.
+CompileIQ evaluates complete recipes, not raw workgroup, register or PTXAS parameters.
 
 The modified CompileIQ wheel is accepted by the V2 protocol/capability contract,
 not by an exact fork commit or wheel hash. The installed Python source identity
 is nevertheless recorded and bound to checkpoints, so code drift invalidates
-resume rather than silently reusing measurements. The current commit and wheel
-SHA in the manifest describe one qualified build only.
+resume rather than silently reusing measurements.
 
 ### Device-resident bounded workloads with `DeviceExtent`
 
@@ -2280,9 +2257,7 @@ Vulkan launch state remains an external 16-byte compatibility state and reports
 zero internal packet bytes. Exact physical work reduction is not a universal
 speedup: a light standalone Vulkan payload can cost more than a fixed Graph
 because packet preparation and ordering add a dispatch/dependency. Measure the
-complete workload against both fixed Graph and direct execution. The paired
-harnesses are `benchmarks/dynamic_workload_bench.py` and
-`benchmarks/device_worklist_bench.py`.
+complete workload against both fixed Graph and direct execution.
 
 ### `GraphBuilder.dispatch_indirect(kernel, *args, dispatch_packet, template_args=None, label=None)`
 
@@ -2397,10 +2372,7 @@ resources, and submission guards once per region. Its structured command
 buffers use allocation-level effects to place RAW/WAR/WAW barriers and retain
 conservative controller/global boundaries. The capability keys
 `compound_single_preparation` and `structured_barrier_policy` describe these
-active policies. The environment switches
-`TI_VULKAN_COMPOUND_SINGLE_PREPARATION=0` and
-`TI_VULKAN_STRUCTURED_HAZARD_PLANNER=0` are qualification fallbacks to the
-legacy per-chunk preparation and eager per-task barrier paths.
+active policies.
 
 `portable` forces the portable route; `native_required` fails closed when the
 selected backend cannot honor its native contract. Portable structured-control
@@ -2475,7 +2447,6 @@ published by the same Graph's `bind()` method.
 | `Graph.prepare_telemetry(mode, *, slots=1)` | Explicitly allocate one to the configured maximum bounded telemetry slots and compile required packed snapshot kernels without executing the Graph or reading user resources. `mode="timestamps"` additionally performs one empty instrumented transaction to move backend event/query initialization outside the first measured submission. Preparation covers currently materialized workspace lanes; later lanes reuse compiled kernels but materialize their own bounded storage. `False` is a no-op. |
 | `SubmissionTicket.telemetry()` | Wait if needed and return an immutable schema-v5 `GraphSubmissionTelemetry` when telemetry was requested; otherwise return `None`. Region reports include terminal counters, stop positions, nested invocation counts, and `pipeline` is the ticket-owned `GraphPipelineReport`. Nullable GPU duration fields are never inferred from host wall time. |
 | `SubmissionTicket.pipeline_report()` | Return the same immutable pipeline object as `ticket.telemetry().pipeline`, waiting if needed. Returns `None` when telemetry was not requested. |
-| `Graph._prewarm()` | Warm the current runtime's backend plan; this internal/advanced entry point does not change the argument contract. |
 
 #### `GraphBindingSet`
 
@@ -2723,7 +2694,7 @@ generation reports `runtime_invalid`.
 
 ### `GraphBuilder.append_native(node, *, prewarm=False, admission="explicit")`
 
-Location: `taichi_forge.graph._graph`; available on the Forge graph builder.
+Available on `ti.graph.GraphBuilder`.
 
 Append a Forge DSL-defined native node to a graph.
 
@@ -3093,7 +3064,7 @@ root.place(x)
 
 Signature:
 
-```python
+```text
 hash(axes, dimensions, *, max_active=None, expected_active=None,
      capacity=None, hash_load_factor=None)
 ```
