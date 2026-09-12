@@ -923,7 +923,8 @@ class CudaGraphExecHandle {
 
 class CudaStreamCaptureGuard {
  public:
-  explicit CudaStreamCaptureGuard(void *stream) : stream_(stream) {
+  explicit CudaStreamCaptureGuard(void *stream, bool borrowed_graph = false)
+      : stream_(stream), borrowed_graph_(borrowed_graph) {
   }
   ~CudaStreamCaptureGuard() {
     abort();
@@ -945,7 +946,7 @@ class CudaStreamCaptureGuard {
     auto &driver = CUDADriver::get_instance();
     const uint32_t result =
         driver.stream_end_capture.call(stream_, &graph);
-    if (result == CUDA_SUCCESS && graph != nullptr) {
+    if (result == CUDA_SUCCESS && graph != nullptr && !borrowed_graph_) {
       driver.graph_destroy.call(graph);
     }
   }
@@ -953,6 +954,7 @@ class CudaStreamCaptureGuard {
  private:
   void *stream_{nullptr};
   bool active_{true};
+  bool borrowed_graph_{false};
 };
 
 class CudaGraphCapturePacket {
@@ -1150,6 +1152,22 @@ struct CudaGraphBoundedDispatchObservation {
 
 }  // namespace
 
+// One private counter per static loop, not per encoded iteration. Parent
+// Graph ownership covers every conditional handle and borrowed body graph.
+struct CudaNestedConditionalState {
+  cuda::CudaGraphConditionalControl *controls{nullptr};
+  std::vector<DeviceAllocation> predicates;
+  std::vector<int> budgets;
+  std::vector<std::array<std::size_t, 3>> boundaries;
+  std::size_t outer_condition_count{0};
+
+  ~CudaNestedConditionalState() {
+    if (controls != nullptr) {
+      CUDADriver::get_instance().mem_free(controls);
+    }
+  }
+};
+
 struct CompiledGraphCudaState {
   std::vector<CudaGraphArgSignatureEntry> signature;
   std::vector<DeviceAllocation> allocations;
@@ -1172,6 +1190,7 @@ struct CompiledGraphCudaState {
   std::vector<std::int32_t> bounded_dispatch_group_indices;
   std::vector<std::int32_t> bounded_dispatch_group_member_indices;
   CudaGraphExecHandle graph_exec;
+  std::unique_ptr<CudaNestedConditionalState> nested_conditional;
   cuda::CudaGraphConditionalControl *conditional_control{nullptr};
   std::uint64_t conditional_handle{0};
   bool conditional_mode{false};
@@ -1285,6 +1304,7 @@ struct CompiledGraphCudaState {
     auto &context = CUDAContext::get_instance();
     context.make_current();
     graph_exec.reset();
+    nested_conditional.reset();
     for (auto &event : parallel_capture_events) {
       event.mark_complete();
     }
@@ -1409,6 +1429,10 @@ struct CompiledGraphCudaState {
     }
     if (nested_device_nodes != nullptr) {
       bytes += nested_host_nodes.size() * sizeof(std::uintptr_t);
+    }
+    if (nested_conditional && nested_conditional->controls != nullptr) {
+      bytes += nested_conditional->budgets.size() *
+               sizeof(cuda::CudaGraphConditionalControl);
     }
     return bytes;
   }
@@ -3160,10 +3184,382 @@ bool try_run_cuda_masked_control_graph(
   return true;
 }
 
-// Encode a strict while -> while hierarchy with device-updatable CUDA Graph
-// kernel nodes. Each static business dispatch is compiled once. The bounded
-// topology repeats only lightweight updater nodes and ordinary payload nodes,
-// avoiding the per-dispatch compiler-gated variants used by the legacy route.
+// Encode a strict while -> while hierarchy with nested CUDA conditional
+// nodes. Each static region is captured once in its owning conditional
+// body; iteration budgets change private control data, not Graph topology.
+bool try_run_cuda_conditional_nested_control_graph(
+    const CompiledGraph &graph,
+    const CompileConfig &compile_config,
+    const std::unordered_map<std::string, IValue> &args,
+    CompiledGraphJITCache &cache,
+    Program &program,
+    Ndarray &outer_predicate,
+    const std::vector<CompiledGraphNestedInnerControl> &inners,
+    std::size_t outer_condition_count,
+    int outer_budget,
+    RuntimeStatistics *statistics) {
+  auto *state = get_cuda_graph_state(cache);
+  auto unavailable = [&]() {
+    mark_cuda_graph_fallback(
+        *state, CompiledGraphFallbackReason::structural_unsupported, true);
+    state->retire();
+    return false;
+  };
+  std::optional<CudaGraphSignatureCandidate> signature;
+  try {
+    signature = make_cuda_graph_signature(graph, program, args);
+  } catch (...) {
+    state->retire();
+    throw;
+  }
+  if (!signature) {
+    return unavailable();
+  }
+  // Cache identity, not repeated semantic/capability validation. A frozen
+  // exact binding reuses all preparation facts and allocates no topology
+  // vectors. Changed controls/budgets are handled at the preparation boundary.
+  const auto *cached = state->nested_conditional.get();
+  if (cached && state->graph_exec &&
+      cached->outer_condition_count == outer_condition_count &&
+      cached->budgets.front() == outer_budget &&
+      cached->predicates.front() == outer_predicate.get_device_allocation() &&
+      cached->boundaries.size() == inners.size() &&
+      state->signature == signature->entries) {
+    bool same = true;
+    for (std::size_t i = 0; i < inners.size(); ++i) {
+      const auto &inner = inners[i];
+      same =
+          same && inner.predicate &&
+          cached->predicates[i + 1] == inner.predicate->get_device_allocation() &&
+          cached->budgets[i + 1] == inner.max_iterations &&
+          cached->boundaries[i] ==
+              std::array<std::size_t, 3>{inner.condition_dispatch_begin,
+                                         inner.body_dispatch_begin,
+                                         inner.dispatch_end};
+    }
+    if (same) {
+      CUDAContext::get_instance().make_current();
+      state->collect_ready_deferred_resources();
+      CUDADriver::get_instance().graph_launch(state->graph_exec.get(), nullptr);
+      state->stats.last_path =
+          CompiledGraphExecutionPath::cuda_conditional_nested_replay;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+      if (state->diagnostics_enabled) {
+        state->stats.backend = CompiledGraphBackend::cuda;
+        ++state->stats.attempts;
+        ++state->stats.exact_replays;
+        state->stats.last_driver_error = 0;
+      }
+      if (statistics) {
+        statistics->record_graph_replay();
+      }
+      return true;
+    }
+  }
+  const auto dispatch_count = graph.dispatches.size();
+  if (compile_config.debug || outer_condition_count == 0 ||
+      outer_condition_count >= dispatch_count || dispatch_count > 4096 ||
+      outer_budget <= 0 || outer_budget > 64 || inners.empty() ||
+      inners.size() > 8 ||
+      std::any_of(graph.dispatches.begin(), graph.dispatches.end(),
+                  [](const auto &dispatch) {
+                    // A provider's ordinary capture permission does not imply
+                    // conditional-body permission. Kernel-backed actions have
+                    // already been lowered to ti_kernel dispatches here.
+                    return !dispatch.ti_kernel ||
+                           dispatch.cuda_capture_command ||
+                           dispatch.cuda_bounded_dispatch.has_value();
+                  })) {
+    return unavailable();
+  }
+  std::vector<DeviceAllocation> predicates;
+  std::vector<int> budgets{outer_budget};
+  std::vector<std::array<std::size_t, 3>> boundaries;
+  auto append_predicate = [&](Ndarray *predicate) {
+    if (predicate == nullptr || predicate->owning_program() != &program ||
+        predicate->get_nelement() != 1 ||
+        predicate->get_element_data_type() != PrimitiveType::i32) {
+      return false;
+    }
+    const auto allocation = predicate->get_device_allocation();
+    if (dynamic_cast<cuda::CudaDevice *>(allocation.device) == nullptr ||
+        (!predicates.empty() &&
+         predicates.front().device != allocation.device) ||
+        std::find(predicates.begin(), predicates.end(), allocation) !=
+            predicates.end()) {
+      return false;
+    }
+    predicates.push_back(allocation);
+    return true;
+  };
+  if (!append_predicate(&outer_predicate)) {
+    return unavailable();
+  }
+  std::size_t cursor = outer_condition_count;
+  for (const auto &inner : inners) {
+    const auto begin = inner.condition_dispatch_begin;
+    const auto body = inner.body_dispatch_begin;
+    const auto end = inner.dispatch_end;
+    if (cursor > begin || begin >= body || body >= end ||
+        end > dispatch_count - outer_condition_count ||
+        end - body <= body - begin || inner.max_iterations <= 0 ||
+        inner.max_iterations > 64 || !append_predicate(inner.predicate)) {
+      return unavailable();
+    }
+    boundaries.push_back({begin, body, end});
+    budgets.push_back(inner.max_iterations);
+    cursor = end;
+  }
+  auto &driver = CUDADriver::get_instance();
+  if (!driver.stream_begin_capture_to_graph.available() ||
+      !driver.stream_get_capture_info_v2.available() ||
+      !driver.graph_conditional_handle_create.available() ||
+      !driver.graph_add_node.available() ||
+      !driver.graph_instantiate_with_flags.available() ||
+      !cuda::driver_graph_conditional_setter_compiled()) {
+    return unavailable();
+  }
+  auto topology_matches = [&](const CompiledGraphCudaState &candidate) {
+    const auto *plan = candidate.nested_conditional.get();
+    return plan && plan->predicates == predicates && plan->budgets == budgets &&
+           plan->boundaries == boundaries &&
+           plan->outer_condition_count == outer_condition_count;
+  };
+  try {
+    for (const auto &allocation : predicates) {
+      if (std::find(signature->allocations.begin(), signature->allocations.end(),
+                    allocation) == signature->allocations.end()) {
+        signature->allocations.push_back(allocation);
+      }
+    }
+    state = select_cuda_graph_replay_slot_by_signature(
+        cache, signature->entries, topology_matches);
+    if (state->graph_exec && state->signature != signature->entries) {
+      state = allocate_cuda_replay_slot_for_miss(cache, state, signature->entries);
+    }
+    CUDAContext::get_instance().make_current();
+    state->collect_ready_deferred_resources();
+    if (state->diagnostics_enabled) {
+      state->stats.backend = CompiledGraphBackend::cuda;
+      ++state->stats.attempts;
+      state->stats.last_driver_error = 0;
+    }
+    auto launch = [&](CompiledGraphExecutionPath path) {
+      driver.graph_launch(state->graph_exec.get(), nullptr);
+      state->stats.last_path = path;
+      state->stats.last_fallback_reason = CompiledGraphFallbackReason::none;
+    };
+    if (topology_matches(*state) && state->graph_exec &&
+        state->signature == signature->entries) {
+      launch(CompiledGraphExecutionPath::cuda_conditional_nested_replay);
+      if (state->diagnostics_enabled) {
+        ++state->stats.exact_replays;
+      }
+      if (statistics) {
+        statistics->record_graph_replay();
+      }
+      return true;
+    }
+    auto leases = acquire_cuda_graph_allocation_leases(signature->allocations);
+    if (!leases) {
+      mark_cuda_graph_fallback(
+          *state, CompiledGraphFallbackReason::resource_unavailable);
+      return false;
+    }
+    if (topology_matches(*state) && state->graph_exec &&
+        cuda_graph_signatures_are_structurally_compatible(
+            state->signature, signature->entries)) {
+      std::vector<std::vector<uint8_t>> host_buffers;
+      if (patch_cuda_graph_arguments(graph, args, signature->entries, *state,
+                                     host_buffers)) {
+        auto old_leases = std::move(state->allocation_leases);
+        state->allocation_leases = std::move(*leases);
+        state->allocations = signature->allocations;
+        state->signature = std::move(signature->entries);
+        state->defer_replay_resources(std::move(old_leases),
+                                      std::move(host_buffers));
+        launch(CompiledGraphExecutionPath::cuda_conditional_nested_patched_replay);
+        if (state->diagnostics_enabled) {
+          ++state->stats.patched_replays;
+        }
+        if (statistics) {
+          statistics->record_graph_replay();
+        }
+        return true;
+      }
+    }
+
+    const bool recapture = state->has_captured_once;
+    state->retire();
+    state->signature = std::move(signature->entries);
+    state->allocations = std::move(signature->allocations);
+    state->allocation_leases = std::move(*leases);
+    state->texture_leases = std::move(signature->texture_leases);
+    state->nested_conditional = std::make_unique<CudaNestedConditionalState>();
+    auto &plan = *state->nested_conditional;
+    plan.predicates = std::move(predicates);
+    plan.budgets = std::move(budgets);
+    plan.boundaries = std::move(boundaries);
+    plan.outer_condition_count = outer_condition_count;
+    if (state->diagnostics_enabled) {
+      ++state->stats.capture_attempts;
+      state->stats.recaptures += recapture;
+    }
+    if (cache.kernels.size() != dispatch_count) {
+      cache.kernels.assign(dispatch_count, {});
+    }
+    void *stream = state->ensure_capture_stream();
+    for (std::size_t i = 0; i < dispatch_count; ++i) {
+      const auto &dispatch = graph.dispatches[i];
+      auto *launcher = dynamic_cast<cuda::KernelLauncher *>(
+          &program.get_program_impl()->get_kernel_launcher());
+      if (!launcher) {
+        return unavailable();
+      }
+      auto *data = get_or_compile_cached_kernel(
+          dispatch, compile_config, cache.kernels[i], true);
+      auto handle = launcher->register_llvm_kernel(
+          dynamic_cast<const LLVM::CompiledKernelData &>(*data));
+      auto context = dispatch.ti_kernel->make_launch_context();
+      context.append_dispatch_label(dispatch.dispatch_label);
+      graph.init_runtime_context(dispatch.symbolic_args, args, context);
+      program.resolve_ndarray_launch_context_under_guard(context);
+      program.resolve_runtime_storage_launch_context_under_guard(context);
+      program.resolve_texture_launch_context_under_guard(context);
+      CudaGraphCapturePacket packet(stream);
+      packet.launcher = launcher;
+      if (!launcher->prepare_cuda_graph_launch(handle, context, packet.packet,
+                                               stream)) {
+        driver.stream_synchronize(stream);
+        return unavailable();
+      }
+      state->packets.push_back(std::move(packet));
+    }
+    cuda::driver_graph_prepare_conditional_setter();
+    std::vector<cuda::CudaGraphConditionalControl> controls(plan.budgets.size());
+    auto *device = static_cast<cuda::CudaDevice *>(plan.predicates.front().device);
+    for (std::size_t i = 0; i < controls.size(); ++i) {
+      controls[i].predicate = reinterpret_cast<std::uintptr_t>(
+          device->get_alloc_info(plan.predicates[i]).ptr);
+      controls[i].iteration = 0;
+      controls[i].max_iterations = plan.budgets[i];
+      controls[i].continue_while_nonzero = 1;
+    }
+    driver.malloc(reinterpret_cast<void **>(&plan.controls),
+                  controls.size() * sizeof(controls.front()));
+    driver.memcpy_host_to_device_async(plan.controls, controls.data(),
+                                        controls.size() * sizeof(controls.front()),
+                                        stream);
+    // Cold preparation only. Replays reset private iteration state on device.
+    driver.stream_synchronize(stream);
+    CudaGraphHandle parent;
+    driver.graph_create(parent.put(), 0);
+    void *context = nullptr;
+    driver.context_get_current(&context);
+    std::vector<std::uint64_t> handles(controls.size());
+    for (auto &handle : handles) {
+      driver.graph_conditional_handle_create(&handle, parent.get(), context, 0,
+                                             1);
+    }
+    auto capture_lock =
+        CUDAContext::get_instance().get_graph_capture_lock_guard();
+    auto capture_range = [&](CUgraph destination, void *dependency,
+                             std::size_t begin, std::size_t end,
+                             std::size_t loop, bool reset, void **tail) {
+      driver.stream_begin_capture_to_graph(
+          stream, destination, dependency ? &dependency : nullptr, nullptr,
+          dependency ? 1 : 0, CU_STREAM_CAPTURE_MODE_RELAXED);
+      CudaStreamCaptureGuard guard(stream, /*borrowed_graph=*/true);
+      for (std::size_t i = begin; i < end; ++i) {
+        const auto &packet = state->packets[i];
+        packet.launcher->capture_cuda_graph_launch(packet.packet, stream);
+      }
+      cuda::driver_graph_set_conditional(plan.controls + loop, handles[loop],
+                                          stream, reset);
+      std::uint32_t status = 0;
+      const void **dependencies = nullptr;
+      std::size_t count = 0;
+      driver.stream_get_capture_info_v2(stream, &status, nullptr, nullptr,
+                                         &dependencies, &count);
+      // The last operation is our single-stream setter, including empty tasks.
+      if (count != 1 || dependencies == nullptr) {
+        guard.abort();
+        return unavailable();
+      }
+      *tail = const_cast<void *>(dependencies[0]);
+      CUgraph captured = nullptr;
+      auto error = guard.end(&captured);
+      if (error != CUDA_SUCCESS || captured != destination) {
+        return handle_cuda_graph_driver_failure(
+            *state, error, "nested conditional capture");
+      }
+      return true;
+    };
+    auto add_while = [&](CUgraph owner, void *dependency, std::size_t loop,
+                         void **node) {
+      TaichiCudaGraphNodeParams params{};
+      params.type = 13;
+      params.parameters.conditional.handle = handles[loop];
+      params.parameters.conditional.type = 1;
+      params.parameters.conditional.size = 1;
+      params.parameters.conditional.context = context;
+      driver.graph_add_node(node, owner, &dependency, 1, &params);
+      return params.parameters.conditional.ph_graph_out[0];
+    };
+    void *tail = nullptr;
+    if (!capture_range(parent.get(), nullptr, 0, outer_condition_count, 0, true,
+                       &tail)) {
+      return false;
+    }
+    void *outer_node = nullptr;
+    CUgraph body = add_while(parent.get(), tail, 0, &outer_node);
+    void *previous = nullptr;
+    cursor = outer_condition_count;
+    for (std::size_t i = 0; i < plan.boundaries.size(); ++i) {
+      const auto &range = plan.boundaries[i];
+      // Initial inner condition follows the user's prefix. Reset only our
+      // private iteration counter on *each* outer entry, never user state.
+      if (!capture_range(body, previous, cursor, range[1], i + 1, true,
+                         &tail)) {
+        return false;
+      }
+      CUgraph inner_body = add_while(body, tail, i + 1, &previous);
+      if (!capture_range(inner_body, nullptr, range[1], range[2], i + 1, false,
+                         &tail)) {
+        return false;
+      }
+      cursor = range[2];
+    }
+    if (!capture_range(body, previous, cursor, dispatch_count, 0, false, &tail)) {
+      return false;
+    }
+    auto error = driver.graph_instantiate_with_flags.call(
+        state->graph_exec.put(), parent.get(), 0);
+    if (error != CUDA_SUCCESS || !state->graph_exec) {
+      return handle_cuda_graph_driver_failure(
+          *state, error, "nested conditional instantiate");
+    }
+    state->has_captured_once = true;
+    state->retry.record_success();
+    if (state->diagnostics_enabled) {
+      ++state->stats.captures;
+    }
+    if (statistics) {
+      statistics->record_graph_capture();
+      if (recapture) {
+        statistics->record_graph_recapture();
+      }
+    }
+    launch(CompiledGraphExecutionPath::cuda_conditional_nested_capture);
+    return true;
+  } catch (...) {
+    state->retire();
+    throw;
+  }
+}
+
+// Expand bounded iterations into device-updatable payload groups, preserving
+// the independently selectable route for high-activity, fine-grained bodies.
 bool try_run_cuda_device_update_nested_control_graph(
     const CompiledGraph &graph,
     const CompileConfig &compile_config,
@@ -6493,7 +6889,7 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
     std::size_t outer_condition_dispatch_count,
     int outer_max_iterations,
-    bool allow_device_update) const try {
+    CompiledGraphNestedCudaRoute route) const try {
 #if defined(TI_WITH_CUDA)
   if (compile_config.arch != Arch::cuda || outer_predicate == nullptr ||
       outer_counter == nullptr || inner_controls.empty() ||
@@ -6596,17 +6992,27 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_sequence_cached(
     cache.validated_snode_tree_program = program;
     cache.validated_snode_tree_epoch = tree_lifecycle_guard.epoch();
   }
-  const bool device_update_submitted =
-      allow_device_update &&
-      try_run_cuda_device_update_nested_control_graph(
+  bool submitted =
+      route == CompiledGraphNestedCudaRoute::conditional &&
+      try_run_cuda_conditional_nested_control_graph(
           *this, compile_config, args, cache, *program, *outer_predicate,
           inner_controls, outer_condition_dispatch_count,
           outer_max_iterations, &program->runtime_statistics());
-  if (!device_update_submitted &&
-      !try_run_cuda_masked_nested_control_graph(
-          *this, compile_config, args, cache, *program, *outer_predicate,
-          inner_controls, outer_condition_dispatch_count,
-          outer_max_iterations, &program->runtime_statistics())) {
+  if (route == CompiledGraphNestedCudaRoute::automatic ||
+      route == CompiledGraphNestedCudaRoute::device_update) {
+    submitted = try_run_cuda_device_update_nested_control_graph(
+        *this, compile_config, args, cache, *program, *outer_predicate,
+        inner_controls, outer_condition_dispatch_count,
+        outer_max_iterations, &program->runtime_statistics());
+  }
+  if (!submitted && (route == CompiledGraphNestedCudaRoute::automatic ||
+                     route == CompiledGraphNestedCudaRoute::masked)) {
+    submitted = try_run_cuda_masked_nested_control_graph(
+        *this, compile_config, args, cache, *program, *outer_predicate,
+        inner_controls, outer_condition_dispatch_count,
+        outer_max_iterations, &program->runtime_statistics());
+  }
+  if (!submitted) {
     return false;
   }
   program->mark_runtime_submission(
@@ -6662,7 +7068,9 @@ bool CompiledGraph::jit_submit_bounded_cuda_nested_cached(
   return jit_submit_bounded_cuda_nested_sequence_cached(
       compile_config, args, cache, outer_predicate, outer_counter,
       outer_status, {inner}, outer_condition_dispatch_count,
-      outer_max_iterations, allow_device_update);
+      outer_max_iterations, allow_device_update
+                                ? CompiledGraphNestedCudaRoute::automatic
+                                : CompiledGraphNestedCudaRoute::masked);
 }
 
 CompiledGraphStructuredResult

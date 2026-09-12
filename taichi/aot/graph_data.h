@@ -418,9 +418,21 @@ enum class CompiledGraphExecutionPath : uint8_t {
   cuda_device_update_nested_capture,
   cuda_device_update_nested_replay,
   cuda_device_update_nested_patched_replay,
+  cuda_conditional_nested_capture,
+  cuda_conditional_nested_replay,
+  cuda_conditional_nested_patched_replay,
   vulkan_record,
   vulkan_replay,
   vulkan_patched_replay,
+};
+
+// An explicitly selected physical recipe must not silently change topology.
+// Only the legacy automatic route may fall back from device update to masking.
+enum class CompiledGraphNestedCudaRoute : uint8_t {
+  automatic,
+  masked,
+  device_update,
+  conditional,
 };
 
 enum class CompiledGraphFallbackReason : uint8_t {
@@ -860,7 +872,7 @@ struct TI_DLL_EXPORT CompiledGraph {
       const std::vector<CompiledGraphNestedInnerControl> &inner_controls,
       std::size_t outer_condition_dispatch_count,
       int outer_max_iterations,
-      bool allow_device_update) const;
+      CompiledGraphNestedCudaRoute route) const;
   CompiledGraphStructuredResult jit_run_bounded_vulkan_cached(
       const CompileConfig &compile_config,
       const std::unordered_map<std::string, IValue> &args,

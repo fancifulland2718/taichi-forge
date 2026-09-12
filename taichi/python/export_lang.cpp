@@ -5568,6 +5568,8 @@ void export_lang(py::module &m) {
     std::size_t outer_condition_dispatch_count{0};
     int outer_max_iterations{0};
     bool allow_device_update{true};
+    aot::CompiledGraphNestedCudaRoute route{
+        aot::CompiledGraphNestedCudaRoute::automatic};
   };
 
   auto make_nested_graph_controls = [](
@@ -5850,7 +5852,10 @@ void export_lang(py::module &m) {
             cuda_nested->inner_controls,
             cuda_nested->outer_condition_dispatch_count,
             cuda_nested->outer_max_iterations,
-            cuda_nested->allow_device_update);
+            cuda_nested->route == aot::CompiledGraphNestedCudaRoute::automatic &&
+                    !cuda_nested->allow_device_update
+                ? aot::CompiledGraphNestedCudaRoute::masked
+                : cuda_nested->route);
       }
       if (vulkan_chunk_iterations != nullptr) {
         TI_ASSERT(cache != nullptr);
@@ -6045,6 +6050,13 @@ void export_lang(py::module &m) {
             case aot::CompiledGraphExecutionPath::
                 cuda_device_update_nested_patched_replay:
               return "cuda_device_update_nested_patched_replay";
+            case aot::CompiledGraphExecutionPath::cuda_conditional_nested_capture:
+              return "cuda_conditional_nested_capture";
+            case aot::CompiledGraphExecutionPath::cuda_conditional_nested_replay:
+              return "cuda_conditional_nested_replay";
+            case aot::CompiledGraphExecutionPath::
+                cuda_conditional_nested_patched_replay:
+              return "cuda_conditional_nested_patched_replay";
             case aot::CompiledGraphExecutionPath::vulkan_record:
               return "vulkan_record";
             case aot::CompiledGraphExecutionPath::vulkan_replay:
@@ -6729,7 +6741,7 @@ void export_lang(py::module &m) {
               int outer_max_iterations,
               const py::sequence &inner_max_iterations,
               Ndarray *outer_status, const py::sequence &inner_statuses,
-              bool allow_device_update) {
+              bool allow_device_update, const std::string &execution_route) {
             CudaNestedGraphRequest request;
             request.outer_predicate = &outer_predicate;
             request.outer_counter = &outer_counter;
@@ -6741,6 +6753,15 @@ void export_lang(py::module &m) {
                 outer_condition_dispatch_count;
             request.outer_max_iterations = outer_max_iterations;
             request.allow_device_update = allow_device_update;
+            if (execution_route == "conditional") {
+              request.route = aot::CompiledGraphNestedCudaRoute::conditional;
+            } else if (execution_route == "device_update") {
+              request.route = aot::CompiledGraphNestedCudaRoute::device_update;
+            } else if (execution_route == "masked") {
+              request.route = aot::CompiledGraphNestedCudaRoute::masked;
+            } else if (execution_route != "auto") {
+              throw py::value_error("unknown nested CUDA execution route");
+            }
             return jit_run_graph(
                 self, compile_config, pyargs, &cache, nullptr, 0, true,
                 nullptr, nullptr, -1, -1, nullptr, nullptr, nullptr, 0, true,
@@ -6753,7 +6774,16 @@ void export_lang(py::module &m) {
           py::arg("inner_boundaries"), py::arg("outer_max_iterations"),
           py::arg("inner_max_iterations"), py::arg("outer_status"),
           py::arg("inner_statuses"),
-          py::arg("allow_device_update") = true)
+          py::arg("allow_device_update") = true,
+          py::arg("execution_route") = "auto")
+      .def("_cuda_conditional_body_eligible", [](const aot::CompiledGraph &self) {
+        return std::all_of(self.dispatches.begin(), self.dispatches.end(),
+                           [](const auto &dispatch) {
+                             return dispatch.ti_kernel &&
+                                    !dispatch.cuda_capture_command &&
+                                    !dispatch.cuda_bounded_dispatch.has_value();
+                           });
+      })
       .def("jit_run_conditional_cuda_cached",
            [jit_run_graph](aot::CompiledGraph *self,
                            const CompileConfig &compile_config,

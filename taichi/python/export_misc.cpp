@@ -790,6 +790,9 @@ void export_misc(py::module &m) {
                           : "none"));
     result["general_graph_exact_control_available"] =
         exact_graph_control_available;
+    result["nested_conditional_graph_available"] =
+        exact_graph_control_available && driver.stream_get_capture_info_v2.available();
+    result["nested_explicit_route_compiled"] = true;
     result["internal_masked_graph_available"] = internal_masked_graph_available;
     result["exact_control_unavailable_reason"] =
         exact_control_unavailable_reason;
