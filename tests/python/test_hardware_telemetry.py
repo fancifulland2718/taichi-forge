@@ -110,6 +110,38 @@ def test_hardware_telemetry_uses_explicit_failure_phases():
         assert getattr(after, phase) == getattr(before, phase) + 1
 
 
+def test_repeated_hardware_counters_reuse_storage_and_reset_with_generation(monkeypatch):
+    generation = 1
+    monkeypatch.setattr(execution_telemetry, "_runtime_generation", lambda: generation)
+    monkeypatch.setattr(execution_telemetry, "_generation", None)
+    monkeypatch.setattr(execution_telemetry, "_counters", {})
+    monkeypatch.setattr(execution_telemetry, "_seen_resources", {})
+    original_factory = execution_telemetry._new_counters
+    allocations = []
+
+    def allocate():
+        counters = original_factory()
+        allocations.append(counters)
+        return counters
+
+    monkeypatch.setattr(execution_telemetry, "_new_counters", allocate)
+    for _ in range(4):
+        execution_telemetry._record("test.reuse", attempted=1)
+        execution_telemetry._record("test.reuse", executed=1)
+        execution_telemetry._record_resource_uses("test.reuse", ("resource",))
+    assert len(allocations) == 1
+    assert allocations[0]["attempted"] == allocations[0]["executed"] == 4
+    assert allocations[0]["resource_first_uses"] == 1
+    assert allocations[0]["resource_reuses"] == 3
+
+    generation = 2
+    execution_telemetry._record_resource_uses("test.reuse", ("resource",))
+    assert len(allocations) == 2
+    assert allocations[1]["attempted"] == 0
+    assert allocations[1]["resource_first_uses"] == 1
+    assert allocations[1]["resource_reuses"] == 0
+
+
 @test_utils.test(arch=ti.cpu)
 def test_hardware_telemetry_classifies_lazy_provider_load_without_error_text(
     monkeypatch,

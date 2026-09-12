@@ -99,7 +99,9 @@ def _record(operation_id, **increments):
     generation = _runtime_generation()
     with _lock:
         _ensure_generation_locked(generation)
-        counters = _counters.setdefault(operation_id, _new_counters())
+        counters = _counters.get(operation_id)
+        if counters is None:
+            counters = _counters[operation_id] = _new_counters()
         for name, amount in increments.items():
             counters[name] += int(amount)
 
@@ -196,14 +198,18 @@ def _record_resource_uses(operation_id, keys):
     reuses = 0
     with _lock:
         _ensure_generation_locked(generation)
-        seen = _seen_resources.setdefault(operation_id, set())
+        seen = _seen_resources.get(operation_id)
+        if seen is None:
+            seen = _seen_resources[operation_id] = set()
         for key in keys:
             if key in seen:
                 reuses += 1
             else:
                 seen.add(key)
                 first_uses += 1
-        counters = _counters.setdefault(operation_id, _new_counters())
+        counters = _counters.get(operation_id)
+        if counters is None:
+            counters = _counters[operation_id] = _new_counters()
         counters["resource_first_uses"] += first_uses
         counters["resource_reuses"] += reuses
 
