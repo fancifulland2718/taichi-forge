@@ -92,5 +92,68 @@ TEST(VulkanCompletionTest, GraphicsAndComputeUseTheirActualQueueIdentity) {
   EXPECT_TRUE(draw->wait());
 }
 
+TEST(VulkanCompletionTest, ReusedDependencyCommandsRetainPerSubmitCompletion) {
+  if (!is_vulkan_api_available()) {
+    GTEST_SKIP() << "Vulkan is unavailable";
+  }
+  VulkanDeviceCreator::Params params;
+  VulkanDeviceCreator creator(params);
+  auto *device = creator.device();
+  auto *stream = device->get_compute_stream();
+  auto producer = submit_empty(device->get_graphics_stream());
+  ASSERT_TRUE(producer);
+  auto before = device->queue_submission_snapshot();
+  auto dependency = stream->submit_dependency({producer});
+  ASSERT_TRUE(dependency);
+  producer.reset();  // The submission, not the caller, owns the wait semaphore.
+  auto after = device->queue_submission_snapshot();
+  EXPECT_EQ(after.queue_submit_calls - before.queue_submit_calls, 1);
+  EXPECT_EQ(after.submitted_command_buffers - before.submitted_command_buffers, 1);
+  EXPECT_TRUE(stream->is_last_submission(dependency));
+
+  stream->begin_submission_batch();
+  auto pending = stream->submit_dependency({dependency});
+  ASSERT_TRUE(pending);
+  EXPECT_FALSE(stream->is_last_submission(pending));
+  dependency.reset();
+  before = device->queue_submission_snapshot();
+  auto batch = stream->end_submission_batch();
+  ASSERT_TRUE(batch);
+  after = device->queue_submission_snapshot();
+  EXPECT_EQ(after.queue_submit_calls - before.queue_submit_calls, 1);
+  EXPECT_EQ(after.submitted_command_buffers - before.submitted_command_buffers, 1);
+  EXPECT_EQ(after.batched_command_buffers - before.batched_command_buffers, 1);
+  EXPECT_TRUE(stream->is_last_submission(pending));
+  EXPECT_TRUE(batch->wait());
+
+  stream->begin_submission_batch();
+  auto next_dependency = stream->submit_dependency({batch});
+  auto command = submit_empty(stream);
+  ASSERT_TRUE(command);
+  before = device->queue_submission_snapshot();
+  auto mixed = stream->end_submission_batch();
+  ASSERT_TRUE(mixed);
+  after = device->queue_submission_snapshot();
+  EXPECT_EQ(after.queue_submit_calls - before.queue_submit_calls, 1);
+  EXPECT_EQ(after.submitted_command_buffers - before.submitted_command_buffers, 2);
+  EXPECT_EQ(after.batched_command_buffers - before.batched_command_buffers, 2);
+  EXPECT_TRUE(stream->is_last_submission(next_dependency));
+  EXPECT_TRUE(mixed->wait());
+
+  // Signal identity is per submission, even when the dependency command
+  // buffer is shared by several pending submissions in the same batch.
+  stream->begin_submission_batch();
+  auto prefix = stream->submit_dependency({mixed});
+  auto repeated = stream->submit_dependency({prefix});
+  auto [commands, result] = stream->new_command_list_unique();
+  ASSERT_EQ(result, RhiResult::success);
+  auto consumer = stream->submit(commands.get(), {repeated});
+  ASSERT_TRUE(consumer);
+  auto ordered = stream->end_submission_batch();
+  ASSERT_TRUE(ordered);
+  EXPECT_TRUE(ordered->wait());
+  stream->command_sync();
+}
+
 }  // namespace
 }  // namespace taichi::lang::vulkan

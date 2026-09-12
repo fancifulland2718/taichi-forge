@@ -861,6 +861,19 @@ class RHI_DLL_EXPORT Stream {
       CommandList *cmdlist,
       const std::vector<StreamSemaphore> &wait_semaphores = {}) = 0;
 
+  // Order later stream work after these signals without a host wait. Backends
+  // may reuse immutable dependency commands instead of recording a barrier.
+  // The returned completion covers the dependency and owns its native refs.
+  virtual StreamSemaphore submit_dependency(
+      const std::vector<StreamSemaphore> &wait_semaphores) {
+    auto [commands, result] = new_command_list_unique();
+    if (result != RhiResult::success) {
+      return nullptr;
+    }
+    commands->memory_barrier();
+    return submit(commands.get(), wait_semaphores);
+  }
+
   // Optional host transaction batching. Backends that support it may defer
   // submit() calls between these boundaries and publish the ordered command
   // lists with fewer native queue calls. Returned per-submit completion

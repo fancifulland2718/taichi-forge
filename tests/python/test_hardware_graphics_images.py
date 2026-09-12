@@ -115,7 +115,15 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
         monkeypatch.setattr(recording, "_prepare_packet", unexpected_prepare)
         for red in (0.2, 0.8):
             value.fill(red)
-            graph.run(bindings)
+            ti.sync()  # Exclude the input upload from the Graph queue counts.
+            program = impl.get_runtime().prog
+            before = dict(program._debug_vulkan_queue_submission_stats())
+            graph.submit(bindings).wait()
+            after = dict(program._debug_vulkan_queue_submission_stats())
+            # Producer, graphics, consumer plus the immutable bridge command;
+            # caching must preserve the original queue dependency shape.
+            assert after["queue_submit_calls"] - before["queue_submit_calls"] == 3
+            assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 4
             expected = np.broadcast_to([red, 0.25, 0.5, 1.0], (32, 16, 4))
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
 

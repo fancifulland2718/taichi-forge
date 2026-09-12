@@ -6338,15 +6338,8 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   // so no second lifetime/completion domain is introduced.
   try {
     Stream *compute_stream = device_->get_compute_stream();
-    auto [bridge_commands, bridge_result] =
-        compute_stream->new_command_list_unique();
-    TI_ERROR_IF(bridge_result != RhiResult::success,
-                "Runtime graphics completion bridge allocation failed: "
-                "RhiResult({})",
-                bridge_result);
-    bridge_commands->memory_barrier();
     latest_compute_completion_ =
-        compute_stream->submit(bridge_commands.get(), {graphics_completion});
+        compute_stream->submit_dependency({graphics_completion});
     TI_ERROR_IF(!latest_compute_completion_,
                 "Runtime graphics completion bridge returned no token");
   } catch (...) {

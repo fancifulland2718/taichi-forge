@@ -832,6 +832,8 @@ class VulkanStream : public Stream {
   StreamSemaphore submit_synced(
       CommandList *cmdlist,
       const std::vector<StreamSemaphore> &wait_semaphores = {}) override;
+  StreamSemaphore submit_dependency(
+      const std::vector<StreamSemaphore> &wait_semaphores) override;
 
   void begin_submission_batch() override;
   StreamSemaphore end_submission_batch() override;
@@ -874,6 +876,9 @@ class VulkanStream : public Stream {
 
   // Command pools are per-thread
   vkapi::IVkCommandPool command_pool_;
+  // Immutable barrier-only commands, recorded lazily under submission_mutex_.
+  // SIMULTANEOUS_USE permits in-flight reuse; per-submit signals stay separate.
+  vkapi::IVkCommandBuffer dependency_commands_;
   std::mutex submission_mutex_;
   std::vector<TrackedCmdbuf> submitted_cmdbuffers_;
   std::size_t submission_batch_depth_{0};

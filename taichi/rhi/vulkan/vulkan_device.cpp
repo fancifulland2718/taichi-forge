@@ -3426,15 +3426,25 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   device_.throw_if_backend_submission_disallowed("Vulkan queue submit");
   std::lock_guard<std::mutex> submission_lock(submission_mutex_);
   VulkanCommandList *cmdlist = static_cast<VulkanCommandList *>(cmdlist_);
-  vkapi::IVkCommandBuffer buffer = cmdlist->finalize();
-  auto profiler_samplers = cmdlist->take_completed_profiler_samplers();
-
-  /*
-  if (in_flight_cmdlists_.find(buffer) != in_flight_cmdlists_.end()) {
-    TI_ERROR("Can not submit command list that is still in-flight");
-    return;
+  vkapi::IVkCommandBuffer buffer;
+  std::vector<VulkanProfilerSampler> profiler_samplers;
+  if (cmdlist) {
+    buffer = cmdlist->finalize();
+    profiler_samplers = cmdlist->take_completed_profiler_samplers();
+  } else {
+    // Preserve the existing barrier and queue submission shape, but record
+    // the resource-free command buffer only once for this stream. Vulkan
+    // command lists use SIMULTANEOUS_USE, so overlapping submissions need
+    // neither a slot scan nor a host wait before reusing these commands.
+    if (!dependency_commands_) {
+      auto commands = vkapi::allocate_command_buffer(command_pool_);
+      TI_ERROR_IF(!commands, "Vulkan dependency command allocation failed");
+      VulkanCommandList dependency(&device_, this, std::move(commands));
+      dependency.memory_barrier();
+      dependency_commands_ = dependency.finalize();
+    }
+    buffer = dependency_commands_;
   }
-  */
 
   VkSubmitInfo submit_info{};
   submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3456,7 +3466,7 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   submit_info.waitSemaphoreCount = vk_wait_semaphores.size();
   submit_info.pWaitDstStageMask = vk_wait_stages.data();
 
-  auto semaphore = vkapi::create_semaphore(buffer->device, 0);
+  auto semaphore = vkapi::create_semaphore(device_.vk_device(), 0);
   submit_refs.push_back(semaphore);
 
   std::vector<VkSemaphore> vk_signal_semaphores;
@@ -3475,7 +3485,7 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
 
   if (submission_batch_depth_ != 0) {
     if (!submission_batch_fence_) {
-      submission_batch_fence_ = vkapi::create_fence(buffer->device, 0);
+      submission_batch_fence_ = vkapi::create_fence(device_.vk_device(), 0);
     }
     auto completion = std::make_shared<VulkanStreamSemaphoreObject>(
         device_.backend_fault_reporter(), semaphore,
@@ -3492,7 +3502,7 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
     return completion;
   }
 
-  auto fence = vkapi::create_fence(buffer->device, 0);
+  auto fence = vkapi::create_fence(device_.vk_device(), 0);
 
   // Resource tracking, check previously submitted commands
   retire_completed_cmdbuffers();
@@ -3526,6 +3536,12 @@ StreamSemaphore VulkanStream::submit_with_semaphores(
   return std::make_shared<VulkanStreamSemaphoreObject>(
       device_.backend_fault_reporter(), semaphore, fence,
       device_.backend_wait_telemetry());
+}
+
+StreamSemaphore VulkanStream::submit_dependency(
+    const std::vector<StreamSemaphore> &wait_semaphores) {
+  // Use immutable bridge commands, not a new command list per dependency.
+  return submit_with_semaphores(nullptr, wait_semaphores, {});
 }
 
 void VulkanStream::begin_submission_batch() {
