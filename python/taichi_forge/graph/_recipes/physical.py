@@ -1069,13 +1069,28 @@ def _stage_source_regions(definition, recipe, pipeline):
     source_regions = tuple(source.region_id for source in definition.sources)
     path_regions = []
 
+    # Structured stages use their unique control invocation path, not the
+    # ordinary root/index label. Resolve it through the frozen definition's
+    # ownership tree. Native actions may lower to several kernels, so adding
+    # physical dispatch counts to native source counts double-counts them.
+    from taichi_forge.graph._graph import _structured_root_call_sites
+
+    control_sources = {
+        root.region_path: index
+        for index, node in enumerate(getattr(definition._runtime_spec, "nodes", ()))
+        for root in _structured_root_call_sites(node)
+    }
+
     for stage in pipeline:
-        parts = str(stage.get("path_id", "")).split("/")
-        try:
-            source_index = int(parts[1].split(":", 1)[0])
-        except (IndexError, ValueError):
-            path_regions = []
-            break
+        path = str(stage.get("path_id", ""))
+        source_index = control_sources.get(path)
+        if source_index is None:
+            parts = path.split("/")
+            try:
+                source_index = int(parts[1].split(":", 1)[0])
+            except (IndexError, ValueError):
+                path_regions = []
+                break
         prefix = f"graph/{source_index}:"
         regions = tuple(
             source.region_id

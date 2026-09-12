@@ -5101,12 +5101,17 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
         if dict(ti_core.cuda_bounded_dispatch_probe()).get(
             "exact_device_grid_available", False
         ):
-            assert graph._spec.control_recipe_ids == (
+            expected_recipes = (
                 "control:cuda_nested_device_update:v1",
                 "control:cuda_nested_masked_bounded:v1",
             )
+            if dict(ti_core.cuda_conditional_graph_capabilities()).get(
+                "nested_conditional_graph_available", False
+            ):
+                expected_recipes += ("control:cuda_nested_conditional:v1",)
+            assert graph._spec.control_recipe_ids == expected_recipes
         else:
-            assert not graph._spec.control_recipe_ids
+            assert "control:cuda_nested_device_update:v1" not in graph._spec.control_recipe_ids
         assert graph._graph_stats[0]["last_path"] in (
             "cuda_device_update_nested_capture",
             "cuda_device_update_nested_replay",
@@ -5139,6 +5144,48 @@ def test_nested_structured_while_submits_ordered_inner_sequence(monkeypatch):
                 "cuda_masked_replay",
                 "cuda_masked_patched_replay",
             )
+
+
+    if ti.lang.impl.current_cfg().arch == ti.cuda and dict(
+        ti_core.cuda_conditional_graph_capabilities()
+    ).get("nested_conditional_graph_available", False):
+        from taichi_forge.graph._recipes import GraphFamilySelection
+
+        definition = graph.definition
+        catalog = definition.recipe_catalog()
+        fragment = next(
+            fragment for fragment in catalog.fragments
+            if fragment.provider_namespace == "taichi_forge.graph.structured_control"
+            and GraphFamilySelection.from_fragment(fragment).choice_id
+            == "control:cuda_nested_conditional:v1"
+        )
+        entry = catalog.compose((fragment.fragment_id,), stage="single-region")
+        with definition.materialize(entry.recipe) as materialized:
+            compressed = materialized.executor
+            physical_id = materialized.materialized_physical_id
+            # Re-entry must reset each private inner loop, preserve ordered
+            # sibling dependencies, and work after scalar argument patches.
+            for limit in (0, 3, 4, 1, 3):
+                for value in args.values():
+                    value.fill(0)
+                compressed.submit({**args, "outer_limit": limit}).wait()
+                assert args["outer_counter"].to_numpy()[()] == limit
+                assert tuple(args["a_stops"].to_numpy()[:limit]) == tuple(range(1, limit + 1))
+                assert tuple(args["b_stops"].to_numpy()[:limit]) == (2,) * limit
+                assert tuple(args["phases"].to_numpy()[:limit]) == tuple(range(121, 121 + limit))
+                snapshot = compressed._graph_stats[0]
+                assert snapshot["last_path"].startswith("cuda_conditional_nested_")
+                assert snapshot["last_fallback_reason"] == "none"
+                assert snapshot["known_bounded_control_bytes"] == 3 * 24
+                assert materialized.materialized_physical_id == physical_id
+            # Stable bindings must not upload the private iteration controls.
+            frame = compressed.bind({**args, "outer_limit": 3})
+            compressed.submit(frame).wait()
+            before = compressed._graph_stats[0]
+            compressed.submit(frame).wait()
+            after = compressed._graph_stats[0]
+            assert after["last_path"] == "cuda_conditional_nested_replay"
+            assert after["asynchronous_control_updates"] == before["asynchronous_control_updates"]
 
 
 @test_utils.test(arch=ti.vulkan)

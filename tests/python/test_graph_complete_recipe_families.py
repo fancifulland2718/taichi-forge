@@ -1341,6 +1341,81 @@ def test_mixed_map_control_recipes_own_independent_control_state(monkeypatch):
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_nested_conditional_recipe_uses_static_budget_and_owns_replay_resources():
+    if not dict(ti_core.cuda_conditional_graph_capabilities()).get(
+        "nested_conditional_graph_available", False
+    ):
+        pytest.skip("nested CUDA conditional Graph is unavailable")
+
+    @ti.kernel
+    def condition(count: ti.types.ndarray(ti.i32, ndim=0),
+                  predicate: ti.types.ndarray(ti.i32, ndim=0), limit: ti.i32):
+        predicate[None] = int(count[None] < limit)
+
+    @ti.kernel
+    def reset(count: ti.types.ndarray(ti.i32, ndim=0)):
+        count[None] = 0
+
+    @ti.kernel
+    def step(count: ti.types.ndarray(ti.i32, ndim=0),
+             predicate: ti.types.ndarray(ti.i32, ndim=0)):
+        if predicate[None] != 0:
+            count[None] += 1
+
+    symbols = {name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=0)
+               for name in ("outer", "op", "inner", "ip")}
+    target = ti.graph.Arg(ti.graph.ArgKind.SCALAR, "target", ti.i32)
+    builder = ti.graph.GraphBuilder()
+    oc, ic, ib, ob = (builder.create_sequential() for _ in range(4))
+    oc.dispatch(condition, symbols["outer"], symbols["op"], target)
+    ic.dispatch(condition, symbols["inner"], symbols["ip"], target)
+    ib.dispatch(step, symbols["inner"], symbols["ip"])
+    ob.dispatch(reset, symbols["inner"])
+    ob.while_loop(ic, ib, predicate=symbols["ip"], counter=symbols["inner"],
+                  max_iterations=64, masked_execution=True, name="inner")
+    ob.dispatch(step, symbols["outer"], symbols["op"])
+    builder.while_loop(oc, ob, predicate=symbols["op"], counter=symbols["outer"],
+                       max_iterations=64, masked_execution=True, name="outer")
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog()
+    fragments = _family_fragments(catalog, "structured_control")
+    assert tuple(_selection(f).choice_id for f in fragments) == (
+        "control:cuda_nested_conditional:v1",
+    )
+    recipe = catalog.compose((fragments[0].fragment_id,), stage="single-region").recipe
+    with definition.materialize() as baseline:
+        assert not baseline.executor._spec.structured_control_nodes[0].supports_native_submission
+        empty = {name: ti.ndarray(ti.i32, shape=()) for name in symbols}
+        for array in empty.values():
+            array.fill(0)
+        baseline.executor.run({**empty, "target": 0})
+        assert empty["outer"].to_numpy()[()] == 0
+    materialized = definition.materialize(recipe)
+    executor = materialized.executor
+    identity = materialized.materialized_physical_id
+    # Rebind full resource frames; old in-flight submissions keep their leases.
+    frames, tickets = [], []
+    for limit in (0, 2, 64):
+        arrays = {name: ti.ndarray(ti.i32, shape=()) for name in symbols}
+        for array in arrays.values():
+            array.fill(0)
+        frames.append((limit, arrays))
+        tickets.append(executor.submit({**arrays, "target": limit}))
+    for ticket, (limit, arrays) in zip(tickets, frames):
+        ticket.wait()
+        assert arrays["outer"].to_numpy()[()] == limit
+        assert arrays["inner"].to_numpy()[()] == limit
+    assert executor._graph_stats[0]["last_path"].startswith("cuda_conditional_nested_")
+    assert observe_graph_physical_manifest(
+        definition, recipe, executor
+    ).materialized_physical_id == identity
+    materialized.close()
+    with pytest.raises((TaichiRuntimeError, RuntimeError), match="closed|released"):
+        executor.submit({**frames[-1][1], "target": 1})
+    ti.reset()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_complete_structured_control_recipe_rebuilds_both_routes_without_environment(
     monkeypatch,
 ):

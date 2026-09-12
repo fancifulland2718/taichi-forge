@@ -805,9 +805,13 @@ def test_solve_plan_graph_action_uses_independent_workspace_lanes():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
-def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
+@pytest.mark.parametrize("method", ["cg", "pcg"])
+def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop(method):
     size = 16
-    plan = ti.linalg.experimental.SolvePlan(_compiled_identity(size), method="cg", max_iterations=8, atol=1e-6)
+    plan = ti.linalg.experimental.SolvePlan(
+        _compiled_identity(size), method=method, max_iterations=8, atol=1e-6,
+        preconditioner=_compiled_identity(size) if method == "pcg" else None,
+    )
     rhs_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "nested_rhs", ti.f32, ndim=1)
     output_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "nested_output", ti.f32, ndim=1)
     action = plan.graph_action(rhs_arg, output_arg, name="nested_cg")
@@ -924,6 +928,45 @@ def test_solve_plan_graph_action_runs_inside_nested_single_ticket_loop():
     memory = graph.execution_stats().memory
     assert memory.internal_storage_exclusive
     assert memory.persistent_internal_storage_bytes > size * 4
+
+    if ti.lang.impl.current_cfg().arch == ti.cuda:
+        from taichi_forge._lib import core
+        from taichi_forge.graph._recipes import GraphFamilySelection
+
+        if dict(core.cuda_conditional_graph_capabilities()).get(
+            "nested_conditional_graph_available", False
+        ):
+            definition = graph.definition
+            catalog = definition.recipe_catalog()
+            assert graph._spec.control_recipe_domains
+            # Source coverage follows frozen ownership, not the number of
+            # kernels used to implement the operator and preconditioner.
+            with definition.materialize() as baseline:
+                assert baseline.manifest.semantic_graph_id == definition.semantic_graph_id
+            fragment = next(
+                item for item in catalog.fragments
+                if item.provider_namespace == "taichi_forge.graph.structured_control"
+                and GraphFamilySelection.from_fragment(item).choice_id
+                == "control:cuda_nested_conditional:v1"
+            )
+            entry = catalog.compose((fragment.fragment_id,), stage="single-region")
+            with definition.materialize(entry.recipe) as materialized:
+                for target in (3, 1):
+                    counter.fill(0)
+                    materialized.executor.submit(
+                        {
+                            "nested_rhs": rhs, "nested_output": output,
+                            "outer_predicate": predicate, "outer_counter": counter,
+                            "outer_target": target, "solve_stop_trace": stops,
+                            **packet.arguments,
+                        }
+                    ).wait()
+                    assert counter.to_numpy()[()] == target
+                    assert packet.snapshot().converged
+                    np.testing.assert_allclose(storage.to_numpy()[28 : 28 + size], expected, rtol=1e-6)
+                    assert materialized.executor._graph_stats[0]["last_path"].startswith(
+                        "cuda_conditional_nested_"
+                    )
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
