@@ -81,6 +81,7 @@ class GraphMemoryRecipeProvider(GraphRuntimeFragmentProvider):
         return dispatch_source_explanation(
             definition,
             definition._runtime_spec._graph_memory_sources,
+            family="graph_memory",
             supported_scope=(
                 "CUDA single-range ndarray stencil with distinct read/write roles; "
                 "templates supported; captured-field staging not supported"

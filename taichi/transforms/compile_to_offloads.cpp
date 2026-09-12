@@ -178,18 +178,18 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
   using BasicStmtVisitor::visit;
 
   void visit(GlobalLoadStmt *stmt) override {
-    check_pointer(stmt->src);
+    check_pointer(stmt->src, "read");
   }
 
   void visit(GlobalStoreStmt *stmt) override {
-    check_pointer(stmt->dest);
+    check_pointer(stmt->dest, "write");
   }
 
   void visit(GlobalPtrStmt *stmt) override {
     // Dense field stores retain an activation flag in this pre-lowering IR,
     // but an all-dense path cannot allocate or change an active set. Apply
     // the same exact-index proof instead of treating it as an opaque effect.
-    check_pointer(stmt);
+    check_pointer(stmt, "address");
   }
 
   void visit(AtomicOpStmt *stmt) override {
@@ -235,12 +235,13 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
     return index != nullptr && index->loop == task_ && index->index == 0;
   }
 
-  void check_pointer(Stmt *pointer) {
+  void check_pointer(Stmt *pointer, const char *access) {
     pointer = offload_phase_pointer_origin(pointer);
     if (auto *external = pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
       accesses_external_ = true;
       if (!exact_leading_index(external->indices, external->ndim)) {
-        reject("non-pointwise external access");
+        reject(fmt::format("non-pointwise external access (access={}, rank={})",
+                           access, external->ndim));
       }
       return;
     }
@@ -249,9 +250,19 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
       auto *index = global->indices.size() == 1
                         ? global->indices.front()->cast<LoopIndexStmt>()
                         : nullptr;
-      if (global->snode == nullptr || !global->snode->is_path_all_dense ||
-          index == nullptr || index->loop != task_ || index->index != 0) {
-        reject("non-pointwise or sparse field access");
+      if (global->snode == nullptr) {
+        reject("field access has no SNode");
+      } else if (!global->snode->is_path_all_dense) {
+        reject(fmt::format("sparse field access (field={}, access={}, rank={})",
+                           global->snode->name, access, global->indices.size()));
+      } else if (index == nullptr || index->loop != task_ || index->index != 0) {
+        reject(fmt::format(
+            "non-pointwise dense field access (field={}, access={}, rank={}, "
+            "index={}); exact per-lane indexing is required",
+            global->snode->name, access, global->indices.size(),
+            global->indices.empty()
+                ? "scalar"
+                : global->indices.front()->type()));
       }
       return;
     }
@@ -318,11 +329,22 @@ std::string offload_phase_fusion_blocker(
       return "source task has an unsupported range execution mode";
     }
     if (task->begin_value != first->begin_value ||
-        task->end_value != first->end_value ||
-        task->block_dim != first->block_dim ||
+        task->end_value != first->end_value) {
+      return fmt::format(
+          "source tasks do not share one physical constant range: task {} "
+          "range=[{},{}), task {} range=[{},{})",
+          group.front(), first->begin_value, first->end_value, index,
+          task->begin_value, task->end_value);
+    }
+    if (task->block_dim != first->block_dim ||
         task->grid_dim != first->grid_dim ||
         !empty_offload_auxiliary_blocks(task)) {
-      return "source tasks do not share one physical constant range";
+      return fmt::format(
+          "source tasks do not share one physical constant range: task {} "
+          "block={}, grid={}; task {} block={}, grid={}, auxiliary_blocks={}",
+          group.front(), first->block_dim, first->grid_dim, index,
+          task->block_dim, task->grid_dim,
+          !empty_offload_auxiliary_blocks(task));
     }
     const std::string sensitive =
         BlockSensitiveOperationFinder::run(const_cast<OffloadedStmt *>(task));
@@ -332,7 +354,7 @@ std::string offload_phase_fusion_blocker(
     ExactPointwiseOffloadChecker checker(const_cast<OffloadedStmt *>(task));
     task->body->accept(&checker);
     if (!checker.qualified()) {
-      return checker.reason();
+      return fmt::format("{} (source_task={})", checker.reason(), index);
     }
     accesses_external |= checker.accesses_external();
     accesses_field |= checker.accesses_field();

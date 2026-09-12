@@ -75,6 +75,7 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
         return dispatch_source_explanation(
             definition,
             definition._runtime_spec._graph_offload_fusion_sources,
+            family="offload_phase_fusion",
             supported_scope=(
                 "CUDA exact-pointwise constant range phases; templates supported; "
                 "mixed field/external alias proof required"
@@ -122,6 +123,7 @@ class GraphSparseTraversalRecipeProvider(GraphRuntimeFragmentProvider):
         return dispatch_source_explanation(
             definition,
             definition._runtime_spec._graph_sparse_traversal_sources,
+            family="sparse_traversal",
             supported_scope="CUDA listgen with a smaller known parent-capacity bound; template arguments not supported",
         )
 
