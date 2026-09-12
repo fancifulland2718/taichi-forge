@@ -438,11 +438,38 @@ is positive and no larger than 64 or its budget; and the additive complete
 encoded program contains at most 4096 actions. The outer prefix/suffix, gaps
 between inner regions, and all loop condition/body sequences must contain only
 ordinary dispatches or qualified recordable actions. Vulkan uses bounded
-conditional replay. All GPU routes
-avoid host readback between the two levels but retain bounded static topology;
-none claims exact dynamic command termination. Any other nested shape takes
+conditional replay. These default GPU routes avoid host readback between the
+two levels but retain expanded bounded topology; they do not dynamically
+terminate the entire inner subgraph. Any other nested shape takes
 exact portable-parent control; an eligible leaf `while` may still use its flat
 backend route. Vulkan still does not provide native `if`/`switch`.
+
+Complete-recipe search can also offer `cuda_conditional_nested_graph` on a
+runtime supporting CUDA conditional Graphs and capture-to-graph. Each static
+outer/inner body is recorded once and repeated by nested WHILE nodes. This
+does not change the ordinary `auto` route or require an environment override.
+The initial scope remains depth two, one to eight ordered inners, and bounds
+of 1--64 per loop. The 4096 limit applies to static dispatches, not the budget
+product. Actions must have lowered to eligible Taichi kernels, including
+eligible SolvePlan/operator actions; a vendor's ordinary capture permission
+does not imply conditional-body support.
+
+Each loop owns a separate 24-byte private control record. Inner entry resets
+the private iteration on device, never user counters or state. Stable replay
+does not upload these records or add readback between loops. Argument patching,
+independent materialization, close/reset, and in-flight allocation leases use
+the existing owners. Explicit recipes cannot silently fall back to another
+physical route; execution reports use `cuda_conditional_nested_*` path names.
+Aggregate capability fields such as `nested_async_route` still describe the
+default route. A definition's catalog and materialization determine actual
+candidate availability.
+
+Compression is useful for large budgets with early termination, but is not
+universally faster: highly active loops of small kernels can lose to the
+expanded route because of conditional-body scheduling overhead. Search retains
+both, without a universal speedup threshold. Known control-memory accounting
+excludes opaque driver Graph memory. Downstream workloads remain responsible
+for validating end-to-end gains.
 
 The device-control capability report exposes `nested_async_route`, the CUDA
 candidate/qualified/forced-off state, the explicit fallback route,

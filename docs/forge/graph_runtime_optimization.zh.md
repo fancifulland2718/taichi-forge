@@ -345,11 +345,30 @@ Forge 使用与 CUDA 版本无关的双 gate task-entry masking。可以在当�
 outer 与每个 inner 的上限都必须位于 1 到 64；每个 inner chunk 必须为正且不得超过 64
 或对应 inner budget；完整程序按加法计算后最多编码 4096 个 action。outer prefix/suffix、
 各 inner 之间的 gap 以及所有 condition/body sequence 只能包含普通 dispatch 或满足资格的
-recordable action。Vulkan 使用 bounded conditional replay。所有 GPU 路径都不会在两层
-之间做 host readback，但仍保留 bounded
-静态拓扑，因此都不宣称 exact dynamic command termination。其他 nested 结构使用 exact
+recordable action。Vulkan 使用 bounded conditional replay。这些默认 GPU 路径都不会在两层
+之间做 host readback，但仍保留展开的 bounded 静态拓扑，不宣称动态终止整个内层子图。
+其他 nested 结构使用 exact
 portable-parent control；满足资格的 leaf `while` 仍可使用 flat backend route。Vulkan
 仍不支持原生 `if`/`switch`。
+
+完整 recipe 搜索还可提供 `cuda_conditional_nested_graph`：在支持 CUDA conditional
+Graph 及 capture-to-graph 的 runtime 上，每个静态 outer/inner body 只录制一次，由
+嵌套 WHILE node 重复执行。它不改变普通 `auto` 默认路线，也不依赖环境变量开启。
+目前同样限于 depth=2、1--8 个顺序 inner、每层预算 1--64；4096 限制针对静态 dispatch
+数量，而不是预算乘积。只接受已降为合格 Taichi kernel 的 action，包括相应的
+SolvePlan/operator action；vendor 的普通 capture 能力不自动等同于 conditional-body 支持。
+
+每层使用独立的 24 字节私有控制状态，inner 每次进入时在 device 重置私有 iteration，
+不重置用户 counter/state。稳定绑定 replay 不上传这些控制状态，也不增加循环间 host
+readback。参数 patch、独立物化、close/reset 和在途资源 lease 沿用原有 owner。显式选中的
+recipe 不会静默退回另一物理路线；执行报告使用 `cuda_conditional_nested_*` 路径名称。
+`nested_async_route` 等全局 capability 字段仍描述默认路线，候选是否可用以具体 definition
+的 catalog 和物化结果为准。
+
+压缩方案适合预算较大、提前结束较多的控制图，但不是普遍更快：高活跃的小 kernel
+循环可能受 conditional body 调度开销影响而慢于展开方案。搜索保留两者，不设置统一
+加速门槛。报告中的已知控制内存不包含 opaque driver Graph 内存；整体性能仍需下游
+用实际 workload 验证。
 
 device-control capability report 会公开 `nested_async_route`、CUDA candidate/qualified/
 forced-off 状态、显式 fallback route、`nested_no_host_readback` 与
