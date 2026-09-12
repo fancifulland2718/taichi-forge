@@ -15449,7 +15449,7 @@ class _GraphOffloadFusionRecipeSource:
             manifests,
             self.args,
             self.label,
-            "exact_pointwise_phase_fusion",
+            "bounded_pointwise_phase_fusion",
             memory_disjoint_pairs=_graph_offload_disjoint_pairs(self.args),
         )
         return (

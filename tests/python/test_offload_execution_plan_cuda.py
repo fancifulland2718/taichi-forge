@@ -209,7 +209,7 @@ def test_offload_phase_fusion_fails_closed_for_cross_lane_dependency():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_offload_phase_fusion_fails_closed_for_different_constant_ranges():
+def test_offload_phase_fusion_rejects_unproven_unequal_external_ranges():
     count = 1 << 12
     values = ti.ndarray(ti.i32, shape=count)
 
@@ -228,8 +228,81 @@ def test_offload_phase_fusion_fails_closed_for_different_constant_ranges():
     )
     assert len(ranges) == 2
     plan = baseline.with_fused_task_groups(ranges)
-    with pytest.raises(RuntimeError, match="one physical constant range"):
+    with pytest.raises(RuntimeError, match="unequal ranges require independent"):
         _bind_offload_execution_plan(mismatched_ranges, plan).report(values)
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+@pytest.mark.parametrize("first_count,second_count", [(12328, 49), (49, 12328)])
+def test_unequal_field_initialization_preserves_bounds_and_serial_phases(
+    first_count, second_count
+):
+    first = ti.field(ti.i32, shape=first_count + 7)
+    second = ti.Vector.field(2, ti.i32, shape=second_count + 7)
+    state = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def initialize():
+        state[None] += 1
+        for i in range(3, first_count):
+            first[i] = i * 2
+        for i in range(1, second_count):
+            second[i] = ti.Vector([i + 4, -i])
+        state[None] += 7
+
+    plan = _OffloadExecutionPlan.from_task_manifests(initialize.task_manifest())
+    ranges = tuple(t.task_index for t in plan.tasks if t.task_kind == "range_for")
+    assert len(ranges) == 2
+    fused_plan = plan.with_fused_task_groups(ranges)
+    fused = _bind_offload_execution_plan(initialize, fused_plan)
+    report = fused.report()
+    assert [t.task_type for t in report.tasks] == ["serial", "range_for", "serial"]
+    fused_plan.validate_materialization(report.tasks)
+
+    first.fill(-91)
+    second.fill(-91)
+    state[None] = 0
+    for _ in range(3):
+        fused()
+    expected_first = np.full(first_count + 7, -91, np.int32)
+    expected_first[3:first_count] = np.arange(3, first_count, dtype=np.int32) * 2
+    expected_second = np.full((second_count + 7, 2), -91, np.int32)
+    indices = np.arange(1, second_count, dtype=np.int32)
+    expected_second[1:second_count] = np.stack((indices + 4, -indices), axis=1)
+    np.testing.assert_array_equal(first.to_numpy(), expected_first)
+    np.testing.assert_array_equal(second.to_numpy(), expected_second)
+    assert state[None] == 24
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_unequal_field_initialization_rejects_alias_and_dependent_reads():
+    first = ti.field(ti.i32, shape=513)
+    second = ti.field(ti.i32, shape=513)
+
+    @ti.kernel
+    def aliased(a: ti.template(), b: ti.template()):
+        for i in range(513):
+            a[i] = i
+        for i in range(19):
+            b[i] = -i
+
+    @ti.kernel
+    def dependent():
+        for i in range(513):
+            first[i] = i
+        for i in range(19):
+            second[i] = first[i]
+
+    for kernel, args, reason in (
+        (aliased, (first, first), "same field in multiple phases"),
+        (dependent, (), "global reads are not supported"),
+    ):
+        plan = _OffloadExecutionPlan.from_task_manifests(kernel.task_manifest(*args))
+        ranges = tuple(t.task_index for t in plan.tasks if t.task_kind == "range_for")
+        with pytest.raises(RuntimeError, match=reason):
+            _bind_offload_execution_plan(
+                kernel, plan.with_fused_task_groups(ranges)
+            ).report(*args)
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)

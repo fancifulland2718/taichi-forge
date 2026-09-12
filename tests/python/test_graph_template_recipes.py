@@ -90,6 +90,58 @@ def test_template_field_offload_recipe_preserves_owner_and_live_contents():
 
 
 @test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_unequal_template_initialization_enters_complete_recipe_search():
+    @ti.data_oriented
+    class Work:
+        def __init__(self):
+            self.count = 2404
+            self.block_count = 10
+            self.owner = ti.field(ti.i32, shape=self.count)
+            self.offset = ti.field(ti.i32, shape=self.block_count)
+            self.counter = ti.field(ti.i32, shape=())
+
+        @ti.kernel
+        def initialize(self):
+            self.counter[None] += 1
+            for i in range(self.count):
+                self.owner[i] = self.count
+            for i in range(self.block_count):
+                self.offset[i] = 0
+
+    work = Work()
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(work.initialize, template_args={"self": work})
+    definition = builder.freeze()
+    session = definition.search_recipes(
+        target=ti.graph.GraphOptimizationTarget(objectives=(("physical_tasks", "min"),)),
+        budget=ti.graph.GraphSearchBudget(evaluation_limit=8),
+    )
+    assert any("offload_phase_fusion" in r.manifest.families for r in session.recipes)
+
+    def evaluate(graph, _recipe):
+        work.owner.fill(-1)
+        work.offset.fill(-1)
+        work.counter[None] = 0
+        bindings = graph.bind({})
+        before = graph.binding_statistics()
+        for _ in range(3):
+            graph.run(bindings)
+        np.testing.assert_array_equal(work.owner.to_numpy(), np.full(work.count, work.count))
+        np.testing.assert_array_equal(work.offset.to_numpy(), np.zeros(work.block_count))
+        assert work.counter[None] == 3
+        assert graph.binding_statistics()["raw_replay_validations"] == before["raw_replay_validations"]
+        return {"physical_tasks": float(len(graph.task_manifest()))}
+
+    decision = session.run(evaluate)
+    assert decision.status == "selected"
+    assert "offload_phase_fusion" in decision.selection.manifest.families
+    rebuilt = ti.graph.GraphBuilder()
+    rebuilt.dispatch(work.initialize, template_args={"self": work})
+    resolved = rebuilt.freeze().resolve_recipe(decision.selection_artifact)
+    assert resolved.recipe_id == decision.selection.recipe_id
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
 def test_template_ndarray_memory_recipe_keeps_specialization_and_binding_checks():
     count = 1031
 

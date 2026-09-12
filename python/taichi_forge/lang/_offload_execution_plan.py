@@ -334,7 +334,7 @@ class _OffloadExecutionPlan:
         }
         if fusion_groups:
             topology = {
-                "operation": "fuse_exact_pointwise_range_tasks",
+                "operation": "fuse_bounded_pointwise_range_tasks",
                 "source_task_groups": fusion_groups,
             }
             stable_payload["topology_transform"] = topology
@@ -424,7 +424,7 @@ class _OffloadExecutionPlan:
         }
         if self.fusion_groups:
             payload["topology_transform"] = {
-                "operation": "fuse_exact_pointwise_range_tasks",
+                "operation": "fuse_bounded_pointwise_range_tasks",
                 "source_task_groups": self.fusion_groups,
             }
         return payload
@@ -438,7 +438,7 @@ class _OffloadExecutionPlan:
         }
         if self.fusion_groups:
             payload["topology_transform"] = {
-                "operation": "fuse_exact_pointwise_range_tasks",
+                "operation": "fuse_bounded_pointwise_range_tasks",
                 "source_task_groups": self.fusion_groups,
             }
         return payload

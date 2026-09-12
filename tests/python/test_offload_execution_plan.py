@@ -171,6 +171,9 @@ def test_offload_phase_fusion_has_distinct_identity_and_exact_source_lineage():
     assert fused.identity != baseline.identity
     assert fused.compilation_identity != baseline.compilation_identity
     assert fused.fusion_groups == ((1, 2),)
+    assert fused.stable_payload["topology_transform"]["operation"] == (
+        "fuse_bounded_pointwise_range_tasks"
+    )
     assert tuple(task.task_kind for task in fused.materialized_tasks) == (
         "serial",
         "range_for",

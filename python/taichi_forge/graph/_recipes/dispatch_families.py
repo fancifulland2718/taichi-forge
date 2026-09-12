@@ -42,8 +42,8 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
     descriptor = runtime_family_provider_descriptor(
         "offload_phase_fusion",
         capabilities=("offload-phase-fusion", "typed-runtime-fragment"),
-        domain_version="template-specialized-offload-fusion-v2",
-        semantic_fingerprint="exact-pointwise-separated-address-spaces-v2",
+        domain_version="template-specialized-offload-fusion-v3",
+        semantic_fingerprint="bounded-pointwise-independent-field-init-v3",
     )
 
     def fragments(self, definition):
@@ -77,7 +77,8 @@ class GraphOffloadPhaseFusionRecipeProvider(GraphRuntimeFragmentProvider):
             definition._runtime_spec._graph_offload_fusion_sources,
             family="offload_phase_fusion",
             supported_scope=(
-                "CUDA exact-pointwise constant range phases; templates supported; "
+                "CUDA exact-pointwise constant range phases or masked unequal "
+                "ranges initializing independent dense fields; templates supported; "
                 "mixed field/external alias proof required"
             ),
         )

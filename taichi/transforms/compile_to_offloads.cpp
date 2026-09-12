@@ -171,7 +171,9 @@ bool offload_phase_thread_private_pointer(Stmt *stmt) {
 
 class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
  public:
-  explicit ExactPointwiseOffloadChecker(OffloadedStmt *task) : task_(task) {
+  explicit ExactPointwiseOffloadChecker(OffloadedStmt *task,
+                                       bool initialization_only = false)
+      : task_(task), initialization_only_(initialization_only) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
   }
@@ -179,10 +181,21 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
   using BasicStmtVisitor::visit;
 
   void visit(GlobalLoadStmt *stmt) override {
+    if (initialization_only_ &&
+        !offload_phase_thread_private_pointer(stmt->src)) {
+      reject("unequal ranges require independent dense field initialization; "
+             "global reads are not supported");
+    }
     check_pointer(stmt->src, "read");
   }
 
   void visit(GlobalStoreStmt *stmt) override {
+    if (initialization_only_) {
+      auto *origin = offload_phase_pointer_origin(stmt->dest);
+      if (auto *field = origin ? origin->cast<GlobalPtrStmt>() : nullptr) {
+        written_fields_.insert(field->snode);
+      }
+    }
     check_pointer(stmt->dest, "write");
   }
 
@@ -227,6 +240,10 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
     return accesses_field_;
   }
 
+  const std::unordered_set<SNode *> &written_fields() const {
+    return written_fields_;
+  }
+
  private:
   bool exact_leading_index(const std::vector<Stmt *> &indices, int ndim) const {
     if (ndim < 1 || indices.size() < static_cast<std::size_t>(ndim)) {
@@ -240,6 +257,10 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
     pointer = offload_phase_pointer_origin(pointer);
     if (auto *external = pointer ? pointer->cast<ExternalPtrStmt>() : nullptr) {
       accesses_external_ = true;
+      if (initialization_only_) {
+        reject("unequal ranges require independent dense fields; external "
+               "memory needs an alias contract");
+      }
       if (!exact_leading_index(external->indices, external->ndim)) {
         reject(fmt::format("non-pointwise external access (access={}, rank={})",
                            access, external->ndim));
@@ -253,6 +274,8 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
                         : nullptr;
       if (global->snode == nullptr) {
         reject("field access has no SNode");
+      } else if (initialization_only_ && global->snode->is_bit_level) {
+        reject("unequal range initialization does not support packed fields");
       } else if (!global->snode->is_path_all_dense) {
         reject(fmt::format("sparse field access (field={}, access={}, rank={})",
                            global->snode->name, access, global->indices.size()));
@@ -282,6 +305,8 @@ class ExactPointwiseOffloadChecker final : public BasicStmtVisitor {
   std::string reason_;
   bool accesses_external_{false};
   bool accesses_field_{false};
+  bool initialization_only_{false};
+  std::unordered_set<SNode *> written_fields_;
 };
 
 class OffloadLoopIndexRebaser final : public BasicStmtVisitor {
@@ -317,8 +342,14 @@ std::string offload_phase_fusion_blocker(
     const std::vector<OffloadedStmt *> &tasks,
     const std::vector<int> &group) {
   const auto *first = tasks[group.front()];
+  const bool unequal_ranges = std::any_of(
+      group.begin(), group.end(), [&](int index) {
+        return tasks[index]->begin_value != first->begin_value ||
+               tasks[index]->end_value != first->end_value;
+      });
   bool accesses_external = false;
   bool accesses_field = false;
+  std::unordered_set<SNode *> written_fields;
   for (const int index : group) {
     const auto *task = tasks[index];
     if (task->task_type != OffloadedStmt::TaskType::range_for) {
@@ -329,16 +360,8 @@ std::string offload_phase_fusion_blocker(
         task->external_shared_staged) {
       return "source task has an unsupported range execution mode";
     }
-    if (task->begin_value != first->begin_value ||
-        task->end_value != first->end_value) {
-      return fmt::format(
-          "source tasks do not share one physical constant range: task {} "
-          "range=[{},{}), task {} range=[{},{})",
-          group.front(), first->begin_value, first->end_value, index,
-          task->begin_value, task->end_value);
-    }
     if (task->block_dim != first->block_dim ||
-        task->grid_dim != first->grid_dim ||
+        (!unequal_ranges && task->grid_dim != first->grid_dim) ||
         !empty_offload_auxiliary_blocks(task)) {
       return fmt::format(
           "source tasks do not share one physical constant range: task {} "
@@ -352,13 +375,20 @@ std::string offload_phase_fusion_blocker(
     if (!sensitive.empty()) {
       return sensitive;
     }
-    ExactPointwiseOffloadChecker checker(const_cast<OffloadedStmt *>(task));
+    ExactPointwiseOffloadChecker checker(const_cast<OffloadedStmt *>(task),
+                                        unequal_ranges);
     task->body->accept(&checker);
     if (!checker.qualified()) {
       return fmt::format("{} (source_task={})", checker.reason(), index);
     }
     accesses_external |= checker.accesses_external();
     accesses_field |= checker.accesses_field();
+    for (auto *field : checker.written_fields()) {
+      if (!written_fields.insert(field).second) {
+        return "unequal range initialization writes the same field in multiple "
+               "phases";
+      }
+    }
   }
   // A runtime ndarray may be a zero-copy view into a captured field at a
   // different offset. Pointwise indices alone do not prove cross-lane freedom
@@ -370,8 +400,9 @@ std::string offload_phase_fusion_blocker(
   return "";
 }
 
-void apply_exact_pointwise_offload_fusion(
+void apply_bounded_pointwise_offload_fusion(
     Block *root,
+    const CompileConfig &config,
     const Kernel::OffloadExecutionPlan &plan,
     const std::vector<OffloadedStmt *> &source_tasks) {
   for (const auto &group : plan.fusion_groups) {
@@ -392,6 +423,65 @@ void apply_exact_pointwise_offload_fusion(
        group_it != plan.fusion_groups.rend(); ++group_it) {
     const auto &group = *group_it;
     auto *destination = source_tasks[group.front()];
+    int begin = destination->begin_value;
+    int end = destination->end_value;
+    int grid = destination->grid_dim;
+    bool unequal_ranges = false;
+    for (int index : group) {
+      const auto *source = source_tasks[index];
+      unequal_ranges |= source->begin_value != destination->begin_value ||
+                        source->end_value != destination->end_value;
+      begin = std::min(begin, source->begin_value);
+      end = std::max(end, source->end_value);
+      grid = std::max(grid, source->grid_dim);
+    }
+    if (unequal_ranges) {
+      // Guard the entire original body, including pointer construction. Never
+      // replicate a serial preamble or execute a short phase outside its range.
+      auto body = std::make_unique<Block>();
+      auto *lane = body->push_back<LoopIndexStmt>(destination, 0);
+      for (int index : group) {
+        auto *source = source_tasks[index];
+        OffloadLoopIndexRebaser rebaser(source, destination);
+        source->body->accept(&rebaser);
+        Stmt *predicate = nullptr;
+        if (source->begin_value != begin) {
+          auto *lower =
+              body->push_back<ConstStmt>(TypedConstant(source->begin_value));
+          predicate =
+              body->push_back<BinaryOpStmt>(BinaryOpType::cmp_ge, lane, lower);
+        }
+        if (source->end_value != end) {
+          auto *upper =
+              body->push_back<ConstStmt>(TypedConstant(source->end_value));
+          auto *lt =
+              body->push_back<BinaryOpStmt>(BinaryOpType::cmp_lt, lane, upper);
+          predicate = predicate ? body->push_back<BinaryOpStmt>(
+                                      BinaryOpType::bit_and, predicate, lt)
+                                : lt;
+        }
+        if (predicate) {
+          auto *guard = body->push_back<IfStmt>(predicate)->as<IfStmt>();
+          guard->set_true_statements(std::move(source->body));
+        } else {
+          // The union loop already enforces both bounds for a full-span phase.
+          while (!source->body->statements.empty()) {
+            body->insert(source->body->extract(0));
+          }
+        }
+      }
+      destination->body = std::move(body);
+      destination->body->set_parent_stmt(destination);
+      destination->begin_value = begin;
+      destination->end_value = end;
+      destination->grid_dim = grid;
+      for (std::size_t member = 1; member < group.size(); ++member) {
+        root->extract(source_tasks[group[member]]);
+      }
+      // New predicates need concrete scalar types before IR verification.
+      irpass::type_check(destination, config);
+      continue;
+    }
     for (std::size_t member = 1; member < group.size(); ++member) {
       auto *source = source_tasks[group[member]];
       OffloadLoopIndexRebaser rebaser(source, destination);
@@ -510,7 +600,7 @@ void apply_offload_execution_plan(IRNode *ir,
     task->block_dim = spec.workgroup_size;
   }
   if (!plan->fusion_groups.empty()) {
-    apply_exact_pointwise_offload_fusion(ir->as<Block>(), *plan, tasks);
+    apply_bounded_pointwise_offload_fusion(ir->as<Block>(), config, *plan, tasks);
   }
 }
 

@@ -46,6 +46,7 @@ _GRAPH_OFFLOAD_FUSION_RECIPE_SCHEMA_VERSION = 1
 _GRAPH_OFFLOAD_FUSION_RECIPE_PREFIXES = {
     "direct": "graph-offload-fusion:direct:",
     "exact_pointwise_phase_fusion": "graph-offload-fusion:exact-pointwise:",
+    "bounded_pointwise_phase_fusion": "graph-offload-fusion:bounded-pointwise:",
 }
 
 _GRAPH_SPARSE_TRAVERSAL_RECIPE_SCHEMA_VERSION = 1

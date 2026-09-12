@@ -373,7 +373,7 @@ def test_complete_recipe_searches_and_materializes_offload_phase_fusion():
     fused_manifest = next(
         manifest
         for manifest in manifests
-        if manifest.strategy == "exact_pointwise_phase_fusion"
+        if manifest.strategy == "bounded_pointwise_phase_fusion"
         and len(manifest.to_dict()["materialized_tasks"]) == 1
     )
     payload = fused_manifest.to_dict()
