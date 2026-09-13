@@ -17,6 +17,11 @@ from taichi_forge._hardware_telemetry import (
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._optix_micromap import (
+    OptixOpacityMicromap,
+    _MicromapDesc,
+    _MicromapMemory,
+)
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     runtime_generation_matches,
@@ -48,6 +53,7 @@ _MULTI_INSTANCE_IAS = 1 << 9
 _DEVICE_INSTANCE_TRANSFORM_UPDATE = 1 << 10
 _ALPHA_MASK = 1 << 11
 _INSTANCE_OPACITY = 1 << 12
+_OPACITY_MICROMAP_IMPORT = 1 << 13
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -264,6 +270,14 @@ _GetLastError = ctypes.CFUNCTYPE(
 _TraceAlpha = ctypes.CFUNCTYPE(
     ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_AlphaTraceDesc)
 )
+_CreateMicromapGas = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.POINTER(_TriangleSceneDesc),
+    ctypes.POINTER(_MicromapDesc),
+    ctypes.POINTER(ctypes.c_void_p),
+    ctypes.POINTER(_MicromapMemory),
+)
 
 
 class _ProviderApi(ctypes.Structure):
@@ -295,6 +309,8 @@ class _ProviderApi(ctypes.Structure):
         ("prepare_alpha", _PrepareTyped),
         ("trace_alpha", _TraceAlpha),
         ("trace_instance_alpha", _TraceAlpha),
+        ("create_triangle_gas_micromap", _CreateMicromapGas),
+        ("trace_instance_micromap", _TraceAlpha),
     ]
 
 
@@ -766,12 +782,20 @@ class OptixProvider:
         self._validate_lifetime()
         return OptixTriangleScene(self, vertices, indices, allow_update=allow_update)
 
-    def triangle_gas(self, vertices, indices, *, allow_update=True):
+    def triangle_gas(
+        self, vertices, indices, *, allow_update=True, opacity_micromap=None
+    ):
         """Create one independently retained triangle GAS for IAS reuse."""
 
         self._validate_lifetime()
         _require_instance_api(self._loaded.api)
-        return OptixTriangleGAS(self, vertices, indices, allow_update=allow_update)
+        return OptixTriangleGAS(
+            self,
+            vertices,
+            indices,
+            allow_update=allow_update,
+            opacity_micromap=opacity_micromap,
+        )
 
     def instance_scene(self, instances, *, allow_update=True):
         """Create a fixed-topology IAS, retaining every referenced GAS."""
@@ -945,6 +969,14 @@ class OptixRayQueryRecording(BackendCommandRecording):
             raise ValueError("OptiX ray bindings must be unique")
         if not isinstance(any_hit, bool):
             raise TypeError("OptiX any_hit must be a bool")
+        micromap = isinstance(scene, OptixInstanceScene) and scene._has_micromaps
+        if micromap:
+            if hit_indices is None:
+                raise ValueError("OptiX OMM scenes require typed queries")
+            if alpha_masks is None:
+                # OMM classification is intrinsic to this imported GAS. None
+                # accepts unknown states; callers can instead supply alpha masks.
+                alpha_masks = (None,) * scene.instance_count
         if alpha_masks is None:
             if any_hit:
                 raise ValueError("OptiX any_hit requires an explicit alpha-mask query")
@@ -973,7 +1005,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
             if set(names).intersection(mask_names):
                 raise ValueError("OptiX alpha bindings must not reuse ray/hit names")
             names += tuple(dict.fromkeys(mask_names))
-            if not mask_names and not any_hit:
+            if not mask_names and not any_hit and not micromap:
                 # Exactly the same closest-hit semantics as the opaque route;
                 # no mask pipeline/table/workspace is needed for this request.
                 alpha_masks = None
@@ -995,10 +1027,13 @@ class OptixRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "hit_indices", hit_indices)
         object.__setattr__(self, "alpha_masks", alpha_masks)
         object.__setattr__(self, "any_hit", any_hit)
-        if alpha_masks is not None:
-            scene.provider._prepare_alpha(scene)
-        elif hit_indices is not None:
-            scene.provider._prepare_typed(scene)
+        object.__setattr__(self, "_micromap", micromap)
+        # OMM's distinct pipeline was prepared by the importing GAS adapter.
+        if not micromap:
+            if alpha_masks is not None:
+                scene.provider._prepare_alpha(scene)
+            elif hit_indices is not None:
+                scene.provider._prepare_typed(scene)
 
     @property
     def resource_effects(self):
@@ -1159,9 +1194,13 @@ class OptixRayQueryRecording(BackendCommandRecording):
         workspace.from_numpy(host)
         api = self.scene.provider._loaded.api
         function = (
-            api.trace_instance_alpha
-            if isinstance(self.scene, OptixInstanceScene)
-            else api.trace_alpha
+            api.trace_instance_micromap
+            if self._micromap
+            else (
+                api.trace_instance_alpha
+                if isinstance(self.scene, OptixInstanceScene)
+                else api.trace_alpha
+            )
         )
         desc = _AlphaTraceDesc(
             ctypes.sizeof(_AlphaTraceDesc),
@@ -1243,6 +1282,13 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 "any_accepted_hit": item.any_hit,
                 "opaque_instances": (
                     tuple(instance.opaque for instance in item.scene._instances)
+                    if isinstance(item.scene, OptixInstanceScene)
+                    else ()
+                ),
+                "opacity_micromaps": (
+                    tuple(
+                        instance.gas._micromap_id for instance in item.scene._instances
+                    )
                     if isinstance(item.scene, OptixInstanceScene)
                     else ()
                 ),
@@ -1580,7 +1626,9 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
 class OptixTriangleGAS:
     """Independent fixed-topology triangle GAS retained by instance scenes."""
 
-    def __init__(self, provider, vertices, indices, *, allow_update=True):
+    def __init__(
+        self, provider, vertices, indices, *, allow_update=True, opacity_micromap=None
+    ):
         if not isinstance(provider, OptixProvider):
             raise TypeError("provider must be an OptixProvider")
         if not isinstance(allow_update, bool):
@@ -1589,6 +1637,21 @@ class OptixTriangleGAS:
         _require_instance_api(provider._loaded.api)
         vertex_description, vertex_count = _ray_storage(vertices, 3, (f32,), "vertices")
         index_description, triangle_count = _ray_storage(indices, 3, (i32,), "indices")
+        api = provider._loaded.api
+        if opacity_micromap is not None:
+            if not isinstance(opacity_micromap, OptixOpacityMicromap):
+                raise TypeError("opacity_micromap must be an OptixOpacityMicromap")
+            if opacity_micromap.triangle_count != triangle_count:
+                raise ValueError(
+                    "OMM triangle mapping must match the GAS triangle count"
+                )
+            if not int(api.info.features) & _OPACITY_MICROMAP_IMPORT or not all(
+                _api_has(api, name)
+                for name in ("create_triangle_gas_micromap", "trace_instance_micromap")
+            ):
+                raise TaichiRuntimeError(
+                    "OptiX adapter does not support baked OMM import"
+                )
         storage, owners = _prepare_storage(
             provider,
             (vertices, indices),
@@ -1604,18 +1667,33 @@ class OptixTriangleGAS:
             *storage.pointers,
             0,
         )
-        api = provider._loaded.api
+        micromap_memory = _MicromapMemory()
+        micromap_memory.struct_size = ctypes.sizeof(micromap_memory)
+        if opacity_micromap is None:
+            create = partial(
+                _invoke_checked,
+                api,
+                api.create_triangle_gas,
+                provider._context,
+                ctypes.byref(desc),
+                ctypes.byref(gas),
+            )
+        else:
+            imported, import_owners = opacity_micromap._native()
+            create = partial(
+                _invoke_checked,
+                api,
+                api.create_triangle_gas_micromap,
+                provider._context,
+                ctypes.byref(desc),
+                ctypes.byref(imported),
+                ctypes.byref(gas),
+                ctypes.byref(micromap_memory),
+            )
         with hardware_failure_phase("provider_plan_failure"):
             provider._runtime_prog._invoke_external_cuda_prepared(
                 storage,
-                partial(
-                    _invoke_checked,
-                    api,
-                    api.create_triangle_gas,
-                    provider._context,
-                    ctypes.byref(desc),
-                    ctypes.byref(gas),
-                ),
+                create,
             )
             if not gas.value:
                 raise TaichiRuntimeError("OptiX provider returned an empty GAS")
@@ -1626,6 +1704,8 @@ class OptixTriangleGAS:
         self.vertex_count = vertex_count
         self.triangle_count = triangle_count
         self.allow_update = allow_update
+        self._micromap_id = opacity_micromap.fingerprint if opacity_micromap else None
+        self._micromap_memory = micromap_memory
         self._indices = indices
         self._indices_description = index_description
         self._index_owner = indices.arr if isinstance(indices, Ndarray) else indices
@@ -1704,7 +1784,33 @@ class OptixTriangleGAS:
         return make_memory_report(
             "optix_shared_triangle_gas",
             "cuda",
-            components,
+            components
+            + (
+                ()
+                if self._micromap_id is None
+                else (
+                    HardwareMemoryComponent(
+                        "opacity_micromap_array_and_indices",
+                        int(
+                            self._micromap_memory.array_bytes
+                            + self._micromap_memory.index_bytes
+                        ),
+                        True,
+                        "provider_generation",
+                        "provider",
+                        resident=resident,
+                    ),
+                    HardwareMemoryComponent(
+                        "opacity_micromap_import_temporary",
+                        int(self._micromap_memory.build_temporary_bytes),
+                        True,
+                        "invocation",
+                        "provider",
+                        resident=False,
+                        reusable=False,
+                    ),
+                )
+            ),
             lifecycle_state="ready" if resident else "closed",
             ownership_scope="provider_context_and_gas_generation",
         )
@@ -1805,6 +1911,8 @@ class OptixInstanceScene:
                 raise TaichiRuntimeError(
                     "OptiX adapter does not support instance opacity"
                 )
+            if instance.opaque and instance.gas._micromap_id is not None:
+                raise ValueError("OMM instances cannot declare always-opaque geometry")
         native = (_InstanceDesc * len(normalized))()
         for index, instance in enumerate(normalized):
             native[index].struct_size = ctypes.sizeof(_InstanceDesc)
@@ -1846,6 +1954,7 @@ class OptixInstanceScene:
         self._runtime_generation = provider._runtime_generation
         self._instances = normalized
         self._topology = tuple(instance.gas for instance in normalized)
+        self._has_micromaps = any(gas._micromap_id is not None for gas in self._topology)
         self.allow_update = allow_update
         self._effect_name = (
             f"optix-ray-instance-scene:{self._runtime_generation}:{int(scene.value)}"
@@ -2279,6 +2388,7 @@ def is_loaded():
 
 
 __all__ = [
+    "OptixOpacityMicromap",
     "OptixGASRefitRecording",
     "OptixInstanceRefitRecording",
     "OptixInstanceScene",

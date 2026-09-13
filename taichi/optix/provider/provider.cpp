@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <map>
 #include <new>
 #include <string>
 #include <vector>
@@ -43,7 +44,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2-omm1";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -56,7 +57,8 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE |
                                TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
-                               TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY;
+                               TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
+                               TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT;
 
 void clear_error_state() {
   last_error.clear();
@@ -167,6 +169,8 @@ struct Context {
   std::atomic<bool> typed_ready{false};
   RayPipeline alpha;
   std::atomic<bool> alpha_ready{false};
+  RayPipeline micromap;
+  std::atomic<bool> micromap_ready{false};
   std::mutex prepare_mutex;
   std::atomic<std::size_t> scene_count{0};
   std::atomic<std::size_t> gas_count{0};
@@ -215,6 +219,9 @@ struct TriangleGas {
   std::atomic<std::size_t> instance_ref_count{0};
   DeviceBuffer gas;
   DeviceBuffer scratch;
+  DeviceBuffer micromap;
+  DeviceBuffer micromap_indices;
+  std::vector<OptixOpacityMicromapUsageCount> micromap_usage;
   OptixTraversableHandle gas_handle{0};
 };
 
@@ -365,7 +372,7 @@ TiForgeOptixResult create_pipeline(Context *owner,
                                    RayPipeline *context,
                                    int variant) {
   const bool typed = variant != 0;
-  const bool alpha = variant == 2;
+  const bool alpha = variant >= 2;
   OptixModuleCompileOptions module_options{};
   module_options.maxRegisterCount = OPTIX_COMPILE_DEFAULT_MAX_REGISTER_COUNT;
   module_options.optLevel = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
@@ -373,6 +380,7 @@ TiForgeOptixResult create_pipeline(Context *owner,
 
   OptixPipelineCompileOptions pipeline_options{};
   pipeline_options.usesMotionBlur = false;
+  pipeline_options.allowOpacityMicromaps = variant == 3;
   pipeline_options.traversableGraphFlags =
       OPTIX_TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_LEVEL_INSTANCING;
   pipeline_options.numPayloadValues = typed ? 7 : 4;
@@ -714,7 +722,9 @@ std::size_t shared_pipeline_sbt_bytes(Context *context) {
          context->typed.raygen_record.bytes + context->typed.miss_record.bytes +
          context->typed.hitgroup_record.bytes +
          context->alpha.raygen_record.bytes + context->alpha.miss_record.bytes +
-         context->alpha.hitgroup_record.bytes;
+         context->alpha.hitgroup_record.bytes +
+         context->micromap.raygen_record.bytes + context->micromap.miss_record.bytes +
+         context->micromap.hitgroup_record.bytes;
 }
 
 void initialize_memory_result(TiForgeOptixSceneMemory *memory) {
@@ -764,10 +774,187 @@ void release_instance_references(InstanceScene *scene) {
   scene->gas_refs.clear();
 }
 
-TiForgeOptixResult create_triangle_gas(
+// Cold import only. Host descriptors and classification data are borrowed for
+// this call; the GAS owns the resulting array and optional index buffer.
+TiForgeOptixResult import_micromap(
+    TriangleGas *gas,
+    const TiForgeOptixMicromapDesc *desc,
+    CUstream stream,
+    TiForgeOptixMicromapMemory *memory) {
+  // Bakers can emit only predefined triangle states and no array entries.
+  // Supply one unreferenced native entry: OptiX requires an array for indexed
+  // attachment even though no triangle needs to reference an actual micromap.
+  TiForgeOptixMicromapDesc normalized{};
+  const uint8_t unused_state = 0;
+  const TiForgeOptixMicromapEntry unused_entry{0, 0, 1};
+  if (desc->struct_size >= sizeof(*desc) && !desc->micromap_count &&
+      !desc->data_size && desc->triangle_indices) {
+    for (uint32_t i = 0; i < desc->triangle_count; ++i) {
+      if (desc->triangle_indices[i] < -4 || desc->triangle_indices[i] >= 0) {
+        return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                    "invalid empty OMM triangle mapping");
+      }
+    }
+    normalized = *desc;
+    normalized.data_size = 1;
+    normalized.data = &unused_state;
+    normalized.micromap_count = 1;
+    normalized.entries = &unused_entry;
+    desc = &normalized;
+  }
+  if (desc->struct_size < sizeof(*desc) || !desc->micromap_count ||
+      !desc->data || !desc->data_size || !desc->entries || desc->reserved ||
+      desc->triangle_count != gas->triangle_count ||
+      (!desc->triangle_indices &&
+       desc->micromap_count != gas->triangle_count)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid baked OMM descriptor");
+  }
+  try {
+    using Key = std::pair<unsigned int, unsigned int>;
+    std::map<Key, unsigned int> histogram, usage;
+    for (uint32_t i = 0; i < desc->micromap_count; ++i) {
+      const auto &entry = desc->entries[i];
+      if (entry.subdivision_level >
+              OPTIX_OPACITY_MICROMAP_MAX_SUBDIVISION_LEVEL ||
+          (entry.format != 1 && entry.format != 2)) {
+        return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                    "invalid OMM level or format");
+      }
+      const uint64_t bytes =
+          ((1ull << (2 * entry.subdivision_level)) * entry.format + 7) / 8;
+      if (uint64_t(entry.byte_offset) + bytes > desc->data_size) {
+        return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                    "OMM entry exceeds baked data");
+      }
+      ++histogram[{entry.subdivision_level, entry.format}];
+    }
+    if (desc->triangle_indices) {
+      for (uint32_t i = 0; i < desc->triangle_count; ++i) {
+        const int32_t index = desc->triangle_indices[i];
+        if (index < -4 ||
+            (index >= 0 && uint32_t(index) >= desc->micromap_count)) {
+          return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                      "invalid OMM triangle mapping");
+        }
+        if (index >= 0) {
+          const auto &entry = desc->entries[index];
+          ++usage[{entry.subdivision_level, entry.format}];
+        }
+      }
+    } else {
+      usage = histogram;
+    }
+    std::vector<OptixOpacityMicromapHistogramEntry> native_histogram;
+    for (const auto &item : histogram) {
+      native_histogram.push_back(
+          {item.second, item.first.first,
+           static_cast<OptixOpacityMicromapFormat>(item.first.second)});
+    }
+    for (const auto &item : usage) {
+      gas->micromap_usage.push_back(
+          {item.second, item.first.first,
+           static_cast<OptixOpacityMicromapFormat>(item.first.second)});
+    }
+    static_assert(sizeof(TiForgeOptixMicromapEntry) ==
+                  sizeof(OptixOpacityMicromapDesc));
+    DeviceBuffer data, entries, scratch;
+    auto result = data.allocate(desc->data_size);
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      result = entries.allocate(size_t(desc->micromap_count) *
+                                sizeof(OptixOpacityMicromapDesc));
+    }
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      result = cuda_check(cuMemcpyHtoD(data.pointer, desc->data, data.bytes),
+                          "OMM data upload");
+    }
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      result = cuda_check(
+          cuMemcpyHtoD(entries.pointer, desc->entries, entries.bytes),
+          "OMM entries upload");
+    }
+    if (result == TI_FORGE_OPTIX_SUCCESS && desc->triangle_indices) {
+      result = gas->micromap_indices.allocate(size_t(desc->triangle_count) *
+                                              sizeof(int32_t));
+      if (result == TI_FORGE_OPTIX_SUCCESS) {
+        result = cuda_check(
+            cuMemcpyHtoD(gas->micromap_indices.pointer, desc->triangle_indices,
+                         gas->micromap_indices.bytes),
+            "OMM indices upload");
+      }
+    }
+    OptixOpacityMicromapArrayBuildInput input{};
+    input.flags = OPTIX_OPACITY_MICROMAP_FLAG_PREFER_FAST_TRACE;
+    input.inputBuffer = data.pointer;
+    input.perMicromapDescBuffer = entries.pointer;
+    input.numMicromapHistogramEntries =
+        static_cast<unsigned int>(native_histogram.size());
+    input.micromapHistogramEntries = native_histogram.data();
+    OptixMicromapBufferSizes sizes{};
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      result = optix_check(optixOpacityMicromapArrayComputeMemoryUsage(
+                               gas->context->optix_context, &input, &sizes),
+                           "OMM memory usage");
+    }
+    if (result == TI_FORGE_OPTIX_SUCCESS)
+      result = gas->micromap.allocate(sizes.outputSizeInBytes);
+    if (result == TI_FORGE_OPTIX_SUCCESS)
+      result = scratch.allocate(sizes.tempSizeInBytes);
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      OptixMicromapBuffers buffers{};
+      buffers.output = gas->micromap.pointer;
+      buffers.outputSizeInBytes = gas->micromap.bytes;
+      buffers.temp = scratch.pointer;
+      buffers.tempSizeInBytes = scratch.bytes;
+      result = optix_check(
+          optixOpacityMicromapArrayBuild(gas->context->optix_context, stream,
+                                         &input, &buffers),
+          "OMM build");
+      // Includes failure rollback: borrowed host input / temporary device
+      // buffers cannot retire until work submitted by the build has completed.
+      auto completed =
+          cuda_check(cuStreamSynchronize(stream), "OMM build completion");
+      if (completed != TI_FORGE_OPTIX_SUCCESS)
+        result = completed;
+    }
+    if (result == TI_FORGE_OPTIX_SUCCESS) {
+      memory->reserved = 0;
+      memory->array_bytes = gas->micromap.bytes;
+      memory->index_bytes = gas->micromap_indices.bytes;
+      memory->build_temporary_bytes =
+          data.bytes + entries.bytes + scratch.bytes;
+    }
+    return result;
+  } catch (const std::bad_alloc &) {
+    return fail(TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY,
+                "OMM import metadata allocation failed");
+  }
+}
+
+void attach_micromap(TriangleGas *gas,
+                     OptixBuildInput &input,
+                     unsigned int &flags) {
+  if (!gas->micromap.pointer)
+    return;
+  flags = OPTIX_GEOMETRY_FLAG_NONE;
+  auto &omm = input.triangleArray.opacityMicromap;
+  omm.indexingMode = gas->micromap_indices.pointer
+                         ? OPTIX_OPACITY_MICROMAP_ARRAY_INDEXING_MODE_INDEXED
+                         : OPTIX_OPACITY_MICROMAP_ARRAY_INDEXING_MODE_LINEAR;
+  omm.opacityMicromapArray = gas->micromap.pointer;
+  omm.indexBuffer = gas->micromap_indices.pointer;
+  omm.indexSizeInBytes = omm.indexBuffer ? sizeof(int32_t) : 0;
+  omm.numMicromapUsageCounts =
+      static_cast<unsigned int>(gas->micromap_usage.size());
+  omm.micromapUsageCounts = gas->micromap_usage.data();
+}
+
+TiForgeOptixResult create_triangle_gas_impl(
     TiForgeOptixContext raw_context,
     const TiForgeOptixTriangleSceneDesc *desc,
-    TiForgeOptixTriangleGas *out_gas) {
+    TiForgeOptixTriangleGas *out_gas,
+    const TiForgeOptixMicromapDesc *micromap = nullptr,
+    TiForgeOptixMicromapMemory *micromap_memory = nullptr) {
   clear_error_state();
   auto *context = static_cast<Context *>(raw_context);
   if (context == nullptr || desc == nullptr || out_gas == nullptr ||
@@ -787,15 +974,26 @@ TiForgeOptixResult create_triangle_gas(
   gas->triangle_count = desc->triangle_count;
   gas->allow_update = desc->allow_update != 0;
 
+  if (micromap) {
+    auto imported = import_micromap(
+        gas, micromap, reinterpret_cast<CUstream>(desc->cuda_stream),
+        micromap_memory);
+    if (imported != TI_FORGE_OPTIX_SUCCESS) {
+      delete gas;
+      return imported;
+    }
+  }
+
   CUdeviceptr vertex_buffer = 0;
   unsigned int geometry_flags = 0;
   auto input = triangle_build_input(*desc, &vertex_buffer, &geometry_flags);
+  attach_micromap(gas, input, geometry_flags);
   auto options = build_options(gas->allow_update, OPTIX_BUILD_OPERATION_BUILD);
   OptixAccelBufferSizes sizes{};
-  auto result = optix_check(
-      optixAccelComputeMemoryUsage(context->optix_context, &options, &input, 1,
-                                   &sizes),
-      "optixAccelComputeMemoryUsage(shared GAS)");
+  auto result =
+      optix_check(optixAccelComputeMemoryUsage(context->optix_context, &options,
+                                               &input, 1, &sizes),
+                  "optixAccelComputeMemoryUsage(shared GAS)");
   if (result == TI_FORGE_OPTIX_SUCCESS) {
     result = gas->gas.allocate(sizes.outputSizeInBytes);
   }
@@ -820,9 +1018,9 @@ TiForgeOptixResult create_triangle_gas(
   }
   if (result != TI_FORGE_OPTIX_SUCCESS) {
     if (build_may_be_enqueued) {
-      const auto rollback_result = cuda_check(
-          cuStreamSynchronize(stream),
-          "cuStreamSynchronize(shared GAS build rollback)");
+      const auto rollback_result =
+          cuda_check(cuStreamSynchronize(stream),
+                     "cuStreamSynchronize(shared GAS build rollback)");
       if (rollback_result != TI_FORGE_OPTIX_SUCCESS) {
         result = rollback_result;
       }
@@ -836,6 +1034,40 @@ TiForgeOptixResult create_triangle_gas(
   context->gas_count.fetch_add(1);
   *out_gas = gas;
   return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult create_triangle_gas(
+    TiForgeOptixContext context,
+    const TiForgeOptixTriangleSceneDesc *desc,
+    TiForgeOptixTriangleGas *out_gas) {
+  return create_triangle_gas_impl(context, desc, out_gas);
+}
+
+TiForgeOptixResult create_triangle_gas_micromap(
+    TiForgeOptixContext raw_context,
+    const TiForgeOptixTriangleSceneDesc *desc,
+    const TiForgeOptixMicromapDesc *micromap,
+    TiForgeOptixTriangleGas *out_gas,
+    TiForgeOptixMicromapMemory *memory) {
+  clear_error_state();
+  if (!raw_context || !micromap || !memory ||
+      memory->struct_size < sizeof(*memory)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid OMM import request");
+  }
+  auto *context = static_cast<Context *>(raw_context);
+  {
+    std::lock_guard<std::mutex> lock(context->prepare_mutex);
+    if (!context->micromap_ready.load(std::memory_order_acquire)) {
+      auto result = create_pipeline(context, &context->micromap, 3);
+      if (result != TI_FORGE_OPTIX_SUCCESS) {
+        destroy_pipeline(&context->micromap);
+        return result;
+      }
+      context->micromap_ready.store(true, std::memory_order_release);
+    }
+  }
+  return create_triangle_gas_impl(raw_context, desc, out_gas, micromap, memory);
 }
 
 TiForgeOptixResult update_triangle_gas(
@@ -857,6 +1089,7 @@ TiForgeOptixResult update_triangle_gas(
   CUdeviceptr vertex_buffer = 0;
   unsigned int geometry_flags = 0;
   auto input = triangle_build_input(*desc, &vertex_buffer, &geometry_flags);
+  attach_micromap(gas, input, geometry_flags);
   auto options = build_options(true, OPTIX_BUILD_OPERATION_UPDATE);
   return optix_check(
       optixAccelBuild(gas->context->optix_context,
@@ -951,6 +1184,7 @@ TiForgeOptixResult create_instance_scene(
         !gas->owner_live.load(std::memory_order_acquire) ||
         source.custom_index > 0xffffffu || source.visibility_mask > 0xffu ||
         (source.reserved & ~1u) != 0 ||
+        (gas->micromap.pointer && (source.reserved & 1u)) ||
         !valid_affine_transform(source.transform)) {
       delete scene;
       return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
@@ -966,7 +1200,8 @@ TiForgeOptixResult create_instance_scene(
     destination.visibilityMask = source.visibility_mask;
     destination.flags = (source.reserved & 1u)
                             ? OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT
-                            : OPTIX_INSTANCE_FLAG_ENFORCE_ANYHIT;
+                            : (gas->micromap.pointer ? OPTIX_INSTANCE_FLAG_NONE
+                                                     : OPTIX_INSTANCE_FLAG_ENFORCE_ANYHIT);
     destination.traversableHandle = gas->gas_handle;
     scene->gas_refs.push_back(gas);
   }
@@ -1157,6 +1392,7 @@ TiForgeOptixResult destroy_context(TiForgeOptixContext raw_context) {
     return result;
   }
   destroy_transform_module(context);
+  destroy_pipeline(&context->micromap);
   destroy_pipeline(&context->alpha);
   destroy_pipeline(&context->typed);
   destroy_pipeline(&context->legacy);
@@ -1366,7 +1602,7 @@ TiForgeOptixResult trace_instance_scene_typed(
       "optixLaunch(typed instance scene)");
 }
 
-template <typename SceneType>
+template <typename SceneType, bool Micromap = false>
 TiForgeOptixResult launch_alpha(SceneType *scene,
                                  uint32_t instance_count,
                                  const TiForgeOptixAlphaTraceDesc *desc) {
@@ -1375,11 +1611,13 @@ TiForgeOptixResult launch_alpha(SceneType *scene,
       !desc->ray_count || !desc->rays || !desc->hits || !desc->hit_indices ||
       !desc->masks || !desc->launch_params || desc->mask_count != instance_count ||
       desc->any_hit > 1 ||
-      !scene->context->alpha_ready.load(std::memory_order_acquire)) {
+      !(Micromap ? scene->context->micromap_ready : scene->context->alpha_ready)
+           .load(std::memory_order_acquire)) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "OptiX alpha trace requires prepared masks, pipeline and workspace");
   }
   const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  auto &pipeline = Micromap ? scene->context->micromap : scene->context->alpha;
   const AlphaLaunchParams params{
       {desc->rays, desc->hits, scene->ias_handle, desc->hit_indices},
       desc->masks, desc->any_hit, 0};
@@ -1390,8 +1628,8 @@ TiForgeOptixResult launch_alpha(SceneType *scene,
     return result;
   }
   return optix_check(
-      optixLaunch(scene->context->alpha.pipeline, stream, desc->launch_params,
-                  sizeof(params), &scene->context->alpha.sbt,
+      optixLaunch(pipeline.pipeline, stream, desc->launch_params,
+                  sizeof(params), &pipeline.sbt,
                   desc->ray_count, 1, 1),
       "optixLaunch(alpha mask)");
 }
@@ -1406,6 +1644,13 @@ TiForgeOptixResult trace_instance_alpha(
     const TiForgeOptixAlphaTraceDesc *desc) {
   auto *scene = static_cast<InstanceScene *>(raw_scene);
   return launch_alpha(scene, scene ? scene->instance_count : 0, desc);
+}
+
+TiForgeOptixResult trace_instance_micromap(
+    TiForgeOptixInstanceScene raw_scene,
+    const TiForgeOptixAlphaTraceDesc *desc) {
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  return launch_alpha<InstanceScene, true>(scene, scene ? scene->instance_count : 0, desc);
 }
 
 TiForgeOptixResult get_instance_scene_memory(
@@ -1554,6 +1799,8 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->prepare_alpha = prepare_alpha;
   out_api->trace_alpha = trace_alpha;
   out_api->trace_instance_alpha = trace_instance_alpha;
+  out_api->create_triangle_gas_micromap = create_triangle_gas_micromap;
+  out_api->trace_instance_micromap = trace_instance_micromap;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

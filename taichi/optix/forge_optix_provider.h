@@ -48,6 +48,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE = 1ull << 10,
   TI_FORGE_OPTIX_FEATURE_ALPHA_MASK = 1ull << 11,
   TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY = 1ull << 12,
+  TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT = 1ull << 13,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -138,6 +139,37 @@ typedef void *TiForgeOptixContext;
 typedef void *TiForgeOptixTriangleScene;
 typedef void *TiForgeOptixTriangleGas;
 typedef void *TiForgeOptixInstanceScene;
+
+// Baked input, not an opaque driver allocation. Entries use native OptiX OMM
+// ordering and format values (1 = two-state, 2 = four-state). All pointers are
+// host input valid for the duration of create_triangle_gas_micromap only.
+typedef struct TiForgeOptixMicromapEntry {
+  uint32_t byte_offset;
+  uint16_t subdivision_level;
+  uint16_t format;
+} TiForgeOptixMicromapEntry;
+
+typedef struct TiForgeOptixMicromapDesc {
+  uint32_t struct_size;
+  uint32_t micromap_count;
+  uint64_t data_size;
+  const void *data;
+  const TiForgeOptixMicromapEntry *entries;
+  uint32_t triangle_count;
+  uint32_t reserved;
+  // Optional int32 map; null uses linear one-micromap-per-triangle mapping.
+  // Negative values -1 .. -4 are the native uniform-state special indices.
+  const int32_t *triangle_indices;
+} TiForgeOptixMicromapDesc;
+
+typedef struct TiForgeOptixMicromapMemory {
+  uint32_t struct_size;
+  uint32_t reserved;
+  uint64_t array_bytes;
+  uint64_t index_bytes;
+  // Peak import-only temporary storage, freed before creation returns.
+  uint64_t build_temporary_bytes;
+} TiForgeOptixMicromapMemory;
 
 // Cold fixed-topology metadata. transform is a row-major affine 3x4 matrix.
 // custom_index and visibility_mask are limited to 24 and 8 bits respectively.
@@ -239,6 +271,13 @@ typedef TiForgeOptixResult (*TiForgeOptixTraceInstanceAlphaFn)(
     TiForgeOptixInstanceScene scene,
     const TiForgeOptixAlphaTraceDesc *desc);
 
+typedef TiForgeOptixResult (*TiForgeOptixCreateTriangleGasMicromapFn)(
+    TiForgeOptixContext context,
+    const TiForgeOptixTriangleSceneDesc *desc,
+    const TiForgeOptixMicromapDesc *micromap,
+    TiForgeOptixTriangleGas *out_gas,
+    TiForgeOptixMicromapMemory *out_memory);
+
 typedef struct TiForgeOptixProviderApi {
   uint32_t struct_size;
   uint32_t provider_abi_version;
@@ -268,6 +307,8 @@ typedef struct TiForgeOptixProviderApi {
   TiForgeOptixPrepareTypedFn prepare_alpha;
   TiForgeOptixTraceAlphaFn trace_alpha;
   TiForgeOptixTraceInstanceAlphaFn trace_instance_alpha;
+  TiForgeOptixCreateTriangleGasMicromapFn create_triangle_gas_micromap;
+  TiForgeOptixTraceInstanceAlphaFn trace_instance_micromap;
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(
