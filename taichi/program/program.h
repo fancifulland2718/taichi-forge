@@ -364,6 +364,8 @@ class CudaProviderCompletionResource {
  */
 
 class TI_DLL_EXPORT Program {
+  class ExternalDenseStorageLaunchLeases;
+
  public:
   using Kernel = taichi::lang::Kernel;
 
@@ -413,6 +415,9 @@ class TI_DLL_EXPORT Program {
     Program *previous_program_{nullptr};
     std::unique_lock<std::recursive_mutex> lock_;
     RuntimeResourceGraphScope *previous_scope_{nullptr};
+    // Consumer-retired external storage must stay alive through dispatch,
+    // without being pinned to Program-wide GPU completion/retirement.
+    std::unique_ptr<ExternalDenseStorageLaunchLeases> external_storage_leases_;
     std::unique_ptr<ExternalAccessEpoch> external_access_epoch_;
   };
 

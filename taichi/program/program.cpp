@@ -228,6 +228,7 @@ Program::RuntimeResourceGraphScope::RuntimeResourceGraphScope(
       previous_program_(std::exchange(other.previous_program_, nullptr)),
       lock_(std::move(other.lock_)),
       previous_scope_(std::exchange(other.previous_scope_, nullptr)),
+      external_storage_leases_(std::move(other.external_storage_leases_)),
       external_access_epoch_(std::move(other.external_access_epoch_)) {
   if (active_runtime_resource_graph_scope == &other) {
     active_runtime_resource_graph_scope = this;
@@ -6910,6 +6911,27 @@ void Program::retain_runtime_storage_for_graph_submission(
       pin_external_dense_storage_launch_leases(external_leases);
     }
   }
+  // pin_external_dense_storage_launch_leases deliberately leaves leases whose
+  // retirement is owned by the external consumer (for example a shared display
+  // frame). Keep those in this transaction, not in the global inflight map.
+  // The external access epoch releases before these leases leave the scope.
+  auto retain_local = [&](ExternalDenseStorageLease &lease) {
+    if (!lease) {
+      return;
+    }
+    auto &retained =
+        active_runtime_resource_graph_scope->external_storage_leases_;
+    if (!retained) {
+      retained = std::make_unique<ExternalDenseStorageLaunchLeases>();
+    }
+    retained->add(std::move(lease));
+  };
+  for (std::size_t i = 0; i < external_leases.inline_count_; ++i) {
+    retain_local(*external_leases.inline_leases_[i]);
+  }
+  for (auto &lease : external_leases.overflow_leases_) {
+    retain_local(lease);
+  }
 }
 
 storage::ResolvedDenseBinding
@@ -7351,13 +7373,20 @@ storage::ResolvedDenseBinding Program::resolve_dense_storage_descriptor(
       TI_ERROR_IF(
           result != ExternalDenseStorageRegistry::Result::kSuccess || !lease,
           "External dense storage is stale or retired");
-      const auto inflight = external_dense_storage_inflight_leases_.find(
-          external_dense_storage_lease_key(handle));
-      if (inflight != external_dense_storage_inflight_leases_.end()) {
-        resource = inflight->second.get();
-      } else {
-        external_leases.add(std::move(lease));
-        resource = external_leases.find(handle);
+      if (active_runtime_resource_graph_program == this &&
+          active_runtime_resource_graph_scope->external_storage_leases_) {
+        resource = active_runtime_resource_graph_scope->external_storage_leases_
+                       ->find(handle);
+      }
+      if (resource == nullptr) {
+        const auto inflight = external_dense_storage_inflight_leases_.find(
+            external_dense_storage_lease_key(handle));
+        if (inflight != external_dense_storage_inflight_leases_.end()) {
+          resource = inflight->second.get();
+        } else {
+          external_leases.add(std::move(lease));
+          resource = external_leases.find(handle);
+        }
       }
     }
     TI_ERROR_IF(resource == nullptr,

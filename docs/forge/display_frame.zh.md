@@ -63,6 +63,10 @@ if frame is not None:
 
 - 通过 Forge 有序 CUDA 执行路径写入。任意外部 stream 的写入不会被隐式等待；外部输入应使用
   [受管 interop 接口](zero_copy_interop.zh.md)导入并交接。
+- 已编译 Graph 可将 `frame.pixels` 绑定到 2D `ti.u32` ndarray 参数。对借用目标的所有写入应放入
+  同一次 Graph 执行，各 dispatch 共享一次外部访问区间，Graph 交回所有权后再提交显示帧。
+  可以复用编译好的 Graph，但应绑定本次 acquire 的 view；旧 binding 不会延长写入期限。
+  这不代表外部存储已经支持 CUDA capture/replay。
 - 写入必须以 `submit_frame(frame)` 或 `frame.cancel()` 结束；退出 `with frame` 时若尚未提交，
   会自动取消，异常退出也一样。
 - 不得保留 `frame.pixels` 供之后写入。提交/取消后借用结束；再次 acquire 即使尺寸相同，也可能返回其他帧槽。

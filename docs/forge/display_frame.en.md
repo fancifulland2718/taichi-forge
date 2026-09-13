@@ -71,6 +71,12 @@ if frame is not None:
 - Write through Forge's ordered CUDA execution path. Arbitrary external stream
   writes are not implicitly joined; import/synchronize external input through
   the [managed interop APIs](zero_copy_interop.en.md).
+- A compiled Graph may bind `frame.pixels` to a 2D `ti.u32` ndarray argument.
+  Put all writes to the borrowed target in one Graph run: its dispatches share
+  one external access interval, which ends when the Graph hands ownership back.
+  Submit the frame afterwards. Reuse the compiled Graph, but bind the view from
+  the current acquire; an old binding does not extend the write lease. This
+  does not imply CUDA capture/replay support for external storage.
 - Finish with `submit_frame(frame)` or `frame.cancel()`. Leaving `with frame`
   without submission cancels the write, including on exceptions.
 - Do not retain `frame.pixels` for later writes. Submission/cancellation seals

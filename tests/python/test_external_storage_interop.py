@@ -53,6 +53,39 @@ def test_dlpack_view_binds_numpy_storage_without_copy():
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False)
+def test_graph_retains_external_storage_without_global_gpu_pinning():
+    @ti.kernel
+    def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in values:
+            values[i] += 1
+
+    values = np.zeros(32, dtype=np.int32)
+    program = impl.get_runtime().prog
+    before = program._debug_external_dense_storage_stats()
+    view = ti.interop.from_dlpack(values)
+    builder = ti.graph.GraphBuilder()
+    argument = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "values", ti.i32, ndim=1)
+    builder.dispatch(increment, argument)
+    builder.dispatch(increment, argument)
+    graph = builder.compile()
+    bound = graph.bind(dict(values=view))
+    try:
+        graph.run(bound)
+        graph.run(bound)
+        np.testing.assert_array_equal(values, np.full(32, 4, dtype=np.int32))
+        assert program._debug_external_dense_storage_stats()["inflight"] == 0
+        view.close()
+        with pytest.raises(RuntimeError, match="stale|retired|closed"):
+            graph.run(bound)
+    finally:
+        graph.close()
+        view.close()
+    after = program._debug_external_dense_storage_stats()
+    for key in ("live", "retiring", "leases"):
+        assert after[key] == before[key]
+
+
+@test_utils.test(arch=ti.cpu, offline_cache=False)
 def test_historical_numpy_kernel_argument_keeps_direct_cpu_binding():
     @ti.kernel
     def increment(values: ti.types.ndarray(dtype=ti.i32, ndim=1)):
