@@ -124,56 +124,131 @@ class AccelerationStructureAccessor:
         self.ptr_expr = ptr_expr
 
     @taichi_scope
-    def trace_closest_filtered(self, origin, direction, accept, *, args=(),
-                               t_min=0.0, t_max=1.0e30, cull_mask=0xFF):
+    def trace_closest_filtered(
+        self,
+        origin,
+        direction,
+        accept,
+        *,
+        args=(),
+        t_min=0.0,
+        t_max=1.0e30,
+        cull_mask=0xFF,
+        respect_opacity=False,
+    ):
         """Return the nearest triangle accepted by an inlined ``ti.func``.
 
         ``accept(candidate, *args)`` must return a scalar truth value and may
         only read resources. It can interpolate UVs and sample bound textures.
-        Every triangle is filtered, including geometry built as opaque. Use
+        Without micromaps every triangle is filtered, including opaque geometry. Use
         ``trace_closest`` for the unfiltered opaque fast path. Candidate order
         is unspecified; rejection continues the same device traversal.
+        ``respect_opacity=True`` keeps hardware opacity classification: known
+        transparent cells miss, opaque cells commit without calling ``accept``,
+        and only nonopaque/unknown candidates reach the callback. This also
+        respects ordinary opaque geometry in the same TLAS. Use ``opaque=False``
+        when building non-OMM BLAS that require filtering in such a query.
+        This flag does not disable
+        micromaps when false: transparent cells remain absent from traversal.
         """
-        return self._trace_filtered(origin, direction, accept, args, t_min,
-                                    t_max, cull_mask, False)
+        return self._trace_filtered(
+            origin,
+            direction,
+            accept,
+            args,
+            t_min,
+            t_max,
+            cull_mask,
+            False,
+            respect_opacity,
+        )
 
     @taichi_scope
-    def trace_any_filtered(self, origin, direction, accept, *, args=(),
-                           t_min=0.0, t_max=1.0e30, cull_mask=0xFF):
+    def trace_any_filtered(
+        self,
+        origin,
+        direction,
+        accept,
+        *,
+        args=(),
+        t_min=0.0,
+        t_max=1.0e30,
+        cull_mask=0xFF,
+        respect_opacity=False,
+    ):
         """Return any accepted hit, terminating traversal for occlusion.
 
         Use the returned ``hit`` member for shadow/occlusion tests. Unlike
         ``trace_closest_filtered``, the accepted hit need not be nearest.
+        ``respect_opacity`` has the same meaning as in that method.
         """
-        return self._trace_filtered(origin, direction, accept, args, t_min,
-                                    t_max, cull_mask, True)
+        return self._trace_filtered(
+            origin,
+            direction,
+            accept,
+            args,
+            t_min,
+            t_max,
+            cull_mask,
+            True,
+            respect_opacity,
+        )
 
     @taichi_scope
-    def _trace_filtered(self, origin, direction, accept, args, t_min, t_max,
-                        cull_mask, any_hit):
+    def _trace_filtered(
+        self,
+        origin,
+        direction,
+        accept,
+        args,
+        t_min,
+        t_max,
+        cull_mask,
+        any_hit,
+        respect_opacity,
+    ):
+        if not isinstance(respect_opacity, bool):
+            raise TypeError("respect_opacity must be a compile-time bool")
         if impl.default_cfg().arch != _ti_core.Arch.vulkan:
             raise TypeError("filtered ray queries require the Vulkan backend")
-        if (not getattr(accept, "_is_taichi_function", False)
-                or getattr(accept, "_is_real_function", False)
-                or getattr(getattr(accept, "func", None), "pyfunc", True)):
-            raise TypeError("ray-query accept must be an inlined ti.func, not a Python callback")
+        if (
+            not getattr(accept, "_is_taichi_function", False)
+            or getattr(accept, "_is_real_function", False)
+            or getattr(getattr(accept, "func", None), "pyfunc", True)
+        ):
+            raise TypeError(
+                "ray-query accept must be an inlined ti.func, not a Python callback"
+            )
         builder = impl.get_runtime().compiling_callable.ast_builder()
         debug = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
 
         def query_op(name, *values, materialize=True):
             op = getattr(_ti_core.InternalOp, "vulkan_ray_query_" + name)
-            raw = Expr(_ti_core.insert_materialized_internal_func_call(op, make_expr_group(*values)))
+            raw = Expr(
+                _ti_core.insert_materialized_internal_func_call(
+                    op, make_expr_group(*values)
+                )
+            )
             if materialize:
                 builder.insert_expr_stmt(raw.ptr)
             return raw
 
         origin = [ops.cast(value, f32) for value in _vector3_entries(origin, "origin")]
-        direction = [ops.cast(value, f32) for value in _vector3_entries(direction, "direction")]
+        direction = [
+            ops.cast(value, f32) for value in _vector3_entries(direction, "direction")
+        ]
         # NoOpaque forces triangle candidates even for an opaque BLAS. The
         # first-hit bit terminates only after confirm, never after rejection.
-        query = query_op("initialize", self.ptr_expr, *origin, *direction,
-                         ops.cast(t_min, f32), ops.cast(t_max, f32),
-                         ops.cast(6 if any_hit else 2, u32), ops.cast(cull_mask, u32))
+        query = query_op(
+            "initialize",
+            self.ptr_expr,
+            *origin,
+            *direction,
+            ops.cast(t_min, f32),
+            ops.cast(t_max, f32),
+            ops.cast((4 if any_hit else 0) | (0 if respect_opacity else 2), u32),
+            ops.cast(cull_mask, u32),
+        )
         proceed = query_op("proceed", query, materialize=False)
         builder.begin_frontend_ray_query_filter(proceed.ptr, debug)
         try:

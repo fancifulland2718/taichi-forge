@@ -1,5 +1,7 @@
 """Public Vulkan hardware ray-query provider API."""
 
+from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
+
 from taichi_forge.hardware._ray import (
     InstanceTLAS,
     RayInstance,
@@ -13,6 +15,7 @@ from taichi_forge.hardware._ray import (
     VulkanTLASRefitRecording,
     VulkanTLASTransformRecording,
     is_available,
+    is_opacity_micromap_available,
 )
 from taichi_forge.hardware._optix import (
     OptixAlphaMask,
@@ -31,6 +34,8 @@ from taichi_forge.hardware._optix import (
 )
 
 __all__ = [
+    "is_opacity_micromap_available",
+    "VulkanOpacityMicromap",
     "InstanceTLAS",
     "OptixAlphaMask",
     "OptixOpacityMicromap",

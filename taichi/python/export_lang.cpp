@@ -3335,6 +3335,17 @@ void export_lang(py::module &m) {
                &Program::create_vulkan_instance_tlas_resource),
            py::arg("blas_handles"),
            py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_triangle_blas_micromap_resource",
+           tracked_native_program_method(
+               &Program::create_vulkan_triangle_blas_micromap_resource),
+           py::arg("vertex_count"), py::arg("triangle_count"),
+           py::arg("data"), py::arg("descriptors"), py::arg("indices"),
+           py::arg("indexed"), py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_triangle_blas_resource_with_opacity",
+           tracked_native_program_method(
+               &Program::create_vulkan_triangle_blas_resource_with_opacity),
+           py::arg("vertex_count"), py::arg("triangle_count"), py::arg("opaque"),
+           py::call_guard<py::gil_scoped_release>())
       .def("_vulkan_instance_tlas_build",
            tracked_native_program_method(&Program::vulkan_instance_tlas_build),
            py::arg("handle"), py::arg("instances"), py::arg("update"),

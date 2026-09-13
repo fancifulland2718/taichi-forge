@@ -2640,6 +2640,12 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   if (int(params.usage & AllocUsage::AccelerationStructureStorage)) {
     buffer_info.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_STORAGE_BIT_KHR;
   }
+  if (int(params.usage & AllocUsage::MicromapBuildInput)) {
+    buffer_info.usage |= VK_BUFFER_USAGE_MICROMAP_BUILD_INPUT_READ_ONLY_BIT_EXT;
+  }
+  if (int(params.usage & AllocUsage::MicromapStorage)) {
+    buffer_info.usage |= VK_BUFFER_USAGE_MICROMAP_STORAGE_BIT_EXT;
+  }
   const bool needs_device_address =
       int(params.usage & AllocUsage::DeviceAddress) ||
       int(params.usage & AllocUsage::AccelerationStructureBuildInput) ||

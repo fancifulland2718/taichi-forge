@@ -13,6 +13,7 @@
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/program/vulkan_micromap.h"
 
 namespace taichi::lang {
 namespace {
@@ -663,33 +664,38 @@ class VulkanRayResource {
 
 class VulkanTriangleBlasResource final : public VulkanRayResource {
  public:
-  VulkanTriangleBlasResource(Program *program,
-                             std::size_t vertex_count,
-                             std::size_t triangle_count)
+  VulkanTriangleBlasResource(
+      Program *program,
+      std::size_t vertex_count,
+      std::size_t triangle_count,
+      std::shared_ptr<VulkanOpacityMicromap> micromap = {},
+      bool opaque = true)
       : program_(program),
         vertex_count_(vertex_count),
-        triangle_count_(triangle_count) {
+        triangle_count_(triangle_count),
+        micromap_(std::move(micromap)) {
+    opaque_ = !micromap_ && opaque;
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan triangle BLAS requires a live Program.");
-    device_ = static_cast<vulkan::VulkanDevice *>(
-        program_->get_compute_device());
+    device_ =
+        static_cast<vulkan::VulkanDevice *>(program_->get_compute_device());
     TI_ERROR_IF(device_ == nullptr ||
                     !device_->vk_caps().acceleration_structure ||
                     !device_->vk_caps().ray_query,
                 "Vulkan triangle BLAS requires acceleration-structure and "
                 "ray-query support.");
-    TI_ERROR_IF(vertex_count_ == 0 ||
-                    vertex_count_ > static_cast<std::size_t>(
-                                        (std::numeric_limits<
-                                            std::uint32_t>::max)()),
-                "Vulkan triangle BLAS vertex_count must be in [1, "
-                "UINT32_MAX].");
-    TI_ERROR_IF(triangle_count_ == 0 ||
-                    triangle_count_ > static_cast<std::size_t>(
-                                          (std::numeric_limits<
-                                              std::uint32_t>::max)()),
-                "Vulkan triangle BLAS triangle_count must be in [1, "
-                "UINT32_MAX].");
+    TI_ERROR_IF(
+        vertex_count_ == 0 ||
+            vertex_count_ > static_cast<std::size_t>(
+                                (std::numeric_limits<std::uint32_t>::max)()),
+        "Vulkan triangle BLAS vertex_count must be in [1, "
+        "UINT32_MAX].");
+    TI_ERROR_IF(
+        triangle_count_ == 0 ||
+            triangle_count_ > static_cast<std::size_t>(
+                                  (std::numeric_limits<std::uint32_t>::max)()),
+        "Vulkan triangle BLAS triangle_count must be in [1, "
+        "UINT32_MAX].");
     get_build_sizes_ = load_vulkan_device_function<
         PFN_vkGetAccelerationStructureBuildSizesKHR>(
         device_->vk_device(), "vkGetAccelerationStructureBuildSizesKHR");
@@ -715,13 +721,22 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     vertex_bytes_ = checked_mul(vertex_count_, 3 * sizeof(float), "vertex");
     index_bytes_ =
         checked_mul(triangle_count_, 3 * sizeof(std::uint32_t), "index");
-    vertex_buffer_ = allocate(
-        vertex_bytes_, AllocUsage::AccelerationStructureBuildInput |
-                           AllocUsage::DeviceAddress);
-    index_buffer_ = allocate(
-        index_bytes_, AllocUsage::AccelerationStructureBuildInput |
-                          AllocUsage::DeviceAddress);
-    create_acceleration_structure();
+    try {
+      vertex_buffer_ =
+          allocate(vertex_bytes_, AllocUsage::AccelerationStructureBuildInput |
+                                      AllocUsage::DeviceAddress);
+      index_buffer_ =
+          allocate(index_bytes_, AllocUsage::AccelerationStructureBuildInput |
+                                     AllocUsage::DeviceAddress);
+      create_acceleration_structure();
+    } catch (...) {
+      blas_.reset();
+      release(scratch_);
+      release(storage_);
+      release(index_buffer_);
+      release(vertex_buffer_);
+      throw;
+    }
   }
 
   ~VulkanTriangleBlasResource() override {
@@ -741,10 +756,19 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     result.geometry_input_requested_bytes = vertex_bytes_ + index_bytes_;
     result.acceleration_structure_requested_bytes = storage_bytes_;
     result.build_scratch_requested_bytes = scratch_bytes_;
-    result.known_requested_bytes = result.geometry_input_requested_bytes +
-                                   result.acceleration_structure_requested_bytes +
-                                   result.build_scratch_requested_bytes;
+    if (micromap_) {
+      result.geometry_input_requested_bytes += micromap_->memory[1];
+      result.acceleration_structure_requested_bytes += micromap_->memory[0];
+    }
+    result.known_requested_bytes =
+        result.geometry_input_requested_bytes +
+        result.acceleration_structure_requested_bytes +
+        result.build_scratch_requested_bytes;
     result.known_allocation_count = 4;
+    if (micromap_) {
+      result.known_allocation_count +=
+          (micromap_->memory[0] != 0) + (micromap_->memory[1] != 0);
+    }
     return result;
   }
 
@@ -825,6 +849,9 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
           device_->get_vkbuffer(allocation.get_ptr()));
     }
     command_buffer->refs.push_back(blas_);
+    if (micromap_) {
+      micromap_->retain(command_buffer);
+    }
   }
 
  private:
@@ -864,6 +891,7 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
     triangles.sType =
         VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.pNext = micromap_ ? &micromap_->attachment : nullptr;
     triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
     triangles.vertexData.deviceAddress =
         device_->get_buffer_device_address(vertex_buffer_);
@@ -875,7 +903,7 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.flags = opaque_ ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
     geometry.geometry.triangles = triangles;
     return geometry;
   }
@@ -949,6 +977,8 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
   PFN_vkGetAccelerationStructureDeviceAddressKHR get_as_address_{nullptr};
   PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_{nullptr};
   std::mutex mutex_;
+  std::shared_ptr<VulkanOpacityMicromap> micromap_;
+  bool opaque_{true};
 };
 
 class VulkanInstanceTlasResource final : public VulkanRayResource {
@@ -1379,6 +1409,7 @@ Program::vulkan_ray_query_properties() const {
       {"buffer_device_address", 0},
       {"acceleration_structure", 0},
       {"ray_query", 0},
+      {"opacity_micromap", 0},
       {"max_geometry_count", 0},
       {"max_instance_count", 0},
       {"max_primitive_count", 0},
@@ -1400,6 +1431,7 @@ Program::vulkan_ray_query_properties() const {
   result["buffer_device_address"] = caps.buffer_device_address;
   result["acceleration_structure"] = caps.acceleration_structure;
   result["ray_query"] = caps.ray_query;
+  result["opacity_micromap"] = caps.opacity_micromap;
   result["available"] = vulkan_ray_query_available();
   if (!caps.acceleration_structure) {
     return result;
@@ -1713,18 +1745,50 @@ std::size_t Program::execute_vulkan_ray_geometry(
 std::uint64_t Program::create_vulkan_triangle_blas_resource(
     std::size_t vertex_count,
     std::size_t triangle_count) {
+  return create_vulkan_triangle_blas_resource_with_opacity(
+      vertex_count, triangle_count, true);
+}
+
+std::uint64_t Program::create_vulkan_triangle_blas_resource_with_opacity(
+    std::size_t vertex_count,
+    std::size_t triangle_count,
+    bool opaque) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
   TI_ERROR_IF(!vulkan_ray_query_available(),
               "Vulkan triangle BLAS resources require "
               "VK_KHR_acceleration_structure and VK_KHR_ray_query.");
   auto resource = std::make_shared<VulkanTriangleBlasResource>(
-      this, vertex_count, triangle_count);
+      this, vertex_count, triangle_count, nullptr, opaque);
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   TI_ERROR_IF(next_vulkan_ray_resource_handle_ == 0,
               "Vulkan ray resource handle space exhausted.");
   const std::uint64_t handle = next_vulkan_ray_resource_handle_++;
   vulkan_ray_resources_.emplace(handle, std::move(resource));
   return handle;
+}
+
+std::pair<std::uint64_t, std::array<std::size_t, 3>>
+Program::create_vulkan_triangle_blas_micromap_resource(
+    std::size_t vertex_count,
+    std::size_t triangle_count,
+    const std::string &data,
+    const std::string &descriptors,
+    const std::string &indices,
+    bool indexed) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!vulkan_ray_query_available(),
+              "Vulkan ray query is unavailable.");
+  auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
+  auto micromap = std::make_shared<VulkanOpacityMicromap>(device);
+  micromap->build(data, descriptors, indices, indexed, triangle_count);
+  auto resource = std::make_shared<VulkanTriangleBlasResource>(
+      this, vertex_count, triangle_count, micromap);
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  TI_ERROR_IF(next_vulkan_ray_resource_handle_ == 0,
+              "Vulkan ray resource handle space exhausted.");
+  const auto handle = next_vulkan_ray_resource_handle_++;
+  vulkan_ray_resources_.emplace(handle, std::move(resource));
+  return {handle, micromap->memory};
 }
 
 std::uint64_t Program::create_vulkan_instance_tlas_resource(
@@ -2051,6 +2115,7 @@ Program::vulkan_ray_query_properties() const {
           {"buffer_device_address", 0},
           {"acceleration_structure", 0},
           {"ray_query", 0},
+          {"opacity_micromap", 0},
           {"max_geometry_count", 0},
           {"max_instance_count", 0},
           {"max_primitive_count", 0},
@@ -2123,6 +2188,18 @@ Program::vulkan_triangle_ray_scene_memory_statistics(std::uint64_t) {
 std::uint64_t Program::create_vulkan_triangle_blas_resource(std::size_t,
                                                             std::size_t) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::uint64_t Program::create_vulkan_triangle_blas_resource_with_opacity(
+    std::size_t, std::size_t, bool) {
+  TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::pair<std::uint64_t, std::array<std::size_t, 3>>
+Program::create_vulkan_triangle_blas_micromap_resource(
+    std::size_t, std::size_t, const std::string &, const std::string &,
+    const std::string &, bool) {
+  TI_ERROR("Vulkan opacity micromap requires TI_WITH_VULKAN=ON.");
 }
 
 std::uint64_t Program::create_vulkan_instance_tlas_resource(

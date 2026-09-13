@@ -960,6 +960,7 @@ struct VulkanCapabilities {
   bool conditional_rendering{false};
   bool buffer_device_address{false};
   bool acceleration_structure{false};
+  bool opacity_micromap{false};
   bool ray_query{false};
   bool cooperative_matrix{false};
   bool multi_draw_indirect{false};

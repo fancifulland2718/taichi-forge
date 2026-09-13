@@ -1489,6 +1489,14 @@ class TI_DLL_EXPORT Program {
   std::uint64_t create_vulkan_triangle_blas_resource(
       std::size_t vertex_count,
       std::size_t triangle_count);
+  std::uint64_t create_vulkan_triangle_blas_resource_with_opacity(
+      std::size_t vertex_count, std::size_t triangle_count, bool opaque);
+
+  std::pair<std::uint64_t, std::array<std::size_t, 3>>
+  create_vulkan_triangle_blas_micromap_resource(
+      std::size_t vertex_count, std::size_t triangle_count,
+      const std::string &data, const std::string &descriptors,
+      const std::string &indices, bool indexed);
 
   std::uint64_t create_vulkan_instance_tlas_resource(
       const std::vector<std::uint64_t> &blas_handles);

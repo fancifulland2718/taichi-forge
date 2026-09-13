@@ -793,6 +793,8 @@ enum class AllocUsage : int {
   AccelerationStructureBuildInput = 128,
   AccelerationStructureStorage = 256,
   DeviceAddress = 512,
+  MicromapBuildInput = 1024,
+  MicromapStorage = 2048,
 };
 
 MAKE_ENUM_FLAGS(AllocUsage)

@@ -35,6 +35,25 @@ class _PreparedRayCommand:
     owners: tuple
 
 
+def _scene_opacity_manifest(scene):
+    """Cold recording metadata, not a replay-time topology scan."""
+    topology = getattr(scene, "_topology", ())
+    micromaps = tuple(
+        (i, blas._micromap_id)
+        for i, blas in enumerate(topology)
+        if blas._micromap_id is not None
+    )
+    nonopaque = tuple(
+        i
+        for i, blas in enumerate(topology)
+        if not blas.opaque and blas._micromap_id is None
+    )
+    return {
+        **({"opacity_micromaps": micromaps} if micromaps else {}),
+        **({"nonopaque_blas": nonopaque} if nonopaque else {}),
+    }
+
+
 def _ray_storage(value, width, dtypes, name):
     description = describe_storage(value)
     if not description.supported:
@@ -173,6 +192,7 @@ class VulkanRayQueryRecording(BackendCommandRecording):
                 "kind": "vulkan_triangle_ray_query",
                 "ray_count": item.ray_count,
                 "scene_kind": item.scene._scene_kind,
+                **_scene_opacity_manifest(item.scene),
                 "hit_layout": (
                     "typed" if item.hit_indices is not None else "legacy_float4"
                 ),
@@ -535,6 +555,12 @@ class VulkanBLASBuildRecording(_GeometryRecording, BackendCommandRecording):
     def debug_info(self):
         return {
             "kind": "vulkan_triangle_blas_build",
+            **({"opaque": False} if not self.blas.opaque else {}),
+            **(
+                {"opacity_micromap": self.blas._micromap_id}
+                if self.blas._micromap_id is not None
+                else {}
+            ),
             "vertex_count": self.blas.vertex_count,
             "triangle_count": self.blas.triangle_count,
         }
@@ -612,11 +638,17 @@ class VulkanBLASRefitRecording(_GeometryRecording, BackendCommandRecording):
 
 
 class TriangleBLAS:
-    """Independent fixed-topology Vulkan triangle BLAS resource."""
+    """Independent fixed-topology Vulkan triangle BLAS resource.
+
+    With no micromap, geometry is opaque by default. ``opaque=False`` lets
+    filtered queries using ``respect_opacity=True`` evaluate its candidates.
+    A micromap supplies its own classification and cannot use ``opaque=True``.
+    Topology and opacity are fixed; vertex positions can be refitted.
+    """
 
     graph_runtime_lifetime_check_required = False
 
-    def __init__(self, vertices, indices):
+    def __init__(self, vertices, indices, *, opacity_micromap=None, opaque=None):
         program = _require_vulkan_ray_runtime("TriangleBLAS")
         vertex_count = _ray_storage(vertices, 3, (f32,), "vertices")[1]
         triangle_count = _ray_storage(indices, 3, (i32,), "indices")[1]
@@ -624,9 +656,54 @@ class TriangleBLAS:
         self._runtime_generation = int(impl.runtime_generation())
         self.vertex_count = vertex_count
         self.triangle_count = triangle_count
-        self._handle = int(
-            program._create_vulkan_triangle_blas_resource(vertex_count, triangle_count)
-        )
+        self._micromap_memory = None
+        self._micromap_id = None
+        if opaque is not None and not isinstance(opaque, bool):
+            raise TypeError("opaque must be a bool or None")
+        if opacity_micromap is not None and opaque is True:
+            raise ValueError(
+                "An OMM BLAS must use its micromap opacity, not opaque=True"
+            )
+        self._opaque = opacity_micromap is None and opaque is not False
+        if opacity_micromap is None:
+            if self._opaque:
+                self._handle = int(
+                    program._create_vulkan_triangle_blas_resource(
+                        vertex_count, triangle_count
+                    )
+                )
+            else:
+                create = getattr(
+                    program, "_create_vulkan_triangle_blas_resource_with_opacity", None
+                )
+                if create is None:
+                    raise TaichiRuntimeError(
+                        "The installed runtime does not support nonopaque Vulkan BLAS"
+                    )
+                self._handle = int(create(vertex_count, triangle_count, False))
+        else:
+            from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
+
+            if not isinstance(opacity_micromap, VulkanOpacityMicromap):
+                raise TypeError("opacity_micromap must be a VulkanOpacityMicromap")
+            if opacity_micromap.triangle_count != triangle_count:
+                raise ValueError("Vulkan micromap triangle count must match the BLAS")
+            create = getattr(
+                program, "_create_vulkan_triangle_blas_micromap_resource", None
+            )
+            if create is None:
+                raise TaichiRuntimeError(
+                    "The installed runtime does not support Vulkan micromap import"
+                )
+            self._handle, self._micromap_memory = create(
+                vertex_count,
+                triangle_count,
+                opacity_micromap.data,
+                opacity_micromap.descriptors,
+                opacity_micromap.triangle_indices or b"",
+                opacity_micromap.triangle_indices is not None,
+            )
+            self._micromap_id = opacity_micromap.fingerprint
         self._effect_name = f"vulkan-ray-blas:{self._runtime_generation}:{self._handle}"
         try:
             self._memory_stats = dict(
@@ -636,6 +713,10 @@ class TriangleBLAS:
         except Exception:
             self.close()
             raise
+
+    @property
+    def opaque(self):
+        return self._opaque
 
     @property
     def closed(self):
@@ -1225,16 +1306,16 @@ def _require_vulkan_ray_runtime(resource_name):
     return program
 
 
-def _independent_ray_memory_report(
-    resource, *, provider, geometry_name, storage_name
-):
+def _independent_ray_memory_report(resource, *, provider, geometry_name, storage_name):
     handle_present = resource._handle is not None
     runtime_valid = handle_present and runtime_generation_matches(resource)
     stats = resource._memory_stats
+    micromap = getattr(resource, "_micromap_memory", None)
     components = (
         HardwareMemoryComponent(
             geometry_name,
-            int(stats["geometry_input_requested_bytes"]),
+            int(stats["geometry_input_requested_bytes"])
+            - (micromap[1] if micromap else 0),
             True,
             "provider_generation",
             "provider",
@@ -1242,7 +1323,8 @@ def _independent_ray_memory_report(
         ),
         HardwareMemoryComponent(
             storage_name,
-            int(stats["acceleration_structure_requested_bytes"]),
+            int(stats["acceleration_structure_requested_bytes"])
+            - (micromap[0] if micromap else 0),
             True,
             "provider_generation",
             "provider",
@@ -1265,6 +1347,25 @@ def _independent_ray_memory_report(
             resident=runtime_valid,
         ),
     )
+    if micromap:
+        components += tuple(
+            HardwareMemoryComponent(
+                name,
+                int(size),
+                True,
+                lifetime,
+                "provider",
+                resident=runtime_valid if i < 2 else False,
+                reusable=i < 2,
+            )
+            for i, (name, size, lifetime) in enumerate(
+                (
+                    ("opacity_micromap_storage", micromap[0], "provider_generation"),
+                    ("opacity_micromap_indices", micromap[1], "provider_generation"),
+                    ("opacity_micromap_import_temporary", micromap[2], "invocation"),
+                )
+            )
+        )
     return make_memory_report(
         provider,
         "vulkan",
@@ -1272,11 +1373,19 @@ def _independent_ray_memory_report(
         lifecycle_state=(
             "ready"
             if runtime_valid
-            else "closed"
-            if not handle_present
-            else "runtime_invalid"
+            else "closed" if not handle_present else "runtime_invalid"
         ),
         ownership_scope="resource_generation",
+    )
+
+
+def is_opacity_micromap_available():
+    """Cold capability query; never loads an external baker or builds an AS."""
+    program = impl.get_runtime().prog
+    return bool(
+        program is not None
+        and active_backend() == "vulkan"
+        and program._vulkan_ray_query_properties().get("opacity_micromap", False)
     )
 
 
@@ -1292,6 +1401,7 @@ def is_available():
 
 
 __all__ = [
+    "is_opacity_micromap_available",
     "InstanceTLAS",
     "RayInstance",
     "TriangleBLAS",

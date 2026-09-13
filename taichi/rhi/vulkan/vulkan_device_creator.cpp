@@ -670,6 +670,15 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   const bool cooperative_matrix_extension_requested =
       !manual_create ||
       extension_was_requested(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
+  const bool micromap_extension_available =
+      ray_extension_cluster_available &&
+      has_device_extension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
+      (vk_api_version >= VK_API_VERSION_1_3 ||
+       has_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) &&
+      (!manual_create ||
+       (extension_was_requested(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
+        (vk_api_version >= VK_API_VERSION_1_3 ||
+         extension_was_requested(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME))));
   const bool cooperative_matrix_extension_available =
       vk_api_version >= VK_API_VERSION_1_1 &&
       cooperative_matrix_extension_requested &&
@@ -795,6 +804,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
                (name == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ||
                 name == VK_KHR_RAY_QUERY_EXTENSION_NAME ||
                 name == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if (micromap_extension_available &&
+               (name == VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME ||
+                name == VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (cooperative_matrix_extension_available &&
                name == VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) {
@@ -941,6 +954,10 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   acceleration_structure_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
   VkPhysicalDeviceRayQueryFeaturesKHR ray_query_feature{};
+  VkPhysicalDeviceOpacityMicromapFeaturesEXT micromap_feature{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
+  VkPhysicalDeviceSynchronization2Features synchronization2_feature{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
   ray_query_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
   VkPhysicalDeviceCooperativeMatrixFeaturesKHR cooperative_matrix_feature{};
@@ -1118,6 +1135,24 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
         ti_device_->vk_caps().acceleration_structure = true;
         ti_device_->vk_caps().ray_query = true;
         caps.set(DeviceCapability::spirv_has_ray_query, true);
+        if (micromap_extension_available) {
+          features2.pNext = &micromap_feature;
+          query_physical_device_features2(&features2);
+          features2.pNext = &synchronization2_feature;
+          query_physical_device_features2(&features2);
+          if (micromap_feature.micromap &&
+              synchronization2_feature.synchronization2) {
+            // Only device builds are used. Do not enable capture/replay or
+            // host-build features just because the physical device has them.
+            micromap_feature.micromapCaptureReplay = VK_FALSE;
+            micromap_feature.micromapHostCommands = VK_FALSE;
+            *pNextEnd = &micromap_feature;
+            pNextEnd = &micromap_feature.pNext;
+            *pNextEnd = &synchronization2_feature;
+            pNextEnd = &synchronization2_feature.pNext;
+            ti_device_->vk_caps().opacity_micromap = true;
+          }
+        }
       }
     }
 
