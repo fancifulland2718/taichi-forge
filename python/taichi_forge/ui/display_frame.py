@@ -1,8 +1,68 @@
 import numpy as np
+import weakref
 
 from taichi_forge.lang._texture import Texture
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.types.primitive_types import u32
+
+
+class DisplayCompletion:
+    """GPU display-consumer completion, not confirmation of on-screen presentation."""
+
+    def __init__(self, native):
+        self._native = native
+
+    @property
+    def status(self):
+        return self._native.status
+
+    def done(self):
+        return self._native.done()
+
+    def wait(self):
+        self._native.wait()
+
+
+class WritableDisplayFrame:
+    """Canvas-owned packed RGBA8 write lease from Canvas.acquire_frame().
+
+    pixels is a (width, height) u32 dense view, x-major, y=0 at the bottom.
+    Use it only before submit/cancel, on Forge's ordered CUDA execution path.
+    Do not retain the view for later writes. Cancelling does not publish pixels.
+    """
+
+    def __init__(self, canvas, pixels, completion):
+        self._canvas = weakref.ref(canvas)
+        self._pixels = pixels
+        self.width, self.height = pixels.shape
+        self.completion = DisplayCompletion(completion)
+        self.source_completion = None
+        self._state = "writable"
+
+    @property
+    def pixels(self):
+        canvas = self._canvas()
+        if self._state != "writable" or canvas is None:
+            raise RuntimeError("Display frame is no longer writable")
+        canvas._check_display_owner()
+        return self._pixels
+
+    def cancel(self):
+        if self._state != "writable":
+            return
+        canvas = self._canvas()
+        if canvas is not None:
+            canvas._cancel_write(self)
+
+    def _seal(self, state):
+        self._state = state
+        self._pixels = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.cancel()
 
 
 class DisplayFrame:

@@ -72,9 +72,16 @@ class TI_DLL_EXPORT Renderer {
   void set_image(taichi::lang::Texture *tex);
 
   void set_image_transpose(bool transpose);
+  bool set_image_shared_cuda(const SetImageInfo &info);
 
   std::shared_ptr<SharedCudaVulkanImage>
   acquire_shared_cuda_vulkan_image(int width, int height);
+
+  std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
+  void finish_display_write();
+  taichi::lang::RuntimeCompletion record_display_source_completion();
+  void cancel_display_frame();
+  bool repeat_display_frame();
 
   void triangles(const TrianglesInfo &info);
 
@@ -132,6 +139,7 @@ class TI_DLL_EXPORT Renderer {
   void wait_oldest_frame();
   size_t max_frames_in_flight();
   SetImage *get_set_image_renderable();
+  SetImage *get_set_image_renderable(bool reuse_last_image);
   bool remember_runtime_resource_handle(
       taichi::lang::RuntimeResourceHandle handle);
   void retain_field_info(const FieldInfo &field);
@@ -157,6 +165,7 @@ class TI_DLL_EXPORT Renderer {
   std::deque<InFlightFrame> in_flight_frames_;
   std::vector<std::unique_ptr<SetImage>> reusable_set_images_;
   SetImage *pending_set_image_{nullptr};
+  std::shared_ptr<SharedCudaVulkanImage> last_shared_display_image_;
   bool last_frame_used_shared_cuda_vulkan_{false};
   std::vector<taichi::lang::RuntimeResourceHandle>
       pending_runtime_resource_handles_;

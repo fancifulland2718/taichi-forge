@@ -1,16 +1,16 @@
 import numpy as np
+import weakref
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.lang import impl
 from taichi_forge.lang._storage_view import DenseNdarrayView, StorageDescription
 from taichi_forge.lang._texture import Texture
 from .scene import SceneV2
-from .display_frame import DisplayFrame
+from .display_frame import DisplayFrame, WritableDisplayFrame, DisplayCompletion
 
 from .staging_buffer import (
     copy_all_to_vbo,
     copy_all_to_vbo_particle,
-    copy_packed_display_frame,
     get_indices_field_v2,
     get_vbo_field_v2,
     to_rgba8,
@@ -28,11 +28,77 @@ class Canvas:
     please call the `get_canvas()` method of :class:`~taichi_forge.ui.Window`.
     """
 
-    def __init__(self, canvas, window=None) -> None:
+    def __init__(self, canvas, window=None, *, owner=None) -> None:
         self.canvas = canvas  # reference to a PyCanvas
         self.window = window
         self._set_image_info_cache = {}
         self._shared_cuda_vulkan_views = {}
+        self._display_write = None
+        self._display_runtime = impl.pytaichi
+        self._window_owner = None if owner is None else weakref.ref(owner)
+
+    def _check_display_owner(self):
+        if self._display_runtime is not impl.pytaichi or impl.pytaichi.prog is None:
+            raise RuntimeError("Display canvas belongs to an invalidated runtime")
+        owner = None if self._window_owner is None else self._window_owner()
+        if owner is None or owner.window is None:
+            raise RuntimeError("Display window is closed")
+
+    def acquire_frame(self, width, height):
+        """Borrow a packed RGBA8 CUDA write target, or return None when busy.
+
+        Requires CUDA compute and GGUI Vulkan external sharing. No staging
+        fallback is used. Submit/cancel before another image or Window.show().
+        """
+        self._check_display_owner()
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
+        if any(isinstance(n, bool) or not isinstance(n, int) or n <= 0 for n in (width, height)):
+            raise ValueError("Display dimensions must be positive integers")
+        if not hasattr(self.canvas, "_track_display_frame"):
+            raise RuntimeError("This native runtime does not support display borrowing")
+        if not self.window.can_render_frame():
+            return None
+        try:
+            pixels = self._acquire_shared_cuda_vulkan_view(width, height)
+            if pixels is None:
+                raise RuntimeError("CUDA-Vulkan shared display is unavailable")
+            frame = WritableDisplayFrame(self, pixels, self.canvas._track_display_frame(True))
+        except Exception:
+            self.canvas._cancel_display_frame()
+            raise
+        self._display_write = frame
+        return frame
+
+    def _cancel_write(self, frame):
+        self._check_display_owner()
+        if self._display_write is not frame:
+            raise RuntimeError("Display write belongs to another canvas or is already sealed")
+        self.canvas._cancel_display_frame()
+        self._display_write = None
+        frame._seal("cancelled")
+
+    def repeat_frame(self):
+        """Re-display the last submitted borrowed image; return its completion.
+
+        Returns None when busy or no borrowed image has reached Window.show().
+        Does not borrow a write slot or enqueue a pixel-touch kernel.
+        """
+        self._check_display_owner()
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
+        if not self.window.can_render_frame():
+            return None
+        if not self.canvas._repeat_display_frame():
+            return None
+        return DisplayCompletion(self.canvas._track_display_frame())
+
+    def _close_display(self):
+        if self._display_write is not None:
+            self._display_write._seal("cancelled")
+            self._display_write = None
+        self._shared_cuda_vulkan_views.clear()
+        self._set_image_info_cache.clear()
 
     def _get_set_image_info(self, staging_img):
         if hasattr(staging_img, "ctypes"):
@@ -107,8 +173,10 @@ class Canvas:
             img (numpy.ndarray, :class:`~taichi_forge.MatrixField`, :class:`~taichi_forge.Field`, :class:`~taichi_forge.Texture`): \
                 the image to be shown.
         """
-        if isinstance(img, DisplayFrame):
+        if isinstance(img, (DisplayFrame, WritableDisplayFrame)):
             return self.submit_frame(img)
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
         if self.window is not None and not self.window.can_render_frame():
             self.window.record_display_frame_dropped()
             return False
@@ -174,8 +242,23 @@ class Canvas:
             )
             return True
 
-    def submit_frame(self, frame):
+    def submit_frame(self, frame, *, track_source=False):
         """Submit a display-ready frame to the canvas."""
+        if isinstance(frame, WritableDisplayFrame):
+            self._check_display_owner()
+            if self._display_write is not frame:
+                raise RuntimeError("Display write belongs to another canvas or is already sealed")
+            self.canvas._finish_display_write()
+            if track_source:
+                frame.source_completion = self.canvas._record_display_source_completion()
+            self._display_write = None
+            frame._seal("submitted")
+            self._record_display_frame_accepted(frame.width, frame.height)
+            return True
+        if track_source:
+            raise ValueError("track_source requires a writable display frame")
+        if self._display_write is not None:
+            raise RuntimeError("Submit or cancel the current display write first")
         if not isinstance(frame, DisplayFrame):
             raise TypeError("submit_frame expects a DisplayFrame")
         default_transpose = frame.kind != DisplayFrame.TEXTURE
@@ -196,13 +279,14 @@ class Canvas:
                 frame.transpose,
             )
         elif frame.kind == DisplayFrame.PACKED_U32:
-            shared = None
-            if impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda:
-                shared = self._acquire_shared_cuda_vulkan_view(frame.width, frame.height)
-            if shared is None:
+            shared_submit = getattr(self.canvas, "_set_image_shared_cuda", None)
+            shared = (
+                impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda
+                and shared_submit is not None
+                and shared_submit(frame.field_info)
+            )
+            if not shared:
                 self.canvas.set_image(frame.field_info)
-            else:
-                copy_packed_display_frame(frame.packed_u32, shared)
         elif frame.kind == DisplayFrame.TEXTURE:
             self.canvas.set_image_texture(frame.texture.tex)
         else:

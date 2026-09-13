@@ -13,6 +13,7 @@
 #include <optional>
 #include <set>
 #include <memory>
+#include <mutex>
 #include "taichi/ui/utils/utils.h"
 #include "taichi/ui/ggui/vertex.h"
 
@@ -36,6 +37,24 @@ namespace taichi::ui {
 
 namespace vulkan {
 
+// Optional completion for a Canvas image, attached to the existing render
+// submission. This is not a second queue or a promise of on-screen
+// presentation.
+class TI_DLL_EXPORT DisplayCompletion final {
+ public:
+  bool done();
+  void wait();
+  std::string status();
+  void attach(taichi::lang::StreamSemaphore completion);
+  void retire();
+  void cancel();
+
+ private:
+  std::mutex mutex_;
+  std::string status_{"pending"};
+  taichi::lang::StreamSemaphore completion_;
+};
+
 class SharedCudaVulkanImage final {
  public:
   static std::shared_ptr<SharedCudaVulkanImage> create(
@@ -54,6 +73,8 @@ class SharedCudaVulkanImage final {
   int height() const noexcept;
   bool ready_for_vulkan_submit() const noexcept;
   void prepare_cuda_write();
+  void finish_cuda_write();
+  void copy_cuda_image(taichi::lang::DevicePtr source);
   taichi::lang::StreamSemaphore submit_vulkan_frame(
       taichi::lang::vulkan::VulkanStream &stream,
       taichi::lang::CommandList *command_list,
@@ -96,6 +117,7 @@ class SetImage final : public Renderable {
   SetImage(AppContext *app_context, VertexAttributes vbo_attrs);
 
   ~SetImage() override {
+    cancel_display();
     erase_direct_set_image_state(this);
   }
 
@@ -112,6 +134,25 @@ class SetImage final : public Renderable {
   void update_data(taichi::lang::Texture *tex);
 
   void set_transpose(bool transpose);
+
+  void use_shared_image(std::shared_ptr<SharedCudaVulkanImage> image);
+  std::shared_ptr<SharedCudaVulkanImage> shared_image() const {
+    return shared_cuda_vulkan_image_;
+  }
+  void track_display(std::shared_ptr<DisplayCompletion> completion,
+                     bool writable);
+  bool display_write_open() const {
+    return display_write_open_;
+  }
+  void seal_display_write() {
+    display_write_open_ = false;
+  }
+  bool tracks_display() const {
+    return bool(display_completion_);
+  }
+  void attach_display_completion(taichi::lang::StreamSemaphore completion);
+  void retire_display();
+  void cancel_display();
 
   std::shared_ptr<SharedCudaVulkanImage> acquire_shared_cuda_vulkan_image(
       int width,
@@ -138,6 +179,8 @@ class SetImage final : public Renderable {
   std::shared_ptr<SharedCudaVulkanImage> shared_cuda_vulkan_image_;
   bool shared_cuda_vulkan_disabled_{false};
   bool pending_shared_cuda_vulkan_{false};
+  std::shared_ptr<DisplayCompletion> display_completion_;
+  bool display_write_open_{false};
 
   taichi::lang::BufferFormat format_;
 

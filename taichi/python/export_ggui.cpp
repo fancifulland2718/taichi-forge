@@ -528,6 +528,33 @@ struct PyCanvas {
     ggui_canvas->set_image_transpose(transpose);
   }
 
+  vulkan::Canvas &display_canvas() {
+    auto *value = dynamic_cast<vulkan::Canvas *>(canvas);
+    TI_ERROR_IF(!value, "Display borrowing requires GGUI");
+    return *value;
+  }
+
+  bool set_image_shared_cuda(FieldInfo info) {
+    return display_canvas().set_image_shared_cuda(SetImageInfo{info});
+  }
+
+  std::shared_ptr<vulkan::DisplayCompletion> track_display_frame(
+      bool writable) {
+    return display_canvas().track_display_frame(writable);
+  }
+  void finish_display_write() {
+    display_canvas().finish_display_write();
+  }
+  RuntimeCompletion record_display_source_completion() {
+    return display_canvas().record_display_source_completion();
+  }
+  void cancel_display_frame() {
+    display_canvas().cancel_display_frame();
+  }
+  bool repeat_display_frame() {
+    return display_canvas().repeat_display_frame();
+  }
+
   vulkan::SharedCudaVulkanImage *acquire_shared_cuda_vulkan_image(
       int width,
       int height) {
@@ -973,12 +1000,28 @@ void export_ggui(py::module &m) {
       .def_property_readonly("width", &vulkan::SharedCudaVulkanImage::width)
       .def_property_readonly("height", &vulkan::SharedCudaVulkanImage::height);
 
+  py::class_<vulkan::DisplayCompletion,
+             std::shared_ptr<vulkan::DisplayCompletion>>(m,
+                                                         "_DisplayCompletion")
+      .def("done", &vulkan::DisplayCompletion::done)
+      .def("wait", &vulkan::DisplayCompletion::wait,
+           py::call_guard<py::gil_scoped_release>())
+      .def_property_readonly("status", &vulkan::DisplayCompletion::status);
+
   py::class_<PyCanvas>(m, "PyCanvas")
       .def("set_background_color", &PyCanvas::set_background_color)
       .def("set_image", &PyCanvas::set_image)
       .def("set_image_host_rgba8", &PyCanvas::set_image_host_rgba8)
       .def("set_image_texture", &PyCanvas::set_image_texture)
       .def("_set_image_transpose", &PyCanvas::set_image_transpose)
+      .def("_set_image_shared_cuda", &PyCanvas::set_image_shared_cuda)
+      .def("_track_display_frame", &PyCanvas::track_display_frame,
+           py::arg("writable") = false)
+      .def("_finish_display_write", &PyCanvas::finish_display_write)
+      .def("_record_display_source_completion",
+           &PyCanvas::record_display_source_completion)
+      .def("_cancel_display_frame", &PyCanvas::cancel_display_frame)
+      .def("_repeat_display_frame", &PyCanvas::repeat_display_frame)
       .def("_acquire_shared_cuda_vulkan_image",
            &PyCanvas::acquire_shared_cuda_vulkan_image,
            py::return_value_policy::reference)

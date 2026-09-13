@@ -56,6 +56,7 @@ class Window:
             ti_arch,
         )
         self._layout = WindowLayout(self)
+        self._canvas = None
         _active_windows.add(self)
 
     @property
@@ -146,7 +147,11 @@ class Window:
 
     def get_canvas(self):
         """Returns a canvas handle. See :class`~taichi_forge.ui.canvas.Canvas`"""
-        return Canvas(self.window.get_canvas(), self.window)
+        if self.window is None:
+            raise RuntimeError("Display window is closed")
+        if self._canvas is None:
+            self._canvas = Canvas(self.window.get_canvas(), self.window, owner=self)
+        return self._canvas
 
     def get_scene(self):
         """Returns a scene handle. See :class`~taichi_forge.ui.scene.SceneV2`"""
@@ -285,6 +290,8 @@ class Window:
         if self.window is None:
             return None
         window = self.window
+        if self._canvas is not None:
+            self._canvas._close_display()
         self.window = None
         _active_windows.discard(self)
         remove_window_staging_cache(window)

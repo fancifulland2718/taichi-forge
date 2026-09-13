@@ -23,6 +23,66 @@ using namespace taichi::lang::vulkan;
 
 static_assert(sizeof(SetImage::DirectUniformBufferObject) == 48);
 
+bool DisplayCompletion::done() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(status_ == "cancelled",
+              "Display frame was cancelled before submission");
+  TI_ERROR_IF(status_ == "invalidated",
+              "Display completion was invalidated by window teardown");
+  if (status_ == "submitted" && completion_->is_ready()) {
+    status_ = "complete";
+    completion_.reset();
+  }
+  return status_ == "complete";
+}
+
+void DisplayCompletion::wait() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(status_ == "pending",
+              "Display frame has not been submitted by Window.show()");
+  TI_ERROR_IF(status_ == "cancelled",
+              "Display frame was cancelled before submission");
+  TI_ERROR_IF(status_ == "invalidated",
+              "Display completion was invalidated by window teardown");
+  if (status_ == "submitted") {
+    TI_ERROR_IF(!completion_->wait(),
+                "Display submission has no host completion");
+    status_ = "complete";
+    completion_.reset();
+  }
+}
+
+std::string DisplayCompletion::status() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return status_;
+}
+
+void DisplayCompletion::attach(StreamSemaphore completion) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  TI_ERROR_IF(status_ != "pending" || !completion,
+              "Invalid display completion attachment");
+  completion_ = std::move(completion);
+  status_ = "submitted";
+}
+
+void DisplayCompletion::retire() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (status_ == "submitted") {
+    status_ = "complete";
+    completion_.reset();
+  }
+}
+
+void DisplayCompletion::cancel() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (status_ == "pending") {
+    status_ = "cancelled";
+  } else if (status_ == "submitted") {
+    status_ = "invalidated";
+    completion_.reset();
+  }
+}
+
 class SharedCudaVulkanImage::Impl {
  public:
   struct Lifetime {
@@ -177,6 +237,44 @@ class SharedCudaVulkanImage::Impl {
         stream, command_list, additional_waits);
   }
 
+  void finish_cuda_write() {
+    TI_ERROR_IF(!lifetime_ || !lifetime_->interop,
+                "Shared display storage is closed");
+    // Empty/cancelled writes and cached redisplay still consume the binary
+    // semaphore pair, but need no pixel-touch kernel or host wait.
+    if (lifetime_->interop->access_state() ==
+        VulkanCudaExternalAllocation::AccessState::kAwaitingCudaAcquire) {
+      const auto stream =
+          ExternalStreamDomain::cuda(program_->runtime_program_generation(), 1);
+      auto guard = program_->acquire_runtime_resource_submission_guard();
+      lifetime_->interop->acquire_for_consumer(stream);
+      lifetime_->interop->release_from_consumer(stream);
+      program_->mark_runtime_submission_pending();
+    }
+    TI_ERROR_IF(!ready_for_vulkan_submit(),
+                "Display write is still active on another stream");
+  }
+
+  void copy_cuda_image(DevicePtr source) {
+    const auto destination = lifetime_->interop->cuda_allocation().get_ptr();
+    TI_ERROR_IF(source.device != destination.device,
+                "Shared display copy requires the same CUDA device");
+    auto guard = program_->acquire_runtime_resource_submission_guard();
+    const auto stream =
+        ExternalStreamDomain::cuda(program_->runtime_program_generation(), 1);
+    lifetime_->interop->acquire_for_consumer(stream);
+    try {
+      // Existing same-device DtoD is host-asynchronous. The interop semaphore
+      // owns GPU completion; do not use the old cross-API staging copy/wait.
+      Device::memcpy_direct(destination, source, requested_bytes_);
+    } catch (...) {
+      lifetime_->interop->release_from_consumer(stream);
+      throw;
+    }
+    lifetime_->interop->release_from_consumer(stream);
+    program_->mark_runtime_submission_pending();
+  }
+
  private:
   void close_noexcept() noexcept {
     try {
@@ -245,6 +343,14 @@ bool SharedCudaVulkanImage::ready_for_vulkan_submit() const noexcept {
 
 void SharedCudaVulkanImage::prepare_cuda_write() {
   impl_->prepare_cuda_write();
+}
+
+void SharedCudaVulkanImage::finish_cuda_write() {
+  impl_->finish_cuda_write();
+}
+
+void SharedCudaVulkanImage::copy_cuda_image(DevicePtr source) {
+  impl_->copy_cuda_image(source);
 }
 
 StreamSemaphore SharedCudaVulkanImage::submit_vulkan_frame(
@@ -376,8 +482,12 @@ SetImage::acquire_shared_cuda_vulkan_image(int width, int height) {
       app_context_->config.ggui_arch != Arch::vulkan) {
     return nullptr;
   }
+  // A new image before show() supersedes the prior pending image, just like
+  // the ordinary set_image path. Its display ticket must not follow new pixels.
+  cancel_display();
   try {
     if (!shared_cuda_vulkan_image_ ||
+        shared_cuda_vulkan_image_.use_count() > 1 ||
         shared_cuda_vulkan_image_->width() != width ||
         shared_cuda_vulkan_image_->height() != height) {
       shared_cuda_vulkan_image_ =
@@ -410,6 +520,44 @@ bool SetImage::has_pending_shared_cuda_vulkan_image() const noexcept {
          shared_cuda_vulkan_image_->ready_for_vulkan_submit();
 }
 
+void SetImage::use_shared_image(std::shared_ptr<SharedCudaVulkanImage> image) {
+  shared_cuda_vulkan_image_ = std::move(image);
+  width_ = shared_cuda_vulkan_image_->width();
+  height_ = shared_cuda_vulkan_image_->height();
+  format_ = BufferFormat::rgba8;
+  reset_upload_staging();
+  update_direct_buffer_ubo();
+  get_direct_state(this).display_buffer =
+      shared_cuda_vulkan_image_->vulkan_ptr();
+  use_direct_buffer_pipeline();
+  pending_shared_cuda_vulkan_ = true;
+}
+
+void SetImage::track_display(std::shared_ptr<DisplayCompletion> completion,
+                             bool writable) {
+  cancel_display();
+  display_completion_ = std::move(completion);
+  display_write_open_ = writable;
+}
+
+void SetImage::attach_display_completion(StreamSemaphore completion) {
+  if (display_completion_)
+    display_completion_->attach(std::move(completion));
+}
+
+void SetImage::retire_display() {
+  if (display_completion_)
+    display_completion_->retire();
+  display_completion_.reset();
+}
+
+void SetImage::cancel_display() {
+  if (display_completion_)
+    display_completion_->cancel();
+  display_completion_.reset();
+  display_write_open_ = false;
+}
+
 StreamSemaphore SetImage::submit_shared_cuda_vulkan_frame(
     VulkanStream &stream,
     CommandList *command_list,
@@ -421,6 +569,7 @@ StreamSemaphore SetImage::submit_shared_cuda_vulkan_frame(
 }
 
 void SetImage::update_data(const SetImageInfo &info) {
+  cancel_display();
   pending_shared_cuda_vulkan_ = false;
   // We might not have a current program if GGUI is used in external apps to
   // load AOT modules
@@ -522,6 +671,7 @@ void SetImage::update_data(const SetImageInfo &info) {
 }
 
 void SetImage::update_data(const DisplayFrameInfo &info) {
+  cancel_display();
   pending_shared_cuda_vulkan_ = false;
   TI_ASSERT_INFO(info.host_rgba8 != nullptr,
                  "display frame host RGBA8 pointer must not be null");
@@ -543,6 +693,7 @@ void SetImage::update_data(const DisplayFrameInfo &info) {
 }
 
 void SetImage::update_data(Texture *tex) {
+  cancel_display();
   pending_shared_cuda_vulkan_ = false;
   Program *prog = app_context_->prog();
   use_texture_pipeline();

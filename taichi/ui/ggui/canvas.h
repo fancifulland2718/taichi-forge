@@ -49,6 +49,13 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
   void set_image(taichi::lang::Texture *tex) override;
 
   void set_image_transpose(bool transpose);
+  bool set_image_shared_cuda(const SetImageInfo &info);
+
+  std::shared_ptr<DisplayCompletion> track_display_frame(bool writable);
+  void finish_display_write();
+  taichi::lang::RuntimeCompletion record_display_source_completion();
+  void cancel_display_frame();
+  bool repeat_display_frame();
 
   std::shared_ptr<SharedCudaVulkanImage>
   acquire_shared_cuda_vulkan_image(int width, int height);

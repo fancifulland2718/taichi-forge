@@ -1379,8 +1379,119 @@ def test_imgui():
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
+def test_borrowed_display_frames_source_completion_and_repeat():
+    window = ti.ui.Window("borrow", (32, 48), show_window=False)
+    canvas = window.get_canvas()
+    assert canvas is window.get_canvas()
+
+    @ti.kernel
+    def paint(target: ti.types.ndarray(dtype=ti.u32, ndim=2), value: ti.u32):
+        for i, j in target:
+            target[i, j] = value
+
+    tickets = []
+    for value in (0xFF0000FF, 0xFF00FF00, 0xFFFF0000, 0xFF332211):
+        with canvas.acquire_frame(32, 48) as frame:
+            paint(frame.pixels, value)
+            assert not frame.completion.done()
+            with pytest.raises(RuntimeError, match="not been submitted"):
+                frame.completion.wait()
+            assert canvas.submit_frame(frame, track_source=True)
+        frame.source_completion.wait()
+        assert frame.source_completion.done()
+        assert window.show()
+        tickets.append(frame.completion)
+        with pytest.raises(RuntimeError, match="no longer writable"):
+            _ = frame.pixels
+    # Reuse the exact last image, even when earlier renderable slots retire.
+    tickets[-1].wait()
+    # Repeated read submissions must not accumulate renderable/storage slots.
+    for _ in range(24):
+        repeated = canvas.repeat_frame()
+        assert repeated is not None
+        assert window.show()
+        repeated.wait()
+    # A cancelled producer must not replace or overwrite the cached image.
+    with canvas.acquire_frame(32, 48) as cancelled:
+        paint(cancelled.pixels, 0xFFFFFFFF)
+    repeated = canvas.repeat_frame()
+    assert repeated is not None and repeated.status == "pending"
+    image = window.get_image_buffer_as_numpy()
+    np.testing.assert_allclose(
+        image, np.broadcast_to(np.array([17, 34, 51, 255]) / 255, image.shape), atol=1 / 255 + 1e-5
+    )
+    repeated.wait()
+    assert repeated.done()
+    window.destroy()
+    assert all(ticket.done() for ticket in tickets)
+    assert repeated.done()
+    with pytest.raises(RuntimeError, match="closed"):
+        canvas.acquire_frame(32, 48)
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
+def test_borrowed_display_cancel_resize_and_owner_boundaries():
+    window = ti.ui.Window("cancel", (8, 12), show_window=False)
+    other = ti.ui.Window("other", (8, 12), show_window=False)
+    canvas = window.get_canvas()
+    baseline = impl.get_runtime().prog._debug_external_dense_storage_stats()
+
+    @ti.kernel
+    def clear(target: ti.types.ndarray(dtype=ti.u32, ndim=2)):
+        for i, j in target:
+            target[i, j] = 0
+
+    for attempt in range(12):
+        with canvas.acquire_frame(8, 12) as cancelled:
+            if attempt % 2:
+                clear(cancelled.pixels)
+            with pytest.raises(RuntimeError, match="Submit or cancel"):
+                window.get_image_buffer_as_numpy()
+            with pytest.raises(RuntimeError, match="another canvas"):
+                other.get_canvas().submit_frame(cancelled)
+        assert cancelled.completion.status == "cancelled"
+        with pytest.raises(RuntimeError, match="cancelled"):
+            cancelled.completion.wait()
+    # Cancellation reuses the native slot rather than accumulating renderables.
+    assert len(canvas._shared_cuda_vulkan_views) == 1
+    with canvas.acquire_frame(8, 12) as superseded:
+        clear(superseded.pixels)
+        assert canvas.submit_frame(superseded)
+    with canvas.acquire_frame(8, 12):
+        assert superseded.completion.status == "cancelled"
+    for shape in ((8, 12), (12, 8), (8, 12)):
+        with canvas.acquire_frame(*shape) as frame:
+            # An empty write is legal and must close the semaphore epoch without
+            # a dummy pixel kernel; uninitialized pixel values aren't asserted.
+            assert canvas.submit_frame(frame, track_source=True)
+        assert window.show()
+        frame.completion.wait()
+    window.destroy()
+    other.destroy()
+    ti.sync()
+    final = impl.get_runtime().prog._debug_external_dense_storage_stats()
+    for key in ("live", "retiring", "leases"):
+        assert final[key] == baseline[key]
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda])
+def test_borrowed_display_reset_invalidates_write():
+    window = ti.ui.Window("reset", (8, 8), show_window=False)
+    canvas = window.get_canvas()
+    frame = canvas.acquire_frame(8, 8)
+    ti.reset()
+    with pytest.raises(RuntimeError, match="no longer writable|invalidated"):
+        _ = frame.pixels
+    assert frame.completion.status == "cancelled"
+    window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=[ti.cuda, ti.vulkan])
-def test_display_frame_device_transpose_and_default_restore():
+def test_display_frame_device_transpose():
     # Both orientations use exact pixel centers on differently shaped windows.
     width, height = 12, 20
     image = ti.ndarray(ti.u32, shape=(width, height))
@@ -1404,6 +1515,40 @@ def test_display_frame_device_transpose_and_default_restore():
         if impl.get_runtime().prog.config().arch == ti.cuda:
             if canvas._shared_cuda_vulkan_views:
                 assert window.get_display_stats()["last_render_zero_copy"]
+        window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.vulkan])
+def test_display_frame_texture_transpose_and_default_restore():
+    width, height = 12, 20
+    texture = ti.Texture(ti.Format.rgba8, (width, height))
+
+    @ti.kernel
+    def paint(target: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8, lod=0)):
+        for x, y in ti.ndrange(width, height):
+            target.store(ti.Vector([x, y]), ti.Vector([x / 255.0, y / 255.0, 0.0, 1.0]))
+
+    paint(texture)
+    expected = np.zeros((width, height, 4), dtype=np.float32)
+    expected[..., 0] = np.arange(width)[:, None] / 255.0
+    expected[..., 1] = np.arange(height)[None, :] / 255.0
+    expected[..., 3] = 1.0
+    for transpose in (True, False):
+        shape = (height, width) if transpose else (width, height)
+        window = ti.ui.Window("texture layout", shape, show_window=False)
+        canvas = window.get_canvas()
+        assert canvas.submit_frame(ti.ui.DisplayFrame.from_texture(texture, transpose=transpose))
+        result = window.get_image_buffer_as_numpy()
+        reference = expected.transpose(1, 0, 2) if transpose else expected
+        np.testing.assert_allclose(result, reference, atol=1 / 255.0 + 1e-5)
+        # Supersede the nondefault layout before draw; default set_image must
+        # restore the same pending renderable's uniform layout.
+        assert canvas.submit_frame(ti.ui.DisplayFrame.from_texture(texture, transpose=True))
+        assert canvas.set_image(texture)
+        result = window.get_image_buffer_as_numpy()
+        if not transpose:
+            np.testing.assert_allclose(result, expected, atol=1 / 255.0 + 1e-5)
         window.destroy()
 
 

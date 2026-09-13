@@ -88,6 +88,78 @@ Renderer::acquire_shared_cuda_vulkan_image(int width, int height) {
   return set_image->acquire_shared_cuda_vulkan_image(width, height);
 }
 
+std::shared_ptr<DisplayCompletion> Renderer::track_display_frame(
+    bool writable) {
+  TI_ERROR_IF(!pending_set_image_, "No pending display image");
+  auto completion = std::make_shared<DisplayCompletion>();
+  pending_set_image_->track_display(completion, writable);
+  return completion;
+}
+
+bool Renderer::set_image_shared_cuda(const SetImageInfo &info) {
+  TI_ERROR_IF(
+      info.img.shape.size() != 2 || info.img.dtype != PrimitiveType::u32,
+      "Shared packed display input must be a 2D u32 image");
+  retain_field_info(info.img);
+  auto image =
+      acquire_shared_cuda_vulkan_image(info.img.shape[0], info.img.shape[1]);
+  if (!image) {
+    return false;
+  }
+  image->copy_cuda_image(info.img.dev_alloc.get_ptr());
+  return true;
+}
+
+void Renderer::finish_display_write() {
+  TI_ERROR_IF(!pending_set_image_ || !pending_set_image_->shared_image(),
+              "No borrowed display image");
+  pending_set_image_->shared_image()->finish_cuda_write();
+  pending_set_image_->seal_display_write();
+}
+
+RuntimeCompletion Renderer::record_display_source_completion() {
+  // Explicit observation of the producer stream, including work already
+  // covered by an earlier Graph ticket. Do not use the no-pending fast token.
+  auto *program = app_context_.prog();
+  TI_ERROR_IF(!program, "Display source completion requires an active Program");
+  program->mark_runtime_submission_pending();
+  return program->record_runtime_completion();
+}
+
+void Renderer::cancel_display_frame() {
+  if (!pending_set_image_)
+    return;
+  if (pending_set_image_->shared_image())
+    finish_display_write();
+  pending_set_image_->cancel_display();
+  render_queue_.erase(std::remove(render_queue_.begin(), render_queue_.end(),
+                                  pending_set_image_),
+                      render_queue_.end());
+  const auto owner = std::find_if(
+      renderables_.begin(), renderables_.end(),
+      [this](const auto &item) { return item.get() == pending_set_image_; });
+  if (owner != renderables_.end()) {
+    reusable_set_images_.reserve(reusable_set_images_.size() + 1);
+    reusable_set_images_.emplace_back(
+        static_cast<SetImage *>(owner->release()));
+    renderables_.erase(owner);
+  }
+  pending_set_image_ = nullptr;
+}
+
+bool Renderer::repeat_display_frame() {
+  TI_ERROR_IF(pending_set_image_,
+              "Submit or cancel the pending display frame first");
+  if (!last_shared_display_image_)
+    return false;
+  last_shared_display_image_->finish_cuda_write();
+  auto *image = get_set_image_renderable(/*reuse_last_image=*/true);
+  image->use_shared_image(last_shared_display_image_);
+  render_queue_.push_back(image);
+  pending_set_image_ = image;
+  return true;
+}
+
 void Renderer::set_image(Texture *tex) {
   retain_texture(tex);
   SetImage *s = pending_set_image_;
@@ -289,6 +361,7 @@ Renderer::~Renderer() {
       TI_WARN("GGUI renderer teardown wait failed");
     }
   }
+  last_shared_display_image_.reset();
   for (const auto &set_image : reusable_set_images_) {
     erase_direct_set_image_state(set_image.get());
   }
@@ -318,6 +391,10 @@ bool Renderer::last_frame_used_shared_cuda_vulkan() const noexcept {
 }
 
 void Renderer::discard_pending_frame() {
+  for (const auto &item : renderables_) {
+    if (auto *image = dynamic_cast<SetImage *>(item.get()))
+      image->cancel_display();
+  }
   recycle_renderable_list(renderables_);
   render_queue_.clear();
   pending_set_image_ = nullptr;
@@ -335,10 +412,24 @@ size_t Renderer::max_frames_in_flight() {
 }
 
 SetImage *Renderer::get_set_image_renderable() {
+  return get_set_image_renderable(/*reuse_last_image=*/false);
+}
+
+SetImage *Renderer::get_set_image_renderable(bool reuse_last_image) {
   std::unique_ptr<SetImage> r;
-  if (!reusable_set_images_.empty()) {
-    r = std::move(reusable_set_images_.back());
-    reusable_set_images_.pop_back();
+  auto reusable = reusable_set_images_.end();
+  if (last_shared_display_image_ && !reuse_last_image) {
+    reusable = std::find_if(
+        reusable_set_images_.begin(), reusable_set_images_.end(),
+        [this](const auto &item) {
+          return item->shared_image() != last_shared_display_image_;
+        });
+  } else if (!reusable_set_images_.empty()) {
+    reusable = std::prev(reusable_set_images_.end());
+  }
+  if (reusable != reusable_set_images_.end()) {
+    r = std::move(*reusable);
+    reusable_set_images_.erase(reusable);
   }
   if (!r) {
     r = std::make_unique<SetImage>(&app_context_, VboHelpers::all());
@@ -453,6 +544,10 @@ void Renderer::recycle_renderable_list(
 }
 
 void Renderer::recycle_renderables(InFlightFrame &frame) {
+  for (const auto &item : frame.renderables) {
+    if (auto *image = dynamic_cast<SetImage *>(item.get()))
+      image->retire_display();
+  }
   recycle_renderable_list(frame.renderables);
 }
 
@@ -646,6 +741,8 @@ bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
 }
 
 bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
+  TI_ERROR_IF(pending_set_image_ && pending_set_image_->display_write_open(),
+              "Submit or cancel the current display write before rendering");
   last_frame_used_shared_cuda_vulkan_ = false;
   if (has_offscreen_targets()) {
     return draw_offscreen_targets(gui_base);
@@ -679,7 +776,15 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
 
   std::vector<StreamSemaphore> wait_semaphores;
 
-  if (app_context_.prog()) {
+  const bool use_shared_cuda_vulkan =
+      pending_set_image_ &&
+      pending_set_image_->has_pending_shared_cuda_vulkan_image();
+  // An image-only shared submission already carries the CUDA producer's
+  // external semaphore. LLVM flush() would add a redundant host stream wait.
+  // Mixed geometry retains the general flush contract for its other resources.
+  const bool shared_image_only =
+      use_shared_cuda_vulkan && render_queue_.size() == 1;
+  if (app_context_.prog() && !shared_image_only) {
     auto sema = app_context_.prog()->flush();
     if (sema) {
       wait_semaphores.push_back(sema);
@@ -690,9 +795,6 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
     wait_semaphores.push_back(semaphore);
   }
 
-  const bool use_shared_cuda_vulkan =
-      pending_set_image_ &&
-      pending_set_image_->has_pending_shared_cuda_vulkan_image();
   if (use_shared_cuda_vulkan) {
     auto *vulkan_stream = dynamic_cast<VulkanStream *>(stream);
     TI_ERROR_IF(vulkan_stream == nullptr,
@@ -705,6 +807,13 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
         stream->submit(cmd_list.get(), wait_semaphores);
   }
   last_frame_used_shared_cuda_vulkan_ = use_shared_cuda_vulkan;
+  if (pending_set_image_) {
+    pending_set_image_->attach_display_completion(render_complete_semaphore_);
+    last_shared_display_image_ =
+        use_shared_cuda_vulkan && pending_set_image_->tracks_display()
+            ? pending_set_image_->shared_image()
+            : nullptr;
+  }
   render_surface_image_ = surface_image;
 
   render_queue_.clear();
