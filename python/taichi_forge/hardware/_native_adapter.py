@@ -91,6 +91,8 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         self._runtime_bindings = runtime_bindings
         self._lifetime_leases = lifetime_leases
         self._debug_info = debug_info
+        identity_factory = getattr(recording, "_graph_identity_factory", None)
+        self._frozen_identity = None if identity_factory is None else identity_factory()
         self.graph_publish_time_binding_validation_stable = (
             publish_time_binding_validation_stable
         )
@@ -131,11 +133,16 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
     @property
     def graph_ir_node(self):
         node = super().graph_ir_node
-        fingerprint = getattr(self._recording, "_graph_semantic_fingerprint", "")
+        fingerprint = (
+            self._frozen_identity[0] if self._frozen_identity is not None
+            else getattr(self._recording, "_graph_semantic_fingerprint", "")
+        )
         return replace(node, semantic_fingerprint=fingerprint) if fingerprint else node
 
     @property
     def graph_physical_plan_id(self):
+        if self._frozen_identity is not None:
+            return self._frozen_identity[1]
         return getattr(self._recording, "_graph_physical_plan_id", "")
 
     def _freeze_graph_recipe_source(self):

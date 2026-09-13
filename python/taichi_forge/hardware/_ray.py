@@ -12,6 +12,7 @@ from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     runtime_generation_matches,
@@ -116,6 +117,10 @@ class VulkanRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "rays", rays)
         object.__setattr__(self, "hits", hits)
         object.__setattr__(self, "hit_indices", hit_indices)
+        identify_ray_recording(
+            self, "trace_closest", scene._effect_name, ray_count=ray_count,
+            hit_layout="legacy_float4" if hit_indices is None else "typed",
+        )
 
     @property
     def resource_effects(self):
@@ -283,6 +288,7 @@ class VulkanRayRefitRecording(_GeometryRecording, BackendCommandRecording):
         object.__setattr__(self, "scene", scene)
         object.__setattr__(self, "geometry_owner", scene)
         object.__setattr__(self, "vertices", vertices)
+        identify_ray_recording(self, "scene_refit", scene._effect_name)
 
     @property
     def resource_effects(self):
@@ -387,8 +393,8 @@ class TriangleScene(_TypedRayScene):
         )
         self.vertex_count = vertex_count
         self.triangle_count = triangle_count
-        self._effect_name = (
-            f"vulkan-ray-scene:{self._runtime_generation}:{self._handle}"
+        self._effect_name = RayResourceIdentity(
+            "vulkan_triangle_scene", vertex_count=vertex_count, triangle_count=triangle_count
         )
         self._scene_kind = "updatable_triangle_blas_tlas"
         self._memory_stats = dict(
@@ -538,6 +544,7 @@ class VulkanBLASBuildRecording(_GeometryRecording, BackendCommandRecording):
         object.__setattr__(self, "geometry_owner", blas)
         object.__setattr__(self, "vertices", vertices)
         object.__setattr__(self, "indices", indices)
+        identify_ray_recording(self, "blas_build", blas._effect_name)
 
     @property
     def resource_effects(self):
@@ -603,6 +610,7 @@ class VulkanBLASRefitRecording(_GeometryRecording, BackendCommandRecording):
         object.__setattr__(self, "blas", blas)
         object.__setattr__(self, "geometry_owner", blas)
         object.__setattr__(self, "vertices", vertices)
+        identify_ray_recording(self, "blas_refit", blas._effect_name)
 
     @property
     def resource_effects(self):
@@ -704,7 +712,11 @@ class TriangleBLAS:
                 opacity_micromap.triangle_indices is not None,
             )
             self._micromap_id = opacity_micromap.fingerprint
-        self._effect_name = f"vulkan-ray-blas:{self._runtime_generation}:{self._handle}"
+        self._effect_name = RayResourceIdentity(
+            "vulkan_triangle_blas", vertex_count=vertex_count,
+            triangle_count=triangle_count, opaque=self._opaque,
+            micromap_asset=self._micromap_id,
+        )
         try:
             self._memory_stats = dict(
                 program._vulkan_ray_resource_memory_stats(self._handle)
@@ -872,6 +884,10 @@ class _VulkanTLASRecording(BackendCommandRecording):
         object.__setattr__(self, "tlas", tlas)
         object.__setattr__(self, "instances", normalized)
         object.__setattr__(self, "update", bool(update))
+        identify_ray_recording(
+            self, "tlas_refit" if update else "tlas_build", tlas._effect_name,
+            instances=tuple((item.transform, item.mask, item.custom_index) for item in normalized),
+        )
 
     @property
     def resource_effects(self):
@@ -965,6 +981,7 @@ class VulkanTLASTransformRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "tlas", tlas)
         object.__setattr__(self, "transforms", transforms)
+        identify_ray_recording(self, "tlas_device_refit", tlas._effect_name)
         object.__setattr__(
             self,
             "_effects",
@@ -1070,7 +1087,7 @@ class _KernelAccelerationStructureDescriptor:
     runtime_generation: int
     handle: int
     instance_count: int
-    effect_name: str
+    effect_name: object
 
     @property
     def resource_effects(self):
@@ -1102,8 +1119,8 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
                 [blas._handle for blas in self._topology]
             )
         )
-        self._effect_name = (
-            f"vulkan-ray-tlas:{self._runtime_generation}:{self._handle}"
+        self._effect_name = RayResourceIdentity(
+            "vulkan_instance_tlas", children=tuple(blas._effect_name for blas in self._topology)
         )
         self._scene_kind = "independent_instance_tlas"
         try:

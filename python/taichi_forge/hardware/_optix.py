@@ -17,6 +17,7 @@ from taichi_forge._hardware_telemetry import (
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
 from taichi_forge.hardware._optix_micromap import (
     OptixOpacityMicromap,
     _MicromapDesc,
@@ -1028,6 +1029,16 @@ class OptixRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "alpha_masks", alpha_masks)
         object.__setattr__(self, "any_hit", any_hit)
         object.__setattr__(self, "_micromap", micromap)
+        identify_ray_recording(
+            self, "trace_any" if any_hit else "trace_closest", scene._effect_name,
+            ray_count=ray_count, hit_layout="legacy_float4" if hit_indices is None else "typed",
+            alpha_masks=(
+                tuple(None if mask is None else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
+                      for mask in alpha_masks)
+                if alpha_masks is not None and any(mask is not None for mask in alpha_masks)
+                else None
+            ),
+        )
         # OMM's distinct pipeline was prepared by the importing GAS adapter.
         if not micromap:
             if alpha_masks is not None:
@@ -1319,6 +1330,7 @@ class OptixRayRefitRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "scene", scene)
         object.__setattr__(self, "vertices", vertices)
+        identify_ray_recording(self, "scene_refit", scene._effect_name)
 
     @property
     def resource_effects(self):
@@ -1411,6 +1423,7 @@ class OptixGASRefitRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "gas", gas)
         object.__setattr__(self, "vertices", vertices)
+        identify_ray_recording(self, "gas_refit", gas._effect_name)
 
     @property
     def resource_effects(self):
@@ -1534,6 +1547,9 @@ class OptixInstanceRefitRecording(BackendCommandRecording):
         )
         object.__setattr__(self, "scene", scene)
         object.__setattr__(self, "transforms", transforms)
+        identify_ray_recording(
+            self, "ias_refit" if transforms is None else "ias_device_refit", scene._effect_name
+        )
         gas_effects = tuple(
             static_resource_effect(gas._effect_name, GraphAccess.READ)
             for gas in dict.fromkeys(scene._topology)
@@ -1709,7 +1725,11 @@ class OptixTriangleGAS:
         self._indices = indices
         self._indices_description = index_description
         self._index_owner = indices.arr if isinstance(indices, Ndarray) else indices
-        self._effect_name = f"optix-ray-gas:{self._runtime_generation}:{int(gas.value)}"
+        self._effect_name = RayResourceIdentity(
+            "optix_triangle_gas", vertex_count=vertex_count, triangle_count=triangle_count,
+            allow_update=allow_update, micromap_asset=self._micromap_id,
+            adapter=_decode(api.info.build_identity),
+        )
         memory = _SceneMemory()
         memory.struct_size = ctypes.sizeof(memory)
         result = int(api.get_triangle_gas_memory(gas, ctypes.byref(memory)))
@@ -1956,8 +1976,10 @@ class OptixInstanceScene:
         self._topology = tuple(instance.gas for instance in normalized)
         self._has_micromaps = any(gas._micromap_id is not None for gas in self._topology)
         self.allow_update = allow_update
-        self._effect_name = (
-            f"optix-ray-instance-scene:{self._runtime_generation}:{int(scene.value)}"
+        self._effect_name = RayResourceIdentity(
+            "optix_instance_scene", children=tuple(gas._effect_name for gas in self._topology),
+            opaque_instances=tuple(instance.opaque for instance in normalized),
+            allow_update=allow_update, adapter=_decode(api.info.build_identity),
         )
         self._memory_function = api.get_instance_scene_memory
         self._query_kind = "optix_instance_ray_query"
@@ -2199,8 +2221,9 @@ class OptixTriangleScene:
         self._index_owner = indices.arr if isinstance(indices, Ndarray) else indices
         self._memory_function = api.get_scene_memory
         self._query_kind = "optix_triangle_ray_query"
-        self._effect_name = (
-            f"optix-ray-scene:{self._runtime_generation}:{int(scene.value)}"
+        self._effect_name = RayResourceIdentity(
+            "optix_triangle_scene", vertex_count=vertex_count, triangle_count=triangle_count,
+            allow_update=allow_update, adapter=_decode(provider._loaded.api.info.build_identity),
         )
         memory = _SceneMemory()
         memory.struct_size = ctypes.sizeof(_SceneMemory)
