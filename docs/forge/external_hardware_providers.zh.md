@@ -675,12 +675,58 @@ opaque_instance = ti.hardware.ray.OptixRayInstance(gas, opaque=True)
 即使同一 query 含其他 alpha 实例，硬件也会绕过该实例的 any-hit；其 mask 条目只能为 `None`。
 这是不可变的场景语义，不会自动扫描纹理来分类；transform/refit 保留该属性，改变属性需创建新 IAS，
 但 GAS 可以继续共用。缺少 instance-opacity 能力的旧 adapter 在场景创建时拒绝该声明。
-全 `None` 的最近命中查询会规范化到既有 typed opaque 路线，不分配 alpha table/workspace；
+对于不含 OMM 的 GAS，全 `None` 最近命中查询会规范化到既有 typed opaque 路线，不分配 alpha table/workspace；
 `any_hit=True` 仍保留首个接受命中的语义。
 
 无需过滤时保留原 opaque query，评价完整渲染或
 阴影窗口而不只看 query 时间。缺少 alpha-mask 能力的旧 adapter 会在准备时拒绝，不偷偷改为 opaque。
 wheel 仍只包含 Forge adapter 和嵌入设备程序，NVIDIA runtime 由外部环境提供，不新增用户 Toolkit 要求。
+
+### 导入已烘焙的 OptiX opacity micromap
+
+OMM 导入是 shared triangle GAS 的显式扩展，不是烘焙器，也不会自动改写材质。
+应用可用外部工具/库生成数据，再交给 Forge adapter：
+
+```python
+omm = ti.hardware.ray.OptixOpacityMicromap(
+    baked_bytes,
+    descriptors,       # 小端 (u32 byte_offset, u16 level, u16 format)
+    triangle_indices,  # 可选 packed int32；None 表示一一线性映射
+)
+gas = provider.triangle_gas(vertices, indices, opacity_micromap=omm)
+scene = provider.instance_scene((ti.hardware.ray.OptixRayInstance(gas),))
+query = scene.record_typed(ray_count, alpha_masks=(mask,))
+# 按上文绑定 rays/hits/hit_indices，以及 mask 的 UV/texture。
+```
+
+`descriptors` 也接受 `(byte_offset, subdivision_level, format)` 三元组序列，
+`triangle_indices` 也接受整数序列。使用原生 OptiX 微三角形位序，level 为 0–12；
+format `1` 表示二状态，`2` 表示四状态。带 dtype 的索引缓冲必须为小端 int32；
+baker 输出 int16/int64 时需先转换。原始 descriptor 每项为 8 字节，不是三个 uint32。
+多个三角形可以复用同一个 micromap。原生索引 `-1/-2/-3/-4` 分别表示完全透明、完全不透明、
+unknown-transparent、unknown-opaque。若输出全部为这些特殊索引，data/descriptors 可以为空；
+其他情况至少提供一个完整 descriptor。
+
+已分类的 opaque/transparent 区域由遍历处理，四状态 unknown 区域调用所提供的 alpha mask。
+mask 为 `None` 表示**接受 unknown 命中**，不是禁用 OMM，也不会把已烘焙的透明区域恢复为不透明。
+省略 mask 的 `record_typed()` 同样接受 unknown。`any_hit=True` 返回任意一个被接受的命中，
+不保证最近。OMM GAS 不支持旧 float-packed `record()` 或 `opaque=True` 实例；应使用 typed query
+和普通实例。不含 OMM 的现有 GAS 路线不改变。
+
+Forge 在导入时检查布局、范围和映射，不重新扫描纹理来验证或烘焙分类。
+调用者负责数据与 triangle 顺序、UV、texture、filter、cutoff 一致；保持该对应关系时可以 refit
+顶点和实例变换。分类改变后应导入新 GAS/IAS 并重新绑定，不能任意修改 alpha/UV 后继续沿用旧分类。
+支持原生二状态输入，但不会自动把四状态 unknown 强制转换为二状态。
+
+`OptixOpacityMicromap` 复制为不可变 host 数据；GAS 创建时只上传/构建一次，并持有 array 和映射。
+导入临时缓冲在构建返回前释放，IAS 引用在原 GAS owner 关闭后仍保留实际 GAS/OMM 分配。
+固定绑定应复用 prepared 路径；仍须按 Graph → scene → provider 的顺序关闭资源。
+`gas.memory_report()` 分开报告 OMM array/index 与已不驻留的导入临时空间，driver 私有分配保持 unknown。
+
+当前入口导入的是 **host 烘焙数据**，不是外部 GPU 裸指针或序列化 driver AS。
+需要支持 OMM 的 device/driver/Forge adapter；旧 adapter 明确拒绝，不偷偷改成 opaque 路线。
+wheel 不新增 baker 或 vendor runtime 依赖。unknown 占比高时 OMM 可能更慢，应比较完整查询/消费窗口，
+并计入导入/构建的摊销成本后再决定采用。
 
 ## 显式 optional runtime 执行 provider
 

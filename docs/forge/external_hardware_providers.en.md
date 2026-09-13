@@ -854,7 +854,7 @@ not an automatically inferred texture classification: transform/refit updates
 preserve it, and changing it requires a new IAS (the GAS can be shared).
 Older adapters without instance-opacity support reject this declaration at
 scene construction. An all-`None` closest query is normalized to the existing
-opaque typed route, without an alpha table/workspace; `any_hit=True` retains
+opaque typed route for a GAS without OMM, without an alpha table/workspace; `any_hit=True` retains
 its first-accepted semantics.
 
 Keep the original opaque query when filtering is unnecessary, and evaluate the
@@ -862,6 +862,65 @@ full render or shadow window rather than only query time. Older adapters that la
 support reject preparation; they do not silently run an opaque query. The
 wheel contains Forge's adapter and embedded device programs only; NVIDIA's
 runtime remains externally configured, with no new user Toolkit requirement.
+
+### Importing baked OptiX opacity micromaps
+
+OMM import is an explicit extension of shared triangle GAS, not a baker or an
+automatic material rewrite. Obtain baked data from an external tool/library,
+then import it through Forge's adapter:
+
+```python
+omm = ti.hardware.ray.OptixOpacityMicromap(
+    baked_bytes,
+    descriptors,       # packed little-endian (u32 offset, u16 level, u16 format)
+    triangle_indices,  # optional packed int32; None selects linear mapping
+)
+gas = provider.triangle_gas(vertices, indices, opacity_micromap=omm)
+scene = provider.instance_scene((ti.hardware.ray.OptixRayInstance(gas),))
+query = scene.record_typed(ray_count, alpha_masks=(mask,))
+# Bind rays/hits/hit_indices and mask UV/texture resources as above.
+```
+
+`descriptors` also accepts `(byte_offset, subdivision_level, format)` triples;
+`triangle_indices` also accepts integer sequences. Use native OptiX bit ordering,
+levels 0–12, and format `1` for two-state or `2` for four-state. Typed index
+buffers must be little-endian int32; convert a baker's int16/int64 buffer first.
+Raw descriptor records are 8 bytes, including the packed two uint16 fields—not
+three uint32 values. Several triangles may reference the same micromap.
+Native indices `-1`, `-2`, `-3`, `-4` mean fully transparent, fully opaque,
+unknown-transparent, unknown-opaque. An all-special-index output may supply
+empty data and descriptors. Otherwise provide at least one complete descriptor.
+
+Known opaque/transparent cells are handled during traversal. Four-state unknown
+cells use the supplied alpha mask. A `None` mask **accepts unknown cells**; it
+does not disable OMM or make baked transparent cells opaque. `record_typed()`
+without masks has that same unknown-accept behavior. `any_hit=True` returns any
+accepted hit, not necessarily the closest. Legacy float-packed `record()` and
+`opaque=True` instances are not supported for OMM GASes; use typed queries and
+ordinary instances. Existing GASes without OMM retain their prior semantics.
+
+Forge checks input layout, bounds and mapping during import, but does not
+validate or rebake alpha classifications. The caller must keep baked data
+consistent with triangle order, UVs, texture, filtering and cutoff. Refit may
+change vertices/instance transforms while preserving that correspondence.
+To change classifications, import a new GAS/IAS and rebind; do not reuse stale
+baked states after arbitrary alpha/UV changes. Two-state data is supported,
+but Forge does not silently convert four-state unknown cells to two-state.
+
+Host input is copied into the immutable `OptixOpacityMicromap`; GAS construction
+uploads/builds once and owns the array and mapping. Temporary import buffers
+retire before construction returns. IAS references retain the GAS allocations,
+including OMM, after the original GAS owner closes. Reuse prepared bindings;
+close Graphs before their scene/provider, as for other OptiX resources.
+`gas.memory_report()` separates OMM array/index storage from nonresident import
+temporaries. Driver-private allocations remain unknown.
+
+This entry imports **host baked data**, not a live external GPU pointer or a
+serialized driver acceleration structure. It requires an OMM-capable device,
+driver and Forge adapter; unsupported adapters reject the request, without an
+opaque fallback. The wheel adds no baker or vendor runtime dependency. OMM can
+cost more when most cells are unknown; compare the complete query/consumer
+window and account for import/build amortization before adoption.
 
 ## Explicit optional runtime execution providers
 
