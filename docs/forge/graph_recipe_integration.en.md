@@ -34,6 +34,37 @@ and search API, not an application benchmark or a promise of acceleration.
 
 ## Executable example
 
+### Vulkan compute and graphics frames
+
+For a flat Graph containing kernels and graphics `pipeline.record_pass()` actions, default
+recipe discovery can offer a complete frame recorded on a compute-capable graphics
+queue. It reuses the prepared draw packets, argument images and descriptors, and
+avoids internal compute/graphics queue handoffs. Ordinary `compile()` keeps its
+existing queues. No additional vendor runtime or Toolkit package is required.
+
+Use the search workflow below with an evaluator that binds once, warms up, and
+measures the **complete frame including completion**. Materialize the selection
+and retain its `graph.bind(...)` result; passing a raw dictionary on every run
+includes fresh preparation. Buffer contents may change in place; publish changed
+resources or scalar arguments through the binding update API. Closing a referenced
+graphics pipeline retires the fixed frame, which must be recreated before reuse.
+
+The single-queue recipe preserves operation order and device memory dependencies.
+For one graphics pass between a buffer-only compute prefix and compute consumers,
+discovery can also offer an independent graphics fork/join. Binding preparation
+must prove that the prefix does not touch any buffer consumed by the pass,
+including aliases and dense roots. Both branches join before the consumer, and
+the completion ticket covers the whole frame. Texture/AS prefixes and arbitrary
+multi-pass scheduling are outside this bounded candidate.
+
+Fewer submissions do not guarantee better overlap: compare the single-queue,
+fork/join and baseline plans using the same complete workload. Entry-layout repair
+after an upload or intervening image use, and explicit completion tickets, can still need
+additional submissions. Retained arguments/descriptors cost memory per binding;
+driver-owned memory is not reported as an exact peak. Keep the baseline available.
+
+### CUDA provider example
+
 [complete_recipe_provider.py](../../python/taichi_forge/examples/graph/complete_recipe_provider.py)
 implements a complete external provider using public APIs. It replaces two integer passes
 with one without changing Forge's family registry or CompileIQ.

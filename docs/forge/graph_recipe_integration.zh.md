@@ -26,6 +26,30 @@ CUDA recipe discovery 可以在 template 专门化后合并相邻的常量范围
 
 ## 可运行示例与结果处理
 
+### Vulkan 计算与 graphics 完整帧
+
+对于包含 kernel 与 graphics `pipeline.record_pass()` 操作的平坦 Graph，默认 recipe discovery
+可以提供在支持 compute 的 graphics 队列上录制的完整帧。它复用已准备的 draw packet、参数和
+descriptor，减少图内 compute/graphics 队列交接。普通 `compile()` 保持原队列路径；不新增
+vendor runtime 或 CUDA Toolkit 安装依赖。
+
+使用下方搜索流程，evaluator 应先绑定、预热，再测量**包含完成等待的完整帧**。物化选择后保留
+`graph.bind(...)` 的结果；每次传入普通字典会包含重新准备成本。buffer 内容可原位更新，资源或
+scalar 参数变化通过 binding update 发布。关闭被引用的 graphics pipeline 会退休固定帧，
+再次使用前需重新创建。
+
+单队列方案保留操作顺序和设备内存依赖。若一个 graphics pass 位于仅使用 buffer 的计算前缀与
+计算消费者之间，还可能生成独立 graphics fork/join 候选。绑定准备必须证明计算前缀与该 pass
+使用的 buffer 不重叠，包括实际别名和 dense root；两条分支在消费者前汇合，完成 ticket 覆盖
+整帧。带 Texture/AS 的前缀、任意多 pass 调度不属于此候选的范围。
+
+提交更少不保证 GPU 重叠更好：应以相同完整窗口比较单队列、fork/join 与 baseline。
+上传或其他 image 操作之后的入口 layout 修复、显式完成 ticket 仍可能增加提交。
+每份绑定保留参数与 descriptor，存在显存
+代价；driver-owned 存储不作为精确峰值报告。应始终保留 baseline。
+
+### CUDA provider 示例
+
 [complete_recipe_provider.py](../../python/taichi_forge/examples/graph/complete_recipe_provider.py)
 使用纯公开接口：应用提供一个精确整数算子的两遍 baseline 和一遍替代 Graph。无需修改中央 family 或 CompileIQ。
 
