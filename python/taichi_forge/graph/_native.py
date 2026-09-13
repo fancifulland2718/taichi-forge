@@ -911,6 +911,30 @@ class BackendCommandGraphAction(RecordableGraphAction):
         return self._recording.execute(_GraphValidatedBindings(bindings))
 
 
+def collect_provider_memory_reports(owners):
+    """Observe provider-owned dependencies once, only at an explicit report boundary.
+
+    Dependencies describe accounting, not executable leases or new replay checks.
+    A provider's own report must exclude the dependencies it declares here.
+    """
+    reports, seen = [], set()
+    pending = list(reversed(tuple(owners)))
+    while pending:
+        owner = pending.pop()
+        identity = getattr(owner, "_graph_provider_memory_identity", None)
+        key = identity() if identity is not None else ("lease", id(owner))
+        if key in seen:
+            continue
+        seen.add(key)
+        observe = getattr(owner, "_graph_provider_memory_report", None)
+        if observe is not None:
+            reports.append(observe())
+        dependencies = getattr(owner, "_graph_provider_memory_dependencies", None)
+        if dependencies is not None:
+            pending.extend(reversed(tuple(dependencies())))
+    return tuple(reports)
+
+
 class NativeGraphExecutable:
     """Compiled native graph node with an optional recordable action."""
 

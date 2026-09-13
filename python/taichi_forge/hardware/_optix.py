@@ -18,6 +18,9 @@ from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
+from taichi_forge.hardware._ray_memory import (
+    aggregate_ray_memory, ray_resource_resident,
+)
 from taichi_forge.hardware._optix_micromap import (
     OptixOpacityMicromap,
     _MicromapDesc,
@@ -778,6 +781,24 @@ class OptixProvider:
     @property
     def closed(self):
         return self._context is None
+
+    def _graph_provider_memory_report(self):
+        resident = not self.closed and runtime_generation_matches(self)
+        return make_memory_report(
+            "optix_context", "cuda",
+            (
+                HardwareMemoryComponent(
+                    "shared_pipeline_sbt", self._shared_pipeline_sbt_bytes,
+                    True, "runtime", "provider", resident=resident,
+                ),
+                HardwareMemoryComponent(
+                    "optix_driver_context_state", None, False, "runtime", "driver",
+                    resident=resident,
+                ),
+            ),
+            lifecycle_state="closed" if self.closed else "ready" if resident else "runtime_invalid",
+            ownership_scope="provider_context_shared_across_scenes_and_gases",
+        )
 
     def triangle_scene(self, vertices, indices, *, allow_update=True):
         self._validate_lifetime()
@@ -1722,6 +1743,7 @@ class OptixTriangleGAS:
         self.allow_update = allow_update
         self._micromap_id = opacity_micromap.fingerprint if opacity_micromap else None
         self._micromap_memory = micromap_memory
+        self._ray_retainers = weakref.WeakSet()
         self._indices = indices
         self._indices_description = index_description
         self._index_owner = indices.arr if isinstance(indices, Ndarray) else indices
@@ -1765,7 +1787,11 @@ class OptixTriangleGAS:
         )
 
     def memory_report(self):
-        resident = self._gas is not None and runtime_generation_matches(self)
+        """Include retained GAS storage even after its original handle closes."""
+        return aggregate_ray_memory(self)
+
+    def _local_memory_report(self):
+        resident = ray_resource_resident(self)
         memory = self._memory
         components = (
             HardwareMemoryComponent(
@@ -1782,22 +1808,6 @@ class OptixTriangleGAS:
                 True,
                 "provider_generation",
                 "provider",
-                resident=resident,
-            ),
-            HardwareMemoryComponent(
-                "shared_pipeline_sbt",
-                self.provider._shared_pipeline_sbt_bytes,
-                True,
-                "runtime",
-                "provider",
-                resident=resident,
-            ),
-            HardwareMemoryComponent(
-                "optix_driver_context_state",
-                None,
-                False,
-                "runtime",
-                "driver",
                 resident=resident,
             ),
         )
@@ -1831,12 +1841,15 @@ class OptixTriangleGAS:
                     ),
                 )
             ),
-            lifecycle_state="ready" if resident else "closed",
-            ownership_scope="provider_context_and_gas_generation",
+            lifecycle_state="closed" if self.closed else "ready" if resident else "runtime_invalid",
+            ownership_scope="gas_generation_including_retained_references",
         )
 
     def _graph_provider_memory_report(self):
-        return self.memory_report()
+        return self._local_memory_report()
+
+    def _graph_provider_memory_dependencies(self):
+        return (self.provider,) if ray_resource_resident(self) else ()
 
     def close(self):
         if self._gas is None:
@@ -1993,6 +2006,8 @@ class OptixInstanceScene:
         self._memory = memory
         provider._shared_pipeline_sbt_bytes = int(memory.shared_pipeline_sbt_bytes)
         provider._scenes.add(self)
+        for gas in dict.fromkeys(self._topology):
+            gas._ray_retainers.add(self)
 
     @property
     def closed(self):
@@ -2090,6 +2105,10 @@ class OptixInstanceScene:
         )
 
     def memory_report(self):
+        """Include unique GAS/context dependencies, not only IAS allocations."""
+        return aggregate_ray_memory(self)
+
+    def _local_memory_report(self):
         resident = self._scene is not None and runtime_generation_matches(self)
         memory = self._memory
         components = (
@@ -2117,22 +2136,6 @@ class OptixInstanceScene:
                 "provider",
                 resident=resident,
             ),
-            HardwareMemoryComponent(
-                "shared_pipeline_sbt",
-                self.provider._shared_pipeline_sbt_bytes,
-                True,
-                "runtime",
-                "provider",
-                resident=resident,
-            ),
-            HardwareMemoryComponent(
-                "referenced_shared_gas_and_driver_state",
-                None,
-                False,
-                "provider_generation",
-                "driver",
-                resident=resident,
-            ),
         )
         return make_memory_report(
             "optix_instance_ray",
@@ -2143,7 +2146,12 @@ class OptixInstanceScene:
         )
 
     def _graph_provider_memory_report(self):
-        return self.memory_report()
+        return self._local_memory_report()
+
+    def _graph_provider_memory_dependencies(self):
+        if not ray_resource_resident(self):
+            return ()
+        return (*dict.fromkeys(self._topology), self.provider)
 
     def close(self):
         if self._scene is None:
@@ -2307,6 +2315,9 @@ class OptixTriangleScene:
         )
 
     def memory_report(self):
+        return aggregate_ray_memory(self)
+
+    def _local_memory_report(self):
         resident = self._scene is not None and runtime_generation_matches(self)
         memory = self._memory
         components = (
@@ -2342,22 +2353,6 @@ class OptixTriangleScene:
                 "provider",
                 resident=resident,
             ),
-            HardwareMemoryComponent(
-                "shared_pipeline_sbt",
-                self.provider._shared_pipeline_sbt_bytes,
-                True,
-                "runtime",
-                "provider",
-                resident=resident,
-            ),
-            HardwareMemoryComponent(
-                "optix_driver_context_state",
-                None,
-                False,
-                "runtime",
-                "driver",
-                resident=resident,
-            ),
         )
         return make_memory_report(
             "optix_triangle_ray",
@@ -2368,7 +2363,10 @@ class OptixTriangleScene:
         )
 
     def _graph_provider_memory_report(self):
-        return self.memory_report()
+        return self._local_memory_report()
+
+    def _graph_provider_memory_dependencies(self):
+        return (self.provider,) if ray_resource_resident(self) else ()
 
     def close(self):
         if self._scene is None:

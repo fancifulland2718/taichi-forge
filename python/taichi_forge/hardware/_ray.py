@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from functools import partial
 import math
+import weakref
 
 from taichi_forge._lib import core as _ti_core
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
@@ -13,6 +14,7 @@ from taichi_forge._hardware_telemetry import (
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
+from taichi_forge.hardware._ray_memory import aggregate_ray_memory, ray_resource_resident
 from taichi_forge.hardware._native_adapter import (
     native_recording_node,
     runtime_generation_matches,
@@ -666,6 +668,7 @@ class TriangleBLAS:
         self.triangle_count = triangle_count
         self._micromap_memory = None
         self._micromap_id = None
+        self._ray_retainers = weakref.WeakSet()
         if opaque is not None and not isinstance(opaque, bool):
             raise TypeError("opaque must be a bool or None")
         if opacity_micromap is not None and opaque is True:
@@ -1128,6 +1131,8 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
                 program._vulkan_ray_resource_memory_stats(self._handle)
             )
             self.build(normalized)
+            for blas in dict.fromkeys(self._topology):
+                blas._ray_retainers.add(self)
         except Exception:
             self.close()
             raise
@@ -1274,15 +1279,19 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         self._validate_lifetime()
 
     def memory_report(self):
+        """Include each retained BLAS once; use Graph reports across shared scenes."""
+        return aggregate_ray_memory(self)
+
+    def _graph_provider_memory_dependencies(self):
+        return tuple(dict.fromkeys(self._topology)) if ray_resource_resident(self) else ()
+
+    def _graph_provider_memory_report(self):
         return _independent_ray_memory_report(
             self,
             provider="vulkan_instance_tlas",
             geometry_name="instance_build_inputs",
             storage_name="tlas_storage",
         )
-
-    def _graph_provider_memory_report(self):
-        return self.memory_report()
 
     def close(self):
         if self._handle is None:
@@ -1325,7 +1334,7 @@ def _require_vulkan_ray_runtime(resource_name):
 
 def _independent_ray_memory_report(resource, *, provider, geometry_name, storage_name):
     handle_present = resource._handle is not None
-    runtime_valid = handle_present and runtime_generation_matches(resource)
+    runtime_valid = ray_resource_resident(resource)
     stats = resource._memory_stats
     micromap = getattr(resource, "_micromap_memory", None)
     components = (
@@ -1388,11 +1397,9 @@ def _independent_ray_memory_report(resource, *, provider, geometry_name, storage
         "vulkan",
         components,
         lifecycle_state=(
-            "ready"
-            if runtime_valid
-            else "closed" if not handle_present else "runtime_invalid"
+            "closed" if not handle_present else "ready" if runtime_valid else "runtime_invalid"
         ),
-        ownership_scope="resource_generation",
+        ownership_scope="resource_generation_including_retained_references; pending command retirement is not observed",
     )
 
 

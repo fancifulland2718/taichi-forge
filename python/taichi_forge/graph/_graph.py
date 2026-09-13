@@ -11874,19 +11874,9 @@ class _GraphSpec:
                 validate()
 
     def provider_memory_reports(self):
-        reports = []
-        seen = set()
-        for lease in self.lifetime_leases:
-            observe = getattr(lease, "_graph_provider_memory_report", None)
-            if observe is None:
-                continue
-            identity = getattr(lease, "_graph_provider_memory_identity", None)
-            identity = identity() if identity is not None else ("lease", id(lease))
-            if identity in seen:
-                continue
-            seen.add(identity)
-            reports.append(observe())
-        return tuple(reports)
+        from taichi_forge.graph._native import collect_provider_memory_reports
+
+        return collect_provider_memory_reports(self.lifetime_leases)
 
     def graph_submission_owners(self):
         owners = []
