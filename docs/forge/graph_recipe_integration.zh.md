@@ -285,6 +285,11 @@ ti.sync()  # 按应用实际需求设置完成边界。
 不会启用执行帧复用。绑定后的 native action 可以复用 prepared packet，但仍可能需要录制命令或跨队列提交；
 binding 复用不等于完整 Graph replay。
 
+Vulkan binding-frame recipe 会在完整 recipe 结束时发布已入队的工作，不增加 host completion 等待，
+无需依赖后续无关 dispatch 或 `ti.sync()` 才开始执行。`graph.submit(bindings)` 仍使用原有提交事务与
+completion ticket；应用需要显式完成通知或在途所有权时应使用该 ticket。
+既有队列背压与应用显式完成边界仍然有效。
+
 在计时循环外读取 `bindings.statistics()`，检查发布资格与阻碍原因。close/reset 后这些发布事实仍可读取，
 但不表示失效 Graph 仍能执行。比较候选时保持相同的输入更新、packing、后续消费和完成窗口；
 单帧延迟与多帧合并完成的摊销成本分开报告。CPU 提交耗时与剩余等待时间都不能单独作为 GPU 时间。

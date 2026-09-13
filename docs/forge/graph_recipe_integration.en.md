@@ -346,6 +346,13 @@ keeping only the recipe ID, executor or Python dictionary does not enable frame
 reuse. A bound native action can reuse its prepared packet while still recording
 commands or crossing a queue boundary: binding reuse is not whole-Graph replay.
 
+Vulkan binding-frame recipes publish queued work at the end of the complete
+recipe, without adding a host completion wait. They do not need a later unrelated
+dispatch or `ti.sync()` to start execution. `graph.submit(bindings)` keeps its
+existing submission transaction and completion ticket; use that ticket when
+your application needs explicit completion or in-flight ownership.
+Existing queue backpressure and application completion boundaries still apply.
+
 Read `bindings.statistics()` outside the measured loop to inspect publication
 qualification and blockers. Its facts remain readable after close/reset, but do
 not establish that a retired Graph can execute. Compare candidates with the same
