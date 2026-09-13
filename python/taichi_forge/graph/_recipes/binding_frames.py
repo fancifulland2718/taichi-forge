@@ -193,9 +193,11 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-ordered-graphics-boundaries",
             "vulkan-ordered-compute-boundaries",
             "vulkan-complete-recipe-publication",
+            "vulkan-complete-graphics-queue-recording",
+            "vulkan-independent-graphics-fork-join",
         ),
-        domain_version="immutable-binding-frame-domain-v12",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-published-boundaries-v12",
+        domain_version="immutable-binding-frame-domain-v13",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-graphics-queue-v13",
     )
 
     def fragments(self, definition):
@@ -221,7 +223,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             return ()
         native = bool(spec.native_count)
         graphics_only = all(node.recordable_action.backend_command_recording.queue == "graphics" for node in boundaries)
-        return (
+        fragments = (
             _fragment(
                 definition,
                 family="binding_frames",
@@ -231,7 +233,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                 tasks=(
                     GraphFragmentTask.create(
                         "whole-graph-bindings:execute",
-                        "vulkan_complete_graph_binding_reuse" if vulkan else "cuda_complete_graph_binding_reuse",
+                        ("vulkan_complete_graph_binding_reuse" if vulkan else "cuda_complete_graph_binding_reuse"),
                         effects=spec.pre_optimization_ir_root.effects,
                         bindings=spec.pre_optimization_ir_root.bindings,
                         physical={
@@ -260,8 +262,12 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                                                 }
                                                 for node in boundaries
                                             ),
-                                            ("graphics_parameters" if graphics_only else "native_parameters"): "prepared_per_binding",
-                                            ("graphics_commands" if graphics_only else "native_commands"): "original_recording_replay_mode",
+                                            (
+                                                "graphics_parameters" if graphics_only else "native_parameters"
+                                            ): "prepared_per_binding",
+                                            (
+                                                "graphics_commands" if graphics_only else "native_commands"
+                                            ): "original_recording_replay_mode",
                                         }
                                         if boundaries
                                         else {}
@@ -294,12 +300,99 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     ),
                 ),
                 provider_descriptor=self.descriptor,
-                executor_kind="vulkan_immutable_argument_frames" if vulkan else "cuda_immutable_argument_frames",
+                executor_kind=("vulkan_immutable_argument_frames" if vulkan else "cuda_immutable_argument_frames"),
             ),
         )
+        if vulkan:
+            from taichi_forge.graph._recipes.vulkan_binding_frames import (
+                graphics_queue_eligible,
+            )
+
+            if graphics_queue_eligible(spec):
+                fragments += (
+                    _fragment(
+                        definition,
+                        family="binding_frames",
+                        source_key="whole-graph-bindings",
+                        choice_id="graphics-queue-argument-images",
+                        coverage=tuple(region.region_id for region in definition.regions),
+                        tasks=(
+                            GraphFragmentTask.create(
+                                "whole-graph-bindings:execute",
+                                "vulkan_complete_graphics_queue_binding_reuse",
+                                effects=spec.pre_optimization_ir_root.effects,
+                                bindings=spec.pre_optimization_ir_root.bindings,
+                                physical={
+                                    "queue": "graphics_compute_capable",
+                                    "submission": "single_primary_complete_graph",
+                                    "argument_images": "immutable_per_published_binding",
+                                    "argument_upload": "preparation_only",
+                                    "graphics_parameters": "existing_prepared_packet",
+                                    "image_layouts": "closed_cycle_with_entry_repair_after_layout_change",
+                                    "dependencies": "ordered_compute_graphics_memory_and_image_barriers",
+                                    "pipeline_invalidation": "owner_close_retires_dependent_frames",
+                                    "workspace_lanes": 1,
+                                },
+                            ),
+                        ),
+                        provider_descriptor=self.descriptor,
+                        executor_kind="vulkan_graphics_queue_immutable_argument_frames",
+                    ),
+                )
+                from taichi_forge.graph._recipes.vulkan_binding_frames import (
+                    independent_graphics_eligible,
+                )
+
+                if independent_graphics_eligible(spec):
+                    fragments += (
+                        _fragment(
+                            definition,
+                            family="binding_frames",
+                            source_key="whole-graph-bindings",
+                            choice_id="independent-graphics-argument-images",
+                            coverage=tuple(region.region_id for region in definition.regions),
+                            tasks=(
+                                GraphFragmentTask.create(
+                                    "whole-graph-bindings:execute",
+                                    "vulkan_complete_graphics_fork_join_binding_reuse",
+                                    effects=spec.pre_optimization_ir_root.effects,
+                                    bindings=spec.pre_optimization_ir_root.bindings,
+                                    physical={
+                                        "queues": ("compute", "graphics"),
+                                        "submission": "compute_prefix_parallel_graphics_then_joined_consumer",
+                                        "argument_images": "immutable_per_published_binding",
+                                        "alias_proof": "bound_allocations_and_dense_roots_checked_at_preparation",
+                                        "graphics_parameters": "existing_prepared_packet",
+                                        "image_layouts": "shader_read_cycle_across_graphics_and_consumer",
+                                        "completion": "consumer_compute_tail_covers_both_branches",
+                                        "workspace_lanes": 1,
+                                    },
+                                ),
+                            ),
+                            provider_descriptor=self.descriptor,
+                            executor_kind="vulkan_graphics_fork_join_immutable_argument_frames",
+                        ),
+                    )
+        return fragments
 
     def contribute_runtime(self, assembly, selection):
-        if selection.source_key != "whole-graph-bindings" or selection.choice_id != "immutable-argument-images":
+        if selection.source_key != "whole-graph-bindings":
+            raise ValueError("unknown whole-Graph immutable binding selection")
+        if selection.choice_id == "independent-graphics-argument-images" and assembly.definition.backend == "vulkan":
+            from taichi_forge.graph._recipes.vulkan_binding_frames import (
+                VulkanIndependentGraphicsBindingExecutor,
+            )
+
+            assembly.select_binding_executor(VulkanIndependentGraphicsBindingExecutor)
+            return
+        if selection.choice_id == "graphics-queue-argument-images" and assembly.definition.backend == "vulkan":
+            from taichi_forge.graph._recipes.vulkan_binding_frames import (
+                VulkanGraphicsQueueBindingExecutor,
+            )
+
+            assembly.select_binding_executor(VulkanGraphicsQueueBindingExecutor)
+            return
+        if selection.choice_id != "immutable-argument-images":
             raise ValueError("unknown whole-Graph immutable binding selection")
         if assembly.definition.backend == "vulkan":
             from taichi_forge.graph._recipes.vulkan_binding_frames import VulkanBindingFrameExecutor
@@ -310,6 +403,39 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
 
     def describe(self, definition, fragment_key):
         if definition.backend == "vulkan":
+            if str(fragment_key).endswith(":independent-graphics-argument-images"):
+                return {
+                    **super().describe(definition, fragment_key),
+                    "display_name": "Whole-Graph independent graphics fork/join",
+                    "changes": (
+                        "run a disjoint compute prefix and one graphics pass on separate queues",
+                        "join both branches before the compute consumer; keep a complete completion token",
+                        "reuse immutable commands and bindings without replay-time alias checks",
+                    ),
+                    "limitations": (
+                        "one graphics pass between buffer-only compute prefix and compute consumer",
+                        "binding publication rejects actual allocation aliases, even with distinct argument names",
+                        "no host-readback, external synchronization domain, image/AS prefix or general DAG scheduling",
+                        "extra submissions can outweigh overlap on small workloads; compare the full window",
+                    ),
+                }
+            if "graphics-queue-argument-images" in str(fragment_key):
+                return {
+                    **super().describe(definition, fragment_key),
+                    "display_name": "Whole-Graph compute and graphics queue recording",
+                    "changes": (
+                        "record kernels and prepared graphics packets into one immutable primary command buffer",
+                        "replace internal queue handoffs with explicit device memory and image dependencies",
+                        "prepare bindings once; retain resources until the last complete frame finishes",
+                    ),
+                    "limitations": (
+                        "flat fixed-binding Graph on a compute-capable Vulkan graphics queue",
+                        "original operation order is preserved; no asynchronous graphics/compute overlap is promised",
+                        "raw mapping calls include preparation; publish a Graph binding to amortize setup",
+                        "pipeline close retires dependent frames; recreate them before reuse",
+                        "ordinary runtime queue selection is unchanged; compare complete workload cost before choosing",
+                    ),
+                }
             return {
                 **super().describe(definition, fragment_key),
                 "display_name": "Whole-Graph immutable Vulkan binding frames",

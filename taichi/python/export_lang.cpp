@@ -3198,6 +3198,8 @@ void export_lang(py::module &m) {
           py::arg("colors"), py::arg("depth"), py::arg("draws"),
           py::arg("depth_clear"), py::arg("viewport"),
           py::arg("retained_replay") = false, py::arg("clear_depth") = 0.0f)
+      .def("_vulkan_graphics_graph_command", &Program::vulkan_graphics_graph_command,
+           py::call_guard<py::gil_scoped_release>())
       .def("_execute_vulkan_graphics_pass",
            [](Program *program, const std::shared_ptr<PreparedVulkanGraphicsPass> &packet) {
              py::gil_scoped_release release;
@@ -6098,6 +6100,10 @@ void export_lang(py::module &m) {
   py::class_<gfx::FixedGraphRecording, std::shared_ptr<gfx::FixedGraphRecording>>(
       m, "_VulkanFixedGraphRecording")
       .def_static("supports_texture_bindings", [] { return true; })
+      .def_static("supports_graphics_queue", &gfx::FixedGraphRecording::supports_graphics_queue,
+                  py::call_guard<py::gil_scoped_release>())
+      .def("uses_graphics_queue", &gfx::FixedGraphRecording::uses_graphics_queue)
+      .def("uses_independent_graphics", &gfx::FixedGraphRecording::uses_independent_graphics)
       .def_static("supports_acceleration_structure_bindings",
                   [] { return true; })
       .def_static("supports_snode_tree_dependencies",
@@ -6110,7 +6116,8 @@ void export_lang(py::module &m) {
       .def("uses_secondary_commands", &gfx::FixedGraphRecording::uses_secondary_commands,
            py::call_guard<py::gil_scoped_release>());
   m.def("_prepare_vulkan_graph_recording",
-        [with_graph_arguments](Program &program, const py::list &sources, const py::dict &args) {
+        [with_graph_arguments](Program &program, const py::list &sources, const py::dict &args,
+                              bool independent_graphics) {
           std::vector<gfx::GraphRecordingSource> native_sources;
           for (const auto &source : sources) {
             if (py::isinstance<aot::CompiledGraph>(source)) {
@@ -6121,9 +6128,10 @@ void export_lang(py::module &m) {
           }
           auto schema = gfx::graph_recording_argument_schema(native_sources);
           return with_graph_arguments(&schema, args, [&](const auto &converted) {
-            return program.create_vulkan_graph_recording(native_sources, converted);
+            return program.create_vulkan_graph_recording(native_sources, converted, independent_graphics);
           });
-        }, py::keep_alive<0, 1>());
+        }, py::arg("program"), py::arg("sources"), py::arg("args"),
+        py::arg("independent_graphics") = false, py::keep_alive<0, 1>());
   m.def("_publish_vulkan_graph_commands",
         &Program::publish_vulkan_graph_commands,
         py::call_guard<py::gil_scoped_release>());

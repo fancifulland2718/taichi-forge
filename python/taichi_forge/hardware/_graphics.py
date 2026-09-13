@@ -788,9 +788,25 @@ class _PreparedGraphicsPass:
     owners: tuple
 
 
+@dataclass(frozen=True)
+class _PreparedGraphicsAction:
+    recording: object
+    packet: _PreparedGraphicsPass
+
+    def __call__(self):
+        return self.recording.execute(self.packet)
+
+    def _vulkan_graph_command(self):
+        # Cold materialization hook. The ordinary action still uses its original
+        # queue and submission path; only a complete recipe embeds this packet.
+        return self.recording._runtime_prog._vulkan_graphics_graph_command(self.packet.command)
+
+
 @instrument_hardware_recording("raster.draw.vulkan")
 class VulkanGraphicsPassRecording(BackendCommandRecording):
     """One renderer-neutral Vulkan render pass containing one or more draws."""
+
+    _supports_prepared_graphics_graph_command = True
 
     def __init__(
         self,
@@ -1137,7 +1153,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         return packet.color
 
     def prepare_graph_execute(self, bindings):
-        return partial(self.execute, self._prepare_packet(bindings))
+        return _PreparedGraphicsAction(self, self._prepare_packet(bindings))
 
     def validate_graph_lifetime(self):
         for pipeline in self.pipelines:

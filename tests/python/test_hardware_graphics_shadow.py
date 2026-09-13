@@ -42,8 +42,9 @@ def _vertices():
     return vertices, data
 
 
+@pytest.mark.parametrize("graphics_recipe", [False, True])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_shadow_depth_only_graph_consumers_rebind_and_comparison_filter(monkeypatch):
+def test_shadow_depth_only_graph_consumers_rebind_and_comparison_filter(monkeypatch, graphics_recipe):
     gfx = ti.hardware.graphics
     vertices, data = _vertices()
     config = ti.hardware.sampling.SamplerConfig(
@@ -108,7 +109,25 @@ def test_shadow_depth_only_graph_consumers_rebind_and_comparison_filter(monkeypa
         arg(kind.NDARRAY, "result", ti.f32, ndim=1),
         arg(kind.NDARRAY, "pixels", ti.types.vector(4, ti.f32), ndim=2),
     )
-    graph = builder.compile()
+    context = materialized = None
+    if graphics_recipe:
+        from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+        from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+        definition = builder.freeze()
+        catalog = definition.recipe_catalog(
+            providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
+        )
+        recipe = next(
+            entry.recipe
+            for entry in catalog.entries()
+            if any(f.fragment_key.endswith(":graphics-queue-argument-images") for f in entry.recipe.fragments)
+        )
+        context = definition.materialization_context(provider_set=catalog.provider_set)
+        materialized = context.materialize(recipe)
+        graph = materialized.executor
+    else:
+        graph = builder.compile()
     bindings = dict(
         vertices=vertices,
         shadow=depth,
@@ -141,6 +160,9 @@ def test_shadow_depth_only_graph_consumers_rebind_and_comparison_filter(monkeypa
     graph.close()
     writer.close()
     reader.close()
+    if materialized is not None:
+        materialized.close()
+        context.close()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

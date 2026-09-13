@@ -1434,6 +1434,8 @@ class TI_DLL_EXPORT Program {
       const VulkanGraphicsPassInfo &pass);
   std::size_t execute_vulkan_graphics_pass(
       const std::shared_ptr<PreparedVulkanGraphicsPass> &packet);
+  std::shared_ptr<gfx::ExternalGraphCommand> vulkan_graphics_graph_command(
+      const std::shared_ptr<PreparedVulkanGraphicsPass> &packet);
 
   void destroy_vulkan_graphics_pipeline(std::uint64_t handle);
 
@@ -1573,7 +1575,8 @@ class TI_DLL_EXPORT Program {
       std::uint64_t handle, const std::string &binding_name);
   std::shared_ptr<gfx::FixedGraphRecording> create_vulkan_graph_recording(
       const std::vector<gfx::GraphRecordingSource> &sources,
-      const std::unordered_map<std::string, aot::IValue> &args);
+      const std::unordered_map<std::string, aot::IValue> &args,
+      bool independent_graphics = false);
   // Publish one complete prepared recipe without waiting. An enclosing
   // runtime submission transaction still owns its physical batch boundary.
   void publish_vulkan_graph_commands();

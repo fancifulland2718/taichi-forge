@@ -33,6 +33,7 @@ bool Program::snode_tree_dependencies_are_fixed_dense(
 #include "taichi/runtime/gfx/kernel_launcher.h"
 #include "taichi/runtime/gfx/runtime.h"
 #include "taichi/program/storage_view.h"
+#include "taichi/rhi/vulkan/vulkan_device.h"
 
 namespace taichi::lang::gfx {
 aot::CompiledGraph graph_recording_argument_schema(
@@ -81,12 +82,34 @@ aot::CompiledGraph graph_recording_argument_schema(
 FixedGraphRecording::FixedGraphRecording(
     Program &program,
     std::unique_ptr<GraphReplayRegistration> registration,
-    bool has_snode_tree_dependencies)
+    bool has_snode_tree_dependencies,
+    bool uses_graphics_queue,
+    bool independent_graphics)
     : program_(&program),
       has_snode_tree_dependencies_(has_snode_tree_dependencies),
+      uses_graphics_queue_(uses_graphics_queue),
+      independent_graphics_(independent_graphics),
       registration_(std::move(registration)) {
 }
 FixedGraphRecording::~FixedGraphRecording() = default;
+bool FixedGraphRecording::supports_graphics_queue(Program &program) {
+  if (program.compile_config().arch != Arch::vulkan) {
+    return false;
+  }
+  auto *device =
+      dynamic_cast<vulkan::VulkanDevice *>(program.get_graphics_device());
+  if (!device) {
+    return false;
+  }
+  std::uint32_t count = 0;
+  vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(), &count,
+                                          nullptr);
+  std::vector<VkQueueFamilyProperties> families(count);
+  vkGetPhysicalDeviceQueueFamilyProperties(device->vk_physical_device(), &count,
+                                          families.data());
+  const auto index = device->graphics_queue_family_index();
+  return index < count && (families[index].queueFlags & VK_QUEUE_COMPUTE_BIT);
+}
 bool FixedGraphRecording::supports_snode_tree_dependencies(
     Program &program,
     const aot::CompiledGraph &graph) {
@@ -144,7 +167,8 @@ void Program::publish_vulkan_graph_commands() {
 std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &sources,
-    const std::unordered_map<std::string, aot::IValue> &args) {
+    const std::unordered_map<std::string, aot::IValue> &args,
+    bool independent_graphics) {
   auto tree_guard = acquire_snode_tree_lifecycle_read_guard();
   auto scope = acquire_runtime_resource_graph_scope();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan || compile_config().debug ||
@@ -268,17 +292,27 @@ Program::create_vulkan_graph_recording(
       operations.push_back(
           {{}, [command](Device *device, CommandList *commands) {
              command->record(device, commands);
-           }, command->supports_inline_recording(), command->image_uses()});
+           }, command->supports_inline_recording(), command->image_uses(),
+           command->requires_graphics_queue(),
+           command->graphics_pipeline_dependencies(), command->buffer_uses()});
     }
   }
   std::sort(tree_ids.begin(), tree_ids.end());
   tree_ids.erase(std::unique(tree_ids.begin(), tree_ids.end()), tree_ids.end());
   const bool has_tree_dependencies = !tree_ids.empty();
+  const bool graphics_queue = std::any_of(
+      operations.begin(), operations.end(),
+      [](const auto &operation) { return operation.graphics_queue; });
+  TI_ERROR_IF(graphics_queue &&
+                  !gfx::FixedGraphRecording::supports_graphics_queue(*this),
+              "Prepared mixed Graph requires a compute-capable graphics queue");
   auto registration = launcher->runtime()->prepare_fixed_graph(
-      operations, std::move(owners), std::move(tree_ids));
+      operations, std::move(owners), std::move(tree_ids), independent_graphics);
   return std::make_shared<gfx::FixedGraphRecording>(*this,
                                                     std::move(registration),
-                                                    has_tree_dependencies);
+                                                    has_tree_dependencies,
+                                                    graphics_queue,
+                                                    independent_graphics);
 }
 }  // namespace taichi::lang
 #else
@@ -290,7 +324,8 @@ void Program::publish_vulkan_graph_commands() {
 std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &,
-    const std::unordered_map<std::string, aot::IValue> &) {
+    const std::unordered_map<std::string, aot::IValue> &,
+    bool) {
   TI_ERROR("Prepared Vulkan Graph is unavailable in this build");
 }
 }  // namespace taichi::lang

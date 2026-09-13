@@ -33,8 +33,9 @@ def test_color_target_blend_state_validation():
             target(**{field: "multiply"})
 
 
+@pytest.mark.parametrize("graphics_recipe", [False, True])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
-def test_mrt_float_integer_outputs_graph_rebind_and_lifetime(monkeypatch):
+def test_mrt_float_integer_outputs_graph_rebind_and_lifetime(monkeypatch, graphics_recipe):
     monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
     gfx = ti.hardware.graphics
     vertices = ti.ndarray(ti.f32, 15)
@@ -99,7 +100,27 @@ def test_mrt_float_integer_outputs_graph_rebind_and_lifetime(monkeypatch):
         arg(kind.NDARRAY, "primitives", ti.i32, ndim=2),
         arg(kind.NDARRAY, "colors", ti.types.vector(4, ti.f32), ndim=2),
     )
-    graph = builder.compile()
+    context = materialized = None
+    if graphics_recipe:
+        from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+        from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+        definition = builder.freeze()
+        catalog = definition.recipe_catalog(
+            providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
+        )
+        recipe = next(
+            entry.recipe
+            for entry in catalog.entries()
+            if any(f.fragment_key.endswith(":graphics-queue-argument-images") for f in entry.recipe.fragments)
+        )
+        context = definition.materialization_context(provider_set=catalog.provider_set)
+        materialized = context.materialize(recipe)
+        assert materialized.manifest.submissions[0].queues == ("graphics",)
+        assert all(command.queue == "graphics" for command in materialized.manifest.commands)
+        graph = materialized.executor
+    else:
+        graph = builder.compile()
     bindings = dict(
         vertices=vertices,
         color=image,
@@ -132,6 +153,9 @@ def test_mrt_float_integer_outputs_graph_rebind_and_lifetime(monkeypatch):
         )
     graph.close()
     pipeline.close()
+    if materialized is not None:
+        materialized.close()
+        context.close()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

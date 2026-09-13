@@ -308,6 +308,9 @@ class TI_DLL_EXPORT GfxRuntime {
     std::function<void(Device *, CommandList *)> external;
     bool inline_recording{false};
     std::vector<std::pair<DeviceAllocation, ImageLayout>> images;
+    bool graphics_queue{false};
+    std::vector<std::uint64_t> graphics_pipelines;
+    std::optional<std::vector<DeviceAllocation>> buffers;
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {
@@ -496,6 +499,7 @@ class TI_DLL_EXPORT GfxRuntime {
     // Cold invalidation index. These roots are pinned by the command payload;
     // replay never revalidates or traverses the tree list.
     std::vector<int> fixed_snode_tree_ids;
+    std::vector<std::uint64_t> fixed_graphics_pipelines;
     std::uint64_t fixed_argument_bytes{0};
     bool fixed_secondary{false};
     uint64_t attempts{0};
@@ -538,8 +542,10 @@ class TI_DLL_EXPORT GfxRuntime {
   std::unique_ptr<GraphReplayRegistration> prepare_fixed_graph(
       const std::vector<GraphRecordingOperation> &operations,
       std::vector<std::shared_ptr<void>> owners,
-      std::vector<int> snode_tree_ids = {});
+      std::vector<int> snode_tree_ids = {},
+      bool independent_graphics = false);
   void launch_prepared_graph(std::uint64_t replay_key);
+  void retire_graphics_pipeline_recordings(std::uint64_t pipeline);
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
   void copy_image(DeviceAllocation dst,
@@ -635,6 +641,10 @@ class TI_DLL_EXPORT GfxRuntime {
   StreamSemaphore latest_compute_completion_;
   StreamSemaphore pending_graphics_completion_;
   StreamSemaphore submit_compute_commands(CommandList *commands);
+  StreamSemaphore submit_graphics_commands(
+      GraphicsDevice *device,
+      CommandList *commands,
+      const StreamSemaphore *fork_predecessor = nullptr);
   bool graphics_submission_used_{false};
 
   // Feasibility proof for an exact-binding graphics command-list set. The set

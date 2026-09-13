@@ -11,9 +11,11 @@
 #include "taichi/program/ndarray.h"
 #include "taichi/program/program_impl.h"
 #include "taichi/program/texture.h"
+#include "taichi/runtime/gfx/graph_recording.h"
 
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
+#include "taichi/runtime/gfx/kernel_launcher.h"
 
 namespace taichi::lang {
 class VulkanGraphicsPipelineResource;
@@ -282,6 +284,7 @@ struct PreparedVulkanGraphicsPass::State {
   std::vector<RuntimeResourceHandle> arrays;
   std::vector<RuntimeResourceHandle> textures;
   std::vector<std::uint64_t> pipelines;
+  std::vector<DeviceAllocation> buffers;
   std::function<void(GraphicsDevice *, CommandList *)> record;
   std::vector<ComputeOpImageRef> images;
   std::vector<std::uint64_t> replay_key;
@@ -1548,6 +1551,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   };
   for (const auto *array : arrays) {
     append_handle(prepared.arrays, array->runtime_resource_handle());
+    if (std::find(prepared.buffers.begin(), prepared.buffers.end(),
+                  array->get_device_allocation()) == prepared.buffers.end()) {
+      prepared.buffers.push_back(array->get_device_allocation());
+    }
   }
   for (const auto *texture : textures) {
     append_handle(prepared.textures, texture->runtime_resource_handle());
@@ -1625,6 +1632,107 @@ std::size_t Program::execute_vulkan_graphics_pass(
   return 0;
 }
 
+namespace {
+class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
+ public:
+  PreparedGraphicsGraphCommand(std::shared_ptr<PreparedVulkanGraphicsPass> packet,
+                              std::shared_ptr<void> arrays,
+                              std::shared_ptr<void> textures)
+      : packet_(std::move(packet)),
+        arrays_(std::move(arrays)),
+        textures_(std::move(textures)) {
+  }
+
+  std::vector<aot::Arg> arguments() const override {
+    return {};
+  }
+  bool requires_graphics_queue() const override {
+    return true;
+  }
+  std::optional<std::vector<DeviceAllocation>> buffer_uses() const override {
+    return packet_->state->buffers;
+  }
+  std::vector<std::uint64_t> graphics_pipeline_dependencies() const override {
+    return packet_->state->pipelines;
+  }
+  void validate(
+      Program &program,
+      const std::unordered_map<std::string, aot::IValue> &) const override {
+    const auto &state = *packet_->state;
+    TI_ERROR_IF(state.owner != &program ||
+                    state.generation != program.runtime_program_generation() ||
+                    !state.resources->acquire(),
+                "Prepared graphics command is closed or belongs to another runtime");
+  }
+  std::vector<std::pair<DeviceAllocation, ImageLayout>> image_uses()
+      const override {
+    std::vector<std::pair<DeviceAllocation, ImageLayout>> result;
+    for (const auto &image : packet_->state->images) {
+      result.emplace_back(image.image, image.initial_layout);
+    }
+    return result;
+  }
+  void record(Device *device, CommandList *commands) const override {
+    // These barriers replace cross-queue semaphore dependencies, not lifecycle
+    // checks. Ordinary compute barriers do not cover vertex/index/uniform reads
+    // or attachment accesses. Recording happens only at binding publication.
+    auto buffer =
+        static_cast<vulkan::VulkanCommandList *>(commands)->vk_command_buffer();
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(buffer->buffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT, 0, 1, &barrier,
+                         0, nullptr, 0, nullptr);
+    packet_->state->record(static_cast<GraphicsDevice *>(device), commands);
+    // Also order read-before-write reuse of vertex/uniform buffers in a later
+    // compute operation (including the next replay of this immutable frame).
+    vkCmdPipelineBarrier(buffer->buffer, VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 1, &barrier, 0, nullptr, 0, nullptr);
+  }
+
+ private:
+  std::shared_ptr<PreparedVulkanGraphicsPass> packet_;
+  std::shared_ptr<void> arrays_;
+  std::shared_ptr<void> textures_;
+};
+}  // namespace
+
+std::shared_ptr<gfx::ExternalGraphCommand> Program::vulkan_graphics_graph_command(
+    const std::shared_ptr<PreparedVulkanGraphicsPass> &packet) {
+  auto guard = acquire_runtime_resource_submission_guard();
+  TI_ERROR_IF(!packet || !packet->state || packet->state->owner != this ||
+                  packet->state->generation != runtime_program_generation(),
+              "Prepared graphics pass belongs to another or retired runtime");
+  const auto &prepared = *packet->state;
+  TI_ERROR_IF(!prepared.resources->acquire(),
+              "Prepared graphics pipeline is closed");
+  NdarrayLaunchLeases arrays;
+  for (const auto handle : prepared.arrays) {
+    TI_ERROR_IF(handle.index >= ndarray_view_slots_.size(),
+                "Prepared graphics ndarray is retired");
+    const auto &slot = ndarray_view_slots_[handle.index];
+    TI_ERROR_IF(slot.handle != handle || !slot.view || !slot.resource,
+                "Prepared graphics ndarray is retired");
+    auto lease = slot.resource->lease.clone();
+    TI_ERROR_IF(!lease, "Cannot retain prepared graphics ndarray");
+    arrays.add(std::move(lease));
+  }
+  TextureLaunchLeases textures;
+  for (const auto handle : prepared.textures) {
+    auto acquired = texture_resources_.acquire(handle);
+    TI_ERROR_IF(acquired.first != TextureResourceRegistry::Result::kSuccess,
+                "Cannot retain prepared graphics texture");
+    textures.add(std::move(acquired.second));
+  }
+  return std::make_shared<PreparedGraphicsGraphCommand>(
+      packet, std::make_shared<NdarrayLaunchLeases>(std::move(arrays)),
+      std::make_shared<TextureLaunchLeases>(std::move(textures)));
+}
+
 std::size_t Program::vulkan_graphics_pass(
     Texture *color, Texture *depth,
     const std::vector<VulkanGraphicsDrawCommand> &commands,
@@ -1672,6 +1780,12 @@ void Program::destroy_vulkan_graphics_pipeline(std::uint64_t handle) {
     resource = found->second;
     vulkan_graphics_pipelines_.erase(found);
     resource->close_prepared_resources();
+    // Cold owner invalidation, analogous to fixed dense root retirement. The
+    // existing replay registration rejects later runs without scanning owners.
+    if (auto *launcher =
+            dynamic_cast<gfx::KernelLauncher *>(&get_kernel_launcher())) {
+      launcher->runtime()->retire_graphics_pipeline_recordings(handle);
+    }
     if (!runtime_has_fatal_fault() &&
         runtime_submission_pending_.load(std::memory_order_acquire)) {
       vulkan_graphics_pipeline_retirements_.push_back(std::move(resource));
@@ -1837,6 +1951,11 @@ std::size_t Program::vulkan_graphics_pass(
     const std::vector<VulkanGraphicsDrawCommand> &,
     const VulkanGraphicsPassInfo &) {
   TI_ERROR("Vulkan graphics passes are unavailable in this build.");
+}
+
+std::shared_ptr<gfx::ExternalGraphCommand> Program::vulkan_graphics_graph_command(
+    const std::shared_ptr<PreparedVulkanGraphicsPass> &) {
+  TI_ERROR("Vulkan graphics recording is unavailable in this build");
 }
 
 void Program::destroy_vulkan_graphics_pipeline(std::uint64_t) {

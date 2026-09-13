@@ -49,7 +49,7 @@ def _recording(pipeline):
     return pipeline.record_pass((draw,), color="target")
 
 
-@pytest.mark.parametrize("binding_recipe", [False, True])
+@pytest.mark.parametrize("binding_recipe", [False, True, "graphics_queue"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False, gfx_cmdlist_lazy_submit=True, gfx_cmdlist_max_dispatches=10000)
 def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypatch, binding_recipe):
     if not ti.hardware.graphics.is_available():
@@ -106,14 +106,22 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             catalog = definition.recipe_catalog(
                 providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
             )
-            assert len(catalog.entries()) == 2
-            recipe = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+            assert len(catalog.entries()) == 3
+            choice = (
+                "graphics-queue-argument-images" if binding_recipe == "graphics_queue" else "immutable-argument-images"
+            )
+            recipe = next(
+                entry.recipe
+                for entry in catalog.entries()
+                if any(f.fragment_key.endswith(":" + choice) for f in entry.recipe.fragments)
+            )
             materialization = definition.materialization_context(provider_set=catalog.provider_set)
             materialized = materialization.materialize(recipe)
             graph = materialized.executor
-            assert (
-                materialized.manifest.submissions[0].replay_mode
-                == "vulkan_secondary_frames_with_ordered_graphics_published"
+            assert materialized.manifest.submissions[0].replay_mode == (
+                "vulkan_complete_graphics_queue_immutable_frame"
+                if binding_recipe == "graphics_queue"
+                else "vulkan_secondary_frames_with_ordered_graphics_published"
             )
             assert recipe.planned_physical_id != catalog.baseline.recipe.planned_physical_id
         else:
@@ -135,7 +143,11 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
         frame = bindings._version.execution_frame
         if binding_recipe:
             assert frame is not None
-            assert len(frame._frames) == 2
+            if binding_recipe == "graphics_queue":
+                assert frame.uses_graphics_queue()
+                assert not frame.uses_secondary_commands()
+            else:
+                assert len(frame._frames) == 2
             assert frame.argument_bytes() > 0
             executor = graph._instance._backend_executable
             native_prepare = executor._prepare
@@ -161,15 +173,25 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             # separate bridge-only command buffer is recorded or submitted,
             # and the graphics wait must not split the two ordinary consumers.
             # The explicit batching setting removes timer/compilation noise.
-            assert after["queue_submit_calls"] - before["queue_submit_calls"] == 3
-            assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 3
+            if binding_recipe == "graphics_queue":
+                # One complete graphics frame plus the explicit completion
+                # marker; first use can additionally repair entry layouts.
+                expected_submits = 3 if red == 0.2 else 2
+            else:
+                expected_submits = 3
+            assert after["queue_submit_calls"] - before["queue_submit_calls"] == expected_submits
+            assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == expected_submits
             expected = np.broadcast_to(np.array([red, 0.25, 0.5, 1.0]) + 0.125, (32, 16, 4))
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
         if binding_recipe:
             stats = graph.execution_stats()
             assert stats.memory.persistent_argument_bytes == frame.argument_bytes()
             assert [s.last_path for s in stats.segments if s.kind == "cgraph"] == [
-                "vulkan_prepared_compute_with_ordered_graphics"
+                (
+                    "vulkan_prepared_graphics_queue_plan"
+                    if binding_recipe == "graphics_queue"
+                    else "vulkan_prepared_compute_with_ordered_graphics"
+                )
             ] * 2
             assert stats.compiled_task_count == 3
             assert stats.counters_complete is False
@@ -186,7 +208,7 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
         monkeypatch.setattr(recording, "_prepare_packet", unexpected_prepare)
         graph.run(bindings)
         np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
-        if binding_recipe:
+        if binding_recipe is True:
             # Preparation of a later compute segment may fail after the first
             # owns native resources. Roll back only the new publication.
             previous_version = bindings._version
@@ -210,7 +232,8 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
         graph.close()
         if binding_recipe:
             assert frame.argument_bytes() == 0
-            assert previous_version.execution_frame.argument_bytes() == 0
+            if binding_recipe is True:
+                assert previous_version.execution_frame.argument_bytes() == 0
             with pytest.raises(RuntimeError, match="closed"):
                 frame.run()
             materialized.close()
@@ -381,6 +404,86 @@ def test_sampled_graphics_prepared_packet_lifetime_and_reset():
         execute()
 
 
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_independent_graphics_fork_joins_and_rejects_bound_aliases():
+    from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+    from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+    @ti.kernel
+    def prefix(scratch: ti.types.ndarray(ti.f32, 1), seed: ti.i32):
+        for i in scratch:
+            value = float(seed)
+            for j in range(1024):
+                value += 0.25
+            scratch[i] = value
+
+    @ti.kernel
+    def paint(image: ti.types.rw_texture(2, fmt=ti.Format.rgba8)):
+        for x, y in image:
+            image.store(ti.Vector([x, y]), ti.Vector([0.75, 0.25, 0.5, 1.0]))
+
+    @ti.kernel
+    def join(image: ti.types.texture(2), scratch: ti.types.ndarray(ti.f32, 1), result: ti.types.ndarray(ti.f32, 2)):
+        for x, y in result:
+            result[x, y] = image.fetch(ti.Vector([x, y]), 0).x + scratch[0]
+
+    pipeline = _sampled_pipeline()
+    vertices, uniform = _quad_resources()
+    recording = _recording(pipeline)
+    builder = ti.graph.GraphBuilder()
+    arg, kind = ti.graph.Arg, ti.graph.ArgKind
+    builder.dispatch(prefix, arg(kind.NDARRAY, "scratch", ti.f32, ndim=1), arg(kind.SCALAR, "seed", ti.i32))
+    builder.append_native(recording, admission="auto")
+    builder.dispatch(
+        join,
+        arg(kind.TEXTURE, "target", ndim=2),
+        arg(kind.NDARRAY, "scratch", ti.f32, ndim=1),
+        arg(kind.NDARRAY, "result", ti.f32, ndim=2),
+    )
+    definition = builder.freeze()
+    catalog = definition.recipe_catalog(providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider()))
+    recipe = next(
+        entry.recipe
+        for entry in catalog.entries()
+        if any(f.fragment_key.endswith(":independent-graphics-argument-images") for f in entry.recipe.fragments)
+    )
+    source, target = (ti.Texture(ti.Format.rgba8, (32, 16)) for _ in range(2))
+    scratch, result = ti.ndarray(ti.f32, vertices.shape), ti.ndarray(ti.f32, (32, 16))
+    paint(source)
+    context = definition.materialization_context(provider_set=catalog.provider_set)
+    with context.materialize(recipe) as materialized:
+        graph = materialized.executor
+        tasks = materialized.manifest.tasks
+        graphics_index = next(i for i, task in enumerate(tasks) if task.kind == "native_action")
+        assert tasks[graphics_index].depends_on == ()
+        assert tasks[graphics_index + 1].depends_on == (graphics_index - 1, graphics_index)
+        binding = graph.bind(
+            dict(
+                source=source, target=target, scratch=scratch, seed=1, result=result, vertices=vertices, uniform=uniform
+            )
+        )
+        assert binding._version.execution_frame.uses_independent_graphics()
+        for seed in (1, 4, 2):
+            binding.update(seed=seed)
+            for _ in range(4):
+                graph.run(binding)
+            graph.submit(binding).wait()
+            np.testing.assert_allclose(result.to_numpy(), seed + 256.75, atol=1 / 255)
+        previous = binding._version
+        # Distinct symbolic names can still refer to one concrete allocation.
+        # Reject at publication, without damaging the previous valid frame.
+        with pytest.raises(RuntimeError, match="alias"):
+            binding.update(scratch=vertices)
+        assert binding._version is previous
+        ticket = graph.submit(binding)
+        pipeline.close()
+        ticket.wait()
+        np.testing.assert_allclose(result.to_numpy(), 258.75, atol=1 / 255)
+        with pytest.raises(RuntimeError, match="closed|retired"):
+            graph.run(binding)
+    context.close()
+
+
 @pytest.mark.parametrize("retirement", ["pipeline_close", "reset"])
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
@@ -434,7 +537,9 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
         np.testing.assert_allclose(output.to_numpy(), expected, atol=1 / 255)
         observed.add(request.recipe_id)
         # Deterministic search-contract test, not an acceleration measurement.
-        return {"prepared_candidate": float(bindings._version.execution_frame is not None)}
+        frame = bindings._version.execution_frame
+        score = 2 if frame is not None and hasattr(frame, "uses_graphics_queue") else int(frame is not None)
+        return {"prepared_candidate": float(score)}
 
     session = frozen.search_recipes(
         providers=providers,
@@ -445,7 +550,7 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
     decision = session.run(evaluate)
     assert decision.status == "selected", decision.report.results
     assert decision.report.search_complete
-    assert len(observed) == 2
+    assert len(observed) == 3
     fresh = definition()
     assert fresh.semantic_graph_id == frozen.semantic_graph_id
     selection = fresh.resolve_recipe(decision.selection_artifact, providers=providers)
@@ -453,8 +558,7 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
         graph = materialized.executor
         bindings = graph.bind(args)
         frame = bindings._version.execution_frame
-        assert len(frame._frames) == 1
-        assert len(frame._actions) == 3
+        assert frame.uses_graphics_queue()
         graph.run(args)  # Raw mappings explicitly prepare and retire a frame.
         np.testing.assert_allclose(output.to_numpy(), expected, atol=1 / 255)
         assert len(graph._instance._backend_executable._frames) == 1
@@ -471,6 +575,6 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
             with pytest.raises((RuntimeError, ti.TaichiRuntimeError), match="runtime|generation"):
                 graph.submit(bindings)
         assert frame.argument_bytes() == 0
-        with pytest.raises(RuntimeError, match="closed"):
+        with pytest.raises(RuntimeError, match="closed|finalized"):
             frame.run()
     pipeline.close()

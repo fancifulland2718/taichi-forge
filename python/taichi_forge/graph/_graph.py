@@ -13504,6 +13504,15 @@ class _GraphInstance:
     def physical_submission_mode(self):
         return getattr(self._backend_executable, "physical_submission_mode", "runtime_managed")
 
+    @property
+    def physical_execution_queue(self):
+        """Whole-executable queue assignment, if owned by its materializer."""
+        return getattr(self._backend_executable, "physical_execution_queue", None)
+
+    def refine_physical_topology(self, tasks, commands):
+        refine = getattr(self._backend_executable, "refine_physical_topology", None)
+        return (tasks, commands) if refine is None else refine(tasks, commands)
+
     def _run_general(self, args, temporaries=None):
         self._executable.run(args, temporaries)
 

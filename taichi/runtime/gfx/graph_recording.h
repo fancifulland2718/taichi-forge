@@ -2,6 +2,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <variant>
 
 #include "taichi/aot/graph_data.h"
@@ -27,6 +28,16 @@ class TI_DLL_EXPORT ExternalGraphCommand {
   virtual bool supports_inline_recording() const {
     return false;
   }
+  virtual bool requires_graphics_queue() const {
+    return false;
+  }
+  // Cold invalidation dependencies, never traversed during replay.
+  virtual std::vector<std::uint64_t> graphics_pipeline_dependencies() const {
+    return {};
+  }
+  virtual std::optional<std::vector<DeviceAllocation>> buffer_uses() const {
+    return std::nullopt;
+  }
   // Static dense storage owners, resolved during cold command preparation.
   // The enclosing recorder retains roots and retires on tree destruction.
   virtual std::vector<SNodeTreeDependency> snode_tree_dependencies() const {
@@ -44,18 +55,29 @@ class TI_DLL_EXPORT FixedGraphRecording {
  public:
   FixedGraphRecording(Program &program,
                       std::unique_ptr<GraphReplayRegistration> registration,
-                      bool has_snode_tree_dependencies);
+                      bool has_snode_tree_dependencies,
+                      bool uses_graphics_queue = false,
+                      bool independent_graphics = false);
   ~FixedGraphRecording();
   static bool supports_snode_tree_dependencies(Program &program,
                                               const aot::CompiledGraph &graph);
+  static bool supports_graphics_queue(Program &program);
   void run();
   void close();
   std::uint64_t argument_bytes() const;
   bool uses_secondary_commands() const;
+  bool uses_graphics_queue() const {
+    return uses_graphics_queue_;
+  }
+  bool uses_independent_graphics() const {
+    return independent_graphics_;
+  }
 
  private:
   Program *program_;
   bool has_snode_tree_dependencies_{false};
+  bool uses_graphics_queue_{false};
+  bool independent_graphics_{false};
   mutable std::mutex mutex_;
   std::unique_ptr<GraphReplayRegistration> registration_;
 };

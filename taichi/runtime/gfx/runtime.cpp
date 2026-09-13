@@ -2507,6 +2507,7 @@ GfxRuntime::GraphReplayExecutable::known_persistent_argument_bytes() const {
 void GfxRuntime::GraphReplayState::reset() {
   fixed_submit = {};
   fixed_snode_tree_ids.clear();
+  fixed_graphics_pipelines.clear();
   fixed_argument_bytes = 0;
   fixed_secondary = false;
   executable.reset();
@@ -2734,7 +2735,8 @@ bool bind_graph_task(GfxRuntime::GraphReplayExecutable::PreparedDispatch &pd,
 std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
     std::vector<std::shared_ptr<void>> owners,
-    std::vector<int> snode_tree_ids) {
+    std::vector<int> snode_tree_ids,
+    bool independent_graphics) {
   // On a cold failure release the host API lock before registration retirement
   // (registry -> runtime is also the order used by reset and late destruction).
   auto registration = register_graph_replay(1);
@@ -2758,6 +2760,18 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     slot.retained_owners.push_back(root_buffers_[tree_id]);
   }
   state.fixed_snode_tree_ids = std::move(snode_tree_ids);
+  const bool graphics_queue = std::any_of(
+      operations.begin(), operations.end(),
+      [](const auto &operation) { return operation.graphics_queue; });
+  auto *graphics_device =
+      graphics_queue ? dynamic_cast<GraphicsDevice *>(device_) : nullptr;
+  TI_ERROR_IF(graphics_queue && !graphics_device,
+              "Prepared mixed Graph requires a graphics device");
+  for (const auto &operation : operations) {
+    state.fixed_graphics_pipelines.insert(state.fixed_graphics_pipelines.end(),
+                                          operation.graphics_pipelines.begin(),
+                                          operation.graphics_pipelines.end());
+  }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
   std::vector<ImageBinding> entry_images;
@@ -2807,6 +2821,52 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     prepared.push_back({kernel, dispatch.host_ctx});
   }
   executable.refresh_prepared_cache({1}, prepared);
+  if (independent_graphics) {
+    // One bounded fork/join: buffer-only compute prefix, one independent
+    // graphics pass, then a compute consumer. No general scheduler or replay
+    // alias check. Different public argument names are not proof of separation.
+    const auto pass =
+        std::find_if(operations.begin(), operations.end(),
+                     [](const auto &op) { return op.external != nullptr; });
+    TI_ERROR_IF(pass == operations.begin() || pass == operations.end() ||
+                    pass + 1 == operations.end() || !pass->graphics_queue ||
+                    !pass->buffers ||
+                    std::any_of(pass + 1, operations.end(),
+                                [](const auto &op) { return op.external != nullptr; }),
+                "Independent graphics requires compute prefix, one graphics "
+                "pass and compute consumer");
+    const auto conflicts = [&](DeviceAllocation allocation) {
+      return std::find(pass->buffers->begin(), pass->buffers->end(), allocation) !=
+             pass->buffers->end();
+    };
+    const auto prefix_size =
+        static_cast<std::size_t>(std::distance(operations.begin(), pass));
+    for (std::size_t i = 0; i < prefix_size; ++i) {
+      const auto &pd = prepared[i];
+      for (const auto &[key, allocation] : *pd.any_arrays) {
+        TI_ERROR_IF(conflicts(allocation),
+                    "Independent graphics buffers alias the compute prefix");
+      }
+      const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
+      for (std::size_t t = 0; t < tasks.size(); ++t) {
+        TI_ERROR_IF(!tasks[t].texture_binds.empty() ||
+                        !tasks[t].acceleration_structure_binds.empty(),
+                    "Independent graphics prefix requires buffer-only kernels");
+        for (const auto &bind : pd.kernel->buffer_binding_plan(t)) {
+          if (bind.kind == CompiledTaichiKernel::BufferBindingKind::StaticRw &&
+              bind.static_alloc) {
+            TI_ERROR_IF(conflicts(*bind.static_alloc),
+                        "Independent graphics buffers alias a compute root");
+          } else if (bind.kind ==
+                     CompiledTaichiKernel::BufferBindingKind::StaticLookupRw) {
+            const auto *allocation = pd.kernel->get_buffer_bind(bind.buffer);
+            TI_ERROR_IF(!allocation || conflicts(*allocation),
+                        "Independent graphics cannot prove compute root separation");
+          }
+        }
+      }
+    }
+  }
   slot.args_buffers.resize(prepared.size());
   slot.args_buffer_sizes.resize(prepared.size());
   for (std::size_t i = 0; i < prepared.size(); ++i) {
@@ -2830,7 +2890,10 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     }
   }
   std::unique_ptr<CommandList> commands;
-  if (std::all_of(operations.begin(), operations.end(),
+  std::unique_ptr<CommandList> prefix_commands;
+  std::unique_ptr<CommandList> graphics_commands;
+  if (!graphics_queue &&
+      std::all_of(operations.begin(), operations.end(),
                   [](const auto &operation) {
                     return !operation.external || operation.inline_recording;
                   })) {
@@ -2838,8 +2901,10 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   }
   state.fixed_secondary = bool(commands);
   if (!commands) {
-    auto [primary, status] =
-        device_->get_compute_stream()->new_command_list_unique();
+    auto *stream = graphics_queue && !independent_graphics
+                       ? graphics_device->get_graphics_stream()
+                       : device_->get_compute_stream();
+    auto [primary, status] = stream->new_command_list_unique();
     TI_ERROR_IF(status != RhiResult::success,
                 "Prepared Vulkan Graph command allocation failed");
     commands = std::move(primary);
@@ -2848,6 +2913,14 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   std::size_t kernel_index = 0;
   for (const auto &operation : operations) {
     if (operation.external) {
+      if (independent_graphics) {
+        prefix_commands = std::move(commands);
+        auto [graphics, status] =
+            graphics_device->get_graphics_stream()->new_command_list_unique();
+        TI_ERROR_IF(status != RhiResult::success,
+                    "Independent graphics command allocation failed");
+        commands = std::move(graphics);
+      }
       for (const auto &[image, layout] : operation.images) {
         TI_ERROR_IF(image.device != device_ ||
                         last_image_layouts_.find(image.alloc_id) ==
@@ -2856,13 +2929,35 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         const auto [previous, first_use] =
             recorded_image_layouts.emplace(image.alloc_id, layout);
         if (first_use) {
-          entry_images.emplace_back(image, layout);
-        } else if (previous->second != layout) {
+          const auto entry =
+              independent_graphics ? ImageLayout::shader_read : layout;
+          entry_images.emplace_back(image, entry);
+          if (entry != layout) {
+            commands->image_transition(image, entry, layout);
+          }
+        } else if (previous->second != layout ||
+                   (operation.graphics_queue &&
+                    (layout == ImageLayout::color_attachment ||
+                     layout == ImageLayout::depth_attachment))) {
           commands->image_transition(image, previous->second, layout);
           previous->second = layout;
         }
       }
       operation.external(device_, commands.get());
+      if (independent_graphics) {
+        for (const auto &[image, layout] : operation.images) {
+          if (layout != ImageLayout::shader_read) {
+            commands->image_transition(image, layout, ImageLayout::shader_read);
+          }
+          recorded_image_layouts[image.alloc_id] = ImageLayout::shader_read;
+        }
+        graphics_commands = std::move(commands);
+        auto [consumer, status] =
+            device_->get_compute_stream()->new_command_list_unique();
+        TI_ERROR_IF(status != RhiResult::success,
+                    "Independent graphics consumer allocation failed");
+        commands = std::move(consumer);
+      }
       commands->memory_barrier();
       continue;
     }
@@ -2983,7 +3078,31 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   for (auto bytes : slot.args_buffer_sizes) {
     state.fixed_argument_bytes += bytes;
   }
-  if (state.fixed_secondary) {
+  if (independent_graphics) {
+    slot.cmdlist = std::move(prefix_commands);
+    slot.recorded = true;
+    executable.slots.push_back(std::move(slot));
+    executable.slots.resize(3);
+    executable.slots[1].cmdlist = std::move(graphics_commands);
+    executable.slots[2].cmdlist = std::move(commands);
+    executable.slots[1].recorded = executable.slots[2].recorded = true;
+    auto *slots = executable.slots.data();
+    state.fixed_submit = [this, slots, graphics_device] {
+      flush_if_pending();
+      // Separate the common predecessor before forking. Otherwise a batched
+      // token could cover the new prefix as well and accidentally serialize it.
+      device_->get_compute_stream()->flush_submission_batch();
+      // A prior graphics tail already orders this graphics queue. Its binary
+      // semaphore is consumed only by the prefix, never by both branches.
+      const auto predecessor = latest_compute_completion_;
+      slots[0].completion = submit_compute_commands(slots[0].cmdlist.get());
+      slots[1].completion = submit_graphics_commands(
+          graphics_device, slots[1].cmdlist.get(), &predecessor);
+      // Same compute queue orders the prefix. The graphics wait joins the
+      // independent branch; this tail covers both branches and the consumer.
+      slots[2].completion = submit_compute_commands(slots[2].cmdlist.get());
+    };
+  } else if (state.fixed_secondary) {
     // payload.cmdlist deliberately stays empty: commands retain the payload,
     // never the reverse. This makes close-before-submission safe without
     // cycles.
@@ -3002,24 +3121,41 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     slot.recorded = true;
     executable.slots.push_back(std::move(slot));
     auto *primary_slot = &executable.slots.front();
-    state.fixed_submit = [this, primary_slot] {
+    state.fixed_submit = [this, primary_slot, graphics_device] {
       flush_if_pending();
-      primary_slot->completion =
-          submit_compute_commands(primary_slot->cmdlist.get());
+      primary_slot->completion = graphics_device
+          ? submit_graphics_commands(graphics_device, primary_slot->cmdlist.get())
+          : submit_compute_commands(primary_slot->cmdlist.get());
     };
   }
   state.last_path = GraphReplayLastPath::record;
   if (!entry_images.empty()) {
     state.fixed_submit =
         [this, launch = std::move(state.fixed_submit),
-         images = std::move(entry_images), epoch = std::uint64_t{0}]() mutable {
+         images = std::move(entry_images), graphics_device,
+         epoch = std::uint64_t{0}]() mutable {
           if (epoch != image_layout_epoch_) {
             // Only an intervening upload, graphics use or another image plan
             // can require an entry-layout repair. No probe, owner validation,
             // parameter upload or host synchronization is needed here.
-            for (const auto &[image, layout] : images) {
-              if (last_image_layouts_.at(image.alloc_id) != layout) {
-                transition_image(image, layout);
+            if (graphics_device) {
+              std::vector<ComputeOpImageRef> repairs;
+              for (const auto &[image, layout] : images) {
+                if (last_image_layouts_.at(image.alloc_id) != layout) {
+                  repairs.push_back({image, layout, layout});
+                }
+              }
+              if (!repairs.empty()) {
+                // Attachment stages must be recorded on a graphics-capable
+                // queue, never the dedicated compute command pool.
+                enqueue_graphics_op_lambda(
+                    [](GraphicsDevice *, CommandList *) {}, repairs);
+              }
+            } else {
+              for (const auto &[image, layout] : images) {
+                if (last_image_layouts_.at(image.alloc_id) != layout) {
+                  transition_image(image, layout);
+                }
               }
             }
             epoch = image_layout_epoch_;
@@ -3042,8 +3178,23 @@ void GfxRuntime::launch_prepared_graph(std::uint64_t replay_key) {
                   state->second.retirement_requested ||
                   !state->second.fixed_submit,
               "Prepared Vulkan Graph is retired or references a destroyed "
-              "SNodeTree; rebuild the Graph");
+              "SNodeTree or closed graphics pipeline; rebuild the Graph");
   state->second.fixed_submit();
+}
+
+void GfxRuntime::retire_graphics_pipeline_recordings(std::uint64_t pipeline) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  std::vector<std::uint64_t> dependent;
+  for (const auto &[key, state] : graph_replay_states_) {
+    if (std::find(state.fixed_graphics_pipelines.begin(),
+                  state.fixed_graphics_pipelines.end(), pipeline) !=
+        state.fixed_graphics_pipelines.end()) {
+      dependent.push_back(key);
+    }
+  }
+  for (const auto key : dependent) {
+    retire_graph_replay(key);
+  }
 }
 
 bool GfxRuntime::try_launch_graph(
@@ -6323,22 +6474,10 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   // recording the latter's commands. This preserves cross-queue ordering
   // without putting host command construction into the GPU's dependency gap.
   // Neither the enclosing transaction nor device execution is waited here.
-  device_->get_compute_stream()->flush_submission_batch();
-  std::vector<StreamSemaphore> graphics_waits;
-  if (pending_graphics_completion_) {
-    graphics_waits.push_back(pending_graphics_completion_);
-  } else if (latest_compute_completion_) {
-    graphics_waits.push_back(latest_compute_completion_);
-  }
   StreamSemaphore graphics_completion;
   try {
     graphics_completion =
-        graphics_stream->submit(submitted_commands, graphics_waits);
-    // Submission already owns GPU resources even if the compute bridge below
-    // fails. Keep this completion domain visible to error/close synchronization.
-    graphics_submission_used_ = true;
-    TI_ERROR_IF(!graphics_completion,
-                "Runtime graphics submission returned no completion token");
+        submit_graphics_commands(graphics_device, submitted_commands);
   } catch (...) {
     ++retained_graphics_replay_.submit_failures;
     if (record_retained || replay) {
@@ -6346,8 +6485,6 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     }
     throw;
   }
-  pending_graphics_completion_ = graphics_completion;
-  latest_compute_completion_.reset();
   // Recording a transition is not committing it. Publish image state only
   // after successful submission. A later compute failure retains its wait.
   for (const auto &ref : image_refs) {
@@ -6368,6 +6505,34 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   // compute work consumes its wait through submit_compute_commands(); an
   // explicit terminal ticket still publishes a marker when needed.
   return graphics_completion;
+}
+
+StreamSemaphore GfxRuntime::submit_graphics_commands(
+    GraphicsDevice *device,
+    CommandList *commands,
+    const StreamSemaphore *fork_predecessor) {
+  // Shared by ordinary passes and complete mixed recordings. Both consume the
+  // same accurate compute tail and publish a token covering every command.
+  device_->get_compute_stream()->flush_submission_batch();
+  std::vector<StreamSemaphore> waits;
+  if (fork_predecessor) {
+    if (*fork_predecessor) {
+      waits.push_back(*fork_predecessor);
+    }
+  } else if (pending_graphics_completion_) {
+    waits.push_back(pending_graphics_completion_);
+  } else if (latest_compute_completion_) {
+    waits.push_back(latest_compute_completion_);
+  }
+  auto completion = device->get_graphics_stream()->submit(commands, waits);
+  graphics_submission_used_ = true;
+  TI_ERROR_IF(!completion,
+              "Runtime graphics submission returned no completion token");
+  pending_graphics_completion_ = completion;
+  if (!fork_predecessor) {
+    latest_compute_completion_.reset();
+  }
+  return completion;
 }
 
 void GfxRuntime::invalidate_graphics_command_replay_locked(

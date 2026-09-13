@@ -83,6 +83,26 @@ def eligible(spec, backend):
     return reusable
 
 
+def graphics_queue_eligible(spec):
+    """Cold capability check for whole-Graph compute/graphics co-recording."""
+    from taichi_forge._lib import core
+    from taichi_forge.lang import impl
+
+    native = getattr(core, "_VulkanFixedGraphRecording", None)
+    supports = getattr(native, "supports_graphics_queue", None)
+    boundaries = prepared_boundaries(spec)
+    return (
+        bool(boundaries)
+        and all(
+            recording.queue == "graphics" and getattr(recording, "_supports_prepared_graphics_graph_command", False)
+            for node, recording in spec._native_preparers
+            if node in boundaries
+        )
+        and supports is not None
+        and supports(impl.get_runtime().prog)
+    )
+
+
 class _SegmentedBindingFrame:
     """One published frame; ordered actions retain their original owners.
 
@@ -111,6 +131,37 @@ class _SegmentedBindingFrame:
 
     def argument_bytes(self):
         return sum(frame.argument_bytes() for frame in self._frames)
+
+
+def independent_graphics_eligible(spec):
+    from taichi_forge._lib import core
+    from taichi_forge.graph._graph import _CompiledCGraphNode
+    from taichi_forge.graph._ir import GraphAccess
+
+    if not hasattr(getattr(core, "_VulkanFixedGraphRecording", None), "uses_independent_graphics"):
+        return False
+    boundaries = prepared_boundaries(spec)
+    if len(boundaries) != 1:
+        return False
+    middle = spec.nodes.index(boundaries[0])
+    if middle == 0 or middle + 1 == len(spec.nodes):
+        return False
+    prefix = spec.nodes[:middle]
+    if not all(isinstance(node, _CompiledCGraphNode) for node in prefix + spec.nodes[middle + 1 :]):
+        return False
+    graphics_resources = {effect.resource for effect in boundaries[0].ir_node.effects}
+    pending = [node.ir_node for node in prefix]
+    while pending:
+        node = pending.pop()
+        pending.extend(node.children)
+        if any(
+            "texture" in str(binding.kind).lower() or "acceleration" in str(binding.kind).lower()
+            for binding in node.bindings
+        ):
+            return False
+        if any(effect.access == GraphAccess.OPAQUE or effect.resource in graphics_resources for effect in node.effects):
+            return False
+    return True
 
 
 class VulkanBindingFrameExecutor:
@@ -268,3 +319,79 @@ class VulkanBindingFrameExecutor:
     @property
     def debug_graph_stats(self):
         return self.snapshot_graph_stats
+
+
+class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
+    """An explicitly selected complete recipe, not a global queue override."""
+
+    physical_execution_queue = "graphics"
+    independent_graphics = False
+
+    def __init__(self, instance):
+        super().__init__(instance)
+        if not graphics_queue_eligible(instance.spec):
+            raise ValueError("mixed recording requires prepared graphics packets and a compute-capable graphics queue")
+        self.execution_kind = "vulkan_prepared_graphics_queue_graph"
+        self.physical_submission_mode = "vulkan_complete_graphics_queue_immutable_frame"
+
+    def _frame(self, arguments, flattened=None, native_actions=None):
+        self._context.begin(arguments, flattened_args=flattened)
+        frame = None
+        try:
+            sources = []
+            for segment in self._segments:
+                if isinstance(segment, tuple):
+                    sources.extend(segment)
+                else:
+                    sources.append(native_actions[segment]._vulkan_graph_command())
+            frame = self._prepare(self._program, sources, self._context.flattened_args(), self.independent_graphics)
+            if not frame.uses_graphics_queue():
+                raise ValueError("mixed Graph recipe did not materialize on the graphics queue")
+            if self.independent_graphics and not frame.uses_independent_graphics():
+                raise ValueError("independent graphics recipe did not materialize its fork/join")
+        except BaseException:
+            if frame is not None:
+                frame.close()
+            raise
+        finally:
+            self._context.end()
+        self._frames.add(frame)
+        return frame
+
+    @property
+    def snapshot_graph_stats(self):
+        result = super().snapshot_graph_stats
+        rows = result if isinstance(result, tuple) else (result,)
+        path = (
+            "vulkan_prepared_graphics_fork_join_plan"
+            if self.independent_graphics
+            else "vulkan_prepared_graphics_queue_plan"
+        )
+        return tuple({**row, "last_path": path} for row in rows)
+
+
+class VulkanIndependentGraphicsBindingExecutor(VulkanGraphicsQueueBindingExecutor):
+    independent_graphics = True
+    physical_execution_queue = None
+
+    def __init__(self, instance):
+        super().__init__(instance)
+        if not independent_graphics_eligible(instance.spec):
+            raise ValueError("independent graphics recipe requires a disjoint buffer-only compute prefix")
+        self.execution_kind = "vulkan_prepared_graphics_fork_join_graph"
+        self.physical_submission_mode = "vulkan_complete_graphics_fork_join_immutable_frame"
+
+    def refine_physical_topology(self, tasks, commands):
+        # The outer fork/join is known even though vendor-internal draw commands
+        # remain opaque. Preserve task identities and the manifest's exactness.
+        middle = [i for i, task in enumerate(tasks) if task.kind == "native_action"]
+        if len(middle) != 1 or len(tasks) != len(commands):
+            raise ValueError("independent graphics physical topology does not match its complete recipe")
+        index = middle[0]
+        if index == 0 or index + 1 == len(tasks):
+            raise ValueError("independent graphics physical topology is missing a fork branch or consumer")
+        tasks, commands = list(tasks), list(commands)
+        for records in (tasks, commands):
+            records[index] = replace(records[index], depends_on=())
+            records[index + 1] = replace(records[index + 1], depends_on=(index - 1, index))
+        return tasks, commands

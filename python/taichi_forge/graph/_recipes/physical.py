@@ -1167,6 +1167,7 @@ def observe_graph_physical_manifest(definition, recipe, graph):
     # task normalization into a false exactness claim.
     command_topology_exact = False
     static_resources = {}
+    execution_queue = graph._instance.physical_execution_queue
 
     def append_task(
         kind,
@@ -1180,6 +1181,8 @@ def observe_graph_physical_manifest(definition, recipe, graph):
         command_depends_on=None,
     ):
         task_index = len(tasks)
+        if execution_queue is not None:
+            queue = execution_queue
         if depends_on is None:
             depends_on = () if task_index == 0 else (task_index - 1,)
         tasks.append(
@@ -1439,6 +1442,7 @@ def observe_graph_physical_manifest(definition, recipe, graph):
                 lifetime="submission",
             )
         )
+    tasks, commands = graph._instance.refine_physical_topology(tasks, commands)
     submissions = (
         (
             GraphPhysicalSubmissionManifest(
