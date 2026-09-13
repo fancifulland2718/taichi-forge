@@ -30,6 +30,100 @@ Supported constructors:
 the recommended compatibility path unless the caller already owns a
 display-ready frame.
 
+## Layout and packing
+
+For NumPy and packed ndarray frames, `transpose=True` uses Forge's image
+convention: the first two axes are `(width, height)`, with `y=0` at the bottom.
+Use `transpose=False` for a contiguous `(height, width, 4)` NumPy image or
+`(height, width)` packed array. Transpose exchanges axes; it does **not** flip
+top-origin camera images vertically. Perform any required vertical flip when
+producing the pixels. Texture frames default to their native `(width, height)`
+coordinates with `transpose=False`.
+
+Packed RGBA8 stores `R | (G << 8) | (B << 16) | (A << 24)` in each `ti.u32`.
+Both orientations are supported for device frames, including non-square images.
+
+## Borrow a GPU display target
+
+For a CUDA producer on the same GPU as GGUI Vulkan, `canvas.acquire_frame(w, h)`
+returns a `ti.ui.WritableDisplayFrame`. Its `pixels` is a Canvas-owned, packed
+RGBA8 dense view with shape `(width, height)`. A kernel accepting
+`ti.types.ndarray(dtype=ti.u32, ndim=2)` can write directly into this view.
+
+This is an explicit shared-storage API: missing CUDA-Vulkan sharing support
+raises `RuntimeError`, rather than silently allocating a staging fallback.
+Continue to use `set_image`/`DisplayFrame` for portable submission.
+
+Integration pattern (`render_or_copy` is the application's producer kernel):
+
+```python
+canvas = window.get_canvas()
+frame = canvas.acquire_frame(width, height)
+if frame is not None:
+    with frame:
+        render_or_copy(frame.pixels)
+        canvas.submit_frame(frame, track_source=True)
+    source_done = frame.source_completion
+    if window.show():
+        display_done = frame.completion
+```
+
+- Write through Forge's ordered CUDA execution path. Arbitrary external stream
+  writes are not implicitly joined; import/synchronize external input through
+  the [managed interop APIs](zero_copy_interop.en.md).
+- Finish with `submit_frame(frame)` or `frame.cancel()`. Leaving `with frame`
+  without submission cancels the write, including on exceptions.
+- Do not retain `frame.pixels` for later writes. Submission/cancellation seals
+  the lease; another acquire may return a different slot of the same size.
+- A visible window under backpressure may return `None`; keep pumping window
+  events with `show()`. Hidden rendering can wait for a frame slot at submission.
+- A submitted but not yet rendered image can be superseded by another image;
+  its display completion is cancelled. Cancelled writes do not replace the
+  cached image.
+- Choose new dimensions on the next acquire to resize the producer target.
+  The display viewport scales the image independently. New storage has no
+  promised initial pixel values; initialize every pixel you intend to display.
+- Destroying the window or resetting the runtime ends the write lease. No
+  borrowed view may be reused in a new window/runtime.
+
+### Two different completion boundaries
+
+| Object | What completion means | How to use it |
+| --- | --- | --- |
+| `frame.source_completion` | Ordered CUDA work submitted before `submit_frame(..., track_source=True)` has completed, including reading/copying application inputs. | Poll `done()` before returning an input slot to its producer; `wait()` explicitly blocks. `None` unless requested. |
+| `frame.completion` | The GGUI GPU submission consuming this image has completed. | Poll `done()` or explicitly `wait()` after successful rendering. It does not confirm on-screen presentation. |
+
+`DisplayCompletion.status` is `pending`, `submitted`, `complete`, `cancelled`,
+or `invalidated`. `done()` observes GPU readiness; `status` alone does not poll
+the GPU. Waiting before `Window.show()` (or an explicit render/readback) submits
+the image raises rather than hanging. Cancelled/invalidated tickets raise from
+`done()` and `wait()`. Successfully retired tickets remain complete after window
+destruction. Completion never grants permission to write an old borrowed view.
+
+`track_source` is only accepted for writable frames. Ordinary `submit_frame`
+still returns a boolean and does not allocate a new completion object. Poll
+at application slot-reuse boundaries; neither a per-frame global `ti.sync()`
+nor a busy polling loop is required by this API.
+
+### Redisplay without rewriting pixels
+
+```python
+completion = canvas.repeat_frame()
+if completion is not None:
+    window.show()
+```
+
+This reuses the exact last borrowed image that reached GGUI submission, not an
+arbitrary same-size slot. It retains that image until replaced or the window is
+destroyed. It does not reproduce prior GUI widgets/geometry, which the application
+should record again as needed. It adds no pixel-touch kernel or image copy, but
+still performs GPU ownership handoff and a graphics submission. `None` means
+backpressure or no cached borrowed image. Ordinary `DisplayFrame` submissions
+are not automatically cached by this interface.
+Redisplay increases actual submission counters, not `accepted_frames`, which
+counts new image inputs. Use `submitted_frames` and
+`zero_copy_render_submissions` to observe this path.
+
 ## Display Statistics
 
 `Window.get_display_stats()` exposes display submission counters for engine-side
@@ -50,13 +144,18 @@ Use `Window.reset_display_stats()` before a profiling window.
   direct device path. Other combinations retain the established staging path.
 - Contiguous host `uint8` RGBA NumPy images are submitted directly through the
   host RGBA8 path. Float NumPy images still need host-side conversion to RGBA8.
-- Packed `u32` device frames can use a Vulkan storage-buffer display path when
-  available. This is the lowest-overhead path when the producer already writes
-  packed RGBA8, but it is not intended to replace normal `set_image()` inputs.
+- Packed `u32` CUDA frames copy once into shared display storage when available;
+  Vulkan packed frames can be consumed as storage buffers. Borrowing lets a CUDA
+  producer write into display storage directly and fuse packing/overlays there.
+  Which path is faster depends on the complete producer and display workload.
 - The shared CUDA-Vulkan path is automatic: Vulkan owns the exportable buffer,
   CUDA imports it, and external semaphores transfer ownership. After the first
   handoff, the normal Vulkan render submission also releases the buffer for the
   next CUDA write, so steady state does not add a second graphics submission.
+- Image-only CUDA shared submissions use the GPU handoff without an additional
+  host CUDA flush. Mixed geometry retains its existing synchronization contract.
+- Vulkan Texture submission still copies into a GGUI-owned texture. This API
+  does not make external Vulkan images or arbitrary external streams zero-copy.
 - If capability or physical-device identity checks fail, the same `set_image()`
   call uses the established staging path. Applications do not need a platform-
   specific branch.

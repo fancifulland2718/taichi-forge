@@ -2594,15 +2594,29 @@ shared storage 或经过优化的 device-side staging 路径。
 
 | API | 输入 | 参数 / 局限 |
 | --- | --- | --- |
-| `DisplayFrame.from_numpy_rgba8(image, *, copy=False, transpose=True)` | host RGBA 图像 | `image` 必须是 shape `(H, W, 4)` 的 `uint8` 数组。除非 `copy=True`，否则必须 C-contiguous。 |
+| `DisplayFrame.from_numpy_rgba8(image, *, copy=False, transpose=True)` | host RGBA 图像 | `uint8`，默认 shape `(W, H, 4)`；`(H, W, 4)` 使用 `transpose=False`。除非 `copy=True`，否则须 C-contiguous；不自动上下翻转。 |
 | `DisplayFrame.from_texture(texture, *, transpose=False)` | `ti.Texture` | texture 必须属于兼容 graphics 后端。 |
 | `DisplayFrame.from_packed_u32_ndarray(image, *, transpose=True)` | 2D `ti.ndarray(ti.u32)` | 每个元素是 packed RGBA8。构造函数会缓存 field metadata 以便重复提交。 |
 
-### `Canvas.submit_frame(frame)`
+### `Canvas.acquire_frame(width, height)` / `Canvas.repeat_frame()`
+
+`acquire_frame` 在同 GPU 的 CUDA-Vulkan sharing 路径借用 Canvas 管理的 `WritableDisplayFrame`。
+向 `frame.pixels` 写入 packed RGBA8 后提交或取消；context manager 退出会取消未提交写入。
+共享能力不支持时抛异常，可见窗口背压时返回 `None`。这不是任意外部图像导入 API。
+
+`repeat_frame` 重显上一次实际提交的 borrowed image，返回 `DisplayCompletion`；背压或没有
+缓存图像时返回 `None`。它不复用可写 view，也不缓存 GUI/geometry 命令。
+
+布局、resize、所有权及 source/display 完成边界示例见[显示帧提交](display_frame.zh.md)。
+
+### `Canvas.submit_frame(frame, *, track_source=False)`
 
 位置：`taichi_forge.ui.canvas.Canvas`。
 
-向窗口显示链路提交一个 `DisplayFrame`。
+提交 `DisplayFrame`，或结束从此 Canvas 借用的 `WritableDisplayFrame` 写入。
+`track_source=True` 仅适用于后者，通过 `frame.source_completion.done()/wait()` 表示此前
+CUDA producer 工作完成。`frame.completion.done()/wait()` 则表示渲染提交后 GGUI GPU reader
+完成，不代表显示器上屏。普通提交不创建完成对象。
 
 ```python
 frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(color_buffer)

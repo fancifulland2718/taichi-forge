@@ -24,9 +24,12 @@ Storage description 不承诺每个 consumer 都能执行所有 layout。每个 
 | `ti.interop.capabilities()` | 同时查询旧 DLPack capability shape 与 provider-scoped capability。 | 只读 capability query。 |
 | 既有 NumPy、PyTorch、Paddle kernel 参数 | 保持已有应用源码兼容。 | 可资格验证时使用 direct path，否则保留既有 copy fallback 行为。 |
 | `canvas.set_image(image)` | 提交普通图像输入。 | 合格的 CUDA 图像自动使用 CUDA-Vulkan shared storage，否则使用既有 device/host staging。 |
+| `canvas.acquire_frame(width, height)` | 为 CUDA producer 借用 Canvas 自有 packed RGBA8 存储。 | 显式共享，不做 staging fallback；submit/cancel 结束写入借用。 |
 | `window.get_display_stats()` | 检查显示 admission 与实际 render path。 | 报告 `zero_copy_render_submissions` 和 `last_render_zero_copy`。 |
 
-显式 view API 返回 metadata object，不创建新的 payload allocation，也不会改变 source 原有 indexing API。
+storage-view API 返回 metadata object，不创建新的 payload allocation，也不会改变 source 原有 indexing API。
+显示借用则使用 Canvas 管理的可复用 allocation。完成通知与缓存重显见[显示帧提交](display_frame.zh.md)；
+source 消费完成与 display reader 完成是不同的边界。
 
 ## DLPack 导入
 

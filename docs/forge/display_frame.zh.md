@@ -27,6 +27,80 @@ canvas.submit_frame(frame)
 如 NumPy、field、ndarray、texture 仍是推荐的兼容路径，除非调用方已经持有
 display-ready frame。
 
+## 布局与打包
+
+NumPy 和 packed ndarray 的 `transpose=True` 使用 Forge 图像约定：前两轴为
+`(width, height)`，`y=0` 位于底部。连续的 `(height, width, 4)` NumPy 图像或
+`(height, width)` packed 数组应使用 `transpose=False`。transpose 只交换轴，**不做上下翻转**；
+顶端为原点的相机图像应在生产像素时完成所需翻转。Texture 默认 `transpose=False`，
+使用其原生 `(width, height)` 坐标。
+
+每个 `ti.u32` 像素按 `R | (G << 8) | (B << 16) | (A << 24)` 打包。
+device frame 的两种朝向均受支持，包括非方形图像。
+
+## 借用 GPU 显示目标
+
+CUDA producer 与 GGUI Vulkan 使用同一 GPU 时，`canvas.acquire_frame(w, h)` 返回
+`ti.ui.WritableDisplayFrame`。其 `pixels` 是 Canvas 管理的 packed RGBA8 dense view，
+形状为 `(width, height)`，可传给 `ti.types.ndarray(dtype=ti.u32, ndim=2)` kernel 参数。
+
+这是显式共享存储接口：CUDA-Vulkan sharing 不可用时抛出 `RuntimeError`，不会静默分配
+staging fallback。需要兼容提交时继续使用 `set_image`/`DisplayFrame`。
+
+接入模板（`render_or_copy` 是应用自己的 producer kernel）：
+
+```python
+canvas = window.get_canvas()
+frame = canvas.acquire_frame(width, height)
+if frame is not None:
+    with frame:
+        render_or_copy(frame.pixels)
+        canvas.submit_frame(frame, track_source=True)
+    source_done = frame.source_completion
+    if window.show():
+        display_done = frame.completion
+```
+
+- 通过 Forge 有序 CUDA 执行路径写入。任意外部 stream 的写入不会被隐式等待；外部输入应使用
+  [受管 interop 接口](zero_copy_interop.zh.md)导入并交接。
+- 写入必须以 `submit_frame(frame)` 或 `frame.cancel()` 结束；退出 `with frame` 时若尚未提交，
+  会自动取消，异常退出也一样。
+- 不得保留 `frame.pixels` 供之后写入。提交/取消后借用结束；再次 acquire 即使尺寸相同，也可能返回其他帧槽。
+- 可见窗口承受背压时可能返回 `None`，仍应调用 `show()` 处理窗口事件。隐藏渲染可在提交时等待可用帧槽。
+- 尚未实际渲染的已提交图像可被新图像覆盖，其 display completion 会取消。取消写入不会替换缓存图像。
+- 下一次 acquire 可指定新尺寸；显示 viewport 会独立缩放图像。新存储不保证初始像素值，应写好所有待显示像素。
+- window destroy 或 runtime reset 会结束借用；旧 view 不得在新窗口或新 runtime 中使用。
+
+### 两种不同的完成边界
+
+| 对象 | 完成含义 | 使用方法 |
+| --- | --- | --- |
+| `frame.source_completion` | `submit_frame(..., track_source=True)` 之前已提交的有序 CUDA 工作完成，包括读取/复制应用输入。 | 输入槽交还 producer 前检查 `done()`；`wait()` 显式阻塞。不请求时为 `None`。 |
+| `frame.completion` | 消费此图像的 GGUI GPU submission 完成。 | 成功渲染后检查 `done()`，或显式 `wait()`。不代表显示器已经上屏。 |
+
+`DisplayCompletion.status` 为 `pending`、`submitted`、`complete`、`cancelled` 或 `invalidated`。
+`done()` 检查 GPU 完成状态，单独读取 `status` 不轮询 GPU。`Window.show()` 或显式 render/readback
+真正提交图像之前调用 `wait()` 会报错，不会无限等待。cancelled/invalidated 的 `done()` 和 `wait()`
+都会报错；已成功完成的 ticket 在窗口销毁后仍保持完成。任何完成状态都不授权重新写入旧借用 view。
+
+`track_source` 只用于 writable frame。普通 `submit_frame` 仍返回 bool，不额外创建完成对象。
+应在应用复用输入槽时查询完成，不需要因为该接口逐帧调用全局 `ti.sync()` 或忙等轮询。
+
+### 不重写像素的缓存重显
+
+```python
+completion = canvas.repeat_frame()
+if completion is not None:
+    window.show()
+```
+
+重显精确复用上一次进入 GGUI submission 的 borrowed image，而非随便选取一个同尺寸槽位。
+图像保留到被替换或窗口销毁。之前的 GUI widget/几何不会一起缓存，应用需要时应重新记录。
+该路径不增加 pixel-touch kernel 或图像复制，但仍需 GPU 所有权交接和 graphics submission。
+返回 `None` 表示背压或没有可用缓存图像；普通 `DisplayFrame` 不由此接口自动缓存。
+重显增加实际提交计数，不增加代表新输入图像的 `accepted_frames`；可通过
+`submitted_frames` 和 `zero_copy_render_submissions` 观察该路径。
+
 ## Display stats
 
 `Window.get_display_stats()` 暴露引擎侧 profiling 使用的显示提交计数，包括 accepted、
@@ -44,13 +118,14 @@ submission，`last_render_zero_copy` 报告最近一次 render submission path�
   allocation。Vulkan-native 图像保持 direct device path，其它组合保留既有 staging。
 - C-contiguous host `uint8` RGBA NumPy 图像会直接走 host RGBA8 提交路径。float
   NumPy 图像仍需要在 host 侧转换为 RGBA8。
-- packed `u32` device frame 在可用时可走 Vulkan storage-buffer 显示路径。
-  当 producer 已经直接写 packed RGBA8 时，这是固定开销最低的路径，但它不是普通
-  `set_image()` 输入的替代 API。
+- packed `u32` CUDA frame 在可用时复制一次到共享显示存储；Vulkan packed frame 可直接作为 storage buffer 消费。
+  借用接口允许 CUDA producer 直接写显示存储，并在其中合并 packing/overlay。实际快慢取决于完整生产与显示流程。
 - Shared CUDA-Vulkan path 会自动建立：Vulkan 持有 exportable buffer，CUDA 导入同一
   allocation，并通过 external semaphore 交换所有权。初次 handoff 后，正常 Vulkan
   render submission 同时把 buffer 释放给下一次 CUDA write，steady state 不增加第二次
   graphics submission。
+- 只有共享图像的 CUDA 提交使用 GPU handoff，不再额外执行 host CUDA flush；混合几何仍沿用既有同步合同。
+- Vulkan Texture 提交仍复制到 GGUI 自有 texture；本接口不使外部 Vulkan image 或任意外部 stream 自动获得零复制。
 - capability 或 physical-device identity 检查失败时，同一个 `set_image()` 调用使用既有
   staging path；应用无需增加平台特化分支。
 - 可见窗口 present 受平台 WSI/swapchain 合同限制。测量 display sink 原始吞吐时，hidden/offscreen 提交更合适。

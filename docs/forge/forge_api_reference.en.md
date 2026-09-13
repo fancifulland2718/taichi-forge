@@ -3144,15 +3144,35 @@ Constructors:
 
 | API | Input | Parameters / limits |
 | --- | --- | --- |
-| `DisplayFrame.from_numpy_rgba8(image, *, copy=False, transpose=True)` | Host RGBA image | `image` must be a `uint8` array with shape `(H, W, 4)`. It must be C-contiguous unless `copy=True`. |
+| `DisplayFrame.from_numpy_rgba8(image, *, copy=False, transpose=True)` | Host RGBA image | `uint8`, default shape `(W, H, 4)`; use `transpose=False` for `(H, W, 4)`. C-contiguous unless `copy=True`; vertical origin is not flipped. |
 | `DisplayFrame.from_texture(texture, *, transpose=False)` | `ti.Texture` | Texture must belong to a compatible graphics backend. |
 | `DisplayFrame.from_packed_u32_ndarray(image, *, transpose=True)` | 2D `ti.ndarray(ti.u32)` | Each element is packed RGBA8. The constructor caches field metadata for repeated submission. |
 
-### `Canvas.submit_frame(frame)`
+### `Canvas.acquire_frame(width, height)` / `Canvas.repeat_frame()`
+
+`acquire_frame` borrows a Canvas-owned `WritableDisplayFrame` for same-GPU
+CUDA-Vulkan sharing. Write packed RGBA8 into `frame.pixels`, then submit or
+cancel; a context-manager exit cancels unsubmitted writes. Unsupported sharing
+raises; visible-window backpressure returns `None`. This is not an arbitrary
+external-image import API.
+
+`repeat_frame` queues the last actually submitted borrowed image and returns a
+`DisplayCompletion`, or `None` for backpressure/no cached image. It does not
+reuse a writable view or cache GUI/geometry commands.
+
+See [Display frame submission](display_frame.en.md) for layout, resizing,
+ownership, and source-versus-display completion examples.
+
+### `Canvas.submit_frame(frame, *, track_source=False)`
 
 Location: `taichi_forge.ui.canvas.Canvas`.
 
-Submit a `DisplayFrame` to the window display path.
+Submit a `DisplayFrame` or seal a `WritableDisplayFrame` borrowed from this
+Canvas. `track_source=True` is only valid for the latter and provides
+`frame.source_completion.done()/wait()` for preceding CUDA producer work.
+`frame.completion.done()/wait()` instead covers the GGUI GPU reader after
+render submission, not on-screen presentation. Ordinary submissions do not
+create completion objects.
 
 ```python
 frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(color_buffer)

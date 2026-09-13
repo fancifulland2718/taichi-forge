@@ -24,9 +24,13 @@ A storage description does not promise that every consumer can execute every lay
 | `ti.interop.capabilities()` | Query both the legacy DLPack capability shape and provider-scoped capabilities. | Read-only capability query. |
 | Historical NumPy, PyTorch, and Paddle kernel arguments | Preserve existing application source compatibility. | Uses a qualified direct path where available and preserves established copy fallback behavior otherwise. |
 | `canvas.set_image(image)` | Submit ordinary image inputs. | Automatically uses CUDA-Vulkan shared storage for qualified CUDA images; otherwise uses the established device or host staging path. |
+| `canvas.acquire_frame(width, height)` | Borrow Canvas-owned packed RGBA8 storage for a CUDA producer. | Explicit shared-storage path; no staging fallback. Submit/cancel ends the write lease. |
 | `window.get_display_stats()` | Inspect display admission and the selected render path. | Reports `zero_copy_render_submissions` and `last_render_zero_copy`. |
 
-The explicit view APIs return metadata objects, not new allocations. They do not change the source object's indexing API.
+The storage-view APIs return metadata objects, not new allocations. They do not change the source object's indexing API.
+Display borrowing instead uses Canvas-owned reusable allocations. See
+[Display frame submission](display_frame.en.md) for completion and cached
+redisplay; source-consumption completion and display-reader completion differ.
 
 ## DLPack import
 
