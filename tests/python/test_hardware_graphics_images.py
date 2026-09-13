@@ -50,7 +50,7 @@ def _recording(pipeline):
 
 
 @pytest.mark.parametrize("binding_recipe", [False, True])
-@test_utils.test(arch=ti.vulkan, offline_cache=False)
+@test_utils.test(arch=ti.vulkan, offline_cache=False, gfx_cmdlist_lazy_submit=True, gfx_cmdlist_max_dispatches=10000)
 def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypatch, binding_recipe):
     if not ti.hardware.graphics.is_available():
         pytest.skip("Vulkan graphics commands are unavailable")
@@ -73,6 +73,11 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             for channel in ti.static(range(4)):
                 result[x, y, channel] = sampled[channel]
 
+    @ti.kernel
+    def finish(result: ti.types.ndarray(dtype=ti.f32, ndim=3)):
+        for x, y, channel in result:
+            result[x, y, channel] += 0.125
+
     with _sampled_pipeline() as pipeline:
         vertices, uniform = _quad_resources()
         recording = _recording(pipeline)
@@ -91,6 +96,7 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             ti.graph.Arg(ti.graph.ArgKind.TEXTURE, "target", ndim=2),
             ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=3),
         )
+        builder.dispatch(finish, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=3))
         materialization = None
         if binding_recipe:
             from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
@@ -105,7 +111,10 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             materialization = definition.materialization_context(provider_set=catalog.provider_set)
             materialized = materialization.materialize(recipe)
             graph = materialized.executor
-            assert materialized.manifest.submissions[0].replay_mode == "vulkan_secondary_frames_with_ordered_graphics_published"
+            assert (
+                materialized.manifest.submissions[0].replay_mode
+                == "vulkan_secondary_frames_with_ordered_graphics_published"
+            )
             assert recipe.planned_physical_id != catalog.baseline.recipe.planned_physical_id
         else:
             graph = builder.compile()
@@ -149,10 +158,12 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             graph.submit(bindings).wait()
             after = dict(program._debug_vulkan_queue_submission_stats())
             # The real consumer submission waits on graphics directly; no
-            # separate bridge-only command buffer is recorded or submitted.
+            # separate bridge-only command buffer is recorded or submitted,
+            # and the graphics wait must not split the two ordinary consumers.
+            # The explicit batching setting removes timer/compilation noise.
             assert after["queue_submit_calls"] - before["queue_submit_calls"] == 3
             assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 3
-            expected = np.broadcast_to([red, 0.25, 0.5, 1.0], (32, 16, 4))
+            expected = np.broadcast_to(np.array([red, 0.25, 0.5, 1.0]) + 0.125, (32, 16, 4))
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
         if binding_recipe:
             stats = graph.execution_stats()
@@ -160,7 +171,7 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             assert [s.last_path for s in stats.segments if s.kind == "cgraph"] == [
                 "vulkan_prepared_compute_with_ordered_graphics"
             ] * 2
-            assert stats.compiled_task_count == 2
+            assert stats.compiled_task_count == 3
             assert stats.counters_complete is False
 
         monkeypatch.setattr(recording, "_prepare_packet", prepare)
@@ -204,6 +215,64 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
                 frame.run()
             materialized.close()
             materialization.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_graphics_waits_for_cached_compute_buffer_producer():
+    """A replayed buffer producer must publish the graphics queue dependency."""
+
+    @ti.kernel
+    def prepare(scratch: ti.types.ndarray(ti.i32, 1), selector: ti.i32):
+        for i in scratch:
+            value = selector
+            for _ in range(256):
+                value = (value * 109 + 89) & 65535
+            scratch[i] = value
+
+    @ti.kernel
+    def publish(scratch: ti.types.ndarray(ti.i32, 1), uniform: ti.types.ndarray(ti.f32, 1)):
+        # An even number of odd multiply/add steps preserves the selector bit.
+        u = 0.25 + 0.5 * (scratch[scratch.shape[0] - 1] & 1)
+        uniform[0], uniform[1] = u, 0.5
+        uniform[2], uniform[3] = u, 0.5
+
+    @ti.kernel
+    def paint(image: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8)):
+        for x, y in image:
+            image.store(ti.Vector([x, y]), ti.Vector([float(x >= 8), 0.25, 0.5, 1.0]))
+
+    @ti.kernel
+    def read(image: ti.types.texture(2)) -> ti.f32:
+        return image.fetch(ti.Vector([8, 4]), 0).x
+
+    with _sampled_pipeline() as pipeline:
+        vertices, uniform = _quad_resources()
+        scratch = ti.ndarray(ti.i32, 262144)
+        source = ti.Texture(ti.Format.rgba8, (16, 8))
+        target = ti.Texture(ti.Format.rgba8, (16, 8))
+        paint(source)
+        ti.sync()
+        builder = ti.graph.GraphBuilder()
+        scratch_arg = ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "scratch", ti.i32, ndim=1)
+        builder.dispatch(prepare, scratch_arg, ti.graph.Arg(ti.graph.ArgKind.SCALAR, "selector", ti.i32))
+        builder.dispatch(publish, scratch_arg, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "uniform", ti.f32, ndim=1))
+        builder.append_native(_recording(pipeline), admission="auto")
+        graph = builder.compile()
+        try:
+            bindings = graph.bind(
+                dict(scratch=scratch, selector=0, uniform=uniform, source=source, target=target, vertices=vertices)
+            )
+            # No host wait between the producer Graph and its graphics consumer.
+            # Changing only a scalar exercises native record and cached replay.
+            for selector in (0, 1, 0, 1, 0, 1):
+                bindings.update(selector=selector)
+                graph.run(bindings)
+                ti.sync()
+                assert read(target) == pytest.approx(selector, abs=1 / 255)
+            segments = [s for s in graph.execution_stats().segments if s.kind == "cgraph"]
+            assert segments[0].last_path == "vulkan_replay"
+        finally:
+            graph.close()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

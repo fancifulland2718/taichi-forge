@@ -2338,14 +2338,10 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
   }
 
-  // A graphics consumer must be published when it is ready, not held by the
-  // ordinary lazy-submit timeout until another frame or host synchronization.
-  // Carry its cross-queue wait on this real work instead of an empty bridge.
-  if (pending_graphics_completion_ && current_cmdlist_) {
-    flush();
-  } else {
-    submit_current_cmdlist_if_timeout();
-  }
+  // A pending graphics wait is an ordering dependency, not a flush boundary.
+  // Let ordinary consumers share a command list; flush()/batch completion
+  // attaches the wait once when that list is actually submitted.
+  submit_current_cmdlist_if_timeout();
 }
 
 void GfxRuntime::GraphReplayExecutable::reset() {
@@ -5593,6 +5589,8 @@ StreamSemaphore GfxRuntime::submit_compute_commands(CommandList *commands) {
   // Successful submit owns the wait reference, including inside a batch.
   // On failure leave it available to the runtime's recovery/close boundary.
   pending_graphics_completion_.reset();
+  // Publish every compute path, including cached Graph replay. Otherwise a
+  // later graphics operation can wait an older token and race this producer.
   latest_compute_completion_ = completion;
   return completion;
 }
