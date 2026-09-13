@@ -375,9 +375,14 @@ Texture::Texture(Program *prog,
       dimension_(dimension),
       sampler_config_(sampler_config),
       prog_(prog) {
+  TI_ERROR_IF(sampler_config.compare_op < -1 || sampler_config.compare_op > 7,
+              "Invalid sampler compare_op");
+  TI_ERROR_IF(sampler_config.compare_op >= 0 &&
+                  (format != BufferFormat::depth32f || dimension != ImageDimension::d2D),
+              "Comparison sampling requires a 2D depth32f Texture");
   TI_ERROR_IF(sampler_config.has_extended_sampling() &&
                   prog->compile_config().arch != Arch::vulkan,
-              "Extended mip/LOD/anisotropic sampler state currently requires "
+              "Extended mip/LOD/anisotropic/comparison sampler state currently requires "
               "the Vulkan backend");
   TI_ERROR_IF(mip_levels < 1, "Texture mip_levels must be positive");
   TI_ERROR_IF(mip_levels > 1 &&

@@ -568,8 +568,9 @@ SType IRBuilder::get_pointer_type(const SType &value_type,
 }
 
 SType IRBuilder::get_underlying_image_type(const SType &primitive_type,
-                                           int num_dimensions) {
-  auto key = std::make_pair(primitive_type.id, num_dimensions);
+                                           int num_dimensions, bool depth) {
+  // Dimensions are positive; negative keys distinguish depth sampled types.
+  auto key = std::make_pair(primitive_type.id, depth ? -num_dimensions : num_dimensions);
 
   auto it = sampled_image_underlying_image_type_.find(key);
   if (it != sampled_image_underlying_image_type_.end()) {
@@ -590,7 +591,7 @@ SType IRBuilder::get_underlying_image_type(const SType &primitive_type,
   }
   ib_.begin(spv::OpTypeImage)
       .add_seq(img_id, primitive_type, dim,
-               /*Depth=*/0, /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/1,
+               /*Depth=*/depth ? 1 : 0, /*Arrayed=*/0, /*MS=*/0, /*Sampled=*/1,
                spv::ImageFormatUnknown)
       .commit(&global_);
 
@@ -603,14 +604,14 @@ SType IRBuilder::get_underlying_image_type(const SType &primitive_type,
 }
 
 SType IRBuilder::get_sampled_image_type(const SType &primitive_type,
-                                        int num_dimensions) {
-  auto key = std::make_pair(primitive_type.id, num_dimensions);
+                                        int num_dimensions, bool depth) {
+  auto key = std::make_pair(primitive_type.id, depth ? -num_dimensions : num_dimensions);
   auto it = sampled_image_ptr_tbl_.find(key);
   if (it != sampled_image_ptr_tbl_.end()) {
     return it->second;
   }
 
-  SType image_type = get_underlying_image_type(primitive_type, num_dimensions);
+  SType image_type = get_underlying_image_type(primitive_type, num_dimensions, depth);
   int img_id = image_type.id;
 
   SType sampled_t;
@@ -1075,8 +1076,8 @@ Value IRBuilder::struct_array_access_chunked(const SType &res_type,
 Value IRBuilder::texture_argument(int num_channels,
                                   int num_dimensions,
                                   uint32_t descriptor_set,
-                                  uint32_t binding) {
-  auto texture_type = this->get_sampled_image_type(f32_type(), num_dimensions);
+                                  uint32_t binding, bool depth) {
+  auto texture_type = this->get_sampled_image_type(f32_type(), num_dimensions, depth);
   auto texture_ptr_type =
       get_pointer_type(texture_type, spv::StorageClassUniformConstant);
 
@@ -1515,18 +1516,30 @@ Value IRBuilder::sample_texture_grad(Value texture_var,
                     static_cast<uint32_t>(spv::ImageOperandsGradMask), dx, dy);
 }
 
+Value IRBuilder::sample_texture_compare(Value texture_var,
+                                         const std::vector<Value> &args) {
+  TI_ASSERT(args.size() == 3);
+  auto image = load_variable(texture_var, get_sampled_image_type(f32_type(), 2, true));
+  auto uv = make_value(spv::OpCompositeConstruct, t_v2_fp32_, args[0], args[1]);
+  const auto zero = float_immediate_number(t_fp32_, 0.0);
+  auto comparison = make_value(spv::OpImageSampleDrefExplicitLod, t_fp32_, image,
+      uv, args[2], static_cast<uint32_t>(spv::ImageOperandsLodMask), zero);
+  // TextureOpStmt uses the existing composite-extract expression contract.
+  return make_value(spv::OpCompositeConstruct, t_v4_fp32_, comparison, zero, zero, zero);
+}
+
 Value IRBuilder::fetch_texel(Value texture_var,
                              const std::vector<Value> &args,
-                             Value lod) {
+                             Value lod, bool depth) {
   auto sampled_image = this->load_variable(
-      texture_var, this->get_sampled_image_type(f32_type(), args.size()));
+      texture_var, this->get_sampled_image_type(f32_type(), args.size(), depth));
   if (texture_var.flag == ValueKind::kNonUniformTexturePtr) {
     decorate(spv::OpDecorate, sampled_image, spv::DecorationNonUniform);
   }
 
   // OpImageFetch requires operand with OpImageType
   // We have to extract the underlying OpImage from OpSampledImage here
-  SType image_type = get_underlying_image_type(f32_type(), args.size());
+  SType image_type = get_underlying_image_type(f32_type(), args.size(), depth);
   Value image_val = make_value(spv::OpImage, image_type, sampled_image);
 
   Value uv;

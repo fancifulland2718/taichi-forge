@@ -365,9 +365,10 @@ class IRBuilder {
   SType get_pointer_type(const SType &value_type,
                          spv::StorageClass storage_class);
   // Get an image type
-  SType get_sampled_image_type(const SType &primitive_type, int num_dimensions);
+  SType get_sampled_image_type(const SType &primitive_type, int num_dimensions,
+                               bool depth = false);
   SType get_underlying_image_type(const SType &primitive_type,
-                                  int num_dimensions);
+                                  int num_dimensions, bool depth = false);
   SType get_storage_image_type(BufferFormat format, int num_dimensions);
   SType get_storage_image_sampled_type(BufferFormat format) const;
   SType get_storage_image_texel_type(BufferFormat format);
@@ -413,7 +414,8 @@ class IRBuilder {
   Value texture_argument(int num_channels,
                          int num_dimensions,
                          uint32_t descriptor_set,
-                         uint32_t binding);
+                         uint32_t binding,
+                         bool depth = false);
   Value texture_array_argument(int num_channels,
                                int num_dimensions,
                                uint32_t descriptor_set,
@@ -466,10 +468,11 @@ class IRBuilder {
                        Value lod);
 
   Value sample_texture_grad(Value texture_var, const std::vector<Value> &args);
+  Value sample_texture_compare(Value texture_var, const std::vector<Value> &args);
 
   Value fetch_texel(Value texture_var,
                     const std::vector<Value> &args,
-                    Value lod);
+                    Value lod, bool depth = false);
 
   Value image_load(Value image_var,
                    const std::vector<Value> &args,

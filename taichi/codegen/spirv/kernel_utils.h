@@ -135,8 +135,10 @@ struct TaskAttributes {
     int binding{0};
     bool is_storage{false};
     int lod{0};
+    bool comparison{false};
+    bool uses_sampling{false};  // Fetch-only bindings ignore sampler comparison state.
 
-    TI_IO_DEF(arg_id, binding, is_storage, lod);
+    TI_IO_DEF(arg_id, binding, is_storage, lod, comparison, uses_sampling);
   };
 
   struct AccelerationStructureBind {

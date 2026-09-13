@@ -159,6 +159,7 @@ std::string texture_op_type_name(TextureOpType type) {
     REGISTER_TYPE(kLoad);
     REGISTER_TYPE(kStore);
     REGISTER_TYPE(kSampleGrad);
+    REGISTER_TYPE(kSampleCompare);
 
 #undef REGISTER_TYPE
     default:

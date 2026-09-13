@@ -143,7 +143,9 @@ class Kernel;
 //       this compile-time proof, even when the optimized kernel key matches.
 //  33 - Storage texture views retain mip level in callable parameters and
 //       SPIR-V descriptor metadata; old artifacts silently bound level zero.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 33;
+//  34 - Sampled texture descriptor metadata distinguishes comparison sampling
+//       from ordinary filtering and fetch-only bindings.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 34;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

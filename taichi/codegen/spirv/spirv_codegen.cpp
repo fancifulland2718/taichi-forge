@@ -408,6 +408,7 @@ class TaskCodegen : public IRVisitor {
 
     fill_snode_to_root();
     collect_ray_query_result_masks();
+    collect_comparison_textures();
     ir_ = std::make_shared<spirv::IRBuilder>(arch_, caps_);
   }
 
@@ -4223,6 +4224,7 @@ class TaskCodegen : public IRVisitor {
         TextureBind bind;
         bind.arg_id = arg_id;
         bind.binding = binding;
+        bind.uses_sampling = sampling_textures_.count(arg_id) != 0;
         texture_binds_.push_back(bind);
         argid_to_tex_value_[arg_id] = array;
         sampled_image_descriptor_count_ += capacity;
@@ -4257,10 +4259,13 @@ class TaskCodegen : public IRVisitor {
                     "device limit");
         int binding = binding_head_++;
         val = ir_->texture_argument(/*num_channels=*/4, stmt->dimensions,
-                                    /*descriptor_set=*/0, binding);
+                                    /*descriptor_set=*/0, binding,
+                                    comparison_textures_.count(arg_id) != 0);
         TextureBind bind;
         bind.arg_id = arg_id;
         bind.binding = binding;
+        bind.comparison = comparison_textures_.count(arg_id) != 0;
+        bind.uses_sampling = sampling_textures_.count(arg_id) != 0;
         texture_binds_.push_back(bind);
         argid_to_tex_value_[arg_id] = val;
         ++sampled_image_descriptor_count_;
@@ -4273,7 +4278,14 @@ class TaskCodegen : public IRVisitor {
   void visit(TextureOpStmt *stmt) override {
     spirv::Value tex = ir_->query_value(stmt->texture_ptr->raw_name());
     spirv::Value val;
-    if (stmt->op == TextureOpType::kSampleGrad) {
+    if (stmt->op == TextureOpType::kSampleCompare) {
+      std::vector<spirv::Value> args;
+      for (auto *arg : stmt->args) {
+        args.push_back(ir_->query_value(arg->raw_name()));
+      }
+      val = ir_->sample_texture_compare(tex, args);
+      ir_->register_value(stmt->raw_name(), val);
+    } else if (stmt->op == TextureOpType::kSampleGrad) {
       std::vector<spirv::Value> args;
       for (auto *arg : stmt->args) {
         args.push_back(ir_->query_value(arg->raw_name()));
@@ -4293,7 +4305,9 @@ class TaskCodegen : public IRVisitor {
         val = ir_->sample_texture(tex, args, lod);
       } else if (stmt->op == TextureOpType::kFetchTexel) {
         // Texel fetch
-        val = ir_->fetch_texel(tex, args, lod);
+        const auto *ptr = stmt->texture_ptr->as<TexturePtrStmt>();
+        const auto &arg_id = ptr->arg_load_stmt->as<ArgLoadStmt>()->arg_id;
+        val = ir_->fetch_texel(tex, args, lod, comparison_textures_.count(arg_id) != 0);
       }
       ir_->register_value(stmt->raw_name(), val);
     } else if (stmt->op == TextureOpType::kLoad ||
@@ -4315,6 +4329,31 @@ class TaskCodegen : public IRVisitor {
       }
     } else {
       TI_NOT_IMPLEMENTED;
+    }
+  }
+
+  void collect_comparison_textures() {
+    const auto ops = irpass::analysis::gather_statements(task_ir_, [](Stmt *item) {
+      return item->is<TextureOpStmt>();
+    });
+    for (const auto *item : ops) {
+      const auto *op = item->as<TextureOpStmt>();
+      if (op->op == TextureOpType::kSampleCompare || op->op == TextureOpType::kSampleLod ||
+          op->op == TextureOpType::kSampleGrad) {
+        const auto *ptr = op->texture_ptr->as<TexturePtrStmt>();
+        sampling_textures_.insert(ptr->arg_load_stmt->as<ArgLoadStmt>()->arg_id);
+      }
+      if (op->op == TextureOpType::kSampleCompare) {
+        const auto *ptr = op->texture_ptr->as<TexturePtrStmt>();
+        comparison_textures_.insert(ptr->arg_load_stmt->as<ArgLoadStmt>()->arg_id);
+      }
+    }
+    for (const auto *item : ops) {
+      const auto *op = item->as<TextureOpStmt>();
+      const auto *ptr = op->texture_ptr->as<TexturePtrStmt>();
+      TI_ERROR_IF(comparison_textures_.count(ptr->arg_load_stmt->as<ArgLoadStmt>()->arg_id) &&
+                      (op->op == TextureOpType::kSampleLod || op->op == TextureOpType::kSampleGrad),
+                  "A comparison texture cannot also use ordinary filtered sampling; use fetch for raw depth");
     }
   }
 
@@ -7410,6 +7449,8 @@ class TaskCodegen : public IRVisitor {
     std::unordered_map<BufferInfo, uint32_t, BufferInfoHasher>
       buffer_access_map_;
   std::vector<TextureBind> texture_binds_;
+  std::set<std::vector<int>> comparison_textures_;
+  std::set<std::vector<int>> sampling_textures_;
   std::uint64_t sampled_image_descriptor_count_{0};
   std::vector<AccelerationStructureBind> acceleration_structure_binds_;
   std::unordered_map<std::vector<int>,

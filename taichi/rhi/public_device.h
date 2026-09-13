@@ -163,10 +163,12 @@ struct ImageSamplerConfig {
   float min_lod{0.0f};
   float max_lod{-1.0f};  // -1 means no upper clamp.
   float max_anisotropy{1.0f};
+  int compare_op{-1};  // -1 disables comparison; 0..7 follow VkCompareOp.
 
   bool has_extended_sampling() const {
     return mip_filter != ImageFilter::nearest || lod_bias != 0.0f ||
-           min_lod != 0.0f || max_lod != -1.0f || max_anisotropy != 1.0f;
+           min_lod != 0.0f || max_lod != -1.0f || max_anisotropy != 1.0f ||
+           compare_op != -1;
   }
 
   bool operator==(const ImageSamplerConfig &other) const {
@@ -176,7 +178,7 @@ struct ImageSamplerConfig {
            address_mode_w == other.address_mode_w &&
            mip_filter == other.mip_filter && lod_bias == other.lod_bias &&
            min_lod == other.min_lod && max_lod == other.max_lod &&
-           max_anisotropy == other.max_anisotropy;
+           max_anisotropy == other.max_anisotropy && compare_op == other.compare_op;
   }
 
   bool operator!=(const ImageSamplerConfig &other) const {

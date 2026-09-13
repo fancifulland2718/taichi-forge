@@ -32,6 +32,8 @@ def kernel_intrinsic_operations(_operation):
             layouts=("sampled_image", "storage_image"),
             numeric_contracts=(
                 "sample_lod:explicit_lod_vec4_f32",
+                "sample_grad:explicit_gradients_2d_vec4_f32",
+                "sample_compare:reference_vs_depth_2d_scalar_f32",
                 "fetch:texel_vec4_f32",
                 "storage_load_store:format_sampled_type",
             ),
@@ -44,7 +46,8 @@ def kernel_intrinsic_operations(_operation):
             notes=(
                 "sample_lod uses immutable per-texture min/mag filter and U/V/W "
                 "address modes; Vulkan sampler objects are cached per device.",
-                "2D Vulkan Textures can allocate explicit mip chains; sampled views span the chain and rw_texture(lod=N) binds one allocated level. Other dimensions remain single-level. No automatic mip generation, anisotropy or comparison mode.",
+                "2D Vulkan Textures can allocate explicit mip chains; sampled views span the chain and rw_texture(lod=N) binds one allocated level. Other dimensions remain single-level; mip generation is explicit.",
+                "SamplerConfig exposes mip filtering, LOD bias/clamps and capability-checked anisotropy. Comparison sampling requires a 2D depth32f texture with compare_op and sample_compare or a matching SPIR-V shadow sampler; it is not supported by TextureCollection.",
                 "fetch uses integer texel coordinates and ignores sampler configuration.",
                 "Capable runtimes offer complete-recipe immutable secondary frames for sampled/storage images; closed layout cycles preserve upload and graphics ordering without per-image scans on unchanged replay. Ordinary Graph execution is unchanged.",
             ),

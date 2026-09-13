@@ -1298,6 +1298,22 @@ void TextureOpExpression::type_check(const CompileConfig *config) {
                         arg_type->to_string()));
       }
     }
+  } else if (op == TextureOpType::kSampleCompare) {
+    if (config->arch != Arch::vulkan || ptr->num_dims != 2 || ptr->is_storage ||
+        ptr->collection_capacity > 0) {
+      ErrorEmitter(TaichiTypeError(), this,
+                   "sample_compare requires a single 2D Vulkan sampled texture");
+    }
+    if (args.size() != 3) {
+      ErrorEmitter(TaichiTypeError(), this, "sample_compare requires UV and depth reference");
+    }
+    for (int i = 0; i < args.size(); ++i) {
+      TI_ASSERT_TYPE_CHECKED(args[i]);
+      if (args[i].get_rvalue_type() != PrimitiveType::f32) {
+        ErrorEmitter(TaichiTypeError(), this,
+                     "sample_compare coordinates and reference must be f32");
+      }
+    }
   } else if (op == TextureOpType::kSampleGrad) {
     if (config->arch != Arch::vulkan || ptr->num_dims != 2 || ptr->is_storage) {
       ErrorEmitter(TaichiTypeError(), this,

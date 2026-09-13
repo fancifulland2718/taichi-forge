@@ -5542,7 +5542,8 @@ void export_lang(py::module &m) {
       .def_readwrite("lod_bias", &ImageSamplerConfig::lod_bias)
       .def_readwrite("min_lod", &ImageSamplerConfig::min_lod)
       .def_readwrite("max_lod", &ImageSamplerConfig::max_lod)
-      .def_readwrite("max_anisotropy", &ImageSamplerConfig::max_anisotropy);
+      .def_readwrite("max_anisotropy", &ImageSamplerConfig::max_anisotropy)
+      .def_readwrite("compare_op", &ImageSamplerConfig::compare_op);
 
   py::class_<Texture>(m, "Texture")
       .def("device_allocation_ptr", &Texture::get_device_allocation_ptr_as_int)
@@ -7402,7 +7403,7 @@ void export_lang(py::module &m) {
 
   auto &&texture =
       py::enum_<TextureOpType>(m, "TextureOpType", py::arithmetic());
-  for (int t = 0; t <= (int)TextureOpType::kSampleGrad; t++)
+  for (int t = 0; t <= (int)TextureOpType::kSampleCompare; t++)
     texture.value(texture_op_type_name(TextureOpType(t)).c_str(),
                   TextureOpType(t));
   texture.export_values();

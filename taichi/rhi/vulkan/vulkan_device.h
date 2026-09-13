@@ -461,6 +461,8 @@ class VulkanPipeline : public Pipeline {
   // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
   void validate_color_attachment_types(const std::vector<int> &types) const;
   bool color_attachment_blends(std::size_t index) const;
+  void validate_sampled_texture(std::uint32_t set, std::uint32_t binding,
+                                bool comparison) const;
 
   std::unordered_map<uint32_t, VulkanResourceSet> &
   get_resource_set_templates() {
@@ -518,6 +520,7 @@ class VulkanPipeline : public Pipeline {
       graphics_pipeline_dynamic_;
 
   std::unordered_map<uint32_t, VulkanResourceSet> set_templates_;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, bool> comparison_samplers_;
   std::vector<vkapi::IVkDescriptorSetLayout> set_layouts_;
   std::vector<VkShaderModule> shader_modules_;
   vkapi::IVkPipeline pipeline_{VK_NULL_HANDLE};

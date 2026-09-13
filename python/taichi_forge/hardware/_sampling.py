@@ -15,6 +15,9 @@ _ADDRESS_MODES = {
     "mirrored_repeat": _ti_core.ImageAddressMode.mirrored_repeat,
     "clamp_to_edge": _ti_core.ImageAddressMode.clamp_to_edge,
 }
+_COMPARE_OPS = {name: index for index, name in enumerate(
+    ("never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always")
+)}
 
 
 def _choice(value, choices, label):
@@ -38,6 +41,9 @@ class SamplerConfig:
     clamps and anisotropy are currently Vulkan-only. ``max_lod=None`` leaves
     the upper LOD unclamped; ``max_anisotropy=1`` disables anisotropy.
     ``Texture.fetch`` uses exact integer coordinates and ignores sampler state.
+    ``compare_op`` enables reference-versus-depth comparison for a 2D Vulkan
+    depth32f texture. Use ``sample_compare`` or a matching SPIR-V shadow sampler;
+    regular filtered sampling must use a non-comparison sampler.
     """
 
     min_filter: str = "linear"
@@ -50,6 +56,7 @@ class SamplerConfig:
     min_lod: float = 0.0
     max_lod: float | None = None
     max_anisotropy: float = 1.0
+    compare_op: str | None = None
 
     def __post_init__(self):
         _choice(self.min_filter, _FILTERS, "min_filter")
@@ -58,6 +65,8 @@ class SamplerConfig:
         _choice(self.address_mode_v, _ADDRESS_MODES, "address_mode_v")
         _choice(self.address_mode_w, _ADDRESS_MODES, "address_mode_w")
         _choice(self.mip_filter, _FILTERS, "mip_filter")
+        if self.compare_op is not None:
+            _choice(self.compare_op, _COMPARE_OPS, "compare_op")
         for label in ("lod_bias", "min_lod", "max_lod", "max_anisotropy"):
             value = getattr(self, label)
             if label == "max_lod" and value is None:
@@ -87,6 +96,7 @@ class SamplerConfig:
         config.min_lod = self.min_lod
         config.max_lod = -1.0 if self.max_lod is None else self.max_lod
         config.max_anisotropy = self.max_anisotropy
+        config.compare_op = -1 if self.compare_op is None else _COMPARE_OPS[self.compare_op]
         return config
 
 

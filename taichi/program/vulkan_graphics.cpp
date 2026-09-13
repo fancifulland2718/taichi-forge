@@ -779,25 +779,20 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   prepared.generation = runtime_program_generation();
   TI_ERROR_IF(!vulkan_graphics_pipeline_available(), "Graphics passes require Vulkan");
   auto *device = static_cast<vulkan::VulkanDevice *>(get_graphics_device());
-  TI_ERROR_IF(colors.empty() || colors.size() > device->vk_caps().max_color_attachments,
+  TI_ERROR_IF(colors.size() > device->vk_caps().max_color_attachments,
               "Vulkan color attachment count exceeds the device limit");
-  Texture *color = colors.front().texture;
-  TI_ERROR_IF(!color,
-              "Vulkan graphics pass requires a color attachment Texture.");
+  Texture *extent_texture = colors.empty() ? depth : colors.front().texture;
+  TI_ERROR_IF(!extent_texture,
+              "Vulkan graphics pass requires a color or depth attachment Texture.");
   TI_ERROR_IF(commands.empty() || commands.size() > kMaximumPassDraws,
               "Vulkan graphics pass requires 1 to {} draws.",
               kMaximumPassDraws);
-  TI_ERROR_IF(color->owning_program() != this,
-              "Vulkan graphics color attachment belongs to another Program.");
-  const auto color_size = color->get_size();
+  TI_ERROR_IF(extent_texture->owning_program() != this,
+              "Vulkan graphics attachment belongs to another Program.");
+  const auto color_size = extent_texture->get_size();
   TI_ERROR_IF(color_size[0] <= 0 || color_size[1] <= 0 || color_size[2] != 1,
               "Vulkan graphics color attachment must be a nonempty 2D "
               "Texture.");
-  TI_ERROR_IF(color->get_buffer_format() == BufferFormat::depth16 ||
-                  color->get_buffer_format() ==
-                      BufferFormat::depth24stencil8 ||
-                  color->get_buffer_format() == BufferFormat::depth32f,
-              "Vulkan graphics color attachment cannot use a depth format.");
   if (depth) {
     TI_ERROR_IF(depth->owning_program() != this,
                 "Vulkan graphics depth attachment belongs to another "
@@ -807,7 +802,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                 "Vulkan graphics color and depth attachments must have the "
                 "same 2D shape.");
     TI_ERROR_IF(depth->get_buffer_format() != BufferFormat::depth32f,
-                "Vulkan graphics P0 depth attachments require depth32f.");
+                "Vulkan graphics depth attachments require depth32f.");
   }
   TI_ERROR_IF(!std::isfinite(pass.clear_depth) || pass.clear_depth < 0.0f ||
                   pass.clear_depth > 1.0f,
@@ -1201,11 +1196,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                   "Vulkan sampled images must be on this device and cannot "
                   "alias render-pass attachments");
       const auto format = image->get_buffer_format();
-      TI_ERROR_IF(format == BufferFormat::depth16 ||
-                      format == BufferFormat::depth24stencil8 ||
-                      format == BufferFormat::depth32f ||
-                      !is_float_sampled_texture_format(format),
-                  "Graphics sampled images require floating-point or normalized color textures");
+      TI_ERROR_IF(!is_float_sampled_texture_format(format),
+                  "Graphics sampled images require floating-point, normalized or depth textures");
+      native_pipeline->validate_sampled_texture(shader.set_index, shader.binding,
+                                                image->sampler_config_.compare_op >= 0);
       textures.push_back(image);
       recorded.shader_images.push_back(
           {shader.set_index, shader.binding, allocation, image->sampler_config_});

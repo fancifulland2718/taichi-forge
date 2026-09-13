@@ -180,8 +180,8 @@ def _color_targets(values, blending):
     if values is None:
         return ()
     targets = tuple(values)
-    if blending or not targets or not all(isinstance(x, ColorTarget) for x in targets):
-        raise ValueError("color_targets requires nonempty ColorTarget values and blending=False")
+    if blending or not all(isinstance(x, ColorTarget) for x in targets):
+        raise ValueError("color_targets requires ColorTarget values and blending=False")
     return tuple((x.blending, x.write_mask,
                   _BLEND_FACTORS[x.src_color_factor], _BLEND_FACTORS[x.dst_color_factor],
                   _BLEND_OPS[x.color_op], _BLEND_FACTORS[x.src_alpha_factor],
@@ -823,15 +823,18 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             if (color != "color" or color_load_op != "clear" or color_store_op != "store"
                     or tuple(clear_color) != (0.0, 0.0, 0.0, 1.0)):
                 raise ValueError("colors cannot be combined with single-color options")
-            if not colors or not all(isinstance(x, ColorAttachment) for x in colors):
+            if not all(isinstance(x, ColorAttachment) for x in colors):
                 raise TypeError("colors must contain ColorAttachment values")
+        if not colors and depth is None:
+            raise ValueError("depth-only graphics passes require a depth binding")
         color_names = tuple(x.name for x in colors)
         if len(set(color_names)) != len(color_names):
             raise ValueError("color attachment names must be distinct")
-        color = color_names[0]
-        color_load_op = colors[0].load_op
-        color_store_op = colors[0].store_op
-        clear_color = colors[0].clear_value
+        color = color_names[0] if colors else None
+        if colors:
+            color_load_op = colors[0].load_op
+            color_store_op = colors[0].store_op
+            clear_color = colors[0].clear_value
         if depth is not None:
             depth = _name(depth, "depth binding")
             if depth in color_names:
@@ -1004,7 +1007,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         validate_exact_bindings(self, bindings, "Vulkan graphics pass")
         self.validate_graph_lifetime()
         self.validate_graph_bindings(bindings)
-        color = bindings[self.color]
+        color = None if self.color is None else bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
 
         raw_draws = []
@@ -1121,7 +1124,8 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             owner.tex if isinstance(owner, Texture) else owner.arr
             for owner in owners
         )
-        result = color if len(self.colors) == 1 else tuple(bindings[x.name] for x in self.colors)
+        result = (depth if not self.colors else color if len(self.colors) == 1
+                  else tuple(bindings[x.name] for x in self.colors))
         return _PreparedGraphicsPass(command, result, owners + native_owners)
 
     def execute(self, bindings):

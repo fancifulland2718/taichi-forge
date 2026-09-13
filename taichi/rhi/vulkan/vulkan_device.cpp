@@ -268,6 +268,14 @@ bool VulkanPipeline::color_attachment_blends(std::size_t index) const {
   return graphics_pipeline_template_->blend_attachments.at(index).blendEnable;
 }
 
+void VulkanPipeline::validate_sampled_texture(std::uint32_t set,
+                                             std::uint32_t binding,
+                                             bool comparison) const {
+  const auto found = comparison_samplers_.find({set, binding});
+  TI_ERROR_IF(found == comparison_samplers_.end() || found->second != comparison,
+              "Graphics shader sampled-image declaration and sampler compare_op do not match");
+}
+
 VulkanPipeline::~VulkanPipeline() {
   for (VkShaderModule shader_module : shader_modules_) {
     vkDestroyShaderModule(device_, shader_module, kNoVkAllocCallbacks);
@@ -419,6 +427,12 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
           set.buffer(desc_binding->binding, kDeviceNullPtr, 0);
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+          const auto [found, inserted] = comparison_samplers_.emplace(
+              std::make_pair(set_index, desc_binding->binding), desc_binding->image.depth == 1);
+          if (!inserted && found->second != (desc_binding->image.depth == 1)) {
+            spvReflectDestroyShaderModule(&module);
+            TI_ERROR("Shader stages disagree on comparison sampler binding");
+          }
           if (desc_binding->count > 1) {
             set.image_array(
                 desc_binding->binding,
@@ -3898,6 +3912,8 @@ vkapi::IVkSampler VulkanDevice::get_sampler(
               limits.maxSamplerAnisotropy);
   TI_ERROR_IF(config.max_anisotropy > 1.0f && !vk_caps().sampler_anisotropy,
               "Sampler anisotropy is not enabled on this Vulkan device");
+  TI_ERROR_IF(config.compare_op < -1 || config.compare_op > 7,
+              "Invalid sampler compare_op");
 
   const auto to_filter = [](ImageFilter filter) {
     return filter == ImageFilter::nearest ? VK_FILTER_NEAREST
@@ -3926,8 +3942,9 @@ vkapi::IVkSampler VulkanDevice::get_sampler(
   sampler_info.maxAnisotropy = config.max_anisotropy;
   sampler_info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
   sampler_info.unnormalizedCoordinates = VK_FALSE;
-  sampler_info.compareEnable = VK_FALSE;
-  sampler_info.compareOp = VK_COMPARE_OP_ALWAYS;
+  sampler_info.compareEnable = config.compare_op >= 0;
+  sampler_info.compareOp = config.compare_op < 0 ? VK_COMPARE_OP_ALWAYS
+                                                : static_cast<VkCompareOp>(config.compare_op);
   sampler_info.mipmapMode = config.mip_filter == ImageFilter::linear
                                 ? VK_SAMPLER_MIPMAP_MODE_LINEAR
                                 : VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -4006,6 +4023,14 @@ DeviceAllocation VulkanDevice::create_image(const ImageParams &params) {
   // Reject unsupported explicit sampling state before registering an image.
   // Existing storage-only images keep their default sampler behavior.
   if (params.sampler_config.has_extended_sampling()) {
+    if (params.sampler_config.compare_op >= 0) {
+      TI_ERROR_IF(params.format != BufferFormat::depth32f || params.dimension != ImageDimension::d2D,
+                  "Comparison sampling requires a 2D depth32f image");
+      VkFormatProperties properties{};
+      vkGetPhysicalDeviceFormatProperties(physical_device_, VK_FORMAT_D32_SFLOAT, &properties);
+      TI_ERROR_IF(!(properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT),
+                  "Vulkan device cannot sample depth32f images");
+    }
     if (params.sampler_config.mip_filter == ImageFilter::linear ||
         params.sampler_config.max_anisotropy > 1.0f) {
       const auto [result, format] = buffer_format_ti_to_vk(params.format);

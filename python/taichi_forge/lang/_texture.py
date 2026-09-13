@@ -38,6 +38,23 @@ class TextureSampler:
         return vector(4, f32)([r, g, b, a])
 
     @taichi_scope
+    def sample_compare(self, uv, reference):
+        """Return the filtered depth comparison at mip zero (2D Vulkan).
+
+        The depth32f Texture must use ``SamplerConfig(compare_op=...)``.
+        The operation compares ``reference`` against stored depth, then filters
+        comparison results. UV uses the same axis order as ``sample_lod``.
+        Depth convention and receiver bias belong to the caller.
+        """
+        ast_builder = impl.get_runtime().compiling_callable.ast_builder()
+        dbg_info = _ti_core.DebugInfo(impl.get_runtime().get_current_src_info())
+        value = ast_builder.make_texture_op_expr(
+            _ti_core.TextureOpType.kSampleCompare, self.ptr_expr,
+            make_expr_group(*_get_entries(uv), reference), dbg_info,
+        )
+        return impl.call_internal("composite_extract_0", value, with_runtime_context=False)
+
+    @taichi_scope
     def sample_grad(self, uv, duvdx, duvdy):
         """Sample a 2D Vulkan texture with caller-provided UV derivatives.
 

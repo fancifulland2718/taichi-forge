@@ -20,6 +20,10 @@ def test_sampler_config_validation():
     with pytest.raises(TypeError, match="address_mode_u must be a string"):
         _config(address_mode_u=1)
     assert _config().max_lod is None
+    assert _config().compare_op is None
+    assert _config(compare_op="less").compare_op == "less"
+    with pytest.raises(ValueError, match="compare_op"):
+        _config(compare_op="invalid")
     assert _config(mip_filter="linear", max_lod=2) == _config(
         mip_filter="linear", max_lod=2.0
     )
@@ -100,6 +104,8 @@ def test_vulkan_sampler_mip_filter_clamps_and_retained_cache():
 def test_cuda_rejects_extended_sampler_state_instead_of_ignoring_it():
     with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
         ti.Texture(ti.Format.r32f, (4, 4), sampler=_config(mip_filter="linear"))
+    with pytest.raises(RuntimeError, match="requires the Vulkan backend"):
+        ti.Texture(ti.Format.depth32f, (4, 4), sampler=_config(compare_op="less"))
     image = ti.Texture(ti.Format.r32f, (4, 4))
     assert image.shape == (4, 4)
 

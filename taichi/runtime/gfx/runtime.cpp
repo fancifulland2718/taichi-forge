@@ -2191,6 +2191,8 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
           const auto sampler = image_sampler_configs_.find(texture.alloc_id);
           TI_ERROR_IF(sampler == image_sampler_configs_.end(),
                       "TextureCollection member is not a tracked image");
+          TI_ERROR_IF(bind.uses_sampling && sampler->second.compare_op >= 0,
+                      "TextureCollection does not support comparison sampling");
           samplers.push_back(sampler->second);
         }
         bindings->image_array(bind.binding, collection->second, samplers);
@@ -2203,6 +2205,9 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
       } else {
         transition_image(texture, ImageLayout::shader_read);
         const auto sampler = image_sampler_configs_.find(texture.alloc_id);
+        TI_ERROR_IF(bind.uses_sampling && bind.comparison !=
+                        (sampler != image_sampler_configs_.end() && sampler->second.compare_op >= 0),
+                    "Texture sampling operation and sampler compare_op do not match");
         bindings->image(bind.binding, texture,
                         sampler == image_sampler_configs_.end()
                             ? ImageSamplerConfig{}
@@ -2902,6 +2907,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
             TI_ERROR_IF(sampler == image_sampler_configs_.end(),
                         "Prepared Vulkan Graph TextureCollection member has "
                         "no sampler configuration");
+            TI_ERROR_IF(bind.uses_sampling && sampler->second.compare_op >= 0,
+                        "TextureCollection does not support comparison sampling");
             samplers.push_back(sampler->second);
           }
           resources->image_array(bind.binding, collection->second, samplers);
@@ -2932,6 +2939,9 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         if (bind.is_storage) {
           resources->rw_image(bind.binding, image, bind.lod);
         } else {
+          TI_ERROR_IF(bind.uses_sampling && bind.comparison !=
+                          (image_sampler_configs_.at(image.alloc_id).compare_op >= 0),
+                      "Texture sampling operation and sampler compare_op do not match");
           resources->image(bind.binding, image,
                             image_sampler_configs_.at(image.alloc_id));
         }
