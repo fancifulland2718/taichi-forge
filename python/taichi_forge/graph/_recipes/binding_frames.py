@@ -192,9 +192,10 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-fixed-dense-root-retention",
             "vulkan-ordered-graphics-boundaries",
             "vulkan-ordered-compute-boundaries",
+            "vulkan-complete-recipe-publication",
         ),
-        domain_version="immutable-binding-frame-domain-v11",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-ordered-boundaries-v11",
+        domain_version="immutable-binding-frame-domain-v12",
+        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-published-boundaries-v12",
     )
 
     def fragments(self, definition):
@@ -240,6 +241,7 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                             "workspace_lanes": 1,
                             **(
                                 {
+                                    "publication": "complete_recipe_boundary",
                                     "submission": (
                                         (
                                             "secondary_compute_segments_with_ordered_graphics"

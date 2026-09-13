@@ -37,6 +37,7 @@ def eligible(spec, backend):
         or config.kernel_profiler
         or spec.runtime_lifetime_leases
         or not hasattr(core, "_prepare_vulkan_graph_recording")
+        or not hasattr(core, "_publish_vulkan_graph_commands")
     ):
         return False
     if not spec.nodes:
@@ -114,7 +115,7 @@ class _SegmentedBindingFrame:
 
 class VulkanBindingFrameExecutor:
     execution_kind = "vulkan_prepared_binding_graph"
-    physical_submission_mode = "vulkan_secondary_immutable_argument_frames"
+    physical_submission_mode = "vulkan_secondary_immutable_argument_frames_published"
 
     def __init__(self, instance):
         from taichi_forge._lib import core
@@ -129,6 +130,7 @@ class VulkanBindingFrameExecutor:
             )
         self._program = impl.get_runtime().prog
         self._prepare = core._prepare_vulkan_graph_recording
+        self._publish = core._publish_vulkan_graph_commands
         boundaries = prepared_boundaries(spec)
         self._segments = []
         sources = []
@@ -148,9 +150,9 @@ class VulkanBindingFrameExecutor:
         self._segmented = bool(boundaries)
         if self._segmented:
             self.physical_submission_mode = (
-                "vulkan_secondary_frames_with_ordered_graphics"
+                "vulkan_secondary_frames_with_ordered_graphics_published"
                 if all(node.recordable_action.backend_command_recording.queue == "graphics" for node in boundaries)
-                else "vulkan_secondary_frames_with_ordered_native"
+                else "vulkan_secondary_frames_with_ordered_native_published"
             )
         self._frames = weakref.WeakSet()
         self._context = _GraphRunContext()
@@ -215,6 +217,10 @@ class VulkanBindingFrameExecutor:
                 frame.run()
             finally:
                 frame.close()
+        # Publish the complete compute/native sequence, not each secondary
+        # segment. Graph.run must make progress without a later unrelated
+        # dispatch or ti.sync; Graph.submit retains its enclosing batch.
+        self._publish(self._program)
 
     def invalidate_runtime(self, preserve_executables=False):
         for frame in tuple(self._frames):
@@ -233,7 +239,7 @@ class VulkanBindingFrameExecutor:
             last_path=(
                 (
                     "vulkan_prepared_compute_with_ordered_graphics"
-                    if self.physical_submission_mode == "vulkan_secondary_frames_with_ordered_graphics"
+                    if self.physical_submission_mode == "vulkan_secondary_frames_with_ordered_graphics_published"
                     else "vulkan_prepared_compute_with_ordered_native"
                 )
                 if self._segmented

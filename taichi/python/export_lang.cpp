@@ -6103,6 +6103,9 @@ void export_lang(py::module &m) {
             return program.create_vulkan_graph_recording(native_sources, converted);
           });
         }, py::keep_alive<0, 1>());
+  m.def("_publish_vulkan_graph_commands",
+        &Program::publish_vulkan_graph_commands,
+        py::call_guard<py::gil_scoped_release>());
 #endif
 
 #if defined(TI_WITH_CUDA)

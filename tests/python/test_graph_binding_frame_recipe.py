@@ -266,7 +266,7 @@ def test_binding_recipe_fork_search_report_and_fresh_definition_resolve(sampled_
     with fresh.materialize(selection) as materialized:
         evaluate(materialized.executor, selection)
         expected_mode = (
-            "vulkan_secondary_immutable_argument_frames"
+            "vulkan_secondary_immutable_argument_frames_published"
             if definition.backend == "vulkan"
             else "cuda_immutable_argument_frames_exec_reuse"
         )
@@ -485,3 +485,23 @@ def test_binding_recipe_manifest_failure_retires_unpublished_executor(monkeypatc
             bindings = recovered.executor.bind(dict(source=source, output=output, scale=3))
             recovered.executor.run(bindings)
             np.testing.assert_array_equal(output.to_numpy(), host * 3 + 7)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_vulkan_binding_recipe_requires_native_publication_capability(monkeypatch):
+    definition = _texture_definition()
+    provider = GraphBindingFrameRecipeProvider()
+    assert provider.fragments(definition)
+    monkeypatch.delattr(core, "_publish_vulkan_graph_commands")
+    assert provider.fragments(definition) == ()
+    source = ti.ndarray(ti.f32, (17, 23))
+    source.fill(3)
+    image = ti.Texture(ti.Format.r32f, (17, 23))
+    image.from_ndarray(source)
+    output = ti.ndarray(ti.f32, (17, 23))
+    graph = definition.compile()
+    try:
+        graph.run(dict(image=image, output=output))
+        np.testing.assert_array_equal(output.to_numpy(), np.full((17, 23), 7, np.float32))
+    finally:
+        graph.close()

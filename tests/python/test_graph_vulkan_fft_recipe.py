@@ -101,7 +101,7 @@ def test_vulkan_fft_complete_recipes_compose_real_partitions_and_immutable_frame
             embedded = index in (1, 3)
             assert (
                 graph._instance.physical_submission_mode
-                == "vulkan_secondary_immutable_argument_frames"
+                == "vulkan_secondary_immutable_argument_frames_published"
             ) == embedded
             before = graph.execution_stats().memory.persistent_bytes
             with monkeypatch.context() as replay:

@@ -114,7 +114,7 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
         context = definition.materialization_context(provider_set=catalog.provider_set)
         materialized = context.materialize(candidates[0])
         graph = materialized.executor
-        assert graph._instance.physical_submission_mode == "vulkan_secondary_frames_with_ordered_native"
+        assert graph._instance.physical_submission_mode == "vulkan_secondary_frames_with_ordered_native_published"
     else:
         graph = builder.compile()
     arguments = dict(
@@ -162,7 +162,19 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
         patched.setattr(ti.hardware.ray.RayInstance, "_to_core", unexpected_cold_work)
         for displacement in (0, 2, 0):
             shift.fill(displacement)
+            program = impl.get_runtime().prog
+            if binding_recipe:
+                # Flush the producer before observing the recipe's own queue
+                # publication. A later array read must not be what submits it.
+                ti.sync()
+                before_submit = program._debug_vulkan_queue_submission_stats()
             graph.run(bindings)
+            if binding_recipe:
+                after_submit = program._debug_vulkan_queue_submission_stats()
+                assert (
+                    after_submit["queue_submit_calls"]
+                    == before_submit["queue_submit_calls"] + 1
+                )
             expected = expected_ids if displacement == 0 else np.full(count, -1)
             np.testing.assert_array_equal(selected.to_numpy(), expected)
             if displacement == 0:
@@ -174,6 +186,19 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
                     hits.to_numpy()[visible, 0],
                     (2 - 0.25 * (np.arange(count) % 2))[visible],
                 )
+        if binding_recipe:
+            # The same publisher must join Graph.submit's existing transaction,
+            # not submit each compute/native segment independently.
+            ti.sync()
+            before_submit = program._debug_vulkan_queue_submission_stats()
+            ticket = graph.submit(bindings)
+            after_submit = program._debug_vulkan_queue_submission_stats()
+            assert (
+                after_submit["queue_submit_calls"]
+                == before_submit["queue_submit_calls"] + 1
+            )
+            ticket.wait()
+            np.testing.assert_array_equal(selected.to_numpy(), expected_ids)
     revision = bindings.revision
     for bad, reason in (
         (ti.ndarray(ti.i32, (count, 12)), "dtype"),
@@ -189,6 +214,18 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
         with pytest.raises(RuntimeError, match=reason):
             bindings.update(transforms=bad)
         assert bindings.revision == revision
+    if binding_recipe:
+        # Raw mappings intentionally prepare temporary frames; they still
+        # publish the complete recipe before returning, then retire safely.
+        ti.sync()
+        before_submit = program._debug_vulkan_queue_submission_stats()
+        graph.run(arguments)
+        after_submit = program._debug_vulkan_queue_submission_stats()
+        assert (
+            after_submit["queue_submit_calls"]
+            == before_submit["queue_submit_calls"] + 1
+        )
+        np.testing.assert_array_equal(selected.to_numpy(), expected_ids)
     graph.run(bindings)
     np.testing.assert_array_equal(selected.to_numpy(), expected_ids)
     if storage_kind == "field_range":

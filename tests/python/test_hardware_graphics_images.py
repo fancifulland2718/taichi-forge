@@ -105,7 +105,7 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             materialization = definition.materialization_context(provider_set=catalog.provider_set)
             materialized = materialization.materialize(recipe)
             graph = materialized.executor
-            assert materialized.manifest.submissions[0].replay_mode == "vulkan_secondary_frames_with_ordered_graphics"
+            assert materialized.manifest.submissions[0].replay_mode == "vulkan_secondary_frames_with_ordered_graphics_published"
             assert recipe.planned_physical_id != catalog.baseline.recipe.planned_physical_id
         else:
             graph = builder.compile()

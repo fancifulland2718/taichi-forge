@@ -1569,6 +1569,9 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<gfx::FixedGraphRecording> create_vulkan_graph_recording(
       const std::vector<gfx::GraphRecordingSource> &sources,
       const std::unordered_map<std::string, aot::IValue> &args);
+  // Publish one complete prepared recipe without waiting. An enclosing
+  // runtime submission transaction still owns its physical batch boundary.
+  void publish_vulkan_graph_commands();
 
   std::uint64_t create_cuda_cufft_plan_1d(std::size_t length,
                                           std::size_t batch_count,

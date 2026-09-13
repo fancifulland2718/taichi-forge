@@ -207,7 +207,7 @@ def test_texture_collection_public_binding_frame_recipe_rebind_and_retirement():
             graph = materialized.executor
             assert (
                 materialized.manifest.submissions[0].replay_mode
-                == "vulkan_secondary_immutable_argument_frames"
+                == "vulkan_secondary_immutable_argument_frames_published"
             )
             bindings = graph.bind(
                 {

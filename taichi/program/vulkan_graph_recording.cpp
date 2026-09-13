@@ -129,6 +129,18 @@ bool FixedGraphRecording::uses_secondary_commands() const {
 }  // namespace taichi::lang::gfx
 
 namespace taichi::lang {
+void Program::publish_vulkan_graph_commands() {
+  auto guard = acquire_runtime_resource_submission_guard();
+  auto *launcher = dynamic_cast<gfx::KernelLauncher *>(&get_kernel_launcher());
+  TI_ERROR_IF(!launcher, "Prepared Vulkan Graph launcher is unavailable");
+  // Secondary compute frames and ordered native commands share this primary.
+  // Publishing only at the complete recipe boundary allows the GPU to start
+  // while the caller prepares the next frame. Stream::submit still joins an
+  // existing transaction; this does not insert a fence wait or split its batch.
+  // The stream retains the primary, secondary payloads and native owners.
+  launcher->runtime()->flush_if_pending();
+}
+
 std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &sources,
@@ -271,6 +283,10 @@ Program::create_vulkan_graph_recording(
 }  // namespace taichi::lang
 #else
 namespace taichi::lang {
+void Program::publish_vulkan_graph_commands() {
+  TI_ERROR("Prepared Vulkan Graph is unavailable in this build");
+}
+
 std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &,
