@@ -277,7 +277,7 @@ filter 可选 `nearest`/`linear`，各轴 address 可选 `repeat`、`mirrored_re
 `mip_shape(level)` 返回该级尺寸，奇数向下取整且最小为一；不会自动填充内容。
 采样使用 normalized coordinate。Vulkan 默认 `mip_filter="nearest"`；显式
 `mip_filter="linear"` 才在相邻层级之间插值。`min_filter="linear"` 本身仅在单级 texel
-之间插值。暂不提供 comparison sampling。
+之间插值。二维 Vulkan `depth32f` 支持比较采样，见下文阴影深度通路。
 `sample_lod()` 使用 sampler，精确整数 coordinate 的 `fetch()` 忽略它；浮点 filtering 不
 承诺跨设备 bitwise deterministic。普通 field/ndarray 访问不会自动转换为 texture。
 
@@ -453,8 +453,8 @@ graph.close()
 ```
 
 sampler 由 Texture 提供，SPIR-V image 类型和 descriptor 布局须与声明一致；buffer/image 不能占用
-同一 set/binding。source 是受管浮点/归一化 color texture，不能与本 pass attachment 别名。
-本接口不包括 depth attachment 采样、storage-image 写入或 graphics descriptor array。
+同一 set/binding。source 是受管浮点/归一化或深度 Texture，不能与本 pass attachment 别名。
+深度图可以在写入 pass 结束后供后续 pass 采样；本接口不包括 storage-image 写入或 graphics descriptor array。
 kernel 生产纹理、draw 消费、后续 kernel 消费可按设备依赖顺序执行，无 host readback。
 
 `Graph.bind()` 一次准备 layout/range/descriptor 元数据，数据原位变化继续复用；资源替换需显式更新绑定。
@@ -494,12 +494,67 @@ pipeline 的 `color_targets=(ColorTarget(...), ...)` 可分别设置 `blending`�
 （RGBA 对应位 1/2/4/8，默认 15）。默认不混合、写所有通道；整数混合被拒绝，不同附件状态要求
 设备支持 independent blend。旧 `blending=` 与 `color_targets=` 不要同时使用。
 
+RGB 和 alpha 混合公式分别由 `src_color_factor`、`dst_color_factor`、`color_op`，以及
+`src_alpha_factor`、`dst_alpha_factor`、`alpha_op` 设置。因子为 `zero`、`one`、`src_color`、
+`dst_color`、`src_alpha`、`dst_alpha` 及后四者的 `one_minus_...`；运算为 `add`、`subtract`、
+`reverse_subtract`、`min`、`max`。`min/max` 忽略因子；未开放 blend constant 或 dual-source blending。
+旧默认对 RGB 和 alpha 都是 `src_alpha` / `one_minus_src_alpha` + `add`，不会自动改为预乘公式。
+
+```python
+# 预乘 alpha：应用的 fragment 输出必须已经预乘 RGB。
+premultiplied = gfx.ColorTarget(
+    blending=True, src_color_factor="one", dst_color_factor="one_minus_src_alpha",
+    src_alpha_factor="one", dst_alpha_factor="one_minus_src_alpha",
+)
+# 独立累积附件可用 one/one；整数 ID 附件仍必须禁用混合。
+```
+
 附件必须是互不相同、尺寸一致、格式可用的存活二维单级 Texture。不开放采样输入与附件别名、
 MSAA resolve、稀疏 output location、mip/layer 附件 view。准备阶段检查限值，不逐 draw 重验。
 多附件 prepared 调用返回按 location 排列的 Texture tuple；旧单附件调用仍返回单 Texture。
 后续 kernel 可用 `Texture.fetch` 消费浮点目标，用匹配格式的 `rw_texture.load` 读取整数 ID
 （如 `fmt=ti.Format.r32u`），无需 readback 或 ID 打包。比较多 pass 时计入所有附件显存及完整
 生产/draw/消费成本；MRT 不会自动改写普通 draw。
+
+#### 阴影深度通路（Vulkan）
+
+`record_pass(colors=(), depth="shadow", ...)` 明确创建无颜色附件的 pass；必须提供深度绑定。
+pipeline 的 fragment SPIR-V 不得声明颜色输出（可以提供空 `main` 的 fragment shader），并显式开启
+`depth_test=True, depth_write=True`。沿用相同 prepared/Graph 入口，不创建颜色占位图。
+
+```python
+shadow = ti.Texture(
+    ti.Format.depth32f, (width, height),
+    sampler=ti.hardware.sampling.SamplerConfig(
+        compare_op="less_equal", min_filter="linear", mag_filter="linear",
+        address_mode_u="clamp_to_edge", address_mode_v="clamp_to_edge",
+    ),
+)
+write_shadow = depth_pipeline.record_pass(
+    (depth_pipeline.pass_draw(gfx.Draw(vertex_count), vertex_buffers={0: "vertices"}),),
+    colors=(), depth="shadow", clear_depth=1.0,
+)
+# depth_pipeline 在创建时使用 depth_compare="less"；Graph 中先 append_native(write_shadow)，
+# 再追加读取 shadow 的 graphics pass 或 kernel。无需中间 ti.sync()。
+
+@ti.kernel
+def read_shadow(image: ti.types.texture(2), out: ti.types.ndarray()):
+    out[0] = image.sample_compare(ti.Vector([0.5, 0.5]), 0.7)
+```
+
+`sample_compare(uv, reference)` 返回单个 f32；先按 `compare_op` 比较 **reference 与存储深度**，
+再过滤比较结果。它使用显式 LOD 0，sampler LOD 配置仍生效；linear 过滤提供硬件比较过滤，
+不是“先平均深度再比较”。当前仅支持单个二维 Vulkan `depth32f` Texture，不支持 CUDA 或 texture collection。
+精确读原始深度可用 `fetch(...).x`；比较 sampler 不得用于 `sample_lod/sample_grad`。
+
+graphics 消费端使用匹配的 SPIR-V shadow sampler（例如 GLSL `sampler2DShadow`），通过既有
+`ShaderImageBinding` 绑定同一 Texture。普通深度采样则用 `compare_op=None` 与普通 sampler。
+采样比较与光栅 `depth_compare` 独立配置；投影、reverse-Z、receiver bias、阴影图边界与透明裁剪规则由应用决定。
+不要假设 clamp-to-edge 会自动把投影范围外的点判为受光。
+
+无颜色附件的 prepared 调用返回 depth Texture。固定绑定可重复执行，数据原位更新不重新准备；
+替换纹理需更新绑定。不同 pass 可先写后读，同一个 pass 仍禁止附件与采样输入别名。
+Forge 保留设备侧布局转换和生命周期约束，不承诺将多个 graphics pass 合成一次提交。
 
 ### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
 

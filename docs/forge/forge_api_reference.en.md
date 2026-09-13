@@ -336,7 +336,8 @@ level. `mip_shape(level)` returns each allocated extent, rounding odd dimensions
 down and clamping to one. Levels are not populated automatically. Sampling uses
 normalized coordinates. Vulkan defaults to `mip_filter="nearest"`;
 `mip_filter="linear"` interpolates between levels. `min_filter="linear"` alone
-only interpolates texels within a level. Comparison sampling is not exposed.
+only interpolates texels within a level. Two-dimensional Vulkan `depth32f`
+textures support comparison sampling; see the shadow-depth path below.
 `sample_lod()` uses the sampler while exact integer-coordinate
 `fetch()` ignores it. Floating filtering does not promise cross-device
 bitwise determinism.
@@ -565,9 +566,9 @@ graph.close()
 
 The texture supplies its sampler; the SPIR-V image type and descriptor layout
 must match the declarations. Buffer and image bindings cannot share a set/binding
-pair. The source is a managed floating/normalized color texture and cannot alias
-a pass attachment. Sampling a depth attachment, storage-image writes, and graphics
-descriptor arrays are not part of this interface. Kernel-produced textures,
+pair. The source is a managed floating/normalized or depth texture and cannot alias
+a pass attachment. A later pass may sample a completed depth attachment.
+Storage-image writes and graphics descriptor arrays are not part of this interface. Kernel-produced textures,
 the draw, and later kernel consumers are ordered without a host readback.
 
 `Graph.bind()` prepares layout/range/descriptor metadata once. Updating data in
@@ -616,6 +617,23 @@ default 15). Defaults are no blending and all channels writable. Integer
 blending is rejected; differing target states require independent-blend
 support. Use legacy `blending=` or `color_targets=`, not both.
 
+Set RGB through `src_color_factor`, `dst_color_factor`, `color_op`, and alpha
+through `src_alpha_factor`, `dst_alpha_factor`, `alpha_op`. Factors are `zero`,
+`one`, `src_color`, `dst_color`, `src_alpha`, `dst_alpha`, and `one_minus_...`
+for the last four. Operations are `add`, `subtract`, `reverse_subtract`, `min`,
+and `max`; `min/max` ignore factors. Blend constants and dual-source blending
+are not exposed. Defaults retain `src_alpha` / `one_minus_src_alpha` + `add`
+for both RGB and alpha, not an implicit premultiplied-alpha convention.
+
+```python
+# The application's fragment RGB must already be premultiplied.
+premultiplied = gfx.ColorTarget(
+    blending=True, src_color_factor="one", dst_color_factor="one_minus_src_alpha",
+    src_alpha_factor="one", dst_alpha_factor="one_minus_src_alpha",
+)
+# An independent accumulation target can use one/one. Integer IDs cannot blend.
+```
+
 Targets must be distinct live 2D single-level textures with compatible color
 attachment formats and equal extents. Aliasing sampled inputs with attachments,
 MSAA resolves, sparse output locations and mip/layer attachment views are not
@@ -626,6 +644,55 @@ single-Texture result. Subsequent kernels can consume float targets through
 (for example `fmt=ti.Format.r32u`). No readback or ID packing is necessary.
 Include all attachment bytes and complete producer/draw/consumer costs when
 comparing MRT with separate passes. MRT is not an automatic draw rewrite.
+
+#### Shadow-depth path (Vulkan)
+
+`record_pass(colors=(), depth="shadow", ...)` explicitly requests a pass without
+color attachments. A depth binding is required. Its fragment SPIR-V must declare
+no color outputs (an empty fragment `main` is sufficient); enable `depth_test`
+and `depth_write` on the pipeline. This uses existing prepared/Graph execution,
+without a dummy color image.
+
+```python
+shadow = ti.Texture(
+    ti.Format.depth32f, (width, height),
+    sampler=ti.hardware.sampling.SamplerConfig(
+        compare_op="less_equal", min_filter="linear", mag_filter="linear",
+        address_mode_u="clamp_to_edge", address_mode_v="clamp_to_edge",
+    ),
+)
+write_shadow = depth_pipeline.record_pass(
+    (depth_pipeline.pass_draw(gfx.Draw(vertex_count), vertex_buffers={0: "vertices"}),),
+    colors=(), depth="shadow", clear_depth=1.0,
+)
+# Construct depth_pipeline with depth_compare="less". Append write_shadow to
+# the Graph before a graphics/kernel consumer of shadow. No intermediate ti.sync().
+
+@ti.kernel
+def read_shadow(image: ti.types.texture(2), out: ti.types.ndarray()):
+    out[0] = image.sample_compare(ti.Vector([0.5, 0.5]), 0.7)
+```
+
+`sample_compare(uv, reference)` returns one f32: it compares **reference against
+stored depth** using `compare_op`, then filters comparison results. Explicit LOD
+zero is used, subject to sampler LOD settings. Linear comparison filtering is
+not a comparison against averaged depth. Currently this supports a single 2D
+Vulkan `depth32f` texture, not CUDA or texture collections. Use `fetch(...).x`
+for exact raw depth; do not use `sample_lod/sample_grad` with a comparison sampler.
+
+A graphics consumer supplies matching SPIR-V (for example GLSL `sampler2DShadow`)
+and binds the same texture through `ShaderImageBinding`. Ordinary depth sampling
+uses `compare_op=None` and a regular sampler. Sampling comparison and raster
+`depth_compare` are independent. Projection, reverse-Z, receiver bias, shadow-map
+bounds and transparency rules belong to the application. Clamp-to-edge does not
+automatically mark points outside the light projection as lit.
+
+A depth-only prepared call returns its depth Texture. Fixed bindings can be
+reused after in-place data changes; replacing a texture requires rebinding.
+Later passes may read an earlier depth output, but attachment/input aliasing
+within one pass remains unsupported. Device layout transitions and resource
+lifetimes remain managed; multiple graphics passes are not promised to become
+one submission.
 
 ### `ti.hardware.raster.RasterPass` (0.6.3 in development)
 
