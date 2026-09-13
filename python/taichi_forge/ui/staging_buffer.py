@@ -279,9 +279,12 @@ def copy_image_f32_to_rgba8_ti_ndarray(
     dst: ti.types.ndarray(),
     num_components: ti.template(),
     gray_scale: ti.template(),
+    image_shape: ti.template(),
 ):
-    for I in ti.grouped(src):
-        i, j = I[0], I[1]
+    # Image extents are fixed during preparation. Specializing this range
+    # avoids a serial extent task and dynamic pixel-index division, while
+    # the buffers remain ordinary ndarray arguments (including shared views).
+    for i, j in ti.ndrange(image_shape[0], image_shape[1]):
         px = ti.Vector([0, 0, 0, 0xFF], dt=u32)
         if ti.static(gray_scale):
             c = 0.0
@@ -305,9 +308,9 @@ def copy_image_u8_to_rgba8_ti_ndarray(
     dst: ti.types.ndarray(),
     num_components: ti.template(),
     gray_scale: ti.template(),
+    image_shape: ti.template(),
 ):
-    for I in ti.grouped(src):
-        i, j = I[0], I[1]
+    for i, j in ti.ndrange(image_shape[0], image_shape[1]):
         px = ti.Vector([0, 0, 0, 0xFF], dt=u32)
         if ti.static(gray_scale):
             px[0] = px[1] = px[2] = ti.cast(src[i, j], u32)
@@ -573,9 +576,9 @@ def to_rgba8_packed_ndarray(image, destination=None):
     is_ti_ndarray = hasattr(image, "to_numpy") and not hasattr(image, "snode")
     if is_ti_ndarray:
         if image.dtype == u8:
-            copy_image_u8_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale)
+            copy_image_u8_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale, packed_shape)
         else:
-            copy_image_f32_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale)
+            copy_image_f32_to_rgba8_ti_ndarray(image, cached, channels, is_grayscale, packed_shape)
     elif image.dtype == u8:
         copy_image_u8_to_rgba8(image, cached, channels, is_grayscale)
     else:
@@ -637,9 +640,9 @@ def to_rgba8(image):
         if _try_pack_taichi_image_on_host(image, staging_img, channels, is_grayscale):
             pass
         elif image.dtype == u8:
-            copy_image_u8_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale)
+            copy_image_u8_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale, image.shape[:2])
         elif image.dtype == f32:
-            copy_image_f32_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale)
+            copy_image_f32_to_rgba8_ti_ndarray(image, staging_img, channels, is_grayscale, image.shape[:2])
         else:
             raise Exception("dtype of input image must either be u8 or f32")
     else:

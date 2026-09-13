@@ -260,6 +260,27 @@ def test_to_rgba8_packed_ndarray_taichi_image():
     np.testing.assert_array_equal(packed_scalar.to_numpy(), _pack_rgba8_numpy_reference(scalar_np))
 
 
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_packed_ndarray_fixed_extents_preserve_values_and_reuse_specialization():
+    for dtype, channels in ((ti.f32, 3), (ti.f32, 1), (ti.u8, 4), (ti.u8, 1)):
+        for shape in ((5, 9), (9, 5)):
+            image = ti.ndarray(dtype, shape) if channels == 1 else ti.Vector.ndarray(channels, dtype, shape)
+            host_shape = shape if channels == 1 else (*shape, channels)
+            values = np.arange(np.prod(host_shape)).reshape(host_shape)
+            values = ((values % 17) / 10 - 0.2).astype(np.float32) if dtype == ti.f32 else (values % 256).astype(np.uint8)
+            destination = ti.ndarray(ti.u32, shape)
+            image.from_numpy(values)
+            to_rgba8_packed_ndarray(image, destination=destination)
+            np.testing.assert_array_equal(destination.to_numpy(), _pack_rgba8_numpy_reference(values))
+            compiled = impl.get_runtime().get_num_compiled_functions()
+            replacement = ti.ndarray(ti.u32, shape)
+            values = np.flip(values, axis=0).copy()
+            image.from_numpy(values)
+            to_rgba8_packed_ndarray(image, destination=replacement)
+            assert impl.get_runtime().get_num_compiled_functions() == compiled
+            np.testing.assert_array_equal(replacement.to_numpy(), _pack_rgba8_numpy_reference(values))
+
+
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=supported_archs)
 def test_geometry_2d():
