@@ -840,7 +840,7 @@ remain integer indices and f32 distances/barycentrics, not float-packed IDs.
 #### Vulkan inline candidate filtering
 
 `scene.trace_closest_filtered(origin, direction, accept, args=(), t_min=0.0,
-t_max=1e30, cull_mask=0xff)` returns the closest **accepted** triangle hit.
+t_max=1e30, cull_mask=0xff, respect_opacity=False)` returns the closest **accepted** triangle hit.
 `trace_any_filtered(...)` returns the first accepted hit for occlusion, not
 necessarily the closest. These methods run inside `@ti.kernel`; they do not
 change the batch `record_typed` or opaque `trace_closest` methods.
@@ -873,12 +873,73 @@ and accepting one does not assume it is nearest.
 
 Bind AS, UV/material arrays and textures through normal Graph arguments.
 In-place device updates are visible under normal ordering; replacement needs
-explicit rebinding. Filtered queries expose every triangle to the predicate,
+explicit rebinding. By default, without micromaps, filtered queries expose every triangle to the predicate,
 including triangles declared opaque in the AS. They may therefore cost more
 than the unchanged opaque fast path even when every hit is accepted. This is
 alpha-mask/occlusion support, not multi-layer transparency or an automatic
 material system. OptiX uses a separate bounded mask API described in the
 [external provider guide](external_hardware_providers.en.md#optix-alpha-mask-queries).
+
+#### Vulkan opacity declarations and baked micromaps
+
+Use `respect_opacity=True` on either filtered query to accept hardware-classified
+opaque hits without running the predicate. For non-OMM geometry, create an opaque
+`TriangleBLAS(vertices, indices)` for fully opaque surfaces, or use `opaque=False`
+for surfaces whose candidates must run the predicate. These declarations are fixed
+at BLAS creation; refit only changes positions. Ordinary unfiltered queries are
+not an alpha-filtering replacement.
+
+For a baked opacity micromap (OMM), initialize Vulkan and check
+`ti.hardware.ray.is_opacity_micromap_available()`. This requires the active device
+to enable `VK_EXT_opacity_micromap` and its dependencies; ordinary ray-query support
+alone is insufficient. No external baker is loaded by this check.
+
+```python
+# baked_data, descriptors and optional triangle_indices come from the application
+# or an external baker. This is host baked-data import, not a borrowed GPU handle.
+asset = ti.hardware.ray.VulkanOpacityMicromap(
+    baked_data, descriptors, triangle_indices
+)
+blas = ti.hardware.ray.TriangleBLAS(vertices, indices, opacity_micromap=asset)
+scene = ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)])
+
+# Inside a kernel, use the existing inlined alpha predicate only for unknown cells:
+# hit = scene.trace_closest_filtered(origin, direction, accept_alpha,
+#     args=(uvs, alpha), respect_opacity=True)
+# ... bind/execute Graph, consume results, then close Graph, scene and BLAS.
+```
+
+Inputs use the [native Vulkan micromap encoding](https://docs.vulkan.org/refpages/latest/refpages/source/VkMicromapBuildInfoEXT.html):
+`data` is a bytes-like bitstream in Vulkan microtriangle order; descriptors are
+`(byte_offset, subdivision_level, format)` triples or packed little-endian
+`u32/u16/u16` bytes. Format `1` is two-state and `2` four-state. An omitted
+`triangle_indices` means one micromap per geometry triangle; otherwise supply
+signed int32 indices, optionally reusing entries. Native indices `-1`, `-2`,
+`-3`, `-4` denote uniform transparent, opaque, unknown-transparent and
+unknown-opaque triangles. An all-predefined mapping can use empty data/descriptors.
+Forge copies host inputs once and owns the built device resources in the BLAS.
+
+With `respect_opacity=True`, transparent cells miss, opaque cells are accepted
+without the predicate, and unknown cells call it. The same query respects ordinary
+opaque geometry in the TLAS: declare unbaked alpha geometry `opaque=False`.
+`respect_opacity=False` forces remaining candidates through the predicate; it does
+**not** disable OMM or restore already-transparent cells. Four-state unknowns are
+not implicitly forced into two-state classification. `opaque=True` and an OMM
+are incompatible.
+
+The caller/baker owns agreement with topology, UVs, alpha values, sampling rules
+and cutoff. Position-only BLAS/TLAS refit can reuse the OMM. Changed classification
+requires a new BLAS/TLAS and new bindings; do not reuse a stale OMM after editing
+its alpha texture. Import validates formats and bounds, not classification accuracy.
+Closing the original BLAS does not discard geometry retained by an existing TLAS.
+Closing that TLAS or resetting the runtime invalidates its old Graph bindings.
+Reports separate resident OMM storage/indices from released import
+scratch; driver-private VRAM remains unknown.
+
+The wheel adds Forge's driver-backed import code, not a baker, vendor runtime or
+Vulkan SDK dependency. The application supplies baked data and any external baker.
+Build cost and extra memory must be amortized; unknown-heavy maps can lose performance.
+Measure the complete rendering/query-consumer window rather than assuming a speedup.
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3 in development)
 

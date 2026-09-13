@@ -679,7 +679,7 @@ descriptor 检查或 host readback。ordinary Graph 仍可用，不隐式切换�
 #### Vulkan inline 候选过滤
 
 kernel 内 `scene.trace_closest_filtered(origin, direction, accept, args=(), t_min=0.0,
-t_max=1e30, cull_mask=0xff)` 返回最近的**已接受**三角形命中；`trace_any_filtered(...)`
+t_max=1e30, cull_mask=0xff, respect_opacity=False)` 返回最近的**已接受**三角形命中；`trace_any_filtered(...)`
 用于遮挡，返回首个接受的命中，不保证最近。它们不改变 batch `record_typed` 或不透明
 `trace_closest` 的语义。
 
@@ -706,9 +706,58 @@ candidate 公开 `primitive_index`、`instance_id`（TLAS 序号）、`instance_
 candidate/query 状态不能逃逸 predicate 作用域，不能假定遍历顺序；拒绝继续，接受后仍可能找到更近命中。
 
 AS、UV/材质数组和纹理沿普通 Graph 参数绑定。原位设备更新遵循既有排序，替换资源需显式 rebind。
-过滤查询将所有三角形交给 predicate，包括 AS 中声明 opaque 的三角形；即使全部接受，也可能比原有
+默认不使用 micromap 时，过滤查询将所有三角形交给 predicate，包括 AS 中声明 opaque 的三角形；即使全部接受，也可能比原有
 不透明 fast path 更慢。这是 alpha-mask/遮挡能力，不是多层透明算法或自动材质系统。
 OptiX 使用独立的受限 mask API，见[外部 provider 文档](external_hardware_providers.zh.md#optix-alpha-mask-查询)。
+
+#### Vulkan 不透明声明与已烘焙 micromap
+
+在两种 filtered query 上传 `respect_opacity=True`，可让硬件判定为 opaque 的命中跳过 predicate。
+非 OMM 几何中，完全不透明表面使用默认 `TriangleBLAS(vertices, indices)`；需要执行 alpha predicate
+的表面使用 `opaque=False`。这些声明在创建 BLAS 时固定，refit 只改变位置；普通不带 predicate
+的查询不能代替 alpha 过滤。
+
+导入已烘焙的 opacity micromap（OMM）前，初始化 Vulkan 并检查
+`ti.hardware.ray.is_opacity_micromap_available()`。它要求当前 device 已启用
+`VK_EXT_opacity_micromap` 及其依赖，仅支持普通 ray query 不够；查询 capability 不加载外部 baker。
+
+```python
+# baked_data、descriptors 和可选 triangle_indices 由应用/外部 baker 提供。
+# 此接口导入 host baked 数据，不接收 borrowed GPU handle。
+asset = ti.hardware.ray.VulkanOpacityMicromap(
+    baked_data, descriptors, triangle_indices
+)
+blas = ti.hardware.ray.TriangleBLAS(vertices, indices, opacity_micromap=asset)
+scene = ti.hardware.ray.InstanceTLAS([ti.hardware.ray.RayInstance(blas)])
+
+# kernel 内沿用已有内联 alpha predicate，只处理 unknown cell：
+# hit = scene.trace_closest_filtered(origin, direction, accept_alpha,
+#     args=(uvs, alpha), respect_opacity=True)
+# ... 绑定/执行 Graph，消费结果，随后关闭 Graph、scene 和 BLAS。
+```
+
+输入使用 [Vulkan 原生 micromap 编码](https://docs.vulkan.org/refpages/latest/refpages/source/VkMicromapBuildInfoEXT.html)：
+`data` 是按 Vulkan 微三角形顺序排列的 bytes-like 位流；descriptor 是
+`(byte_offset, subdivision_level, format)` 三元组，或 little-endian `u32/u16/u16` packed bytes。
+format `1` 表示二状态、`2` 表示四状态。不提供 `triangle_indices` 时，每个几何三角形对应一个
+micromap；否则传 signed int32 索引，可重复使用 entry。原生特殊索引 `-1/-2/-3/-4` 分别表示
+整三角形 transparent、opaque、unknown-transparent、unknown-opaque；全特殊索引映射可以使用空
+data/descriptors。Forge 一次性复制 host 输入，构建后的 device 资源归原 BLAS owner 管理。
+
+`respect_opacity=True` 时，transparent 直接不命中、opaque 直接接受、unknown 才调用 predicate。
+同一 TLAS 的普通 opaque 几何也会跳过回调，因此未烘焙的 alpha 几何应声明 `opaque=False`。
+`respect_opacity=False` 强制剩余候选进入 predicate，**不是关闭 OMM**，不会恢复已被判为 transparent
+的 cell。四状态 unknown 不会被隐式压成二状态。`opaque=True` 与 OMM 不能同时指定。
+
+应用/baker 负责分类与 topology、UV、alpha、采样规则及 cutoff 对应。只改位置的 BLAS/TLAS refit
+可复用 OMM；分类变化需重建 BLAS/TLAS 并重新绑定，不能修改 alpha 纹理后继续沿用失效的分类。
+导入检查格式和范围，不扫描纹理证明分类。关闭原 BLAS 不销毁已有 TLAS 持有的几何；关闭 TLAS
+或 reset runtime 会使该 TLAS 的旧 Graph 绑定失效。
+显存报告区分常驻 OMM/index 与已释放的导入临时空间，driver 私有驻留量仍为未知。
+
+wheel 只增加 Forge 的 driver-backed 导入代码，不打入 baker、vendor runtime 或 Vulkan SDK。
+应用提供 baked 数据和所需外部 baker。构建成本与额外显存需摊销，unknown 比例高可能变慢；应测完整
+渲染/查询消费窗口，不预设一定加速。
 
 ### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3 开发中）
 
