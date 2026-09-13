@@ -1200,6 +1200,12 @@ VulkanCommandList::VulkanCommandList(VulkanDevice *ti_device,
 }
 
 VulkanCommandList::~VulkanCommandList() {
+  if (!finalized_) {
+    // Cold preparation may discard a list without ever submitting it. Return
+    // an initial, not still-recording, buffer to the pool; vkBeginCommandBuffer
+    // cannot implicitly reset a buffer left in the recording state.
+    vkResetCommandBuffer(buffer_->buffer, 0);
+  }
   if (profiler_sampler_reservations_ != 0) {
     ti_device_->profiler_discard_reserved_samplers(
         profiler_sampler_reservations_);
@@ -4211,7 +4217,8 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
     description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    description.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    description.initialLayout = clear ? VK_IMAGE_LAYOUT_UNDEFINED
+                                      : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     description.finalLayout = desc.color_final_layout;
 
@@ -4231,7 +4238,9 @@ vkapi::IVkRenderPass VulkanDevice::get_renderpass(
     description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    description.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    description.initialLayout =
+        desc.clear_depth ? VK_IMAGE_LAYOUT_UNDEFINED
+                         : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     description.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
