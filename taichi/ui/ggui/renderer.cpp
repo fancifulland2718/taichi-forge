@@ -99,6 +99,11 @@ void Renderer::set_image(Texture *tex) {
   s->update_data(tex);
 }
 
+void Renderer::set_image_transpose(bool transpose) {
+  TI_ERROR_IF(!pending_set_image_, "No pending display image");
+  pending_set_image_->set_transpose(transpose);
+}
+
 void Renderer::triangles(const TrianglesInfo &info) {
   retain_renderable_info(info.renderable_info);
   Triangles *triangles =

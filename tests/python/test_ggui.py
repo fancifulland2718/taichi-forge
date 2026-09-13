@@ -1379,6 +1379,35 @@ def test_imgui():
 
 
 @pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
+@test_utils.test(arch=[ti.cuda, ti.vulkan])
+def test_display_frame_device_transpose_and_default_restore():
+    # Both orientations use exact pixel centers on differently shaped windows.
+    width, height = 12, 20
+    image = ti.ndarray(ti.u32, shape=(width, height))
+    x = np.arange(width, dtype=np.uint32)[:, None]
+    y = np.arange(height, dtype=np.uint32)[None, :]
+    image.from_numpy(x | (y << 8) | np.uint32(0xFF000000))
+    for transpose in (False, True):
+        shape = (width, height) if transpose else (height, width)
+        window = ti.ui.Window("layout", shape, show_window=False)
+        canvas = window.get_canvas()
+        assert canvas.submit_frame(ti.ui.DisplayFrame.from_packed_u32_ndarray(image, transpose=transpose))
+        result = window.get_image_buffer_as_numpy()
+        expected = np.empty((width, height, 4), dtype=np.float32)
+        expected[..., 0] = x / 255.0
+        expected[..., 1] = y / 255.0
+        expected[..., 2] = 0
+        expected[..., 3] = 1
+        if not transpose:
+            expected = expected.transpose(1, 0, 2)
+        np.testing.assert_allclose(result, expected, atol=1 / 255.0 + 1e-5)
+        if impl.get_runtime().prog.config().arch == ti.cuda:
+            if canvas._shared_cuda_vulkan_views:
+                assert window.get_display_stats()["last_render_zero_copy"]
+        window.destroy()
+
+
+@pytest.mark.skipif(not _ti_core.GGUI_AVAILABLE, reason="GGUI Not Available")
 @test_utils.test(arch=supported_archs)
 def test_imgui_font_scale_from_logical_height():
     window = ti.ui.Window("test", (320, 240), show_window=False)

@@ -263,6 +263,7 @@ struct DirectSetImageState {
   taichi::lang::DevicePtr display_buffer{taichi::lang::kDeviceNullPtr};
   int ubo_width{0};
   int ubo_height{0};
+  bool ubo_transpose{true};
   bool ubo_valid{false};
   bool enabled{false};
 };
@@ -297,7 +298,7 @@ void SetImage::update_ubo(float x_factor, float y_factor, bool transpose) {
   app_context_->device().unmap(*uniform_buffer_renderable_);
 }
 
-void SetImage::update_direct_buffer_ubo() {
+void SetImage::update_direct_buffer_ubo(bool transpose) {
   DirectSetImageState &state = get_direct_state(this);
   if (!state.ubo) {
     auto [buf, res] = app_context_->device().allocate_memory_unique(
@@ -307,7 +308,7 @@ void SetImage::update_direct_buffer_ubo() {
     state.ubo = std::move(buf);
   }
   if (state.ubo_valid && state.ubo_width == width_ &&
-      state.ubo_height == height_) {
+      state.ubo_height == height_ && state.ubo_transpose == transpose) {
     return;
   }
 
@@ -318,7 +319,7 @@ void SetImage::update_direct_buffer_ubo() {
                                    upper_bound,
                                    1.0f,
                                    1.0f,
-                                   1,
+                                   int(transpose),
                                    width_,
                                    height_};
   void *mapped{nullptr};
@@ -327,7 +328,16 @@ void SetImage::update_direct_buffer_ubo() {
   app_context_->device().unmap(*state.ubo);
   state.ubo_width = width_;
   state.ubo_height = height_;
+  state.ubo_transpose = transpose;
   state.ubo_valid = true;
+}
+
+void SetImage::set_transpose(bool transpose) {
+  if (auto *state = find_direct_state(this); state && state->enabled) {
+    update_direct_buffer_ubo(transpose);
+  } else {
+    update_ubo(1.0f, 1.0f, transpose);
+  }
 }
 
 bool SetImage::can_use_direct_buffer(DevicePtr ptr) const {

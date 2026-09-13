@@ -522,6 +522,12 @@ struct PyCanvas {
     canvas->set_image(texture);
   }
 
+  void set_image_transpose(bool transpose) {
+    auto *ggui_canvas = dynamic_cast<vulkan::Canvas *>(canvas);
+    TI_ERROR_IF(!ggui_canvas, "Display layout requires a GGUI canvas");
+    ggui_canvas->set_image_transpose(transpose);
+  }
+
   vulkan::SharedCudaVulkanImage *acquire_shared_cuda_vulkan_image(
       int width,
       int height) {
@@ -972,6 +978,7 @@ void export_ggui(py::module &m) {
       .def("set_image", &PyCanvas::set_image)
       .def("set_image_host_rgba8", &PyCanvas::set_image_host_rgba8)
       .def("set_image_texture", &PyCanvas::set_image_texture)
+      .def("_set_image_transpose", &PyCanvas::set_image_transpose)
       .def("_acquire_shared_cuda_vulkan_image",
            &PyCanvas::acquire_shared_cuda_vulkan_image,
            py::return_value_policy::reference)

@@ -27,6 +27,10 @@ void Canvas::set_image(Texture *tex) {
   renderer_->set_image(tex);
 }
 
+void Canvas::set_image_transpose(bool transpose) {
+  renderer_->set_image_transpose(transpose);
+}
+
 std::shared_ptr<SharedCudaVulkanImage>
 Canvas::acquire_shared_cuda_vulkan_image(int width, int height) {
   return renderer_->acquire_shared_cuda_vulkan_image(width, height);

@@ -111,6 +111,8 @@ class SetImage final : public Renderable {
 
   void update_data(taichi::lang::Texture *tex);
 
+  void set_transpose(bool transpose);
+
   std::shared_ptr<SharedCudaVulkanImage> acquire_shared_cuda_vulkan_image(
       int width,
       int height);
@@ -144,7 +146,7 @@ class SetImage final : public Renderable {
 
   void update_ubo(float x_factor, float y_factor, bool transpose);
 
-  void update_direct_buffer_ubo();
+  void update_direct_buffer_ubo(bool transpose = true);
 
   bool can_use_direct_buffer(taichi::lang::DevicePtr ptr) const;
 

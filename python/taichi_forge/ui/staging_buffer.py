@@ -539,6 +539,13 @@ def _cached_ndarray_matches(cached, shape):
     return cached is not None and getattr(cached, "arr", None) is not None and cached.shape == shape
 
 
+@kernel
+def copy_packed_display_frame(source: ndarray_type(dtype=u32, ndim=2),
+                              destination: ndarray_type(dtype=u32, ndim=2)):
+    for i, j in source:
+        destination[i, j] = source[i, j]
+
+
 def to_rgba8_packed_ndarray(image, destination=None):
     """Pack a Taichi image into a device-side u32 RGBA8 ndarray.
 

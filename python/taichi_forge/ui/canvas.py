@@ -10,6 +10,7 @@ from .display_frame import DisplayFrame
 from .staging_buffer import (
     copy_all_to_vbo,
     copy_all_to_vbo_particle,
+    copy_packed_display_frame,
     get_indices_field_v2,
     get_vbo_field_v2,
     to_rgba8,
@@ -175,6 +176,14 @@ class Canvas:
 
     def submit_frame(self, frame):
         """Submit a display-ready frame to the canvas."""
+        if not isinstance(frame, DisplayFrame):
+            raise TypeError("submit_frame expects a DisplayFrame")
+        default_transpose = frame.kind != DisplayFrame.TEXTURE
+        set_transpose = None
+        if frame.kind != DisplayFrame.HOST_RGBA8 and frame.transpose != default_transpose:
+            set_transpose = getattr(self.canvas, "_set_image_transpose", None)
+            if set_transpose is None:
+                raise RuntimeError("This native runtime does not support explicit device display layout")
         if self.window is not None and not self.window.can_render_frame():
             self.window.record_display_frame_dropped()
             return False
@@ -187,11 +196,19 @@ class Canvas:
                 frame.transpose,
             )
         elif frame.kind == DisplayFrame.PACKED_U32:
-            self.canvas.set_image(frame.field_info)
+            shared = None
+            if impl.pytaichi.prog.config().arch == _ti_core.Arch.cuda:
+                shared = self._acquire_shared_cuda_vulkan_view(frame.width, frame.height)
+            if shared is None:
+                self.canvas.set_image(frame.field_info)
+            else:
+                copy_packed_display_frame(frame.packed_u32, shared)
         elif frame.kind == DisplayFrame.TEXTURE:
             self.canvas.set_image_texture(frame.texture.tex)
         else:
             raise ValueError(f"unsupported display frame kind: {frame.kind}")
+        if set_transpose is not None:
+            set_transpose(frame.transpose)
         self._record_display_frame_accepted(frame.width, frame.height)
         return True
 

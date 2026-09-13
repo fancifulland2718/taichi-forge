@@ -48,6 +48,8 @@ class TI_DLL_EXPORT Canvas final : public CanvasBase {
 
   void set_image(taichi::lang::Texture *tex) override;
 
+  void set_image_transpose(bool transpose);
+
   std::shared_ptr<SharedCudaVulkanImage>
   acquire_shared_cuda_vulkan_image(int width, int height);
 
