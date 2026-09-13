@@ -23,6 +23,16 @@ def _pipeline(**kwargs):
     )
 
 
+def test_color_target_blend_state_validation():
+    target = ti.hardware.graphics.ColorTarget
+    for field in ("src_color_factor", "dst_color_factor", "src_alpha_factor", "dst_alpha_factor"):
+        with pytest.raises(ValueError, match=field):
+            target(**{field: "constant_color"})
+    for field in ("color_op", "alpha_op"):
+        with pytest.raises(ValueError, match=field):
+            target(**{field: "multiply"})
+
+
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_mrt_float_integer_outputs_graph_rebind_and_lifetime(monkeypatch):
     monkeypatch.setenv("TI_VULKAN_GRAPHICS_RETAINED_REPLAY_PROOF", "1")
@@ -234,3 +244,55 @@ def test_mrt_per_target_write_mask_blend_and_load():
                 image[drawn], np.tile([expected_red, 0.5, 0.75, 1], (drawn.sum(), 1))
             )
             np.testing.assert_array_equal(ids.to_numpy(), 0xFEDCBA98)
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_mrt_independent_color_alpha_equations_prepared_replay():
+    gfx = ti.hardware.graphics
+    pipeline = gfx.VulkanGraphicsPipeline(
+        _spirv_header("2_triangle.vert.spv.h"),
+        (Path(__file__).parent / "assets/hardware_graphics_blend.frag.spv").read_bytes(),
+        vertex_bindings=(gfx.VertexBinding(0, 20),),
+        vertex_attributes=(gfx.VertexAttribute(0, 0, ti.Format.rg32f, 0),
+                           gfx.VertexAttribute(1, 0, ti.Format.rgb32f, 8)),
+        color_targets=(
+            gfx.ColorTarget(True, src_color_factor="one", dst_color_factor="one",
+                            src_alpha_factor="one", dst_alpha_factor="one_minus_src_alpha"),
+            gfx.ColorTarget(True, src_color_factor="one", dst_color_factor="one",
+                            color_op="reverse_subtract", alpha_op="min"),
+        ),
+    )
+    vertices = ti.ndarray(ti.f32, 15)
+    vertices.from_numpy(np.array(
+        [-0.8, -0.8, 1, 0, 0, 0.8, -0.8, 1, 0, 0, -0.8, 0.8, 1, 0, 0], np.float32))
+    textures = [ti.Texture(ti.Format.rgba32f, (32, 24)) for _ in range(2)]
+    values = ti.Vector.ndarray(4, ti.f32, (32, 24))
+
+    @ti.kernel
+    def read(image: ti.types.texture(2), out: ti.types.ndarray()):
+        for i, j in out:
+            out[i, j] = image.fetch(ti.Vector([i, j]), 0)
+
+    recording = pipeline.record_pass(
+        (pipeline.pass_draw(gfx.Draw(3), vertex_buffers={0: "vertices"}),) * 2,
+        colors=(gfx.ColorAttachment("sum", clear_value=(1, 1, 1, 0.25)),
+                gfx.ColorAttachment("difference", clear_value=(8, 8, 8, 0.75))),
+    )
+    builder = ti.graph.GraphBuilder()
+    builder.append_native(recording, admission="auto")
+    graph = builder.compile()
+    bound = graph.bind(dict(vertices=vertices, sum=textures[0], difference=textures[1]))
+    for _ in range(2):
+        graph.submit(bound).wait()
+        for texture, expected, clear in zip(
+            textures, ((9, 1.5, 2, 0.8125), (4, 7, 6, 0.25)),
+            ((1, 1, 1, 0.25), (8, 8, 8, 0.75)),
+        ):
+            read(texture, values)
+            image = values.to_numpy()
+            drawn = image[:, :, 0] != clear[0]
+            assert drawn.any() and (~drawn).any()
+            np.testing.assert_allclose(image[drawn], np.tile(expected, (drawn.sum(), 1)))
+            np.testing.assert_allclose(image[~drawn], np.tile(clear, ((~drawn).sum(), 1)))
+    graph.close()
+    pipeline.close()

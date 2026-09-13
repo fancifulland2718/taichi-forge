@@ -36,6 +36,14 @@ from taichi_forge.lang.exception import TaichiRuntimeError
 
 _TOPOLOGIES = {"triangles": 0, "lines": 1, "points": 2}
 _POLYGON_MODES = {"fill": 0, "line": 1, "point": 2}
+_BLEND_OPS = {name: index for index, name in enumerate(
+    ("add", "subtract", "reverse_subtract", "min", "max")
+)}
+_BLEND_FACTORS = {name: index for index, name in enumerate(
+    ("zero", "one", "src_color", "one_minus_src_color", "dst_color",
+     "one_minus_dst_color", "src_alpha", "one_minus_src_alpha",
+     "dst_alpha", "one_minus_dst_alpha")
+)}
 _DEPTH_COMPARE_OPS = {
     name: index for index, name in enumerate(
         ("never", "less", "equal", "less_equal", "greater", "not_equal", "greater_equal", "always")
@@ -139,12 +147,20 @@ class ColorAttachment:
 class ColorTarget:
     """Per-output fixed pipeline state. Bit 0..3 enables R/G/B/A writes.
 
-    Blending uses the existing source-alpha/one-minus-source-alpha equation;
-    integer ID targets must leave blending disabled.
+    RGB and alpha have independent factors and operations. Defaults retain the
+    source-alpha/one-minus-source-alpha equation for both. Integer ID targets
+    must leave blending disabled. Blend constants and dual-source blending are
+    not exposed.
     """
 
     blending: bool = False
     write_mask: int = 15
+    src_color_factor: str = "src_alpha"
+    dst_color_factor: str = "one_minus_src_alpha"
+    color_op: str = "add"
+    src_alpha_factor: str = "src_alpha"
+    dst_alpha_factor: str = "one_minus_src_alpha"
+    alpha_op: str = "add"
 
     def __post_init__(self):
         if not isinstance(self.blending, bool):
@@ -152,6 +168,12 @@ class ColorTarget:
         mask = _u32(self.write_mask, "color write_mask")
         if mask > 15:
             raise ValueError("color write_mask must be in [0, 15]")
+        for name in ("src_color_factor", "dst_color_factor", "src_alpha_factor", "dst_alpha_factor"):
+            if getattr(self, name) not in _BLEND_FACTORS:
+                raise ValueError(f"unsupported {name}")
+        for name in ("color_op", "alpha_op"):
+            if getattr(self, name) not in _BLEND_OPS:
+                raise ValueError(f"unsupported {name}")
 
 
 def _color_targets(values, blending):
@@ -160,7 +182,10 @@ def _color_targets(values, blending):
     targets = tuple(values)
     if blending or not targets or not all(isinstance(x, ColorTarget) for x in targets):
         raise ValueError("color_targets requires nonempty ColorTarget values and blending=False")
-    return tuple((x.blending, x.write_mask) for x in targets)
+    return tuple((x.blending, x.write_mask,
+                  _BLEND_FACTORS[x.src_color_factor], _BLEND_FACTORS[x.dst_color_factor],
+                  _BLEND_OPS[x.color_op], _BLEND_FACTORS[x.src_alpha_factor],
+                  _BLEND_FACTORS[x.dst_alpha_factor], _BLEND_OPS[x.alpha_op]) for x in targets)
 
 
 @dataclass(frozen=True)

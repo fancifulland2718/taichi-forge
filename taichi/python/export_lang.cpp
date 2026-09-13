@@ -1315,12 +1315,32 @@ void export_lang(py::module &m) {
 
   py::class_<PreparedVulkanGraphicsPass, std::shared_ptr<PreparedVulkanGraphicsPass>>(
       m, "_PreparedVulkanGraphicsPass");
-  auto parse_graphics_color_targets = [](const std::vector<std::pair<bool, std::uint32_t>> &raw) {
+  auto parse_graphics_color_targets = [](const py::sequence &raw) {
     std::vector<BlendingParams> targets;
-    for (const auto &[enabled, mask] : raw) {
+    for (const auto item_handle : raw) {
+      const auto item = py::cast<py::tuple>(item_handle);
+      TI_ERROR_IF(item.size() != 2 && item.size() != 8,
+                  "Color target requires enable, mask and optional RGB/alpha blend functions");
       BlendingParams target;
-      target.enable = enabled;
-      target.write_mask = mask;
+      target.enable = py::cast<bool>(item[0]);
+      target.write_mask = py::cast<std::uint32_t>(item[1]);
+      TI_ERROR_IF(target.write_mask > 15, "Invalid graphics color write mask");
+      if (item.size() == 8) {
+        auto factor = [](const py::handle &value) {
+          const auto raw = py::cast<std::uint32_t>(value);
+          TI_ERROR_IF(raw > static_cast<std::uint32_t>(BlendFactor::one_minus_dst_alpha),
+                      "Invalid graphics blend factor");
+          return static_cast<BlendFactor>(raw);
+        };
+        auto op = [](const py::handle &value) {
+          const auto raw = py::cast<std::uint32_t>(value);
+          TI_ERROR_IF(raw > static_cast<std::uint32_t>(BlendOp::max),
+                      "Invalid graphics blend operation");
+          return static_cast<BlendOp>(raw);
+        };
+        target.color = {op(item[4]), factor(item[2]), factor(item[3])};
+        target.alpha = {op(item[7]), factor(item[5]), factor(item[6])};
+      }
       targets.push_back(target);
     }
     return targets;
@@ -2977,7 +2997,7 @@ void export_lang(py::module &m) {
              bool depth_test, bool depth_write, bool blending,
              const std::string &name, int depth_compare,
              float depth_bias_constant, float depth_bias_slope,
-             const std::vector<std::pair<bool, std::uint32_t>> &raw_color_targets) {
+             const py::sequence &raw_color_targets) {
             auto decode_spirv = [](py::bytes value, const char *stage) {
               const std::string bytes = py::cast<std::string>(value);
               TI_ERROR_IF(bytes.empty() ||
@@ -3040,7 +3060,7 @@ void export_lang(py::module &m) {
              bool front_face_cull, bool back_face_cull, bool depth_test,
              bool depth_write, bool blending, const std::string &name,
              int depth_compare, float depth_bias_constant, float depth_bias_slope,
-             const std::vector<std::pair<bool, std::uint32_t>> &raw_color_targets) {
+             const py::sequence &raw_color_targets) {
             auto decode_spirv = [](py::bytes value, const char *stage,
                                    bool optional) {
               const std::string bytes = py::cast<std::string>(value);
