@@ -591,9 +591,9 @@ class TI_DLL_EXPORT GfxRuntime {
 
   // Submit one graphics command list between two compute-stream completion
   // points. Vulkan may select a compute-only queue family, so graphics work
-  // must never be recorded into current_cmdlist_. The returned-to-compute
-  // semaphore bridge keeps later kernels, RuntimeCompletion, and resource
-  // retirement in the existing runtime ordering domain without a host wait.
+  // must never be recorded into current_cmdlist_. The next compute submission
+  // carries the graphics dependency, keeping kernels, RuntimeCompletion, and
+  // resource retirement ordered without a bridge-only submit or host wait.
   StreamSemaphore enqueue_graphics_op_lambda(
       std::function<void(GraphicsDevice *device, CommandList *cmdlist)> op,
       const std::vector<ComputeOpImageRef> &image_refs,
@@ -629,17 +629,19 @@ class TI_DLL_EXPORT GfxRuntime {
   // (for example copy_image -> transition_image and synchronize -> flush).
   mutable std::recursive_mutex host_api_mutex_;
 
-  // Latest completion on the runtime compute stream. A graphics submission
-  // consumes it, then publishes a new compute-stream bridge completion. This
-  // is deliberately a binary-semaphore chain rather than a host-side wait.
+  // A graphics submission consumes the compute tail. Its signal is carried
+  // by the next real compute submission (or an explicit completion marker),
+  // rather than a separate bridge-only queue submission.
   StreamSemaphore latest_compute_completion_;
+  StreamSemaphore pending_graphics_completion_;
+  StreamSemaphore submit_compute_commands(CommandList *commands);
   bool graphics_submission_used_{false};
 
   // Feasibility proof for an exact-binding graphics command-list set. The set
   // is intentionally fixed at two: this covers the qualified two-packet
   // fixed-binding burst without allowing binding churn to grow driver-owned
-  // command buffers without bound. Compute/graphics semaphore bridges remain
-  // per submission and are never retained here.
+  // command buffers without bound. Compute/graphics dependency signals remain
+  // per submission and are never retained as part of the recorded commands.
   struct RetainedGraphicsCommandReplay {
     static constexpr std::size_t kSlotCapacity = 2;
     struct Slot {

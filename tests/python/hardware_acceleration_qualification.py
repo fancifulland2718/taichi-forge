@@ -4278,8 +4278,10 @@ def _vulkan_offscreen_simulation_case(order, args):
                 and replay_stats["retained_replay_attempts"] > 0
                 and replay_stats["retained_replay_submit_failures"] == 0
                 and replay_stats["retained_replay_bridge_failures"] == 0
-                and replay_stats["retained_replay_graphics_submissions"]
-                == replay_stats["retained_replay_bridge_submissions"]
+                # Graphics dependencies may be carried by a real consumer
+                # rather than a bridge-only submission.
+                and replay_stats["retained_replay_bridge_submissions"]
+                <= replay_stats["retained_replay_graphics_submissions"]
             )
         )
     )

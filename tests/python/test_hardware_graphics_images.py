@@ -148,10 +148,10 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             before = dict(program._debug_vulkan_queue_submission_stats())
             graph.submit(bindings).wait()
             after = dict(program._debug_vulkan_queue_submission_stats())
-            # Producer, graphics, consumer plus the immutable bridge command;
-            # caching must preserve the original queue dependency shape.
+            # The real consumer submission waits on graphics directly; no
+            # separate bridge-only command buffer is recorded or submitted.
             assert after["queue_submit_calls"] - before["queue_submit_calls"] == 3
-            assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 4
+            assert after["submitted_command_buffers"] - before["submitted_command_buffers"] == 3
             expected = np.broadcast_to([red, 0.25, 0.5, 1.0], (32, 16, 4))
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
         if binding_recipe:
@@ -204,6 +204,64 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
                 frame.run()
             materialized.close()
             materialization.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_graphics_dependency_chain_terminal_ticket_and_host_readback():
+    """Unconsumed graphics signals survive another draw or a terminal ticket."""
+    vertices, uniform = _quad_resources()
+    source = ti.Texture(ti.Format.rgba8, (16, 8))
+    middle = ti.Texture(ti.Format.rgba8, (16, 8))
+    target = ti.Texture(ti.Format.rgba8, (16, 8))
+
+    @ti.kernel
+    def paint(image: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8), red: ti.f32):
+        for i, j in image:
+            image.store(ti.Vector([i, j]), ti.Vector([red, 0.25, 0.5, 1.0]))
+
+    @ti.kernel
+    def read(image: ti.types.texture(2)) -> ti.f32:
+        return image.fetch(ti.Vector([8, 4]), 0).x
+
+    @ti.kernel
+    def read_external(image: ti.types.texture(2), result: ti.types.ndarray(dtype=ti.f32, ndim=1)):
+        result[0] = image.fetch(ti.Vector([8, 4]), 0).x
+
+    with _sampled_pipeline() as pipeline:
+        draw = pipeline.pass_draw(
+            ti.hardware.graphics.Draw(6),
+            vertex_buffers={0: "vertices"},
+            shader_buffers={(0, 1): "uniform"},
+            shader_images={(0, 0): "middle"},
+        )
+        first = _recording(pipeline)
+        second = pipeline.record_pass((draw,), color="result")
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(first, admission="auto")
+        builder.append_native(second, admission="auto")
+        graph = builder.compile()
+        bindings = graph.bind(
+            dict(source=source, target=middle, middle=middle, result=target, vertices=vertices, uniform=uniform)
+        )
+        program = impl.get_runtime().prog
+        for red in (0.2, 0.8, 0.4):
+            paint(source, red)
+            graph.run(bindings)
+            # Synchronous return and external-array readback use the same
+            # pending graphics wait as ordinary/prepared compute submissions.
+            assert read(target) == pytest.approx(red, abs=1 / 255)
+            graph.run(bindings)
+            host = np.zeros(1, np.float32)
+            read_external(target, host)
+            assert host[0] == pytest.approx(red, abs=1 / 255)
+            # A readback consumes its own binary signal; the next draw must
+            # not wait that already-consumed signal again.
+            graph.run(bindings)
+            completion = program._record_runtime_completion()
+            completion.wait()
+        graph.submit(bindings).wait()
+        graph.close()
+    ti.sync()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

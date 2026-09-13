@@ -694,6 +694,7 @@ class HostDeviceContextBlitter {
     device_->unmap(*device_args_buffer_);
   }
 
+  template <typename Submit>
   bool device_to_host(
       CommandList *cmdlist,
       const std::unordered_map<std::vector<int>,
@@ -702,7 +703,8 @@ class HostDeviceContextBlitter {
       const std::unordered_map<std::vector<int>,
                                size_t,
                                hashing::Hasher<std::vector<int>>>
-          &ext_arr_size) {
+          &ext_arr_size,
+      Submit &&submit) {
     if (ctx_attribs_->empty()) {
       return false;
     }
@@ -740,8 +742,7 @@ class HostDeviceContextBlitter {
 
     if (require_sync) {
       if (readback_sizes.size()) {
-        StreamSemaphore command_complete_sema =
-            device_->get_compute_stream()->submit(cmdlist);
+        StreamSemaphore command_complete_sema = submit(cmdlist);
 
         device_->wait_idle();
 
@@ -751,7 +752,8 @@ class HostDeviceContextBlitter {
                       readback_sizes.data(), int(readback_sizes.size()),
                       {command_complete_sema}) == RhiResult::success);
       } else {
-        device_->get_compute_stream()->submit_synced(cmdlist);
+        submit(cmdlist);
+        device_->get_compute_stream()->command_sync();
       }
 
       if (!ctx_attribs_->has_rets()) {
@@ -2319,7 +2321,12 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
   if (ctx_blitter) {
     insert_pending_dispatch_barriers();
     if (ctx_blitter->device_to_host(current_cmdlist_.get(), any_arrays,
-                                    ext_array_size)) {
+                                    ext_array_size, [this](CommandList *commands) {
+                                      return submit_compute_commands(commands);
+                                    })) {
+      // The readback path may consume the submitted binary signal. Its host
+      // synchronization already covers the producer; never wait it again.
+      latest_compute_completion_.reset();
       current_cmdlist_ = nullptr;
       current_cmdlist_dispatch_count_ = 0;
       ctx_buffers_.clear();
@@ -2331,7 +2338,14 @@ void GfxRuntime::launch_kernel(KernelHandle handle,
     }
   }
 
-  submit_current_cmdlist_if_timeout();
+  // A graphics consumer must be published when it is ready, not held by the
+  // ordinary lazy-submit timeout until another frame or host synchronization.
+  // Carry its cross-queue wait on this real work instead of an empty bridge.
+  if (pending_graphics_completion_ && current_cmdlist_) {
+    flush();
+  } else {
+    submit_current_cmdlist_if_timeout();
+  }
 }
 
 void GfxRuntime::GraphReplayExecutable::reset() {
@@ -2995,8 +3009,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     state.fixed_submit = [this, primary_slot] {
       flush_if_pending();
       primary_slot->completion =
-          device_->get_compute_stream()->submit(primary_slot->cmdlist.get());
-      latest_compute_completion_ = primary_slot->completion;
+          submit_compute_commands(primary_slot->cmdlist.get());
     };
   }
   state.last_path = GraphReplayLastPath::record;
@@ -4451,8 +4464,7 @@ bool GfxRuntime::try_launch_graph(
   };
 
   if (slot->recorded && slot->cmdlist && slot->key == key) {
-    slot->completion =
-        device_->get_compute_stream()->submit(slot->cmdlist.get());
+    slot->completion = submit_compute_commands(slot->cmdlist.get());
     if (state.diagnostics_enabled) {
       ++state.replayed;
     }
@@ -4469,8 +4481,7 @@ bool GfxRuntime::try_launch_graph(
       slot->structure_key == structure_key && patch_all_task_bindings() &&
       update_structured_bindings(/*patch_existing=*/true)) {
     slot->key = key;
-    slot->completion =
-        device_->get_compute_stream()->submit(slot->cmdlist.get());
+    slot->completion = submit_compute_commands(slot->cmdlist.get());
     if (state.diagnostics_enabled) {
       ++state.replayed;
       ++state.patched;
@@ -4930,9 +4941,7 @@ bool GfxRuntime::try_launch_graph(
       slot->structure_key = std::move(structure_key);
       slot->cmdlist = std::move(recorded_cmdlist);
       slot->recorded = true;
-      slot->completion =
-          device_->get_compute_stream()->submit(
-              slot->cmdlist.get());
+      slot->completion = submit_compute_commands(slot->cmdlist.get());
       if (state.diagnostics_enabled) {
         ++state.recorded;
       }
@@ -5180,8 +5189,7 @@ bool GfxRuntime::try_launch_graph(
     slot->structure_key = std::move(structure_key);
     slot->cmdlist = std::move(recorded_cmdlist);
     slot->recorded = true;
-    slot->completion =
-        device_->get_compute_stream()->submit(slot->cmdlist.get());
+    slot->completion = submit_compute_commands(slot->cmdlist.get());
     if (state.diagnostics_enabled) {
       ++state.recorded;
     }
@@ -5458,7 +5466,7 @@ bool GfxRuntime::try_launch_graph(
   slot->structure_key = std::move(structure_key);
   slot->cmdlist = std::move(recorded_cmdlist);
   slot->recorded = true;
-  slot->completion = device_->get_compute_stream()->submit(slot->cmdlist.get());
+  slot->completion = submit_compute_commands(slot->cmdlist.get());
   if (state.diagnostics_enabled) {
     ++state.recorded;
   }
@@ -5544,10 +5552,8 @@ void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   flush_if_pending();
   device_->get_compute_stream()->command_sync();
   if (graphics_submission_used_) {
-    // Every runtime graphics submission publishes a compute-stream bridge, so
-    // graphics is already complete here. Synchronizing its stream retires the
-    // command buffers and their pipeline/image references without extending
-    // ordinary execution with a host wait.
+    // Graphics may be the final producer, with no following compute consumer.
+    // Retire that queue at this explicit synchronization boundary as well.
     auto *graphics_device = dynamic_cast<GraphicsDevice *>(device_);
     TI_ASSERT(graphics_device != nullptr);
     graphics_device->get_graphics_stream()->command_sync();
@@ -5579,12 +5585,24 @@ void GfxRuntime::synchronize_impl(bool check_hash_overflow) {
   fflush(stdout);
 }
 
+StreamSemaphore GfxRuntime::submit_compute_commands(CommandList *commands) {
+  auto completion = pending_graphics_completion_
+                        ? device_->get_compute_stream()->submit(
+                              commands, {pending_graphics_completion_})
+                        : device_->get_compute_stream()->submit(commands);
+  // Successful submit owns the wait reference, including inside a batch.
+  // On failure leave it available to the runtime's recovery/close boundary.
+  pending_graphics_completion_.reset();
+  latest_compute_completion_ = completion;
+  return completion;
+}
+
 StreamSemaphore GfxRuntime::flush() {
   std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
   StreamSemaphore sema;
   if (current_cmdlist_) {
     insert_pending_dispatch_barriers();
-    sema = device_->get_compute_stream()->submit(current_cmdlist_.get());
+    sema = submit_compute_commands(current_cmdlist_.get());
     current_cmdlist_ = nullptr;
     current_cmdlist_dispatch_count_ = 0;
     ctx_buffers_.clear();
@@ -5596,7 +5614,7 @@ StreamSemaphore GfxRuntime::flush() {
         device_->get_compute_stream()->new_command_list_unique();
     TI_ASSERT(res == RhiResult::success);
     cmdlist->memory_barrier();
-    sema = device_->get_compute_stream()->submit(cmdlist.get());
+    sema = submit_compute_commands(cmdlist.get());
   }
   current_cmdlist_dispatch_count_ = 0;
   latest_compute_completion_ = sema;
@@ -5618,7 +5636,8 @@ StreamSemaphore GfxRuntime::record_completion_semaphore() {
   // unlike reusing the token returned by an earlier end_submission_batch().
   // Untracked native work or work on another queue cannot establish this
   // match and keeps the existing marker path.
-  if (!current_cmdlist_ && latest_compute_completion_ &&
+  if (!current_cmdlist_ && !pending_graphics_completion_ &&
+      latest_compute_completion_ &&
       device_->get_compute_stream()->is_last_submission(
           latest_compute_completion_)) {
     return latest_compute_completion_;
@@ -5642,7 +5661,7 @@ void GfxRuntime::begin_submission_batch() {
 
 StreamSemaphore GfxRuntime::end_submission_batch() {
   try {
-    if (current_cmdlist_) {
+    if (current_cmdlist_ || pending_graphics_completion_) {
       flush();
     }
     StreamSemaphore completion =
@@ -6160,8 +6179,8 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   }
 
   // Publish all preceding runtime work before crossing to the graphics queue.
-  // If there is no current list, latest_compute_completion_ still represents
-  // the most recent explicit flush or the bridge from an earlier graphics op.
+  // With no compute list, a preceding graphics signal can directly order this
+  // graphics consumer. Each binary signal is consumed by exactly one submit.
   if (StreamSemaphore flushed = flush_if_pending()) {
     latest_compute_completion_ = std::move(flushed);
   }
@@ -6308,7 +6327,9 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
   // Neither the enclosing transaction nor device execution is waited here.
   device_->get_compute_stream()->flush_submission_batch();
   std::vector<StreamSemaphore> graphics_waits;
-  if (latest_compute_completion_) {
+  if (pending_graphics_completion_) {
+    graphics_waits.push_back(pending_graphics_completion_);
+  } else if (latest_compute_completion_) {
     graphics_waits.push_back(latest_compute_completion_);
   }
   StreamSemaphore graphics_completion;
@@ -6327,8 +6348,10 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
     }
     throw;
   }
+  pending_graphics_completion_ = graphics_completion;
+  latest_compute_completion_.reset();
   // Recording a transition is not committing it. Publish image state only
-  // after successful submission, including when the later bridge fails.
+  // after successful submission. A later compute failure retains its wait.
   for (const auto &ref : image_refs) {
     set_tracked_image_layout(ref.image.alloc_id, ref.final_layout);
   }
@@ -6343,29 +6366,10 @@ StreamSemaphore GfxRuntime::enqueue_graphics_op_lambda(
         graphics_completion;
   }
 
-  // Bring the dependency back to the compute stream immediately. All later
-  // kernel submissions and RuntimeCompletion tickets already use this stream,
-  // so no second lifetime/completion domain is introduced.
-  try {
-    Stream *compute_stream = device_->get_compute_stream();
-    latest_compute_completion_ =
-        compute_stream->submit_dependency({graphics_completion});
-    TI_ERROR_IF(!latest_compute_completion_,
-                "Runtime graphics completion bridge returned no token");
-  } catch (...) {
-    ++retained_graphics_replay_.bridge_failures;
-    ++retained_graphics_replay_.submit_failures;
-    // Preserve the graphics completion as the next ordering dependency even
-    // when bridge recording fails. A non-fatal caller may then fall back
-    // without submitting compute work ahead of the graphics operation.
-    latest_compute_completion_ = graphics_completion;
-    if (record_retained || replay) {
-      invalidate_graphics_command_replay_locked();
-    }
-    throw;
-  }
-  ++retained_graphics_replay_.bridge_submissions;
-  return latest_compute_completion_;
+  // The graphics token already owns its submitted resources. The next real
+  // compute work consumes its wait through submit_compute_commands(); an
+  // explicit terminal ticket still publishes a marker when needed.
+  return graphics_completion;
 }
 
 void GfxRuntime::invalidate_graphics_command_replay_locked(

@@ -1377,7 +1377,7 @@ def test_vulkan_graphics_pass_shader_buffer_effects_are_explicit():
             ("parameters", GraphAccess.READ),
             ("state", GraphAccess.READ_WRITE),
         )
-        with pytest.raises(ValueError, match="only supports color store"):
+        with pytest.raises(ValueError, match="require store_op='store'"):
             pipeline.record_pass((draw,), color_store_op="discard")
         with pytest.raises(ValueError, match="exactly"):
             pipeline.pass_draw(
