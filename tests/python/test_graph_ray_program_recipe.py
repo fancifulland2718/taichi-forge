@@ -14,7 +14,7 @@ from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
 from tests import test_utils
 
 
-def _window(owners, *, scalar=17):
+def _window(owners, *, scalar=17, drift=None):
     ray = ti.hardware.ray
     output, middle, result = [ti.ndarray(ti.u32, 8) for _ in range(3)]
     if ti.cfg.arch == ti.vulkan:
@@ -34,20 +34,47 @@ def _window(owners, *, scalar=17):
         expected = 6 * np.arange(8, dtype=np.uint32) + 2 * scalar + 2
         kind = "vulkan_ray_program"
     else:
-        from tests.python.test_hardware_optix_program_public import _provider, _program, _record, _scene
+        from tests.python.test_hardware_optix_program_public import (
+            PARAMS,
+            E,
+            _module,
+            _provider,
+            _program,
+            _record,
+            _scene,
+        )
 
         provider = _provider()
         owners.callback(provider.close)
         gas, scene = _scene(provider)
         owners.callback(gas.close)
         owners.callback(scene.close)
-        program = owners.enter_context(_program(provider))
+        if drift in ("code", "layout"):
+            module = _module()
+            parameters = PARAMS
+            if drift == "code":
+                code = module.code.replace(b"add.s32 \t%r3, %r1, %r4;", b"sub.s32 \t%r3, %r1, %r4;")
+                assert code != module.code
+                module = ray.PtxModule(code)
+            else:
+                parameters = ray.OptixParameterLayout(32, PARAMS.fields)
+            program = provider.program(
+                (module,),
+                raygen={"render": E(0, "__raygen__render")},
+                miss={"miss": E(0, "__miss__value")},
+                hit_groups={"hit": ray.OptixHitGroup(E(0, "__closesthit__value"), E(0, "__anyhit__mask"))},
+                parameters=parameters,
+                payload_count=1,
+            )
+        else:
+            program = _program(provider)
+        owners.enter_context(program)
         recording = _record(program, scene)
         recording = program.record(
             8,
             raygen=recording.raygen,
             miss=recording.miss,
-            hit=recording.hit,
+            hit=tuple(reversed(recording.hit)) if drift == "sbt_mapping" else recording.hit,
             parameters={"scene": "world", "output": "output", "bias": 5 if scalar == 17 else scalar, "count": 8},
             scenes={"world": scene},
         )
@@ -138,7 +165,8 @@ def test_native_program_recipe_report_reallocation_and_contract_drift():
         ).run(evaluate)
         assert decision.status == "selected", decision.report.to_json()
         assert decision.report.search_complete
-        assert baseline in observed and len(observed) >= 2
+        assert baseline in observed
+        assert len(observed) == (4 if definition.backend == "vulkan" else 2)
         report = json.loads(decision.report.to_json())
         native = report["reuse"]["context"]["native_source_contracts"]
         assert len(native) == 1
@@ -174,6 +202,14 @@ def test_native_program_recipe_report_reallocation_and_contract_drift():
         different, *_ = _window(owners, scalar=23)
         with pytest.raises(ti.graph.GraphRecipeReuseError):
             different.resolve_recipe(artifact, providers=providers)
+        if definition.backend == "cuda":
+            for change in ("code", "layout", "sbt_mapping"):
+                # Valid programs with a changed contract must not inherit a
+                # previous program's selection. No stale executable is loaded.
+                with ExitStack() as changed_owners:
+                    changed, *_ = _window(changed_owners, drift=change)
+                    with pytest.raises(ti.graph.GraphRecipeReuseError):
+                        changed.resolve_recipe(artifact, providers=providers)
         context = multiprocessing.get_context("spawn")
         queue = context.Queue()
         child = context.Process(target=_resolve_program_window, args=(definition.backend, artifact.to_dict(), queue))

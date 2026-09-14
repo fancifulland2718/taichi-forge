@@ -13,7 +13,9 @@ class GraphMapFusionRecipeProvider(GraphRuntimeFragmentProvider):
 
     descriptor = runtime_family_provider_descriptor(
         "map_fusion",
-        capabilities=("exact-map-partition", "typed-runtime-fragment"),
+        capabilities=("exact-map-partition", "typed-runtime-fragment", "vulkan-fixed-frame-composition"),
+        domain_version="map-fusion-fixed-frame-domain-v2",
+        semantic_fingerprint="exact-map-partition-vulkan-fixed-frame-v2",
     )
 
     def fragments(self, definition):
@@ -58,6 +60,10 @@ class GraphMapFusionRecipeProvider(GraphRuntimeFragmentProvider):
                     coverage=coverage,
                     tasks=(task,),
                     provider_descriptor=self.descriptor,
+                    compatible_executor_kinds=(
+                        ("vulkan_immutable_argument_frames",)
+                        if definition.backend == "vulkan" else ()
+                    ),
                 )
             )
         return tuple(result)

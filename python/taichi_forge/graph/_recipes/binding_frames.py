@@ -195,9 +195,10 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
             "vulkan-complete-recipe-publication",
             "vulkan-complete-graphics-queue-recording",
             "vulkan-independent-graphics-fork-join",
+            "vulkan-prepared-native-command-factories",
         ),
-        domain_version="immutable-binding-frame-domain-v13",
-        semantic_fingerprint="cuda-vulkan-composed-native-image-dense-graphics-queue-v13",
+        domain_version="immutable-binding-frame-domain-v14",
+        semantic_fingerprint="cuda-vulkan-composed-native-command-factories-v14",
     )
 
     def fragments(self, definition):
