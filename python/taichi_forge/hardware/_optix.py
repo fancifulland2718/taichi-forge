@@ -315,6 +315,7 @@ class _ProviderApi(ctypes.Structure):
         ("trace_instance_alpha", _TraceAlpha),
         ("create_triangle_gas_micromap", _CreateMicromapGas),
         ("trace_instance_micromap", _TraceAlpha),
+        ("get_program_api", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p)),
     ]
 
 

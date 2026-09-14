@@ -148,6 +148,7 @@ function(_ti_add_optix_provider target_name root)
 
     add_library(${target_name} SHARED
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/provider.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/provider/program.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/taichi/optix/forge_optix_provider.h"
         ${_ptx_headers})
     target_compile_features(${target_name} PRIVATE cxx_std_17)

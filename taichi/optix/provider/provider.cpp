@@ -1,4 +1,5 @@
 #include "taichi/optix/forge_optix_provider.h"
+#include "taichi/optix/provider/program_internal.h"
 
 #if defined(_WIN32) && !defined(NOMINMAX)
 #define NOMINMAX
@@ -29,7 +30,7 @@
 #error "Forge OptiX provider supports only SDK ABI 93, 105, and 118"
 #endif
 
-namespace {
+namespace taichi::optix_provider {
 
 thread_local std::string last_error;
 thread_local std::string last_optix_log;
@@ -44,7 +45,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2-omm1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2-omm1-program1";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -58,7 +59,8 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE |
                                TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
                                TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
-                               TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT;
+                               TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT |
+                               TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE;
 
 void clear_error_state() {
   last_error.clear();
@@ -175,6 +177,7 @@ struct Context {
   std::atomic<std::size_t> scene_count{0};
   std::atomic<std::size_t> gas_count{0};
   std::atomic<std::size_t> instance_scene_count{0};
+  std::atomic<std::size_t> program_count{0};
 };
 
 struct LaunchParams {
@@ -197,6 +200,7 @@ static_assert(sizeof(TiForgeOptixAlphaMask) == 32,
 
 struct Scene {
   Context *context{nullptr};
+  std::atomic<std::size_t> program_refs{0};
   uint32_t vertex_count{0};
   uint32_t triangle_count{0};
   bool allow_update{false};
@@ -227,6 +231,8 @@ struct TriangleGas {
 
 struct InstanceScene {
   Context *context{nullptr};
+  std::atomic<std::size_t> program_refs{0};
+  uint32_t max_sbt_offset{0};
   uint32_t instance_count{0};
   bool allow_update{false};
   std::vector<TriangleGas *> gas_refs;
@@ -1383,9 +1389,9 @@ TiForgeOptixResult destroy_context(TiForgeOptixContext raw_context) {
                 "OptiX context is null");
   }
   if (context->scene_count.load() != 0 || context->gas_count.load() != 0 ||
-      context->instance_scene_count.load() != 0) {
+      context->instance_scene_count.load() != 0 || context->program_count.load() != 0) {
     return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
-                "OptiX context still owns live acceleration structures");
+                "OptiX context still owns live acceleration structures or programs");
   }
   auto result = cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(context destroy)");
   if (result != TI_FORGE_OPTIX_SUCCESS) {
@@ -1681,6 +1687,10 @@ TiForgeOptixResult destroy_instance_scene(
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "OptiX instance scene is null");
   }
+  if (scene->program_refs.load() != 0) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "OptiX instance scene still has prepared program launches");
+  }
   auto result =
       cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(instance scene destroy)");
   if (result != TI_FORGE_OPTIX_SUCCESS) {
@@ -1726,6 +1736,10 @@ TiForgeOptixResult destroy_triangle_scene(
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
                 "OptiX triangle scene is null");
   }
+  if (scene->program_refs.load() != 0) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "OptiX triangle scene still has prepared program launches");
+  }
   auto result =
       cuda_check(cuCtxSynchronize(), "cuCtxSynchronize(triangle scene destroy)");
   if (result != TI_FORGE_OPTIX_SUCCESS) {
@@ -1746,7 +1760,69 @@ std::size_t get_last_error(char *destination, std::size_t destination_size) {
   return required;
 }
 
-}  // namespace
+TiForgeOptixResult retain_program_context(TiForgeOptixContext raw,
+                                          ProgramContextView *view) {
+  auto *context = static_cast<Context *>(raw);
+  if (!context || !view) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "invalid program context");
+  }
+  view->cuda_context = context->cuda_context;
+  view->optix_context = context->optix_context;
+  context->program_count.fetch_add(1);
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+void release_program_context(TiForgeOptixContext raw) {
+  static_cast<Context *>(raw)->program_count.fetch_sub(1);
+}
+
+TiForgeOptixResult program_scene_info(TiForgeOptixContext context,
+                                       const TiForgeOptixProgramScene *binding,
+                                       TiForgeOptixProgramSceneInfo *info) {
+  if (!context || !binding || !binding->scene || binding->kind > 1 || !info ||
+      info->struct_size < sizeof(*info)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "invalid program scene binding");
+  }
+  if (binding->kind == 0) {
+    auto *scene = static_cast<Scene *>(binding->scene);
+    if (scene->context != context) {
+      return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "program scene belongs to another context");
+    }
+    info->traversable = scene->ias_handle;
+    info->max_sbt_offset = 0;
+    info->has_opacity_micromaps = 0;
+  } else {
+    auto *scene = static_cast<InstanceScene *>(binding->scene);
+    if (scene->context != context) {
+      return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "program scene belongs to another context");
+    }
+    info->traversable = scene->ias_handle;
+    info->max_sbt_offset = scene->max_sbt_offset;
+    info->has_opacity_micromaps = std::any_of(scene->gas_refs.begin(), scene->gas_refs.end(),
+                                           [](const auto *gas) { return gas->micromap.pointer != 0; });
+  }
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult retain_program_scene(TiForgeOptixContext context,
+                                        const TiForgeOptixProgramScene &binding,
+                                        TiForgeOptixProgramSceneInfo *info) {
+  auto result = program_scene_info(context, &binding, info);
+  if (result == TI_FORGE_OPTIX_SUCCESS) {
+    if (binding.kind == 0) static_cast<Scene *>(binding.scene)->program_refs.fetch_add(1);
+    else static_cast<InstanceScene *>(binding.scene)->program_refs.fetch_add(1);
+  }
+  return result;
+}
+
+void release_program_scene(const TiForgeOptixProgramScene &binding) {
+  if (binding.kind == 0) static_cast<Scene *>(binding.scene)->program_refs.fetch_sub(1);
+  else static_cast<InstanceScene *>(binding.scene)->program_refs.fetch_sub(1);
+}
+
+}  // namespace taichi::optix_provider
+
+using namespace taichi::optix_provider;
 
 extern "C" TI_FORGE_OPTIX_EXPORT TiForgeOptixResult
 taichi_forge_optix_provider_query(uint32_t requested_abi_version,
@@ -1801,6 +1877,7 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->trace_instance_alpha = trace_instance_alpha;
   out_api->create_triangle_gas_micromap = create_triangle_gas_micromap;
   out_api->trace_instance_micromap = trace_instance_micromap;
+  out_api->get_program_api = get_program_api;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

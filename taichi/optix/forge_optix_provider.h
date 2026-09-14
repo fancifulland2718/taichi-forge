@@ -49,6 +49,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_ALPHA_MASK = 1ull << 11,
   TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY = 1ull << 12,
   TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT = 1ull << 13,
+  TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE = 1ull << 14,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -278,6 +279,8 @@ typedef TiForgeOptixResult (*TiForgeOptixCreateTriangleGasMicromapFn)(
     TiForgeOptixTriangleGas *out_gas,
     TiForgeOptixMicromapMemory *out_memory);
 
+struct TiForgeOptixProgramApi;
+
 typedef struct TiForgeOptixProviderApi {
   uint32_t struct_size;
   uint32_t provider_abi_version;
@@ -309,6 +312,7 @@ typedef struct TiForgeOptixProviderApi {
   TiForgeOptixTraceInstanceAlphaFn trace_instance_alpha;
   TiForgeOptixCreateTriangleGasMicromapFn create_triangle_gas_micromap;
   TiForgeOptixTraceInstanceAlphaFn trace_instance_micromap;
+  TiForgeOptixResult (*get_program_api)(size_t, struct TiForgeOptixProgramApi *);
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(
