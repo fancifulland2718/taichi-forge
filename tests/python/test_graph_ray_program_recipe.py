@@ -57,6 +57,11 @@ def _window(owners, *, scalar=17, drift=None):
                 assert code != module.code
                 module = ray.PtxModule(code)
             else:
+                # A new layout must still match its PTX ABI. Newer adapters
+                # correctly reject a 32-byte declaration over a 24-byte symbol.
+                code = module.code.replace(b".const .align 8 .b8 params[24];", b".const .align 8 .b8 params[32];")
+                assert code != module.code
+                module = ray.PtxModule(code)
                 parameters = ray.OptixParameterLayout(32, PARAMS.fields)
             program = provider.program(
                 (module,),
