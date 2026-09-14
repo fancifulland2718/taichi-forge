@@ -1,6 +1,12 @@
-"""Public Vulkan hardware ray-query provider API."""
+"""Public Vulkan ray-query and OptiX provider/program APIs."""
 
 from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
+from taichi_forge.hardware._shader_artifact import PtxModule, ShaderBuildInfo
+from taichi_forge.hardware._optix_parameters import OptixParameterField, OptixParameterLayout
+from taichi_forge.hardware._optix_program import (
+    OptixHitGroup, OptixPreparedLaunch, OptixProgram, OptixProgramRecording,
+    OptixSbtRecord, OptixShaderEntry,
+)
 
 from taichi_forge.hardware._ray import (
     InstanceTLAS,
@@ -34,6 +40,16 @@ from taichi_forge.hardware._optix import (
 )
 
 __all__ = [
+    "PtxModule",
+    "ShaderBuildInfo",
+    "OptixHitGroup",
+    "OptixParameterField",
+    "OptixParameterLayout",
+    "OptixPreparedLaunch",
+    "OptixProgram",
+    "OptixProgramRecording",
+    "OptixSbtRecord",
+    "OptixShaderEntry",
     "is_opacity_micromap_available",
     "VulkanOpacityMicromap",
     "InstanceTLAS",

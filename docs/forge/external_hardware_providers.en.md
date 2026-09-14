@@ -933,6 +933,97 @@ opaque fallback. The wheel adds no baker or vendor runtime dependency. OMM can
 cost more when most cells are unknown; compare the complete query/consumer
 window and account for import/build amortization before adoption.
 
+### Managed programmable OptiX programs
+
+`ti.hardware.ray.OptixProgram` accepts externally compiled `ray.PtxModule`
+artifacts and named raygen, miss, and triangle hit groups. It uses the same
+`OptixProvider`, GAS and instance scene as fixed queries. There is no mandatory
+intermediate rays/hits buffer: a raygen shader can read device inputs, generate
+rays and write application outputs directly. Any-hit is device shader code,
+not a Python callback. Custom intersection, callable and motion-blur programs
+are not supported by this interface.
+
+The following example assumes an existing provider, scene and `u32[8]` output,
+and PTX entries implementing this C ABI: launch parameters
+`{ uint64_t scene; uint32_t *output; uint32_t bias, count; }`, miss data
+`{ uint32_t value; }`, and hit data `{ uint32_t value, accept; }`.
+
+```python
+from taichi_forge.hardware import ray
+
+F, L = ray.OptixParameterField, ray.OptixParameterLayout
+E, R = ray.OptixShaderEntry, ray.OptixSbtRecord
+parameters = L(24, (
+    F("scene", 0, kind="scene"),
+    F("output", 8, kind="buffer", access="write"),
+    F("bias", 16, "u32"), F("count", 20, "u32"),
+))
+program = provider.program(
+    (ray.PtxModule.from_file("material.ptx"),),
+    raygen={"render": E(0, "__raygen__render")},
+    miss={"miss": E(0, "__miss__value")},
+    hit_groups={"surface": ray.OptixHitGroup(
+        E(0, "__closesthit__value"), E(0, "__anyhit__mask"))},
+    parameters=parameters, payload_count=1,
+)
+miss = R("miss", layout=L(4, (F("value", 0, "u32"),), alignment=4),
+         values={"value": 7})
+hit_layout = L(8, (F("value", 0, "u32"), F("accept", 4, "u32")))
+recording = program.record(
+    8, raygen="render", miss=(miss, miss),
+    hit=(R("surface", layout=hit_layout, values={"value": 100, "accept": 1}),
+         R("surface", layout=hit_layout, values={"value": 200, "accept": 0})),
+    parameters={"scene": "world", "output": "out", "bias": 5, "count": 8},
+    scenes={"world": scene},
+)
+with recording.prepare({"out": output}) as launch:
+    launch.initialize()  # one ordered upload of private parameters and SBT
+    launch.run()         # asynchronous; repeat after in-place device updates
+    launch.run()
+    ti.sync()            # only where the application actually needs completion
+    print(launch.memory_report().to_dict())
+program.close()           # then close scene, GAS and provider in owner order
+```
+
+The shader determines the ray-type offset/stride and miss index passed to
+`optixTrace`. Provide enough records for every reachable index, including each
+instance's `sbt_record_offset`; that offset is not its `custom_index`.
+Group names select entry points; they do not imply material or ray semantics.
+The payload count must cover **all compiled module entries**, not just the
+selected raygen. Compile with an OptiX SDK/PTX version accepted by the selected
+adapter and driver. The optional `scripts/compile_hardware_shader.py` tool
+requires an explicitly supplied compiler; `PtxModule.from_file()` never invokes
+one. User PTX does not change the wheel's built-in PTX or runtime dependencies.
+
+Every device resource referenced in launch parameters or SBT data must use a
+`kind="buffer"`, `"texture"` or `"scene"` field and a symbolic name. Forge
+retains the corresponding owners and uses managed storage addresses. Qualified
+dense field/views are accepted without an ndarray staging copy; unsupported
+layouts fail during preparation. Access declarations must cover the shader's
+actual reads/writes. Forge does not infer buffer bounds, data types or hidden
+pointers from arbitrary PTX. Raw pointer integers are not a substitute for
+resource fields. Texture fields are existing CUDA texture objects and inherit
+their sampler; unsupported texture capabilities are not emulated.
+
+`record()` snapshots scalar bytes and SBT data. `prepare()` resolves bindings,
+allocates storage and packs native SBT headers, but does not upload, launch, or
+write application outputs. `initialize()` performs one idempotent, stream-ordered
+upload; repeated `run()` does not repack or copy parameters. Change buffer/texture
+objects by preparing again; change scalars, dimensions, SBT or scene references
+by recording again. For frequently changing values, bind a device buffer and
+update it in place. Scene refit does not require program compilation or SBT
+reconstruction. Scene resources are recording-owned, not Vulkan AS arguments.
+
+Close launches before their scenes. `program.close()` retires its launches;
+runtime reset/exit retires launches, programs, scenes, GAS and context in order.
+Explicit close can wait for pending work; steady launches do not wait for host
+completion. `launch.memory_report()` reports only its exact device allocation;
+`preparation_info()` separately reports pinned-host bytes and stack settings.
+`program.memory_report()` leaves driver-private pipeline bytes unknown. Neither
+stack configuration nor borrowed scene/output storage is counted as private
+launch VRAM. Graph/capture support must be checked separately from direct
+program execution; a native launch alone is not a CUDA Graph replay claim.
+
 ## Explicit optional runtime execution providers
 
 The standard runtime wheel contains Forge-owned thin adapters for the following

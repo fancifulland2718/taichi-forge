@@ -764,6 +764,7 @@ class OptixProvider:
         self._runtime_generation = int(impl.runtime_generation())
         self._scenes = weakref.WeakSet()
         self._gases = weakref.WeakSet()
+        self._programs = weakref.WeakSet()
         self._typed_prepared = False
         self._alpha_prepared = False
         self._shared_pipeline_sbt_bytes = 0
@@ -784,6 +785,7 @@ class OptixProvider:
             }
         )
         _loaded_providers.add(self)
+        impl.get_runtime().register_runtime_object(self)
 
     @property
     def closed(self):
@@ -810,6 +812,12 @@ class OptixProvider:
     def triangle_scene(self, vertices, indices, *, allow_update=True):
         self._validate_lifetime()
         return OptixTriangleScene(self, vertices, indices, allow_update=allow_update)
+
+    def program(self, modules, **options):
+        """Create a managed programmable pipeline from explicit PTX artifacts."""
+        from taichi_forge.hardware._optix_program import OptixProgram
+
+        return OptixProgram(self, modules, **options)
 
     def triangle_gas(
         self, vertices, indices, *, allow_update=True, opacity_micromap=None
@@ -905,6 +913,8 @@ class OptixProvider:
             return None
         live = tuple(scene for scene in self._scenes if not scene.closed)
         live_gases = tuple(gas for gas in self._gases if not gas.closed)
+        if any(not program.closed for program in self._programs):
+            raise TaichiRuntimeError("close OptiX programs before their provider")
         if live or live_gases:
             raise TaichiRuntimeError(
                 "OptixProvider cannot close while triangle scenes are live or "
@@ -920,6 +930,19 @@ class OptixProvider:
         return None
 
     destroy = close
+
+    def _invalidate_runtime(self):
+        # Runtime invalidation runs before native Program finalization. Retire
+        # launch -> pipeline -> IAS/scene -> GAS -> context, never after CUDA
+        # resources have already been torn down. Explicit close keeps its
+        # existing fail-closed child ownership contract.
+        for program in tuple(self._programs):
+            program.close()
+        for scene in tuple(self._scenes):
+            scene.close()
+        for gas in tuple(self._gases):
+            gas.close()
+        self.close()
 
     def __enter__(self):
         self._validate_lifetime()

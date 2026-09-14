@@ -735,6 +735,75 @@ Forge 在导入时检查布局、范围和映射，不重新扫描纹理来验�
 wheel 不新增 baker 或 vendor runtime 依赖。unknown 占比高时 OMM 可能更慢，应比较完整查询/消费窗口，
 并计入导入/构建的摊销成本后再决定采用。
 
+### 受管可编程 OptiX program
+
+`ti.hardware.ray.OptixProgram` 接受外部编译的 `ray.PtxModule`，声明命名的 raygen、miss、triangle
+hit group，复用现有 `OptixProvider`、GAS 和 instance scene。raygen 可直接读取设备数据、生成射线并写入
+应用输出，不要求固定的 rays/hits 中间缓冲。any-hit 是设备 shader，不是 Python 回调；本接口不支持
+自定义 intersection、callable 或 motion-blur program。
+
+下面假定已经存在 `provider`、`scene` 和 `u32[8]` 的 `output`。PTX 的参数 ABI 是
+`{ uint64_t scene; uint32_t *output; uint32_t bias, count; }`，miss 数据是
+`{ uint32_t value; }`，hit 数据是 `{ uint32_t value, accept; }`。
+
+```python
+from taichi_forge.hardware import ray
+
+F, L = ray.OptixParameterField, ray.OptixParameterLayout
+E, R = ray.OptixShaderEntry, ray.OptixSbtRecord
+program = provider.program(
+    (ray.PtxModule.from_file("material.ptx"),),
+    raygen={"render": E(0, "__raygen__render")},
+    miss={"miss": E(0, "__miss__value")},
+    hit_groups={"surface": ray.OptixHitGroup(
+        E(0, "__closesthit__value"), E(0, "__anyhit__mask"))},
+    parameters=L(24, (
+        F("scene", 0, kind="scene"), F("output", 8, kind="buffer", access="write"),
+        F("bias", 16, "u32"), F("count", 20, "u32"),
+    )), payload_count=1,
+)
+miss = R("miss", layout=L(4, (F("value", 0, "u32"),), alignment=4), values={"value": 7})
+hit_layout = L(8, (F("value", 0, "u32"), F("accept", 4, "u32")))
+recording = program.record(
+    8, raygen="render", miss=(miss, miss),
+    hit=(R("surface", layout=hit_layout, values={"value": 100, "accept": 1}),
+         R("surface", layout=hit_layout, values={"value": 200, "accept": 0})),
+    parameters={"scene": "world", "output": "out", "bias": 5, "count": 8},
+    scenes={"world": scene},
+)
+with recording.prepare({"out": output}) as launch:
+    launch.initialize()  # 私有参数/SBT 的一次性有序上传
+    launch.run()         # 异步；设备数据原位更新后可重复使用
+    launch.run()
+    ti.sync()            # 只在应用确实需要完成结果时等待
+    print(launch.memory_report().to_dict())
+program.close()           # 此后按顺序关闭 scene、GAS 和 provider
+```
+
+shader 自行决定 `optixTrace` 中的 ray-type offset/stride 和 miss index；SBT 必须覆盖所有可达索引，
+包括各实例的 `sbt_record_offset`，它与 `custom_index` 不同。group 名称只选择入口，不隐含材质或射线语义。
+payload count 要覆盖同一 module 中全部被编译入口，而不仅是所选 raygen。外部 PTX 必须匹配所用
+adapter/driver 接受的 OptiX SDK、PTX 版本。可选工具 `scripts/compile_hardware_shader.py` 要求显式指定
+编译器；`PtxModule.from_file()` 只读文件。外部 program 不改变 wheel 内置 PTX，也不新增必需的 vendor runtime。
+
+launch 参数或 SBT 中的设备资源都应使用 `kind="buffer"`、`"texture"` 或 `"scene"` 字段，并以名称引用。
+Forge 保留对应 owner，通过现有受管存储解析地址。合格 dense field/view 可直接消费，不引入 ndarray staging；
+不支持的布局在准备阶段拒绝。access 必须覆盖 shader 实际读写，Forge 不从任意 PTX 推断 buffer 的范围、dtype
+或隐藏指针，不能用普通整数指针绕过资源字段。texture 使用现有 CUDA texture object 及其 sampler，
+不模拟尚未支持的纹理能力。
+
+`record()` 固定 scalar 字节和 SBT 内容；`prepare()` 解析绑定、分配存储并打包原生 SBT header，不上传、
+不 launch、不修改应用输出。`initialize()` 做一次幂等有序上传；重复 `run()` 不重新打包或复制参数。
+更换 buffer/texture 对象时重新 prepare；修改 scalar、尺寸、SBT 或 scene 引用时重新 record。高频变化的值
+应放进受管设备 buffer 后原位更新。scene refit 不重编译 program 或重建 SBT；scene 属于 recording owner，
+不是 Vulkan AS 参数。
+
+launch 应早于 scene 关闭；`program.close()` 先关闭其 launch。runtime reset/退出按 launch、program、scene、
+GAS、context 顺序退休。显式 close 可以等待在途工作，稳态 launch 不等待 host 完成。
+`launch.memory_report()` 只计自身精确 device allocation；`preparation_info()` 单列 pinned-host bytes 与 stack
+设置；`program.memory_report()` 将 driver-private pipeline 内存保留为 unknown。stack 配置以及借用的
+AS/output 不冒充 launch 私有显存。Graph/capture 支持需与直接执行分别判断，原生 launch 不代表 CUDA Graph replay。
+
 ## 显式 optional runtime 执行 provider
 
 标准 runtime wheel 随附以下三个 Forge 自有薄 adapter。adapter 不包含也不链接 vendor

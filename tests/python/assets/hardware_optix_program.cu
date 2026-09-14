@@ -1,4 +1,5 @@
 #include <optix.h>
+#include <cuda_runtime.h>
 
 struct Parameters {
   OptixTraversableHandle scene;
@@ -57,4 +58,17 @@ extern "C" __global__ void __closesthit__value() {
 extern "C" __global__ void __anyhit__mask() {
   const auto *data = reinterpret_cast<const HitData *>(optixGetSbtDataPointer());
   if (!data->accept) optixIgnoreIntersection();
+}
+
+// The only application resource pointers are indirect, in raygen SBT data.
+// This proves the public preparation retains owners beyond launch parameters.
+struct IndirectData {
+  unsigned int *output;
+  const unsigned int *input;
+  cudaTextureObject_t texture;
+};
+extern "C" __global__ void __raygen__indirect() {
+  const auto *data = reinterpret_cast<const IndirectData *>(optixGetSbtDataPointer());
+  const auto index = optixGetLaunchIndex().x;
+  data->output[index] = data->input[index] + static_cast<unsigned int>(tex2D<float>(data->texture, 0.5f, 0.5f));
 }

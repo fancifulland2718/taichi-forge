@@ -161,3 +161,32 @@ $L__BB4_2:
 	ret;
 
 }
+	// .globl	__raygen__indirect
+.visible .entry __raygen__indirect()
+{
+	.reg .f32 	%f<6>;
+	.reg .b32 	%r<5>;
+	.reg .b64 	%rd<8>;
+
+
+	// begin inline asm
+	call (%r1), _optix_get_launch_index_x, ();
+	// end inline asm
+	// begin inline asm
+	call (%rd1), _optix_get_sbt_data_ptr_64, ();
+	// end inline asm
+	ld.u64 	%rd2, [%rd1+8];
+	mul.wide.u32 	%rd3, %r1, 4;
+	add.s64 	%rd4, %rd2, %rd3;
+	ld.u32 	%r2, [%rd4];
+	ld.u64 	%rd5, [%rd1+16];
+	mov.f32 	%f1, 0f3F000000;
+	tex.2d.v4.f32.f32 	{%f2, %f3, %f4, %f5}, [%rd5, {%f1, %f1}];
+	cvt.rzi.u32.f32 	%r3, %f2;
+	add.s32 	%r4, %r3, %r2;
+	ld.u64 	%rd6, [%rd1];
+	add.s64 	%rd7, %rd6, %rd3;
+	st.u32 	[%rd7], %r4;
+	ret;
+
+}

@@ -119,6 +119,7 @@ def test_optix_close_keeps_live_handle_when_synchronization_fails(monkeypatch):
     provider._runtime_prog = runtime
     provider._scenes = set()
     provider._gases = set()
+    provider._programs = set()
     with pytest.raises(RuntimeError, match="injected synchronize failure"):
         provider.close()
     assert not provider.closed
@@ -155,6 +156,7 @@ def test_optix_stale_generation_close_drops_views_without_native_calls(monkeypat
     provider._runtime_prog = runtime
     provider._scenes = set()
     provider._gases = set()
+    provider._programs = set()
     provider.close()
     assert provider.closed
 
