@@ -223,6 +223,66 @@ provider 在物理观测前应调用 `scope.own_executor(graph)` 登记执行器
 只有 provider 明确保证共享状态安全并返回 `GraphMaterializationProduct(..., shareable_executor=True)`，
 同一 context 才跨 recipe 共享实例。同一 recipe 在同一 context 的显式重复请求仍使用已有实例。
 
+## 显式附件精度与外部资源计划
+
+符号化 image binding 并不固定实际附件的格式或尺寸，因此不能仅凭结构 Graph ID 在不同图像绑定之间复用
+性能测量。provider 若选择具体格式，应将其写入 fragment 的 `GraphFragmentTask.create(physical=...)`
+和稳定解析合同；物化时还可以通过公共接口描述实际外部资源计划：
+
+```python
+# 位于 provider 装配阶段。graph 已编译；target 是将要绑定的单层 RGBA16F Texture。
+# 这里声明既定资源，不会自动将其他格式转换成 RGBA16F。
+logical_bytes = target.shape[0] * target.shape[1] * 8
+attachment = ti.graph.GraphPhysicalResourceManifest.create(
+    resource_id="external:accumulation",
+    kind="texture",
+    requested_bytes=logical_bytes,
+    allocated_bytes=logical_bytes,  # 仅为计划值，不代表观测到的驱动显存。
+    alignment=1,
+    ownership="external",
+    lifetime="graph",
+    scope="public_external",
+    binding_name="accumulation",  # 必须存在于 Graph 的公共 binding ABI。
+    properties={
+        "format": target.fmt.name,
+        "shape": target.shape,
+        "mip_levels": target.mip_levels,
+    },
+)
+scope.own_executor(graph)
+physical = ti.graph.CompiledGraphPhysicalManifest.from_graph(
+    definition, recipe, graph, external_resource_plan=(attachment,),
+)
+return ti.graph.GraphMaterializationProduct(graph, physical)
+```
+
+`properties` 会冻结为 canonical JSON-safe 描述。即使字节数相同，格式、尺寸、布局和 mip 数也会影响
+物理身份。不要放入 live handle、分配地址、pool 快照、时间戳、容差或性能结论。没有 properties 或
+外部计划的既有描述保持原有身份行为。
+
+外部计划是 provider 声明，不是对 `graph.bind()` 输入的自动发现或验证。provider/evaluator 必须绑定声明的
+资源；改变格式或布局时，要建立对应的新计划和测量上下文。准备阶段仍使用既有 binding/lifetime 检查。
+此计划不会向 replay 插入转换、资源替换、同步或校验。搜索的 evaluator 后观测会保留该计划；手动重新观测时
+使用 `physical.refresh_from_graph(definition, recipe, graph)`。
+
+可从 `physical.to_dict()["resource_plan"]` 读取描述。外部计划不会计入 `resources` 分配观测或 Graph 自有
+显存总量。附件逻辑容量、驱动预留和实际进程峰值是不同口径，需要时分别提供 named metric。
+
+降低精度还必须有应用明确拥有的数值合同：
+
+- `GraphWorkloadContext` 保存输入尺寸、数值/动态范围假设、层数或迭代边界及 baseline 格式。
+- `GraphEvaluationContract` 保存是否允许近似、参考方法、容差及完整计时/完成窗口。
+- 这些是调用者定义的事实，**不是内建精度策略开关**。provider 必须在未获许可时不生成近似 fragment，
+  将策略纳入自己的 descriptor/fragment 身份，并拒绝不相容的恢复。
+- 保留精确 baseline。在 evaluator 中验证输出；仅检查 finite 不足以说明画质合格。计时包括完整 producer、
+  附件操作和 consumer，以及实际需要的 packing 与完成等待。
+- 修改数值许可、容差或 workload 后，不再沿用旧测量证据/checkpoint。结构解析成功不代表允许放宽数值策略；
+  要使用相应 provider set 和适用性检查。
+
+深层混合和 HDR 输入可能使 FP16 累积丢失小贡献或超出有效数值范围。将 log 累积改为乘法透射率是另一项
+算法选择，并不保证精度或性能改善。Forge 不自动生成这些替代方案，也不修改默认格式；CompileIQ 仍只调度
+完整的 opaque recipe。
+
 ## evaluator 不应制造错误结论
 
 每次评估先建立等价输入状态、发布 binding、预热，再测量。输入恢复、正确性 readback 和库 probe 不应混入

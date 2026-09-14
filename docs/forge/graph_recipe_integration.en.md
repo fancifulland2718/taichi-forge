@@ -257,6 +257,83 @@ still references that executor. `Graph.close()` is idempotent; caller-owned inpu
 Runtime reset closes live materialization contexts. Rebuild a definition after reset rather
 than retaining old runtime executables. Custom executor types must supply their release callback.
 
+## Explicit attachment precision and external resource plans
+
+A symbolic image binding does not fix an attachment's format or dimensions. A
+structural Graph ID alone is therefore not sufficient to reuse measurements
+across differently bound images. When a provider chooses a concrete format,
+include that choice in its fragment's `GraphFragmentTask.create(physical=...)`
+and stable resolution contract. The materializer can also describe the actual
+external resource plan through public APIs:
+
+```python
+# Inside provider assembly. graph is already compiled; target is the concrete
+# RGBA16F texture this provider/evaluator will bind, not an inferred conversion.
+logical_bytes = target.shape[0] * target.shape[1] * 8  # This single-level format.
+attachment = ti.graph.GraphPhysicalResourceManifest.create(
+    resource_id="external:accumulation",
+    kind="texture",
+    requested_bytes=logical_bytes,
+    allocated_bytes=logical_bytes,  # Plan-only value, not observed driver VRAM.
+    alignment=1,
+    ownership="external",
+    lifetime="graph",
+    scope="public_external",
+    binding_name="accumulation",  # Must be in the Graph's public binding ABI.
+    properties={
+        "format": target.fmt.name,
+        "shape": target.shape,
+        "mip_levels": target.mip_levels,
+    },
+)
+scope.own_executor(graph)
+physical = ti.graph.CompiledGraphPhysicalManifest.from_graph(
+    definition, recipe, graph, external_resource_plan=(attachment,),
+)
+return ti.graph.GraphMaterializationProduct(graph, physical)
+```
+
+`properties` is an immutable, canonical JSON-safe description. Format, extent,
+layout and mip count affect physical identity even when byte counts coincide.
+Live handles, allocation addresses, pool snapshots, timestamps, tolerances and
+performance claims do not belong in these properties. Existing descriptors with
+no properties or external plan retain their identity behavior.
+
+External plans are provider declarations, not automatic discovery or validation
+of the resources passed to `graph.bind()`. The provider/evaluator must bind the
+declared resources; changing format/layout requires a matching new plan and
+measurement context. Preparation uses the existing binding/lifetime checks.
+The plan does not insert conversion, resource replacement, synchronization or
+checks into replay. Search preserves it during post-evaluator observation;
+manual re-observation uses `physical.refresh_from_graph(definition, recipe, graph)`.
+
+Read the descriptors from `physical.to_dict()["resource_plan"]`. External plans
+are not added to the `resources` allocation observations or Graph-owned memory
+totals. Logical attachment capacity, driver reservations and measured process
+peak are different quantities; provide separate named metrics when needed.
+
+Precision reduction also needs an explicit application numerical contract:
+
+- Put input dimensions, value/dynamic-range assumptions, layer/iteration bounds
+  and the baseline format in `GraphWorkloadContext`.
+- Put approximation permission, reference method, error tolerance and the
+  complete timing/completion window in `GraphEvaluationContract`.
+- These are caller-defined facts, **not built-in precision-policy switches**.
+  The provider must omit approximate fragments unless permitted, include the
+  policy in its descriptor/fragment identity, and reject incompatible restoration.
+- Keep the exact baseline. Validate candidate output in the evaluator; finite
+  output alone does not establish acceptable quality. Time the complete producer,
+  attachment operation and consumer, including required packing and completion.
+- Changing numerical permission, tolerance or workload invalidates old measurement
+  evidence/checkpoints. Structural resolution alone does not authorize a looser
+  numerical policy; use the corresponding provider set and applicability check.
+
+FP16 accumulation can lose small contributions or exceed its useful range under
+deep blending and HDR inputs. Replacing log accumulation with multiplicative
+transmittance is a separate algorithmic choice, not a guaranteed precision or
+performance improvement. Forge does not generate these alternatives automatically
+or change default formats. CompileIQ continues to schedule complete opaque recipes.
+
 ## Evaluation boundaries
 
 Restore equivalent input state for every evaluation, bind once, warm up, then measure.
