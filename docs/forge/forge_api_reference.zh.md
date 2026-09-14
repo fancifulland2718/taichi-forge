@@ -432,6 +432,26 @@ presentation 或 renderer policy。它只支持 Vulkan、不能在 `@ti.kernel` 
 SPIR-V 避免新增 shader-toolchain 依赖，也不增加官方 wheel 变体。driver 持有的 pipeline
 与 shader-module 内存按 opaque memory 报告，不做虚假估算。
 
+shader 输入也接受 `graphics.SpirvShader(code, stage, entry_point="main",
+build=graphics.ShaderBuildInfo(...))`。光栅接口要求匹配 vertex/fragment/task/mesh stage
+的 `main` 入口。`SpirvShader.from_file(path, stage=...)` 只读取预编译产物，不调用编译器。
+可选来源字段包括 target、compiler/version、有序编译选项和源文件 SHA256；未知字段保持 `None`。
+`pipeline.shader_artifacts()` 返回独立的来源事实。相同字节和 pipeline 状态不会因来源标签、
+文件路径或资源分配变化而改变执行身份。
+
+源码仓库提供可选工具 `scripts/compile_hardware_shader.py`，例如：
+
+```text
+python scripts/compile_hardware_shader.py --kind spirv --compiler /path/to/glslc --source shader.frag --output shader.spv --target vulkan1.2 --stage fragment --option=-O
+```
+
+工具输出二进制和 `.json` 编译记录。应用自己的 OptiX 源码可用 `--kind optix-ptx`、显式
+`--compiler /path/to/nvcc --target compute_75 --include /path/to/OptiX/include`，不传 `--stage`；
+必要时用 `--option=--compiler-bindir=/path/to/compiler` 选择 CUDA 支持的 host compiler。
+编译器及 SDK 均由应用提供，不进入 runtime wheel。编译成功、头部检查和 descriptor reflection
+不证明 shader 正确性、访问范围或驱动兼容性；这些合同仍由调用者负责。记录不哈希 include
+依赖，因此不是 build cache。
+
 调用方 SPIR-V 需要采样图像时，在 pipeline 中声明
 `shader_image_bindings=(ti.hardware.graphics.ShaderImageBinding(set_index=0, binding=0),)`，
 再通过 pass draw 绑定相应的 scalar **combined image sampler**：

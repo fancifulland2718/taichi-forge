@@ -32,6 +32,7 @@ from taichi_forge.hardware._native_adapter import (
     validate_runtime_generation,
 )
 from taichi_forge.hardware._runtime import active_backend
+from taichi_forge.hardware._shader_artifact import ShaderBuildInfo, SpirvShader
 from taichi_forge.lang import impl
 from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture
@@ -114,6 +115,11 @@ def _name(value, label):
 
 
 def _bytes(value, label):
+    if isinstance(value, SpirvShader):
+        stage = label.removesuffix("_spirv")
+        if value.stage != stage or value.entry_point != "main":
+            raise ValueError(f"{label} requires the {stage} entry 'main'")
+        return value.code
     if not isinstance(value, (bytes, bytearray, memoryview)):
         raise TypeError(f"{label} must be a bytes-like SPIR-V binary")
     value = bytes(value)
@@ -1428,6 +1434,13 @@ class VulkanGraphicsPipeline:
         self._runtime_generation = int(impl.runtime_generation())
         vertex_code = _bytes(vertex_spirv, "vertex_spirv")
         fragment_code = _bytes(fragment_spirv, "fragment_spirv")
+        self._shader_artifacts = tuple(
+            value if isinstance(value, SpirvShader) else SpirvShader(code, stage)
+            for stage, value, code in (
+                ("vertex", vertex_spirv, vertex_code),
+                ("fragment", fragment_spirv, fragment_code),
+            )
+        )
         targets = _color_targets(color_targets, blending)
         pipeline_id = graphics_pipeline_identity(
             shaders=(("vertex", vertex_code), ("fragment", fragment_code)),
@@ -1484,6 +1497,14 @@ class VulkanGraphicsPipeline:
     @property
     def closed(self):
         return self._handle is None
+
+    def shader_artifacts(self):
+        """Cold source facts, separate from allocation-independent execution ID.
+
+        Identical bytes/state execute the same plan even if build provenance
+        differs. Returned dictionaries are detached from the frozen artifacts.
+        """
+        return tuple(artifact.to_dict() for artifact in self._shader_artifacts)
 
     def record(self, draw, **kwargs):
         self._validate_lifetime()
@@ -1714,6 +1735,14 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         task_code = b"" if task_spirv is None else _bytes(task_spirv, "task_spirv")
         mesh_code = _bytes(mesh_spirv, "mesh_spirv")
         fragment_code = _bytes(fragment_spirv, "fragment_spirv")
+        self._shader_artifacts = tuple(
+            value if isinstance(value, SpirvShader) else SpirvShader(code, stage)
+            for stage, value, code in (
+                ("task", task_spirv, task_code),
+                ("mesh", mesh_spirv, mesh_code),
+                ("fragment", fragment_spirv, fragment_code),
+            ) if code
+        )
         targets = _color_targets(color_targets, blending)
         pipeline_id = graphics_pipeline_identity(
             shaders=(("task", task_code), ("mesh", mesh_code), ("fragment", fragment_code)),
@@ -1894,6 +1923,8 @@ def is_mesh_shader_available(*, task_shader=False):
 
 
 __all__ = [
+    "ShaderBuildInfo",
+    "SpirvShader",
     "ColorAttachment",
     "ColorTarget",
     "Draw",

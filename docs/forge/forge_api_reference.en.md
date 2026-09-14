@@ -543,6 +543,31 @@ SPIR-V rather than adding a shader-toolchain dependency, and adds no official
 wheel variant. Driver-owned pipeline and shader-module memory is reported as
 opaque rather than estimated.
 
+Shader inputs also accept `graphics.SpirvShader(code, stage, entry_point="main",
+build=graphics.ShaderBuildInfo(...))`. Graphics requires `main` in the declared
+vertex/fragment/task/mesh stage. `SpirvShader.from_file(path, stage=...)` reads a
+precompiled module; it never invokes a compiler. Optional build facts include
+target, compiler/version, ordered options, and a source SHA256. Unknown facts
+remain `None`. `pipeline.shader_artifacts()` returns detached source facts.
+Identical code and pipeline state retain the same execution identity even when
+build labels differ; neither file paths nor allocations identify a program.
+
+For explicit local compilation, a source checkout provides
+`scripts/compile_hardware_shader.py`. For example:
+
+```text
+python scripts/compile_hardware_shader.py --kind spirv --compiler /path/to/glslc --source shader.frag --output shader.spv --target vulkan1.2 --stage fragment --option=-O
+```
+
+The tool emits a binary and `.json` build record. It also accepts
+`--kind optix-ptx --compiler /path/to/nvcc --target compute_75 --include /path/to/OptiX/include`
+for caller-owned OptiX source (omit `--stage`). Select a compatible CUDA host
+compiler via `--option=--compiler-bindir=/path/to/compiler` when necessary.
+These tools/SDKs are caller-provided and are not added to the runtime wheel.
+Compiler success, header inspection, and descriptor reflection do not prove
+shader correctness, resource bounds, or driver compatibility. The caller owns
+those contracts. Include dependencies are not hashed; the record is not a build cache.
+
 For sampled images in caller-provided SPIR-V, add
 `shader_image_bindings=(ti.hardware.graphics.ShaderImageBinding(set_index=0, binding=0),)`
 to the pipeline and bind the corresponding scalar **combined image sampler**
