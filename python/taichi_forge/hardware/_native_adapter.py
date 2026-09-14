@@ -1,6 +1,7 @@
 """Shared adapters for explicit hardware recordings in root Graphs."""
 
 from dataclasses import replace
+import json
 
 from taichi_forge.graph._ir import ResourceEffect, RuntimeBinding
 from taichi_forge.graph._native import (
@@ -93,6 +94,10 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         self._debug_info = debug_info
         identity_factory = getattr(recording, "_graph_identity_factory", None)
         self._frozen_identity = None if identity_factory is None else identity_factory()
+        source_factory = getattr(recording, "_graph_source_contract", None)
+        self._source_contract_json = None if source_factory is None else json.dumps(
+            source_factory(), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
         self.graph_publish_time_binding_validation_stable = (
             publish_time_binding_validation_stable
         )
@@ -144,6 +149,10 @@ class HardwareRecordingExecutable(NativeGraphExecutable):
         if self._frozen_identity is not None:
             return self._frozen_identity[1]
         return getattr(self._recording, "_graph_physical_plan_id", "")
+
+    @property
+    def graph_source_contract(self):
+        return None if self._source_contract_json is None else json.loads(self._source_contract_json)
 
     def _freeze_graph_recipe_source(self):
         freeze = getattr(self._recording, "_freeze_graph_recipe_source", None)

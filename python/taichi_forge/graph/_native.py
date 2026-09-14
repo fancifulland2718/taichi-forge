@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import partial
+import json
 from types import MappingProxyType
 
 from taichi_forge._lib import core as _ti_core
@@ -190,6 +191,7 @@ class NativeActionManifest:
     automatic_admissible: bool = False
     fragmentation_reason: str = "none"
     physical_plan_id: str = ""
+    source_contract_json: str = ""
 
     def to_dict(self, *, _static_resources=None):
         if _static_resources is None:
@@ -238,6 +240,10 @@ class NativeActionManifest:
             "automatic_admissible": self.automatic_admissible,
             "fragmentation_reason": self.fragmentation_reason,
             "physical_plan_id": self.physical_plan_id,
+            **(
+                {"source_contract": json.loads(self.source_contract_json)}
+                if self.source_contract_json else {}
+            ),
         }
 
 
@@ -955,6 +961,16 @@ class NativeGraphExecutable:
         return {}
 
     @property
+    def graph_source_contract(self):
+        """Optional JSON-safe provider declarations, frozen at Graph compilation.
+
+        These describe source/layout/execution assumptions, not observations or
+        proof of correctness. Exclude runtime objects, addresses and memory
+        snapshots. Return None when no source contract is available.
+        """
+        return None
+
+    @property
     def runtime_arg_schema(self):
         return ()
 
@@ -1195,6 +1211,14 @@ def native_action_manifest(
         workspace_ownership = "provider"
         replay_mode = "opaque"
 
+    source_contract = executable.graph_source_contract
+    if source_contract is not None and not isinstance(source_contract, Mapping):
+        raise TypeError("Native Graph source contracts must be JSON-safe mappings")
+    source_contract_json = (
+        "" if source_contract is None else json.dumps(
+            dict(source_contract), sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+    )
     return NativeActionManifest(
         schema_version=4,
         name=name,
@@ -1256,6 +1280,7 @@ def native_action_manifest(
         physical_plan_id=str(
             getattr(executable, "graph_physical_plan_id", "")
         ),
+        source_contract_json=source_contract_json,
     )
 
 

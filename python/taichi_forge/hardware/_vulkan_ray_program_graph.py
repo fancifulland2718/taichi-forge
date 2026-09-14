@@ -1,9 +1,13 @@
 """Existing Graph adapter for an explicitly initialized Vulkan RT packet."""
 
+import hashlib
+import json
+from dataclasses import asdict
+
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._native_adapter import native_recording_node, static_resource_effect
-from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
+from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording, program_sbt_contract
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
@@ -31,6 +35,32 @@ class _PreparedVulkanProgramRecording(BackendCommandRecording):
             scene_names=scene_names,
         )
         identify_ray_recording(self, "vulkan_program_launch", resource, program=source.to_dict())
+        object.__setattr__(self, "_source_resource_plan_json", resource._plan_json)
+
+    def _graph_source_contract(self):
+        source = self.launch.recording
+        return {
+            "kind": "vulkan_ray_program",
+            "source": "provider_declared_not_measured",
+            "program": source.program.to_dict(),
+            "launch": {
+                "dimensions": source.dimensions,
+                "bindings": {name: asdict(binding) for name, binding in source.bindings.items()},
+                "push_constant_bytes": len(source.push_constants),
+                "push_constant_sha256": hashlib.sha256(source.push_constants).hexdigest(),
+                "sbt": {
+                    name: program_sbt_contract(records)
+                    for name, records in (("raygen", (source.raygen,)), ("miss", source.miss), ("hit", source.hit))
+                },
+            },
+            "resources": json.loads(self._source_resource_plan_json),
+            "execution": {
+                "initialization": "explicit_before_graph_binding",
+                "ordinary": "runtime_ordered_rerecord",
+                "fixed_command_factory": True,
+                "compiler": "caller_supplied_spirv_no_runtime_compiler",
+            },
+        }
 
     @property
     def resource_effects(self):

@@ -4,6 +4,16 @@ import json
 
 
 def _search_context(definition, provider_set, workload, evaluation, backend, *, catalog=None):
+    native_sources = []
+    for stage_index, stage in enumerate(getattr(definition._runtime_spec, "pipeline_definition", ())):
+        for action_index, action in enumerate(stage.get("native_actions", ())):
+            if action.source_contract_json:
+                native_sources.append({
+                    "stage_index": stage_index,
+                    "action_index": action_index,
+                    "physical_plan_id": action.physical_plan_id,
+                    "source_contract": json.loads(action.source_contract_json),
+                })
     return {
         "source": "caller_declarations_and_frozen_forge_facts_not_qualification",
         "workload": None if workload is None else workload.to_dict(),
@@ -14,6 +24,7 @@ def _search_context(definition, provider_set, workload, evaluation, backend, *, 
         "semantic_provider_sources": json.loads(definition._semantic_payload_json)["provider_sources"],
         "baseline_execution": definition.planned_physical_manifest["execution"],
         "recipe_discovery": None if catalog is None else catalog.discovery_report(),
+        **({"native_source_contracts": native_sources} if native_sources else {}),
     }
 
 
@@ -67,6 +78,13 @@ def _context_markdown(context, annotations):
     lines.extend(["", "## Frozen recipe configuration and numerical contracts", ""])
     if context.get("semantic_provider_sources"):
         lines.extend(_json_section("Frozen semantic source contracts", context["semantic_provider_sources"]))
+    if context.get("native_source_contracts"):
+        lines.extend([
+            "", "Native source contracts describe the baseline's provider-owned programs and bindings. "
+            "They are frozen declarations, not measured performance or shader-safety proofs; a replacement "
+            "recipe's observed physical manifest remains authoritative for its execution path.",
+        ])
+        lines.extend(_json_section("Frozen native source contracts", context["native_source_contracts"]))
     for annotation in annotations:
         # Physical field names are provider-owned. Do not restrict human
         # explanations to the schema of a few existing library providers.

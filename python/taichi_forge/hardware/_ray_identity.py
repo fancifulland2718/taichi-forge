@@ -52,6 +52,23 @@ def identify_ray_recording(recording, operation, resource, **parameters):
     )
 
 
+def program_sbt_contract(records):
+    """Cold report facts: preserve layout/mapping identity, omit scalar contents."""
+    facts = tuple(record.to_dict() for record in records)
+    layouts = {}
+    for item in facts:
+        declaration = {key: value for key, value in item.items() if key not in ("data", "scalar_bytes")}
+        declaration["scalar_payload_bytes"] = len(item.get("data", item.get("scalar_bytes", ""))) // 2
+        key = _canonical(declaration)
+        entry = layouts.setdefault(key, {"declaration": declaration, "record_count": 0})
+        entry["record_count"] += 1
+    return {
+        "record_count": len(facts),
+        "record_contract_id": "sbt-records:" + hashlib.sha256(_canonical(facts).encode()).hexdigest(),
+        "layouts": list(layouts.values()),
+    }
+
+
 def _recording_identity(operation, resource, bindings, parameters):
     semantics = dict(operation=operation, bindings=bindings, **parameters)
     semantic_json = _canonical(semantics)

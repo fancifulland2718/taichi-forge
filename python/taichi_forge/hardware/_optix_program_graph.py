@@ -1,9 +1,12 @@
 """Graph adapter for an explicitly initialized, fixed OptiX launch packet."""
 
+import hashlib
+import json
+
 from taichi_forge.graph._ir import GraphAccess, ResourceEffect
 from taichi_forge.graph._native import BackendCommandRecording
 from taichi_forge.hardware._native_adapter import native_recording_node, static_resource_effect
-from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording
+from taichi_forge.hardware._ray_identity import RayResourceIdentity, identify_ray_recording, program_sbt_contract
 from taichi_forge.lang.exception import TaichiRuntimeError
 
 
@@ -38,6 +41,34 @@ class _PreparedProgramRecording(BackendCommandRecording):
             miss=tuple(item.to_dict() for item in source.miss),
             hit=tuple(item.to_dict() for item in source.hit),
         )
+        object.__setattr__(self, "_source_resource_plan_json", resource._plan_json)
+
+    def _graph_source_contract(self):
+        source = self.launch.recording
+        parameters = source._parameters.to_dict()
+        parameters.pop("scalar_bytes")
+        parameters["scalar_sha256"] = hashlib.sha256(source._parameters.scalar_bytes).hexdigest()
+        return {
+            "kind": "optix_program",
+            "source": "provider_declared_not_measured",
+            "program": source.program.to_dict(),
+            "launch": {
+                "dimensions": source.dimensions,
+                "parameters": parameters,
+                "sbt": {
+                    name: program_sbt_contract(records)
+                    for name, records in (("raygen", (source.raygen,)), ("miss", source.miss), ("hit", source.hit))
+                },
+            },
+            "resources": json.loads(self._source_resource_plan_json),
+            "execution": {
+                "initialization": "explicit_before_graph_binding",
+                "ordinary": "runtime_ordered_rerecord",
+                "capture": "unavailable",
+                "capture_reason": "optix_program_launch_not_capture_supported",
+                "compiler": "caller_supplied_optix_ptx",
+            },
+        }
 
     @property
     def resource_effects(self):
