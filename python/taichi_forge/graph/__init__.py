@@ -34,6 +34,7 @@ from ._recipes import (
     GraphFragmentTask as GraphFragmentTask,
     GraphMaterializationProduct as GraphMaterializationProduct,
     GraphMaterializedFragment as GraphMaterializedFragment,
+    GraphPhysicalResourceManifest as GraphPhysicalResourceManifest,
     GraphRecipeFragment as GraphRecipeFragment,
     GraphRecipeProvider as GraphRecipeProvider,
     GraphRecipeProviderDescriptor as GraphRecipeProviderDescriptor,

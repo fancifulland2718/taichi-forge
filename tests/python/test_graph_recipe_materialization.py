@@ -595,6 +595,56 @@ def test_physical_identity_uses_allocation_policy_not_backing_page_size():
         ).materialized_physical_id != (baseline.materialized_physical_id)
 
 
+def test_resource_format_properties_are_frozen_physical_facts_not_allocation_snapshots():
+    definition = _definition()
+    recipe = GraphRecipeComposer(definition).compose()
+    fields = dict(
+        resource_id="image",
+        kind="texture",
+        requested_bytes=128,
+        allocated_bytes=256,
+        alignment=1,
+        ownership="graph_instance",
+        lifetime="graph",
+    )
+    facts = {"format": "rgba16f", "shape": [4, 4], "mip_levels": 1}
+    resource = GraphPhysicalResourceManifest.create(**fields, properties=facts)
+    original = resource.to_dict()
+    facts["shape"][0] = 8
+    exposed = resource.properties
+    exposed["format"] = "rgba16ui"
+    assert resource.to_dict() == original
+    equivalent = GraphPhysicalResourceManifest.create(
+        **fields,
+        properties={"mip_levels": 1, "shape": (4, 4), "format": "rgba16f"},
+    )
+    assert resource == equivalent
+    reference = _manifest(definition, recipe, "same-work", resources=(resource,))
+    for properties in (
+        {**resource.properties, "format": "rgba16ui"},  # Same size, different interpretation.
+        {**resource.properties, "shape": [8, 2]},  # Same byte count, different layout.
+        {**resource.properties, "mip_levels": 2},
+    ):
+        changed = GraphPhysicalResourceManifest.create(**fields, properties=properties)
+        assert (
+            _manifest(definition, recipe, "same-work", resources=(changed,)).materialized_physical_id
+            != reference.materialized_physical_id
+        )
+    backing = replace(resource, allocated_bytes=1024)
+    assert (
+        _manifest(definition, recipe, "same-work", resources=(backing,)).materialized_physical_id
+        == reference.materialized_physical_id
+    )
+    assert reference.to_dict()["resource_plan"][0]["properties"] == resource.properties
+    assert "allocated_bytes" not in reference.to_dict()["resource_plan"][0]
+    legacy = GraphPhysicalResourceManifest(**fields)
+    assert GraphPhysicalResourceManifest.create(**fields) == legacy
+    assert "properties" not in legacy.to_dict()
+    for invalid in ({"format": object()}, {"format": float("nan")}, {1: "format"}):
+        with pytest.raises((TypeError, ValueError)):
+            GraphPhysicalResourceManifest.create(**fields, properties=invalid)
+
+
 def test_allocated_resources_must_match_requirements_and_appear_in_manifest():
     definition = _definition()
     releases = []

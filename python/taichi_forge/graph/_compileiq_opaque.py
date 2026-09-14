@@ -832,11 +832,7 @@ class _CompleteGraphRecipeSearchSessionV2:
                 # the observation here, outside the replay hot path, so the
                 # V2 memory budget sees the evaluated physical instance rather
                 # than the empty pre-binding shell.
-                from taichi_forge.graph._recipes.physical import (
-                    CompiledGraphPhysicalManifest,
-                )
-
-                manifest = CompiledGraphPhysicalManifest.from_graph(
+                manifest = manifest.refresh_from_graph(
                     self._plans._definition,
                     recipe,
                     materialized.executor,

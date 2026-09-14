@@ -446,7 +446,11 @@ class GraphPhysicalSubmissionManifest:
 
 @dataclass(frozen=True)
 class GraphPhysicalResourceManifest:
-    """One actual Graph-owned, session-owned, or external resource."""
+    """One resource observation or plan, including stable format/layout facts.
+
+    Properties describe the allocation/execution contract, not pool snapshots,
+    live handles, numerical permission or performance claims.
+    """
 
     resource_id: str
     kind: str
@@ -460,6 +464,21 @@ class GraphPhysicalResourceManifest:
     exclusive_submission: bool = False
     allocation_members: tuple[str, ...] = ()
     allocation_count: int | None = None
+    _properties_json: str = field(default="{}", repr=False)
+
+    @classmethod
+    def create(cls, *, properties=None, **resource):
+        """Freeze provider-owned JSON-safe resource facts at preparation time."""
+        from taichi_forge.graph._reuse import _normalize_json
+
+        properties = {} if properties is None else properties
+        if not isinstance(properties, dict):
+            raise TypeError("Graph physical resource properties must be a dictionary")
+        return cls(**resource, _properties_json=_properties_json(_normalize_json(properties)))
+
+    @property
+    def properties(self):
+        return _properties(self._properties_json)
 
     def __post_init__(self):
         _required_text(self.resource_id, "Graph physical resource ID")
@@ -532,6 +551,7 @@ class GraphPhysicalResourceManifest:
             "exclusive_submission": self.exclusive_submission,
             **({"allocation_members": self.allocation_members} if self.allocation_members else {}),
             **({"allocation_count": self.allocation_count} if self.allocation_count is not None else {}),
+            **({"properties": self.properties} if self._properties_json != "{}" else {}),
         }
 
 
@@ -606,6 +626,7 @@ def _resource_identity_payload(resources, public_bindings):
             "exclusive_submission": resource.exclusive_submission,
             **({"allocation_members": resource.allocation_members} if resource.allocation_members else {}),
             **({"allocation_count": resource.allocation_count} if resource.allocation_count is not None else {}),
+            **({"properties": resource.properties} if resource._properties_json != "{}" else {}),
         }
         for index, resource in enumerate(resources)
     )
@@ -735,15 +756,62 @@ class CompiledGraphPhysicalManifest:
     allocation_topology_exact: bool
     resource_plan: tuple[GraphPhysicalResourceManifest, ...] = ()
     _provenance_json: str = field(default="{}", repr=False)
+    external_resource_plan: tuple[GraphPhysicalResourceManifest, ...] = ()
 
     @classmethod
-    def from_graph(cls, definition, recipe, graph):
+    def from_graph(cls, definition, recipe, graph, *, external_resource_plan=()):
         """Observe a provider-built Forge Graph at the materialization boundary.
 
         This describes actual compiled work; it does not prove that an external
         provider's replacement implements the requested mathematical semantics.
+        ``external_resource_plan`` describes provider-owned concrete public
+        binding contracts (e.g. attachment format/extent). It affects physical
+        identity, not Graph-owned allocation totals, and must match the resources
+        used by the evaluator. It neither binds nor converts those resources.
         No observation is installed in Graph replay.
         """
+        external_resource_plan = tuple(external_resource_plan)
+        for item in external_resource_plan:
+            if not isinstance(item, GraphPhysicalResourceManifest) or item.scope != "public_external":
+                raise GraphPhysicalManifestError("external resource plans require public external resource manifests")
+        external_resource_plan = tuple(
+            sorted(external_resource_plan, key=lambda item: (item.binding_name, item.resource_id))
+        )
+        bindings = [item.binding_name for item in external_resource_plan]
+        if len(bindings) != len(set(bindings)):
+            raise GraphPhysicalManifestError("external resource plan bindings must be unique")
+        observed = cls._from_graph(definition, recipe, graph)
+        if not external_resource_plan:
+            return observed
+        result = cls.create(
+            definition,
+            recipe,
+            backend=observed.backend,
+            kernels=observed.kernels,
+            tasks=observed.tasks,
+            commands=observed.commands,
+            submissions=observed.submissions,
+            resources=observed.resources,
+            binding_abi=observed.binding_abi,
+            resource_plan=(*observed.resource_plan, *external_resource_plan),
+            task_topology_exact=observed.task_topology_exact,
+            command_topology_exact=observed.command_topology_exact,
+            allocation_topology_exact=observed.allocation_topology_exact,
+            provenance=observed.provenance,
+        )
+        return replace(result, external_resource_plan=external_resource_plan)
+
+    def refresh_from_graph(self, definition, recipe, graph):
+        """Refresh lazy allocation observations without losing binding plans."""
+        return type(self).from_graph(
+            definition,
+            recipe,
+            graph,
+            external_resource_plan=self.external_resource_plan,
+        )
+
+    @classmethod
+    def _from_graph(cls, definition, recipe, graph):
         if graph.definition is definition:
             return observe_graph_physical_manifest(definition, recipe, graph)
         from taichi_forge.graph._recipes.providers import PROVIDER_OWNED_WHOLE_GRAPH_V1
