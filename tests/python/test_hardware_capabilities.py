@@ -21,6 +21,7 @@ _OPERATION_IDS = (
     "raster.draw.vulkan",
     "raster.adapter.ggui.vulkan",
     "raster.mesh_tasks.vulkan",
+    "ray.program.vulkan",
     "ray.as_build.vulkan",
     "ray.as_refit.vulkan",
     "ray.query.batch.vulkan",
@@ -57,6 +58,7 @@ _OPERATION_IDS = (
     "runtime.probe.cusparselt",
     "runtime.probe.cutensor",
     "runtime.probe.amgx",
+    "ray.program.optix",
     "ray.as_build.optix",
     "ray.as_refit.optix",
     "ray.query.batch.optix",
@@ -346,7 +348,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert texture.layouts == ("sampled_image", "storage_image")
     assert "SPIR-V OpImageSampleExplicitLod and OpImageFetch" in texture.requirements
     assert "SamplerConfig" in texture.public_api
-    assert "fetch uses integer texel coordinates" in texture.notes[2]
+    assert any("fetch uses integer texel coordinates" in note for note in texture.notes)
     assert texture.deterministic is False
 
     cuda_texture = ti.hardware.capability("sampling.texture.cuda")
@@ -359,7 +361,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert cuda_texture.layouts == ("cuda_array",)
     assert "Driver API symbols" in cuda_texture.notes[0]
     assert "CUDA RW textures remain unsupported" in cuda_texture.notes[1]
-    assert "CUDA Graph capture remains unsupported" in cuda_texture.notes[4]
+    assert any("Cached CUDA Graph capture retains sampled texture generations" in note for note in cuda_texture.notes)
     assert "does not silently replace ndarray loads" in cuda_texture.notes[5]
     assert len(cuda_texture.requirements) == 4
 
@@ -368,9 +370,9 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert inline_ray.hardware_acceleration == "qualified"
     assert "VK_KHR_ray_query" in inline_ray.requirements
     assert "trace_closest" in inline_ray.public_api
-    assert "JIT Vulkan kernels only" in inline_ray.notes[2]
-    assert "dense-field particle contact" in inline_ray.notes[4]
-    assert "prepacked ray-buffer" in inline_ray.notes[5]
+    assert any("JIT Vulkan kernels and typed Graph AS bindings" in note for note in inline_ray.notes)
+    assert any("dense-field particle contact" in note for note in inline_ray.notes)
+    assert any("prepacked ray-buffer" in note for note in inline_ray.notes)
 
     cuda_atomic = ti.hardware.capability("kernel.atomic.cuda")
     vulkan_atomic = ti.hardware.capability("kernel.atomic.vulkan")
@@ -468,10 +470,10 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "NVIDIA Vulkan" in vulkan_matrix.notes[2]
 
     optix = ti.hardware.capability("ray.query.batch.optix")
-    assert optix.implementation_status == "internal_foundation"
+    assert optix.implementation_status == "existing_public"
     assert "OPTIX_ABI_VERSION 93, 105, or 118" in optix.requirements[1]
     assert "failure-isolated" in optix.notes[1]
-    assert "No kernel-inline route" in optix.notes[2]
+    assert any("No kernel-inline route" in note for note in optix.notes)
 
     optix_build = ti.hardware.capability("ray.as_build.optix")
     assert optix_build.graph_integration == "unsupported"
@@ -479,7 +481,7 @@ def test_capability_and_provider_queries_are_stable_and_fail_closed():
     assert "share one runtime wheel" in optix_build.notes[1]
 
     optix_refit = ti.hardware.capability("ray.as_refit.optix")
-    assert optix_refit.graph_integration == "opaque"
+    assert optix_refit.graph_integration == "root_ordered"
     assert optix_refit.update_policy == "refit"
     assert optix_refit.scopes == ("python", "graph")
 
@@ -1219,6 +1221,10 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
         assert facts["provider_available"] == program.vulkan_acceleration_structure_available()
         assert facts["required_features"] == ("bufferDeviceAddress", "accelerationStructure")
     assert ray_routes["ray.query.batch.vulkan"].native_facts["provider_available"] == program.vulkan_ray_query_available()
+    ray_program = next(item for item in report.operations if item.descriptor.operation_id == "ray.program.vulkan")
+    assert ray_program.native_facts["provider_available"] == program._vulkan_ray_program_available()
+    assert ray_program.native_facts["requires_inline_ray_query"] is False
+    assert ray_program.native_facts["creates_program_or_sbt"] is False
     assert all(
         operation.native_facts["capability_query"] == "active_vulkan_feature_chain" for operation in ray_routes.values()
     )
@@ -1379,7 +1385,9 @@ def test_optional_optix_probe_and_invalid_tiers_fail_closed(monkeypatch):
     optix_operations = tuple(
         operation for operation in report.operations if operation.descriptor.provider_id == "optix"
     )
-    assert len(optix_operations) == 3
+    assert {item.descriptor.operation_id for item in optix_operations} == {
+        "ray.program.optix", "ray.as_build.optix", "ray.as_refit.optix", "ray.query.batch.optix",
+    }
     assert all(operation.discovery == "missing" for operation in optix_operations)
     assert all(
         operation.unavailable_reason == "bundled_provider_adapter_not_installed" for operation in optix_operations

@@ -4,6 +4,24 @@
 def ray_command_operations(_operation):
     return (
         _operation(
+            "ray.program.vulkan", "ray.program", "vulkan_ray", ("vulkan",),
+            "core", "fixed_function", "native_shader_operation", "implementation_defined",
+            ("python", "graph"), "native_command", "backend_recorded", "runtime_ordered",
+            "provider_owned", "existing_public", activation_mode="explicit_hardware_api",
+            resource_effects=("declared:buffers_images", "read:acceleration_structure", "read:sbt"),
+            lifetime_policy="resource_generation", update_policy="immutable",
+            requirements=("VK_KHR_acceleration_structure", "VK_KHR_ray_tracing_pipeline", "caller SPIR-V"),
+            public_api="ti.hardware.ray.VulkanRayTracingPipeline / VulkanPreparedLaunch",
+            notes=(
+                "Raygen, miss and triangle closest/any-hit shaders; inline ray-query support is not required.",
+                "prepare then explicit initialize before direct run or graph_recording; fixed bindings retain resources.",
+                "Ordinary Graph re-records; eligible immutable-frame recipes retain native commands.",
+                "SBT payload and push constants are scalar bytes, not unowned device pointers.",
+                "The shader must actually trace rays to use traversal hardware; raygen arithmetic alone is not RT acceleration.",
+                "No shader compiler, vendor runtime, callable/intersection stage or software fallback is bundled by this API.",
+            ),
+        ),
+        _operation(
             "ray.as_build.vulkan",
             "ray.acceleration_structure",
             "vulkan_ray",
@@ -102,7 +120,7 @@ def ray_command_operations(_operation):
             requirements=("VK_KHR_acceleration_structure", "VK_KHR_ray_query"),
             public_api=(
                 "ti.hardware.ray.InstanceTLAS.trace / "
-                "ti.hardware.ray.TriangleScene.trace"
+                "ti.hardware.ray.TriangleScene.trace / ti.hardware.ray.triangle_scene"
             ),
             dtypes=("ray:f32", "hit:f32"),
             shapes_or_tiles=("rays:(N,8)", "hits:(N,4)", "workgroup:128"),
@@ -169,6 +187,23 @@ def ray_command_operations(_operation):
 def ray_optional_operations(_operation):
     return (
         _operation(
+            "ray.program.optix", "ray.program", "optix", ("cuda",),
+            "lazy_external", "vendor_hardware_runtime", "vendor_hardware_runtime", "implementation_defined",
+            ("python", "graph"), "external_library", "root_ordered", "runtime_ordered",
+            "provider_owned", "existing_public", activation_mode="explicit_hardware_api", dependency_name="OptiX",
+            resource_effects=("declared:buffers_textures", "read:acceleration_structure", "read:sbt"),
+            lifetime_policy="provider_plan", update_policy="immutable",
+            requirements=("Forge adapter program feature", "compatible OptiX driver runtime", "caller OptiX PTX"),
+            public_api="ti.hardware.ray.OptixProvider.program / OptixPreparedLaunch",
+            notes=(
+                "Select an adapter with required_features=('program',); runtime ABI compatibility is still required.",
+                "Raygen, miss and triangle closest/any-hit shaders with owned parameter/SBT resource references.",
+                "Explicit initialize precedes direct run and Graph binding; Graph execution is ordered re-record, not CUDA capture.",
+                "Program/launch memory is reported separately from borrowed scene/context resources; driver-private memory may be unknown.",
+                "Caller PTX and numerical/alpha semantics remain caller-owned; no general shader safety proof or application speedup is claimed.",
+            ),
+        ),
+        _operation(
             "ray.as_build.optix",
             "ray.acceleration_structure",
             "optix",
@@ -182,7 +217,7 @@ def ray_optional_operations(_operation):
             "unsupported",
             "runtime_ordered",
             "provider_owned",
-            "internal_foundation",
+            "existing_public",
             activation_mode="explicit_hardware_api",
             dependency_name="OptiX",
             resource_effects=("read:geometry", "write:gas_ias"),
@@ -211,10 +246,10 @@ def ray_optional_operations(_operation):
             "implementation_defined",
             ("python", "graph"),
             "external_library",
-            "opaque",
+            "root_ordered",
             "runtime_ordered",
             "provider_owned",
-            "internal_foundation",
+            "existing_public",
             activation_mode="explicit_hardware_api",
             dependency_name="OptiX",
             resource_effects=("read:vertices", "read_write:gas"),
@@ -242,10 +277,10 @@ def ray_optional_operations(_operation):
             "implementation_defined",
             ("python", "graph"),
             "external_library",
-            "opaque",
+            "root_ordered",
             "runtime_ordered",
             "provider_owned",
-            "internal_foundation",
+            "existing_public",
             activation_mode="explicit_hardware_api",
             dependency_name="OptiX",
             resource_effects=("read:scene", "read:rays", "write:hits"),
@@ -257,12 +292,13 @@ def ray_optional_operations(_operation):
                 "fixed Forge f32x8 ray and f32x4 closest-hit storage ABI",
                 "compact program-owned ndarray, dense field or view; typed indices require the optional ABI-1 suffix",
             ),
-            public_api="ti.hardware.ray.OptixTriangleScene.record",
+            public_api="ti.hardware.ray.OptixTriangleScene.record / ti.hardware.ray.triangle_scene",
             notes=(
                 "The runtime wheel carries thin adapters compiled from pinned official headers; it does not bundle nvoptix or the CUDA Toolkit.",
                 "Provider loading is explicit and failure-isolated; normal CUDA initialization and every other provider remain independent.",
                 "record_typed writes f32(t,u,v,0) and i32/u32(primitive,instance,custom,hit); fixed Graph bindings prepare storage before submission.",
-                "No kernel-inline route, automatic selection, cross-device qualification, or performance claim is made.",
+                "triangle_scene selects this native route on CUDA, without switching devices or enabling retained/precision policies.",
+                "No kernel-inline route, cross-device qualification, or performance claim is made.",
             ),
         ),
     )

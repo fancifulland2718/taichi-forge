@@ -62,6 +62,14 @@ _INSTANCE_SBT_OFFSET = 1 << 15
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
+_OPTIONAL_FEATURE_REQUIREMENTS = {
+    "typed_hits": _TYPED_HITS,
+    "instances": _INSTANCE_FEATURES,
+    "alpha_mask": _ALPHA_MASK,
+    "opacity_micromap": _OPACITY_MICROMAP_IMPORT,
+    "program": 1 << 14,
+    "instance_sbt_offset": _INSTANCE_SBT_OFFSET,
+}
 _loaded_providers = weakref.WeakSet()
 
 
@@ -546,6 +554,7 @@ def probe_provider(path=None):
             provider_name=_decode(info.provider_name),
             build_identity=_decode(info.build_identity),
             feature_bits=int(info.features),
+            program_feature_advertised=bool(int(info.features) & (1 << 14)),
         )
         if failures:
             native_facts["rejected_newer_candidates"] = tuple(failures)
@@ -568,6 +577,7 @@ def passive_status():
         "provider_enablement_changed": False,
         "provider_selection_changed": False,
         "loaded_provider_count": len(loaded),
+        "program_feature_advertised": any(int(provider.identity["feature_bits"]) & (1 << 14) for provider in loaded),
     }
     if not loaded:
         return {
@@ -688,9 +698,16 @@ def _prepare_storage(owner, values, descriptions, writable, textures=()):
 
 
 class OptixProvider:
-    """Owner of one bundled OptiX adapter and CUDA context view."""
+    """Owner of one bundled OptiX adapter and CUDA context view.
 
-    def __init__(self, library_path=None, *, validation=False, provider_path=None):
+    ``required_features`` filters candidate adapters before context creation.
+    Names are program, typed_hits, instances, alpha_mask, opacity_micromap and
+    instance_sbt_offset. Use ("program",) for programmable PTX; default empty
+    preserves legacy batch selection. Features never bypass runtime ABI checks.
+    An explicit provider_path is not silently replaced by another adapter.
+    """
+
+    def __init__(self, library_path=None, *, validation=False, provider_path=None, required_features=()):
         program = impl.get_runtime().prog
         if program is None or active_backend() != "cuda":
             raise TaichiRuntimeError(
@@ -698,6 +715,15 @@ class OptixProvider:
             )
         if not isinstance(validation, bool):
             raise TypeError("validation must be a bool")
+        if isinstance(required_features, str):
+            raise TypeError("required_features must be a sequence of feature names")
+        required_features = tuple(required_features)
+        if any(not isinstance(name, str) or name not in _OPTIONAL_FEATURE_REQUIREMENTS for name in required_features):
+            raise ValueError("unknown OptiX required feature")
+        required_features = tuple(sorted(set(required_features)))
+        required_mask = 0
+        for name in required_features:
+            required_mask |= _OPTIONAL_FEATURE_REQUIREMENTS[name]
         with hardware_failure_phase("provider_load_failure"):
             candidates, runtime_path, provider_source = (
                 _provider_candidates_for_load(library_path, provider_path)
@@ -710,7 +736,11 @@ class OptixProvider:
             load_failures = []
             for candidate in candidates:
                 try:
-                    queried_candidates.append(_query_provider(candidate))
+                    queried = _query_provider(candidate)
+                    if int(queried.api.info.features) & required_mask != required_mask:
+                        load_failures.append(f"{candidate}: missing required features {required_features}")
+                        continue
+                    queried_candidates.append(queried)
                 except (
                     AttributeError,
                     OSError,
@@ -762,6 +792,7 @@ class OptixProvider:
         self._context = context
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
+        self.required_features = required_features
         self._scenes = weakref.WeakSet()
         self._gases = weakref.WeakSet()
         self._programs = weakref.WeakSet()
@@ -2460,16 +2491,17 @@ class OptixTriangleScene:
         return False
 
 
-def load_provider(library_path=None, *, validation=False, provider_path=None):
+def load_provider(library_path=None, *, validation=False, provider_path=None, required_features=()):
     """Load OptiX with an optional explicit Forge adapter path.
 
     ``library_path`` remains the user-provided vendor runtime. ``provider_path``
     is for an explicit local Forge C-ABI adapter and is never treated as a
     vendor runtime candidate or installed into the runtime wheel.
+    ``required_features`` has the same cold selection contract as OptixProvider.
     """
 
     return OptixProvider(
-        library_path, validation=validation, provider_path=provider_path
+        library_path, validation=validation, provider_path=provider_path, required_features=required_features
     )
 
 

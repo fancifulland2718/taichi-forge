@@ -1090,6 +1090,7 @@ def _passive_core_statuses(runtime_initialized, backend):
     )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
     as_available = bool(program is not None and program.vulkan_acceleration_structure_available())
+    ray_program_available = bool(program is not None and program._vulkan_ray_program_available())
     cooperative_matrix_available = bool(
         program is not None and program.vulkan_cooperative_matrix_available()
     )
@@ -1195,6 +1196,18 @@ def _passive_core_statuses(runtime_initialized, backend):
                 },
             },
         },
+        "ray.program.vulkan": {
+            "available": ray_program_available,
+            "native_facts": {
+                "provider_available": ray_program_available,
+                "capability_query": "active_vulkan_rt_pipeline_feature_chain",
+                "requires_inline_ray_query": False,
+                "creates_program_or_sbt": False,
+                "initialization": "explicit_before_graph_binding",
+                "ordinary_graph": "runtime_ordered_rerecord",
+                "fixed_command_factory": True,
+            },
+        },
         "ray.as_build.vulkan": {
             "available": as_available,
             "native_facts": as_facts,
@@ -1213,7 +1226,7 @@ def _passive_core_statuses(runtime_initialized, backend):
                 **ray_facts,
                 "scope": "jit_kernel_intrinsic",
                 "aot_supported": False,
-                "graph_resource_argument_supported": False,
+                "graph_resource_argument_supported": True,
             },
         },
         "matrix.mma.vulkan": {
@@ -1244,6 +1257,7 @@ def _passive_core_statuses(runtime_initialized, backend):
 
 
 _EXTERNAL_OPERATION_REQUIRED_FACTS = {
+    "ray.program.optix": "program_feature_advertised",
     "linalg.spmm.cusparse_explicit": "spmm_f32_available",
     "linalg.spsv.cusparse_explicit": "spsv_f32_available",
     "linalg.spsm.cusparse_explicit": "spsm_f32_available",

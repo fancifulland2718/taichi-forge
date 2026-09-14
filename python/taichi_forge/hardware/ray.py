@@ -1,4 +1,6 @@
-"""Public Vulkan ray-query and OptiX provider/program APIs."""
+"""Native batch scenes plus explicit Vulkan and OptiX resource/program APIs."""
+
+from taichi_forge.hardware._ray_factory import NativeTriangleScene, triangle_scene
 
 from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
 from taichi_forge.hardware._shader_artifact import PtxModule, ShaderBuildInfo
@@ -45,6 +47,8 @@ from taichi_forge.hardware._optix import (
 )
 
 __all__ = [
+    "NativeTriangleScene",
+    "triangle_scene",
     "SpirvShader",
     "VulkanHitGroup",
     "VulkanPreparedLaunch",
