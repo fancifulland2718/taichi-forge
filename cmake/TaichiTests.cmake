@@ -256,11 +256,16 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     tests/cpp/aot/graph_replay_identity_test.cpp
     tests/cpp/aot/gfx_utils.cpp
     tests/cpp/aot/vulkan/device_test.cpp)
+  # OBJECT libraries carry usage requirements, but not their object files,
+  # through an INTERFACE library. Link the existing native targets directly so
+  # split-runtime builds do not require exporting private RHI symbols.
+  get_target_property(_ti_backend_native_targets
+    taichi_backend_test_dependencies INTERFACE_LINK_LIBRARIES)
   target_link_libraries(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     PRIVATE
       taichi_core
       gtest_main
-      taichi_backend_test_dependencies)
+      ${_ti_backend_native_targets})
   target_include_directories(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
     PRIVATE
       ${PROJECT_SOURCE_DIR}
