@@ -793,7 +793,8 @@ Forge 保留对应 owner，通过现有受管存储解析地址。合格 dense f
 不模拟尚未支持的纹理能力。
 
 `record()` 固定 scalar 字节和 SBT 内容；`prepare()` 解析绑定、分配存储并打包原生 SBT header，不上传、
-不 launch、不修改应用输出。`initialize()` 做一次幂等有序上传；重复 `run()` 不重新打包或复制参数。
+不 launch、不修改应用输出。`initialize()` 做一次幂等有序上传；重复 `run()` 不重新打包或上传 Forge 自有参数/SBT。
+OptiX 仍可能把设备 launch 参数复制到其内部存储。
 更换 buffer/texture 对象时重新 prepare；修改 scalar、尺寸、SBT 或 scene 引用时重新 record。高频变化的值
 应放进受管设备 buffer 后原位更新。scene refit 不重编译 program 或重建 SBT；scene 属于 recording owner，
 不是 Vulkan AS 参数。
@@ -814,7 +815,10 @@ launch.close()
 `launch.graph_recording()` 返回等价的显式 native recording。Graph 发布绑定时检查固定对象身份，不执行初始化。
 替换资源要建立新的 prepared launch/recording；设备内容和 scene transform 可以通过有序操作原位修改。
 此路径是保留 packet 的 **runtime-ordered native launch**，`replay_mode="rerecord"`，不是 OptiX 的 CUDA Graph
-capture。关闭 Graph 不会关闭仍由调用者拥有、可供 direct 调用复用的 launch。
+capture。recording 报告 `capture="unavailable"`，原因是 `optix_program_launch_not_capture_supported`。
+不要用外部 CUDA stream capture 包裹此 launch：提交成功并不代表程序可被重放。
+关闭 Graph 不会关闭仍由调用者拥有、可供 direct 调用复用的 launch；关闭 launch 或其 program 则先关闭引用它的
+Graph，完成在途工作后再释放 packet 和 pipeline。
 
 launch 应早于 scene 关闭；`program.close()` 先关闭其 launch。runtime reset/退出按 launch、program、scene、
 GAS、context 顺序退休。显式 close 可以等待在途工作，稳态 launch 不等待 host 完成。

@@ -222,6 +222,9 @@ def test_prepared_program_graph_composes_refit_and_consumer_without_repreparatio
         launch.initialize()
         command = launch.graph_recording()
         assert command.replay_mode == "rerecord"
+        diagnostic = command._as_graph_native_node().compile().debug_info
+        assert diagnostic["capture"] == "unavailable"
+        assert diagnostic["capture_reason"] == "optix_program_launch_not_capture_supported"
 
         @ti.kernel
         def move(t: ti.types.ndarray(ti.f32, ndim=2), shift: ti.f32):
@@ -276,4 +279,119 @@ def test_prepared_program_graph_composes_refit_and_consumer_without_repreparatio
         program.close()
         scene.close()
         gas.close()
+        provider.close()
+
+
+@pytest.mark.parametrize("retire", ["close", "reset"])
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_program_graph_feedback_inflight_and_retirement(retire, monkeypatch):
+    provider = _provider()
+    gas, scene = _scene(provider)
+    program = _program(provider)
+    output, result = ti.ndarray(ti.u32, 8), ti.ndarray(ti.u32, 8)
+    output.fill(999)
+    result.fill(0)
+    launch = _record(program, scene).prepare({"out": output}).initialize()
+    graph = None
+    try:
+        command = launch.graph_recording()
+        assert command.replay_mode == "rerecord"
+
+        @ti.kernel
+        def consume(source: ti.types.ndarray(ti.u32, ndim=1), target: ti.types.ndarray(ti.u32, ndim=1)):
+            for i in target:
+                target[i] += source[i]
+
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(command, admission="explicit")
+        builder.dispatch(
+            consume,
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.u32, ndim=1),
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.u32, ndim=1),
+        )
+        graph = builder.compile()
+        bound = graph.bind({"out": output, "result": result})
+        np.testing.assert_array_equal(output.to_numpy(), [999] * 8)
+        np.testing.assert_array_equal(result.to_numpy(), [0] * 8)
+        with pytest.raises(RuntimeError, match="fixed bindings"):
+            bound.update(out=ti.ndarray(ti.u32, 8))
+
+        def no_reprepare(*args, **kwargs):
+            raise AssertionError("Graph replay reinitialized its prepared program")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(launch, "initialize", no_reprepare)
+            patched.setattr(command, "prepare_graph_execute", no_reprepare)
+            patched.setattr(command, "validate_graph_bindings", no_reprepare)
+            submissions = [graph.submit(bound) for _ in range(4)]
+            for submission in submissions:
+                submission.wait()
+        expected = np.array([122, 12, 12, 12, 122, 12, 12, 12], np.uint32)
+        np.testing.assert_array_equal(result.to_numpy(), expected * 4)
+        # A consumer's CUDA replay must not imply that the OptiX action was
+        # captured. The report keeps the two execution segments separate.
+        segments = graph.execution_stats().segments
+        assert len(segments) == 2
+        assert not segments[0].backend_replay_path
+        assert segments[1].backend_replay_path
+        # Close/reset handles outstanding native work and retires the Graph
+        # before freeing the prepared SBT or pipeline addresses.
+        graph.submit(bound)
+        if retire == "close":
+            program.close()
+            assert program.closed and launch.closed
+        else:
+            ti.reset()
+            assert all(item.closed for item in (launch, program, scene, gas, provider))
+        with pytest.raises(RuntimeError, match="closed|reset|reinitialization"):
+            graph.run(bound)
+    finally:
+        if graph is not None:
+            graph.close()
+        launch.close()
+        program.close()
+        scene.close()
+        gas.close()
+        provider.close()
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_program_graph_sbt_field_texture_inputs_and_explicit_graph_close():
+    provider = _provider()
+    program = provider.program((_module(),), raygen={"indirect": E(0, "__raygen__indirect")}, payload_count=1)
+    layout = L(
+        24, (F("out", 0, kind="buffer", access="write"), F("in", 8, kind="buffer"), F("tex", 16, kind="texture"))
+    )
+    recording = program.record(8, raygen=R("indirect", layout=layout, values={"out": "out", "in": "in", "tex": "tex"}))
+    inputs, output = ti.field(ti.u32, 8), ti.ndarray(ti.u32, 8)
+    inputs.fill(3)
+    pixels = ti.ndarray(ti.f32, (2, 2))
+    pixels.fill(9)
+    texture = ti.Texture(ti.Format.r32f, (2, 2))
+    texture.from_ndarray(pixels)
+    bindings = {"out": output, "in": inputs, "tex": texture}
+    launch = recording.prepare(bindings).initialize()
+    graph = None
+    try:
+        builder = ti.graph.GraphBuilder()
+        builder.append_native(launch, admission="explicit")
+        graph = builder.compile()
+        bound = graph.bind(bindings)
+        for value in (3, 7):
+            inputs.fill(value)
+            graph.run(bound)
+            np.testing.assert_array_equal(output.to_numpy(), [value + 9] * 8)
+        pixels.fill(2)
+        texture.from_ndarray(pixels)
+        graph.run(bound)
+        np.testing.assert_array_equal(output.to_numpy(), [9] * 8)
+        graph.close()
+        assert not launch.closed
+        launch.run()  # the caller's original direct packet is still usable
+        np.testing.assert_array_equal(output.to_numpy(), [9] * 8)
+    finally:
+        if graph is not None:
+            graph.close()
+        launch.close()
+        program.close()
         provider.close()

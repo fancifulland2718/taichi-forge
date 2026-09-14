@@ -308,10 +308,12 @@ class OptixProgram:
     def close(self):
         if self.closed:
             return
+        # Graph lifecycle locks precede the native submission guard. A launch
+        # may retire referring Graphs, so do that before taking the guard here.
+        for launch in tuple(self._launches):
+            launch.close()
         scope = self._runtime_prog._begin_external_cuda_submission()
         try:
-            for launch in tuple(self._launches):
-                launch.close()
             _invoke_checked(self.provider._loaded.api, self._api.destroy, self._handle)
             self._handle = None
         finally:
@@ -436,6 +438,8 @@ class OptixPreparedLaunch:
         self._owners = ()
         self._bindings = MappingProxyType({})
         self._initialized = False
+        self._graphs = weakref.WeakSet()
+        self._closing = False
         self._memory = None
         self.program._validate_lifetime()
         if set(bindings) != set(recording.binding_names):
@@ -571,6 +575,12 @@ class OptixPreparedLaunch:
 
         return _PreparedProgramRecording(self)
 
+    def _register_graph_owner(self, graph):
+        self._require_initialized()
+        if self._closing:
+            raise TaichiRuntimeError("cannot attach a Graph to a retiring OptiX launch")
+        self._graphs.add(graph)
+
     def _as_graph_native_node(self):
         return self.graph_recording()._as_graph_native_node()
 
@@ -615,8 +625,14 @@ class OptixPreparedLaunch:
     def close(self):
         if self.closed:
             return
-        scope = self._runtime_prog._begin_external_cuda_submission()
+        self._closing = True
+        scope = None
         try:
+            # No native guard is held while acquiring Graph lifecycle locks.
+            # Graph close completes in-flight work and drops prepared callables.
+            for graph in tuple(self._graphs):
+                graph.close()
+            scope = self._runtime_prog._begin_external_cuda_submission()
             _invoke_checked(self.program.provider._loaded.api, self.program._api.destroy_launch, self._handle)
             self._handle = None
             self._call = _closed
@@ -625,6 +641,7 @@ class OptixPreparedLaunch:
             self._owners = ()
             self._bindings = MappingProxyType({})
         finally:
+            self._closing = False
             del scope
 
     def __enter__(self):

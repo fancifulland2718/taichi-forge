@@ -1008,7 +1008,8 @@ their sampler; unsupported texture capabilities are not emulated.
 `record()` snapshots scalar bytes and SBT data. `prepare()` resolves bindings,
 allocates storage and packs native SBT headers, but does not upload, launch, or
 write application outputs. `initialize()` performs one idempotent, stream-ordered
-upload; repeated `run()` does not repack or copy parameters. Change buffer/texture
+upload; repeated `run()` does not repack or upload Forge-owned parameters/SBT.
+OptiX can still copy device launch parameters into its internal storage. Change buffer/texture
 objects by preparing again; change scalars, dimensions, SBT or scene references
 by recording again. For frequently changing values, bind a device buffer and
 update it in place. Scene refit does not require program compilation or SBT
@@ -1034,7 +1035,12 @@ it does not initialize the launch. Replacing those resources requires a new
 prepared launch/recording. Device contents and scene transforms may change in
 place through ordered operations. This route is a retained **runtime-ordered
 native launch**, with `replay_mode="rerecord"`, not CUDA Graph capture of OptiX.
+The recording reports `capture="unavailable"` with reason
+`optix_program_launch_not_capture_supported`. Do not wrap this launch in external
+CUDA stream capture: successful submission alone does not establish replay support.
 Closing the Graph does not close a caller-owned launch reused by direct calls.
+Closing the launch or its program first closes referring Graphs and completes
+their outstanding work before releasing the packet and pipeline.
 
 Close launches before their scenes. `program.close()` retires its launches;
 runtime reset/exit retires launches, programs, scenes, GAS and context in order.

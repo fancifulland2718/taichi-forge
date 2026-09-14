@@ -18514,6 +18514,17 @@ class Graph:
         self._runtime_valid = True
         self._run_impl = self._instance.run_impl
         impl.get_runtime().register_runtime_object(self)
+        # Cold owner association, not a replay validator. A provider that owns
+        # addresses embedded in recorded device commands can retire this Graph
+        # before freeing its resources. Owners keep weak references only.
+        try:
+            for lease in self._spec.lifetime_leases:
+                register = getattr(lease, "_register_graph_owner", None)
+                if register is not None:
+                    register(self)
+        except BaseException:
+            self.close()
+            raise
 
     def bind(self, arguments):
         """Create a versioned runtime binding source for repeat invocation.

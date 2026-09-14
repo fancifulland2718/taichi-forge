@@ -80,7 +80,8 @@ class _PreparedProgramRecording(BackendCommandRecording):
                 "kind": "optix_program_prepared_launch",
                 "execution": "runtime_ordered_native_launch",
                 "initialization": "explicit_before_graph_binding",
-                "capture": "not_enabled",
+                "capture": "unavailable",
+                "capture_reason": "optix_program_launch_not_capture_supported",
             },
             # Exact object/layout binding does not change within a BindingVersion.
             # Native prepared storage and the launch callable own retirement.
