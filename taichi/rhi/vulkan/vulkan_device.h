@@ -31,6 +31,8 @@ using std::unordered_map;
 class VulkanDevice;
 class VulkanResourceBinder;
 class VulkanStream;
+struct VulkanRayTracingPipelineParams;
+class VulkanShaderBindingTable;
 
 struct VulkanProfilerSampler {
   std::string kernel_name;
@@ -43,6 +45,7 @@ struct SpirvCodeView {
   const uint32_t *data = nullptr;
   size_t size = 0;
   VkShaderStageFlagBits stage = VK_SHADER_STAGE_COMPUTE_BIT;
+  std::string entry_point{"main"};
 
   SpirvCodeView() = default;
 
@@ -428,6 +431,8 @@ class VulkanPipeline : public Pipeline {
   };
 
   explicit VulkanPipeline(const Params &params);
+  VulkanPipeline(const Params &params,
+                 const VulkanRayTracingPipelineParams &ray_params);
   explicit VulkanPipeline(
       const Params &params,
       const RasterParams &raster_params,
@@ -462,6 +467,14 @@ class VulkanPipeline : public Pipeline {
     return bind_point_;
   }
 
+  // Handles are pipeline-local and only consumed by cold SBT packing.
+  const std::vector<std::uint8_t> &ray_group_handles() const {
+    return ray_group_handles_;
+  }
+  const std::vector<VkShaderStageFlagBits> &ray_group_stages() const {
+    return ray_group_stages_;
+  }
+
   // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
   void validate_color_attachment_types(const std::vector<int> &types) const;
   bool color_attachment_blends(std::size_t index) const;
@@ -480,6 +493,7 @@ class VulkanPipeline : public Pipeline {
       const;
 
  private:
+  friend class VulkanShaderBindingTable;
   void create_descriptor_set_layout(const Params &params);
   void create_shader_stages(const Params &params);
   void create_pipeline_layout();
@@ -519,6 +533,9 @@ class VulkanPipeline : public Pipeline {
   VkPipelineBindPoint bind_point_{VK_PIPELINE_BIND_POINT_COMPUTE};
 
   std::vector<VkPipelineShaderStageCreateInfo> shader_stages_;
+  std::vector<std::string> shader_entry_points_;
+  std::vector<std::uint8_t> ray_group_handles_;
+  std::vector<VkShaderStageFlagBits> ray_group_stages_;
 
   std::unique_ptr<GraphicsPipelineTemplate> graphics_pipeline_template_;
   std::mutex graphics_pipeline_mutex_;
@@ -564,6 +581,11 @@ class VulkanCommandList : public CommandList {
   void push_constants(const void *data, uint32_t size) noexcept;
   RhiResult dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) noexcept final;
   RhiResult dispatch_indirect(DevicePtr indirect) noexcept final;
+  // Fixed, validated SBT and dimensions from a prepared Vulkan program.
+  void trace_rays(const VulkanShaderBindingTable &sbt,
+                  std::uint32_t width,
+                  std::uint32_t height,
+                  std::uint32_t depth);
   RhiResult begin_conditional(DevicePtr predicate,
                               bool inverted = false) noexcept final;
   RhiResult end_conditional() noexcept final;
@@ -950,6 +972,7 @@ struct VulkanCapabilities {
   uint32_t max_per_stage_descriptor_samplers{0};
   uint32_t max_descriptor_set_samplers{0};
   uint32_t max_per_stage_resources{0};
+  std::array<std::uint64_t, 3> max_ray_dispatch_dimensions{0, 0, 0};
   bool physical_device_features2{false};
   bool external_memory{false};
   bool external_semaphore{false};

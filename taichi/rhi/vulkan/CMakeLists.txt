@@ -9,12 +9,14 @@ target_sources(${VULKAN_RHI}
     vulkan_device_creator.cpp
     vulkan_loader.cpp
     vulkan_memory_allocator.cpp
+    vulkan_ray_pipeline.cpp
     ${PROJECT_SOURCE_DIR}/external/SPIRV-Reflect/spirv_reflect.c
 
     vulkan_api.h
     vulkan_device.h
     vulkan_device_creator.h
     vulkan_loader.h
+    vulkan_ray_pipeline.h
   )
 
 #TODO 4832, some dependencies here should not be required as they

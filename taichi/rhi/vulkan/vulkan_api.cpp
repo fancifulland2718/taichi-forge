@@ -453,7 +453,10 @@ IVkPipeline create_raytracing_pipeline(
   VkResult res = vkCreateRayTracingPipelinesKHR(
       device, deferredOperation, cache ? cache->cache : VK_NULL_HANDLE, 1,
       create_info, nullptr, &obj->pipeline);
-  BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create raytracing pipeline");
+  RHI_THROW_UNLESS(
+      res == VK_SUCCESS,
+      std::runtime_error("Failed to create ray-tracing pipeline: VkResult " +
+                         std::to_string(static_cast<int>(res))));
 
   return obj;
 }

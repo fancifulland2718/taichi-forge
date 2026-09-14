@@ -256,6 +256,8 @@ if (TI_WITH_VULKAN AND TI_WITH_CUDA)
     tests/cpp/aot/graph_replay_identity_test.cpp
     tests/cpp/aot/gfx_utils.cpp
     tests/cpp/aot/vulkan/device_test.cpp)
+  target_sources(${TAICHI_BACKEND_SAFETY_TESTS_NAME}
+    PRIVATE tests/cpp/aot/vulkan/ray_pipeline_test.cpp)
   # OBJECT libraries carry usage requirements, but not their object files,
   # through an INTERFACE library. Link the existing native targets directly so
   # split-runtime builds do not require exporting private RHI symbols.

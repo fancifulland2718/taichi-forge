@@ -619,6 +619,11 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       physical_device_properties.limits.maxDescriptorSetSamplers;
   ti_device_->vk_caps().max_per_stage_resources =
       physical_device_properties.limits.maxPerStageResources;
+  for (unsigned i = 0; i < 3; ++i) {
+    ti_device_->vk_caps().max_ray_dispatch_dimensions[i] =
+        std::uint64_t(physical_device_properties.limits.maxComputeWorkGroupCount[i]) *
+        physical_device_properties.limits.maxComputeWorkGroupSize[i];
+  }
   if (vk_api_version >= VK_API_VERSION_1_3) {
     caps.set(DeviceCapability::spirv_version, 0x10500);
   } else if (vk_api_version >= VK_API_VERSION_1_2) {

@@ -373,20 +373,43 @@ vkapi::IVkPipeline VulkanPipeline::graphics_pipeline_dynamic(
 }
 
 void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
+  std::map<std::pair<std::uint32_t, std::uint32_t>,
+           std::pair<SpvReflectDescriptorType, std::uint32_t>> ray_descriptors;
   for (auto &code_view : params.code) {
-    SpvReflectShaderModule module;
-    SpvReflectResult result =
-        spvReflectCreateShaderModule(code_view.size, code_view.data, &module);
-    RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
+    spv_reflect::ShaderModule reflection(code_view.size, code_view.data);
+    RHI_THROW_UNLESS(reflection.GetResult() == SPV_REFLECT_RESULT_SUCCESS,
                      std::runtime_error("spvReflectCreateShaderModule failed"));
+    const auto &module = reflection.GetShaderModule();
+    const auto *entry = spvReflectGetEntryPoint(&module, code_view.entry_point.c_str());
+    RHI_THROW_UNLESS(entry && static_cast<VkShaderStageFlagBits>(entry->shader_stage) == code_view.stage,
+                     std::invalid_argument("SPIR-V entry point is missing or has the wrong shader stage"));
+    SpvReflectResult result;
+
+    if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+      std::uint32_t count = 0;
+      result = reflection.EnumerateEntryPointPushConstantBlocks(
+          code_view.entry_point.c_str(), &count, nullptr);
+      RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
+                       std::invalid_argument("Cannot reflect ray push constants"));
+      std::vector<SpvReflectBlockVariable *> blocks(count);
+      result = reflection.EnumerateEntryPointPushConstantBlocks(
+          code_view.entry_point.c_str(), &count, blocks.data());
+      RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
+                       std::invalid_argument("Cannot reflect ray push constants"));
+      for (const auto *block : blocks) {
+        RHI_THROW_UNLESS(block->offset <= 128 && block->size <= 128 - block->offset,
+                         std::invalid_argument("Ray push constants exceed the 128-byte pipeline layout"));
+      }
+    }
 
     uint32_t set_count = 0;
-    result = spvReflectEnumerateDescriptorSets(&module, &set_count, nullptr);
+    result = reflection.EnumerateEntryPointDescriptorSets(
+        code_view.entry_point.c_str(), &set_count, nullptr);
     RHI_THROW_UNLESS(result == SPV_REFLECT_RESULT_SUCCESS,
                      std::runtime_error("Failed to enumerate number of sets"));
     std::vector<SpvReflectDescriptorSet *> desc_sets(set_count);
-    result = spvReflectEnumerateDescriptorSets(&module, &set_count,
-                                               desc_sets.data());
+    result = reflection.EnumerateEntryPointDescriptorSets(
+        code_view.entry_point.c_str(), &set_count, desc_sets.data());
     RHI_THROW_UNLESS(
         result == SPV_REFLECT_RESULT_SUCCESS,
         std::runtime_error("spvReflectEnumerateDescriptorSets failed"));
@@ -396,6 +419,17 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
     for (const SpvReflectDescriptorSet *desc_set : desc_sets) {
       for (std::uint32_t i = 0; i < desc_set->binding_count; ++i) {
         const SpvReflectDescriptorBinding *binding = desc_set->bindings[i];
+        if (bind_point_ == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
+          const auto declaration = std::make_pair(binding->descriptor_type, binding->count);
+          const auto [found, inserted] = ray_descriptors.emplace(
+              std::make_pair(desc_set->set, binding->binding), declaration);
+          RHI_THROW_UNLESS(inserted || found->second == declaration,
+                           std::invalid_argument("Ray stages must agree on descriptor type and array count"));
+          RHI_THROW_UNLESS(binding->count == 1 ||
+                               binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_STORAGE_BUFFER ||
+                               binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                           std::invalid_argument("Ray descriptor arrays are supported for storage buffers and combined samplers"));
+        }
         RHI_THROW_UNLESS(
             binding->count > 0,
             std::invalid_argument(
@@ -455,7 +489,6 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
           const auto [found, inserted] = comparison_samplers_.emplace(
               std::make_pair(set_index, desc_binding->binding), desc_binding->image.depth == 1);
           if (!inserted && found->second != (desc_binding->image.depth == 1)) {
-            spvReflectDestroyShaderModule(&module);
             TI_ERROR("Shader stages disagree on comparison sampler binding");
           }
           if (desc_binding->count > 1) {
@@ -473,13 +506,18 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
           if (desc_binding->count != 1) {
-            spvReflectDestroyShaderModule(&module);
             TI_ERROR(
                 "Acceleration-structure descriptor arrays are not supported");
           }
           set.acceleration_structure(desc_binding->binding, nullptr);
           VkPipelineStageFlags stage = 0;
-          switch (module.shader_stage) {
+          switch (entry->shader_stage) {
+            case SPV_REFLECT_SHADER_STAGE_RAYGEN_BIT_KHR:
+            case SPV_REFLECT_SHADER_STAGE_MISS_BIT_KHR:
+            case SPV_REFLECT_SHADER_STAGE_CLOSEST_HIT_BIT_KHR:
+            case SPV_REFLECT_SHADER_STAGE_ANY_HIT_BIT_KHR:
+              stage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+              break;
             case SPV_REFLECT_SHADER_STAGE_VERTEX_BIT:
               stage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
               break;
@@ -496,11 +534,12 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
               stage = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
               break;
             default:
-              spvReflectDestroyShaderModule(&module);
               TI_ERROR("Unsupported acceleration-structure shader stage");
           }
           acceleration_structure_stages_[{set_index, desc_binding->binding}] |= stage;
         } else {
+          RHI_THROW_UNLESS(bind_point_ != VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
+                           std::invalid_argument("Unsupported ray descriptor type"));
           RHI_LOG_ERROR("Unrecognized binding ignored");
         }
       }
@@ -526,15 +565,15 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
 
     if (code_view.stage == VK_SHADER_STAGE_FRAGMENT_BIT) {
       uint32_t render_target_count = 0;
-      result = spvReflectEnumerateOutputVariables(&module, &render_target_count,
-                                                  nullptr);
+      result = reflection.EnumerateEntryPointOutputVariables(
+          code_view.entry_point.c_str(), &render_target_count, nullptr);
       RHI_THROW_UNLESS(
           result == SPV_REFLECT_RESULT_SUCCESS,
           std::runtime_error("Failed to enumerate number of output vars"));
 
       std::vector<SpvReflectInterfaceVariable *> variables(render_target_count);
-      result = spvReflectEnumerateOutputVariables(&module, &render_target_count,
-                                                  variables.data());
+      result = reflection.EnumerateEntryPointOutputVariables(
+          code_view.entry_point.c_str(), &render_target_count, variables.data());
 
       RHI_THROW_UNLESS(
           result == SPV_REFLECT_RESULT_SUCCESS,
@@ -575,7 +614,6 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
                 graphics_pipeline_template_->blend_attachments.end(),
                 default_state);
     }
-    spvReflectDestroyShaderModule(&module);
   }
 
   // A program can have no binding sets at all.
@@ -597,17 +635,22 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
 }
 
 void VulkanPipeline::create_shader_stages(const Params &params) {
+  // Reserve before creating handles; allocation failure cannot strand a module.
+  shader_modules_.reserve(params.code.size());
+  shader_stages_.reserve(params.code.size());
+  shader_entry_points_.reserve(params.code.size());
   for (auto &code_view : params.code) {
     VkPipelineShaderStageCreateInfo &shader_stage_info =
         shader_stages_.emplace_back();
 
+    shader_entry_points_.push_back(code_view.entry_point);
     VkShaderModule shader_module = create_shader_module(device_, code_view);
 
     shader_stage_info.sType =
         VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     shader_stage_info.stage = code_view.stage;
     shader_stage_info.module = shader_module;
-    shader_stage_info.pName = "main";
+    shader_stage_info.pName = shader_entry_points_.back().c_str();
 
     shader_modules_.push_back(shader_module);
   }
@@ -2718,8 +2761,16 @@ RhiResult VulkanDevice::allocate_memory(const AllocParams &params,
   }
   const bool needs_device_address =
       int(params.usage & AllocUsage::DeviceAddress) ||
+      int(params.usage & AllocUsage::ShaderBindingTable) ||
       int(params.usage & AllocUsage::AccelerationStructureBuildInput) ||
       int(params.usage & AllocUsage::AccelerationStructureStorage);
+  if (int(params.usage & AllocUsage::ShaderBindingTable)) {
+    if (!vk_caps().ray_tracing_pipeline) {
+      allocations_.release(&alloc);
+      return RhiResult::not_supported;
+    }
+    buffer_info.usage |= VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR;
+  }
   if (needs_device_address) {
     if (!vk_caps().buffer_device_address) {
       allocations_.release(&alloc);
@@ -4033,6 +4084,7 @@ DeviceAllocation VulkanDevice::import_vkbuffer(vkapi::IVkBuffer buffer,
   alloc_int.mapped = nullptr;
   const bool import_needs_device_address =
       int(usage & AllocUsage::DeviceAddress) ||
+      int(usage & AllocUsage::ShaderBindingTable) ||
       int(usage & AllocUsage::AccelerationStructureBuildInput) ||
       int(usage & AllocUsage::AccelerationStructureStorage);
   if (get_caps().get(DeviceCapability::spirv_has_physical_storage_buffer) ||

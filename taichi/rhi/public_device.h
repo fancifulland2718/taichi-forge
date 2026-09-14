@@ -797,6 +797,7 @@ enum class AllocUsage : int {
   DeviceAddress = 512,
   MicromapBuildInput = 1024,
   MicromapStorage = 2048,
+  ShaderBindingTable = 4096,
 };
 
 MAKE_ENUM_FLAGS(AllocUsage)
