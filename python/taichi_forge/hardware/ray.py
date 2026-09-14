@@ -2,6 +2,11 @@
 
 from taichi_forge.hardware._vulkan_micromap import VulkanOpacityMicromap
 from taichi_forge.hardware._shader_artifact import PtxModule, ShaderBuildInfo
+from taichi_forge.hardware._shader_artifact import SpirvShader
+from taichi_forge.hardware._vulkan_ray_program import (
+    VulkanHitGroup, VulkanPreparedLaunch, VulkanProgramRecording, VulkanRayBinding,
+    VulkanRayTracingPipeline, VulkanSbtRecord, is_program_available,
+)
 from taichi_forge.hardware._optix_parameters import OptixParameterField, OptixParameterLayout
 from taichi_forge.hardware._optix_program import (
     OptixHitGroup, OptixPreparedLaunch, OptixProgram, OptixProgramRecording,
@@ -40,6 +45,14 @@ from taichi_forge.hardware._optix import (
 )
 
 __all__ = [
+    "SpirvShader",
+    "VulkanHitGroup",
+    "VulkanPreparedLaunch",
+    "VulkanProgramRecording",
+    "VulkanRayBinding",
+    "VulkanRayTracingPipeline",
+    "VulkanSbtRecord",
+    "is_program_available",
     "PtxModule",
     "ShaderBuildInfo",
     "OptixHitGroup",

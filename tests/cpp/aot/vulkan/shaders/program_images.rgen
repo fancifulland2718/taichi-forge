@@ -1,0 +1,13 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+
+layout(set = 0, binding = 0) uniform sampler2D source_image;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D target_image;
+layout(set = 0, binding = 2, std430) readonly buffer Gain { float gain; };
+layout(push_constant) uniform Parameters { float bias; } parameters;
+
+void main() {
+    ivec2 p = ivec2(gl_LaunchIDEXT.xy);
+    vec4 value = texelFetch(source_image, p, 0);
+    imageStore(target_image, p, value * gain + vec4(parameters.bias));
+}

@@ -474,6 +474,9 @@ class VulkanPipeline : public Pipeline {
   const std::vector<VkShaderStageFlagBits> &ray_group_stages() const {
     return ray_group_stages_;
   }
+  std::uint32_t required_ray_push_constant_bytes() const {
+    return required_ray_push_constant_bytes_;
+  }
 
   // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
   void validate_color_attachment_types(const std::vector<int> &types) const;
@@ -494,6 +497,7 @@ class VulkanPipeline : public Pipeline {
 
  private:
   friend class VulkanShaderBindingTable;
+  std::uint32_t required_ray_push_constant_bytes_{0};
   void create_descriptor_set_layout(const Params &params);
   void create_shader_stages(const Params &params);
   void create_pipeline_layout();

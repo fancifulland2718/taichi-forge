@@ -218,6 +218,11 @@ class CudaCudssPlan;
 class VulkanTriangleRayScene;
 class VulkanRayResource;
 class VulkanGraphicsPipelineResource;
+class VulkanRayProgramResource;
+struct VulkanRayProgramShader;
+struct VulkanRayProgramGroup;
+struct VulkanRayProgramLaunch;
+struct PreparedVulkanRayLaunch;
 class ProgramLifetimeToken;
 class ExternalSynchronizationDomain;
 class ExternalAccessEpoch;
@@ -1545,6 +1550,24 @@ class TI_DLL_EXPORT Program {
                                        CommandList *command_list);
 
   void destroy_vulkan_ray_resource(std::uint64_t handle);
+
+  bool vulkan_ray_program_available() const;
+  std::uint64_t create_vulkan_ray_program(
+      const std::vector<VulkanRayProgramShader> &shaders,
+      const std::vector<VulkanRayProgramGroup> &groups,
+      std::uint32_t recursion_depth,
+      bool opacity_micromap);
+  void destroy_vulkan_ray_program(std::uint64_t handle);
+  void vulkan_clear_ray_programs();
+  std::shared_ptr<PreparedVulkanRayLaunch> prepare_vulkan_ray_launch(
+      std::uint64_t program, const VulkanRayProgramLaunch &launch);
+  void initialize_vulkan_ray_launch(const std::shared_ptr<PreparedVulkanRayLaunch> &launch);
+  void execute_vulkan_ray_launch(const std::shared_ptr<PreparedVulkanRayLaunch> &launch);
+  void close_vulkan_ray_launch(const std::shared_ptr<PreparedVulkanRayLaunch> &launch);
+  std::unordered_map<std::string, std::uint64_t> vulkan_ray_launch_info(
+      const std::shared_ptr<PreparedVulkanRayLaunch> &launch);
+  std::shared_ptr<gfx::ExternalGraphCommand> vulkan_ray_program_graph_command(
+      const std::shared_ptr<PreparedVulkanRayLaunch> &launch);
 
   // Preparation binds descriptors and registers the lease with the AS owner.
   // Recording retains native buffers and establishes the graphics dependency.
@@ -4523,6 +4546,10 @@ class TI_DLL_EXPORT Program {
   std::vector<std::shared_ptr<VulkanRayResource>>
       vulkan_ray_resource_retirements_;
   std::uint64_t next_vulkan_ray_resource_handle_{1};
+  // Same ray dependency ID namespace, separate program and AS ownership tables.
+  // Recorded commands retain Vulkan objects through existing stream completion.
+  std::unordered_map<std::uint64_t, std::shared_ptr<VulkanRayProgramResource>>
+      vulkan_ray_programs_;
   std::mutex cuda_cufft_plan_mutex_;
   std::unordered_map<std::uint64_t, std::shared_ptr<VulkanFftPlan>>
       vulkan_fft_plans_;

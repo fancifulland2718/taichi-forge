@@ -2219,6 +2219,7 @@ void Program::destroy_vulkan_ray_resource(std::uint64_t handle) {
 }
 
 void Program::vulkan_clear_ray_scenes() {
+  vulkan_clear_ray_programs();
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   vulkan_ray_scenes_.clear();
   vulkan_ray_scene_retirements_.clear();

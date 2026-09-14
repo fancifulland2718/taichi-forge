@@ -44,6 +44,8 @@
 #include "taichi/program/runtime_statistics.h"
 #include "taichi/program/storage_view.h"
 #include "taichi/python/export_storage_view.h"
+#include "taichi/python/export_vulkan_ray_program.h"
+#include "taichi/program/vulkan_ray_program.h"
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
 #include "taichi/system/timeline.h"
@@ -1293,6 +1295,7 @@ void export_lang(py::module &m) {
           &Program::RegisteredKernelExecutionPlan::
               has_snode_tree_dependencies);
 
+  export_vulkan_ray_program(m);
   py::class_<VulkanRayInstanceInfo>(m, "VulkanRayInstanceInfo")
       .def(py::init<>())
       .def_readwrite("transform", &VulkanRayInstanceInfo::transform)
@@ -3217,6 +3220,22 @@ void export_lang(py::module &m) {
           py::arg("colors"), py::arg("depth"), py::arg("draws"),
           py::arg("depth_clear"), py::arg("viewport"),
           py::arg("retained_replay") = false, py::arg("clear_depth") = 0.0f)
+      .def("_vulkan_ray_program_available", &Program::vulkan_ray_program_available)
+      .def("_create_vulkan_ray_program", &Program::create_vulkan_ray_program,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_destroy_vulkan_ray_program", &Program::destroy_vulkan_ray_program,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_prepare_vulkan_ray_launch", &Program::prepare_vulkan_ray_launch,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_initialize_vulkan_ray_launch", &Program::initialize_vulkan_ray_launch,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_execute_vulkan_ray_launch", &Program::execute_vulkan_ray_launch,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_close_vulkan_ray_launch", &Program::close_vulkan_ray_launch,
+           py::call_guard<py::gil_scoped_release>())
+      .def("_vulkan_ray_launch_info", &Program::vulkan_ray_launch_info)
+      .def("_vulkan_ray_program_graph_command", &Program::vulkan_ray_program_graph_command,
+           py::call_guard<py::gil_scoped_release>())
       .def("_vulkan_graphics_graph_command", &Program::vulkan_graphics_graph_command,
            py::call_guard<py::gil_scoped_release>())
       .def("_execute_vulkan_graphics_pass",

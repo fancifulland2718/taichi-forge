@@ -399,6 +399,8 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
       for (const auto *block : blocks) {
         RHI_THROW_UNLESS(block->offset <= 128 && block->size <= 128 - block->offset,
                          std::invalid_argument("Ray push constants exceed the 128-byte pipeline layout"));
+        required_ray_push_constant_bytes_ = std::max(
+            required_ray_push_constant_bytes_, block->offset + block->size);
       }
     }
 

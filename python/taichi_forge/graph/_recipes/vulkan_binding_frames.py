@@ -73,9 +73,14 @@ def eligible(spec, backend):
             if node in boundaries:
                 continue
             recording = getattr(node.executable, "_recording", None)
-            if not callable(getattr(recording, "_vulkan_graph_command", None)) or not getattr(
-                recording.source, "_statistics", {}
-            ).get("inline_recording_available"):
+            if not callable(getattr(recording, "_vulkan_graph_command", None)):
+                return False
+            # Legacy command-sequence factories also exist before their source
+            # has been qualified. Prepared owner-backed factories are already
+            # fixed and validate resources when publishing the native command;
+            # they do not own a command-sequence source/statistics object.
+            source = getattr(recording, "source", None)
+            if source is not None and not getattr(source, "_statistics", {}).get("inline_recording_available"):
                 return False
             reusable = True
         else:
