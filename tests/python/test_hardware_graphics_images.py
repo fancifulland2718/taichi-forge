@@ -506,7 +506,7 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
     vertices, uniform = _quad_resources()
     recording = _recording(pipeline)
 
-    def definition():
+    def definition(recording=recording):
         builder = ti.graph.GraphBuilder()
         # Both leading and trailing ordered boundaries must be kept, not just
         # graphics found between two reusable compute segments.
@@ -551,6 +551,12 @@ def test_graphics_binding_recipe_search_resolve_and_retirement(retirement):
     assert decision.status == "selected", decision.report.results
     assert decision.report.search_complete
     assert len(observed) == 3
+    # Resource names/effects stay identical, but changing the clear operation's
+    # value changes observable semantics and must invalidate saved selections.
+    changed_recording = pipeline.record_pass(recording.draws, color="target", clear_color=(1, 0, 0, 1))
+    with pytest.raises(ValueError, match="different semantic Graph") as drift:
+        definition(changed_recording).resolve_recipe(decision.selection_artifact, providers=providers)
+    assert drift.value.error_key == "semantic_graph_drift"
     fresh = definition()
     assert fresh.semantic_graph_id == frozen.semantic_graph_id
     selection = fresh.resolve_recipe(decision.selection_artifact, providers=providers)

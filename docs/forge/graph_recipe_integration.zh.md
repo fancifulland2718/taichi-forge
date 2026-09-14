@@ -38,6 +38,11 @@ vendor runtime 或 CUDA Toolkit 安装依赖。
 scalar 参数变化通过 binding update 发布。关闭被引用的 graphics pipeline 会退休固定帧，
 再次使用前需重新创建。
 
+保存的 graphics selection 与 shader 内容、固定 pipeline 状态、draw 范围和附件操作绑定。
+相同描述以新的 pipeline handle 或标签重新创建时身份不变；修改 shader、混合、深度状态或
+clear 值后应重新选择。调用者提供的任意 SPIR-V 按内容区分，不自动假定语义等价。
+缺少这些 graphics 指纹的旧 selection 需要重新生成；身份构建不进入逐帧 replay。
+
 单队列方案保留操作顺序和设备内存依赖。若一个 graphics pass 位于仅使用 buffer 的计算前缀与
 计算消费者之间，还可能生成独立 graphics fork/join 候选。绑定准备必须证明计算前缀与该 pass
 使用的 buffer 不重叠，包括实际别名和 dense root；两条分支在消费者前汇合，完成 ticket 覆盖

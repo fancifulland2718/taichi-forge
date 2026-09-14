@@ -49,6 +49,14 @@ includes fresh preparation. Buffer contents may change in place; publish changed
 resources or scalar arguments through the binding update API. Closing a referenced
 graphics pipeline retires the fixed frame, which must be recreated before reuse.
 
+Saved graphics selections are bound to shader contents, fixed pipeline state,
+draw ranges and attachment operations. Recreating the same description with new
+pipeline handles or labels preserves its identity; changing shader/blend/depth
+state or clear values requires a new selection. Arbitrary caller SPIR-V is
+compared by content, not assumed to be semantically equivalent. Older selections
+without these graphics fingerprints must be regenerated. Identity construction
+does not run during frame replay.
+
 The single-queue recipe preserves operation order and device memory dependencies.
 For one graphics pass between a buffer-only compute prefix and compute consumers,
 discovery can also offer an independent graphics fork/join. Binding preparation

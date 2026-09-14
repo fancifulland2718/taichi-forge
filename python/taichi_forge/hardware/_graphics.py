@@ -20,6 +20,10 @@ from taichi_forge._hardware_telemetry import (
     instrument_hardware_recording,
 )
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
+from taichi_forge.hardware._graphics_identity import (
+    graphics_pipeline_identity,
+    graphics_recording_identity,
+)
 from taichi_forge.hardware._native_adapter import (
     graph_bindings_are_validated,
     native_recording_node,
@@ -672,6 +676,9 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         object.__setattr__(self, "clear_depth", _clear_depth(clear_depth))
         object.__setattr__(self, "viewport", viewport)
 
+    def _graph_identity_factory(self):
+        return graphics_recording_identity(self, single_draw=True)
+
     @property
     def resource_effects(self):
         effects = [ResourceEffect(self.color, GraphAccess.WRITE)]
@@ -995,6 +1002,9 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         object.__setattr__(self, "_ndarray_names", ndarray_names)
         object.__setattr__(self, "_sampled_names", frozenset(sampled_names))
         object.__setattr__(self, "_texture_names", texture_names)
+
+    def _graph_identity_factory(self):
+        return graphics_recording_identity(self)
 
     @property
     def resource_effects(self):
@@ -1342,6 +1352,20 @@ class VulkanGraphicsPipeline:
         depth_params = _depth_params(depth_compare, depth_bias_constant, depth_bias_slope)
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
+        vertex_code = _bytes(vertex_spirv, "vertex_spirv")
+        fragment_code = _bytes(fragment_spirv, "fragment_spirv")
+        targets = _color_targets(color_targets, blending)
+        pipeline_id = graphics_pipeline_identity(
+            shaders=(("vertex", vertex_code), ("fragment", fragment_code)),
+            vertex_bindings=vertex_bindings,
+            vertex_attributes=vertex_attributes,
+            shader_buffers=shader_buffer_bindings,
+            shader_images=shader_image_bindings,
+            topology=topology_value, polygon_mode=polygon_value,
+            front_cull=front_cull, back_cull=back_cull,
+            depth_test=bool(depth_test), depth_write=bool(depth_write),
+            depth=depth_params, blending=bool(blending), color_targets=targets,
+        )
         self.vertex_bindings = vertex_bindings
         self.vertex_attributes = vertex_attributes
         self.shader_buffer_bindings = shader_buffer_bindings
@@ -1351,8 +1375,8 @@ class VulkanGraphicsPipeline:
         with hardware_failure_phase("provider_plan_failure"):
             self._handle = int(
                 program._create_vulkan_graphics_pipeline(
-                    _bytes(vertex_spirv, "vertex_spirv"),
-                    _bytes(fragment_spirv, "fragment_spirv"),
+                    vertex_code,
+                    fragment_code,
                     tuple(
                         (item.binding, item.stride, item.instance)
                         for item in vertex_bindings
@@ -1370,9 +1394,10 @@ class VulkanGraphicsPipeline:
                     bool(blending),
                     name,
                     *depth_params,
-                    _color_targets(color_targets, blending),
+                    targets,
                 )
             )
+        self._graphics_pipeline_id = pipeline_id
 
     @property
     def closed(self):
@@ -1598,6 +1623,19 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         depth_params = _depth_params(depth_compare, depth_bias_constant, depth_bias_slope)
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
+        task_code = b"" if task_spirv is None else _bytes(task_spirv, "task_spirv")
+        mesh_code = _bytes(mesh_spirv, "mesh_spirv")
+        fragment_code = _bytes(fragment_spirv, "fragment_spirv")
+        targets = _color_targets(color_targets, blending)
+        pipeline_id = graphics_pipeline_identity(
+            shaders=(("task", task_code), ("mesh", mesh_code), ("fragment", fragment_code)),
+            shader_buffers=shader_buffer_bindings,
+            shader_images=shader_image_bindings,
+            topology=topology_value, polygon_mode=polygon_value,
+            front_cull=front_cull, back_cull=back_cull,
+            depth_test=bool(depth_test), depth_write=bool(depth_write),
+            depth=depth_params, blending=bool(blending), color_targets=targets,
+        )
         self.vertex_bindings = ()
         self.vertex_attributes = ()
         self.shader_buffer_bindings = shader_buffer_bindings
@@ -1607,9 +1645,9 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         with hardware_failure_phase("provider_plan_failure"):
             self._handle = int(
                 program._create_vulkan_mesh_pipeline(
-                    b"" if task_spirv is None else _bytes(task_spirv, "task_spirv"),
-                    _bytes(mesh_spirv, "mesh_spirv"),
-                    _bytes(fragment_spirv, "fragment_spirv"),
+                    task_code,
+                    mesh_code,
+                    fragment_code,
                     topology_value,
                     polygon_value,
                     front_cull,
@@ -1619,9 +1657,10 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
                     bool(blending),
                     name,
                     *depth_params,
-                    _color_targets(color_targets, blending),
+                    targets,
                 )
             )
+        self._graphics_pipeline_id = pipeline_id
 
     def record(self, draw, **kwargs):
         raise TypeError("mesh pipelines require pass_draw()/record_pass()")
