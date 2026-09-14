@@ -34,6 +34,7 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 | 求解线性系统 | [Operator/SolvePlan](linear_operator.zh.md)、[稀疏 API](sparse_runtime_and_linear_algebra.zh.md)、[求解器选择](physics_sparse_solver_selection.zh.md) |
 | 使用可选 GPU 库、ray、texture、graphics | [硬件/provider](external_hardware_providers.zh.md)、[API 参考](forge_api_reference.zh.md) |
 | 呈现图像 | [DisplayFrame](display_frame.zh.md) |
+| 使用原生光栅／射线程序与 Graph 消费者 | [Native programs](native_ray_programs.zh.md) |
 | 使用 StructNdarray | [StructNdarray API](struct_ndarray_api.zh.md) |
 
 ## 人类与 agent 的阅读约定

@@ -799,6 +799,12 @@ recording with fixed bindings for repeat submission.
 
 ### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3 in development)
 
+`ti.hardware.ray.triangle_scene(vertices, indices, backend="auto")` selects the
+existing native batch route on the active Vulkan/CUDA backend. It does not switch
+devices or fall back to software. For factory ownership, user SPIR-V/PTX programs,
+SBT, direct/Graph execution and complete examples, see
+[native raster and ray programs](native_ray_programs.en.md).
+
 The low-level Vulkan hardware ray-query API separates fixed-topology
 triangle BLAS resources from a fixed-order instance TLAS:
 

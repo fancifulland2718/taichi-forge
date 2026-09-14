@@ -37,6 +37,7 @@ See [external providers](external_hardware_providers.en.md),
 | Solve a linear system | [Operator/SolvePlan](linear_operator.en.md), [sparse API](sparse_runtime_and_linear_algebra.en.md), [solver selection](physics_sparse_solver_selection.en.md) |
 | Use optional GPU libraries, ray, texture or graphics | [Hardware/providers](external_hardware_providers.en.md), [hardware API](forge_api_reference.en.md) |
 | Present an image | [DisplayFrame](display_frame.en.md) |
+| Use native raster/ray programs and Graph consumers | [Native programs](native_ray_programs.en.md) |
 
 ## Reading contracts — humans and agents
 

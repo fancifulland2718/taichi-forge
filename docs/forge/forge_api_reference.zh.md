@@ -638,6 +638,10 @@ host NumPy 几何只支持直接执行；用于 Graph 时请先上传到 device 
 
 ### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3 开发中）
 
+`ti.hardware.ray.triangle_scene(vertices, indices, backend="auto")` 在当前 Vulkan/CUDA
+后端选择已有原生 batch 路线，不切换设备、不回退软件。工厂所有权、自定义 SPIR-V/PTX、SBT、
+direct/Graph 执行与完整示例见[原生光栅与射线程序](native_ray_programs.zh.md)。
+
 底层 Vulkan 硬件 Ray Query API 将 fixed-topology triangle BLAS 与 fixed-order
 instance TLAS 分离：
 
