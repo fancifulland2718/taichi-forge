@@ -455,7 +455,11 @@ class VulkanPipeline : public Pipeline {
   }
 
   bool is_graphics() const {
-    return graphics_pipeline_template_ != nullptr;
+    return bind_point_ == VK_PIPELINE_BIND_POINT_GRAPHICS;
+  }
+
+  VkPipelineBindPoint bind_point() const {
+    return bind_point_;
   }
 
   // Cold pass preparation: 1=float/normalized, 2=signed integer, 3=unsigned.
@@ -511,6 +515,8 @@ class VulkanPipeline : public Pipeline {
   VkDevice device_{VK_NULL_HANDLE};  // not owned
 
   std::string name_;
+
+  VkPipelineBindPoint bind_point_{VK_PIPELINE_BIND_POINT_COMPUTE};
 
   std::vector<VkPipelineShaderStageCreateInfo> shader_stages_;
 
@@ -973,6 +979,9 @@ struct VulkanCapabilities {
   bool acceleration_structure{false};
   bool opacity_micromap{false};
   bool ray_query{false};
+  bool ray_tracing_pipeline{false};
+  VkPhysicalDeviceRayTracingPipelinePropertiesKHR ray_tracing_properties{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
   bool cooperative_matrix{false};
   bool multi_draw_indirect{false};
   bool draw_indirect_first_instance{false};

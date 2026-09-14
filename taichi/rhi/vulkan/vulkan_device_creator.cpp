@@ -653,25 +653,34 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
                      extension_name) !=
            params_.additional_device_extensions.end();
   };
-  // Keep the first hardware-ray slice deliberately narrow: Vulkan 1.2 gives
-  // us core SPIR-V 1.4 and buffer-device-address dependencies, while the three
-  // KHR extensions below provide AS construction and inline shader queries.
-  // Explicitly configured devices retain their existing opt-in contract.
-  const bool ray_extension_cluster_requested =
+  // AS storage is shared by inline queries and ray-tracing pipelines. Keep
+  // their optional feature paths independent; Vulkan 1.2 provides the core
+  // SPIR-V 1.4 and buffer-device-address dependencies used by this backend.
+  // Explicitly configured devices retain their opt-in extension contract.
+  const bool acceleration_structure_extensions_requested =
       !manual_create ||
       (extension_was_requested(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
-       extension_was_requested(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
        extension_was_requested(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME));
-  const bool ray_extension_cluster_available =
-      vk_api_version >= VK_API_VERSION_1_2 && ray_extension_cluster_requested &&
+  const bool acceleration_structure_extensions_available =
+      vk_api_version >= VK_API_VERSION_1_2 &&
+      acceleration_structure_extensions_requested &&
       has_device_extension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) &&
-      has_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
       has_device_extension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+  const bool ray_query_extension_available =
+      acceleration_structure_extensions_available &&
+      has_device_extension(VK_KHR_RAY_QUERY_EXTENSION_NAME) &&
+      (!manual_create ||
+       extension_was_requested(VK_KHR_RAY_QUERY_EXTENSION_NAME));
+  const bool ray_tracing_pipeline_extension_available =
+      acceleration_structure_extensions_available &&
+      has_device_extension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) &&
+      (!manual_create ||
+       extension_was_requested(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME));
   const bool cooperative_matrix_extension_requested =
       !manual_create ||
       extension_was_requested(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME);
   const bool micromap_extension_available =
-      ray_extension_cluster_available &&
+      acceleration_structure_extensions_available &&
       has_device_extension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME) &&
       (vk_api_version >= VK_API_VERSION_1_3 ||
        has_device_extension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME)) &&
@@ -800,10 +809,14 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (name == VK_KHR_16BIT_STORAGE_EXTENSION_NAME) {
       enabled_extensions.push_back(ext.extensionName);
-    } else if (ray_extension_cluster_available &&
+    } else if (acceleration_structure_extensions_available &&
                (name == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME ||
-                name == VK_KHR_RAY_QUERY_EXTENSION_NAME ||
                 name == VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME)) {
+      enabled_extensions.push_back(ext.extensionName);
+    } else if ((ray_query_extension_available &&
+                name == VK_KHR_RAY_QUERY_EXTENSION_NAME) ||
+               (ray_tracing_pipeline_extension_available &&
+                name == VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME)) {
       enabled_extensions.push_back(ext.extensionName);
     } else if (micromap_extension_available &&
                (name == VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME ||
@@ -954,6 +967,8 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
   acceleration_structure_feature.sType =
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
   VkPhysicalDeviceRayQueryFeaturesKHR ray_query_feature{};
+  VkPhysicalDeviceRayTracingPipelineFeaturesKHR ray_tracing_pipeline_feature{
+      VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
   VkPhysicalDeviceOpacityMicromapFeaturesEXT micromap_feature{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
   VkPhysicalDeviceSynchronization2Features synchronization2_feature{
@@ -1115,26 +1130,21 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
       pNextEnd = &buffer_device_address_feature.pNext;
     }
 
-    // Acceleration structures and ray queries are one atomic provider
-    // capability. Never advertise a partially enabled extension cluster.
-    if (ray_extension_cluster_available &&
+    // AS is the shared resource capability. Query and pipeline support may
+    // exist independently; neither consumer is a prerequisite for the other.
+    if (acceleration_structure_extensions_available &&
         ti_device_->vk_caps().buffer_device_address) {
       features2.pNext = &acceleration_structure_feature;
       query_physical_device_features2(&features2);
-      features2.pNext = &ray_query_feature;
-      query_physical_device_features2(&features2);
 
-      if (acceleration_structure_feature.accelerationStructure &&
-          ray_query_feature.rayQuery) {
+      if (acceleration_structure_feature.accelerationStructure) {
+        // This backend uses device AS builds with fixed descriptor bindings.
+        acceleration_structure_feature = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
         acceleration_structure_feature.accelerationStructure = VK_TRUE;
-        ray_query_feature.rayQuery = VK_TRUE;
         *pNextEnd = &acceleration_structure_feature;
         pNextEnd = &acceleration_structure_feature.pNext;
-        *pNextEnd = &ray_query_feature;
-        pNextEnd = &ray_query_feature.pNext;
         ti_device_->vk_caps().acceleration_structure = true;
-        ti_device_->vk_caps().ray_query = true;
-        caps.set(DeviceCapability::spirv_has_ray_query, true);
         if (micromap_extension_available) {
           features2.pNext = &micromap_feature;
           query_physical_device_features2(&features2);
@@ -1153,6 +1163,37 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
             ti_device_->vk_caps().opacity_micromap = true;
           }
         }
+      }
+    }
+
+    if (ti_device_->vk_caps().acceleration_structure &&
+        ray_query_extension_available) {
+      features2.pNext = &ray_query_feature;
+      query_physical_device_features2(&features2);
+      if (ray_query_feature.rayQuery) {
+        *pNextEnd = &ray_query_feature;
+        pNextEnd = &ray_query_feature.pNext;
+        ti_device_->vk_caps().ray_query = true;
+        caps.set(DeviceCapability::spirv_has_ray_query, true);
+      }
+    }
+    if (ti_device_->vk_caps().acceleration_structure &&
+        ray_tracing_pipeline_extension_available) {
+      features2.pNext = &ray_tracing_pipeline_feature;
+      query_physical_device_features2(&features2);
+      if (ray_tracing_pipeline_feature.rayTracingPipeline) {
+        // No shader-handle capture/replay, indirect trace or primitive culling
+        // is implied by the presence of the basic pipeline feature.
+        ray_tracing_pipeline_feature = {
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
+        ray_tracing_pipeline_feature.rayTracingPipeline = VK_TRUE;
+        *pNextEnd = &ray_tracing_pipeline_feature;
+        pNextEnd = &ray_tracing_pipeline_feature.pNext;
+        ti_device_->vk_caps().ray_tracing_pipeline = true;
+        VkPhysicalDeviceProperties2 properties2{
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        properties2.pNext = &ti_device_->vk_caps().ray_tracing_properties;
+        query_physical_device_properties2(&properties2);
       }
     }
 
@@ -1433,6 +1474,14 @@ void VulkanDeviceCreator::create_logical_device(bool manual_create) {
                                                  kNoVkAllocCallbacks, &device_),
                                   "failed to create logical device");
   VulkanLoader::instance().load_device(device_);
+
+  // Entry points are optional for ordinary compute/graphics devices. Missing
+  // RT symbols disable only this feature, not creation of the Vulkan backend.
+  if (ti_device_->vk_caps().ray_tracing_pipeline &&
+      (!vkCreateRayTracingPipelinesKHR || !vkGetRayTracingShaderGroupHandlesKHR ||
+       !vkCmdTraceRaysKHR)) {
+    ti_device_->vk_caps().ray_tracing_pipeline = false;
+  }
 
   if (queue_family_indices_.compute_family.has_value()) {
     vkGetDeviceQueue(device_, queue_family_indices_.compute_family.value(), 0,

@@ -251,6 +251,7 @@ VulkanPipeline::VulkanPipeline(
       cache_(params.cache) {
   this->graphics_pipeline_template_ =
       std::make_unique<GraphicsPipelineTemplate>();
+  bind_point_ = VK_PIPELINE_BIND_POINT_GRAPHICS;
 
   create_descriptor_set_layout(params);
   create_shader_stages(params);
@@ -1283,7 +1284,7 @@ void VulkanCommandList::bind_pipeline(Pipeline *p) noexcept {
     buffer_->refs.push_back(vk_pipeline);
   } else {
     auto vk_pipeline = pipeline->pipeline();
-    vkCmdBindPipeline(buffer_->buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+    vkCmdBindPipeline(buffer_->buffer, pipeline->bind_point(),
                       vk_pipeline->pipeline);
     buffer_->refs.push_back(vk_pipeline);
   }
@@ -1335,9 +1336,7 @@ RhiResult VulkanCommandList::bind_shader_resources(ShaderResourceSet *res,
 
   VkPipelineLayout pipeline_layout =
       current_pipeline_->pipeline_layout()->layout;
-  VkPipelineBindPoint bind_point = current_pipeline_->is_graphics()
-                                       ? VK_PIPELINE_BIND_POINT_GRAPHICS
-                                       : VK_PIPELINE_BIND_POINT_COMPUTE;
+  const VkPipelineBindPoint bind_point = current_pipeline_->bind_point();
 
   {
     std::lock_guard<std::mutex> descriptor_set_lock(vk_set->mutex);

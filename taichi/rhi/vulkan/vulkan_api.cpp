@@ -441,16 +441,16 @@ IVkPipeline create_raytracing_pipeline(
     create_info->basePipelineIndex = 0;
   }
 
-  PFN_vkCreateRayTracingPipelinesKHR create_raytracing_pipeline_khr =
-      PFN_vkCreateRayTracingPipelinesKHR(vkGetInstanceProcAddr(
-          taichi::lang::vulkan::VulkanLoader::instance().get_instance(),
-          "vkCreateRayTracingPipelinesKHR"));
+  if (!vkCreateRayTracingPipelinesKHR) {
+    RHI_LOG_ERROR("Ray-tracing pipeline entry point is unavailable");
+    return nullptr;
+  }
 
   std::unique_lock<std::mutex> cache_lock;
   if (cache) {
     cache_lock = std::unique_lock<std::mutex>(cache->mutex);
   }
-  VkResult res = create_raytracing_pipeline_khr(
+  VkResult res = vkCreateRayTracingPipelinesKHR(
       device, deferredOperation, cache ? cache->cache : VK_NULL_HANDLE, 1,
       create_info, nullptr, &obj->pipeline);
   BAIL_ON_VK_BAD_RESULT_NO_RETURN(res, "failed to create raytracing pipeline");
