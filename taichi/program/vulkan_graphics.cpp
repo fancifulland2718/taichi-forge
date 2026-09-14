@@ -61,6 +61,8 @@ struct RecordedGraphicsDraw {
   DeviceAllocation index_buffer{kDeviceNullAllocation};
   std::vector<RecordedGraphicsShaderBuffer> shader_buffers;
   std::vector<RecordedGraphicsShaderImage> shader_images;
+  std::vector<VulkanGraphicsShaderAccelerationStructureBinding>
+      shader_acceleration_structures;
   VulkanGraphicsDrawInfo draw;
   std::optional<RecordedGraphicsIndirect> indirect;
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
@@ -74,6 +76,7 @@ struct PreparedVulkanGraphicsDrawResources {
 
 struct PreparedVulkanGraphicsResourcePayload {
   std::vector<PreparedVulkanGraphicsDrawResources> draws;
+  std::vector<std::function<void(CommandList *)>> acceleration_structure_reads;
 };
 
 class PreparedVulkanGraphicsResourceLease;
@@ -86,7 +89,7 @@ struct PreparedVulkanGraphicsResourceStats {
   std::uint64_t raster_resources{0};
 };
 
-class PreparedVulkanGraphicsResourceLease {
+class PreparedVulkanGraphicsResourceLease : public PreparedResourceLease {
  public:
   explicit PreparedVulkanGraphicsResourceLease(
       std::shared_ptr<const PreparedVulkanGraphicsResourcePayload> payload)
@@ -98,7 +101,7 @@ class PreparedVulkanGraphicsResourceLease {
     return payload_;
   }
 
-  void clear() noexcept {
+  void clear() noexcept override {
     std::lock_guard<std::mutex> lock(mutex_);
     payload_.reset();
   }
@@ -284,6 +287,7 @@ struct PreparedVulkanGraphicsPass::State {
   std::vector<RuntimeResourceHandle> arrays;
   std::vector<RuntimeResourceHandle> textures;
   std::vector<std::uint64_t> pipelines;
+  std::vector<std::uint64_t> ray_resources;
   std::vector<DeviceAllocation> buffers;
   std::function<void(GraphicsDevice *, CommandList *)> record;
   std::vector<ComputeOpImageRef> images;
@@ -1207,6 +1211,21 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
       recorded.shader_images.push_back(
           {shader.set_index, shader.binding, allocation, image->sampler_config_});
     }
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> as_bindings;
+    for (const auto &shader : command.shader_acceleration_structures) {
+      const auto key =
+          (static_cast<std::uint64_t>(shader.set_index) << 32) | shader.binding;
+      TI_ERROR_IF(!shader_bindings.insert(key).second,
+                  "Vulkan graphics descriptor set {} binding {} is duplicated",
+                  shader.set_index, shader.binding);
+      as_bindings.emplace_back(shader.set_index, shader.binding);
+    }
+    native_pipeline->validate_acceleration_structure_bindings(as_bindings);
+    recorded.shader_acceleration_structures =
+        command.shader_acceleration_structures;
+    for (auto &as : recorded.shader_acceleration_structures) {
+      as.consumer_stages = native_pipeline->acceleration_structure_stages(as.set_index, as.binding);
+    }
     recorded_draws.push_back(std::move(recorded));
   }
 
@@ -1228,7 +1247,7 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     // attachment collision and is deliberately not used.
     replay_key.reserve(32 + commands.size() * 32);
     replay_key.push_back(0x4652475250415353ull);  // "FRGRPASS"
-    replay_key.push_back(2);
+    replay_key.push_back(3);
     replay_key.push_back(reinterpret_cast<std::uintptr_t>(this));
     replay_key.push_back(colors.size());
     for (std::size_t i = 0; i < colors.size(); ++i) {
@@ -1286,6 +1305,12 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
         }
       }
       replay_key.push_back(recorded.shader_images.size());
+      replay_key.push_back(recorded.shader_acceleration_structures.size());
+      for (const auto &as : recorded.shader_acceleration_structures) {
+        replay_key.push_back(as.set_index);
+        replay_key.push_back(as.binding);
+        replay_key.push_back(as.handle);
+      }
       for (const auto &image : recorded.shader_images) {
         replay_key.push_back(image.set_index);
         replay_key.push_back(image.binding);
@@ -1327,6 +1352,8 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
 
   auto resource_payload =
       std::make_shared<PreparedVulkanGraphicsResourcePayload>();
+  auto resource_lease =
+      std::make_shared<PreparedVulkanGraphicsResourceLease>(resource_payload);
   resource_payload->draws.reserve(recorded_draws.size());
   for (const auto &recorded : recorded_draws) {
     PreparedVulkanGraphicsDrawResources draw_resources;
@@ -1355,6 +1382,17 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                     "Vulkan graphics shader resource set creation failed.");
       }
       resource_set->image(image.binding, image.allocation, image.sampler);
+    }
+    for (const auto &as : recorded.shader_acceleration_structures) {
+      auto &resource_set = resource_sets[as.set_index];
+      if (!resource_set) {
+        resource_set = device->create_resource_set_unique();
+        TI_ERROR_IF(!resource_set,
+                    "Vulkan graphics AS resource set creation failed.");
+      }
+      resource_payload->acceleration_structure_reads.push_back(
+          prepare_vulkan_ray_graphics_binding(as.handle, resource_set.get(),
+                                              as.binding, resource_lease, as.consumer_stages));
     }
     draw_resources.shader_resource_sets.reserve(resource_sets.size());
     for (auto &[set_index, resource_set] : resource_sets) {
@@ -1387,8 +1425,6 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
     }
     resource_payload->draws.push_back(std::move(draw_resources));
   }
-  auto resource_lease =
-      std::make_shared<PreparedVulkanGraphicsResourceLease>(resource_payload);
   std::unordered_set<const VulkanGraphicsPipelineResource *>
       registered_pipelines;
   for (const auto &pipeline : pipelines) {
@@ -1410,6 +1446,10 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
                     "Prepared Vulkan graphics resources are stale or closed.");
         auto *vulkan_commands =
             static_cast<vulkan::VulkanCommandList *>(commands);
+        for (const auto &read :
+             resource_payload->acceleration_structure_reads) {
+          read(commands);
+        }
         vulkan_commands->set_next_renderpass_color_final_layout(
             ImageLayout::color_attachment);
         vulkan_commands->set_next_renderpass_depth_clear_value(pass.clear_depth);
@@ -1571,6 +1611,9 @@ std::shared_ptr<PreparedVulkanGraphicsPass> Program::prepare_vulkan_graphics_pas
   }
   for (const auto &command : commands) {
     append_handle(prepared.pipelines, command.pipeline_handle);
+    for (const auto &as : command.shader_acceleration_structures) {
+      append_handle(prepared.ray_resources, as.handle);
+    }
   }
   prepared.replay_key = std::move(replay_key);
   return packet;
@@ -1654,6 +1697,9 @@ class PreparedGraphicsGraphCommand final : public gfx::ExternalGraphCommand {
   }
   std::vector<std::uint64_t> graphics_pipeline_dependencies() const override {
     return packet_->state->pipelines;
+  }
+  std::vector<std::uint64_t> ray_resource_dependencies() const override {
+    return packet_->state->ray_resources;
   }
   void validate(
       Program &program,

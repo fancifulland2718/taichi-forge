@@ -469,6 +469,12 @@ class VulkanPipeline : public Pipeline {
     return set_templates_;
   }
 
+  VkPipelineStageFlags acceleration_structure_stages(std::uint32_t set,
+                                                     std::uint32_t binding) const;
+  void validate_acceleration_structure_bindings(
+      const std::vector<std::pair<std::uint32_t, std::uint32_t>> &bindings)
+      const;
+
  private:
   void create_descriptor_set_layout(const Params &params);
   void create_shader_stages(const Params &params);
@@ -521,6 +527,8 @@ class VulkanPipeline : public Pipeline {
 
   std::unordered_map<uint32_t, VulkanResourceSet> set_templates_;
   std::map<std::pair<std::uint32_t, std::uint32_t>, bool> comparison_samplers_;
+  std::map<std::pair<std::uint32_t, std::uint32_t>, VkPipelineStageFlags>
+      acceleration_structure_stages_;
   std::vector<vkapi::IVkDescriptorSetLayout> set_layouts_;
   std::vector<VkShaderModule> shader_modules_;
   vkapi::IVkPipeline pipeline_{VK_NULL_HANDLE};

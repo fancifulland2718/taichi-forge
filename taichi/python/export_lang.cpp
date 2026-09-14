@@ -1486,7 +1486,25 @@ void export_lang(py::module &m) {
     }
     const std::size_t payload_size = mesh ? 8 : (indirect ? 15 : 13);
     if (item.size() == payload_size + 1) {
-      for (const py::handle raw_image : py::cast<py::sequence>(item[payload_size])) {
+      py::object images = py::reinterpret_borrow<py::object>(item[payload_size]);
+      if (py::isinstance<py::dict>(images)) {
+        const auto descriptors = py::cast<py::dict>(images);
+        for (const auto entry : descriptors) {
+          const auto key = py::cast<std::string>(entry.first);
+          TI_ERROR_IF(key != "images" && key != "acceleration_structures",
+                      "Unknown graphics descriptor category: {}", key);
+        }
+        images = descriptors["images"];
+        for (const auto raw_as : py::cast<py::sequence>(descriptors["acceleration_structures"])) {
+          const auto as = py::cast<py::tuple>(raw_as);
+          TI_ERROR_IF(as.size() != 3,
+                      "Graphics AS binding requires set, binding and TLAS handle");
+          command.shader_acceleration_structures.push_back(
+              {py::cast<std::uint32_t>(as[0]), py::cast<std::uint32_t>(as[1]),
+               py::cast<std::uint64_t>(as[2])});
+        }
+      }
+      for (const py::handle raw_image : py::cast<py::sequence>(images)) {
         const auto image = py::cast<py::tuple>(raw_image);
         TI_ERROR_IF(image.size() != 3,
                     "Graphics sampled-image binding requires set, binding and Texture");
@@ -1502,6 +1520,7 @@ void export_lang(py::module &m) {
 
   py::class_<Program>(m, "Program")
       .def(py::init<>())
+      .def("_vulkan_graphics_shader_as_available", &Program::vulkan_ray_query_available)
       .def("config", &Program::compile_config,
            py::return_value_policy::reference)
       .def("sync_kernel_profiler",

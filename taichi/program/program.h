@@ -23,6 +23,7 @@
 #include <taichi/program/runtime_fault.h>
 #include <taichi/program/runtime_trace.h>
 #include <taichi/program/primitive_workspace.h>
+#include <taichi/program/prepared_resource_lease.h>
 
 #define TI_RUNTIME_HOST
 #include "taichi/aot/module_builder.h"
@@ -280,6 +281,13 @@ struct VulkanGraphicsShaderImageBinding {
   Texture *texture{nullptr};
 };
 
+struct VulkanGraphicsShaderAccelerationStructureBinding {
+  std::uint32_t set_index{0};
+  std::uint32_t binding{0};
+  std::uint64_t handle{0};
+  std::uint32_t consumer_stages{0};  // Derived from reflection, not Python.
+};
+
 struct VulkanGraphicsIndirectInfo {
   Ndarray *command_buffer{nullptr};
   Ndarray *count_buffer{nullptr};
@@ -308,6 +316,8 @@ struct VulkanGraphicsDrawCommand {
   std::optional<VulkanGraphicsIndirectInfo> indirect;
   std::optional<VulkanGraphicsMeshDrawInfo> mesh;
   std::vector<VulkanGraphicsShaderImageBinding> shader_images;
+  std::vector<VulkanGraphicsShaderAccelerationStructureBinding>
+      shader_acceleration_structures;
 };
 
 struct VulkanGraphicsColorAttachment {
@@ -1531,6 +1541,15 @@ class TI_DLL_EXPORT Program {
                                        CommandList *command_list);
 
   void destroy_vulkan_ray_resource(std::uint64_t handle);
+
+  // Preparation binds descriptors and registers the lease with the AS owner.
+  // Recording retains native buffers and establishes the graphics dependency.
+  std::function<void(CommandList *)> prepare_vulkan_ray_graphics_binding(
+      std::uint64_t handle,
+      ShaderResourceSet *bindings,
+      int binding,
+      const std::shared_ptr<PreparedResourceLease> &lease,
+      std::uint32_t consumer_stages);
 
   void vulkan_clear_ray_scenes();
 

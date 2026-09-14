@@ -311,6 +311,7 @@ class TI_DLL_EXPORT GfxRuntime {
     bool graphics_queue{false};
     std::vector<std::uint64_t> graphics_pipelines;
     std::optional<std::vector<DeviceAllocation>> buffers;
+    std::vector<std::uint64_t> ray_resources;
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {
@@ -500,6 +501,7 @@ class TI_DLL_EXPORT GfxRuntime {
     // replay never revalidates or traverses the tree list.
     std::vector<int> fixed_snode_tree_ids;
     std::vector<std::uint64_t> fixed_graphics_pipelines;
+    std::vector<std::uint64_t> fixed_ray_resources;
     std::uint64_t fixed_argument_bytes{0};
     bool fixed_secondary{false};
     uint64_t attempts{0};
@@ -546,6 +548,7 @@ class TI_DLL_EXPORT GfxRuntime {
       bool independent_graphics = false);
   void launch_prepared_graph(std::uint64_t replay_key);
   void retire_graphics_pipeline_recordings(std::uint64_t pipeline);
+  void retire_ray_resource_recordings(std::uint64_t resource);
 
   void buffer_copy(DevicePtr dst, DevicePtr src, size_t size);
   void copy_image(DeviceAllocation dst,

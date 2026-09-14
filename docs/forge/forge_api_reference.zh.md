@@ -462,6 +462,21 @@ pipeline/runtime 生命周期仍受约束。执行是 native **rerecord** action
 既有 graphics/compute queue bridge 保留。准备好的 host packet 不会让已关闭 pipeline 继续可执行，
 也不会把 GPU pipeline 生命周期延长到 `ti.reset()` 之后。
 
+#### graphics shader 中的加速结构
+
+在支持 ray query 的 Vulkan 设备上，调用方 shader 可以读取与 compute query 相同的受管
+`ti.hardware.ray.InstanceTLAS`。创建 pipeline 时声明
+`shader_acceleration_structure_bindings=(graphics.ShaderAccelerationStructureBinding(0, 2),)`，
+再在 `pipeline.pass_draw()` 中设置 `shader_acceleration_structures={(0, 2): "scene"}`，
+和图像、buffer 一起传入 `scene=tlas` 绑定。SPIR-V 必须在该 set/binding 声明 scalar AS descriptor；
+AS、buffer、image 的位置不能重叠。不接受 raw handle、BLAS 或 AS descriptor array。
+
+重复直接执行使用 `recording.prepare_graph_execute(bindings)`；也可把 recording 加入 Graph 后固定绑定。
+设备 refit 不改变绑定；替换 TLAS 使用 `bound.update(scene=replacement)`。既有有序 refit 命令仍保留其执行边界，
+只有支持相应组合的完整 recipe 才能改变它。关闭 TLAS 会使相关 prepared draw 和录制 Graph 失效；
+已提交命令保留原生资源直到完成。graphics 绑定本身不需要额外 rays/hits 中间缓冲，shader 和阴影策略仍归应用所有。
+该功能复用 Vulkan runtime，不需要安装外部光追库。
+
 #### 深度状态与多颜色附件
 
 构造 pipeline 可设置 `depth_test`、`depth_write`、`depth_compare`、`depth_bias_constant`

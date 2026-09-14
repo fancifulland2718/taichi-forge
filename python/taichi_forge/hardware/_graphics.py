@@ -395,6 +395,33 @@ def _shader_image_declarations(values, buffer_keys):
 
 
 @dataclass(frozen=True)
+class ShaderAccelerationStructureBinding:
+    """One read-only Vulkan InstanceTLAS descriptor in caller SPIR-V.
+
+    Reuses a managed TLAS, including device refits; never a raw handle or BLAS.
+    """
+
+    set_index: int
+    binding: int
+
+    def __post_init__(self):
+        _u32(self.set_index, "set_index")
+        _u32(self.binding, "binding")
+
+
+def _shader_as_declarations(values, occupied_keys, program):
+    values = tuple(values)
+    if not all(isinstance(item, ShaderAccelerationStructureBinding) for item in values):
+        raise TypeError("shader_acceleration_structure_bindings must contain ShaderAccelerationStructureBinding values")
+    by_key = {(item.set_index, item.binding): item for item in values}
+    if len(by_key) != len(values) or by_key.keys() & occupied_keys:
+        raise ValueError("shader AS set/binding pairs must be unique across resources")
+    if values and not getattr(program, "_vulkan_graphics_shader_as_available", lambda: False)():
+        raise TaichiRuntimeError("Vulkan graphics AS bindings are unavailable in this build/runtime")
+    return values, MappingProxyType(by_key)
+
+
+@dataclass(frozen=True)
 class GraphicsPassDraw:
     """One pipeline and its symbolic resources inside a graphics pass."""
 
@@ -406,6 +433,7 @@ class GraphicsPassDraw:
     indirect_buffer: str | None = None
     count_buffer: str | None = None
     shader_images: object = None
+    shader_acceleration_structures: object = None
 
     def __post_init__(self):
         if not isinstance(self.pipeline, VulkanGraphicsPipeline):
@@ -534,6 +562,21 @@ class GraphicsPassDraw:
         if normalized_images.keys() != self.pipeline._shader_image_by_key.keys():
             raise ValueError("shader_images must bind exactly the pipeline shader images")
 
+        structures = {} if self.shader_acceleration_structures is None else self.shader_acceleration_structures
+        if not isinstance(structures, dict):
+            raise TypeError("shader_acceleration_structures must map (set_index, binding) pairs to names")
+        normalized_as = {}
+        for key, name in structures.items():
+            if not isinstance(key, (tuple, list)) or len(key) != 2:
+                raise TypeError("shader-AS keys must contain set_index and binding")
+            normalized_as[(_u32(key[0], "shader-AS set_index"), _u32(key[1], "shader-AS binding"))] = _name(
+                name, "shader-AS name"
+            )
+        if normalized_as.keys() != self.pipeline._shader_as_by_key.keys():
+            raise ValueError("shader_acceleration_structures must bind exactly the pipeline AS declarations")
+        object.__setattr__(self, "shader_acceleration_structures", MappingProxyType(normalized_as))
+        object.__setattr__(self, "_ordered_shader_acceleration_structures", tuple(sorted(normalized_as.items())))
+
         object.__setattr__(self, "vertex_buffers", MappingProxyType(vertices))
         object.__setattr__(
             self, "_ordered_vertex_buffers", tuple(sorted(vertices.items()))
@@ -579,7 +622,11 @@ class VulkanGraphicsDrawRecording(BackendCommandRecording):
         pipeline_handle = int(pipeline._handle)
         if not isinstance(draw, Draw):
             raise TypeError("draw must be a ti.hardware.graphics.Draw value")
-        if pipeline.shader_buffer_bindings or pipeline.shader_image_bindings:
+        if (
+            pipeline.shader_buffer_bindings
+            or pipeline.shader_image_bindings
+            or pipeline.shader_acceleration_structure_bindings
+        ):
             raise ValueError(
                 "pipelines with shader resources require pass_draw()/record_pass()"
             )
@@ -956,6 +1003,13 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 sampled_names.add(name)
                 effects[name] = GraphAccess.READ
         texture_names = attachment_names | sampled_names
+        as_names = set()
+        for item in draws:
+            for name in item.shader_acceleration_structures.values():
+                if name in texture_names or name in ndarray_names:
+                    raise ValueError("graphics AS names cannot also name image or buffer resources")
+                as_names.add(name)
+                effects[name] = GraphAccess.READ
         runtime_prog = pipelines[0]._runtime_prog
         if any(pipeline._runtime_prog is not runtime_prog for pipeline in pipelines[1:]):
             raise ValueError("all graphics-pass pipelines must belong to one runtime")
@@ -1002,6 +1056,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         object.__setattr__(self, "_ndarray_names", ndarray_names)
         object.__setattr__(self, "_sampled_names", frozenset(sampled_names))
         object.__setattr__(self, "_texture_names", texture_names)
+        object.__setattr__(self, "_acceleration_structure_names", frozenset(as_names))
 
     def _graph_identity_factory(self):
         return graphics_recording_identity(self)
@@ -1033,6 +1088,14 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         validate_exact_bindings(self, bindings, "Vulkan graphics pass")
         self.validate_graph_lifetime()
         self.validate_graph_bindings(bindings)
+        if self._acceleration_structure_names:
+            from taichi_forge.hardware._ray import InstanceTLAS
+
+            for name in self._acceleration_structure_names:
+                scene = bindings[name]
+                if not isinstance(scene, InstanceTLAS) or scene._runtime_prog is not self._runtime_prog:
+                    raise TaichiRuntimeError("graphics AS bindings require an InstanceTLAS from this runtime")
+                scene._validate_lifetime()
         color = None if self.color is None else bindings[self.color]
         depth = None if self.depth is None else bindings[self.depth]
 
@@ -1128,7 +1191,19 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                     )
                 )
 
-            if item._ordered_shader_images:
+            if item._ordered_shader_acceleration_structures:
+                raw_draws[-1] += (
+                    {
+                        "images": tuple(
+                            (key[0], key[1], bindings[name].tex) for key, name in item._ordered_shader_images
+                        ),
+                        "acceleration_structures": tuple(
+                            (key[0], key[1], bindings[name]._handle)
+                            for key, name in item._ordered_shader_acceleration_structures
+                        ),
+                    },
+                )
+            elif item._ordered_shader_images:
                 raw_draws[-1] += (tuple(
                     (key[0], key[1], bindings[name].tex)
                     for key, name in item._ordered_shader_images
@@ -1149,6 +1224,7 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
         native_owners = tuple(
             owner.tex if isinstance(owner, Texture) else owner.arr
             for owner in owners
+            if isinstance(owner, (Texture, Ndarray))
         )
         result = (depth if not self.colors else color if len(self.colors) == 1
                   else tuple(bindings[x.name] for x in self.colors))
@@ -1199,7 +1275,11 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
             runtime_bindings=lambda item: tuple(
                 (
                     name,
-                    "texture" if name in item._texture_names else "ndarray",
+                    (
+                        "texture"
+                        if name in item._texture_names
+                        else "acceleration_structure" if name in item._acceleration_structure_names else "ndarray"
+                    ),
                 )
                 for name in item.binding_names
             ),
@@ -1209,27 +1289,17 @@ class VulkanGraphicsPassRecording(BackendCommandRecording):
                 "draw_count": len(item.draws),
                 "pipeline_count": len(item.pipelines),
                 "sampled_image_count": sum(len(draw.shader_images) for draw in item.draws),
-                "indexed_draw_count": sum(
-                    draw.index_buffer is not None for draw in item.draws
-                ),
-                "indirect_draw_count": sum(
-                    isinstance(draw.draw, IndirectDraw) for draw in item.draws
-                ),
-                "indirect_count_draw_count": sum(
-                    draw.count_buffer is not None for draw in item.draws
-                ),
-                "mesh_draw_count": sum(
-                    isinstance(draw.draw, MeshDraw) for draw in item.draws
-                ),
+                "indexed_draw_count": sum(draw.index_buffer is not None for draw in item.draws),
+                "indirect_draw_count": sum(isinstance(draw.draw, IndirectDraw) for draw in item.draws),
+                "indirect_count_draw_count": sum(draw.count_buffer is not None for draw in item.draws),
+                "mesh_draw_count": sum(isinstance(draw.draw, MeshDraw) for draw in item.draws),
                 "bindless_buffer_table_count": sum(
                     isinstance(declaration, ShaderBufferArrayBinding)
                     for pipeline in item.pipelines
                     for declaration in pipeline.shader_buffer_bindings
                 ),
                 "color_load_op": item.color_load_op,
-                "color_attachments": tuple(
-                    (x.name, x.load_op, x.store_op, x.clear_value) for x in item.colors
-                ),
+                "color_attachments": tuple((x.name, x.load_op, x.store_op, x.clear_value) for x in item.colors),
                 "depth_load_op": item.depth_load_op,
             },
             publish_time_binding_validation_stable=True,
@@ -1264,6 +1334,7 @@ class VulkanGraphicsPipeline:
         vertex_attributes,
         shader_buffer_bindings=(),
         shader_image_bindings=(),
+        shader_acceleration_structure_bindings=(),
         topology="triangles",
         polygon_mode="fill",
         cull_mode="none",
@@ -1317,6 +1388,9 @@ class VulkanGraphicsPipeline:
         shader_image_bindings, shader_image_by_key = _shader_image_declarations(
             shader_image_bindings, shader_buffer_by_key.keys()
         )
+        shader_acceleration_structure_bindings, shader_as_by_key = _shader_as_declarations(
+            shader_acceleration_structure_bindings, shader_buffer_by_key.keys() | shader_image_by_key.keys(), program
+        )
         array_bindings = tuple(
             item
             for item in shader_buffer_bindings
@@ -1361,10 +1435,16 @@ class VulkanGraphicsPipeline:
             vertex_attributes=vertex_attributes,
             shader_buffers=shader_buffer_bindings,
             shader_images=shader_image_bindings,
-            topology=topology_value, polygon_mode=polygon_value,
-            front_cull=front_cull, back_cull=back_cull,
-            depth_test=bool(depth_test), depth_write=bool(depth_write),
-            depth=depth_params, blending=bool(blending), color_targets=targets,
+            shader_acceleration_structures=shader_acceleration_structure_bindings,
+            topology=topology_value,
+            polygon_mode=polygon_value,
+            front_cull=front_cull,
+            back_cull=back_cull,
+            depth_test=bool(depth_test),
+            depth_write=bool(depth_write),
+            depth=depth_params,
+            blending=bool(blending),
+            color_targets=targets,
         )
         self.vertex_bindings = vertex_bindings
         self.vertex_attributes = vertex_attributes
@@ -1372,6 +1452,8 @@ class VulkanGraphicsPipeline:
         self._shader_buffer_by_key = MappingProxyType(shader_buffer_by_key)
         self.shader_image_bindings = shader_image_bindings
         self._shader_image_by_key = shader_image_by_key
+        self.shader_acceleration_structure_bindings = shader_acceleration_structure_bindings
+        self._shader_as_by_key = shader_as_by_key
         with hardware_failure_phase("provider_plan_failure"):
             self._handle = int(
                 program._create_vulkan_graphics_pipeline(
@@ -1415,6 +1497,7 @@ class VulkanGraphicsPipeline:
         index_buffer=None,
         shader_buffers=None,
         shader_images=None,
+        shader_acceleration_structures=None,
         indirect_buffer=None,
         count_buffer=None,
     ):
@@ -1426,6 +1509,7 @@ class VulkanGraphicsPipeline:
             index_buffer=index_buffer,
             shader_buffers=shader_buffers,
             shader_images=shader_images,
+            shader_acceleration_structures=shader_acceleration_structures,
             indirect_buffer=indirect_buffer,
             count_buffer=count_buffer,
         )
@@ -1541,6 +1625,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         task_spirv=None,
         shader_buffer_bindings=(),
         shader_image_bindings=(),
+        shader_acceleration_structure_bindings=(),
         topology="triangles",
         polygon_mode="fill",
         cull_mode="none",
@@ -1588,6 +1673,9 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         shader_image_bindings, shader_image_by_key = _shader_image_declarations(
             shader_image_bindings, shader_buffer_by_key.keys()
         )
+        shader_acceleration_structure_bindings, shader_as_by_key = _shader_as_declarations(
+            shader_acceleration_structure_bindings, shader_buffer_by_key.keys() | shader_image_by_key.keys(), program
+        )
         array_bindings = tuple(
             item
             for item in shader_buffer_bindings
@@ -1631,10 +1719,16 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
             shaders=(("task", task_code), ("mesh", mesh_code), ("fragment", fragment_code)),
             shader_buffers=shader_buffer_bindings,
             shader_images=shader_image_bindings,
-            topology=topology_value, polygon_mode=polygon_value,
-            front_cull=front_cull, back_cull=back_cull,
-            depth_test=bool(depth_test), depth_write=bool(depth_write),
-            depth=depth_params, blending=bool(blending), color_targets=targets,
+            shader_acceleration_structures=shader_acceleration_structure_bindings,
+            topology=topology_value,
+            polygon_mode=polygon_value,
+            front_cull=front_cull,
+            back_cull=back_cull,
+            depth_test=bool(depth_test),
+            depth_write=bool(depth_write),
+            depth=depth_params,
+            blending=bool(blending),
+            color_targets=targets,
         )
         self.vertex_bindings = ()
         self.vertex_attributes = ()
@@ -1642,6 +1736,8 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
         self._shader_buffer_by_key = MappingProxyType(shader_buffer_by_key)
         self.shader_image_bindings = shader_image_bindings
         self._shader_image_by_key = shader_image_by_key
+        self.shader_acceleration_structure_bindings = shader_acceleration_structure_bindings
+        self._shader_as_by_key = shader_as_by_key
         with hardware_failure_phase("provider_plan_failure"):
             self._handle = int(
                 program._create_vulkan_mesh_pipeline(
@@ -1665,7 +1761,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
     def record(self, draw, **kwargs):
         raise TypeError("mesh pipelines require pass_draw()/record_pass()")
 
-    def pass_draw(self, draw, *, shader_buffers=None, shader_images=None):
+    def pass_draw(self, draw, *, shader_buffers=None, shader_images=None, shader_acceleration_structures=None):
         self._validate_lifetime()
         if not isinstance(draw, MeshDraw):
             raise TypeError("VulkanMeshPipeline draws require a MeshDraw value")
@@ -1675,6 +1771,7 @@ class VulkanMeshPipeline(VulkanGraphicsPipeline):
             {},
             shader_buffers=shader_buffers,
             shader_images=shader_images,
+            shader_acceleration_structures=shader_acceleration_structures,
         )
 
     def record_pass(self, draws, **kwargs):
@@ -1806,6 +1903,7 @@ __all__ = [
     "ShaderBufferArrayBinding",
     "ShaderBufferBinding",
     "ShaderImageBinding",
+    "ShaderAccelerationStructureBinding",
     "VertexAttribute",
     "VertexBinding",
     "VulkanGraphicsDrawRecording",

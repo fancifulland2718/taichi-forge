@@ -14,6 +14,7 @@
 #if defined(TI_WITH_VULKAN)
 #include "taichi/rhi/vulkan/vulkan_device.h"
 #include "taichi/program/vulkan_micromap.h"
+#include "taichi/runtime/gfx/kernel_launcher.h"
 
 namespace taichi::lang {
 namespace {
@@ -660,6 +661,31 @@ class VulkanRayResource {
   virtual ~VulkanRayResource() = default;
   virtual VulkanRayResourceKind kind() const = 0;
   virtual VulkanTriangleRaySceneMemoryStatistics memory_statistics() const = 0;
+
+  void register_prepared_lease(
+      const std::shared_ptr<PreparedResourceLease> &lease) {
+    // The Program submission guard serializes preparation against close/reset.
+    prepared_leases_.erase(
+        std::remove_if(prepared_leases_.begin(), prepared_leases_.end(),
+                       [](const auto &item) { return item.expired(); }),
+        prepared_leases_.end());
+    if (std::none_of(prepared_leases_.begin(), prepared_leases_.end(),
+                     [&](const auto &item) { return item.lock() == lease; })) {
+      prepared_leases_.push_back(lease);
+    }
+  }
+
+  void invalidate_prepared_resources() noexcept {
+    for (const auto &item : prepared_leases_) {
+      if (auto lease = item.lock()) {
+        lease->clear();
+      }
+    }
+    prepared_leases_.clear();
+  }
+
+ private:
+  std::vector<std::weak_ptr<PreparedResourceLease>> prepared_leases_;
 };
 
 class VulkanTriangleBlasResource final : public VulkanRayResource {
@@ -1216,6 +1242,34 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     query_.record(command_list, tlas_, packet);
     retain(static_cast<vulkan::VulkanCommandList *>(command_list)
                ->vk_command_buffer());
+  }
+
+  void bind_for_graphics(ShaderResourceSet *bindings, int binding) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    TI_ERROR_IF(!bindings || binding < 0,
+                "Vulkan graphics TLAS binding is invalid.");
+    static_cast<vulkan::VulkanResourceSet *>(bindings)->acceleration_structure(
+        binding, tlas_);
+  }
+
+  void record_graphics_read(CommandList *commands, VkPipelineStageFlags consumer_stages) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto command_buffer =
+        static_cast<vulkan::VulkanCommandList *>(commands)->vk_command_buffer();
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    // Same-queue builds need an explicit shader dependency. With distinct
+    // queues the existing runtime-ordered graphics semaphore supplies it;
+    // an AS_BUILD stage is not legal on a graphics-only queue family.
+    if (device_->graphics_queue() == device_->compute_queue()) {
+      vkCmdPipelineBarrier(
+          command_buffer->buffer,
+          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+          consumer_stages, 0, 1, &barrier, 0, nullptr, 0,
+          nullptr);
+    }
+    retain(command_buffer);
   }
 
   void bind_for_kernel(ShaderResourceSet *bindings,
@@ -1994,6 +2048,30 @@ void Program::vulkan_bind_ray_kernel_resource(
   resource->bind_for_kernel(bindings, binding, command_list);
 }
 
+std::function<void(CommandList *)> Program::prepare_vulkan_ray_graphics_binding(
+    std::uint64_t handle,
+    ShaderResourceSet *bindings,
+    int binding,
+    const std::shared_ptr<PreparedResourceLease> &lease,
+    std::uint32_t consumer_stages) {
+  std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
+  const auto found = vulkan_ray_resources_.find(handle);
+  TI_ERROR_IF(found == vulkan_ray_resources_.end(),
+              "Vulkan graphics acceleration structure is stale or closed.");
+  auto resource =
+      std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
+  TI_ERROR_IF(!resource || !lease,
+              "Vulkan graphics requires a top-level AS and a prepared lease.");
+  resource->bind_for_graphics(bindings, binding);
+  resource->register_prepared_lease(lease);
+  return [weak = std::weak_ptr<VulkanInstanceTlasResource>(resource), consumer_stages](
+             CommandList *commands) {
+    auto owner = weak.lock();
+    TI_ERROR_IF(!owner, "Prepared Vulkan graphics AS is stale or closed.");
+    owner->record_graphics_read(commands, consumer_stages);
+  };
+}
+
 VulkanTriangleRaySceneMemoryStatistics
 Program::vulkan_triangle_ray_scene_memory_statistics(
     std::uint64_t handle) {
@@ -2079,7 +2157,13 @@ void Program::destroy_vulkan_ray_resource(std::uint64_t handle) {
       return;
     }
     resource = found->second;
+    resource->invalidate_prepared_resources();
     vulkan_ray_resources_.erase(found);
+    if (auto *launcher =
+            dynamic_cast<gfx::KernelLauncher *>(&get_kernel_launcher())) {
+      launcher->runtime()->retire_ray_resource_recordings(handle);
+    }
+    program_impl_->invalidate_graphics_command_replay();
     if (!runtime_has_fatal_fault() &&
         runtime_submission_pending_.load(std::memory_order_acquire)) {
       vulkan_ray_resource_retirements_.push_back(std::move(resource));
@@ -2095,6 +2179,9 @@ void Program::vulkan_clear_ray_scenes() {
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   vulkan_ray_scenes_.clear();
   vulkan_ray_scene_retirements_.clear();
+  for (const auto &[handle, resource] : vulkan_ray_resources_) {
+    resource->invalidate_prepared_resources();
+  }
   vulkan_ray_resources_.clear();
   vulkan_ray_resource_retirements_.clear();
 }
@@ -2104,6 +2191,15 @@ void Program::vulkan_clear_ray_scenes() {
 #else
 
 namespace taichi::lang {
+
+std::function<void(CommandList *)> Program::prepare_vulkan_ray_graphics_binding(
+    std::uint64_t,
+    ShaderResourceSet *,
+    int,
+    const std::shared_ptr<PreparedResourceLease> &,
+    std::uint32_t) {
+  TI_ERROR("Vulkan graphics AS binding requires TI_WITH_VULKAN=ON.");
+}
 
 bool Program::vulkan_ray_query_available() const {
   return false;

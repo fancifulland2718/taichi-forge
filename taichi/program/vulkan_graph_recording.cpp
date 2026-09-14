@@ -289,12 +289,16 @@ Program::create_vulkan_graph_recording(
       command->validate(*this, args);
       retain_dependencies(command->snode_tree_dependencies());
       owners.push_back(command);
-      operations.push_back(
-          {{}, [command](Device *device, CommandList *commands) {
-             command->record(device, commands);
-           }, command->supports_inline_recording(), command->image_uses(),
-           command->requires_graphics_queue(),
-           command->graphics_pipeline_dependencies(), command->buffer_uses()});
+      operations.push_back({{},
+                            [command](Device *device, CommandList *commands) {
+                              command->record(device, commands);
+                            },
+                            command->supports_inline_recording(),
+                            command->image_uses(),
+                            command->requires_graphics_queue(),
+                            command->graphics_pipeline_dependencies(),
+                            command->buffer_uses(),
+                            command->ray_resource_dependencies()});
     }
   }
   std::sort(tree_ids.begin(), tree_ids.end());

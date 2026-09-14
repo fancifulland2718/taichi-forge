@@ -276,6 +276,30 @@ void VulkanPipeline::validate_sampled_texture(std::uint32_t set,
               "Graphics shader sampled-image declaration and sampler compare_op do not match");
 }
 
+void VulkanPipeline::validate_acceleration_structure_bindings(
+    const std::vector<std::pair<std::uint32_t, std::uint32_t>> &bindings)
+    const {
+  std::size_t expected = 0;
+  for (const auto &[set, resources] : set_templates_) {
+    for (const auto &[binding, descriptor] : resources.get_bindings()) {
+      if (descriptor.type == VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
+        ++expected;
+        TI_ERROR_IF(std::find(bindings.begin(), bindings.end(),
+                              std::make_pair(set, binding)) == bindings.end(),
+                    "Graphics shader AS set {} binding {} is missing", set,
+                    binding);
+      }
+    }
+  }
+  TI_ERROR_IF(expected != bindings.size(),
+              "Graphics AS declarations do not match shader descriptors");
+}
+
+VkPipelineStageFlags VulkanPipeline::acceleration_structure_stages(
+    std::uint32_t set, std::uint32_t binding) const {
+  return acceleration_structure_stages_.at({set, binding});
+}
+
 VulkanPipeline::~VulkanPipeline() {
   for (VkShaderModule shader_module : shader_modules_) {
     vkDestroyShaderModule(device_, shader_module, kNoVkAllocCallbacks);
@@ -447,7 +471,34 @@ void VulkanPipeline::create_descriptor_set_layout(const Params &params) {
           set.rw_image(desc_binding->binding, kDeviceNullAllocation, {});
         } else if (desc_binding->descriptor_type ==
                    SPV_REFLECT_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR) {
+          if (desc_binding->count != 1) {
+            spvReflectDestroyShaderModule(&module);
+            TI_ERROR(
+                "Acceleration-structure descriptor arrays are not supported");
+          }
           set.acceleration_structure(desc_binding->binding, nullptr);
+          VkPipelineStageFlags stage = 0;
+          switch (module.shader_stage) {
+            case SPV_REFLECT_SHADER_STAGE_VERTEX_BIT:
+              stage = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+              break;
+            case SPV_REFLECT_SHADER_STAGE_FRAGMENT_BIT:
+              stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+              break;
+            case SPV_REFLECT_SHADER_STAGE_COMPUTE_BIT:
+              stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+              break;
+            case SPV_REFLECT_SHADER_STAGE_TASK_BIT_EXT:
+              stage = VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT;
+              break;
+            case SPV_REFLECT_SHADER_STAGE_MESH_BIT_EXT:
+              stage = VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
+              break;
+            default:
+              spvReflectDestroyShaderModule(&module);
+              TI_ERROR("Unsupported acceleration-structure shader stage");
+          }
+          acceleration_structure_stages_[{set_index, desc_binding->binding}] |= stage;
         } else {
           RHI_LOG_ERROR("Unrecognized binding ignored");
         }

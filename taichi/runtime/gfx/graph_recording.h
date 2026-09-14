@@ -35,6 +35,9 @@ class TI_DLL_EXPORT ExternalGraphCommand {
   virtual std::vector<std::uint64_t> graphics_pipeline_dependencies() const {
     return {};
   }
+  virtual std::vector<std::uint64_t> ray_resource_dependencies() const {
+    return {};
+  }
   virtual std::optional<std::vector<DeviceAllocation>> buffer_uses() const {
     return std::nullopt;
   }

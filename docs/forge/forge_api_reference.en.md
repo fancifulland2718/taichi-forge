@@ -578,6 +578,28 @@ not an immutable draw-command replay promise; normal graphics/compute queue
 bridges remain. Prepared host packets do not keep a closed pipeline executable
 or extend its lifetime beyond `ti.reset()`.
 
+#### Acceleration structures in graphics shaders
+
+On a Vulkan device with ray-query support, a caller shader can read the same
+managed `ti.hardware.ray.InstanceTLAS` used by compute queries. Declare
+`shader_acceleration_structure_bindings=(graphics.ShaderAccelerationStructureBinding(0, 2),)`
+when creating the pipeline, then pass
+`shader_acceleration_structures={(0, 2): "scene"}` to `pipeline.pass_draw()`.
+Include `scene=tlas` with the pass's image and buffer bindings. The SPIR-V must
+declare a scalar acceleration-structure descriptor at that exact set/binding;
+AS, buffer and image declarations cannot overlap. Raw handles, BLAS bindings
+and AS descriptor arrays are not accepted.
+
+Use `recording.prepare_graph_execute(bindings)` for repeated direct execution,
+or append the recording to a Graph and bind it once. Device refits preserve the
+binding; replacing a TLAS requires `bound.update(scene=replacement)`. The existing
+ordered refit command remains a separate boundary unless the selected complete
+recipe supports its composition. Closing a TLAS invalidates its prepared draws
+and recorded Graphs; commands already submitted retain their native resources
+until completion. No additional ray/hit staging buffers are required by this
+graphics binding, and the application still owns its shader and shadow policy.
+This uses the existing Vulkan runtime; no external ray library is needed.
+
 #### Depth state and multiple color attachments
 
 Pipeline construction accepts `depth_test`, `depth_write`, `depth_compare`,

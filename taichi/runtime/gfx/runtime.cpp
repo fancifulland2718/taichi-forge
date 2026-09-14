@@ -2508,6 +2508,7 @@ void GfxRuntime::GraphReplayState::reset() {
   fixed_submit = {};
   fixed_snode_tree_ids.clear();
   fixed_graphics_pipelines.clear();
+  fixed_ray_resources.clear();
   fixed_argument_bytes = 0;
   fixed_secondary = false;
   executable.reset();
@@ -2771,6 +2772,9 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     state.fixed_graphics_pipelines.insert(state.fixed_graphics_pipelines.end(),
                                           operation.graphics_pipelines.begin(),
                                           operation.graphics_pipelines.end());
+    state.fixed_ray_resources.insert(state.fixed_ray_resources.end(),
+                                     operation.ray_resources.begin(),
+                                     operation.ray_resources.end());
   }
   std::vector<GraphReplayExecutable::PreparedDispatch> prepared;
   using ImageBinding = std::pair<DeviceAllocation, ImageLayout>;
@@ -2976,6 +2980,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                     "Prepared Vulkan Graph acceleration structure is unbound");
         found->owner->vulkan_bind_ray_kernel_resource(
             found->handle, resources.get(), bind.binding, commands.get());
+        state.fixed_ray_resources.push_back(found->handle);
       }
       std::unordered_map<DeviceAllocationId, ImageLayout> task_images;
       for (const auto &bind : tasks[i].texture_binds) {
@@ -3178,8 +3183,24 @@ void GfxRuntime::launch_prepared_graph(std::uint64_t replay_key) {
                   state->second.retirement_requested ||
                   !state->second.fixed_submit,
               "Prepared Vulkan Graph is retired or references a destroyed "
-              "SNodeTree or closed graphics pipeline; rebuild the Graph");
+              "SNodeTree or closed graphics pipeline/acceleration structure; "
+              "rebuild the Graph");
   state->second.fixed_submit();
+}
+
+void GfxRuntime::retire_ray_resource_recordings(std::uint64_t resource) {
+  std::lock_guard<std::recursive_mutex> lock(host_api_mutex_);
+  std::vector<std::uint64_t> dependent;
+  for (const auto &[key, state] : graph_replay_states_) {
+    if (std::find(state.fixed_ray_resources.begin(),
+                  state.fixed_ray_resources.end(),
+                  resource) != state.fixed_ray_resources.end()) {
+      dependent.push_back(key);
+    }
+  }
+  for (const auto key : dependent) {
+    retire_graph_replay(key);
+  }
 }
 
 void GfxRuntime::retire_graphics_pipeline_recordings(std::uint64_t pipeline) {

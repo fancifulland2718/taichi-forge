@@ -23,42 +23,47 @@ def graphics_pipeline_identity(
     vertex_attributes=(),
     shader_buffers=(),
     shader_images=(),
+    shader_acceleration_structures=(),
     **state,
 ):
     """Hash once at pipeline creation; retain neither shader bytes nor handles."""
+    extra = {}
+    if shader_acceleration_structures:
+        extra["shader_acceleration_structures"] = tuple(
+            asdict(item) for item in sorted(shader_acceleration_structures, key=lambda x: (x.set_index, x.binding))
+        )
     return _digest(
         {
             "schema": "taichi_forge.graphics_pipeline.v1",
-            "shaders": tuple(
-                (stage, hashlib.sha256(code).hexdigest()) for stage, code in shaders
-            ),
-            "vertex_bindings": tuple(
-                asdict(item)
-                for item in sorted(vertex_bindings, key=lambda x: x.binding)
-            ),
+            "shaders": tuple((stage, hashlib.sha256(code).hexdigest()) for stage, code in shaders),
+            "vertex_bindings": tuple(asdict(item) for item in sorted(vertex_bindings, key=lambda x: x.binding)),
             "vertex_attributes": tuple(
                 (item.location, item.binding, item.format.name, item.offset)
                 for item in sorted(vertex_attributes, key=lambda x: x.location)
             ),
             "shader_buffers": tuple(
                 (type(item).__name__, asdict(item))
-                for item in sorted(
-                    shader_buffers, key=lambda x: (x.set_index, x.binding)
-                )
+                for item in sorted(shader_buffers, key=lambda x: (x.set_index, x.binding))
             ),
             "shader_images": tuple(
-                asdict(item)
-                for item in sorted(
-                    shader_images, key=lambda x: (x.set_index, x.binding)
-                )
+                asdict(item) for item in sorted(shader_images, key=lambda x: (x.set_index, x.binding))
             ),
             "state": state,
+            **extra,
         }
     )
 
 
 def _draw(
-    draw, pipeline, vertices, index, buffers=(), images=(), indirect=None, count=None
+    draw,
+    pipeline,
+    vertices,
+    index,
+    buffers=(),
+    images=(),
+    indirect=None,
+    count=None,
+    acceleration_structures=(),
 ):
     return {
         "pipeline": pipeline._graphics_pipeline_id,
@@ -70,6 +75,7 @@ def _draw(
         "shader_images": images,
         "indirect": indirect,
         "count": count,
+        **({"shader_acceleration_structures": acceleration_structures} if acceleration_structures else {}),
     }
 
 
@@ -97,6 +103,7 @@ def graphics_recording_identity(recording, *, single_draw=False):
                 item._ordered_shader_images,
                 item.indirect_buffer,
                 item.count_buffer,
+                item._ordered_shader_acceleration_structures,
             )
             for item in recording.draws
         )
