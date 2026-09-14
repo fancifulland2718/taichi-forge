@@ -10,6 +10,66 @@ from taichi_forge.lang import impl
 from tests import test_utils
 
 
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_fused_identity_covers_all_sources_and_argument_remaps():
+    from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+    from taichi_forge.graph._recipes.map_fusion import GraphMapFusionRecipeProvider
+
+    @ti.kernel
+    def producer(source: ti.types.ndarray(ti.i32, ndim=1), temporary: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in range(17):
+            temporary[i] = source[i] + 1
+
+    @ti.kernel
+    def consumer(
+        left: ti.types.ndarray(ti.i32, ndim=1),
+        right: ti.types.ndarray(ti.i32, ndim=1),
+        output: ti.types.ndarray(ti.i32, ndim=1),
+    ):
+        for i in range(17):
+            output[i] = 3 * left[i] + right[i]
+
+    @ti.kernel
+    def different_consumer(
+        left: ti.types.ndarray(ti.i32, ndim=1),
+        right: ti.types.ndarray(ti.i32, ndim=1),
+        output: ti.types.ndarray(ti.i32, ndim=1),
+    ):
+        for i in range(17):
+            output[i] = 5 * left[i] + right[i]
+
+    providers = (GraphRuntimeAssemblyProvider(), GraphMapFusionRecipeProvider())
+    symbols = {
+        name: ti.graph.Arg(ti.graph.ArgKind.NDARRAY, name, ti.i32, ndim=1)
+        for name in ("source", "temporary", "output")
+    }
+    data = np.arange(17, dtype=np.int32)
+    identities = []
+    for operation, swap, expected in (
+        (consumer, False, 4 * data + 3),
+        (different_consumer, False, 6 * data + 5),
+        (consumer, True, 4 * data + 1),
+        (consumer, False, 4 * data + 3),
+    ):
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(producer, symbols["source"], symbols["temporary"])
+        inputs = ("source", "temporary") if swap else ("temporary", "source")
+        builder.dispatch(operation, *(symbols[name] for name in inputs), symbols["output"])
+        definition = builder.freeze()
+        catalog = definition.recipe_catalog(providers=providers)
+        recipe = next(entry.recipe for entry in catalog.entries() if entry.recipe.fragments)
+        arrays = {name: ti.ndarray(ti.i32, 17) for name in symbols}
+        arrays["source"].from_numpy(data)
+        with definition.materialization_context(provider_set=catalog.provider_set) as context:
+            with context.materialize(recipe) as materialized:
+                assert len(materialized.manifest.kernels) == 1
+                identities.append(materialized.manifest.kernels[0].artifact_identity)
+                materialized.executor.run(arrays)
+                np.testing.assert_array_equal(arrays["output"].to_numpy(), expected)
+    assert len(set(identities[:3])) == 3
+    assert identities[0] == identities[3]
+
+
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan])
 def test_map_recipe_identity_tracks_source_kernel_code():
 

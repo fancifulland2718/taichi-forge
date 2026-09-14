@@ -5,6 +5,8 @@
 #include <unordered_map>
 #include <utility>
 
+#include "picosha2.h"
+
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/transforms.h"
@@ -286,6 +288,25 @@ std::optional<GraphMapComposition> compose_graph_map_kernels(
     return std::nullopt;
   }
 
+  // A lowered kernel has no AST cache hash. Its name therefore participates
+  // in its compilation identity. Include every compiled source and argument
+  // remap, not the first source's process-local name and the source count.
+  // This both survives reallocation and distinguishes different consumers
+  // or alias patterns following the same producer.
+  std::string identity = "graph-map-composition-v1";
+  for (std::size_t index = 0; index < sources.size(); ++index) {
+    const auto &key = sources[index].kernel->get_cached_kernel_key();
+    if (key.empty()) {
+      return std::nullopt;
+    }
+    identity += fmt::format("|{}:{}|{}:", key.size(), key, remaps[index].size());
+    for (const auto argument : remaps[index]) {
+      identity += fmt::format("{},", argument);
+    }
+  }
+  const auto fused_name =
+      "graph_fused_map_" + picosha2::hash256_hex_string(identity);
+
   std::vector<SingleLoopIR> loops;
   loops.reserve(sources.size());
   for (std::size_t index = 0; index < sources.size(); ++index) {
@@ -302,9 +323,7 @@ std::optional<GraphMapComposition> compose_graph_map_kernels(
   }
 
   result.kernel = std::make_unique<Kernel>(
-      *first.kernel->program, std::move(fused_ir),
-      fmt::format("{}__graph_fused_map{}", first.kernel->get_name(),
-                  sources.size()));
+      *first.kernel->program, std::move(fused_ir), fused_name);
   result.kernel->parameter_list = std::move(parameters);
   for (std::size_t index = 0; index < result.kernel->parameter_list.size();
        ++index) {
