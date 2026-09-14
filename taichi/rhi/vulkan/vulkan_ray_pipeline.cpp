@@ -254,8 +254,8 @@ VulkanShaderBindingTable::VulkanShaderBindingTable(
     }
   }
 
-  // One cold upload using the existing allocator/stream. Publish transfer
-  // writes here so replay needs neither another SBT upload nor an SBT barrier.
+  // Packing is host-only. Do not flush unrelated runtime work or introduce a
+  // hidden submit/wait from construction or Graph binding preparation.
   auto [staging, staging_result] = device.allocate_memory_unique(
       {packed.size(), true, false, false, AllocUsage::Upload});
   if (staging_result != RhiResult::success || !staging) {
@@ -267,13 +267,21 @@ VulkanShaderBindingTable::VulkanShaderBindingTable(
   }
   std::memcpy(mapped, packed.data(), packed.size());
   device.unmap(*staging);
-  auto *stream = device.get_compute_stream();
-  auto [commands, command_result] = stream->new_command_list_unique();
-  if (command_result != RhiResult::success || !commands) {
-    throw std::runtime_error("Failed to create Vulkan SBT upload command");
+  staging_ = std::move(staging);
+}
+
+void VulkanShaderBindingTable::record_initialization(
+    VulkanCommandList &commands) {
+  if (!staging_) {
+    throw std::logic_error("Vulkan SBT initialization was already recorded");
   }
-  commands->buffer_copy(allocation_->get_ptr(0), staging->get_ptr(0),
-                        packed.size());
+  auto command_buffer = commands.vk_command_buffer();
+  if (command_buffer->device != buffer_->device) {
+    throw std::invalid_argument(
+        "Vulkan SBT initialization requires the same device");
+  }
+  commands.buffer_copy(allocation_->get_ptr(0), staging_->get_ptr(0),
+                       allocated_bytes_);
   VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
   barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
   barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
@@ -281,13 +289,12 @@ VulkanShaderBindingTable::VulkanShaderBindingTable(
       VK_QUEUE_FAMILY_IGNORED;
   barrier.buffer = buffer_->buffer;
   barrier.size = VK_WHOLE_SIZE;
-  vkCmdPipelineBarrier(static_cast<VulkanCommandList *>(commands.get())
-                           ->vk_command_buffer()
-                           ->buffer,
-                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+  vkCmdPipelineBarrier(command_buffer->buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
                        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0,
                        nullptr, 1, &barrier, 0, nullptr);
-  stream->submit_synced(commands.get());
+  // buffer_copy retains the staging Vk allocation until command retirement.
+  // No persistent upload buffer and no completion wait are required here.
+  staging_.reset();
 }
 
 void validate_ray_dispatch(const VulkanDevice &device,
@@ -307,6 +314,39 @@ void validate_ray_dispatch(const VulkanDevice &device,
     }
     total *= dimensions[i];
   }
+}
+
+void record_ray_program_begin(VulkanCommandList &commands) {
+  VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  barrier.srcAccessMask =
+      VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+  barrier.dstAccessMask =
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+  vkCmdPipelineBarrier(commands.vk_command_buffer()->buffer,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                           VK_PIPELINE_STAGE_TRANSFER_BIT |
+                           VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                       VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1,
+                       &barrier, 0, nullptr, 0, nullptr);
+}
+
+void record_ray_program_end(VulkanCommandList &commands) {
+  VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+  barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  barrier.dstAccessMask =
+      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+      VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT |
+      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+  // The execution dependency also orders RT AS/geometry reads before a later
+  // build/refit overwrites the same storage; no readback or host wait is
+  // needed.
+  vkCmdPipelineBarrier(
+      commands.vk_command_buffer()->buffer,
+      VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT |
+          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
 void VulkanCommandList::trace_rays(const VulkanShaderBindingTable &sbt,

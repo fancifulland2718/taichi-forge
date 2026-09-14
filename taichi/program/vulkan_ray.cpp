@@ -1256,15 +1256,17 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                ->vk_command_buffer());
   }
 
-  void bind_for_graphics(ShaderResourceSet *bindings, int binding) {
+  void bind_for_shader(ShaderResourceSet *bindings, int binding) {
     std::lock_guard<std::mutex> lock(mutex_);
     TI_ERROR_IF(!bindings || binding < 0,
-                "Vulkan graphics TLAS binding is invalid.");
+                "Vulkan shader TLAS binding is invalid.");
     static_cast<vulkan::VulkanResourceSet *>(bindings)->acceleration_structure(
         binding, tlas_);
   }
 
-  void record_graphics_read(CommandList *commands, VkPipelineStageFlags consumer_stages) {
+  void record_shader_read(CommandList *commands,
+                          VkPipelineStageFlags consumer_stages,
+                          bool graphics_queue) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto command_buffer =
         static_cast<vulkan::VulkanCommandList *>(commands)->vk_command_buffer();
@@ -1274,7 +1276,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     // Same-queue builds need an explicit shader dependency. With distinct
     // queues the existing runtime-ordered graphics semaphore supplies it;
     // an AS_BUILD stage is not legal on a graphics-only queue family.
-    if (device_->graphics_queue() == device_->compute_queue()) {
+    if (!graphics_queue || device_->graphics_queue() == device_->compute_queue()) {
       vkCmdPipelineBarrier(
           command_buffer->buffer,
           VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
@@ -2082,21 +2084,34 @@ std::function<void(CommandList *)> Program::prepare_vulkan_ray_graphics_binding(
     int binding,
     const std::shared_ptr<PreparedResourceLease> &lease,
     std::uint32_t consumer_stages) {
+  return prepare_vulkan_ray_shader_binding(handle, bindings, binding, lease,
+                                            consumer_stages, true);
+}
+
+std::function<void(CommandList *)> Program::prepare_vulkan_ray_shader_binding(
+    std::uint64_t handle,
+    ShaderResourceSet *bindings,
+    int binding,
+    const std::shared_ptr<PreparedResourceLease> &lease,
+    std::uint32_t consumer_stages,
+    bool graphics_queue) {
+  auto submission_guard = acquire_runtime_resource_submission_guard();
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   const auto found = vulkan_ray_resources_.find(handle);
   TI_ERROR_IF(found == vulkan_ray_resources_.end(),
-              "Vulkan graphics acceleration structure is stale or closed.");
+              "Vulkan shader acceleration structure is stale or closed.");
   auto resource =
       std::dynamic_pointer_cast<VulkanInstanceTlasResource>(found->second);
   TI_ERROR_IF(!resource || !lease,
-              "Vulkan graphics requires a top-level AS and a prepared lease.");
-  resource->bind_for_graphics(bindings, binding);
+              "Vulkan shader binding requires a top-level AS and a prepared lease.");
+  resource->bind_for_shader(bindings, binding);
   resource->register_prepared_lease(lease);
-  return [weak = std::weak_ptr<VulkanInstanceTlasResource>(resource), consumer_stages](
+  return [weak = std::weak_ptr<VulkanInstanceTlasResource>(resource),
+          consumer_stages, graphics_queue](
              CommandList *commands) {
     auto owner = weak.lock();
-    TI_ERROR_IF(!owner, "Prepared Vulkan graphics AS is stale or closed.");
-    owner->record_graphics_read(commands, consumer_stages);
+    TI_ERROR_IF(!owner, "Prepared Vulkan shader AS is stale or closed.");
+    owner->record_shader_read(commands, consumer_stages, graphics_queue);
   };
 }
 
@@ -2219,6 +2234,16 @@ void Program::vulkan_clear_ray_scenes() {
 #else
 
 namespace taichi::lang {
+
+std::function<void(CommandList *)> Program::prepare_vulkan_ray_shader_binding(
+    std::uint64_t,
+    ShaderResourceSet *,
+    int,
+    const std::shared_ptr<PreparedResourceLease> &,
+    std::uint32_t,
+    bool) {
+  TI_ERROR("Vulkan shader AS binding requires TI_WITH_VULKAN=ON.");
+}
 
 std::function<void(CommandList *)> Program::prepare_vulkan_ray_graphics_binding(
     std::uint64_t,

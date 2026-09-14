@@ -27,9 +27,10 @@ struct VulkanShaderBindingRecord {
   std::vector<std::uint8_t> data;
 };
 
-// Cold preparation allocates and uploads once. Command buffers retain the Vk
-// allocation independently, so releasing a prepared owner cannot free in-flight
-// SBT memory. Runtime reset still retires program owners before the device.
+// Cold construction packs staging data but submits no GPU work. Initialization
+// is recorded explicitly on the runtime's ordered compute queue. Command
+// buffers retain both allocations, including after the prepared owner is
+// released.
 class VulkanShaderBindingTable {
  public:
   VulkanShaderBindingTable(VulkanDevice &device,
@@ -37,6 +38,14 @@ class VulkanShaderBindingTable {
                            const VulkanShaderBindingRecord &raygen,
                            const std::vector<VulkanShaderBindingRecord> &miss,
                            const std::vector<VulkanShaderBindingRecord> &hit);
+
+  // One-shot initialization, outside steady trace/replay. The owner publishes
+  // readiness only after accepting this command into its ordered execution
+  // flow.
+  void record_initialization(VulkanCommandList &commands);
+  bool initialization_recorded() const {
+    return !staging_;
+  }
 
   std::size_t allocated_bytes() const {
     return allocated_bytes_;
@@ -56,6 +65,7 @@ class VulkanShaderBindingTable {
 
  private:
   DeviceAllocationUnique allocation_;
+  DeviceAllocationUnique staging_;
   vkapi::IVkBuffer buffer_;
   std::array<VkStridedDeviceAddressRegionKHR, 3> regions_{};
   std::size_t allocated_bytes_{0};
@@ -66,5 +76,11 @@ void validate_ray_dispatch(const VulkanDevice &device,
                            std::uint32_t width,
                            std::uint32_t height,
                            std::uint32_t depth);
+
+// Runtime-ordered compute/transfer <-> programmable RT dependencies. Recorded
+// around an external program, not inserted into ordinary dispatch or replay.
+// AS-build -> RT reads are supplied by the bound AS owner's recording callback.
+void record_ray_program_begin(VulkanCommandList &commands);
+void record_ray_program_end(VulkanCommandList &commands);
 
 }  // namespace taichi::lang::vulkan

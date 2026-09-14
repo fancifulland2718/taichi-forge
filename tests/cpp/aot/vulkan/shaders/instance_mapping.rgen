@@ -1,0 +1,16 @@
+#version 460
+#extension GL_EXT_ray_tracing : require
+struct Hit { uvec4 ids; vec4 geometry; };
+layout(location = 0) rayPayloadEXT Hit payload;
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std430) buffer Output { Hit values[]; } output_data;
+void main() {
+    uint i = gl_LaunchIDEXT.x;
+    uint ray_type = i % 2;
+    float x = i < 4 ? 0.25 + 2.0 * float(i / 2) : 20.0;
+    payload.ids = uvec4(0);
+    payload.geometry = vec4(0);
+    traceRayEXT(scene, 0, 255, ray_type, 2, ray_type,
+                vec3(x, 0.25, -1.0), 0.001, vec3(0, 0, 1), 10.0, 0);
+    output_data.values[i] = payload;
+}

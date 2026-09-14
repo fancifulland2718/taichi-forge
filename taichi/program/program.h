@@ -1555,6 +1555,17 @@ class TI_DLL_EXPORT Program {
       const std::shared_ptr<PreparedResourceLease> &lease,
       std::uint32_t consumer_stages);
 
+  // Shared AS descriptor/lease preparation for graphics and compute-queue RT.
+  // A distinct graphics queue relies on the runtime's semaphore dependency;
+  // a compute-queue consumer always records the AS-build dependency explicitly.
+  std::function<void(CommandList *)> prepare_vulkan_ray_shader_binding(
+      std::uint64_t handle,
+      ShaderResourceSet *bindings,
+      int binding,
+      const std::shared_ptr<PreparedResourceLease> &lease,
+      std::uint32_t consumer_stages,
+      bool graphics_queue);
+
   void vulkan_clear_ray_scenes();
 
   std::uint64_t create_vulkan_fft_plan(const std::string &adapter_path,
