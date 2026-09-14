@@ -3313,6 +3313,8 @@ void export_lang(py::module &m) {
            py::arg("batch_count"), py::call_guard<py::gil_scoped_release>())
       .def("vulkan_ray_query_available",
            &Program::vulkan_ray_query_available)
+      .def("vulkan_acceleration_structure_available",
+           &Program::vulkan_acceleration_structure_available)
       .def("_vulkan_ray_query_properties",
            &Program::vulkan_ray_query_properties)
       .def("vulkan_cooperative_matrix_available",
@@ -3375,6 +3377,11 @@ void export_lang(py::module &m) {
            tracked_native_program_method(
                &Program::create_vulkan_instance_tlas_resource),
            py::arg("blas_handles"),
+           py::call_guard<py::gil_scoped_release>())
+      .def("_create_vulkan_instance_tlas_resource_with_sbt",
+           tracked_native_program_method(
+               &Program::create_vulkan_instance_tlas_resource_with_sbt),
+           py::arg("blas_handles"), py::arg("sbt_record_offsets"),
            py::call_guard<py::gil_scoped_release>())
       .def("_create_vulkan_triangle_blas_micromap_resource",
            tracked_native_program_method(

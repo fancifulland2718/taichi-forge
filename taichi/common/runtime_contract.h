@@ -9,8 +9,8 @@ namespace taichi {
 // Keep the values POD-like: they are the bootstrap contract used before any
 // backend or Program instance exists.
 inline constexpr int kForgeContractManifestSchemaVersion = 1;
-// Graphics draw packets and prepared Graph operations include AS dependencies.
-inline constexpr int kForgeNativeAbiRevision = 8;
+// Managed Vulkan AS factories carry frozen instance-to-SBT mappings.
+inline constexpr int kForgeNativeAbiRevision = 9;
 inline constexpr std::uint32_t kForgeRuntimeStatisticsSchemaVersion = 3;
 
 inline constexpr std::uint64_t kForgeFeatureCpu = 1ull << 0;

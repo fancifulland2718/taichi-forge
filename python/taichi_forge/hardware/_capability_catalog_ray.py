@@ -35,6 +35,7 @@ def ray_command_operations(_operation):
             notes=(
                 "Independent fixed-topology triangle BLAS and fixed-order instance TLAS resources.",
                 "Instance descriptors expose row-major 3x4 transforms, 8-bit masks, and 24-bit custom indices.",
+                "A 24-bit SBT record offset is frozen per instance; inline/batch queries ignore it.",
                 "TriangleScene remains the identity-instance compatibility wrapper.",
             ),
         ),
@@ -71,7 +72,7 @@ def ray_command_operations(_operation):
             notes=(
                 "Explicit Python or Graph native command; never selected by an ordinary kernel.",
                 "BLAS refit is vertex-only; TLAS refit may update transforms, masks, and custom indices.",
-                "BLAS counts and TLAS BLAS count/order remain fixed for the resource lifetime.",
+                "BLAS counts, TLAS BLAS count/order and SBT record offsets remain fixed for the resource lifetime.",
                 "TriangleScene retains its identity-TLAS compatibility refit route.",
             ),
         ),

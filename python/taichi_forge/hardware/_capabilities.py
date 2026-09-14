@@ -1089,6 +1089,7 @@ def _passive_core_statuses(runtime_initialized, backend):
         }
     )
     ray_available = bool(program is not None and program.vulkan_ray_query_available())
+    as_available = bool(program is not None and program.vulkan_acceleration_structure_available())
     cooperative_matrix_available = bool(
         program is not None and program.vulkan_cooperative_matrix_available()
     )
@@ -1119,6 +1120,12 @@ def _passive_core_statuses(runtime_initialized, backend):
             "rayQuery",
         ),
         "capability_query_builds_acceleration_structure": False,
+    }
+    as_facts = {
+        **ray_facts,
+        "provider_available": as_available,
+        "required_features": ("bufferDeviceAddress", "accelerationStructure"),
+        "sbt_record_offsets": "frozen_uint24_records",
     }
     return {
         "runtime.buffer_commands.vulkan": {
@@ -1189,12 +1196,12 @@ def _passive_core_statuses(runtime_initialized, backend):
             },
         },
         "ray.as_build.vulkan": {
-            "available": ray_available,
-            "native_facts": ray_facts,
+            "available": as_available,
+            "native_facts": as_facts,
         },
         "ray.as_refit.vulkan": {
-            "available": ray_available,
-            "native_facts": ray_facts,
+            "available": as_available,
+            "native_facts": as_facts,
         },
         "ray.query.batch.vulkan": {
             "available": ray_available,

@@ -95,6 +95,8 @@ class RayQueryPipelines {
   }
 
   void prepare(vulkan::VulkanDevice *device, unsigned variant) {
+    TI_ERROR_IF(!device->vk_caps().ray_query,
+                "Vulkan inline/batch ray query is unavailable; AS construction alone does not enable it.");
     if (pipelines_[variant]) {
       return;
     }
@@ -707,9 +709,8 @@ class VulkanTriangleBlasResource final : public VulkanRayResource {
         static_cast<vulkan::VulkanDevice *>(program_->get_compute_device());
     TI_ERROR_IF(device_ == nullptr ||
                     !device_->vk_caps().acceleration_structure ||
-                    !device_->vk_caps().ray_query,
-                "Vulkan triangle BLAS requires acceleration-structure and "
-                "ray-query support.");
+                    !device_->vk_caps().buffer_device_address,
+                "Vulkan triangle BLAS requires acceleration-structure and device-address support.");
     TI_ERROR_IF(
         vertex_count_ == 0 ||
             vertex_count_ > static_cast<std::size_t>(
@@ -1011,19 +1012,27 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
  public:
   VulkanInstanceTlasResource(
       Program *program,
-      std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases)
-      : program_(program), blases_(std::move(blases)) {
+      std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases,
+      std::vector<std::uint32_t> sbt_record_offsets)
+      : program_(program), blases_(std::move(blases)),
+        sbt_record_offsets_(std::move(sbt_record_offsets)) {
     TI_ERROR_IF(program_ == nullptr,
                 "Vulkan instance TLAS requires a live Program.");
     TI_ERROR_IF(blases_.empty(),
                 "Vulkan instance TLAS requires at least one BLAS instance.");
+    TI_ERROR_IF(sbt_record_offsets_.size() != blases_.size(),
+                "Vulkan TLAS requires one frozen SBT offset per instance.");
+    for (auto offset : sbt_record_offsets_) {
+      TI_ERROR_IF(offset > 0xffffff,
+                  "Vulkan instance SBT record offset exceeds its 24-bit field.");
+      max_sbt_record_offset_ = std::max(max_sbt_record_offset_, offset);
+    }
     device_ = static_cast<vulkan::VulkanDevice *>(
         program_->get_compute_device());
     TI_ERROR_IF(device_ == nullptr ||
                     !device_->vk_caps().acceleration_structure ||
-                    !device_->vk_caps().ray_query,
-                "Vulkan instance TLAS requires acceleration-structure and "
-                "ray-query support.");
+                    !device_->vk_caps().buffer_device_address,
+                "Vulkan instance TLAS requires acceleration-structure and device-address support.");
     get_build_sizes_ = load_vulkan_device_function<
         PFN_vkGetAccelerationStructureBuildSizesKHR>(
         device_->vk_device(), "vkGetAccelerationStructureBuildSizesKHR");
@@ -1056,7 +1065,6 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
         instance_bytes_, AllocUsage::AccelerationStructureBuildInput |
                              AllocUsage::DeviceAddress | AllocUsage::Storage);
     create_acceleration_structure();
-    create_query_pipeline();
     // Instance topology remains ordered, but repeated instances of one BLAS
     // need only one set of lifetime references in each recorded command.
     std::unordered_set<VulkanTriangleBlasResource *> retained;
@@ -1097,6 +1105,10 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
     return blases_.size();
   }
 
+  std::uint32_t max_sbt_record_offset() const {
+    return max_sbt_record_offset_;
+  }
+
   const std::vector<std::shared_ptr<VulkanTriangleBlasResource>> &blases()
       const {
     return blases_;
@@ -1123,7 +1135,7 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                   sizeof(destination.transform.matrix));
       destination.instanceCustomIndex = source.custom_index;
       destination.mask = source.mask;
-      destination.instanceShaderBindingTableRecordOffset = 0;
+      destination.instanceShaderBindingTableRecordOffset = sbt_record_offsets_[index];
       destination.flags =
           VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
       destination.accelerationStructureReference =
@@ -1407,10 +1419,6 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
                         AllocUsage::Storage | AllocUsage::DeviceAddress);
   }
 
-  void create_query_pipeline() {
-    query_.prepare(device_, 0);
-  }
-
   void retain(const vkapi::IVkCommandBuffer &command_buffer) const {
     const std::array<DeviceAllocation, 3> allocations{
         instance_buffer_, storage_, scratch_};
@@ -1427,6 +1435,8 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   Program *program_{nullptr};
   vulkan::VulkanDevice *device_{nullptr};
   std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases_;
+  const std::vector<std::uint32_t> sbt_record_offsets_;
+  std::uint32_t max_sbt_record_offset_{0};
   std::vector<std::shared_ptr<VulkanTriangleBlasResource>> retained_blases_;
   std::size_t instance_bytes_{0};
   std::size_t storage_bytes_{0};
@@ -1444,6 +1454,16 @@ class VulkanInstanceTlasResource final : public VulkanRayResource {
   PFN_vkCmdBuildAccelerationStructuresKHR cmd_build_{nullptr};
   std::mutex mutex_;
 };
+
+bool Program::vulkan_acceleration_structure_available() const {
+  if (compile_config().arch != Arch::vulkan || !program_impl_) {
+    return false;
+  }
+  auto *device = static_cast<vulkan::VulkanDevice *>(
+      const_cast<Program *>(this)->get_compute_device());
+  return device && device->vk_caps().buffer_device_address &&
+         device->vk_caps().acceleration_structure;
+}
 
 bool Program::vulkan_ray_query_available() const {
   if (compile_config().arch != Arch::vulkan || !program_impl_) {
@@ -1808,9 +1828,9 @@ std::uint64_t Program::create_vulkan_triangle_blas_resource_with_opacity(
     std::size_t triangle_count,
     bool opaque) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(!vulkan_ray_query_available(),
+  TI_ERROR_IF(!vulkan_acceleration_structure_available(),
               "Vulkan triangle BLAS resources require "
-              "VK_KHR_acceleration_structure and VK_KHR_ray_query.");
+              "VK_KHR_acceleration_structure and device addresses.");
   auto resource = std::make_shared<VulkanTriangleBlasResource>(
       this, vertex_count, triangle_count, nullptr, opaque);
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
@@ -1830,8 +1850,8 @@ Program::create_vulkan_triangle_blas_micromap_resource(
     const std::string &indices,
     bool indexed) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(!vulkan_ray_query_available(),
-              "Vulkan ray query is unavailable.");
+  TI_ERROR_IF(!vulkan_acceleration_structure_available(),
+              "Vulkan acceleration structures are unavailable.");
   auto *device = static_cast<vulkan::VulkanDevice *>(get_compute_device());
   auto micromap = std::make_shared<VulkanOpacityMicromap>(device);
   micromap->build(data, descriptors, indices, indexed, triangle_count);
@@ -1847,10 +1867,17 @@ Program::create_vulkan_triangle_blas_micromap_resource(
 
 std::uint64_t Program::create_vulkan_instance_tlas_resource(
     const std::vector<std::uint64_t> &blas_handles) {
+  return create_vulkan_instance_tlas_resource_with_sbt(
+      blas_handles, std::vector<std::uint32_t>(blas_handles.size(), 0));
+}
+
+std::uint64_t Program::create_vulkan_instance_tlas_resource_with_sbt(
+    const std::vector<std::uint64_t> &blas_handles,
+    const std::vector<std::uint32_t> &sbt_record_offsets) {
   auto submission_guard = acquire_runtime_resource_submission_guard();
-  TI_ERROR_IF(!vulkan_ray_query_available(),
+  TI_ERROR_IF(!vulkan_acceleration_structure_available(),
               "Vulkan instance TLAS resources require "
-              "VK_KHR_acceleration_structure and VK_KHR_ray_query.");
+              "VK_KHR_acceleration_structure and device addresses.");
   TI_ERROR_IF(blas_handles.empty(),
               "Vulkan instance TLAS requires at least one BLAS handle.");
   std::vector<std::shared_ptr<VulkanTriangleBlasResource>> blases;
@@ -1871,7 +1898,7 @@ std::uint64_t Program::create_vulkan_instance_tlas_resource(
     }
   }
   auto resource =
-      std::make_shared<VulkanInstanceTlasResource>(this, std::move(blases));
+      std::make_shared<VulkanInstanceTlasResource>(this, std::move(blases), sbt_record_offsets);
   std::lock_guard<std::mutex> lock(vulkan_ray_scene_mutex_);
   TI_ERROR_IF(next_vulkan_ray_resource_handle_ == 0,
               "Vulkan ray resource handle space exhausted.");
@@ -2026,7 +2053,8 @@ Program::vulkan_ray_kernel_resource_properties(std::uint64_t handle) {
           {"top_level", 1},
           {"read_only", 1},
           {"exact_generation", 1},
-          {"instance_count", resource->instance_count()}};
+          {"instance_count", resource->instance_count()},
+          {"max_sbt_record_offset", resource->max_sbt_record_offset()}};
 }
 
 void Program::vulkan_bind_ray_kernel_resource(
@@ -2205,6 +2233,10 @@ bool Program::vulkan_ray_query_available() const {
   return false;
 }
 
+bool Program::vulkan_acceleration_structure_available() const {
+  return false;
+}
+
 std::unordered_map<std::string, std::uint64_t>
 Program::vulkan_ray_query_properties() const {
   return {{"available", 0},
@@ -2301,6 +2333,12 @@ Program::create_vulkan_triangle_blas_micromap_resource(
 std::uint64_t Program::create_vulkan_instance_tlas_resource(
     const std::vector<std::uint64_t> &) {
   TI_ERROR("Vulkan ray query requires TI_WITH_VULKAN=ON.");
+}
+
+std::uint64_t Program::create_vulkan_instance_tlas_resource_with_sbt(
+    const std::vector<std::uint64_t> &,
+    const std::vector<std::uint32_t> &) {
+  TI_ERROR("Vulkan acceleration structures require TI_WITH_VULKAN=ON.");
 }
 
 std::size_t Program::vulkan_instance_tlas_build(

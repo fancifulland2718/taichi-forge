@@ -30,10 +30,15 @@ def test_device_tlas_transforms_compose_without_repreparing_and_retain_owners(
             transform=(1, 0, 0, 4 * i, 0, 1, 0, 0, 0, 0, 1, 0),
             mask=0 if i % 5 == 0 else 0xFF,
             custom_index=0xFFFF00 + i,
+            sbt_record_offset=2 * i + 1,
         )
         for i in range(count)
     ]
     tlas = ti.hardware.ray.InstanceTLAS(instances)
+    assert tlas.sbt_record_offsets == tuple(2 * i + 1 for i in range(count))
+    assert impl.get_runtime().prog._vulkan_ray_kernel_resource_properties(
+        tlas._handle
+    )["max_sbt_record_offset"] == 2 * count - 1
     memory_before = dict(
         impl.get_runtime().prog._vulkan_ray_resource_memory_stats(tlas._handle)
     )
@@ -264,7 +269,7 @@ def test_device_tlas_matrix_layout_host_metadata_and_reset_contract():
         pytest.skip("Vulkan ray query is unavailable")
     blas = _triangle_blas()
     tlas = ti.hardware.ray.InstanceTLAS(
-        [ti.hardware.ray.RayInstance(blas, custom_index=71)]
+        [ti.hardware.ray.RayInstance(blas, custom_index=71, sbt_record_offset=7)]
     )
     matrix = ti.Matrix.ndarray(3, 4, ti.f32, shape=(1,))
     value = np.array([[[2, 0, 0, 4], [0, 1, 0, 0], [0, 0, 1, 0]]], np.float32)
@@ -281,10 +286,30 @@ def test_device_tlas_matrix_layout_host_metadata_and_reset_contract():
         np.testing.assert_array_equal(ids.to_numpy(), [[0, 0, 71, 1]])
         np.testing.assert_allclose(hits.to_numpy(), [[2, 0.25, 0.25, 0]])
     # Explicit host refit refreshes metadata, and later device packing preserves it.
-    tlas.refit([ti.hardware.ray.RayInstance(blas, custom_index=37)])
+    tlas.refit([ti.hardware.ray.RayInstance(blas, custom_index=37, sbt_record_offset=7)])
     tlas.refit_transforms(matrix)
     tlas.trace_typed(rays, hits, ids)
     np.testing.assert_array_equal(ids.to_numpy(), [[0, 0, 37, 1]])
+    assert tlas.sbt_record_offsets == (7,)
+    with pytest.raises(RuntimeError, match="SBT record offsets"):
+        tlas.refit([ti.hardware.ray.RayInstance(blas, sbt_record_offset=8)])
+    for bad in (-1, 0x1000000):
+        with pytest.raises(ValueError, match="24 bits"):
+            ti.hardware.ray.RayInstance(blas, sbt_record_offset=bad)
+    with pytest.raises(TypeError, match="integer"):
+        ti.hardware.ray.RayInstance(blas, sbt_record_offset=True)
+    program = impl.get_runtime().prog
+    before = program._debug_vulkan_ray_resource_stats()
+    with pytest.raises(RuntimeError, match="one frozen SBT offset"):
+        program._create_vulkan_instance_tlas_resource_with_sbt([blas._handle], [])
+    with pytest.raises(RuntimeError, match="24-bit"):
+        program._create_vulkan_instance_tlas_resource_with_sbt([blas._handle], [0x1000000])
+    assert program._debug_vulkan_ray_resource_stats() == before
+    # The legacy factory still means an all-zero map; no old call is reinterpreted.
+    old_handle = program._create_vulkan_instance_tlas_resource([blas._handle])
+    assert program._vulkan_ray_kernel_resource_properties(old_handle)["max_sbt_record_offset"] == 0
+    program._destroy_vulkan_ray_resource(old_handle)
+    assert '"sbt_record_offsets":[7]' in tlas._effect_name._plan_json
     recording = tlas.record_refit_transforms()
     ti.reset()
     ti.init(arch=ti.vulkan, offline_cache=False)

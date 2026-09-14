@@ -826,6 +826,14 @@ the number and order of referenced BLAS resources; BLAS refit is vertex-only
 and preserves vertex count and index topology. Batch query reads the TLAS and
 writes caller-owned hits without host readback.
 
+`RayInstance(..., sbt_record_offset=0)` optionally sets a 24-bit offset in hit
+records, not bytes or custom IDs. `tlas.sbt_record_offsets` exposes the immutable
+mapping. Both host and device refits preserve it; create another TLAS to change
+the mapping. Inline and batch queries ignore these offsets. All-zero mappings
+retain the existing behavior. Independent BLAS/TLAS construction requires
+acceleration structures and buffer device addresses; batch/inline queries still
+require ray-query support, independently of RT-pipeline support.
+
 For fixed topology with **device-produced transforms**, use
 `tlas.refit_transforms(transforms)` or `tlas.record_refit_transforms()`:
 

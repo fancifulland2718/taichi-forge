@@ -664,6 +664,12 @@ custom index。TLAS build/refit 保持所引用 BLAS 的数量与顺序；BLAS r
 保持 vertex count 与 index topology。batch query 读取 TLAS、写入调用方持有的 hit，且不做
 host readback。
 
+`RayInstance(..., sbt_record_offset=0)` 可指定 24-bit hit record 偏移，单位是记录，
+不是字节，也不是 custom index。`tlas.sbt_record_offsets` 返回创建时冻结的映射；
+host/device refit 都保留它，改变映射需要新建 TLAS。inline/batch query 不读取 SBT，
+全零偏移保持原有行为。独立 BLAS/TLAS 创建只要求 acceleration structure 与 buffer
+device address；batch/inline query 仍单独要求 ray-query 能力，不因 RT pipeline 可用而自动成立。
+
 固定拓扑但变换由设备产生时，使用 `tlas.refit_transforms(transforms)` 或
 `tlas.record_refit_transforms()`：
 

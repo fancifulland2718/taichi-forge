@@ -1212,8 +1212,13 @@ def test_vulkan_passive_routes_only_admit_evaluated_provider_requirements():
         if operation.descriptor.operation_id in ("ray.as_build.vulkan", "ray.as_refit.vulkan", "ray.query.batch.vulkan")
     }
     assert len(ray_routes) == 3
-    assert len({operation.discovery for operation in ray_routes.values()}) == 1
-    assert len({operation.selection for operation in ray_routes.values()}) == 1
+    assert ray_routes["ray.as_build.vulkan"].discovery == ray_routes["ray.as_refit.vulkan"].discovery
+    program = ti.lang.impl.get_runtime().prog
+    for operation_id in ("ray.as_build.vulkan", "ray.as_refit.vulkan"):
+        facts = ray_routes[operation_id].native_facts
+        assert facts["provider_available"] == program.vulkan_acceleration_structure_available()
+        assert facts["required_features"] == ("bufferDeviceAddress", "accelerationStructure")
+    assert ray_routes["ray.query.batch.vulkan"].native_facts["provider_available"] == program.vulkan_ray_query_available()
     assert all(
         operation.native_facts["capability_query"] == "active_vulkan_feature_chain" for operation in ray_routes.values()
     )

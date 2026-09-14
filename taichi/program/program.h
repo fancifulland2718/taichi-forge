@@ -1367,6 +1367,7 @@ class TI_DLL_EXPORT Program {
                                       std::size_t batch_count);
 
   bool vulkan_ray_query_available() const;
+  bool vulkan_acceleration_structure_available() const;
 
   std::unordered_map<std::string, std::uint64_t>
   vulkan_ray_query_properties() const;
@@ -1517,6 +1518,9 @@ class TI_DLL_EXPORT Program {
 
   std::uint64_t create_vulkan_instance_tlas_resource(
       const std::vector<std::uint64_t> &blas_handles);
+  std::uint64_t create_vulkan_instance_tlas_resource_with_sbt(
+      const std::vector<std::uint64_t> &blas_handles,
+      const std::vector<std::uint32_t> &sbt_record_offsets);
 
   std::size_t vulkan_instance_tlas_build(
       std::uint64_t handle,

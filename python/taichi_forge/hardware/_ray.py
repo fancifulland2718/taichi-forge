@@ -659,7 +659,7 @@ class TriangleBLAS:
     graph_runtime_lifetime_check_required = False
 
     def __init__(self, vertices, indices, *, opacity_micromap=None, opaque=None):
-        program = _require_vulkan_ray_runtime("TriangleBLAS")
+        program = _require_vulkan_as_runtime("TriangleBLAS")
         vertex_count = _ray_storage(vertices, 3, (f32,), "vertices")[1]
         triangle_count = _ray_storage(indices, 3, (i32,), "indices")[1]
         self._runtime_prog = program
@@ -842,6 +842,7 @@ class RayInstance:
     transform: tuple = _IDENTITY_TRANSFORM_3X4
     mask: int = 0xFF
     custom_index: int = 0
+    sbt_record_offset: int = 0
 
     def __post_init__(self):
         if not isinstance(self.blas, TriangleBLAS):
@@ -858,6 +859,10 @@ class RayInstance:
             raise ValueError(
                 "Vulkan ray instance custom_index must be in [0, 16777215]"
             )
+        if isinstance(self.sbt_record_offset, bool) or not isinstance(self.sbt_record_offset, int):
+            raise TypeError("Vulkan ray instance sbt_record_offset must be an integer")
+        if not 0 <= self.sbt_record_offset <= 0xFFFFFF:
+            raise ValueError("Vulkan ray instance sbt_record_offset must fit in 24 bits")
         object.__setattr__(self, "transform", _normalize_transform(self.transform))
 
     def _to_core(self):
@@ -890,6 +895,7 @@ class _VulkanTLASRecording(BackendCommandRecording):
         identify_ray_recording(
             self, "tlas_refit" if update else "tlas_build", tlas._effect_name,
             instances=tuple((item.transform, item.mask, item.custom_index) for item in normalized),
+            **({"sbt_record_offsets": tlas.sbt_record_offsets} if any(tlas.sbt_record_offsets) else {}),
         )
 
     @property
@@ -1111,19 +1117,21 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
     """Independent Vulkan TLAS with fixed BLAS topology and mutable metadata."""
 
     def __init__(self, instances):
-        program = _require_vulkan_ray_runtime("InstanceTLAS")
+        program = _require_vulkan_as_runtime("InstanceTLAS")
         self._runtime_prog = program
         self._runtime_generation = int(impl.runtime_generation())
         normalized = self._normalize_instances(instances, require_live=True)
         self._topology = tuple(instance.blas for instance in normalized)
         self._instances = normalized
+        self._sbt_record_offsets = tuple(instance.sbt_record_offset for instance in normalized)
         self._handle = int(
-            program._create_vulkan_instance_tlas_resource(
-                [blas._handle for blas in self._topology]
+            program._create_vulkan_instance_tlas_resource_with_sbt(
+                [blas._handle for blas in self._topology], self._sbt_record_offsets
             )
         )
         self._effect_name = RayResourceIdentity(
-            "vulkan_instance_tlas", children=tuple(blas._effect_name for blas in self._topology)
+            "vulkan_instance_tlas", children=tuple(blas._effect_name for blas in self._topology),
+            **({"sbt_record_offsets": self._sbt_record_offsets} if any(self._sbt_record_offsets) else {}),
         )
         self._scene_kind = "independent_instance_tlas"
         try:
@@ -1144,6 +1152,16 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
     @property
     def instance_count(self):
         return len(self._topology)
+
+    @property
+    def sbt_record_offsets(self):
+        """Frozen per-instance offsets in hit records, not bytes or custom IDs.
+
+        Native Vulkan ray programs interpret these offsets with their declared
+        ray-type/geometry stride. Inline and batch ray queries ignore the SBT.
+        Host and device refits preserve the mapping; use a new TLAS to change it.
+        """
+        return self._sbt_record_offsets
 
     def _normalize_instances(self, instances, *, require_live):
         try:
@@ -1167,11 +1185,11 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
 
     def _validate_topology(self, instances):
         if len(instances) != len(self._topology) or any(
-            instance.blas is not expected
-            for instance, expected in zip(instances, self._topology)
+            instance.blas is not expected or instance.sbt_record_offset != offset
+            for instance, expected, offset in zip(instances, self._topology, self._sbt_record_offsets)
         ):
             raise TaichiRuntimeError(
-                "Vulkan TLAS build/refit must preserve BLAS count and order"
+                "Vulkan TLAS build/refit must preserve BLAS count and order and SBT record offsets"
             )
 
     def record_build(self, instances=None):
@@ -1207,7 +1225,7 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         Matrices are row-major affine transforms. Producers must supply finite
         values and an invertible upper 3x3; values are not read back or scanned.
 
-        BLAS references, order, masks and custom indices remain those of the
+        BLAS references, order, SBT record offsets, masks and custom indices remain those of the
         preceding build/refit. Only the transform words of the retained Vulkan
         instance descriptors are overwritten. Packing and AS scratch belong to
         the existing TLAS; transform storage remains caller-owned. Host
@@ -1313,7 +1331,7 @@ class InstanceTLAS(_TypedRayScene, _AccelerationStructureResource):
         return False
 
 
-def _require_vulkan_ray_runtime(resource_name):
+def _require_vulkan_as_runtime(resource_name):
     program = impl.get_runtime().prog
     if program is None:
         raise TaichiRuntimeError(
@@ -1324,10 +1342,10 @@ def _require_vulkan_ray_runtime(resource_name):
             f"{resource_name} requires the Vulkan backend; the active backend "
             f"is {active_backend()}"
         )
-    if not program.vulkan_ray_query_available():
+    if not program.vulkan_acceleration_structure_available():
         raise TaichiRuntimeError(
             f"{resource_name} requires VK_KHR_acceleration_structure and "
-            "VK_KHR_ray_query"
+            "buffer device addresses"
         )
     return program
 
