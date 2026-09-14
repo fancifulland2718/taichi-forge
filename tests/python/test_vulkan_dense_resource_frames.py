@@ -112,13 +112,20 @@ def test_dense_resource_whole_graph_frames(resource_kind, retirement, monkeypatc
                 graph.run(bindings[1])
                 np.testing.assert_array_equal(arguments["output"].to_numpy(), np.full((8, 4), 24))
 
-            # Published frames own closed images/TLAS/BLAS as well as the roots.
-            retire_resources()
+            # Submitted commands retain their allocations. Explicit AS close
+            # also retires dependent executable frames; image wrapper retirement
+            # retains the existing published-image behavior.
             graph.run(bindings[0])
+            retire_resources()
+            if resource_kind == "as":
+                with pytest.raises(RuntimeError, match="retired|closed"):
+                    graph.run(bindings[0])
+            else:
+                graph.run(bindings[0])
             if retirement == "tree":
                 trees[0].destroy()
                 np.testing.assert_array_equal(arguments["output"].to_numpy(), np.full((8, 4), 16))
-                with pytest.raises(ti.TaichiRuntimeError, match="destroyed SNodeTree"):
+                with pytest.raises(RuntimeError, match="destroyed SNodeTree|retired"):
                     graph.run(bindings[0])
             elif retirement == "close":
                 graph.close()

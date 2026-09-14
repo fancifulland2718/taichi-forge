@@ -764,8 +764,9 @@ scene_arg = ti.graph.Arg(ti.graph.ArgKind.ACCELERATION_STRUCTURE, "scene")
 
 已有 `GraphBindingFrameRecipeProvider` 可为包含这种绑定的平坦 kernel Graph 生成 Vulkan
 immutable secondary-command recipe。`Graph.bind()` 一次准备 descriptor，并保留实际 TLAS、
-引用的 BLAS 及 backing resource，直到 frame/command retirement。源句柄关闭后已发布 frame
-仍可执行，新准备则拒绝关闭的句柄；runtime reset 退役所有 frame。同一资源的 refit/build
+引用的 BLAS 及 backing resource，直到 frame/command retirement。显式关闭所绑定的 AS
+会退役依赖它的 frame：已经提交的工作仍持有资源直至完成，但继续 replay 和新准备均被拒绝。
+建议先关闭 Graph，再关闭 AS owner；runtime reset 退役所有 frame。同一资源的 refit/build
 通过既有有序 AS command 与 device barrier 对后续执行可见，无需重新绑定。AS build 不嵌入
 只读 frame；改变 topology 时应创建新资源及 binding。immutable replay 不增加 Python AS
 descriptor 检查或 host readback。ordinary Graph 仍可用，不隐式切换到此 recipe。AOT 明确

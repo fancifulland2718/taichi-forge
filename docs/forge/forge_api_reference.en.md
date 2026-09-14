@@ -948,9 +948,11 @@ scene_arg = ti.graph.Arg(ti.graph.ArgKind.ACCELERATION_STRUCTURE, "scene")
 The existing `GraphBindingFrameRecipeProvider` can produce an immutable Vulkan
 secondary-command recipe for flat kernel Graphs containing these bindings.
 `Graph.bind()` prepares descriptors once and retains the actual TLAS, referenced
-BLAS, and backing resources until frame/command retirement. Published frames
-remain executable after the source handles close; new preparation from a closed
-handle fails. Runtime reset retires all frames. Refit/build changes to the same
+BLAS, and backing resources until frame/command retirement. Explicitly closing
+the bound AS retires dependent frames: already submitted work keeps its resources
+until completion, but further replay and new preparation are rejected. Close
+Graphs before their AS owners when possible. Runtime reset retires all frames.
+Refit/build changes to the same
 resource are visible without rebinding, through the existing ordered AS command
 and device barriers. AS builds are not embedded in the read-only frame; topology
 changes require a new resource and binding. No Python AS descriptor checks or
