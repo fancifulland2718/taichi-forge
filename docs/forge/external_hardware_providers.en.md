@@ -1014,6 +1014,28 @@ by recording again. For frequently changing values, bind a device buffer and
 update it in place. Scene refit does not require program compilation or SBT
 reconstruction. Scene resources are recording-owned, not Vulkan AS arguments.
 
+An initialized launch can be placed between producers/refit commands and
+consumers in a root Graph:
+
+```python
+launch = recording.prepare({"out": output}).initialize()
+builder = ti.graph.GraphBuilder()
+builder.append_native(launch, admission="explicit")
+graph = builder.compile()
+bound = graph.bind({"out": output})
+graph.submit(bound).wait()
+graph.close()
+launch.close()
+```
+
+`launch.graph_recording()` returns the equivalent explicit native recording.
+Graph binding validates exact resource identities once per published binding;
+it does not initialize the launch. Replacing those resources requires a new
+prepared launch/recording. Device contents and scene transforms may change in
+place through ordered operations. This route is a retained **runtime-ordered
+native launch**, with `replay_mode="rerecord"`, not CUDA Graph capture of OptiX.
+Closing the Graph does not close a caller-owned launch reused by direct calls.
+
 Close launches before their scenes. `program.close()` retires its launches;
 runtime reset/exit retires launches, programs, scenes, GAS and context in order.
 Explicit close can wait for pending work; steady launches do not wait for host

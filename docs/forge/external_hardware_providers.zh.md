@@ -798,6 +798,24 @@ Forge 保留对应 owner，通过现有受管存储解析地址。合格 dense f
 应放进受管设备 buffer 后原位更新。scene refit 不重编译 program 或重建 SBT；scene 属于 recording owner，
 不是 Vulkan AS 参数。
 
+初始化后的 launch 可加入 root Graph，与 producer、refit 和 consumer 顺序组合：
+
+```python
+launch = recording.prepare({"out": output}).initialize()
+builder = ti.graph.GraphBuilder()
+builder.append_native(launch, admission="explicit")
+graph = builder.compile()
+bound = graph.bind({"out": output})
+graph.submit(bound).wait()
+graph.close()
+launch.close()
+```
+
+`launch.graph_recording()` 返回等价的显式 native recording。Graph 发布绑定时检查固定对象身份，不执行初始化。
+替换资源要建立新的 prepared launch/recording；设备内容和 scene transform 可以通过有序操作原位修改。
+此路径是保留 packet 的 **runtime-ordered native launch**，`replay_mode="rerecord"`，不是 OptiX 的 CUDA Graph
+capture。关闭 Graph 不会关闭仍由调用者拥有、可供 direct 调用复用的 launch。
+
 launch 应早于 scene 关闭；`program.close()` 先关闭其 launch。runtime reset/退出按 launch、program、scene、
 GAS、context 顺序退休。显式 close 可以等待在途工作，稳态 launch 不等待 host 完成。
 `launch.memory_report()` 只计自身精确 device allocation；`preparation_info()` 单列 pinned-host bytes 与 stack

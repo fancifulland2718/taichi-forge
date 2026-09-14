@@ -203,3 +203,77 @@ def test_sbt_payload_is_a_c_byte_snapshot_not_a_mutable_python_container():
         R("hit", layout=L(32, alignment=32))
     with pytest.raises(ValueError, match="binding"):
         R("hit", layout=L(8, (F("buffer", 0, kind="buffer"),)), values={"buffer": 12345})
+
+
+@test_utils.test(arch=ti.cuda, offline_cache=False)
+def test_prepared_program_graph_composes_refit_and_consumer_without_repreparation(monkeypatch):
+    from taichi_forge.hardware import _optix_program_graph as graph_adapter
+
+    provider = _provider()
+    gas, scene = _scene(provider)
+    program = _program(provider)
+    output, result = ti.ndarray(ti.u32, 8), ti.ndarray(ti.u32, 8)
+    transforms = ti.ndarray(ti.f32, (1, 12))
+    launch = _record(program, scene).prepare({"out": output})
+    graph = None
+    try:
+        with pytest.raises(RuntimeError, match="initialize"):
+            launch.graph_recording()
+        launch.initialize()
+        command = launch.graph_recording()
+        assert command.replay_mode == "rerecord"
+
+        @ti.kernel
+        def move(t: ti.types.ndarray(ti.f32, ndim=2), shift: ti.f32):
+            for i in range(12):
+                t[0, i] = ti.cast(i == 0 or i == 5 or i == 10, ti.f32)
+                if i == 3:
+                    t[0, i] = shift
+
+        @ti.kernel
+        def consume(source: ti.types.ndarray(ti.u32, ndim=1), target: ti.types.ndarray(ti.u32, ndim=1)):
+            for i in target:
+                target[i] = source[i] + 1
+
+        builder = ti.graph.GraphBuilder()
+        builder.dispatch(
+            move,
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "transforms", ti.f32, ndim=2),
+            ti.graph.Arg(ti.graph.ArgKind.SCALAR, "shift", ti.f32),
+        )
+        builder.append_native(scene.record_refit_transforms(), admission="explicit")
+        builder.append_native(launch, admission="explicit")
+        builder.dispatch(
+            consume,
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.u32, ndim=1),
+            ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.u32, ndim=1),
+        )
+        graph = builder.compile()
+        bound = graph.bind({"transforms": transforms, "shift": 0.0, "out": output, "result": result})
+        assert bound.fast_path_qualified
+        with pytest.raises(RuntimeError, match="fixed bindings"):
+            bound.update(out=ti.ndarray(ti.u32, 8))
+
+        def no_repeat(*args, **kwargs):
+            raise AssertionError("Graph replay reinitialized or revalidated its fixed OptiX packet")
+
+        for shift in (0.0, 4.0, 0.0):
+            bound.update(shift=shift)
+            with monkeypatch.context() as patched:
+                patched.setattr(launch, "initialize", no_repeat)
+                patched.setattr(graph_adapter._PreparedProgramRecording, "validate_graph_bindings", no_repeat)
+                patched.setattr(graph_adapter._PreparedProgramRecording, "prepare_graph_execute", no_repeat)
+                graph.submit(bound).wait()
+            expected = [123, 13, 13, 13, 123, 13, 13, 13] if shift == 0 else [13] * 8
+            np.testing.assert_array_equal(result.to_numpy(), expected)
+        launch.close()
+        with pytest.raises(RuntimeError, match="closed|invalidated"):
+            graph.run(bound)
+    finally:
+        if graph is not None:
+            graph.close()
+        launch.close()
+        program.close()
+        scene.close()
+        gas.close()
+        provider.close()

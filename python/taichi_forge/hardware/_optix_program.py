@@ -303,6 +303,8 @@ class OptixProgram:
             ownership_scope="program_only_excluding_launches_and_shared_context",
         )
 
+    _graph_provider_memory_report = memory_report
+
     def close(self):
         if self.closed:
             return
@@ -432,6 +434,8 @@ class OptixPreparedLaunch:
         self._runtime_generation = self.program._runtime_generation
         self._storage = None
         self._owners = ()
+        self._bindings = MappingProxyType({})
+        self._initialized = False
         self._memory = None
         self.program._validate_lifetime()
         if set(bindings) != set(recording.binding_names):
@@ -534,6 +538,7 @@ class OptixPreparedLaunch:
             memory = a.Memory(c.sizeof(a.Memory))
             _invoke_checked(self.program.provider._loaded.api, self.program._api.memory, handle, c.byref(memory))
             self._memory = memory
+            self._bindings = MappingProxyType(dict(bindings))
             self.program._launches.add(self)
         except BaseException:
             self.close()
@@ -551,7 +556,23 @@ class OptixPreparedLaunch:
             _closed()
         self._runtime_prog._invoke_external_cuda_prepared(self._storage, self._initialize)
         self._call = self._run
+        self._initialized = True
         return self
+
+    def _require_initialized(self):
+        if self.closed:
+            _closed()
+        if not self._initialized:
+            _uninitialized()
+
+    def graph_recording(self):
+        """Reference this initialized packet from a root Graph; bindings stay fixed."""
+        from taichi_forge.hardware._optix_program_graph import _PreparedProgramRecording
+
+        return _PreparedProgramRecording(self)
+
+    def _as_graph_native_node(self):
+        return self.graph_recording()._as_graph_native_node()
 
     def _initialize(self):
         _invoke_checked(self.program.provider._loaded.api, self.program._api.initialize, self._handle, 0)
@@ -586,6 +607,11 @@ class OptixPreparedLaunch:
             return {}
         return {name: int(getattr(self._memory, name)) for name, _ in a.Memory._fields_[1:]}
 
+    _graph_provider_memory_report = memory_report
+
+    def _graph_provider_memory_dependencies(self):
+        return (self.program, *dict.fromkeys(self.recording.scenes.values()))
+
     def close(self):
         if self.closed:
             return
@@ -594,8 +620,10 @@ class OptixPreparedLaunch:
             _invoke_checked(self.program.provider._loaded.api, self.program._api.destroy_launch, self._handle)
             self._handle = None
             self._call = _closed
+            self._initialized = False
             self._storage = None
             self._owners = ()
+            self._bindings = MappingProxyType({})
         finally:
             del scope
 
