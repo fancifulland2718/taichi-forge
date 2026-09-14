@@ -58,6 +58,7 @@ _DEVICE_INSTANCE_TRANSFORM_UPDATE = 1 << 10
 _ALPHA_MASK = 1 << 11
 _INSTANCE_OPACITY = 1 << 12
 _OPACITY_MICROMAP_IMPORT = 1 << 13
+_INSTANCE_SBT_OFFSET = 1 << 15
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -316,6 +317,11 @@ class _ProviderApi(ctypes.Structure):
         ("create_triangle_gas_micromap", _CreateMicromapGas),
         ("trace_instance_micromap", _TraceAlpha),
         ("get_program_api", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p)),
+        ("create_instance_scene_sbt", ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_InstanceSceneDesc),
+            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p))),
+        ("prepare_instance_sbt", ctypes.CFUNCTYPE(
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64))),
     ]
 
 
@@ -1067,6 +1073,8 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 scene.provider._prepare_alpha(scene)
             elif hit_indices is not None:
                 scene.provider._prepare_typed(scene)
+        if isinstance(scene, OptixInstanceScene):
+            scene._prepare_fixed_sbt(3 if micromap else 2 if alpha_masks is not None else 1 if hit_indices is not None else 0)
 
     @property
     def resource_effects(self):
@@ -1889,8 +1897,12 @@ class OptixRayInstance:
     mask: int = 0xFF
     custom_index: int = 0
     opaque: bool = False
+    sbt_record_offset: int = 0
 
     def __post_init__(self):
+        if (isinstance(self.sbt_record_offset, bool) or not isinstance(self.sbt_record_offset, int)
+                or not 0 <= self.sbt_record_offset <= 0xFFFFFFFF):
+            raise ValueError("OptiX instance sbt_record_offset must be a uint32")
         if not isinstance(self.opaque, bool):
             raise TypeError("OptiX instance opaque must be a bool")
         if not isinstance(self.gas, OptixTriangleGAS):
@@ -1947,6 +1959,13 @@ class OptixInstanceScene:
                 )
             if instance.opaque and instance.gas._micromap_id is not None:
                 raise ValueError("OMM instances cannot declare always-opaque geometry")
+        sbt_offsets = tuple(instance.sbt_record_offset for instance in normalized)
+        uses_sbt_offsets = any(sbt_offsets)
+        api = provider._loaded.api
+        if uses_sbt_offsets and (not int(api.info.features) & _INSTANCE_SBT_OFFSET or not all(
+            _api_has(api, name) for name in ("create_instance_scene_sbt", "prepare_instance_sbt")
+        )):
+            raise TaichiRuntimeError("OptiX adapter lacks instance SBT offsets; use a newer Forge adapter")
         native = (_InstanceDesc * len(normalized))()
         for index, instance in enumerate(normalized):
             native[index].struct_size = ctypes.sizeof(_InstanceDesc)
@@ -1965,6 +1984,12 @@ class OptixInstanceScene:
             0,
         )
         api = provider._loaded.api
+        create_args = (provider._context, ctypes.byref(desc), ctypes.byref(scene))
+        create = api.create_instance_scene
+        if uses_sbt_offsets:
+            offsets = (ctypes.c_uint32 * len(sbt_offsets))(*sbt_offsets)
+            create = api.create_instance_scene_sbt
+            create_args = (provider._context, ctypes.byref(desc), offsets, ctypes.byref(scene))
         storage = provider._runtime_prog._prepare_external_cuda_storage((), ())
         with hardware_failure_phase("provider_plan_failure"):
             provider._runtime_prog._invoke_external_cuda_prepared(
@@ -1972,10 +1997,8 @@ class OptixInstanceScene:
                 partial(
                     _invoke_checked,
                     api,
-                    api.create_instance_scene,
-                    provider._context,
-                    ctypes.byref(desc),
-                    ctypes.byref(scene),
+                    create,
+                    *create_args,
                 ),
             )
             if not scene.value:
@@ -1987,6 +2010,9 @@ class OptixInstanceScene:
         self._runtime_prog = provider._runtime_prog
         self._runtime_generation = provider._runtime_generation
         self._instances = normalized
+        self._sbt_offsets = sbt_offsets
+        self._fixed_sbt_variants = set()
+        self._fixed_sbt_bytes = 0
         self._topology = tuple(instance.gas for instance in normalized)
         self._has_micromaps = any(gas._micromap_id is not None for gas in self._topology)
         self.allow_update = allow_update
@@ -1994,6 +2020,7 @@ class OptixInstanceScene:
             "optix_instance_scene", children=tuple(gas._effect_name for gas in self._topology),
             opaque_instances=tuple(instance.opaque for instance in normalized),
             allow_update=allow_update, adapter=_decode(api.info.build_identity),
+            **({"sbt_record_offsets": sbt_offsets} if uses_sbt_offsets else {}),
         )
         self._memory_function = api.get_instance_scene_memory
         self._query_kind = "optix_instance_ray_query"
@@ -2021,6 +2048,20 @@ class OptixInstanceScene:
     def _trace_function(self, typed):
         api = self.provider._loaded.api
         return api.trace_instance_scene_typed if typed else api.trace_instance_scene
+
+    def _prepare_fixed_sbt(self, variant):
+        if not any(self._sbt_offsets) or variant in self._fixed_sbt_variants:
+            return
+        total = ctypes.c_uint64()
+        api = self.provider._loaded.api
+        scope = self._runtime_prog._begin_external_cuda_submission()
+        try:
+            self._validate_lifetime()
+            _invoke_checked(api, api.prepare_instance_sbt, self._scene, variant, ctypes.byref(total))
+        finally:
+            del scope
+        self._fixed_sbt_bytes = int(total.value)
+        self._fixed_sbt_variants.add(variant)
 
     def record(self, ray_count, *, rays="rays", hits="hits"):
         self._validate_lifetime()
@@ -2136,6 +2177,10 @@ class OptixInstanceScene:
                 "provider_generation",
                 "provider",
                 resident=resident,
+            ),
+            HardwareMemoryComponent(
+                "fixed_query_instance_sbt", self._fixed_sbt_bytes, True,
+                "provider_generation", "provider", resident=resident,
             ),
         )
         return make_memory_report(

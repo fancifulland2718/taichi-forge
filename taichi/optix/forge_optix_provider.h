@@ -50,6 +50,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY = 1ull << 12,
   TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT = 1ull << 13,
   TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE = 1ull << 14,
+  TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET = 1ull << 15,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -313,6 +314,15 @@ typedef struct TiForgeOptixProviderApi {
   TiForgeOptixCreateTriangleGasMicromapFn create_triangle_gas_micromap;
   TiForgeOptixTraceInstanceAlphaFn trace_instance_micromap;
   TiForgeOptixResult (*get_program_api)(size_t, struct TiForgeOptixProgramApi *);
+  // Offsets have instance_count elements. The existing InstanceDesc stride is
+  // unchanged. Old creation still produces zero offsets.
+  TiForgeOptixResult (*create_instance_scene_sbt)(
+      TiForgeOptixContext, const TiForgeOptixInstanceSceneDesc *,
+      const uint32_t *offsets, TiForgeOptixInstanceScene *);
+  // Cold compatibility preparation for fixed batch queries: 0 legacy, 1 typed,
+  // 2 alpha, 3 micromap. Reports scene-owned (not context-shared) SBT bytes.
+  TiForgeOptixResult (*prepare_instance_sbt)(TiForgeOptixInstanceScene,
+                                           uint32_t variant, uint64_t *bytes);
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(

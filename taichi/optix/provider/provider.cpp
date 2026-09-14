@@ -6,6 +6,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -45,7 +46,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances1-alpha2-omm1-program1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -60,7 +61,8 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
                                TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
                                TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT |
-                               TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE;
+                               TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE |
+                               TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET;
 
 void clear_error_state() {
   last_error.clear();
@@ -233,6 +235,8 @@ struct InstanceScene {
   Context *context{nullptr};
   std::atomic<std::size_t> program_refs{0};
   uint32_t max_sbt_offset{0};
+  std::array<DeviceBuffer, 4> fixed_hit_records;
+  std::array<OptixShaderBindingTable, 4> fixed_sbt{};
   uint32_t instance_count{0};
   bool allow_update{false};
   std::vector<TriangleGas *> gas_refs;
@@ -1148,10 +1152,11 @@ TiForgeOptixResult destroy_triangle_gas(TiForgeOptixTriangleGas raw_gas) {
   return TI_FORGE_OPTIX_SUCCESS;
 }
 
-TiForgeOptixResult create_instance_scene(
+TiForgeOptixResult create_instance_scene_impl(
     TiForgeOptixContext raw_context,
     const TiForgeOptixInstanceSceneDesc *desc,
-    TiForgeOptixInstanceScene *out_scene) {
+    TiForgeOptixInstanceScene *out_scene,
+    const uint32_t *sbt_offsets) {
   clear_error_state();
   auto *context = static_cast<Context *>(raw_context);
   if (context == nullptr || desc == nullptr || out_scene == nullptr ||
@@ -1169,6 +1174,18 @@ TiForgeOptixResult create_instance_scene(
   scene->context = context;
   scene->instance_count = desc->instance_count;
   scene->allow_update = desc->allow_update != 0;
+  if (sbt_offsets) {
+    scene->max_sbt_offset = *std::max_element(sbt_offsets, sbt_offsets + desc->instance_count);
+    unsigned int max_offset{};
+    const auto result = optix_check(optixDeviceContextGetProperty(context->optix_context,
+        OPTIX_DEVICE_PROPERTY_LIMIT_MAX_SBT_OFFSET, &max_offset, sizeof(max_offset)),
+        "optixDeviceContextGetProperty(SBT offset)");
+    if (result != TI_FORGE_OPTIX_SUCCESS || scene->max_sbt_offset > max_offset) {
+      delete scene;
+      return result != TI_FORGE_OPTIX_SUCCESS ? result :
+          fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "instance SBT offset exceeds the device limit");
+    }
+  }
   std::vector<OptixInstance> host_instances;
   try {
     host_instances.resize(desc->instance_count);
@@ -1202,7 +1219,7 @@ TiForgeOptixResult create_instance_scene(
     std::memcpy(destination.transform, source.transform,
                 sizeof(destination.transform));
     destination.instanceId = source.custom_index;
-    destination.sbtOffset = 0;
+    destination.sbtOffset = sbt_offsets ? sbt_offsets[index] : 0;
     destination.visibilityMask = source.visibility_mask;
     destination.flags = (source.reserved & 1u)
                             ? OPTIX_INSTANCE_FLAG_DISABLE_ANYHIT
@@ -1279,6 +1296,76 @@ TiForgeOptixResult create_instance_scene(
   context->instance_scene_count.fetch_add(1);
   *out_scene = scene;
   return TI_FORGE_OPTIX_SUCCESS;
+}
+
+TiForgeOptixResult create_instance_scene(
+    TiForgeOptixContext context, const TiForgeOptixInstanceSceneDesc *desc,
+    TiForgeOptixInstanceScene *out) {
+  return create_instance_scene_impl(context, desc, out, nullptr);
+}
+
+TiForgeOptixResult create_instance_scene_sbt(
+    TiForgeOptixContext context, const TiForgeOptixInstanceSceneDesc *desc,
+    const uint32_t *offsets, TiForgeOptixInstanceScene *out) {
+  if (!offsets) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "instance SBT offsets are null");
+  }
+  return create_instance_scene_impl(context, desc, out, offsets);
+}
+
+TiForgeOptixResult prepare_instance_sbt(TiForgeOptixInstanceScene raw,
+                                        uint32_t variant, uint64_t *bytes) {
+  clear_error_state();
+  auto *scene = static_cast<InstanceScene *>(raw);
+  if (!scene || variant > 3 || !bytes) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "invalid instance SBT preparation");
+  }
+  auto *context = scene->context;
+  std::lock_guard<std::mutex> lock(context->prepare_mutex);
+  RayPipeline *pipelines[] = {&context->legacy, &context->typed, &context->alpha, &context->micromap};
+  auto *pipeline = pipelines[variant];
+  if (!pipeline->pipeline) {
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "prepare the fixed query pipeline before its instance SBT");
+  }
+  auto &records = scene->fixed_hit_records[variant];
+  if (scene->max_sbt_offset && !records.pointer) {
+    try {
+      SbtRecord<EmptySbtData> record{};
+      auto result = optix_check(optixSbtRecordPackHeader(pipeline->hitgroup, &record),
+                                 "optixSbtRecordPackHeader(fixed instance compatibility)");
+      if (result != TI_FORGE_OPTIX_SUCCESS) return result;
+      const size_t count = size_t(scene->max_sbt_offset) + 1;
+      std::vector<SbtRecord<EmptySbtData>> host(count, record);
+      result = records.allocate(host.size() * sizeof(record));
+      if (result == TI_FORGE_OPTIX_SUCCESS) {
+        result = cuda_check(cuMemcpyHtoD(records.pointer, host.data(), records.bytes),
+                              "cuMemcpyHtoD(fixed instance SBT initialization)");
+      }
+      if (result != TI_FORGE_OPTIX_SUCCESS) {
+        records.reset();
+        return result;
+      }
+      auto &sbt = scene->fixed_sbt[variant];
+      sbt = pipeline->sbt;
+      sbt.hitgroupRecordBase = records.pointer;
+      sbt.hitgroupRecordStrideInBytes = sizeof(record);
+      sbt.hitgroupRecordCount = static_cast<unsigned int>(count);
+    } catch (const std::bad_alloc &) {
+      return fail(TI_FORGE_OPTIX_ERROR_OUT_OF_MEMORY, "failed to allocate fixed instance SBT metadata");
+    }
+  }
+  *bytes = 0;
+  for (const auto &buffer : scene->fixed_hit_records) *bytes += buffer.bytes;
+  return TI_FORGE_OPTIX_SUCCESS;
+}
+
+const OptixShaderBindingTable *fixed_query_sbt(Scene *, uint32_t, RayPipeline &pipeline) {
+  return &pipeline.sbt;
+}
+
+const OptixShaderBindingTable *fixed_query_sbt(InstanceScene *scene, uint32_t variant, RayPipeline &pipeline) {
+  if (!scene->max_sbt_offset) return &pipeline.sbt;
+  return scene->fixed_hit_records[variant].pointer ? &scene->fixed_sbt[variant] : nullptr;
 }
 
 TiForgeOptixResult update_instance_scene(
@@ -1563,6 +1650,8 @@ TiForgeOptixResult trace_instance_scene(
                 "invalid OptiX instance trace descriptor");
   }
   const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  const auto *sbt = fixed_query_sbt(scene, 0, scene->context->legacy);
+  if (!sbt) return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "instance SBT compatibility is not prepared");
   const LaunchParams params{static_cast<CUdeviceptr>(desc->rays),
                             static_cast<CUdeviceptr>(desc->hits),
                             scene->ias_handle, 0};
@@ -1575,7 +1664,7 @@ TiForgeOptixResult trace_instance_scene(
   return optix_check(
       optixLaunch(scene->context->legacy.pipeline, stream,
                   scene->launch_params.pointer, sizeof(params),
-                  &scene->context->legacy.sbt, desc->ray_count, 1, 1),
+                  sbt, desc->ray_count, 1, 1),
       "optixLaunch(instance scene)");
 }
 
@@ -1593,6 +1682,8 @@ TiForgeOptixResult trace_instance_scene_typed(
         "OptiX typed instance trace requires a prepared pipeline and valid storage");
   }
   const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
+  const auto *sbt = fixed_query_sbt(scene, 1, scene->context->typed);
+  if (!sbt) return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "typed instance SBT compatibility is not prepared");
   const LaunchParams params{desc->rays, desc->hits, scene->ias_handle,
                             desc->hit_indices};
   auto result = cuda_check(cuMemcpyHtoDAsync(scene->launch_params.pointer,
@@ -1604,7 +1695,7 @@ TiForgeOptixResult trace_instance_scene_typed(
   return optix_check(
       optixLaunch(scene->context->typed.pipeline, stream,
                   scene->launch_params.pointer, sizeof(params),
-                  &scene->context->typed.sbt, desc->ray_count, 1, 1),
+                  sbt, desc->ray_count, 1, 1),
       "optixLaunch(typed instance scene)");
 }
 
@@ -1624,6 +1715,8 @@ TiForgeOptixResult launch_alpha(SceneType *scene,
   }
   const auto stream = reinterpret_cast<CUstream>(desc->cuda_stream);
   auto &pipeline = Micromap ? scene->context->micromap : scene->context->alpha;
+  const auto *sbt = fixed_query_sbt(scene, Micromap ? 3 : 2, pipeline);
+  if (!sbt) return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "alpha instance SBT compatibility is not prepared");
   const AlphaLaunchParams params{
       {desc->rays, desc->hits, scene->ias_handle, desc->hit_indices},
       desc->masks, desc->any_hit, 0};
@@ -1635,7 +1728,7 @@ TiForgeOptixResult launch_alpha(SceneType *scene,
   }
   return optix_check(
       optixLaunch(pipeline.pipeline, stream, desc->launch_params,
-                  sizeof(params), &pipeline.sbt,
+                  sizeof(params), sbt,
                   desc->ray_count, 1, 1),
       "optixLaunch(alpha mask)");
 }
@@ -1878,6 +1971,8 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->create_triangle_gas_micromap = create_triangle_gas_micromap;
   out_api->trace_instance_micromap = trace_instance_micromap;
   out_api->get_program_api = get_program_api;
+  out_api->create_instance_scene_sbt = create_instance_scene_sbt;
+  out_api->prepare_instance_sbt = prepare_instance_sbt;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

@@ -82,7 +82,10 @@ def test_baked_omm_microtriangle_queries_refit_and_retained_lifetime(format, ind
             )
         scene = provider.instance_scene(
             (
-                ti.hardware.ray.OptixRayInstance(front, custom_index=13),
+                ti.hardware.ray.OptixRayInstance(
+                    front, custom_index=13,
+                    sbt_record_offset=3 if int(provider.identity["feature_bits"]) & _optix._INSTANCE_SBT_OFFSET else 0,
+                ),
                 ti.hardware.ray.OptixRayInstance(
                     back,
                     opaque=True,

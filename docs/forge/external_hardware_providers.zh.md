@@ -602,6 +602,13 @@ AOS matrix-3x4。device producer 可在 recording 前原位更新。每个矩阵
 更新几何时先执行 `gas.record_refit()`，再对每个受影响的 IAS 执行 `scene.record_refit()`，最后查询；
 变换 refit 也会更新 IAS bounds。
 
+`OptixRayInstance(..., sbt_record_offset=0)` 可声明固定的原生 SBT record offset，单位是记录而非字节。
+非零值需要新 adapter，且须满足设备上限；transform/geometry refit 保留此映射。改变映射需创建新 IAS，
+不得改写在途实例。可编程 shader 按原生规则将它与 trace record offset/stride 组合；当前 GAS 只有一个
+geometry record contribution。既有 fixed batch/typed/alpha/OMM 查询仍可使用同一 AS：首次准备按所需
+offset 范围建立等价 hit records，不复制或改写 AS。该一次性准备可能分配/上传 SBT 数据，replay 不重建；
+scene 显存报告将额外存储列为 `fixed_query_instance_sbt`。
+
 typed instance index 是 IAS 中的序号，不是 custom index。共享 GAS 显存由 GAS 自己报告，
 scene 只报告其 IAS/scratch，不重复计入 GAS。先关闭 Graph/scene，再关闭 GAS/provider；reset 后不得复用。
 旧 adapter 仍可运行其支持的 triangle-scene 路径，但会明确拒绝可选的新实例功能。这些是 runtime-ordered

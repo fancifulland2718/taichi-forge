@@ -761,6 +761,17 @@ indices (24 bits) remain fixed; recreate the scene to change them. Geometry
 updates use `gas.record_refit()`, followed by `scene.record_refit()` for every
 affected IAS before querying. A transform refit also refreshes the IAS bounds.
 
+`OptixRayInstance(..., sbt_record_offset=0)` optionally sets a fixed native SBT
+record offset (records, not bytes). Nonzero offsets require a newer adapter and
+must fit the device limit. Transform/geometry refit preserves the mapping;
+changing it requires a new IAS, not a modified in-flight instance. Programmable
+shaders combine it with their trace record offset/stride. The current GAS has
+one geometry record contribution. Existing fixed batch/typed/alpha/OMM queries
+remain valid: their first preparation creates equivalent hit records covering
+the required offsets, without cloning or changing the AS. This one-time setup
+may allocate/upload SBT data; replay does not rebuild it. Scene memory reports
+list the extra `fixed_query_instance_sbt` storage separately.
+
 The typed instance index is the IAS ordinal, not the custom index. Shared GAS
 memory is reported by the GAS; each scene reports its own IAS and scratch
 without counting the GAS again. Close graphs/scenes before GAS/provider;
