@@ -51,6 +51,7 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT = 1ull << 13,
   TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE = 1ull << 14,
   TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET = 1ull << 15,
+  TI_FORGE_OPTIX_FEATURE_COMPACT_OCCLUSION = 1ull << 16,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -323,6 +324,13 @@ typedef struct TiForgeOptixProviderApi {
   // 2 alpha, 3 micromap. Reports scene-owned (not context-shared) SBT bytes.
   TiForgeOptixResult (*prepare_instance_sbt)(TiForgeOptixInstanceScene,
                                            uint32_t variant, uint64_t *bytes);
+  // Optional compact-query suffix. Reuses the AlphaTraceDesc wire layout:
+  // hits = uint32[N] occluded (0 miss, 1 accepted hit), hit_indices = 0,
+  // any_hit = 1. Opaque queries may use masks=0, mask_count=0. The caller owns
+  // the same 48-byte, stream-ordered launch workspace; no full-hit buffer exists.
+  TiForgeOptixTraceAlphaFn trace_occlusion;
+  TiForgeOptixTraceInstanceAlphaFn trace_instance_occlusion;
+  TiForgeOptixTraceInstanceAlphaFn trace_instance_micromap_occlusion;
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(

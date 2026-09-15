@@ -59,6 +59,7 @@ _ALPHA_MASK = 1 << 11
 _INSTANCE_OPACITY = 1 << 12
 _OPACITY_MICROMAP_IMPORT = 1 << 13
 _INSTANCE_SBT_OFFSET = 1 << 15
+_COMPACT_OCCLUSION = 1 << 16
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -69,6 +70,7 @@ _OPTIONAL_FEATURE_REQUIREMENTS = {
     "opacity_micromap": _OPACITY_MICROMAP_IMPORT,
     "program": 1 << 14,
     "instance_sbt_offset": _INSTANCE_SBT_OFFSET,
+    "occlusion": _COMPACT_OCCLUSION,
 }
 _loaded_providers = weakref.WeakSet()
 
@@ -330,6 +332,9 @@ class _ProviderApi(ctypes.Structure):
             ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p))),
         ("prepare_instance_sbt", ctypes.CFUNCTYPE(
             ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64))),
+        ("trace_occlusion", _TraceAlpha),
+        ("trace_instance_occlusion", _TraceAlpha),
+        ("trace_instance_micromap_occlusion", _TraceAlpha),
     ]
 
 
@@ -607,13 +612,17 @@ def _ray_storage(value, width, dtypes, name, *, access="readwrite"):
     element_shape = tuple(descriptor.element_shape)
     if descriptor.scalar_type not in dtypes:
         raise TaichiRuntimeError(f"OptiX ray {name} must use dtype {dtypes}")
-    if element_shape == () and len(shape) == 2 and shape[1] == width:
+    if width == 1 and element_shape == () and len(shape) == 1:
+        count = shape[0]
+    elif element_shape == () and len(shape) == 2 and shape[1] == width:
         count = shape[0]
     elif element_shape == (width,) and len(shape) == 1:
         count = shape[0]
     else:
         raise TaichiRuntimeError(
-            f"OptiX ray {name} must have scalar shape (N, {width}) or "
+            f"OptiX ray {name} must have "
+            + ("scalar shape (N,) or " if width == 1 else "")
+            + f"scalar shape (N, {width}) or "
             f"AOS vector-{width} shape (N,)"
         )
     if count <= 0:
@@ -1036,9 +1045,19 @@ class OptixRayQueryRecording(BackendCommandRecording):
         hit_indices=None,
         alpha_masks=None,
         any_hit=False,
+        _occlusion=False,
     ):
         if not isinstance(scene, (OptixTriangleScene, OptixInstanceScene)):
             raise TypeError("OptiX ray query recording requires an OptiX scene")
+        if _occlusion:
+            api = scene.provider._loaded.api
+            if not int(api.info.features) & _COMPACT_OCCLUSION or not all(
+                _api_has(api, name)
+                for name in ("trace_occlusion", "trace_instance_occlusion", "trace_instance_micromap_occlusion")
+            ):
+                raise TaichiRuntimeError("OptiX adapter does not support compact occlusion; use a newer Forge adapter")
+            if hit_indices is not None or not any_hit:
+                raise ValueError("Compact occlusion requires one output and first-hit traversal")
         if (
             isinstance(ray_count, bool)
             or not isinstance(ray_count, int)
@@ -1054,17 +1073,17 @@ class OptixRayQueryRecording(BackendCommandRecording):
             raise TypeError("OptiX any_hit must be a bool")
         micromap = isinstance(scene, OptixInstanceScene) and scene._has_micromaps
         if micromap:
-            if hit_indices is None:
+            if hit_indices is None and not _occlusion:
                 raise ValueError("OptiX OMM scenes require typed queries")
             if alpha_masks is None:
                 # OMM classification is intrinsic to this imported GAS. None
                 # accepts unknown states; callers can instead supply alpha masks.
                 alpha_masks = (None,) * scene.instance_count
         if alpha_masks is None:
-            if any_hit:
+            if any_hit and not _occlusion:
                 raise ValueError("OptiX any_hit requires an explicit alpha-mask query")
         else:
-            if hit_indices is None:
+            if hit_indices is None and not _occlusion:
                 raise ValueError("OptiX alpha masks require typed hits")
             alpha_masks = tuple(alpha_masks)
             count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
@@ -1111,24 +1130,35 @@ class OptixRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "alpha_masks", alpha_masks)
         object.__setattr__(self, "any_hit", any_hit)
         object.__setattr__(self, "_micromap", micromap)
+        object.__setattr__(self, "_occlusion", _occlusion)
+        object.__setattr__(
+            self, "_hit_layout", "u32_occlusion" if _occlusion else "legacy_float4" if hit_indices is None else "typed"
+        )
         identify_ray_recording(
-            self, "trace_any" if any_hit else "trace_closest", scene._effect_name,
-            ray_count=ray_count, hit_layout="legacy_float4" if hit_indices is None else "typed",
+            self,
+            "trace_occlusion" if _occlusion else "trace_any" if any_hit else "trace_closest",
+            scene._effect_name,
+            ray_count=ray_count,
+            hit_layout=self._hit_layout,
             alpha_masks=(
-                tuple(None if mask is None else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
-                      for mask in alpha_masks)
+                tuple(
+                    None if mask is None else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
+                    for mask in alpha_masks
+                )
                 if alpha_masks is not None and any(mask is not None for mask in alpha_masks)
                 else None
             ),
         )
         # OMM's distinct pipeline was prepared by the importing GAS adapter.
         if not micromap:
-            if alpha_masks is not None:
+            if alpha_masks is not None or _occlusion:
                 scene.provider._prepare_alpha(scene)
             elif hit_indices is not None:
                 scene.provider._prepare_typed(scene)
         if isinstance(scene, OptixInstanceScene):
-            scene._prepare_fixed_sbt(3 if micromap else 2 if alpha_masks is not None else 1 if hit_indices is not None else 0)
+            scene._prepare_fixed_sbt(
+                3 if micromap else 2 if alpha_masks is not None or _occlusion else 1 if hit_indices is not None else 0
+            )
 
     @property
     def resource_effects(self):
@@ -1155,7 +1185,10 @@ class OptixRayQueryRecording(BackendCommandRecording):
         return self.prepare_graph_execute(bindings)()
 
     def _binding_descriptions(self, bindings):
-        specs = [(self.rays, (f32,), 8), (self.hits, (f32,), 4)]
+        specs = [
+            (self.rays, (f32,), 8),
+            (self.hits, (i32, u32) if self._occlusion else (f32,), 1 if self._occlusion else 4),
+        ]
         if self.hit_indices is not None:
             specs.append((self.hit_indices, (i32, u32), 4))
         descriptions = []
@@ -1177,7 +1210,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         from taichi_forge._lib import core
 
         values, descriptions, textures = [], [], []
-        for index, mask in enumerate(self.alpha_masks):
+        for index, mask in enumerate(self.alpha_masks or ()):
             if mask is None:
                 continue
             gas = (
@@ -1217,7 +1250,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         validate_exact_bindings(self, bindings, "OptiX ray query")
         self.validate_graph_lifetime()
         descriptions = self._binding_descriptions(bindings)
-        if self.alpha_masks is not None:
+        if self.alpha_masks is not None or self._occlusion:
             return self._prepare_alpha_execute(bindings, descriptions)
         values = tuple(bindings[name] for name in self.binding_names)
         storage, owners = _prepare_storage(
@@ -1255,12 +1288,13 @@ class OptixRayQueryRecording(BackendCommandRecording):
         mask_values, mask_descriptions, textures = self._mask_bindings(bindings)
         # One retained allocation: 48 bytes of launch parameters, then one
         # 32-byte record per instance. Neither table nor pointers rebuild on run.
-        workspace = ScalarNdarray(u64, (6 + 4 * len(self.alpha_masks),))
+        masks_spec = self.alpha_masks or ()
+        workspace = ScalarNdarray(u64, (6 + 4 * len(masks_spec),))
         workspace_description = describe_storage(workspace)
         values = (
             bindings[self.rays],
             bindings[self.hits],
-            bindings[self.hit_indices],
+            *((bindings[self.hit_indices],) if self.hit_indices is not None else ()),
             *mask_values,
             workspace,
         )
@@ -1269,22 +1303,23 @@ class OptixRayQueryRecording(BackendCommandRecording):
             self.scene,
             values,
             descriptions,
-            (False, True, True, *([False] * len(mask_values)), True),
+            (False, True, *((True,) if self.hit_indices is not None else ()), *([False] * len(mask_values)), True),
             textures,
         )
-        masks = (_AlphaMask * len(self.alpha_masks))()
+        query_pointer_count = 2 if self._occlusion else 3
+        masks = (_AlphaMask * len(masks_spec))()
         active = 0
-        for index, mask in enumerate(self.alpha_masks):
+        for index, mask in enumerate(masks_spec):
             if mask is not None:
                 masks[index] = _AlphaMask(
-                    storage.pointers[3 + 2 * active],
-                    storage.pointers[4 + 2 * active],
+                    storage.pointers[query_pointer_count + 2 * active],
+                    storage.pointers[query_pointer_count + 1 + 2 * active],
                     storage.texture_objects[active],
                     mask.cutoff,
                     mask.channel,
                 )
                 active += 1
-        host = np.zeros(6 + 4 * len(self.alpha_masks), dtype=np.uint64)
+        host = np.zeros(6 + 4 * len(masks_spec), dtype=np.uint64)
         host[6:] = np.frombuffer(bytes(masks), dtype=np.uint64)
         workspace.from_numpy(host)
         api = self.scene.provider._loaded.api
@@ -1297,28 +1332,36 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 else api.trace_alpha
             )
         )
+        if self._occlusion:
+            function = (
+                api.trace_instance_micromap_occlusion
+                if self._micromap
+                else (
+                    api.trace_instance_occlusion if isinstance(self.scene, OptixInstanceScene) else api.trace_occlusion
+                )
+            )
         desc = _AlphaTraceDesc(
             ctypes.sizeof(_AlphaTraceDesc),
             self.ray_count,
-            *storage.pointers[:3],
+            storage.pointers[0],
+            storage.pointers[1],
+            0 if self._occlusion else storage.pointers[2],
             0,
-            storage.pointers[-1] + 48,
+            storage.pointers[-1] + 48 if masks_spec else 0,
             storage.pointers[-1],
-            len(self.alpha_masks),
+            len(masks_spec),
             int(self.any_hit),
         )
         return _PreparedOptixCall(
             self.scene,
             storage,
-            partial(
-                _invoke_checked, api, function, self.scene._scene, ctypes.byref(desc)
-            ),
+            partial(_invoke_checked, api, function, self.scene._scene, ctypes.byref(desc)),
             owners,
         )
 
     def memory_report(self):
         report = self.scene.memory_report()
-        if self.alpha_masks is None:
+        if self.alpha_masks is None and not self._occlusion:
             return report
         return make_memory_report(
             report.provider,
@@ -1326,8 +1369,12 @@ class OptixRayQueryRecording(BackendCommandRecording):
             (
                 *report.components,
                 HardwareMemoryComponent(
-                    "alpha_workspace_per_prepared_binding",
-                    48 + 32 * len(self.alpha_masks),
+                    (
+                        "occlusion_workspace_per_prepared_binding"
+                        if self._occlusion
+                        else "alpha_workspace_per_prepared_binding"
+                    ),
+                    48 + 32 * len(self.alpha_masks or ()),
                     True,
                     "provider_generation",
                     "runtime",
@@ -1361,7 +1408,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 "kind": item.scene._query_kind,
                 "ray_count": item.ray_count,
                 "provider_abi": PROVIDER_ABI_NAME,
-                "hit_layout": "legacy_float4" if item.hit_indices is None else "typed",
+                "hit_layout": item._hit_layout,
                 "alpha_masks": (
                     None
                     if item.alpha_masks is None
@@ -2153,6 +2200,25 @@ class OptixInstanceScene:
             any_hit=any_hit,
         )
 
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None):
+        """Write one i32/u32 flag per ray: 1 for an accepted hit, 0 for a miss.
+
+        Fixed bindings accept contiguous scalar (N,) or (N,1) storage. Optional
+        alpha masks use the same per-instance policy as record_typed; imported
+        opacity micromaps keep their classification and unknown-state policy.
+        No hit position, distance, barycentrics or indices are produced.
+        """
+        self._validate_lifetime()
+        return OptixRayQueryRecording(
+            self,
+            ray_count,
+            rays=rays,
+            hits=occluded,
+            alpha_masks=alpha_masks,
+            any_hit=True,
+            _occlusion=True,
+        )
+
     def trace_typed(self, rays, hits, hit_indices):
         ray_count = _ray_storage(rays, 8, (f32,), "rays")[1]
         self.record_typed(ray_count).execute(
@@ -2387,6 +2453,24 @@ class OptixTriangleScene:
             hit_indices=hit_indices,
             alpha_masks=alpha_masks,
             any_hit=any_hit,
+        )
+
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None):
+        """Write one i32/u32 flag per ray without producing full hit records.
+
+        Output is contiguous scalar (N,) or (N,1) storage: 1 for the first
+        accepted intersection, 0 for a miss. alpha_masks, when provided, has
+        one entry and follows record_typed's filtering policy.
+        """
+        self._validate_lifetime()
+        return OptixRayQueryRecording(
+            self,
+            ray_count,
+            rays=rays,
+            hits=occluded,
+            alpha_masks=alpha_masks,
+            any_hit=True,
+            _occlusion=True,
         )
 
     def trace_typed(self, rays, hits, hit_indices):

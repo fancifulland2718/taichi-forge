@@ -46,7 +46,7 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1";
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1-occlusion1";
 constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
                                TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
@@ -62,7 +62,8 @@ constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
                                TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
                                TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT |
                                TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE |
-                               TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET;
+                               TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET |
+                               TI_FORGE_OPTIX_FEATURE_COMPACT_OCCLUSION;
 
 void clear_error_state() {
   last_error.clear();
@@ -1699,14 +1700,18 @@ TiForgeOptixResult trace_instance_scene_typed(
       "optixLaunch(typed instance scene)");
 }
 
-template <typename SceneType, bool Micromap = false>
+template <typename SceneType, bool Micromap = false, bool Occlusion = false>
 TiForgeOptixResult launch_alpha(SceneType *scene,
-                                 uint32_t instance_count,
-                                 const TiForgeOptixAlphaTraceDesc *desc) {
+                               uint32_t instance_count,
+                               const TiForgeOptixAlphaTraceDesc *desc) {
   clear_error_state();
   if (scene == nullptr || desc == nullptr || desc->struct_size < sizeof(*desc) ||
-      !desc->ray_count || !desc->rays || !desc->hits || !desc->hit_indices ||
-      !desc->masks || !desc->launch_params || desc->mask_count != instance_count ||
+      !desc->ray_count || !desc->rays || !desc->hits ||
+      (Occlusion ? (desc->hit_indices != 0 || desc->any_hit != 1)
+                 : !desc->hit_indices) ||
+      !desc->launch_params ||
+      (!(Occlusion && !desc->masks && desc->mask_count == 0) &&
+       (!desc->masks || desc->mask_count != instance_count)) ||
       desc->any_hit > 1 ||
       !(Micromap ? scene->context->micromap_ready : scene->context->alpha_ready)
            .load(std::memory_order_acquire)) {
@@ -1719,7 +1724,7 @@ TiForgeOptixResult launch_alpha(SceneType *scene,
   if (!sbt) return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "alpha instance SBT compatibility is not prepared");
   const AlphaLaunchParams params{
       {desc->rays, desc->hits, scene->ias_handle, desc->hit_indices},
-      desc->masks, desc->any_hit, 0};
+      desc->masks, desc->any_hit, Occlusion ? 1u : 0u};
   auto result = cuda_check(cuMemcpyHtoDAsync(desc->launch_params, &params,
                                            sizeof(params), stream),
                            "cuMemcpyHtoDAsync(alpha launch params)");
@@ -1750,6 +1755,24 @@ TiForgeOptixResult trace_instance_micromap(
     const TiForgeOptixAlphaTraceDesc *desc) {
   auto *scene = static_cast<InstanceScene *>(raw_scene);
   return launch_alpha<InstanceScene, true>(scene, scene ? scene->instance_count : 0, desc);
+}
+
+TiForgeOptixResult trace_occlusion(TiForgeOptixTriangleScene raw_scene,
+                                  const TiForgeOptixAlphaTraceDesc *desc) {
+  return launch_alpha<Scene, false, true>(static_cast<Scene *>(raw_scene), 1, desc);
+}
+
+TiForgeOptixResult trace_instance_occlusion(TiForgeOptixInstanceScene raw_scene,
+                                           const TiForgeOptixAlphaTraceDesc *desc) {
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  return launch_alpha<InstanceScene, false, true>(scene, scene ? scene->instance_count : 0, desc);
+}
+
+TiForgeOptixResult trace_instance_micromap_occlusion(
+    TiForgeOptixInstanceScene raw_scene,
+    const TiForgeOptixAlphaTraceDesc *desc) {
+  auto *scene = static_cast<InstanceScene *>(raw_scene);
+  return launch_alpha<InstanceScene, true, true>(scene, scene ? scene->instance_count : 0, desc);
 }
 
 TiForgeOptixResult get_instance_scene_memory(
@@ -1973,6 +1996,9 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->get_program_api = get_program_api;
   out_api->create_instance_scene_sbt = create_instance_scene_sbt;
   out_api->prepare_instance_sbt = prepare_instance_sbt;
+  out_api->trace_occlusion = trace_occlusion;
+  out_api->trace_instance_occlusion = trace_instance_occlusion;
+  out_api->trace_instance_micromap_occlusion = trace_instance_micromap_occlusion;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

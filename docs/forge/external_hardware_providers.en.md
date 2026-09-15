@@ -803,6 +803,30 @@ Word-aligned query storage is a separate adapter feature bit. Legacy adapters
 without that feature require 16-byte aligned ray/hit addresses, rejected at
 preparation if unmet; no misaligned access is passed to their old PTX.
 
+#### Compact OptiX occlusion
+
+For shadows or visibility tests that only consume a yes/no answer, triangle
+and instance scenes expose `scene.record_occlusion(N, rays="rays",
+occluded="occluded", alpha_masks=None)`. Bind the existing f32 `(N, 8)` rays
+and a contiguous i32/u32 `(N,)` or `(N, 1)` output. Every invocation writes
+`1` for an accepted hit within the ray interval and `0` for a miss.
+
+```python
+flags = ti.ndarray(ti.u32, N)
+query = scene.record_occlusion(N)
+builder.append_native(query, admission="explicit")
+# Bind "rays" and "occluded" when preparing the enclosing Graph.
+```
+
+This route stops at the first accepted intersection and does not produce
+distance, barycentrics or IDs. It needs 4 output bytes per ray instead of the
+32 bytes of typed hits; ray generation and input packing are unchanged.
+Optional alpha masks and imported OMM use the same acceptance policy as typed
+queries, including OMM unknown states. Bindings and the small launch workspace
+are retained by the prepared command; reuse the bound Graph for repeated work.
+It remains runtime-ordered, not CUDA Graph capture. Older adapters without the
+`occlusion` feature reject preparation; existing typed queries remain usable.
+
 #### OptiX alpha-mask queries
 
 `record_typed(..., alpha_masks=..., any_hit=False)` optionally filters triangle

@@ -633,6 +633,26 @@ pipeline memory 仍为 unknown。typed caller 输出为每 ray 32 bytes，旧布
 word-aligned query storage 使用独立 adapter feature bit。没有此能力的旧 adapter 要求
 ray/hit 地址按 16 bytes 对齐，不满足时在准备阶段拒绝，不把未对齐指针传给旧 PTX。
 
+#### OptiX 紧凑遮挡查询
+
+阴影或可见性测试只需要是否命中时，triangle/instance scene 可使用
+`scene.record_occlusion(N, rays="rays", occluded="occluded", alpha_masks=None)`。
+输入沿用 f32 `(N, 8)` 射线；输出为连续 i32/u32 `(N,)` 或 `(N, 1)`，每次执行写入
+`1`（射线区间内存在接受的命中）或 `0`（未命中）。
+
+```python
+flags = ti.ndarray(ti.u32, N)
+query = scene.record_occlusion(N)
+builder.append_native(query, admission="explicit")
+# 准备完整 Graph 时绑定 "rays" 和 "occluded"。
+```
+
+该路径在首个有效命中后结束，不输出距离、重心或 ID；每条射线输出由 typed hit 的 32 字节
+减为 4 字节，但不消除射线生成和输入 packing。可选 alpha mask 与导入 OMM 沿用 typed 查询
+的接受语义，包括 unknown 状态。prepared command 保留绑定和小型 launch workspace，连续
+调用应复用 bound Graph。执行仍为 runtime-ordered，不代表 CUDA Graph capture。旧 adapter
+缺少 `occlusion` 能力时在准备阶段拒绝此接口，原 typed 查询保持可用。
+
 #### OptiX alpha-mask 查询
 
 `record_typed(..., alpha_masks=..., any_hit=False)` 可在 OptiX 设备程序中过滤三角形命中。

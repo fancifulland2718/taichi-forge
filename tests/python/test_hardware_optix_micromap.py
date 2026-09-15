@@ -116,6 +116,10 @@ def test_baked_omm_microtriangle_queries_refit_and_retained_lifetime(format, ind
         any_hit = scene.record_typed(
             count, alpha_masks=(mask, None), any_hit=True
         ).prepare_graph_execute(bindings)
+        flags = ti.ndarray(ti.u32, count)
+        compact = scene.record_occlusion(count, alpha_masks=(mask, None)).prepare_graph_execute(
+            dict(rays=rays, occluded=flags, uvs=uvs, alpha=texture)
+        )
         per_map = [0, 1, 0, 1] if format == 1 else [0, 1, 2, 3]
         states = np.array(
             per_map * 2 + ([0] * 4 + [1] * 4 + [2] * 4 + [3] * 4 if indexed else [])
@@ -140,6 +144,14 @@ def test_baked_omm_microtriangle_queries_refit_and_retained_lifetime(format, ind
                 any_hit()
                 np.testing.assert_array_equal(ids.to_numpy()[:, 3], 1)
                 np.testing.assert_allclose(hits.to_numpy()[~accepted, 0], 2)
+                # Exclude the opaque back layer. Classified transparent cells
+                # must miss even when the fallback alpha texture says opaque.
+                rays_host[:, 7] = 1.75
+                rays.from_numpy(rays_host)
+                compact()
+                np.testing.assert_array_equal(flags.to_numpy(), accepted.astype(np.uint32))
+                rays_host[:, 7] = 10
+                rays.from_numpy(rays_host)
         memory = {item.name: item for item in front.memory_report().components}
         assert memory["opacity_micromap_array_and_indices"].requested_bytes > 0
         assert not memory["opacity_micromap_import_temporary"].resident

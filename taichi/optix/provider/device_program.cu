@@ -84,6 +84,11 @@ static_assert(sizeof(LaunchParams) == 48, "Alpha launch wire layout changed");
 extern "C" __constant__ LaunchParams params;
 
 extern "C" __global__ void __miss__forge_batch_ray() {
+#if TI_FORGE_OPTIX_TYPED == 2
+  if (params.reserved == 1) {
+    optixSetPayload_0(0u);
+  }
+#endif
 }
 
 #if !TI_FORGE_OPTIX_TYPED
@@ -117,6 +122,22 @@ extern "C" __global__ void __closesthit__forge_batch_ray() {
 extern "C" __global__ void __raygen__forge_batch_ray_typed() {
   const unsigned int index = optixGetLaunchIndex().x;
   const RayRecord ray = params.rays[index];
+#if TI_FORGE_OPTIX_TYPED == 2
+  if (params.reserved == 1) {
+    // Visibility needs no distance, indices, barycentrics or closest-hit shader.
+    unsigned int occluded = 1;
+    unsigned int flags = OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT |
+                         OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT;
+    if (!params.masks) flags |= OPTIX_RAY_FLAG_DISABLE_ANYHIT;
+    optixTrace(params.traversable,
+               make_float3(ray.origin_tmin.x, ray.origin_tmin.y, ray.origin_tmin.z),
+               make_float3(ray.direction_tmax.x, ray.direction_tmax.y, ray.direction_tmax.z),
+               ray.origin_tmin.w, ray.direction_tmax.w, 0.0f, OptixVisibilityMask(0xff),
+               flags, 0, 1, 0, occluded);
+    reinterpret_cast<unsigned int *>(params.hits)[index] = occluded;
+    return;
+  }
+#endif
   unsigned int t = __float_as_uint(-1.0f);
   unsigned int primitive = ~0u, instance = ~0u, custom = ~0u;
   unsigned int u = 0, v = 0, hit = 0;

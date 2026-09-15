@@ -179,6 +179,20 @@ def test_optix_alpha_device_graph_and_retained_bindings(instanced, monkeypatch):
         ti.sync()
         assert ids.to_numpy()[::2, 3].all()
         assert not ids.to_numpy()[1::2, 3].any()
+        # Compact queries keep the same alpha traversal, but no full-hit
+        # storage is bound or allocated by the adapter.
+        flags = ti.ndarray(ti.u32, count)
+        compact_args = {key: value for key, value in args.items() if key not in ("hits", "hit_indices")}
+        compact_args["occluded"] = flags
+        compact = scene.record_occlusion(count, alpha_masks=all_masks).prepare_graph_execute(compact_args)
+        for alpha in (0, 1, 0):
+            pixels.fill(alpha)
+            replacement.from_ndarray(pixels)
+            prepared()
+            compact()
+            ti.sync()
+            np.testing.assert_array_equal(flags.to_numpy(), ids.to_numpy()[:, 3])
+            np.testing.assert_array_equal(flags.to_numpy()[::2], alpha)
         with pytest.raises(ValueError, match="instance count"):
             scene.record_typed(count, alpha_masks=())
         with pytest.raises(RuntimeError, match="UV count"):
@@ -198,6 +212,12 @@ def test_optix_alpha_device_graph_and_retained_bindings(instanced, monkeypatch):
             scene.record_typed(count, alpha_masks=all_masks)
         api.struct_size = old_size
         provider._alpha_prepared = True
+        api.struct_size = _optix._ProviderApi.trace_occlusion.offset
+        try:
+            with pytest.raises(RuntimeError, match="compact occlusion"):
+                scene.record_occlusion(count)
+        finally:
+            api.struct_size = old_size
         # Explicit resource retirement is rejected before the provider sees it.
         replacement._delete_runtime_texture()
         with pytest.raises(RuntimeError, match="retired Texture"):
