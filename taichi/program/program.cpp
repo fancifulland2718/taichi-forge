@@ -330,6 +330,15 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
 }
 
 Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
+  if (!finished_) {
+    abort();
+  }
+}
+
+void Program::RuntimeSubmissionTransaction::abort() noexcept {
+  if (finished_) {
+    return;
+  }
   if ((gpu_timing_requested_ || cuda_concurrent_batch_) &&
       Program::active_runtime_submission_telemetry_transaction() == this) {
     Program::active_runtime_submission_telemetry_transaction() =
@@ -352,6 +361,11 @@ Program::RuntimeSubmissionTransaction::~RuntimeSubmissionTransaction() {
   // is sufficient: legacy synchronize/next completion retains responsibility
   // for any resources already pinned by that segment.
   submission_scope_.reset();
+  gpu_region_timings_.clear();
+  active_gpu_region_timings_.clear();
+  gpu_timing_.reset();
+  program_ = nullptr;
+  finished_ = true;
 }
 
 void *Program::RuntimeSubmissionTransaction::register_cuda_concurrent_stream(

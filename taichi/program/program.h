@@ -474,6 +474,7 @@ class TI_DLL_EXPORT Program {
     void begin_gpu_region_timing(const std::string &path_id);
     void end_gpu_region_timing(const std::string &path_id);
     void *register_cuda_concurrent_stream(void *stream);
+    void abort() noexcept;
     RuntimeCompletion finish();
     RuntimeSubmissionStatistics submission_statistics() const noexcept {
       return submission_statistics_;

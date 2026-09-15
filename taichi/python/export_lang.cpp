@@ -1236,6 +1236,8 @@ void export_lang(py::module &m) {
 
   py::class_<Program::RuntimeSubmissionTransaction>(
       m, "_RuntimeSubmissionTransaction")
+      .def("_abort", &Program::RuntimeSubmissionTransaction::abort,
+           py::call_guard<py::gil_scoped_release>())
       .def("_mark_submission",
            &Program::RuntimeSubmissionTransaction::mark_submission)
       .def("_begin_gpu_region_timing",

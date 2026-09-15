@@ -8776,3 +8776,34 @@ def test_graph_indirect_dispatch_validates_packet_and_aot_boundary():
         match="indirect dispatch.*JIT-only",
     ):
         module.add_graph("indirect", graph)
+
+
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_timed_submission_abort_does_not_depend_on_traceback_destruction(monkeypatch):
+    @ti.kernel
+    def increment(out: ti.types.ndarray(ti.i32, ndim=1)):
+        for i in out:
+            out[i] += 1
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(increment, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1))
+    graph = builder.compile()
+    out = ti.ndarray(ti.i32, 32)
+    out.fill(0)
+    original = graph._instance.run_with_gpu_timing
+
+    def fail_after_execution(prepared, transaction):
+        original(prepared, transaction)
+        raise RuntimeError("injected failure after timed execution")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(graph._instance, "run_with_gpu_timing", fail_after_execution)
+        with pytest.raises(RuntimeError, match="injected failure") as retained:
+            graph.submit({"out": out}, telemetry="timestamps")
+    # The traceback still owns the native transaction through the inner frame.
+    # Already-enqueued work must finish, and the next writer must not deadlock.
+    graph.submit({"out": out}).wait()
+    np.testing.assert_array_equal(out.to_numpy(), 2)
+    assert retained.traceback
+    ti.reset()
+    graph.close()

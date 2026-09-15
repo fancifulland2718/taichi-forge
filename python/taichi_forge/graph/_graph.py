@@ -19492,7 +19492,12 @@ class Graph:
         except BaseException:
             # A retained Python traceback otherwise keeps the native batch
             # open while lease cancellation or caller teardown tries to wait.
-            # Its destructor publishes already-enqueued work without waiting.
+            # Close explicitly: inner traceback frames can also retain it.
+            # Older shims keep their destructor-based cleanup behavior.
+            if transaction is not None:
+                abort = getattr(transaction, "_abort", None)
+                if abort is not None:
+                    abort()
             transaction = None
             if observation_lease is not None:
                 observation_lease.cancel()
