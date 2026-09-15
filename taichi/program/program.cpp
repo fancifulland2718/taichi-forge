@@ -506,6 +506,23 @@ void Program::RuntimeSubmissionTransaction::end_gpu_region_timing(
   active_gpu_region_timings_.pop_back();
 }
 
+void Program::RuntimeSubmissionTransaction::retain_recorded_gpu_timings(
+    Program *owner,
+    const std::vector<std::pair<std::string, StreamGpuTiming>> &timings) {
+  TI_ERROR_IF(finished_ || !gpu_timing_requested_ || owner != program_,
+              "Recorded GPU timing requires this runtime's active timed transaction");
+  for (const auto &[path, timing] : timings) {
+    gpu_region_timings_.push_back({path, timing});
+  }
+}
+
+void Program::retain_recorded_gpu_timings(
+    const std::vector<std::pair<std::string, StreamGpuTiming>> &timings) {
+  auto *transaction = active_runtime_submission_telemetry_transaction();
+  TI_ERROR_IF(!transaction, "Recorded GPU timing requires an active timed transaction");
+  transaction->retain_recorded_gpu_timings(this, timings);
+}
+
 RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
   TI_ERROR_IF(finished_, "Runtime submission transaction already finished");
   TI_ERROR_IF(!active_gpu_region_timings_.empty(),

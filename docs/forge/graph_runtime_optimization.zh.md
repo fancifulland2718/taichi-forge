@@ -175,10 +175,15 @@ for stage in report.pipeline.stages:
     print(stage.path_id, stage.name, stage.gpu_timestamp_scope, stage.gpu_duration_ns)
 ```
 
-`execution_stage` 对应已有执行边界：单个编译 Graph，或 prepared Vulkan 计算／图形序列中
-原本独立的分段。缓存命令与已发布绑定继续复用。一个 stage 包含多个 pass 时，**不能**将它解释为
-逐 pass 计时。合并多个 root 的单一 frame 与 fork/join frame 目前保留 whole-ticket 时间，
-不可获得的 stage 时间为 `None`，不是零。时间跨度可能包含依赖等待和 GPU 空闲，不等于纯 shader 时间。
+`execution_stage` 对应编译 Graph 或 native stage。prepared Vulkan 的合并 secondary、
+单 graphics queue 和 fork/join 缓存命令也能记录内部 source-stage 边界，不为计时拆分提交。
+首次计时会按实际在途并发量缓存带时间戳的命令版本，每个版本使用独立查询槽；ticket 冻结结果后
+才能复用。应单独预热诊断路径：首次可能准备参数和命令，缓存版本也占用额外内存，并随绑定／Graph
+关闭；driver query pool 字节数仍未知。普通执行命令及其物理身份不变。
+
+一个 stage 包含多个 kernel/pass 时，**不能**将它解释为逐 kernel/pass 计时。旧 shim 或不支持
+队列时间戳时，不可获得的时间为 `None`，不是零。时间跨度可能包含依赖等待和 GPU 空闲，不等于
+纯 shader 时间；并行 fork 分支有重叠，不能相加当作整帧时间。
 时间戳会标注 `gpu_measurement_path_changed=True`，完整帧收益应另用未插桩路径验证。
 query 由 ticket 持有，完成后读取，不在 pass 之间插入 host wait。
 普通执行及 `summary` 模式不记录这些时间戳。

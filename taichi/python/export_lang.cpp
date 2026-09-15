@@ -6159,6 +6159,10 @@ void export_lang(py::module &m) {
                   &gfx::FixedGraphRecording::supports_snode_tree_dependencies,
                   py::call_guard<py::gil_scoped_release>())
       .def("run", &gfx::FixedGraphRecording::run, py::call_guard<py::gil_scoped_release>())
+      .def("run_with_gpu_timing", &gfx::FixedGraphRecording::run_with_gpu_timing,
+           py::call_guard<py::gil_scoped_release>())
+      .def("timing_slot_available", &gfx::FixedGraphRecording::timing_slot_available,
+           py::call_guard<py::gil_scoped_release>())
       .def("close", &gfx::FixedGraphRecording::close, py::call_guard<py::gil_scoped_release>())
       .def("argument_bytes", &gfx::FixedGraphRecording::argument_bytes,
            py::call_guard<py::gil_scoped_release>())
@@ -6166,7 +6170,7 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>());
   m.def("_prepare_vulkan_graph_recording",
         [with_graph_arguments](Program &program, const py::list &sources, const py::dict &args,
-                              bool independent_graphics) {
+                              bool independent_graphics, const std::vector<std::string> &timing_paths) {
           std::vector<gfx::GraphRecordingSource> native_sources;
           for (const auto &source : sources) {
             if (py::isinstance<aot::CompiledGraph>(source)) {
@@ -6177,10 +6181,11 @@ void export_lang(py::module &m) {
           }
           auto schema = gfx::graph_recording_argument_schema(native_sources);
           return with_graph_arguments(&schema, args, [&](const auto &converted) {
-            return program.create_vulkan_graph_recording(native_sources, converted, independent_graphics);
+            return program.create_vulkan_graph_recording(native_sources, converted, independent_graphics, timing_paths);
           });
         }, py::arg("program"), py::arg("sources"), py::arg("args"),
-        py::arg("independent_graphics") = false, py::keep_alive<0, 1>());
+        py::arg("independent_graphics") = false, py::arg("timing_paths") = std::vector<std::string>{},
+        py::keep_alive<0, 1>());
   m.def("_publish_vulkan_graph_commands",
         &Program::publish_vulkan_graph_commands,
         py::call_guard<py::gil_scoped_release>());

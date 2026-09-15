@@ -27,6 +27,65 @@ def _scale_graph(name, ndim):
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_cached_secondary_timestamp_slots_freeze_before_reuse_and_reset():
+    program = impl.get_runtime().prog
+    graph = _scale_graph("factor", 1)
+    source = graph._spec.nodes[0].compiled_graph
+    data = ti.ndarray(ti.f32, 4096)
+    data.fill(1)
+    frames = [
+        core._prepare_vulkan_graph_recording(
+            program, [source, source], {"data": data.arr, "factor": 2.0},
+            timing_paths=["root/0", "root/1"],
+        )
+        for _ in range(4)
+    ]
+    assert all(frame.uses_secondary_commands() and frame.timing_slot_available() for frame in frames)
+    with pytest.raises(RuntimeError, match="active timed transaction"):
+        frames[0].run_with_gpu_timing()
+    with pytest.raises(RuntimeError, match="unique nonempty"):
+        core._prepare_vulkan_graph_recording(
+            program, [source, source], {"data": data.arr, "factor": 2.0},
+            timing_paths=["same", "same"],
+        )
+    completions = []
+    for frame in frames:
+        transaction = program._begin_runtime_submission_transaction(gpu_timing=True)
+        frame.run_with_gpu_timing()
+        assert not frame.timing_slot_available()
+        with pytest.raises(RuntimeError, match="earlier ticket"):
+            frame.run_with_gpu_timing()
+        completions.append(transaction._finish())
+    snapshots = []
+    for completion in reversed(completions):
+        completion.wait()
+        snapshot = completion._gpu_region_timings()
+        assert [entry["path_id"] for entry in snapshot] == ["root/0", "root/1"]
+        assert all(entry["available"] and entry["duration_ns"] >= 0 for entry in snapshot)
+        snapshots.append(snapshot)
+    assert all(frame.timing_slot_available() for frame in frames)
+    np.testing.assert_array_equal(data.to_numpy(), 256)
+    transaction = program._begin_runtime_submission_transaction(gpu_timing=True)
+    frames[0].run_with_gpu_timing()
+    pending = transaction._finish()
+    frames[0].close()
+    pending.wait()
+    assert pending._gpu_region_timings()[0]["available"]
+    for completion, snapshot in zip(reversed(completions), snapshots):
+        assert completion._gpu_region_timings() == snapshot
+    # A native frame may survive outside a public Graph owner. Its weak timing
+    # reference must not keep VkQueryPool alive beyond device destruction.
+    transaction = program._begin_runtime_submission_transaction(gpu_timing=True)
+    frames[1].run_with_gpu_timing()
+    last = transaction._finish()
+    ti.reset()
+    assert not frames[1].timing_slot_available()
+    assert last._gpu_region_timings()[0]["available"]
+    for frame in frames:
+        frame.close()
+
+
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_vulkan_fixed_graph_preparation_does_not_execute_and_frames_are_immutable(
     monkeypatch,
 ):

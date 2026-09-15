@@ -185,6 +185,7 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
         if binding_recipe:
             stats = graph.execution_stats()
+            assert executor._timing_frames is None
             assert stats.memory.persistent_argument_bytes == frame.argument_bytes()
             assert [s.last_path for s in stats.segments if s.kind == "cgraph"] == [
                 (
@@ -196,9 +197,11 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             assert stats.compiled_task_count == 3
             assert stats.counters_complete is False
 
-        if binding_recipe is True:
-            # Timestamp the existing cached compute/graphics/compute stages.
-            # Preparation remains forbidden, and each ticket owns its queries.
+        if binding_recipe:
+            # Coalesced frames lazily prepare query-isolated command variants.
+            # Existing segmented frames need no additional preparation.
+            if binding_recipe == "graphics_queue":
+                monkeypatch.setattr(executor, "_prepare", native_prepare)
             tickets = [graph.submit(bindings, telemetry="timestamps") for _ in range(4)]
             reports = [ticket.telemetry() for ticket in reversed(tickets)]
             for report in reports:
@@ -212,6 +215,20 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
                 else:
                     assert all(stage.gpu_duration_ns is None for stage in report.pipeline.stages)
             saved = reports[0].pipeline
+            if binding_recipe == "graphics_queue":
+                slots = executor._timing_frames[frame]
+                assert 1 <= len(slots) <= 4
+                assert all(slot.timing_slot_available() for slot in slots)
+                assert stats.memory.persistent_argument_bytes == graph.execution_stats().memory.persistent_argument_bytes
+                monkeypatch.setattr(executor, "_prepare", unexpected_native_prepare)
+                # Delayed/reversed reads and another batch must not overwrite
+                # previous ticket results or recreate cached command buffers.
+                # First batch may have needed fewer than four live slots if
+                # older tickets completed during preparation. Verify reuse at
+                # concurrency one, not an assumed peak of four.
+                for _ in range(4):
+                    graph.submit(bindings, telemetry="timestamps").wait()
+                assert tickets[-1].telemetry().pipeline == saved
             graph.submit(bindings).wait()
             assert tickets[-1].telemetry().pipeline == saved
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
@@ -228,6 +245,18 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
         monkeypatch.setattr(recording, "_prepare_packet", unexpected_prepare)
         graph.run(bindings)
         np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
+        if binding_recipe == "graphics_queue":
+            # New storage gets a distinct diagnostic pool; pending queries
+            # outlive explicit close and retain their old immutable snapshot.
+            monkeypatch.setattr(executor, "_prepare", unexpected_native_prepare)
+            with pytest.raises(AssertionError, match="rebuilt compute") as retained_failure:
+                graph.submit(bindings, telemetry="timestamps")
+            # Retain its traceback while executing again: no transaction lock
+            # or unpublished batch may depend on Python exception destruction.
+            graph.submit(bindings).wait()
+            assert retained_failure.traceback
+            monkeypatch.setattr(executor, "_prepare", native_prepare)
+            pending_timing = graph.submit(bindings, telemetry="timestamps")
         if binding_recipe is True:
             # Preparation of a later compute segment may fail after the first
             # owns native resources. Roll back only the new publication.
@@ -250,6 +279,8 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             graph.submit(bindings).wait()
             np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
         graph.close()
+        if binding_recipe == "graphics_queue":
+            assert all(stage.gpu_timestamp_exact for stage in pending_timing.telemetry().pipeline.stages)
         if binding_recipe:
             assert frame.argument_bytes() == 0
             if binding_recipe is True:
@@ -490,6 +521,12 @@ def test_independent_graphics_fork_joins_and_rejects_bound_aliases():
             graph.submit(binding).wait()
             np.testing.assert_allclose(result.to_numpy(), seed + 256.75, atol=1 / 255)
         previous = binding._version
+        timed = [graph.submit(binding, telemetry="timestamps") for _ in range(4)]
+        for ticket in reversed(timed):
+            report = ticket.telemetry()
+            assert report.pipeline.stage_count == 3
+            assert all(stage.gpu_timestamp_exact for stage in report.pipeline.stages)
+            assert all(0 <= stage.gpu_duration_ns <= report.gpu_duration_ns for stage in report.pipeline.stages)
         # Distinct symbolic names can still refer to one concrete allocation.
         # Reject at publication, without damaging the previous valid frame.
         with pytest.raises(RuntimeError, match="alias"):

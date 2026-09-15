@@ -214,13 +214,21 @@ for stage in report.pipeline.stages:
     print(stage.path_id, stage.name, stage.gpu_timestamp_scope, stage.gpu_duration_ns)
 ```
 
-`execution_stage` measures an existing execution boundary: a single compiled
-Graph, or a separately submitted stage in a prepared Vulkan compute/graphics
-sequence. Cached commands and published bindings are reused. A stage containing
-several passes is **not** a per-pass breakdown. Coalesced multi-root and fork/join
-frames currently retain whole-ticket timing; unavailable stage durations are
-`None`, not zero. Spans can include dependency waits and GPU idle time, not just
-shader execution. Timestamp instrumentation is reported as
+`execution_stage` measures a compiled Graph or a native stage. Prepared Vulkan
+frames also expose their source-stage boundaries inside coalesced secondary,
+graphics-queue and fork/join command buffers, without splitting their submissions.
+Timed submissions lazily cache instrumented command variants for the observed
+in-flight concurrency. Each variant has independent queries, and becomes reusable
+only after its ticket freezes the results. Warm this diagnostic path separately:
+first use can prepare argument images and commands, and the cached variants use
+additional memory. They close with the binding/Graph; driver query-pool bytes
+remain unknown. Ordinary commands and their physical identity are unchanged.
+
+A stage containing several kernels or passes is **not** a per-kernel/pass
+breakdown. Older shims or unsupported queue timestamp capabilities leave
+unavailable durations as `None`, not zero. Spans can include dependency waits and
+GPU idle time, not just shader execution; overlapping fork branches must not be
+summed as whole-frame time. Timestamp instrumentation is reported as
 `gpu_measurement_path_changed=True`; compare uninstrumented full-frame costs
 separately. Queries belong to the submission ticket and are read after completion,
 without a host wait between passes. Ordinary execution and `summary` mode do not

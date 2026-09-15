@@ -312,6 +312,7 @@ class TI_DLL_EXPORT GfxRuntime {
     std::vector<std::uint64_t> graphics_pipelines;
     std::optional<std::vector<DeviceAllocation>> buffers;
     std::vector<std::uint64_t> ray_resources;
+    std::string timing_path;
   };
 
   enum class GraphStructuredStrategy : std::uint32_t {
@@ -497,6 +498,7 @@ class TI_DLL_EXPORT GfxRuntime {
   struct GraphReplayState {
     GraphReplayExecutable executable;
     std::function<void()> fixed_submit;
+    std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> fixed_gpu_timings;
     // Cold invalidation index. These roots are pinned by the command payload;
     // replay never revalidates or traverses the tree list.
     std::vector<int> fixed_snode_tree_ids;
@@ -545,7 +547,8 @@ class TI_DLL_EXPORT GfxRuntime {
       const std::vector<GraphRecordingOperation> &operations,
       std::vector<std::shared_ptr<void>> owners,
       std::vector<int> snode_tree_ids = {},
-      bool independent_graphics = false);
+      bool independent_graphics = false,
+      std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> *timings = nullptr);
   void launch_prepared_graph(std::uint64_t replay_key);
   void retire_graphics_pipeline_recordings(std::uint64_t pipeline);
   void retire_ray_resource_recordings(std::uint64_t resource);

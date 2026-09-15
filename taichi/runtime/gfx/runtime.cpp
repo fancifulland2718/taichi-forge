@@ -2506,6 +2506,7 @@ GfxRuntime::GraphReplayExecutable::known_persistent_argument_bytes() const {
 
 void GfxRuntime::GraphReplayState::reset() {
   fixed_submit = {};
+  fixed_gpu_timings.reset();
   fixed_snode_tree_ids.clear();
   fixed_graphics_pipelines.clear();
   fixed_ray_resources.clear();
@@ -2737,7 +2738,8 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
     const std::vector<GraphRecordingOperation> &operations,
     std::vector<std::shared_ptr<void>> owners,
     std::vector<int> snode_tree_ids,
-    bool independent_graphics) {
+    bool independent_graphics,
+    std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> *timings) {
   // On a cold failure release the host API lock before registration retirement
   // (registry -> runtime is also the order used by reset and late destruction).
   auto registration = register_graph_replay(1);
@@ -2748,6 +2750,10 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   // Build transactionally before publishing a registration. No mathematical
   // dispatch or queue submission occurs during argument/descriptor preparation.
   GraphReplayState state;
+  if (timings) {
+    state.fixed_gpu_timings =
+        std::make_shared<std::vector<std::pair<std::string, StreamGpuTiming>>>();
+  }
   auto &executable = state.executable;
   executable.bind_device(device_);
   auto payload = std::make_shared<GraphReplayExecutable::Slot>();
@@ -2915,7 +2921,25 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
   }
   commands->memory_barrier();
   std::size_t kernel_index = 0;
-  for (const auto &operation : operations) {
+  StreamGpuTiming active_timing;
+  const auto begin_timing = [&](std::size_t index, Stream *stream) {
+    if (timings && (index == 0 || operations[index - 1].timing_path != operations[index].timing_path)) {
+      active_timing = stream->begin_gpu_timing_inline(commands.get());
+      state.fixed_gpu_timings->emplace_back(operations[index].timing_path, active_timing);
+    }
+  };
+  const auto end_timing = [&](std::size_t index, Stream *stream) {
+    if (timings && (index + 1 == operations.size() ||
+                    operations[index + 1].timing_path != operations[index].timing_path)) {
+      stream->end_gpu_timing_inline(active_timing, commands.get());
+      active_timing.reset();
+    }
+  };
+  auto *compute_timing_stream = graphics_queue && !independent_graphics
+                                   ? graphics_device->get_graphics_stream()
+                                   : device_->get_compute_stream();
+  for (std::size_t operation_index = 0; operation_index < operations.size(); ++operation_index) {
+    const auto &operation = operations[operation_index];
     if (operation.external) {
       if (independent_graphics) {
         prefix_commands = std::move(commands);
@@ -2925,6 +2949,9 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
                     "Independent graphics command allocation failed");
         commands = std::move(graphics);
       }
+      auto *stream = independent_graphics ? graphics_device->get_graphics_stream()
+                                         : compute_timing_stream;
+      begin_timing(operation_index, stream);
       for (const auto &[image, layout] : operation.images) {
         TI_ERROR_IF(image.device != device_ ||
                         last_image_layouts_.find(image.alloc_id) ==
@@ -2948,6 +2975,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
         }
       }
       operation.external(device_, commands.get());
+      end_timing(operation_index, stream);
       if (independent_graphics) {
         for (const auto &[image, layout] : operation.images) {
           if (layout != ImageLayout::shader_read) {
@@ -2965,6 +2993,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       commands->memory_barrier();
       continue;
     }
+    begin_timing(operation_index, compute_timing_stream);
     auto &pd = prepared[kernel_index++];
     const auto &tasks = pd.kernel->ti_kernel_attribs().tasks_attribs;
     for (std::size_t i = 0; i < tasks.size(); ++i) {
@@ -3071,6 +3100,7 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
       commands->memory_barrier();
       slot.resource_sets.push_back(std::move(resources));
     }
+    end_timing(operation_index, compute_timing_stream);
   }
   // Close the recorded layout cycle. The same immutable commands can then
   // replay without inspecting or changing per-image tracking on each launch.
@@ -3167,6 +3197,9 @@ std::unique_ptr<GraphReplayRegistration> GfxRuntime::prepare_fixed_graph(
           }
           launch();
         };
+  }
+  if (timings) {
+    *timings = state.fixed_gpu_timings;
   }
   graph_replay_states_.emplace(registration->replay_key(), std::move(state));
   return registration;

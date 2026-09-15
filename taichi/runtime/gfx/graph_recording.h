@@ -60,12 +60,15 @@ class TI_DLL_EXPORT FixedGraphRecording {
                       std::unique_ptr<GraphReplayRegistration> registration,
                       bool has_snode_tree_dependencies,
                       bool uses_graphics_queue = false,
-                      bool independent_graphics = false);
+                      bool independent_graphics = false,
+                      std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> timings = {});
   ~FixedGraphRecording();
   static bool supports_snode_tree_dependencies(Program &program,
                                               const aot::CompiledGraph &graph);
   static bool supports_graphics_queue(Program &program);
   void run();
+  void run_with_gpu_timing();
+  bool timing_slot_available() const;
   void close();
   std::uint64_t argument_bytes() const;
   bool uses_secondary_commands() const;
@@ -83,6 +86,9 @@ class TI_DLL_EXPORT FixedGraphRecording {
   bool independent_graphics_{false};
   mutable std::mutex mutex_;
   std::unique_ptr<GraphReplayRegistration> registration_;
+  // Only instrumented variants own these. Completion tickets retain them
+  // until immutable host snapshots are frozen, preventing premature reuse.
+  std::weak_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> timings_;
 };
 
 // Conversion schema only. This object is never used as an executable or AOT

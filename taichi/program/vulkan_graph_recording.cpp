@@ -84,12 +84,14 @@ FixedGraphRecording::FixedGraphRecording(
     std::unique_ptr<GraphReplayRegistration> registration,
     bool has_snode_tree_dependencies,
     bool uses_graphics_queue,
-    bool independent_graphics)
+    bool independent_graphics,
+    std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> timings)
     : program_(&program),
       has_snode_tree_dependencies_(has_snode_tree_dependencies),
       uses_graphics_queue_(uses_graphics_queue),
       independent_graphics_(independent_graphics),
-      registration_(std::move(registration)) {
+      registration_(std::move(registration)),
+      timings_(std::move(timings)) {
 }
 FixedGraphRecording::~FixedGraphRecording() = default;
 bool FixedGraphRecording::supports_graphics_queue(Program &program) {
@@ -138,6 +140,32 @@ void FixedGraphRecording::run() {
 void FixedGraphRecording::close() {
   std::lock_guard<std::mutex> lock(mutex_);
   registration_.reset();
+  timings_.reset();
+}
+bool FixedGraphRecording::timing_slot_available() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto timings = timings_.lock();
+  return registration_ && timings && !timings->empty() &&
+         std::all_of(timings->begin(), timings->end(), [](const auto &entry) {
+           return !entry.second || entry.second.use_count() == 1;
+         });
+}
+void FixedGraphRecording::run_with_gpu_timing() {
+  std::optional<Program::SNodeTreeLifecycleReadGuard> tree_guard;
+  if (has_snode_tree_dependencies_) {
+    tree_guard.emplace(program_->acquire_snode_tree_lifecycle_read_guard());
+  }
+  auto guard = program_->acquire_runtime_resource_submission_guard();
+  std::lock_guard<std::mutex> lock(mutex_);
+  const auto timings = timings_.lock();
+  TI_ERROR_IF(!registration_ || !timings || timings->empty(),
+              "Prepared GPU timing requires an open instrumented frame and transaction");
+  TI_ERROR_IF(!std::all_of(timings->begin(), timings->end(), [](const auto &entry) {
+                return !entry.second || entry.second.use_count() == 1;
+              }), "Prepared GPU timing slot still belongs to an earlier ticket");
+  program_->retain_recorded_gpu_timings(*timings);
+  registration_->launch_prepared();
+  program_->mark_runtime_submission_pending();
 }
 std::uint64_t FixedGraphRecording::argument_bytes() const {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -168,7 +196,14 @@ std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &sources,
     const std::unordered_map<std::string, aot::IValue> &args,
-    bool independent_graphics) {
+    bool independent_graphics,
+    const std::vector<std::string> &timing_paths) {
+  TI_ERROR_IF(!timing_paths.empty() &&
+                  (timing_paths.size() != sources.size() ||
+                   std::unordered_set<std::string>(timing_paths.begin(), timing_paths.end()).size() != timing_paths.size() ||
+                   std::any_of(timing_paths.begin(), timing_paths.end(),
+                               [](const auto &path) { return path.empty(); })),
+              "Prepared GPU timing requires one unique nonempty path per source");
   auto tree_guard = acquire_snode_tree_lifecycle_read_guard();
   auto scope = acquire_runtime_resource_graph_scope();
   TI_ERROR_IF(compile_config().arch != Arch::vulkan || compile_config().debug ||
@@ -250,7 +285,9 @@ Program::create_vulkan_graph_recording(
       tree_ids.push_back(dependency.tree_id);
     }
   };
+  std::size_t source_index = 0;
   for (const auto &source : sources) {
+    const auto first_operation = operations.size();
     if (const auto *graph_pointer =
             std::get_if<aot::CompiledGraph *>(&source.value)) {
       const auto &graph = **graph_pointer;
@@ -300,6 +337,12 @@ Program::create_vulkan_graph_recording(
                             command->buffer_uses(),
                             command->ray_resource_dependencies()});
     }
+    if (!timing_paths.empty()) {
+      for (std::size_t i = first_operation; i < operations.size(); ++i) {
+        operations[i].timing_path = timing_paths[source_index];
+      }
+    }
+    ++source_index;
   }
   std::sort(tree_ids.begin(), tree_ids.end());
   tree_ids.erase(std::unique(tree_ids.begin(), tree_ids.end()), tree_ids.end());
@@ -310,13 +353,16 @@ Program::create_vulkan_graph_recording(
   TI_ERROR_IF(graphics_queue &&
                   !gfx::FixedGraphRecording::supports_graphics_queue(*this),
               "Prepared mixed Graph requires a compute-capable graphics queue");
+  std::shared_ptr<std::vector<std::pair<std::string, StreamGpuTiming>>> timings;
   auto registration = launcher->runtime()->prepare_fixed_graph(
-      operations, std::move(owners), std::move(tree_ids), independent_graphics);
+      operations, std::move(owners), std::move(tree_ids), independent_graphics,
+      timing_paths.empty() ? nullptr : &timings);
   return std::make_shared<gfx::FixedGraphRecording>(*this,
                                                     std::move(registration),
                                                     has_tree_dependencies,
                                                     graphics_queue,
-                                                    independent_graphics);
+                                                    independent_graphics,
+                                                    std::move(timings));
 }
 }  // namespace taichi::lang
 #else
@@ -329,7 +375,8 @@ std::shared_ptr<gfx::FixedGraphRecording>
 Program::create_vulkan_graph_recording(
     const std::vector<gfx::GraphRecordingSource> &,
     const std::unordered_map<std::string, aot::IValue> &,
-    bool) {
+    bool,
+    const std::vector<std::string> &) {
   TI_ERROR("Prepared Vulkan Graph is unavailable in this build");
 }
 }  // namespace taichi::lang

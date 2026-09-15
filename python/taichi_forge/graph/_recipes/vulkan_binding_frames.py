@@ -202,6 +202,8 @@ class VulkanBindingFrameExecutor:
         self._program = impl.get_runtime().prog
         self._prepare = core._prepare_vulkan_graph_recording
         self._publish = core._publish_vulkan_graph_commands
+        self._source_timing_paths = tuple(stage["path_id"] for stage in spec.pipeline_definition)
+        self._timing_frames = None
         boundaries = prepared_boundaries(spec)
         self._segments = []
         self._segment_timing_paths = []
@@ -246,7 +248,7 @@ class VulkanBindingFrameExecutor:
     def prewarm(self):
         return self
 
-    def _frame(self, arguments, flattened=None, native_actions=None):
+    def _frame(self, arguments, flattened=None, native_actions=None, *, _timing=False):
         self._context.begin(arguments, flattened_args=flattened)
         frames = []
         actions = []
@@ -254,7 +256,11 @@ class VulkanBindingFrameExecutor:
             args = self._context.flattened_args()
             for segment in self._segments:
                 if isinstance(segment, tuple):
-                    frame = self._prepare(self._program, list(segment), args)
+                    frame = (
+                        self._prepare(self._program, list(segment), args, False, self._source_timing_paths)
+                        if _timing
+                        else self._prepare(self._program, list(segment), args)
+                    )
                     frames.append(frame)
                     # A missing secondary path is not an ordinary fallback.
                     if not frame.uses_secondary_commands():
@@ -271,7 +277,8 @@ class VulkanBindingFrameExecutor:
         finally:
             self._context.end()
         frame = _SegmentedBindingFrame(frames, actions, self._segment_timing_paths) if self._segmented else frames[0]
-        self._frames.add(frame)
+        if not _timing:
+            self._frames.add(frame)
         return frame
 
     def prepare_binding_version(self, version):
@@ -302,6 +309,11 @@ class VulkanBindingFrameExecutor:
         self._publish(self._program)
 
     def invalidate_runtime(self, preserve_executables=False):
+        if self._timing_frames is not None:
+            for slots in tuple(self._timing_frames.values()):
+                for slot in slots:
+                    slot.close()
+            self._timing_frames.clear()
         for frame in tuple(self._frames):
             frame.close()
         self._frames.clear()
@@ -318,9 +330,23 @@ class VulkanBindingFrameExecutor:
         try:
             if isinstance(frame, _SegmentedBindingFrame):
                 frame.run_with_gpu_timing(transaction)
+            elif hasattr(frame, "timing_slot_available"):
+                if self._timing_frames is None:
+                    self._timing_frames = weakref.WeakKeyDictionary()
+                slots = self._timing_frames.setdefault(frame, [])
+                slot = next((item for item in slots if item.timing_slot_available()), None)
+                if slot is None:
+                    # Cold growth only for a newly observed timed concurrency.
+                    # Tickets keep queries leased until results are frozen;
+                    # subsequent measurements reuse the immutable commands.
+                    slot = self._frame(
+                        invocation.arguments, invocation.flattened_args, invocation.native_actions, _timing=True
+                    )
+                    slots.append(slot)
+                slot.run_with_gpu_timing()
             else:
-                # A graphics-queue/fork-join frame has no per-root boundary.
-                # Preserve its commands and report only whole-ticket timing.
+                # Older native shims keep whole-ticket timing without changing
+                # the measured recipe or pretending to expose internal stages.
                 frame.run()
         finally:
             if version is None:
@@ -381,7 +407,7 @@ class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
         self.execution_kind = "vulkan_prepared_graphics_queue_graph"
         self.physical_submission_mode = "vulkan_complete_graphics_queue_immutable_frame"
 
-    def _frame(self, arguments, flattened=None, native_actions=None):
+    def _frame(self, arguments, flattened=None, native_actions=None, *, _timing=False):
         self._context.begin(arguments, flattened_args=flattened)
         frame = None
         try:
@@ -391,7 +417,17 @@ class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
                     sources.extend(segment)
                 else:
                     sources.append(native_actions[segment]._vulkan_graph_command())
-            frame = self._prepare(self._program, sources, self._context.flattened_args(), self.independent_graphics)
+            frame = (
+                self._prepare(
+                    self._program,
+                    sources,
+                    self._context.flattened_args(),
+                    self.independent_graphics,
+                    self._source_timing_paths,
+                )
+                if _timing
+                else self._prepare(self._program, sources, self._context.flattened_args(), self.independent_graphics)
+            )
             if not frame.uses_graphics_queue():
                 raise ValueError("mixed Graph recipe did not materialize on the graphics queue")
             if self.independent_graphics and not frame.uses_independent_graphics():
@@ -402,7 +438,8 @@ class VulkanGraphicsQueueBindingExecutor(VulkanBindingFrameExecutor):
             raise
         finally:
             self._context.end()
-        self._frames.add(frame)
+        if not _timing:
+            self._frames.add(frame)
         return frame
 
     @property

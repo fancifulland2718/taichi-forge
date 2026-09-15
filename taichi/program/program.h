@@ -473,6 +473,9 @@ class TI_DLL_EXPORT Program {
     void mark_submission() noexcept;
     void begin_gpu_region_timing(const std::string &path_id);
     void end_gpu_region_timing(const std::string &path_id);
+    void retain_recorded_gpu_timings(
+        Program *owner,
+        const std::vector<std::pair<std::string, StreamGpuTiming>> &timings);
     void *register_cuda_concurrent_stream(void *stream);
     void abort() noexcept;
     RuntimeCompletion finish();
@@ -1634,10 +1637,15 @@ class TI_DLL_EXPORT Program {
   std::shared_ptr<gfx::FixedGraphRecording> create_vulkan_graph_recording(
       const std::vector<gfx::GraphRecordingSource> &sources,
       const std::unordered_map<std::string, aot::IValue> &args,
-      bool independent_graphics = false);
+      bool independent_graphics = false,
+      const std::vector<std::string> &timing_paths = {});
   // Publish one complete prepared recipe without waiting. An enclosing
   // runtime submission transaction still owns its physical batch boundary.
   void publish_vulkan_graph_commands();
+  // Instrumented native recordings attach already-recorded queries to the
+  // active completion transaction; ordinary submission never calls this.
+  void retain_recorded_gpu_timings(
+      const std::vector<std::pair<std::string, StreamGpuTiming>> &timings);
 
   std::uint64_t create_cuda_cufft_plan_1d(std::size_t length,
                                           std::size_t batch_count,

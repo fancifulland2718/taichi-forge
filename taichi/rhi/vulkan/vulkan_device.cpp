@@ -5333,8 +5333,8 @@ StreamGpuTiming VulkanStream::begin_gpu_timing() {
 
 StreamGpuTiming VulkanStream::begin_gpu_timing_inline(
     CommandList *cmdlist) {
-  TI_ERROR_IF(submission_batch_depth_ == 0,
-              "Vulkan GPU timing requires an active submission batch");
+  // Recording an immutable diagnostic variant does not submit queue work.
+  // Its owner must prevent query reuse until completion snapshots are frozen.
   TI_ERROR_IF(cmdlist == nullptr,
               "Vulkan inline GPU timing requires a command list");
   const std::uint32_t valid_bits =
@@ -5380,8 +5380,6 @@ void VulkanStream::end_gpu_timing_inline(const StreamGpuTiming &timing,
   if (!timing) {
     return;
   }
-  TI_ERROR_IF(submission_batch_depth_ == 0,
-              "Vulkan GPU timing requires an active submission batch");
   TI_ERROR_IF(cmdlist == nullptr,
               "Vulkan inline GPU timing requires a command list");
   auto vulkan_timing =
