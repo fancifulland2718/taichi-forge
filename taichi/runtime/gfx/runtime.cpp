@@ -4310,8 +4310,9 @@ bool GfxRuntime::try_launch_graph(
                                sizeof(std::uint32_t));
       outer_initial->rw_buffer(1, nested_control->outer_counter,
                                sizeof(std::uint32_t));
-      outer_initial->rw_buffer(2, outer_status,
-                               sizeof(std::uint32_t));
+      if (nested_control->outer_has_status) {
+        outer_initial->rw_buffer(2, outer_status, sizeof(std::uint32_t));
+      }
       outer_initial->rw_buffer(3,
                                *slot->structured_control_buffer);
       bool inner_ready = true;
@@ -4334,18 +4335,22 @@ bool GfxRuntime::try_launch_graph(
         controller->rw_buffer(0, inner.inner_predicate,
                               sizeof(std::uint32_t));
         controller->rw_buffer(1, *slot->structured_control_buffer);
-        controller->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+        if (inner.inner_has_status) {
+          controller->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+        }
         inner_initial->rw_buffer(0, inner.inner_counter,
                                  sizeof(std::uint32_t));
-        inner_initial->rw_buffer(1, inner_status,
-                                 sizeof(std::uint32_t));
+        if (inner.inner_has_status) {
+          inner_initial->rw_buffer(1, inner_status, sizeof(std::uint32_t));
+        }
         inner_initial->rw_buffer(2, *slot->structured_control_buffer);
         inner_terminal->rw_buffer(0, inner.inner_predicate,
                                   sizeof(std::uint32_t));
         inner_terminal->rw_buffer(1, inner.inner_counter,
                                   sizeof(std::uint32_t));
-        inner_terminal->rw_buffer(2, inner_status,
-                                  sizeof(std::uint32_t));
+        if (inner.inner_has_status) {
+          inner_terminal->rw_buffer(2, inner_status, sizeof(std::uint32_t));
+        }
         inner_terminal->rw_buffer(3, *slot->structured_control_buffer);
         inner_ready =
             inner_ready &&
@@ -4360,8 +4365,9 @@ bool GfxRuntime::try_launch_graph(
                                 sizeof(std::uint32_t));
       outer_terminal->rw_buffer(1, nested_control->outer_counter,
                                 sizeof(std::uint32_t));
-      outer_terminal->rw_buffer(2, outer_status,
-                                sizeof(std::uint32_t));
+      if (nested_control->outer_has_status) {
+        outer_terminal->rw_buffer(2, outer_status, sizeof(std::uint32_t));
+      }
       outer_terminal->rw_buffer(3,
                                 *slot->structured_control_buffer);
       return inner_ready &&
@@ -4383,21 +4389,19 @@ bool GfxRuntime::try_launch_graph(
     controller->rw_buffer(0, structured_control->predicate,
                           sizeof(std::uint32_t));
     controller->rw_buffer(1, *slot->structured_control_buffer);
-    controller->rw_buffer(
-        2,
-        structured_control->has_status ? structured_control->status
-                                       : structured_control->counter,
-        sizeof(std::uint32_t));
+    // Match the compiled interface: a no-status shader has no binding 2.
+    // Binding a dummy counter is not equivalent after dead-code elimination.
+    if (structured_control->has_status) {
+      controller->rw_buffer(2, structured_control->status, sizeof(std::uint32_t));
+    }
     if (structured_terminal_observation) {
       terminal->rw_buffer(0, structured_control->predicate,
                           sizeof(std::uint32_t));
       terminal->rw_buffer(1, structured_control->counter,
                           sizeof(std::uint32_t));
-      terminal->rw_buffer(
-          2,
-          structured_control->has_status ? structured_control->status
-                                         : structured_control->counter,
-          sizeof(std::uint32_t));
+      if (structured_control->has_status) {
+        terminal->rw_buffer(2, structured_control->status, sizeof(std::uint32_t));
+      }
       terminal->rw_buffer(3, *slot->structured_control_buffer);
     }
     bool gate_ready = true;
