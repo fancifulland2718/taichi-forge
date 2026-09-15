@@ -64,6 +64,7 @@ class _PreparedProgramRecording(BackendCommandRecording):
             "execution": {
                 "initialization": "explicit_before_graph_binding",
                 "ordinary": "runtime_ordered_rerecord",
+                "submission_bridge": "native_c_abi" if self.launch._native_call is not None else "python_callback",
                 "capture": "unavailable",
                 "capture_reason": "optix_program_launch_not_capture_supported",
                 "compiler": "caller_supplied_optix_ptx",
@@ -91,7 +92,7 @@ class _PreparedProgramRecording(BackendCommandRecording):
     def prepare_graph_execute(self, bindings):
         # Cold binding proof only. Never allocate, initialize or upload here.
         self.validate_graph_bindings(bindings)
-        return self.launch.run
+        return self.launch._call
 
     def execute(self, bindings):
         return self.prepare_graph_execute(bindings)()
@@ -110,6 +111,7 @@ class _PreparedProgramRecording(BackendCommandRecording):
             debug_info={
                 "kind": "optix_program_prepared_launch",
                 "execution": "runtime_ordered_native_launch",
+                "submission_bridge": "native_c_abi" if self.launch._native_call is not None else "python_callback",
                 "initialization": "explicit_before_graph_binding",
                 "capture": "unavailable",
                 "capture_reason": "optix_program_launch_not_capture_supported",

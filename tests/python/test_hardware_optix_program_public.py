@@ -78,8 +78,13 @@ def _record(program, scene):
     )
 
 
+@pytest.mark.parametrize("native_bridge", [True, False])
 @test_utils.test(arch=ti.cuda, offline_cache=False)
-def test_public_program_reuses_owned_packet_and_rebinds_without_recompilation():
+def test_public_program_reuses_owned_packet_and_rebinds_without_recompilation(native_bridge, monkeypatch):
+    from taichi_forge._lib import core
+
+    if not native_bridge:
+        monkeypatch.delattr(core, "_bind_external_cuda_call")
     provider = _provider()
     gas, scene = _scene(provider)
     program = _program(provider)
@@ -97,12 +102,48 @@ def test_public_program_reuses_owned_packet_and_rebinds_without_recompilation():
         with pytest.raises(RuntimeError, match="prepared"):
             scene.close()
         launch.initialize().initialize()
+        assert (launch._native_call is not None) == native_bridge
+        assert launch.graph_recording()._graph_source_contract()["execution"]["submission_bridge"] == (
+            "native_c_abi" if native_bridge else "python_callback"
+        )
         for _ in range(3):
             launch.run()
         expected = [122, 12, 12, 12, 122, 12, 12, 12]
         np.testing.assert_array_equal(output.to_numpy(), expected)
         assert launch.memory_report().known_resident_requested_bytes == 256
         assert launch.preparation_info()["pinned_host_bytes"] == 256
+        if native_bridge:
+            # A provider failure must escape the same native submission scope,
+            # without retiring a healthy packet or leaking its storage lease.
+            import ctypes as c
+
+            message = b"injected prepared launch failure\0"
+
+            @c.CFUNCTYPE(c.c_int, c.c_void_p, c.c_uint64)
+            def fail(handle, stream):
+                return -7
+
+            @c.CFUNCTYPE(c.c_size_t, c.c_void_p, c.c_size_t)
+            def error(buffer, size):
+                if buffer:
+                    c.memmove(buffer, message, min(size, len(message)))
+                return len(message)
+
+            failure_call = core._bind_external_cuda_call(
+                launch._runtime_prog,
+                launch._storage,
+                c.cast(fail, c.c_void_p).value,
+                launch._handle.value,
+                c.cast(error, c.c_void_p).value,
+                (fail, error),
+            )
+            with pytest.raises(RuntimeError, match="injected prepared launch failure"):
+                failure_call()
+            failure_call.invalidate()
+            with pytest.raises(RuntimeError, match="retired"):
+                failure_call()
+            launch.run()
+            np.testing.assert_array_equal(output.to_numpy(), expected)
         rebound = ti.ndarray(ti.u32, 8)
         with recording.prepare({"out": rebound}) as second:
             second.initialize().run()
@@ -225,6 +266,7 @@ def test_prepared_program_graph_composes_refit_and_consumer_without_repreparatio
         diagnostic = command._as_graph_native_node().compile().debug_info
         assert diagnostic["capture"] == "unavailable"
         assert diagnostic["capture_reason"] == "optix_program_launch_not_capture_supported"
+        assert diagnostic["submission_bridge"] == "native_c_abi"
 
         @ti.kernel
         def move(t: ti.types.ndarray(ti.f32, ndim=2), shift: ti.f32):
@@ -264,6 +306,8 @@ def test_prepared_program_graph_composes_refit_and_consumer_without_repreparatio
             bound.update(shift=shift)
             with monkeypatch.context() as patched:
                 patched.setattr(launch, "initialize", no_repeat)
+                patched.setattr(launch, "_launch", no_repeat)
+                patched.setattr(launch, "_run", no_repeat)
                 patched.setattr(graph_adapter._PreparedProgramRecording, "validate_graph_bindings", no_repeat)
                 patched.setattr(graph_adapter._PreparedProgramRecording, "prepare_graph_execute", no_repeat)
                 graph.submit(bound).wait()
@@ -292,6 +336,8 @@ def test_program_graph_feedback_inflight_and_retirement(retire, monkeypatch):
     output.fill(999)
     result.fill(0)
     launch = _record(program, scene).prepare({"out": output}).initialize()
+    retained_call = launch._native_call
+    assert retained_call is not None
     graph = None
     try:
         command = launch.graph_recording()
@@ -345,6 +391,8 @@ def test_program_graph_feedback_inflight_and_retirement(retire, monkeypatch):
             assert all(item.closed for item in (launch, program, scene, gas, provider))
         with pytest.raises(RuntimeError, match="closed|reset|reinitialization"):
             graph.run(bound)
+        with pytest.raises(RuntimeError, match="retired"):
+            retained_call()
     finally:
         if graph is not None:
             graph.close()

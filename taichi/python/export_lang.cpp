@@ -45,6 +45,7 @@
 #include "taichi/program/storage_view.h"
 #include "taichi/python/export_storage_view.h"
 #include "taichi/python/export_vulkan_ray_program.h"
+#include "taichi/python/export_external_cuda_call.h"
 #include "taichi/program/vulkan_ray_program.h"
 #include "taichi/python/export.h"
 #include "taichi/math/svd.h"
@@ -1296,6 +1297,7 @@ void export_lang(py::module &m) {
               has_snode_tree_dependencies);
 
   export_vulkan_ray_program(m);
+  export_external_cuda_call(m);
   py::class_<VulkanRayInstanceInfo>(m, "VulkanRayInstanceInfo")
       .def(py::init<>())
       .def_readwrite("transform", &VulkanRayInstanceInfo::transform)

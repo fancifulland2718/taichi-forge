@@ -12,6 +12,7 @@ import struct
 from types import MappingProxyType
 import weakref
 
+from taichi_forge._lib import core
 from taichi_forge.hardware import _optix_program_abi as a
 from taichi_forge.hardware._memory import HardwareMemoryComponent, make_memory_report
 from taichi_forge.hardware._native_adapter import runtime_generation_matches
@@ -428,6 +429,7 @@ class OptixPreparedLaunch:
     def __init__(self, recording, bindings):
         self._handle = None
         self._call = _uninitialized
+        self._native_call = None
         if not isinstance(recording, OptixProgramRecording):
             raise TypeError("preparation requires an OptixProgramRecording")
         self.recording = recording
@@ -559,7 +561,20 @@ class OptixPreparedLaunch:
         if self.closed:
             _closed()
         self._runtime_prog._invoke_external_cuda_prepared(self._storage, self._initialize)
-        self._call = self._run
+        # Older compatible shims retain the callback route. Binding the optional
+        # native thunk is a preparation decision, never a replay-time probe.
+        bind_native = getattr(core, "_bind_external_cuda_call", None)
+        if bind_native is not None and self._native_call is None:
+            loaded = self.program.provider._loaded
+            self._native_call = bind_native(
+                self._runtime_prog,
+                self._storage,
+                c.cast(self.program._api.launch, c.c_void_p).value,
+                self._handle.value,
+                c.cast(loaded.api.get_last_error, c.c_void_p).value,
+                loaded,
+            )
+        self._call = self._native_call if self._native_call is not None else self._run
         self._initialized = True
         return self
 
@@ -632,6 +647,12 @@ class OptixPreparedLaunch:
             # Graph close completes in-flight work and drops prepared callables.
             for graph in tuple(self._graphs):
                 graph.close()
+            # Retire escaped callables before entering vendor destruction, which
+            # may release the GIL. Graph completion still precedes resource free.
+            self._call = _closed
+            if self._native_call is not None:
+                self._native_call.invalidate()
+                self._native_call = None
             scope = self._runtime_prog._begin_external_cuda_submission()
             _invoke_checked(self.program.provider._loaded.api, self.program._api.destroy_launch, self._handle)
             self._handle = None
