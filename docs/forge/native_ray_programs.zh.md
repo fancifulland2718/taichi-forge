@@ -134,6 +134,13 @@ Graph 按 runtime 顺序提交这个 prepared call，并与可 capture 的 CUDA 
 CompileIQ 只接收完整 recipe identity 与应用评价成本，不接收 RT 裸 block/tile/vendor 开关。
 保留 baseline，评价完整有效窗口，包括准备摊销、packing、refit、消费与完成。
 
+如果没有 immutable CUDA frame 候选，可读取
+`definition.recipe_catalog().discovery_report()["providers"]` 中 binding-frame provider 的
+`provider_explanation`。其中 `reasons` 区分尚不支持的 SNode／AS 绑定、缺少 capture 合同的
+native command，以及不符合单一编译 Graph 要求的拓扑。这些仅是该候选的准入原因，
+不表示整个 CUDA 后端没有 capture。特别地，typed OptiX batch query 仍走有序 native 路径，
+其周围符合条件的 kernel 分段可以 replay。不要为了生成候选而删除生命周期检查或改变 baseline。
+
 报告将 provider 声明的代码／布局／SBT／构建及资源计划事实与实测数据分开。
 物理执行身份不是实时指针或冷／热分配快照。资源替换可以保持等价计划身份，
 但 shader／布局／SBT 变化会使旧合同不适用。新进程重新建立等价 definition 与 program，

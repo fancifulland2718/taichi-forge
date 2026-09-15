@@ -172,6 +172,16 @@ CompileIQ sees complete recipe identities and application evaluation costs, not
 bare RT block/tile/vendor switches. Keep the baseline and measure a complete useful
 window, including preparation amortization, packing, refit, consumers and completion.
 
+If an immutable CUDA frame candidate is absent, inspect
+`definition.recipe_catalog().discovery_report()["providers"]` and the binding-frame
+provider's `provider_explanation`. Its `reasons` distinguish unsupported SNode/AS
+bindings, native commands without a capture contract, and non-single-Graph
+topology. These are candidate-specific admission reasons, not a statement that
+CUDA capture is unavailable everywhere. In particular, the typed OptiX batch
+query still uses its ordered native path; eligible surrounding kernel segments
+can replay. Do not remove lifetime checks or change the baseline just to obtain
+an immutable-frame candidate.
+
 Reports preserve provider-declared code/layout/SBT/build and resource-plan facts
 separately from measurements. Physical execution identity is not a live pointer
 or a cold/warm allocation snapshot. Resource replacement can retain an equivalent

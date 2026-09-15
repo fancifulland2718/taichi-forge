@@ -10,37 +10,48 @@ from taichi_forge.graph._recipes.families import (
 from taichi_forge.graph._recipes.fragments import GraphFragmentTask
 
 
-def _eligible(spec, backend):
+def _cuda_frame_rejections(spec, backend):
     from taichi_forge._lib import core
-    from taichi_forge.graph._graph import _CompiledCGraphNode
+    from taichi_forge.graph._graph import _CompiledCGraphNode, _CompiledNativeGraphNode
     from taichi_forge.lang import impl
 
     if backend != "cuda" or impl.current_cfg().arch != core.Arch.cuda:
-        return False
+        return ("backend_not_cuda",)
+    reasons = []
     if spec._acceleration_structure_binding_requirements:
-        return False
+        reasons.append("acceleration_structure_bindings_not_supported")
     native = getattr(core, "_CudaGraphBindingExecutor", None)
     if native is None or not native.available():
-        return False
+        return (*reasons, "native_binding_executor_unavailable")
     retained_events = getattr(native, "retains_completion_events_until_close", None)
     if retained_events is None or not retained_events():
-        return False
+        reasons.append("retained_completion_events_unavailable")
     if spec._texture_binding_requirements:
         supports_textures = getattr(native, "supports_sampled_texture_bindings", None)
         if supports_textures is None or not supports_textures():
-            return False
+            reasons.append("sampled_texture_bindings_unavailable")
         if any(arg.tag != core.ArgKind.TEXTURE for arg in spec._texture_binding_requirements):
-            return False
+            reasons.append("storage_texture_bindings_not_supported")
     config = impl.current_cfg()
-    if config.debug or config.kernel_profiler or len(spec.nodes) != 1:
-        return False
+    if config.debug or config.kernel_profiler:
+        reasons.append("debug_or_kernel_profiler_enabled")
+    if spec.snode_tree_dependency_info:
+        reasons.append("snode_bindings_not_supported")
+    if any(
+        isinstance(item, _CompiledNativeGraphNode)
+        and not getattr(getattr(item.executable, "_recording", None), "_graph_binding_frame_capture_safe", False)
+        for item in spec.nodes
+    ):
+        reasons.append("native_command_not_capture_safe")
+    if len(spec.nodes) != 1:
+        return (*reasons, "requires_single_compiled_graph")
     node = spec.nodes[0]
     if not isinstance(node, _CompiledCGraphNode):
-        return False
+        return (*reasons, "requires_single_compiled_graph")
     if getattr(node, "source_native_count", 0):
         supports_commands = getattr(native, "supports_capture_commands", None)
         if supports_commands is None or not supports_commands():
-            return False
+            reasons.append("native_command_capture_unavailable")
         # Frozen definitions expose sources; materialized segments expose their
         # actual execution leases. Neither discovery path creates vendor plans.
         sources = tuple(
@@ -53,15 +64,20 @@ def _eligible(spec, backend):
         if len(sources) != node.source_native_count or not all(
             getattr(source, "_graph_binding_frame_capture_safe", False) for source in sources
         ):
-            return False
-    return (
-        isinstance(node, _CompiledCGraphNode)
-        and spec.needs_runtime_args
-        and not spec.snode_tree_dependency_info
-        and not node.temporary_actions
-        and not node.parallel_dispatch_groups
-        and all(operation[0] in ("dispatch", "native") for operation in node.recipe_operations)
-    )
+            reasons.append("native_command_not_capture_safe")
+    if not spec.needs_runtime_args:
+        reasons.append("no_runtime_bindings")
+    if node.temporary_actions:
+        reasons.append("temporary_actions_not_supported")
+    if node.parallel_dispatch_groups:
+        reasons.append("parallel_dispatch_groups_not_supported")
+    if any(operation[0] not in ("dispatch", "native") for operation in node.recipe_operations):
+        reasons.append("operation_topology_not_supported")
+    return tuple(reasons)
+
+
+def _eligible(spec, backend):
+    return not _cuda_frame_rejections(spec, backend)
 
 
 class _BindingFrameExecutor:
@@ -200,6 +216,20 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
         domain_version="immutable-binding-frame-domain-v14",
         semantic_fingerprint="cuda-vulkan-composed-native-command-factories-v14",
     )
+
+    def explain_discovery(self, definition):
+        if definition.backend != "cuda":
+            return None
+        reasons = _cuda_frame_rejections(definition._runtime_spec, definition.backend)
+        return {
+            "scope": "cuda_immutable_argument_frames",
+            "eligible": not reasons,
+            "reasons": reasons,
+            "limitation": (
+                "This is immutable-frame recipe admission, not whole-backend CUDA capture availability. "
+                "The baseline can still replay eligible kernel segments around ordered native commands."
+            ),
+        }
 
     def fragments(self, definition):
         spec = definition._runtime_spec

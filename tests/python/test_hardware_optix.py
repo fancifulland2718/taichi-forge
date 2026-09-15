@@ -614,6 +614,21 @@ def test_optix_typed_hits_dense_bindings_and_retirement(storage_kind, monkeypatc
                     ),
                     ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "summary", ti.f32, ndim=1),
                 )
+            from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
+            from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
+
+            definition = builder.freeze()
+            catalog = definition.recipe_catalog(
+                providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
+            )
+            explanation = next(
+                item["provider_explanation"]
+                for item in catalog.discovery_report()["providers"]
+                if item["provider_namespace"] == "taichi_forge.graph.binding_frames"
+            )
+            assert not explanation["eligible"]
+            assert "native_command_not_capture_safe" in explanation["reasons"]
+            # Admission reporting must not disable the working ordered baseline.
             graph = builder.compile()
             arguments = {name: bound_values[name] for name in recording.binding_names}
             if summary is not None:
