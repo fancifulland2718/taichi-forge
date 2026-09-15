@@ -80,7 +80,8 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
     bool include_ambient_payload,
     bool include_active_slots = false,
     bool include_tombstone_count = false,
-    bool include_compact_child_pool = false) {
+    bool include_compact_child_pool = false,
+    std::size_t payload_alignment = 4) {
   TI_ERROR_IF(payload_stride == 0 || payload_stride % 4 != 0,
               "Hash SNode requires a positive 4-byte aligned payload cell "
               "size, got {} bytes.",
@@ -97,7 +98,7 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
                                  : payload_stride;
   layout.payload_offset =
       align_up(layout.key_offset + layout.table_capacity * 4,
-               static_cast<std::size_t>(4));
+               include_compact_child_pool ? std::size_t(4) : payload_alignment);
   layout.active_count_offset =
       align_up(layout.payload_offset +
                    payload_unit_stride * layout.table_capacity,
@@ -130,7 +131,7 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
         align_up(cursor, static_cast<std::size_t>(4));
     cursor = layout.compact_child_pool_overflow_offset + 4;
     layout.compact_child_pool_offset =
-        align_up(cursor, static_cast<std::size_t>(4));
+        align_up(cursor, payload_alignment);
     layout.compact_child_pool_stride = payload_stride;
     cursor = layout.compact_child_pool_offset +
              layout.compact_child_pool_stride *
@@ -138,12 +139,12 @@ inline HashSNodeFlatLayout compute_hash_snode_flat_layout(
   }
 
   if (include_ambient_payload) {
-    layout.ambient_offset = align_up(cursor, static_cast<std::size_t>(4));
+    layout.ambient_offset = align_up(cursor, payload_alignment);
     layout.container_stride =
         align_up(layout.ambient_offset + payload_stride,
-                 static_cast<std::size_t>(4));
+                 payload_alignment);
   } else {
-    layout.container_stride = align_up(cursor, static_cast<std::size_t>(4));
+    layout.container_stride = align_up(cursor, payload_alignment);
   }
   return layout;
 }

@@ -284,7 +284,9 @@ class StructCompiler {
         c.freelist_links_offset = static_cast<uint32_t>(cursor);
         cursor += 4 * capacity;
       }
-      cursor = (cursor + 3u) & ~size_t(3);
+      const auto payload_alignment =
+          std::max(size_t(4), cell_alignments_.at(desc.snode->id));
+      cursor = align_up(cursor, payload_alignment);
       c.pool_data_offset = static_cast<uint32_t>(cursor);
       // C-2.5 (2026-05)：Chunked 路径 pool_cells = chunk_size_cells（仅
       // chunk[0] 容量；chunk[k>0] 在独立 DeviceAllocation 不计入 cursor）。
@@ -297,7 +299,7 @@ class StructCompiler {
         // 恒为 0（与 LLVM ambient_val_addr 语义一致）。容量溢出的失败写会暂时
         // 路由到这里，并在下一同步边界报错；初始零值由池 buffer 的 fill(0)
         // 或 root buffer 的 memset(0) 提供（按 indep_pool 决定）。
-        cursor = (cursor + 3u) & ~size_t(3);
+        cursor = align_up(cursor, payload_alignment);
         c.has_ambient_zone = true;
         c.ambient_offset = static_cast<uint32_t>(cursor);
         cursor += cell_bytes;
@@ -390,6 +392,8 @@ class StructCompiler {
 
     SNodeDescriptor sn_desc;
     sn_desc.snode = sn;
+    size_t cell_alignment = 1;
+    size_t container_alignment = 1;
     if (is_place) {
       // G9.2 (2026-04-30): a `place` whose dt is a quant scalar
       // (QuantIntType / QuantFixedType / QuantFloatType) lives entirely
@@ -405,6 +409,7 @@ class StructCompiler {
       } else {
         sn_desc.cell_stride = data_type_size(sn->dt);
         sn_desc.container_stride = sn_desc.cell_stride;
+        cell_alignment = container_alignment = sn_desc.cell_stride;
       }
     } else {
       // Sort by size, so that smaller subfields are placed first.
@@ -414,6 +419,8 @@ class StructCompiler {
       int i = 0;
       for (auto &ch : sn->ch) {
         element_strides.push_back({compute_snode_size(ch.get()), i});
+        cell_alignment =
+            std::max(cell_alignment, container_alignments_.at(ch->id));
         i += 1;
       }
       std::sort(
@@ -425,6 +432,7 @@ class StructCompiler {
       std::size_t cell_stride = 0;
       for (auto &[snode_size, i] : element_strides) {
         auto &ch = sn->ch[i];
+        cell_stride = align_up(cell_stride, container_alignments_.at(ch->id));
         auto child_offset = cell_stride;
         auto *ch_snode = ch.get();
         cell_stride += snode_size;
@@ -432,15 +440,23 @@ class StructCompiler {
             ->second.mem_offset_in_parent_cell = child_offset;
         ch_snode->offset_bytes_in_parent_cell = child_offset;
       }
+      // Typed shader accesses and native byte copies must name the same bytes.
+      // Pad each repeated cell, not just the first child's absolute address.
+      cell_stride = align_up(cell_stride, cell_alignment);
       sn_desc.cell_stride = cell_stride;
+      container_alignment = cell_alignment;
 
       if (sn->type == SNodeType::bitmasked) {
+        container_alignment = std::max(cell_alignment, size_t(4));
         size_t num_cells = sn_desc.snode->num_cells_per_container;
         size_t bitmask_num_words =
             num_cells % 32 == 0 ? (num_cells / 32) : (num_cells / 32 + 1);
         sn_desc.container_stride =
             cell_stride * num_cells + bitmask_num_words * 4;
       } else if (sn->type == SNodeType::pointer) {
+        // The in-parent container contains u32 slots. Its payload is separately
+        // aligned in the allocator pool using cell_alignment.
+        container_alignment = 4;
         // Phase 2b: the pointer SNode container resident in the parent cell
         // holds only the slot array (4 bytes per cell). The actual child
         // cells (`cell_stride` bytes each, capacity = num_cells_per_container)
@@ -451,6 +467,7 @@ class StructCompiler {
         sn_desc.container_stride =
             sn_desc.snode->num_cells_per_container * 4;
       } else if (sn->type == SNodeType::hash) {
+        container_alignment = std::max(cell_alignment, size_t(4));
         TI_ERROR_IF(cell_stride == 0 || cell_stride % 4 != 0,
                     "Hash SNode on Vulkan requires a positive 4-byte aligned "
                     "payload cell size, got {} bytes.",
@@ -461,7 +478,8 @@ class StructCompiler {
             *sn, policy_.hash_compact_child_pool);
         const auto layout = compute_hash_snode_flat_layout(
             *sn, cell_stride, /*include_ambient_payload=*/true,
-            policy_.hash_active_list, include_tombstone, compact_child_pool);
+            policy_.hash_active_list, include_tombstone, compact_child_pool,
+            container_alignment);
         sn_desc.hash_table_capacity = layout.table_capacity;
         sn_desc.hash_state_offset = layout.state_offset;
         sn_desc.hash_key_offset = layout.key_offset;
@@ -485,6 +503,7 @@ class StructCompiler {
             layout.compact_child_pool_stride;
         sn_desc.container_stride = layout.container_stride;
       } else if (sn->type == SNodeType::dynamic) {
+        container_alignment = std::max(cell_alignment, size_t(4));
 #if defined(TI_VULKAN_DYNAMIC)
         // G4: append a u32 length counter at the end of each dynamic
         // container. Layout = [data: cell_stride * N][length u32]. The
@@ -522,6 +541,7 @@ class StructCompiler {
             sn->physical_type, sn->ch[0]->dt,
             sn->num_cells_per_container);
         std::size_t phys_bytes = data_type_size(sn->physical_type);
+        cell_alignment = container_alignment = phys_bytes;
         sn_desc.cell_stride = phys_bytes;
         sn_desc.container_stride = phys_bytes;
       } else if (sn->type == SNodeType::bit_struct) {
@@ -536,6 +556,7 @@ class StructCompiler {
                     "bit_struct physical type must be at least 32 bits on "
                     "Vulkan/SPIR-V backend.");
         std::size_t phys_bytes = data_type_size(sn->physical_type);
+        cell_alignment = container_alignment = phys_bytes;
         sn_desc.cell_stride = phys_bytes;
         sn_desc.container_stride = phys_bytes;
       } else {
@@ -544,6 +565,10 @@ class StructCompiler {
       }
     }
 
+    sn_desc.container_stride =
+        align_up(sn_desc.container_stride, container_alignment);
+    cell_alignments_[sn->id] = cell_alignment;
+    container_alignments_[sn->id] = container_alignment;
     sn->cell_size_bytes = sn_desc.cell_stride;
 
     sn_desc.total_num_cells_from_root = 1;
@@ -573,6 +598,9 @@ class StructCompiler {
   }
 
   SNodeDescriptorsMap snode_descriptors_;
+  // Compile-time facts only; emitted offsets/strides remain the runtime ABI.
+  std::unordered_map<int, size_t> cell_alignments_;
+  std::unordered_map<int, size_t> container_alignments_;
   PointerLayoutPolicy policy_;
 };
 

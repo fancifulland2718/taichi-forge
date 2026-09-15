@@ -2163,8 +2163,12 @@ class TaskCodegen : public IRVisitor {
     // B-3.c-1（2026-05）：sn 自身池的元数据 + pool_data + ambient 在 ON
     // 时位于 sn 自身的独立 NodeAllocatorPool buffer（B-3.c-2 把
     // pool_data + ambient 一并移入）；OFF 时退化为 root buffer。
+    // Read-only lookup only reads the parent slots. Declare the u32 payload
+    // metadata view only for allocating paths; otherwise it can survive in the
+    // binding manifest after SPIR-V DCE removes it (e.g. an i64-only reader).
     auto pool_meta_buffer =
-        contract.pool_buffer_binding_id >= 0
+        do_activate && !contract.deterministic_slot &&
+                contract.pool_buffer_binding_id >= 0
             ? get_buffer_value(
                   BufferInfo(BufferType::NodeAllocatorPool,
                              contract.pool_buffer_binding_id),
@@ -3241,7 +3245,9 @@ class TaskCodegen : public IRVisitor {
               spv::OpUDiv, ir_->u32_type(), val,
               ir_->uint_immediate_number(ir_->u32_type(), acc_shape));
         }
-        if (shape > 0 && shape != 1) {
+        if (shape == 1) {
+          val = ir_->uint_immediate_number(ir_->u32_type(), 0);
+        } else if (shape > 1) {
           val = ir_->make_value(
               spv::OpUMod, ir_->u32_type(), val,
               ir_->uint_immediate_number(ir_->u32_type(), shape));

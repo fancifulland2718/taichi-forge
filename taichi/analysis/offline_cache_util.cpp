@@ -125,6 +125,9 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
   serializer(config.spirv_adaptive_opt);
   serializer(config.spirv_adaptive_opt_threshold);
   if (arch_uses_spirv(config.arch)) {
+    // Old SPIR-V may address mixed-width SNodes with unaligned offsets/pools.
+    // This is a compiler layout revision, independent of wheel/commit identity.
+    serializer(std::string("spirv-snode-scalar-alignment-v1"));
     serializer(config.spirv_skip_loop_unroll);
   }
   // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
