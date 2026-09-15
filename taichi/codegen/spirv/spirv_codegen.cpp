@@ -5808,33 +5808,32 @@ class TaskCodegen : public IRVisitor {
       task_attribs_.advisory_num_threads_per_group = 1;
     }
 
-    auto root_buffer = get_buffer_value(BufferInfo(BufferType::Root, root_id),
-                                        PrimitiveType::u32);
-
     auto u32_t = ir_->u32_type();
 
-    // B-3.c-2（2026-05）：listgen 全扫描在不同 level 上访问的容器可能位于
-    // 不同 buffer——每跨过一个 pointer SNode（且其 binding_id>=0），后续
-    // level 的 slot/mask/length 都从该 pointer 自己的独立池 buffer 读。
-    // OFF 默认所有 binding_id==-1，level_buffers 全等于 root_buffer，行为
-    // 字节等价旧路径。
-    std::vector<spirv::Value> level_buffers((size_t)n);
+    // Descending through a pointer may switch subsequent slot/mask/length
+    // reads from the root allocation to that pointer's independent pool.
+    // Track the address space without declaring its descriptor yet. A pointer
+    // followed only by dense nodes never reads its payload pool during listgen;
+    // declaring that pool here leaves a stale binding after SPIR-V DCE.
+    std::vector<BufferInfo> level_buffers(
+        (size_t)n, BufferInfo(BufferType::Root, root_id));
     {
-      spirv::Value cur = root_buffer;
+      BufferInfo cur(BufferType::Root, root_id);
       for (int k = 0; k < n; ++k) {
         level_buffers[(size_t)k] = cur;
         if (path[k]->type == SNodeType::pointer) {
           const auto &c =
               compiled_structs_[root_id].pointer_contracts.at(path[k]->id);
           if (c.pool_buffer_binding_id >= 0) {
-            cur = get_buffer_value(
-                BufferInfo(BufferType::NodeAllocatorPool,
-                           c.pool_buffer_binding_id),
-                PrimitiveType::u32);
+            cur = BufferInfo(BufferType::NodeAllocatorPool,
+                             c.pool_buffer_binding_id);
           }
         }
       }
     }
+    auto level_buffer = [&](int k) {
+      return get_buffer_value(level_buffers[(size_t)k], PrimitiveType::u32);
+    };
 
     auto gid = ir_->cast(u32_t, ir_->get_global_invocation_id(0));
     auto num_cells_const = ir_->uint_immediate_number(u32_t, total_cells);
@@ -5907,7 +5906,7 @@ class TaskCodegen : public IRVisitor {
       bool path_k_is_hash = (path[k]->type == SNodeType::hash);
       if (path_k_is_hash) {
         auto state_ptr =
-            hash_state_ptr(level_buffers[(size_t)k], addr, desc_k, i_path[k]);
+            hash_state_ptr(level_buffer(k), addr, desc_k, i_path[k]);
         auto state = hash_load_stable_state(state_ptr);
         auto occupied = ir_->make_value(
             spv::OpIEqual, ir_->bool_type(), state,
@@ -5918,7 +5917,7 @@ class TaskCodegen : public IRVisitor {
             ir_->uint_immediate_number(u32_t, 0));
         active = ir_->make_value(spv::OpBitwiseAnd, u32_t, active, bit);
         auto key_ptr =
-            hash_key_ptr(level_buffers[(size_t)k], addr, desc_k, i_path[k]);
+            hash_key_ptr(level_buffer(k), addr, desc_k, i_path[k]);
         coord_path[k] = ir_->load_variable(key_ptr, u32_t);
       } else if (path_k_is_pointer) {
         // slot_byte_addr = addr + 4 * i_path[k]
@@ -5930,7 +5929,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, slot_byte_addr,
             ir_->uint_immediate_number(u32_t, 2));
         auto slot_ptr =
-            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], slot_word_idx);
+            ir_->struct_array_access(u32_t, level_buffer(k), slot_word_idx);
         auto slot_value = ir_->load_variable(slot_ptr, u32_t);
         // active &= (slot != 0)
         auto is_zero = ir_->make_value(
@@ -5964,7 +5963,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, word_byte_addr,
             ir_->uint_immediate_number(u32_t, 2));
         auto word_ptr =
-            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], word_u32_idx);
+            ir_->struct_array_access(u32_t, level_buffer(k), word_u32_idx);
         auto mask_word = ir_->load_variable(word_ptr, u32_t);
         auto bit_idx = ir_->make_value(
             spv::OpBitwiseAnd, u32_t, i_path[k],
@@ -5987,7 +5986,7 @@ class TaskCodegen : public IRVisitor {
             spv::OpShiftRightLogical, u32_t, len_byte_off,
             ir_->uint_immediate_number(u32_t, 2));
         auto len_ptr =
-            ir_->struct_array_access(u32_t, level_buffers[(size_t)k], len_word_idx);
+            ir_->struct_array_access(u32_t, level_buffer(k), len_word_idx);
         auto len_val = ir_->make_value(
             spv::OpAtomicLoad, u32_t, len_ptr,
             /*scope=*/ir_->const_i32_one_,
@@ -6026,7 +6025,7 @@ class TaskCodegen : public IRVisitor {
         }
         if (path_k_is_hash) {
           addr = hash_resolve_payload_byte_offset(
-              level_buffers[(size_t)k], addr, desc_k, i_path[k],
+              level_buffer(k), addr, desc_k, i_path[k],
               /*do_activate=*/false);
           addr = ir_->add(
               addr,

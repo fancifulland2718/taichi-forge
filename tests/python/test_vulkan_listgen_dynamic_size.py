@@ -15,6 +15,47 @@ def test_g4_listgen_reuse_adaptive_defaults_off():
     assert cfg.spirv_adaptive_opt_threshold == 64
 
 
+@pytest.mark.parametrize("ballot,opt_level", [(False, 0), (False, 1), (True, 0), (True, 1)])
+@test_utils.test(arch=ti.vulkan, offline_cache=False)
+def test_listgen_binds_only_consumed_pointer_pools(ballot, opt_level):
+    # Configure before any storage/kernel materialization. Both optimized and
+    # unoptimized shader interfaces must agree with the compiled binding plan.
+    ti.cfg.spirv_listgen_subgroup_ballot = ballot
+    ti.cfg.external_optimization_level = opt_level
+    ti.cfg.spirv_adaptive_opt = False
+    fields = []
+    for kind in ("dense_tail", "nested_pointer", "nested_mask"):
+        values = ti.field(ti.i32)
+        if kind == "dense_tail":
+            ti.root.pointer(ti.i, 64).dense(ti.i, 4).place(values)
+        elif kind == "nested_pointer":
+            ti.root.pointer(ti.i, 8).pointer(ti.i, 8).dense(ti.i, 4).place(values)
+        else:
+            ti.root.pointer(ti.i, 8).bitmasked(ti.i, 8).dense(ti.i, 4).place(values)
+        fields.append(values)
+
+    @ti.kernel
+    def populate(values: ti.template(), shift: ti.i32):
+        for i in range(32):
+            values[(i * 29 + shift) % 256] = i + 1
+
+    @ti.kernel
+    def total(values: ti.template()) -> ti.i32:
+        result = 0
+        for i in values:
+            result += values[i]
+        return result
+
+    for values in fields:
+        assert total(values) == 0
+        populate(values, 0)
+        assert total(values) == sum(range(1, 33))
+        ti.deactivate_all_snodes()
+        assert total(values) == 0
+        populate(values, 1)
+        assert total(values) == sum(range(1, 33))
+
+
 @test_utils.test(
     arch=ti.vulkan,
     vulkan_sparse_experimental=True,
