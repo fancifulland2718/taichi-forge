@@ -3649,7 +3649,13 @@ def _materialize_graph_pipeline_report(
                     int(region["duration_ns"]) if region_available else None
                 ),
                 gpu_timestamp_scope=(
-                    "structured_region" if region_available else "unavailable"
+                    (
+                        "execution_stage"
+                        if item["kind"] in ("cgraph", "native", "observation")
+                        else "structured_region"
+                    )
+                    if region_available
+                    else "unavailable"
                 ),
                 gpu_timestamp_exact=(
                     bool(region["exact"]) if region is not None else False
@@ -13295,6 +13301,23 @@ class _GraphInstance:
     def run(self, args):
         self._run_impl(self, args, self._temporary_bindings)
 
+    def run_with_gpu_timing(self, args, transaction):
+        # Instrument the existing executor, including immutable binding frames.
+        # Never split a cached mixed command buffer just to invent per-pass times.
+        # Multi-root/coalesced executors retain whole-ticket timing until they
+        # expose an equivalent native region boundary.
+        if len(self.spec.nodes) != 1:
+            timed_run = getattr(self._backend_executable, "run_prepared_with_gpu_timing", None)
+            if timed_run is not None:
+                return timed_run(args, transaction)
+            return self.run(args)
+        path_id = self.spec.pipeline_definition[0]["path_id"]
+        transaction._begin_gpu_region_timing(path_id)
+        try:
+            self.run(args)
+        finally:
+            transaction._end_gpu_region_timing(path_id)
+
     def run_cuda_concurrent_batch(self, args):
         if not isinstance(self._backend_executable, _CGraphJITExecutable):
             raise TaichiRuntimeError(
@@ -19400,6 +19423,8 @@ class Graph:
                             if telemetry_recorder is not None and timestamp_telemetry:
                                 telemetry_recorder.detach_gpu_timing()
                         self._latest_control_flow_was_async = True
+                    elif timestamp_telemetry:
+                        submission_instance.run_with_gpu_timing(prepared, transaction)
                     else:
                         submission_instance.run(prepared)
                     submission_owners = prepared.submission_owners

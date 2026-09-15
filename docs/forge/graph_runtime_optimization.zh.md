@@ -167,6 +167,22 @@ pacer 限制已准入 invocation 与排队 caller，不保证独立 GPU stream�
 读报告不会隐式开启 telemetry。kernel/Graph `task_manifest()` 和 dispatch label 用于关联工作，
 不是 launch 参数搜索 API。
 
+对于 profiler 未能完整归因的缓存 Vulkan 工作，可以读取 ticket 的显式 GPU 时间戳：
+
+```python
+report = graph.submit(bindings, telemetry="timestamps").telemetry()
+for stage in report.pipeline.stages:
+    print(stage.path_id, stage.name, stage.gpu_timestamp_scope, stage.gpu_duration_ns)
+```
+
+`execution_stage` 对应已有执行边界：单个编译 Graph，或 prepared Vulkan 计算／图形序列中
+原本独立的分段。缓存命令与已发布绑定继续复用。一个 stage 包含多个 pass 时，**不能**将它解释为
+逐 pass 计时。合并多个 root 的单一 frame 与 fork/join frame 目前保留 whole-ticket 时间，
+不可获得的 stage 时间为 `None`，不是零。时间跨度可能包含依赖等待和 GPU 空闲，不等于纯 shader 时间。
+时间戳会标注 `gpu_measurement_path_changed=True`，完整帧收益应另用未插桩路径验证。
+query 由 ticket 持有，完成后读取，不在 pass 之间插入 host wait。
+普通执行及 `summary` 模式不记录这些时间戳。
+
 ## 性能与显存权衡
 
 将准备、首次执行、重复执行分开。测量包含必要完成等待和结果发布的完整 step/frame，

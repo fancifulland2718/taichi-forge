@@ -7088,8 +7088,15 @@ def test_graph_ticket_reports_whole_gpu_timing_without_structured_regions():
     stage = pipeline.stages[0]
     assert stage.kind == "cgraph"
     assert stage.path_id == "root/0"
-    assert stage.gpu_duration_ns is None
-    assert stage.gpu_timestamp_scope == "unavailable"
+    if report.gpu_timestamp_exact:
+        assert stage.gpu_duration_ns is not None
+        assert 0 <= stage.gpu_duration_ns <= report.gpu_duration_ns
+        assert stage.gpu_timestamp_scope == "execution_stage"
+        assert stage.gpu_timestamp_exact
+        assert stage.gpu_measurement_path_changed
+    else:
+        assert stage.gpu_duration_ns is None
+        assert stage.gpu_timestamp_scope == "unavailable"
     arena = graph._instance.structured_telemetry_arena_stats
     assert arena["materialized"]
     assert arena["slots"] == 1

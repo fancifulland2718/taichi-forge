@@ -116,9 +116,10 @@ class _SegmentedBindingFrame:
     already queued in a primary command buffer.
     """
 
-    def __init__(self, frames, actions):
+    def __init__(self, frames, actions, timing_paths):
         self._frames = tuple(frames)
         self._actions = tuple(actions)
+        self._timing_paths = tuple(timing_paths)
         self._closed = False
 
     def run(self):
@@ -133,6 +134,20 @@ class _SegmentedBindingFrame:
         for frame in self._frames:
             frame.close()
         self._frames = ()
+
+    def run_with_gpu_timing(self, transaction):
+        if self._closed:
+            raise RuntimeError("Prepared Vulkan Graph is closed")
+        for execute, path in zip(self._actions, self._timing_paths):
+            if path is None:
+                # Multiple roots coalesced into one secondary stay indivisible.
+                execute()
+                continue
+            transaction._begin_gpu_region_timing(path)
+            try:
+                execute()
+            finally:
+                transaction._end_gpu_region_timing(path)
 
     def argument_bytes(self):
         return sum(frame.argument_bytes() for frame in self._frames)
@@ -189,20 +204,28 @@ class VulkanBindingFrameExecutor:
         self._publish = core._publish_vulkan_graph_commands
         boundaries = prepared_boundaries(spec)
         self._segments = []
+        self._segment_timing_paths = []
         sources = []
-        for node in spec.nodes:
+        source_paths = []
+        for node, stage in zip(spec.nodes, spec.pipeline_definition):
             if node in boundaries:
                 if sources:
                     self._segments.append(tuple(sources))
+                    self._segment_timing_paths.append(source_paths[0] if len(source_paths) == 1 else None)
                     sources = []
+                    source_paths = []
                 self._segments.append(node)
+                self._segment_timing_paths.append(stage["path_id"])
             elif isinstance(node, _CompiledCGraphNode):
                 sources.append(node.compiled_graph)
+                source_paths.append(stage["path_id"])
             else:
                 recording = node.executable._recording
                 sources.append(recording._vulkan_graph_command())
+                source_paths.append(stage["path_id"])
         if sources:
             self._segments.append(tuple(sources))
+            self._segment_timing_paths.append(source_paths[0] if len(source_paths) == 1 else None)
         self._segmented = bool(boundaries)
         if self._segmented:
             self.physical_submission_mode = (
@@ -247,7 +270,7 @@ class VulkanBindingFrameExecutor:
             raise
         finally:
             self._context.end()
-        frame = _SegmentedBindingFrame(frames, actions) if self._segmented else frames[0]
+        frame = _SegmentedBindingFrame(frames, actions, self._segment_timing_paths) if self._segmented else frames[0]
         self._frames.add(frame)
         return frame
 
@@ -284,6 +307,25 @@ class VulkanBindingFrameExecutor:
         self._frames.clear()
         self._segments.clear()
         self._context = None
+
+    def run_prepared_with_gpu_timing(self, invocation, transaction):
+        version = invocation.binding_version
+        frame = (
+            version.execution_frame
+            if version is not None
+            else self._frame(invocation.arguments, invocation.flattened_args, invocation.native_actions)
+        )
+        try:
+            if isinstance(frame, _SegmentedBindingFrame):
+                frame.run_with_gpu_timing(transaction)
+            else:
+                # A graphics-queue/fork-join frame has no per-root boundary.
+                # Preserve its commands and report only whole-ticket timing.
+                frame.run()
+        finally:
+            if version is None:
+                frame.close()
+        self._publish(self._program)
 
     @property
     def snapshot_graph_stats(self):

@@ -205,6 +205,27 @@ invocation needs measurement. Reporting does not implicitly enable telemetry.
 Kernel `task_manifest()`, Graph task manifests and dispatch labels help
 correlate compiled work; they are not launch-parameter search APIs.
 
+For cached Vulkan work that a profiler cannot fully attribute, inspect the
+ticket's explicit GPU timestamps:
+
+```python
+report = graph.submit(bindings, telemetry="timestamps").telemetry()
+for stage in report.pipeline.stages:
+    print(stage.path_id, stage.name, stage.gpu_timestamp_scope, stage.gpu_duration_ns)
+```
+
+`execution_stage` measures an existing execution boundary: a single compiled
+Graph, or a separately submitted stage in a prepared Vulkan compute/graphics
+sequence. Cached commands and published bindings are reused. A stage containing
+several passes is **not** a per-pass breakdown. Coalesced multi-root and fork/join
+frames currently retain whole-ticket timing; unavailable stage durations are
+`None`, not zero. Spans can include dependency waits and GPU idle time, not just
+shader execution. Timestamp instrumentation is reported as
+`gpu_measurement_path_changed=True`; compare uninstrumented full-frame costs
+separately. Queries belong to the submission ticket and are read after completion,
+without a host wait between passes. Ordinary execution and `summary` mode do not
+record these timestamps.
+
 ## Performance and memory trade-offs
 
 Separate preparation, first execution and repeated execution. Measure the

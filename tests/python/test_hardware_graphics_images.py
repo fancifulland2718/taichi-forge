@@ -196,6 +196,26 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             assert stats.compiled_task_count == 3
             assert stats.counters_complete is False
 
+        if binding_recipe is True:
+            # Timestamp the existing cached compute/graphics/compute stages.
+            # Preparation remains forbidden, and each ticket owns its queries.
+            tickets = [graph.submit(bindings, telemetry="timestamps") for _ in range(4)]
+            reports = [ticket.telemetry() for ticket in reversed(tickets)]
+            for report in reports:
+                assert report.pipeline.stage_count == 3
+                if report.gpu_timestamp_exact:
+                    assert all(stage.gpu_timestamp_exact for stage in report.pipeline.stages)
+                    assert all(stage.gpu_timestamp_scope == "execution_stage" for stage in report.pipeline.stages)
+                    assert all(
+                        0 <= stage.gpu_duration_ns <= report.gpu_duration_ns for stage in report.pipeline.stages
+                    )
+                else:
+                    assert all(stage.gpu_duration_ns is None for stage in report.pipeline.stages)
+            saved = reports[0].pipeline
+            graph.submit(bindings).wait()
+            assert tickets[-1].telemetry().pipeline == saved
+            np.testing.assert_allclose(result.to_numpy(), expected, atol=1 / 255)
+
         monkeypatch.setattr(recording, "_prepare_packet", prepare)
         if binding_recipe:
             monkeypatch.setattr(executor, "_prepare", native_prepare)
