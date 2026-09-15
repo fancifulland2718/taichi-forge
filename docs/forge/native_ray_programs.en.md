@@ -141,6 +141,13 @@ Use `launch.run()` directly, or append `launch.graph_recording()` to a
 `GraphBuilder` before freezing it. The examples include a real device consumer
 and close Graph users before launch, program, scene and provider owners.
 
+For OptiX, preparation selects a direct native adapter call when the installed
+shim supports it; older compatible shims retain the callback path. Graphs submit
+this prepared call in runtime order alongside any captured CUDA segments. This
+does not make the OptiX launch capturable or remove its submission cost. Execution
+diagnostics distinguish the submission bridge from capture support. Closing the
+launch or resetting the runtime retires its dependent Graphs and prepared calls.
+
 Reuse the prepared launch with in-place data updates that preserve the declared
 layout and resources. Replacing bindings, changing shader/layout/SBT structure,
 resizing storage or resetting the runtime requires the corresponding new

@@ -109,6 +109,11 @@ python -m taichi_forge.examples.features.native_ray_program_optix --ptx query.pt
 可直接 `launch.run()`，也可在 freeze 前将 `launch.graph_recording()` 加入 `GraphBuilder`。
 示例包含真正的设备消费者，按 Graph、launch、program、scene、provider 的依赖顺序关闭。
 
+OptiX 在准备阶段选择当前 shim 支持的直接原生 adapter 调用；较旧的兼容 shim 保留回调路径。
+Graph 按 runtime 顺序提交这个 prepared call，并与可 capture 的 CUDA 分段组合。
+这不代表 OptiX launch 已可 capture，也不消除它的提交成本；执行诊断分别说明提交桥接与 capture 支持。
+关闭 launch 或 reset runtime 会使依赖它的 Graph 与 prepared call 失效。
+
 在布局与资源不变的前提下，允许的原位数据更新可以复用 prepared launch。
 替换绑定、修改 shader／布局／SBT 结构、改变容量或 reset runtime，需要相应的新准备／generation。
 借用的数组、纹理、scene 必须存活到消费者完成。`run()` 是提交，不是 CPU 消费 fence；
