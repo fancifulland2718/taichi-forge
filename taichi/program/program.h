@@ -4704,6 +4704,8 @@ class TI_DLL_EXPORT Program {
   std::vector<NdarrayResourceSlotView> ndarray_view_slots_;
   NdarrayInflightLeaseMap ndarray_inflight_leases_;
   TextureResourceRegistry texture_resources_;
+  // Cold allocation/finalize boundary, distinct from registry and replay locks.
+  std::mutex texture_creation_mutex_;
   mutable std::mutex texture_lifecycle_mutex_;
   bool texture_resources_open_{true};
   std::unordered_map<const Texture *, TextureResourceView> texture_views_;

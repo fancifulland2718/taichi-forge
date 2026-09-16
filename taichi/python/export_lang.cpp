@@ -2869,7 +2869,10 @@ void export_lang(py::module &m) {
           "create_texture",
           [&](Program *program, BufferFormat fmt,
               const std::vector<int> &shape,
-              const ImageSamplerConfig &sampler_config, int mip_levels) -> Texture * {
+              ImageSamplerConfig sampler_config, int mip_levels) -> Texture * {
+            // Convert/copy Python inputs before waiting on the resource gate.
+            // An active submission may need the GIL to finish its transaction.
+            py::gil_scoped_release release;
             return program->create_texture(fmt, shape, sampler_config, mip_levels);
           },
           py::arg("fmt"), py::arg("shape"), py::arg("sampler_config"),

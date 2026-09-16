@@ -9002,6 +9002,9 @@ void Program::finalize() {
   };
 
   best_effort("close runtime resources", [&] {
+    // Texture allocation may wait for the GFX recording gate. Join it before
+    // acquiring submission/registry locks, never while holding those locks.
+    std::lock_guard<std::mutex> creation_lock(texture_creation_mutex_);
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
     close_argpack_resources();
@@ -9584,8 +9587,13 @@ Texture *Program::create_texture(BufferFormat buffer_format,
                                  const std::vector<int> &shape,
                                  ImageSamplerConfig sampler_config,
                                  int mip_levels) {
-  std::lock_guard<std::recursive_mutex> submission_lock(
-      runtime_resource_submission_mutex_);
+  // A new Texture is private until registry publication. Do not hold the
+  // resource submission gate while allocation waits for an active GFX batch:
+  // that batch may still need the resource gate to replay its next command.
+  // This cold-only gate also keeps finalize from destroying the backend before
+  // allocation and publication finish; ordinary replay never acquires it.
+  std::lock_guard<std::mutex> creation_lock(texture_creation_mutex_);
+  ensure_runtime_submission_allowed("Texture creation");
   {
     std::lock_guard<std::mutex> lifecycle_lock(texture_lifecycle_mutex_);
     TI_ERROR_IF(!texture_resources_open_,

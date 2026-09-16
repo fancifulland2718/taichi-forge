@@ -1,4 +1,4 @@
-"""Bounded subprocess regressions for Python/native Graph retirement ordering."""
+"""Bounded subprocess regressions for Python/native resource ordering."""
 
 import json
 from pathlib import Path
@@ -39,6 +39,9 @@ def _retire_during_submission(mode):
     elif mode == "graph_close":
         holder = [builder.compile()]
         holder[0].run({"data": data})
+    elif mode == "texture_create":
+        holder = []
+        graph.run({"data": data})
     else:
         holder = [core._prepare_vulkan_graph_recording(program, [source], args)]
         holder[0].run()
@@ -54,6 +57,8 @@ def _retire_during_submission(mode):
                 holder[0].clear_runtime_state()
             elif mode == "cache_retire":
                 holder[0].retire_snode_tree_runtime_state()
+            elif mode == "texture_create":
+                holder.append(ti.Texture(ti.Format.rgba8, (3, 2), mip_levels=2))
             elif mode in ("frame_close", "graph_close"):
                 holder[0].close()
             else:
@@ -62,13 +67,15 @@ def _retire_during_submission(mode):
             errors.append(error)
 
     # Keep the real native batch open across Python calls, as Graph.submit does.
-    # Retirement must wait without holding the GIL or an inverse registry lock.
+    # Resource creation/retirement must wait without holding the GIL or an
+    # inverse registry lock. Merely prewarming allocations cannot fix this.
     transaction = program._begin_runtime_submission_transaction()
     worker = threading.Thread(target=retire)
     worker.start()
     assert started.wait(5)
     worker.join(0.1)  # Allow the competing retirement to enter its native wait.
-    assert worker.is_alive(), "retirement should be ordered after the open batch"
+    assert not errors, errors
+    assert worker.is_alive(), "resource operation should be ordered after the open batch"
     survivor.run()
     completion = transaction._finish()
     worker.join(5)
@@ -76,6 +83,25 @@ def _retire_during_submission(mode):
     assert not errors
     completion.wait()
     np.testing.assert_array_equal(data.to_numpy(), np.full(256, 4, dtype=np.int32))
+    if mode == "texture_create":
+
+        @ti.kernel
+        def write_image(image: ti.types.rw_texture(num_dimensions=2, fmt=ti.Format.rgba8)):
+            for x, y in image:
+                image.store(ti.Vector([x, y]), ti.Vector([1.0, 0.0, 1.0, 1.0]))
+
+        @ti.kernel
+        def read_image(image: ti.types.texture(num_dimensions=2), result: ti.types.ndarray()):
+            for x, y in ti.ndrange(3, 2):
+                value = image.fetch(ti.Vector([x, y]), 0)
+                for c in ti.static(range(4)):
+                    result[x, y, c] = value[c]
+
+        result = ti.ndarray(ti.f32, (3, 2, 4))
+        write_image(holder[0])
+        read_image(holder[0], result)
+        np.testing.assert_array_equal(result.to_numpy(), np.broadcast_to([1, 0, 1, 1], (3, 2, 4)))
+        holder.clear()
     survivor.close()
     graph.close()
     ti.reset()
@@ -83,7 +109,8 @@ def _retire_during_submission(mode):
 
 
 @pytest.mark.parametrize(
-    "mode", ["cache_clear", "cache_retire", "cache_destroy", "frame_close", "frame_destroy", "graph_close"]
+    "mode",
+    ["cache_clear", "cache_retire", "cache_destroy", "frame_close", "frame_destroy", "graph_close", "texture_create"],
 )
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_graph_retirement_during_native_batch(mode):
