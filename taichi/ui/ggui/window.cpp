@@ -73,6 +73,14 @@ bool Window::show() {
     if (renderer_->swap_chain().device_lost()) {
       return false;
     }
+    if (!framebuffer_available_) {
+      // A minimized window must keep pumping events, not wait inside its
+      // resize callback. Pending display reads never reached a submission.
+      renderer_->discard_pending_frame();
+      record_display_frame_dropped();
+      prepare_for_next_frame();
+      return false;
+    }
     if (renderer_->swap_chain().needs_swapchain_recreate()) {
       resize();
     }
@@ -120,7 +128,8 @@ bool Window::can_render_frame() {
   if (!config_.show_window) {
     return true;
   }
-  return renderer_ && !drawn_frame_ && !renderer_->has_render_work() &&
+  return framebuffer_available_ && renderer_ && !drawn_frame_ &&
+         !renderer_->has_render_work() &&
          !(gui_ && gui_->has_widgets()) && renderer_->can_accept_frame();
 }
 
@@ -174,9 +183,11 @@ void Window::framebuffer_resize_callback(GLFWwindow *glfw_window_,
 void Window::resize() {
   int width = 0, height = 0;
   glfwGetFramebufferSize(glfw_window_, &width, &height);
-  while (width == 0 || height == 0) {
-    glfwGetFramebufferSize(glfw_window_, &width, &height);
-    glfwWaitEvents();
+  framebuffer_available_ = width > 0 && height > 0;
+  if (!framebuffer_available_) {
+    // Keep the existing swapchain and its resource owners until restoration
+    // or teardown. A later nonzero resize performs the normal retirement.
+    return;
   }
   renderer_->wait_for_in_flight_frames();
   renderer_->app_context().config.width = width;
