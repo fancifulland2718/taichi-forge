@@ -39,6 +39,43 @@ Each Graph serializes its host invocation. That does not prevent data races
 between independent Graphs or simulation/rendering users of the same storage.
 Use application-owned slots, snapshots or a producer/consumer protocol.
 
+## Select an execution contract at construction time
+
+Use the public selector when the application requires a particular complete
+execution contract, rather than selecting a performance winner:
+
+```python
+definition = builder.freeze()
+selection = definition.select_execution_recipe(
+    queue="graphics", binding_reuse="require",
+)
+with definition.materialize(selection) as materialized:
+    graph = materialized.executor
+    bindings = graph.bind(arguments)
+    graph.submit(bindings).wait()
+```
+
+`queue="graphics"` requires the complete Vulkan Graph on a compute-capable
+graphics queue. `queue="preserve"` keeps existing compute/native queues and their
+ordered boundaries. Neither enables independent fork/join scheduling implicitly.
+`binding_reuse="require"` requires immutable published bindings; `"prefer"`
+allows baseline fallback **only** with `queue="preserve"`. Inspect
+`selection.manifest.is_baseline` to distinguish that fallback. An unsupported
+required contract raises `ti.graph.GraphRecipeProviderError` with
+`error_key="execution_contract_unavailable"`; it does not silently switch queues.
+
+The returned `GraphRecipeHandle` owns the provider contract required by
+`definition.materialize()`. No private provider imports or fragment-name matching
+are needed. Eligibility is structural: binding-specific layout, alias and
+lifetime requirements are still checked at `graph.bind()`; a failed bind does
+not retry baseline. Reuse published bindings rather than rebuilding an argument
+dictionary each frame. Close the materialized handle before its resource owners.
+
+Selection performs no benchmark and does not change `compile()` or runtime
+defaults. Use complete-recipe search with application-window measurements when
+comparing alternative physical strategies; explicit queue selection alone is
+not evidence of lower frame cost.
+
 ## Runtime arguments and dense fields
 
 Declare runtime inputs with `ti.graph.Arg`. Bind a data-oriented `self`,
@@ -233,6 +270,26 @@ summed as whole-frame time. Timestamp instrumentation is reported as
 separately. Queries belong to the submission ticket and are read after completion,
 without a host wait between passes. Ordinary execution and `summary` mode do not
 record these timestamps.
+
+To correlate a stage with compiled work, inspect its existing task mapping:
+
+```python
+for stage in report.pipeline.stages:
+    print(stage.path_id, stage.gpu_queue_or_stream_id, stage.task_mapping_status)
+    for task in stage.tasks:
+        print(task.dispatch_index, task.kernel_name, task.task_name, task.task_id)
+```
+
+These fields describe compiled membership, not a new per-task clock. Native
+stages instead expose `native_actions`; missing mappings remain unavailable.
+Adding dispatch labels can inhibit composition, so label a diagnostic variant
+only when that trade-off is acceptable. Start the profiler before recording and
+include warm-up in the capture to retain command-buffer creation context. For
+CUDA Graph kernel detail use `--cuda-graph-trace=node`; for Vulkan inspect both
+the API and GPU workload tracks. Profiler coverage depends on its version and
+capture mode; absence of an event is not zero GPU work. See the
+[Nsight Systems guide](https://docs.nvidia.com/nsight-systems/UserGuide/).
+Keep warm, uninstrumented full-window timing as the performance comparison.
 
 ## Performance and memory trade-offs
 

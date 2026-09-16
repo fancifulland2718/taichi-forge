@@ -967,6 +967,24 @@ rays and write application outputs directly. Any-hit is device shader code,
 not a Python callback. Custom intersection, callable and motion-blur programs
 are not supported by this interface.
 
+For frequently rendered frames, prepare and initialize a launch once per stable
+resource set. Put changing camera/scene values in declared device buffer inputs:
+in-place contents are live, whereas scalar launch parameters and SBT data are
+preparation-time snapshots. Replacing storage, launch dimensions or that snapshot
+requires a new prepared launch. A custom raygen may compute primary rays directly
+and write only the outputs its consumer needs; Forge does not automatically
+translate an existing Taichi ray-generation or shading function into OptiX PTX.
+
+An initialized launch can be appended to a root Graph alongside device transforms,
+AS refit and consumer kernels. Its prepared parameters, SBT and storage leases are
+reused, but this remains an ordered native launch, not CUDA Graph capture. The
+CUDA immutable-frame recipe's narrower admission (including static SNode and
+unsupported native-command combinations) does not prevent that baseline Graph
+composition. Measure the full prepare-input/trace/consumer/publication window:
+neither avoiding an intermediate buffer nor a faster isolated trace proves a
+faster frame. Custom PTX/compiler inputs remain application supplied; this route
+adds no compiler or vendor runtime to the portable wheel.
+
 The following example assumes an existing provider, scene and `u32[8]` output,
 and PTX entries implementing this C ABI: launch parameters
 `{ uint64_t scene; uint32_t *output; uint32_t bias, count; }`, miss data

@@ -762,6 +762,17 @@ hit group，复用现有 `OptixProvider`、GAS 和 instance scene。raygen 可�
 应用输出，不要求固定的 rays/hits 中间缓冲。any-hit 是设备 shader，不是 Python 回调；本接口不支持
 自定义 intersection、callable 或 motion-blur program。
 
+频繁渲染时，每组固定资源只 prepare/initialize 一次。相机或场景的动态值放在声明的设备 buffer
+输入中：原位更新的内容是动态的，scalar launch 参数和 SBT 数据则是准备时的快照。更换 storage、
+launch 尺寸或该快照需要重新准备。自定义 raygen 可以直接生成主射线，只写 consumer 所需输出；
+Forge 不会自动把现有 Taichi 射线生成或着色函数转换为 OptiX PTX。
+
+已初始化 launch 可与设备变换、AS refit 和消费 kernel 一起加入 root Graph。参数、SBT 与
+storage lease 复用，但仍是有序 native launch，不是 CUDA Graph capture。CUDA immutable-frame
+recipe 较窄的准入（包括 static SNode 和不支持的 native command 组合）不阻止这类 baseline
+Graph 组合。应测量准备输入、trace、消费和发布的完整窗口；少一个中间缓冲或裸 trace 更快
+都不能证明整帧更快。自定义 PTX/编译器仍由应用提供，不向 portable wheel 增加编译器或 vendor runtime。
+
 下面假定已经存在 `provider`、`scene` 和 `u32[8]` 的 `output`。PTX 的参数 ABI 是
 `{ uint64_t scene; uint32_t *output; uint32_t bias, count; }`，miss 数据是
 `{ uint32_t value; }`，hit 数据是 `{ uint32_t value, accept; }`。

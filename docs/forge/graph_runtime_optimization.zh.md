@@ -31,6 +31,35 @@ finally:
 同一 Graph 的 host invocation 会串行化，但这不能消除独立 Graph 或仿真/渲染对共享数据的竞争。
 应用仍需 slot、snapshot 或 producer/consumer 所有权协议。
 
+## 在构建时选择执行合同
+
+应用需要确定的完整执行合同，而不是搜索性能最优方案时，使用公开选择入口：
+
+```python
+definition = builder.freeze()
+selection = definition.select_execution_recipe(
+    queue="graphics", binding_reuse="require",
+)
+with definition.materialize(selection) as materialized:
+    graph = materialized.executor
+    bindings = graph.bind(arguments)
+    graph.submit(bindings).wait()
+```
+
+`queue="graphics"` 要求整个 Vulkan Graph 在具备 compute 能力的 graphics 队列执行；
+`queue="preserve"` 保留既有 compute/native 队列及有序边界，两者都不隐式启用独立 fork/join。
+`binding_reuse="require"` 要求不可变的已发布绑定；`"prefer"` **仅在** `queue="preserve"`
+时允许退回 baseline，通过 `selection.manifest.is_baseline` 区分。必须满足的合同不可用时抛出
+`ti.graph.GraphRecipeProviderError`，`error_key="execution_contract_unavailable"`，不静默换队列。
+
+返回的 `GraphRecipeHandle` 携带 `definition.materialize()` 所需 provider 合同；应用无需导入
+私有 provider 或匹配 fragment 名称。选择只判断结构适用性，具体绑定的布局、别名和生命周期
+仍在 `graph.bind()` 验证；绑定失败不再尝试 baseline。固定资源应复用已发布绑定，不每帧
+重新构造参数字典。在资源 owner 关闭前先关闭 materialized handle。
+
+该入口不测性能，不改变 `compile()` 或 runtime 默认路线。比较物理策略时使用完整 recipe 搜索
+与应用窗口评价；显式选择 graphics 队列本身不是整帧收益证据。
+
 ## Runtime 参数与 dense field
 
 用 `ti.graph.Arg` 声明 runtime 输入。data-oriented `self`、捕获 Field 或其他
@@ -187,6 +216,23 @@ for stage in report.pipeline.stages:
 时间戳会标注 `gpu_measurement_path_changed=True`，完整帧收益应另用未插桩路径验证。
 query 由 ticket 持有，完成后读取，不在 pass 之间插入 host wait。
 普通执行及 `summary` 模式不记录这些时间戳。
+
+阶段与编译后任务的关联使用已有映射：
+
+```python
+for stage in report.pipeline.stages:
+    print(stage.path_id, stage.gpu_queue_or_stream_id, stage.task_mapping_status)
+    for task in stage.tasks:
+        print(task.dispatch_index, task.kernel_name, task.task_name, task.task_id)
+```
+
+这些字段描述任务归属，不新增逐任务计时；native stage 使用 `native_actions`，缺失映射仍是
+unavailable。dispatch label 可能阻止组合，只在接受这种变化的诊断版本中添加。profiler 应从录制
+之前启动，捕获中包含暖机，保留 command buffer 创建上下文。CUDA Graph 的 kernel 细节使用
+`--cuda-graph-trace=node`；Vulkan 同时查看 API 和 GPU workload 轨道。覆盖取决于 profiler 版本
+和捕获模式，缺事件不等于没有 GPU 工作。参见
+[Nsight Systems 指南](https://docs.nvidia.com/nsight-systems/UserGuide/)。
+性能结论仍以暖态、未插桩的完整窗口对比为准。
 
 ## 性能与显存权衡
 
