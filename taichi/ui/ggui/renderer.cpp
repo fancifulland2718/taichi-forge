@@ -693,6 +693,8 @@ void Renderer::set_offscreen_targets(Texture *color, Texture *depth) {
 }
 
 bool Renderer::draw_offscreen_targets(GuiBase *gui_base) {
+  auto submission_guard =
+      app_context_.prog()->acquire_runtime_resource_submission_guard();
   // Targets were qualified and retained once at the cold binding boundary.
   // Draw/vertex preparation remains the existing GGUI path.
   const auto color = offscreen_color_->get()->get_device_allocation();
@@ -755,6 +757,14 @@ bool Renderer::draw_frame(GuiBase *gui_base, bool blocking_acquire) {
   }
   if (surface_image.image.device == nullptr) {
     return false;
+  }
+  // A shared runtime stream must not fold graphics work into another thread's
+  // still-open Graph batch. Surface acquisition stays outside this host gate;
+  // the gate orders recording/submission, not GPU completion or presentation.
+  Program::RuntimeResourceSubmissionGuard submission_guard;
+  if (auto *program = app_context_.prog();
+      program && program->get_graphics_device() == &app_context_.device()) {
+    submission_guard = program->acquire_runtime_resource_submission_guard();
   }
   StreamSemaphore semaphore = surface_image.image_available;
   auto image = surface_image.image;

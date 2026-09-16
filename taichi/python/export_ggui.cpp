@@ -515,6 +515,7 @@ struct PyCanvas {
     info.height = height;
     info.row_stride_bytes = row_stride_bytes;
     info.transpose = transpose;
+    py::gil_scoped_release release;
     canvas->set_image(info);
   }
 
@@ -665,6 +666,7 @@ struct PyWindow {
                         ti_arch,
                         ggui_arch};
 
+    py::gil_scoped_release release;
     window = std::make_unique<vulkan::Window>(prog, config);
   }
 
@@ -780,18 +782,23 @@ struct PyWindow {
 
   py::array_t<float> get_image_buffer() {
     uint32_t w, h;
-    auto &img_buffer = window->get_image_buffer(w, h);
-
-    float *image = new float[w * h * 4];
-    // Here we must match the numpy 3d array memory layout. Refs:
-    // https://numpy.org/doc/stable/reference/arrays.ndarray.html
-    for (int i = 0; i < w; i++) {
-      for (int j = 0; j < h; j++) {
-        auto pixel = img_buffer[j * w + i];
-        for (int k = 0; k < 4; k++) {
-          // must flip up-down to match the numpy array memory layout
-          image[i * h * 4 + (h - j - 1) * 4 + k] = (pixel & 0xFF) / 255.0;
-          pixel >>= 8;
+    float *image;
+    {
+      // Rendering/readback can wait on a concurrent submission whose owner must
+      // reacquire Python to finish. Construct Python objects only after the wait.
+      py::gil_scoped_release release;
+      auto &img_buffer = window->get_image_buffer(w, h);
+      image = new float[w * h * 4];
+      // Here we must match the numpy 3d array memory layout. Refs:
+      // https://numpy.org/doc/stable/reference/arrays.ndarray.html
+      for (int i = 0; i < w; i++) {
+        for (int j = 0; j < h; j++) {
+          auto pixel = img_buffer[j * w + i];
+          for (int k = 0; k < 4; k++) {
+            // must flip up-down to match the numpy array memory layout
+            image[i * h * 4 + (h - j - 1) * 4 + k] = (pixel & 0xFF) / 255.0;
+            pixel >>= 8;
+          }
         }
       }
     }
@@ -939,10 +946,12 @@ void export_ggui(py::module &m) {
                     double, std::string, Arch>())
       .def("get_canvas", &PyWindow::get_canvas)
       .def("get_scene", &PyWindow::get_scene)
-      .def("show", &PyWindow::show)
+      .def("show", &PyWindow::show,
+           py::call_guard<py::gil_scoped_release>())
       .def("can_render_frame", &PyWindow::can_render_frame)
       .def("_begin_offscreen_frame", &PyWindow::begin_offscreen_frame)
-      .def("_render_offscreen_frame", &PyWindow::render_offscreen_frame)
+      .def("_render_offscreen_frame", &PyWindow::render_offscreen_frame,
+           py::call_guard<py::gil_scoped_release>())
       .def("_set_offscreen_targets", &PyWindow::set_offscreen_targets)
       .def("is_headless_display", &PyWindow::is_headless_display)
       .def("record_display_frame_accepted",
@@ -965,9 +974,11 @@ void export_ggui(py::module &m) {
       .def("toggle_edge_region", &PyWindow::toggle_edge_region)
       .def("set_minimum_render_size", &PyWindow::set_minimum_render_size)
       .def("get_window_layout", &PyWindow::get_window_layout)
-      .def("write_image", &PyWindow::write_image)
+      .def("write_image", &PyWindow::write_image,
+           py::call_guard<py::gil_scoped_release>())
       .def("copy_depth_buffer_to_ndarray",
-           &PyWindow::copy_depth_buffer_to_ndarray)
+           &PyWindow::copy_depth_buffer_to_ndarray,
+           py::call_guard<py::gil_scoped_release>())
       .def("get_image_buffer_as_numpy", &PyWindow::get_image_buffer)
       .def("is_pressed", &PyWindow::is_pressed)
       .def("get_cursor_pos", &PyWindow::py_get_cursor_pos)
@@ -986,7 +997,8 @@ void export_ggui(py::module &m) {
            py::arg("poll") = true)
       .def("get_current_event", &PyWindow::get_current_event)
       .def("set_current_event", &PyWindow::set_current_event)
-      .def("destroy", &PyWindow::destroy)
+      .def("destroy", &PyWindow::destroy,
+           py::call_guard<py::gil_scoped_release>())
       .def("GUI", &PyWindow::gui);
 
   py::class_<vulkan::SharedCudaVulkanImage,
@@ -1010,11 +1022,14 @@ void export_ggui(py::module &m) {
 
   py::class_<PyCanvas>(m, "PyCanvas")
       .def("set_background_color", &PyCanvas::set_background_color)
-      .def("set_image", &PyCanvas::set_image)
+      .def("set_image", &PyCanvas::set_image,
+           py::call_guard<py::gil_scoped_release>())
       .def("set_image_host_rgba8", &PyCanvas::set_image_host_rgba8)
-      .def("set_image_texture", &PyCanvas::set_image_texture)
+      .def("set_image_texture", &PyCanvas::set_image_texture,
+           py::call_guard<py::gil_scoped_release>())
       .def("_set_image_transpose", &PyCanvas::set_image_transpose)
-      .def("_set_image_shared_cuda", &PyCanvas::set_image_shared_cuda)
+      .def("_set_image_shared_cuda", &PyCanvas::set_image_shared_cuda,
+           py::call_guard<py::gil_scoped_release>())
       .def("_track_display_frame", &PyCanvas::track_display_frame,
            py::arg("writable") = false)
       .def("_finish_display_write", &PyCanvas::finish_display_write)

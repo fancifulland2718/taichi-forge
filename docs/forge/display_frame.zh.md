@@ -136,6 +136,30 @@ submission，`last_render_zero_copy` 报告最近一次 render submission path�
 
 ## 异步仿真与显示提交
 
+### Graph 到 Canvas 的设备顺序
+
+在同一个 Forge Vulkan Program/device 中，先提交 Graph producer，再调用
+`canvas.set_image(image)` 与 `window.show()`，不需要仅为让显示链路看见这些写入而额外调用
+producer 的 `ticket.wait()`；缓存 Graph replay 也在此范围内。图像 packing/copy 使用有序 runtime
+路径；实际渲染会 flush 此前工作，并把得到的 semaphore 交给 graphics submission。
+Canvas 没有 ticket 参数，不代表这条设备依赖不存在。
+
+需要区分两个边界：
+
+- 必须先完成 producer 的提交，再将图像交给 Canvas。独立资源上的模拟可以并发，但如果 worker
+  仍在写同一源资源，应用必须建立明确交接。任意外部 queue/stream 不会自动加入此顺序，
+  应使用受管 interop 合同。
+- producer 完成不同于显示消费者完成。Graph ticket 只覆盖该 Graph，不覆盖之后的 packing、
+  copy 或 graphics 读取。`set_image()` 接受输入或 `show()` 返回，并不授权立即覆盖/释放仍被消费的
+  源资源。源 slot 应保持有效，只在覆盖其最后一次读取的完成边界后复用。借用显示目标可使用前述
+  source/display completion；同步图像读回也会完成其消费的渲染，但不需要为此给普通显示循环增加读回。
+
+因此，应用应先确认源 slot 所有权与消费者完成协议，再删除冗余的 **producer 预等待**。
+这不是无条件删除等待的建议，也不承诺零复制或整帧加速。窗口/present 调用仍留在窗口所属线程。
+
+多线程提交 Graph 时，可以共用一个 `ti.graph.SubmissionPacer` 并使用独立 lane，限制在途工作。
+原生提交事务自身也维护提交顺序；pacer 不能替代源资源所有权或显示消费者完成协议。
+
 Python 仿真 worker 可以持续提交 graph/kernel，同时由主线程上传并 present GGUI 帧。backend
 launcher、首次 kernel 注册和 GFX command recording 都有 runtime 级同步，不需要由应用把
 整个 simulation step 与 render frame 放进同一把 Python 锁。

@@ -200,6 +200,41 @@ This queue-level guarantee does not replace application data ownership:
   producer-consumer protocol. Queue serialization alone does not make
   overlapping reads and writes to application resources safe.
 
+## Graph-to-Canvas device ordering
+
+On the same Forge Vulkan Program/device, a Graph producer may enqueue its work
+before `canvas.set_image(image)` and `window.show()` without a separate producer
+`ticket.wait()` solely to make those writes visible to the display path. Cached
+Graph replay is included. Image packing/copying uses the ordered runtime path;
+rendering flushes that work and passes the resulting semaphore to the graphics
+submission. The absence of a Canvas ticket parameter does not mean that this
+device dependency is missing.
+
+This ordering has two important limits:
+
+- Enqueue the complete producer before handing its image to Canvas. Unrelated
+  simulation work may run concurrently, but a worker still writing the same
+  source needs an application-owned handoff. Arbitrary external queues/streams
+  are not implicitly joined; use the managed interop contract for those.
+- Producer completion and display-consumer completion are different. A Graph
+  ticket covers the Graph, not later packing, copying or graphics reads.
+  `set_image()` acceptance and a return from `show()` do not authorize immediate
+  overwrite or release of a source still being consumed. Keep source slots alive
+  and reuse them only at a completion boundary covering their last read. For a
+  borrowed display target, use its documented source/display completions above.
+  Synchronous image readback also completes its consuming render, but need not
+  be added to a normal display loop.
+
+An application can therefore remove a redundant *producer pre-wait* only after
+its source-slot ownership and consumer-completion protocol are established.
+This is not a blanket instruction to remove waits, nor a promise of zero copies
+or a frame-time improvement. Keep window/present calls on the window thread.
+
+For bounded multi-threaded Graph submission, a shared `ti.graph.SubmissionPacer`
+with separate lanes can limit in-flight work. Native submission transactions
+also preserve their own ordering; the pacer is not a substitute for resource
+ownership or display-consumer completion.
+
 ## Resize and Lifetime
 
 Display frames carry width, height, row stride, and transpose metadata. Resize

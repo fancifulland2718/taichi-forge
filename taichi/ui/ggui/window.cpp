@@ -259,6 +259,11 @@ std::pair<uint32_t, uint32_t> Window::get_window_shape() {
 }
 
 void Window::write_image(const std::string &filename) {
+  Program::RuntimeResourceSubmissionGuard submission_guard;
+  if (auto *program = renderer_->app_context().prog();
+      program && program->get_graphics_device() == &renderer_->app_context().device()) {
+    submission_guard = program->acquire_runtime_resource_submission_guard();
+  }
   if (!drawn_frame_) {
     if (!draw_frame(/*blocking_acquire=*/true)) {
       return;
@@ -324,6 +329,13 @@ void Window::copy_depth_buffer_to_ndarray(
 }
 
 std::vector<uint32_t> &Window::get_image_buffer(uint32_t &w, uint32_t &h) {
+  // Synchronous readback cannot join a concurrent runtime Graph batch: its
+  // stream wait would precede that batch's submission. Reuse the native gate.
+  Program::RuntimeResourceSubmissionGuard submission_guard;
+  if (auto *program = renderer_->app_context().prog();
+      program && program->get_graphics_device() == &renderer_->app_context().device()) {
+    submission_guard = program->acquire_runtime_resource_submission_guard();
+  }
   if (!drawn_frame_) {
     draw_frame(/*blocking_acquire=*/true);
   }
