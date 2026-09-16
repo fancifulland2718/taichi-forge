@@ -406,6 +406,22 @@ class GraphBindingFrameRecipeProvider(GraphRuntimeFragmentProvider):
                     )
         return fragments
 
+    def matches_execution_contract(self, recipe, *, queue):
+        """Own the mapping from public requirements to private physical choices."""
+        from taichi_forge.graph._recipes.families import GraphFamilySelection
+
+        if len(recipe.fragments) != 1:
+            return False
+        fragment = recipe.fragments[0]
+        if fragment.provider_namespace != self.descriptor.namespace:
+            return False
+        selection = GraphFamilySelection.from_fragment(fragment)
+        expected = {
+            "preserve": "immutable-argument-images",
+            "graphics": "graphics-queue-argument-images",
+        }[queue]
+        return selection.source_key == "whole-graph-bindings" and selection.choice_id == expected
+
     def contribute_runtime(self, assembly, selection):
         if selection.source_key != "whole-graph-bindings":
             raise ValueError("unknown whole-Graph immutable binding selection")

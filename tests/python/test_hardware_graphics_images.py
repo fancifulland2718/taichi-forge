@@ -97,33 +97,20 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=3),
         )
         builder.dispatch(finish, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "result", ti.f32, ndim=3))
-        materialization = None
         if binding_recipe:
-            from taichi_forge.graph._recipes.binding_frames import GraphBindingFrameRecipeProvider
-            from taichi_forge.graph._recipes.families import GraphRuntimeAssemblyProvider
-
             definition = builder.freeze()
-            catalog = definition.recipe_catalog(
-                providers=(GraphRuntimeAssemblyProvider(), GraphBindingFrameRecipeProvider())
+            recipe = definition.select_execution_recipe(
+                queue="graphics" if binding_recipe == "graphics_queue" else "preserve",
+                binding_reuse="require",
             )
-            assert len(catalog.entries()) == 3
-            choice = (
-                "graphics-queue-argument-images" if binding_recipe == "graphics_queue" else "immutable-argument-images"
-            )
-            recipe = next(
-                entry.recipe
-                for entry in catalog.entries()
-                if any(f.fragment_key.endswith(":" + choice) for f in entry.recipe.fragments)
-            )
-            materialization = definition.materialization_context(provider_set=catalog.provider_set)
-            materialized = materialization.materialize(recipe)
+            materialized = definition.materialize(recipe)
             graph = materialized.executor
             assert materialized.manifest.submissions[0].replay_mode == (
                 "vulkan_complete_graphics_queue_immutable_frame"
                 if binding_recipe == "graphics_queue"
                 else "vulkan_secondary_frames_with_ordered_graphics_published"
             )
-            assert recipe.planned_physical_id != catalog.baseline.recipe.planned_physical_id
+            assert recipe.planned_physical_id != definition.baseline_recipe.planned_physical_id
         else:
             graph = builder.compile()
         source = ti.Texture(ti.Format.rgba8, (64, 32))
@@ -288,7 +275,6 @@ def test_sampled_graphics_device_producer_consumer_and_prepared_rebind(monkeypat
             with pytest.raises(RuntimeError, match="closed"):
                 frame.run()
             materialized.close()
-            materialization.close()
 
 
 @test_utils.test(arch=ti.vulkan, offline_cache=False)

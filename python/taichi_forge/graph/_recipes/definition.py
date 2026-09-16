@@ -460,6 +460,23 @@ class GraphDefinition:
         catalog.build_single_region_stage()
         return catalog
 
+    def select_execution_recipe(self, *, queue="preserve", binding_reuse="require"):
+        """Select a complete recipe by a construction-time execution contract.
+
+        ``queue='preserve'`` keeps the established queues and ordered native
+        boundaries. ``queue='graphics'`` requires the complete Vulkan Graph to
+        run on its compute-capable graphics queue. Neither changes ordinary
+        runtime defaults nor claims to select the fastest implementation.
+
+        ``binding_reuse='require'`` requires immutable published bindings;
+        ``'prefer'`` permits the complete baseline only with ``queue='preserve'``.
+        Publish bindings on the materialized executor to amortize preparation.
+        Binding-specific shape, alias and lifetime checks still occur there.
+        """
+        from taichi_forge.graph._execution_selection import select_execution_recipe
+
+        return select_execution_recipe(self, queue=queue, binding_reuse=binding_reuse)
+
     def search_recipes(
         self,
         *,
