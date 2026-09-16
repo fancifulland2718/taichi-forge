@@ -639,7 +639,12 @@ class TI_DLL_EXPORT GfxRuntime {
   // threads, so they must not mutate that state concurrently. Recursive
   // locking is intentional: public operations compose other public operations
   // (for example copy_image -> transition_image and synchronize -> flush).
-  mutable std::recursive_mutex host_api_mutex_;
+  // Replay registrations can outlive the runtime. Share this one gate with
+  // their registry, rather than nesting registry -> runtime locks against an
+  // open submission batch (runtime -> registry).
+  std::shared_ptr<std::recursive_mutex> host_api_mutex_owner_{
+      std::make_shared<std::recursive_mutex>()};
+  std::recursive_mutex &host_api_mutex_{*host_api_mutex_owner_};
 
   // A graphics submission consumes the compute tail. Its signal is carried
   // by the next real compute submission (or an explicit completion marker),

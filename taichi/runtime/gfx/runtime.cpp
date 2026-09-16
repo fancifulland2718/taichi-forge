@@ -836,23 +836,24 @@ uint64_t get_graph_replay_slot_saturation_fallbacks() {
 
 class GraphReplayRegistry {
  public:
-  explicit GraphReplayRegistry(GfxRuntime *runtime) : runtime_(runtime) {
+  explicit GraphReplayRegistry(GfxRuntime *runtime)
+      : mutex_(runtime->host_api_mutex_owner_), runtime_(runtime) {
   }
 
   void retire(uint64_t token) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
     if (runtime_ != nullptr) {
       runtime_->retire_graph_replay(token);
     }
   }
 
   void close() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
     runtime_ = nullptr;
   }
 
   GraphReplayStats debug_stats(uint64_t replay_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
     if (runtime_ == nullptr) {
       return {};
     }
@@ -860,7 +861,7 @@ class GraphReplayRegistry {
   }
 
   GraphReplayStats snapshot_stats(uint64_t replay_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
     if (runtime_ == nullptr) {
       return {};
     }
@@ -868,13 +869,13 @@ class GraphReplayRegistry {
   }
 
   void launch_prepared(uint64_t replay_key) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(*mutex_);
     TI_ERROR_IF(runtime_ == nullptr, "Prepared Vulkan Graph belongs to a closed runtime");
     runtime_->launch_prepared_graph(replay_key);
   }
 
  private:
-  std::mutex mutex_;
+  std::shared_ptr<std::recursive_mutex> mutex_;
   GfxRuntime *runtime_{nullptr};
 };
 

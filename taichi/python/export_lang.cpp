@@ -6147,7 +6147,7 @@ void export_lang(py::module &m) {
   py::class_<gfx::ExternalGraphCommand, std::shared_ptr<gfx::ExternalGraphCommand>>(
       m, "_GfxExternalGraphCommand");
   py::class_<gfx::FixedGraphRecording, std::shared_ptr<gfx::FixedGraphRecording>>(
-      m, "_VulkanFixedGraphRecording")
+      m, "_VulkanFixedGraphRecording", py::release_gil_before_calling_cpp_dtor())
       .def_static("supports_texture_bindings", [] { return true; })
       .def_static("supports_graphics_queue", &gfx::FixedGraphRecording::supports_graphics_queue,
                   py::call_guard<py::gil_scoped_release>())
@@ -6231,12 +6231,18 @@ void export_lang(py::module &m) {
            py::call_guard<py::gil_scoped_release>());
 #endif
 
-  py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache")
+  // Retirement can wait for a native batch whose owner must re-enter Python
+  // to finish it. Both explicit close/reset and last-owner destruction must
+  // release the GIL; the cache contains only native state.
+  py::class_<aot::CompiledGraphJITCache>(m, "CompiledGraphJITCache",
+                                      py::release_gil_before_calling_cpp_dtor())
       .def(py::init<>())
       .def("clear_runtime_state",
-           &aot::CompiledGraphJITCache::clear_runtime_state)
+           &aot::CompiledGraphJITCache::clear_runtime_state,
+           py::call_guard<py::gil_scoped_release>())
       .def("retire_snode_tree_runtime_state",
-           &aot::CompiledGraphJITCache::retire_snode_tree_runtime_state)
+           &aot::CompiledGraphJITCache::retire_snode_tree_runtime_state,
+           py::call_guard<py::gil_scoped_release>())
       .def("_set_stable_replay_optimization",
            [](aot::CompiledGraphJITCache &cache, bool enabled) {
              const bool previous =
@@ -6245,23 +6251,24 @@ void export_lang(py::module &m) {
              if (previous != enabled) {
                cache.clear_runtime_state();
              }
-           })
+           }, py::call_guard<py::gil_scoped_release>())
       .def("_debug_graph_stats", [](aot::CompiledGraphJITCache &cache,
                                      bool enable_diagnostics) {
-        if (enable_diagnostics && !cache.graph_diagnostics_enabled) {
-          const auto previous = cache.debug_graph_stats();
-          if (previous.stats.last_path !=
-                  aot::CompiledGraphExecutionPath::none ||
-              previous.stats.last_fallback_reason !=
-                  aot::CompiledGraphFallbackReason::none) {
-            cache.graph_diagnostics_counters_complete = false;
+        const auto snapshot = [&] {
+          py::gil_scoped_release release;
+          if (enable_diagnostics && !cache.graph_diagnostics_enabled) {
+            const auto previous = cache.debug_graph_stats();
+            if (previous.stats.last_path !=
+                    aot::CompiledGraphExecutionPath::none ||
+                previous.stats.last_fallback_reason !=
+                    aot::CompiledGraphFallbackReason::none) {
+              cache.graph_diagnostics_counters_complete = false;
+            }
+            // Private debug opt-in only; public execution_stats() passes false.
+            cache.graph_diagnostics_enabled = true;
           }
-          // This is a private test/debug opt-in. Public execution_stats()
-          // passes false and therefore cannot mutate the production replay
-          // mode or its future cost.
-          cache.graph_diagnostics_enabled = true;
-        }
-        const auto snapshot = cache.debug_graph_stats();
+          return cache.debug_graph_stats();
+        }();
         const auto &stats = snapshot.stats;
         auto backend_name = [](aot::CompiledGraphBackend backend) {
           switch (backend) {
