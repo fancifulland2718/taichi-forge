@@ -184,8 +184,11 @@ Program::SNodeTreeLifecycleReadGuard::SNodeTreeLifecycleReadGuard(
     Program *program)
     : program_(program),
       previous_program_(active_snode_tree_lifecycle_program),
-      lock_(program->snode_tree_lifecycle_mutex_),
-      epoch_(program->snode_tree_mutation_epoch()) {
+      lock_(program->snode_tree_lifecycle_mutex_, std::defer_lock) {
+  if (previous_program_ != program_) {
+    lock_.lock();
+  }
+  epoch_ = program->snode_tree_mutation_epoch();
   active_snode_tree_lifecycle_program = program_;
 }
 
@@ -275,6 +278,10 @@ Program::RuntimeSubmissionTransaction::RuntimeSubmissionTransaction(
       gpu_timing_requested_(gpu_timing),
       cuda_concurrent_batch_(cuda_concurrent_batch) {
   TI_ASSERT(program_ != nullptr);
+  tree_lifecycle_guard_.emplace(
+      program_->acquire_snode_tree_lifecycle_read_guard());
+  resource_submission_guard_ = std::unique_lock<std::recursive_mutex>(
+      program_->runtime_resource_submission_mutex_);
   // The outer scope must observe tracking enabled so nested kernel/CGraph
   // launches reuse this reader instead of opening segment-local boundaries.
   program_->runtime_completion_tracking_enabled_.store(
@@ -366,6 +373,10 @@ void Program::RuntimeSubmissionTransaction::abort() noexcept {
   gpu_timing_.reset();
   program_ = nullptr;
   finished_ = true;
+  if (resource_submission_guard_.owns_lock()) {
+    resource_submission_guard_.unlock();
+  }
+  tree_lifecycle_guard_.reset();
 }
 
 void *Program::RuntimeSubmissionTransaction::register_cuda_concurrent_stream(
@@ -550,6 +561,10 @@ RuntimeCompletion Program::RuntimeSubmissionTransaction::finish() {
         previous_telemetry_transaction_;
   }
   Program *program = std::exchange(program_, nullptr);
+  // Release on success or a completion-recording exception, before returning
+  // to Python. Old tickets retain their own backend completion, not this gate.
+  auto tree_guard = std::move(tree_lifecycle_guard_);
+  auto resource_guard = std::move(resource_submission_guard_);
   return program->record_runtime_completion(
       std::move(gpu_timing_), std::move(gpu_region_timings_));
 }
@@ -9002,9 +9017,6 @@ void Program::finalize() {
   };
 
   best_effort("close runtime resources", [&] {
-    // Texture allocation may wait for the GFX recording gate. Join it before
-    // acquiring submission/registry locks, never while holding those locks.
-    std::lock_guard<std::mutex> creation_lock(texture_creation_mutex_);
     std::lock_guard<std::recursive_mutex> submission_lock(
         runtime_resource_submission_mutex_);
     close_argpack_resources();
@@ -9587,12 +9599,10 @@ Texture *Program::create_texture(BufferFormat buffer_format,
                                  const std::vector<int> &shape,
                                  ImageSamplerConfig sampler_config,
                                  int mip_levels) {
-  // A new Texture is private until registry publication. Do not hold the
-  // resource submission gate while allocation waits for an active GFX batch:
-  // that batch may still need the resource gate to replay its next command.
-  // This cold-only gate also keeps finalize from destroying the backend before
-  // allocation and publication finish; ordinary replay never acquires it.
-  std::lock_guard<std::mutex> creation_lock(texture_creation_mutex_);
+  // Submission transactions acquire this gate before opening their backend
+  // batch, so allocation and finalize use the same resource ownership order.
+  std::lock_guard<std::recursive_mutex> submission_lock(
+      runtime_resource_submission_mutex_);
   ensure_runtime_submission_allowed("Texture creation");
   {
     std::lock_guard<std::mutex> lifecycle_lock(texture_lifecycle_mutex_);

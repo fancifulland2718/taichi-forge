@@ -491,6 +491,10 @@ class TI_DLL_EXPORT Program {
     void join_cuda_concurrent_streams();
 
     Program *program_{nullptr};
+    // Keep SNode -> resource -> completion-reader -> backend-batch order across the
+    // thread-affine transaction, including its final completion publication.
+    std::optional<SNodeTreeLifecycleReadGuard> tree_lifecycle_guard_;
+    std::unique_lock<std::recursive_mutex> resource_submission_guard_;
     std::optional<RuntimeSubmissionScope> submission_scope_;
     bool submission_batch_open_{false};
     bool finished_{false};
@@ -4704,8 +4708,6 @@ class TI_DLL_EXPORT Program {
   std::vector<NdarrayResourceSlotView> ndarray_view_slots_;
   NdarrayInflightLeaseMap ndarray_inflight_leases_;
   TextureResourceRegistry texture_resources_;
-  // Cold allocation/finalize boundary, distinct from registry and replay locks.
-  std::mutex texture_creation_mutex_;
   mutable std::mutex texture_lifecycle_mutex_;
   bool texture_resources_open_{true};
   std::unordered_map<const Texture *, TextureResourceView> texture_views_;

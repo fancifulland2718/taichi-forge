@@ -39,13 +39,21 @@ def _retire_during_submission(mode):
     elif mode == "graph_close":
         holder = [builder.compile()]
         holder[0].run({"data": data})
-    elif mode == "texture_create":
+    elif mode in (
+        "texture_create", "ndarray_create", "transaction_submit", "transaction_abort", "tree_destroy",
+        "kernel_registration",
+    ):
         holder = []
         graph.run({"data": data})
     else:
         holder = [core._prepare_vulkan_graph_recording(program, [source], args)]
         holder[0].run()
     survivor = core._prepare_vulkan_graph_recording(program, [source], args)
+    if mode == "tree_destroy":
+        fields = ti.FieldsBuilder()
+        unrelated = ti.field(ti.i32)
+        fields.dense(ti.i, 8).place(unrelated)
+        holder.append(fields.finalize())
     ti.sync()
     started = threading.Event()
     errors = []
@@ -59,6 +67,16 @@ def _retire_during_submission(mode):
                 holder[0].retire_snode_tree_runtime_state()
             elif mode == "texture_create":
                 holder.append(ti.Texture(ti.Format.rgba8, (3, 2), mip_levels=2))
+            elif mode in ("ndarray_create", "transaction_abort"):
+                holder.append(ti.ndarray(ti.i32, 128))
+            elif mode == "transaction_submit":
+                nested = program._begin_runtime_submission_transaction()
+                survivor.run()
+                holder.append(nested._finish())
+            elif mode == "tree_destroy":
+                holder[0].destroy()
+            elif mode == "kernel_registration":
+                holder.append(program._debug_kernel_executable_lifecycle_stats())
             elif mode in ("frame_close", "graph_close"):
                 holder[0].close()
             else:
@@ -77,12 +95,20 @@ def _retire_during_submission(mode):
     assert not errors, errors
     assert worker.is_alive(), "resource operation should be ordered after the open batch"
     survivor.run()
-    completion = transaction._finish()
+    if mode == "transaction_abort":
+        transaction._abort()
+        completion = None
+    else:
+        completion = transaction._finish()
     worker.join(5)
     assert not worker.is_alive()
     assert not errors
-    completion.wait()
-    np.testing.assert_array_equal(data.to_numpy(), np.full(256, 4, dtype=np.int32))
+    if completion is not None:
+        completion.wait()
+    else:
+        ti.sync()
+    expected = 6 if mode == "transaction_submit" else 4
+    np.testing.assert_array_equal(data.to_numpy(), np.full(256, expected, dtype=np.int32))
     if mode == "texture_create":
 
         @ti.kernel
@@ -110,7 +136,11 @@ def _retire_during_submission(mode):
 
 @pytest.mark.parametrize(
     "mode",
-    ["cache_clear", "cache_retire", "cache_destroy", "frame_close", "frame_destroy", "graph_close", "texture_create"],
+    [
+        "cache_clear", "cache_retire", "cache_destroy", "frame_close", "frame_destroy", "graph_close",
+        "texture_create", "ndarray_create", "transaction_submit", "transaction_abort", "tree_destroy",
+        "kernel_registration",
+    ],
 )
 @test_utils.test(arch=ti.vulkan, offline_cache=False)
 def test_graph_retirement_during_native_batch(mode):

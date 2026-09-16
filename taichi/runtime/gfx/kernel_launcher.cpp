@@ -21,7 +21,10 @@ void KernelLauncher::launch_kernel(
 
 KernelLauncher::Handle KernelLauncher::get_or_register_kernel(
     const lang::CompiledKernelData &compiled_kernel_data) {
-  std::lock_guard<std::mutex> lock(registration_mutex_);
+  // The handle and runtime registration are one operation under the runtime's
+  // existing gate. A second launcher gate would invert the order when an open
+  // Graph batch (already owning the runtime gate) registers its next kernel.
+  std::lock_guard<std::recursive_mutex> lock(config_.gfx_runtime_->host_api_mutex_);
   if (compiled_kernel_data.get_handle()) {
     return *compiled_kernel_data.get_handle();
   }
@@ -47,12 +50,10 @@ KernelLauncher::Handle KernelLauncher::register_kernel(
 }
 
 void KernelLauncher::retire_snode_tree(int tree_id) {
-  std::lock_guard<std::mutex> lock(registration_mutex_);
   config_.gfx_runtime_->retire_snode_tree_kernels(tree_id);
 }
 
 std::size_t KernelLauncher::debug_registered_kernel_count() {
-  std::lock_guard<std::mutex> lock(registration_mutex_);
   return config_.gfx_runtime_->debug_registered_kernel_count();
 }
 

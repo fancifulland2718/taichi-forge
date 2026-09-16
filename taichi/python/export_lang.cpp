@@ -2250,6 +2250,10 @@ void export_lang(py::module &m) {
         return program.kernels.size();
       })
       .def("_debug_kernel_lifecycle_stats", [](Program &program) {
+        const auto registered = [&] {
+          py::gil_scoped_release release;
+          return program.get_kernel_launcher().debug_registered_kernel_count();
+        }();
         std::size_t live_definitions = 0;
         std::size_t retired_shells = 0;
         for (const auto &kernel : program.kernels) {
@@ -2266,8 +2270,7 @@ void export_lang(py::module &m) {
         result["retired_shell_inline_bytes_lower_bound"] =
             retired_shells * sizeof(Kernel);
         result["retired_shell_total_owned_bytes_reported"] = false;
-        result["registered_executables"] =
-            program.get_kernel_launcher().debug_registered_kernel_count();
+        result["registered_executables"] = registered;
         return result;
       })
       .def("_set_kernel_executable_lifecycle_telemetry_enabled",
@@ -2275,8 +2278,13 @@ void export_lang(py::module &m) {
            py::arg("enabled"))
       .def("_debug_kernel_executable_lifecycle_stats",
            [](Program &program, bool reset) {
-             const auto stats =
-                 program.debug_kernel_executable_lifecycle_statistics(reset);
+             const auto [stats, registered] = [&] {
+               py::gil_scoped_release release;
+               auto stats = program.debug_kernel_executable_lifecycle_statistics(reset);
+               return std::make_pair(
+                   std::move(stats),
+                   program.get_kernel_launcher().debug_registered_kernel_count());
+             }();
              py::dict result;
              result["schema_version"] = 1;
              result["enabled"] = stats.enabled;
@@ -2302,12 +2310,12 @@ void export_lang(py::module &m) {
              result["relocatable_template_reclaims"] =
                  stats.relocatable_template_reclaims;
              result["handle_inline_bytes"] = stats.handle_inline_bytes;
-             result["registered_executables"] =
-                 program.get_kernel_launcher().debug_registered_kernel_count();
+             result["registered_executables"] = registered;
              return result;
            },
            py::arg("reset") = false)
       .def("_debug_kernel_registration_count", [](Program &program) {
+        py::gil_scoped_release release;
         return program.get_kernel_launcher().debug_registered_kernel_count();
       })
       .def("_snode_tree_layout_fingerprint",
@@ -2817,7 +2825,8 @@ void export_lang(py::module &m) {
           py::arg("dt"), py::arg("shape"),
           py::arg("layout") = ExternalArrayLayout::kNull,
           py::arg("zero_fill") = false, py::arg("dbg_info") = DebugInfo(),
-          py::return_value_policy::reference)
+          py::return_value_policy::reference,
+          py::call_guard<py::gil_scoped_release>())
       .def(
           "_create_graph_observation_ndarray",
           [&](Program *program, const DataType &dt,
@@ -2829,16 +2838,21 @@ void export_lang(py::module &m) {
           },
           py::arg("dt"), py::arg("shape"),
           py::arg("layout") = ExternalArrayLayout::kNull,
-          py::return_value_policy::reference)
-      .def("delete_ndarray", &Program::delete_ndarray)
+          py::return_value_policy::reference,
+          py::call_guard<py::gil_scoped_release>())
+      .def("delete_ndarray", &Program::delete_ndarray,
+           py::call_guard<py::gil_scoped_release>())
       .def(
           "create_argpack",
           [&](Program *program, const DataType &dt) -> ArgPack * {
             return program->create_argpack(dt);
           },
-          py::arg("dt"), py::return_value_policy::reference)
-      .def("delete_argpack", &Program::delete_argpack)
-      .def("delete_texture", &Program::delete_texture)
+          py::arg("dt"), py::return_value_policy::reference,
+          py::call_guard<py::gil_scoped_release>())
+      .def("delete_argpack", &Program::delete_argpack,
+           py::call_guard<py::gil_scoped_release>())
+      .def("delete_texture", &Program::delete_texture,
+           py::call_guard<py::gil_scoped_release>())
       .def("_debug_argpack_resource_stats",
            &Program::debug_argpack_resource_stats)
       .def("_debug_argpack_resource_identity",
@@ -2881,21 +2895,25 @@ void export_lang(py::module &m) {
       .def("get_ndarray_data_ptr_as_int",
            [](Program *program, Ndarray *ndarray) {
              return program->get_ndarray_data_ptr_as_int(ndarray);
-           })
+           },
+           py::call_guard<py::gil_scoped_release>())
       .def("fill_float",
            [](Program *program, Ndarray *ndarray, float val) {
              program->fill_ndarray_fast_u32(ndarray,
                                             reinterpret_cast<uint32_t &>(val));
-           })
+           },
+           py::call_guard<py::gil_scoped_release>())
       .def("fill_int",
            [](Program *program, Ndarray *ndarray, int32_t val) {
              program->fill_ndarray_fast_u32(ndarray,
                                             reinterpret_cast<int32_t &>(val));
-           })
+           },
+           py::call_guard<py::gil_scoped_release>())
       .def("fill_uint",
            [](Program *program, Ndarray *ndarray, uint32_t val) {
              program->fill_ndarray_fast_u32(ndarray, val);
-           })
+           },
+           py::call_guard<py::gil_scoped_release>())
       .def("copy_ndarray",
            [](Program *program, Ndarray *dst, Ndarray *src) {
              program->copy_ndarray_fast(dst, src);
@@ -8232,7 +8250,8 @@ void export_lang(py::module &m) {
          bool compile_only) -> SNodeTree * {
         return program->add_snode_tree(registry->finalize(root), compile_only);
       },
-      py::return_value_policy::reference);
+      py::return_value_policy::reference,
+      py::call_guard<py::gil_scoped_release>());
 
   // Sparse Matrix
   py::class_<SparseMatrixBuilder>(m, "SparseMatrixBuilder")

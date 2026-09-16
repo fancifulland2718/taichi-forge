@@ -48,6 +48,7 @@ using InputBuffersMap =
 class SNodeTreeManager;
 class GfxRuntime;
 class GraphReplayRegistry;
+class KernelLauncher;
 
 TI_DLL_EXPORT uint64_t get_graph_replay_slot_saturation_fallbacks();
 
@@ -273,7 +274,7 @@ class TI_DLL_EXPORT GfxRuntime {
   // To make Pimpl + std::unique_ptr work
   ~GfxRuntime();
 
-  using KernelHandle = KernelLauncher::Handle;
+  using KernelHandle = lang::KernelLauncher::Handle;
 
   struct RegisterParams {
     TaichiKernelAttributes kernel_attribs;
@@ -632,6 +633,7 @@ class TI_DLL_EXPORT GfxRuntime {
  private:
   friend class taichi::lang::gfx::SNodeTreeManager;
   friend class GraphReplayRegistry;
+  friend class KernelLauncher;
 
   // GfxRuntime owns a single mutable command-recording state (command list,
   // barriers, descriptor caches, temporary buffers, image layouts, and graph
