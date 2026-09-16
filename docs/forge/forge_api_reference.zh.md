@@ -2710,21 +2710,24 @@ shared storage 或经过优化的 device-side staging 路径。
 
 布局、resize、所有权及 source/display 完成边界示例见[显示帧提交](display_frame.zh.md)。
 
-### `Canvas.submit_frame(frame, *, track_source=False)`
+### `Canvas.submit_frame(frame, *, track_source=False, track_completion=False)`
 
 位置：`taichi_forge.ui.canvas.Canvas`。
 
 提交 `DisplayFrame`，或结束从此 Canvas 借用的 `WritableDisplayFrame` 写入。
 `track_source=True` 仅适用于后者，通过 `frame.source_completion.done()/wait()` 表示此前
 CUDA producer 工作完成。`frame.completion.done()/wait()` 则表示渲染提交后 GGUI GPU reader
-完成，不代表显示器上屏。普通提交不创建完成对象。
+完成，不代表显示器上屏。`track_completion=True` 也能为普通 DisplayFrame 返回这一消费者完成对象；
+未开启时，普通提交不创建完成对象。
 
 ```python
 frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(color_buffer)
 canvas.submit_frame(frame)
 ```
 
-返回：如果显示链路接受该帧则为 `True`；如果窗口帧策略丢弃该帧则为 `False`。
+返回：默认接受为 `True`、丢弃为 `False`；`track_completion=True` 时分别为 `DisplayCompletion`、`None`。
+已接受但尚未渲染的帧被替换／丢弃时，完成对象变为 cancelled。通过 `Window.show()` 实际提交，
+复用输入存储前检查／等待消费者完成，详见[显示生命周期说明](display_frame.zh.md)。
 
 说明：
 

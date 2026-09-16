@@ -27,6 +27,30 @@ canvas.submit_frame(frame)
 如 NumPy、field、ndarray、texture 仍是推荐的兼容路径，除非调用方已经持有
 display-ready frame。
 
+### 显示消费完成后复用输入存储
+
+应用自持的 packed buffer 或 Texture 可以显式请求既有的 GPU 消费者完成对象：
+
+```python
+done = canvas.submit_frame(frame, track_completion=True)
+window.show()  # 未接受图像时也继续处理窗口事件
+if done is not None and done.status not in ("cancelled", "invalidated"):
+    done.wait()  # 仅在确实需要复用这份输入存储时等待
+```
+
+开启跟踪时返回 `DisplayCompletion`，窗口无法接受新帧时返回 `None`。默认仍返回 bool，
+不分配完成对象。对 writable frame，返回的就是原有 `frame.completion`。
+
+持续异步显示应使用有界输入槽，并保存每槽最近的消费完成对象。覆盖槽内容前检查 `done()`，
+只在需要该槽时等待。同一输入若被提交多次，必须等所有消费者完成后再复用；Graph producer
+完成不覆盖随后发生的显示读取。取消的 pending display 没有 GPU reader，但取消显示不会
+取消或完成 producer 工作。
+
+`Window.show()` 可能丢弃已接受但尚未渲染的图像，此时其完成对象变为 cancelled。
+该完成边界只代表 GPU 消费，不代表屏幕上屏，也不授权使用已结束借用的旧 writable view。
+最小化时继续调用 `show()` 处理恢复／关闭事件；零尺寸窗口在恢复前不接受显示帧。
+resize／销毁仍可能等待在途资源。窗口操作始终由窗口所属线程执行。
+
 ## 布局与打包
 
 NumPy 和 packed ndarray 的 `transpose=True` 使用 Forge 图像约定：前两轴为
@@ -87,7 +111,7 @@ if frame is not None:
 真正提交图像之前调用 `wait()` 会报错，不会无限等待。cancelled/invalidated 的 `done()` 和 `wait()`
 都会报错；已成功完成的 ticket 在窗口销毁后仍保持完成。任何完成状态都不授权重新写入旧借用 view。
 
-`track_source` 只用于 writable frame。普通 `submit_frame` 仍返回 bool，不额外创建完成对象。
+`track_source` 只用于 writable frame。未开启 `track_completion` 的普通提交仍返回 bool，不创建完成对象。
 应在应用复用输入槽时查询完成，不需要因为该接口逐帧调用全局 `ti.sync()` 或忙等轮询。
 
 ### 不重写像素的缓存重显

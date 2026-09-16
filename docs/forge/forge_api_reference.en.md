@@ -3293,7 +3293,7 @@ reuse a writable view or cache GUI/geometry commands.
 See [Display frame submission](display_frame.en.md) for layout, resizing,
 ownership, and source-versus-display completion examples.
 
-### `Canvas.submit_frame(frame, *, track_source=False)`
+### `Canvas.submit_frame(frame, *, track_source=False, track_completion=False)`
 
 Location: `taichi_forge.ui.canvas.Canvas`.
 
@@ -3301,16 +3301,20 @@ Submit a `DisplayFrame` or seal a `WritableDisplayFrame` borrowed from this
 Canvas. `track_source=True` is only valid for the latter and provides
 `frame.source_completion.done()/wait()` for preceding CUDA producer work.
 `frame.completion.done()/wait()` instead covers the GGUI GPU reader after
-render submission, not on-screen presentation. Ordinary submissions do not
-create completion objects.
+render submission, not on-screen presentation. `track_completion=True` also
+exposes this consumer completion for ordinary DisplayFrames; otherwise ordinary
+submissions do not create completion objects.
 
 ```python
 frame = ti.ui.DisplayFrame.from_packed_u32_ndarray(color_buffer)
 canvas.submit_frame(frame)
 ```
 
-Returns: `True` if the frame was accepted by the display path, `False` if it
-was dropped by the window frame policy.
+Returns: by default `True` if accepted, `False` if dropped. With
+`track_completion=True`, returns `DisplayCompletion` or `None` respectively.
+An accepted frame replaced/dropped before graphics submission has a cancelled
+completion. Call `Window.show()` to submit; poll/wait before reusing its input
+storage. See [display lifetime guidance](display_frame.en.md).
 
 Notes:
 

@@ -30,6 +30,37 @@ Supported constructors:
 the recommended compatibility path unless the caller already owns a
 display-ready frame.
 
+### Reuse input storage after display consumption
+
+For application-owned packed buffers or textures, request the existing GPU
+consumer completion explicitly:
+
+```python
+done = canvas.submit_frame(frame, track_completion=True)
+window.show()  # also pump events when no frame was accepted
+if done is not None and done.status not in ("cancelled", "invalidated"):
+    done.wait()  # only when this input storage must be reused
+```
+
+With tracking enabled, submission returns `DisplayCompletion`, or `None` when
+the window cannot accept a frame. Without it, the return value remains bool
+and no completion object is allocated. For writable frames, tracking returns
+the same object as `frame.completion`.
+
+Use a bounded set of input slots for continuous asynchronous display. Associate
+each slot with its latest completion and check `done()` before overwriting it;
+wait only when that slot is needed. If an input is submitted more than once,
+all its consumers must have finished before reuse. Graph producer completion
+alone does not cover subsequent display reads. A cancelled pending display has
+no GPU reader, but cancellation does not cancel or finish its producer work.
+
+`Window.show()` can drop an accepted but not yet rendered frame; its completion
+then becomes cancelled. This completion covers GPU reads, not screen scanout,
+and never grants permission to reuse an expired writable-frame view. Continue
+calling `show()` while minimized to process restore/close events. Zero-sized
+windows decline frames until restored; resize/teardown may wait for in-flight
+resources. Window operations remain on the window-owning thread.
+
 ## Layout and packing
 
 For NumPy and packed ndarray frames, `transpose=True` uses Forge's image
@@ -106,8 +137,8 @@ the image raises rather than hanging. Cancelled/invalidated tickets raise from
 `done()` and `wait()`. Successfully retired tickets remain complete after window
 destruction. Completion never grants permission to write an old borrowed view.
 
-`track_source` is only accepted for writable frames. Ordinary `submit_frame`
-still returns a boolean and does not allocate a new completion object. Poll
+`track_source` is only accepted for writable frames. Without `track_completion`,
+ordinary `submit_frame` returns a boolean and does not allocate a completion object. Poll
 at application slot-reuse boundaries; neither a per-frame global `ti.sync()`
 nor a busy polling loop is required by this API.
 

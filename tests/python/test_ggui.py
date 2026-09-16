@@ -1418,7 +1418,7 @@ def test_borrowed_display_frames_source_completion_and_repeat():
             assert not frame.completion.done()
             with pytest.raises(RuntimeError, match="not been submitted"):
                 frame.completion.wait()
-            assert canvas.submit_frame(frame, track_source=True)
+            assert canvas.submit_frame(frame, track_source=True, track_completion=True) is frame.completion
         frame.source_completion.wait()
         assert frame.source_completion.done()
         assert window.show()

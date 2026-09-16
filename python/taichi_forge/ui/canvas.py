@@ -242,8 +242,20 @@ class Canvas:
             )
             return True
 
-    def submit_frame(self, frame, *, track_source=False):
-        """Submit a display-ready frame to the canvas."""
+    def submit_frame(self, frame, *, track_source=False, track_completion=False):
+        """Submit a display-ready frame to the canvas.
+
+        By default return whether the frame was accepted. With
+        ``track_completion=True``, return its DisplayCompletion, or None when
+        busy. Window.show() still performs the actual graphics submission.
+        Completion covers GPU consumption, not on-screen presentation; a
+        replaced or dropped pending frame is cancelled. Tracking is opt-in
+        and uses the existing display submission, without a producer wait.
+        """
+        if track_completion:
+            self._check_display_owner()
+            if not hasattr(self.canvas, "_track_display_frame"):
+                raise RuntimeError("This native runtime does not support display completion tracking")
         if isinstance(frame, WritableDisplayFrame):
             self._check_display_owner()
             if self._display_write is not frame:
@@ -254,7 +266,7 @@ class Canvas:
             self._display_write = None
             frame._seal("submitted")
             self._record_display_frame_accepted(frame.width, frame.height)
-            return True
+            return frame.completion if track_completion else True
         if track_source:
             raise ValueError("track_source requires a writable display frame")
         if self._display_write is not None:
@@ -269,7 +281,7 @@ class Canvas:
                 raise RuntimeError("This native runtime does not support explicit device display layout")
         if self.window is not None and not self.window.can_render_frame():
             self.window.record_display_frame_dropped()
-            return False
+            return None if track_completion else False
         if frame.kind == DisplayFrame.HOST_RGBA8:
             self.canvas.set_image_host_rgba8(
                 frame.host_rgba8,
@@ -294,6 +306,8 @@ class Canvas:
         if set_transpose is not None:
             set_transpose(frame.transpose)
         self._record_display_frame_accepted(frame.width, frame.height)
+        if track_completion:
+            return DisplayCompletion(self.canvas._track_display_frame())
         return True
 
     def contour(self, scalar_field, cmap_name="plasma", normalize=False):
