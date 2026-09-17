@@ -1,8 +1,7 @@
-name: Build runtime wheel artifacts
+name: Build and publish runtime wheels
 
-# Builds platform-native taichi-forge-runtime wheels without publishing them.
-# publish_pypi.yml calls this workflow, validates every CPython shim against
-# these artifacts, and only then publishes both projects.
+# Builds platform-native taichi-forge-runtime wheels. Manual runs can publish
+# this project independently; reusable calls are non-publishing validation.
 
 on:
   workflow_call:
@@ -24,14 +23,27 @@ on:
         default: ""
 
       platform:
-        description: "Runtime artifacts to build (no publishing)"
+        description: "Runtime artifacts to build; publication requires all"
         required: false
         type: choice
         default: all
         options: [all, windows, linux]
+      publish:
+        description: "Publish the runtime wheels independently"
+        type: boolean
+        default: false
+      target:
+        description: "Runtime publication index"
+        type: choice
+        options: [testpypi, pypi]
+        default: testpypi
 
 permissions:
   contents: read
+
+concurrency:
+  group: forge-runtime-release-${{ github.ref }}-${{ inputs.version || 'version-file' }}
+  cancel-in-progress: false
 
 env:
   TI_SKIP_VERSION_CHECK: "ON"
@@ -53,20 +65,30 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: set
+        env:
+          REQUEST_VERSION: ${{ inputs.version }}
+          REQUEST_PUBLISH: ${{ inputs.publish }}
+          PLATFORM: ${{ inputs.platform }}
+          TARGET: ${{ inputs.target || 'testpypi' }}
         shell: bash
         run: |
           set -euo pipefail
-          case "${{ inputs.platform }}" in
+          case "$PLATFORM" in
             all|windows|linux) ;;
             *) echo "Unsupported runtime platform" >&2; exit 1 ;;
           esac
-          if [[ -n "${{ inputs.version }}" ]]; then
-            ver="${{ inputs.version }}"
+          case "$TARGET" in pypi|testpypi) ;; *) echo "Invalid package index"; exit 1 ;; esac
+          if [[ "$REQUEST_PUBLISH" == true && "$PLATFORM" != all ]]; then
+            echo "Runtime publication requires both platforms"; exit 1
+          fi
+          if [[ -n "$REQUEST_VERSION" ]]; then
+            ver="$REQUEST_VERSION"
           else
             ver="$(tr -d ' \t\n' < version.txt)"
           fi
           ver="${ver#forge-v}"
           ver="${ver#v}"
+          python -c "from scripts.sync_runtime_dependency import _version_parts; import sys; _version_parts(sys.argv[1])" "$ver"
           echo "Resolved version: $ver"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
 
@@ -308,6 +330,8 @@ jobs:
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           $version = "1.4.304.1"
           $installer = "$env:TEMP\VulkanSDK.exe"
           Invoke-WebRequest "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
@@ -323,6 +347,8 @@ jobs:
       - name: Download prebuilt LLVM 20
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           $url = "${{ env.LLVM20_WIN_URL }}"
           $expectedHash = ("${{ env.LLVM20_WIN_SHA256 }}").ToLowerInvariant()
           if (-not $url) {
@@ -344,6 +370,8 @@ jobs:
       - name: Install python build deps
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           python -m pip install "pip==26.2.1"
           python -m pip install --requirement packaging/constraints/release-build.txt
           python -m pip install --require-hashes --no-deps `
@@ -354,6 +382,8 @@ jobs:
       - name: Override version
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           Set-Content -Path version.txt -NoNewline -Value "${{ needs.resolve_version.outputs.version }}"
           Get-Content version.txt
           python scripts/sync_runtime_dependency.py
@@ -361,6 +391,8 @@ jobs:
       - name: Build runtime wheel
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           # CUDA 12.5 supports MSVC 192x/193x, not the runner's current 194x.
           # Use the installed v142 toolset only for PTX preprocessing; native
           # runtime/shim compilation retains the current MSVC environment.
@@ -378,6 +410,8 @@ jobs:
       - name: Validate runtime native build options
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           $buildDirs = @(Get-ChildItem -LiteralPath _skbuild -Directory | Where-Object {
             Test-Path -LiteralPath (Join-Path $_.FullName "CMakeCache.txt")
           })
@@ -415,6 +449,8 @@ jobs:
       - name: Repair runtime wheel contents
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           $buildDirs = @(Get-ChildItem -Path _skbuild -Directory | Where-Object {
             Test-Path (Join-Path $_.FullName "CMakeCache.txt")
           })
@@ -428,6 +464,8 @@ jobs:
       - name: Validate runtime wheel contents
         shell: pwsh
         run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          $ErrorActionPreference = 'Stop'
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows `
             --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
@@ -438,3 +476,48 @@ jobs:
           name: wheel-windows-runtime
           path: dist-runtime/*.whl
           if-no-files-found: error
+
+  publish_runtime:
+    name: Publish runtime to PyPI
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+    needs: [resolve_version, build_linux_runtime, build_windows_runtime]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: ${{ inputs.target }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+      - name: Install publication check dependencies
+        run: python -m pip install "packaging==26.0"
+      - name: Download runtime wheels
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: wheel-*-runtime
+          merge-multiple: true
+          path: dist
+      - name: Validate runtime publication set
+        run: |
+          python -m scripts.validate_release_wheel_set --wheel-dir dist \
+            --version "${{ needs.resolve_version.outputs.version }}" --project runtime
+      - name: Prepare missing wheels for resumable upload
+        id: upload
+        run: |
+          python scripts/check_pypi_version_available.py --repository "${{ inputs.target }}" \
+            --wheel-dir dist --upload-dir upload
+          echo "count=$(find upload -name '*.whl' | wc -l)" >> "$GITHUB_OUTPUT"
+      - name: Publish runtime to TestPyPI
+        if: inputs.target == 'testpypi' && steps.upload.outputs.count != '0'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          packages-dir: upload
+      - name: Publish runtime to PyPI
+        if: inputs.target == 'pypi' && steps.upload.outputs.count != '0'
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
+        with:
+          packages-dir: upload

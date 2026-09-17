@@ -819,6 +819,7 @@ def validate_runtime_wheels(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel-dir", type=Path, required=True)
+    parser.add_argument("--version", help="Require the runtime version selected for shim linking")
     parser.add_argument(
         "--platform",
         choices=["windows", "linux", "manylinux", "macos", "pair"],
@@ -873,6 +874,8 @@ def main() -> None:
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
     for info in infos:
+        if args.version is not None and Version(info.version) != Version(args.version):
+            raise SystemExit(f"Expected runtime version {args.version}, found {info.version}: {info.path.name}")
         suffix = f", bundled CUDART major={info.cuda_major}" if info.cuda_major is not None else ", bundled CUDART=none"
         print(
             f"Validated {info.path.name}: platform={info.platform}, "

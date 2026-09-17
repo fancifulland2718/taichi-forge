@@ -1358,12 +1358,22 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "refs/tags/forge-v*" in workflow
     assert "tag_name: forge-v${{" in workflow
     assert "tag_name: v${{" not in workflow
-    # Partial platform audits may reuse an ABI-compatible runtime artifact, but
-    # must not enter the full-release aggregation/publication path.
+    # Runtime reuse is independent of platform scope; partial audits still do
+    # not enter the release aggregation/publication path.
     assert "validation_platform:" in workflow
     assert "options: [all, windows]" in workflow
     assert "Platform-scoped validation cannot publish" in workflow
-    assert "Runtime reuse requires Windows-only validation and a numeric run ID" in workflow
+    assert "Artifact reuse requires a numeric run ID" in workflow
+    assert "options: [index, artifact, build]" in workflow
+    assert "default: index" in workflow
+    assert "Joint builds are validation-only" in workflow
+    assert "Publish the selected runtime independently" in workflow
+    assert "--runtime-version" in workflow
+    assert "--project shim" in workflow
+    assert "pattern: wheel-*-py*" in workflow
+    assert "name: validated-shim-wheel-set" in workflow
+    assert "--wheel-dir dist --upload-dir upload" in workflow
+    assert workflow.count("packages-dir: upload") == 2
     assert "run-id: ${{ inputs.runtime_run_id || github.run_id }}" in workflow
     assert "github-token: ${{ github.token }}" in workflow
     assert "actions: read" in workflow
@@ -1371,10 +1381,11 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     windows_job = workflow.split("  build_windows:\n", 1)[1].split("  validate_wheel_set:\n", 1)[0]
     assert "needs.resolve_version.result == 'success'" in windows_job
     assert "needs.build_runtime.result == 'success'" in windows_job
-    assert "inputs.runtime_run_id && inputs.validation_platform == 'windows'" in windows_job
+    assert "needs.resolve_version.outputs.runtime_source != 'build'" in windows_job
     for job in ("build_linux", "validate_wheel_set"):
         section = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
-        assert "if: ${{ inputs.validation_platform != 'windows' }}" in section
+        assert "inputs.validation_platform != 'windows'" in section
+        assert "!cancelled()" in section
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
@@ -1388,11 +1399,19 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
     assert workflow.count("--wheel-dir wheelhouse-runtime --platform manylinux") == 2
     assert "--wheel-dir dist-runtime --platform windows" in workflow
     assert "workflow_call:" in workflow
-    assert "gh-action-pypi-publish" not in workflow
+    assert "gh-action-pypi-publish" in workflow
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish" in workflow
+    assert "Runtime publication requires both platforms" in workflow
+    assert "--project runtime" in workflow
+    assert "pattern: wheel-*-runtime" in workflow
+    assert "--wheel-dir dist --upload-dir upload" in workflow
+    assert workflow.count("packages-dir: upload") == 2
+    assert "skip-existing:" not in workflow
     assert "auditwheel show wheelhouse-runtime/*.whl" in workflow
     assert "--exclude libcuda.so.1" in workflow
     assert workflow.count("--dependency-class driver-only") == 3
     assert workflow.count("TI_WITH_CUDA:BOOL=ON") == 4
+    assert workflow.count("TI_WITH_AMDGPU:BOOL=ON") == 4
     assert workflow.count("TI_WITH_VULKAN:BOOL=ON") == 4
     assert workflow.count("TI_WITH_SPLIT_PYTHON_RUNTIME:BOOL=ON") == 4
     assert workflow.count("TI_WITH_PYTHON:BOOL=ON") == 4
@@ -1415,6 +1434,36 @@ def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
         workflow,
         re.IGNORECASE,
     )
+
+
+@pytest.mark.parametrize("filename", ["publish_pypi.yml", "publish_runtime_pypi.yml"])
+def test_release_workflow_powershell_stops_on_each_native_command_failure(filename):
+    workflow = (REPO_ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8")
+    blocks = re.findall(r"        shell: pwsh\n        run: \|\n((?:          .*\n|\n)+)", workflow)
+    assert len(blocks) == workflow.count("shell: pwsh") > 0
+    for block in blocks:
+        assert block.startswith(
+            "          $PSNativeCommandUseErrorActionPreference = $true\n"
+            "          $ErrorActionPreference = 'Stop'\n"
+        )
+        assert block.count("$PSNativeCommandUseErrorActionPreference") == 1
+
+
+@pytest.mark.parametrize("expected", [None, "0.6.3", "0.6.4"])
+def test_runtime_wheel_cli_checks_selected_link_version(tmp_path, monkeypatch, capsys, expected):
+    wheel = tmp_path / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl"
+    _write_runtime_wheel(wheel, platform="windows", version="0.6.3", cuda_major=12,
+                         dependency_class="driver-only")
+    argv = ["validate_runtime_wheel.py", "--wheel-dir", str(tmp_path), "--platform", "windows"]
+    if expected is not None:
+        argv.extend(["--version", expected])
+    monkeypatch.setattr("sys.argv", argv)
+    if expected == "0.6.4":
+        with pytest.raises(SystemExit, match="Expected runtime version 0.6.4, found 0.6.3"):
+            validate_runtime_wheel.main()
+    else:
+        validate_runtime_wheel.main()
+        assert "version=0.6.3" in capsys.readouterr().out
 
 
 def test_runtime_project_defaults_to_driver_only():
