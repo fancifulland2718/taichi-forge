@@ -48,7 +48,7 @@ python -I -m build --wheel --no-isolation
 - 使用 `CMAKE_ARGS`，不要使用 `TAICHI_CMAKE_ARGS`。发布 workflow 走 scikit-build-core，
   `TAICHI_CMAKE_ARGS` 是旧 setup.py 构建变量，在这里会被忽略。
 - `LLVM_DIR` 必须指向 LLVM 20 安装中的 `lib/cmake/llvm/LLVMConfig.cmake`。
-- 发布 wheel 配置启用 Vulkan、OpenGL、CUDA 和 LLVM，把原生 runtime 从 CPython shim
+- 发布 wheel 配置启用 Vulkan、OpenGL、CUDA、AMDGPU 和 LLVM，把原生 runtime 从 CPython shim
   中拆出，关闭 C API 打包树和测试二进制。C API 属于原生分发产物；需要时应单独构建或
   单独发布。
 - 平台 runtime wheel 必须先于 CPython shim wheel 构建。shim 构建应消费已经构建或已经
@@ -77,10 +77,15 @@ python -I -m build --wheel --no-isolation
 `taichi-forge-runtime` workflow 还会追加这些仅用于 runtime 的参数：
 
 ```bash
+-DTI_WITH_AMDGPU:BOOL=ON
 -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
 -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
 -DTI_WITH_CUPTI:BOOL=OFF
 ```
+
+AMDGPU 构建使用固定的 HIP 7.14.1 host 头文件和 LLVM 20 匹配的设备 bitcode；
+只在 runtime 构建时获取。用户仍需自行安装兼容的 HIP runtime、驱动与 linker，
+未安装 HIP 不影响 CPU/CUDA/Vulkan 使用。详见 [ROCm 基础后端](rocm_backend.zh.md)。
 
 workflow 还设置：
 

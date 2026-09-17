@@ -42,14 +42,17 @@ HIP 不可用不影响普通 CPU/CUDA 路径。
 
 ## 构建与 wheel 边界
 
-AMDGPU 仍为显式构建选项，不含此后端的 wheel 不能只靠安装 HIP 获得支持。
-native runtime 构建增加：
+0.6.3 标准 Windows/Linux runtime wheel 默认编入 AMDGPU；这不改变默认后端选择，
+也不捆绑 HIP runtime。自定义精简 wheel 可以用 `TI_WITH_AMDGPU=OFF` 关闭。
+不含此后端的旧 wheel 不能只靠安装 HIP 获得支持。
+手动 CMake 构建时启用：
 
 ```text
 -DTI_WITH_AMDGPU=ON
--DTI_HIP_INCLUDE_DIR=<近期 HIP SDK>/include
 ```
 
+默认构建自动获取校验和固定的 HIP 7.14.1 host API 头文件，不需要安装完整 ROCm SDK。
+离线构建可用 `TI_HIP_INCLUDE_DIR=<近期 HIP SDK>/include` 提供头文件。
 LLVM 需要包含 AMDGPU target。构建使用 HIP 头文件，但 runtime 动态加载用户的
 HIP 库；wheel 不捆绑 HIP runtime、驱动或数学库，也不静态导入它们。
 仅构建 Python shim 时无需重新安装 HIP SDK。

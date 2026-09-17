@@ -58,7 +58,7 @@ Important details:
   will be ignored here.
 - Set `LLVM_DIR` to a prebuilt LLVM 20 installation containing
   `lib/cmake/llvm/LLVMConfig.cmake`.
-- The release wheel configuration enables Vulkan, OpenGL, CUDA, and LLVM,
+- The release wheel configuration enables Vulkan, OpenGL, CUDA, AMDGPU, and LLVM,
   splits the native runtime out of the CPython shim, omits the C API package
   tree, and disables test binaries. C API artifacts are native distribution
   outputs and should be built or published separately when needed.
@@ -89,10 +89,15 @@ Base release build `CMAKE_ARGS`:
 The `taichi-forge-runtime` workflow appends these runtime-only flags:
 
 ```bash
+-DTI_WITH_AMDGPU:BOOL=ON
 -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
 -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
 -DTI_WITH_CUPTI:BOOL=OFF
 ```
+
+The runtime build fetches pinned HIP 7.14.1 host headers and LLVM-20-compatible
+device bitcode. Users still supply a compatible HIP runtime, driver and linker;
+CPU/CUDA/Vulkan use does not require HIP. See the [ROCm guide](rocm_backend.en.md).
 
 The workflow also sets:
 

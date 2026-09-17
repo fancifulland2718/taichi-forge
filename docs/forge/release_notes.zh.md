@@ -43,6 +43,9 @@
 
 ### 硬件与数据接入
 
+- 标准 Windows/Linux runtime wheel 编入可选 ROCm/HIP 基础后端（`ti.amdgpu`）。
+  HIP runtime、驱动与 linker 由用户配置；不改变默认后端，不包含高级 Graph/渲染功能。
+  支持边界和构建输入见 [ROCm 指南](rocm_backend.zh.md)。
 - 公共 capability、provider status、execution/memory report，逐操作区分 Graph/search 支持。
 - 使用用户提供的库执行 prepared/recorded matmul、稀疏操作、FFT 与 contraction；
   提供可选 Vulkan FFT/Parallel Sort 和 Toolkit 源码 addon。
@@ -54,6 +57,8 @@
 
 ### 修复与升级注意事项
 
+- 修正新版 HIP ABI、Windows AMDGPU 构建/二进制链接及 CUDA/AMDGPU 内存池所有权。
+  AMDGPU 编入 wheel 不代表所有 AMD GPU/驱动组合已完成实机验证。
 - 修正 Vulkan storage texture 写入、storage image format 保留、mixed Graph 提交边界与纹理 transition。
 - 修正旧 Graph 失效报错、物化 executor 释放、observation 拒绝后的清理，以及已链接 graphics 能力报告。
 - 减少重复绑定/准备，改进控制图和 solver 执行；具体收益仍需实际 workload 测量。

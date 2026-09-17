@@ -51,14 +51,17 @@ for platform and driver requirements.
 
 ## Building an AMDGPU-enabled runtime
 
-AMDGPU remains an opt-in build feature; a wheel without it cannot gain the
-backend merely by installing HIP. Build the native runtime with:
+Standard 0.6.3 Windows/Linux runtime wheels include AMDGPU by default. This
+does not change backend selection or bundle HIP. Custom minimal wheels can
+disable it with `TI_WITH_AMDGPU=OFF`; older wheels without the backend cannot
+gain it merely by installing HIP. For a manual CMake build, enable:
 
 ```text
 -DTI_WITH_AMDGPU=ON
--DTI_HIP_INCLUDE_DIR=<recent-HIP-SDK>/include
 ```
 
+The default build fetches checksum-pinned HIP 7.14.1 host headers, not a full
+ROCm SDK. Offline builders can set `TI_HIP_INCLUDE_DIR=<recent-HIP-SDK>/include`.
 The LLVM distribution must include the AMDGPU target. HIP headers are used to
 compile the adapter, but Forge dynamically loads the HIP runtime: the wheel
 does not bundle or import-link the HIP runtime, driver, or math libraries.

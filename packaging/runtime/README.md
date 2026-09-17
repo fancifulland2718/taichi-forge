@@ -11,6 +11,11 @@ cuSPARSE, cuSOLVER, or cuFFT. Those libraries are optional user-provided
 providers and are loaded only when the corresponding hardware operation is
 selected. Installing `taichi-forge` does not require a local CUDA Toolkit.
 
+Standard Windows/Linux wheels also include the basic AMDGPU backend. Selecting
+`ti.amdgpu` requires a compatible user-installed ROCm/HIP runtime, driver and
+linker. HIP libraries are loaded optionally, never bundled or mandatory native
+imports. CPU/CUDA/Vulkan use does not require ROCm.
+
 It intentionally does not expose the public `taichi_forge` Python API. The
 Python package imports `taichi_forge_runtime` only to locate native resources.
 

@@ -50,6 +50,10 @@ runtime, backend and optional provider.
 
 ### Hardware and data integration
 
+- Standard Windows/Linux runtime wheels include the optional basic ROCm/HIP
+  backend (`ti.amdgpu`). Users supply HIP, its driver and linker. Default backend
+  selection is unchanged; advanced Graph/rendering features are not included.
+  See the [ROCm guide](rocm_backend.en.md) for requirements and build inputs.
 - Public capability, provider status, execution and memory reports, with explicit
   operation-specific Graph/search support.
 - Prepared and recorded matmul, sparse operations, FFT and contraction regions
@@ -65,6 +69,9 @@ runtime, backend and optional provider.
 
 ### Fixes and upgrade notes
 
+- Updated HIP ABI handling, Windows AMDGPU builds/binary linking and separate
+  CUDA/AMDGPU allocation ownership. Inclusion in the wheel does not mean every
+  AMD GPU/driver combination has been qualified on hardware.
 - Corrected Vulkan storage-texture writes and preservation of storage image
   formats, mixed Graph submission boundaries and texture transitions.
 - Corrected retired Graph error handling, materialized-executor retirement,
