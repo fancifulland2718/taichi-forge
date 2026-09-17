@@ -39,7 +39,9 @@
 	url = https://github.com/g-truc/glm.git
 [submodule "external/eigen"]
 	path = external/eigen
-	url = https://gitlab.com/libeigen/eigen.git
+	# The pinned Eigen 3.3.9 commit is also on the upstream team's historical
+	# mirror. Keep the gitlink unchanged; avoid GitLab availability in wheel CI.
+	url = https://github.com/eigenteam/eigen-git-mirror.git
 	branch = 3.3
 [submodule "external/SPIRV-Reflect"]
 	path = external/SPIRV-Reflect
