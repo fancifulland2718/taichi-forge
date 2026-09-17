@@ -11,30 +11,11 @@ constexpr uint32 HIP_EVENT_DEFAULT = 0x0;
 constexpr uint32 HIP_STREAM_DEFAULT = 0x0;
 constexpr uint32 HIP_STREAM_NON_BLOCKING = 0x1;
 constexpr uint32 HIP_MEM_ATTACH_GLOBAL = 0x1;
-constexpr uint32 HIP_MEM_ADVISE_SET_PREFERRED_LOCATION = 3;
 constexpr uint32 HIP_DEVICE_ATTRIBUTE_MAX_BLOCK_DIM_X = 26;
 constexpr uint32 HIP_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 63;
-// sizeof(hipDeviceProperties_t) in ROCm 6.
-// ROCm 5.7.1 is 792 and ROCm 6 is 1472, so to make both work we use whichever
-// is larger.
-constexpr uint32 HIP_DEVICE_PROPERTIES_STRUCT_SIZE = 1472;
-// offsetof(hipDeviceProp_t, gcnArchName) / 4
-constexpr uint32 HIP_DEVICE_GCN_ARCH_NAME = 396 / 4;
-// offsetof(hipDeviceProp_t, gcnArchName) / 4
-constexpr uint32 HIP_DEVICE_GCN_ARCH_NAME_6 = 1160 / 4;
-// offsetof(hipDeviceProp_t, major) / 4
-constexpr uint32 HIP_DEVICE_MAJOR = 328 / 4;
-// offsetof(hipDeviceProp_t, major) / 4
-constexpr uint32 HIP_DEVICE_MAJOR_6 = 360 / 4;
-// offsetof(hipDeviceProp_t, minor) / 4
-constexpr uint32 HIP_DEVICE_MINOR = 332 / 4;
-// offsetof(hipDeviceProp_t, minor) / 4
-constexpr uint32 HIP_DEVICE_MINOR_6 = 364 / 4;
 constexpr uint32 HIP_ERROR_ASSERT = 710;
 constexpr uint32 HIP_JIT_MAX_REGISTERS = 0;
-constexpr uint32 HIP_POINTER_ATTRIBUTE_MEMORY_TYPE = 2;
 constexpr uint32 HIP_SUCCESS = 0;
-constexpr uint32 HIP_MEMORYTYPE_DEVICE = 1;
 
 std::string get_amdgpu_error_message(uint32 err);
 
@@ -97,7 +78,7 @@ class AMDGPUDriverBase {
   std::unique_ptr<DynamicLoader> loader_;
   AMDGPUDriverBase();
 
-  bool load_lib(std::string lib_linux);
+  bool load_lib();
 
   bool disabled_by_env_{false};
 };
@@ -109,13 +90,23 @@ class AMDGPUDriver : protected AMDGPUDriverBase {
 #include "taichi/rhi/amdgpu/amdgpu_driver_functions.inc.h"
 #undef PER_AMDGPU_FUNCTION
 
-  char *(*get_error_name)(uint32);
+  const char *(*get_error_name)(uint32){nullptr};
 
-  char *(*get_error_string)(uint32);
+  const char *(*get_error_string)(uint32){nullptr};
 
-  void (*driver_get_version)(int *);
+  uint32 (*driver_get_version)(int *){nullptr};
 
-  void (*runtime_get_version)(int *);
+  uint32 (*runtime_get_version)(int *){nullptr};
+
+  struct DeviceInfo {
+    std::string architecture;
+    int major;
+    int minor;
+    int warp_size;
+  };
+
+  DeviceInfo device_info(int device);
+  bool pointer_is_device(void *ptr);
 
   bool detected();
 
@@ -128,7 +119,9 @@ class AMDGPUDriver : protected AMDGPUDriverBase {
 
   std::mutex lock_;
 
-  // bool rocm_version_valid_{false};
+  bool available_{false};
+  void *device_properties_{nullptr};
+  void *pointer_attributes_{nullptr};
 };
 
 }  // namespace lang

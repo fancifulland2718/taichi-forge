@@ -14,10 +14,10 @@ class AMDGPUDriver;
 
 class AMDGPUContext {
  private:
-  void *device_{nullptr};
-  void *context_{nullptr};
+  int device_{0};
   int dev_count_{0};
   int compute_capability_{0};
+  int warp_size_{32};
   std::string mcpu_;
   std::mutex lock_;
   KernelProfilerBase *profiler_{nullptr};
@@ -74,12 +74,17 @@ class AMDGPUContext {
     return mcpu_;
   }
 
-  void *get_context() {
-    return context_;
+  int get_warp_size() const {
+    return warp_size_;
+  }
+
+  std::string get_target_features() const {
+    return warp_size_ == 64 ? "+wavefrontsize64,-wavefrontsize32"
+                            : "+wavefrontsize32,-wavefrontsize64";
   }
 
   void make_current() {
-    driver_.context_set_current(context_);
+    driver_.device_set_current(device_);
   }
 
   int get_compute_capability() const {
@@ -90,20 +95,20 @@ class AMDGPUContext {
 
   class ContextGuard {
    private:
-    void *old_ctx_;
-    void *new_ctx_;
+    int old_device_;
+    int new_device_;
 
    public:
     explicit ContextGuard(AMDGPUContext *new_ctx)
-        : old_ctx_(nullptr), new_ctx_(new_ctx) {
-      AMDGPUDriver::get_instance().context_get_current(&old_ctx_);
-      if (old_ctx_ != new_ctx)
+        : old_device_(0), new_device_(new_ctx->device_) {
+      AMDGPUDriver::get_instance().device_get_current(&old_device_);
+      if (old_device_ != new_device_)
         new_ctx->make_current();
     }
 
     ~ContextGuard() {
-      if (old_ctx_ != new_ctx_) {
-        AMDGPUDriver::get_instance().context_set_current(old_ctx_);
+      if (old_device_ != new_device_) {
+        AMDGPUDriver::get_instance().device_set_current(old_device_);
       }
     }
   };

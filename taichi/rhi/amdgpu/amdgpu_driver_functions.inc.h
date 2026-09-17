@@ -8,17 +8,12 @@ PER_AMDGPU_FUNCTION(device_get_attribute,
                     int *,
                     uint32,
                     int);
-PER_AMDGPU_FUNCTION(device_get_prop, hipGetDeviceProperties, void *, void *);
-PER_AMDGPU_FUNCTION(device_get_name, hipDeviceGetName, char *, int, void *);
-PER_AMDGPU_FUNCTION(device_get, hipDeviceGet, void *, void *);
-
-// Context management
-PER_AMDGPU_FUNCTION(context_create, hipCtxCreate, void *, int, void *);
-PER_AMDGPU_FUNCTION(context_set_current, hipCtxSetCurrent, void *);
-PER_AMDGPU_FUNCTION(context_get_current, hipCtxGetCurrent, void **);
+PER_AMDGPU_FUNCTION(device_get_name, hipDeviceGetName, char *, int, int);
+PER_AMDGPU_FUNCTION(device_get_current, hipGetDevice, int *);
+PER_AMDGPU_FUNCTION(device_set_current, hipSetDevice, int);
 
 // Stream management
-PER_AMDGPU_FUNCTION(stream_create, hipStreamCreate, void **, uint32);
+PER_AMDGPU_FUNCTION(stream_create, hipStreamCreateWithFlags, void **, uint32);
 
 // Memory management
 PER_AMDGPU_FUNCTION(memcpy_host_to_device,
@@ -67,18 +62,9 @@ PER_AMDGPU_FUNCTION(malloc_managed,
                     void **,
                     std::size_t,
                     uint32);
-PER_AMDGPU_FUNCTION(memset, hipMemset, void *, uint8, std::size_t);
+PER_AMDGPU_FUNCTION(memset, hipMemset, void *, int, std::size_t);
 PER_AMDGPU_FUNCTION(mem_free, hipFree, void *);
 PER_AMDGPU_FUNCTION(mem_get_info, hipMemGetInfo, std::size_t *, std::size_t *);
-PER_AMDGPU_FUNCTION(mem_get_attribute,
-                    hipPointerGetAttribute,
-                    void *,
-                    uint32,
-                    void *);
-PER_AMDGPU_FUNCTION(mem_get_attributes,
-                    hipPointerGetAttributes,
-                    void *,
-                    void *);
 
 // Module and kernels
 PER_AMDGPU_FUNCTION(module_get_function,
@@ -106,7 +92,7 @@ PER_AMDGPU_FUNCTION(kernel_get_attribute,
                     uint32,
                     void *);
 PER_AMDGPU_FUNCTION(kernel_get_occupancy,
-                    hipOccupancyMaxActiveBlocksPerMultiprocessor,
+                    hipModuleOccupancyMaxActiveBlocksPerMultiprocessor,
                     int *,
                     void *,
                     int,

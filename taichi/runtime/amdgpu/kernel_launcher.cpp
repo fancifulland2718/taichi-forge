@@ -5,12 +5,7 @@ namespace taichi::lang {
 namespace amdgpu {
 
 bool KernelLauncher::on_amdgpu_device(void *ptr) {
-  unsigned int attr_val[8];
-  // mem_get_attribute doesn't work well on ROCm
-  uint32_t ret_code =
-      AMDGPUDriver::get_instance().mem_get_attributes.call(attr_val, ptr);
-
-  return ret_code == HIP_SUCCESS && attr_val[0] == HIP_MEMORYTYPE_DEVICE;
+  return AMDGPUDriver::get_instance().pointer_is_device(ptr);
 }
 
 void KernelLauncher::launch_llvm_kernel(Handle handle,
@@ -39,6 +34,12 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   AMDGPUDriver::get_instance().malloc(
       (void **)&device_result_buffer,
       std::max(ctx.result_buffer_size, sizeof(uint64)));
+  if (ctx.result_buffer_size == 0) {
+    // Retire scratch with the existing launch-context buffers at synchronize;
+    // do not add a hipFree-induced wait to every void-returning kernel.
+    AMDGPUContext::get_instance().push_back_kernel_arg_pointer(
+        device_result_buffer);
+  }
 
   for (int i = 0; i < (int)parameters.size(); i++) {
     const auto &kv = parameters[i];
@@ -102,11 +103,9 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   }
   char *host_result_buffer = (char *)ctx.get_context().result_buffer;
   if (ctx.result_buffer_size > 0) {
-    // Malloc_Async and Free_Async are available after ROCm 5.4
-    AMDGPUDriver::get_instance().malloc((void **)&device_result_buffer,
-                                        ctx.result_buffer_size);
     ctx.get_context().result_buffer = (uint64 *)device_result_buffer;
   }
+  auto *host_arg_buffer = ctx.get_context().arg_buffer;
   char *device_arg_buffer = nullptr;
   if (ctx.arg_buffer_size > 0) {
     AMDGPUDriver::get_instance().malloc((void **)&device_arg_buffer,
@@ -133,11 +132,13 @@ void KernelLauncher::launch_llvm_kernel(Handle handle,
   TI_TRACE("Launching kernel");
   if (ctx.arg_buffer_size > 0) {
     AMDGPUDriver::get_instance().mem_free(device_arg_buffer);
+    ctx.get_context().arg_buffer = host_arg_buffer;
   }
   if (ctx.result_buffer_size > 0) {
     AMDGPUDriver::get_instance().memcpy_device_to_host(
         host_result_buffer, device_result_buffer, ctx.result_buffer_size);
     AMDGPUDriver::get_instance().mem_free(device_result_buffer);
+    ctx.get_context().result_buffer = (uint64 *)host_result_buffer;
   }
   if (transfers.size()) {
     for (auto itr = transfers.begin(); itr != transfers.end(); itr++) {

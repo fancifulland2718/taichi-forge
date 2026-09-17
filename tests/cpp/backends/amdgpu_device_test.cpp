@@ -27,7 +27,16 @@
 namespace taichi {
 namespace lang {
 
-TEST(AMDGPU, CreateDeviceAndAlloc) {
+class AMDGPU : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    if (!AMDGPUDriver::get_instance_without_context().detected()) {
+      GTEST_SKIP() << "No compatible HIP runtime/device";
+    }
+  }
+};
+
+TEST_F(AMDGPU, CreateDeviceAndAlloc) {
   std::unique_ptr<amdgpu::AmdgpuDevice> device =
       std::make_unique<amdgpu::AmdgpuDevice>();
   EXPECT_TRUE(device != nullptr);
@@ -58,7 +67,7 @@ TEST(AMDGPU, CreateDeviceAndAlloc) {
   device->unmap(device_alloc);
 }
 
-TEST(AMDGPU, ImportMemory) {
+TEST_F(AMDGPU, ImportMemory) {
   std::unique_ptr<amdgpu::AmdgpuDevice> device =
       std::make_unique<amdgpu::AmdgpuDevice>();
   EXPECT_TRUE(device != nullptr);
@@ -98,14 +107,14 @@ TEST(AMDGPU, ImportMemory) {
   AMDGPUDriver::get_instance().mem_free(ptr);
 }
 
-TEST(AMDGPU, CreateContextAndGetMemInfo) {
+TEST_F(AMDGPU, CreateContextAndGetMemInfo) {
   auto total_size = AMDGPUContext::get_instance().get_total_memory();
   auto free_size = AMDGPUContext::get_instance().get_free_memory();
   EXPECT_GE(total_size, free_size);
   EXPECT_GE(free_size, 0);
 }
 
-TEST(AMDGPU, ConvertAllocaInstAddressSpacePass) {
+TEST_F(AMDGPU, ConvertAllocaInstAddressSpacePass) {
   const std::string program =
       "define dso_local void @runtime_add(double* %0, double* %1, double* %2) "
       "#4 "
@@ -156,7 +165,7 @@ TEST(AMDGPU, ConvertAllocaInstAddressSpacePass) {
   }
 }
 
-TEST(AMDGPU, ConvertFuncParamAddressSpacePass) {
+TEST_F(AMDGPU, ConvertFuncParamAddressSpacePass) {
   const std::string program =
       "define dso_local void @runtime_add(double* %0, double* %1, double* %2) "
       "#4 "
@@ -193,7 +202,7 @@ TEST(AMDGPU, ConvertFuncParamAddressSpacePass) {
   }
 }
 
-TEST(AMDGPU, CompileProgramAndLaunch) {
+TEST_F(AMDGPU, CompileProgramAndLaunch) {
   std::string program =
       "target datalayout = "
       "\"e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-i64:"

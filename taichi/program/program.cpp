@@ -8585,7 +8585,10 @@ RuntimeStatisticsSnapshot Program::runtime_statistics_snapshot() {
 #ifdef TI_WITH_LLVM
   if (arch_uses_llvm(compile_config().arch)) {
     const DeviceMemoryPoolStats device =
-        DeviceMemoryPool::get_instance().get_stats();
+        DeviceMemoryPool::get_instance(compile_config().arch == Arch::amdgpu
+                                          ? Arch::amdgpu
+                                          : Arch::cuda)
+            .get_stats();
     const std::uint64_t device_live =
         device.bytes_allocated_total >= device.bytes_released_total
             ? device.bytes_allocated_total - device.bytes_released_total

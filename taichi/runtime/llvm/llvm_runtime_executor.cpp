@@ -1445,7 +1445,8 @@ void LlvmRuntimeExecutor::finalize() {
 
     // Reset memory pool
     if (backend_calls_safe) {
-      DeviceMemoryPool::get_instance().reset();
+      // Release only the pool owned by this backend. CUDA keeps its original pool.
+      DeviceMemoryPool::get_instance(config_.arch).reset();
 
       // Release unused memory from cuda memory pool.
       synchronize();

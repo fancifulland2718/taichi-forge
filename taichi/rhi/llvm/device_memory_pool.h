@@ -14,16 +14,16 @@ namespace taichi::lang {
 
 // R1.c: read-only diagnostic snapshot for the device-side memory pool.
 struct DeviceMemoryPoolStats {
-  uint64_t allocate_count{0};       // # allocate + allocate_with_cache calls
-  uint64_t release_count{0};        // # release calls
+  uint64_t allocate_count{0};  // # allocate + allocate_with_cache calls
+  uint64_t release_count{0};   // # release calls
   uint64_t bytes_allocated_total{0};
   uint64_t bytes_released_total{0};
-  uint64_t cache_hit_count{0};      // hits served from CachingAllocator
-  uint64_t cache_miss_count{0};     // forwarded to device->allocate_*
-  uint64_t raw_chunks{0};           // # device-side raw blocks alive
-  uint64_t raw_bytes{0};            // sum of device-side raw block sizes
-  uint64_t cached_blocks{0};        // # blocks parked in caching free-list
-  uint64_t cached_bytes{0};         // total bytes parked in free-list
+  uint64_t cache_hit_count{0};   // hits served from CachingAllocator
+  uint64_t cache_miss_count{0};  // forwarded to device->allocate_*
+  uint64_t raw_chunks{0};        // # device-side raw blocks alive
+  uint64_t raw_bytes{0};         // sum of device-side raw block sizes
+  uint64_t cached_blocks{0};     // # blocks parked in caching free-list
+  uint64_t cached_bytes{0};      // total bytes parked in free-list
 };
 
 class TI_DLL_EXPORT DeviceMemoryPool {
@@ -32,6 +32,8 @@ class TI_DLL_EXPORT DeviceMemoryPool {
   static const size_t page_size;
 
   static DeviceMemoryPool &get_instance(bool merge_upon_release = true);
+  static DeviceMemoryPool &get_instance(Arch arch,
+                                        bool merge_upon_release = true);
 
   void *allocate_with_cache(LlvmDevice *device,
                             const LlvmDevice::LlvmRuntimeAllocParams &params);
@@ -39,6 +41,7 @@ class TI_DLL_EXPORT DeviceMemoryPool {
   void release(std::size_t size, void *ptr, bool release_raw = false);
   void reset();
   explicit DeviceMemoryPool(bool merge_upon_release);
+  DeviceMemoryPool(Arch arch, bool merge_upon_release);
   ~DeviceMemoryPool();
 
   // R1.c: returns a consistent snapshot under the pool's own mutex.
@@ -54,6 +57,7 @@ class TI_DLL_EXPORT DeviceMemoryPool {
 
   std::mutex mut_allocation_;
   bool merge_upon_release_ = true;
+  Arch arch_{Arch::cuda};
 
   // R1.c counters; updated under mut_allocation_.
   uint64_t allocate_count_{0};

@@ -20,7 +20,11 @@
 namespace taichi::lang {
 
 DeviceMemoryPool::DeviceMemoryPool(bool merge_upon_release)
-    : merge_upon_release_(merge_upon_release) {
+    : DeviceMemoryPool(Arch::cuda, merge_upon_release) {
+}
+
+DeviceMemoryPool::DeviceMemoryPool(Arch arch, bool merge_upon_release)
+    : merge_upon_release_(merge_upon_release), arch_(arch) {
   allocator_ = std::make_unique<CachingAllocator>(merge_upon_release);
 }
 
@@ -93,20 +97,24 @@ void *DeviceMemoryPool::allocate_raw_memory(std::size_t size, bool managed) {
   void *ptr = nullptr;
 
 #if TI_WITH_CUDA
-  if (!managed) {
-    CUDADriver::get_instance().malloc(&ptr, size);
-  } else {
-    CUDADriver::get_instance().malloc_managed(&ptr, size, CU_MEM_ATTACH_GLOBAL);
+  if (arch_ == Arch::cuda) {
+    if (!managed) {
+      CUDADriver::get_instance().malloc(&ptr, size);
+    } else {
+      CUDADriver::get_instance().malloc_managed(&ptr, size,
+                                                CU_MEM_ATTACH_GLOBAL);
+    }
   }
-#elif TI_WITH_AMDGPU
-  if (!managed) {
-    AMDGPUDriver::get_instance().malloc(&ptr, size);
-  } else {
-    AMDGPUDriver::get_instance().malloc_managed(&ptr, size,
-                                                HIP_MEM_ATTACH_GLOBAL);
+#endif
+#if TI_WITH_AMDGPU
+  if (arch_ == Arch::amdgpu) {
+    if (!managed) {
+      AMDGPUDriver::get_instance().malloc(&ptr, size);
+    } else {
+      AMDGPUDriver::get_instance().malloc_managed(&ptr, size,
+                                                  HIP_MEM_ATTACH_GLOBAL);
+    }
   }
-#else
-  TI_NOT_IMPLEMENTED;
 #endif
 
   if (ptr == nullptr) {
@@ -136,14 +144,14 @@ void DeviceMemoryPool::deallocate_raw_memory(void *ptr) {
   }
 
 #if TI_WITH_CUDA
-  CUDADriver::get_instance().mem_free(ptr);
-  raw_memory_chunks_.erase(ptr);
-#elif TI_WITH_AMDGPU
-  AMDGPUDriver::get_instance().mem_free(ptr);
-  raw_memory_chunks_.erase(ptr);
-#else
-  TI_NOT_IMPLEMENTED;
+  if (arch_ == Arch::cuda)
+    CUDADriver::get_instance().mem_free(ptr);
 #endif
+#if TI_WITH_AMDGPU
+  if (arch_ == Arch::amdgpu)
+    AMDGPUDriver::get_instance().mem_free(ptr);
+#endif
+  raw_memory_chunks_.erase(ptr);
 }
 
 void DeviceMemoryPool::reset() {
@@ -163,6 +171,17 @@ DeviceMemoryPool::~DeviceMemoryPool() {
 const size_t DeviceMemoryPool::page_size{1 << 12};  // 4 KB page size by default
 
 DeviceMemoryPool &DeviceMemoryPool::get_instance(bool merge_upon_release) {
+  return get_instance(Arch::cuda, merge_upon_release);
+}
+
+DeviceMemoryPool &DeviceMemoryPool::get_instance(Arch arch,
+                                                 bool merge_upon_release) {
+  if (arch == Arch::amdgpu) {
+    static auto *amdgpu_pool =
+        new DeviceMemoryPool(Arch::amdgpu, merge_upon_release);
+    return *amdgpu_pool;
+  }
+  TI_ASSERT(arch == Arch::cuda);
   static DeviceMemoryPool *cuda_memory_pool =
       new DeviceMemoryPool(merge_upon_release);
   return *cuda_memory_pool;
