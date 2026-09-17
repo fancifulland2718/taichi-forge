@@ -61,6 +61,7 @@ OPTIONAL_PROVIDER_EXPORTS = {
         {
             "taichi_forge_cudss_configuration_query",
             "taichi_forge_cudss_allocator_query",
+            "taichi_forge_cudss_factor_statistics_query",
         }
     ),
     "taichi_forge_vkfft_provider_query": frozenset(

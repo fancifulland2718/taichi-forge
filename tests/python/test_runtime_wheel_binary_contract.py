@@ -75,6 +75,10 @@ def test_windows_provider_optional_exports_are_owner_scoped(
 
         exports.add(required)
         audit()  # Previous adapters do not need the new extension symbols.
+        if provider == "cudss":
+            # A real adapter export must be checked independently of the allowlist.
+            exports.add("taichi_forge_cudss_factor_statistics_query")
+            audit()
         extensions = validate_runtime_wheel.OPTIONAL_PROVIDER_EXPORTS[required]
         for extension in sorted(extensions):
             exports.add(extension)
