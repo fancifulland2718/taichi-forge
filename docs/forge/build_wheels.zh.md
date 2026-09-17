@@ -11,8 +11,10 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 
 两个包独立发布。`publish_runtime_pypi.yml` 构建并可选发布原生 runtime；
 `publish_pypi.yml` 默认使用已发布的 runtime 链接并安装验证 shim，只发布 `taichi-forge`。
-通过 `runtime_version` 可选择不同包版本的兼容 runtime，也可以显式复用已有 artifact；
-联合构建 runtime/shim 保留为不发布的验证模式。发布参数与权限见
+通过 `runtime_version` 可选择不同包版本的兼容 runtime，主包 workflow 不会重编 runtime。
+已有 `validated-shim-wheel-set` 可以通过 `wheel_run_id` 直接发布，不重建任何 wheel。
+上传需显式设置 `publish=true`，单选 `target=pypi` 仅选择索引；流程不自动创建 GitHub Release。
+发布参数与权限见
 [维护者发行流程](../design/pypi_release.md)。
 
 两个 workflow 共构建两类 wheel：

@@ -9,8 +9,9 @@ runtime 与 Python 主包保持独立发布：
 - [`publish_pypi.yml`](../../.github/workflows/publish_pypi.yml)
   构建、验证并可选发布 Python/pybind shim `taichi-forge`，默认复用已发布 runtime，不重新构建它。
 
-正式发布顺序为 **runtime 独立发布 → shim 构建与安装验证 → shim 上传 → GitHub Release**。
-只更新 Python 包时可以复用兼容 runtime。尚未发布的 runtime 可以通过 artifact 或联合构建验证；
+正式发布顺序为 **runtime 独立发布 → shim 构建与安装验证 → shim 上传**。
+主包 workflow 不构建 runtime，也不创建 GitHub Release。这样 Python 包更新、上传重试都不需要重编 native。
+只更新 Python 包时可以复用兼容 runtime。尚未发布的 runtime 可以通过独立构建的 artifact 验证；
 发布 shim 前，其声明的 runtime 必须已在所选索引上可获取。
 
 下文以 `0.6.3` 为示例。其它版本须同步 `version.txt`、包元数据、workflow 输入或 tag
@@ -21,9 +22,8 @@ runtime 与 Python 主包保持独立发布：
 
 ### 1.1 GitHub 仓库设置
 
-- **Settings → Actions → General → Workflow permissions** 必须设置为 "Read and write
-  permissions"（默认只读），否则 `GITHUB_TOKEN` 无法创建 Release、无法 push tag。
-  - 症状：Release step 报 `403 Resource not accessible by integration`。
+- 构建只需仓库与 artifact 读取权限；上传作业额外声明 `id-token: write`。
+  无需仓库写权限或 `RELEASE_PAT`。GitHub Release 如有需要可以单独手动创建，不影响 pip 安装。
 - **Settings → Environments** 新建两个环境：
   - `testpypi` — 绑定到 TestPyPI 的 Trusted Publisher。
   - `pypi`     — 绑定到生产 PyPI 的 Trusted Publisher。
@@ -70,16 +70,9 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 手动运行 `publish_pypi.yml` 并设置 `publish=false`，会构建、安装验证并汇总两个平台的
 Python 3.10–3.14 shim wheel，保存为 `validated-shim-wheel-set`。该模式不进入发布 environment，
 不上传 PyPI/TestPyPI，也不创建 GitHub Release。只有这组 shim 通过后，发布作业才消费该 artifact。
-选择 `runtime_source=build` 时才额外调用原生 runtime 构建，用于未发布二进制的联合验证。
+运行名称与摘要会标明“Build only”或“Publish”；选择 `target=pypi` 不等于开启上传。
 
-### 1.5 （备选）PAT fallback
-
-如果默认 `GITHUB_TOKEN` 即使开启了 "Read and write" 依然无法创建 Release（比如组织
-级策略覆盖），把一个 fine-grained PAT（权限：Contents: write）存为 `RELEASE_PAT`：
-`publish_pypi.yml` 已经用 `${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}` 优先
-使用它。
-
-### 1.6 单一平台 driver-only runtime wheel
+### 1.5 单一平台 driver-only runtime wheel
 
 `publish_runtime_pypi.yml` 构建不依赖 CUDA Toolkit runtime 的平台级
 `taichi-forge-runtime` wheel，并显式启用：
@@ -139,9 +132,11 @@ Actions → Publish wheels to PyPI → Run workflow
 
 - `runtime_source=artifact`：同时填写 `runtime_run_id`，复用已有运行的
   `wheel-windows-runtime` / `wheel-linux-runtime`。支持两个平台，不重新构建 native。
-- `runtime_source=build`：调用 runtime workflow 构建当前源码，再验证两个 runtime 与十个 shim；
-  无需索引已有该版本，但只允许 `publish=false`。原生 artifact 与验证后的 shim artifact 分别保存。
 - `runtime_source=index`：从 `target` 指定的索引下载 `runtime_version`，不启动 runtime job。
+
+`runtime_version` 填包版本，例如 `0.6.3`；`runtime_run_id` 填 Actions URL 中的数字运行编号，
+例如 `https://github.com/<owner>/<repo>/actions/runs/123456789` 中的 `123456789`。
+不要在运行编号字段填版本号。使用 `index` 时将 `runtime_run_id` 留空。
 
 只验证 Windows 时使用 `validation_platform=windows`、`publish=false`。可通过
 `runtime_source=artifact` 与 `runtime_run_id` 复用已有运行的 `wheel-windows-runtime`；仍需满足依赖、native/provider
@@ -169,8 +164,8 @@ Actions → Publish wheels to PyPI → Run workflow
   target:  testpypi
 ```
 
-等待 runtime 上传完成，再运行主包 workflow。主包验证并上传成功后创建 **draft** GitHub Release
-（非 tag 触发）。两个项目分别需要对应的 Trusted Publisher。
+等待 runtime 上传完成，再运行主包 workflow。两个项目分别需要对应的 Trusted Publisher，
+但都不需要 GitHub Release 权限。
 
 安装验证：
 ```
@@ -198,10 +193,10 @@ git push origin forge-v0.6.3
 1. 从 PyPI 下载源码元数据声明的两个平台 runtime wheel，不重建、不上传 runtime。
 2. 构建 10 个 shim wheel，按各解释器安装并验证，再校验 shim 集合。
 3. 核对已有文件的 SHA256，只上传 `taichi-forge` 缺失的 wheel。
-4. 上传成功后创建非 draft GitHub Release，附带自动生成说明与 wheel。
+4. 在运行摘要记录上传结果；wheel 同时保留为 Actions artifact，不自动创建 GitHub Release。
 
 也可以手动选择 `publish=true`、`target=pypi`、`validation_platform=all`；这会真实上传，
-但 GitHub Release 是 draft。使用 `runtime_source=artifact` 发布时，还会确认所用 runtime 文件
+不需要推 tag。使用 `runtime_source=artifact` 发布时，还会确认所用 runtime 文件
 已经以相同 SHA256 发布到所选索引，避免发布一个用户无法安装依赖的 shim。
 发布前核对 README、文档索引和发布说明的版本及功能说明；对外文档描述该版本的用法，
 不承载临时的构建或上传进度。
@@ -213,15 +208,39 @@ git push origin forge-v0.6.3
 优先在原运行中重跑失败的发布作业，以继续消费同一批 artifact，避免重建后产生不同字节。
 只有源码或产物实际改变时才需要新版本；网络中断造成的部分上传不要求改版本。
 
+### 2.5 发布已构建的主包（不重新编译）
+
+若此前只构建未上传，或需用修正后的发布流程上传旧运行的产物，手动运行 `publish_pypi.yml`：
+
+```text
+version: 0.6.3
+runtime_version: 0.6.3
+runtime_source: index
+runtime_run_id: 留空
+wheel_run_id: <拥有 validated-shim-wheel-set 的 Actions 数字运行编号>
+validation_platform: all
+publish: true
+target: pypi
+```
+
+这条路径跳过 Windows/Linux 的全部编译作业，下载所选运行中已经过安装验证的
+`validated-shim-wheel-set`，重新核对十个 shim 的集合、版本与 runtime 依赖，再上传缺失文件。
+所需 runtime 必须已在所选索引发布。输入的 `version`/`runtime_version` 应匹配旧 artifact，
+不是把旧 wheel 改成新版本，也不会把当前源码里的新功能注入旧 wheel。
+
+`wheel_run_id` 复用主包产物，`runtime_run_id` 仅在编译新 shim 时复用 runtime；两者不要混填。
+artifact 过期或原运行未完成集合验证时，仍需重新构建 shim，但不需要重新构建 runtime。
+
 ## 3. 常见"无权限"问题速查
 
 | 症状 | 原因 | 解决 |
 | ---- | --- | ---- |
-| `Error 403: Resource not accessible by integration` 在 `action-gh-release` | Workflow permissions 是只读 | Settings → Actions → General → Workflow permissions 改为 "Read and write" |
-| `id-token: write not granted` | 发布作业缺 `permissions.id-token: write` | 主包 workflow 在顶层声明，runtime 在发布 job 声明；检查组织限制和 job 覆盖 |
+| 构建成功，但 PyPI 上传显示 skipped | `publish=false`、验证未成功，或旧 workflow 的 skipped 依赖链 | 查看 Resolve version 日志与摘要；用当前 workflow 的 `wheel_run_id` 路径配合 `publish=true` 发布已有产物 |
+| `id-token: write not granted` | 发布作业缺 `permissions.id-token: write` | 两个 workflow 均在上传 job 声明；检查组织限制和 job 覆盖 |
 | PyPI 返回 `invalid-publisher` | Trusted Publisher 没绑定或环境名不匹配 | 按 §1.2 重新绑定，确认 `environment.name` 与 PyPI 侧配置一致 |
 | PyPI 返回 `File already exists` 或发布检查发现内容不同 | 并发上传、重建导致文件变化，或此前部分上传 | 重跑原发布作业以使用原 artifact；相同 SHA256 会跳过，不同内容必须使用新版本 |
-| Release step 成功但 asset 为空 | artifact download 失败 / path 不对 | 看 `Gather wheels` step 输出，确认 `dist/*.whl` 确实存在 |
+| 找不到 `validated-shim-wheel-set` | 原运行没有完整验证成功，或 artifact 已过期 | 检查所选运行的 artifact；原始单个 wheel artifact 不等于已验证的完整集合 |
+| Eigen clone 报 GitLab 过载 | 旧源码的 submodule URL 仍指向 GitLab | 当前固定提交已改用上游团队的 GitHub 历史镜像；已有 checkout 先 `git submodule sync -- external/eigen` |
 | shim job 下载 runtime 失败 | 所选索引缺少版本，或 artifact 过期、run ID 不正确 | `index` 模式先确认独立 runtime 已发布；`artifact` 模式核对对应平台 artifact 与运行权限 |
 | fork 触发 workflow 没有 id-token | fork 的 `pull_request` 默认没 OIDC 权限 | 改用 `workflow_dispatch` 或从 canonical repo 发起 |
 | 标准 runtime 编译意外寻找 CUDA/CCCL 头文件 | production target 错误依赖了 Toolkit-reference source | 确认三个标准 flag 均为 OFF，并把 CUB/CUDART source 只留在独立 reference target |

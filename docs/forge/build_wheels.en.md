@@ -14,8 +14,10 @@ The two packages have independent publishing workflows. `publish_runtime_pypi.ym
 builds and optionally publishes the native runtime. `publish_pypi.yml` defaults to
 linking and install-validating shims against a published runtime, and publishes
 only `taichi-forge`. Its `runtime_version` input can select a compatible runtime
-with a different package version. Existing artifacts can also be reused; a joint
-runtime/shim build is available as a non-publishing validation mode.
+with a different package version. The shim workflow never builds the runtime.
+Use `wheel_run_id` to publish an existing `validated-shim-wheel-set` without
+rebuilding any wheel. Set `publish=true` explicitly to upload; selecting
+`target=pypi` alone only chooses the index. GitHub Releases are not created.
 For publication inputs and permissions, see the
 [maintainer release procedure](../design/pypi_release.md).
 
