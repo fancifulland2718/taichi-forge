@@ -11,6 +11,13 @@ want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
 ## Wheel Matrix
 
+`publish_pypi.yml` first calls the reusable runtime build, then builds and
+install-validates the shims against those exact artifacts. It collects the
+complete set before publishing either project. No prior PyPI runtime upload is
+needed. `publish_runtime_pypi.yml` itself only produces build artifacts.
+For publication inputs and permissions, see the
+[maintainer release procedure](../design/pypi_release.md).
+
 The publish workflow builds two wheel families:
 
 - `taichi-forge-runtime`: platform-native runtime wheels tagged as
@@ -289,7 +296,7 @@ discoverable, as in the runtime workflow. This is a build-machine requirement,
 not an end-user Toolkit dependency. Build the platform runtime wheel once:
 
 ```bash
-CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
+CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_AMDGPU:BOOL=ON -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
@@ -367,7 +374,7 @@ CUDA 12.5 PTX preprocessing (not an unsupported newer compiler). Build the
 platform runtime wheel once:
 
 ```powershell
-$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
+$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_AMDGPU:BOOL=ON -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
 $env:CMAKE_ARGS += " `"-DCMAKE_CUDA_HOST_COMPILER:FILEPATH=$ptxHost`""
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```

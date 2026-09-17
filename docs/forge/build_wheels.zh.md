@@ -9,6 +9,11 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 
 ## Wheel 矩阵
 
+`publish_pypi.yml` 先调用可复用的 runtime 构建，再针对这批 artifact 构建并安装验证 shim，
+收齐完整集合后才发布两个项目。不需要预先将 runtime 上传 PyPI。
+`publish_runtime_pypi.yml` 自身只产出构建 artifact；发布参数与权限见
+[维护者发行流程](../design/pypi_release.md)。
+
 发布 workflow 构建两类 wheel：
 
 - `taichi-forge-runtime`：平台原生 runtime wheel，标签为
@@ -251,7 +256,7 @@ python scripts/sync_runtime_dependency.py
 构建。这是构建机要求，不是最终用户的 Toolkit 依赖。平台 runtime wheel 只需要构建一次：
 
 ```bash
-CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
+CMAKE_ARGS="$BASE_CMAKE_ARGS -DTI_WITH_AMDGPU:BOOL=ON -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF" \
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
 
@@ -322,7 +327,7 @@ python scripts\sync_runtime_dependency.py
 编译器。平台 runtime wheel 只需要构建一次：
 
 ```powershell
-$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
+$env:CMAKE_ARGS = "$baseCmakeArgs -DTI_WITH_AMDGPU:BOOL=ON -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF -DTI_WITH_CUPTI:BOOL=OFF"
 $env:CMAKE_ARGS += " `"-DCMAKE_CUDA_HOST_COMPILER:FILEPATH=$ptxHost`""
 python -I -m build --wheel --no-isolation --outdir dist-runtime packaging/runtime
 ```
