@@ -67,7 +67,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
   }
     if (op == UnaryOpType::abs) {
       if (input_taichi_type->is_primitive(PrimitiveTypeID::f16)) {
-        llvm_val[stmt] = call("__ocml_fasb_f16", input);
+        llvm_val[stmt] = call("__ocml_fabs_f16", input);
       } else if (input_taichi_type->is_primitive(PrimitiveTypeID::f32)) {
         llvm_val[stmt] = call("__ocml_fabs_f32", input);
       } else if (input_taichi_type->is_primitive(PrimitiveTypeID::f64)) {
@@ -110,7 +110,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_oeq_then = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_oeq_else);
+        bb_oeq_else->insertInto(func);
         builder->SetInsertPoint(bb_oeq_else);
         auto fcmp_olt = builder->CreateFCmpOLT(
             input,
@@ -125,7 +125,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_olt_then = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_olt_else);
+        bb_olt_else->insertInto(func);
         builder->SetInsertPoint(bb_olt_else);
         builder->CreateStore(
             llvm::ConstantFP::get(llvm::Type::getFloatTy(*llvm_context), 1),
@@ -133,7 +133,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_olt_else = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_merge);
+        bb_merge->insertInto(func);
         builder->SetInsertPoint(bb_merge);
         llvm_val[stmt] =
             builder->CreateLoad(llvm::Type::getFloatTy(*llvm_context), cast);
@@ -161,7 +161,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_oeq_then = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_oeq_else);
+        bb_oeq_else->insertInto(func);
         builder->SetInsertPoint(bb_oeq_else);
         auto fcmp_olt = builder->CreateFCmpOLT(
             input,
@@ -176,7 +176,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_olt_then = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_olt_else);
+        bb_olt_else->insertInto(func);
         builder->SetInsertPoint(bb_olt_else);
         builder->CreateStore(
             llvm::ConstantFP::get(llvm::Type::getDoubleTy(*llvm_context), 1),
@@ -184,7 +184,7 @@ class TaskCodeGenAMDGPU : public TaskCodeGenLLVM {
         builder->CreateBr(bb_merge);
         bb_olt_else = builder->GetInsertBlock();
 
-        func->getBasicBlockList().push_back(bb_merge);
+        bb_merge->insertInto(func);
         builder->SetInsertPoint(bb_merge);
         llvm_val[stmt] =
             builder->CreateLoad(llvm::Type::getDoubleTy(*llvm_context), cast);

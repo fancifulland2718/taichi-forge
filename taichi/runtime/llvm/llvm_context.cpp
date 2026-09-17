@@ -642,11 +642,15 @@ void TaichiLLVMContext::link_module_with_amdgpu_libdevice(
     std::unique_ptr<llvm::Module> &module) {
   TI_ASSERT(arch_ == Arch::amdgpu);
 #if defined(TI_WITH_AMDGPU)
-  auto isa_version = AMDGPUContext::get_instance().get_mcpu().substr(3, 4);
+  auto &amdgpu_context = AMDGPUContext::get_instance();
+  auto isa_version = amdgpu_context.get_mcpu().substr(3);
+  const std::string wavefront_lib = amdgpu_context.get_warp_size() == 64
+                                       ? "oclc_wavefrontsize64_on.bc"
+                                       : "oclc_wavefrontsize64_off.bc";
   std::string libdevice_files[] = {"ocml.bc",
-                                   "oclc_wavefrontsize64_off.bc",
+                                   wavefront_lib,
                                    "ockl.bc",
-                                   "oclc_abi_version_400.bc",
+                                   "oclc_abi_version_500.bc",
                                    "oclc_correctly_rounded_sqrt_off.bc",
                                    "oclc_daz_opt_off.bc",
                                    "oclc_finite_only_off.bc",
@@ -656,6 +660,10 @@ void TaichiLLVMContext::link_module_with_amdgpu_libdevice(
 
   for (auto &libdevice : libdevice_files) {
     std::string lib_dir = runtime_lib_dir() + "/";
+    TI_ERROR_IF(!llvm::sys::fs::exists(lib_dir + libdevice),
+                "AMDGPU compiler bitcode missing: {}. Use the runtime's "
+                "matching device libraries, not an arbitrary installed SDK.",
+                lib_dir + libdevice);
     auto libdevice_module = module_from_bitcode_file(lib_dir + libdevice,
                                                      get_this_thread_context());
 
@@ -671,8 +679,9 @@ void TaichiLLVMContext::link_module_with_amdgpu_libdevice(
 
     for (auto &f : libdevice_module->functions()) {
       auto func_name = libdevice.substr(0, libdevice.length() - 3);
-      if (starts_with(f.getName().lower(), "__" + func_name))
-        f.setLinkage(llvm::Function::CommonLinkage);
+      if (!f.isDeclaration() &&
+          starts_with(f.getName().lower(), "__" + func_name))
+        f.setLinkage(llvm::Function::LinkOnceODRLinkage);
     }
 
     bool failed =

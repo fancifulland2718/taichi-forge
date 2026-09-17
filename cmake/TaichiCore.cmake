@@ -126,13 +126,6 @@ else()
     endif()
 endif()
 
-if (WIN32)
-    if (TI_WITH_AMDGPU)
-        set(TI_WITH_AMDGPU OFF)
-        message(WARNING "AMDGPU backend not supported on Windows. Setting TI_WITH_AMDGPU to OFF.")
-    endif()
-endif()
-
 if(TI_WITH_VULKAN)
     set(TI_WITH_GGUI ON)
 endif()
@@ -144,6 +137,7 @@ if (NOT TI_WITH_PREBUILT_PYTHON_RUNTIME AND
 endif()
 
 if(NOT TI_WITH_LLVM)
+    set(TI_WITH_AMDGPU OFF)
     set(TI_WITH_CUDA OFF)
     set(TI_WITH_CUDA_TOOLKIT OFF)
     set(TI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE OFF)
@@ -675,7 +669,11 @@ if(TI_WITH_LLVM)
     endif()
 
     if (TI_WITH_AMDGPU)
+        if(NOT "AMDGPU" IN_LIST LLVM_TARGETS_TO_BUILD)
+            message(FATAL_ERROR "TI_WITH_AMDGPU requires LLVM built with the AMDGPU target")
+        endif()
         llvm_map_components_to_libnames(llvm_amdgpu_libs AMDGPU)
+        include(cmake/AMDGPUDeviceLibs.cmake)
         add_subdirectory(taichi/codegen/amdgpu)
         add_subdirectory(taichi/runtime/amdgpu)
 
@@ -1116,6 +1114,8 @@ if(TI_WITH_PYTHON)
                 cpu_runtime
                 cuda_codegen
                 cuda_runtime
+                amdgpu_codegen
+                amdgpu_runtime
                 llvm_program_impl
                 llvm_codegen
                 llvm_runtime
@@ -1128,6 +1128,7 @@ if(TI_WITH_PYTHON)
                 interop_rhi
                 cpu_rhi
                 cuda_rhi
+                amdgpu_rhi
                 llvm_rhi
                 opengl_rhi
                 vulkan_rhi)
@@ -1442,9 +1443,13 @@ if (NOT TI_WITH_PREBUILT_PYTHON_RUNTIME)
     endif()
 
     if (TI_WITH_AMDGPU)
-        file(GLOB AMDGPU_BC_FILES ${CMAKE_SOURCE_DIR}/external/amdgpu_libdevice/*.bc)
+        file(GLOB AMDGPU_BC_FILES "${TI_AMDGPU_DEVICE_LIBS_DIR}/*.bc")
         install(FILES ${AMDGPU_BC_FILES}
                 DESTINATION ${INSTALL_LIB_DIR}/runtime
+                COMPONENT runtime)
+        install(FILES "${TI_AMDGPU_DEVICE_LIBS_LICENSE}"
+                DESTINATION ${INSTALL_LIB_DIR}/runtime
+                RENAME AMDGPU-DEVICE-LIBS-LICENSE.txt
                 COMPONENT runtime)
     endif()
 endif()

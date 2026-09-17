@@ -5,6 +5,8 @@
 
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/Support/Program.h"
+#include "llvm/Support/FileUtilities.h"
 
 namespace taichi {
 namespace lang {
@@ -49,6 +51,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   std::string error_str;
   auto target = llvm::TargetRegistry::lookupTarget(triple_str, error_str);
 
+  TI_ERROR_IF(!target, "AMDGPU LLVM target unavailable: {}", error_str);
+
   llvm::TargetOptions options;
   options.MCOptions.AsmVerbose = false;
   if (this->config_.fast_math) {
@@ -67,7 +71,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   options.GuaranteedTailCallOpt = 0;
 
   std::unique_ptr<llvm::TargetMachine> machine(target->createTargetMachine(
-      triple_str, AMDGPUContext::get_instance().get_mcpu(), "", options,
+      triple_str, AMDGPUContext::get_instance().get_mcpu(),
+      AMDGPUContext::get_instance().get_target_features(), options,
       llvm::Reloc::PIC_, llvm::CodeModel::Small,
       llvm::CodeGenOptLevel::Aggressive));
 
@@ -91,7 +96,8 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     auto module_clone = llvm::CloneModule(*llvm_module);
     std::unique_ptr<llvm::TargetMachine> machine_gen_gcn(
         target->createTargetMachine(
-            triple_str, AMDGPUContext::get_instance().get_mcpu(), "", options,
+            triple_str, AMDGPUContext::get_instance().get_mcpu(),
+            AMDGPUContext::get_instance().get_target_features(), options,
             llvm::Reloc::PIC_, llvm::CodeModel::Small,
             llvm::CodeGenOptLevel::Aggressive));
 
@@ -111,10 +117,9 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     llvm::legacy::PassManager module_gen_gcn_pass_manager;
     llvm::SmallString<0> gcnstr;
     llvm::raw_svector_ostream llvm_stream_gcn(gcnstr);
-    machine_gen_gcn->addPassesToEmitFile(module_gen_gcn_pass_manager,
-                                         llvm_stream_gcn, nullptr,
-                                         llvm::CodeGenFileType::AssemblyFile,
-                                         true);
+    machine_gen_gcn->addPassesToEmitFile(
+        module_gen_gcn_pass_manager, llvm_stream_gcn, nullptr,
+        llvm::CodeGenFileType::AssemblyFile, true);
     module_gen_gcn_pass_manager.run(*module_clone);
     std::string gcn(gcnstr.begin(), gcnstr.end());
     static FileSequenceWriter writer("taichi_kernel_amdgcn_{:04d}.gcn",
@@ -160,14 +165,53 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   }
 
   std::string obj_str(outstr.begin(), outstr.end());
-  std::ofstream(obj_path) << obj_str;
+  {
+    std::ofstream object(obj_path, std::ios::binary);
+    object.write(obj_str.data(), obj_str.size());
+    TI_ERROR_IF(!object, "Cannot write AMDGPU object: {}", obj_path);
+  }
+  llvm::FileRemover remove_object(obj_path);
+  llvm::FileRemover remove_hsaco(hsaco_path);
 
-  TI_TRACE("Loading module...");
-  [[maybe_unused]] auto _ = AMDGPUContext::get_instance().get_lock_guard();
-
-  std::string lld_cmd = "ld.lld -shared " + obj_path + " -o " + hsaco_path;
-  if (std::system(lld_cmd.c_str()))
-    TI_ERROR(fmt::format("Generate {} Error", hsaco_filename));
+  std::string linker;
+  if (const auto *explicit_linker = std::getenv("TI_AMDGPU_LLD")) {
+    linker = explicit_linker;
+  } else {
+#ifdef TI_PLATFORM_WINDOWS
+    const char *filename = "ld.lld.exe";
+#else
+    const char *filename = "ld.lld";
+#endif
+    for (const char *key : {"ROCM_PATH", "HIP_PATH"}) {
+      const auto *root = std::getenv(key);
+      if (!root)
+        continue;
+      for (const char *subdir : {"llvm/bin", "lib/llvm/bin", "bin"}) {
+        auto candidate = std::filesystem::path(root) / subdir / filename;
+        if (std::filesystem::is_regular_file(candidate)) {
+          linker = candidate.string();
+          break;
+        }
+      }
+      if (!linker.empty())
+        break;
+    }
+    if (linker.empty()) {
+      auto found = llvm::sys::findProgramByName(filename);
+      if (found)
+        linker = *found;
+    }
+  }
+  TI_ERROR_IF(linker.empty(),
+              "AMDGPU requires ld.lld from the ROCm SDK. "
+              "Set ROCM_PATH/HIP_PATH or TI_AMDGPU_LLD.");
+  // Argument-vector execution preserves paths with spaces and avoids a shell.
+  const llvm::StringRef args[] = {linker, "-shared", obj_path, "-o",
+                                  hsaco_path};
+  std::string link_error;
+  int result = llvm::sys::ExecuteAndWait(linker, args, std::nullopt, {}, 0, 0,
+                                         &link_error);
+  TI_ERROR_IF(result != 0, "AMDGPU link failed ({}): {}", result, link_error);
 
   std::string hsaco_str = load_hsaco(hsaco_path);
 

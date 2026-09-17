@@ -90,8 +90,9 @@ struct AMDGPUConvertAllocaInstAddressSpacePass : public FunctionPass {
   }
   bool runOnFunction(llvm::Function &f) override {
     f.addFnAttr("target-cpu",
-                "gfx" + AMDGPUContext::get_instance().get_mcpu().substr(3, 4));
-    f.addFnAttr("target-features", "");
+                AMDGPUContext::get_instance().get_mcpu());
+    f.addFnAttr("target-features",
+                AMDGPUContext::get_instance().get_target_features());
     for (auto &bb : f) {
       std::vector<AllocaInst *> alloca_inst_vec;
       for (Instruction &inst : bb) {
@@ -255,13 +256,7 @@ struct AMDGPUConvertFuncParamAddressSpacePass : public ModulePass {
       std::vector<llvm::Type *> new_func_params;
       for (auto &arg : f->args()) {
         if (arg.getType()->getTypeID() == llvm::Type::PointerTyID) {
-          // This is a temporary LLVM interface to handle transition from typed
-          // pointer to opaque pointer In the future, if we only clang++ > 14,
-          // we can compeletely comply to opaque pointer and replace the
-          // following code with llvm::PointerType::get(M.getContext(),
-          // usigned(1))
-          auto new_type = llvm::PointerType::getWithSamePointeeType(
-              llvm::dyn_cast<llvm::PointerType>(arg.getType()), unsigned(1));
+          auto new_type = llvm::PointerType::get(M.getContext(), 1);
 
           new_func_params.push_back(new_type);
         } else {
@@ -276,21 +271,21 @@ struct AMDGPUConvertFuncParamAddressSpacePass : public ModulePass {
       new_func->addFnAttr("amdgpu-flat-work-group-size", "1, 1024");
       new_func->addFnAttr(
           "target-cpu",
-          "gfx" + AMDGPUContext::get_instance().get_mcpu().substr(3, 4));
+          AMDGPUContext::get_instance().get_mcpu());
+      new_func->addFnAttr("target-features",
+                         AMDGPUContext::get_instance().get_target_features());
       new_func->setComdat(f->getComdat());
       f->getParent()->getFunctionList().insert(f->getIterator(), new_func);
       new_func->takeName(f);
-      new_func->getBasicBlockList().splice(new_func->begin(),
-                                           f->getBasicBlockList());
+      new_func->splice(new_func->begin(), f);
       for (llvm::Function::arg_iterator I = f->arg_begin(), E = f->arg_end(),
                                         I2 = new_func->arg_begin();
            I != E; ++I, ++I2) {
         if (I->getType()->getTypeID() == llvm::Type::PointerTyID) {
-          auto &front_bb = new_func->getBasicBlockList().front();
+          auto &front_bb = new_func->front();
           llvm::Instruction *addrspacecast =
               new AddrSpaceCastInst(I2, I->getType());
-          front_bb.getInstList().insertAfter(front_bb.getFirstInsertionPt(),
-                                             addrspacecast);
+          addrspacecast->insertBefore(front_bb, front_bb.getFirstInsertionPt());
           I->replaceAllUsesWith(addrspacecast);
           I2->takeName(&*I);
         } else {

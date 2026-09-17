@@ -134,12 +134,16 @@ def setup_llvm() -> None:
         os.environ["LLVM_DIR"] = str(out)
         return
 
+    if cmake_args.get_effective("TI_WITH_AMDGPU"):
+        raise RuntimeError(
+            "AMDGPU builds require a recent LLVM with the AMDGPU target. "
+            "Set LLVM_DIR or provide a supported LLVM download URL; "
+            "the legacy LLVM 15 fallback is not compatible with this backend."
+        )
+
     # Tier 3: legacy LLVM 15 fallback on Linux/macOS; error out on Windows.
     if u.system == "Linux":
-        if cmake_args.get_effective("TI_WITH_AMDGPU"):
-            legacy_url = "https://github.com/GaleSeLee/assets/releases/download/v0.0.5/taichi-llvm-15.0.0-linux.zip"
-            out = get_cache_home() / "llvm15-amdgpu-005"
-        elif is_manylinux2014():
+        if is_manylinux2014():
             legacy_url = "https://github.com/ailzhang/torchhub_example/releases/download/0.3/taichi-llvm-15-linux.zip"
             out = get_cache_home() / "llvm15-manylinux2014"
         else:
