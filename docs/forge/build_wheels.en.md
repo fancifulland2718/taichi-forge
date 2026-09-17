@@ -10,14 +10,16 @@ want to reproduce the PyPI-style Windows or Ubuntu builds locally.
 
 ## Wheel Matrix
 
-`publish_pypi.yml` first calls the reusable runtime build, then builds and
-install-validates the shims against those exact artifacts. It collects the
-complete set before publishing either project. No prior PyPI runtime upload is
-needed. `publish_runtime_pypi.yml` itself only produces build artifacts.
+The two packages have independent publishing workflows. `publish_runtime_pypi.yml`
+builds and optionally publishes the native runtime. `publish_pypi.yml` defaults to
+linking and install-validating shims against a published runtime, and publishes
+only `taichi-forge`. Its `runtime_version` input can select a compatible runtime
+with a different package version. Existing artifacts can also be reused; a joint
+runtime/shim build is available as a non-publishing validation mode.
 For publication inputs and permissions, see the
 [maintainer release procedure](../design/pypi_release.md).
 
-The publish workflow builds two wheel families:
+Together, the workflows build two wheel families:
 
 - `taichi-forge-runtime`: platform-native runtime wheels tagged as
   `py3-none-win_amd64` and `py3-none-manylinux_2_35_x86_64`.
@@ -35,8 +37,9 @@ The pybind shim is still per-CPython-minor. `pyproject.toml` currently sets
 
 Use the runtime wheel required by the Python package's dependency metadata.
 For source builds, link the shim against the intended runtime artifact and run
-the supplied wheel validators. Package version and native ABI compatibility
-determine pairing; equal Git commits are neither required nor sufficient.
+the supplied wheel validators. The declared runtime dependency, native ABI and
+required capabilities determine pairing; equal package versions or Git commits
+are neither required nor sufficient.
 The runtime/shim link is not a public C++ SDK.
 
 Test installed wheels from outside the source checkout with development path
@@ -76,7 +79,9 @@ Important details:
   remain owned by `taichi-forge-runtime`; a shim wheel must contain one pybind
   extension and no duplicate runtime, CUDART, or bitcode assets.
 - After changing `version.txt`, run `python scripts/sync_runtime_dependency.py`
-  before building release wheels. The publish workflow does this automatically.
+  before building release wheels. Add `--runtime-version <compatible-version>`
+  when reusing a differently versioned runtime. The publish workflow passes its
+  selected runtime version automatically.
 - PyPI/TestPyPI publishing must be authorized for both project names:
   `taichi-forge` and `taichi-forge-runtime`.
 
@@ -200,7 +205,8 @@ vendor libraries or profiler runtime into the portable wheel. A full
 to use this addon.
 
 After installing both distributions, `scripts/validate_installed_runtime.py`
-requires equal shim/runtime versions. Install validation resolves the shim
+requires the installed runtime version to match the shim's declared dependency,
+not the shim's own version. Install validation resolves the shim
 wheel's declared Python dependencies, uses the local runtime wheel, runs
 `pip check`, and imports from outside the checkout. Each CPython build runs
 `scripts/validate_shim_wheel.py` to reject missing direct Python dependencies,
@@ -404,8 +410,9 @@ with `publish=false`. It builds and validates the five Windows CPython shims;
 Linux jobs, full-release aggregation and publication are skipped. The default
 `validation_platform=all` retains the complete release matrix.
 
-To reuse a successful Windows runtime build, also supply its numeric
-`runtime_run_id`. The workflow downloads that run's `wheel-windows-runtime`
+To reuse a successful Windows runtime build, set `runtime_source=artifact` and
+supply its numeric `runtime_run_id` and selected `runtime_version`.
+The workflow downloads that run's `wheel-windows-runtime`
 artifact and links the shims against it without rebuilding native code. Reuse
 still requires compatible package versions, native/provider contracts and C++
 compiler ABI; it does not require matching source commits. A local MSVC-built

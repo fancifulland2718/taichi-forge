@@ -9,12 +9,13 @@ PyPI 风格的 Windows 或 Ubuntu 构建。
 
 ## Wheel 矩阵
 
-`publish_pypi.yml` 先调用可复用的 runtime 构建，再针对这批 artifact 构建并安装验证 shim，
-收齐完整集合后才发布两个项目。不需要预先将 runtime 上传 PyPI。
-`publish_runtime_pypi.yml` 自身只产出构建 artifact；发布参数与权限见
+两个包独立发布。`publish_runtime_pypi.yml` 构建并可选发布原生 runtime；
+`publish_pypi.yml` 默认使用已发布的 runtime 链接并安装验证 shim，只发布 `taichi-forge`。
+通过 `runtime_version` 可选择不同包版本的兼容 runtime，也可以显式复用已有 artifact；
+联合构建 runtime/shim 保留为不发布的验证模式。发布参数与权限见
 [维护者发行流程](../design/pypi_release.md)。
 
-发布 workflow 构建两类 wheel：
+两个 workflow 共构建两类 wheel：
 
 - `taichi-forge-runtime`：平台原生 runtime wheel，标签为
   `py3-none-win_amd64` 和 `py3-none-manylinux_2_35_x86_64`。
@@ -30,8 +31,8 @@ shim 暂不发布 `abi3` wheel。
 ### Runtime 与 shim 兼容性
 
 使用 Python 包依赖元数据要求的 runtime wheel。源码构建时，以目标 runtime 产物链接 shim，
-并运行仓库提供的 wheel 校验工具。包版本与 native ABI 兼容性决定配对；
-不要求 Git commit 相同，也不能仅凭 commit 相同认定兼容。
+并运行仓库提供的 wheel 校验工具。声明的 runtime 依赖、native ABI 和所需能力决定配对；
+不要求两个包版本或 Git commit 相同，也不能仅凭它们相同认定兼容。
 runtime/shim 链接边界不是公共 C++ SDK。
 
 在源码目录外测试已安装 wheel，并清除开发路径覆盖。记录构建输入与依赖，方便其他开发者复现产物。
@@ -63,7 +64,8 @@ python -I -m build --wheel --no-isolation
   `taichi-forge-runtime`；shim wheel 只能包含 pybind extension，不能重复携带 runtime、
   CUDART 或 bitcode asset。
 - 修改 `version.txt` 后，发布构建前先运行 `python scripts/sync_runtime_dependency.py`。
-  发布 workflow 会自动执行这一步。
+  复用不同版本的兼容 runtime 时，追加 `--runtime-version <兼容版本>`；发布 workflow
+  会自动传入所选 runtime 版本。
 - PyPI/TestPyPI 发布权限必须同时覆盖两个 project：`taichi-forge` 和
   `taichi-forge-runtime`。
 
@@ -165,8 +167,9 @@ reference method 不同。显式执行和搜索边界见
 不得把其 CUDART、compiler、vendor library 或 profiler runtime 复制进 portable wheel。
 仅使用该 addon 不需要、也不会因此发布完整 `cuda-toolkit-specialized-runtime` 变体。
 
-两个 distribution 安装后，`scripts/validate_installed_runtime.py` 要求 shim/runtime
-版本一致。安装验证从包索引解析 shim 声明的 Python 依赖，使用本地 runtime wheel，运行
+两个 distribution 安装后，`scripts/validate_installed_runtime.py` 要求 runtime 版本
+符合 shim 声明的精确依赖，不要求等于 shim 自身版本。
+安装验证从包索引解析 shim 声明的 Python 依赖，使用本地 runtime wheel，运行
 `pip check`，并在仓库目录外 import。每个 CPython 构建都会运行
 `scripts/validate_shim_wheel.py`，拒绝缺失的直接 Python 依赖、重复 runtime payload 或
 不匹配的 runtime 依赖。Linux prebuilt shim 只使用 LLVM headers，且刻意不链接
@@ -356,7 +359,8 @@ powershell -File scripts\build_llvm20_local.ps1
 此时构建并验证五个 Windows CPython shim，跳过 Linux、完整发布集合汇总和发布。
 默认 `validation_platform=all` 保留完整发布矩阵。
 
-如需复用已成功构建的 Windows runtime，再传入其数字 `runtime_run_id`。workflow 下载该运行的
+如需复用已成功构建的 Windows runtime，设置 `runtime_source=artifact`，并传入数字
+`runtime_run_id` 与所选 `runtime_version`。workflow 下载该运行的
 `wheel-windows-runtime` artifact，直接用于 shim 链接，不重编 native。复用仍要求包版本、native/provider
 合同及 C++ compiler ABI 相容，但不要求 source commit 相同。本地另一套 MSVC 编出的 shim 未必能搭配
 CI runtime。此类审计产物不等于完整发布集合，也不代替 GPU 执行资格。

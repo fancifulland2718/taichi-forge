@@ -2,19 +2,20 @@
 
 > 本文以 `0.6.3` 为例介绍维护者的构建、验证与发布流程。
 
-发布入口只有一个，runtime 构建由它委托给可复用 workflow：
+runtime 与 Python 主包保持独立发布：
 
 - [`publish_runtime_pypi.yml`](../../.github/workflows/publish_runtime_pypi.yml)
-  构建平台级 `taichi-forge-runtime` artifact，支持 `workflow_call` 和手动构建，**不上传包**。
+  构建平台级 `taichi-forge-runtime`，手动运行时可单独发布；通过 `workflow_call` 调用时只构建。
 - [`publish_pypi.yml`](../../.github/workflows/publish_pypi.yml)
-  先调用 runtime 构建，再构建 Python/pybind shim `taichi-forge`，完成整组验证后可选发布两个项目。
+  构建、验证并可选发布 Python/pybind shim `taichi-forge`，默认复用已发布 runtime，不重新构建它。
 
-顺序为 **runtime artifact → shim 构建与安装验证 → 完整 wheel 集合 → 上传 → GitHub Release**。
-shim 从本次 workflow 的 runtime artifact 解包 link artifacts，不依赖提前发布到 PyPI/TestPyPI。
-上传两个项目并非索引端的原子事务；失败后应核对实际已上传文件，不要盲目重试或覆盖同版本。
+正式发布顺序为 **runtime 独立发布 → shim 构建与安装验证 → shim 上传 → GitHub Release**。
+只更新 Python 包时可以复用兼容 runtime。尚未发布的 runtime 可以通过 artifact 或联合构建验证；
+发布 shim 前，其声明的 runtime 必须已在所选索引上可获取。
 
 下文以 `0.6.3` 为示例。其它版本须同步 `version.txt`、包元数据、workflow 输入或 tag
-以及安装命令。标准发行的 runtime 与 shim 包版本相同；兼容性不以 Git commit 相等为条件。
+以及安装命令。`runtime_version` 指定精确的兼容 runtime 依赖，不要求等于 shim 版本；
+兼容性依赖 native ABI、所需功能和安装验证，不以 Git commit 相等为条件。
 
 ## 1. 一次成功发行需要的全部前置条件
 
@@ -34,10 +35,11 @@ shim 从本次 workflow 的 runtime artifact 解包 link artifacts，不依赖�
 
 | PyPI Project Name | Workflow filename | Owner | Repository name | Environment name |
 | ---- | ---- | ---- | ---- | ---- |
-| `taichi-forge-runtime` | `publish_pypi.yml` | `<仓库 owner>` | `<实际仓库名>` | `pypi` 或 `testpypi` |
+| `taichi-forge-runtime` | `publish_runtime_pypi.yml` | `<仓库 owner>` | `<实际仓库名>` | `pypi` 或 `testpypi` |
 | `taichi-forge` | `publish_pypi.yml` | `<仓库 owner>` | `<实际仓库名>` | `pypi` 或 `testpypi` |
 
-两个项目都绑定到实际执行上传的 `publish_pypi.yml`，不是只产出 artifact 的 runtime workflow。
+两个项目分别绑定到实际执行上传的 workflow。若曾把 runtime 绑定到主包 workflow，按上表修正；
+修改仓库 YAML 不会自动更改 PyPI 侧的 Trusted Publisher 配置。
 绑定完成后，workflow 里的 `pypa/gh-action-pypi-publish` 会通过 OIDC 向
 PyPI 申请短期 token，**无需手动维护任何 secret**。
 
@@ -65,9 +67,10 @@ PyPI 申请短期 token，**无需手动维护任何 secret**。
 校验值对应下载的 LLVM artifact，不绑定 Forge commit HEAD。变更 URL 时同步核对该产物的校验值；不要用另一平台
 或另一构建的值。公开 artifact 的 digest/随附 checksum 应与实际下载文件一致。
 
-手动运行 `publish_pypi.yml` 并设置 `publish=false`，会构建、安装验证并汇总校验完整的两个平台 runtime 和
-Python 3.10–3.14 shim wheel 集合，保存为 `validated-wheel-set` artifact。该模式不进入发布 environment，
-不上传 PyPI/TestPyPI，也不创建 GitHub Release。只有完整集合通过后，显式发布才消费这份已验证的 artifact。
+手动运行 `publish_pypi.yml` 并设置 `publish=false`，会构建、安装验证并汇总两个平台的
+Python 3.10–3.14 shim wheel，保存为 `validated-shim-wheel-set`。该模式不进入发布 environment，
+不上传 PyPI/TestPyPI，也不创建 GitHub Release。只有这组 shim 通过后，发布作业才消费该 artifact。
+选择 `runtime_source=build` 时才额外调用原生 runtime 构建，用于未发布二进制的联合验证。
 
 ### 1.5 （备选）PAT fallback
 
@@ -112,43 +115,62 @@ shim-only 构建无法携带这些二进制更新。只改 Python 包装、测�
 runtime。若该版本已经正式发布，应使用新版本，不覆盖旧文件。不得把 native provider 复制进 shim。
 
 `publish_pypi.yml` 的各 CPython shim job 不重新编译 C++ runtime，也不安装 CUDA Toolkit。
-runtime 只由被调用的 runtime workflow 构建一次/平台；shim job 消费其 artifact。
+runtime 由独立 workflow 构建一次/平台；shim job 消费选定的已发布 wheel 或 artifact。
 
 ## 2. 触发方式
 
-### 2.1 预演（不上传 PyPI）
+### 2.1 只构建和验证（不上传 PyPI）
 
 ```
 Actions → Publish wheels to PyPI → Run workflow
   version: 0.6.3
+  runtime_version: 0.6.3
+  runtime_source: index
   validation_platform: all
   publish: false
-  target:  testpypi        (忽略，不会上传)
+  target: pypi            (runtime 下载来源，不上传)
 ```
 
-入口会构建 2 个 runtime 和 10 个 shim wheel（2 OS × Python 3.10–3.14），保存
-`validated-wheel-set`。`publish=false` 不进入发布 environment、不上传包、不创建 Release，
-也不要求对应版本已在索引中存在。候选可使用正式目标版本号，不能仅凭文件名视为已经发布。
+默认从选定索引下载 runtime，构建 10 个 shim wheel（2 OS × Python 3.10–3.14），保存
+`validated-shim-wheel-set`。`publish=false` 不进入发布 environment、不上传包、不创建 Release。
+`runtime_version` 留空时采用本次 shim 版本；不是自动选择最新 runtime。
+
+其他输入方式：
+
+- `runtime_source=artifact`：同时填写 `runtime_run_id`，复用已有运行的
+  `wheel-windows-runtime` / `wheel-linux-runtime`。支持两个平台，不重新构建 native。
+- `runtime_source=build`：调用 runtime workflow 构建当前源码，再验证两个 runtime 与十个 shim；
+  无需索引已有该版本，但只允许 `publish=false`。原生 artifact 与验证后的 shim artifact 分别保存。
+- `runtime_source=index`：从 `target` 指定的索引下载 `runtime_version`，不启动 runtime job。
 
 只验证 Windows 时使用 `validation_platform=windows`、`publish=false`。可通过
-`runtime_run_id` 复用已有运行的 `wheel-windows-runtime` artifact；仍需满足版本、native/provider
+`runtime_source=artifact` 与 `runtime_run_id` 复用已有运行的 `wheel-windows-runtime`；仍需满足依赖、native/provider
 合同和编译器 ABI，不能只比较源码 commit。该模式不构成完整发行集合，也不允许发布。
 
-只需构建 runtime 时，可手动运行 `Build runtime wheel artifacts`，传入 `version` 与
-`platform=windows|linux|all`。此 workflow 没有 `publish` 或 `target` 输入。
+只需构建 runtime 时，手动运行 `Build and publish runtime wheels`，传入 `version`、
+`platform=windows|linux|all` 与 `publish=false`。正式上传必须 `platform=all`；
+通过 `workflow_call` 调用时不上传。
 
 ### 2.2 TestPyPI（真正上传，但到沙箱）
 
 ```
-Actions → Publish wheels to PyPI → Run workflow
+1. Actions → Build and publish runtime wheels → Run workflow
   version: 0.6.3rc1
+  platform: all
+  publish: true
+  target: testpypi
+
+2. Actions → Publish wheels to PyPI → Run workflow
+  version: 0.6.3rc1
+  runtime_version: 0.6.3rc1
+  runtime_source: index
   validation_platform: all
   publish: true
   target:  testpypi
 ```
 
-先在本次运行中完成整组构建与验证，再上传两个项目到 test.pypi.org。上传成功后创建
-**draft** GitHub Release（非 tag 触发）。两个项目都需要对应的 Trusted Publisher。
+等待 runtime 上传完成，再运行主包 workflow。主包验证并上传成功后创建 **draft** GitHub Release
+（非 tag 触发）。两个项目分别需要对应的 Trusted Publisher。
 
 安装验证：
 ```
@@ -157,10 +179,14 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 
 ### 2.3 生产发行（推 tag）
 
+先手动运行 runtime workflow，以 `publish=true`、`target=pypi`、`platform=all` 发布所需 runtime；
+如果合适的兼容版本已发布，则无需重建或重复上传。
+
 创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.6.3`，并运行
 `python scripts/sync_runtime_dependency.py`，使 `pyproject.toml` 精确依赖
 `taichi-forge-runtime==0.6.3`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
-正式源码 tag 中的版本一致性。
+正式源码 tag 中的版本一致性。复用其他 runtime 版本时，用 `--runtime-version <兼容版本>`
+写入依赖；tag workflow 读取该声明，而不是强制 runtime 版本等于 tag 版本。
 
 ```
 git tag forge-v0.6.3
@@ -169,26 +195,34 @@ git push origin forge-v0.6.3
 
 推 tag 会触发完整生产发布，不能用它代替无发布预演。tag 触发后 workflow 会：
 
-1. 构建两个平台的 runtime artifact，不预先上传。
-2. 构建 10 个 shim wheel，按各解释器安装并验证 artifact，再校验完整集合。
-3. 确认目标版本在两个 PyPI 项目中尚未发布，再上传整组 wheel。
+1. 从 PyPI 下载源码元数据声明的两个平台 runtime wheel，不重建、不上传 runtime。
+2. 构建 10 个 shim wheel，按各解释器安装并验证，再校验 shim 集合。
+3. 核对已有文件的 SHA256，只上传 `taichi-forge` 缺失的 wheel。
 4. 上传成功后创建非 draft GitHub Release，附带自动生成说明与 wheel。
 
 也可以手动选择 `publish=true`、`target=pypi`、`validation_platform=all`；这会真实上传，
-但 GitHub Release 是 draft。两种发布方式择一，不能对同一版本重复上传。
+但 GitHub Release 是 draft。使用 `runtime_source=artifact` 发布时，还会确认所用 runtime 文件
+已经以相同 SHA256 发布到所选索引，避免发布一个用户无法安装依赖的 shim。
 发布前核对 README、文档索引和发布说明的版本及功能说明；对外文档描述该版本的用法，
 不承载临时的构建或上传进度。
+
+### 2.4 部分上传后的恢复
+
+两个发布作业都逐文件核对所选索引：同名且 SHA256 相同的文件跳过，只上传缺失文件；
+同名但内容不同或已撤回的文件会明确报错。没有启用盲目的 `skip-existing`。
+优先在原运行中重跑失败的发布作业，以继续消费同一批 artifact，避免重建后产生不同字节。
+只有源码或产物实际改变时才需要新版本；网络中断造成的部分上传不要求改版本。
 
 ## 3. 常见"无权限"问题速查
 
 | 症状 | 原因 | 解决 |
 | ---- | --- | ---- |
 | `Error 403: Resource not accessible by integration` 在 `action-gh-release` | Workflow permissions 是只读 | Settings → Actions → General → Workflow permissions 改为 "Read and write" |
-| `id-token: write not granted` | 工作流或作业级别缺 `permissions.id-token: write` | 已在顶层声明，检查是否在 job 里被覆盖 |
+| `id-token: write not granted` | 发布作业缺 `permissions.id-token: write` | 主包 workflow 在顶层声明，runtime 在发布 job 声明；检查组织限制和 job 覆盖 |
 | PyPI 返回 `invalid-publisher` | Trusted Publisher 没绑定或环境名不匹配 | 按 §1.2 重新绑定，确认 `environment.name` 与 PyPI 侧配置一致 |
-| 版本可用性检查拒绝或 PyPI 返回 `File already exists` | 重复上传或此前只完成部分上传 | 检查两个项目的实际文件；流程没有启用 `skip-existing`，不要覆盖或静默跳过，重新发布使用新版本 |
+| PyPI 返回 `File already exists` 或发布检查发现内容不同 | 并发上传、重建导致文件变化，或此前部分上传 | 重跑原发布作业以使用原 artifact；相同 SHA256 会跳过，不同内容必须使用新版本 |
 | Release step 成功但 asset 为空 | artifact download 失败 / path 不对 | 看 `Gather wheels` step 输出，确认 `dist/*.whl` 确实存在 |
-| shim job 下载 runtime artifact 失败 | runtime job 失败、artifact 过期或复用 run ID 不正确 | 检查 `wheel-windows-runtime` / `wheel-linux-runtime` artifact 与运行权限，不要通过预上传 PyPI 绕过 |
+| shim job 下载 runtime 失败 | 所选索引缺少版本，或 artifact 过期、run ID 不正确 | `index` 模式先确认独立 runtime 已发布；`artifact` 模式核对对应平台 artifact 与运行权限 |
 | fork 触发 workflow 没有 id-token | fork 的 `pull_request` 默认没 OIDC 权限 | 改用 `workflow_dispatch` 或从 canonical repo 发起 |
 | 标准 runtime 编译意外寻找 CUDA/CCCL 头文件 | production target 错误依赖了 Toolkit-reference source | 确认三个标准 flag 均为 OFF，并把 CUB/CUDART source 只留在独立 reference target |
 | driver-only runtime wheel 出现 CUDART 或 manifest | release target 或 auditwheel 意外引入 Toolkit runtime 依赖 | 检查 CMake cache、PE import/ELF `DT_NEEDED` 与 `--dependency-class driver-only` 校验 |
@@ -237,7 +271,7 @@ python scripts/validate_runtime_wheel.py --wheel-dir <one-native-platform-runtim
 python scripts/validate_shim_wheel.py --wheel-dir <one-shim-wheel-dir> --platform <windows-or-manylinux> --strict-binary
 ```
 
-随后让 pip 按 shim wheel 的 `Requires-Dist` 安装其 Python 依赖和本地同版本 runtime wheel，
+随后让 pip 按 shim wheel 的 `Requires-Dist` 安装其 Python 依赖和本地声明版本的 runtime wheel，
 运行 `pip check`；不得在最终安装验证中使用 `--no-deps`。再到仓库目录之外运行
 `scripts/validate_installed_runtime.py`；Linux 还要运行
 `scripts/validate_runtime_load_order.py`，确认 runtime-first 与 driver-first 都通过。新候选必须
