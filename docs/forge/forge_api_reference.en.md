@@ -11,6 +11,7 @@ Initialization and compile options belong in [Forge options](forge_options.en.md
 
 | Need | Section / guide |
 | --- | --- |
+| Basic AMD GPU backend (`ti.amdgpu`) | [ROCm/HIP setup and limits](rocm_backend.en.md) |
 | Hardware, texture, ray and graphics | [Top-level APIs](#taichi_forge-top-level-apis), [provider setup](external_hardware_providers.en.md) |
 | Runtime diagnostics | [Runtime](#taichi_forgeruntime) |
 | Sort, scan, reductions and prepared plans | [Algorithms](#taichi_forgealgorithms), [usage guide](native_algorithms.en.md) |

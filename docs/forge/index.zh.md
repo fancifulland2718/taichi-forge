@@ -4,7 +4,9 @@
 
 ## 版本与安装
 
-这些文档描述当前阅读的源码树。标注 `0.6.3` 或“开发中”的能力可能尚未包含在已安装版本中。
+这些文档描述 **0.6.3，当前为发布准备阶段，尚未正式发布**。
+从包索引安装会选择已可用的发行版，不会自动安装此候选包。
+标注 `0.6.3` 或“开发中”的能力可能尚未包含在已安装版本中。
 请结合[发布说明](release_notes.zh.md)，使用对应 release tag 的文档核对已发布 wheel。
 
 ```bash
@@ -15,6 +17,8 @@ python -c "import taichi_forge as ti; print(ti.__version__); print(ti.__file__)"
 导入名称是 `taichi_forge`，不是 `taichi`。pip 会安装兼容的 native runtime 依赖，
 runtime 与 Python shim 不需要 Git commit 相同。普通 CUDA 运行需要驱动，不需要本机 CUDA Toolkit；
 vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
+0.6.3 标准 Windows/Linux wheel 编入基础 `ti.amdgpu` 支持；HIP、驱动和 linker
+仍需用户安装，使用其他后端不要求安装 HIP。
 参见[外部 provider](external_hardware_providers.zh.md)、
 [Linux 环境](linux_revalidation.zh.md)和[源码构建](build_wheels.zh.md)。
 
@@ -23,6 +27,7 @@ vendor 库及 Vulkan shader 编译 addon 另有显式依赖。
 | 任务 | 文档 |
 | --- | --- |
 | 执行 kernel 并复用 Graph | [快速开始](quickstart.zh.md) |
+| 选择基础 AMD GPU 后端 | [ROCm/HIP 配置与限制](rocm_backend.zh.md) |
 | 查找公共符号与输入限制 | [API 参考](forge_api_reference.zh.md) |
 | 选择初始化与编译配置 | [配置项](forge_options.zh.md)、[编译缓存](cache_compile.zh.md)、[取舍](compilation_tradeoffs.zh.md) |
 | 迁移 Taichi Graph | [迁移指南](graph_migration_guide.zh.md)、[Dense Field Graph](dense_field_graph.zh.md) |

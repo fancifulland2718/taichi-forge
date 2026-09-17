@@ -50,6 +50,9 @@ Do not run a closed Graph. After `ti.reset()`, recreate the arrays and Graph.
 
 - Select `ti.cuda` or `ti.vulkan` only after checking your installed backend.
   A Graph can execute ordinarily even when device capture/replay is unavailable.
+- For basic AMD kernels, see [ROCm/HIP setup](rocm_backend.en.md) and select
+  `ti.amdgpu` explicitly. Its basic backend support does not imply the advanced
+  Graph, hardware-rendering or vendor-library paths documented for CUDA/Vulkan.
 - For Field/template arguments, see [dense Field bindings](dense_field_graph.en.md).
 - For completion, control flow and diagnostics, see [Graph execution](graph_runtime_optimization.en.md).
 - To optimize an unchanged semantic definition, see [complete recipe search](graph_recipe_integration.en.md).

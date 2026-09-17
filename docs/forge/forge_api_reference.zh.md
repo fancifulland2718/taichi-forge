@@ -9,6 +9,7 @@
 
 | 需求 | 章节/指南 |
 | --- | --- |
+| 基础 AMD GPU 后端（`ti.amdgpu`） | [ROCm/HIP 配置与限制](rocm_backend.zh.md) |
 | hardware、texture、ray、graphics | [顶层 API](#taichi_forge-顶层-api)、[provider 配置](external_hardware_providers.zh.md) |
 | runtime 诊断 | [Runtime](#taichi_forgeruntime) |
 | sort、scan、reduce、prepared plan | [Algorithms](#taichi_forgealgorithms)、[使用指南](native_algorithms.zh.md) |

@@ -172,7 +172,7 @@ heterogeneous engine
 Forge 不通过 pointer 或 cache-key 技巧合并任意闭包 owner。兼容 owner 可以改用现有 runtime
 dense-Field binding ABI；把任意闭包改写为该 ABI 仍由应用显式决定，不是自动 cache 优化。
 
-### 当前 0.6.2 发行边界
+### 当前 0.6.3 支持边界
 
 当前 Taichi Forge 继续支持上述 block 模型：应用可以持有和调度多张独立编译的 Graph，
 各自使用稳定但不同的 solver、layout、shape 或 feature signature，并在每个 block 内批处理

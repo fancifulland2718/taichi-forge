@@ -195,7 +195,7 @@ can instead use the runtime dense-Field binding ABI; converting unrelated
 closures into that ABI remains an explicit application choice rather than an
 automatic cache optimization.
 
-### Current 0.6.2 release boundary
+### Current 0.6.3 support boundary
 
 Current Taichi Forge keeps the block model above: applications may own and
 schedule independently compiled Graphs with different stable solver, layout,

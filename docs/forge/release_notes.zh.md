@@ -10,7 +10,7 @@
 
 | 版本 | 主要内容 |
 | --- | --- |
-| [待发布 / 0.6.3](#unreleased) | 完整 Graph recipe、可复用报告、硬件 provider、typed resource 与 prepared operation |
+| [0.6.3 / 发布准备](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
 | [0.6.2](#062) | 执行计划、动态工作、Graph 存储与求解器改进 |
 | [0.6.1](#061) | task policy/label、device worklist、SNode 生命周期、Graph telemetry |
 | [0.6.0](#060) | 结构化控制、operator/solver、driver-only CUDA primitive、互通 |
@@ -25,10 +25,12 @@
 | [0.1.0](#010)–[0.1.3](#013) | Forge 包/导入名称与工具链 |
 
 <a id="unreleased"></a>
+<a id="063"></a>
 
-## 待发布
+## 0.6.3 — 发布准备
 
-开发版本线：**0.6.3**。具体可用性仍取决于安装的 runtime、后端和可选 provider。
+源码/包版本：**0.6.3**。目前尚未正式发布；构建出带此版本号的 wheel 不等于完成发行。
+具体可用性仍取决于安装的 runtime、后端和可选 provider。
 
 ### Graph 搜索与可复用执行
 
@@ -40,6 +42,8 @@
 - 扩大合格 template/dense-Field recipe，补充候选生成与执行路径诊断。
 - 混合控制独立物化、事务化 close/reset 生命周期；CUDA 零 task dispatch 可作为 no-op capture。
 - 合格控制形状增加可选压缩 nested CUDA conditional recipe，保留原展开式替代方案。
+- 公共构建期执行方案选择与绑定准入诊断；受支持的缓存 Graph 路径可显式启用 GPU 阶段计时。
+  计时范围及不可用数据明确报告，不由 replay 标签推断。
 
 ### 硬件与数据接入
 
@@ -52,6 +56,13 @@
 - Texture sampling/storage 与 Graph 绑定改进，typed ray hit、dense-storage ray 绑定、
   Vulkan acceleration-structure 参数。
 - 受管 texture mip/subresource、raster 设备输出与 prepared draw、显式 Vulkan SPD plan。
+- Vulkan 梯度/mip 采样、各向异性与 LOD 控制；深度比较采样与 depth-only pass 支持 shadow map 消费。
+- Vulkan graphics 支持多颜色附件、逐附件混合公式和深度状态，包含浮点及整数输出。
+  便捷 `RasterPass` 仍为 RGBA8；HDR 应使用低层 graphics API。
+- 在已说明的设备/provider 边界内提供原生 Vulkan/OptiX ray program、紧凑遮挡查询、
+  alpha-mask 过滤与 opacity micromap 导入；不代替应用渲染器或透明算法。
+- 公共 GPU 显示目标借用与显式 consumer completion，支持有界异步源资源复用。
+  既有 Graph→Canvas 设备顺序与“允许覆盖仍被消费的源资源”是不同合同。
 - 固定绑定的 prepared sort、compact/unique 和 operator plan。
 - 在文档限定 dtype/layout/lifetime 下，提供 device-resident cuSOLVERDn Cholesky 与 AmgX 数据路径。
 
@@ -61,6 +72,8 @@
   AMDGPU 编入 wheel 不代表所有 AMD GPU/驱动组合已完成实机验证。
 - 修正 Vulkan storage texture 写入、storage image format 保留、mixed Graph 提交边界与纹理 transition。
 - 修正旧 Graph 失效报错、物化 executor 释放、observation 拒绝后的清理，以及已链接 graphics 能力报告。
+- 修正 Texture 创建与 Graph 提交的锁顺序、并发 compute/display 录制顺序；
+  最小化窗口继续处理事件。完成跟踪不要求默认全局同步。
 - 减少重复绑定/准备，改进控制图和 solver 执行；具体收益仍需实际 workload 测量。
 - CPU argument-upload 的延迟释放存储与 device memory 分开报告。
 - 使用兼容 runtime/shim，不要求 source commit 相同。完整 recipe 搜索要求维护版 fork，不能以基础 CompileIQ 替代。
@@ -73,6 +86,8 @@
 使用方式见 [Graph 执行](graph_runtime_optimization.zh.md)、
 [recipe 接入](graph_recipe_integration.zh.md)、
 [硬件/provider](external_hardware_providers.zh.md)与 [API 参考](forge_api_reference.zh.md)。
+渲染接入另见[原生 ray program](native_ray_programs.zh.md)和
+[显示所有权/完成通知](display_frame.zh.md)。
 
 ## 0.6.2
 

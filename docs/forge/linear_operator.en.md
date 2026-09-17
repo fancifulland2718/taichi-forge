@@ -1004,7 +1004,7 @@ fails during plan construction.
 
 ### Current unsupported boundary
 
-The `0.6.2` numerical-tooling contract intentionally does not provide:
+The current `0.6.3` numerical-tooling contract intentionally does not provide:
 
 - nonlinear, residual-dependent, adaptive, or Python-callback preconditioners;
 - automatic restart selection, block or multi-RHS Krylov methods, recycling,

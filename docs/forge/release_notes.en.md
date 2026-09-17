@@ -12,7 +12,7 @@ may no longer be available from a package index.
 
 | Version | Main additions |
 | --- | --- |
-| [Unreleased / 0.6.3](#unreleased) | Complete Graph recipes, reusable reports, hardware providers, typed resources and prepared operations |
+| [0.6.3 / release preparation](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
 | [0.6.0](#060) | Structured Graph control, operators/solvers, driver-only CUDA primitives and interop |
@@ -26,10 +26,14 @@ may no longer be available from a package index.
 | [0.2.4](#024) | Compile/cache and memory diagnostics |
 | [0.1.0](#010)–[0.1.3](#013) | Forge package/import identity and toolchain |
 
-## Unreleased
+<a id="unreleased"></a>
+<a id="063"></a>
 
-Development line: **0.6.3**. Availability remains specific to the installed
-runtime, backend and optional provider.
+## 0.6.3 — release preparation
+
+Source/package version: **0.6.3**. This version is not yet published; building a
+wheel with this version does not make it a released distribution. Availability
+remains specific to the installed runtime, backend and optional provider.
 
 ### Graph search and reusable execution
 
@@ -47,6 +51,9 @@ runtime, backend and optional provider.
   lifetimes; zero-task CUDA dispatches can be captured as no-ops.
 - Optional compressed nested CUDA conditional recipes for supported control
   shapes, alongside the existing expanded alternatives.
+- Public build-time execution selection and binding-admission diagnostics;
+  opt-in GPU stage timing for supported cached Graph paths. Timing scope and
+  unavailable measurements remain explicit rather than inferred from replay labels.
 
 ### Hardware and data integration
 
@@ -63,6 +70,17 @@ runtime, backend and optional provider.
   dense-storage ray bindings and Vulkan acceleration-structure arguments.
 - Managed texture mip/subresource views, raster device outputs/prepared draws and
   explicit Vulkan SPD plans.
+- Vulkan gradient/mip sampling, anisotropy and LOD controls; depth comparison
+  sampling and depth-only passes for shadow-map consumers.
+- Vulkan graphics supports multiple color attachments, per-attachment blend
+  equations and depth state, including floating-point and integer targets.
+  The convenience `RasterPass` remains RGBA8; use the low-level graphics API for HDR.
+- Native Vulkan/OptiX ray programs, compact occlusion queries, alpha-mask
+  filtering and imported opacity micromaps within documented device/provider
+  limits. These do not supply an application renderer or transparency algorithm.
+- Public GPU display-target borrowing and opt-in consumer completion support
+  bounded asynchronous source reuse. Existing Graph-to-Canvas device ordering
+  remains distinct from permission to overwrite an in-flight source.
 - Prepared sort, compact/unique and operator plans for fixed-binding reuse.
 - Device-resident cuSOLVERDn Cholesky and AmgX data paths within their documented
   dtype, layout and lifetime contracts.
@@ -76,6 +94,9 @@ runtime, backend and optional provider.
   formats, mixed Graph submission boundaries and texture transitions.
 - Corrected retired Graph error handling, materialized-executor retirement,
   rejected-observation cleanup and reporting of linked graphics capability.
+- Corrected lock ordering for texture creation versus Graph submission and
+  concurrent compute/display recording; minimized windows continue pumping
+  events. Completion tracking does not require a default global synchronization.
 - Reduced repeated binding/preparation work and improved control/solver execution;
   actual benefit remains workload-dependent.
 - Deferred CPU argument-upload storage is reported separately from device memory.
@@ -93,7 +114,9 @@ runtime, backend and optional provider.
 Usage: [Graph execution](graph_runtime_optimization.en.md),
 [recipe integration](graph_recipe_integration.en.md),
 [hardware/providers](external_hardware_providers.en.md) and
-[API reference](forge_api_reference.en.md).
+[API reference](forge_api_reference.en.md). For rendering, see
+[native ray programs](native_ray_programs.en.md) and
+[display ownership/completion](display_frame.en.md).
 
 ## 0.6.2
 

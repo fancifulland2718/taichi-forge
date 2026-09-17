@@ -849,7 +849,7 @@ Python iteration callback、自动 restart 选择、block GMRES 或领域 outer-
 
 ### 当前未支持边界
 
-`0.6.2` 数值工具合同有意不提供：
+当前 `0.6.3` 数值工具合同有意不提供：
 
 - nonlinear、依赖 residual、adaptive 或 Python callback 驱动的 preconditioner；
 - 自动 restart 选择、block/multi-RHS Krylov、recycling、deflation、pipelining 或

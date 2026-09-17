@@ -3,7 +3,7 @@
 [English](README.md) · [文档入口](docs/forge/index.zh.md) · [快速开始](docs/forge/quickstart.zh.md)
 
 Taichi Forge 是面向仿真与渲染的社区维护版 [Taichi](https://github.com/taichi-dev/taichi)。
-通过嵌入 Python 的语言编写 kernel，使用 CPU、CUDA、Vulkan、可复用 Graph、
+通过嵌入 Python 的语言编写 kernel，使用 CPU、CUDA、Vulkan 或基础 ROCm/HIP 后端、可复用 Graph、
 native 算法及可选硬件 provider。
 
 ## 安装
@@ -24,6 +24,8 @@ pip 会安装兼容的 `taichi-forge-runtime` 依赖。wheel 可用性取决于 
 
 普通 CUDA 执行需要兼容驱动，不需要本机 CUDA Toolkit；Vulkan 需要兼容驱动和 ICD。
 可选库需要显式启用，并遵守各自版本、设备及部署要求。
+0.6.3 标准 Windows/Linux runtime wheel 还编入 `ti.amdgpu`；使用它需要用户安装
+HIP runtime、AMD 驱动与 linker，参见 [ROCm 配置与支持边界](docs/forge/rocm_backend.zh.md)。
 
 ## 按任务开始
 
@@ -46,7 +48,9 @@ pip 会安装兼容的 `taichi-forge-runtime` 依赖。wheel 可用性取决于 
 Taichi 1.7.4 是公共编程模型的兼容参考；Forge 使用独立版本线。
 受支持的源码兼容 API 不代表私有实现、二进制 ABI、后端覆盖或性能完全相同。
 
-仓库文档描述对应源码。开发中、experimental 功能可能尚未进入已安装 wheel；
+当前源码目标为 **0.6.3（发布准备中，尚未正式发布）**。
+上述安装命令选择包索引中已可用的最新版本，不会安装尚未发布的候选包。
+experimental 功能可能尚未进入已安装 wheel；
 请结合[发布说明](docs/forge/release_notes.zh.md)和对应 release tag 文档核对版本行为。
 
 能力发现、显式执行、Graph recording、完整 recipe 搜索是不同支持层级，

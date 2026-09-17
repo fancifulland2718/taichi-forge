@@ -47,6 +47,8 @@ finally:
 
 - 核对已安装后端后可选择 `ti.cuda` 或 `ti.vulkan`。
   没有 device capture/replay 能力时，Graph 仍可能通过 ordinary 路径执行。
+- AMD 基础 kernel 参见 [ROCm/HIP 配置](rocm_backend.zh.md)，显式选择 `ti.amdgpu`。
+  基础后端支持不代表具有 CUDA/Vulkan 文档中的高级 Graph、硬件渲染或 vendor 库路线。
 - Field/template 参数见 [Dense Field 绑定](dense_field_graph.zh.md)。
 - 完成等待、控制流和诊断见 [Graph 执行](graph_runtime_optimization.zh.md)。
 - 优化不变的语义 definition 见[完整 recipe 搜索](graph_recipe_integration.zh.md)。

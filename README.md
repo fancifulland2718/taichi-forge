@@ -4,7 +4,7 @@
 
 Taichi Forge is a community-maintained fork of
 [Taichi](https://github.com/taichi-dev/taichi) for simulation and rendering.
-Write kernels in a Python-embedded language, then use CPU, CUDA or Vulkan
+Write kernels in a Python-embedded language, then use CPU, CUDA, Vulkan or basic ROCm/HIP
 execution, reusable Graphs, native algorithms and optional hardware providers.
 
 [![PyPI](https://img.shields.io/pypi/v/taichi-forge.svg)](https://pypi.org/project/taichi-forge/)
@@ -31,6 +31,9 @@ platform; the source build matrix covers Python 3.10–3.14 on Windows and Linux
 Ordinary CUDA execution requires a compatible driver, not a local CUDA Toolkit.
 Vulkan requires a compatible driver/ICD. Optional libraries are enabled explicitly
 and have their own version, device and deployment requirements.
+Standard 0.6.3 Windows/Linux runtime wheels also include `ti.amdgpu`; using it
+requires a user-installed HIP runtime, AMD driver and linker. See the
+[ROCm setup and support limits](docs/forge/rocm_backend.en.md).
 
 ## Start with your task
 
@@ -55,8 +58,10 @@ Taichi 1.7.4 is the public programming-model reference; Forge has an independent
 release track. Supported source-compatible APIs do not imply identical private
 implementation, binary ABI, backend coverage or performance.
 
-Repository documentation describes its source revision. In-development and
-experimental features may not exist in your installed wheel. Use the
+This source tree targets **0.6.3 (release preparation; not yet published)**.
+The install command above selects the latest version available on your package
+index, not an unpublished candidate. Experimental features may not exist in
+your installed wheel. Use the
 [release notes](docs/forge/release_notes.en.md) and the documentation at your
 release tag for version-specific behavior.
 

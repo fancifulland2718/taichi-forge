@@ -4,8 +4,10 @@
 
 ## Versions and installation
 
-These pages describe the source tree you are reading. Features marked
-`0.6.3` or `in development` may not exist in an installed release. Consult the
+These pages describe **0.6.3, currently in release preparation and not yet
+published**. Installing from a package index selects an available release, not
+this unpublished candidate. Features marked `0.6.3` or `in development` may
+not exist in that installed release. Consult the
 [release notes](release_notes.en.md) and use documentation from your release tag
 when working with a published wheel.
 
@@ -18,6 +20,8 @@ Import `taichi_forge`, not `taichi`. Pip installs the compatible native runtime
 dependency; do not require runtime and Python shim Git commits to match.
 Ordinary CUDA needs a driver, not a local CUDA Toolkit. Vendor libraries and
 Vulkan shader-compilation addons have explicit extra requirements.
+Standard 0.6.3 Windows/Linux wheels include basic `ti.amdgpu` support; HIP,
+its driver and linker remain user-installed and are optional for other backends.
 See [external providers](external_hardware_providers.en.md),
 [Linux setup](linux_revalidation.en.md) and [source builds](build_wheels.en.md).
 
@@ -26,6 +30,7 @@ See [external providers](external_hardware_providers.en.md),
 | Task | Start here |
 | --- | --- |
 | Run a kernel and reuse a Graph | [Quick start](quickstart.en.md) |
+| Select the basic AMD GPU backend | [ROCm/HIP setup and limits](rocm_backend.en.md) |
 | Find a public symbol or supported input | [API reference](forge_api_reference.en.md) |
 | Choose initialization/compile settings | [Options](forge_options.en.md), [compile/cache](cache_compile.en.md), [trade-offs](compilation_tradeoffs.en.md) |
 | Migrate a Taichi Graph | [Migration](graph_migration_guide.en.md), [dense Field Graph](dense_field_graph.en.md) |
