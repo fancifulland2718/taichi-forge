@@ -80,6 +80,7 @@ jobs:
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_AMDGPU:BOOL=ON
         -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
         -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
         -DTI_WITH_CUPTI:BOOL=OFF
@@ -204,6 +205,7 @@ jobs:
           grep -F "TI_BUILD_VKFFT_PROVIDER:BOOL=ON" "$cache"
           grep -F "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF" "$cache"
           grep -F "TI_WITH_CUDA:BOOL=ON" "$cache"
+          grep -F "TI_WITH_AMDGPU:BOOL=ON" "$cache"
           grep -F "TI_WITH_VULKAN:BOOL=ON" "$cache"
           grep -F "TI_WITH_OPENGL:BOOL=ON" "$cache"
           grep -F "TI_WITH_LLVM:BOOL=ON" "$cache"
@@ -228,7 +230,7 @@ jobs:
           set -euo pipefail
           python scripts/validate_runtime_wheel.py \
             --wheel-dir dist-runtime --platform linux \
-            --dependency-class driver-only --strict-binary --require-vkfft
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
 
       - name: Audit runtime wheel
         run: |
@@ -244,7 +246,7 @@ jobs:
           auditwheel show wheelhouse-runtime/*.whl
           python scripts/validate_runtime_wheel.py \
             --wheel-dir wheelhouse-runtime --platform manylinux \
-            --dependency-class driver-only --strict-binary --require-vkfft
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -266,6 +268,7 @@ jobs:
         -DTI_WITH_VULKAN:BOOL=ON
         -DTI_WITH_OPENGL:BOOL=ON
         -DTI_WITH_CUDA:BOOL=ON
+        -DTI_WITH_AMDGPU:BOOL=ON
         -DTI_WITH_CUDA_TOOLKIT:BOOL=OFF
         -DTI_WITH_CUDA_TOOLKIT_PRIMITIVE_REFERENCE:BOOL=OFF
         -DTI_WITH_CUPTI:BOOL=OFF
@@ -394,6 +397,7 @@ jobs:
               "TI_BUILD_VKFFT_PROVIDER:BOOL=ON",
               "TI_ALLOW_UNQUALIFIED_OPTIX_PTX_TOOLKIT:BOOL=OFF",
               "TI_WITH_CUDA:BOOL=ON",
+              "TI_WITH_AMDGPU:BOOL=ON",
               "TI_WITH_VULKAN:BOOL=ON",
               "TI_WITH_OPENGL:BOOL=ON",
               "TI_WITH_LLVM:BOOL=ON",
@@ -426,7 +430,7 @@ jobs:
         run: |
           python scripts/validate_runtime_wheel.py `
             --wheel-dir dist-runtime --platform windows `
-            --dependency-class driver-only --strict-binary --require-vkfft
+            --dependency-class driver-only --strict-binary --require-vkfft --require-amdgpu
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

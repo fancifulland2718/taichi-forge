@@ -93,10 +93,6 @@ else()
     set(INSTALL_LIB_DIR ${CMAKE_INSTALL_PREFIX}/python/taichi_forge/_lib)
 endif()
 
-if (TI_WITH_AMDGPU AND TI_WITH_CUDA)
-    message(WARNING "Compiling CUDA and AMDGPU backends simultaneously")
-endif()
-
 if(UNIX AND NOT APPLE)
     # Handy helper for Linux
     # https://stackoverflow.com/a/32259072/12003165

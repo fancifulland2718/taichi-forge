@@ -29,11 +29,11 @@ FORBIDDEN_VENDOR_RUNTIME = re.compile(
     r"(?:cublas(?:lt)?64_|cusparse64_|cusolver64_|cufft(?:w)?64_|"
     r"cusparseLt64_|cudss64_|curand64_|cupti64_|"
     r"nvrtc(?:-builtins)?64_|nvjitlink_|nvoptix|nvcuda|nvml|nvToolsExt|"
-    r"amgxsh|nccl|cutensor(?:Mg)?(?:64_)?)"
+    r"amgxsh|nccl|amdhip64|hiprtc|hsa-runtime64|cutensor(?:Mg)?(?:64_)?)"
     r"[^/]*\.dll"
     r"|lib(?:cublas(?:lt)?|cusparse|cusolver|cufft(?:w)?|curand|cupti|"
     r"cusparseLt|cudss|nvrtc(?:-builtins)?|nvjitlink|nvoptix|cuda|nvidia-ml|nvToolsExt|"
-    r"amgxsh|nccl|cutensor(?:Mg)?)(?:-[^.]+)?\.so(?:\..*)?"
+    r"amgxsh|nccl|amdhip64|hiprtc|hsa-runtime64|cutensor(?:Mg)?)(?:-[^.]+)?\.so(?:\..*)?"
     r")",
     re.IGNORECASE,
 )
@@ -78,6 +78,22 @@ VKFFT_LICENSE_FILES = (
     "SPIRV-Headers-LICENSE.txt",
     "SOURCES.txt",
 )
+
+
+def _validate_amdgpu_payload(zf: ZipFile, names: list[str], required: bool) -> None:
+    prefix = f"{PACKAGE}/_lib/runtime/"
+    if not required and f"{prefix}runtime_amdgpu.bc" not in names:
+        return  # Older or explicitly non-AMDGPU builds remain inspectable.
+    for leaf in (
+        "runtime_amdgpu.bc", "ocml.bc", "ockl.bc", "opencl.bc",
+        "oclc_abi_version_500.bc", "oclc_wavefrontsize64_on.bc",
+        "oclc_wavefrontsize64_off.bc", "AMDGPU-DEVICE-LIBS-LICENSE.txt",
+    ):
+        member = prefix + leaf
+        if names.count(member) != 1 or not zf.read(member):
+            raise RuntimeError(f"AMDGPU compiler input missing, empty or duplicated: {leaf}")
+    if not any(name.startswith(prefix + "oclc_isa_version_") and name.endswith(".bc") for name in names):
+        raise RuntimeError("AMDGPU compiler inputs have no target ISA bitcode")
 
 
 def _validate_vkfft_payload(zf: ZipFile, names: list[str], platform: str, required: bool) -> set[str]:
@@ -509,6 +525,7 @@ def inspect_runtime_wheel(
     strict_binary: bool = False,
     required_export_manifest_schema: int | None = None,
     require_vkfft: bool = False,
+    require_amdgpu: bool = False,
 ) -> RuntimeWheelInfo:
     if expected_dependency_class not in {
         "driver-only",
@@ -530,6 +547,7 @@ def inspect_runtime_wheel(
         if corrupt is not None:
             raise RuntimeError(f"Corrupt wheel member in {wheel.name}: {corrupt}")
         names = zf.namelist()
+        _validate_amdgpu_payload(zf, names, require_amdgpu)
         actual_vkfft_providers = _validate_vkfft_payload(zf, names, platform, require_vkfft)
         metadata_names = [name for name in names if name.endswith(".dist-info/METADATA")]
         record_names = [name for name in names if name.endswith(".dist-info/RECORD")]
@@ -758,6 +776,7 @@ def validate_runtime_wheels(
     strict_binary: bool = False,
     required_export_manifest_schema: int | None = None,
     require_vkfft: bool = False,
+    require_amdgpu: bool = False,
 ) -> list[RuntimeWheelInfo]:
     wheels = sorted(wheel_dir.glob("*.whl"))
     expected_count = 2 if expected_platform == "pair" else 1
@@ -773,6 +792,7 @@ def validate_runtime_wheels(
             strict_binary,
             required_export_manifest_schema,
             require_vkfft,
+            require_amdgpu,
         )
         for wheel in wheels
     ]
@@ -805,6 +825,8 @@ def main() -> None:
         required=True,
     )
     parser.add_argument("--cuda-major", type=int)
+    parser.add_argument("--require-amdgpu", action="store_true",
+                        help="Require AMDGPU compiler bitcode and its license")
     parser.add_argument(
         "--require-vkfft",
         action="store_true",
@@ -846,6 +868,7 @@ def main() -> None:
             args.strict_binary,
             args.export_manifest_schema,
             args.require_vkfft,
+            args.require_amdgpu,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc
