@@ -4,12 +4,9 @@
 
 ## Versions and installation
 
-These pages describe **0.6.3, currently in release preparation and not yet
-published**. Installing from a package index selects an available release, not
-this unpublished candidate. Features marked `0.6.3` or `in development` may
-not exist in that installed release. Consult the
-[release notes](release_notes.en.md) and use documentation from your release tag
-when working with a published wheel.
+These pages document **Taichi Forge 0.6.3**. See the
+[release notes](release_notes.en.md) for changes and upgrade guidance.
+For another version, use the documentation at its release tag.
 
 ```bash
 python -m pip install -U taichi-forge

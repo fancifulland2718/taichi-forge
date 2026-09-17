@@ -2,8 +2,8 @@
 
 [中文](forge_api_reference.zh.md) · [Documentation](index.en.md)
 
-This reference lists public symbols, call positions and support limits for the
-current source. Development/experimental labels still apply; check the
+This reference lists public symbols, call positions and support limits for
+Taichi Forge 0.6.3; see the
 [installed-version guidance](index.en.md#versions-and-installation).
 Initialization and compile options belong in [Forge options](forge_options.en.md).
 
@@ -34,7 +34,7 @@ Import Forge as:
 import taichi_forge as ti
 ```
 
-### `ti.hardware` capabilities and explicit probes (0.6.3 in development)
+### `ti.hardware` capabilities and explicit probes (0.6.3)
 
 - `ti.hardware.status(operation_id)`, `provider_status(provider_id)` and
   `execution_report()` are passive queries. They do not load, enable, benchmark
@@ -79,7 +79,7 @@ code generation may choose native atomics, CAS, subgroup instructions, or
 shared memory according to the exact operation and device. An API name alone
 is not evidence of a particular instruction.
 
-### `ti.hardware.linalg.gemm_f32` (0.6.3 in development)
+### `ti.hardware.linalg.gemm_f32` (0.6.3)
 
 An explicit cuBLAS provider for compact row-major f32 matrices:
 
@@ -186,7 +186,7 @@ compiler rewrite of arbitrary kernels. None is kernel-callable. Provider
 analysis, factorization, and numerical failures after explicit selection stay
 visible rather than silently falling back.
 
-### `ti.hardware.tensor` and `ti.hardware.linalg.AmgxProvider` (0.6.3 in development)
+### `ti.hardware.tensor` and `ti.hardware.linalg.AmgxProvider` (0.6.3)
 
 Three user-runtime adapters expose explicit retained execution resources:
 
@@ -220,7 +220,7 @@ recording interfaces; none becomes an automatic provider choice merely by
 installing its runtime. See the external-provider guide for installation, path,
 numeric, and memory gates.
 
-### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3 in development)
+### `ti.graph.VulkanBufferCommand` and `VulkanBufferCommandRecording` (0.6.3)
 
 These APIs describe and submit one Vulkan RHI buffer-command sequence:
 `fill_u32()`, `copy()`, `buffer_barrier()`, and `memory_barrier()`. Execute it
@@ -244,7 +244,7 @@ mismatches, Graph use after reset, and recordings over 4096 commands fail.
 The route uses only runtime code already present in official wheels and does
 not add a wheel variant.
 
-### `ti.hardware.image.VulkanImageCopyRecording` (0.6.3 in development)
+### `ti.hardware.image.VulkanImageCopyRecording` (0.6.3)
 
 This low-level command copies one complete, format- and extent-matched
 Vulkan color `ti.Texture` into another:
@@ -509,7 +509,7 @@ no automatic mip generation, raw CompileIQ library axis, AOT or structured
 control-region promise. Choose using complete host/device/memory measurements,
 including the consumers and any input conversion.
 
-### `ti.hardware.graphics.VulkanGraphicsPipeline` (0.6.3 in development)
+### `ti.hardware.graphics.VulkanGraphicsPipeline` (0.6.3)
 
 This is the low-level, renderer-neutral Vulkan raster interface. The caller
 provides SPIR-V shader binaries, exact vertex layouts, runtime-owned
@@ -742,7 +742,7 @@ within one pass remains unsupported. Device layout transitions and resource
 lifetimes remain managed; multiple graphics passes are not promised to become
 one submission.
 
-### `ti.hardware.raster.RasterPass` (0.6.3 in development)
+### `ti.hardware.raster.RasterPass` (0.6.3)
 
 A compatibility and qualification adapter over the existing GGUI renderer:
 
@@ -798,7 +798,7 @@ is direct-execution only: upload it to device storage before recording a Graph.
 Changing explicit execution bindings prepares a new staging set; retain a
 recording with fixed bindings for repeat submission.
 
-### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3 in development)
+### `ti.hardware.ray` BLAS/TLAS and batch query (0.6.3)
 
 `ti.hardware.ray.triangle_scene(vertices, indices, backend="auto")` selects the
 existing native batch route on the active Vulkan/CUDA backend. It does not switch
@@ -1072,7 +1072,7 @@ Vulkan SDK dependency. The application supplies baked data and any external bake
 Build cost and extra memory must be amortized; unknown-heavy maps can lose performance.
 Measure the complete rendering/query-consumer window rather than assuming a speedup.
 
-### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3 in development)
+### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND` (0.6.3)
 
 An explicit single-GPU cuFFT provider for C2C, R2C, and C2R transforms:
 
@@ -1532,7 +1532,7 @@ native path, they call CUDA device APIs, native Vulkan code/shaders, or native
 CPU/C++ implementations directly. Otherwise, supported routes fall back to
 Taichi helper kernels.
 
-### CompileIQ boundary (0.6.3 in development)
+### CompileIQ boundary (0.6.3)
 
 The algorithms module has no independent CompileIQ search API. Use
 `definition.search_recipes(...)` for complete Graph recipes; ordinary

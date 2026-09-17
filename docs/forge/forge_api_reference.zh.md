@@ -2,7 +2,7 @@
 
 [English](forge_api_reference.en.md) · [文档入口](index.zh.md)
 
-本文列出当前源码的公共符号、调用位置与支持边界；开发中/experimental 标记继续有效，
+本文列出 Taichi Forge 0.6.3 的公共符号、调用位置与支持边界，
 请核对[安装版本说明](index.zh.md#版本与安装)。初始化和编译配置统一见 [Forge 选项](forge_options.zh.md)。
 
 ## 导航
@@ -31,7 +31,7 @@
 import taichi_forge as ti
 ```
 
-### `ti.hardware` capability 与显式 probe（0.6.3 开发中）
+### `ti.hardware` capability 与显式 probe（0.6.3）
 
 - `ti.hardware.status(operation_id)`、`provider_status(provider_id)`、
   `execution_report()` 是被动查询，不加载、启用、benchmark 或选择可选 provider。
@@ -67,7 +67,7 @@ hardware catalog 也描述现有 CUDA/Vulkan kernel 路线。它们不新增依�
 可能根据具体 operation/device 选择 native atomic、CAS、subgroup instruction 或 shared
 memory。仅凭 API 名称不能证明使用了某条特定指令。
 
-### `ti.hardware.linalg.gemm_f32`（0.6.3 开发中）
+### `ti.hardware.linalg.gemm_f32`（0.6.3）
 
 面向 compact row-major f32 matrix 的显式 cuBLAS provider：
 
@@ -150,7 +150,7 @@ Forge 不安装 cuDSS，不新增 Python package requirement，不链接或捆�
 选择，不是编译器改写任意 kernel；它们都不能在 kernel 内调用。显式选中 provider 后发生
 的 analysis、factorization 或数值失败保持可见，不会静默 fallback。
 
-### `ti.hardware.tensor` 与 `ti.hardware.linalg.AmgxProvider`（0.6.3 开发中）
+### `ti.hardware.tensor` 与 `ti.hardware.linalg.AmgxProvider`（0.6.3）
 
 三个用户 runtime adapter 公开显式 retained execution resource：
 
@@ -178,7 +178,7 @@ plan/solver 必须先于 provider 关闭；`ti.reset()` 后所有对象失效。
 vendor runtime 就自动成为默认 provider。
 安装、路径、数值和内存门禁见 external-provider 指南。
 
-### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3 开发中）
+### `ti.graph.VulkanBufferCommand` 与 `VulkanBufferCommandRecording`（0.6.3）
 
 这两个 API 描述并一次性提交 Vulkan RHI buffer command sequence：`fill_u32()`、
 `copy()`、`buffer_barrier()` 与 `memory_barrier()`。可通过
@@ -197,7 +197,7 @@ runtime-ordered compute queue 和 `rerecord` replay。它不可从 `@ti.kernel` 
 越界、overlap copy、错误 backend/device、reset 后的旧 Graph 和超过 4096 条 command
 都会失败。该功能完全使用官方 wheel 已包含的 runtime，不增加 wheel 发行矩阵。
 
-### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3 开发中）
+### `ti.hardware.image.VulkanImageCopyRecording`（0.6.3）
 
 该 底层命令把一个完整 Vulkan color `ti.Texture` 复制到 format 与 extent 相同的另一个
 Texture：
@@ -402,7 +402,7 @@ color mip 应由应用提供线性光空间数值并确定 alpha 约定，RGBA8 
 native 路径本身不等于完整录图。不新增自动生成 mip、CompileIQ 裸库轴、AOT 或结构化 control region
 支持；采用时应计入真实 consumer、输入转换及 host/device/显存的完整成本。
 
-### `ti.hardware.graphics.VulkanGraphicsPipeline`（0.6.3 开发中）
+### `ti.hardware.graphics.VulkanGraphicsPipeline`（0.6.3）
 
 这是 renderer-neutral 的底层 Vulkan 光栅接口。调用方提供 SPIR-V shader binary、精确
 vertex layout、runtime-owned `ti.ndarray` vertex/index buffer，以及 runtime-owned
@@ -592,7 +592,7 @@ graphics 消费端使用匹配的 SPIR-V shadow sampler（例如 GLSL `sampler2D
 替换纹理需更新绑定。不同 pass 可先写后读，同一个 pass 仍禁止附件与采样输入别名。
 Forge 保留设备侧布局转换和生命周期约束，不承诺将多个 graphics pass 合成一次提交。
 
-### `ti.hardware.raster.RasterPass`（0.6.3 开发中）
+### `ti.hardware.raster.RasterPass`（0.6.3）
 
 现有 GGUI renderer 之上的兼容与资格验证 adapter：
 
@@ -637,7 +637,7 @@ replay 在设备端读取 field/ndarray 的原位更新，不再让几何数据�
 host NumPy 几何只支持直接执行；用于 Graph 时请先上传到 device storage。
 显式 execute 换绑定会新建准备缓冲；反复提交应保留固定绑定的 recording。
 
-### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3 开发中）
+### `ti.hardware.ray` BLAS/TLAS 与 batch query（0.6.3）
 
 `ti.hardware.ray.triangle_scene(vertices, indices, backend="auto")` 在当前 Vulkan/CUDA
 后端选择已有原生 batch 路线，不切换设备、不回退软件。工厂所有权、自定义 SPIR-V/PTX、SBT、
@@ -861,7 +861,7 @@ wheel 只增加 Forge 的 driver-backed 导入代码，不打入 baker、vendor 
 应用提供 baked 数据和所需外部 baker。构建成本与额外显存需摊销，unknown 比例高可能变慢；应测完整
 渲染/查询消费窗口，不预设一定加速。
 
-### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3 开发中）
+### `ti.hardware.fft.CufftPlan1D` / `CufftPlanND`（0.6.3）
 
 面向 C2C、R2C 与 C2R transform 的显式 single-GPU cuFFT provider：
 
@@ -1255,7 +1255,7 @@ ti.algorithms.experimental_reduce(...)
 CUDA device API、native Vulkan 代码 / shader 或 native CPU/C++ 实现；否则，
 已支持的路线会回退到 Taichi helper kernel。
 
-### CompileIQ 边界（0.6.3 开发中）
+### CompileIQ 边界（0.6.3）
 
 算法模块不提供独立 CompileIQ 搜索 API。通过 `definition.search_recipes(...)`
 搜索完整 Graph recipe；普通 primitive 保留显式 method 与 `auto` 合同。

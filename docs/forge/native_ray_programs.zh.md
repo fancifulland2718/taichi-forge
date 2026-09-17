@@ -2,7 +2,7 @@
 
 [English](native_ray_programs.en.md) · [硬件 API](forge_api_reference.zh.md)
 
-本文描述 0.6.3 开发源码。使用对应发布文档和兼容的 shim/runtime，不要求 Git commit 相同。
+本文介绍 0.6.3 的原生光栅与射线接口。使用对应发布文档和兼容的 shim/runtime，不要求 Git commit 相同。
 Vulkan 示例已在 Windows/NVIDIA 上执行；其他设备或平台需要核对 capability，不能据此承诺性能。
 
 ## 选择适合的入口

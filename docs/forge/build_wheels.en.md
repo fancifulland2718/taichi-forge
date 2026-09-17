@@ -1,7 +1,6 @@
 # Building Forge Wheels
 
-> Current source build contract: `0.6.3`. This is not a claim that every build
-> profile or hardware combination is release-qualified. The split runtime/shim
+> This guide describes wheel builds for `0.6.3`. The split runtime/shim
 > model first shipped in `0.4.23`; see [release notes](release_notes.en.md).
 
 This document mirrors the public wheel build path used by

@@ -1,6 +1,6 @@
 # 构建 Forge wheel
 
-> 当前源码构建合同：`0.6.3`，不代表所有 build profile 或硬件组合已完成发行资格化。
+> 本文介绍 `0.6.3` 的 wheel 构建方式。
 > runtime/shim 拆包从 `0.4.23` 开始公开；版本归属见 [版本更新说明](release_notes.zh.md)。
 
 本文对齐 `.github/workflows/publish_runtime_pypi.yml` 和

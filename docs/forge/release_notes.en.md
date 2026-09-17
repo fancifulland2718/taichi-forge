@@ -3,16 +3,13 @@
 [中文](release_notes.zh.md) · [Documentation](index.en.md)
 
 This page summarizes user-visible changes and upgrade considerations.
-Repository documentation describes its source revision; an unreleased feature
-is not a claim about the wheel currently installed. Use the documentation at
-your release tag for that version's exact contract. Older distribution files
-may no longer be available from a package index.
+Use the documentation at your release tag for version-specific API details.
 
 ## Quick index
 
 | Version | Main additions |
 | --- | --- |
-| [0.6.3 / release preparation](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
+| [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
 | [0.6.0](#060) | Structured Graph control, operators/solvers, driver-only CUDA primitives and interop |
@@ -29,11 +26,7 @@ may no longer be available from a package index.
 <a id="unreleased"></a>
 <a id="063"></a>
 
-## 0.6.3 — release preparation
-
-Source/package version: **0.6.3**. This version is not yet published; building a
-wheel with this version does not make it a released distribution. Availability
-remains specific to the installed runtime, backend and optional provider.
+## 0.6.3
 
 ### Graph search and reusable execution
 

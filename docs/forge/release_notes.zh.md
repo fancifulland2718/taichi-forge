@@ -2,15 +2,13 @@
 
 [English](release_notes.en.md) · [文档入口](index.zh.md)
 
-本页概括用户可见变化与升级注意事项。仓库文档描述对应源码，
-“待发布”不代表该功能已包含在当前安装的 wheel 中。
-请使用对应 release tag 的文档核对具体合同。较旧发行文件可能不再由包索引保留。
+本页概括用户可见变化与升级注意事项。具体 API 用法请查阅对应 release tag 的文档。
 
 ## 快速索引
 
 | 版本 | 主要内容 |
 | --- | --- |
-| [0.6.3 / 发布准备](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
+| [0.6.3](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
 | [0.6.2](#062) | 执行计划、动态工作、Graph 存储与求解器改进 |
 | [0.6.1](#061) | task policy/label、device worklist、SNode 生命周期、Graph telemetry |
 | [0.6.0](#060) | 结构化控制、operator/solver、driver-only CUDA primitive、互通 |
@@ -27,10 +25,7 @@
 <a id="unreleased"></a>
 <a id="063"></a>
 
-## 0.6.3 — 发布准备
-
-源码/包版本：**0.6.3**。目前尚未正式发布；构建出带此版本号的 wheel 不等于完成发行。
-具体可用性仍取决于安装的 runtime、后端和可选 provider。
+## 0.6.3
 
 ### Graph 搜索与可复用执行
 

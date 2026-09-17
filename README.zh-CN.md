@@ -48,10 +48,8 @@ HIP runtime、AMD 驱动与 linker，参见 [ROCm 配置与支持边界](docs/fo
 Taichi 1.7.4 是公共编程模型的兼容参考；Forge 使用独立版本线。
 受支持的源码兼容 API 不代表私有实现、二进制 ABI、后端覆盖或性能完全相同。
 
-当前源码目标为 **0.6.3（发布准备中，尚未正式发布）**。
-上述安装命令选择包索引中已可用的最新版本，不会安装尚未发布的候选包。
-experimental 功能可能尚未进入已安装 wheel；
-请结合[发布说明](docs/forge/release_notes.zh.md)和对应 release tag 文档核对版本行为。
+本文档适用于 **Taichi Forge 0.6.3**，版本变化与升级说明见
+[发布说明](docs/forge/release_notes.zh.md)。使用其他版本时，请查阅对应 release tag 的文档。
 
 能力发现、显式执行、Graph recording、完整 recipe 搜索是不同支持层级，
 需要逐项核对 dtype/layout、设备和生命周期要求。搜索使用维护版 CompileIQ fork；

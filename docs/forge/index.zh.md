@@ -4,10 +4,8 @@
 
 ## 版本与安装
 
-这些文档描述 **0.6.3，当前为发布准备阶段，尚未正式发布**。
-从包索引安装会选择已可用的发行版，不会自动安装此候选包。
-标注 `0.6.3` 或“开发中”的能力可能尚未包含在已安装版本中。
-请结合[发布说明](release_notes.zh.md)，使用对应 release tag 的文档核对已发布 wheel。
+这些文档适用于 **Taichi Forge 0.6.3**，版本变化与升级说明见
+[发布说明](release_notes.zh.md)。使用其他版本时，请查阅对应 release tag 的文档。
 
 ```bash
 python -m pip install -U taichi-forge

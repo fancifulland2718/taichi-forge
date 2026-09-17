@@ -2,7 +2,7 @@
 
 [中文](native_ray_programs.zh.md) · [Hardware API](forge_api_reference.en.md)
 
-These interfaces describe the 0.6.3 development source. Use matching release
+These interfaces are available in 0.6.3. Use matching release
 documentation and compatible shim/runtime packages. They do not require matching
 Git commits. Vulkan examples have been exercised on Windows/NVIDIA; availability
 on another device or platform is a capability question, not a performance promise.
