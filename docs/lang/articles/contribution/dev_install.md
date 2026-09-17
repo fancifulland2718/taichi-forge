@@ -422,7 +422,7 @@ The `develop` command serves the developers' needs better because edits to the P
 | TI_BUILD_EXAMPLES            | Build the C++ examples                                     | ON      |
 | TI_BUILD_RHI_EXAMPLES        | Build the Unified Device API examples                      | OFF     |
 | TI_BUILD_TESTS               | Build the C++ tests                                        | OFF     |
-| TI_WITH_AMDGPU               | Build with the AMDGPU backend                              | OFF     |
+| TI_WITH_AMDGPU               | Build the [basic ROCm/HIP backend](../../../forge/rocm_backend.en.md) (Linux/Windows; HIP 7+ headers and AMDGPU-enabled LLVM) | OFF |
 | TI_WITH_BACKTRACE            | Use backward-cpp to print out C++ stack trace upon failure | OFF     |
 | TI_WITH_CUDA                 | Build with the CUDA backend                                | ON      |
 | TI_WITH_CUDA_TOOLKIT         | Build with the CUDA toolkit                                | OFF     |
