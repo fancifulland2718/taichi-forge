@@ -1,10 +1,12 @@
 name: Publish wheels to PyPI
+run-name: "${{ (inputs.publish || startsWith(github.ref, 'refs/tags/forge-v')) && 'Publish' || 'Build only' }} taichi-forge ${{ inputs.version || github.ref_name }}"
 
 # Builds the Python-facing taichi-forge CPython/pybind shim wheels for Windows
 # (x64) and Linux (x86_64, manylinux), then optionally publishes them to PyPI.
 # By default this workflow links against an already-published runtime and only
-# publishes taichi-forge. Artifact reuse is explicit; a joint native build is
-# available for non-publishing validation without changing either publisher.
+# publishes taichi-forge. This workflow never builds the native runtime.
+# Existing validated shim artifacts can be published without rebuilding either
+# package. GitHub Releases are independent and are not created here.
 #
 # Trigger:
 #   * workflow_dispatch — manual, with a version input. If `publish=true`
@@ -15,17 +17,7 @@ name: Publish wheels to PyPI
 #     repo's PyPI Trusted Publisher binding to be configured (see
 #     docs/design/pypi_release.md).
 #
-# Permission-handling notes (the "no permission to create release" pitfall):
-#   * `permissions.contents: write` is REQUIRED so that
-#     softprops/action-gh-release can create/update the GitHub Release
-#     from within the workflow (default token lacks write scope).
-#   * `permissions.id-token: write` is REQUIRED for PyPI Trusted
-#     Publishing via `pypa/gh-action-pypi-publish` (OIDC handshake).
-#   * If the release step still returns 403 "Resource not accessible by
-#     integration", check: (a) repo settings → Actions → General →
-#     Workflow permissions is set to "Read and write", and (b) for forks
-#     the `pull_request` trigger cannot mint an id-token — use
-#     `workflow_dispatch` or push a tag from the canonical branch.
+# PyPI upload uses a job-scoped OIDC token. Building needs no write permission.
 
 on:
   workflow_dispatch:
@@ -39,9 +31,9 @@ on:
         required: false
         default: ""
       runtime_source:
-        description: "Runtime input: package index, existing artifact, or validation-only build"
+        description: "Use an existing runtime from the index or an Actions artifact (never rebuilds it)"
         type: choice
-        options: [index, artifact, build]
+        options: [index, artifact]
         default: index
       validation_platform:
         description: "Validation scope; Windows-only runs never publish"
@@ -49,29 +41,31 @@ on:
         options: [all, windows]
         default: all
       runtime_run_id:
-        description: "Runtime artifact run ID (required with runtime_source=artifact)"
+        description: "Actions run ID, e.g. 35196322756, NOT a version; only for runtime_source=artifact"
         type: string
         required: false
         default: ""
       publish:
-        description: "Publish the validated shim wheels"
+        description: "Upload to the selected index; false only builds/validates and saves artifacts"
         type: boolean
         default: false
       target:
-        description: "Package index for runtime download and shim publication"
+        description: "Package index; selecting pypi does not enable uploading (set publish=true)"
         type: choice
         options: [testpypi, pypi]
         default: testpypi
+      wheel_run_id:
+        description: "Reuse validated SHIM wheels from this Actions run ID; blank builds new shims"
+        type: string
+        required: false
+        default: ""
   push:
     tags:
       - "forge-v*"
 
 permissions:
-  # Needed by softprops/action-gh-release to create/update the GitHub Release.
-  contents: write
+  contents: read
   actions: read
-  # Needed by pypa/gh-action-pypi-publish (Trusted Publishing / OIDC).
-  id-token: write
 
 concurrency:
   group: forge-wheel-release-${{ github.ref }}-${{ github.event.inputs.version || 'version-file' }}
@@ -98,12 +92,14 @@ jobs:
       runtime_source: ${{ steps.set.outputs.runtime_source }}
       target: ${{ steps.set.outputs.target }}
       is_tag: ${{ steps.set.outputs.is_tag }}
+      publish: ${{ steps.set.outputs.publish }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: set
         env:
           VALIDATION_PLATFORM: ${{ inputs.validation_platform || 'all' }}
           RUNTIME_RUN_ID: ${{ inputs.runtime_run_id }}
+          WHEEL_RUN_ID: ${{ inputs.wheel_run_id }}
           REQUEST_PUBLISH: ${{ inputs.publish }}
           REQUEST_VERSION: ${{ inputs.version }}
           RUNTIME_VERSION: ${{ inputs.runtime_version }}
@@ -113,24 +109,28 @@ jobs:
         run: |
           set -euo pipefail
           case "$VALIDATION_PLATFORM" in all|windows) ;; *) echo "Invalid validation platform"; exit 1 ;; esac
-          case "$RUNTIME_SOURCE" in index|artifact|build) ;; *) echo "Invalid runtime source"; exit 1 ;; esac
+          case "$RUNTIME_SOURCE" in index|artifact) ;; *) echo "Invalid runtime source; build native runtime separately"; exit 1 ;; esac
           case "$TARGET" in pypi|testpypi) ;; *) echo "Invalid package index"; exit 1 ;; esac
           if [[ "$VALIDATION_PLATFORM" != all && ( "$REQUEST_PUBLISH" == true || "$GITHUB_REF" == refs/tags/forge-v* ) ]]; then
             echo "Platform-scoped validation cannot publish"; exit 1
           fi
           if [[ "$RUNTIME_SOURCE" == artifact ]]; then
-            [[ "$RUNTIME_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Artifact reuse requires a numeric run ID"; exit 1; }
+            [[ "$RUNTIME_RUN_ID" =~ ^[0-9]+$ ]] || { echo "runtime_run_id must be an Actions run ID (e.g. 35196322756), not a version; put 0.6.3 in runtime_version"; exit 1; }
           elif [[ -n "$RUNTIME_RUN_ID" ]]; then
             echo "runtime_run_id requires runtime_source=artifact"; exit 1
           fi
-          if [[ "$RUNTIME_SOURCE" == build && "$REQUEST_PUBLISH" == true ]]; then
-            echo "Joint builds are validation-only; publish runtime independently first"; exit 1
+          if [[ -n "$WHEEL_RUN_ID" ]]; then
+            [[ "$WHEEL_RUN_ID" =~ ^[0-9]+$ ]] || { echo "wheel_run_id must be an Actions run ID, not a version"; exit 1; }
+            if [[ "$VALIDATION_PLATFORM" != all || "$RUNTIME_SOURCE" != index ]]; then
+              echo "Reusing validated shims requires validation_platform=all and runtime_source=index"; exit 1
+            fi
           fi
           if [[ "${GITHUB_REF}" == refs/tags/forge-v* ]]; then
             ver="${GITHUB_REF#refs/tags/forge-v}"
             echo "is_tag=true" >> "$GITHUB_OUTPUT"
             TARGET=pypi
             RUNTIME_SOURCE=index
+            REQUEST_PUBLISH=true
             RUNTIME_VERSION="$(sed -nE 's/.*"taichi-forge-runtime==([^"]+)".*/\1/p' pyproject.toml)"
           elif [[ -n "$REQUEST_VERSION" ]]; then
             ver="$REQUEST_VERSION"
@@ -150,20 +150,22 @@ jobs:
           echo "runtime_version=$runtime_ver" >> "$GITHUB_OUTPUT"
           echo "runtime_source=$RUNTIME_SOURCE" >> "$GITHUB_OUTPUT"
           echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-
-  build_runtime:
-    name: Build runtime artifacts
-    if: ${{ needs.resolve_version.outputs.runtime_source == 'build' }}
-    needs: resolve_version
-    uses: ./.github/workflows/publish_runtime_pypi.yml
-    with:
-      version: ${{ needs.resolve_version.outputs.runtime_version }}
-      platform: ${{ inputs.validation_platform || 'all' }}
+          echo "publish=${REQUEST_PUBLISH:-false}" >> "$GITHUB_OUTPUT"
+          if [[ "$REQUEST_PUBLISH" == true ]]; then
+            echo "### Publish taichi-forge $ver to $TARGET" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Build/validate only — no upload requested" >> "$GITHUB_STEP_SUMMARY"
+            echo "target=$TARGET selects the index; set publish=true to upload." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "Runtime $runtime_ver is reused, never rebuilt. GitHub Release creation is not part of this workflow." >> "$GITHUB_STEP_SUMMARY"
+          if [[ -n "$WHEEL_RUN_ID" ]]; then
+            echo "Using validated shim artifacts from run $WHEEL_RUN_ID; no wheel compilation." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   build_linux:
     name: Linux wheel (py${{ matrix.python }})
-    if: ${{ !cancelled() && inputs.validation_platform != 'windows' && needs.resolve_version.result == 'success' && (needs.resolve_version.outputs.runtime_source != 'build' || needs.build_runtime.result == 'success') }}
-    needs: [resolve_version, build_runtime]
+    if: ${{ inputs.validation_platform != 'windows' && !inputs.wheel_run_id }}
+    needs: resolve_version
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -440,8 +442,8 @@ jobs:
 
   build_windows:
     name: Windows wheel (py${{ matrix.python }})
-    if: ${{ !cancelled() && needs.resolve_version.result == 'success' && (needs.resolve_version.outputs.runtime_source != 'build' || needs.build_runtime.result == 'success') }}
-    needs: [resolve_version, build_runtime]
+    if: ${{ !inputs.wheel_run_id }}
+    needs: resolve_version
     runs-on: windows-2022
     strategy:
       fail-fast: false
@@ -691,11 +693,12 @@ jobs:
   validate_wheel_set:
     name: Validate shim wheel set
     # A platform-scoped audit produces per-shim artifacts, not a release set.
-    if: ${{ !cancelled() && inputs.validation_platform != 'windows' && needs.build_linux.result == 'success' && needs.build_windows.result == 'success' }}
+    if: ${{ !cancelled() && needs.resolve_version.result == 'success' && inputs.validation_platform != 'windows' && (inputs.wheel_run_id || (needs.build_linux.result == 'success' && needs.build_windows.result == 'success')) }}
     needs: [resolve_version, build_linux, build_windows]
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -713,10 +716,31 @@ jobs:
           python -m pip install "packaging==26.0"
 
       - name: Download all wheel artifacts
+        if: ${{ !inputs.wheel_run_id }}
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           pattern: wheel-*-py*
+
+      - name: Reuse previously validated shim wheels
+        if: ${{ inputs.wheel_run_id }}
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: validated-shim-wheel-set
+          path: artifacts
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.wheel_run_id }}
+
+      - name: Check published runtime dependency for reused shims
+        if: ${{ inputs.wheel_run_id && needs.resolve_version.outputs.publish == 'true' }}
+        shell: bash
+        run: |
+          index_url=https://pypi.org/simple/
+          if [[ "${{ needs.resolve_version.outputs.target }}" == testpypi ]]; then index_url=https://test.pypi.org/simple/; fi
+          for platform in win_amd64 manylinux_2_35_x86_64; do
+            python -m pip download --only-binary=:all: --no-deps --index-url "$index_url" \
+              --platform "$platform" "taichi-forge-runtime==${{ needs.resolve_version.outputs.runtime_version }}" -d runtime-check
+          done
 
       - name: Gather wheels
         run: |
@@ -735,14 +759,18 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
 
-  collect_and_release:
-    name: GitHub Release + PyPI upload
+  publish_shim:
+    name: Publish validated shim wheels
     needs: [resolve_version, validate_wheel_set]
     runs-on: ubuntu-latest
     # Only this workflow publishes the shim; runtime has its own publisher.
-    if: |
-      needs.resolve_version.outputs.is_tag == 'true' ||
-      inputs.publish
+    # Explicit success checks allow artifact-only publication when build jobs
+    # were intentionally skipped, but never upload after failed validation.
+    if: ${{ !cancelled() && needs.resolve_version.result == 'success' && needs.validate_wheel_set.result == 'success' && needs.resolve_version.outputs.publish == 'true' }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
     environment:
       name: ${{ needs.resolve_version.outputs.target }}
       url: ${{ needs.resolve_version.outputs.target == 'pypi' && 'https://pypi.org/p/taichi-forge' || 'https://test.pypi.org/p/taichi-forge' }}
@@ -780,16 +808,7 @@ jobs:
         with:
           packages-dir: upload
 
-      - name: Create GitHub Release
-        # Create the release only after the package upload has succeeded.
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          tag_name: forge-v${{ needs.resolve_version.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          name: Taichi Forge v${{ needs.resolve_version.outputs.version }}
-          generate_release_notes: true
-          draft: ${{ needs.resolve_version.outputs.is_tag != 'true' }}
-          prerelease: ${{ contains(needs.resolve_version.outputs.version, 'dev') || contains(needs.resolve_version.outputs.version, 'rc') }}
-          files: dist/*.whl
-          fail_on_unmatched_files: true
-          token: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+      - name: Summarize publication
+        run: |
+          echo "### taichi-forge ${{ needs.resolve_version.outputs.version }} published to ${{ needs.resolve_version.outputs.target }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Uploaded ${{ steps.upload.outputs.count }} missing wheel(s); identical published files were retained." >> "$GITHUB_STEP_SUMMARY"

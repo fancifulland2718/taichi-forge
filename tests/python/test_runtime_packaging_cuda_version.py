@@ -1350,23 +1350,23 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert workflow.count("python -m pip check") == 4
     assert workflow.count("scripts/validate_numpy_abi.py") == 2
     assert workflow.count("packaging/constraints/release-build.txt") == 4
-    assert "build_runtime:" in workflow
-    assert "uses: ./.github/workflows/publish_runtime_pypi.yml" in workflow
+    assert "build_runtime:" not in workflow
+    assert "uses: ./.github/workflows/publish_runtime_pypi.yml" not in workflow
     assert "scripts.validate_release_wheel_set" in workflow
     assert "skip-existing:" not in workflow
     assert '- "forge-v*"' in workflow
     assert "refs/tags/forge-v*" in workflow
-    assert "tag_name: forge-v${{" in workflow
-    assert "tag_name: v${{" not in workflow
+    assert "action-gh-release" not in workflow
+    assert "contents: write" not in workflow
     # Runtime reuse is independent of platform scope; partial audits still do
     # not enter the release aggregation/publication path.
     assert "validation_platform:" in workflow
     assert "options: [all, windows]" in workflow
     assert "Platform-scoped validation cannot publish" in workflow
-    assert "Artifact reuse requires a numeric run ID" in workflow
-    assert "options: [index, artifact, build]" in workflow
+    assert "put 0.6.3 in runtime_version" in workflow
+    assert "options: [index, artifact]" in workflow
     assert "default: index" in workflow
-    assert "Joint builds are validation-only" in workflow
+    assert "Joint builds" not in workflow
     assert "Publish the selected runtime independently" in workflow
     assert "--runtime-version" in workflow
     assert "--project shim" in workflow
@@ -1377,15 +1377,34 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "run-id: ${{ inputs.runtime_run_id || github.run_id }}" in workflow
     assert "github-token: ${{ github.token }}" in workflow
     assert "actions: read" in workflow
-    assert "platform: ${{ inputs.validation_platform || 'all' }}" in workflow
     windows_job = workflow.split("  build_windows:\n", 1)[1].split("  validate_wheel_set:\n", 1)[0]
-    assert "needs.resolve_version.result == 'success'" in windows_job
-    assert "needs.build_runtime.result == 'success'" in windows_job
-    assert "needs.resolve_version.outputs.runtime_source != 'build'" in windows_job
+    assert "needs: resolve_version" in windows_job
+    assert "if: ${{ !inputs.wheel_run_id }}" in windows_job
     for job in ("build_linux", "validate_wheel_set"):
         section = workflow.split(f"  {job}:\n", 1)[1].split("    steps:\n", 1)[0]
         assert "inputs.validation_platform != 'windows'" in section
-        assert "!cancelled()" in section
+
+
+def test_shim_artifact_publication_skips_compilation_but_requires_validation():
+    workflow = (REPO_ROOT / ".github" / "workflows" / "publish_pypi.yml").read_text(encoding="utf-8")
+    for name in ("build_linux", "build_windows"):
+        job = workflow.split(f"  {name}:\n", 1)[1].split("    steps:\n", 1)[0]
+        assert "!inputs.wheel_run_id" in job
+    validation = workflow.split("  validate_wheel_set:\n", 1)[1].split("  publish_shim:\n", 1)[0]
+    assert "!cancelled()" in validation
+    assert "inputs.wheel_run_id || (needs.build_linux.result == 'success'" in validation
+    assert "run-id: ${{ inputs.wheel_run_id }}" in validation
+    assert "name: validated-shim-wheel-set" in validation
+    assert "--project shim --runtime-version" in validation
+    assert "for platform in win_amd64 manylinux_2_35_x86_64" in validation
+    publication = workflow.split("  publish_shim:\n", 1)[1]
+    assert "!cancelled()" in publication
+    assert "needs.validate_wheel_set.result == 'success'" in publication
+    assert "needs.resolve_version.outputs.publish == 'true'" in publication
+    assert "id-token: write" in publication
+    assert "id-token: write" not in workflow.split("  publish_shim:\n", 1)[0]
+    assert "Build/validate only — no upload requested" in workflow
+    assert "set publish=true to upload" in workflow
 
 
 def test_runtime_publish_workflow_has_no_cuda_wheel_matrix():
