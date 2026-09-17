@@ -5,7 +5,6 @@ import pytest
 
 import taichi_forge as ti
 from taichi_forge.lang import misc
-from tests import test_utils
 
 
 def test_amdgpu_selection_respects_fallback(monkeypatch):
@@ -21,8 +20,20 @@ def test_amdgpu_selection_preserves_requested_backend(monkeypatch):
     assert misc.adaptive_arch_select(ti.amdgpu, enable_fallback=False) == ti.amdgpu
 
 
-@test_utils.test(arch=ti.amdgpu, offline_cache=False)
-def test_amdgpu_dense_field_ndarray_and_device_math():
+@pytest.fixture
+def amdgpu_runtime():
+    # The general backend matrix intentionally does not include AMDGPU yet.
+    # This bounded basic test must still run on a HIP-capable machine.
+    if not misc.is_arch_supported(ti.amdgpu):
+        pytest.skip("HIP runtime / AMD device unavailable")
+    ti.init(arch=ti.amdgpu, enable_fallback=False, offline_cache=False)
+    try:
+        yield
+    finally:
+        ti.reset()
+
+
+def test_amdgpu_dense_field_ndarray_and_device_math(amdgpu_runtime):
     # Non-block-aligned length covers the tail of range kernels as well.
     n = 4099
     field = ti.field(ti.f32, shape=n)
