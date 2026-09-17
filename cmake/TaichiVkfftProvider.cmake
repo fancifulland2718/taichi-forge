@@ -38,17 +38,27 @@ find_path(TI_VKFFT_GLSLANG_INCLUDE glslang_c_interface.h
           HINTS "${Vulkan_INCLUDE_DIR}/glslang/Include" REQUIRED)
 # Use the compiler distribution's matched static libraries. Do not bind to
 # Forge's differently-versioned SPIRV-Tools target or export their symbols.
-find_library(TI_VKFFT_GLSLANG_STATIC NAMES glslang
-             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
-find_library(TI_VKFFT_SPIRV_OPT_STATIC NAMES SPIRV-Tools-opt
-             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
-find_library(TI_VKFFT_SPIRV_STATIC NAMES SPIRV-Tools
-             HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
+function(_ti_vkfft_find_compiler_libraries)
+    # Linux SDKs can ship both .so and .a. A variable named *_STATIC does not
+    # affect find_library's default preference for shared libraries. Limit this
+    # search only; Vulkan and the rest of Forge keep their normal link policy.
+    if(UNIX)
+        set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+    endif()
+    find_library(TI_VKFFT_GLSLANG_STATIC NAMES glslang
+                 HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
+    find_library(TI_VKFFT_SPIRV_OPT_STATIC NAMES SPIRV-Tools-opt
+                 HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
+    find_library(TI_VKFFT_SPIRV_STATIC NAMES SPIRV-Tools
+                 HINTS "$ENV{VULKAN_SDK}/Lib" "$ENV{VULKAN_SDK}/lib" REQUIRED)
+endfunction()
+_ti_vkfft_find_compiler_libraries()
 if(UNIX)
     foreach(_ti_vkfft_library TI_VKFFT_GLSLANG_STATIC TI_VKFFT_SPIRV_OPT_STATIC
                              TI_VKFFT_SPIRV_STATIC)
         if(NOT "${${_ti_vkfft_library}}" MATCHES "\\.a$")
-            message(FATAL_ERROR "${_ti_vkfft_library} must name a static archive")
+            message(FATAL_ERROR "${_ti_vkfft_library} must name a static archive; "
+                "clear this cached entry or set it to the matching SDK .a file")
         endif()
     endforeach()
 endif()
