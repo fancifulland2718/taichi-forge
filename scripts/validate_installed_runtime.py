@@ -15,6 +15,10 @@ from importlib import metadata
 from importlib.util import find_spec
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
+
 
 faulthandler.enable(all_threads=True)
 
@@ -36,11 +40,22 @@ _checkpoint("import taichi_forge: passed")
 def _validate_distribution_versions() -> str:
     shim_version = metadata.version("taichi-forge")
     runtime_version = metadata.version("taichi-forge-runtime")
-    if shim_version != runtime_version:
+    requirements = [
+        Requirement(raw) for raw in metadata.requires("taichi-forge") or []
+        if canonicalize_name(Requirement(raw).name) == "taichi-forge-runtime"
+    ]
+    if len(requirements) != 1:
+        raise RuntimeError("installed shim must declare one exact runtime dependency")
+    requirement = requirements[0]
+    pins = list(requirement.specifier)
+    if (requirement.marker is not None or requirement.url is not None or requirement.extras
+            or len(pins) != 1 or pins[0].operator != "==" or "*" in pins[0].version):
+        raise RuntimeError("installed shim must declare one unconditional exact runtime dependency")
+    if Version(runtime_version) != Version(pins[0].version):
         raise RuntimeError(
             "installed shim/runtime version mismatch: "
             f"taichi-forge={shim_version}, "
-            f"taichi-forge-runtime={runtime_version}"
+            f"taichi-forge-runtime={runtime_version}, required={requirement}"
         )
     return shim_version
 

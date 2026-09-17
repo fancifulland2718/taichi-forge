@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the complete runtime plus CPython shim release set."""
+"""Validate independent runtime/shim releases or a combined validation set."""
 
 from __future__ import annotations
 
@@ -17,16 +17,24 @@ from scripts.validate_shim_wheel import validate_shim_wheel
 EXPECTED_PYTHON_TAGS = frozenset({"cp310", "cp311", "cp312", "cp313", "cp314"})
 
 
-def validate_release_set(wheel_dir: Path, expected_version: Version) -> None:
+def validate_release_set(
+    wheel_dir: Path, expected_version: Version, *, project: str = "all",
+    runtime_version: Version | None = None,
+) -> None:
+    if project not in {"all", "runtime", "shim"}:
+        raise ValueError(f"Unknown release project: {project}")
+    runtime_version = runtime_version or expected_version
     runtime_wheels = sorted(wheel_dir.glob("taichi_forge_runtime-*.whl"))
     shim_wheels = sorted(wheel_dir.glob("taichi_forge-[0-9]*.whl"))
-    if len(runtime_wheels) != 2:
+    runtime_count = 0 if project == "shim" else 2
+    shim_count = 0 if project == "runtime" else 10
+    if len(runtime_wheels) != runtime_count:
         raise RuntimeError(
-            f"Expected two runtime wheels, found {[p.name for p in runtime_wheels]}"
+            f"Expected {runtime_count} runtime wheels, found {[p.name for p in runtime_wheels]}"
         )
-    if len(shim_wheels) != 10:
+    if len(shim_wheels) != shim_count:
         raise RuntimeError(
-            f"Expected ten CPython shim wheels, found {[p.name for p in shim_wheels]}"
+            f"Expected {shim_count} CPython shim wheels, found {[p.name for p in shim_wheels]}"
         )
 
     runtime_infos = [
@@ -37,9 +45,9 @@ def validate_release_set(wheel_dir: Path, expected_version: Version) -> None:
         )
         for wheel in runtime_wheels
     ]
-    if {info.platform for info in runtime_infos} != {"windows", "manylinux"}:
+    if runtime_count and {info.platform for info in runtime_infos} != {"windows", "manylinux"}:
         raise RuntimeError("Runtime release set must contain Windows and manylinux")
-    if {Version(info.version) for info in runtime_infos} != {expected_version}:
+    if runtime_count and {Version(info.version) for info in runtime_infos} != {runtime_version}:
         raise RuntimeError(
             "Runtime release versions do not match the requested version"
         )
@@ -56,7 +64,10 @@ def validate_release_set(wheel_dir: Path, expected_version: Version) -> None:
             raise RuntimeError(f"Shim wheel has ambiguous Python tags: {wheel.name}")
         python_tag = next(iter(python_tags))
         platform = "windows" if "win_amd64" in wheel.name.lower() else "manylinux"
-        validate_shim_wheel(wheel, platform, expected_python_tag=python_tag)
+        validate_shim_wheel(
+            wheel, platform, expected_python_tag=python_tag,
+            expected_runtime_version=str(runtime_version),
+        )
         combinations[(platform, python_tag)] += 1
 
     expected = {
@@ -64,6 +75,8 @@ def validate_release_set(wheel_dir: Path, expected_version: Version) -> None:
         for platform in ("windows", "manylinux")
         for python_tag in EXPECTED_PYTHON_TAGS
     }
+    if not shim_count:
+        expected = set()
     if set(combinations) != expected or any(
         count != 1 for count in combinations.values()
     ):
@@ -77,14 +90,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--wheel-dir", type=Path, required=True)
     parser.add_argument("--version", type=Version, required=True)
+    parser.add_argument("--project", choices=("all", "runtime", "shim"), default="all")
+    parser.add_argument("--runtime-version", type=Version)
     args = parser.parse_args()
     try:
-        validate_release_set(args.wheel_dir, args.version)
+        validate_release_set(args.wheel_dir, args.version, project=args.project, runtime_version=args.runtime_version)
     except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(
-        f"Validated complete release set for {args.version}: "
-        "2 runtime wheels, 10 CPython shims"
+        f"Validated {args.project} release set for {args.version}, "
+        f"runtime={args.runtime_version or args.version}"
     )
     return 0
 

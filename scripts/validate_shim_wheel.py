@@ -14,6 +14,7 @@ from zipfile import ZipFile
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name, parse_wheel_filename
+from packaging.version import Version
 
 
 PROJECT = "taichi-forge"
@@ -123,6 +124,7 @@ def validate_shim_wheel(
     expected_platform: str,
     strict_binary: bool = False,
     expected_python_tag: str | None = None,
+    expected_runtime_version: str | None = None,
 ) -> str:
     platform = _wheel_platform(wheel)
     if platform != expected_platform:
@@ -213,11 +215,19 @@ def validate_shim_wheel(
                 "Shim wheel has an unexpected NumPy compatibility contract: "
                 f"{sorted(numpy_requirements)}"
             )
-        expected_runtime = f"{RUNTIME_PROJECT}=={version}"
         runtime_requirements = requirements_by_project[RUNTIME_PROJECT]
-        if runtime_requirements != [expected_runtime]:
+        if len(runtime_requirements) != 1:
+            raise RuntimeError("Expected one exact runtime dependency")
+        runtime_requirement = Requirement(runtime_requirements[0])
+        pins = list(runtime_requirement.specifier)
+        if (runtime_requirement.marker is not None or runtime_requirement.url is not None
+                or runtime_requirement.extras or len(pins) != 1
+                or pins[0].operator != "==" or "*" in pins[0].version):
+            raise RuntimeError("Expected one unconditional exact runtime dependency")
+        runtime_version = Version(pins[0].version)
+        if expected_runtime_version is not None and runtime_version != Version(expected_runtime_version):
             raise RuntimeError(
-                f"Expected runtime dependency {expected_runtime!r} in {wheel.name}, "
+                f"Expected runtime dependency {RUNTIME_PROJECT}=={expected_runtime_version} in {wheel.name}, "
                 f"found {runtime_requirements}"
             )
 
@@ -310,6 +320,7 @@ def main() -> None:
         "--python-tag",
         help="Require the wheel's CPython/ABI tag (for example cp314)",
     )
+    parser.add_argument("--runtime-version", help="Require the exact runtime used to link this shim")
     args = parser.parse_args()
 
     wheels = sorted(args.wheel_dir.glob("*.whl"))
@@ -324,6 +335,7 @@ def main() -> None:
             args.platform,
             strict_binary=args.strict_binary,
             expected_python_tag=args.python_tag,
+            expected_runtime_version=args.runtime_version,
         )
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise SystemExit(str(exc)) from exc

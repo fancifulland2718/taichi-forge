@@ -339,6 +339,79 @@ def test_pypi_release_preflight_normalizes_versions():
     assert versions == {Version("0.6.3"), Version("0.6.4rc1")}
 
 
+@pytest.mark.parametrize("project", ["runtime", "shim", "all"])
+def test_release_sets_allow_independent_projects_and_reused_runtime(tmp_path, project):
+    for platform, suffix in (("windows", "win_amd64"), ("manylinux", "manylinux_2_35_x86_64")):
+        if project != "shim":
+            _write_runtime_wheel(
+                tmp_path / f"taichi_forge_runtime-0.6.3-py3-none-{suffix}.whl",
+                platform=platform, version="0.6.3", cuda_major=0,
+                dependency_class="driver-only", export_manifest_schema=2,
+            )
+        if project != "runtime":
+            for tag in validate_release_wheel_set.EXPECTED_PYTHON_TAGS:
+                _write_shim_wheel(
+                    tmp_path / f"taichi_forge-0.6.4-{tag}-{tag}-{suffix}.whl",
+                    platform=platform, version="0.6.4", runtime_version="0.6.3",
+                )
+    validate_release_wheel_set.validate_release_set(
+        tmp_path, Version("0.6.3" if project == "runtime" else "0.6.4"),
+        project=project, runtime_version=Version("0.6.3"),
+    )
+
+
+@pytest.mark.parametrize("state,pending_count", [("absent", 2), ("partial", 1), ("complete", 0)])
+def test_publication_stages_only_missing_identical_wheels(tmp_path, monkeypatch, state, pending_count):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    candidates = tmp_path / "candidates"
+    candidates.mkdir()
+    wheels = [candidates / "taichi_forge_runtime-0.6.3-py3-none-win_amd64.whl",
+              candidates / "taichi_forge-0.6.4-cp310-cp310-win_amd64.whl"]
+    for wheel in wheels:
+        wheel.write_bytes(wheel.name.encode())
+
+    def response(request, timeout):
+        assert timeout == 30
+        runtime = "/taichi-forge-runtime/" in request.full_url
+        wheel = wheels[0 if runtime else 1]
+        if state == "absent" or (state == "partial" and not runtime):
+            raise HTTPError(request.full_url, 404, "not found", {}, None)
+        return BytesIO(json.dumps({"urls": [{
+            "filename": wheel.name, "digests": {"sha256": hashlib.sha256(wheel.read_bytes()).hexdigest()}
+        }]}).encode())
+
+    monkeypatch.setattr(check_pypi_version_available, "urlopen", response)
+    output = tmp_path / "upload"
+    assert check_pypi_version_available.prepare_upload(candidates, output, "https://test.pypi.org/pypi") == pending_count
+    assert len(list(output.glob("*.whl"))) == pending_count
+    for wheel in output.glob("*.whl"):
+        assert wheel.read_bytes() == (candidates / wheel.name).read_bytes()
+    assert len(list(candidates.glob("*.whl"))) == 2
+
+
+@pytest.mark.parametrize("failure", ["digest", "yanked", "network"])
+def test_publication_conflicts_do_not_stage_partial_upload(tmp_path, monkeypatch, failure):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    wheel = tmp_path / "taichi_forge-0.6.3-cp310-cp310-win_amd64.whl"
+    wheel.write_bytes(b"candidate")
+
+    def response(request, timeout):
+        if failure == "network":
+            raise HTTPError(request.full_url, 503, "unavailable", {}, None)
+        return BytesIO(json.dumps({"urls": [{
+            "filename": wheel.name, "yanked": failure == "yanked",
+            "digests": {"sha256": "bad" if failure == "digest" else hashlib.sha256(b"candidate").hexdigest()},
+        }]}).encode())
+
+    monkeypatch.setattr(check_pypi_version_available, "urlopen", response)
+    output = tmp_path / "upload"
+    with pytest.raises((RuntimeError, HTTPError)):
+        check_pypi_version_available.prepare_upload(tmp_path, output, "https://pypi.org/pypi")
+    assert not output.exists()
+
+
 def test_runtime_repair_discovers_versioned_windows_cudart(tmp_path):
     runtime = tmp_path / "taichi_runtime.dll"
     runtime.write_bytes(b"prefix\0cudart64_11.dll\0suffix")
@@ -429,6 +502,7 @@ def test_installed_runtime_validator_requires_matching_distribution_versions(
         "version",
         versions.__getitem__,
     )
+    monkeypatch.setattr(validate_installed_runtime.metadata, "requires", lambda _: ["taichi-forge-runtime==1.2.3"])
 
     with pytest.raises(RuntimeError, match="version mismatch"):
         validate_installed_runtime._validate_distribution_versions()
@@ -876,7 +950,7 @@ def test_shim_wheel_validator_rejects_duplicate_runtime(tmp_path):
         validate_shim_wheel.validate_shim_wheel(wheel, "windows")
 
 
-def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
+def test_shim_wheel_validator_checks_selected_runtime_version(tmp_path):
     wheel = tmp_path / "taichi_forge-0.4.3-cp310-cp310-win_amd64.whl"
     _write_shim_wheel(
         wheel,
@@ -885,8 +959,46 @@ def test_shim_wheel_validator_rejects_mismatched_runtime_version(tmp_path):
         runtime_version="0.4.1",
     )
 
+    assert validate_shim_wheel.validate_shim_wheel(
+        wheel, "windows", expected_runtime_version="0.4.1"
+    ) == "0.4.3"
     with pytest.raises(RuntimeError, match="Expected runtime dependency"):
-        validate_shim_wheel.validate_shim_wheel(wheel, "windows")
+        validate_shim_wheel.validate_shim_wheel(wheel, "windows", expected_runtime_version="0.4.3")
+
+
+def test_installed_runtime_uses_declared_dependency_not_shim_version(monkeypatch):
+    monkeypatch.setattr(validate_installed_runtime.metadata, "version", {
+        "taichi-forge": "0.6.4", "taichi-forge-runtime": "0.6.3"
+    }.__getitem__)
+    monkeypatch.setattr(validate_installed_runtime.metadata, "requires", lambda _: ["taichi-forge-runtime==0.6.3"])
+    assert validate_installed_runtime._validate_distribution_versions() == "0.6.4"
+
+
+@pytest.mark.parametrize("requirement", ["taichi-forge-runtime>=0.6.3", "taichi-forge-runtime==0.6.*", "taichi-forge-runtime==0.6.3; python_version < '3.12'"])
+def test_installed_runtime_requires_unconditional_exact_dependency(monkeypatch, requirement):
+    monkeypatch.setattr(validate_installed_runtime.metadata, "version", lambda _: "0.6.3")
+    monkeypatch.setattr(validate_installed_runtime.metadata, "requires", lambda _: [requirement])
+    with pytest.raises(RuntimeError, match="unconditional exact"):
+        validate_installed_runtime._validate_distribution_versions()
+
+
+def test_sync_runtime_dependency_preserves_shim_version(tmp_path, monkeypatch):
+    import sys
+    for name, relative in (
+        ("VERSION", "version.txt"), ("PYPROJECT", "pyproject.toml"),
+        ("RUNTIME_PYPROJECT", "packaging/runtime/pyproject.toml"),
+        ("VERSION_HEADER", "taichi/common/version.h"),
+    ):
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((REPO_ROOT / relative).read_text(encoding="utf-8"), encoding="utf-8")
+        monkeypatch.setattr(sync_runtime_dependency, name, target)
+    sync_runtime_dependency.VERSION.write_text("v0.6.4", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["sync", "--runtime-version", "0.6.3"])
+    assert sync_runtime_dependency.main() == 0
+    project = sync_runtime_dependency.PYPROJECT.read_text(encoding="utf-8")
+    assert '"taichi-forge-runtime==0.6.3"' in project
+    assert 'TI_VERSION_PATCH = "4"' in project
 
 
 @pytest.mark.parametrize("dependency", ["colorama", "dill", "numpy", "rich"])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import re
 from pathlib import Path
 
@@ -69,12 +70,17 @@ def _sync_version_header(
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--runtime-version", help="Exact compatible runtime dependency; defaults to the package version")
+    args = parser.parse_args()
     version = _normalize_version(VERSION.read_text(encoding="utf-8"))
     major, minor, patch = _version_parts(version)
+    runtime_version = _normalize_version(args.runtime_version) if args.runtime_version else version
+    _version_parts(runtime_version)
     text = PYPROJECT.read_text(encoding="utf-8")
     updated, count = re.subn(
         r'"taichi-forge-runtime==[^"]+"',
-        f'"taichi-forge-runtime=={version}"',
+        f'"taichi-forge-runtime=={runtime_version}"',
         text,
     )
     if count != 1:
@@ -85,7 +91,7 @@ def main() -> int:
     _sync_version_header(VERSION_HEADER, major, minor, patch)
     print(
         "Synced CMake version to "
-        f"{version} and taichi-forge-runtime dependency to the same version"
+        f"{version} and taichi-forge-runtime dependency to {runtime_version}"
     )
     return 0
 
