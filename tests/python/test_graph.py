@@ -7280,6 +7280,12 @@ def test_structured_graph_vulkan_compound_submit_crosses_stream_backlog_bound():
     # transaction. First use may legitimately flush those setup commands
     # immediately before the batch begins.
     graph.submit(args).wait()
+    # Require the measured submission to produce the result again instead
+    # of accepting values left by the warm-up transaction.
+    args["state"].fill(0)
+    for index in range(stage_count):
+        args[f"predicate_{index}"].fill(0)
+        args[f"counter_{index}"].fill(0)
     ti.sync()
     before = ti.runtime.stats().synchronization.backend_waits
     queue_before = impl.get_runtime().prog._debug_vulkan_queue_submission_stats()
@@ -7291,16 +7297,13 @@ def test_structured_graph_vulkan_compound_submit_crosses_stream_backlog_bound():
         # boundary. One unrelated bounded replay/resource wait remains
         # permissible and is accounted separately.
         assert after_submit - before <= 1
-    assert queue_after["queue_submit_calls"] - queue_before["queue_submit_calls"] == 2
-    assert (
-        queue_after["batched_queue_submit_calls"]
-        - queue_before["batched_queue_submit_calls"]
-        == 1
-    )
-    assert (
-        queue_after["batched_command_buffers"] - queue_before["batched_command_buffers"]
-        >= stage_count * 8
-    )
+    # The ticket reuses the batch's queue-tail fence; recording completion
+    # must not add an empty command buffer or a second queue submission.
+    assert queue_after["queue_submit_calls"] - queue_before["queue_submit_calls"] == 1
+    assert queue_after["batched_queue_submit_calls"] - queue_before["batched_queue_submit_calls"] == 1
+    batch_buffers = queue_after["batched_command_buffers"] - queue_before["batched_command_buffers"]
+    assert batch_buffers >= stage_count * 8
+    assert queue_after["submitted_command_buffers"] - queue_before["submitted_command_buffers"] == batch_buffers
 
     expected = {"state": stage_count * step}
     expected.update({f"counter_{index}": step for index in range(stage_count)})
