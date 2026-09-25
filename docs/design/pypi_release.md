@@ -1,6 +1,6 @@
 # PyPI 发行流程与权限排查
 
-> 本文以 `0.6.3` 为例介绍维护者的构建、验证与发布流程。
+> 本文以开发中的 `0.6.4` 为例介绍维护者的构建、验证与发布流程；示例不代表该版本已经发布。
 
 runtime 与 Python 主包保持独立发布：
 
@@ -14,7 +14,7 @@ runtime 与 Python 主包保持独立发布：
 只更新 Python 包时可以复用兼容 runtime。尚未发布的 runtime 可以通过独立构建的 artifact 验证；
 发布 shim 前，其声明的 runtime 必须已在所选索引上可获取。
 
-下文以 `0.6.3` 为示例。其它版本须同步 `version.txt`、包元数据、workflow 输入或 tag
+下文以 `0.6.4` 为示例。其它版本须同步 `version.txt`、包元数据、workflow 输入或 tag
 以及安装命令。`runtime_version` 指定精确的兼容 runtime 依赖，不要求等于 shim 版本；
 兼容性依赖 native ABI、所需功能和安装验证，不以 Git commit 相等为条件。
 
@@ -116,8 +116,8 @@ runtime 由独立 workflow 构建一次/平台；shim job 消费选定的已发�
 
 ```
 Actions → Publish wheels to PyPI → Run workflow
-  version: 0.6.3
-  runtime_version: 0.6.3
+  version: 0.6.4
+  runtime_version: 0.6.4
   runtime_source: index
   validation_platform: all
   publish: false
@@ -134,7 +134,7 @@ Actions → Publish wheels to PyPI → Run workflow
   `wheel-windows-runtime` / `wheel-linux-runtime`。支持两个平台，不重新构建 native。
 - `runtime_source=index`：从 `target` 指定的索引下载 `runtime_version`，不启动 runtime job。
 
-`runtime_version` 填包版本，例如 `0.6.3`；`runtime_run_id` 填 Actions URL 中的数字运行编号，
+`runtime_version` 填包版本，例如 `0.6.4`；`runtime_run_id` 填 Actions URL 中的数字运行编号，
 例如 `https://github.com/<owner>/<repo>/actions/runs/123456789` 中的 `123456789`。
 不要在运行编号字段填版本号。使用 `index` 时将 `runtime_run_id` 留空。
 
@@ -150,14 +150,14 @@ Actions → Publish wheels to PyPI → Run workflow
 
 ```
 1. Actions → Build and publish runtime wheels → Run workflow
-  version: 0.6.3rc1
+  version: 0.6.4rc1
   platform: all
   publish: true
   target: testpypi
 
 2. Actions → Publish wheels to PyPI → Run workflow
-  version: 0.6.3rc1
-  runtime_version: 0.6.3rc1
+  version: 0.6.4rc1
+  runtime_version: 0.6.4rc1
   runtime_source: index
   validation_platform: all
   publish: true
@@ -169,7 +169,7 @@ Actions → Publish wheels to PyPI → Run workflow
 
 安装验证：
 ```
-pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==0.6.3rc1
+pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ taichi-forge==0.6.4rc1
 ```
 
 ### 2.3 生产发行（推 tag）
@@ -177,15 +177,15 @@ pip install -i https://test.pypi.org/simple/ --extra-index-url https://pypi.org/
 先手动运行 runtime workflow，以 `publish=true`、`target=pypi`、`platform=all` 发布所需 runtime；
 如果合适的兼容版本已发布，则无需重建或重复上传。
 
-创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.6.3`，并运行
+创建正式 tag 前，tag 所指向的 commit 必须已经把 `version.txt` 更新为 `v0.6.4`，并运行
 `python scripts/sync_runtime_dependency.py`，使 `pyproject.toml` 精确依赖
-`taichi-forge-runtime==0.6.3`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
+`taichi-forge-runtime==0.6.4`。workflow 会再次同步构建工作区，但不能用这一临时覆盖替代
 正式源码 tag 中的版本一致性。复用其他 runtime 版本时，用 `--runtime-version <兼容版本>`
 写入依赖；tag workflow 读取该声明，而不是强制 runtime 版本等于 tag 版本。
 
 ```
-git tag forge-v0.6.3
-git push origin forge-v0.6.3
+git tag forge-v0.6.4
+git push origin forge-v0.6.4
 ```
 
 推 tag 会触发完整生产发布，不能用它代替无发布预演。tag 触发后 workflow 会：
@@ -213,8 +213,8 @@ git push origin forge-v0.6.3
 若此前只构建未上传，或需用修正后的发布流程上传旧运行的产物，手动运行 `publish_pypi.yml`：
 
 ```text
-version: 0.6.3
-runtime_version: 0.6.3
+version: 0.6.4
+runtime_version: 0.6.4
 runtime_source: index
 runtime_run_id: 留空
 wheel_run_id: <拥有 validated-shim-wheel-set 的 Actions 数字运行编号>

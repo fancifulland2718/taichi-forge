@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 0.6.3 or 0.6.3rc1); leave empty to use version.txt"
+        description: "Version (e.g. 0.6.4 or 0.6.4rc1); leave empty to use version.txt"
         required: false
         default: ""
       runtime_version:
@@ -115,7 +115,7 @@ jobs:
             echo "Platform-scoped validation cannot publish"; exit 1
           fi
           if [[ "$RUNTIME_SOURCE" == artifact ]]; then
-            [[ "$RUNTIME_RUN_ID" =~ ^[0-9]+$ ]] || { echo "runtime_run_id must be an Actions run ID (e.g. 35196322756), not a version; put 0.6.3 in runtime_version"; exit 1; }
+            [[ "$RUNTIME_RUN_ID" =~ ^[0-9]+$ ]] || { echo "runtime_run_id must be an Actions run ID (e.g. 35196322756), not a version; put 0.6.4 in runtime_version"; exit 1; }
           elif [[ -n "$RUNTIME_RUN_ID" ]]; then
             echo "runtime_run_id requires runtime_source=artifact"; exit 1
           fi

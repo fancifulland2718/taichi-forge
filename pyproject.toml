@@ -40,7 +40,7 @@ dependencies = [
   "colorama",
   "dill",
   "rich",
-  "taichi-forge-runtime==0.6.3",
+  "taichi-forge-runtime==0.6.4",
 ]
 
 [project.urls]
@@ -91,7 +91,7 @@ wheel.py-api = ""
 [tool.scikit-build.cmake.define]
 TI_VERSION_MAJOR = "0"
 TI_VERSION_MINOR = "6"
-TI_VERSION_PATCH = "3"
+TI_VERSION_PATCH = "4"
 TI_PYTHON_INSTALL_PACKAGE = "taichi_forge"
 
 [tool.scikit-build.metadata.version]

@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version (e.g. 0.6.3 or 0.6.3rc1); leave empty to use version.txt"
+        description: "Version (e.g. 0.6.4 or 0.6.4rc1); leave empty to use version.txt"
         required: false
         default: ""
 

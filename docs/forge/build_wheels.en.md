@@ -1,6 +1,6 @@
 # Building Forge Wheels
 
-> This guide describes wheel builds for `0.6.3`. The split runtime/shim
+> This guide describes source wheel builds for `0.6.4` (in development). The split runtime/shim
 > model first shipped in `0.4.23`; see [release notes](release_notes.en.md).
 
 This document mirrors the public wheel build path used by

@@ -2,7 +2,7 @@
 
 [English](forge_api_reference.en.md) · [文档入口](index.zh.md)
 
-本文列出 Taichi Forge 0.6.3 的公共符号、调用位置与支持边界，
+本文列出 Taichi Forge 0.6.4（开发中）的公共符号、调用位置与支持边界，
 请核对[安装版本说明](index.zh.md#版本与安装)。初始化和编译配置统一见 [Forge 选项](forge_options.zh.md)。
 
 ## 导航

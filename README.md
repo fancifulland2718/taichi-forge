@@ -58,9 +58,11 @@ Taichi 1.7.4 is the public programming-model reference; Forge has an independent
 release track. Supported source-compatible APIs do not imply identical private
 implementation, binary ABI, backend coverage or performance.
 
-This documentation covers **Taichi Forge 0.6.3**. See the
+This documentation covers **Taichi Forge 0.6.4 (in development)**. See the
 [release notes](docs/forge/release_notes.en.md) for changes and upgrade guidance.
-For another version, use the documentation at its release tag.
+The install command above selects the latest published package; it does not
+select this development checkout. For a released version, use the documentation
+at its release tag.
 
 Capability discovery, explicit execution, Graph recording and complete-recipe
 search are distinct support levels. Check dtype/layout, device and lifetime

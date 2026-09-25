@@ -3,7 +3,7 @@
 [中文](forge_api_reference.zh.md) · [Documentation](index.en.md)
 
 This reference lists public symbols, call positions and support limits for
-Taichi Forge 0.6.3; see the
+Taichi Forge 0.6.4 (in development); see the
 [installed-version guidance](index.en.md#versions-and-installation).
 Initialization and compile options belong in [Forge options](forge_options.en.md).
 

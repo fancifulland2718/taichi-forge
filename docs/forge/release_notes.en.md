@@ -9,6 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
+| [0.6.4](#064) | In development; changes will be recorded as they land |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
@@ -24,6 +25,17 @@ Use the documentation at your release tag for version-specific API details.
 | [0.1.0](#010)–[0.1.3](#013) | Forge package/import identity and toolchain |
 
 <a id="unreleased"></a>
+<a id="064"></a>
+
+## 0.6.4 (in development)
+
+- Open the 0.6.4 development cycle from the 0.6.3 baseline. Source version
+  metadata and the default runtime dependency now target 0.6.4.
+- No new runtime behavior or expanded backend support is claimed by this
+  version transition. Validated changes will be added here as they land.
+- This section does not announce a PyPI release. For installed releases, use
+  the documentation at the corresponding release tag.
+
 <a id="063"></a>
 
 ## 0.6.3

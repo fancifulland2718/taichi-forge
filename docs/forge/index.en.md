@@ -4,9 +4,11 @@
 
 ## Versions and installation
 
-These pages document **Taichi Forge 0.6.3**. See the
+These pages document **Taichi Forge 0.6.4 (in development)**. See the
 [release notes](release_notes.en.md) for changes and upgrade guidance.
-For another version, use the documentation at its release tag.
+The install command above selects the latest published package; it does not
+select this development checkout. For a released version, use the documentation
+at its release tag.
 
 ```bash
 python -m pip install -U taichi-forge

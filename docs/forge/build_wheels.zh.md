@@ -1,6 +1,6 @@
 # 构建 Forge wheel
 
-> 本文介绍 `0.6.3` 的 wheel 构建方式。
+> 本文介绍开发中 `0.6.4` 的源码 wheel 构建方式。
 > runtime/shim 拆包从 `0.4.23` 开始公开；版本归属见 [版本更新说明](release_notes.zh.md)。
 
 本文对齐 `.github/workflows/publish_runtime_pypi.yml` 和
