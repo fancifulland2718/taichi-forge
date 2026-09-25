@@ -145,7 +145,9 @@ class Kernel;
 //       SPIR-V descriptor metadata; old artifacts silently bound level zero.
 //  34 - Sampled texture descriptor metadata distinguishes comparison sampling
 //       from ordinary filtering and fetch-only bindings.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 34;
+//  35 - SPIR-V optimizers register a fresh pass chain for every task. Earlier
+//       artifacts could skip optimization after consuming a cached optimizer.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 35;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

@@ -9,7 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
-| [0.6.4](#064) | In development; changes will be recorded as they land |
+| [0.6.4](#064) | In development; SPIR-V optimizer lifecycle repair |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
@@ -31,8 +31,13 @@ Use the documentation at your release tag for version-specific API details.
 
 - Open the 0.6.4 development cycle from the 0.6.3 baseline. Source version
   metadata and the default runtime dependency now target 0.6.4.
-- No new runtime behavior or expanded backend support is claimed by this
-  version transition. Validated changes will be added here as they land.
+- Create a fresh SPIR-V optimizer for each task. SPIRV-Tools consumes its pass
+  list after a run; reusing the old optimizer silently skipped optimization for
+  later tasks and could expose a Vulkan driver compiler crash with loop-carried
+  struct cursors and nested vector branches. Existing pass options are preserved.
+- Invalidate older compiled-kernel caches so affected shaders are regenerated.
+  Explicitly disabled optimization and the fast compile tier retain their
+  existing behavior; this repair does not qualify the unoptimized cursor path.
 - This section does not announce a PyPI release. For installed releases, use
   the documentation at the corresponding release tag.
 

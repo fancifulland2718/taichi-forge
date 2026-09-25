@@ -8,7 +8,7 @@
 
 | 版本 | 主要内容 |
 | --- | --- |
-| [0.6.4](#064) | 开发中；随变动落地记录更新 |
+| [0.6.4](#064) | 开发中；修复 SPIR-V optimizer 生命周期 |
 | [0.6.3](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
 | [0.6.2](#062) | 执行计划、动态工作、Graph 存储与求解器改进 |
 | [0.6.1](#061) | task policy/label、device worklist、SNode 生命周期、Graph telemetry |
@@ -29,7 +29,11 @@
 ## 0.6.4（开发中）
 
 - 从 0.6.3 基线开启 0.6.4 开发周期；源码版本元数据与默认 runtime 依赖同步为 0.6.4。
-- 本次版本切换不声明新的运行行为或扩大的后端支持；已验证变动会随落地补充到此处。
+- 每个 task 创建独立 SPIR-V optimizer。SPIRV-Tools 每次运行后会消费 pass 列表；
+  复用旧对象会让后续 task 静默跳过优化，并可能在循环携带 struct cursor、嵌套向量分支时
+  触发 Vulkan 驱动编译崩溃。保留现有 pass 配置选项。
+- 使旧 compiled-kernel 缓存失效，重新生成受影响的着色器。显式关闭优化和 fast compile
+  tier 保持原语义；本修复不代表未优化 cursor 路径已通过验证。
 - 本节不代表已发布到 PyPI。使用已安装的发布版本时，请查阅对应 release tag 的文档。
 
 <a id="063"></a>
