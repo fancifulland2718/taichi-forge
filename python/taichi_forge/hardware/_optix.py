@@ -60,6 +60,10 @@ _INSTANCE_OPACITY = 1 << 12
 _OPACITY_MICROMAP_IMPORT = 1 << 13
 _INSTANCE_SBT_OFFSET = 1 << 15
 _COMPACT_OCCLUSION = 1 << 16
+_FACE_FILTER_TYPED = 1 << 17
+_FACE_FILTER_OCCLUSION = 1 << 18
+_FACE_FILTER_PER_PRIMITIVE = 1 << 19
+_FACE_FILTER_ALPHA = 1 << 20
 _INSTANCE_FEATURES = (
     _SHARED_TRIANGLE_GAS | _MULTI_INSTANCE_IAS | _DEVICE_INSTANCE_TRANSFORM_UPDATE
 )
@@ -71,6 +75,10 @@ _OPTIONAL_FEATURE_REQUIREMENTS = {
     "program": 1 << 14,
     "instance_sbt_offset": _INSTANCE_SBT_OFFSET,
     "occlusion": _COMPACT_OCCLUSION,
+    "face_filter_typed": _FACE_FILTER_TYPED | _TYPED_HITS,
+    "face_filter_occlusion": _FACE_FILTER_OCCLUSION | _COMPACT_OCCLUSION,
+    "face_filter_per_primitive": _FACE_FILTER_PER_PRIMITIVE,
+    "face_filter_alpha": _FACE_FILTER_ALPHA | _ALPHA_MASK,
 }
 _loaded_providers = weakref.WeakSet()
 
@@ -181,6 +189,18 @@ class _AlphaTraceDesc(ctypes.Structure):
         ("mask_count", ctypes.c_uint32),
         ("any_hit", ctypes.c_uint32),
     ]
+
+
+class _FaceTraceDesc(ctypes.Structure):
+    _fields_ = _AlphaTraceDesc._fields_ + [
+        ("faces", ctypes.c_uint64),
+        ("face_count", ctypes.c_uint32),
+        ("occlusion", ctypes.c_uint32),
+    ]
+
+
+class _FaceRule(ctypes.Structure):
+    _fields_ = [("primitives", ctypes.c_uint64), ("mode", ctypes.c_uint32), ("reserved", ctypes.c_uint32)]
 
 
 class _AlphaMask(ctypes.Structure):
@@ -327,14 +347,26 @@ class _ProviderApi(ctypes.Structure):
         ("create_triangle_gas_micromap", _CreateMicromapGas),
         ("trace_instance_micromap", _TraceAlpha),
         ("get_program_api", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_size_t, ctypes.c_void_p)),
-        ("create_instance_scene_sbt", ctypes.CFUNCTYPE(
-            ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_InstanceSceneDesc),
-            ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_void_p))),
-        ("prepare_instance_sbt", ctypes.CFUNCTYPE(
-            ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64))),
+        (
+            "create_instance_scene_sbt",
+            ctypes.CFUNCTYPE(
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.POINTER(_InstanceSceneDesc),
+                ctypes.POINTER(ctypes.c_uint32),
+                ctypes.POINTER(ctypes.c_void_p),
+            ),
+        ),
+        (
+            "prepare_instance_sbt",
+            ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64)),
+        ),
         ("trace_occlusion", _TraceAlpha),
         ("trace_instance_occlusion", _TraceAlpha),
         ("trace_instance_micromap_occlusion", _TraceAlpha),
+        ("prepare_faces", _PrepareTyped),
+        ("trace_faces", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_FaceTraceDesc))),
+        ("trace_instance_faces", ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.POINTER(_FaceTraceDesc))),
     ]
 
 
@@ -386,6 +418,14 @@ def _check_api(api):
     ):
         if not bool(getattr(api, name)):
             raise RuntimeError(f"OptiX provider is missing ABI entry {name}")
+    if int(api.info.features) & (_FACE_FILTER_TYPED | _FACE_FILTER_OCCLUSION):
+        if not all(_api_has(api, name) for name in ("prepare_faces", "trace_faces", "trace_instance_faces")):
+            raise RuntimeError("OptiX face-filter feature table is truncated or incomplete")
+
+
+def _supported_features(api):
+    bits = int(api.info.features)
+    return tuple(name for name, mask in _OPTIONAL_FEATURE_REQUIREMENTS.items() if bits & mask == mask)
 
 
 def _api_has(api, name):
@@ -559,6 +599,7 @@ def probe_provider(path=None):
             provider_name=_decode(info.provider_name),
             build_identity=_decode(info.build_identity),
             feature_bits=int(info.features),
+            supported_features=_supported_features(loaded.api),
             program_feature_advertised=bool(int(info.features) & (1 << 14)),
         )
         if failures:
@@ -710,8 +751,9 @@ class OptixProvider:
     """Owner of one bundled OptiX adapter and CUDA context view.
 
     ``required_features`` filters candidate adapters before context creation.
-    Names are program, typed_hits, instances, alpha_mask, opacity_micromap and
-    instance_sbt_offset. Use ("program",) for programmable PTX; default empty
+    Names include program, typed_hits, instances, alpha_mask, opacity_micromap,
+    instance_sbt_offset, occlusion, face_filter_typed, face_filter_occlusion,
+    face_filter_per_primitive and face_filter_alpha. Use ("program",) for programmable PTX; default empty
     preserves legacy batch selection. Features never bypass runtime ABI checks.
     An explicit provider_path is not silently replaced by another adapter.
     """
@@ -807,6 +849,8 @@ class OptixProvider:
         self._programs = weakref.WeakSet()
         self._typed_prepared = False
         self._alpha_prepared = False
+        self._faces_prepared = False
+        self.features = frozenset(_supported_features(loaded.api))
         self._shared_pipeline_sbt_bytes = 0
         info = loaded.api.info
         self.identity = MappingProxyType(
@@ -822,6 +866,7 @@ class OptixProvider:
                 "provider_name": _decode(info.provider_name),
                 "build_identity": _decode(info.build_identity),
                 "feature_bits": int(info.features),
+                "supported_features": tuple(sorted(self.features)),
             }
         )
         _loaded_providers.add(self)
@@ -948,6 +993,28 @@ class OptixProvider:
                 del scope
         self._alpha_prepared = True
 
+    def _prepare_faces(self, scene):
+        self._validate_lifetime()
+        if self._faces_prepared:
+            return
+        api = self._loaded.api
+        if not int(api.info.features) & (_FACE_FILTER_TYPED | _FACE_FILTER_OCCLUSION) or not all(
+            _api_has(api, name) for name in ("prepare_faces", "trace_faces", "trace_instance_faces")
+        ):
+            raise TaichiRuntimeError("OptiX adapter does not support face filtering; use a newer Forge adapter")
+        with hardware_failure_phase("provider_plan_failure"):
+            scope = self._runtime_prog._begin_external_cuda_submission()
+            try:
+                scene._validate_lifetime()
+                _invoke_checked(api, api.prepare_faces, self._context)
+                memory = _SceneMemory()
+                memory.struct_size = ctypes.sizeof(memory)
+                _invoke_checked(api, scene._memory_function, scene._scene, ctypes.byref(memory))
+                self._shared_pipeline_sbt_bytes = int(memory.shared_pipeline_sbt_bytes)
+            finally:
+                del scope
+        self._faces_prepared = True
+
     def close(self):
         if self._context is None:
             return None
@@ -991,6 +1058,23 @@ class OptixProvider:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
         return False
+
+
+@dataclass(frozen=True)
+class OptixFaceRuleTable:
+    """Read-only i32/u32 binding in GAS primitive order: 0 two-sided, 1 front-only.
+
+    Instances may bind different tables even when sharing the same GAS.
+    Contents must remain fixed while a prepared query/Graph binding is in use.
+    Rebind new storage at a cold boundary to change rules. There is no device
+    readback or per-launch content validation.
+    """
+
+    binding: str
+
+    def __post_init__(self):
+        if not isinstance(self.binding, str) or not self.binding:
+            raise ValueError("OptiX face table binding must be a nonempty name")
 
 
 @dataclass(frozen=True)
@@ -1044,6 +1128,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         hits="hits",
         hit_indices=None,
         alpha_masks=None,
+        face_rules=None,
         any_hit=False,
         _occlusion=False,
     ):
@@ -1072,6 +1157,36 @@ class OptixRayQueryRecording(BackendCommandRecording):
         if not isinstance(any_hit, bool):
             raise TypeError("OptiX any_hit must be a bool")
         micromap = isinstance(scene, OptixInstanceScene) and scene._has_micromaps
+        face_names = []
+        if face_rules is not None:
+            if isinstance(face_rules, str):
+                raise TypeError("OptiX face_rules must be a sequence in instance order")
+            face_rules = tuple(face_rules)
+            count = scene.instance_count if isinstance(scene, OptixInstanceScene) else 1
+            if len(face_rules) != count:
+                raise ValueError("OptiX face rules must match the instance count")
+            for rule in face_rules:
+                if isinstance(rule, OptixFaceRuleTable):
+                    face_names.append(rule.binding)
+                elif not isinstance(rule, str) or rule not in ("two_sided", "front_only"):
+                    raise ValueError("OptiX face rules require two_sided, front_only or OptixFaceRuleTable")
+            if any_hit and alpha_masks is None and not _occlusion:
+                alpha_masks = (None,) * count
+            if all(rule == "two_sided" for rule in face_rules):
+                face_rules = None
+            else:
+                if hit_indices is None and not _occlusion:
+                    raise ValueError("OptiX face rules require typed hits or compact occlusion")
+                if micromap:
+                    raise ValueError("OptiX face filtering with opacity micromaps is unsupported")
+                needed = _FACE_FILTER_OCCLUSION if _occlusion else _FACE_FILTER_TYPED
+                if face_names:
+                    needed |= _FACE_FILTER_PER_PRIMITIVE
+                api = scene.provider._loaded.api
+                if int(api.info.features) & needed != needed or not all(
+                    _api_has(api, name) for name in ("prepare_faces", "trace_faces", "trace_instance_faces")
+                ):
+                    raise TaichiRuntimeError("OptiX adapter does not support the requested face filtering")
         if micromap:
             if hit_indices is None and not _occlusion:
                 raise ValueError("OptiX OMM scenes require typed queries")
@@ -1111,6 +1226,12 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 # Exactly the same closest-hit semantics as the opaque route;
                 # no mask pipeline/table/workspace is needed for this request.
                 alpha_masks = None
+        if face_rules is not None and alpha_masks is not None and any(mask is not None for mask in alpha_masks):
+            if not int(scene.provider._loaded.api.info.features) & _FACE_FILTER_ALPHA:
+                raise TaichiRuntimeError("OptiX adapter does not support face filtering combined with alpha masks")
+        if set(names).intersection(face_names):
+            raise ValueError("OptiX face table bindings must not reuse ray, hit or alpha names")
+        names += tuple(dict.fromkeys(face_names))
         super().__init__(
             backend="cuda",
             binding_names=names,
@@ -1128,6 +1249,19 @@ class OptixRayQueryRecording(BackendCommandRecording):
         object.__setattr__(self, "hits", hits)
         object.__setattr__(self, "hit_indices", hit_indices)
         object.__setattr__(self, "alpha_masks", alpha_masks)
+        object.__setattr__(self, "face_rules", face_rules)
+        object.__setattr__(
+            self,
+            "_face_identity",
+            (
+                None
+                if face_rules is None
+                else tuple(
+                    ("primitive_table", rule.binding) if isinstance(rule, OptixFaceRuleTable) else rule
+                    for rule in face_rules
+                )
+            ),
+        )
         object.__setattr__(self, "any_hit", any_hit)
         object.__setattr__(self, "_micromap", micromap)
         object.__setattr__(self, "_occlusion", _occlusion)
@@ -1140,6 +1274,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
             scene._effect_name,
             ray_count=ray_count,
             hit_layout=self._hit_layout,
+            face_rules=self._face_identity,
             alpha_masks=(
                 tuple(
                     None if mask is None else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
@@ -1150,14 +1285,22 @@ class OptixRayQueryRecording(BackendCommandRecording):
             ),
         )
         # OMM's distinct pipeline was prepared by the importing GAS adapter.
-        if not micromap:
+        if face_rules is not None:
+            scene.provider._prepare_faces(scene)
+        elif not micromap:
             if alpha_masks is not None or _occlusion:
                 scene.provider._prepare_alpha(scene)
             elif hit_indices is not None:
                 scene.provider._prepare_typed(scene)
         if isinstance(scene, OptixInstanceScene):
             scene._prepare_fixed_sbt(
-                3 if micromap else 2 if alpha_masks is not None or _occlusion else 1 if hit_indices is not None else 0
+                4
+                if face_rules is not None
+                else (
+                    3
+                    if micromap
+                    else 2 if alpha_masks is not None or _occlusion else 1 if hit_indices is not None else 0
+                )
             )
 
     @property
@@ -1179,6 +1322,12 @@ class OptixRayQueryRecording(BackendCommandRecording):
             effects += tuple(
                 ResourceEffect(name, GraphAccess.READ) for name in mask_names
             )
+        effects += tuple(
+            ResourceEffect(name, GraphAccess.READ)
+            for name in dict.fromkeys(
+                rule.binding for rule in self.face_rules or () if isinstance(rule, OptixFaceRuleTable)
+            )
+        )
         return effects
 
     def execute(self, bindings):
@@ -1205,6 +1354,22 @@ class OptixRayQueryRecording(BackendCommandRecording):
         self._binding_descriptions(bindings)
         if self.alpha_masks is not None:
             self._mask_bindings(bindings)
+        if self.face_rules is not None:
+            self._face_bindings(bindings)
+
+    def _face_bindings(self, bindings):
+        values, descriptions = [], []
+        for index, rule in enumerate(self.face_rules or ()):
+            if not isinstance(rule, OptixFaceRuleTable):
+                continue
+            gas = self.scene._instances[index].gas if isinstance(self.scene, OptixInstanceScene) else self.scene
+            value = bindings[rule.binding]
+            description, count = _ray_storage(value, 1, (i32, u32), rule.binding, access="read")
+            if count != gas.triangle_count:
+                raise TaichiRuntimeError("OptiX face table count must match GAS primitives")
+            values.append(value)
+            descriptions.append(description)
+        return values, descriptions
 
     def _mask_bindings(self, bindings):
         from taichi_forge._lib import core
@@ -1250,7 +1415,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
         validate_exact_bindings(self, bindings, "OptiX ray query")
         self.validate_graph_lifetime()
         descriptions = self._binding_descriptions(bindings)
-        if self.alpha_masks is not None or self._occlusion:
+        if self.alpha_masks is not None or self._occlusion or self.face_rules is not None:
             return self._prepare_alpha_execute(bindings, descriptions)
         values = tuple(bindings[name] for name in self.binding_names)
         storage, owners = _prepare_storage(
@@ -1286,24 +1451,35 @@ class OptixRayQueryRecording(BackendCommandRecording):
         from taichi_forge.types.primitive_types import u64
 
         mask_values, mask_descriptions, textures = self._mask_bindings(bindings)
-        # One retained allocation: 48 bytes of launch parameters, then one
-        # 32-byte record per instance. Neither table nor pointers rebuild on run.
+        face_values, face_descriptions = self._face_bindings(bindings)
+        # Retained launch workspace and descriptor tables are packed once at
+        # binding preparation. Replay uses the same storage and pointers.
         masks_spec = self.alpha_masks or ()
-        workspace = ScalarNdarray(u64, (6 + 4 * len(masks_spec),))
+        faces_spec = self.face_rules or ()
+        launch_words = 8 if faces_spec else 6
+        workspace_words = launch_words + 4 * len(masks_spec) + 2 * len(faces_spec)
+        workspace = ScalarNdarray(u64, (workspace_words,))
         workspace_description = describe_storage(workspace)
         values = (
             bindings[self.rays],
             bindings[self.hits],
             *((bindings[self.hit_indices],) if self.hit_indices is not None else ()),
             *mask_values,
+            *face_values,
             workspace,
         )
-        descriptions = (*descriptions, *mask_descriptions, workspace_description)
+        descriptions = (*descriptions, *mask_descriptions, *face_descriptions, workspace_description)
         storage, owners = _prepare_storage(
             self.scene,
             values,
             descriptions,
-            (False, True, *((True,) if self.hit_indices is not None else ()), *([False] * len(mask_values)), True),
+            (
+                False,
+                True,
+                *((True,) if self.hit_indices is not None else ()),
+                *([False] * (len(mask_values) + len(face_values))),
+                True,
+            ),
             textures,
         )
         query_pointer_count = 2 if self._occlusion else 3
@@ -1319,8 +1495,18 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     mask.channel,
                 )
                 active += 1
-        host = np.zeros(6 + 4 * len(masks_spec), dtype=np.uint64)
-        host[6:] = np.frombuffer(bytes(masks), dtype=np.uint64)
+        host = np.zeros(workspace_words, dtype=np.uint64)
+        masks_end = launch_words + 4 * len(masks_spec)
+        host[launch_words:masks_end] = np.frombuffer(bytes(masks), dtype=np.uint64)
+        faces = (_FaceRule * len(faces_spec))()
+        active = 0
+        for index, rule in enumerate(faces_spec):
+            if isinstance(rule, OptixFaceRuleTable):
+                faces[index] = _FaceRule(storage.pointers[query_pointer_count + len(mask_values) + active], 2, 0)
+                active += 1
+            else:
+                faces[index] = _FaceRule(0, int(rule == "front_only"), 0)
+        host[masks_end:] = np.frombuffer(bytes(faces), dtype=np.uint64)
         workspace.from_numpy(host)
         api = self.scene.provider._loaded.api
         function = (
@@ -1340,17 +1526,21 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     api.trace_instance_occlusion if isinstance(self.scene, OptixInstanceScene) else api.trace_occlusion
                 )
             )
-        desc = _AlphaTraceDesc(
-            ctypes.sizeof(_AlphaTraceDesc),
+        descriptor_type = _FaceTraceDesc if faces_spec else _AlphaTraceDesc
+        if faces_spec:
+            function = api.trace_instance_faces if isinstance(self.scene, OptixInstanceScene) else api.trace_faces
+        desc = descriptor_type(
+            ctypes.sizeof(descriptor_type),
             self.ray_count,
             storage.pointers[0],
             storage.pointers[1],
             0 if self._occlusion else storage.pointers[2],
             0,
-            storage.pointers[-1] + 48 if masks_spec else 0,
+            storage.pointers[-1] + 8 * launch_words if masks_spec else 0,
             storage.pointers[-1],
             len(masks_spec),
             int(self.any_hit),
+            *((storage.pointers[-1] + 8 * masks_end, len(faces_spec), int(self._occlusion)) if faces_spec else ()),
         )
         return _PreparedOptixCall(
             self.scene,
@@ -1361,7 +1551,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
 
     def memory_report(self):
         report = self.scene.memory_report()
-        if self.alpha_masks is None and not self._occlusion:
+        if self.alpha_masks is None and not self._occlusion and self.face_rules is None:
             return report
         return make_memory_report(
             report.provider,
@@ -1370,11 +1560,17 @@ class OptixRayQueryRecording(BackendCommandRecording):
                 *report.components,
                 HardwareMemoryComponent(
                     (
-                        "occlusion_workspace_per_prepared_binding"
-                        if self._occlusion
-                        else "alpha_workspace_per_prepared_binding"
+                        "face_workspace_per_prepared_binding"
+                        if self.face_rules is not None
+                        else (
+                            "occlusion_workspace_per_prepared_binding"
+                            if self._occlusion
+                            else "alpha_workspace_per_prepared_binding"
+                        )
                     ),
-                    48 + 32 * len(self.alpha_masks or ()),
+                    (64 if self.face_rules is not None else 48)
+                    + 32 * len(self.alpha_masks or ())
+                    + 16 * len(self.face_rules or ()),
                     True,
                     "provider_generation",
                     "runtime",
@@ -1394,10 +1590,7 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     (
                         "texture"
                         if item.alpha_masks is not None
-                        and any(
-                            mask is not None and mask.texture == name
-                            for mask in item.alpha_masks
-                        )
+                        and any(mask is not None and mask.texture == name for mask in item.alpha_masks)
                         else "ndarray"
                     ),
                 )
@@ -1413,24 +1606,19 @@ class OptixRayQueryRecording(BackendCommandRecording):
                     None
                     if item.alpha_masks is None
                     else tuple(
-                        (
-                            None
-                            if mask is None
-                            else (mask.uvs, mask.texture, mask.cutoff, mask.channel)
-                        )
+                        (None if mask is None else (mask.uvs, mask.texture, mask.cutoff, mask.channel))
                         for mask in item.alpha_masks
                     )
                 ),
                 "any_accepted_hit": item.any_hit,
+                "face_rules": item._face_identity,
                 "opaque_instances": (
                     tuple(instance.opaque for instance in item.scene._instances)
                     if isinstance(item.scene, OptixInstanceScene)
                     else ()
                 ),
                 "opacity_micromaps": (
-                    tuple(
-                        instance.gas._micromap_id for instance in item.scene._instances
-                    )
+                    tuple(instance.gas._micromap_id for instance in item.scene._instances)
                     if isinstance(item.scene, OptixInstanceScene)
                     else ()
                 ),
@@ -2181,11 +2369,14 @@ class OptixInstanceScene:
         hits="hits",
         hit_indices="hit_indices",
         alpha_masks=None,
+        face_rules=None,
         any_hit=False,
     ):
         """Record typed hits, optionally filtering each instance's alpha mask.
 
         alpha_masks is a fixed tuple of OptixAlphaMask or None per instance.
+        face_rules is a tuple of two_sided/front_only or OptixFaceRuleTable,
+        in instance ordinal order. Candidates must pass both face and alpha rules.
         any_hit returns the first accepted intersection, not necessarily nearest.
         """
 
@@ -2197,15 +2388,17 @@ class OptixInstanceScene:
             hits=hits,
             hit_indices=hit_indices,
             alpha_masks=alpha_masks,
+            face_rules=face_rules,
             any_hit=any_hit,
         )
 
-    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None):
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None):
         """Write one i32/u32 flag per ray: 1 for an accepted hit, 0 for a miss.
 
         Fixed bindings accept contiguous scalar (N,) or (N,1) storage. Optional
         alpha masks use the same per-instance policy as record_typed; imported
         opacity micromaps keep their classification and unknown-state policy.
+        face_rules uses the same candidate acceptance as record_typed.
         No hit position, distance, barycentrics or indices are produced.
         """
         self._validate_lifetime()
@@ -2215,6 +2408,7 @@ class OptixInstanceScene:
             rays=rays,
             hits=occluded,
             alpha_masks=alpha_masks,
+            face_rules=face_rules,
             any_hit=True,
             _occlusion=True,
         )
@@ -2435,12 +2629,15 @@ class OptixTriangleScene:
         hits="hits",
         hit_indices="hit_indices",
         alpha_masks=None,
+        face_rules=None,
         any_hit=False,
     ):
         """Record f32 (t,u,v,0) and i32/u32 (primitive,instance,custom,hit).
 
         Misses write (-1,0,0,0) and (-1,-1,-1,0), with UINT32_MAX for u32.
         This single-instance scene has instance ordinal and custom ID zero.
+        face_rules has one two_sided/front_only or OptixFaceRuleTable entry;
+        it filters geometric facing before candidate acceptance, AND alpha.
         t is the ray parameter (distance only for unit directions); triangle
         weights are (1-u-v,u,v). Scalar (N,4) and AOS vector-4 layouts are accepted.
         """
@@ -2452,15 +2649,17 @@ class OptixTriangleScene:
             hits=hits,
             hit_indices=hit_indices,
             alpha_masks=alpha_masks,
+            face_rules=face_rules,
             any_hit=any_hit,
         )
 
-    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None):
+    def record_occlusion(self, ray_count, *, rays="rays", occluded="occluded", alpha_masks=None, face_rules=None):
         """Write one i32/u32 flag per ray without producing full hit records.
 
         Output is contiguous scalar (N,) or (N,1) storage: 1 for the first
         accepted intersection, 0 for a miss. alpha_masks, when provided, has
-        one entry and follows record_typed's filtering policy.
+        one entry and follows record_typed's filtering policy. face_rules uses
+        that same candidate policy, before accepting an occluder.
         """
         self._validate_lifetime()
         return OptixRayQueryRecording(
@@ -2469,6 +2668,7 @@ class OptixTriangleScene:
             rays=rays,
             hits=occluded,
             alpha_masks=alpha_masks,
+            face_rules=face_rules,
             any_hit=True,
             _occlusion=True,
         )
@@ -2594,6 +2794,7 @@ def is_loaded():
 
 
 __all__ = [
+    "OptixFaceRuleTable",
     "OptixOpacityMicromap",
     "OptixGASRefitRecording",
     "OptixInstanceRefitRecording",

@@ -653,6 +653,63 @@ builder.append_native(query, admission="explicit")
 调用应复用 bound Graph。执行仍为 runtime-ordered，不代表 CUDA Graph capture。旧 adapter
 缺少 `occlusion` 能力时在准备阶段拒绝此接口，原 typed 查询保持可用。
 
+<a id="optix-face-rules"></a>
+
+#### OptiX 候选面规则（0.6.4）
+
+`record_typed(..., face_rules=...)` 与 `record_occlusion(..., face_rules=...)`
+均接受按 **instance ordinal 顺序**排列的固定 tuple；triangle scene 提供一个元素。
+元素为 `"two_sided"`、`"front_only"` 或 `OptixFaceRuleTable("binding_name")`。
+设备表为连续 i32/u32 `(triangle_count,)` 或 `(triangle_count, 1)`，按该实例的
+**GAS primitive 顺序**排列：`0` 为双面，`1` 为仅正面。共享 GAS 的实例可以使用不同
+规则或设备表。primitive/instance/custom ID、重心坐标、每 ray 的 t 区间和输出 ABI 均保持。
+
+```python
+ray = ti.hardware.ray
+provider = ray.load_optix_provider(required_features=(
+    "face_filter_typed", "face_filter_occlusion", "face_filter_per_primitive",
+))
+# 按原有方式创建 gas/scene；本例 IAS 含两个实例。
+rules = ("front_only", ray.OptixFaceRuleTable("faces"))
+main = scene.record_typed(N, face_rules=rules)
+shadow = scene.record_occlusion(N, face_rules=rules)
+# faces 绑定第二个实例 GAS 对应的只读 i32/u32 表。
+# 两个 recording 均可直接执行，也可 append 到原生 Graph。
+```
+
+过滤发生在**接受候选之前**。最近命中查询拒绝背面后继续遍历；紧凑遮挡只在接受有效
+遮挡时终止。`any_hit=True` 仍表示首个已接受交点，不是应用回调。正面按变换后的几何
+绕序定义：对变换后的顶点 `a,b,c`，`dot(direction, cross(b-a, c-a)) < 0` 为正面；
+不使用插值法线或 normal map。沿用现有有限、可逆 f32 仿射矩阵合同，支持旋转、平移、
+非均匀缩放；负行列式变换翻转面朝向。设备变换 refit 使用当前变换，保留规则与 ID。
+设备产生的矩阵仍由调用方保证有效，运行时不进行 host 回读校验。
+
+资源分配和录制前可协商 `face_filter_typed`、`face_filter_occlusion`、
+`face_filter_per_primitive`、`face_filter_alpha`（面规则与 alpha 按 AND 组合）。
+`provider.features` 和 `provider.identity["supported_features"]` 暴露 adapter 的能力声明；
+声明不等于所有驱动/设备已经通过执行验证。旧 adapter 在创建 context 前拒绝所要求的
+新能力；录制时拒绝未支持的组合，绑定准备时拒绝错误的表 dtype/count。
+
+`opaque=True` 声明不需要 alpha mask，**不会绕过面过滤**；面查询会强制必要的 any-hit。
+若同时提供 alpha，只有二者都接受才能报告命中/遮挡；现有 opaque 实例不可绑定 alpha
+mask 的约束保留。第一版在录制期明确拒绝面过滤与已导入 opacity micromap 的组合。
+省略规则或全 `"two_sided"` tuple 保留原路径；显式设备表即使当前全为零也走过滤路径。
+
+统一规则与设备表的绑定名属于不可变 recording 元数据。prepared command／Graph binding
+将借用的规则存储作为只读依赖保留到在途工作完成；绑定使用期间保持表值固定，在冷边界
+改绑新存储或录制新策略。改变 ray 数量时重新录制，退休旧 Graph，并按原顺序关闭 scene
+和 provider。合格的 bound replay 不重新扫描表、分配存储、探测能力或打包指针。
+每个 prepared binding 的查询存储为 64 字节 launch 参数、每实例 16 字节规则描述，
+若带 alpha 则另加每实例 32 字节描述。逐 primitive 表另需调用方每 primitive 4 字节，
+可共享。被动显存报告记录查询 workspace；驱动不透明 pipeline 显存仍为 unknown。
+固定 PTX 由 Forge 构建进 adapter；应用继续自行提供 OptiX runtime，无需编译 PTX。
+
+2026-09-26 本地验证覆盖独立双三角形参考、共享 GAS、变换绕序、alpha 组合及 Graph
+生命周期：Windows、RTX 5090（驱动 610.62）、OptiX SDK ABI 93/105/118。该范围不包含
+GeoPhys 实际资产、Ubuntu 或其他设备。`benchmarks/optix_face_filter.py` 分别测量暖态
+typed、compact 与完整 Graph，记录 host 时间、CUDA event stream 窗口及规则存储成本，
+不据此声明应用加速。
+
 #### OptiX alpha-mask 查询
 
 `record_typed(..., alpha_masks=..., any_hit=False)` 可在 OptiX 设备程序中过滤三角形命中。

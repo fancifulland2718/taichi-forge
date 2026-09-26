@@ -9,7 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
-| [0.6.4](#064) | In development; SPIR-V optimizer lifecycle repair |
+| [0.6.4](#064) | In development; OptiX face filtering and SPIR-V optimizer repair |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
@@ -38,6 +38,11 @@ Use the documentation at your release tag for version-specific API details.
 - Invalidate older compiled-kernel caches so affected shaders are regenerated.
   Explicitly disabled optimization and the fast compile tier retain their
   existing behavior; this repair does not qualify the unoptimized cursor path.
+- Add OptiX candidate face filtering to typed and compact occlusion recordings:
+  per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
+  winding and device refit. Negotiate the new face-filter features before resource
+  creation. Imported opacity micromaps remain an explicitly rejected combination.
+  See [the interface and ownership contract](external_hardware_providers.en.md#optix-face-rules).
 - This section does not announce a PyPI release. For installed releases, use
   the documentation at the corresponding release tag.
 

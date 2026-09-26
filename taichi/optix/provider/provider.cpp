@@ -24,6 +24,7 @@
 #include "device_program_0_ptx.h"
 #include "device_program_1_ptx.h"
 #include "device_program_2_ptx.h"
+#include "device_program_3_ptx.h"
 #include "instance_transform_pack_ptx.h"
 
 #if OPTIX_ABI_VERSION != 93 && OPTIX_ABI_VERSION != 105 && \
@@ -46,24 +47,29 @@ std::string active_optix_runtime_library_path;
 constexpr char kProviderName[] = "taichi-forge-optix";
 constexpr char kBuildIdentity[] =
     "forge-optix-provider-abi1-optix-abi" TI_FORGE_STRINGIFY(
-        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1-occlusion1";
-constexpr uint64_t kFeatures = TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
-                               TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
-                               TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
-                               TI_FORGE_OPTIX_FEATURE_BATCH_CLOSEST_HIT |
-                               TI_FORGE_OPTIX_FEATURE_RUNTIME_ORDERED_STREAM |
-                               TI_FORGE_OPTIX_FEATURE_EXACT_DEVICE_MEMORY |
-                               TI_FORGE_OPTIX_FEATURE_TYPED_HITS |
-                               TI_FORGE_OPTIX_FEATURE_WORD_ALIGNED_QUERY_STORAGE |
-                               TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS |
-                               TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS |
-                               TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE |
-                               TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
-                               TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
-                               TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT |
-                               TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE |
-                               TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET |
-                               TI_FORGE_OPTIX_FEATURE_COMPACT_OCCLUSION;
+        OPTIX_ABI_VERSION) "-scene-refit2-typed1-instances2-alpha2-omm1-program1-occlusion1-faces1";
+constexpr uint64_t kFeatures =
+    TI_FORGE_OPTIX_FEATURE_TRIANGLE_GAS |
+    TI_FORGE_OPTIX_FEATURE_SINGLE_INSTANCE_IAS |
+    TI_FORGE_OPTIX_FEATURE_GAS_UPDATE |
+    TI_FORGE_OPTIX_FEATURE_BATCH_CLOSEST_HIT |
+    TI_FORGE_OPTIX_FEATURE_RUNTIME_ORDERED_STREAM |
+    TI_FORGE_OPTIX_FEATURE_EXACT_DEVICE_MEMORY |
+    TI_FORGE_OPTIX_FEATURE_TYPED_HITS |
+    TI_FORGE_OPTIX_FEATURE_WORD_ALIGNED_QUERY_STORAGE |
+    TI_FORGE_OPTIX_FEATURE_SHARED_TRIANGLE_GAS |
+    TI_FORGE_OPTIX_FEATURE_MULTI_INSTANCE_IAS |
+    TI_FORGE_OPTIX_FEATURE_DEVICE_INSTANCE_TRANSFORM_UPDATE |
+    TI_FORGE_OPTIX_FEATURE_ALPHA_MASK |
+    TI_FORGE_OPTIX_FEATURE_INSTANCE_OPACITY |
+    TI_FORGE_OPTIX_FEATURE_OPACITY_MICROMAP_IMPORT |
+    TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE |
+    TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET |
+    TI_FORGE_OPTIX_FEATURE_COMPACT_OCCLUSION |
+    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_TYPED |
+    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_OCCLUSION |
+    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_PER_PRIMITIVE |
+    TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA;
 
 void clear_error_state() {
   last_error.clear();
@@ -176,6 +182,8 @@ struct Context {
   std::atomic<bool> alpha_ready{false};
   RayPipeline micromap;
   std::atomic<bool> micromap_ready{false};
+  RayPipeline faces;
+  std::atomic<bool> faces_ready{false};
   std::mutex prepare_mutex;
   std::atomic<std::size_t> scene_count{0};
   std::atomic<std::size_t> gas_count{0};
@@ -200,6 +208,16 @@ static_assert(sizeof(AlphaLaunchParams) == 48,
               "Caller-owned alpha launch workspace must be 48 bytes");
 static_assert(sizeof(TiForgeOptixAlphaMask) == 32,
               "Alpha-mask wire layout must be 32 bytes");
+
+struct FaceLaunchParams {
+  AlphaLaunchParams query;
+  CUdeviceptr faces;
+  uint64_t reserved;
+};
+static_assert(sizeof(FaceLaunchParams) == 64,
+              "Face launch workspace must be 64 bytes");
+static_assert(sizeof(TiForgeOptixFaceRule) == 16,
+              "Face-rule wire layout must be 16 bytes");
 
 struct Scene {
   Context *context{nullptr};
@@ -236,10 +254,11 @@ struct InstanceScene {
   Context *context{nullptr};
   std::atomic<std::size_t> program_refs{0};
   uint32_t max_sbt_offset{0};
-  std::array<DeviceBuffer, 4> fixed_hit_records;
-  std::array<OptixShaderBindingTable, 4> fixed_sbt{};
+  std::array<DeviceBuffer, 5> fixed_hit_records;
+  std::array<OptixShaderBindingTable, 5> fixed_sbt{};
   uint32_t instance_count{0};
   bool allow_update{false};
+  bool has_micromaps{false};
   std::vector<TriangleGas *> gas_refs;
   DeviceBuffer ias;
   DeviceBuffer scratch;
@@ -400,13 +419,17 @@ TiForgeOptixResult create_pipeline(Context *owner,
   pipeline_options.pipelineLaunchParamsVariableName = "params";
 #if OPTIX_ABI_VERSION == 118
   pipeline_options.pipelineLaunchParamsSizeInBytes =
-      alpha ? sizeof(AlphaLaunchParams) : sizeof(LaunchParams);
+      variant == 4 ? sizeof(FaceLaunchParams)
+      : alpha      ? sizeof(AlphaLaunchParams)
+                   : sizeof(LaunchParams);
 #endif
 
   char log[8192]{};
   std::size_t log_size = sizeof(log);
-  const auto *ptx = alpha ? ti_forge_optix_device_2_ptx :
-      typed ? ti_forge_optix_device_1_ptx : ti_forge_optix_device_0_ptx;
+  const auto *ptx = variant == 4 ? ti_forge_optix_device_3_ptx
+                    : alpha      ? ti_forge_optix_device_2_ptx
+                    : typed      ? ti_forge_optix_device_1_ptx
+                                 : ti_forge_optix_device_0_ptx;
   auto result =
       optix_check(optixModuleCreate(owner->optix_context, &module_options,
                                     &pipeline_options, ptx, std::strlen(ptx),
@@ -601,6 +624,22 @@ TiForgeOptixResult prepare_alpha(TiForgeOptixContext raw_context) {
   return result;
 }
 
+TiForgeOptixResult prepare_faces(TiForgeOptixContext raw_context) {
+  clear_error_state();
+  auto *context = static_cast<Context *>(raw_context);
+  if (!context)
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "OptiX context is null");
+  std::lock_guard<std::mutex> lock(context->prepare_mutex);
+  if (context->faces_ready.load(std::memory_order_acquire))
+    return TI_FORGE_OPTIX_SUCCESS;
+  const auto result = create_pipeline(context, &context->faces, 4);
+  if (result != TI_FORGE_OPTIX_SUCCESS)
+    destroy_pipeline(&context->faces);
+  else
+    context->faces_ready.store(true, std::memory_order_release);
+  return result;
+}
+
 OptixBuildInput triangle_build_input(
     const TiForgeOptixTriangleSceneDesc &desc,
     CUdeviceptr *vertex_buffer,
@@ -728,14 +767,18 @@ TiForgeOptixResult create_ias(Scene *scene, CUstream stream) {
 
 std::size_t shared_pipeline_sbt_bytes(Context *context) {
   std::lock_guard<std::mutex> lock(context->prepare_mutex);
-  return context->legacy.raygen_record.bytes + context->legacy.miss_record.bytes +
+  return context->legacy.raygen_record.bytes +
+         context->legacy.miss_record.bytes +
          context->legacy.hitgroup_record.bytes +
          context->typed.raygen_record.bytes + context->typed.miss_record.bytes +
          context->typed.hitgroup_record.bytes +
          context->alpha.raygen_record.bytes + context->alpha.miss_record.bytes +
          context->alpha.hitgroup_record.bytes +
-         context->micromap.raygen_record.bytes + context->micromap.miss_record.bytes +
-         context->micromap.hitgroup_record.bytes;
+         context->micromap.raygen_record.bytes +
+         context->micromap.miss_record.bytes +
+         context->micromap.hitgroup_record.bytes +
+         context->faces.raygen_record.bytes + context->faces.miss_record.bytes +
+         context->faces.hitgroup_record.bytes;
 }
 
 void initialize_memory_result(TiForgeOptixSceneMemory *memory) {
@@ -1228,6 +1271,7 @@ TiForgeOptixResult create_instance_scene_impl(
                                                      : OPTIX_INSTANCE_FLAG_ENFORCE_ANYHIT);
     destination.traversableHandle = gas->gas_handle;
     scene->gas_refs.push_back(gas);
+    scene->has_micromaps |= gas->micromap.pointer != 0;
   }
   for (auto *gas : scene->gas_refs) {
     gas->instance_ref_count.fetch_add(1);
@@ -1318,12 +1362,14 @@ TiForgeOptixResult prepare_instance_sbt(TiForgeOptixInstanceScene raw,
                                         uint32_t variant, uint64_t *bytes) {
   clear_error_state();
   auto *scene = static_cast<InstanceScene *>(raw);
-  if (!scene || variant > 3 || !bytes) {
+  if (!scene || variant > 4 || !bytes) {
     return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "invalid instance SBT preparation");
   }
   auto *context = scene->context;
   std::lock_guard<std::mutex> lock(context->prepare_mutex);
-  RayPipeline *pipelines[] = {&context->legacy, &context->typed, &context->alpha, &context->micromap};
+  RayPipeline *pipelines[] = {&context->legacy, &context->typed,
+                              &context->alpha, &context->micromap,
+                              &context->faces};
   auto *pipeline = pipelines[variant];
   if (!pipeline->pipeline) {
     return fail(TI_FORGE_OPTIX_ERROR_LIFETIME, "prepare the fixed query pipeline before its instance SBT");
@@ -1486,6 +1532,7 @@ TiForgeOptixResult destroy_context(TiForgeOptixContext raw_context) {
     return result;
   }
   destroy_transform_module(context);
+  destroy_pipeline(&context->faces);
   destroy_pipeline(&context->micromap);
   destroy_pipeline(&context->alpha);
   destroy_pipeline(&context->typed);
@@ -1775,6 +1822,62 @@ TiForgeOptixResult trace_instance_micromap_occlusion(
   return launch_alpha<InstanceScene, true, true>(scene, scene ? scene->instance_count : 0, desc);
 }
 
+template <typename SceneType>
+TiForgeOptixResult launch_faces(SceneType *scene,
+                              uint32_t instance_count,
+                              const TiForgeOptixFaceTraceDesc *desc) {
+  clear_error_state();
+  if (!scene || !desc)
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT, "null face query");
+  const auto &q = desc->query;
+  if (q.struct_size < sizeof(*desc) || !q.ray_count || !q.rays || !q.hits ||
+      !q.launch_params || !desc->faces || desc->face_count != instance_count ||
+      desc->occlusion > 1 || q.any_hit > 1 ||
+      (desc->occlusion ? (q.hit_indices != 0 || q.any_hit != 1)
+                       : !q.hit_indices) ||
+      (q.masks ? q.mask_count != instance_count : q.mask_count != 0) ||
+      !scene->context->faces_ready.load(std::memory_order_acquire)) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "invalid or unprepared face query");
+  }
+  auto &pipeline = scene->context->faces;
+  const auto *sbt = fixed_query_sbt(scene, 4, pipeline);
+  if (!sbt)
+    return fail(TI_FORGE_OPTIX_ERROR_LIFETIME,
+                "face instance SBT is not prepared");
+  const FaceLaunchParams params{
+      {{q.rays, q.hits, scene->ias_handle, q.hit_indices},
+       q.masks,
+       q.any_hit,
+       desc->occlusion},
+      desc->faces,
+      0};
+  const auto stream = reinterpret_cast<CUstream>(q.cuda_stream);
+  auto result = cuda_check(
+      cuMemcpyHtoDAsync(q.launch_params, &params, sizeof(params), stream),
+      "cuMemcpyHtoDAsync(face launch params)");
+  if (result != TI_FORGE_OPTIX_SUCCESS)
+    return result;
+  return optix_check(optixLaunch(pipeline.pipeline, stream, q.launch_params,
+                                sizeof(params), sbt, q.ray_count, 1, 1),
+                     "optixLaunch(face filter)");
+}
+
+TiForgeOptixResult trace_faces(TiForgeOptixTriangleScene raw,
+                             const TiForgeOptixFaceTraceDesc *desc) {
+  return launch_faces(static_cast<Scene *>(raw), 1, desc);
+}
+
+TiForgeOptixResult trace_instance_faces(TiForgeOptixInstanceScene raw,
+                                      const TiForgeOptixFaceTraceDesc *desc) {
+  auto *scene = static_cast<InstanceScene *>(raw);
+  if (scene && scene->has_micromaps) {
+    return fail(TI_FORGE_OPTIX_ERROR_INVALID_ARGUMENT,
+                "face filtering with opacity micromaps is unsupported");
+  }
+  return launch_faces(scene, scene ? scene->instance_count : 0, desc);
+}
+
 TiForgeOptixResult get_instance_scene_memory(
     TiForgeOptixInstanceScene raw_scene,
     TiForgeOptixSceneMemory *out_memory) {
@@ -1999,6 +2102,9 @@ taichi_forge_optix_provider_query(uint32_t requested_abi_version,
   out_api->trace_occlusion = trace_occlusion;
   out_api->trace_instance_occlusion = trace_instance_occlusion;
   out_api->trace_instance_micromap_occlusion = trace_instance_micromap_occlusion;
+  out_api->prepare_faces = prepare_faces;
+  out_api->trace_faces = trace_faces;
+  out_api->trace_instance_faces = trace_instance_faces;
   std::memcpy(destination, out_api, out_api->struct_size);
   return TI_FORGE_OPTIX_SUCCESS;
 }

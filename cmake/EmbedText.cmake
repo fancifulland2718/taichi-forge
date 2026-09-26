@@ -23,6 +23,14 @@ string(FIND "${_ti_embedded_text}" ")TFOPTIXPTX\"" _ti_embedded_delimiter)
 if(NOT _ti_embedded_delimiter EQUAL -1)
     message(FATAL_ERROR "Embedded input contains the reserved raw-string delimiter")
 endif()
-file(WRITE "${OUTPUT_FILE}"
-    "#pragma once\n"
-    "static const char ${SYMBOL_NAME}[] = R\"TFOPTIXPTX(${_ti_embedded_text})TFOPTIXPTX\";\n")
+# MSVC limits each string literal to 16380 characters. Split the text into
+# adjacent literals without changing the bytes or allocating at runtime.
+file(WRITE "${OUTPUT_FILE}" "#pragma once\nstatic const char ${SYMBOL_NAME}[] =\n")
+string(LENGTH "${_ti_embedded_text}" _ti_text_length)
+set(_ti_text_offset 0)
+while(_ti_text_offset LESS _ti_text_length)
+    string(SUBSTRING "${_ti_embedded_text}" ${_ti_text_offset} 8192 _ti_text_chunk)
+    file(APPEND "${OUTPUT_FILE}" "R\"TFOPTIXPTX(${_ti_text_chunk})TFOPTIXPTX\"\n")
+    math(EXPR _ti_text_offset "${_ti_text_offset} + 8192")
+endwhile()
+file(APPEND "${OUTPUT_FILE}" "\"\";\n")

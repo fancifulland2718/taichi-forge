@@ -52,6 +52,10 @@ typedef enum TiForgeOptixFeature {
   TI_FORGE_OPTIX_FEATURE_PROGRAMMABLE_PIPELINE = 1ull << 14,
   TI_FORGE_OPTIX_FEATURE_INSTANCE_SBT_OFFSET = 1ull << 15,
   TI_FORGE_OPTIX_FEATURE_COMPACT_OCCLUSION = 1ull << 16,
+  TI_FORGE_OPTIX_FEATURE_FACE_FILTER_TYPED = 1ull << 17,
+  TI_FORGE_OPTIX_FEATURE_FACE_FILTER_OCCLUSION = 1ull << 18,
+  TI_FORGE_OPTIX_FEATURE_FACE_FILTER_PER_PRIMITIVE = 1ull << 19,
+  TI_FORGE_OPTIX_FEATURE_FACE_FILTER_ALPHA = 1ull << 20,
 } TiForgeOptixFeature;
 
 typedef struct TiForgeOptixProviderInfo {
@@ -126,6 +130,26 @@ typedef struct TiForgeOptixAlphaTraceDesc {
   uint32_t mask_count;
   uint32_t any_hit;
 } TiForgeOptixAlphaTraceDesc;
+
+// One record per instance ordinal. mode: 0 two-sided, 1 front-only, 2 table.
+// Tables contain one uint32 per GAS primitive: 0 two-sided, 1 front-only.
+// Storage is read-only and caller-retained until every launch retires.
+typedef struct TiForgeOptixFaceRule {
+  uint64_t primitives;
+  uint32_t mode;
+  uint32_t reserved;
+} TiForgeOptixFaceRule;
+
+// Optional face-filtered typed/compact query; old descriptors are unchanged.
+// query.struct_size is sizeof(TiForgeOptixFaceTraceDesc); query.launch_params
+// names 64 caller-owned device bytes. masks may be null. Face and alpha
+// acceptance are combined with AND. No opacity-micromap scenes are supported.
+typedef struct TiForgeOptixFaceTraceDesc {
+  TiForgeOptixAlphaTraceDesc query;
+  uint64_t faces;
+  uint32_t face_count;
+  uint32_t occlusion;
+} TiForgeOptixFaceTraceDesc;
 
 typedef struct TiForgeOptixSceneMemory {
   uint32_t struct_size;
@@ -321,7 +345,7 @@ typedef struct TiForgeOptixProviderApi {
       TiForgeOptixContext, const TiForgeOptixInstanceSceneDesc *,
       const uint32_t *offsets, TiForgeOptixInstanceScene *);
   // Cold compatibility preparation for fixed batch queries: 0 legacy, 1 typed,
-  // 2 alpha, 3 micromap. Reports scene-owned (not context-shared) SBT bytes.
+  // 2 alpha, 3 micromap, 4 faces. Reports scene-owned SBT bytes.
   TiForgeOptixResult (*prepare_instance_sbt)(TiForgeOptixInstanceScene,
                                            uint32_t variant, uint64_t *bytes);
   // Optional compact-query suffix. Reuses the AlphaTraceDesc wire layout:
@@ -331,6 +355,12 @@ typedef struct TiForgeOptixProviderApi {
   TiForgeOptixTraceAlphaFn trace_occlusion;
   TiForgeOptixTraceInstanceAlphaFn trace_instance_occlusion;
   TiForgeOptixTraceInstanceAlphaFn trace_instance_micromap_occlusion;
+  // Optional face-filter suffix; fixed-query SBT variant 4.
+  TiForgeOptixPrepareTypedFn prepare_faces;
+  TiForgeOptixResult (*trace_faces)(TiForgeOptixTriangleScene,
+                                  const TiForgeOptixFaceTraceDesc *);
+  TiForgeOptixResult (*trace_instance_faces)(TiForgeOptixInstanceScene,
+                                           const TiForgeOptixFaceTraceDesc *);
 } TiForgeOptixProviderApi;
 
 typedef TiForgeOptixResult (*TiForgeOptixProviderQueryFn)(

@@ -827,6 +827,78 @@ are retained by the prepared command; reuse the bound Graph for repeated work.
 It remains runtime-ordered, not CUDA Graph capture. Older adapters without the
 `occlusion` feature reject preparation; existing typed queries remain usable.
 
+<a id="optix-face-rules"></a>
+
+#### OptiX candidate face rules (0.6.4)
+
+Both `record_typed(..., face_rules=...)` and `record_occlusion(..., face_rules=...)`
+accept a fixed tuple in **instance ordinal order** (one entry for a triangle scene).
+An entry is `"two_sided"`, `"front_only"`, or `OptixFaceRuleTable("binding_name")`.
+A table binding is contiguous i32/u32 `(triangle_count,)` or `(triangle_count, 1)`
+storage in that instance's **GAS primitive order**: `0` means two-sided, `1` means
+front-only. Shared GAS instances can use different rules/tables. Primitive,
+instance and custom IDs, barycentrics, ray intervals and output layouts are unchanged.
+
+```python
+ray = ti.hardware.ray
+provider = ray.load_optix_provider(required_features=(
+    "face_filter_typed", "face_filter_occlusion", "face_filter_per_primitive",
+))
+# Create gas/scene as usual. This example has two IAS instances.
+rules = ("front_only", ray.OptixFaceRuleTable("faces"))
+main = scene.record_typed(N, face_rules=rules)
+shadow = scene.record_occlusion(N, face_rules=rules)
+# Bind faces to a read-only i32/u32 table for the second instance's GAS.
+# Both recordings can be executed directly or appended to a native Graph.
+```
+
+Filtering happens **before accepting a candidate**. Closest-hit traversal continues
+past rejected backfaces; compact occlusion terminates only at an accepted blocker.
+`any_hit=True` still means the first accepted intersection, not an application callback.
+The front is defined by transformed geometric winding: for transformed vertices
+`a,b,c`, a ray is front-facing when `dot(direction, cross(b-a, c-a)) < 0`.
+Interpolated normals and normal maps have no role. Finite, invertible f32 affine
+transforms follow the existing instance contract; rotations/translations and
+nonuniform scale are supported, and negative determinant transforms reverse facing.
+Device transform refit uses the current transform without changing the rules or IDs.
+As with existing refit, device-produced matrices are caller-validated, without host readback.
+
+Negotiate before allocating scenes or recording work. The optional features are
+`face_filter_typed`, `face_filter_occlusion`, `face_filter_per_primitive`, and
+`face_filter_alpha` (face AND alpha acceptance). `provider.features` and
+`provider.identity["supported_features"]` expose the negotiated adapter declarations;
+these describe API support, not qualification on every driver/device. Older adapters
+reject required features before context creation. Face queries reject unsupported
+capabilities at recording, and invalid table dtype/count at binding preparation.
+
+`opaque=True` still declares absence of alpha masking; it does **not** disable required
+face filtering. Face queries enforce any-hit even on opaque instances. When alpha is
+also supplied, both tests must accept; the existing prohibition on attaching alpha
+masks to declared-opaque instances remains. Face filtering with imported opacity
+micromaps is explicitly rejected at recording in this version. Omitting rules, or
+using an all-`"two_sided"` tuple, preserves the existing path; an explicit device table
+uses filtering even when its current contents happen to be all zero.
+
+Uniform rules and table binding names are immutable recording metadata. Prepared
+commands/Graph bindings retain the borrowed rule storage as a read-only dependency
+through in-flight completion. Keep its values fixed while those bindings are in use;
+change rules by binding new storage or recording a new policy at a cold boundary.
+Resize ray batches by recording again, retire old Graphs, and close scenes before
+the provider as usual. No table scan, allocation, capability probe or repacking runs
+per ray or during qualified bound replay. Query-owned storage is 64 launch bytes plus
+16 bytes per instance and, when present, 32 alpha descriptor bytes per instance per
+prepared binding. Primitive tables additionally occupy 4 caller-owned bytes per
+primitive and may be shared. Passive memory reports include query workspace costs;
+opaque driver pipeline memory remains unknown. Forge builds the fixed PTX into its
+adapters; applications continue to supply the external OptiX runtime and need no PTX build.
+
+Local validation on 2026-09-26 covered the independent two-triangle oracle, shared
+GAS, transformed winding, alpha composition and Graph lifecycle on Windows with an
+RTX 5090 (driver 610.62), using OptiX SDK ABIs 93/105/118. This is not qualification
+of GeoPhys assets, Ubuntu or other devices. `benchmarks/optix_face_filter.py` measures
+warm typed, compact and complete Graph work separately, with host timings, CUDA
+event stream windows and rule-storage costs; it makes no application speedup claim.
+
 #### OptiX alpha-mask queries
 
 `record_typed(..., alpha_masks=..., any_hit=False)` optionally filters triangle

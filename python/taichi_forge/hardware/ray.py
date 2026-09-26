@@ -32,6 +32,7 @@ from taichi_forge.hardware._ray import (
 )
 from taichi_forge.hardware._optix import (
     OptixAlphaMask,
+    OptixFaceRuleTable,
     OptixOpacityMicromap,
     OptixGASRefitRecording,
     OptixInstanceRefitRecording,
@@ -71,6 +72,7 @@ __all__ = [
     "VulkanOpacityMicromap",
     "InstanceTLAS",
     "OptixAlphaMask",
+    "OptixFaceRuleTable",
     "OptixOpacityMicromap",
     "OptixGASRefitRecording",
     "OptixInstanceRefitRecording",

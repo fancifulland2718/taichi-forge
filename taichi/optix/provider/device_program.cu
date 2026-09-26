@@ -62,14 +62,18 @@ struct LaunchParams {
   HitRecord *hits;
   OptixTraversableHandle traversable;
   PackedUint4 *hit_indices;
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
   const struct AlphaMask *masks;
   unsigned int any_hit;
   unsigned int reserved;
+#if TI_FORGE_OPTIX_TYPED == 3
+  const struct FaceRule *faces;
+  unsigned long long face_reserved;
+#endif
 #endif
 };
 
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
 struct AlphaMask {
   const float *uvs;
   const unsigned int *indices;
@@ -78,13 +82,23 @@ struct AlphaMask {
   unsigned int channel;
 };
 static_assert(sizeof(AlphaMask) == 32, "Alpha-mask wire layout changed");
+#if TI_FORGE_OPTIX_TYPED == 3
+struct FaceRule {
+  const unsigned int *primitives;
+  unsigned int mode;
+  unsigned int reserved;
+};
+static_assert(sizeof(FaceRule) == 16, "Face-rule wire layout changed");
+static_assert(sizeof(LaunchParams) == 64, "Face launch wire layout changed");
+#else
 static_assert(sizeof(LaunchParams) == 48, "Alpha launch wire layout changed");
+#endif
 #endif
 
 extern "C" __constant__ LaunchParams params;
 
 extern "C" __global__ void __miss__forge_batch_ray() {
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
   if (params.reserved == 1) {
     optixSetPayload_0(0u);
   }
@@ -122,13 +136,18 @@ extern "C" __global__ void __closesthit__forge_batch_ray() {
 extern "C" __global__ void __raygen__forge_batch_ray_typed() {
   const unsigned int index = optixGetLaunchIndex().x;
   const RayRecord ray = params.rays[index];
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
   if (params.reserved == 1) {
     // Visibility needs no distance, indices, barycentrics or closest-hit shader.
     unsigned int occluded = 1;
     unsigned int flags = OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT |
                          OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT;
+#if TI_FORGE_OPTIX_TYPED == 3
+    // Face filtering must run even for opaque instances/geometries.
+    flags |= OPTIX_RAY_FLAG_ENFORCE_ANYHIT;
+#else
     if (!params.masks) flags |= OPTIX_RAY_FLAG_DISABLE_ANYHIT;
+#endif
     optixTrace(params.traversable,
                make_float3(ray.origin_tmin.x, ray.origin_tmin.y, ray.origin_tmin.z),
                make_float3(ray.direction_tmax.x, ray.direction_tmax.y, ray.direction_tmax.z),
@@ -142,10 +161,14 @@ extern "C" __global__ void __raygen__forge_batch_ray_typed() {
   unsigned int primitive = ~0u, instance = ~0u, custom = ~0u;
   unsigned int u = 0, v = 0, hit = 0;
   unsigned int flags = OPTIX_RAY_FLAG_DISABLE_ANYHIT;
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
   // The IAS decides which instances need filtering. Opaque rays above still
   // override that state; alpha rays must not force opaque instances into AH.
+#if TI_FORGE_OPTIX_TYPED == 3
+  flags = OPTIX_RAY_FLAG_ENFORCE_ANYHIT;
+#else
   flags = OPTIX_RAY_FLAG_NONE;
+#endif
   if (params.any_hit) {
     flags |= OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT;
   }
@@ -174,8 +197,35 @@ extern "C" __global__ void __closesthit__forge_batch_ray_typed() {
   optixSetPayload_6(1u);
 }
 
-#if TI_FORGE_OPTIX_TYPED == 2
+#if TI_FORGE_OPTIX_TYPED >= 2
 extern "C" __global__ void __anyhit__forge_alpha_mask() {
+#if TI_FORGE_OPTIX_TYPED == 3
+  const FaceRule rule = params.faces[optixGetInstanceIndex()];
+  const unsigned int mode =
+      rule.mode == 2 ? rule.primitives[optixGetPrimitiveIndex()] : rule.mode;
+  if (mode != 0) {
+    // OptiX's hit kind uses object-space winding. Mirroring reverses the
+    // winding of the transformed vertices, so apply the transform parity.
+    bool front = optixIsTriangleFrontFaceHit();
+    float m[12];
+    optixGetObjectToWorldTransformMatrix(m);
+    // Double intermediates avoid overflow/underflow of products of finite
+    // f32 transform coefficients when determining orientation parity.
+    const double a = m[0], b = m[1], c = m[2];
+    const double d = m[4], e = m[5], f = m[6];
+    const double g = m[8], h = m[9], i = m[10];
+    const double determinant =
+        a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+    if (determinant < 0.0f)
+      front = !front;
+    if (!front) {
+      optixIgnoreIntersection();
+      return;
+    }
+  }
+#endif
+  if (!params.masks)
+    return;
   const AlphaMask mask = params.masks[optixGetInstanceIndex()];
   if (!mask.texture) {
     return;

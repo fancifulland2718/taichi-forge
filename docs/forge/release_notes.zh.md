@@ -8,7 +8,7 @@
 
 | 版本 | 主要内容 |
 | --- | --- |
-| [0.6.4](#064) | 开发中；修复 SPIR-V optimizer 生命周期 |
+| [0.6.4](#064) | 开发中；OptiX 面过滤与 SPIR-V optimizer 修复 |
 | [0.6.3](#063) | 完整 Graph recipe、硬件渲染、可复用操作与基础 ROCm/HIP |
 | [0.6.2](#062) | 执行计划、动态工作、Graph 存储与求解器改进 |
 | [0.6.1](#061) | task policy/label、device worklist、SNode 生命周期、Graph telemetry |
@@ -34,6 +34,10 @@
   触发 Vulkan 驱动编译崩溃。保留现有 pass 配置选项。
 - 使旧 compiled-kernel 缓存失效，重新生成受影响的着色器。显式关闭优化和 fast compile
   tier 保持原语义；本修复不代表未优化 cursor 路径已通过验证。
+- typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
+  规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
+  明确拒绝与已导入 opacity micromap 的组合。接口与所有权见
+  [外部硬件 provider 文档](external_hardware_providers.zh.md#optix-face-rules)。
 - 本节不代表已发布到 PyPI。使用已安装的发布版本时，请查阅对应 release tag 的文档。
 
 <a id="063"></a>
