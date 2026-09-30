@@ -147,7 +147,10 @@ class Kernel;
 //       from ordinary filtering and fetch-only bindings.
 //  35 - SPIR-V optimizers register a fresh pass chain for every task. Earlier
 //       artifacts could skip optimization after consuming a cached optimizer.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 35;
+//  36 - SPIR-V thread indices use the registered intrinsic and complete
+//       builtin entry-point interfaces. Unsupported intrinsics fail compilation
+//       instead of emitting invalid ID zero.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 36;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

@@ -4598,7 +4598,7 @@ class TaskCodegen : public IRVisitor {
       val = ir_->const_i32_zero_;
     } else if (stmt->func_name == "localInvocationId") {
       val = ir_->cast(ir_->i32_type(), ir_->get_local_invocation_id(0));
-    } else if (stmt->func_name == "globalInvocationId") {
+    } else if (stmt->func_name == "vkGlobalThreadIdx") {
       val = ir_->cast(ir_->i32_type(), ir_->get_global_invocation_id(0));
     } else if (stmt->func_name == "workgroupMemoryBarrier") {
       ir_->make_inst(
@@ -4716,6 +4716,11 @@ class TaskCodegen : public IRVisitor {
           ir_->int_immediate_number(ir_->i32_type(), spv::ScopeSubgroup), arg0,
           arg1);
     }
+    // An unmatched intrinsic must never register the default Value (ID zero):
+    // that would emit invalid SPIR-V and can crash the driver's compiler.
+    TI_ERROR_IF(val.id == 0,
+                "Internal operation '{}' is not implemented by SPIR-V codegen.",
+                stmt->func_name);
     ir_->register_value(stmt->raw_name(), val);
   }
 

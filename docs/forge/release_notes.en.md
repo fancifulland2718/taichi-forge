@@ -38,6 +38,11 @@ Use the documentation at your release tag for version-specific API details.
 - Invalidate older compiled-kernel caches so affected shaders are regenerated.
   Explicitly disabled optimization and the fast compile tier retain their
   existing behavior; this repair does not qualify the unoptimized cursor path.
+- Repair SPIR-V SIMT thread indices: `ti.simt.block.global_thread_idx()` now
+  selects the correct backend and lowers the registered `vkGlobalThreadIdx`
+  intrinsic; local thread IDs are included in the shader entry-point interface.
+  Unsupported SPIR-V intrinsics fail during compilation instead of emitting
+  invalid ID zero and reaching the driver.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource

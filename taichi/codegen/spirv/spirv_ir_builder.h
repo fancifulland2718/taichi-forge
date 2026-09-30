@@ -508,6 +508,9 @@ class IRBuilder {
     if (gl_global_invocation_id_.id != 0) {
       ib_.add(gl_global_invocation_id_);
     }
+    if (gl_local_invocation_id_.id != 0) {
+      ib_.add(gl_local_invocation_id_);
+    }
     if (gl_num_work_groups_.id != 0) {
       ib_.add(gl_num_work_groups_);
     }

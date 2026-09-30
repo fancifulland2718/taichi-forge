@@ -34,6 +34,9 @@
   触发 Vulkan 驱动编译崩溃。保留现有 pass 配置选项。
 - 使旧 compiled-kernel 缓存失效，重新生成受影响的着色器。显式关闭优化和 fast compile
   tier 保持原语义；本修复不代表未优化 cursor 路径已通过验证。
+- 修复 SPIR-V SIMT 线程索引：`ti.simt.block.global_thread_idx()` 正确选择后端，并为
+  已注册的 `vkGlobalThreadIdx` 生成有效代码；局部线程 ID 补入着色器入口接口。未实现的 SPIR-V
+  内部操作在编译期明确报错，避免生成零 ID 后交给驱动。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见
