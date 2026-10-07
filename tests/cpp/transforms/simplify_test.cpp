@@ -1,12 +1,48 @@
 #include "gtest/gtest.h"
 
 #include "taichi/ir/statements.h"
+#include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
 #include "tests/cpp/program/test_program.h"
 
 namespace taichi::lang {
 
 // Basic tests within a basic block
+
+TEST(Simplify, IndexedLoadsPreserveStoreBarriers) {
+  for (bool advanced : {false, true}) {
+    for (bool in_branch : {false, true}) {
+      SCOPED_TRACE(advanced);
+      SCOPED_TRACE(in_branch);
+      auto block = std::make_unique<Block>();
+      auto ptr = block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+      auto other = block->push_back<GlobalTemporaryStmt>(4, PrimitiveType::i32);
+      auto one = block->push_back<ConstStmt>(TypedConstant(1));
+      auto first = block->push_back<GlobalLoadStmt>(ptr);
+      auto unrelated = block->push_back<GlobalLoadStmt>(other);
+      auto duplicate = block->push_back<GlobalLoadStmt>(ptr);
+      auto writes = block.get();
+      if (in_branch) {
+        auto branch = block->push_back<IfStmt>(one)->as<IfStmt>();
+        branch->set_true_statements(std::make_unique<Block>());
+        writes = branch->true_statements.get();
+      }
+      writes->push_back<GlobalStoreStmt>(ptr, one);
+      auto after = block->push_back<GlobalLoadStmt>(ptr);
+      auto result = block->push_back<ReturnStmt>(
+          std::vector<Stmt *>{first, unrelated, duplicate, after});
+      CompileConfig config;
+      config.advanced_optimization = advanced;
+      irpass::type_check(block.get(), config);
+      irpass::simplify(block.get(), config);
+      EXPECT_EQ(result->operand(0), first);
+      EXPECT_EQ(result->operand(1), unrelated);
+      EXPECT_EQ(result->operand(2), first);
+      EXPECT_EQ(result->operand(3), after);
+      EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+    }
+  }
+}
 
 TEST(Simplify, SimplifyLinearizedWithTrivialInputs) {
   TestProgram test_prog;

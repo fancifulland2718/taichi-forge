@@ -29,6 +29,12 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Rebuild blocks in order during AST lowering, and batch constant-fold/atomic
+  replacements with indexed operand updates. Large static expansions no longer
+  perform a full block scan and vector shift for every replacement in these
+  passes. Immutable-local removal also compacts blocks once, and load-reuse
+  searches index candidates by pointer identity while retaining store checks.
+  Static-loop semantics and compile-tier defaults are unchanged.
 - Open the 0.6.4 development cycle from the 0.6.3 baseline. Source version
   metadata and the default runtime dependency now target 0.6.4.
 - Default Python `ti.init()` to `compile_tier="fast"` with

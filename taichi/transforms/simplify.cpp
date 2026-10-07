@@ -48,6 +48,8 @@ class BasicBlockSimplify : public IRVisitor {
   StructForStmt *current_struct_for;
   CompileConfig config;
   DelayedIRModifier modifier;
+  std::unordered_map<Stmt *, std::vector<std::pair<int, GlobalLoadStmt *>>>
+      global_loads_;
 
   BasicBlockSimplify(Block *block,
                      std::set<int> &visited,
@@ -70,6 +72,7 @@ class BasicBlockSimplify : public IRVisitor {
   }
 
   void accept_block() {
+    global_loads_.clear();
     for (int i = 0; i < (int)block->statements.size(); i++) {
       current_stmt_id = i;
       block->statements[i]->accept(this);
@@ -94,10 +97,15 @@ class BasicBlockSimplify : public IRVisitor {
   }
 
   void visit(GlobalLoadStmt *stmt) override {
-    if (is_done(stmt))
+    auto &candidates = global_loads_[stmt->src];
+    if (is_done(stmt)) {
+      candidates.emplace_back(current_stmt_id, stmt);
       return;
-    for (int i = 0; i < current_stmt_id; i++) {
-      auto &bstmt = block->statements[i];
+    }
+    // Load reuse requires pointer identity. Index only previous loads of that
+    // pointer instead of scanning unrelated statements for every array element.
+    // Keep candidate order and the intervening-write checks unchanged.
+    for (auto [i, bstmt] : candidates) {
       if (stmt->ret_type == bstmt->ret_type) {
         auto &bstmt_data = *bstmt;
         if (typeid(bstmt_data) == typeid(*stmt)) {
@@ -139,7 +147,7 @@ class BasicBlockSimplify : public IRVisitor {
               }
             }
             if (!has_store) {
-              stmt->replace_usages_with(bstmt.get());
+              stmt->replace_usages_with(bstmt);
               modifier.erase(stmt);
               return;
             }
@@ -147,6 +155,7 @@ class BasicBlockSimplify : public IRVisitor {
         }
       }
     }
+    candidates.emplace_back(current_stmt_id, stmt);
     set_done(stmt);
   }
 

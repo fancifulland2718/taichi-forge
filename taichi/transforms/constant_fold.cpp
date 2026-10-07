@@ -9,6 +9,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/transforms/constant_fold.h"
+#include "taichi/transforms/batch_stmt_replacer.h"
 #include "taichi/program/program.h"
 
 namespace taichi::lang {
@@ -28,7 +29,10 @@ T shr(T value, unsigned int shift) {
 class ConstantFold : public BasicStmtVisitor {
  public:
   using BasicStmtVisitor::visit;
-  DelayedIRModifier modifier;
+  BatchStmtReplacer modifier;
+
+  explicit ConstantFold(IRNode *root) : modifier(root) {
+  }
 
   static bool is_good_type(DataType dt) {
     // ConstStmt of `bad` types like `i8` is not supported by LLVM.
@@ -269,8 +273,7 @@ class ConstantFold : public BasicStmtVisitor {
 
   void visit(UnaryOpStmt *stmt) override {
     if (stmt->is_cast() && stmt->cast_type == stmt->operand->ret_type) {
-      stmt->replace_usages_with(stmt->operand);
-      modifier.erase(stmt);
+      modifier.replace(stmt, VecStatement(), stmt->operand);
       return;
     }
 
@@ -302,12 +305,12 @@ class ConstantFold : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node) {
-    ConstantFold folder;
     bool modified = false;
 
     while (true) {
+      ConstantFold folder(node);
       node->accept(&folder);
-      if (folder.modifier.modify_ir()) {
+      if (folder.modifier.apply()) {
         modified = true;
       } else {
         break;
@@ -319,27 +322,23 @@ class ConstantFold : public BasicStmtVisitor {
 
  private:
   void insert_and_erase(Stmt *stmt, const TypedConstant &new_constant) {
-    auto evaluated = Stmt::make<ConstStmt>(new_constant);
-    stmt->replace_usages_with(evaluated.get());
-    modifier.insert_before(stmt, std::move(evaluated));
-    modifier.erase(stmt);
+    VecStatement stmts;
+    auto evaluated = stmts.push_back<ConstStmt>(new_constant);
+    modifier.replace(stmt, std::move(stmts), evaluated);
   }
 
   void insert_and_erase(Stmt *stmt,
                         const std::vector<TypedConstant> &new_constants) {
     std::vector<Stmt *> values;
+    VecStatement stmts;
     for (auto &new_constant : new_constants) {
-      auto const_stmt = Stmt::make<ConstStmt>(new_constant);
-      values.push_back(const_stmt.get());
-      modifier.insert_before(stmt, std::move(const_stmt));
+      values.push_back(stmts.push_back<ConstStmt>(new_constant));
     }
 
-    auto evaluated = Stmt::make<MatrixInitStmt>(values);
+    auto evaluated = stmts.push_back<MatrixInitStmt>(values);
     evaluated->ret_type = stmt->ret_type;
 
-    stmt->replace_usages_with(evaluated.get());
-    modifier.insert_before(stmt, std::move(evaluated));
-    modifier.erase(stmt);
+    modifier.replace(stmt, std::move(stmts), evaluated);
   }
 };
 

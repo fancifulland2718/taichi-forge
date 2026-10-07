@@ -49,6 +49,14 @@ bounds-check cost while retaining the other debug behavior. This is a targeted
 diagnostic or application-contract control, not a general production tuning
 default: an invalid index is backend-undefined once the check is disabled.
 
+## Nested static loops
+
+Nested `ti.static` loops still expand during the fast tier. An `8 x 8` loop is
+supported normally; compile cost also depends on the body and further nesting.
+AST lowering, constant folding and atomic demotion batch their IR replacements
+to avoid repeated block scans. Expansion itself and downstream code generation
+still cost time proportional to the generated program, or more in other passes.
+
 ## When to use `advanced_optimization=False`
 
 Taichi's official settings guide says that disabling advanced optimization can

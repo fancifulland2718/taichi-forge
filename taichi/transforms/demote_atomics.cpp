@@ -4,6 +4,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/system/profiler.h"
+#include "taichi/transforms/batch_stmt_replacer.h"
 
 #include <deque>
 #include <set>
@@ -23,9 +24,9 @@ class DemoteAtomics : public BasicStmtVisitor {
   using BasicStmtVisitor::visit;
 
   OffloadedStmt *current_offloaded;
-  DelayedIRModifier modifier;
+  BatchStmtReplacer modifier;
 
-  DemoteAtomics() {
+  explicit DemoteAtomics(IRNode *root) : modifier(root) {
     current_offloaded = nullptr;
   }
 
@@ -193,9 +194,7 @@ class DemoteAtomics : public BasicStmtVisitor {
       // value. The correct thing is to replace |stmt| $d with the loaded
       // old value $d'.
       // See also: https://github.com/taichi-dev/taichi/issues/332
-      stmt->replace_usages_with(load);
-      modifier.replace_with(stmt, std::move(new_stmts),
-                            /*replace_usages=*/false);
+      modifier.replace(stmt, std::move(new_stmts), load);
     }
   }
 
@@ -219,11 +218,11 @@ class DemoteAtomics : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node) {
-    DemoteAtomics demoter;
     bool modified = false;
     while (true) {
+      DemoteAtomics demoter(node);
       node->accept(&demoter);
-      if (demoter.modifier.modify_ir()) {
+      if (demoter.modifier.apply()) {
         modified = true;
       } else {
         break;

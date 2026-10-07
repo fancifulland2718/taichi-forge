@@ -6,6 +6,7 @@
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
 
+#include <unordered_map>
 #include <unordered_set>
 
 namespace taichi::lang {
@@ -14,14 +15,33 @@ namespace {
 
 using FlattenContext = Expression::FlattenContext;
 
-template <typename Vec>
-std::vector<typename Vec::value_type::pointer> make_raw_pointer_list(
-    const Vec &unique_pointers) {
-  std::vector<typename Vec::value_type::pointer> raw_pointers;
-  for (auto &ptr : unique_pointers)
-    raw_pointers.push_back(ptr.get());
-  return raw_pointers;
-}
+// Frontend expressions resolve locals through Block::local_var_to_stmt. Only
+// registered IR operands need rebinding after lowering; do that in one walk
+// instead of searching the enclosing block for every frontend statement.
+class RebindLoweredStatements : public BasicStmtVisitor {
+ public:
+  explicit RebindLoweredStatements(
+      const std::unordered_map<Stmt *, Stmt *> &replacements)
+      : replacements_(replacements) {
+    invoke_default_visitor = true;
+  }
+
+  void visit(Stmt *stmt) override {
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto found = replacements_.find(stmt->operand(i));
+      if (found != replacements_.end()) {
+        stmt->set_operand(i, found->second);
+      }
+    }
+  }
+
+  void preprocess_container_stmt(Stmt *stmt) override {
+    visit(stmt);
+  }
+
+ private:
+  const std::unordered_map<Stmt *, Stmt *> &replacements_;
+};
 
 }  // namespace
 
@@ -34,6 +54,23 @@ class LowerAST : public IRVisitor {
   std::unordered_set<Stmt *> detected_fors_with_break_;
   Block *current_block_;
   int current_block_depth_;
+  bool current_stmt_replaced_{false};
+  std::unordered_map<Stmt *, Stmt *> replacements_;
+
+  void replace_with(Stmt *stmt, VecStatement &&lowered) {
+    TI_ASSERT(stmt->parent == current_block_);
+    if (!lowered.stmts.empty()) {
+      replacements_.emplace(stmt, lowered.back().get());
+    }
+    current_block_->insert(std::move(lowered));
+    current_stmt_replaced_ = true;
+  }
+
+  void replace_with(Stmt *stmt, std::unique_ptr<Stmt> lowered) {
+    VecStatement stmts;
+    stmts.push_back(std::move(lowered));
+    replace_with(stmt, std::move(stmts));
+  }
 
   FlattenContext make_flatten_ctx() {
     FlattenContext fctx;
@@ -53,14 +90,26 @@ class LowerAST : public IRVisitor {
 
   void visit(Block *stmt_list) override {
     auto backup_block = this->current_block_;
+    auto backup_replaced = current_stmt_replaced_;
     this->current_block_ = stmt_list;
-    auto stmts = make_raw_pointer_list(stmt_list->statements);
+    // Keep the original statements alive while emitting the lowered block in
+    // order. This avoids both linear position searches and vector suffix moves.
+    auto stmts = std::move(stmt_list->statements);
+    stmt_list->statements.clear();
+    stmt_list->statements.reserve(stmts.size());
     current_block_depth_++;
     for (auto &stmt : stmts) {
+      current_stmt_replaced_ = false;
       stmt->accept(this);
+      if (current_stmt_replaced_) {
+        stmt_list->trash_bin.push_back(std::move(stmt));
+      } else {
+        stmt_list->insert(std::move(stmt));
+      }
     }
     current_block_depth_--;
     this->current_block_ = backup_block;
+    current_stmt_replaced_ = backup_replaced;
   }
 
   void visit(FrontendAllocaStmt *stmt) override {
@@ -74,11 +123,11 @@ class LowerAST : public IRVisitor {
           tensor_type->get_shape(), tensor_type->get_element_type(),
           stmt->is_shared);
       block->local_var_to_stmt.insert(std::make_pair(ident, lowered.get()));
-      stmt->parent->replace_with(stmt, std::move(lowered));
+      replace_with(stmt, std::move(lowered));
     } else {
       auto lowered = std::make_unique<AllocaStmt>(alloca_type);
       block->local_var_to_stmt.insert(std::make_pair(ident, lowered.get()));
-      stmt->parent->replace_with(stmt, std::move(lowered));
+      replace_with(stmt, std::move(lowered));
     }
   }
 
@@ -91,7 +140,7 @@ class LowerAST : public IRVisitor {
       args.push_back(flatten_rvalue(arg, &fctx));
     }
     auto lowered = fctx.push_back<FuncCallStmt>(stmt->func, args);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
     if (const auto &ident = stmt->ident) {
       TI_ASSERT(block->local_var_to_stmt.find(ident.value()) ==
                 block->local_var_to_stmt.end());
@@ -113,7 +162,7 @@ class LowerAST : public IRVisitor {
     }
     auto pif = new_if.get();
     fctx.push_back(std::move(new_if));
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
     pif->accept(this);
   }
 
@@ -142,7 +191,7 @@ class LowerAST : public IRVisitor {
       }
     }
     fctx.push_back<PrintStmt>(new_contents, stmt->formats);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
   }
 
   void visit(FrontendBreakStmt *stmt) override {
@@ -150,11 +199,11 @@ class LowerAST : public IRVisitor {
     VecStatement stmts;
     auto const_true = stmts.push_back<ConstStmt>(TypedConstant((int32)0));
     stmts.push_back<WhileControlStmt>(while_stmt->mask, const_true);
-    stmt->parent->replace_with(stmt, std::move(stmts));
+    replace_with(stmt, std::move(stmts));
   }
 
   void visit(FrontendContinueStmt *stmt) override {
-    stmt->parent->replace_with(stmt, Stmt::make<ContinueStmt>());
+    replace_with(stmt, Stmt::make<ContinueStmt>());
   }
 
   void visit(FrontendWhileStmt *stmt) override {
@@ -177,12 +226,12 @@ class LowerAST : public IRVisitor {
     auto &&const_stmt =
         std::make_unique<ConstStmt>(TypedConstant((int32)0xFFFFFFFF));
     auto const_stmt_ptr = const_stmt.get();
-    stmt->insert_before_me(std::move(mask));
-    stmt->insert_before_me(std::move(const_stmt));
-    stmt->insert_before_me(
+    current_block_->insert(std::move(mask));
+    current_block_->insert(std::move(const_stmt));
+    current_block_->insert(
         std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
     auto pwhile = new_while.get();
-    stmt->parent->replace_with(stmt, std::move(new_while));
+    replace_with(stmt, std::move(new_while));
     pwhile->accept(this);
     if (ray_query_filter) {
       // One cold compiler check over the inlined predicate. Resource reads stay
@@ -419,20 +468,20 @@ class LowerAST : public IRVisitor {
           stmts->insert(std::move(load_and_compare[i]), i);
         }
 
-        stmt->insert_before_me(
+        current_block_->insert(
             std::make_unique<AllocaStmt>(PrimitiveType::i32));
         auto &&const_stmt =
             std::make_unique<ConstStmt>(TypedConstant((int32)0xFFFFFFFF));
         auto const_stmt_ptr = const_stmt.get();
-        stmt->insert_before_me(std::move(mask));
-        stmt->insert_before_me(std::move(const_stmt));
-        stmt->insert_before_me(
+        current_block_->insert(std::move(mask));
+        current_block_->insert(std::move(const_stmt));
+        current_block_->insert(
             std::make_unique<LocalStoreStmt>(new_while->mask, const_stmt_ptr));
         fctx.push_back(std::move(new_while));
       }
     }
     auto pfor = fctx.stmts.back().get();
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
     pfor->accept(this);
   }
 
@@ -465,7 +514,7 @@ class LowerAST : public IRVisitor {
       return_ele.push_back(flatten_rvalue(x, &fctx));
     }
     fctx.push_back<ReturnStmt>(return_ele);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
   }
 
   void visit(FrontendAssignStmt *assign) override {
@@ -503,7 +552,7 @@ class LowerAST : public IRVisitor {
       fctx.push_back<GlobalStoreStmt>(dest_stmt, expr_stmt);
     }
     fctx.stmts.back()->dbg_info = assign->dbg_info;
-    assign->parent->replace_with(assign, std::move(fctx.stmts));
+    replace_with(assign, std::move(fctx.stmts));
   }
 
   void visit(FrontendSNodeOpStmt *stmt) override {
@@ -541,7 +590,7 @@ class LowerAST : public IRVisitor {
       TI_NOT_IMPLEMENTED
     }
 
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
   }
 
   void visit(FrontendAssertStmt *stmt) override {
@@ -559,13 +608,13 @@ class LowerAST : public IRVisitor {
     }
     fctx.push_back<AssertStmt>(val_stmt, stmt->text, args_stmts,
                                stmt->dbg_info);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
   }
 
   void visit(FrontendExprStmt *stmt) override {
     auto fctx = make_flatten_ctx();
     flatten_rvalue(stmt->val, &fctx);
-    stmt->parent->replace_with(stmt, std::move(fctx.stmts));
+    replace_with(stmt, std::move(fctx.stmts));
   }
 
   void visit(FrontendExternalFuncStmt *stmt) override {
@@ -600,12 +649,14 @@ class LowerAST : public IRVisitor {
           ExternalFuncCallStmt::BITCODE, nullptr, "", stmt->bc_filename,
           stmt->bc_funcname, arg_statements, output_statements));
     }
-    stmt->parent->replace_with(stmt, std::move(ctx.stmts));
+    replace_with(stmt, std::move(ctx.stmts));
   }
 
   static void run(IRNode *node) {
     LowerAST inst(irpass::analysis::detect_fors_with_break(node));
     node->accept(&inst);
+    RebindLoweredStatements rebind(inst.replacements_);
+    node->accept(&rebind);
   }
 };
 

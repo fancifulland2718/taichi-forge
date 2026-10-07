@@ -43,6 +43,12 @@
 行为。这是面向诊断或已经验证过的应用 bounds contract 的定向控制，不是通用的生产调优
 默认值：关闭检查后，非法索引将恢复为后端未定义行为。
 
+## 嵌套静态循环
+
+嵌套 `ti.static` 循环在 fast 档位仍会展开。`8 x 8` 正常支持，编译成本还取决于
+循环体大小及更深的嵌套。AST 降低、常量折叠和原子操作降级通过批量替换 IR 避免
+重复扫描块；展开本身、后端代码生成以及其它 pass 仍会随生成的程序规模增加耗时。
+
 ## 何时使用 `advanced_optimization=False`
 
 Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以节省编译时间并

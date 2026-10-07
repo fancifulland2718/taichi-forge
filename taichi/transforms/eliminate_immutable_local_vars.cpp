@@ -18,7 +18,11 @@ class EliminateImmutableLocalVars : public BasicStmtVisitor {
   std::unordered_set<Stmt *> immutable_local_vars_;
   std::unordered_map<Stmt *, Stmt *> immutable_local_var_to_value_;
   ImmediateIRModifier immediate_modifier_;
-  DelayedIRModifier delayed_modifier_;
+  std::unordered_map<Block *, std::unordered_set<Stmt *>> to_erase_;
+
+  void erase(Stmt *stmt) {
+    to_erase_[stmt->parent].insert(stmt);
+  }
 
  public:
   explicit EliminateImmutableLocalVars(
@@ -29,7 +33,7 @@ class EliminateImmutableLocalVars : public BasicStmtVisitor {
 
   void visit(AllocaStmt *stmt) override {
     if (immutable_local_vars_.find(stmt) != immutable_local_vars_.end()) {
-      delayed_modifier_.erase(stmt);
+      erase(stmt);
     }
   }
 
@@ -37,7 +41,7 @@ class EliminateImmutableLocalVars : public BasicStmtVisitor {
     if (immutable_local_vars_.find(stmt->src) != immutable_local_vars_.end()) {
       immediate_modifier_.replace_usages_with(
           stmt, immutable_local_var_to_value_[stmt->src]);
-      delayed_modifier_.erase(stmt);
+      erase(stmt);
     }
   }
 
@@ -46,7 +50,7 @@ class EliminateImmutableLocalVars : public BasicStmtVisitor {
       TI_ASSERT(immutable_local_var_to_value_.find(stmt->dest) ==
                 immutable_local_var_to_value_.end());
       immutable_local_var_to_value_[stmt->dest] = stmt->val;
-      delayed_modifier_.erase(stmt);
+      erase(stmt);
     }
   }
 
@@ -54,7 +58,11 @@ class EliminateImmutableLocalVars : public BasicStmtVisitor {
     EliminateImmutableLocalVars pass(
         irpass::analysis::gather_immutable_local_vars(node), node);
     node->accept(&pass);
-    pass.delayed_modifier_.modify_ir();
+    // All removals are non-container statements. Compact each block once,
+    // instead of finding and shifting its suffix for every removed local.
+    for (auto &[block, stmts] : pass.to_erase_) {
+      block->erase(std::move(stmts));
+    }
   }
 };
 
