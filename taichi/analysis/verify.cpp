@@ -102,7 +102,7 @@ class IRVerifier : public BasicStmtVisitor {
     }
     current_block_ = backup_block;
     if (!block->parent_stmt() || !block->parent_stmt()->is<OffloadedStmt>())
-      current_block_ = backup_block;
+      visible_stmts_.pop_back();
   }
 
   void visit(OffloadedStmt *stmt) override {
@@ -115,7 +115,14 @@ class IRVerifier : public BasicStmtVisitor {
                offloaded_task_type_name(stmt->task_type), stmt->name(),
                fmt::ptr(stmt->body.get()));
     }
+    // A task is compiled into its own function/shader. Its prologues, body
+    // and epilogues share a scope, but cannot use another task's SSA values.
+    auto enclosing_scopes = std::move(visible_stmts_);
+    visible_stmts_.clear();
+    visible_stmts_.emplace_back();
+    visible_stmts_.back().insert(stmt);  // LoopIndexStmt refers to its task.
     stmt->all_blocks_accept(this);
+    visible_stmts_ = std::move(enclosing_scopes);
   }
 
   void visit(LocalLoadStmt *stmt) override {
