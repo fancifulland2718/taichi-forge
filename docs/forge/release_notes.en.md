@@ -50,6 +50,9 @@ Use the documentation at your release tag for version-specific API details.
 - Repair branch ownership when optimization merges adjacent `if` statements
   with complementary empty branches. Balanced compilation now passes IR
   validation for this case instead of retaining the erased statement as parent.
+- Lower one-bit predicate AND, OR and XOR to SPIR-V logical instructions.
+  Integer bitwise instructions with boolean operands produced invalid shaders
+  and could crash SPIRV-Tools during balanced optimization.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource

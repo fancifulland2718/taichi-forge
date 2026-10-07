@@ -42,6 +42,8 @@
   compiled-kernel 缓存失效，以重新生成受影响的产物。
 - 修复相邻 `if` 合并时转移分支块的父节点。互补空分支在 balanced 优化后不再保留
   已删除语句作为父节点，避免 IR 校验失败。
+- 将单比特谓词的 AND、OR、XOR 降低为 SPIR-V 逻辑指令，避免 bool 操作数使用整数
+  位操作而生成非法着色器，并触发 balanced 优化中的 SPIRV-Tools 崩溃。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

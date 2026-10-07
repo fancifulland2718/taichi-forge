@@ -4105,6 +4105,17 @@ class TaskCodegen : public IRVisitor {
         bin_value = generate_sshl_overflow(lhs_value, rhs_value, bin->get_tb());
       }
     }
+    else if (dst_type.dt == PrimitiveType::u1 &&
+             (op_type == BinaryOpType::bit_and ||
+              op_type == BinaryOpType::bit_or ||
+              op_type == BinaryOpType::bit_xor)) {
+      // IR simplification can retain one-bit operands for predicate bitwise
+      // operations. SPIR-V integer bitwise opcodes do not accept OpTypeBool.
+      auto opcode = op_type == BinaryOpType::bit_and ? spv::OpLogicalAnd
+                    : op_type == BinaryOpType::bit_or ? spv::OpLogicalOr
+                                                     : spv::OpLogicalNotEqual;
+      bin_value = ir_->make_value(opcode, dst_type, lhs_value, rhs_value);
+    }
     BINARY_OP_TO_SPIRV_BITWISE(bit_and, OpBitwiseAnd)
     BINARY_OP_TO_SPIRV_BITWISE(bit_or, OpBitwiseOr)
     BINARY_OP_TO_SPIRV_BITWISE(bit_xor, OpBitwiseXor)

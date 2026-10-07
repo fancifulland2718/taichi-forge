@@ -7,6 +7,36 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("compile_tier", ["fast", "balanced"])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_predicate_bitwise_operations(compile_tier):
+    ti.cfg.compile_tier = compile_tier
+    ti.cfg.advanced_optimization = compile_tier != "fast"
+    result = ti.field(ti.i32, shape=(4, 3))
+
+    @ti.kernel
+    def run():
+        for i in range(4):
+            a = i < 2
+            b = i % 2 == 0
+            if a & b:
+                result[i, 0] = 1
+            if a | b:
+                result[i, 1] = 1
+            if a ^ b:
+                result[i, 2] = 1
+
+    expected = np.array([[1, 1, 0], [0, 1, 1], [0, 1, 1], [0, 0, 0]])
+    run()
+    np.testing.assert_array_equal(result.to_numpy(), expected)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(run)
+    graph = builder.compile()
+    result.fill(0)
+    graph.run({})
+    np.testing.assert_array_equal(result.to_numpy(), expected)
+
+
 @test_utils.test()
 def test_bit_shl():
     @ti.kernel
