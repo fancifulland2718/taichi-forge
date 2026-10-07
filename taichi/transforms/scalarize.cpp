@@ -1216,9 +1216,17 @@ class ExtractLocalPointers : public BasicStmtVisitor {
   void visit(OffloadedStmt *stmt) override {
     // Extract to OffloadStmt
     Block *orig_top_level = top_level_;
+    // Offloads are compiled into separate functions/shaders. Constants and
+    // pointers extracted into one task cannot be referenced by another task.
+    decltype(first_const_) saved_const;
+    decltype(first_matrix_ptr_) saved_matrix_ptr;
+    first_const_.swap(saved_const);
+    first_matrix_ptr_.swap(saved_matrix_ptr);
     top_level_ = stmt->body.get();
     stmt->all_blocks_accept(this);
     top_level_ = orig_top_level;
+    first_const_.swap(saved_const);
+    first_matrix_ptr_.swap(saved_matrix_ptr);
   }
 
   void visit(MatrixPtrStmt *stmt) override {

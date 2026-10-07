@@ -37,6 +37,9 @@
 - 修复 SPIR-V SIMT 线程索引：`ti.simt.block.global_thread_idx()` 正确选择后端，并为
   已注册的 `vkGlobalThreadIdx` 生成有效代码；局部线程 ID 补入着色器入口接口。未实现的 SPIR-V
   内部操作在编译期明确报错，避免生成零 ID 后交给驱动。
+- 将局部向量指针标量化时复用的常量限定在所属 offloaded task 内。连续任务中的动态
+  向量索引不再跨着色器引用 SSA 值，修复 Vulkan `query_value` 编译失败；同时使旧
+  compiled-kernel 缓存失效，以重新生成受影响的产物。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

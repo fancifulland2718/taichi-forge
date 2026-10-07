@@ -43,6 +43,10 @@ Use the documentation at your release tag for version-specific API details.
   intrinsic; local thread IDs are included in the shader entry-point interface.
   Unsupported SPIR-V intrinsics fail during compilation instead of emitting
   invalid ID zero and reaching the driver.
+- Keep scalarized local-vector pointer constants within their offloaded task.
+  Dynamic vector indexing in consecutive tasks no longer shares shader-local
+  SSA values across shaders, fixing Vulkan `query_value` compilation failures.
+  Invalidate compiled-kernel caches to regenerate affected artifacts.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource

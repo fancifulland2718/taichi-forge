@@ -1392,3 +1392,41 @@ def test_matrix_loop_unique():
 
     for u in range(10):
         assert F_x[u][1] == 1.0
+
+
+@pytest.mark.parametrize("compile_tier", ["fast", "balanced"])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], offline_cache=False)
+def test_dynamic_local_vector_pointer_constants_are_task_local(compile_tier):
+    # Runtime indexing keeps local vector allocations through scalarization.
+    # The second offload must not refer to the first offload's offset constants.
+    ti.cfg.compile_tier = compile_tier
+    ti.cfg.advanced_optimization = compile_tier != "fast"
+    indices = ti.field(ti.i32, shape=4)
+    result = ti.Vector.field(3, ti.f32, shape=8)
+    selectors = np.array([0, 1, 2, 1], dtype=np.int32)
+    indices.from_numpy(selectors)
+
+    @ti.kernel
+    def run():
+        for i in range(4):
+            value = ti.Vector([1.0, 2.0, 3.0])
+            value[indices[i]] += 4.0
+            result[i] = value
+        for i in range(4):
+            value = ti.Vector([2.0, 3.0, 4.0])
+            value[indices[i]] += 5.0
+            result[i + 4] = value
+
+    expected = np.tile([1.0, 2.0, 3.0], (8, 1)).astype(np.float32)
+    expected[4:] += 1
+    for i, component in enumerate(selectors):
+        expected[i, component] += 4
+        expected[i + 4, component] += 5
+    run()
+    np.testing.assert_array_equal(result.to_numpy(), expected)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(run)
+    graph = builder.compile()
+    result.fill(-1)
+    graph.run({})
+    np.testing.assert_array_equal(result.to_numpy(), expected)

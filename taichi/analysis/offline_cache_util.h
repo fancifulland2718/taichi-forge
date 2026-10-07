@@ -150,7 +150,9 @@ class Kernel;
 //  36 - SPIR-V thread indices use the registered intrinsic and complete
 //       builtin entry-point interfaces. Unsupported intrinsics fail compilation
 //       instead of emitting invalid ID zero.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 36;
+//  37 - Scalarized local-pointer constants are scoped to one offloaded task;
+//       cached artifacts must not retain cross-task SSA references.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 37;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(
