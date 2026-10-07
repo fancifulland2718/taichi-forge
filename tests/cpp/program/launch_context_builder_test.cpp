@@ -26,9 +26,10 @@ TEST(LaunchContextBuilderTest, HasNoCudaTaskExecutionPlanByDefault) {
 void set_test_execution_plan(Kernel &kernel,
                              const std::string &execution_identity,
                              int work_per_thread) {
-  kernel.set_offload_execution_plan(
-      "compilation:test", execution_identity, {0}, {"range_for"}, {0},
-      {"auto"}, {2}, {-1}, {0}, {work_per_thread}, {"direct"});
+  kernel.set_offload_execution_plan("compilation:test", execution_identity, {0},
+                                    {"range_for"}, {0}, {"auto"}, {2}, {-1},
+                                    {0}, {work_per_thread}, {"saturating"},
+                                    {"direct"}, {{}}, {{}}, {{}}, {{}}, {});
 }
 
 TEST(LaunchContextBuilderTest, FreezesBorrowedKernelExecutionPlan) {

@@ -58,6 +58,8 @@
   此结果仅验证该编译问题，不代表通用应用加速收益。
 - 平衡 IR 校验器的作用域栈，并隔离 offloaded task；保留同一 task 的 prologue、body
   与 epilogue 之间的合法可见性。分支局部值逃逸或跨 task 的 SSA 引用在代码生成前报错。
+- 恢复完整 C++ 测试构建：更新 launch policy 参数，并在 split runtime 测试链接时
+  纳入传递依赖中的 native object library。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

@@ -73,6 +73,8 @@ Use the documentation at your release tag for version-specific API details.
 - Balance IR verifier scopes and isolate offloaded tasks while preserving
   visibility from a task's prologues to its body and epilogues. Branch-local
   or cross-task SSA references now fail validation before code generation.
+- Restore the aggregate C++ test build: update launch-policy arguments and
+  include transitive native object libraries when linking split-runtime tests.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource
