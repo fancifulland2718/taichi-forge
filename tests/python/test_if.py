@@ -35,3 +35,38 @@ def test_ifexpr_scalar():
             g_v[I] = 0 if cond else g_v[I]
 
     func()
+
+
+@pytest.mark.parametrize("move_true_branch", [True, False])
+@test_utils.test(arch=[ti.cuda, ti.vulkan], compile_tier="balanced",
+                 advanced_optimization=True, offline_cache=False)
+def test_adjacent_if_merge_transfers_branch_owner(move_true_branch):
+    result = ti.field(ti.i32, shape=4)
+
+    @ti.kernel
+    def run():
+        for i in result:
+            condition = i < 2
+            if ti.static(move_true_branch):
+                if condition:
+                    result[i] = 3
+                if condition:
+                    pass
+                else:
+                    result[i] = 5
+            else:
+                if condition:
+                    pass
+                else:
+                    result[i] = 5
+                if condition:
+                    result[i] = 3
+
+    run()
+    assert result.to_numpy().tolist() == [3, 3, 5, 5]
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(run)
+    graph = builder.compile()
+    result.fill(-1)
+    graph.run({})
+    assert result.to_numpy().tolist() == [3, 3, 5, 5]

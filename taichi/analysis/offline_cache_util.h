@@ -152,7 +152,8 @@ class Kernel;
 //       instead of emitting invalid ID zero.
 //  37 - Scalarized local-pointer constants are scoped to one offloaded task;
 //       cached artifacts must not retain cross-task SSA references.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 37;
+//  38 - Merging adjacent if statements reparents transferred branch blocks.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 38;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

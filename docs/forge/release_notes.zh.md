@@ -40,6 +40,8 @@
 - 将局部向量指针标量化时复用的常量限定在所属 offloaded task 内。连续任务中的动态
   向量索引不再跨着色器引用 SSA 值，修复 Vulkan `query_value` 编译失败；同时使旧
   compiled-kernel 缓存失效，以重新生成受影响的产物。
+- 修复相邻 `if` 合并时转移分支块的父节点。互补空分支在 balanced 优化后不再保留
+  已删除语句作为父节点，避免 IR 校验失败。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

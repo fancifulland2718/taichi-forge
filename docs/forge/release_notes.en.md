@@ -47,6 +47,9 @@ Use the documentation at your release tag for version-specific API details.
   Dynamic vector indexing in consecutive tasks no longer shares shader-local
   SSA values across shaders, fixing Vulkan `query_value` compilation failures.
   Invalidate compiled-kernel caches to regenerate affected artifacts.
+- Repair branch ownership when optimization merges adjacent `if` statements
+  with complementary empty branches. Balanced compilation now passes IR
+  validation for this case instead of retaining the erased statement as parent.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource

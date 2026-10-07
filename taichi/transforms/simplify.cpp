@@ -446,6 +446,12 @@ class BasicBlockSimplify : public IRVisitor {
           };
           concatenate(bstmt->true_statements, if_stmt->true_statements);
           concatenate(bstmt->false_statements, if_stmt->false_statements);
+          // An empty destination clause takes ownership of the source block.
+          // Rebind it before the source IfStmt is erased.
+          if (bstmt->true_statements)
+            bstmt->true_statements->set_parent_stmt(bstmt);
+          if (bstmt->false_statements)
+            bstmt->false_statements->set_parent_stmt(bstmt);
           modifier.erase(if_stmt);
           return;
         }
