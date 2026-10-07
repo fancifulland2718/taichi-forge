@@ -31,6 +31,11 @@ Use the documentation at your release tag for version-specific API details.
 
 - Open the 0.6.4 development cycle from the 0.6.3 baseline. Source version
   metadata and the default runtime dependency now target 0.6.4.
+- Default Python `ti.init()` to `compile_tier="fast"` with
+  `advanced_optimization=False`, including packaged installs. Explicit
+  `balanced`/`full` initialization enables advanced IR optimization unless
+  the caller sets that flag separately. Keyword options still override
+  environment options. Existing compile-cache keys separate these settings.
 - Create a fresh SPIR-V optimizer for each task. SPIRV-Tools consumes its pass
   list after a run; reusing the old optimizer silently skipped optimization for
   later tasks and could expose a Vulkan driver compiler crash with loop-carried

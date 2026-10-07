@@ -30,7 +30,8 @@ All defaults match upstream 1.7.4 unless noted.
 
 | Kwarg | Default | Purpose |
 |---|---|---|
-| `compile_tier` | `"balanced"` | `"fast"` forces LLVM to `-O0` (floor `-O1` on NVPTX / AMDGCN) and skips `spirv-opt` at level 0. `"balanced"` and `"full"` keep the configured backend level. This is the recommended application-facing control. |
+| `compile_tier` | `"fast"` in `ti.init()` | `"fast"` forces LLVM to `-O0` (floor `-O1` on NVPTX / AMDGCN) and skips `spirv-opt` at level 0. `"balanced"` and `"full"` keep the configured backend level. This is the recommended application-facing control. |
+| `advanced_optimization` | `False` for `fast`; `True` for explicit `balanced`/`full` initialization | Selects the advanced IR pipeline. An explicit keyword or `TI_ADVANCED_OPTIMIZATION` overrides the tier-derived default; keywords take precedence over environment values. Per-kernel tier overrides continue to inherit this Program-level flag. |
 | `llvm_opt_level` | `3` | Explicit LLVM `-O` level (`0`–`3`) for non-`fast` tiers. `compile_tier="fast"` still forces the backend-safe O0/O1 level. Prefer `compile_tier` unless a representative benchmark justifies a backend-specific override. |
 
 ### 2.2 Compile-pipeline batch & threading

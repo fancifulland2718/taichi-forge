@@ -26,8 +26,8 @@
 | --- | --- | --- | --- |
 | `offline_cache=True` | 相同后端与编译配置 | 后续进程可免去未改变产物的重复编译 | 首次运行仍需编译；源码、shape、layout、后端或进入 key 的配置变化都会 miss |
 | `ti.compile_kernels(...)` | 指定 specialization | 把编译移到热循环前 | 不会减少编译工作量；参数必须有代表性 |
-| `compile_tier='fast'` | Program，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O0，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
-| `compile_tier='balanced'` | Program 默认 | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
+| `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O0，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
+| `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
 | `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 编译代价最高；只用于已证明有运行期收益的热点 |
 | `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 会成组关闭 LICM、whole-kernel CSE、CFG optimization、store/load forwarding 等；不是细粒度生产调参开关 |
 | `debug=True` 及越界/AD validation | Program | 更强诊断与安全检查 | 改变生成代码和运行成本；debug 与 release 必须分开测量 |

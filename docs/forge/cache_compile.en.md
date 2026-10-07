@@ -49,9 +49,11 @@ ti.compile_kernels([
 ])
 ```
 
-Use `compile_tier="fast"` for iteration speed when exact peak runtime
-performance is not required, and `compile_tier="full"` for the most conservative
-legacy optimization pipeline.
+Python `ti.init()` defaults to `compile_tier="fast"` and
+`advanced_optimization=False`, including packaged installations. Explicit
+`balanced` or `full` initialization enables advanced IR optimization unless
+the caller separately overrides that flag. Select `full` when the measured
+workload benefits from the most conservative legacy optimization pipeline.
 
 ## Metadata Lock Lifetime
 

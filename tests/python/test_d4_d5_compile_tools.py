@@ -282,7 +282,7 @@ def test_source_template_cache_reuses_ast_template_for_specializations():
     assert x[None] == 5
 
 
-@test_utils.test(arch=ti.cpu, offline_cache=False)
+@test_utils.test(arch=ti.cpu, offline_cache=False, compile_tier="balanced")
 def test_kernel_cache_key_separates_compile_tier_changes():
     x = ti.field(ti.i32, shape=())
 

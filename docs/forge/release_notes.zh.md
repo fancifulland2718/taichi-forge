@@ -29,6 +29,9 @@
 ## 0.6.4（开发中）
 
 - 从 0.6.3 基线开启 0.6.4 开发周期；源码版本元数据与默认 runtime 依赖同步为 0.6.4。
+- Python `ti.init()`（包括打包安装）默认使用 `compile_tier="fast"` 与
+  `advanced_optimization=False`。显式初始化为 `balanced/full` 时，若未单独指定
+  高级 IR 优化开关，则默认开启；关键字参数仍优先于环境变量。现有缓存键区分这些设置。
 - 每个 task 创建独立 SPIR-V optimizer。SPIRV-Tools 每次运行后会消费 pass 列表；
   复用旧对象会让后续 task 静默跳过优化，并可能在循环携带 struct cursor、嵌套向量分支时
   触发 Vulkan 驱动编译崩溃。保留现有 pass 配置选项。

@@ -44,8 +44,9 @@ ti.compile_kernels([
 ])
 ```
 
-开发迭代优先时可使用 `compile_tier="fast"`；需要最保守 legacy 优化管线时使用
-`compile_tier="full"`。
+Python `ti.init()`（包括打包安装）默认使用 `compile_tier="fast"` 与
+`advanced_optimization=False`。显式初始化为 `balanced/full` 时，若没有单独覆盖
+该开关，则开启高级 IR 优化。需要最保守 legacy 优化管线且有实测收益时，可选择 `full`。
 
 ## Metadata lock 生命周期
 

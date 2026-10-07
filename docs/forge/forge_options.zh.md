@@ -33,7 +33,8 @@
 
 | 参数 | 默认 | 用途 |
 |---|---|---|
-| `compile_tier` | `"balanced"` | `"fast"` 强制 LLVM 使用 `-O0`（NVPTX / AMDGCN 下兜底 `-O1`），并以 level 0 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。应用层推荐只使用该选项。 |
+| `compile_tier` | `ti.init()` 中为 `"fast"` | `"fast"` 强制 LLVM 使用 `-O0`（NVPTX / AMDGCN 下兜底 `-O1`），并以 level 0 跳过 `spirv-opt`；`"balanced"` 与 `"full"` 保留已配置的后端等级。应用层推荐只使用该选项。 |
+| `advanced_optimization` | `fast` 为 `False`；显式初始化为 `balanced/full` 时为 `True` | 选择高级 IR 优化管线。显式参数或 `TI_ADVANCED_OPTIMIZATION` 覆盖按 tier 推导的默认值，参数优先于环境变量；每 kernel 的 tier 覆盖仍继承 Program 级的此开关。 |
 | `llvm_opt_level` | `3` | 非 `fast` tier 下显式指定 LLVM `-O` 等级（`0`–`3`）；`compile_tier="fast"` 仍会强制后端安全的 O0/O1。除非代表性 benchmark 证明有必要，否则优先使用 `compile_tier`。 |
 
 ### 2.2 编译管线 / 线程

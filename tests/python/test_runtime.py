@@ -52,7 +52,8 @@ init_args = {
     # 'key': [default, choices],
     "log_level": ["info", ["error", "warn", "info", "debug", "trace"]],
     "gdb_trigger": [False, TF],
-    "advanced_optimization": [True, TF],
+    "compile_tier": ["fast", ["fast", "balanced", "full"]],
+    "advanced_optimization": [False, TF],
     "debug": [False, TF],
     "print_ir": [False, TF],
     "verbose": [True, TF],
@@ -147,6 +148,32 @@ def test_init_arch(arch):
     with patch_os_environ_helper({}, excludes=["TI_ARCH"]):
         ti.init(arch=arch)
         assert ti.lang.impl.current_cfg().arch == arch
+
+
+@pytest.mark.parametrize(
+    "environment,kwargs,tier,advanced",
+    [
+        ({}, {}, "fast", False),
+        ({}, {"compile_tier": "balanced"}, "balanced", True),
+        ({}, {"compile_tier": "full"}, "full", True),
+        ({"TI_COMPILE_TIER": "balanced"}, {}, "balanced", True),
+        ({"TI_COMPILE_TIER": "full"}, {"compile_tier": "fast"}, "fast", False),
+        ({"TI_ADVANCED_OPTIMIZATION": "1"}, {}, "fast", True),
+        ({"TI_ADVANCED_OPTIMIZATION": "0"}, {"compile_tier": "balanced"}, "balanced", False),
+        ({"TI_ADVANCED_OPTIMIZATION": "1"}, {"advanced_optimization": False}, "fast", False),
+        ({}, {"compile_tier": "fast", "advanced_optimization": True}, "fast", True),
+        ({"TI_COMPILE_TIER": "", "TI_ADVANCED_OPTIMIZATION": ""}, {}, "fast", False),
+    ],
+)
+def test_compile_defaults_and_explicit_overrides(environment, kwargs, tier, advanced):
+    try:
+        with patch_os_environ_helper(environment, excludes=env_configs):
+            ti.init(arch=ti.cpu, _test_mode=True, **kwargs)
+            cfg = ti.lang.impl.default_cfg()
+            assert cfg.compile_tier == tier
+            assert cfg.advanced_optimization is advanced
+    finally:
+        ti.reset()
 
 
 @test_utils.test(arch=ti.cpu)

@@ -30,8 +30,8 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | --- | --- | --- | --- |
 | `offline_cache=True` | Matching backend and compile configuration | Avoids recompiling unchanged artifacts in later processes | First run still compiles; changed source, shape, layout, backend, or keyed configuration causes a miss |
 | `ti.compile_kernels(...)` | Selected specializations | Moves compilation before the hot loop | Does not make compilation cheaper; requires representative arguments |
-| `compile_tier='fast'` | Program, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O0 on CPU, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
-| `compile_tier='balanced'` | Program default | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
+| `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O0 on CPU, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
+| `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
 | `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
 | `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables LICM, whole-kernel CSE, CFG optimization, store/load forwarding, and related passes as a group; it is not a fine-grained production tuning knob |
 | `debug=True` and bounds/AD validation | Program | Better diagnostics and safety checks | Changes generated code and runtime cost; keep separate debug and release measurements |

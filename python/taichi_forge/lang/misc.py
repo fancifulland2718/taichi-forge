@@ -413,6 +413,9 @@ def init(
 
     cfg = impl.default_cfg()
     cfg.offline_cache = True  # Enable offline cache in frontend instead of C++ side
+    # Shipped Python packages favor edit/run latency. Keep this frontend
+    # default independent of the internal C++ CompileConfig constructor.
+    cfg.compile_tier = "fast"
 
     spec_cfg = _SpecialConfig()
     env_comp = _EnvironmentConfigurator(kwargs, cfg)
@@ -420,6 +423,10 @@ def init(
     check_out_of_bound_explicit = (
         "check_out_of_bound" in kwargs
         or bool(os.environ.get("TI_CHECK_OUT_OF_BOUND", ""))
+    )
+    advanced_optimization_explicit = (
+        "advanced_optimization" in kwargs
+        or bool(os.environ.get("TI_ADVANCED_OPTIMIZATION", ""))
     )
 
     # configure default_fp/ip:
@@ -481,6 +488,12 @@ def init(
         if _cast is bool:
             _cast = None
         env_comp.add(key, _cast)
+
+    # An explicit tier selects its usual IR pipeline unless the caller also
+    # selects advanced_optimization. Keyword/environment overrides retain the
+    # same precedence as every other ti.init option.
+    if not advanced_optimization_explicit:
+        cfg.advanced_optimization = cfg.compile_tier != "fast"
 
     _ti_core._set_check_out_of_bound_explicit(check_out_of_bound_explicit)
 
