@@ -757,7 +757,9 @@ SType IRBuilder::get_storage_pointer_type(const SType &value_type) {
   return get_pointer_type(value_type, storage_class);
 }
 
-SType IRBuilder::get_array_type(const SType &_value_type, uint32_t num_elems) {
+SType IRBuilder::get_array_type(const SType &_value_type,
+                                uint32_t num_elems,
+                                bool has_buffer_layout) {
   auto value_type = _value_type;
   if (value_type.dt->is_primitive(PrimitiveTypeID::u1)) {
     value_type = i32_type();
@@ -776,6 +778,10 @@ SType IRBuilder::get_array_type(const SType &_value_type, uint32_t num_elems) {
     ib_.begin(spv::OpTypeRuntimeArray)
         .add_seq(arr_type, value_type)
         .commit(&global_);
+  }
+
+  if (!has_buffer_layout) {
+    return arr_type;
   }
 
   uint32_t nbytes;
@@ -804,7 +810,7 @@ SType IRBuilder::get_array_type(const SType &_value_type, uint32_t num_elems) {
 
 SType IRBuilder::get_struct_array_type(const SType &value_type,
                                        uint32_t num_elems) {
-  SType arr_type = get_array_type(value_type, num_elems);
+  SType arr_type = get_array_type(value_type, num_elems, true);
 
   // declare struct of array
   SType struct_type;

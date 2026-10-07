@@ -364,6 +364,9 @@ GetChStmt::GetChStmt(Stmt *input_ptr,
       is_bit_vectorized(is_bit_vectorized) {
   TI_ASSERT(input_ptr->is<SNodeLookupStmt>());
   input_snode = input_ptr->as<SNodeLookupStmt>()->snode;
+  TI_ASSERT_INFO(chid >= 0 && chid < input_snode->ch.size(),
+                 "GetCh child {} outside SNode {} with {} children", chid,
+                 input_snode->id, input_snode->ch.size());
   output_snode = input_snode->ch[chid].get();
   TI_STMT_REG_FIELDS;
 }
@@ -378,6 +381,9 @@ GetChStmt::GetChStmt(Stmt *input_ptr,
       chid(chid),
       is_bit_vectorized(is_bit_vectorized) {
   input_snode = snode;
+  TI_ASSERT_INFO(chid >= 0 && chid < input_snode->ch.size(),
+                 "GetCh child {} outside SNode {} with {} children", chid,
+                 input_snode->id, input_snode->ch.size());
   output_snode = input_snode->ch[chid].get();
   TI_STMT_REG_FIELDS;
 }

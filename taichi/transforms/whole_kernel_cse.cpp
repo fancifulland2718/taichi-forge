@@ -114,6 +114,11 @@ class WholeKernelCSE : public BasicStmtVisitor {
     // the same type with it?
     if (this_stmt->type() != prev_stmt->type())
       return false;
+    // Address equality is not enough for substitution: scalar and tensor
+    // GlobalPtrStmts may name the same first element, but matrix lowering
+    // interprets their offsets differently (bytes versus components).
+    if (this_stmt->ret_type != prev_stmt->ret_type)
+      return false;
     if (this_stmt->is<GlobalPtrStmt>()) {
       auto this_ptr = this_stmt->as<GlobalPtrStmt>();
       auto prev_ptr = prev_stmt->as<GlobalPtrStmt>();

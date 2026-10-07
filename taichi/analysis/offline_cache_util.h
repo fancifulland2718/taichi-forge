@@ -154,7 +154,9 @@ class Kernel;
 //       cached artifacts must not retain cross-task SSA references.
 //  38 - Merging adjacent if statements reparents transferred branch blocks.
 //  39 - SPIR-V one-bit AND/OR/XOR use boolean logical opcodes.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 39;
+//  40 - Restrict SPIR-V array layouts to buffers; preserve pointer return
+//       types during CSE so byte offsets cannot become component indices.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 40;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

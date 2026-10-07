@@ -7,7 +7,7 @@ import pytest
 from pytest import approx
 from taichi_forge.lang import impl
 from taichi_forge.lang.exception import TaichiCompilationError, TaichiTypeError
-from taichi_forge.lang.misc import get_host_arch_list
+from taichi_forge.lang.misc import get_host_arch_list, is_extension_supported
 
 import taichi_forge as ti
 from tests import test_utils
@@ -1430,3 +1430,48 @@ def test_dynamic_local_vector_pointer_constants_are_task_local(compile_tier):
     result.fill(-1)
     graph.run({})
     np.testing.assert_array_equal(result.to_numpy(), expected)
+
+
+@pytest.mark.parametrize("dtype", [ti.i32, ti.f32, ti.f64])
+@pytest.mark.parametrize("layout", [ti.Layout.AOS, ti.Layout.SOA])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_vector_store_and_component_offsets_keep_pointer_types(dtype, layout):
+    if dtype == ti.f64 and not is_extension_supported(ti.cfg.arch, ti.extension.data64):
+        pytest.skip("Backend does not advertise 64-bit data support")
+    ti.cfg.compile_tier = "balanced"
+    ti.cfg.advanced_optimization = True
+    values = ti.Vector.field(4, dtype, shape=4, layout=layout)
+    result = ti.Vector.field(4, dtype, shape=4)
+    count = ti.field(ti.i32, shape=4)
+    count.from_numpy(np.arange(4, dtype=np.int32))
+
+    @ti.kernel
+    def run():
+        for i in range(4):
+            values[i] = ti.Vector([10, 20, 30, 40])
+            for component in ti.static(range(3)):
+                if component < count[i]:
+                    # This expression is lowered to a byte offset before it
+                    # becomes constant. CSE must not substitute the tensor
+                    # pointer from the whole-vector store for its scalar base.
+                    values[i][1 + component] = 100 * i + component
+            result[i] = values[i]
+
+    expected = np.tile([10, 20, 30, 40], (4, 1))
+    for i in range(4):
+        for component in range(i):
+            expected[i, 1 + component] = 100 * i + component
+    run()
+    np.testing.assert_array_equal(values.to_numpy(), expected)
+    np.testing.assert_array_equal(result.to_numpy(), expected)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(run)
+    graph = builder.compile()
+    try:
+        values.fill(-1)
+        result.fill(-1)
+        graph.run({})
+        np.testing.assert_array_equal(values.to_numpy(), expected)
+        np.testing.assert_array_equal(result.to_numpy(), expected)
+    finally:
+        graph.close()

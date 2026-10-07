@@ -44,6 +44,11 @@
   已删除语句作为父节点，避免 IR 校验失败。
 - 将单比特谓词的 AND、OR、XOR 降低为 SPIR-V 逻辑指令，避免 bool 操作数使用整数
   位操作而生成非法着色器，并触发 balanced 优化中的 SPIRV-Tools 崩溃。
+- 将 SPIR-V 数组的显式步长限定在 buffer 布局中。Function 局部数组与普通 Workgroup
+  数组不再带有非法 `ArrayStride` 装饰；保留 buffer 步长及 bool 数组的 i32 物理存储。
+- 公共子表达式消除保留指针返回类型的区别。同地址的标量与整向量指针不再被合并，
+  避免字节偏移被误解为元素索引，导致 balanced 编译在降级 field 访问时越界崩溃；
+  同时使受影响的 compiled-kernel 缓存失效。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

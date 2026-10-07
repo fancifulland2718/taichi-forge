@@ -372,8 +372,11 @@ class IRBuilder {
   SType get_storage_image_type(BufferFormat format, int num_dimensions);
   SType get_storage_image_sampled_type(BufferFormat format) const;
   SType get_storage_image_texel_type(BufferFormat format);
-  // Get a value_type[num_elems] type
-  SType get_array_type(const SType &value_type, uint32_t num_elems);
+  // Get a value_type[num_elems] type. Only buffer-backed arrays have an
+  // explicit ArrayStride; Function and ordinary Workgroup arrays must not.
+  SType get_array_type(const SType &value_type,
+                       uint32_t num_elems,
+                       bool has_buffer_layout = false);
   // Get a struct{ value_type[num_elems] } type
   SType get_struct_array_type(const SType &value_type, uint32_t num_elems);
   // Construct a struct type

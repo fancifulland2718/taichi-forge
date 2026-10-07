@@ -53,6 +53,13 @@ Use the documentation at your release tag for version-specific API details.
 - Lower one-bit predicate AND, OR and XOR to SPIR-V logical instructions.
   Integer bitwise instructions with boolean operands produced invalid shaders
   and could crash SPIRV-Tools during balanced optimization.
+- Restrict explicit SPIR-V array strides to buffer layouts. Function-local and
+  ordinary Workgroup arrays no longer carry illegal `ArrayStride` decorations;
+  buffer strides, including the physical i32 storage of bool arrays, remain intact.
+- Preserve pointer return types during common subexpression elimination. Scalar
+  and tensor pointers to the same address must stay distinct: merging them could
+  reinterpret byte offsets as component indices and crash balanced compilation
+  while lowering field accesses. Invalidate affected compiled-kernel caches.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource
