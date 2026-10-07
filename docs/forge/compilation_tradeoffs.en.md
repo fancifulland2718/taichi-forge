@@ -57,6 +57,14 @@ AST lowering, constant folding and atomic demotion batch their IR replacements
 to avoid repeated block scans. Expansion itself and downstream code generation
 still cost time proportional to the generated program, or more in other passes.
 
+`unrolling_kernel_warning_limit` is a soft source-expansion diagnostic (default
+1024 expanded statements), shared across inlined functions in a materialization.
+It counts visited statements, so static breaks and skipped branches do not
+contribute hypothetical iterations. The warning names the callable and source
+location and never changes loop semantics. It is an estimate, not native IR size
+or a performance verdict. Set it and `unrolling_limit` to `0` to silence static
+expansion warnings. Both opt-in hard limits remain `0` by default.
+
 ## When to use `advanced_optimization=False`
 
 Taichi's official settings guide says that disabling advanced optimization can

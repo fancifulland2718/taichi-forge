@@ -1,6 +1,8 @@
 import ast
 import builtins
 import traceback
+import warnings
+from contextlib import contextmanager
 from enum import Enum
 from sys import version_info
 from textwrap import TextWrapper
@@ -19,6 +21,8 @@ class Builder:
     def __call__(self, ctx, node):
         method = getattr(self, "build_" + node.__class__.__name__, None)
         try:
+            if ctx.unroll_warning is not None and ctx.unroll_warning.enabled and isinstance(node, ast.stmt):
+                ctx.unroll_warning.record_statement(ctx, node)
             if method is None:
                 error_msg = f'Unsupported node "{node.__class__.__name__}"'
                 raise TaichiSyntaxError(error_msg)
@@ -142,6 +146,71 @@ class ReturnStatus(Enum):
     ReturnedValue = 2
 
 
+class UnrollWarning:
+    """One diagnostic budget for a materialization, including inlined funcs.
+
+    Count statements actually visited inside static loops, not hypothetical
+    products of range lengths. This respects static branches/break/continue.
+    The count estimates source expansion; it is not a native IR size or a cap.
+    """
+
+    def __init__(self, ctx):
+        runtime = impl.get_runtime()
+        self.loop_limit = runtime.unrolling_limit
+        self.statement_limit = runtime.unrolling_kernel_warning_limit
+        self.enabled = bool(self.loop_limit or self.statement_limit)
+        self.name = ctx.func.func.__name__
+        self.depth = 0
+        self.statements = 0
+        self.iterations = 0
+        self.warned = False
+
+    @contextmanager
+    def static_scope(self):
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+
+    def record_iteration(self, ctx, node, count):
+        if not self.enabled:
+            return
+        self.iterations += 1
+        if self.loop_limit and count > self.loop_limit:
+            self.warn(ctx, node, f"a loop exceeded unrolling_limit={self.loop_limit}")
+
+    def record_statement(self, ctx, node):
+        if not self.depth:
+            return
+        self.statements += 1
+        if self.statement_limit and self.statements > self.statement_limit:
+            self.warn(
+                ctx,
+                node,
+                f"source expansion exceeded unrolling_kernel_warning_limit={self.statement_limit}",
+            )
+
+    def warn(self, ctx, node, reason):
+        if self.warned:
+            return
+        self.warned = True
+        # The diagnostic is a single snapshot. Stop accounting after emitting it.
+        self.enabled = False
+        warnings.warn_explicit(
+            f"Compiling '{self.name}': {reason}; so far {self.statements} expanded "
+            f"source statements across {self.iterations} ti.static iterations. "
+            "Large static expansions may compile slowly. Compilation continues "
+            "with unchanged semantics. If compile-time specialization is not needed, "
+            "consider a runtime outer loop. Adjust these warning thresholds or set "
+            "ti.init(unrolling_limit=0, unrolling_kernel_warning_limit=0) to silence them.",
+            SyntaxWarning,
+            ctx.file,
+            node.lineno + ctx.lineno_offset,
+            module="taichi_forge",
+        )
+
+
 class ASTTransformerContext:
     def __init__(
         self,
@@ -189,6 +258,7 @@ class ASTTransformerContext:
         # ASTTransformer.build_static_for; compared against
         # impl.get_runtime().unrolling_kernel_hard_limit.
         self.unrolled_iterations = 0
+        self.unroll_warning = None
 
     # e.g.: FunctionDef, Module, Global
     def variable_scope_guard(self):

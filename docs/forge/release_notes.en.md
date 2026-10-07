@@ -35,6 +35,10 @@ Use the documentation at your release tag for version-specific API details.
   passes. Immutable-local removal also compacts blocks once, and load-reuse
   searches index candidates by pointer identity while retaining store checks.
   Static-loop semantics and compile-tier defaults are unchanged.
+- Warn once per kernel materialization about cumulative static source expansion,
+  including inlined functions. `unrolling_kernel_warning_limit=1024` counts
+  expanded source statements; `0` disables this diagnostic. It does not cap
+  expansion or reject compilation. Explicit hard limits remain disabled by default.
 - Open the 0.6.4 development cycle from the 0.6.3 baseline. Source version
   metadata and the default runtime dependency now target 0.6.4.
 - Default Python `ti.init()` to `compile_tier="fast"` with

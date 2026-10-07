@@ -50,7 +50,9 @@
 | 参数 | 默认 | 用途 |
 |---|---|---|
 | `tiered_full_simplify` | `True` | 把 `full_simplify` 拆为局部 fixed-point + 每外圈一次 global pass，并有独立 cache key。建议保持 `True`；只有隔离编译器回归、对照旧 cadence 时才设 `False`。 |
-| `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，避免静默吃编译时间。 |
+| `unrolling_limit` | `32` | 单个静态循环超过指定迭代次数时软告警。与累计提示共享每次编译最多一次的告警；`0` 关闭此触发条件。 |
+| `unrolling_kernel_warning_limit` | `1024` | 静态循环内实际展开的源码语句数超过此值时软告警，计入嵌套循环和内联函数。它估算源码展开量，并非原生 IR 计数；继续编译，`0` 关闭此触发条件。 |
+| `unrolling_hard_limit` | `0`（关） | 每个 `ti.static(for ...)` 的 unroll 迭代上限；超出抛 `TaichiCompilationError`，仅在用户显式启用时生效。 |
 | `unrolling_kernel_hard_limit` | `0`（关） | 单 kernel 内 unroll 总迭代上限。 |
 | `func_inline_depth_limit` | 上游默认 | `@ti.func` 内联递归深度硬上限。 |
 | `kernel_specialization_limit` | `1024` | 当前 Program generation 驻留的 `@ti.kernel` specialization/executable template 预算。达到正整数上限后，已有 specialization 继续运行，新的 cache miss 明确失败。销毁 SNodeTree 会返还未被 pin 的 generation binding；CPU/CUDA/Vulkan 的直接 root-dense Field 模板可在相同结构和 kernel 语义下复用 executable，新的 generation 只重建已验证 binding。稀疏 SNode、隐藏 field capture、grad/dual、data-oriented template 与不匹配 layout 继续按 generation 编译。stale Graph 不会 retarget。`ti.reset()` 会创建新 Program generation。 |

@@ -1271,7 +1271,11 @@ class ASTTransformer(Builder):
 
     @staticmethod
     def build_static_for(ctx, node, is_grouped):
-        ti_unroll_limit = impl.get_runtime().unrolling_limit
+        with ctx.unroll_warning.static_scope():
+            return ASTTransformer._build_static_for(ctx, node, is_grouped)
+
+    @staticmethod
+    def _build_static_for(ctx, node, is_grouped):
         if is_grouped:
             assert len(node.iter.args[0].args) == 1
             ndrange_arg = build_stmt(ctx, node.iter.args[0].args[0])
@@ -1282,23 +1286,11 @@ class ASTTransformer(Builder):
                 raise TaichiSyntaxError(f"Group for should have 1 loop target, found {len(targets)}")
             target = targets[0]
             iter_time = 0
-            alert_already = False
 
             for value in impl.grouped(ndrange_arg):
                 iter_time += 1
                 ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
-                if not alert_already and ti_unroll_limit and iter_time > ti_unroll_limit:
-                    alert_already = True
-                    warnings.warn_explicit(
-                        f"""You are unrolling more than
-                        {ti_unroll_limit} iterations, so the compile time may be extremely long.
-                        You can use a non-static for loop if you want to decrease the compile time.
-                        You can disable this warning by setting ti.init(unrolling_limit=0).""",
-                        SyntaxWarning,
-                        ctx.file,
-                        node.lineno + ctx.lineno_offset,
-                        module="taichi_forge",
-                    )
+                ctx.unroll_warning.record_iteration(ctx, node, iter_time)
 
                 with ctx.variable_scope_guard():
                     ctx.create_variable(target, value)
@@ -1313,25 +1305,13 @@ class ASTTransformer(Builder):
             targets = ASTTransformer.get_for_loop_targets(node)
 
             iter_time = 0
-            alert_already = False
             for target_values in node.iter.ptr:
                 if not isinstance(target_values, collections.abc.Sequence) or len(targets) == 1:
                     target_values = [target_values]
 
                 iter_time += 1
                 ASTTransformer._check_unroll_hard_limit(ctx, node, iter_time)
-                if not alert_already and ti_unroll_limit and iter_time > ti_unroll_limit:
-                    alert_already = True
-                    warnings.warn_explicit(
-                        f"""You are unrolling more than
-                        {ti_unroll_limit} iterations, so the compile time may be extremely long.
-                        You can use a non-static for loop if you want to decrease the compile time.
-                        You can disable this warning by setting ti.init(unrolling_limit=0).""",
-                        SyntaxWarning,
-                        ctx.file,
-                        node.lineno + ctx.lineno_offset,
-                        module="taichi_forge",
-                    )
+                ctx.unroll_warning.record_iteration(ctx, node, iter_time)
 
                 with ctx.variable_scope_guard():
                     for target, target_value in zip(targets, target_values):

@@ -562,6 +562,7 @@ class PyTaichi:
         # P3 — frontend IR size-control knobs. Default 0 = disabled (no
         # behavior change). Set via ti.init(...) in misc.py.
         self.unrolling_limit = 32
+        self.unrolling_kernel_warning_limit = 1024
         self.unrolling_hard_limit = 0
         self.unrolling_kernel_hard_limit = 0
         self.func_inline_depth_limit = 0

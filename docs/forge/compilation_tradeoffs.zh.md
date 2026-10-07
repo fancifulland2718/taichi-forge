@@ -49,6 +49,12 @@
 循环体大小及更深的嵌套。AST 降低、常量折叠和原子操作降级通过批量替换 IR 避免
 重复扫描块；展开本身、后端代码生成以及其它 pass 仍会随生成的程序规模增加耗时。
 
+`unrolling_kernel_warning_limit` 是软性源码展开提示，默认 1024 条展开语句，
+同一次编译的内联函数共享计数。只统计实际访问的语句，不把静态 break 或跳过分支
+后的假想迭代计入。提示包含函数名、源码位置，继续编译并保留循环语义。
+此计数用于估算展开量，并非原生 IR 规模，也不直接判定写法低效。
+将它与 `unrolling_limit` 同时设为 `0` 可关闭展开告警；两个显式硬上限仍默认 `0`。
+
 ## 何时使用 `advanced_optimization=False`
 
 Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以节省编译时间并

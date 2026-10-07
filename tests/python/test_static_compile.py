@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pytest
 
@@ -77,3 +79,92 @@ def test_nested_static_control_flow_direct_and_graph(compile_tier):
             assert output.to_numpy().tolist() == expected(seed)
     finally:
         graph.close()
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("loop_limit, statement_limit", [(0, 16), (4, 0), (4, 16)])
+@test_utils.test(ti.cpu, unrolling_limit=0, unrolling_kernel_warning_limit=16)
+def test_cumulative_static_warning_is_shared_with_inlined_functions(grouped, loop_limit, statement_limit):
+    ti.lang.impl.get_runtime().unrolling_limit = loop_limit
+    ti.lang.impl.get_runtime().unrolling_kernel_warning_limit = statement_limit
+
+    @ti.func
+    def add_one(value):
+        result = value + 1
+        return result
+
+    @ti.kernel
+    def calculate() -> ti.i32:
+        total = 0
+        if ti.static(grouped):
+            for index in ti.static(ti.grouped(ti.ndrange(8, 8))):
+                total += add_one(index[0] + index[1])
+        else:
+            for i in ti.static(range(8)):
+                for j in ti.static(range(8)):
+                    total += add_one(i + j)
+        return total
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert calculate() == 512
+        assert calculate() == 512
+    messages = [w for w in caught if "expanded source statements" in str(w.message)]
+    assert len(messages) == 1
+    triggers = []
+    if loop_limit:
+        triggers.append("a loop exceeded unrolling_limit=4")
+    if statement_limit:
+        triggers.append("source expansion exceeded unrolling_kernel_warning_limit=16")
+    assert any(trigger in str(messages[0].message) for trigger in triggers)
+    assert messages[0].filename == __file__
+    assert messages[0].lineno > 0
+
+
+@test_utils.test(ti.cpu, unrolling_limit=0, unrolling_kernel_warning_limit=4)
+def test_static_warning_counts_executed_branches_and_resets_after_failure():
+    @ti.kernel
+    def short_loop() -> ti.i32:
+        total = 0
+        for i in ti.static(range(10000)):
+            break
+        return total
+
+    @ti.kernel
+    def invalid():
+        for i in ti.static(range(8)):
+            for j in ti.static(range(8)):
+                ti.static_assert(i < 2)
+
+    @ti.kernel
+    def valid() -> ti.i32:
+        total = 0
+        for i in ti.static(range(8)):
+            total += i
+        return total
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert short_loop() == 0
+    assert not caught
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(ti.TaichiCompilationError):
+            invalid()
+        assert valid() == 28
+    assert len([w for w in caught if "expanded source statements" in str(w.message)]) == 2
+
+
+@test_utils.test(ti.cpu, unrolling_limit=0, unrolling_kernel_warning_limit=0)
+def test_static_warnings_can_be_disabled():
+    @ti.kernel
+    def calculate() -> ti.i32:
+        total = 0
+        for i in ti.static(range(64)):
+            total += i
+        return total
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert calculate() == sum(range(64))
+    assert not caught

@@ -271,6 +271,9 @@ class _SpecialConfig:
         self.short_circuit_operators = True
         self.print_full_traceback = False
         self.unrolling_limit = 32
+        # Soft cumulative source-expansion warning, shared with inlined funcs.
+        # Never rejects a kernel or changes static-loop semantics. 0 disables.
+        self.unrolling_kernel_warning_limit = 1024
         # P3.a — hard stop for a single ti.static(for ...) unroll. 0 = disabled.
         # When > 0 and a static-for would emit more than this many iterations,
         # compilation aborts with TaichiCompilationError instead of running to
@@ -468,6 +471,7 @@ def init(
     env_spec.add("short_circuit_operators")
     env_spec.add("print_full_traceback")
     env_spec.add("unrolling_limit")
+    env_spec.add("unrolling_kernel_warning_limit", int)
     env_spec.add("unrolling_hard_limit")
     env_spec.add("unrolling_kernel_hard_limit")
     env_spec.add("func_inline_depth_limit")
@@ -510,6 +514,7 @@ def init(
         impl.get_runtime().short_circuit_operators = spec_cfg.short_circuit_operators
         impl.get_runtime().print_full_traceback = spec_cfg.print_full_traceback
         impl.get_runtime().unrolling_limit = spec_cfg.unrolling_limit
+        impl.get_runtime().unrolling_kernel_warning_limit = spec_cfg.unrolling_kernel_warning_limit
         impl.get_runtime().unrolling_hard_limit = spec_cfg.unrolling_hard_limit
         impl.get_runtime().unrolling_kernel_hard_limit = spec_cfg.unrolling_kernel_hard_limit
         impl.get_runtime().func_inline_depth_limit = spec_cfg.func_inline_depth_limit
