@@ -64,6 +64,12 @@ Use the documentation at your release tag for version-specific API details.
   statements. An extra nested `else` can no longer be silently erased by CSE.
   CPU, CUDA and Vulkan regressions cover direct calls and Graph execution;
   compiled-kernel cache schema 41 invalidates affected cached artifacts.
+- Store reaching-definition and liveness facts in shared-index bitsets and
+  cache definite-alias queries during CFG analysis. This reduces compilation
+  memory and repeated set work without relaxing alias or multi-destination
+  kill rules. The reported GeoPhys FEM balanced Vulkan fixture now completes
+  on Windows with physical and deterministic-replay checks passing. This is
+  bounded compiler validation, not a general application speedup claim.
 - Add OptiX candidate face filtering to typed and compact occlusion recordings:
   per-instance or per-primitive rules, shared GAS, alpha AND acceptance, transformed
   winding and device refit. Negotiate the new face-filter features before resource

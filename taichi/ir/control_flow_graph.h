@@ -4,6 +4,7 @@
 #include <unordered_set>
 
 #include "taichi/ir/ir.h"
+#include "taichi/ir/cfg_stmt_set.h"
 
 namespace taichi::lang {
 
@@ -48,11 +49,13 @@ class CFGNode {
 
   // Reaching definition analysis
   // https://en.wikipedia.org/wiki/Reaching_definition
-  std::unordered_set<Stmt *> reach_gen, reach_kill, reach_in, reach_out;
+  std::unordered_set<Stmt *> reach_gen, reach_kill;
+  CFGStmtSet reach_in, reach_out;
 
   // Live variable analysis
   // https://en.wikipedia.org/wiki/Live_variable_analysis
-  std::unordered_set<Stmt *> live_gen, live_kill, live_in, live_out;
+  std::unordered_set<Stmt *> live_gen, live_kill;
+  CFGStmtSet live_in, live_out;
 
   CFGNode(Block *block,
           int begin_location,
@@ -84,6 +87,7 @@ class CFGNode {
       Stmt *var);
   static bool may_contain_variable(const std::unordered_set<Stmt *> &var_set,
                                    Stmt *var);
+  static bool may_contain_variable(const CFGStmtSet &var_set, Stmt *var);
   static bool may_contain_variable(
       const std::unordered_map<Stmt *, UseDefineStatus> &var_set,
       Stmt *var);

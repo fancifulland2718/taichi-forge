@@ -24,6 +24,146 @@ bool is_func_return_element_ptr(Stmt *stmt) {
   return is_func_return_element_ptr(elem->src);
 }
 
+// Index definitions by their destinations. Most compiler temporaries are
+// allocas, which can only definitely alias themselves. Resolve other aliases
+// once per distinct kill address, rather than once per node and definition.
+class DataflowKills {
+ public:
+  DataflowKills(const CFGStmtSet::Universe &universe, bool forward)
+      : required_(universe.statements.size()),
+        covered_(required_.size()),
+        fact_epoch_(required_.size()) {
+    for (std::size_t i = 0; i < universe.statements.size(); ++i) {
+      auto stmt = universe.statements[i];
+      auto destinations = forward
+                              ? irpass::analysis::get_store_destination(stmt)
+                              : stmt_refs(nullptr);
+      if (destinations.empty())
+        destinations = stmt_refs(stmt);
+      for (auto address : destinations) {
+        auto insertion = indices_.emplace(address, addresses_.size());
+        if (insertion.second) {
+          addresses_.push_back(address);
+          definitions_.emplace_back();
+          if (!identity_only(address))
+            nonlocal_.push_back(insertion.first->second);
+        }
+        auto &facts = definitions_[insertion.first->second];
+        // A multi-destination definition is killed only when every distinct
+        // destination is killed. Do not double count duplicate destinations.
+        if (facts.empty() || facts.back() != i) {
+          facts.push_back(i);
+          ++required_[i];
+        }
+      }
+    }
+    address_epoch_.resize(addresses_.size());
+  }
+
+  void build(const std::unordered_set<Stmt *> &kill_addresses,
+             CFGStmtSet &result) {
+    ++epoch_;
+    for (auto address : kill_addresses) {
+      for (auto group : aliases(address)) {
+        if (address_epoch_[group] == epoch_)
+          continue;
+        address_epoch_[group] = epoch_;
+        for (auto fact : definitions_[group]) {
+          if (fact_epoch_[fact] != epoch_) {
+            fact_epoch_[fact] = epoch_;
+            covered_[fact] = 0;
+          }
+          if (++covered_[fact] == required_[fact])
+            result.insert_index(fact);
+        }
+      }
+    }
+  }
+
+ private:
+  static bool identity_only(Stmt *stmt) {
+    return stmt->is<AllocaStmt>() || stmt->is<AdStackAllocaStmt>();
+  }
+  const std::vector<std::size_t> &aliases(Stmt *address) {
+    auto insertion = aliases_.try_emplace(address);
+    auto &result = insertion.first->second;
+    if (!insertion.second)
+      return result;
+    auto exact = indices_.find(address);
+    if (exact != indices_.end())
+      result.push_back(exact->second);
+    if (!identity_only(address)) {
+      for (auto group : nonlocal_) {
+        auto candidate = addresses_[group];
+        if (candidate != address &&
+            irpass::analysis::definitely_same_address(candidate, address))
+          result.push_back(group);
+      }
+    }
+    return result;
+  }
+  std::unordered_map<Stmt *, std::size_t> indices_;
+  std::vector<Stmt *> addresses_;
+  std::vector<std::vector<std::size_t>> definitions_;
+  std::vector<std::size_t> nonlocal_, required_, covered_, fact_epoch_,
+      address_epoch_;
+  std::unordered_map<Stmt *, std::vector<std::size_t>> aliases_;
+  std::size_t epoch_{0};
+};
+
+// Both analyses use the same finite, monotone gen/kill equations. Number the
+// facts once and resolve kills before iteration, retaining the existing alias
+// predicate instead of treating merely overlapping addresses as equivalent.
+void solve_dataflow(std::vector<std::unique_ptr<CFGNode>> &nodes,
+                    bool forward) {
+  auto universe = std::make_shared<CFGStmtSet::Universe>();
+  for (const auto &node : nodes) {
+    for (auto stmt : forward ? node->reach_gen : node->live_gen)
+      universe->insert(stmt);
+  }
+  const auto count = nodes.size();
+  DataflowKills kills(*universe, forward);
+  std::vector<CFGStmtSet> gen(count), kill(count);
+  std::unordered_map<CFGNode *, std::size_t> indices;
+  std::queue<std::size_t> work;
+  std::vector<bool> queued(count, true);
+  for (std::size_t i = 0; i < count; ++i) {
+    auto &node = *nodes[i];
+    indices.emplace(&node, i);
+    gen[i].reset(universe);
+    kill[i].reset(universe);
+    auto &input = forward ? node.reach_in : node.live_out;
+    auto &output = forward ? node.reach_out : node.live_in;
+    input.reset(universe);
+    output.reset(universe);
+    for (auto stmt : forward ? node.reach_gen : node.live_gen)
+      gen[i].insert(stmt);
+    kills.build(forward ? node.reach_kill : node.live_kill, kill[i]);
+    output.unite(gen[i]);
+    work.push(forward ? i : count - i - 1);
+  }
+  while (!work.empty()) {
+    auto i = work.front();
+    work.pop();
+    queued[i] = false;
+    auto &node = *nodes[i];
+    auto &input = forward ? node.reach_in : node.live_out;
+    auto &output = forward ? node.reach_out : node.live_in;
+    input.clear();
+    for (auto adjacent : forward ? node.prev : node.next)
+      input.unite(forward ? adjacent->reach_out : adjacent->live_in);
+    if (output.transfer(input, gen[i], kill[i])) {
+      for (auto adjacent : forward ? node.next : node.prev) {
+        auto index = indices.at(adjacent);
+        if (!queued[index]) {
+          queued[index] = true;
+          work.push(index);
+        }
+      }
+    }
+  }
+}
+
 }  // namespace
 
 CFGNode::CFGNode(Block *block,
@@ -169,6 +309,16 @@ bool CFGNode::may_contain_variable(const std::unordered_set<Stmt *> &var_set,
 bool CFGNode::reach_kill_variable(Stmt *var) const {
   // Does this node (definitely) kill a definition of var?
   return contain_variable(reach_kill, var);
+}
+
+bool CFGNode::may_contain_variable(const CFGStmtSet &var_set, Stmt *var) {
+  if (var_set.contains(var))
+    return true;
+  if (var->is<AllocaStmt>() || var->is<AdStackAllocaStmt>())
+    return false;
+  return std::any_of(var_set.begin(), var_set.end(), [&](Stmt *other) {
+    return irpass::analysis::maybe_same_address(var, other);
+  });
 }
 
 // var: dest_addr
@@ -549,7 +699,7 @@ void CFGNode::gather_loaded_snodes(std::unordered_set<SNode *> &snodes) const {
         if (snodes.count(snode) > 0) {
           continue;
         }
-        if (reach_in.find(global_ptr) != reach_in.end() &&
+        if (reach_in.contains(global_ptr) &&
             !contain_variable(killed_in_this_node, global_ptr)) {
           // The UD-chain contains the value before this offloaded task.
           snodes.insert(snode);
@@ -1032,8 +1182,6 @@ void ControlFlowGraph::reaching_definition_analysis(bool after_lower_access) {
 
   TI_AUTO_PROF;
   const int num_nodes = size();
-  std::queue<CFGNode *> to_visit;
-  std::unordered_map<CFGNode *, bool> in_queue;
   TI_ASSERT(nodes[start_node]->empty());
   nodes[start_node]->reach_gen.clear();
   nodes[start_node]->reach_kill.clear();
@@ -1064,54 +1212,8 @@ void ControlFlowGraph::reaching_definition_analysis(bool after_lower_access) {
     if (i != start_node) {
       nodes[i]->reaching_definition_analysis(after_lower_access);
     }
-    nodes[i]->reach_in.clear();
-    nodes[i]->reach_out = nodes[i]->reach_gen;
-    to_visit.push(nodes[i].get());
-    in_queue[nodes[i].get()] = true;
   }
-
-  // [The worklist algorithm]
-  // Determines reach_in and reach_out for each node iteratively.
-  while (!to_visit.empty()) {
-    auto now = to_visit.front();
-    to_visit.pop();
-    in_queue[now] = false;
-
-    now->reach_in.clear();
-    for (auto prev_node : now->prev) {
-      now->reach_in.insert(prev_node->reach_out.begin(),
-                           prev_node->reach_out.end());
-    }
-    auto old_out = std::move(now->reach_out);
-    now->reach_out = now->reach_gen;
-    for (auto stmt : now->reach_in) {
-      auto store_ptrs = irpass::analysis::get_store_destination(stmt);
-      bool killed;
-      if (store_ptrs.empty()) {  // the case of a global pointer
-        killed = now->reach_kill_variable(stmt);
-      } else {
-        killed = true;
-        for (auto store_ptr : store_ptrs) {
-          if (!now->reach_kill_variable(store_ptr)) {
-            killed = false;
-            break;
-          }
-        }
-      }
-      if (!killed) {
-        now->reach_out.insert(stmt);
-      }
-    }
-    if (now->reach_out != old_out) {
-      // changed
-      for (auto next_node : now->next) {
-        if (!in_queue[next_node]) {
-          to_visit.push(next_node);
-          in_queue[next_node] = true;
-        }
-      }
-    }
-  }
+  solve_dataflow(nodes, true);
 }
 
 void ControlFlowGraph::live_variable_analysis(
@@ -1126,8 +1228,6 @@ void ControlFlowGraph::live_variable_analysis(
   // live_out: collection of all the live_in of next nodes
   TI_AUTO_PROF;
   const int num_nodes = size();
-  std::queue<CFGNode *> to_visit;
-  std::unordered_map<CFGNode *, bool> in_queue;
   TI_ASSERT(nodes[final_node]->empty());
   nodes[final_node]->live_gen.clear();
   nodes[final_node]->live_kill.clear();
@@ -1167,40 +1267,8 @@ void ControlFlowGraph::live_variable_analysis(
     if (i != final_node) {
       nodes[i]->live_variable_analysis(after_lower_access);
     }
-    nodes[i]->live_out.clear();
-    nodes[i]->live_in = nodes[i]->live_gen;
-    to_visit.push(nodes[i].get());
-    in_queue[nodes[i].get()] = true;
   }
-
-  // The worklist algorithm.
-  while (!to_visit.empty()) {
-    auto now = to_visit.front();
-    to_visit.pop();
-    in_queue[now] = false;
-
-    now->live_out.clear();
-    for (auto next_node : now->next) {
-      now->live_out.insert(next_node->live_in.begin(),
-                           next_node->live_in.end());
-    }
-    auto old_in = std::move(now->live_in);
-    now->live_in = now->live_gen;
-    for (auto stmt : now->live_out) {
-      if (!CFGNode::contain_variable(now->live_kill, stmt)) {
-        now->live_in.insert(stmt);
-      }
-    }
-    if (now->live_in != old_in) {
-      // changed
-      for (auto prev_node : now->prev) {
-        if (!in_queue[prev_node]) {
-          to_visit.push(prev_node);
-          in_queue[prev_node] = true;
-        }
-      }
-    }
-  }
+  solve_dataflow(nodes, false);
 }
 
 void ControlFlowGraph::simplify_graph() {

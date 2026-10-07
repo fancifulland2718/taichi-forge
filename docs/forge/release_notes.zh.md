@@ -52,6 +52,10 @@
 - 判断 `if` 语句等价时对称检查两个分支是否存在，避免 CSE 静默删除额外的嵌套 `else`。
   CPU、CUDA、Vulkan 回归覆盖直接调用与 Graph 执行；compiled-kernel 缓存 schema
   升至 41，使受影响的旧产物失效。
+- CFG 的到达定义与活跃变量分析采用共享编号的位集，并缓存确定别名查询，降低编译
+  内存和重复集合操作的成本，保留原有别名与多目标写入的 kill 规则。反馈中的 GeoPhys
+  FEM balanced Vulkan 夹具已在 Windows 上完成，物理与确定性重放检查通过；
+  此结果仅验证该编译问题，不代表通用应用加速收益。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见
