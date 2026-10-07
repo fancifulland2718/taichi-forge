@@ -6,6 +6,34 @@
 
 namespace taichi::lang {
 
+TEST(SameStatements, BranchPresenceIsSymmetric) {
+  auto condition = Stmt::make<ConstStmt>(TypedConstant(1));
+  for (int lhs_mask = 0; lhs_mask < 4; ++lhs_mask) {
+    for (int rhs_mask = 0; rhs_mask < 4; ++rhs_mask) {
+      SCOPED_TRACE(lhs_mask);
+      SCOPED_TRACE(rhs_mask);
+      auto make_branch = [&](int mask) {
+        auto branch = std::make_unique<IfStmt>(condition.get());
+        if (mask & 1) {
+          branch->set_true_statements(std::make_unique<Block>());
+          branch->true_statements->push_back<ConstStmt>(TypedConstant(3));
+        }
+        if (mask & 2) {
+          branch->set_false_statements(std::make_unique<Block>());
+          branch->false_statements->push_back<ConstStmt>(TypedConstant(5));
+        }
+        return branch;
+      };
+      auto lhs = make_branch(lhs_mask);
+      auto rhs = make_branch(rhs_mask);
+      EXPECT_EQ(irpass::analysis::same_statements(lhs.get(), rhs.get()),
+                lhs_mask == rhs_mask);
+      EXPECT_EQ(irpass::analysis::same_statements(rhs.get(), lhs.get()),
+                lhs_mask == rhs_mask);
+    }
+  }
+}
+
 TEST(SameStatements, TestSameBlock) {
   auto block = std::make_unique<Block>();
 

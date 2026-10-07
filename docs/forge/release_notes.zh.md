@@ -49,6 +49,9 @@
 - 公共子表达式消除保留指针返回类型的区别。同地址的标量与整向量指针不再被合并，
   避免字节偏移被误解为元素索引，导致 balanced 编译在降级 field 访问时越界崩溃；
   同时使受影响的 compiled-kernel 缓存失效。
+- 判断 `if` 语句等价时对称检查两个分支是否存在，避免 CSE 静默删除额外的嵌套 `else`。
+  CPU、CUDA、Vulkan 回归覆盖直接调用与 Graph 执行；compiled-kernel 缓存 schema
+  升至 41，使受影响的旧产物失效。
 - typed 与 compact occlusion recording 新增 OptiX 候选面过滤，支持按实例/primitive
   规则、共享 GAS、alpha AND 组合、变换后绕序和设备 refit。资源创建前协商新能力；
   明确拒绝与已导入 opacity micromap 的组合。接口与所有权见

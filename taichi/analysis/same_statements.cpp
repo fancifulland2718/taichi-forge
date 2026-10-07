@@ -200,20 +200,17 @@ class IRNodeComparator : public IRVisitor {
     if (!same)
       return;
     auto other = other_node_->as<IfStmt>();
+    if (bool(stmt->true_statements) != bool(other->true_statements) ||
+        bool(stmt->false_statements) != bool(other->false_statements)) {
+      same = false;
+      return;
+    }
     if (stmt->true_statements) {
-      if (!other->true_statements) {
-        same = false;
-        return;
-      }
       other_node_ = other->true_statements.get();
       stmt->true_statements->accept(this);
       other_node_ = other;
     }
     if (stmt->false_statements && same) {
-      if (!other->false_statements) {
-        same = false;
-        return;
-      }
       other_node_ = other->false_statements.get();
       stmt->false_statements->accept(this);
       other_node_ = other;

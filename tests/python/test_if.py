@@ -4,6 +4,45 @@ import taichi_forge as ti
 from tests import test_utils
 
 
+@pytest.mark.parametrize("compile_tier", ["fast", "balanced"])
+@pytest.mark.parametrize("swap_branches", [False, True])
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_nested_if_preserves_extra_else(compile_tier, swap_branches):
+    ti.cfg.compile_tier = compile_tier
+    ti.cfg.advanced_optimization = compile_tier != "fast"
+    result = ti.field(ti.i32, shape=())
+
+    @ti.kernel
+    def run(a: ti.i32, b: ti.i32):
+        result[None] = 0
+        if a != ti.static(int(swap_branches)):
+            if b:
+                result[None] = 1
+        else:
+            if b:
+                result[None] = 1
+            else:
+                result[None] = 2
+
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(
+        run,
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "a", ti.i32),
+        ti.graph.Arg(ti.graph.ArgKind.SCALAR, "b", ti.i32),
+    )
+    graph = builder.compile()
+    try:
+        for a, b in ((0, 0), (0, 1), (1, 0), (1, 1), (0, 0)):
+            expected = 1 if b else (2 if a == int(swap_branches) else 0)
+            run(a, b)
+            assert result[None] == expected
+            result[None] = -1
+            graph.run({"a": a, "b": b})
+            assert result[None] == expected
+    finally:
+        graph.close()
+
+
 @test_utils.test()
 def test_ifexpr_vector():
     n_grids = 10

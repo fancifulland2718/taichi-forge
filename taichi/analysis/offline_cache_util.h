@@ -156,7 +156,9 @@ class Kernel;
 //  39 - SPIR-V one-bit AND/OR/XOR use boolean logical opcodes.
 //  40 - Restrict SPIR-V array layouts to buffers; preserve pointer return
 //       types during CSE so byte offsets cannot become component indices.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 40;
+//  41 - If statement equivalence checks both branch-presence flags. Cached
+//       kernels must not retain an else branch erased by asymmetric CSE.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 41;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(
