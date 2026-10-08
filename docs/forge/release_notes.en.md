@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Run the primal specialization inside custom/no-gradient scopes even when the
+  same kernel was previously used in `FwdMode` or a validation Tape. Restore the
+  enclosing mode after each suppressed call, including argument failures.
 - Record only the outermost `grad_replaced`/`no_grad` call on a Tape. Nested
   decorators restore the enclosing suppression state, including when a body or
   recording step raises, preventing duplicate adjoints and leaked AD state.

@@ -28,6 +28,8 @@
 
 ## 0.6.4（开发中）
 
+- 自定义梯度或 `no_grad` 作用域内复用已进入 forward/validation 模式的 kernel 时，
+  临时执行原值版本，并在调用后恢复外层模式；参数错误时也正确恢复。
 - Tape 只录制最外层 `grad_replaced`/`no_grad` 调用；嵌套装饰器在函数体或录制步骤
   异常时也恢复外层的求导抑制状态，避免重复累计梯度和状态泄漏。
 - debug 模式创建整数 adjoint checkbit 时不再覆盖 dual Field 的浮点 dtype，使同一

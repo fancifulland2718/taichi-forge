@@ -3108,6 +3108,19 @@ class Kernel:
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
     @_shell_pop_print
     def __call__(self, *args, **kwargs):
+        if self.runtime.grad_replaced and self.autodiff_mode in (
+            AutodiffMode.FORWARD,
+            AutodiffMode.VALIDATION,
+        ):
+            # A previous call in this AD context may have selected a transformed
+            # specialization. Custom/no_grad scopes must still run the primal.
+            # Re-enter with NONE and restore the enclosing mode even on failure.
+            previous_mode = self.autodiff_mode
+            self.autodiff_mode = AutodiffMode.NONE
+            try:
+                return self(*args, **kwargs)
+            finally:
+                self.autodiff_mode = previous_mode
         args = _process_args(self, args, kwargs)
 
         # A reverse kernel is already the result of one AD transform.  Running
