@@ -163,7 +163,9 @@ class Kernel;
 //  44 - Forward-mode matrix constructors load tangent values from local storage.
 //  45 - Real functions receive CUDA root bindings separately from return buffers;
 //       SNodeTree dependencies include the transitive function call graph.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 46;
+//  46 - Forward AD local component pointers alias tensor tangent storage.
+//  47 - Real functions inherit the caller's CPU thread ID.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 47;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

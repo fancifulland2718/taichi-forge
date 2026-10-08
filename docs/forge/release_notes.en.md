@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Inherit the caller's CPU worker ID in `real_func` call contexts, including
+  nested and recursive calls. This also preserves worker-local random-state
+  selection without changing the RuntimeContext ABI.
 - Preserve tangent storage aliases for dynamic local vector/matrix component
   writes in forward AD, including repeated updates and constant overwrites.
 - Restore kernel modes in reverse call order when leaving `FwdMode` or a

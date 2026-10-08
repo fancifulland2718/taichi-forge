@@ -3508,6 +3508,15 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
   llvm::Function *llvm_func = func_map[stmt->func];
   auto *new_ctx = create_entry_block_alloca(get_runtime_type("RuntimeContext"));
   call("RuntimeContext_set_runtime", new_ctx, get_runtime());
+  if (arch_is_cpu(compile_config.arch)) {
+    // The third RuntimeContext member identifies the current CPU worker.
+    // Real functions share that worker, including its random-number state.
+    auto *caller_thread = builder->CreateStructGEP(context_ty, get_context(), 2);
+    auto *callee_thread = builder->CreateStructGEP(context_ty, new_ctx, 2);
+    auto *thread_id =
+        builder->CreateLoad(tlctx->get_data_type<int32>(), caller_thread);
+    builder->CreateStore(thread_id, callee_thread);
+  }
   if (!stmt->func->parameter_list.empty()) {
     auto *buffer =
         create_entry_block_alloca(tlctx->get_data_type(stmt->func->args_type));
