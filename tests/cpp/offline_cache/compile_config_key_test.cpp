@@ -2,6 +2,7 @@
 
 #include "taichi/analysis/offline_cache_util.h"
 #include "taichi/program/compile_config.h"
+#include "taichi/program/program.h"
 #include "taichi/rhi/device_capability.h"
 
 namespace taichi::lang {
@@ -47,6 +48,40 @@ TEST(OfflineCache, FingerprintsIrChangingCompileConfigInputs) {
   });
   expect_distinct_key(spirv,
                       [](CompileConfig &config) { config.max_block_dim /= 2; });
+}
+
+TEST(OfflineCache, FunctionDependenciesFollowCallIds) {
+  Program program(Arch::x64);
+  Function first(&program, FunctionKey("first", 0, 0));
+  Function second(&program, FunctionKey("second", 1, 0));
+  first.insert_ret(PrimitiveType::i32);
+  second.insert_ret(PrimitiveType::i32);
+  auto set_body = [](Function &function, int value) {
+    function.set_inline_body([&] {
+      function.context->builder().create_kernel_exprgroup_return(
+          ExprGroup(Expr(value)));
+      return false;
+    });
+  };
+  auto key = [](Function *a, Function *b) {
+    Block root;
+    root.insert(std::make_unique<FrontendFuncCallStmt>(a, ExprGroup(),
+                                                     Identifier(0)));
+    root.insert(std::make_unique<FrontendFuncCallStmt>(b, ExprGroup(),
+                                                     Identifier(1)));
+    std::ostringstream stream;
+    gen_offline_cache_key(&root, &stream);
+    return stream.str();
+  };
+  set_body(first, 10);
+  set_body(second, 20);
+  const auto original = key(&first, &second);
+  EXPECT_NE(original, key(&second, &first));
+  // Swap function bodies and calls: semantics and call IDs are unchanged,
+  // while the address order of the corresponding bodies is reversed.
+  set_body(first, 20);
+  set_body(second, 10);
+  EXPECT_EQ(original, key(&second, &first));
 }
 
 }  // namespace

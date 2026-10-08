@@ -243,6 +243,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
   void visit(FrontendFuncCallStmt *expr) override {
     emit(StmtOpCode::FrontendFuncCallStmt);
+    emit(expr->func->is_inline_template());
     emit(expr->func);
     emit(expr->args.exprs);
   }
@@ -444,9 +445,10 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
 
  private:
   void emit_dependencies() {
-    // Serialize dependent real-functions
-    emit(real_funcs_.size());
-    for (auto &[func, id] : real_funcs_) {
+    // Match the IDs emitted at call sites. Pointer order varies between
+    // processes and can also alias kernels with different call orders.
+    emit(real_funcs_in_id_order_.size());
+    for (auto *func : real_funcs_in_id_order_) {
       if (auto &ast_str = func->try_get_ast_serialization_data();
           ast_str.has_value()) {
         emit_bytes(ast_str->c_str(), ast_str->size());
@@ -535,6 +537,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
     } else {
       auto [iter, ok] = real_funcs_.insert({func, real_funcs_.size()});
       TI_ASSERT(ok);
+      real_funcs_in_id_order_.push_back(func);
       emit(iter->second);
     }
   }
@@ -678,6 +681,7 @@ class ASTSerializer : public IRVisitor, public ExpressionVisitor {
   std::vector<const SNode *> snode_tree_roots_;
   std::unordered_map<const SNode *, std::string> snode_key_cache_;
   std::map<Function *, std::size_t> real_funcs_;
+  std::vector<Function *> real_funcs_in_id_order_;
   std::vector<char> string_pool_;
 };
 

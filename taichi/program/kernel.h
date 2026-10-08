@@ -13,6 +13,7 @@
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/rhi/arch.h"
 #include "taichi/program/callable.h"
+#include "taichi/program/function.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/texture.h"
 #include "taichi/aot/graph_data.h"
@@ -138,6 +139,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
     return ir_is_ast_;
   }
 
+  Function *create_inline_function(const std::string &name);
+
   LaunchContextBuilder make_launch_context(bool cpu_bounded_range = false);
 
   template <typename T>
@@ -255,6 +258,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
   void retire_definition(bool preserve_relocatable_abi = false);
 
  private:
+  // Frontend calls borrow these templates until the kernel definition retires.
+  std::vector<std::unique_ptr<Function>> inline_functions_;
   void init(Program &program,
             const std::function<void()> &func,
             const std::string &name = "",

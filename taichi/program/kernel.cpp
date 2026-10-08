@@ -89,6 +89,14 @@ LaunchContextBuilder Kernel::make_launch_context(bool cpu_bounded_range) {
   return builder;
 }
 
+Function *Kernel::create_inline_function(const std::string &name) {
+  auto function = std::make_unique<Function>(
+      program, FunctionKey(name, 0, static_cast<int>(inline_functions_.size())));
+  auto *result = function.get();
+  inline_functions_.push_back(std::move(function));
+  return result;
+}
+
 template <typename T>
 T Kernel::fetch_ret(DataType dt, int i) {
   if (dt->is_primitive(PrimitiveTypeID::f32)) {
@@ -644,6 +652,7 @@ void Kernel::set_snode_tree_dependencies(
 void Kernel::retire_definition(bool preserve_relocatable_abi) {
   ir.reset();
   context.reset();
+  inline_functions_.clear();
   std::vector<SNode *>().swap(no_activate);
   name.clear();
   name.shrink_to_fit();

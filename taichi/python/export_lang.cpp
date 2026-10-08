@@ -7142,7 +7142,9 @@ void export_lang(py::module &m) {
           [](Kernel *self) -> ASTBuilder * {
             return &self->context->builder();
           },
-          py::return_value_policy::reference);
+          py::return_value_policy::reference)
+      .def("create_inline_function", &Kernel::create_inline_function,
+           py::return_value_policy::reference_internal);
 
   py::class_<LaunchContextBuilder>(m, "KernelLaunchContext")
       .def("set_arg_int", &LaunchContextBuilder::set_arg_int)
@@ -7210,6 +7212,7 @@ void export_lang(py::module &m) {
       .def("insert_acceleration_structure_param",
            &Function::insert_acceleration_structure_param)
       .def("insert_ret", &Function::insert_ret)
+      .def("set_inline_body", &Function::set_inline_body)
       .def("set_function_body",
            py::overload_cast<const std::function<void()> &>(
                &Function::set_function_body))

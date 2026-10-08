@@ -46,6 +46,38 @@ bodies or introduce device function calls. No function-size or call-count limit
 is added. The `python.frontend.<name>.ast_parse` profile event includes both
 initial parsing/layout construction and subsequent AST instantiation.
 
+### Experimental inline function IR reuse
+
+`ti.init(inline_ir_cache=True)` (or `TI_INLINE_IR_CACHE=1`) enables reuse of
+eligible scalar `ti.func` bodies within one kernel materialization. It defaults
+to `False`: preparing a reusable body adds work when it is only called once.
+The AST copy-layout optimization above remains enabled independently.
+Disabling `TI_SOURCE_TEMPLATE_CACHE` also bypasses IR reuse for diagnosis.
+
+The initial subset accepts scalar value arguments/results, primitive static
+arguments and captures, local arithmetic/branches, static loops, and selected
+math intrinsics. Specializations distinguish argument types, static values and
+live captured values. Python callbacks, resource accesses, matrices, runtime
+loops, recursion and calls to other user functions keep ordinary expansion.
+Eligible helpers called from those ordinary expansions can still benefit.
+Python constant returns retain their compile-time behavior. Explicit unrolling
+hard limits and `auto_real_function` retain their existing path.
+
+Each eligible body is lowered once, then cloned with independent locals and
+rebound arguments during kernel AST lowering, before autodiff and offloading.
+No device calls are introduced. Templates belong to the native kernel, retire
+with its definition, and are never stored in the Python source cache. Even with
+offline caching disabled, body contents participate in kernel cache identity.
+Function dependencies are serialized in call-ID order so their addresses do
+not change cache identity or obscure a different call order.
+This reduces repeated frontend work; the expanded backend IR can still grow
+with the number of calls. There is no new size or call-count limit.
+
+Use `ti.compile_profile()` to inspect `python.func.inline_ir_build:<name>` and
+`python.func.inline_ir_call:<name>`; the former includes template preparation and
+initial native lowering. Compare cold compilation and warm execution on the
+target backend before enabling this option in an application.
+
 ## Recommended Usage
 
 For repeated simulation or rendering loops:

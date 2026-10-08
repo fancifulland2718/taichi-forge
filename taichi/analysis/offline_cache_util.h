@@ -167,7 +167,8 @@ class Kernel;
 //  47 - Real functions inherit the caller's CPU thread ID.
 //  48 - Forward AD runtime powers mask inactive logarithms and handle y=0/1.
 //  49 - Forward AD unary derivatives mask zero-tangent singularities per lane.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 49;
+//  50 - Distinguish inline IR templates and serialize functions in call-ID order.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 50;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

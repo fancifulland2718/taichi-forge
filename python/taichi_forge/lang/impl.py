@@ -566,6 +566,7 @@ class PyTaichi:
         self.unrolling_hard_limit = 0
         self.unrolling_kernel_hard_limit = 0
         self.func_inline_depth_limit = 0
+        self.inline_ir_cache = False
         # Live counters used by the enforcement hooks; reset per kernel compile.
         self.func_inline_depth = 0
         # P9.A-1 (F1) — auto-promotion telemetry.

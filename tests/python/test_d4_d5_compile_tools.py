@@ -276,7 +276,7 @@ def test_source_template_cache_reuses_ast_template_for_specializations():
     set_x(3)
     cache = set_x._primal._source_template_cache
     assert len(cache) == 6
-    assert isinstance(cache[4], ast.Module)
+    assert isinstance(cache[4].instantiate(), ast.Module)
     template_id = id(cache[4])
 
     set_x(5)

@@ -29,6 +29,11 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Add opt-in `ti.init(inline_ir_cache=True)` for kernel-local reuse of eligible
+  scalar `ti.func` IR on CPU, CUDA and Vulkan, expanding before autodiff and
+  offloading. Static values and captures separate specializations; unsupported
+  constructs keep ordinary expansion. Defaults remain unchanged because
+  preparing a reusable body can cost more for single-call functions.
 - Reuse parsed AST copy layouts for repeated inline `ti.func` calls, reducing
   frontend preparation overhead while keeping each expansion's mutable state
   independent. Closure reads, static callbacks and per-call lowering retain

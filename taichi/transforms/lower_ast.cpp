@@ -5,6 +5,7 @@
 #include "taichi/ir/visitors.h"
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/system/profiler.h"
+#include "taichi/program/function.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -138,6 +139,38 @@ class LowerAST : public IRVisitor {
     auto fctx = make_flatten_ctx();
     for (const auto &arg : stmt->args.exprs) {
       args.push_back(flatten_rvalue(arg, &fctx));
+    }
+    if (stmt->func->is_inline_template()) {
+      TI_COMPILE_PROFILER("cpp.ir.instantiate_inline_function");
+      TI_ASSERT(stmt->func->ir_stage() == Function::IRStage::InitialIR);
+      TI_ASSERT(args.size() == stmt->func->parameter_list.size());
+      auto body = irpass::analysis::clone(stmt->func->ir.get());
+      irpass::replace_statements(
+          body.get(), [](Stmt *s) { return s->is<ArgLoadStmt>(); },
+          [&](Stmt *s) {
+            const auto &id = s->as<ArgLoadStmt>()->arg_id;
+            TI_ASSERT(id.size() == 1 && id[0] < args.size());
+            return args[id[0]];
+          });
+      auto *inlined = body->as<Block>();
+      TI_ASSERT(!inlined->statements.empty());
+      auto *ret = inlined->statements.back()->as<ReturnStmt>();
+      TI_ASSERT(ret->values.size() == 1);
+      auto *result = ret->values[0];
+      if (stmt->func->inline_returns_lvalue()) {
+        // A regular ti.func can return its private scalar local as an lvalue
+        // (e.g. the target of atomic_add). Preserve that local's identity.
+        result = result->as<LocalLoadStmt>()->src;
+        TI_ASSERT(result->is<AllocaStmt>());
+      }
+      inlined->statements.pop_back();
+      for (auto &s : inlined->statements) {
+        fctx.stmts.push_back(std::move(s));
+      }
+      TI_ASSERT(stmt->ident.has_value());
+      block->local_var_to_stmt.emplace(*stmt->ident, result);
+      replace_with(stmt, std::move(fctx.stmts));
+      return;
     }
     auto lowered = fctx.push_back<FuncCallStmt>(stmt->func, args);
     replace_with(stmt, std::move(fctx.stmts));

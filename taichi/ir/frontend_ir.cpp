@@ -1738,8 +1738,13 @@ std::optional<Expr> ASTBuilder::insert_func_call(Function *func,
     this->insert(std::make_unique<FrontendFuncCallStmt>(
         func, expanded_args,
         std::static_pointer_cast<IdExpression>(var.expr)->id, dbg_info));
-    var.expr->ret_type = func->ret_type;
-    var.expr->ret_type.set_is_pointer(true);
+    if (func->is_inline_template()) {
+      var.expr->ret_type = func->rets[0].dt;
+      var.expr->ret_type.set_is_pointer(func->inline_returns_lvalue());
+    } else {
+      var.expr->ret_type = func->ret_type;
+      var.expr->ret_type.set_is_pointer(true);
+    }
     return var;
   } else {
     this->insert(std::make_unique<FrontendFuncCallStmt>(

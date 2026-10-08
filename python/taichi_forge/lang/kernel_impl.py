@@ -28,6 +28,7 @@ from taichi_forge.lang.ast import (
     transform_tree,
 )
 from taichi_forge.lang.ast._ast_template import ASTTemplate
+from taichi_forge.lang.ast._inline_ir import InlineSyntax, UnsupportedInlineResult, scalar_key
 from taichi_forge.lang.ast.ast_transformer_utils import ReturnStatus
 from taichi_forge.lang.enums import AutodiffMode, Layout
 from taichi_forge.lang.exception import (
@@ -39,7 +40,7 @@ from taichi_forge.lang.exception import (
     handle_exception_from_cpp,
 )
 from taichi_forge.lang.expr import Expr
-from taichi_forge.lang.kernel_arguments import KernelArgument
+from taichi_forge.lang.kernel_arguments import KernelArgument, decl_scalar_arg
 from taichi_forge.lang.matrix import MatrixType
 from taichi_forge.lang.shell import _shell_pop_print
 from taichi_forge.lang.struct import StructType
@@ -415,6 +416,25 @@ class Func:
             if key.instance_id not in self.compiled:
                 self.do_compile(key=key, args=args, arg_features=arg_features)
             return self.func_call_rvalue(key=key, args=args)
+        kernel = impl.get_runtime().current_kernel
+        runtime = impl.get_runtime()
+        if (
+            runtime.inline_ir_cache
+            and _SOURCE_TEMPLATE_CACHE
+            and not self.pyfunc
+            and not impl.default_cfg().auto_real_function
+            and kernel is not None
+            and runtime.compiling_callable is kernel.kernel_cpp
+            and not runtime.unrolling_hard_limit
+            and not runtime.unrolling_kernel_hard_limit
+            and (not runtime.func_inline_depth_limit or runtime.func_inline_depth < runtime.func_inline_depth_limit)
+        ):
+            started = time.perf_counter_ns() if runtime._ti_func_expansion_profile else None
+            reused = self._try_inline_ir_call(kernel, args)
+            if reused is not None:
+                if started is not None:
+                    self._record_inline_expansion(time.perf_counter_ns() - started)
+                return reused
         tree, ctx = _get_tree_and_ctx(
             self,
             is_kernel=False,
@@ -452,20 +472,7 @@ class Func:
                     t0 = time.perf_counter_ns()
                     ret = transform_tree(tree, ctx)
                     dt_ns = time.perf_counter_ns() - t0
-                    stats = runtime._ti_func_expansion_stats.setdefault(
-                        self.func_id,
-                        {
-                            "name": self.func.__name__,
-                            "call_count": 0,
-                            "cumulative_ns": 0,
-                            "max_ns": 0,
-                            "promoted": False,
-                        },
-                    )
-                    stats["call_count"] += 1
-                    stats["cumulative_ns"] += dt_ns
-                    if dt_ns > stats["max_ns"]:
-                        stats["max_ns"] = dt_ns
+                    self._record_inline_expansion(dt_ns)
                 else:
                     ret = transform_tree(tree, ctx)
         finally:
@@ -476,6 +483,110 @@ class Func:
                     "Function has a return type but does not have a return statement"
                 )
         return ret
+
+    def _record_inline_expansion(self, elapsed_ns):
+        stats = impl.get_runtime()._ti_func_expansion_stats.setdefault(
+            self.func_id,
+            {"name": self.func.__name__, "call_count": 0, "cumulative_ns": 0, "max_ns": 0, "promoted": False},
+        )
+        stats["call_count"] += 1
+        stats["cumulative_ns"] += elapsed_ns
+        stats["max_ns"] = max(stats["max_ns"], elapsed_ns)
+
+    def _try_inline_ir_call(self, kernel, args):
+        # Scalar value arguments only; references/resources keep normal lowering.
+        syntax = getattr(self, "_inline_ir_syntax", None)
+        if syntax is not None and not syntax.safe:
+            return None
+        if self.return_type is not None and (
+            len(self.return_type) != 1 or id(self.return_type[0]) not in primitive_types.type_ids
+        ):
+            return None
+        signature, dtypes, values = [], [], []
+        for argument, value in zip(self.arguments, args):
+            annotation = argument.annotation
+            if isinstance(annotation, template):
+                key = scalar_key(value)
+                if key is None:
+                    return None
+                signature.append(("static", key))
+                dtypes.append(None)
+                continue
+            if annotation is not inspect.Parameter.empty and id(annotation) not in primitive_types.type_ids:
+                return None
+            if type(value) is not Expr and type(value) not in (int, float, bool):
+                return None
+            value = Expr(value)
+            if value.is_tensor() or value.is_struct():
+                return None
+            dtype = value.ptr.get_rvalue_type()
+            if dtype not in primitive_types.all_types:
+                return None
+            signature.append(("value", dtype))
+            dtypes.append(dtype)
+            values.append(value)
+
+        tree = ctx = None
+        if syntax is None:
+            tree, ctx = _get_tree_and_ctx(self, is_kernel=False, args=args)
+            syntax = InlineSyntax(tree)
+            self._inline_ir_syntax = syntax
+        dependencies = syntax.dependency_key(_get_global_vars(self.func))
+        if dependencies is None:
+            return None
+        key = (self, tuple(signature), dependencies)
+        cached = kernel._inline_ir_cache.get(key)
+        if cached is False:
+            return None
+        if cached is None:
+            if tree is None:
+                tree, ctx = _get_tree_and_ctx(self, is_kernel=False, args=args)
+            fn = kernel.kernel_cpp.create_inline_function(self.func.__name__)
+
+            def body():
+                runtime = impl.get_runtime()
+                caller = runtime.compiling_callable
+                runtime.compiling_callable = fn
+                try:
+                    ctx.ast_builder = fn.ast_builder()
+                    ctx.argument_data = [
+                        value if dtype is None else decl_scalar_arg(dtype, argument.name, 0)
+                        for argument, value, dtype in zip(self.arguments, args, dtypes)
+                    ]
+                    fn.finalize_params()
+                    with python_compile_profile_event(f"python.func.inline_transform:{self.func.__name__}"):
+                        result = transform_tree(tree, ctx)
+                    # A Python constant return remains usable in ti.static;
+                    # replacing it with an IR expression would change semantics.
+                    if type(result) is not Expr:
+                        raise UnsupportedInlineResult()
+                    result = Expr(result)
+                    if result.ptr.get_rvalue_type() not in primitive_types.all_types:
+                        raise UnsupportedInlineResult()
+                    fn.insert_ret(result.ptr.get_rvalue_type())
+                    ctx.ast_builder.create_kernel_exprgroup_return(
+                        impl.make_expr_group([result]), _ti_core.DebugInfo(runtime.get_current_src_info())
+                    )
+                    return result.ptr.is_lvalue()
+                finally:
+                    runtime.compiling_callable = caller
+
+            try:
+                with python_compile_profile_event(f"python.func.inline_ir_build:{self.func.__name__}"):
+                    fn.set_inline_body(body)
+            except UnsupportedInlineResult:
+                kernel._inline_ir_cache[key] = False
+                return None
+            kernel._inline_ir_cache[key] = fn
+        else:
+            fn = cached
+        with python_compile_profile_event(f"python.func.inline_ir_call:{self.func.__name__}"):
+            result = impl.get_runtime().compiling_callable.ast_builder().insert_func_call(
+                fn,
+                impl.make_expr_group(values),
+                _ti_core.DebugInfo(impl.get_runtime().get_current_src_info()),
+            )
+            return Expr(result)
 
     def func_call_rvalue(self, key, args):
         # Skip the template args, e.g., |self|
@@ -1696,6 +1807,7 @@ class Kernel:
             self.runtime.current_kernel = self
             assert self.runtime.compiling_callable is None
             self.runtime.compiling_callable = kernel_cxx
+            self._inline_ir_cache = {} if self.runtime.inline_ir_cache else None
             try:
                 ctx.ast_builder = kernel_cxx.ast_builder()
                 if range_one_to_one:
@@ -1715,6 +1827,7 @@ class Kernel:
                             "Kernel has a return type but does not have a return statement"
                         )
             finally:
+                self._inline_ir_cache = None
                 self.runtime.inside_kernel = False
                 self.runtime.current_kernel = None
                 self.runtime.compiling_callable = None

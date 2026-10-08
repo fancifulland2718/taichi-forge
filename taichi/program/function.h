@@ -30,6 +30,19 @@ class Function : public Callable {
   // Set the function body to a CHI IR.
   void set_function_body(std::unique_ptr<IRNode> func_body);
 
+  // A kernel-owned, scalar inline template. Lower once, clone at each call
+  // before autodiff/offloading; this never creates a device function call.
+  // The callback reports whether the ordinary inline return is an lvalue.
+  void set_inline_body(const std::function<bool()> &func);
+
+  bool is_inline_template() const {
+    return is_inline_template_;
+  }
+
+  bool inline_returns_lvalue() const {
+    return inline_returns_lvalue_;
+  }
+
   [[nodiscard]] std::string get_name() const override;
 
   const std::optional<std::string> &try_get_ast_serialization_data() const {
@@ -47,6 +60,8 @@ class Function : public Callable {
   std::unordered_set<Stmt *> store_dests;
 
  private:
+  bool is_inline_template_{false};
+  bool inline_returns_lvalue_{false};
   IRStage ir_stage_{IRStage::None};
   std::optional<std::string> ast_serialization_data_;  // For generating AST-Key
 };
