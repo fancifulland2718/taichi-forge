@@ -158,7 +158,8 @@ class Kernel;
 //       types during CSE so byte offsets cannot become component indices.
 //  41 - If statement equivalence checks both branch-presence flags. Cached
 //       kernels must not retain an else branch erased by asymmetric CSE.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 41;
+//  42 - Regenerate forward-mode power derivatives without zero-tangent log terms.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 42;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

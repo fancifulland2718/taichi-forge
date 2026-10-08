@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Fix forward-mode derivatives of constant powers at zero and negative bases
+  under fast compilation. Zero-tangent logarithmic terms are not generated;
+  constant exponents zero and one have explicit derivatives. Old compiled
+  caches are invalidated so previously generated NaNs do not persist on upgrade.
 - Reuse formatted source snippets across static-loop visits and copies of the
   same inlined function template. This reduces Python frontend compilation work
   while preserving source locations, caret formatting and specialization values.

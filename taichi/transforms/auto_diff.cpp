@@ -2009,11 +2009,31 @@ class MakeDual : public ADTransform {
       accumulate(bin, negate(div(mul(bin->lhs, dual(bin->rhs)), numerator)));
     } else if (bin->op_type == BinaryOpType::pow) {
       // d (x ^ y) = x ^ (y-1) * (y * dx + log(x) * x * dy)
+      // A constant exponent has no tangent. Do not evaluate its logarithmic
+      // contribution: 0 * log(x) can be NaN for zero/negative bases, even when
+      // the derivative of x^n is well-defined. This must not rely on algebraic
+      // simplification being enabled later in the pipeline.
+      if (auto exponent = bin->rhs->cast<ConstStmt>()) {
+        if (exponent->val.equal_value(0)) {
+          return;
+        }
+        if (exponent->val.equal_value(1)) {
+          accumulate(bin, dual(bin->lhs));
+          return;
+        }
+      }
+      auto lhs_dual = dual(bin->lhs);
+      auto rhs_dual = dual(bin->rhs);
       auto common_coeff =
           pow(bin->lhs, sub(bin->rhs, constant(1)));  // x ^ (y-1)
-      accumulate(bin, mul(dual(bin->lhs), mul(bin->rhs, common_coeff)));
-      accumulate(bin, mul(dual(bin->rhs),
-                          mul(log(bin->lhs), mul(bin->lhs, common_coeff))));
+      // dual() returns a zero constant for a constant or non-real operand.
+      if (!lhs_dual->is<ConstStmt>()) {
+        accumulate(bin, mul(lhs_dual, mul(bin->rhs, common_coeff)));
+      }
+      if (!rhs_dual->is<ConstStmt>()) {
+        accumulate(bin, mul(rhs_dual,
+                            mul(log(bin->lhs), mul(bin->lhs, common_coeff))));
+      }
     } else if (bin->op_type == BinaryOpType::min ||
                bin->op_type == BinaryOpType::max) {
       auto cmp = bin->op_type == BinaryOpType::min ? cmp_lt(bin->lhs, bin->rhs)
