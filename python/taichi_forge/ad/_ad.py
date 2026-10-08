@@ -554,13 +554,16 @@ def grad_replaced(func):
 
     def decorated(*args, **kwargs):
         # TODO [#3025]: get rid of circular imports and move this to the top.
-        impl.get_runtime().grad_replaced = True
-        if impl.get_runtime().target_tape:
-            impl.get_runtime().target_tape.insert(decorated, args)
+        runtime = impl.get_runtime()
+        previous = runtime.grad_replaced
+        runtime.grad_replaced = True
         try:
+            # A surrounding custom derivative owns the entire nested call.
+            if runtime.target_tape and not previous:
+                runtime.target_tape.insert(decorated, args)
             func(*args, **kwargs)
         finally:
-            impl.get_runtime().grad_replaced = False
+            runtime.grad_replaced = previous
 
     decorated.grad = None
     decorated.autodiff_mode = AutodiffMode.NONE
@@ -617,14 +620,7 @@ def no_grad(func):
         >>> def foo(a):
         >>>     multiply(a)"""
 
-    def decorated(*args, **kwargs):
-        impl.get_runtime().grad_replaced = True
-        if impl.get_runtime().target_tape:
-            impl.get_runtime().target_tape.insert(decorated, args)
-        try:
-            func(*args, **kwargs)
-        finally:
-            impl.get_runtime().grad_replaced = False
+    decorated = grad_replaced(func)
 
     def placeholder(*args, **kwargs):
         return

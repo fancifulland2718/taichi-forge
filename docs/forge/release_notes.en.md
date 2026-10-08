@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Record only the outermost `grad_replaced`/`no_grad` call on a Tape. Nested
+  decorators restore the enclosing suppression state, including when a body or
+  recording step raises, preventing duplicate adjoints and leaked AD state.
 - Keep floating-point dual Field dtypes when debug mode allocates integer
   adjoint checkbits, allowing forward AD and validation Tape on the same Fields.
 - Avoid forward-AD NaNs from inactive runtime exponent tangents, including
