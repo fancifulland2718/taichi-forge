@@ -1909,10 +1909,9 @@ class MakeDual : public ADTransform {
     if (!alloca_ || alloca_->is<ConstStmt>())
       return;  // primal may be int variable
 
-    TI_ASSERT(alloca_->is<AllocaStmt>());
-    auto alloca = alloca_->as<AllocaStmt>();
-    auto local_load = insert<LocalLoadStmt>(alloca);
-    insert<LocalStoreStmt>(alloca, add(local_load, value));
+    TI_ASSERT(alloca_->is<AllocaStmt>() || alloca_->is<MatrixPtrStmt>());
+    auto local_load = insert<LocalLoadStmt>(alloca_);
+    insert<LocalStoreStmt>(alloca_, add(local_load, value));
   }
 
   Stmt *dual(Stmt *stmt) {
@@ -2226,10 +2225,16 @@ class MakeDual : public ADTransform {
     }
 
     auto origin_dual = dual(stmt->origin);
+    if (origin_dual->is<ConstStmt>()) {
+      // Integer tensors have no tangent storage.
+      return;
+    }
     auto origin_dual_ptr = insert<MatrixPtrStmt>(origin_dual, stmt->offset);
     origin_dual_ptr->ret_type = stmt->ret_type;
 
-    accumulate(stmt, origin_dual_ptr);
+    // Component stores must update the original tensor's tangent, not a
+    // scalar copy. LocalLoadStmt takes a snapshot when the component is read.
+    dual_stmt[stmt] = origin_dual_ptr;
   }
 };
 

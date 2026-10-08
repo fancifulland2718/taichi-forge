@@ -29,6 +29,8 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Preserve tangent storage aliases for dynamic local vector/matrix component
+  writes in forward AD, including repeated updates and constant overwrites.
 - Restore kernel modes in reverse call order when leaving `FwdMode` or a
   validation `Tape`. Repeated calls no longer leave ordinary kernels in AD mode;
   forward-mode restoration also runs if seed cleanup fails.
