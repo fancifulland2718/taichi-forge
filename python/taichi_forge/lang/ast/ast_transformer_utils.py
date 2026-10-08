@@ -225,6 +225,7 @@ class ASTTransformerContext:
         start_lineno=None,
         ast_builder=None,
         is_real_function=False,
+        source_info_cache=None,
     ):
         self.func = func
         self.local_scopes = []
@@ -238,6 +239,9 @@ class ASTTransformerContext:
         self.return_data = None
         self.file = file
         self.src = src
+        # Share only rendered source text with copies of the same source
+        # template. Never retain AST nodes or specialization-dependent values.
+        self._source_info_cache = {} if source_info_cache is None else source_info_cache
         self.indent = 0
         for c in self.src[0]:
             if c == " ":
@@ -342,7 +346,23 @@ class ASTTransformerContext:
             raise TaichiNameError(f'Name "{name}" is not defined')
 
     def get_pos_info(self, node):
-        msg = f'File "{self.file}", line {node.lineno + self.lineno_offset}, in {self.func.func.__name__}:\n'
+        key = (
+            type(node),
+            node.lineno,
+            node.col_offset,
+            getattr(node, "end_lineno", None),
+            getattr(node, "end_col_offset", None),
+        )
+        if isinstance(node, (ast.For, ast.While, ast.FunctionDef, ast.If)) and node.lineno != key[3]:
+            key += (node.body[0].lineno,)
+        snippet = self._source_info_cache.get(key)
+        if snippet is None:
+            snippet = self._format_source_info(node)
+            self._source_info_cache[key] = snippet
+        return f'File "{self.file}", line {node.lineno + self.lineno_offset}, in {self.func.func.__name__}:\n' + snippet
+
+    def _format_source_info(self, node):
+        msg = ""
         if version_info < (3, 8):
             msg += self.src[node.lineno - 1] + "\n"
             return msg

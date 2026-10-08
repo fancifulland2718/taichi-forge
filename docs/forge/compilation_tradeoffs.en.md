@@ -57,6 +57,12 @@ AST lowering, constant folding and atomic demotion batch their IR replacements
 to avoid repeated block scans. Expansion itself and downstream code generation
 still cost time proportional to the generated program, or more in other passes.
 
+The frontend also reuses formatted source snippets when expansion revisits a
+source position, including across copies of an inlined function template. The
+cache belongs to that source template and keeps text rather than AST nodes or
+specialization values. Error locations and carets retain their original format.
+This saves diagnostic formatting work without changing the generated program.
+
 `unrolling_kernel_warning_limit` is a soft source-expansion diagnostic (default
 1024 expanded statements), shared across inlined functions in a materialization.
 It counts visited statements, so static breaks and skipped branches do not

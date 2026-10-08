@@ -148,9 +148,9 @@ def _get_tree_and_ctx(
                 src, start_lineno = getsourcelines(self.func)
                 src = [textwrap.fill(line, tabsize=4, width=9999) for line in src]
                 source = textwrap.dedent("\n".join(src))
-                cache = (file, src, start_lineno, source, None)
+                cache = (file, src, start_lineno, source, None, {})
                 self._source_template_cache = cache
-            file, src, start_lineno, source, tree_template = cache
+            file, src, start_lineno, source, tree_template, source_info_cache = cache
         with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
             if tree_template is None:
                 tree_template = ast.parse(source)
@@ -161,9 +161,11 @@ def _get_tree_and_ctx(
                     start_lineno,
                     source,
                     tree_template,
+                    source_info_cache,
                 )
             tree = copy.deepcopy(tree_template)
     else:
+        source_info_cache = None
         with python_compile_profile_event(f"{profile_prefix}.source"):
             file = getsourcefile(self.func)
             src, start_lineno = getsourcelines(self.func)
@@ -195,6 +197,7 @@ def _get_tree_and_ctx(
             file=file,
             ast_builder=ast_builder,
             is_real_function=is_real_function,
+            source_info_cache=source_info_cache,
         )
     return tree, ctx
 

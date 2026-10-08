@@ -1,6 +1,9 @@
 import ast
 
+import pytest
+
 import taichi_forge as ti
+from taichi_forge.lang import kernel_impl
 from tests import test_utils
 
 _ARCHES = [ti.cpu, ti.cuda, ti.vulkan]
@@ -272,7 +275,7 @@ def test_source_template_cache_reuses_ast_template_for_specializations():
 
     set_x(3)
     cache = set_x._primal._source_template_cache
-    assert len(cache) == 5
+    assert len(cache) == 6
     assert isinstance(cache[4], ast.Module)
     template_id = id(cache[4])
 
@@ -280,6 +283,33 @@ def test_source_template_cache_reuses_ast_template_for_specializations():
     assert id(set_x._primal._source_template_cache[4]) == template_id
     assert len(set_x._primal.compiled_kernels) == 2
     assert x[None] == 5
+
+
+@pytest.mark.parametrize("cache_enabled", [False, True])
+@test_utils.test(arch=ti.cpu)
+def test_inline_source_info_keeps_specializations_and_error_locations(monkeypatch, cache_enabled):
+    monkeypatch.setattr(kernel_impl, "_SOURCE_TEMPLATE_CACHE", cache_enabled)
+
+    @ti.func
+    def checked_value(value: ti.template()):
+        ti.static_assert(value >= 0)
+        return value + 1
+
+    @ti.kernel
+    def total(offset: ti.template()) -> ti.i32:
+        result = 0
+        for i in ti.static(range(8)):
+            result += checked_value(i + offset)
+        return result
+
+    assert total(0) == 36
+    with pytest.raises(ti.TaichiCompilationError) as error:
+        total(-1)
+    message = str(error.value)
+    assert "in checked_value:" in message
+    assert "ti.static_assert(value >= 0)" in message
+    assert "^" in message
+    assert total(1) == 44
 
 
 @test_utils.test(arch=ti.cpu, offline_cache=False, compile_tier="balanced")

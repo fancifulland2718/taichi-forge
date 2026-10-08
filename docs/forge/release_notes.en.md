@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Reuse formatted source snippets across static-loop visits and copies of the
+  same inlined function template. This reduces Python frontend compilation work
+  while preserving source locations, caret formatting and specialization values.
+  The cache retains source text rather than expanded AST nodes or runtime values.
 - Rebuild blocks in order during AST lowering, and batch constant-fold/atomic
   replacements with indexed operand updates. Large static expansions no longer
   perform a full block scan and vector shift for every replacement in these
