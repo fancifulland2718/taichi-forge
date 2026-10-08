@@ -31,6 +31,13 @@ Forge 只复用在当前 program、arch、dtype、shape、layout 和 compile con
 
 诊断前端行为时，可用 `TI_SOURCE_TEMPLATE_CACHE=0` 关闭 source template cache。
 
+重复内联的 `ti.func` 调用会复用已解析 Python AST 的复制结构。每次展开仍分配独立的
+AST 节点和子列表，递归展开与编译失败后的重试也相互隔离。全局变量、闭包 cell 每次
+重新读取，静态 Python 回调仍在每次展开时执行。复制结构只保存语法，不保存 Field、
+表达式或原生 IR 句柄。这项优化减少 AST 准备开销，尚未合并降级后的函数体，也不引入
+设备函数调用；不增加函数大小或调用次数限制。`python.frontend.<name>.ast_parse`
+计时项包含首次解析、复制结构构建，以及后续 AST 实例化。
+
 ## 推荐用法
 
 重复仿真或渲染循环中，推荐在热循环前显式预编译：

@@ -1,5 +1,4 @@
 import ast
-import copy
 from dataclasses import replace
 import functools
 import inspect
@@ -28,6 +27,7 @@ from taichi_forge.lang.ast import (
     KernelSimplicityASTChecker,
     transform_tree,
 )
+from taichi_forge.lang.ast._ast_template import ASTTemplate
 from taichi_forge.lang.ast.ast_transformer_utils import ReturnStatus
 from taichi_forge.lang.enums import AutodiffMode, Layout
 from taichi_forge.lang.exception import (
@@ -153,8 +153,9 @@ def _get_tree_and_ctx(
             file, src, start_lineno, source, tree_template, source_info_cache = cache
         with python_compile_profile_event(f"{profile_prefix}.ast_parse"):
             if tree_template is None:
-                tree_template = ast.parse(source)
-                tree_template.body[0].decorator_list = []
+                parsed_tree = ast.parse(source)
+                parsed_tree.body[0].decorator_list = []
+                tree_template = ASTTemplate(parsed_tree)
                 self._source_template_cache = (
                     file,
                     src,
@@ -163,7 +164,7 @@ def _get_tree_and_ctx(
                     tree_template,
                     source_info_cache,
                 )
-            tree = copy.deepcopy(tree_template)
+            tree = tree_template.instantiate()
     else:
         source_info_cache = None
         with python_compile_profile_event(f"{profile_prefix}.source"):

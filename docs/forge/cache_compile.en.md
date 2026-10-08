@@ -36,6 +36,16 @@ shape, layout, and compile configuration.
 The source template cache can be disabled with `TI_SOURCE_TEMPLATE_CACHE=0` when
 diagnosing frontend behavior.
 
+Repeated inline `ti.func` calls reuse a copy layout of the parsed Python AST.
+Each expansion receives independent AST nodes and child lists, including during
+recursive expansion and after a compilation error. Globals and closure cells
+are read again, and static Python callbacks still execute on each expansion.
+The layout contains syntax only, with no Field, expression or native IR handles.
+This reduces AST preparation overhead; it does not deduplicate lowered function
+bodies or introduce device function calls. No function-size or call-count limit
+is added. The `python.frontend.<name>.ast_parse` profile event includes both
+initial parsing/layout construction and subsequent AST instantiation.
+
 ## Recommended Usage
 
 For repeated simulation or rendering loops:

@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Reuse parsed AST copy layouts for repeated inline `ti.func` calls, reducing
+  frontend preparation overhead while keeping each expansion's mutable state
+  independent. Closure reads, static callbacks and per-call lowering retain
+  their existing behavior; no function-size or call-count limit is introduced.
 - Mask zero-tangent lanes before evaluating forward derivatives of `sqrt`,
   `asin`, `acos` and `rsqrt`, avoiding NaNs from inactive singular or overflowing
   derivative terms. Primal values and nonzero-tangent derivative rules stay
