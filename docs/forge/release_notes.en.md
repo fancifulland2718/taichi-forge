@@ -29,6 +29,11 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Fix CUDA `real_func` Field access using the callee's return buffer as a root
+  binding. Pass bindings separately through nested/recursive calls and include
+  callee-only SNodeTrees in dependency collection for binding and lifetime
+  validation. Invalidate old compiled artifacts; the RuntimeContext ABI stays
+  unchanged.
 - Fix forward-mode matrix construction using local tangent addresses as values,
   which caused zero-dimensional SOA matrix fields to fail an IR assertion.
   Load each component's tangent before constructing the matrix and invalidate

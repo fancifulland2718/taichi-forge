@@ -161,7 +161,9 @@ class Kernel;
 //  42 - Regenerate forward-mode power derivatives without zero-tangent log terms.
 //  43 - Pointer metadata uses the complete cell size, including all child SNodes.
 //  44 - Forward-mode matrix constructors load tangent values from local storage.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 44;
+//  45 - Real functions receive CUDA root bindings separately from return buffers;
+//       SNodeTree dependencies include the transitive function call graph.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 45;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

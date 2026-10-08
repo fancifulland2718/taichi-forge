@@ -129,6 +129,8 @@ class TaskCodeGenLLVM : public IRVisitor, public LLVMModuleBuilder {
 
   llvm::Value *get_root(int snode_tree_id);
 
+  llvm::Value *get_cuda_root_binding();
+
   llvm::Value *get_runtime();
 
   void emit_struct_meta_base(const std::string &name,

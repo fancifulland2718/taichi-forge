@@ -3284,6 +3284,23 @@ llvm::IntegerType *TaskCodeGenLLVM::get_integer_type(int bits) {
   return nullptr;
 }
 
+llvm::Value *TaskCodeGenLLVM::get_cuda_root_binding() {
+  TI_ASSERT(compile_config.arch == Arch::cuda &&
+            !cuda_root_binding_tree_ids.empty());
+  // Only the outer no-return kernel repurposes result_buffer for field roots.
+  // Real functions need their own result buffer, so forward the root binding
+  // separately through nested and recursive calls without changing the public
+  // RuntimeContext layout.
+  if (current_callable != kernel) {
+    return get_arg(1);
+  }
+  auto *root_binding_field =
+      builder->CreateStructGEP(context_ty, get_context(), 3);
+  return builder->CreateAlignedLoad(llvm::PointerType::get(*llvm_context, 0),
+                                    root_binding_field, llvm::Align(8),
+                                    "cuda_snode_root_binding");
+}
+
 llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
   TI_ASSERT(func != nullptr);
   auto &function_roots = root_lookup_cache[func];
@@ -3302,12 +3319,7 @@ llvm::Value *TaskCodeGenLLVM::get_root(int snode_tree_id) {
       *binding == snode_tree_id) {
     TI_ASSERT(compile_config.arch == Arch::cuda && kernel->rets.empty());
     auto *pointer_type = llvm::PointerType::get(*llvm_context, 0);
-    auto *zero = tlctx->get_constant(0);
-    auto *root_binding_field = builder->CreateGEP(
-        context_ty, get_context(), {zero, tlctx->get_constant(3)});
-    auto *compact_binding = builder->CreateAlignedLoad(
-        pointer_type, root_binding_field, llvm::Align(8),
-        "cuda_snode_root_binding");
+    auto *compact_binding = get_cuda_root_binding();
     if (cuda_root_binding_tree_ids.size() == 1) {
       root = compact_binding;
     } else {
@@ -3480,9 +3492,13 @@ void TaskCodeGenLLVM::visit(ReferenceStmt *stmt) {
 
 void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
   if (!func_map.count(stmt->func)) {
-    auto guard = get_function_creation_guard(
-        {llvm::PointerType::get(get_runtime_type("RuntimeContext"), 0)},
-        stmt->func->get_name());
+    std::vector<llvm::Type *> argument_types{
+        llvm::PointerType::get(get_runtime_type("RuntimeContext"), 0)};
+    if (!cuda_root_binding_tree_ids.empty()) {
+      argument_types.push_back(llvm::PointerType::get(*llvm_context, 0));
+    }
+    auto guard =
+        get_function_creation_guard(argument_types, stmt->func->get_name());
     const Callable *old_callable = current_callable;
     current_callable = stmt->func;
     func_map.insert({stmt->func, guard.body});
@@ -3507,7 +3523,11 @@ void TaskCodeGenLLVM::visit(FuncCallStmt *stmt) {
         llvm::PointerType::get(tlctx->get_data_type<uint64>(), 0));
     call("RuntimeContext_set_result_buffer", new_ctx, result_buffer_u64);
   }
-  call(llvm_func, new_ctx);
+  if (!cuda_root_binding_tree_ids.empty()) {
+    call(llvm_func, new_ctx, get_cuda_root_binding());
+  } else {
+    call(llvm_func, new_ctx);
+  }
   llvm_val[stmt] = result_buffer;
 }
 

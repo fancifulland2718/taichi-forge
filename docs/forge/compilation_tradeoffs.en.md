@@ -92,10 +92,11 @@ The supported backend boundary is LLVM (CPU/CUDA), with no Vulkan implementation
 gradient kernels reject real functions. Function bodies execute serially within
 each calling thread, and device calls, argument buffers and recursion stacks
 can increase runtime cost. A small pure-scalar or recursion check does not
-qualify Field or ndarray argument paths. In particular, the CUDA
-[`test_experimental_templates`](../../tests/python/test_function.py) regression
-currently reproduces an illegal address and remains unresolved. Validate the
-actual argument forms before adopting this route.
+qualify Field or ndarray argument paths. The CUDA template-Field root-binding
+bug is fixed in the current 0.6.4 development source. Regression coverage
+includes nested/recursive calls, return values, separate Field trees and Graph
+replay with dependency retirement. Validate the actual argument forms and
+lifetime patterns before adopting this route.
 
 Leave `auto_real_function=False`. Its promotion is one-way and based on
 cumulative frontend expansion time, not a measured runtime benefit. Treat it

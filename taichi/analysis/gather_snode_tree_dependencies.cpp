@@ -6,6 +6,7 @@
 #include "taichi/ir/frontend_ir.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/visitors.h"
+#include "taichi/program/function.h"
 #include "taichi/program/kernel.h"
 #include "taichi/program/program.h"
 
@@ -15,6 +16,14 @@ namespace {
 
 class SNodeTreeDependencyCollector : public BasicStmtVisitor {
  public:
+  void visit(FuncCallStmt *stmt) override {
+    visit_function(stmt->func);
+  }
+
+  void visit(FrontendFuncCallStmt *stmt) override {
+    visit_function(stmt->func);
+  }
+
   void visit(Block *block) override {
     for (SNode *snode : block->stop_gradients) {
       record(snode);
@@ -102,6 +111,14 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
 
  private:
+  void visit_function(Function *func) {
+    // Field roots used only by a callee still belong to the caller's binding
+    // table and lifetime contract. Mark before visiting to handle recursion.
+    if (visited_functions_.insert(func).second) {
+      func->ir->accept(this);
+    }
+  }
+
   void record_hash_activation_path(const SNode *snode) {
     for (const SNode *node = snode; node != nullptr; node = node->parent) {
       if (node->type == SNodeType::hash) {
@@ -136,6 +153,7 @@ class SNodeTreeDependencyCollector : public BasicStmtVisitor {
   }
 
   std::unordered_set<int> tree_ids_;
+  std::unordered_set<Function *> visited_functions_;
   SNodeRelocationStructure relocation_structures_{
       SNodeRelocationStructure::none};
   bool may_trigger_hash_overflow_{false};

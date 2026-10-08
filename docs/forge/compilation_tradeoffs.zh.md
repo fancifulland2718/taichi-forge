@@ -74,8 +74,9 @@ kernel 的机器码只编译一次。函数内部的静态循环仍会展开，�
 后端边界是 LLVM（CPU/CUDA），没有 Vulkan 实现；梯度 kernel 会拒绝 real function。
 函数体在每个调用线程内部串行执行，设备调用、参数缓冲和递归栈可能增加运行成本。
 纯标量或简单递归通过，不代表 Field、ndarray 参数路径已经验证。
-尤其是 CUDA 的 [`test_experimental_templates`](../../tests/python/test_function.py)
-回归目前仍会复现非法地址，尚未修复。采用这条路线前须验证实际使用的参数形式。
+当前 0.6.4 开发源码已修复 CUDA 模板 Field 的根绑定问题；回归覆盖嵌套和递归调用、
+返回值、独立 Field 树、Graph 重放及依赖退休。采用这条路线前仍须验证实际使用的
+参数形式和生命周期模式。
 
 保持 `auto_real_function=False`。它根据累计前端展开时间进行单向提升，并不衡量运行期
 收益，应保留为实验能力。对显式 `real_func` 改动，分别测冷预编译、首次启动和暖态完成
