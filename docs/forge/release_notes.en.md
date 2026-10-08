@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Capture numerical gradient-check inputs when entering Tape, after clearing
+  the loss. Successful checks restore the actual computed Field values without
+  replaying user callbacks, preserving accumulated losses across repeated Tapes.
 - Preserve vector/matrix shape and element type in forward derivatives of
   `tanh`, `sqrt`, `asin`, `acos` and `rsqrt`. These operations no longer fail
   compilation with a scalar/tensor type mismatch.

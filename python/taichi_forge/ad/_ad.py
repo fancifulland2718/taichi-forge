@@ -29,6 +29,10 @@ class GradChecker:
         self.loss = loss
         self.eps_range = 2.0 ** np.arange(-3, -30, -2).astype(np.float64)
         self.result = [None] * len(to_check)
+
+    def capture(self):
+        # Tape initializes its loss and materializes fields before this point.
+        # Construction can precede entry and must not freeze stale inputs.
         self.all_fields = get_all_fields()
         self.backups = save_all_fields(self.all_fields)
 
@@ -45,6 +49,7 @@ class GradChecker:
 
     def check_grad(self):
         assert self.loss.dtype == types.f64, "Only f64 is supported when checking grad."
+        final_state = save_all_fields(self.all_fields)
 
         @kernel
         def x_pos(x: template(), tangent_np: ndarray(), eps: types.f64):
@@ -112,8 +117,8 @@ class GradChecker:
 
         assert all(self.result), "Grad check failed: Not all variables pass grad check"
 
-        restore_all_fields(self.all_fields, self.backups)
-        self._replay_calls()
+        # Restore the actual primal result without running user code again.
+        restore_all_fields(self.all_fields, final_state)
 
 
 def get_all_fields():
@@ -254,6 +259,9 @@ class Tape:
                 )
             with torch.no_grad():
                 self.loss.fill_(0.0)
+
+        if self.grad_checker:
+            self.grad_checker.capture()
 
         # Attach the context manager to runtime
         self.runtime.target_tape = self
