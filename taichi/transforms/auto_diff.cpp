@@ -1935,6 +1935,20 @@ class MakeDual : public ADTransform {
     return dual_stmt[stmt];
   }
 
+  Stmt *safe_unary_operand(UnaryOpStmt *stmt,
+                           Stmt *tangent,
+                           float32 inactive_value) {
+    // Mask the input before evaluating a singular/overflowing derivative.
+    // Selecting the derivative afterwards still computes 0 * infinity, and
+    // a tensor may mix active and zero-tangent lanes. Keep the primal intact.
+    auto zero = insert_const_for_grad(stmt->operand->ret_type, stmt, 0);
+    auto safe =
+        insert_const_for_grad(stmt->operand->ret_type, stmt, inactive_value);
+    auto inactive =
+        insert<BinaryOpStmt>(BinaryOpType::cmp_eq, load(tangent), zero);
+    return sel(inactive, safe, stmt->operand);
+  }
+
   void visit(UnaryOpStmt *stmt) override {
     if (stmt->op_type == UnaryOpType::neg) {
       accumulate(stmt, negate(dual(stmt->operand)));
@@ -1954,26 +1968,32 @@ class MakeDual : public ADTransform {
       auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
       accumulate(stmt, mul(sub(one, sqr(stmt)), dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::asin) {
+      auto tangent = dual(stmt->operand);
+      auto operand = safe_unary_operand(stmt, tangent, 0);
       auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
-      accumulate(stmt, mul(div(one, sqrt(sub(one, sqr(stmt->operand)))),
-                           dual(stmt->operand)));
+      accumulate(stmt, mul(div(one, sqrt(sub(one, sqr(operand)))), tangent));
     } else if (stmt->op_type == UnaryOpType::acos) {
+      auto tangent = dual(stmt->operand);
+      auto operand = safe_unary_operand(stmt, tangent, 0);
       auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
       accumulate(stmt,
-                 mul(negate(div(one, sqrt(sub(one, sqr(stmt->operand))))),
-                     dual(stmt->operand)));
+                 mul(negate(div(one, sqrt(sub(one, sqr(operand))))), tangent));
     } else if (stmt->op_type == UnaryOpType::exp) {
       accumulate(stmt, mul(stmt, dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::log) {
       accumulate(stmt, div(dual(stmt->operand), stmt->operand));
     } else if (stmt->op_type == UnaryOpType::sqrt) {
+      auto tangent = dual(stmt->operand);
+      auto operand = safe_unary_operand(stmt, tangent, 1);
       auto half = insert_const_for_grad(stmt->ret_type, stmt, 0.5f);
-      accumulate(stmt, mul(div(half, sqrt(stmt->operand)), dual(stmt->operand)));
+      accumulate(stmt, mul(div(half, sqrt(operand)), tangent));
     } else if (stmt->op_type == UnaryOpType::rsqrt) {
+      auto tangent = dual(stmt->operand);
+      auto operand = safe_unary_operand(stmt, tangent, 1);
       auto negative_half = insert_const_for_grad(stmt->ret_type, stmt, -0.5f);
       auto three = insert_const_for_grad(stmt->ret_type, stmt, 3);
-      accumulate(stmt, mul(mul(negative_half, pow(rsqrt(stmt->operand), three)),
-                           dual(stmt->operand)));
+      accumulate(stmt,
+                 mul(mul(negative_half, pow(rsqrt(operand), three)), tangent));
     } else if (stmt->op_type == UnaryOpType::cast_value) {
       if (is_real(stmt->cast_type.get_element_type()) &&
           is_real(stmt->operand->ret_type.get_element_type())) {
