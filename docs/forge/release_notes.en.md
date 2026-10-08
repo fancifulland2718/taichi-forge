@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Avoid forward-AD NaNs from inactive runtime exponent tangents, including
+  scalar arguments, derived expressions and Fields without dual storage.
+  Runtime exponents zero and one use their boundary-safe base derivatives.
+  The backend's primal `pow` domain is unchanged.
 - Inherit the caller's CPU worker ID in `real_func` call contexts, including
   nested and recursive calls. This also preserves worker-local random-state
   selection without changing the RuntimeContext ABI.

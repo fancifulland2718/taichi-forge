@@ -165,7 +165,8 @@ class Kernel;
 //       SNodeTree dependencies include the transitive function call graph.
 //  46 - Forward AD local component pointers alias tensor tangent storage.
 //  47 - Real functions inherit the caller's CPU thread ID.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 47;
+//  48 - Forward AD runtime powers mask inactive logarithms and handle y=0/1.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 48;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

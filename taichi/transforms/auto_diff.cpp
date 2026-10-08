@@ -2023,15 +2023,35 @@ class MakeDual : public ADTransform {
       }
       auto lhs_dual = dual(bin->lhs);
       auto rhs_dual = dual(bin->rhs);
-      auto common_coeff =
-          pow(bin->lhs, sub(bin->rhs, constant(1)));  // x ^ (y-1)
       // dual() returns a zero constant for a constant or non-real operand.
       if (!lhs_dual->is<ConstStmt>()) {
+        auto base = bin->lhs;
+        if (!bin->rhs->is<ConstStmt>()) {
+          // Runtime exponents 0 and 1 have derivatives 0 and dx, including
+          // at x=0. Use a safe base before evaluating pow: selecting its
+          // result afterwards still evaluates 0^-1 or backend-undefined 0^0.
+          auto zero = insert_const_for_grad(bin->ret_type, bin, 0);
+          auto one = insert_const_for_grad(bin->ret_type, bin, 1);
+          auto exponent_zero =
+              insert<BinaryOpStmt>(BinaryOpType::cmp_eq, bin->rhs, zero);
+          auto exponent_one =
+              insert<BinaryOpStmt>(BinaryOpType::cmp_eq, bin->rhs, one);
+          base = sel(exponent_zero, one, sel(exponent_one, one, base));
+        }
+        auto one = insert_const_for_grad(bin->rhs->ret_type, bin, 1);
+        auto common_coeff = pow(base, sub(bin->rhs, one));
         accumulate(bin, mul(lhs_dual, mul(bin->rhs, common_coeff)));
       }
       if (!rhs_dual->is<ConstStmt>()) {
-        accumulate(bin, mul(rhs_dual,
-                            mul(log(bin->lhs), mul(bin->lhs, common_coeff))));
+        // Inactive runtime inputs also have zero tangents, but dual() may
+        // represent them with local storage. Mask log's input, not its result,
+        // so a zero exponent tangent cannot introduce 0 * log(x) NaNs.
+        auto zero = insert_const_for_grad(bin->ret_type, bin, 0);
+        auto one = insert_const_for_grad(bin->ret_type, bin, 1);
+        auto inactive =
+            insert<BinaryOpStmt>(BinaryOpType::cmp_eq, load(rhs_dual), zero);
+        auto log_base = sel(inactive, one, bin->lhs);
+        accumulate(bin, mul(rhs_dual, mul(log(log_base), bin)));
       }
     } else if (bin->op_type == BinaryOpType::min ||
                bin->op_type == BinaryOpType::max) {
