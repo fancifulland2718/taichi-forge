@@ -50,7 +50,14 @@ class GradChecker:
     def check_grad(self):
         assert self.loss.dtype == types.f64, "Only f64 is supported when checking grad."
         final_state = save_all_fields(self.all_fields)
+        try:
+            self._check_grad()
+        finally:
+            # Numerical replays must not leave perturbed inputs or outputs,
+            # including when a callback raises or the gradient comparison fails.
+            restore_all_fields(self.all_fields, final_state)
 
+    def _check_grad(self):
         @kernel
         def x_pos(x: template(), tangent_np: ndarray(), eps: types.f64):
             for I in impl.grouped(x):
@@ -116,9 +123,6 @@ class GradChecker:
                 print("variable", i, "passes grad check")
 
         assert all(self.result), "Grad check failed: Not all variables pass grad check"
-
-        # Restore the actual primal result without running user code again.
-        restore_all_fields(self.all_fields, final_state)
 
 
 def get_all_fields():

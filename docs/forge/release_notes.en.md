@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Restore computed Field values even when numerical gradient replays raise or
+  the gradient comparison fails. Failed checks no longer leave perturbed inputs
+  or outputs behind, and cleanup does not invoke user callbacks.
 - Capture numerical gradient-check inputs when entering Tape, after clearing
   the loss. Successful checks restore the actual computed Field values without
   replaying user callbacks, preserving accumulated losses across repeated Tapes.
