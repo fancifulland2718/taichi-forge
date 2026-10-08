@@ -262,7 +262,9 @@ class Tape:
             if self.eval_on_exit and _type is None:
                 self.grad()
         finally:
-            for calls, mode in zip(self.calls, self.modes):
+            # Undo each transition in reverse order: repeated calls may have
+            # recorded an already-transformed mode after the original one.
+            for calls, mode in zip(reversed(self.calls), reversed(self.modes)):
                 if mode is not None:
                     calls[0].autodiff_mode = mode
 
@@ -753,8 +755,10 @@ class FwdMode:
 
     def __exit__(self, _type, value, tb):
         self.runtime.fwd_mode_manager = None
-        self.clear_seed()
-        self.recover_kernels()
+        try:
+            self.clear_seed()
+        finally:
+            self.recover_kernels()
 
     def insert(self, func):
         if func.autodiff_mode not in (
@@ -771,7 +775,7 @@ class FwdMode:
 
     def recover_kernels(self):
         assert self.entered, "Before recover the kernels, fwd mode manager must be entered."
-        for calls, mode in zip(self.calls, self.modes):
+        for calls, mode in zip(reversed(self.calls), reversed(self.modes)):
             calls.autodiff_mode = mode
         self.kernels_recovered = True
 

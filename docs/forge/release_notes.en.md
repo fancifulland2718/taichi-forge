@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Restore kernel modes in reverse call order when leaving `FwdMode` or a
+  validation `Tape`. Repeated calls no longer leave ordinary kernels in AD mode;
+  forward-mode restoration also runs if seed cleanup fails.
 - Fix CUDA `real_func` Field access using the callee's return buffer as a root
   binding. Pass bindings separately through nested/recursive calls and include
   callee-only SNodeTrees in dependency collection for binding and lifetime
