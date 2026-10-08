@@ -71,6 +71,38 @@ location and never changes loop semantics. It is an estimate, not native IR size
 or a performance verdict. Set it and `unrolling_limit` to `0` to silence static
 expansion warnings. Both opt-in hard limits remain `0` by default.
 
+## Where `real_func` fits
+
+Keep `@ti.func` as the normal helper for portable CPU/CUDA/Vulkan code and
+autodiff. Use `@ti.real_func` explicitly for LLVM workloads that need runtime
+recursion or repeatedly expand a substantial, shared function body. The
+[original proposal](https://github.com/taichi-dev/taichi/issues/602) addressed
+IR duplication and recursion. Faster AST visits and IR rewrites reduce the
+cost of expansion, but do not remove either need.
+
+Forge caches a real function's frontend and Taichi IR by specialization and
+compile tier within a Program, rebuilding them after `ti.reset()`. LLVM still
+emits the function in each calling module; this is not a guarantee of compiling
+machine code only once across all kernels. Static loops inside the function
+still expand, and distinct `ti.template()` arguments still specialize it.
+Graph replay reduces repeated kernel submission work and complements this
+within-kernel function boundary.
+
+The supported backend boundary is LLVM (CPU/CUDA), with no Vulkan implementation;
+gradient kernels reject real functions. Function bodies execute serially within
+each calling thread, and device calls, argument buffers and recursion stacks
+can increase runtime cost. A small pure-scalar or recursion check does not
+qualify Field or ndarray argument paths. In particular, the CUDA
+[`test_experimental_templates`](../../tests/python/test_function.py) regression
+currently reproduces an illegal address and remains unresolved. Validate the
+actual argument forms before adopting this route.
+
+Leave `auto_real_function=False`. Its promotion is one-way and based on
+cumulative frontend expansion time, not a measured runtime benefit. Treat it
+as experimental, not an engine-wide compile-time optimization. Measure explicit
+`real_func` changes with cold precompilation, first launch, and warm completed
+work separately; use `@ti.func` for small helpers unless evidence favors a change.
+
 ## When to use `advanced_optimization=False`
 
 Taichi's official settings guide says that disabling advanced optimization can
@@ -91,12 +123,13 @@ performance is unchanged:
 
 ## Prefer local tiering before a global switch
 
-Keep the program at `balanced`, then mark only cold or low-duty kernels:
+Start with the Python default `fast`, then select a stronger tier for kernels
+whose measured runtime improvement justifies the additional compilation:
 
 ```python
 import taichi_forge as ti
 
-ti.init(arch=ti.cuda, compile_tier='balanced', offline_cache=True)
+ti.init(arch=ti.cuda, compile_tier='fast', offline_cache=True)
 
 @ti.kernel(opt_level='fast')
 def import_once(dst: ti.types.ndarray()):
@@ -134,9 +167,9 @@ benefits from optimized code.
 - `fast_math=True` may use faster floating-point transformations. Disable it
   when strict IEEE behavior, exceptional values, or tight cross-backend
   agreement is more important than throughput.
-- Unroll and inline hard limits are safety rails for accidental compile-time
-  explosions. A limit should fail clearly rather than silently generate a
-  different algorithm.
+- Prefer expansion warnings when diagnosing compile-time growth. Unroll and
+  inline hard limits are opt-in and disabled by default; an explicitly selected
+  limit fails clearly rather than silently changing the algorithm.
 
 ## Graph replay
 

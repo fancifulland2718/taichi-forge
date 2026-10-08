@@ -59,6 +59,28 @@
 此计数用于估算展开量，并非原生 IR 规模，也不直接判定写法低效。
 将它与 `unrolling_limit` 同时设为 `0` 可关闭展开告警；两个显式硬上限仍默认 `0`。
 
+## `real_func` 的定位
+
+普通辅助函数继续使用 `@ti.func`，便于共享 CPU/CUDA/Vulkan 代码和自动微分。
+`@ti.real_func` 适合显式用于需要运行时递归，或反复展开较大公共函数体的 LLVM 工作负载。
+[最初的提案](https://github.com/taichi-dev/taichi/issues/602) 要解决的是 IR 重复和递归。
+加速 AST 访问和 IR 改写可以降低展开成本，但没有消除这两个需求。
+
+Forge 在同一 Program 内按特化与编译档位缓存 real function 的前端和 Taichi IR，
+`ti.reset()` 后重新构建。LLVM 仍在调用它的各个模块中生成函数，因此不能保证跨所有
+kernel 的机器码只编译一次。函数内部的静态循环仍会展开，不同的 `ti.template()`
+实参仍会产生特化。Graph replay 减少重复提交 kernel 的成本，与 kernel 内的函数边界互补。
+
+后端边界是 LLVM（CPU/CUDA），没有 Vulkan 实现；梯度 kernel 会拒绝 real function。
+函数体在每个调用线程内部串行执行，设备调用、参数缓冲和递归栈可能增加运行成本。
+纯标量或简单递归通过，不代表 Field、ndarray 参数路径已经验证。
+尤其是 CUDA 的 [`test_experimental_templates`](../../tests/python/test_function.py)
+回归目前仍会复现非法地址，尚未修复。采用这条路线前须验证实际使用的参数形式。
+
+保持 `auto_real_function=False`。它根据累计前端展开时间进行单向提升，并不衡量运行期
+收益，应保留为实验能力。对显式 `real_func` 改动，分别测冷预编译、首次启动和暖态完成
+耗时；小辅助函数在没有收益证据时继续使用 `@ti.func`。
+
 ## 何时使用 `advanced_optimization=False`
 
 Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以节省编译时间并
@@ -74,12 +96,13 @@ Taichi 官方 global settings 文档说明，关闭 advanced optimization 可以
 
 ## 优先局部 tier，而不是全局关闭
 
-Program 保持 `balanced`，只标记冷路径或低占空比 kernel：
+从 Python 默认的 `fast` 开始，只为实测运行收益足以抵消额外编译成本的 kernel
+选择更高档位：
 
 ```python
 import taichi_forge as ti
 
-ti.init(arch=ti.cuda, compile_tier='balanced', offline_cache=True)
+ti.init(arch=ti.cuda, compile_tier='fast', offline_cache=True)
 
 @ti.kernel(opt_level='fast')
 def import_once(dst: ti.types.ndarray()):
@@ -112,8 +135,8 @@ timestep 仍受益于优化代码时，这比全局关闭更合适。
   按版本分支。
 - `fast_math=True` 可能采用更快的浮点变换。若严格 IEEE 行为、异常值或紧密跨后端
   一致性比吞吐更重要，应关闭并重新测量。
-- unroll/inline hard limit 是防止意外编译爆炸的安全栏。触发时应明确失败，不能静默换
-  算法。
+- 诊断展开导致的编译增长时优先使用警告。unroll/inline hard limit 仅供显式选择，默认
+  关闭；主动设置的上限触发时应明确失败，不能静默换算法。
 
 ## Graph replay
 
