@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Preserve vector/matrix shape and element type in forward derivatives of
+  `tanh`, `sqrt`, `asin`, `acos` and `rsqrt`. These operations no longer fail
+  compilation with a scalar/tensor type mismatch.
 - Preserve keyword arguments for custom-gradient Tape calls, including bound
   methods and required keyword-only parameters. Reverse callbacks and numerical
   gradient checking replay the same arguments as the recorded primal call.

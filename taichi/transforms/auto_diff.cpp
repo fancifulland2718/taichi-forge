@@ -1951,26 +1951,28 @@ class MakeDual : public ADTransform {
       // `tan`.
       TI_NOT_IMPLEMENTED;
     } else if (stmt->op_type == UnaryOpType::tanh) {
-      accumulate(stmt, mul(sub(constant(1), sqr(stmt)), dual(stmt->operand)));
+      auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
+      accumulate(stmt, mul(sub(one, sqr(stmt)), dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::asin) {
-      accumulate(stmt, mul(div(constant(1),
-                               sqrt(sub(constant(1), sqr(stmt->operand)))),
+      auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
+      accumulate(stmt, mul(div(one, sqrt(sub(one, sqr(stmt->operand)))),
                            dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::acos) {
+      auto one = insert_const_for_grad(stmt->ret_type, stmt, 1);
       accumulate(stmt,
-                 mul(negate(div(constant(1),
-                                sqrt(sub(constant(1), sqr(stmt->operand))))),
+                 mul(negate(div(one, sqrt(sub(one, sqr(stmt->operand))))),
                      dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::exp) {
       accumulate(stmt, mul(stmt, dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::log) {
       accumulate(stmt, div(dual(stmt->operand), stmt->operand));
     } else if (stmt->op_type == UnaryOpType::sqrt) {
-      accumulate(stmt, mul(div(constant(0.5f), sqrt(stmt->operand)),
-                           dual(stmt->operand)));
+      auto half = insert_const_for_grad(stmt->ret_type, stmt, 0.5f);
+      accumulate(stmt, mul(div(half, sqrt(stmt->operand)), dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::rsqrt) {
-      accumulate(stmt, mul(mul(constant(-0.5f),
-                               pow(rsqrt(stmt->operand), constant(3))),
+      auto negative_half = insert_const_for_grad(stmt->ret_type, stmt, -0.5f);
+      auto three = insert_const_for_grad(stmt->ret_type, stmt, 3);
+      accumulate(stmt, mul(mul(negative_half, pow(rsqrt(stmt->operand), three)),
                            dual(stmt->operand)));
     } else if (stmt->op_type == UnaryOpType::cast_value) {
       if (is_real(stmt->cast_type.get_element_type()) &&

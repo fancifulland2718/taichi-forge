@@ -28,6 +28,8 @@
 
 ## 0.6.4（开发中）
 
+- 前向求导中的 `tanh`、`sqrt`、`asin`、`acos` 和 `rsqrt` 保留向量/矩阵的形状与元素类型，
+  避免因标量与 tensor 类型不匹配而编译失败。
 - Tape 保留自定义梯度调用的关键字参数，覆盖绑定方法和必填 keyword-only 参数；
   反向回调与数值梯度检查均使用录制时的原始调用参数。
 - 自定义梯度或 `no_grad` 作用域内复用已进入 forward/validation 模式的 kernel 时，
