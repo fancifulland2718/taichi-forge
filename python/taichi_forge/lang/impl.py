@@ -1289,10 +1289,10 @@ def create_field_member(dtype, name, needs_grad, needs_dual):
         if prog.config().debug:
             # adjoint checkbit
             x_grad_checkbit = Expr(get_runtime().prog.make_id_expr(""))
-            dtype = u8
+            checkbit_dtype = u8
             if prog.config().arch in (_ti_core.opengl, _ti_core.vulkan, _ti_core.gles):
-                dtype = i32
-            x_grad_checkbit.ptr = _ti_core.expr_field(x_grad_checkbit.ptr, cook_dtype(dtype))
+                checkbit_dtype = i32
+            x_grad_checkbit.ptr = _ti_core.expr_field(x_grad_checkbit.ptr, cook_dtype(checkbit_dtype))
             x_grad_checkbit.ptr.set_name(name + ".grad_checkbit")
             x_grad_checkbit.ptr.set_grad_type(SNodeGradType.ADJOINT_CHECKBIT)
             x.ptr.set_adjoint_checkbit(x_grad_checkbit.ptr)

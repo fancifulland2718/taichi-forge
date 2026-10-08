@@ -29,6 +29,8 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Keep floating-point dual Field dtypes when debug mode allocates integer
+  adjoint checkbits, allowing forward AD and validation Tape on the same Fields.
 - Avoid forward-AD NaNs from inactive runtime exponent tangents, including
   scalar arguments, derived expressions and Fields without dual storage.
   Runtime exponents zero and one use their boundary-safe base derivatives.
