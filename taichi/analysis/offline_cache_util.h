@@ -160,7 +160,8 @@ class Kernel;
 //       kernels must not retain an else branch erased by asymmetric CSE.
 //  42 - Regenerate forward-mode power derivatives without zero-tangent log terms.
 //  43 - Pointer metadata uses the complete cell size, including all child SNodes.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 43;
+//  44 - Forward-mode matrix constructors load tangent values from local storage.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 44;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

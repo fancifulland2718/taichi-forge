@@ -2209,7 +2209,9 @@ class MakeDual : public ADTransform {
   void visit(MatrixInitStmt *stmt) override {
     std::vector<Stmt *> duals;
     for (auto &s : stmt->values) {
-      duals.push_back(dual(s));
+      // A matrix contains tangent values, not the allocas storing them.
+      // In particular, SOA field loads can retain this constructor until AD.
+      duals.push_back(load(dual(s)));
     }
     auto dual_stmt = insert<MatrixInitStmt>(duals);
     dual_stmt->ret_type = stmt->ret_type;

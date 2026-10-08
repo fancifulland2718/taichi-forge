@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Fix forward-mode matrix construction using local tangent addresses as values,
+  which caused zero-dimensional SOA matrix fields to fail an IR assertion.
+  Load each component's tangent before constructing the matrix and invalidate
+  previously compiled artifacts.
 - Fix overlapping CUDA deterministic pointer slots when a pointer SNode has
   multiple children. Device metadata now uses the complete cell size for slot
   addressing and activation clearing; cached kernels with the old size are
