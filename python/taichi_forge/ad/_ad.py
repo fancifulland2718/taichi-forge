@@ -32,8 +32,16 @@ class GradChecker:
         self.all_fields = get_all_fields()
         self.backups = save_all_fields(self.all_fields)
 
-    def add_calls(self, calls):
+    def add_calls(self, calls, call_kwargs=None):
         self.calls = calls
+        self._call_kwargs = call_kwargs if call_kwargs is not None else [None] * len(calls)
+
+    def _replay_calls(self):
+        for (func, args), kwargs in zip(self.calls, self._call_kwargs):
+            if kwargs:
+                func(*args, **kwargs)
+            else:
+                func(*args)
 
     def check_grad(self):
         assert self.loss.dtype == types.f64, "Only f64 is supported when checking grad."
@@ -61,14 +69,12 @@ class GradChecker:
 
                 restore_all_fields(self.all_fields, self.backups)
                 x_pos(x, tangent_np, eps)
-                for func, args in self.calls:
-                    func(*args)
+                self._replay_calls()
                 loss_pos = self.loss.to_numpy()
 
                 restore_all_fields(self.all_fields, self.backups)
                 x_neg(x, tangent_np, eps)
-                for func, args in self.calls:
-                    func(*args)
+                self._replay_calls()
                 loss_neg = self.loss.to_numpy()
 
                 ip_numerical = (loss_pos - loss_neg) * 0.5 / eps
@@ -107,8 +113,7 @@ class GradChecker:
         assert all(self.result), "Grad check failed: Not all variables pass grad check"
 
         restore_all_fields(self.all_fields, self.backups)
-        for func, args in self.calls:
-            func(*args)
+        self._replay_calls()
 
 
 def get_all_fields():
@@ -168,6 +173,7 @@ class Tape:
             >>>     sum(2)
         """
         self.calls = []
+        self._call_kwargs = []
         self.modes = []
         self.entered = False
         self.gradient_evaluated = False
@@ -268,7 +274,7 @@ class Tape:
                 if mode is not None:
                     calls[0].autodiff_mode = mode
 
-    def insert(self, func, args):
+    def insert(self, func, args, kwargs=None):
         # Kernels with mode `AutodiffMode.NONE` and `AutodiffMode.VALIDATION` are all forward kernels.
         # The difference is there are `assert` for global data access rule check in VALIDATION kernels.
         if func.autodiff_mode not in (
@@ -279,14 +285,17 @@ class Tape:
                 "ti.ad.Tape() can record only primal kernels; higher-order "
                 "automatic differentiation is not supported."
             )
+        call_kwargs = dict(kwargs) if kwargs else None
         self.modes.append(func.autodiff_mode)
         if self.validation:
             func.autodiff_mode = AutodiffMode.VALIDATION
         self.calls.append((func, args))
+        self._call_kwargs.append(call_kwargs)
 
     def insert_native(self, record):
         self.modes.append(None)
         self.calls.append((record, ()))
+        self._call_kwargs.append(None)
 
     def grad(self):
         assert self.entered, "Before evaluating gradients tape must be entered."
@@ -310,16 +319,19 @@ class Tape:
                 with torch.no_grad():
                     self.loss.grad.fill_(1.0)
 
-        for func, args in reversed(self.calls):
+        for (func, args), kwargs in zip(reversed(self.calls), reversed(self._call_kwargs)):
             # we need to check whether "func" has "grad" attribute
             # since we insert write_int and write_float kernels to self.calls
             # e.g. x[None] = 0.0, this func has no grad attribute
             if hasattr(func, "grad"):
-                func.grad(*args)
+                if kwargs:
+                    func.grad(*args, **kwargs)
+                else:
+                    func.grad(*args)
 
         self.gradient_evaluated = True
         if self.grad_checker:
-            self.grad_checker.add_calls(self.calls)
+            self.grad_checker.add_calls(self.calls, self._call_kwargs)
             self.grad_checker.check_grad()
 
 
@@ -560,7 +572,7 @@ def grad_replaced(func):
         try:
             # A surrounding custom derivative owns the entire nested call.
             if runtime.target_tape and not previous:
-                runtime.target_tape.insert(decorated, args)
+                runtime.target_tape.insert(decorated, args, kwargs)
             func(*args, **kwargs)
         finally:
             runtime.grad_replaced = previous

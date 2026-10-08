@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Preserve keyword arguments for custom-gradient Tape calls, including bound
+  methods and required keyword-only parameters. Reverse callbacks and numerical
+  gradient checking replay the same arguments as the recorded primal call.
 - Run the primal specialization inside custom/no-gradient scopes even when the
   same kernel was previously used in `FwdMode` or a validation Tape. Restore the
   enclosing mode after each suppressed call, including argument failures.
