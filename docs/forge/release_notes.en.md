@@ -29,11 +29,18 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Fast LLVM compilation now eliminates duplicate typed expressions and lowered
+  field-address calculations within basic blocks, including repeated sparse activation
+  lookups. This reduces generated-code and driver compilation work without
+  rewriting static loops or enabling the full advanced optimization pipeline.
+  This pass is not enabled for SPIR-V backends.
+  Field-load reuse also respects atomic and call side effects; older compiled
+  artifacts are invalidated.
 - Add opt-in `ti.init(inline_ir_cache=True)` for kernel-local reuse of eligible
   scalar `ti.func` IR on CPU, CUDA and Vulkan, expanding before autodiff and
   offloading. Static values and captures separate specializations; unsupported
-  constructs keep ordinary expansion. Defaults remain unchanged because
-  preparing a reusable body can cost more for single-call functions.
+  constructs keep ordinary expansion. It remains experimental and off by
+  default; backend IR growth and driver compilation are not reduced by this cache.
 - Reuse parsed AST copy layouts for repeated inline `ti.func` calls, reducing
   frontend preparation overhead while keeping each expansion's mutable state
   independent. Closure reads, static callbacks and per-call lowering retain

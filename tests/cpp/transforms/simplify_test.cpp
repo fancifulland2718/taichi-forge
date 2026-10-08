@@ -3,11 +3,124 @@
 #include "taichi/ir/statements.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/transforms.h"
+#include "taichi/transforms/simplify.h"
 #include "tests/cpp/program/test_program.h"
 
 namespace taichi::lang {
 
 // Basic tests within a basic block
+
+TEST(Simplify, FastLocalCSERewritesDependentExpressionsAndBranches) {
+  auto block = std::make_unique<Block>();
+  auto input = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto one = block->push_back<ConstStmt>(TypedConstant(1));
+  auto sum = block->push_back<BinaryOpStmt>(BinaryOpType::add, input, one);
+  auto duplicate_one = block->push_back<ConstStmt>(TypedConstant(1));
+  auto duplicate_sum =
+      block->push_back<BinaryOpStmt>(BinaryOpType::add, input, duplicate_one);
+  auto branch = block->push_back<IfStmt>(duplicate_sum)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  auto nested_return = branch->true_statements->push_back<ReturnStmt>(
+      std::vector<Stmt *>{duplicate_sum});
+  auto result =
+      block->push_back<ReturnStmt>(std::vector<Stmt *>{sum, duplicate_sum});
+  CompileConfig config;
+  config.advanced_optimization = false;
+  config.flatten_if = false;
+  irpass::type_check(block.get(), config);
+  irpass::full_simplify(block.get(), config, {true, false});
+  EXPECT_EQ(result->operand(0), sum);
+  EXPECT_EQ(result->operand(1), sum);
+  EXPECT_EQ(nested_return->operand(0), sum);
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+}
+
+TEST(Simplify, FastLocalCSEPreservesSignedZeroAndTypes) {
+  auto block = std::make_unique<Block>();
+  auto positive = block->push_back<ConstStmt>(TypedConstant(0.0f));
+  auto negative = block->push_back<ConstStmt>(TypedConstant(-0.0f));
+  auto duplicate = block->push_back<ConstStmt>(TypedConstant(-0.0f));
+  auto integer = block->push_back<ConstStmt>(TypedConstant(0));
+  auto wide = block->push_back<ConstStmt>(TypedConstant(0.0));
+  auto result = block->push_back<ReturnStmt>(
+      std::vector<Stmt *>{positive, negative, duplicate, integer, wide});
+  CompileConfig config;
+  config.advanced_optimization = false;
+  config.constant_folding = false;
+  irpass::type_check(block.get(), config);
+  irpass::full_simplify(block.get(), config, {true, false});
+  EXPECT_EQ(result->operand(0), positive);
+  EXPECT_EQ(result->operand(1), negative);
+  EXPECT_EQ(result->operand(2), negative);
+  EXPECT_EQ(result->operand(3), integer);
+  EXPECT_EQ(result->operand(4), wide);
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+}
+
+TEST(Simplify, FastLocalCSEPreservesSparseActivationBoundaries) {
+  for (bool activate : {false, true}) {
+    for (int barrier : {0, 1, 2}) {
+      SCOPED_TRACE(activate);
+      SCOPED_TRACE(barrier);
+      SNode root(0, SNodeType::root);
+      auto sparse = &root.insert_children(SNodeType::pointer);
+      auto block = std::make_unique<Block>();
+      auto get_root = block->push_back<GetRootStmt>(&root);
+      auto zero = block->push_back<ConstStmt>(TypedConstant(0));
+      auto lookup =
+          block->push_back<SNodeLookupStmt>(sparse, get_root, zero, activate);
+      Block *effects = block.get();
+      if (barrier == 2) {
+        auto cond = block->push_back<ArgLoadStmt>(
+            std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+        auto branch = block->push_back<IfStmt>(cond)->as<IfStmt>();
+        branch->set_true_statements(std::make_unique<Block>());
+        effects = branch->true_statements.get();
+      }
+      if (barrier != 0)
+        effects->push_back<SNodeOpStmt>(SNodeOpType::deactivate, sparse, lookup);
+      auto duplicate =
+          block->push_back<SNodeLookupStmt>(sparse, get_root, zero, activate);
+      auto result =
+          block->push_back<ReturnStmt>(std::vector<Stmt *>{lookup, duplicate});
+      CompileConfig config;
+      config.advanced_optimization = false;
+      config.flatten_if = false;
+      irpass::type_check(block.get(), config);
+      irpass::full_simplify(block.get(), config, {true, false});
+      EXPECT_EQ(result->operand(0), lookup);
+      EXPECT_EQ(result->operand(1),
+                activate && barrier == 0 ? lookup : duplicate);
+      EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+    }
+  }
+}
+
+TEST(Simplify, FastLoadsPreserveAtomicAndCallBarriers) {
+  for (bool atomic : {false, true}) {
+    auto block = std::make_unique<Block>();
+    auto ptr = block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+    auto one = block->push_back<ConstStmt>(TypedConstant(1));
+    auto first = block->push_back<GlobalLoadStmt>(ptr);
+    if (atomic) {
+      block->push_back<AtomicOpStmt>(AtomicOpType::add, ptr, one);
+    } else {
+      // An opaque call is represented by a statement with global side effects.
+      block->push_back<InternalFuncStmt>("test_opaque_effect",
+                                         std::vector<Stmt *>{});
+    }
+    auto after = block->push_back<GlobalLoadStmt>(ptr);
+    auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{first, after});
+    CompileConfig config;
+    config.advanced_optimization = false;
+    irpass::type_check(block.get(), config);
+    irpass::simplify(block.get(), config);
+    EXPECT_EQ(result->operand(0), first);
+    EXPECT_EQ(result->operand(1), after);
+    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  }
+}
 
 TEST(Simplify, IndexedLoadsPreserveStoreBarriers) {
   for (bool advanced : {false, true}) {

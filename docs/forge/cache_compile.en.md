@@ -50,7 +50,9 @@ initial parsing/layout construction and subsequent AST instantiation.
 
 `ti.init(inline_ir_cache=True)` (or `TI_INLINE_IR_CACHE=1`) enables reuse of
 eligible scalar `ti.func` bodies within one kernel materialization. It defaults
-to `False`: preparing a reusable body adds work when it is only called once.
+to `False` while coverage is experimental. Its benefit depends on how much
+compilation time is spent repeatedly lowering eligible helpers; it does not
+reduce the size of the expanded backend IR.
 The AST copy-layout optimization above remains enabled independently.
 Disabling `TI_SOURCE_TEMPLATE_CACHE` also bypasses IR reuse for diagnosis.
 
@@ -77,6 +79,55 @@ Use `ti.compile_profile()` to inspect `python.func.inline_ir_build:<name>` and
 `python.func.inline_ir_call:<name>`; the former includes template preparation and
 initial native lowering. Compare cold compilation and warm execution on the
 target backend before enabling this option in an application.
+
+### Diagnosing large kernels
+
+Measure a real application kernel before choosing an optimization. A small mesh
+can still compile slowly when each vertex update contains material, contact,
+friction and line-search code. Increasing the number of mesh elements need not
+increase compiled code size; static expansion and specialization can.
+
+Separate frontend materialization, native compilation, first launch plus
+`ti.sync()`, and warm execution. First launch may include LLVM-to-PTX compilation
+and CUDA driver module loading, or Vulkan pipeline creation. Measuring only
+`ti.compile_kernels(...)` can miss those costs. Compile-profile parent scopes
+include their children: do not add inclusive timers to their nested timers.
+Record cache settings as well. In the current Vulkan implementation,
+`offline_cache=False` does not disable the separate RHI pipeline cache.
+
+For repeated inline helpers, check whether `inline_ir_build`/`inline_ir_call`
+events actually occur. Matrix/resource-heavy methods may use ordinary expansion
+throughout, so enabling the option alone does not establish a speedup.
+
+If a heavy body repeats inside `ti.static(range(...))` but the loop does not
+require a compile-time index or Python side effects, explicitly test a normal
+`range(...)` loop. This can reduce work throughout native and driver compilation.
+It is an application-level choice: Forge does not silently rewrite static loops
+or impose a new expansion limit. Validate acceptance/rejection behavior and
+compare warm direct/Graph execution on each backend. Different generated code
+can change floating-point rounding even when iteration order is preserved.
+
+Sparse-grid scatter is another useful case to profile: unrolling a small stencil
+can duplicate substantial node-activation and atomic-update code. Compare a
+runtime stencil loop with the same neighbors, weights and bounds checks. For
+small local matrices, explicit selection among constant-index entries can avoid
+introducing dynamic local-array accesses when removing the unrolling.
+
+A faster Forge compilation tier does not guarantee the shortest first launch.
+An inexpensive IR pipeline can leave more work for LLVM or the device driver.
+Compare the complete compile-and-load path before changing optimization defaults;
+reducing repeated code at its source can improve both stages.
+
+With `advanced_optimization=False` and `opt_level>0`, Forge's LLVM pipeline also
+performs local value numbering after field-access lowering, within each basic
+block. Exact typed expressions and eligible
+field-address operations share their previous result; loads and calls are not
+value-numbered. Control-flow and unknown effects stop lookup reuse. This pass
+walks definitions and uses once and removes duplicates in batches, without a
+global fixed-point loop or a size threshold. Static expansion semantics remain
+unchanged. This pass is not enabled for SPIR-V backends: downstream driver costs
+did not show a consistent benefit in the motivating workloads. Backend and
+driver work can still dominate after this cleanup.
 
 ## Recommended Usage
 

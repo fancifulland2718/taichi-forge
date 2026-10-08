@@ -8,7 +8,9 @@
 #include "taichi/program/program.h"
 #include "taichi/transforms/utils.h"
 #include <atomic>
+#include <cstring>
 #include <set>
+#include <typeindex>
 #include <unordered_set>
 #include <utility>
 
@@ -117,13 +119,18 @@ class BasicBlockSimplify : public IRVisitor {
             auto advanced_optimization = config.advanced_optimization;
             for (int j = i + 1; j < current_stmt_id; j++) {
               if (!advanced_optimization) {
-                if (block->statements[j]
-                        ->is_container_statement()) {  // no if, while, etc..
+                auto *intervening = block->statements[j].get();
+                // Abstract pointers only carry activation intent. Actual
+                // activation is emitted at their memory uses by lower_access;
+                // merely computing another address does not invalidate a load.
+                const bool abstract_pointer =
+                    intervening->is<GlobalPtrStmt>() ||
+                    intervening->is<MatrixOfGlobalPtrStmt>();
+                if (intervening->is_container_statement() ||
+                    (intervening->has_global_side_effect() &&
+                     !abstract_pointer)) {
                   has_store = true;
                   break;
-                }
-                if (block->statements[j]->is<GlobalStoreStmt>()) {
-                  has_store = true;
                 }
                 continue;
               }
@@ -543,6 +550,133 @@ class Simplify : public IRVisitor {
 
 const PassID FullSimplifyPass::id = "FullSimplifyPass";
 
+// Cheap value numbering after LLVM access lowering in the non-advanced pipeline.
+// Access lowering emits the same address/activation chain for each component.
+// Leaving those copies to LLVM also leaves repeated activation code for the
+// CUDA driver to compile. Rewrite operands as we walk the SSA def-use order,
+// rather than searching the whole IR for every eliminated statement.
+class LocalCSE : public BasicStmtVisitor {
+ private:
+  static uint64 constant_bits(const ConstStmt *stmt) {
+    uint64 bits = 0;
+    // f16 constants are stored as f32; narrower integer constructors need not
+    // initialize the unused upper bytes of TypedConstant's union.
+    auto bytes = stmt->val.dt == PrimitiveType::f16
+                     ? sizeof(float32)
+                     : data_type_size(stmt->val.dt);
+    std::memcpy(&bits, &stmt->val.value_bits, bytes);
+    return bits;
+  }
+
+  struct Hash {
+    size_t operator()(Stmt *stmt) const {
+      size_t hash = std::hash<std::type_index>{}(std::type_index(typeid(*stmt)));
+      hash = hash * 33 ^ stmt->ret_type.hash();
+      for (int i = 0; i < stmt->num_operands(); ++i)
+        hash = hash * 33 ^ std::hash<Stmt *>{}(stmt->operand(i));
+      if (auto c = stmt->cast<ConstStmt>()) {
+        hash ^= std::hash<uint64>{}(constant_bits(c));
+      }
+      return hash;
+    }
+  };
+
+  struct Equal {
+    bool operator()(Stmt *a, Stmt *b) const {
+      if (a->type() != b->type() || a->ret_type != b->ret_type ||
+          a->num_operands() != b->num_operands())
+        return false;
+      if (auto c = a->cast<ConstStmt>()) {
+        auto other = b->as<ConstStmt>();
+        return c->val.dt == other->val.dt &&
+               constant_bits(c) == constant_bits(other);
+      }
+      for (int i = 0; i < a->num_operands(); ++i) {
+        if (a->operand(i) != b->operand(i))
+          return false;
+      }
+      return a->field_manager.equal(b->field_manager);
+    }
+  };
+
+  using Available = std::unordered_set<Stmt *, Hash, Equal>;
+  std::vector<Available> available_;
+  std::unordered_map<Stmt *, Stmt *> replacements_;
+  std::unordered_map<Block *, std::unordered_set<Stmt *>> erased_;
+
+  void rewrite_operands(Stmt *stmt) {
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto it = replacements_.find(stmt->operand(i));
+      if (it != replacements_.end())
+        stmt->set_operand(i, it->second);
+    }
+  }
+
+  static bool eligible(Stmt *stmt) {
+    if (auto lookup = stmt->cast<SNodeLookupStmt>()) {
+      // A read of an inactive sparse node can return a different pointer after
+      // activation. Only activating (idempotent) or dense lookups are reusable.
+      return lookup->activate || !lookup->snode->need_activation();
+    }
+    return stmt->is<ConstStmt>() || stmt->is<UnaryOpStmt>() ||
+           stmt->is<BinaryOpStmt>() || stmt->is<TernaryOpStmt>() ||
+           stmt->is<LinearizeStmt>() || stmt->is<IntegerOffsetStmt>() ||
+           stmt->is<GetRootStmt>() ||
+           stmt->is<GetChStmt>() || stmt->is<GlobalPtrStmt>() ||
+           stmt->is<ExternalPtrStmt>() || stmt->is<MatrixInitStmt>() ||
+           (stmt->is<MatrixPtrStmt>() && stmt->common_statement_eliminable());
+  }
+
+ public:
+  LocalCSE() {
+    invoke_default_visitor = true;
+  }
+
+  void visit(Block *block) override {
+    available_.emplace_back();
+    for (auto &stmt : block->statements)
+      stmt->accept(this);
+    available_.pop_back();
+  }
+
+  void preprocess_container_stmt(Stmt *stmt) override {
+    rewrite_operands(stmt);
+    // Stay within a basic block: no hoisting, no reuse across branches, loop
+    // iterations, offloads, or a possible sparse deactivation in a child.
+    if (!available_.empty())
+      available_.back().clear();
+  }
+
+  void visit(Stmt *stmt) override {
+    rewrite_operands(stmt);
+    if (eligible(stmt)) {
+      auto [it, inserted] = available_.back().insert(stmt);
+      if (!inserted) {
+        replacements_[stmt] = *it;
+        erased_[stmt->parent].insert(stmt);
+      }
+    } else if (stmt->has_global_side_effect() &&
+               !stmt->is<GlobalStoreStmt>() && !stmt->is<AtomicOpStmt>() &&
+               !stmt->is<LocalStoreStmt>()) {
+      // Calls, SNode operations, and unknown effects may invalidate lookups.
+      available_.back().clear();
+    }
+  }
+
+  static bool run(IRNode *root) {
+    TI_AUTO_PROF;
+    LocalCSE pass;
+    // full_simplify can also receive a single offloaded statement.
+    pass.available_.emplace_back();
+    root->accept(&pass);
+    // Compact each affected block once instead of shifting its statement
+    // vector after every duplicate in a large static expansion.
+    for (auto &[block, statements] : pass.erased_)
+      block->erase(std::move(statements));
+    return !pass.erased_.empty();
+  }
+};
+
 namespace irpass {
 
 bool simplify(IRNode *root, const CompileConfig &config) {
@@ -736,6 +870,12 @@ bool full_simplify(IRNode *root,
   if (simplify(root, config))
     any_modified = true;
   print("simplify");
+  // SPIR-V has a different downstream optimization/driver cost balance; early
+  // CSE increased pipeline creation time there on the motivating workloads.
+  if (args.after_lower_access && arch_uses_llvm(config.arch) &&
+      config.opt_level > 0 && LocalCSE::run(root))
+    any_modified = true;
+  print("local_cse");
   if (die(root))
     any_modified = true;
   print("die");
