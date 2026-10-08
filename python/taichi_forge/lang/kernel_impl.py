@@ -3108,19 +3108,6 @@ class Kernel:
     # Thus this part needs to be fast. (i.e. < 3us on a 4 GHz x64 CPU)
     @_shell_pop_print
     def __call__(self, *args, **kwargs):
-        if self.runtime.grad_replaced and self.autodiff_mode in (
-            AutodiffMode.FORWARD,
-            AutodiffMode.VALIDATION,
-        ):
-            # A previous call in this AD context may have selected a transformed
-            # specialization. Custom/no_grad scopes must still run the primal.
-            # Re-enter with NONE and restore the enclosing mode even on failure.
-            previous_mode = self.autodiff_mode
-            self.autodiff_mode = AutodiffMode.NONE
-            try:
-                return self(*args, **kwargs)
-            finally:
-                self.autodiff_mode = previous_mode
         args = _process_args(self, args, kwargs)
 
         # A reverse kernel is already the result of one AD transform.  Running
@@ -3159,14 +3146,26 @@ class Kernel:
         ):
             self.runtime.target_tape.insert(self, args)
 
-        if (
-            self.autodiff_mode != AutodiffMode.NONE
-            and impl.current_cfg().opt_level == 0
-        ):
-            _logging.warn(
-                """opt_level = 1 is enforced to enable gradient computation."""
-            )
-            impl.current_cfg().opt_level = 1
+        if self.autodiff_mode != AutodiffMode.NONE:
+            if self.runtime.grad_replaced and self.autodiff_mode in (
+                AutodiffMode.FORWARD,
+                AutodiffMode.VALIDATION,
+            ):
+                # A previous call in this context may have selected a transformed
+                # specialization. Custom/no_grad scopes must run the primal.
+                # Keep this check off the ordinary primal path; args are already
+                # normalized, so re-enter without the original keyword mapping.
+                previous_mode = self.autodiff_mode
+                self.autodiff_mode = AutodiffMode.NONE
+                try:
+                    return self(*args)
+                finally:
+                    self.autodiff_mode = previous_mode
+            if impl.current_cfg().opt_level == 0:
+                _logging.warn(
+                    """opt_level = 1 is enforced to enable gradient computation."""
+                )
+                impl.current_cfg().opt_level = 1
         ordinary_fast_eligible = (
             self.autodiff_mode == AutodiffMode.NONE
             and self.runtime.target_tape is None
