@@ -29,6 +29,10 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- Fix overlapping CUDA deterministic pointer slots when a pointer SNode has
+  multiple children. Device metadata now uses the complete cell size for slot
+  addressing and activation clearing; cached kernels with the old size are
+  invalidated. Cover static/dynamic vector component access and reactivation.
 - Fix forward-mode derivatives of constant powers at zero and negative bases
   under fast compilation. Zero-tangent logarithmic terms are not generated;
   constant exponents zero and one have explicit derivatives. Old compiled

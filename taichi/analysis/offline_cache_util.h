@@ -159,7 +159,8 @@ class Kernel;
 //  41 - If statement equivalence checks both branch-presence flags. Cached
 //       kernels must not retain an else branch erased by asymmetric CSE.
 //  42 - Regenerate forward-mode power derivatives without zero-tangent log terms.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 42;
+//  43 - Pointer metadata uses the complete cell size, including all child SNodes.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 43;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

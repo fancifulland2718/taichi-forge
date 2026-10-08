@@ -514,8 +514,11 @@ void TaskCodeGenLLVM::emit_struct_meta_base(const std::string &name,
     auto element_ty = body_type->getArrayElementType();
     element_size = tlctx->get_type_size(element_ty);
   } else if (snode->type == SNodeType::pointer) {
-    auto element_ty = StructCompilerLLVM::get_llvm_node_type(
-        module.get(), snode->ch[0].get());
+    // A pointer cell contains every child, matching the NodeManager allocation.
+    // Using only the first child makes deterministic CUDA slots overlap and
+    // clears only part of a cell when it is activated again.
+    auto element_ty =
+        StructCompilerLLVM::get_llvm_element_type(module.get(), snode);
     element_size = tlctx->get_type_size(element_ty);
   } else if (snode->type == SNodeType::hash) {
     auto element_ty =
