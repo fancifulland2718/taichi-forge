@@ -6,6 +6,7 @@
 #include "taichi/common/exceptions.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/local_storage.h"
 #include "taichi/system/profiler.h"
 #include "taichi/program/function.h"
 
@@ -88,10 +89,7 @@ class DataflowKills {
     return stmt->is<AllocaStmt>() || stmt->is<AdStackAllocaStmt>();
   }
   static Stmt *local_tensor_origin(Stmt *stmt) {
-    auto ptr = stmt->cast<MatrixPtrStmt>();
-    return ptr && ptr->origin->is<AllocaStmt>() && ptr->offset_used_as_index()
-               ? ptr->origin
-               : nullptr;
+    return stmt->is<MatrixPtrStmt>() ? direct_local_allocation(stmt) : nullptr;
   }
   const std::vector<std::size_t> &aliases(Stmt *address) {
     auto insertion = aliases_.try_emplace(address);
@@ -357,8 +355,13 @@ class CFGStoreForwardingDefinitions {
       for (std::size_t i = 0; i < universe->statements.size(); ++i) {
         auto *stmt = universe->statements[i];
         for (auto *dest : irpass::analysis::get_store_destination(stmt)) {
-          if (eligible(dest))
-            definitions_[dest].push_back({stmt, i});
+          if (auto *allocation = direct_local_allocation(dest)) {
+            auto &group = definitions_[allocation];
+            if (group.empty() || group.back().fact_index != i)
+              group.push_back({stmt, i});
+          } else if (fallback_.empty() || fallback_.back().fact_index != i) {
+            fallback_.push_back({stmt, i});
+          }
         }
       }
     }
@@ -369,14 +372,20 @@ class CFGStoreForwardingDefinitions {
            address->ret_type.ptr_removed()->is<PrimitiveType>();
   }
 
-  const std::vector<Definition> &lookup(Stmt *address) const {
+  const std::vector<Definition> &lookup(Stmt *allocation) const {
     static const std::vector<Definition> empty;
-    auto found = definitions_.find(address);
+    auto found = definitions_.find(allocation);
     return found == definitions_.end() ? empty : found->second;
+  }
+
+  const std::vector<Definition> &fallback(Stmt *allocation) const {
+    static const std::vector<Definition> empty;
+    return eligible(allocation) ? empty : fallback_;
   }
 
  private:
   std::unordered_map<Stmt *, std::vector<Definition>> definitions_;
+  std::vector<Definition> fallback_;
 };
 
 struct CFGNode::StoreForwardingIndex {
@@ -404,7 +413,23 @@ struct CFGNode::StoreForwardingIndex {
     if (inserted) {
       // Only filter definitions of an address actually queried by this node.
       // Membership and order are identical to iterating the full reach_in set.
-      for (const auto &definition : definitions.lookup(address)) {
+      const auto &local = definitions.lookup(address);
+      const auto &fallback = definitions.fallback(address);
+      auto lhs = local.begin();
+      auto rhs = fallback.begin();
+      // Merge in original fact order without retaining a copy of all fallback
+      // definitions for every allocation. Multi-destination facts occur once.
+      while (lhs != local.end() || rhs != fallback.end()) {
+        CFGStoreForwardingDefinitions::Definition definition;
+        if (rhs == fallback.end() ||
+            (lhs != local.end() && lhs->fact_index < rhs->fact_index)) {
+          definition = *lhs++;
+        } else if (lhs == local.end() || rhs->fact_index < lhs->fact_index) {
+          definition = *rhs++;
+        } else {
+          definition = *lhs++;
+          ++rhs;
+        }
         if (node.reach_in.contains_index(definition.fact_index))
           found->second.push_back(definition.stmt);
       }
@@ -538,6 +563,13 @@ Stmt *CFGNode::get_store_forwarding_data(Stmt *var,
 
   // [Cross-block search]
   // Search for store to the same dest_addr in reach_in and reach_gen
+  // An unknown entry definition vetoes forwarding regardless of other incoming
+  // values. Do this only after the nearest local definition search: a local
+  // overwrite can make the entry value irrelevant. Alloca is a known zero
+  // definition, so it must still participate in the normal value checks.
+  if (reach_in.contains(var) && !irpass::analysis::get_store_data(var))
+    return nullptr;
+
   Stmt *result = nullptr;
   bool result_visible = false;
   auto visible = [&](Stmt *stmt) {
@@ -593,14 +625,29 @@ Stmt *CFGNode::get_store_forwarding_data(Stmt *var,
       last_def_position = 0;
     }
   } else {
-    for (auto stmt : reach_in) {
+    auto process_incoming = [&](Stmt *stmt) {
       // var == stmt is for the case that a global ptr is never stored.
       // In this case, stmt is from nodes[start_node]->reach_gen.
       if (var == stmt || may_contain_address(stmt, var)) {
         if (!update_result(stmt))
-          return nullptr;
+          return false;
         else
           last_def_position = 0;
+      }
+      return true;
+    };
+    if (auto *allocation = direct_local_allocation(var)) {
+      // Whole tensors and their components share a candidate directory and a
+      // node-local membership filter. Original may-alias/value/visibility checks
+      // still decide each query; nonlocal and nested addresses keep the fallback.
+      for (auto *stmt : index.incoming(allocation)) {
+        if (!process_incoming(stmt))
+          return nullptr;
+      }
+    } else {
+      for (auto *stmt : reach_in) {
+        if (!process_incoming(stmt))
+          return nullptr;
       }
     }
 

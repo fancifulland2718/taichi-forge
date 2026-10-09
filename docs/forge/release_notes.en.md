@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CFG load/store forwarding rejects unknown incoming values early and groups
+  local tensor definitions by allocation, preserving fact order, alias checks
+  and visibility while avoiding scans of unrelated definitions.
 - CFG dead-store elimination checks local uses and full overwrites before
   querying successor liveness, avoiding redundant alias scans while preserving
   partial tensor writes and atomic return values.
