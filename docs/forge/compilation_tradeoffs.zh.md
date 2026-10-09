@@ -49,6 +49,9 @@ AMDGPU 执行仍需对应硬件验证。编译器 schema 更新会使旧缓存�
 whole-kernel CSE 按索引改写直接使用点，并批量删除语句，减少优化器自身的工作。
 没有关闭对应 pass，也没有增加 kernel 大小限制；默认档位保持不变。
 
+SPIR-V 冗余消除沿当前支配树路径保存可用值，退出作用域时撤销记录，避免给每个块
+复制累计映射。保留既有消除规则和优化等级选择。
+
 在当前 Taichi Forge 源码中，`debug=True` 只会在未显式指定
 `check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置
 `TI_CHECK_OUT_OF_BOUND=0`，可以单独隔离 bounds-check 成本，同时保留其它 debug

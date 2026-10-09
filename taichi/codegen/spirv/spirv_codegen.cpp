@@ -24,6 +24,7 @@
 #include "taichi/util/line_appender.h"
 #include "taichi/codegen/spirv/kernel_utils.h"
 #include "taichi/codegen/spirv/spirv_ir_builder.h"
+#include "taichi/codegen/spirv/spirv_redundancy_elimination.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/math/arithmetic.h"
 
@@ -7714,14 +7715,12 @@ std::unique_ptr<spvtools::Optimizer> make_optimizer(
     // Tier 3: aggressive optimization.
     if (enabled("MergeReturn"))
       opt->RegisterPass(spvtools::CreateMergeReturnPass());
-    // V6 (2026-04-26): CreateLoopUnrollPass is the most expensive pass
-    // in the level-3 chain. When skip_loop_unroll is true (or the user
-    // explicitly disables "LoopUnroll" via spirv_disabled_passes) we
-    // drop it entirely and rely on the GPU driver's own loop unrolling.
+    // This controls SPIR-V loops carrying an Unroll hint; Python ti.static
+    // expansion has already happened. Keep it independently diagnosable.
     if (!skip_loop_unroll && enabled("LoopUnroll"))
       opt->RegisterPass(spvtools::CreateLoopUnrollPass(true));
     if (enabled("RedundancyElimination"))
-      opt->RegisterPass(spvtools::CreateRedundancyEliminationPass());
+      opt->RegisterPass(spirv::create_scoped_redundancy_elimination_pass());
     if (enabled("CombineAccessChains"))
       opt->RegisterPass(spvtools::CreateCombineAccessChainsPass());
     if (enabled("Simplification"))

@@ -38,6 +38,8 @@ Use the documentation at your release tag for version-specific API details.
 - Reduce whole-kernel CSE reference-rewrite costs for large generated functions.
   Default optimization tiers and
   static-loop semantics remain unchanged; no size cutoff is introduced.
+- SPIR-V redundancy elimination uses dominator scopes instead of per-block map
+  copying, retaining the existing elimination rules and optimization levels.
 - Fast LLVM compilation now eliminates duplicate typed expressions and lowered
   field-address calculations within basic blocks, including repeated sparse activation
   lookups. This reduces generated-code and driver compilation work without
