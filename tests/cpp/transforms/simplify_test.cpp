@@ -97,28 +97,48 @@ TEST(Simplify, FastLocalCSEPreservesSparseActivationBoundaries) {
   }
 }
 
-TEST(Simplify, FastLoadsPreserveAtomicAndCallBarriers) {
-  for (bool atomic : {false, true}) {
-    auto block = std::make_unique<Block>();
-    auto ptr = block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
-    auto one = block->push_back<ConstStmt>(TypedConstant(1));
-    auto first = block->push_back<GlobalLoadStmt>(ptr);
-    if (atomic) {
-      block->push_back<AtomicOpStmt>(AtomicOpType::add, ptr, one);
-    } else {
-      // An opaque call is represented by a statement with global side effects.
-      block->push_back<InternalFuncStmt>("test_opaque_effect",
-                                         std::vector<Stmt *>{});
+TEST(Simplify, LoadsPreserveAtomicAndCallBarriers) {
+  for (bool advanced : {false, true}) {
+    for (bool nested : {false, true}) {
+      for (int effect = 0; effect < 3; ++effect) {
+        SCOPED_TRACE(advanced);
+        SCOPED_TRACE(nested);
+        SCOPED_TRACE(effect);
+        auto block = std::make_unique<Block>();
+        auto ptr = block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+        auto one = block->push_back<ConstStmt>(TypedConstant(1));
+        auto first = block->push_back<GlobalLoadStmt>(ptr);
+        auto *effects = block.get();
+        if (nested) {
+          auto condition = block->push_back<ArgLoadStmt>(
+              std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+          auto branch = block->push_back<IfStmt>(condition)->as<IfStmt>();
+          branch->set_true_statements(std::make_unique<Block>());
+          effects = branch->true_statements.get();
+        }
+        if (effect == 0) {
+          effects->push_back<AtomicOpStmt>(AtomicOpType::add, ptr, one);
+        } else if (effect == 1) {
+          effects->push_back<ExternalFuncCallStmt>(
+              ExternalFuncCallStmt::ASSEMBLY, nullptr, "opaque", "", "",
+              std::vector<Stmt *>{ptr}, std::vector<Stmt *>{});
+        } else {
+          // An opaque call is represented by a statement with global side effects.
+          effects->push_back<InternalFuncStmt>("test_opaque_effect",
+                                             std::vector<Stmt *>{});
+        }
+        auto after = block->push_back<GlobalLoadStmt>(ptr);
+        auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{first, after});
+        CompileConfig config;
+        config.advanced_optimization = advanced;
+        config.flatten_if = false;
+        irpass::type_check(block.get(), config);
+        irpass::simplify(block.get(), config);
+        EXPECT_EQ(result->operand(0), first);
+        EXPECT_EQ(result->operand(1), after);
+        EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+      }
     }
-    auto after = block->push_back<GlobalLoadStmt>(ptr);
-    auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{first, after});
-    CompileConfig config;
-    config.advanced_optimization = false;
-    irpass::type_check(block.get(), config);
-    irpass::simplify(block.get(), config);
-    EXPECT_EQ(result->operand(0), first);
-    EXPECT_EQ(result->operand(1), after);
-    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
   }
 }
 
@@ -154,6 +174,27 @@ TEST(Simplify, IndexedLoadsPreserveStoreBarriers) {
       EXPECT_EQ(result->operand(3), after);
       EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
     }
+  }
+}
+
+TEST(Simplify, CFGPreservesOpaqueEffectsAndEscapedLocalStorage) {
+  for (bool local : {false, true}) {
+    auto block = std::make_unique<Block>();
+    Stmt *ptr = local ? block->push_back<AllocaStmt>(PrimitiveType::i32)
+                      : block->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+    auto value = block->push_back<ConstStmt>(TypedConstant(7));
+    if (local)
+      block->push_back<LocalStoreStmt>(ptr, value);
+    else
+      block->push_back<GlobalStoreStmt>(ptr, value);
+    block->push_back<InternalFuncStmt>("opaque_effect", std::vector<Stmt *>{ptr});
+    Stmt *after = local ? block->push_back<LocalLoadStmt>(ptr)
+                        : block->push_back<GlobalLoadStmt>(ptr);
+    auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{after});
+    irpass::type_check(block.get(), CompileConfig{});
+    irpass::cfg_optimization(block.get(), false, false, false);
+    EXPECT_EQ(result->operand(0), after);
+    EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
   }
 }
 

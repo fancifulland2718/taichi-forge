@@ -143,10 +143,15 @@ class BasicBlockSimplify : public IRVisitor {
                          else if (auto atomic = s->cast<AtomicOpStmt>())
                            return irpass::analysis::maybe_same_address(
                                atomic->dest, stmt->src);
-                         else if (s->is<FuncCallStmt>())
-                           return true;
-                         else
-                           return false;
+                         // Abstract addresses carry activation intent, not a
+                         // write. Inspect container bodies recursively, but
+                         // never assume an otherwise unknown effect is pure
+                         // (internal/external calls and sparse deactivation
+                         // can invalidate a previously loaded value).
+                         return s->has_global_side_effect() &&
+                                !s->is_container_statement() &&
+                                !s->is<GlobalPtrStmt>() &&
+                                !s->is<MatrixOfGlobalPtrStmt>();
                        })
                        .empty()) {
                 has_store = true;

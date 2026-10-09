@@ -1,9 +1,13 @@
+import pytest
+
 import taichi_forge as ti
 from tests import test_utils
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], advanced_optimization=False, offline_cache=False)
-def test_fast_field_loads_observe_atomic_updates():
+@pytest.mark.parametrize("advanced", [False, True])
+def test_fast_field_loads_observe_atomic_updates(advanced):
+    ti.cfg.advanced_optimization = advanced
     value = ti.field(ti.i32, shape=8)
     observed = ti.Vector.field(3, ti.i32, shape=8)
 
@@ -24,7 +28,9 @@ def test_fast_field_loads_observe_atomic_updates():
 @test_utils.test(
     arch=[ti.cpu, ti.cuda], require=ti.extension.sparse, advanced_optimization=False, offline_cache=False
 )
-def test_fast_sparse_lookup_observes_branch_deactivation_and_reactivation():
+@pytest.mark.parametrize("advanced", [False, True])
+def test_fast_sparse_lookup_observes_branch_deactivation_and_reactivation(advanced):
+    ti.cfg.advanced_optimization = advanced
     x = ti.field(ti.i32)
     y = ti.field(ti.i32)
     pointer = ti.root.pointer(ti.i, 4)
@@ -47,7 +53,9 @@ def test_fast_sparse_lookup_observes_branch_deactivation_and_reactivation():
 
 
 @test_utils.test(arch=[ti.cpu, ti.cuda], advanced_optimization=False, offline_cache=False)
-def test_fast_field_loads_observe_real_function_effects():
+@pytest.mark.parametrize("advanced", [False, True])
+def test_fast_field_loads_observe_real_function_effects(advanced):
+    ti.cfg.advanced_optimization = advanced
     value = ti.field(ti.i32, shape=1)
 
     @ti.real_func

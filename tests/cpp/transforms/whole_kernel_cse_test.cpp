@@ -40,4 +40,43 @@ TEST(WholeKernelCSE, SameAddressPointersKeepTheirPointeeTypes) {
   }
 }
 
+TEST(WholeKernelCSE, SparseAddressesRespectLifetimeBoundaries) {
+  for (bool activate : {false, true}) {
+    for (bool barrier : {false, true}) {
+      SNode root(0, SNodeType::root);
+      auto *sparse = &root.insert_children(SNodeType::pointer);
+      auto block = std::make_unique<Block>();
+      auto get_root = block->push_back<GetRootStmt>(&root);
+      auto zero = block->push_back<ConstStmt>(TypedConstant(0));
+      auto before =
+          block->push_back<SNodeLookupStmt>(sparse, get_root, zero, activate);
+      if (barrier)
+        block->push_back<SNodeOpStmt>(SNodeOpType::deactivate, sparse, before);
+      auto after =
+          block->push_back<SNodeLookupStmt>(sparse, get_root, zero, activate);
+      auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{before, after});
+      irpass::type_check(block.get(), CompileConfig{});
+      irpass::whole_kernel_cse(block.get());
+      EXPECT_EQ(result->operand(1), !barrier ? before : after);
+      EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+    }
+  }
+}
+
+TEST(WholeKernelCSE, ActivationInvalidatesAmbientLookups) {
+  SNode root(0, SNodeType::root);
+  auto *sparse = &root.insert_children(SNodeType::pointer);
+  auto block = std::make_unique<Block>();
+  auto get_root = block->push_back<GetRootStmt>(&root);
+  auto zero = block->push_back<ConstStmt>(TypedConstant(0));
+  auto ambient = block->push_back<SNodeLookupStmt>(sparse, get_root, zero, false);
+  auto activated = block->push_back<SNodeLookupStmt>(sparse, get_root, zero, true);
+  auto after = block->push_back<SNodeLookupStmt>(sparse, get_root, zero, false);
+  auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{ambient, activated, after});
+  irpass::type_check(block.get(), CompileConfig{});
+  irpass::whole_kernel_cse(block.get());
+  EXPECT_NE(result->operand(0), result->operand(2));
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+}
+
 }  // namespace taichi::lang

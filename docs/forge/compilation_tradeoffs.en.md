@@ -33,7 +33,7 @@ setting can be a win for a short CLI tool or an interactive edit-run loop.
 | `compile_tier='fast'` | Python `ti.init()` default, or one kernel through `@ti.kernel(opt_level='fast')` | Uses LLVM O0 on CPU, an O1 safety floor on CUDA/AMDGPU, and skips SPIR-V optimization | Can reduce kernel throughput and change floating-point rounding; benchmark the steady workload |
 | `compile_tier='balanced'` | Explicit Program or per-kernel selection | Production-oriented compromise; LLVM/SPIR-V retain their configured optimization levels | More cold work than `fast` |
 | `compile_tier='full'` | Program or selected kernels | Lets Forge global IR simplification run to fixed point when the default cap is unchanged | Highest compile cost; use only where measured runtime wins justify it |
-| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables LICM, whole-kernel CSE, CFG optimization, store/load forwarding, and related passes as a group; it is not a fine-grained production tuning knob |
+| `advanced_optimization=False` | Broad Taichi IR pipeline | Can dramatically shorten pathological IR simplification and helps isolate optimizer failures | Disables advanced LICM, whole-kernel CSE and CFG optimization as a group; basic simplification and fast LLVM local CSE remain |
 | `debug=True` and bounds/AD validation | Program | Better diagnostics and safety checks | Changes generated code and runtime cost; keep separate debug and release measurements |
 | `kernel_profiler=True` | Runtime measurement | Attributes device time to kernels | Profiling can add synchronization or instrumentation overhead; do not use profiler-on numbers as release latency without qualification |
 
@@ -50,6 +50,10 @@ tier still inherits the Program's `advanced_optimization` choice; it does not
 independently turn that Boolean on. CUDA artifact-level regression checks cover
 both Program tiers and cache reload; AMDGPU execution needs separate hardware
 validation. Existing cache entries are invalidated by the compiler schema change.
+
+Advanced load/address reuse respects opaque-call and sparse-lifetime barriers;
+CFG optimization
+conservatively retains accesses whose memory effects it cannot model.
 
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing

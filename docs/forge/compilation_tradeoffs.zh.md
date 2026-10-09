@@ -29,7 +29,7 @@
 | `compile_tier='fast'` | Python `ti.init()` 默认，或 `@ti.kernel(opt_level='fast')` 指定的单 kernel | CPU 使用 LLVM O0，CUDA/AMDGPU 使用保证正确 lowering 的 O1 下限，SPIR-V 跳过 optimizer | 可能降低 kernel 吞吐并改变浮点舍入；必须测稳态工作负载 |
 | `compile_tier='balanced'` | 显式选择的 Program 或单 kernel | 面向生产的折中；LLVM/SPIR-V 保持配置的优化级别 | 冷编译工作多于 `fast` |
 | `compile_tier='full'` | Program 或指定 kernel | 默认 global IR cap 未显式改动时，允许全局简化迭代到 fixed point | 编译代价最高；只用于已证明有运行期收益的热点 |
-| `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 会成组关闭 LICM、whole-kernel CSE、CFG optimization、store/load forwarding 等；不是细粒度生产调参开关 |
+| `advanced_optimization=False` | 大范围 Taichi IR pipeline | 可显著缩短病态 IR 简化，也可隔离 optimizer 故障 | 成组关闭高级 LICM、whole-kernel CSE 和 CFG 优化；基础简化与 fast LLVM 局部 CSE 仍保留 |
 | `debug=True` 及越界/AD validation | Program | 更强诊断与安全检查 | 改变生成代码和运行成本；debug 与 release 必须分开测量 |
 | `kernel_profiler=True` | 运行期测量 | 把设备时间归因到 kernel | profiler 可能增加同步或 instrumentation；不能不加说明地把 profiler-on 数字当发布延迟 |
 
@@ -42,6 +42,9 @@ offline cache 和延迟 JIT 注册。kernel 的 `opt_level='fast'` 或 `'full'` 
 LLVM optimizer，不再被 Program 档位覆盖。kernel 档位仍继承 Program 的
 `advanced_optimization` 布尔值，不会单独将它开启。CUDA 已有实际产物与缓存恢复回归；
 AMDGPU 执行仍需对应硬件验证。编译器 schema 更新会使旧缓存失效。
+
+高级读取与地址复用遵守不透明调用和稀疏节点生命周期边界；CFG 对无法完整建模的内存
+副作用保守保留相关访问。
 
 在当前 Taichi Forge 源码中，`debug=True` 只会在未显式指定
 `check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置

@@ -54,7 +54,8 @@ class WholeKernelCSE : public BasicStmtVisitor {
   std::vector<std::unordered_map<std::size_t, std::unordered_set<Stmt *> > >
       visible_stmts_;
   DelayedIRModifier modifier_;
-
+  size_t sparse_lookup_epoch_{0};
+  size_t sparse_read_epoch_{0};
   // Reverse def-use map: stmt instance_id -> stmts that use it as operand.
   // Rebuilt once per inner iteration; used for O(direct-users) MarkUndone.
   BuildUsesMap::UsesMap uses_;
@@ -73,6 +74,17 @@ class WholeKernelCSE : public BasicStmtVisitor {
 
   void set_done(Stmt *stmt) {
     visited_.insert(stmt->instance_id);
+  }
+
+  void invalidate_sparse_lookups() {
+    ++sparse_lookup_epoch_;
+    ++sparse_read_epoch_;
+  }
+
+  void preprocess_container_stmt(Stmt *) override {
+    // A child may deactivate a node. Scalar value numbering remains valid,
+    // but physical sparse addresses must be resolved again afterwards.
+    invalidate_sparse_lookups();
   }
 
   // Mark all direct users of `replaced` as needing reprocessing, then
@@ -147,6 +159,19 @@ class WholeKernelCSE : public BasicStmtVisitor {
   }
 
   void visit(Stmt *stmt) override {
+    if (auto *lookup = stmt->cast<SNodeLookupStmt>()) {
+      // A non-activating lookup may name ambient memory before a later
+      // activation. Activating lookups are idempotent until a lifetime/call
+      // barrier; reads may also be reused until another activation occurs.
+      if (lookup->activate && lookup->snode->need_activation())
+        ++sparse_read_epoch_;
+    } else if (stmt->has_global_side_effect() &&
+               !stmt->is<GlobalPtrStmt>() &&
+               !stmt->is<MatrixOfGlobalPtrStmt>() &&
+               !stmt->is<GlobalStoreStmt>() && !stmt->is<AtomicOpStmt>() &&
+               !stmt->is<LocalStoreStmt>()) {
+      invalidate_sparse_lookups();
+    }
     if (!stmt->common_statement_eliminable())
       return;
     // container_statement does not need to be CSE-ed
@@ -154,6 +179,10 @@ class WholeKernelCSE : public BasicStmtVisitor {
       return;
     // Generic visitor for all CSE-able statements.
     std::size_t hash_value = operand_hash(stmt);
+    if (auto *lookup = stmt->cast<SNodeLookupStmt>();
+        lookup && lookup->snode->need_activation()) {
+      hash_value ^= lookup->activate ? sparse_lookup_epoch_ : sparse_read_epoch_;
+    }
     if (is_done(stmt)) {
       visible_stmts_.back()[hash_value].insert(stmt);
       return;
@@ -183,6 +212,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
   }
 
   void visit(IfStmt *if_stmt) override {
+    preprocess_container_stmt(if_stmt);
     if (if_stmt->true_statements) {
       if (if_stmt->true_statements->statements.empty()) {
         if_stmt->set_true_statements(nullptr);
