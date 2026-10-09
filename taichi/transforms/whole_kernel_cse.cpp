@@ -15,7 +15,7 @@ namespace taichi::lang {
 // the previous O(N) full-IR traversal.
 class BuildUsesMap : public BasicStmtVisitor {
  public:
-  using UsesMap = std::unordered_map<int, std::vector<Stmt *>>;
+  using UsesMap = std::unordered_map<int, std::unordered_set<Stmt *>>;
 
   explicit BuildUsesMap(UsesMap &uses) : uses_(uses) {
     allow_undefined_visitor = true;
@@ -25,14 +25,14 @@ class BuildUsesMap : public BasicStmtVisitor {
   void visit(Stmt *stmt) override {
     for (Stmt *op : stmt->get_operands()) {
       if (op)
-        uses_[op->instance_id].push_back(stmt);
+        uses_[op->instance_id].insert(stmt);
     }
   }
 
   void preprocess_container_stmt(Stmt *stmt) override {
     for (Stmt *op : stmt->get_operands()) {
       if (op)
-        uses_[op->instance_id].push_back(stmt);
+        uses_[op->instance_id].insert(stmt);
     }
   }
 
@@ -54,8 +54,10 @@ class WholeKernelCSE : public BasicStmtVisitor {
   std::vector<std::unordered_map<std::size_t, std::unordered_set<Stmt *> > >
       visible_stmts_;
   DelayedIRModifier modifier_;
+  std::unordered_map<Block *, std::unordered_set<Stmt *>> erased_;
   size_t sparse_lookup_epoch_{0};
   size_t sparse_read_epoch_{0};
+
   // Reverse def-use map: stmt instance_id -> stmts that use it as operand.
   // Rebuilt once per inner iteration; used for O(direct-users) MarkUndone.
   BuildUsesMap::UsesMap uses_;
@@ -87,26 +89,30 @@ class WholeKernelCSE : public BasicStmtVisitor {
     invalidate_sparse_lookups();
   }
 
-  // Mark all direct users of `replaced` as needing reprocessing, then
-  // transfer ownership of those users to `replacement` in the uses_ map so
-  // that subsequent eliminations of `replacement` can find them.
-  void mark_undone_and_transfer(Stmt *replaced, Stmt *replacement) {
+  // Rewrite only direct users, including container operands and statements
+  // queued for branch hoisting. Transfer the index immediately: another
+  // replacement in this traversal must see the updated def-use graph.
+  void replace_uses(Stmt *replaced, Stmt *replacement) {
     auto it = uses_.find(replaced->instance_id);
     if (it == uses_.end())
       return;
-    auto &users = it->second;
+    auto users = std::move(it->second);
+    uses_.erase(it);
     auto &rep_users = uses_[replacement->instance_id];
     for (Stmt *user : users) {
+      if (user->erased)
+        continue;
+      user->replace_operand_with(replaced, replacement);
       visited_.erase(user->instance_id);
-      rep_users.push_back(user);
+      rep_users.insert(user);
     }
-    users.clear();
   }
 
   static std::size_t operand_hash(const Stmt *stmt) {
     std::size_t hash_code{0};
     auto hash_type =
-        std::hash<std::type_index>{}(std::type_index(typeid(stmt)));
+        std::hash<std::type_index>{}(std::type_index(typeid(*stmt))) ^
+        std::hash<const Type *>{}(stmt->ret_type);
     if (stmt->is<GlobalPtrStmt>() || stmt->is<LoopUniqueStmt>()) {
       // special cases in common_statement_eliminable()
       return hash_type;
@@ -190,11 +196,8 @@ class WholeKernelCSE : public BasicStmtVisitor {
     for (auto &scope : visible_stmts_) {
       for (auto &prev_stmt : scope[hash_value]) {
         if (common_statement_eliminable(stmt, prev_stmt)) {
-          // Un-mark direct users of stmt using the O(users) fast path,
-          // and transfer them to prev_stmt in the uses_ map.
-          mark_undone_and_transfer(stmt, prev_stmt);
-          stmt->replace_usages_with(prev_stmt);
-          modifier_.erase(stmt);
+          replace_uses(stmt, prev_stmt);
+          erased_[stmt->parent].insert(stmt);
           return;
         }
       }
@@ -247,9 +250,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
                  false_clause->statements[0].get())) {
         // Directly modify this because it won't invalidate any iterators.
         auto common_stmt = true_clause->extract(0);
-        irpass::replace_all_usages_with(false_clause.get(),
-                                        false_clause->statements[0].get(),
-                                        common_stmt.get());
+        replace_uses(false_clause->statements[0].get(), common_stmt.get());
         modifier_.insert_before(if_stmt, std::move(common_stmt));
         false_clause->erase(0);
       }
@@ -264,9 +265,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
                  false_clause->statements.back().get())) {
         // Directly modify this because it won't invalidate any iterators.
         auto common_stmt = true_clause->extract((int)true_clause->size() - 1);
-        irpass::replace_all_usages_with(false_clause.get(),
-                                        false_clause->statements.back().get(),
-                                        common_stmt.get());
+        replace_uses(false_clause->statements.back().get(), common_stmt.get());
         modifier_.insert_after(if_stmt, std::move(common_stmt));
         false_clause->erase((int)false_clause->size() - 1);
       }
@@ -283,13 +282,17 @@ class WholeKernelCSE : public BasicStmtVisitor {
     bool modified = false;
     while (true) {
       // Rebuild the reverse def-use map once per inner iteration (O(N)).
-      // This lets mark_undone_and_transfer run in O(direct-users) rather than
-      // the previous O(N) full-IR traversal (MarkUndone), giving an overall
-      // improvement from O(N_replacements * N) to O(N + N_replacements *
-      // avg_users) per iteration.
+      // Both invalidation and replacement use direct users. Batch ordinary
+      // CSE erasures once per block to avoid repeated vector compaction.
       BuildUsesMap::run(node, eliminator.uses_);
       node->accept(&eliminator);
-      if (eliminator.modifier_.modify_ir())
+      bool iteration_modified = eliminator.modifier_.modify_ir();
+      for (auto &[block, stmts] : eliminator.erased_) {
+        block->erase(std::move(stmts));
+        iteration_modified = true;
+      }
+      eliminator.erased_.clear();
+      if (iteration_modified)
         modified = true;
       else
         break;

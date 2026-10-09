@@ -35,6 +35,9 @@ Use the documentation at your release tag for version-specific API details.
 - Advanced load/address reuse now respects opaque calls and sparse-node lifetime
   changes, including conservative CFG handling of unmodeled effects and escaped
   local storage. Old compiled caches are invalidated.
+- Reduce whole-kernel CSE reference-rewrite costs for large generated functions.
+  Default optimization tiers and
+  static-loop semantics remain unchanged; no size cutoff is introduced.
 - Fast LLVM compilation now eliminates duplicate typed expressions and lowered
   field-address calculations within basic blocks, including repeated sparse activation
   lookups. This reduces generated-code and driver compilation work without

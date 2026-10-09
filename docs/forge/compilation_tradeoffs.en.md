@@ -55,6 +55,10 @@ Advanced load/address reuse respects opaque-call and sparse-lifetime barriers;
 CFG optimization
 conservatively retains accesses whose memory effects it cannot model.
 
+Whole-kernel CSE rewrites indexed direct users and batches statement removal.
+This reduces optimizer work without disabling the pass or adding kernel-size
+cutoffs. Default tiers remain unchanged.
+
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the

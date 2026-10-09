@@ -40,6 +40,70 @@ TEST(WholeKernelCSE, SameAddressPointersKeepTheirPointeeTypes) {
   }
 }
 
+TEST(WholeKernelCSE, RewritesRepeatedUsesAndContainerOperands) {
+  auto block = std::make_unique<Block>();
+  auto input = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto one = block->push_back<ConstStmt>(TypedConstant(1));
+  auto sum = block->push_back<BinaryOpStmt>(BinaryOpType::add, input, one);
+  auto duplicate_one = block->push_back<ConstStmt>(TypedConstant(1));
+  auto duplicate_sum =
+      block->push_back<BinaryOpStmt>(BinaryOpType::add, input, duplicate_one);
+  auto branch = block->push_back<IfStmt>(duplicate_sum)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  auto repeated = branch->true_statements->push_back<BinaryOpStmt>(
+      BinaryOpType::mul, duplicate_sum, duplicate_sum);
+  auto result = branch->true_statements->push_back<ReturnStmt>(
+      std::vector<Stmt *>{repeated});
+  irpass::type_check(block.get(), CompileConfig{});
+  EXPECT_TRUE(irpass::whole_kernel_cse(block.get()));
+  EXPECT_EQ(branch->cond, sum);
+  EXPECT_EQ(repeated->operand(0), sum);
+  EXPECT_EQ(repeated->operand(1), sum);
+  EXPECT_EQ(result->operand(0), repeated);
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  EXPECT_FALSE(irpass::whole_kernel_cse(block.get()));
+}
+
+TEST(WholeKernelCSE, CompositeReturnTypesCanBeHashed) {
+  const DataType structure = TypeFactory::get_instance().get_struct_type(
+      {{PrimitiveType::i32, "value"}});
+  auto block = std::make_unique<Block>();
+  auto first = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, structure, false, true, 0);
+  auto duplicate = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, structure, false, true, 0);
+  auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{duplicate});
+  irpass::type_check(block.get(), CompileConfig{});
+  EXPECT_TRUE(irpass::whole_kernel_cse(block.get()));
+  EXPECT_EQ(result->operand(0), first);
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+}
+
+TEST(WholeKernelCSE, HoistingKeepsTheUseIndexAndDominanceValid) {
+  auto block = std::make_unique<Block>();
+  auto input = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto one = block->push_back<ConstStmt>(TypedConstant(1));
+  auto branch = block->push_back<IfStmt>(input)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  branch->set_false_statements(std::make_unique<Block>());
+  for (auto *clause : {branch->true_statements.get(),
+                       branch->false_statements.get()}) {
+    auto duplicate = clause->push_back<ConstStmt>(TypedConstant(1));
+    auto sum = clause->push_back<BinaryOpStmt>(BinaryOpType::add, input, duplicate);
+    auto nested = clause->push_back<IfStmt>(sum)->as<IfStmt>();
+    nested->set_true_statements(std::make_unique<Block>());
+    nested->true_statements->push_back<ReturnStmt>(std::vector<Stmt *>{sum});
+  }
+  auto result = block->push_back<ReturnStmt>(std::vector<Stmt *>{one});
+  irpass::type_check(block.get(), CompileConfig{});
+  EXPECT_TRUE(irpass::whole_kernel_cse(block.get()));
+  EXPECT_EQ(result->operand(0), one);
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+  EXPECT_FALSE(irpass::whole_kernel_cse(block.get()));
+}
+
 TEST(WholeKernelCSE, SparseAddressesRespectLifetimeBoundaries) {
   for (bool activate : {false, true}) {
     for (bool barrier : {false, true}) {

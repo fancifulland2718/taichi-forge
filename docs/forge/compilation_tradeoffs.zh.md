@@ -46,6 +46,9 @@ AMDGPU 执行仍需对应硬件验证。编译器 schema 更新会使旧缓存�
 高级读取与地址复用遵守不透明调用和稀疏节点生命周期边界；CFG 对无法完整建模的内存
 副作用保守保留相关访问。
 
+whole-kernel CSE 按索引改写直接使用点，并批量删除语句，减少优化器自身的工作。
+没有关闭对应 pass，也没有增加 kernel 大小限制；默认档位保持不变。
+
 在当前 Taichi Forge 源码中，`debug=True` 只会在未显式指定
 `check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置
 `TI_CHECK_OUT_OF_BOUND=0`，可以单独隔离 bounds-check 成本，同时保留其它 debug
