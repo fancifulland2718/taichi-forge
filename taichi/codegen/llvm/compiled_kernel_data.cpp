@@ -1,8 +1,8 @@
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
 
 #include "llvm/IR/Verifier.h"
-#include "llvm/AsmParser/Parser.h"
-#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/raw_ostream.h"
+#include "taichi/runtime/llvm/llvm_module_codec.h"
 
 namespace taichi::lang {
 
@@ -217,14 +217,14 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
   } catch (const liong::json::JsonException &) {
     return Err::kParseMetadataFailed;
   }
-  llvm::SMDiagnostic err;
-  auto ret = llvm::parseAssemblyString(file.src_code(), err, llvm_ctx_);
+  auto ret = decode_llvm_module(llvm::MemoryBufferRef(file.src_code(), "<string>"),
+                                llvm_ctx_, LLVMModuleEncoding::assembly);
   if (!ret) {  // File not found or Parse failed
     TI_DEBUG("Fail to parse llvm::Module from string: {}",
-             err.getMessage().str());
+             llvm::toString(ret.takeError()));
     return Err::kParseSrcCodeFailed;
   }
-  data_.compiled_data.module = std::move(ret);
+  data_.compiled_data.module = std::move(*ret);
   return Err::kNoError;
 }
 
@@ -241,7 +241,8 @@ CompiledKernelData::Err CompiledKernelData::dump_impl(
   }
   std::string str;
   llvm::raw_string_ostream oss(str);
-  data_.compiled_data.module->print(oss, /*AAW=*/nullptr);
+  encode_llvm_module(*data_.compiled_data.module, oss,
+                     LLVMModuleEncoding::assembly);
   file.set_src_code(std::move(str));
   return Err::kNoError;
 }

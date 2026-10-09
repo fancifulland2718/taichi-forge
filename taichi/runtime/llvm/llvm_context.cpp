@@ -51,6 +51,7 @@
 #include "taichi/codegen/codegen_utils.h"
 
 #include "taichi/runtime/llvm/llvm_context_pass.h"
+#include "taichi/runtime/llvm/llvm_module_codec.h"
 
 #ifdef _WIN32
 // Travis CI seems doesn't support <filesystem>...
@@ -272,8 +273,8 @@ std::unique_ptr<llvm::Module> LlvmModuleBitcodeLoader::load(
   TI_ERROR_IF(!ifs, "Bitcode file ({}) not found.", bitcode_path_);
   std::string bitcode(std::istreambuf_iterator<char>(ifs),
                       (std::istreambuf_iterator<char>()));
-  auto runtime =
-      parseBitcodeFile(llvm::MemoryBufferRef(bitcode, buffer_id_), *ctx);
+  auto runtime = decode_llvm_module(llvm::MemoryBufferRef(bitcode, buffer_id_),
+                                    *ctx, LLVMModuleEncoding::bitcode);
   if (!runtime) {
     auto error = runtime.takeError();
     TI_WARN("Bitcode loading error message:");

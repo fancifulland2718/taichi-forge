@@ -2,11 +2,8 @@
 
 #include <queue>
 
-#include "llvm/AsmParser/Parser.h"
-#include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/Bitcode/BitcodeWriter.h"
 #include "llvm/IR/Module.h"
-#include "llvm/Support/SourceMgr.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "taichi/analysis/offline_cache_util.h"
@@ -15,6 +12,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/program/kernel.h"
 #include "taichi/runtime/llvm/llvm_context.h"
+#include "taichi/runtime/llvm/llvm_module_codec.h"
 #include "taichi/util/io.h"
 #include "taichi/util/lock.h"
 #include "taichi/util/offline_cache.h"
@@ -220,13 +218,18 @@ std::unique_ptr<llvm::Module> LlvmOfflineCacheFileReader::load_module(
   } else if (format_ & Format::LL) {
     const std::string filename =
         path_prefix + "." + offline_cache::kLlvmCacheFilenameLLExt;
-    llvm::SMDiagnostic err;
-    auto ret = llvm::parseAssemblyFile(filename, err, llvm_ctx);
-    if (!ret) {  // File not found or Parse failed
-      TI_DEBUG("Fail to parse {}: {}", filename, err.getMessage().str());
+    auto buffer = llvm::MemoryBuffer::getFile(filename);
+    if (!buffer) {
+      TI_DEBUG("Fail to read {}: {}", filename, buffer.getError().message());
       return nullptr;
     }
-    return ret;
+    auto ret = decode_llvm_module((*buffer)->getMemBufferRef(), llvm_ctx,
+                                  LLVMModuleEncoding::assembly);
+    if (!ret) {  // File not found or Parse failed
+      TI_DEBUG("Fail to parse {}: {}", filename, llvm::toString(ret.takeError()));
+      return nullptr;
+    }
+    return std::move(*ret);
   }
   TI_ERROR("Unknown LLVM format={}", int(format_));
   return nullptr;
@@ -264,7 +267,7 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
             filename_prefix + "." + offline_cache::kLlvmCacheFilenameLLExt;
         if (!merge_with_old || try_lock_with_file(filename)) {
           size += write_llvm_module(filename, [mod](llvm::raw_os_ostream &os) {
-            mod->print(os, /*AAW=*/nullptr);
+            encode_llvm_module(*mod, os, LLVMModuleEncoding::assembly);
           });
         } else {
           TI_DEBUG("Cache file {} exists", filename);
@@ -275,7 +278,7 @@ void LlvmOfflineCacheFileWriter::dump(const std::string &path,
             filename_prefix + "." + offline_cache::kLlvmCacheFilenameBCExt;
         if (!merge_with_old || try_lock_with_file(filename)) {
           size += write_llvm_module(filename, [mod](llvm::raw_os_ostream &os) {
-            llvm::WriteBitcodeToFile(*mod, os);
+            encode_llvm_module(*mod, os, LLVMModuleEncoding::bitcode);
           });
         } else {
           TI_DEBUG("Cache file {} exists", filename);
