@@ -29,6 +29,10 @@ class CFGNode {
   };
 
  private:
+  struct StoreForwardingIndex;
+  Stmt *get_store_forwarding_data(Stmt *var,
+                                   int position,
+                                   StoreForwardingIndex &index) const;
   // For accelerating get_store_forwarding_data()
   std::unordered_set<Block *> parent_blocks_;
 
@@ -92,7 +96,6 @@ class CFGNode {
       const std::unordered_map<Stmt *, UseDefineStatus> &var_set,
       Stmt *var);
   bool reach_kill_variable(Stmt *var) const;
-  Stmt *get_store_forwarding_data(Stmt *var, int position) const;
 
   // Analyses and optimizations inside a CFGNode.
   void reaching_definition_analysis(bool after_lower_access);

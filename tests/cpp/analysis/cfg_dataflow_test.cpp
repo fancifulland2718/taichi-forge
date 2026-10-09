@@ -3,6 +3,7 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/control_flow_graph.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/transforms.h"
 
 namespace taichi::lang {
 namespace {
@@ -198,6 +199,177 @@ TEST(CFGDataflow, ConditionalStoresAcrossMultipleWords) {
   compare_reference(*cfg, true);
   cfg->live_variable_analysis(false, std::nullopt);
   compare_reference(*cfg, false);
+}
+
+TEST(CFGForwarding, ScalarDefinitionsSurviveRewritesAndErasure) {
+  for (bool autodiff : {false, true}) {
+    auto root = std::make_unique<Block>();
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+    auto other = root->push_back<AllocaStmt>(PrimitiveType::i32);
+    auto zero_load = root->push_back<LocalLoadStmt>(local);
+    root->push_back<LocalStoreStmt>(local, one);
+    auto first = root->push_back<LocalLoadStmt>(local);
+    root->push_back<LocalStoreStmt>(other, first);
+    root->push_back<LocalStoreStmt>(local, first);  // identical, erased
+    auto second = root->push_back<LocalLoadStmt>(other);
+    auto sum = root->push_back<BinaryOpStmt>(BinaryOpType::add, first, second);
+    root->push_back<LocalStoreStmt>(local, sum);
+    auto last = root->push_back<LocalLoadStmt>(local);
+    auto result = root->push_back<ReturnStmt>(
+        std::vector<Stmt *>{zero_load, first, second, last});
+    irpass::type_check(root.get(), CompileConfig{});
+    auto cfg = irpass::analysis::build_cfg(root.get());
+    cfg->simplify_graph();
+    EXPECT_TRUE(cfg->store_to_load_forwarding(true, autodiff));
+    EXPECT_TRUE(result->operand(0)->as<ConstStmt>()->val.equal_value(0));
+    EXPECT_EQ(result->operand(1), one);
+    EXPECT_EQ(result->operand(2), one);
+    EXPECT_EQ(result->operand(3), sum);
+    EXPECT_EQ(sum->operand(0), one);
+    EXPECT_EQ(sum->operand(1), one);
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+  }
+}
+
+TEST(CFGForwarding, ScalarJoinsRespectValuesAndVisibility) {
+  for (bool same : {false, true}) {
+    for (bool visible : {false, true}) {
+      auto root = std::make_unique<Block>();
+      auto cond = root->push_back<ArgLoadStmt>(
+          std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+      auto one = root->push_back<ConstStmt>(TypedConstant(1));
+      auto two = root->push_back<ConstStmt>(TypedConstant(2));
+      auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+      auto branch = root->push_back<IfStmt>(cond)->as<IfStmt>();
+      branch->set_true_statements(std::make_unique<Block>());
+      branch->set_false_statements(std::make_unique<Block>());
+      auto lhs = visible ? one : branch->true_statements->push_back<ConstStmt>(
+                                    TypedConstant(1));
+      auto rhs = visible ? (same ? one : two)
+                         : branch->false_statements->push_back<ConstStmt>(
+                               TypedConstant(same ? 1 : 2));
+      branch->true_statements->push_back<LocalStoreStmt>(local, lhs);
+      branch->false_statements->push_back<LocalStoreStmt>(local, rhs);
+      auto load = root->push_back<LocalLoadStmt>(local);
+      auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{load});
+      irpass::type_check(root.get(), CompileConfig{});
+      auto cfg = irpass::analysis::build_cfg(root.get());
+      cfg->simplify_graph();
+      cfg->store_to_load_forwarding(true, false);
+      EXPECT_EQ(result->operand(0), same && visible ? one : load);
+      EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+    }
+  }
+}
+
+TEST(CFGForwarding, UnknownScalarDefinitionsShadowKnownStores) {
+  for (bool external : {false, true}) {
+    auto root = std::make_unique<Block>();
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+    root->push_back<LocalStoreStmt>(local, one);
+    if (external) {
+      root->push_back<ExternalFuncCallStmt>(
+          ExternalFuncCallStmt::SHARED_OBJECT, nullptr, "", "", "",
+          std::vector<Stmt *>{}, std::vector<Stmt *>{local});
+    } else {
+      root->push_back<AtomicOpStmt>(AtomicOpType::add, local, one);
+    }
+    auto unknown = root->push_back<LocalLoadStmt>(local);
+    root->push_back<LocalStoreStmt>(local, one);
+    auto known = root->push_back<LocalLoadStmt>(local);
+    auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{unknown, known});
+    irpass::type_check(root.get(), CompileConfig{});
+    auto cfg = irpass::analysis::build_cfg(root.get());
+    cfg->simplify_graph();
+    cfg->store_to_load_forwarding(true, false);
+    EXPECT_EQ(result->operand(0), unknown);
+    EXPECT_EQ(result->operand(1), one);
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+  }
+}
+
+TEST(CFGForwarding, LoopCarriedScalarIsNotReplacedByItsInitialValue) {
+  auto root = std::make_unique<Block>();
+  auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  auto four = root->push_back<ConstStmt>(TypedConstant(4));
+  auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  auto loop = root->push_back<RangeForStmt>(
+                      zero, four, std::make_unique<Block>(), 1, 1, 1, false)
+                  ->as<RangeForStmt>();
+  auto load = loop->body->push_back<LocalLoadStmt>(local);
+  auto sum = loop->body->push_back<BinaryOpStmt>(BinaryOpType::add, load, one);
+  loop->body->push_back<LocalStoreStmt>(local, sum);
+  auto final = root->push_back<LocalLoadStmt>(local);
+  auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{final});
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  cfg->store_to_load_forwarding(true, false);
+  EXPECT_EQ(sum->operand(0), load);
+  EXPECT_EQ(result->operand(0), final);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
+TEST(CFGForwarding, TensorWritesKeepComponentAliasChecks) {
+  for (bool dynamic : {false, true}) {
+    auto root = std::make_unique<Block>();
+    auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto two = root->push_back<ConstStmt>(TypedConstant(2));
+    auto offset = dynamic ? root->push_back<ArgLoadStmt>(
+                                std::vector<int>{0}, PrimitiveType::i32, false,
+                                true, 0)
+                          : one;
+    auto type = TypeFactory::get_instance().get_tensor_type(
+        {2}, PrimitiveType::i32);
+    auto tensor = root->push_back<AllocaStmt>(type);
+    auto values = root->push_back<MatrixInitStmt>(
+        std::vector<Stmt *>{one, two});
+    values->ret_type = type;
+    root->push_back<LocalStoreStmt>(tensor, values);
+    auto first = root->push_back<MatrixPtrStmt>(tensor, zero);
+    auto other = root->push_back<MatrixPtrStmt>(tensor, offset);
+    auto before = root->push_back<LocalLoadStmt>(first);
+    root->push_back<LocalStoreStmt>(other, two);
+    auto after = root->push_back<LocalLoadStmt>(first);
+    auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{before, after});
+    irpass::type_check(root.get(), CompileConfig{});
+    auto cfg = irpass::analysis::build_cfg(root.get());
+    cfg->simplify_graph();
+    cfg->store_to_load_forwarding(true, false);
+    EXPECT_EQ(result->operand(0), one);
+    EXPECT_EQ(result->operand(1), dynamic ? after : one);
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+  }
+}
+
+TEST(CFGForwarding, GlobalAliasesAndEntryFactsSurviveWriteFiltering) {
+  auto root = std::make_unique<Block>();
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  auto two = root->push_back<ConstStmt>(TypedConstant(2));
+  auto ptr = root->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+  auto alias = root->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32);
+  auto entry = root->push_back<GlobalLoadStmt>(ptr);
+  root->push_back<GlobalStoreStmt>(ptr, one);
+  auto before = root->push_back<GlobalLoadStmt>(alias);
+  auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  root->push_back<LocalStoreStmt>(local, two);
+  auto local_load = root->push_back<LocalLoadStmt>(local);
+  root->push_back<GlobalStoreStmt>(alias, local_load);
+  auto after = root->push_back<GlobalLoadStmt>(ptr);
+  auto result = root->push_back<ReturnStmt>(
+      std::vector<Stmt *>{entry, before, after});
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  cfg->store_to_load_forwarding(false, false);
+  EXPECT_EQ(result->operand(0), entry);
+  EXPECT_EQ(result->operand(1), one);
+  EXPECT_EQ(result->operand(2), two);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
 }
 
 }  // namespace

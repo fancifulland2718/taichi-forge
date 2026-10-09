@@ -63,6 +63,11 @@ SPIR-V redundancy elimination keeps values along the active dominator path,
 with scope rollback, instead of copying an accumulated map for every block.
 It retains the existing elimination rules and optimization-level selection.
 
+CFG store/load forwarding indexes scalar local definitions by address instead
+of repeatedly scanning entire blocks and incoming definitions. Control-flow
+joins, visibility and unknown definitions still govern forwarding; matrix and
+global accesses keep their alias checks. No size limit or pass bypass is added.
+
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the
