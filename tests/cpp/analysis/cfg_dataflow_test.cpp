@@ -101,6 +101,89 @@ TEST(CFGDataflow, MatchesReferenceAcrossBranchesLoopsAndAliases) {
   }
 }
 
+TEST(CFGDataflow, TensorCandidateGroupsMatchReference) {
+  for (bool lowered : {false, true}) {
+    for (int selected = 0; selected < 5; ++selected) {
+      SCOPED_TRACE(lowered);
+      SCOPED_TRACE(selected);
+      auto root = std::make_unique<Block>();
+      auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+      auto one = root->push_back<ConstStmt>(TypedConstant(1));
+      auto index = root->push_back<ArgLoadStmt>(
+          std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+      auto other_index = root->push_back<ArgLoadStmt>(
+          std::vector<int>{1}, PrimitiveType::i32, false, true, 0);
+      auto type = TypeFactory::get_instance().get_tensor_type(
+          {2}, PrimitiveType::i32);
+      auto first = root->push_back<AllocaStmt>(type);
+      auto second = root->push_back<AllocaStmt>(type);
+      auto unused = root->push_back<AllocaStmt>(type);
+      auto global = root->push_back<GlobalTemporaryStmt>(0, type);
+      auto global_alias = root->push_back<GlobalTemporaryStmt>(0, type);
+      auto values = root->push_back<MatrixInitStmt>(
+          std::vector<Stmt *>{zero, one});
+      values->ret_type = type;
+      std::vector<Stmt *> components{
+          root->push_back<MatrixPtrStmt>(first, zero),
+          root->push_back<MatrixPtrStmt>(first, one),
+          root->push_back<MatrixPtrStmt>(first, index),
+          root->push_back<MatrixPtrStmt>(first, other_index),
+          root->push_back<MatrixPtrStmt>(second, zero)};
+      auto global_component = root->push_back<MatrixPtrStmt>(global, zero);
+      std::vector<Stmt *> kills{
+          root->push_back<MatrixPtrStmt>(first, zero),
+          root->push_back<MatrixPtrStmt>(first, index),
+          root->push_back<MatrixPtrStmt>(second, zero),
+          root->push_back<MatrixPtrStmt>(unused, zero),
+          root->push_back<MatrixPtrStmt>(global_alias, zero)};
+      ControlFlowGraph cfg;
+      auto start = cfg.push_back();
+      int begin = root->size();
+      auto whole = root->push_back<LocalStoreStmt>(first, values);
+      std::vector<Stmt *> definitions;
+      for (auto ptr : components)
+        definitions.push_back(root->push_back<LocalStoreStmt>(ptr, one));
+      auto global_store =
+          root->push_back<GlobalStoreStmt>(global_component, one);
+      auto define =
+          cfg.push_back(root.get(), begin, root->size(), false, nullptr);
+      begin = root->size();
+      if (selected == 4)
+        root->push_back<GlobalStoreStmt>(kills[selected], zero);
+      else
+        root->push_back<LocalStoreStmt>(kills[selected], zero);
+      auto kill = cfg.push_back(root.get(), begin, root->size(), false, define);
+      begin = root->size();
+      root->push_back<LocalLoadStmt>(first);
+      for (auto ptr : components)
+        root->push_back<LocalLoadStmt>(ptr);
+      root->push_back<GlobalLoadStmt>(global_component);
+      auto use = cfg.push_back(root.get(), begin, root->size(), false, kill);
+      auto end = cfg.push_back();
+      cfg.final_node = cfg.size() - 1;
+      CFGNode::add_edge(start, define);
+      CFGNode::add_edge(define, kill);
+      CFGNode::add_edge(kill, use);
+      CFGNode::add_edge(use, end);
+      cfg.reaching_definition_analysis(lowered);
+      compare_reference(cfg, true);
+      EXPECT_TRUE(kill->reach_out.contains(whole));
+      for (int i = 0; i < static_cast<int>(definitions.size()); ++i) {
+        bool overwritten = (selected == 0 && i == 0) ||
+                           (selected == 1 && i == 2) ||
+                           (selected == 2 && i == 4);
+        EXPECT_EQ(kill->reach_out.contains(definitions[i]), !overwritten);
+      }
+      if (!lowered)
+        EXPECT_EQ(kill->reach_out.contains(global_store), selected != 4);
+      cfg.live_variable_analysis(lowered, std::nullopt);
+      compare_reference(cfg, false);
+      // A store to an otherwise unused root has no live candidate group.
+      EXPECT_TRUE(kill->live_in.contains(first));
+    }
+  }
+}
+
 TEST(CFGDataflow, EmptyGraphAndWordBoundaries) {
   auto root = std::make_unique<Block>();
   auto cfg = irpass::analysis::build_cfg(root.get());

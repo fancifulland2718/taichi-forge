@@ -29,6 +29,8 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- CFG dataflow analysis narrows direct local tensor alias candidates to their
+  owning allocation, preserving dynamic-index checks and nonlocal fallbacks.
 - CFG store/load forwarding indexes scalar local definitions to avoid repeated
   full-block scans in large generated functions, retaining
   control-flow and alias checks.

@@ -71,6 +71,13 @@ shared across the CFG; each node filters only the addresses it queries against
 its reaching-definition bitset. Definition order and rewritten operands remain
 visible to forwarding. No size limit or pass bypass is added.
 
+CFG dataflow kill analysis groups direct local tensor components by their
+owning allocation. A component query checks only that allocation's candidates,
+retaining the original alias predicate for constant and dynamic offsets.
+Whole-tensor overlap is not treated as definite equality; nested and nonlocal
+pointers keep the existing fallback. This reduces unrelated address comparisons
+without limiting program size or changing the optimization tiers.
+
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the

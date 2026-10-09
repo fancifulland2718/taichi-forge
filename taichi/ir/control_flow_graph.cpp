@@ -45,8 +45,11 @@ class DataflowKills {
         if (insertion.second) {
           addresses_.push_back(address);
           definitions_.emplace_back();
-          if (!identity_only(address))
+          if (!identity_only(address)) {
             nonlocal_.push_back(insertion.first->second);
+            if (auto origin = local_tensor_origin(address))
+              local_components_[origin].push_back(insertion.first->second);
+          }
         }
         auto &facts = definitions_[insertion.first->second];
         // A multi-destination definition is killed only when every distinct
@@ -84,6 +87,12 @@ class DataflowKills {
   static bool identity_only(Stmt *stmt) {
     return stmt->is<AllocaStmt>() || stmt->is<AdStackAllocaStmt>();
   }
+  static Stmt *local_tensor_origin(Stmt *stmt) {
+    auto ptr = stmt->cast<MatrixPtrStmt>();
+    return ptr && ptr->origin->is<AllocaStmt>() && ptr->offset_used_as_index()
+               ? ptr->origin
+               : nullptr;
+  }
   const std::vector<std::size_t> &aliases(Stmt *address) {
     auto insertion = aliases_.try_emplace(address);
     auto &result = insertion.first->second;
@@ -93,7 +102,18 @@ class DataflowKills {
     if (exact != indices_.end())
       result.push_back(exact->second);
     if (!identity_only(address)) {
-      for (auto group : nonlocal_) {
+      const auto *candidates = &nonlocal_;
+      if (auto origin = local_tensor_origin(address)) {
+        // A direct local component can definitely alias only components of
+        // this AllocaStmt. Whole-tensor overlap is uncertain, not definite.
+        // Keep the original predicate within the group, including dynamic
+        // offsets; nested and nonlocal pointers retain the full fallback.
+        auto group = local_components_.find(origin);
+        if (group == local_components_.end())
+          return result;
+        candidates = &group->second;
+      }
+      for (auto group : *candidates) {
         auto candidate = addresses_[group];
         if (candidate != address &&
             irpass::analysis::definitely_same_address(candidate, address))
@@ -105,6 +125,7 @@ class DataflowKills {
   std::unordered_map<Stmt *, std::size_t> indices_;
   std::vector<Stmt *> addresses_;
   std::vector<std::vector<std::size_t>> definitions_;
+  std::unordered_map<Stmt *, std::vector<std::size_t>> local_components_;
   std::vector<std::size_t> nonlocal_, required_, covered_, fact_epoch_,
       address_epoch_;
   std::unordered_map<Stmt *, std::vector<std::size_t>> aliases_;
