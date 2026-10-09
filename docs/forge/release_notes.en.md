@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Different optimization requests for one kernel may retain different Field
+  dependencies, fixing an assertion when switching configurations. Definition
+  retirement accumulates dependencies across variants; artifacts and Graphs keep
+  their exact bindings. A previously field-free artifact no longer lets a changed
+  request skip the SNode lifecycle lock.
 - LLVM offline JIT caches store bitcode to reduce serialized size and read costs,
   while retaining legacy text payload reading. New writes use a separate cache
   schema. JIT and AOT share the module codec; AOT still exports text IR by default,

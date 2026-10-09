@@ -237,12 +237,20 @@ class TI_DLL_EXPORT Kernel : public Callable {
       std::size_t task_index,
       OffloadedTaskType task_type) const;
 
-  const std::vector<int> &snode_tree_dependencies() const {
+  // Definition lifetime dependencies accumulate across compiled variants.
+  // Each CompiledKernelData/Graph retains its own exact executable bindings.
+  std::vector<int> snode_tree_dependencies() const {
+    std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
     return snode_tree_dependencies_;
   }
 
   void set_snode_tree_dependencies(
       const std::vector<int> &dependencies) const;
+
+  // A prior field-free artifact permits lock elision only for the same
+  // request. A changed request may retain accesses removed by optimization.
+  bool has_matching_cached_request(const CompileConfig &config,
+                                   const DeviceCapabilityConfig &caps) const;
 
   SNodeTreeDependencyState snode_tree_dependency_state() const noexcept {
     return snode_tree_dependency_state_.load(std::memory_order_acquire);

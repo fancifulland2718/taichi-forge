@@ -14,6 +14,7 @@
 #include "picosha2.h"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 #ifdef TI_WITH_LLVM
@@ -707,16 +708,40 @@ Kernel::offload_task_optimization_spec(std::size_t task_index,
 void Kernel::set_snode_tree_dependencies(
     const std::vector<int> &dependencies) const {
   std::lock_guard<std::mutex> lock(snode_tree_dependencies_mutex_);
-  if (snode_tree_dependency_state_.load(std::memory_order_relaxed) !=
+  if (snode_tree_dependency_state_.load(std::memory_order_relaxed) ==
       SNodeTreeDependencyState::unknown) {
-    TI_ASSERT(snode_tree_dependencies_ == dependencies);
-    return;
+    snode_tree_dependencies_ = dependencies;
+  } else {
+    // Optimization can remove Field accesses in one request but retain them
+    // in another. Keep all known roots for definition retirement, including
+    // roots used only by older live variants. Executable/Graph bindings remain
+    // the exact dependency list owned by their CompiledKernelData.
+    if (std::includes(snode_tree_dependencies_.begin(),
+                      snode_tree_dependencies_.end(), dependencies.begin(),
+                      dependencies.end())) {
+      return;
+    }
+    std::vector<int> combined;
+    std::set_union(snode_tree_dependencies_.begin(),
+                   snode_tree_dependencies_.end(), dependencies.begin(),
+                   dependencies.end(), std::back_inserter(combined));
+    snode_tree_dependencies_ = std::move(combined);
   }
-  snode_tree_dependencies_ = dependencies;
   snode_tree_dependency_state_.store(
-      dependencies.empty() ? SNodeTreeDependencyState::none
-                           : SNodeTreeDependencyState::present,
+      snode_tree_dependencies_.empty() ? SNodeTreeDependencyState::none
+                                      : SNodeTreeDependencyState::present,
       std::memory_order_release);
+}
+
+bool Kernel::has_matching_cached_request(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps) const {
+  std::lock_guard<std::mutex> lock(kernel_key_mutex_);
+  // Conservative structural check only: no IR access or key mutation before
+  // acquiring the Program's SNode lifecycle guard. Unresolved tier overrides
+  // can miss here safely and take the guarded path.
+  return kernel_key_valid_ && kernel_key_context_snapshot_ &&
+         kernel_key_context_snapshot_->matches(config, caps, *this);
 }
 
 void Kernel::retire_definition(bool preserve_relocatable_abi) {

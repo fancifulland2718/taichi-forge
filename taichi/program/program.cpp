@@ -6014,7 +6014,8 @@ void Program::compile_and_launch_kernel(
   const auto dependency_state = kernel_def.snode_tree_dependency_state();
   const bool needs_lifecycle_guard =
       !ordinary_snode_guard_elision_enabled_ ||
-      dependency_state != Kernel::SNodeTreeDependencyState::none;
+      dependency_state != Kernel::SNodeTreeDependencyState::none ||
+      !kernel_def.has_matching_cached_request(compile_config, caps);
   if (needs_lifecycle_guard) {
     const std::uint64_t started = attribute ? ordinary_launch_now_ns() : 0;
     lifecycle_guard.emplace(acquire_snode_tree_lifecycle_read_guard());
