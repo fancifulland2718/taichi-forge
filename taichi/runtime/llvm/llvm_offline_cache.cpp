@@ -427,4 +427,19 @@ LlvmOfflineCache::KernelCacheData::convert_to_llvm_ckd_data() const {
   return result;
 }
 
+LLVM::CompiledKernelData::InternalData
+LlvmOfflineCache::KernelCacheData::take_llvm_ckd_data() && {
+  LLVM::CompiledKernelData::InternalData result;
+  result.args = std::move(args);
+  result.rets = std::move(rets);
+  result.compiled_data = std::move(compiled_data);
+  result.used_snode_tree_ids = std::move(used_snode_tree_ids);
+  result.graph_metadata = std::move(graph_metadata);
+  result.ret_size = ret_size;
+  result.ret_type = ret_type;
+  result.args_size = args_size;
+  result.args_type = args_type;
+  return result;
+}
+
 }  // namespace taichi::lang

@@ -59,8 +59,7 @@ class LlvmAotModule final : public aot::Module {
 
  protected:
   FunctionType convert_module_to_function(
-      const std::string &name,
-      LlvmOfflineCache::KernelCacheData &&loaded);
+      const LLVM::CompiledKernelData &compiled);
 
   LlvmOfflineCache::KernelCacheData load_kernel_from_cache(
       const std::string &name);

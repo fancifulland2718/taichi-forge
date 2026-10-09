@@ -51,6 +51,8 @@ struct LlvmOfflineCache {
 
     KernelCacheData clone() const;
     LLVM::CompiledKernelData::InternalData convert_to_llvm_ckd_data() const;
+    // Consume an owned cache result without cloning its context-bound module.
+    LLVM::CompiledKernelData::InternalData take_llvm_ckd_data() &&;
 
     TI_IO_DEF(kernel_key,
               args,

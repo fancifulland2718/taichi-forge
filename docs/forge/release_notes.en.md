@@ -38,6 +38,9 @@ lifetimes. The entries below describe the changes.
   while retaining legacy text payload reading. New writes use a separate cache
   schema. JIT and AOT share the module codec; AOT still exports text IR by default,
   with optimization tiers and numerical rules unchanged.
+- LLVM AOT loading transfers ownership instead of making two intermediate module
+  copies. Callables retain only their ABI, reducing load peaks and retained IR;
+  the backend continues to own the executable modules and resources.
 - LLVM and GFX AOT exports apply per-kernel optimization tiers and full-tier
   normalization through the same request resolver as JIT, including kernel
   templates. Equivalent resolved requests can share cached code; exported LLVM

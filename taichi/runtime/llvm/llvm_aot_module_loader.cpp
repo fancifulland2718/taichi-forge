@@ -54,12 +54,9 @@ LlvmAotModule::LlvmAotModule(
 }
 
 FunctionType LlvmAotModule::convert_module_to_function(
-    const std::string &name,
-    LlvmOfflineCache::KernelCacheData &&loaded) {
-  Arch arch = executor_->get_config().arch;
+    const LLVM::CompiledKernelData &compiled) {
   auto *launcher = kernel_launcher_.get();
-  LLVM::CompiledKernelData ckd{arch, loaded.convert_to_llvm_ckd_data()};
-  auto handle = kernel_launcher_->register_llvm_kernel(ckd);
+  auto handle = kernel_launcher_->register_llvm_kernel(compiled);
   return [handle, launcher](LaunchContextBuilder &ctx) {
     launcher->launch_llvm_kernel(handle, ctx);
   };
@@ -79,8 +76,14 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
     const std::string &name) {
   auto kernel_cache = load_kernel_from_cache(name);
-  auto fn = convert_module_to_function(name, kernel_cache.clone());
-  return std::make_unique<llvm_aot::KernelImpl>(fn, std::move(kernel_cache));
+  const auto kernel_name = std::move(kernel_cache.kernel_key);
+  LLVM::CompiledKernelData compiled{
+      arch(), std::move(kernel_cache).take_llvm_ckd_data()};
+  auto fn = convert_module_to_function(compiled);
+  // The launcher owns the executable. The callable retains its parameter/return
+  // ABI, not an additional LLVM module for the entire AOT module lifetime.
+  return std::make_unique<llvm_aot::KernelImpl>(
+      std::move(fn), kernel_name, compiled.get_internal_data());
 }
 
 std::unique_ptr<aot::Field> LlvmAotModule::make_new_field(
