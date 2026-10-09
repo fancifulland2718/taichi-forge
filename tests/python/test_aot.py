@@ -736,6 +736,11 @@ def test_vulkan_cgraph_short():
     g.run({"a": a, "c": c})
 
     m = ti.aot.Module(caps=[ti.DeviceCapability.spirv_has_int8])
+    # The preceding JIT run uses the physical device's capabilities. It must
+    # not let this portable AOT request borrow undeclared storage support.
+    with pytest.raises(RuntimeError, match="8-bit scalar storage"):
+        m.add_graph("g_init", g)
+    m = ti.aot.Module(caps=[ti.DeviceCapability.spirv_has_int8, "spirv_has_int8_storage"])
     m.add_graph("g_init", g)
     with tempfile.TemporaryDirectory() as tmpdir:
         m.save(tmpdir)

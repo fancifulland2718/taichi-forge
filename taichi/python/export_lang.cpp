@@ -38,6 +38,7 @@
 #include "taichi/program/cuda_cutensor_capture.h"
 #include "taichi/program/cuda_cusparselt_capture.h"
 #include "taichi/program/extension.h"
+#include "taichi/program/kernel_compile_request.h"
 #include "taichi/program/ndarray.h"
 #include "taichi/program/prepared_primitive.h"
 #include "taichi/program/matrix.h"
@@ -1559,14 +1560,11 @@ void export_lang(py::module &m) {
                          "Kernel cache-key query received a null kernel");
              auto tree_guard =
                  program.acquire_snode_tree_lifecycle_read_guard();
-             auto key = kernel->get_cached_kernel_key();
-             if (key.empty()) {
-               key = get_hashed_offline_cache_key(
-                   program.compile_config(), program.get_device_caps(),
-                   kernel);
-               kernel->set_kernel_key_for_cache(key);
-             }
-             return key;
+             const auto request = resolve_kernel_compile_request(
+                 program.compile_config(), program.get_device_caps(),
+                 kernel->get_compile_tier_override());
+             return kernel->get_or_create_kernel_key_for_cache(
+                 request.config(), request.device_caps());
            })
       .def("_kernel_task_manifest",
            [](Program &program, Kernel *kernel) {

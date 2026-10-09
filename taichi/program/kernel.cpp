@@ -1,5 +1,6 @@
 #include "taichi/program/kernel.h"
 
+#include "taichi/analysis/offline_cache_util.h"
 #include "taichi/rhi/cuda/cuda_driver.h"
 #include "taichi/codegen/codegen.h"
 #include "taichi/common/logging.h"
@@ -12,6 +13,7 @@
 
 #include "picosha2.h"
 
+#include <algorithm>
 #include <utility>
 
 #ifdef TI_WITH_LLVM
@@ -21,6 +23,44 @@
 namespace taichi::lang {
 
 class Function;
+
+struct Kernel::CacheKeyContext {
+  CompileConfig config;
+  DeviceCapabilityConfig caps;
+  std::vector<Parameter> parameters;
+  std::vector<Ret> returns;
+  AutodiffMode autodiff;
+  std::string optimization;
+  std::optional<std::pair<std::uint8_t, int>> implicit_target;
+
+  CacheKeyContext(const CompileConfig &config,
+                  const DeviceCapabilityConfig &caps,
+                  const Kernel &kernel)
+      : config(config),
+        caps(caps),
+        parameters(kernel.parameter_list),
+        returns(kernel.rets),
+        autodiff(kernel.autodiff_mode),
+        optimization(kernel.optimization_spec_cache_key()),
+        implicit_target(get_offline_cache_implicit_target(config.arch)) {
+  }
+
+  bool matches(const CompileConfig &requested,
+               const DeviceCapabilityConfig &target,
+               const Kernel &kernel) const {
+    return same_offline_cache_compile_config(config, requested) &&
+           caps.devcaps == target.devcaps &&
+           implicit_target == get_offline_cache_implicit_target(requested.arch) &&
+           parameters == kernel.parameter_list &&
+           returns.size() == kernel.rets.size() &&
+           std::equal(returns.begin(), returns.end(), kernel.rets.begin(),
+                      [](const Ret &a, const Ret &b) { return a.dt == b.dt; }) &&
+           autodiff == kernel.autodiff_mode &&
+           optimization == kernel.optimization_spec_cache_key();
+  }
+};
+
+Kernel::~Kernel() = default;
 
 Kernel::Kernel(Program &program,
                const std::function<void()> &func,
@@ -133,20 +173,50 @@ std::string Kernel::get_name() const {
   return name;
 }
 
-void Kernel::set_kernel_key_for_cache(const std::string &kernel_key) const {
-  kernel_key_ = kernel_key;
+std::string Kernel::get_or_create_kernel_key_for_cache(
+    const CompileConfig &config,
+    const DeviceCapabilityConfig &caps) const {
+  // Key lookup and the first AST body serialization are one transaction.
+  // Different requests may share the immutable source body, never each
+  // other's configuration/target identity. Return an owned key to callers.
+  std::lock_guard<std::mutex> lock(kernel_key_mutex_);
+  if (kernel_key_valid_ && kernel_key_context_snapshot_ &&
+      kernel_key_context_snapshot_->matches(config, caps, *this)) {
+    return kernel_key_;
+  }
+  auto context = get_hashed_offline_cache_key_context(
+      config, caps, const_cast<Kernel *>(this));
+  if (kernel_key_valid_ && kernel_key_context_ == context) {
+    kernel_key_context_snapshot_ =
+        std::make_unique<CacheKeyContext>(config, caps, *this);
+    return kernel_key_;
+  }
+  TI_ERROR_IF(ir == nullptr,
+              "Cannot compile a retired kernel definition with a different "
+              "request or destroyed SNodeTree dependency; rebuild the "
+              "kernel/Graph.");
+  auto key = ir_is_ast()
+                 ? get_hashed_offline_cache_key(config, caps,
+                                                const_cast<Kernel *>(this))
+                 : "N" + context + "_" + get_name();
+  auto snapshot = std::make_unique<CacheKeyContext>(config, caps, *this);
+  kernel_key_ = std::move(key);
+  kernel_key_context_ = std::move(context);
+  kernel_key_context_snapshot_ = std::move(snapshot);
   kernel_key_valid_ = true;
+  return kernel_key_;
 }
 
-const std::string &Kernel::get_cached_kernel_key() const {
+std::string Kernel::get_cached_kernel_key() const {
+  std::lock_guard<std::mutex> lock(kernel_key_mutex_);
   if (kernel_key_valid_) {
     return kernel_key_;
   }
-  static const std::string empty;
-  return empty;
+  return {};
 }
 
 void Kernel::invalidate_kernel_key_for_cache() const {
+  std::lock_guard<std::mutex> lock(kernel_key_mutex_);
   kernel_key_valid_ = false;
 }
 
@@ -650,6 +720,7 @@ void Kernel::set_snode_tree_dependencies(
 }
 
 void Kernel::retire_definition(bool preserve_relocatable_abi) {
+  std::lock_guard<std::mutex> key_lock(kernel_key_mutex_);
   ir.reset();
   context.reset();
   inline_functions_.clear();
@@ -675,6 +746,9 @@ void Kernel::retire_definition(bool preserve_relocatable_abi) {
   ret_size = 0;
   kernel_key_.clear();
   kernel_key_.shrink_to_fit();
+  kernel_key_context_.clear();
+  kernel_key_context_.shrink_to_fit();
+  kernel_key_context_snapshot_.reset();
   kernel_key_valid_ = false;
   compile_tier_override_.reset();
   task_launch_policy_.reset();

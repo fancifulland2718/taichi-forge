@@ -15,10 +15,57 @@
 #include "picosha2.h"
 
 #include <algorithm>
+#include <cstring>
 #include <sstream>
+#include <type_traits>
 #include <vector>
 
 namespace taichi::lang {
+
+std::optional<std::pair<std::uint8_t, int>> get_offline_cache_implicit_target(
+    Arch arch) {
+#if defined(TI_WITH_CUDA)
+  if (arch == Arch::cuda) {
+    // The provider and actual LLVM target are implicit inputs in addition to
+    // explicit capabilities. Retain both in cached-context validation.
+    return std::make_pair(
+        static_cast<std::uint8_t>(
+            CUDADriver::get_instance_without_context().get_provider()),
+        CUDAContext::get_instance().get_codegen_compute_capability());
+  }
+#endif
+  return std::nullopt;
+}
+
+namespace {
+template <typename T>
+bool same_cache_field(const T &a, const T &b) {
+  if constexpr (std::is_floating_point_v<T>) {
+    // Serialization preserves signed zero and NaN payload bits.
+    return std::memcmp(&a, &b, sizeof(T)) == 0;
+  } else {
+    return a == b;
+  }
+}
+}  // namespace
+
+bool same_offline_cache_compile_config(const CompileConfig &config,
+                                       const CompileConfig &other) {
+#define CACHE_FIELD(name)                         \
+  if (!same_cache_field(config.name, other.name)) \
+  return false
+#define CACHE_TYPE(name) CACHE_FIELD(name)
+#define CACHE_SORTED(name) CACHE_FIELD(name)
+#define CACHE_VALUE(value)
+#define CACHE_CUDA_TARGET()
+#include "taichi/analysis/compile_config_key_fields.inc.h"
+#undef CACHE_CUDA_TARGET
+#undef CACHE_VALUE
+#undef CACHE_SORTED
+#undef CACHE_TYPE
+#undef CACHE_FIELD
+  return true;
+}
 
 static std::vector<std::uint8_t> get_offline_cache_key_of_parameter_list(
     const std::vector<CallableBase::Parameter> &parameter_list) {
@@ -42,149 +89,29 @@ static std::vector<std::uint8_t> get_offline_cache_key_of_compile_config(
     const CompileConfig &config) {
   BinaryOutputSerializer serializer;
   serializer.initialize();
-  serializer(config.arch);
-  serializer(config.debug);
-  serializer(config.cfg_optimization);
-  serializer(config.check_out_of_bound);
-  serializer(config.opt_level);
-  serializer(config.external_optimization_level);
-  serializer(config.llvm_opt_level);
-  serializer(config.compile_tier);
-  serializer(config.tiered_full_simplify);
-  serializer(config.full_simplify_global_iter_cap);
-  serializer(config.move_loop_invariant_outside_if);
-  serializer(config.demote_dense_struct_fors);
-  serializer(config.spirv_skip_intermediate_listgen);
-  serializer(config.spirv_listgen_subgroup_ballot);
-  serializer(config.listgen_static_grid_dim);
-  serializer(config.advanced_optimization);
-  serializer(config.constant_folding);
-  serializer(config.kernel_profiler);
-  serializer(config.fast_math);
-  serializer(config.flatten_if);
-  serializer(config.cache_loop_invariant_global_vars);
-  serializer(config.make_thread_local);
-  serializer(config.make_block_local);
-  serializer(config.detect_read_only);
-  serializer(config.quant_opt_store_fusion);
-  serializer(config.quant_opt_atomic_demotion);
-  serializer(config.default_fp->to_string());
-  serializer(config.default_ip.to_string());
-  if (arch_is_cpu(config.arch)) {
-    serializer(config.default_cpu_block_dim);
-    serializer(config.cpu_max_num_threads);
-    serializer(config.make_cpu_multithreading_loop);
-  } else if (arch_is_gpu(config.arch)) {
-    serializer(config.default_gpu_block_dim);
-    serializer(config.gpu_max_reg);
-    serializer(config.saturating_grid_dim);
-    serializer(config.max_block_dim);
-    serializer(config.cpu_max_num_threads);
+#define CACHE_FIELD(name) serializer(config.name)
+#define CACHE_TYPE(name) serializer(config.name.to_string())
+#define CACHE_SORTED(name)                   \
+  {                                          \
+    auto sorted = config.name;               \
+    std::sort(sorted.begin(), sorted.end()); \
+    serializer(sorted);                      \
   }
-  serializer(config.ad_stack_size);
-  serializer(config.default_ad_stack_size);
-  // NOTE: config.random_seed is intentionally NOT part of the offline cache
-  // key.  It only affects the runtime PRNG seed (see
-  // LlvmRuntimeExecutor::materialize_runtime); the generated IR / LLVM module /
-  // SPIR-V are identical regardless of its value.  Including it here caused
-  // spurious cache misses whenever the user changes ti.init(random_seed=...)
-  // between sessions.  [P1.a cache-key trim]
-  if (config.arch == Arch::opengl || config.arch == Arch::gles) {
-    serializer(config.allow_nv_shader_extension);
+#define CACHE_VALUE(value) serializer(value)
+#define CACHE_CUDA_TARGET()                                             \
+  {                                                                     \
+    const auto target = get_offline_cache_implicit_target(config.arch); \
+    if (target.has_value()) {                                           \
+      serializer(target->first);                                        \
+      serializer(target->second);                                       \
+    }                                                                   \
   }
-  serializer(config.make_mesh_block_local);
-  serializer(config.optimize_mesh_reordered_mapping);
-  serializer(config.mesh_localize_to_end_mapping);
-  serializer(config.mesh_localize_from_end_mapping);
-  serializer(config.mesh_localize_all_attr_mappings);
-  serializer(config.demote_no_access_mesh_fors);
-  serializer(config.experimental_auto_mesh_local);
-  serializer(config.auto_mesh_local_default_occupacy);
-  serializer(config.real_matrix_scalarize);
-  serializer(config.hash_snode_active_list);
-  serializer(config.hash_snode_diagnostics);
-  serializer(config.hash_snode_compact_child_pool);
-  // P9.A (F2/F3): auto_real_function gating + inline budget influence
-  // FuncCallStmt presence and inliner behavior; both must invalidate cache.
-  serializer(config.auto_real_function);
-  serializer(config.auto_real_function_threshold_us);
-  serializer(config.auto_real_function_inline_budget);
-  serializer(config.force_scalarize_matrix);
-  serializer(config.half2_vectorization);
-  // B2 (2026-04-26): SPIR-V disabled-pass list affects emitted SPIR-V on
-  // SPIR-V backends. Sort first so user-supplied list ordering doesn't
-  // produce spurious cache misses. Empty list (default) hashes to a
-  // stable empty entry, so legacy users see no cache invalidation.
-  {
-    std::vector<std::string> sorted_disabled = config.spirv_disabled_passes;
-    std::sort(sorted_disabled.begin(), sorted_disabled.end());
-    serializer(sorted_disabled);
-  }
-  // G-6 (2026-05): task-level SPIR-V adaptive optimizer changes emitted
-  // SPIR-V per task, so ON/OFF and threshold changes must not share cache.
-  serializer(config.spirv_adaptive_opt);
-  serializer(config.spirv_adaptive_opt_threshold);
-  if (arch_uses_spirv(config.arch)) {
-    // Old SPIR-V may address mixed-width SNodes with unaligned offsets/pools.
-    // This is a compiler layout revision, independent of wheel/commit identity.
-    serializer(std::string("spirv-snode-scalar-alignment-v1"));
-    serializer(config.spirv_skip_loop_unroll);
-  }
-  // B-2.b (2026-05): the 4 vulkan_pointer_* runtime fields drive both
-  // root-buffer layout and pointer-SNode SPIR-V codegen. They MUST be
-  // part of the cache key, otherwise toggling vulkan_pointer_ambient_zone
-  // / _freelist / _cas_marker / _pool_fraction silently reuses kernels
-  // compiled under the previous flag value. Default values (True/True/
-  // True/1.0) hash deterministically so legacy users see no invalidation.
-  if (config.arch == Arch::vulkan) {
-    serializer(config.vulkan_pointer_freelist);
-    serializer(config.vulkan_pointer_ambient_zone);
-    serializer(config.vulkan_pointer_cas_marker);
-    serializer(config.vulkan_pointer_pool_fraction);
-    // B-3.b (2026-05): independent_pool 影响 SpirvAllocatorContract.
-    // pool_buffer_binding_id 与 SNodeTree allocator 申请独立 DeviceAllocation。
-    // 即使 codegen 在 B-3.b 不读 binding_id，提前纳入 cache key 避免 B-3.c
-    // 切换 codegen 后命中旧缓存。默认 false 哈希稳定。
-    serializer(config.vulkan_pointer_independent_pool);
-    // C-2.1 (2026-05): allocator_kind 选不同 allocator 实现 → SPIR-V kernel
-    // 寻址（C-2.3 起）和 SNodeTree allocator 构造均不同；必须进入 cache key。
-    // 默认 "bump" 字符串哈希稳定，旧用户无 invalidation。
-    serializer(config.vulkan_pointer_allocator_kind);
-    serializer(config.vulkan_pointer_max_chunks);
-    // C-9 (2026-05): deterministic_slot 改变 alloc 协议（idx_u32+1 直写
-    // vs CasMarker 抢占），必须进入 cache key。详见规划 §14。
-    serializer(config.vulkan_pointer_deterministic_slot);
-    // G11-A (2026-05): bitmasked deactivate 是否清 data slot。改变
-    // codegen（LLVM 改调函数名、SPIR-V 多发射条件 memset），必须进
-    // cache key。默认 false 保持哈希稳定。
-    serializer(config.bitmasked_clear_data_on_deactivate);
-    // VS-3 (2026-05): toggles SPIR-V TaskAttributes sparse-list metadata
-    // consumed by GfxRuntime host-side listgen skipping.
-    serializer(config.vulkan_listgen_reuse);
-  }
-  if (config.arch == Arch::cuda) {
-    // CS-1/2/3 (2026-05): these CUDA sparse flags alter emitted LLVM IR or
-    // runtime metadata decisions. Include them so ON/OFF runs do not reuse
-    // stale offline-cache entries.
-    serializer(config.cuda_pointer_deterministic_slot);
-    serializer(config.cuda_pointer_deterministic_pool_enabled());
-    serializer(config.cuda_pointer_fast_reset);
-    serializer(config.cuda_listgen_reuse);
-    serializer(config.bitmasked_clear_data_on_deactivate);
-#if defined(TI_WITH_CUDA)
-    // MUSA consumes PTX through its CUDA-compatible Driver API, but its
-    // executable acceptance and device runtime are a distinct provider.
-    // Never reuse an NVIDIA-generated cache entry solely because both expose
-    // the same compute-capability-shaped target.
-    serializer(static_cast<uint8_t>(
-        CUDADriver::get_instance_without_context().get_provider()));
-    // The selected LLVM NVPTX target changes emitted PTX. Cache entries must
-    // not cross a target fallback boundary when the same cache directory is
-    // shared by devices with different compute capabilities.
-    serializer(
-        CUDAContext::get_instance().get_codegen_compute_capability());
-#endif
-  }
+#include "taichi/analysis/compile_config_key_fields.inc.h"
+#undef CACHE_CUDA_TARGET
+#undef CACHE_VALUE
+#undef CACHE_SORTED
+#undef CACHE_TYPE
+#undef CACHE_FIELD
   serializer.finalize();
 
   return serializer.data;

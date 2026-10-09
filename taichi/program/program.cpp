@@ -5149,9 +5149,12 @@ const CompiledKernelData &Program::compile_kernel(
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
+  const auto request = resolve_kernel_compile_request(
+      compile_config, caps, kernel_def.get_compile_tier_override());
   if (kernel_def.ir == nullptr) {
     auto handle = mgr.instantiate_relocatable_execution_handle(
-        kernel_def.get_cached_kernel_key(),
+        kernel_def.get_or_create_kernel_key_for_cache(request.config(),
+                                                      request.device_caps()),
         snapshot_snode_tree_dependencies(
             kernel_def.snode_tree_dependencies()));
     TI_ERROR_IF(
@@ -5161,8 +5164,6 @@ const CompiledKernelData &Program::compile_kernel(
     total_compilation_time_ += Time::get_time() - start_t;
     return handle->compiled();
   }
-  const auto request = resolve_kernel_compile_request(
-      compile_config, caps, kernel_def.get_compile_tier_override());
   const auto &ckd =
       mgr.load_or_compile(request.config(), request.device_caps(), kernel_def);
   kernel_def.set_snode_tree_dependencies(ckd.snode_tree_ids());
@@ -5178,9 +5179,12 @@ Program::compile_kernel_execution_handle(
   auto start_t = Time::get_time();
   TI_AUTO_PROF;
   auto &mgr = program_impl_->get_kernel_compilation_manager();
+  const auto request = resolve_kernel_compile_request(
+      compile_config, caps, kernel_def.get_compile_tier_override());
   if (kernel_def.ir == nullptr) {
     auto handle = mgr.instantiate_relocatable_execution_handle(
-        kernel_def.get_cached_kernel_key(),
+        kernel_def.get_or_create_kernel_key_for_cache(request.config(),
+                                                      request.device_caps()),
         snapshot_snode_tree_dependencies(
             kernel_def.snode_tree_dependencies()));
     TI_ERROR_IF(
@@ -5190,8 +5194,6 @@ Program::compile_kernel_execution_handle(
     total_compilation_time_ += Time::get_time() - start_t;
     return handle;
   }
-  const auto request = resolve_kernel_compile_request(
-      compile_config, caps, kernel_def.get_compile_tier_override());
   auto handle = mgr.load_or_compile_execution_handle(
       request.config(), request.device_caps(), kernel_def);
   kernel_def.set_snode_tree_dependencies(handle->compiled().snode_tree_ids());

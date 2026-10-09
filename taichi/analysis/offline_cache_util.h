@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <utility>
 
 #include "taichi/rhi/arch.h"
 
@@ -171,7 +173,17 @@ class Kernel;
 //  51 - Fast local CSE and conservative load barriers for atomic/call effects.
 //  52 - Per-kernel LLVM JIT option snapshots.
 //  53 - Advanced load barriers and sparse address lifetime boundaries.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 53;
+//  54 - Validate cached keys against effective request contexts. Earlier
+//       artifacts may have been stored under another request's cached key.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 54;
+
+// Fast sufficient check for identical serialized configuration inputs. A
+// reordered disabled-pass list may conservatively return false; hashing still
+// canonicalizes it. Implicit provider/target state is compared separately.
+bool same_offline_cache_compile_config(const CompileConfig &config,
+                                       const CompileConfig &other);
+std::optional<std::pair<std::uint8_t, int>> get_offline_cache_implicit_target(
+    Arch arch);
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

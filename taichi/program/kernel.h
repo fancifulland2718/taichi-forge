@@ -22,6 +22,8 @@
 namespace taichi::lang {
 
 class Program;
+struct CompileConfig;
+struct DeviceCapabilityConfig;
 
 class TI_DLL_EXPORT Kernel : public Callable {
  public:
@@ -135,6 +137,8 @@ class TI_DLL_EXPORT Kernel : public Callable {
          const std::string &name = "",
          AutodiffMode autodiff_mode = AutodiffMode::kNone);
 
+  ~Kernel() override;
+
   bool ir_is_ast() const {
     return ir_is_ast_;
   }
@@ -148,9 +152,14 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   [[nodiscard]] std::string get_name() const override;
 
-  void set_kernel_key_for_cache(const std::string &kernel_key) const;
+  // Compilation requests must validate their complete effective context.
+  // The last key alone is only a diagnostic/retirement identity, not proof
+  // that another config or target can reuse the same artifact.
+  std::string get_or_create_kernel_key_for_cache(
+      const CompileConfig &config,
+      const DeviceCapabilityConfig &caps) const;
 
-  const std::string &get_cached_kernel_key() const;
+  std::string get_cached_kernel_key() const;
 
   void invalidate_kernel_key_for_cache() const;
 
@@ -267,7 +276,11 @@ class TI_DLL_EXPORT Kernel : public Callable {
 
   // True if |ir| is a frontend AST. False if it's already offloaded to CHI IR.
   bool ir_is_ast_{false};
+  mutable std::mutex kernel_key_mutex_;
   mutable std::string kernel_key_;
+  mutable std::string kernel_key_context_;
+  struct CacheKeyContext;
+  mutable std::unique_ptr<CacheKeyContext> kernel_key_context_snapshot_;
   mutable bool kernel_key_valid_{false};
   mutable std::optional<std::string> offline_cache_body_;
   std::optional<std::string> compile_tier_override_;

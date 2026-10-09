@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Kernel cache lookups validate the effective configuration, device capabilities,
+  ABI and optimization metadata, preventing cross-request reuse between JIT and
+  AOT. Precompile key queries apply the same kernel-tier normalization as JIT.
+  Context comparison avoids hashing unchanged requests; old compiled caches are
+  invalidated. The Python shim and native runtime require matching ABI revision 11.
 - Algebraic simplification maintains actual statement users across its rewrite
   iterations, building the index only when a reference replacement needs it.
   This reduces repeated IR scans without changing algebraic rules.

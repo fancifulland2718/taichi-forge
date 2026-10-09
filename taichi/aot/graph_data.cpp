@@ -419,7 +419,7 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     execution_handle = prog->compile_kernel_execution_handle(
         compile_config, prog->get_device_caps(), *dispatch.ti_kernel);
     if (cached.kernel_key.empty()) {
-      cached.kernel_key = dispatch.ti_kernel->get_cached_kernel_key();
+      cached.kernel_key = execution_handle->compiled().kernel_identity();
     }
   }
   // All JIT Graph paths retain the stable handle. The historical flag is kept

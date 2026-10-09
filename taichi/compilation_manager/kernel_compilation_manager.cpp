@@ -786,20 +786,7 @@ std::string KernelCompilationManager::make_kernel_key(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
     const Kernel &kernel_def) const {
-  auto kernel_key = kernel_def.get_cached_kernel_key();
-  if (kernel_key.empty()) {
-    if (!kernel_def.ir_is_ast()) {
-      const auto cache_context_key = get_hashed_offline_cache_key_context(
-          compile_config, caps, (Kernel *)&kernel_def);
-      kernel_key = "N" + cache_context_key + "_" + kernel_def.get_name();
-    } else {  // The kernel key is generated from AST
-      kernel_key = get_hashed_offline_cache_key(compile_config, caps,
-                                                (Kernel *)&kernel_def);
-    }
-
-    kernel_def.set_kernel_key_for_cache(kernel_key);
-  }
-  return kernel_key;
+  return kernel_def.get_or_create_kernel_key_for_cache(compile_config, caps);
 }
 
 std::string KernelCompilationManager::make_kernel_semantic_key(
