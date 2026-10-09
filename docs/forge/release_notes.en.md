@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- LLVM and GFX AOT exports apply per-kernel optimization tiers and full-tier
+  normalization through the same request resolver as JIT, including kernel
+  templates. Equivalent resolved requests can share cached code; exported LLVM
+  modules retain the selected backend options. JIT and AOT defaults are unchanged.
 - Kernel cache lookups validate the effective configuration, device capabilities,
   ABI and optimization metadata, preventing cross-request reuse between JIT and
   AOT. Precompile key queries apply the same kernel-tier normalization as JIT.

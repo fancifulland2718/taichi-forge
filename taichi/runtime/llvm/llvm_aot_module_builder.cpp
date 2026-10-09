@@ -6,6 +6,7 @@
 #include "taichi/runtime/llvm/aot_graph_data.h"
 #include "taichi/runtime/llvm/llvm_aot_metadata.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
+#include "taichi/program/kernel_compile_request.h"
 #include "taichi/rhi/cuda/cuda_capability.h"
 
 namespace taichi::lang {
@@ -138,8 +139,11 @@ void LlvmAotModuleBuilder::add_field_per_backend(const std::string &identifier,
 
 LLVM::CompiledKernelData::InternalData LlvmAotModuleBuilder::compile_kernel(
     Kernel *kernel) {
-  const auto &ckd =
-      compilation_manager_.load_or_compile(compile_config_, caps_, *kernel);
+  const auto request = resolve_kernel_compile_request(
+      compile_config_, caps_, kernel->get_compile_tier_override(),
+      CompilePurpose::aot);
+  const auto &ckd = compilation_manager_.load_or_compile(
+      request.config(), request.device_caps(), *kernel);
   TI_ASSERT(arch_uses_llvm(ckd.arch()));
   return dynamic_cast<const LLVM::CompiledKernelData &>(ckd)
       .get_internal_data();

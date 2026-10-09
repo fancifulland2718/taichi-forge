@@ -1,4 +1,5 @@
 #include "taichi/runtime/gfx/aot_module_builder_impl.h"
+#include "taichi/program/kernel_compile_request.h"
 
 #include <fstream>
 #include <type_traits>
@@ -84,8 +85,10 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
 
 void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
                                            Kernel *kernel) {
-  const auto &ckd =
-      compilation_manager_.load_or_compile(config_, caps_, *kernel);
+  const auto request = resolve_kernel_compile_request(
+      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot);
+  const auto &ckd = compilation_manager_.load_or_compile(
+      request.config(), request.device_caps(), *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   auto compiled = spirv_ckd.get_internal_data();
@@ -148,8 +151,10 @@ void AotModuleBuilderImpl::add_field_per_backend(const std::string &identifier,
 void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
                                                 const std::string &key,
                                                 Kernel *kernel) {
-  const auto &ckd =
-      compilation_manager_.load_or_compile(config_, caps_, *kernel);
+  const auto request = resolve_kernel_compile_request(
+      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot);
+  const auto &ckd = compilation_manager_.load_or_compile(
+      request.config(), request.device_caps(), *kernel);
   const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
 
   auto compiled = spirv_ckd.get_internal_data();
