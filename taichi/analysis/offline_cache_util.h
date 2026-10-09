@@ -175,7 +175,9 @@ class Kernel;
 //  53 - Advanced load barriers and sparse address lifetime boundaries.
 //  54 - Validate cached keys against effective request contexts. Earlier
 //       artifacts may have been stored under another request's cached key.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 54;
+//  55 - Store LLVM modules as bitcode. Keep textual payload reading for
+//       compatibility, but separate new writes from text-only runtimes.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 55;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

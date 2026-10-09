@@ -217,8 +217,9 @@ CompiledKernelData::Err CompiledKernelData::load_impl(
   } catch (const liong::json::JsonException &) {
     return Err::kParseMetadataFailed;
   }
-  auto ret = decode_llvm_module(llvm::MemoryBufferRef(file.src_code(), "<string>"),
-                                llvm_ctx_, LLVMModuleEncoding::assembly);
+  const llvm::MemoryBufferRef buffer(file.src_code(), "<string>");
+  auto ret = decode_llvm_module(buffer, llvm_ctx_,
+                                detect_llvm_module_encoding(buffer));
   if (!ret) {  // File not found or Parse failed
     TI_DEBUG("Fail to parse llvm::Module from string: {}",
              llvm::toString(ret.takeError()));
@@ -242,7 +243,7 @@ CompiledKernelData::Err CompiledKernelData::dump_impl(
   std::string str;
   llvm::raw_string_ostream oss(str);
   encode_llvm_module(*data_.compiled_data.module, oss,
-                     LLVMModuleEncoding::assembly);
+                     LLVMModuleEncoding::bitcode);
   file.set_src_code(std::move(str));
   return Err::kNoError;
 }

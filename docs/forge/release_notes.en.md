@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- LLVM offline JIT caches store bitcode to reduce serialized size and read costs,
+  while retaining legacy text payload reading. New writes use a separate cache
+  schema. JIT and AOT share the module codec; AOT still exports text IR by default,
+  with optimization tiers and numerical rules unchanged.
 - LLVM and GFX AOT exports apply per-kernel optimization tiers and full-tier
   normalization through the same request resolver as JIT, including kernel
   templates. Equivalent resolved requests can share cached code; exported LLVM

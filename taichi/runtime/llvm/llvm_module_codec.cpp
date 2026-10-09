@@ -8,6 +8,15 @@
 
 namespace taichi::lang {
 
+LLVMModuleEncoding detect_llvm_module_encoding(llvm::MemoryBufferRef buffer) {
+  const auto *begin =
+      reinterpret_cast<const unsigned char *>(buffer.getBufferStart());
+  const auto *end =
+      reinterpret_cast<const unsigned char *>(buffer.getBufferEnd());
+  return llvm::isBitcode(begin, end) ? LLVMModuleEncoding::bitcode
+                                     : LLVMModuleEncoding::assembly;
+}
+
 llvm::Expected<std::unique_ptr<llvm::Module>> decode_llvm_module(
     llvm::MemoryBufferRef buffer,
     llvm::LLVMContext &context,

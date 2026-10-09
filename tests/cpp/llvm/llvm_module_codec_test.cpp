@@ -44,6 +44,9 @@ entry:
     std::string bytes;
     llvm::raw_string_ostream output(bytes);
     encode_llvm_module(**original, output, encoding);
+    EXPECT_EQ(
+        detect_llvm_module_encoding(llvm::MemoryBufferRef(bytes, "fixture")),
+        encoding);
     EXPECT_EQ(assembly(**original), before);
 
     llvm::LLVMContext destination_context;

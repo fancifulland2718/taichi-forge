@@ -14,6 +14,10 @@ namespace taichi::lang {
 
 enum class LLVMModuleEncoding { assembly, bitcode };
 
+// Recognize LLVM's raw/wrapped bitcode signature. This is not validation;
+// malformed payloads are rejected by decode_llvm_module.
+LLVMModuleEncoding detect_llvm_module_encoding(llvm::MemoryBufferRef buffer);
+
 // Decode eagerly so the returned module does not retain the input buffer.
 // The caller owns the context and must keep it alive for the module's lifetime.
 // Container/schema checks and module verification remain with the caller.
