@@ -9,7 +9,7 @@ Use the documentation at your release tag for version-specific API details.
 
 | Version | Main additions |
 | --- | --- |
-| [0.6.4](#064) | In development; OptiX face filtering and SPIR-V optimizer repair |
+| [0.6.4](#064) | In development; compilation improvements and miscellaneous backend/autodiff fixes |
 | [0.6.3](#063) | Complete Graph recipes, hardware rendering, reusable operations and basic ROCm/HIP |
 | [0.6.2](#062) | Execution plans, dynamic work, Graph storage and solver improvements |
 | [0.6.1](#061) | Task policies/labels, device worklists, SNode lifecycle and Graph telemetry |
@@ -28,6 +28,11 @@ Use the documentation at your release tag for version-specific API details.
 <a id="064"></a>
 
 ## 0.6.4 (in development)
+
+The release focuses on compilation improvements and miscellaneous fixes, with
+changes in both areas already in source. These include lower compilation overhead
+for large functions and fixes for backend correctness, autodiff and resource
+lifetimes. The entries below describe the changes.
 
 - CFG dataflow analysis narrows direct local tensor alias candidates to their
   owning allocation, preserving dynamic-index checks and nonlocal fallbacks.
