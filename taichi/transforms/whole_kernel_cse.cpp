@@ -1,6 +1,7 @@
 #include "taichi/ir/ir.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/system/profiler.h"
@@ -10,57 +11,21 @@
 
 namespace taichi::lang {
 
-// Build the reverse def-use map: for each stmt, which stmts reference it as
-// an operand.  O(N) to build; allows O(direct-users) MarkUndone instead of
-// the previous O(N) full-IR traversal.
-class BuildUsesMap : public BasicStmtVisitor {
- public:
-  using UsesMap = std::unordered_map<int, std::unordered_set<Stmt *>>;
-
-  explicit BuildUsesMap(UsesMap &uses) : uses_(uses) {
-    allow_undefined_visitor = true;
-    invoke_default_visitor = true;
-  }
-
-  void visit(Stmt *stmt) override {
-    for (Stmt *op : stmt->get_operands()) {
-      if (op)
-        uses_[op->instance_id].insert(stmt);
-    }
-  }
-
-  void preprocess_container_stmt(Stmt *stmt) override {
-    for (Stmt *op : stmt->get_operands()) {
-      if (op)
-        uses_[op->instance_id].insert(stmt);
-    }
-  }
-
-  static void run(IRNode *root, UsesMap &uses) {
-    uses.clear();
-    BuildUsesMap builder(uses);
-    root->accept(&builder);
-  }
-
- private:
-  UsesMap &uses_;
-};
-
 // Whole Kernel Common Subexpression Elimination
 class WholeKernelCSE : public BasicStmtVisitor {
  private:
   std::unordered_set<int> visited_;
   // each scope corresponds to an unordered_set
-  std::vector<std::unordered_map<std::size_t, std::unordered_set<Stmt *> > >
+  std::vector<std::unordered_map<std::size_t, std::unordered_set<Stmt *>>>
       visible_stmts_;
   DelayedIRModifier modifier_;
   std::unordered_map<Block *, std::unordered_set<Stmt *>> erased_;
   size_t sparse_lookup_epoch_{0};
   size_t sparse_read_epoch_{0};
 
-  // Reverse def-use map: stmt instance_id -> stmts that use it as operand.
+  // Reverse def-use map for the current pass iteration.
   // Rebuilt once per inner iteration; used for O(direct-users) MarkUndone.
-  BuildUsesMap::UsesMap uses_;
+  StmtUseIndex uses_;
 
  public:
   using BasicStmtVisitor::visit;
@@ -93,19 +58,8 @@ class WholeKernelCSE : public BasicStmtVisitor {
   // queued for branch hoisting. Transfer the index immediately: another
   // replacement in this traversal must see the updated def-use graph.
   void replace_uses(Stmt *replaced, Stmt *replacement) {
-    auto it = uses_.find(replaced->instance_id);
-    if (it == uses_.end())
-      return;
-    auto users = std::move(it->second);
-    uses_.erase(it);
-    auto &rep_users = uses_[replacement->instance_id];
-    for (Stmt *user : users) {
-      if (user->erased)
-        continue;
-      user->replace_operand_with(replaced, replacement);
-      visited_.erase(user->instance_id);
-      rep_users.insert(user);
-    }
+    uses_.replace_uses(replaced, replacement,
+                       [&](Stmt *user) { visited_.erase(user->instance_id); });
   }
 
   static std::size_t operand_hash(const Stmt *stmt) {
@@ -171,8 +125,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
       // barrier; reads may also be reused until another activation occurs.
       if (lookup->activate && lookup->snode->need_activation())
         ++sparse_read_epoch_;
-    } else if (stmt->has_global_side_effect() &&
-               !stmt->is<GlobalPtrStmt>() &&
+    } else if (stmt->has_global_side_effect() && !stmt->is<GlobalPtrStmt>() &&
                !stmt->is<MatrixOfGlobalPtrStmt>() &&
                !stmt->is<GlobalStoreStmt>() && !stmt->is<AtomicOpStmt>() &&
                !stmt->is<LocalStoreStmt>()) {
@@ -187,7 +140,8 @@ class WholeKernelCSE : public BasicStmtVisitor {
     std::size_t hash_value = operand_hash(stmt);
     if (auto *lookup = stmt->cast<SNodeLookupStmt>();
         lookup && lookup->snode->need_activation()) {
-      hash_value ^= lookup->activate ? sparse_lookup_epoch_ : sparse_read_epoch_;
+      hash_value ^=
+          lookup->activate ? sparse_lookup_epoch_ : sparse_read_epoch_;
     }
     if (is_done(stmt)) {
       visible_stmts_.back()[hash_value].insert(stmt);
@@ -252,6 +206,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
         auto common_stmt = true_clause->extract(0);
         replace_uses(false_clause->statements[0].get(), common_stmt.get());
         modifier_.insert_before(if_stmt, std::move(common_stmt));
+        uses_.remove_user(false_clause->statements[0].get());
         false_clause->erase(0);
       }
       // Extend suffix hoist: same idea on the tail. Note insert_after stacks
@@ -267,6 +222,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
         auto common_stmt = true_clause->extract((int)true_clause->size() - 1);
         replace_uses(false_clause->statements.back().get(), common_stmt.get());
         modifier_.insert_after(if_stmt, std::move(common_stmt));
+        uses_.remove_user(false_clause->statements.back().get());
         false_clause->erase((int)false_clause->size() - 1);
       }
     }
@@ -284,10 +240,12 @@ class WholeKernelCSE : public BasicStmtVisitor {
       // Rebuild the reverse def-use map once per inner iteration (O(N)).
       // Both invalidation and replacement use direct users. Batch ordinary
       // CSE erasures once per block to avoid repeated vector compaction.
-      BuildUsesMap::run(node, eliminator.uses_);
+      eliminator.uses_.rebuild(node);
       node->accept(&eliminator);
       bool iteration_modified = eliminator.modifier_.modify_ir();
       for (auto &[block, stmts] : eliminator.erased_) {
+        for (auto *stmt : stmts)
+          eliminator.uses_.remove_user(stmt);
         block->erase(std::move(stmts));
         iteration_modified = true;
       }
@@ -310,7 +268,7 @@ bool whole_kernel_cse(IRNode *root) {
   // children are all OffloadedStmts — CSE is provably independent across
   // offloads (each offload generates a separate launch; their stmts cannot
   // be operands of each other). Running the pass per-offload turns each
-  // fixed-point iteration's BuildUsesMap rebuild from O(whole-IR) into
+  // fixed-point iteration's use-index rebuild from O(whole-IR) into
   // O(per-offload), and stops a tiny modification in offload K from
   // re-triggering an inner iteration that re-walks all other offloads.
   //
