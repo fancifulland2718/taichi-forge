@@ -10,6 +10,7 @@ namespace taichi::lang {
 
 class Function;
 class CFGStoreForwardingDefinitions;
+class StmtUseIndex;
 /**
  * A basic block in control-flow graph.
  * A CFGNode contains a reference to a part of the CHI IR, or more precisely,
@@ -32,8 +33,8 @@ class CFGNode {
  private:
   struct StoreForwardingIndex;
   Stmt *get_store_forwarding_data(Stmt *var,
-                                   int position,
-                                   StoreForwardingIndex &index) const;
+                                  int position,
+                                  StoreForwardingIndex &index) const;
   // For accelerating get_store_forwarding_data()
   std::unordered_set<Block *> parent_blocks_;
 
@@ -78,11 +79,12 @@ class CFGNode {
   std::size_t size() const;
 
   // Methods for modifying the underlying CHI IR.
-  void erase(int location);
+  void erase(int location, StmtUseIndex *uses = nullptr);
   void insert(std::unique_ptr<Stmt> &&new_stmt, int location);
   void replace_with(int location,
                     std::unique_ptr<Stmt> &&new_stmt,
-                    bool replace_usages = true) const;
+                    bool replace_usages = true,
+                    StmtUseIndex *uses = nullptr) const;
 
   // Utility methods.
   static bool contain_variable(const std::unordered_set<Stmt *> &var_set,
@@ -103,10 +105,12 @@ class CFGNode {
   bool store_to_load_forwarding(
       bool after_lower_access,
       bool autodiff_enabled,
-      const CFGStoreForwardingDefinitions &definitions);
+      const CFGStoreForwardingDefinitions &definitions,
+      StmtUseIndex *uses = nullptr);
   void gather_loaded_snodes(std::unordered_set<SNode *> &snodes) const;
   void live_variable_analysis(bool after_lower_access);
-  bool dead_store_elimination(bool after_lower_access);
+  bool dead_store_elimination(bool after_lower_access,
+                              StmtUseIndex *uses = nullptr);
 };
 
 class ControlFlowGraph {
@@ -174,14 +178,17 @@ class ControlFlowGraph {
   /**
    * Perform store-to-load forwarding and identical store elimination.
    */
-  bool store_to_load_forwarding(bool after_lower_access, bool autodiff_enabled);
+  bool store_to_load_forwarding(bool after_lower_access,
+                                bool autodiff_enabled,
+                                StmtUseIndex *uses = nullptr);
 
   /**
    * Perform dead store elimination and identical load elimination.
    */
   bool dead_store_elimination(
       bool after_lower_access,
-      const std::optional<LiveVarAnalysisConfig> &lva_config_opt);
+      const std::optional<LiveVarAnalysisConfig> &lva_config_opt,
+      StmtUseIndex *uses = nullptr);
 
   /**
    * Gather the SNodes which is read or partially written in this offloaded

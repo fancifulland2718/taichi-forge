@@ -3,6 +3,7 @@
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/system/profiler.h"
 
 namespace taichi::lang {
@@ -48,11 +49,15 @@ bool cfg_optimization(
   bool result_modified = false;
   if (!real_matrix_enabled && !escaped_locals) {
     cfg->simplify_graph();
-
-    if (cfg->store_to_load_forwarding(local_only, autodiff_enabled)) {
+    // These two transforms only replace operands and insert/erase ordinary
+    // statements through CFGNode's controlled update methods. Keep the same
+    // index across them; dataflow facts themselves are still rebuilt as needed.
+    // Match Stmt::replace_usages_with even when invoked on a subtree.
+    StmtUseIndex uses(root->get_ir_root());
+    if (cfg->store_to_load_forwarding(local_only, autodiff_enabled, &uses)) {
       result_modified = true;
     }
-    if (cfg->dead_store_elimination(local_only, lva_config_opt)) {
+    if (cfg->dead_store_elimination(local_only, lva_config_opt, &uses)) {
       result_modified = true;
     }
   }

@@ -7,12 +7,20 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/statements.h"
 #include "taichi/ir/local_storage.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/system/profiler.h"
 #include "taichi/program/function.h"
 
 namespace taichi::lang {
 
 namespace {
+
+void replace_uses(Stmt *old_stmt, Stmt *new_stmt, StmtUseIndex *uses) {
+  if (uses)
+    uses->replace_uses(old_stmt, new_stmt);
+  else
+    old_stmt->replace_usages_with(new_stmt);
+}
 
 bool is_func_return_element_ptr(Stmt *stmt) {
   auto *elem = stmt->cast<GetElementStmt>();
@@ -228,8 +236,10 @@ std::size_t CFGNode::size() const {
   return end_location - begin_location;
 }
 
-void CFGNode::erase(int location) {
+void CFGNode::erase(int location, StmtUseIndex *uses) {
   TI_ASSERT(location >= begin_location && location < end_location);
+  if (uses)
+    uses->remove_user(block->statements[location].get());
   block->erase(location);
   end_location--;
   for (auto node = next_node_in_same_block; node != nullptr;
@@ -252,10 +262,18 @@ void CFGNode::insert(std::unique_ptr<Stmt> &&new_stmt, int location) {
 
 void CFGNode::replace_with(int location,
                            std::unique_ptr<Stmt> &&new_stmt,
-                           bool replace_usages) const {
+                           bool replace_usages,
+                           StmtUseIndex *uses) const {
   TI_ASSERT(location >= begin_location && location < end_location);
+  if (uses) {
+    auto *old_stmt = block->statements[location].get();
+    uses->add_user(new_stmt.get());
+    if (replace_usages)
+      uses->replace_uses(old_stmt, new_stmt.get());
+    uses->remove_user(old_stmt);
+  }
   block->replace_with(block->statements[location].get(), std::move(new_stmt),
-                      replace_usages);
+                      replace_usages && !uses);
 }
 
 bool CFGNode::contain_variable(const std::unordered_set<Stmt *> &var_set,
@@ -734,7 +752,8 @@ void CFGNode::reaching_definition_analysis(bool after_lower_access) {
 bool CFGNode::store_to_load_forwarding(
     bool after_lower_access,
     bool autodiff_enabled,
-    const CFGStoreForwardingDefinitions &definitions) {
+    const CFGStoreForwardingDefinitions &definitions,
+    StmtUseIndex *uses) {
   // Contains two separate parts:
   // 1. Store-to-load Forwarding: for each load stmt, find the closest previous
   // store stmt
@@ -783,7 +802,7 @@ bool CFGNode::store_to_load_forwarding(
         // special case of alloca (initialized to 0)
         auto zero = Stmt::make<ConstStmt>(
             TypedConstant(result->ret_type.ptr_removed(), 0));
-        replace_with(i, std::move(zero), true);
+        replace_with(i, std::move(zero), true, uses);
       } else {
         if (result->ret_type.ptr_removed()->is<TensorType>() &&
             !stmt->ret_type->is<TensorType>()) {
@@ -798,8 +817,8 @@ bool CFGNode::store_to_load_forwarding(
           result = result->as<MatrixInitStmt>()->values[offset];
         }
 
-        stmt->replace_usages_with(result);
-        erase(i);  // This causes end_location--
+        replace_uses(stmt, result, uses);
+        erase(i, uses);  // This causes end_location--
         i--;       // to cancel i++ in the for loop
         modified = true;
       }
@@ -823,7 +842,7 @@ bool CFGNode::store_to_load_forwarding(
         // special case of alloca (initialized to 0)
         if (auto stored_data = local_store->val->cast<ConstStmt>()) {
           if (stored_data->val.equal_value(0)) {
-            erase(i);  // This causes end_location--
+            erase(i, uses);  // This causes end_location--
             i--;       // to cancel i++ in the for loop
             modified = true;
           }
@@ -831,7 +850,7 @@ bool CFGNode::store_to_load_forwarding(
       } else {
         // not alloca
         if (irpass::analysis::same_value(result, local_store->val)) {
-          erase(i);  // This causes end_location--
+          erase(i, uses);  // This causes end_location--
           i--;       // to cancel i++ in the for loop
           modified = true;
         }
@@ -840,7 +859,7 @@ bool CFGNode::store_to_load_forwarding(
       if (!after_lower_access) {
         result = get_store_forwarding_data(global_store->dest, i, index);
         if (irpass::analysis::same_value(result, global_store->val)) {
-          erase(i);  // This causes end_location--
+          erase(i, uses);  // This causes end_location--
           i--;       // to cancel i++ in the for loop
           modified = true;
         }
@@ -1027,7 +1046,8 @@ static void update_container_with_alias(
                        container, key, to_erase);
 }
 
-bool CFGNode::dead_store_elimination(bool after_lower_access) {
+bool CFGNode::dead_store_elimination(bool after_lower_access,
+                                     StmtUseIndex *uses) {
   bool modified = false;
   // Map a variable to its nearest load
   std::unordered_map<Stmt *, Stmt *> live_load_in_this_node;
@@ -1126,7 +1146,7 @@ bool CFGNode::dead_store_elimination(bool after_lower_access) {
           //    converting the AtomicStmt into a LoadStmt
           if (!stmt->is<AtomicOpStmt>()) {
             // Eliminate the dead store.
-            erase(i);
+            erase(i, uses);
             modified = true;
             continue;
           }
@@ -1145,7 +1165,7 @@ bool CFGNode::dead_store_elimination(bool after_lower_access) {
                 killed_in_this_node, atomic->dest, true);
             live_load_in_this_node[atomic->dest] = local_load.get();
 
-            replace_with(i, std::move(local_load), true);
+            replace_with(i, std::move(local_load), true, uses);
             modified = true;
             continue;
           } else if (!is_parallel_executed ||
@@ -1167,7 +1187,7 @@ bool CFGNode::dead_store_elimination(bool after_lower_access) {
                 killed_in_this_node, atomic->dest, true);
             live_load_in_this_node[atomic->dest] = global_load.get();
 
-            replace_with(i, std::move(global_load), true);
+            replace_with(i, std::move(global_load), true, uses);
             modified = true;
             continue;
           }
@@ -1213,8 +1233,8 @@ bool CFGNode::dead_store_elimination(bool after_lower_access) {
           // Only perform identical load elimination within a CFGNode.
           auto next_load_stmt = live_load_in_this_node[load_ptr];
           if (irpass::analysis::same_statements(stmt, next_load_stmt)) {
-            next_load_stmt->replace_usages_with(stmt);
-            erase(block->locate(next_load_stmt));
+            replace_uses(next_load_stmt, stmt, uses);
+            erase(block->locate(next_load_stmt), uses);
             modified = true;
           }
         }
@@ -1510,7 +1530,8 @@ bool ControlFlowGraph::unreachable_code_elimination() {
 }
 
 bool ControlFlowGraph::store_to_load_forwarding(bool after_lower_access,
-                                                bool autodiff_enabled) {
+                                                bool autodiff_enabled,
+                                                StmtUseIndex *uses) {
   // The key idea of load-store-forwarding is to find a use-define-chain,
   // which is essentially the load-store-chain in CHI IR.
   //
@@ -1529,7 +1550,7 @@ bool ControlFlowGraph::store_to_load_forwarding(bool after_lower_access,
   bool modified = false;
   for (int i = 0; i < num_nodes; i++) {
     if (nodes[i]->store_to_load_forwarding(after_lower_access, autodiff_enabled,
-                                         definitions))
+                                         definitions, uses))
       modified = true;
   }
   return modified;
@@ -1537,13 +1558,14 @@ bool ControlFlowGraph::store_to_load_forwarding(bool after_lower_access,
 
 bool ControlFlowGraph::dead_store_elimination(
     bool after_lower_access,
-    const std::optional<LiveVarAnalysisConfig> &lva_config_opt) {
+    const std::optional<LiveVarAnalysisConfig> &lva_config_opt,
+    StmtUseIndex *uses) {
   TI_AUTO_PROF;
   live_variable_analysis(after_lower_access, lva_config_opt);
   const int num_nodes = size();
   bool modified = false;
   for (int i = 0; i < num_nodes; i++) {
-    if (nodes[i]->dead_store_elimination(after_lower_access))
+    if (nodes[i]->dead_store_elimination(after_lower_access, uses))
       modified = true;
   }
   return modified;

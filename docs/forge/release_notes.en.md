@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- CFG forwarding and dead-store elimination share a maintained statement-use
+  index, rewriting actual users instead of repeatedly traversing the IR.
+  Alias, visibility and optimization-tier rules are unchanged.
 - CFG load/store forwarding rejects unknown incoming values early and groups
   local tensor definitions by allocation, preserving fact order, alias checks
   and visibility while avoiding scans of unrelated definitions.
