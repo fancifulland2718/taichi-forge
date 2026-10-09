@@ -1363,7 +1363,7 @@ def test_shim_publish_workflow_validates_wheel_boundaries():
     assert "validation_platform:" in workflow
     assert "options: [all, windows]" in workflow
     assert "Platform-scoped validation cannot publish" in workflow
-    assert "put 0.6.3 in runtime_version" in workflow
+    assert re.search(r"put \d+\.\d+\.\d+ in runtime_version", workflow)
     assert "options: [index, artifact]" in workflow
     assert "default: index" in workflow
     assert "Joint builds" not in workflow
