@@ -141,6 +141,11 @@ class CFGStmtSet {
   std::size_t storage_bytes() const {
     return words_.size() * sizeof(uint64_t);
   }
+  // Fact indices are shared by all sets in one analysis. Consumers may index
+  // that immutable directory once and test membership with contains_index().
+  const Universe *universe() const {
+    return universe_.get();
+  }
   const_iterator begin() const {
     return {this, 0};
   }

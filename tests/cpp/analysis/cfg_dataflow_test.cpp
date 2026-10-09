@@ -372,5 +372,66 @@ TEST(CFGForwarding, GlobalAliasesAndEntryFactsSurviveWriteFiltering) {
   EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
 }
 
+TEST(CFGForwarding, SharedDefinitionsObserveRewritesAndFilterUnreachedStores) {
+  auto root = std::make_unique<Block>();
+  auto cond = root->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  auto two = root->push_back<ConstStmt>(TypedConstant(2));
+  auto input = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  auto output = root->push_back<AllocaStmt>(PrimitiveType::i32);
+  root->push_back<LocalStoreStmt>(input, one);
+  auto branch = root->push_back<IfStmt>(cond)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  branch->set_false_statements(std::make_unique<Block>());
+  auto forwarded = branch->true_statements->push_back<LocalLoadStmt>(input);
+  branch->true_statements->push_back<LocalStoreStmt>(output, forwarded);
+  branch->false_statements->push_back<LocalStoreStmt>(output, one);
+  auto first = root->push_back<LocalLoadStmt>(output);
+  auto later = root->push_back<IfStmt>(cond)->as<IfStmt>();
+  later->set_true_statements(std::make_unique<Block>());
+  later->true_statements->push_back<LocalStoreStmt>(output, two);
+  auto last = root->push_back<LocalLoadStmt>(output);
+  auto result = root->push_back<ReturnStmt>(std::vector<Stmt *>{first, last});
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  EXPECT_TRUE(cfg->store_to_load_forwarding(true, false));
+  // The directory must observe the earlier rewrite of the true branch's store,
+  // and exclude both zero initialization and the future store from this query.
+  EXPECT_EQ(result->operand(0), one);
+  EXPECT_EQ(result->operand(1), last);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
+TEST(CFGForwarding, SharedDefinitionsKeepFactIndicesAcrossBitsetWords) {
+  auto root = std::make_unique<Block>();
+  auto cond = root->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  std::vector<Stmt *> locals, results;
+  for (int i = 0; i < 70; ++i) {
+    auto local = root->push_back<AllocaStmt>(PrimitiveType::i32);
+    root->push_back<LocalStoreStmt>(local, one);
+    locals.push_back(local);
+  }
+  auto branch = root->push_back<IfStmt>(cond)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  for (auto local : locals)
+    branch->true_statements->push_back<LocalStoreStmt>(local, one);
+  for (auto local : locals)
+    results.push_back(root->push_back<LocalLoadStmt>(local));
+  auto result = root->push_back<ReturnStmt>(results);
+  irpass::type_check(root.get(), CompileConfig{});
+  auto cfg = irpass::analysis::build_cfg(root.get());
+  cfg->simplify_graph();
+  EXPECT_TRUE(cfg->store_to_load_forwarding(true, false));
+  for (int i = 0; i < 70; ++i)
+    EXPECT_EQ(result->operand(i), one);
+  // A fresh analysis/forwarding pass must not reuse a previous fact directory.
+  cfg->store_to_load_forwarding(true, false);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
 }  // namespace
 }  // namespace taichi::lang

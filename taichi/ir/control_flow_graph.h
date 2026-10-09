@@ -9,6 +9,7 @@
 namespace taichi::lang {
 
 class Function;
+class CFGStoreForwardingDefinitions;
 /**
  * A basic block in control-flow graph.
  * A CFGNode contains a reference to a part of the CHI IR, or more precisely,
@@ -99,7 +100,10 @@ class CFGNode {
 
   // Analyses and optimizations inside a CFGNode.
   void reaching_definition_analysis(bool after_lower_access);
-  bool store_to_load_forwarding(bool after_lower_access, bool autodiff_enabled);
+  bool store_to_load_forwarding(
+      bool after_lower_access,
+      bool autodiff_enabled,
+      const CFGStoreForwardingDefinitions &definitions);
   void gather_loaded_snodes(std::unordered_set<SNode *> &snodes) const;
   void live_variable_analysis(bool after_lower_access);
   bool dead_store_elimination(bool after_lower_access);

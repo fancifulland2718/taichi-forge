@@ -32,6 +32,8 @@ Use the documentation at your release tag for version-specific API details.
 - CFG store/load forwarding indexes scalar local definitions to avoid repeated
   full-block scans in large generated functions, retaining
   control-flow and alias checks.
+  Incoming definitions share one directory per CFG instead of rebuilding the
+  full index at each node; nodes filter only the addresses they query.
 - GPU LLVM options are retained per kernel through cached modules and
   delayed JIT registration, fixing CUDA kernel tiers being overridden by the
   Program tier. Old compiled caches are invalidated.

@@ -66,7 +66,10 @@ It retains the existing elimination rules and optimization-level selection.
 CFG store/load forwarding indexes scalar local definitions by address instead
 of repeatedly scanning entire blocks and incoming definitions. Control-flow
 joins, visibility and unknown definitions still govern forwarding; matrix and
-global accesses keep their alias checks. No size limit or pass bypass is added.
+global accesses keep their alias checks. The incoming-definition directory is
+shared across the CFG; each node filters only the addresses it queries against
+its reaching-definition bitset. Definition order and rewritten operands remain
+visible to forwarding. No size limit or pass bypass is added.
 
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing

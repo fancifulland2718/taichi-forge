@@ -321,18 +321,47 @@ bool CFGNode::may_contain_variable(const CFGStmtSet &var_set, Stmt *var) {
   });
 }
 
-// Scalar allocas have no overlapping component stores. Index their definitions
-// once per node instead of scanning all statements/facts for every access.
-// Keep definition statements, not their values: forwarding can rewrite a
-// definition's operands later in this pass.
-struct CFGNode::StoreForwardingIndex {
-  explicit StoreForwardingIndex(const CFGNode &node)
-      : node(node), cursor(node.begin_location) {
+// Scalar allocas have no overlapping component stores. Share their definition
+// directory across this forwarding pass, preserving the analysis's fact order.
+// Store statements, not values: forwarding can rewrite definition operands.
+class CFGStoreForwardingDefinitions {
+ public:
+  struct Definition {
+    Stmt *stmt;
+    std::size_t fact_index;
+  };
+
+  explicit CFGStoreForwardingDefinitions(const CFGStmtSet &facts) {
+    if (const auto *universe = facts.universe()) {
+      for (std::size_t i = 0; i < universe->statements.size(); ++i) {
+        auto *stmt = universe->statements[i];
+        for (auto *dest : irpass::analysis::get_store_destination(stmt)) {
+          if (eligible(dest))
+            definitions_[dest].push_back({stmt, i});
+        }
+      }
+    }
   }
 
   static bool eligible(Stmt *address) {
     return address->is<AllocaStmt>() &&
            address->ret_type.ptr_removed()->is<PrimitiveType>();
+  }
+
+  const std::vector<Definition> &lookup(Stmt *address) const {
+    static const std::vector<Definition> empty;
+    auto found = definitions_.find(address);
+    return found == definitions_.end() ? empty : found->second;
+  }
+
+ private:
+  std::unordered_map<Stmt *, std::vector<Definition>> definitions_;
+};
+
+struct CFGNode::StoreForwardingIndex {
+  StoreForwardingIndex(const CFGNode &node,
+                       const CFGStoreForwardingDefinitions &definitions)
+      : node(node), definitions(definitions), cursor(node.begin_location) {
   }
 
   Stmt *previous(Stmt *address, int position) {
@@ -341,7 +370,7 @@ struct CFGNode::StoreForwardingIndex {
     while (cursor < position) {
       auto *stmt = node.block->statements[cursor++].get();
       for (auto *dest : irpass::analysis::get_store_destination(stmt)) {
-        if (eligible(dest))
+        if (CFGStoreForwardingDefinitions::eligible(dest))
           latest[dest] = stmt;
       }
     }
@@ -350,21 +379,21 @@ struct CFGNode::StoreForwardingIndex {
   }
 
   const std::vector<Stmt *> &incoming(Stmt *address) {
-    if (!incoming_built) {
-      for (auto *stmt : node.reach_in) {
-        for (auto *dest : irpass::analysis::get_store_destination(stmt)) {
-          if (eligible(dest))
-            reaching[dest].push_back(stmt);
-        }
+    auto [found, inserted] = reaching.try_emplace(address);
+    if (inserted) {
+      // Only filter definitions of an address actually queried by this node.
+      // Membership and order are identical to iterating the full reach_in set.
+      for (const auto &definition : definitions.lookup(address)) {
+        if (node.reach_in.contains_index(definition.fact_index))
+          found->second.push_back(definition.stmt);
       }
-      incoming_built = true;
     }
-    return reaching[address];
+    return found->second;
   }
 
   const CFGNode &node;
+  const CFGStoreForwardingDefinitions &definitions;
   int cursor;
-  bool incoming_built{false};
   std::unordered_map<Stmt *, Stmt *> latest;
   std::unordered_map<Stmt *, std::vector<Stmt *>> reaching;
 };
@@ -376,7 +405,7 @@ Stmt *CFGNode::get_store_forwarding_data(Stmt *var,
   // Return the stored data if all definitions in the UD-chain of |var| at
   // this position store the same data.
   // [Intra-block Search]
-  const bool indexed_local = StoreForwardingIndex::eligible(var);
+  const bool indexed_local = CFGStoreForwardingDefinitions::eligible(var);
   if (indexed_local) {
     if (auto *definition = index.previous(var, position)) {
       // An atomic or an opaque definition returns null and must still shadow
@@ -634,8 +663,10 @@ void CFGNode::reaching_definition_analysis(bool after_lower_access) {
   }
 }
 
-bool CFGNode::store_to_load_forwarding(bool after_lower_access,
-                                       bool autodiff_enabled) {
+bool CFGNode::store_to_load_forwarding(
+    bool after_lower_access,
+    bool autodiff_enabled,
+    const CFGStoreForwardingDefinitions &definitions) {
   // Contains two separate parts:
   // 1. Store-to-load Forwarding: for each load stmt, find the closest previous
   // store stmt
@@ -646,7 +677,7 @@ bool CFGNode::store_to_load_forwarding(bool after_lower_access,
   //        that stores to the same address as the store stmt. If the "val"s
   //        are the same, then remove the store stmt.
   bool modified = false;
-  StoreForwardingIndex index(*this);
+  StoreForwardingIndex index(*this, definitions);
   for (int i = begin_location; i < end_location; i++) {
     // Store-to-load forwarding
     auto stmt = block->statements[i].get();
@@ -1418,11 +1449,12 @@ bool ControlFlowGraph::store_to_load_forwarding(bool after_lower_access,
 
   TI_AUTO_PROF;
   reaching_definition_analysis(after_lower_access);
+  const CFGStoreForwardingDefinitions definitions(nodes[start_node]->reach_in);
   const int num_nodes = size();
   bool modified = false;
   for (int i = 0; i < num_nodes; i++) {
-    if (nodes[i]->store_to_load_forwarding(after_lower_access,
-                                           autodiff_enabled))
+    if (nodes[i]->store_to_load_forwarding(after_lower_access, autodiff_enabled,
+                                         definitions))
       modified = true;
   }
   return modified;
