@@ -1052,15 +1052,22 @@ bool CFGNode::dead_store_elimination(bool after_lower_access) {
         //      stored by another store stmt in this node (thus killed)
         // !may_contain_variable(live_out, store_ptr): address is not used
         //      in the next nodes
-        bool is_used_in_next_nodes = false;
-        for (auto ptr : irpass::analysis::include_aliased_stmts(store_ptr)) {
-          is_used_in_next_nodes |= may_contain_variable(live_out, ptr);
+        // Current-node facts can already decide whether the store is dead.
+        // Only query successor liveness when neither a local use nor a full
+        // overwrite decides the result. Keep the partial tensor coverage rules.
+        bool is_dead = false;
+        if (!may_contain_variable(live_in_this_node, store_ptr)) {
+          is_dead = contain_variable(killed_in_this_node, store_ptr);
+          if (!is_dead) {
+            is_dead = true;
+            for (auto ptr : irpass::analysis::include_aliased_stmts(store_ptr)) {
+              if (may_contain_variable(live_out, ptr)) {
+                is_dead = false;
+                break;
+              }
+            }
+          }
         }
-
-        bool is_killed_in_current_node =
-            contain_variable(killed_in_this_node, store_ptr);
-        bool is_dead = is_killed_in_current_node || !is_used_in_next_nodes;
-        is_dead &= !may_contain_variable(live_in_this_node, store_ptr);
         if (!stmt->is<AllocaStmt>() && !stmt->is<AdStackAllocaStmt>() &&
             !stmt->is<ExternalFuncCallStmt>() && is_dead) {
           // If an address is neither used in this node, nor used in the next
