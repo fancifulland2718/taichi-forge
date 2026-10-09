@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Algebraic simplification maintains actual statement users across its rewrite
+  iterations, building the index only when a reference replacement needs it.
+  This reduces repeated IR scans without changing algebraic rules.
 - Dead-instruction elimination propagates unused operand dependencies through
   a worklist and compacts affected blocks once, avoiding repeated whole-IR
   scans while retaining side effects, container operands and offload bounds.

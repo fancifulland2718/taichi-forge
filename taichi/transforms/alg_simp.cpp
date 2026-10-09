@@ -1,6 +1,7 @@
 #include "taichi/ir/analysis.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/statements.h"
+#include "taichi/ir/stmt_use_index.h"
 #include "taichi/ir/transforms.h"
 #include "taichi/ir/visitors.h"
 #include "taichi/program/program.h"
@@ -13,13 +14,60 @@ class AlgSimp : public BasicStmtVisitor {
   static constexpr int max_weaken_exponent = 32;
 
  private:
+  IRNode *root_;
+  StmtUseIndex uses_;
+  std::vector<Stmt *> pending_users_;
+  std::vector<Stmt *> pending_erased_;
+
+  void replace_uses(Stmt *stmt, Stmt *replacement) {
+    if (!uses_.valid()) {
+      TI_AUTO_PROF;
+      // No-op and cast-only iterations need no reverse index. Build from the
+      // current tree only when the first actual reference rewrite needs it.
+      uses_.rebuild(root_);
+      for (auto *user : pending_users_)
+        uses_.add_user(user);
+      for (auto *erased : pending_erased_)
+        uses_.remove_user(erased);
+      pending_users_.clear();
+      pending_erased_.clear();
+    }
+    uses_.replace_uses(stmt, replacement);
+  }
+
+  void insert_before(Stmt *anchor, std::unique_ptr<Stmt> stmt) {
+    // Pending statements can already be users in a later replacement chain.
+    if (uses_.valid())
+      uses_.add_user(stmt.get());
+    else
+      pending_users_.push_back(stmt.get());
+    modifier.insert_before(anchor, std::move(stmt));
+  }
+
+  void erase(Stmt *stmt) {
+    if (uses_.valid())
+      uses_.remove_user(stmt);
+    else
+      pending_erased_.push_back(stmt);
+    modifier.erase(stmt);
+  }
+
+  void set_cast_operand(UnaryOpStmt *stmt, Stmt *operand) {
+    if (uses_.valid())
+      uses_.remove_user(stmt);
+    stmt->operand = operand;
+    if (uses_.valid())
+      uses_.add_user(stmt);
+    modifier.mark_as_modified();
+  }
+
   void cast_to_result_type(Stmt *&a, Stmt *stmt) {
     if (stmt->ret_type != a->ret_type) {
       auto cast = Stmt::make_typed<UnaryOpStmt>(UnaryOpType::cast_value, a);
       cast->cast_type = stmt->ret_type;
       cast->ret_type = stmt->ret_type;
       a = cast.get();
-      modifier.insert_before(stmt, std::move(cast));
+      insert_before(stmt, std::move(cast));
     }
   }
 
@@ -28,10 +76,10 @@ class AlgSimp : public BasicStmtVisitor {
     auto zero = stmts.back().get();
 
     for (auto &s : stmts) {
-      modifier.insert_before(stmt, std::move(s));
+      insert_before(stmt, std::move(s));
     }
-    stmt->replace_usages_with(zero);
-    modifier.erase(stmt);
+    replace_uses(stmt, zero);
+    erase(stmt);
   }
 
   void replace_with_one(Stmt *stmt) {
@@ -39,10 +87,10 @@ class AlgSimp : public BasicStmtVisitor {
     auto one = stmts.back().get();
 
     for (auto &s : stmts) {
-      modifier.insert_before(stmt, std::move(s));
+      insert_before(stmt, std::move(s));
     }
-    stmt->replace_usages_with(one);
-    modifier.erase(stmt);
+    replace_uses(stmt, one);
+    erase(stmt);
   }
 
   std::vector<float64> get_exponent_values(BinaryOpStmt *stmt) {
@@ -79,7 +127,7 @@ class AlgSimp : public BasicStmtVisitor {
         TI_NOT_IMPLEMENTED
       }
       Stmt *reciprocal_ptr = reciprocal.get();
-      modifier.insert_before(stmt, std::move(reciprocal));
+      insert_before(stmt, std::move(reciprocal));
       return reciprocal_ptr;
     } else {
       auto matrix_rhs = rhs->cast<MatrixInitStmt>();
@@ -100,13 +148,13 @@ class AlgSimp : public BasicStmtVisitor {
           TI_NOT_IMPLEMENTED
         }
         values.push_back(reciprocal.get());
-        modifier.insert_before(stmt, std::move(reciprocal));
+        insert_before(stmt, std::move(reciprocal));
       }
       auto new_rhs = Stmt::make<MatrixInitStmt>(values);
       new_rhs->ret_type = rhs->ret_type;
 
       Stmt *new_rhs_ptr = new_rhs.get();
-      modifier.insert_before(stmt, std::move(new_rhs));
+      insert_before(stmt, std::move(new_rhs));
       return new_rhs_ptr;
     }
   }
@@ -119,7 +167,7 @@ class AlgSimp : public BasicStmtVisitor {
       auto new_rhs =
           Stmt::make<ConstStmt>(TypedConstant(stmt->lhs->ret_type, log2rhs));
       Stmt *new_rhs_ptr = new_rhs.get();
-      modifier.insert_before(stmt, std::move(new_rhs));
+      insert_before(stmt, std::move(new_rhs));
       return new_rhs_ptr;
     } else {
       auto matrix_rhs = rhs->cast<MatrixInitStmt>();
@@ -134,14 +182,14 @@ class AlgSimp : public BasicStmtVisitor {
             TypedConstant(scalar_stmt->ret_type, log2int));
 
         values.push_back(log2int_stmt.get());
-        modifier.insert_before(stmt, std::move(log2int_stmt));
+        insert_before(stmt, std::move(log2int_stmt));
       }
 
       auto new_rhs = Stmt::make<MatrixInitStmt>(values);
       new_rhs->ret_type = rhs->ret_type;
 
       Stmt *new_rhs_ptr = new_rhs.get();
-      modifier.insert_before(stmt, std::move(new_rhs));
+      insert_before(stmt, std::move(new_rhs));
       return new_rhs_ptr;
     }
   }
@@ -158,8 +206,8 @@ class AlgSimp : public BasicStmtVisitor {
       }
     }
 
-    stmt->replace_usages_with(stmt->lhs);
-    modifier.erase(stmt);
+    replace_uses(stmt, stmt->lhs);
+    erase(stmt);
     return true;
   }
 
@@ -194,9 +242,9 @@ class AlgSimp : public BasicStmtVisitor {
     cast_to_result_type(a, stmt);
     auto result = Stmt::make<UnaryOpStmt>(UnaryOpType::sqrt, a);
     result->ret_type = a->ret_type;
-    stmt->replace_usages_with(result.get());
-    modifier.insert_before(stmt, std::move(result));
-    modifier.erase(stmt);
+    replace_uses(stmt, result.get());
+    insert_before(stmt, std::move(result));
+    erase(stmt);
     return true;
   }
 
@@ -235,7 +283,7 @@ class AlgSimp : public BasicStmtVisitor {
               Stmt::make<BinaryOpStmt>(BinaryOpType::mul, result, a_power_of_2);
           new_result->ret_type = a->ret_type;
           result = new_result.get();
-          modifier.insert_before(stmt, std::move(new_result));
+          insert_before(stmt, std::move(new_result));
         }
       }
       current_exponent <<= 1;
@@ -245,10 +293,10 @@ class AlgSimp : public BasicStmtVisitor {
                                                   a_power_of_2, a_power_of_2);
       new_a_power->ret_type = a->ret_type;
       a_power_of_2 = new_a_power.get();
-      modifier.insert_before(stmt, std::move(new_a_power));
+      insert_before(stmt, std::move(new_a_power));
     }
-    stmt->replace_usages_with(result);
-    modifier.erase(stmt);
+    replace_uses(stmt, result);
+    erase(stmt);
     return true;
   }
 
@@ -274,7 +322,7 @@ class AlgSimp : public BasicStmtVisitor {
     auto one = stmts.back().get();
 
     for (auto &s : stmts) {
-      modifier.insert_before(stmt, std::move(s));
+      insert_before(stmt, std::move(s));
     }
 
     cast_to_result_type(one, stmt);
@@ -286,11 +334,11 @@ class AlgSimp : public BasicStmtVisitor {
     auto result =
         Stmt::make<BinaryOpStmt>(BinaryOpType::div, one, a_to_n.get());
     result->ret_type = stmt->ret_type;
-    stmt->replace_usages_with(result.get());
-    modifier.insert_before(stmt, std::move(new_exponent));
-    modifier.insert_before(stmt, std::move(a_to_n));
-    modifier.insert_before(stmt, std::move(result));
-    modifier.erase(stmt);
+    replace_uses(stmt, result.get());
+    insert_before(stmt, std::move(new_exponent));
+    insert_before(stmt, std::move(a_to_n));
+    insert_before(stmt, std::move(result));
+    erase(stmt);
     return true;
   }
 
@@ -299,7 +347,8 @@ class AlgSimp : public BasicStmtVisitor {
   bool fast_math;
   DelayedIRModifier modifier;
 
-  explicit AlgSimp(bool fast_math_) : fast_math(fast_math_) {
+  explicit AlgSimp(IRNode *root, bool fast_math_)
+      : root_(root->get_ir_root()), fast_math(fast_math_) {
   }
 
   [[nodiscard]] bool is_redundant_cast(const DataType &first_cast,
@@ -335,20 +384,18 @@ class AlgSimp : public BasicStmtVisitor {
   void visit(UnaryOpStmt *stmt) override {
     if (stmt->is_cast()) {
       if (stmt->cast_type == stmt->operand->ret_type) {
-        stmt->replace_usages_with(stmt->operand);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->operand);
+        erase(stmt);
       } else if (stmt->operand->is<UnaryOpStmt>() &&
                  stmt->operand->as<UnaryOpStmt>()->is_cast()) {
         auto prev_cast = stmt->operand->as<UnaryOpStmt>();
         if (stmt->op_type == UnaryOpType::cast_bits &&
             prev_cast->op_type == UnaryOpType::cast_bits) {
-          stmt->operand = prev_cast->operand;
-          modifier.mark_as_modified();
+          set_cast_operand(stmt, prev_cast->operand);
         } else if (stmt->op_type == UnaryOpType::cast_value &&
                    prev_cast->op_type == UnaryOpType::cast_value &&
                    is_redundant_cast(prev_cast->cast_type, stmt->cast_type)) {
-          stmt->operand = prev_cast->operand;
-          modifier.mark_as_modified();
+          set_cast_operand(stmt, prev_cast->operand);
         }
       }
     }
@@ -361,8 +408,8 @@ class AlgSimp : public BasicStmtVisitor {
     TI_ASSERT(stmt->op_type == BinaryOpType::mul);
     if (alg_is_one(lhs) || alg_is_one(rhs)) {
       // 1 * a -> a, a * 1 -> a
-      stmt->replace_usages_with(alg_is_one(lhs) ? stmt->rhs : stmt->lhs);
-      modifier.erase(stmt);
+      replace_uses(stmt, alg_is_one(lhs) ? stmt->rhs : stmt->lhs);
+      erase(stmt);
       return true;
     }
     if ((fast_math || is_integral(stmt->ret_type.get_element_type())) &&
@@ -385,9 +432,9 @@ class AlgSimp : public BasicStmtVisitor {
       result->ret_type = stmt->ret_type;
 
       result->dbg_info = stmt->dbg_info;
-      stmt->replace_usages_with(result.get());
-      modifier.insert_before(stmt, std::move(result));
-      modifier.erase(stmt);
+      replace_uses(stmt, result.get());
+      insert_before(stmt, std::move(result));
+      erase(stmt);
       return true;
     }
     if (alg_is_two(lhs) || alg_is_two(rhs)) {
@@ -399,9 +446,9 @@ class AlgSimp : public BasicStmtVisitor {
       auto sum = Stmt::make<BinaryOpStmt>(BinaryOpType::add, a, a);
       sum->ret_type = a->ret_type;
       sum->dbg_info = stmt->dbg_info;
-      stmt->replace_usages_with(sum.get());
-      modifier.insert_before(stmt, std::move(sum));
-      modifier.erase(stmt);
+      replace_uses(stmt, sum.get());
+      insert_before(stmt, std::move(sum));
+      erase(stmt);
       return true;
     }
     return false;
@@ -415,8 +462,8 @@ class AlgSimp : public BasicStmtVisitor {
     if (alg_is_one(rhs) && !(is_real(stmt->lhs->ret_type.get_element_type()) &&
                              stmt->op_type == BinaryOpType::floordiv)) {
       // a / 1 -> a
-      stmt->replace_usages_with(stmt->lhs);
-      modifier.erase(stmt);
+      replace_uses(stmt, stmt->lhs);
+      erase(stmt);
       return true;
     }
     if ((fast_math || is_integral(stmt->ret_type.get_element_type())) &&
@@ -437,9 +484,9 @@ class AlgSimp : public BasicStmtVisitor {
         auto product =
             Stmt::make<BinaryOpStmt>(BinaryOpType::mul, stmt->lhs, new_rhs);
         product->ret_type = stmt->ret_type;
-        stmt->replace_usages_with(product.get());
-        modifier.insert_before(stmt, std::move(product));
-        modifier.erase(stmt);
+        replace_uses(stmt, product.get());
+        insert_before(stmt, std::move(product));
+        erase(stmt);
         return true;
       }
     }
@@ -452,9 +499,9 @@ class AlgSimp : public BasicStmtVisitor {
       auto result =
           Stmt::make<BinaryOpStmt>(BinaryOpType::bit_sar, stmt->lhs, new_rhs);
       result->ret_type = stmt->ret_type;
-      stmt->replace_usages_with(result.get());
-      modifier.insert_before(stmt, std::move(result));
-      modifier.erase(stmt);
+      replace_uses(stmt, result.get());
+      insert_before(stmt, std::move(result));
+      erase(stmt);
       return true;
     }
     return false;
@@ -474,17 +521,17 @@ class AlgSimp : public BasicStmtVisitor {
                stmt->op_type == BinaryOpType::bit_xor) {
       if (alg_is_zero(rhs)) {
         // a +-|^ 0 -> a
-        stmt->replace_usages_with(stmt->lhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->lhs);
+        erase(stmt);
       } else if (stmt->op_type != BinaryOpType::sub && alg_is_zero(lhs)) {
         // 0 +|^ a -> a
-        stmt->replace_usages_with(stmt->rhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->rhs);
+        erase(stmt);
       } else if (stmt->op_type == BinaryOpType::bit_or &&
                  irpass::analysis::same_value(stmt->lhs, stmt->rhs)) {
         // a | a -> a
-        stmt->replace_usages_with(stmt->lhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->lhs);
+        erase(stmt);
       } else if ((stmt->op_type == BinaryOpType::sub ||
                   stmt->op_type == BinaryOpType::bit_xor) &&
                  (fast_math ||
@@ -508,19 +555,19 @@ class AlgSimp : public BasicStmtVisitor {
     } else if (stmt->op_type == BinaryOpType::bit_and) {
       if (alg_is_minus_one(rhs)) {
         // a & -1 -> a
-        stmt->replace_usages_with(stmt->lhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->lhs);
+        erase(stmt);
       } else if (alg_is_minus_one(lhs)) {
         // -1 & a -> a
-        stmt->replace_usages_with(stmt->rhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->rhs);
+        erase(stmt);
       } else if (alg_is_zero(lhs) || alg_is_zero(rhs)) {
         // 0 & a -> 0, a & 0 -> 0
         replace_with_zero(stmt);
       } else if (irpass::analysis::same_value(stmt->lhs, stmt->rhs)) {
         // a & a -> a
-        stmt->replace_usages_with(stmt->lhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->lhs);
+        erase(stmt);
       }
     } else if (stmt->op_type == BinaryOpType::bit_sar ||
                stmt->op_type == BinaryOpType::bit_shl ||
@@ -531,8 +578,8 @@ class AlgSimp : public BasicStmtVisitor {
         // 0 << a -> 0
         // 0 >> a -> 0
         TI_ASSERT(stmt->lhs->ret_type == stmt->ret_type);
-        stmt->replace_usages_with(stmt->lhs);
-        modifier.erase(stmt);
+        replace_uses(stmt, stmt->lhs);
+        erase(stmt);
       }
     } else if (is_comparison(stmt->op_type)) {
       if ((fast_math || is_integral(stmt->lhs->ret_type.get_element_type())) &&
@@ -559,7 +606,7 @@ class AlgSimp : public BasicStmtVisitor {
       return;
     if (!alg_is_zero(cond)) {
       // this statement has no effect
-      modifier.erase(stmt);
+      erase(stmt);
     }
   }
 
@@ -569,7 +616,7 @@ class AlgSimp : public BasicStmtVisitor {
       return;
     if (!alg_is_zero(cond)) {
       // this statement has no effect
-      modifier.erase(stmt);
+      erase(stmt);
     }
   }
 
@@ -677,7 +724,10 @@ class AlgSimp : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node, bool fast_math) {
-    AlgSimp simplifier(fast_math);
+    // All edits go through the helpers above, so one index remains valid
+    // across this pass's fixed-point iterations. Match the original global
+    // replacement scope when the visited node is a subtree.
+    AlgSimp simplifier(node, fast_math);
     bool modified = false;
     while (true) {
       node->accept(&simplifier);
@@ -685,6 +735,10 @@ class AlgSimp : public BasicStmtVisitor {
         modified = true;
       else
         break;
+      // If no rewrite built the index, these changes are now in the tree and
+      // a later iteration will discover them there.
+      simplifier.pending_users_.clear();
+      simplifier.pending_erased_.clear();
     }
     return modified;
   }
