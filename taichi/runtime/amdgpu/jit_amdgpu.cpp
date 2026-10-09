@@ -2,6 +2,7 @@
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_context_pass.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
 
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -28,6 +29,7 @@ JITModule *JITSessionAMDGPU ::add_module(std::unique_ptr<llvm::Module> M,
 
 std::string JITSessionAMDGPU::compile_module_to_hsaco(
     std::unique_ptr<llvm::Module> &llvm_module) {
+  const auto module_options = LLVMModuleOptions::read(*llvm_module, config_);
   llvm::legacy::FunctionPassManager function_pass_manager_addrcast(
       llvm_module.get());
   function_pass_manager_addrcast.add(
@@ -55,7 +57,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
 
   llvm::TargetOptions options;
   options.MCOptions.AsmVerbose = false;
-  if (this->config_.fast_math) {
+  if (module_options.fast_math) {
     options.AllowFPOpFusion = FPOpFusion::Fast;
     options.UnsafeFPMath = 1;
     options.NoInfsFPMath = 1;
@@ -105,9 +107,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
     // emit GCN assembly via the legacy PM (codegen still requires it).
     {
       LLVMOptPipelineOptions opts;
-      opts.opt_level = llvm_opt_level_from_int(
-          effective_llvm_opt_level(config_.llvm_opt_level, config_.compile_tier,
-                                   /*min_level=*/1));
+      opts.opt_level = llvm_opt_level_from_int(module_options.opt_level);
       opts.loop_vectorize = true;
       opts.slp_vectorize = true;
       opts.run_post_gep_passes = false;
@@ -131,9 +131,7 @@ std::string JITSessionAMDGPU::compile_module_to_hsaco(
   {
     TI_PROFILER("llvm_module_opt_pipeline");
     LLVMOptPipelineOptions opts;
-    opts.opt_level = llvm_opt_level_from_int(
-        effective_llvm_opt_level(config_.llvm_opt_level, config_.compile_tier,
-                                 /*min_level=*/1));
+    opts.opt_level = llvm_opt_level_from_int(module_options.opt_level);
     opts.loop_vectorize = true;
     opts.slp_vectorize = true;
     opts.run_post_gep_passes = false;

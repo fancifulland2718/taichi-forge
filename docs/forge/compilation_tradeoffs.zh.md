@@ -37,6 +37,12 @@
 代码的配置已经进入 Forge offline-cache identity。切换它们应生成或加载独立产物，而
 不是复用不兼容 cache。
 
+CUDA 和 AMDGPU 的逐 kernel LLVM 等级及 fast-math 设置现在随编译模块保存，覆盖克隆、
+offline cache 和延迟 JIT 注册。kernel 的 `opt_level='fast'` 或 `'full'` 会传到 GPU
+LLVM optimizer，不再被 Program 档位覆盖。kernel 档位仍继承 Program 的
+`advanced_optimization` 布尔值，不会单独将它开启。CUDA 已有实际产物与缓存恢复回归；
+AMDGPU 执行仍需对应硬件验证。编译器 schema 更新会使旧缓存失效。
+
 在当前 Taichi Forge 源码中，`debug=True` 只会在未显式指定
 `check_out_of_bound` 时启用越界检查。传入 `check_out_of_bound=False`，或设置
 `TI_CHECK_OUT_OF_BOUND=0`，可以单独隔离 bounds-check 成本，同时保留其它 debug

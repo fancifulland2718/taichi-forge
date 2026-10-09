@@ -169,7 +169,8 @@ class Kernel;
 //  49 - Forward AD unary derivatives mask zero-tangent singularities per lane.
 //  50 - Distinguish inline IR templates and serialize functions in call-ID order.
 //  51 - Fast local CSE and conservative load barriers for atomic/call effects.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 51;
+//  52 - Per-kernel LLVM JIT option snapshots.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 52;
 
 std::string get_hashed_offline_cache_key_of_snode(const SNode *snode);
 std::string get_hashed_offline_cache_key_context(

@@ -42,6 +42,15 @@ and other code-generating options are included in Forge offline-cache identity.
 Changing them should compile or load a separate artifact rather than reuse an
 incompatible one.
 
+For CUDA and AMDGPU, the effective kernel LLVM level and fast-math setting now
+travel with the compiled module through cloning, offline caching and delayed
+JIT registration. A kernel's `opt_level='fast'` or `'full'` therefore reaches the
+GPU LLVM optimizer instead of being replaced by the Program tier. The kernel
+tier still inherits the Program's `advanced_optimization` choice; it does not
+independently turn that Boolean on. CUDA artifact-level regression checks cover
+both Program tiers and cache reload; AMDGPU execution needs separate hardware
+validation. Existing cache entries are invalidated by the compiler schema change.
+
 In the current Taichi Forge source, `debug=True` enables bounds checks only
 when `check_out_of_bound` was not explicitly selected. Passing
 `check_out_of_bound=False`, or setting `TI_CHECK_OUT_OF_BOUND=0`, isolates the

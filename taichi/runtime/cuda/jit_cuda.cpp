@@ -2,6 +2,7 @@
 #include "taichi/runtime/cuda/cuda_artifact_provider.h"
 #include "taichi/runtime/llvm/llvm_context.h"
 #include "taichi/runtime/llvm/llvm_opt_pipeline.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
 #include "taichi/util/environ_config.h"
 
 #include <cstdlib>
@@ -132,14 +133,14 @@ CUDAKernelArtifact JITSessionCUDA::build_canonical_artifact(
     function.setName(convert(function.getName().str()));
   }
   artifact.entry_names = cuda_kernel_entry_names(*module);
+  const auto options = LLVMModuleOptions::read(*module, config_);
   artifact.payload = emit_module_to_ptx(module);
   artifact.target_identity = CUDAContext::get_instance().get_mcpu() + "|" +
                              CUDAContext::get_instance().get_mattrs();
   artifact.provider_identity = "llvm_nvptx";
   artifact.max_registers = max_reg;
-  artifact.fast_math = config_.fast_math;
-  artifact.llvm_opt_level = effective_llvm_opt_level(
-      config_.llvm_opt_level, config_.compile_tier, /*min_level=*/1);
+  artifact.fast_math = options.fast_math;
+  artifact.llvm_opt_level = options.opt_level;
   return artifact;
 }
 
@@ -332,6 +333,7 @@ std::string convert(std::string new_name) {
 std::vector<char> JITSessionCUDA::emit_module_to_ptx(
     std::unique_ptr<llvm::Module> &module) {
   TI_AUTO_PROF
+  const auto module_options = LLVMModuleOptions::read(*module, config_);
   // Part of this function is borrowed from Halide::CodeGen_PTX_Dev.cpp
   if (llvm::verifyModule(*module, &llvm::errs())) {
     module->print(llvm::errs(), nullptr);
@@ -356,7 +358,7 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
   TI_ERROR_UNLESS(target, err_str);
 
   TargetOptions options;
-  if (this->config_.fast_math) {
+  if (module_options.fast_math) {
     options.AllowFPOpFusion = FPOpFusion::Fast;
     // See NVPTXISelLowering.cpp
     // Setting UnsafeFPMath true will result in approximations such as
@@ -428,9 +430,7 @@ std::vector<char> JITSessionCUDA::emit_module_to_ptx(
   {
     TI_PROFILER("llvm_module_opt_pipeline");
     LLVMOptPipelineOptions opts;
-    opts.opt_level = llvm_opt_level_from_int(
-        effective_llvm_opt_level(config_.llvm_opt_level, config_.compile_tier,
-                                 /*min_level=*/1));
+    opts.opt_level = llvm_opt_level_from_int(module_options.opt_level);
     opts.loop_vectorize = false;
     opts.slp_vectorize = false;
     opts.run_post_gep_passes = true;

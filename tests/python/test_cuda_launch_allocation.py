@@ -19,6 +19,99 @@ def _allocation_calls():
     )
 
 
+@test_utils.test(arch=ti.cuda)
+@pytest.mark.parametrize("program_tier", ["fast", "balanced"])
+def test_cuda_kernel_tier_reaches_final_artifact(tmp_path, program_tier):
+    ptxas = shutil.which("ptxas") or shutil.which("ptxas.exe")
+    if ptxas is None:
+        pytest.skip("optional ptxas is not installed")
+
+    # Observe the options actually used to emit PTX, including on a later
+    # process's offline-cache load. A pass response never changes the artifact.
+    script = tmp_path / "observe_kernel_tier.py"
+    script.write_text(
+        textwrap.dedent(
+            """
+            import argparse
+            import json
+            import os
+            from pathlib import Path
+            import sys
+
+            if "--request" in sys.argv:
+                parser = argparse.ArgumentParser()
+                parser.add_argument("--request")
+                parser.add_argument("--response")
+                args = parser.parse_args()
+                request = json.loads(Path(args.request).read_text(encoding="utf-8"))
+                path = Path(os.environ["FORGE_TIER_EVIDENCE"]) / (request["artifact_key"] + ".json")
+                path.write_text(json.dumps(request), encoding="utf-8")
+                Path(args.response).write_text(
+                    json.dumps({"schema_version": 2, "status": "pass"}), encoding="utf-8")
+            else:
+                import taichi_forge as ti
+                ti.init(arch=ti.cuda, compile_tier=os.environ["FORGE_PROGRAM_TIER"],
+                        advanced_optimization=False, fast_math=False,
+                        offline_cache=True, offline_cache_file_path=os.environ["FORGE_TIER_CACHE"])
+                runtime = ti.lang.impl.get_runtime()
+                runtime.set_kernel_executable_lifecycle_telemetry_enabled(True)
+
+                @ti.kernel(opt_level="fast")
+                def requested_fast(x: ti.i32) -> ti.i32:
+                    return x * 2
+
+                @ti.kernel(opt_level="full")
+                def requested_full(x: ti.i32) -> ti.i32:
+                    return x * 3
+
+                assert requested_full(7) == 21
+                assert requested_fast(7) == 14
+                ti.sync()
+                print("TIER_CACHE=" + json.dumps(runtime.debug_kernel_executable_lifecycle_stats()))
+                ti.reset()
+            """
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.update(
+        TI_CUDA_PTXAS_MODE="external",
+        TI_CUDA_PTXAS_PATH=ptxas,
+        TI_CUDA_COMPILEIQ_WORKER=str(script),
+        TI_CUDA_COMPILEIQ_PYTHON=sys.executable,
+        FORGE_PROGRAM_TIER=program_tier,
+        FORGE_TIER_CACHE=str(tmp_path / "offline"),
+        TI_SKIP_VERSION_CHECK="1",
+    )
+    # Separate artifact caches force observation even when bitcode is cached.
+    for run in range(2):
+        evidence = tmp_path / f"evidence-{run}"
+        evidence.mkdir()
+        env["FORGE_TIER_EVIDENCE"] = str(evidence)
+        env["TI_CUDA_ARTIFACT_CACHE_PATH"] = str(tmp_path / f"artifacts-{run}")
+        completed = subprocess.run(
+            [sys.executable, str(script)], env=env, capture_output=True,
+            text=True, timeout=60, check=False,
+        )
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        cache_stats = json.loads(next(
+            line.removeprefix("TIER_CACHE=") for line in completed.stdout.splitlines()
+            if line.startswith("TIER_CACHE=")
+        ))
+        if run:
+            assert cache_stats["disk_loads"] >= 2
+            assert cache_stats["compiler_invocations"] == 0
+        observed = {}
+        for path in evidence.glob("*.json"):
+            request = json.loads(path.read_text(encoding="utf-8"))
+            for name in request["entry_names"]:
+                for tier in ("fast", "full"):
+                    if name.startswith("requested_" + tier):
+                        observed[tier] = request["options"]["llvm_opt_level"]
+                        assert request["options"]["fast_math"] is False
+        assert observed == {"fast": 1, "full": 3}
+
+
 def _free_calls():
     return ti_core.query_int64("cuda_async_free_calls") + ti_core.query_int64(
         "cuda_sync_free_fallback_calls"

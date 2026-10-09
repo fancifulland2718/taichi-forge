@@ -6,6 +6,7 @@
 
 #include "taichi/codegen/llvm/kernel_compiler.h"
 #include "taichi/codegen/llvm/compiled_kernel_data.h"
+#include "taichi/runtime/llvm/llvm_module_options.h"
 
 namespace taichi::lang {
 namespace LLVM {
@@ -52,6 +53,8 @@ KernelCompiler::CKDPtr KernelCompiler::compile(
     TI_COMPILE_PROFILER("cpp.compile.llvm.emit_module");
     return codegen->compile_kernel_to_module();
   }();
+  LLVMModuleOptions::from_config(compile_config)
+      .write(*data.compiled_data.module);
   if (kernel_def.get_offload_execution_plan().has_value()) {
     // Entry-specific maxnreg annotations own task-plan caps. Do not add a
     // module-wide CU_JIT_MAX_REGISTERS limit that would collapse them.

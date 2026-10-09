@@ -29,6 +29,9 @@ Use the documentation at your release tag for version-specific API details.
 
 ## 0.6.4 (in development)
 
+- GPU LLVM options are retained per kernel through cached modules and
+  delayed JIT registration, fixing CUDA kernel tiers being overridden by the
+  Program tier. Old compiled caches are invalidated.
 - Fast LLVM compilation now eliminates duplicate typed expressions and lowered
   field-address calculations within basic blocks, including repeated sparse activation
   lookups. This reduces generated-code and driver compilation work without
