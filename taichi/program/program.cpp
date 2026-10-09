@@ -4,6 +4,7 @@
 
 #include "taichi/ir/statements.h"
 #include "taichi/program/extension.h"
+#include "taichi/program/kernel_compile_request.h"
 #include "taichi/codegen/cpu/codegen_cpu.h"
 #include "taichi/struct/struct.h"
 #include "taichi/runtime/program_impls/opengl/opengl_program.h"
@@ -5141,43 +5142,6 @@ Function *Program::create_function(const FunctionKey &func_key) {
   return functions_.back().get();
 }
 
-namespace {
-
-constexpr int kDefaultFullSimplifyGlobalIterCap = 1;
-
-CompileConfig make_effective_kernel_compile_config(
-    const CompileConfig &base_config,
-    const Kernel &kernel_def) {
-  CompileConfig effective_config = base_config;
-
-  // D2: per-kernel opt_level is represented as a compile_tier override on the
-  // C++ Kernel. Normalize it before cache lookup so single-kernel and
-  // compile_kernels batch paths share the same IR/codegen/cache behavior.
-  const auto &override = kernel_def.get_compile_tier_override();
-  if (override.has_value()) {
-    effective_config.compile_tier = *override;
-  }
-  if (effective_config.compile_tier != "fast" &&
-      effective_config.compile_tier != "balanced" &&
-      effective_config.compile_tier != "full") {
-    TI_ERROR("compile_tier must be one of fast, balanced, full; got {}",
-             effective_config.compile_tier);
-  }
-
-  // D2: "full" should mean the global IR passes may run to fixed point.
-  // Preserve explicit advanced tuning: only rewrite the cap when it still has
-  // the default balanced value.
-  if (effective_config.compile_tier == "full" &&
-      effective_config.full_simplify_global_iter_cap ==
-          kDefaultFullSimplifyGlobalIterCap) {
-    effective_config.full_simplify_global_iter_cap = 0;
-  }
-
-  return effective_config;
-}
-
-}  // namespace
-
 const CompiledKernelData &Program::compile_kernel(
     const CompileConfig &compile_config,
     const DeviceCapabilityConfig &caps,
@@ -5197,9 +5161,10 @@ const CompiledKernelData &Program::compile_kernel(
     total_compilation_time_ += Time::get_time() - start_t;
     return handle->compiled();
   }
-  const auto effective_config =
-      make_effective_kernel_compile_config(compile_config, kernel_def);
-  const auto &ckd = mgr.load_or_compile(effective_config, caps, kernel_def);
+  const auto request = resolve_kernel_compile_request(
+      compile_config, caps, kernel_def.get_compile_tier_override());
+  const auto &ckd =
+      mgr.load_or_compile(request.config(), request.device_caps(), kernel_def);
   kernel_def.set_snode_tree_dependencies(ckd.snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return ckd;
@@ -5225,10 +5190,10 @@ Program::compile_kernel_execution_handle(
     total_compilation_time_ += Time::get_time() - start_t;
     return handle;
   }
-  const auto effective_config =
-      make_effective_kernel_compile_config(compile_config, kernel_def);
+  const auto request = resolve_kernel_compile_request(
+      compile_config, caps, kernel_def.get_compile_tier_override());
   auto handle = mgr.load_or_compile_execution_handle(
-      effective_config, caps, kernel_def);
+      request.config(), request.device_caps(), kernel_def);
   kernel_def.set_snode_tree_dependencies(handle->compiled().snode_tree_ids());
   total_compilation_time_ += Time::get_time() - start_t;
   return handle;
@@ -5406,9 +5371,10 @@ void Program::compile_kernels(
   if (n_workers <= 1 || prefer_inner_parallelism) {
     // Fast path: honour the same serial path as compile_kernel.
     for (auto *k : *compile_jobs) {
-      const auto effective_config =
-          make_effective_kernel_compile_config(compile_config, *k);
-      const auto &compiled = mgr.load_or_compile(effective_config, caps, *k);
+      const auto request = resolve_kernel_compile_request(
+          compile_config, caps, k->get_compile_tier_override());
+      const auto &compiled =
+          mgr.load_or_compile(request.config(), request.device_caps(), *k);
       k->set_snode_tree_dependencies(compiled.snode_tree_ids());
     }
     total_compilation_time_ += Time::get_time() - start_t;
@@ -5425,10 +5391,10 @@ void Program::compile_kernels(
         // V7: mark this worker so the LLVM inner pool stays serial.
         CompileKernelsWorkerDepthScope worker_scope(dag_mode);
         try {
-          const auto effective_config =
-              make_effective_kernel_compile_config(compile_config, *k);
-          const auto &compiled =
-              mgr.load_or_compile(effective_config, caps, *k);
+          const auto request = resolve_kernel_compile_request(
+              compile_config, caps, k->get_compile_tier_override());
+          const auto &compiled = mgr.load_or_compile(
+              request.config(), request.device_caps(), *k);
           k->set_snode_tree_dependencies(compiled.snode_tree_ids());
         } catch (...) {
           std::lock_guard<std::mutex> g(err_mu);
