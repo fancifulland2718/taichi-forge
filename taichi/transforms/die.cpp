@@ -6,61 +6,67 @@
 #include "taichi/ir/visitors.h"
 #include "taichi/system/profiler.h"
 
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace taichi::lang {
 
 // Dead Instruction Elimination
 class DIE : public IRVisitor {
  public:
-  std::unordered_set<int> used;
-  int phase;  // 0: mark usage 1: eliminate
-  DelayedIRModifier modifier;
-  bool modified_ir;
+  bool modified_ir{false};
 
   explicit DIE(IRNode *node) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
-    modified_ir = false;
-    while (true) {
-      bool modified = false;
-      phase = 0;
-      used.clear();
-      node->accept(this);
-      phase = 1;
-      while (true) {
-        node->accept(this);
-        if (modifier.modify_ir()) {
-          modified = true;
-          modified_ir = true;
-          continue;
-        }
-        break;
+    node->accept(this);
+
+    // A statement can become dead only when one of its users is removed.
+    // Count operand edges (including repeated operands), then propagate those
+    // removals without rescanning the tree for every dependency layer.
+    std::vector<Stmt *> worklist;
+    for (auto *stmt : candidates_) {
+      if (usage_.at(stmt).count == 0) {
+        worklist.push_back(stmt);
       }
-      if (!modified)
-        break;
     }
+    std::unordered_map<Block *, std::unordered_set<Stmt *>> dead;
+    for (size_t i = 0; i < worklist.size(); ++i) {
+      auto *stmt = worklist[i];
+      dead[stmt->parent].insert(stmt);
+      for (int j = 0; j < stmt->num_operands(); ++j) {
+        if (auto *operand = stmt->operand(j)) {
+          auto &use = usage_.at(operand);
+          TI_ASSERT(use.count > 0);
+          if (--use.count == 0 && use.eliminable) {
+            worklist.push_back(operand);
+          }
+        }
+      }
+    }
+    // Keep pointers stable during propagation, then compact each affected
+    // block once. Block::erase retains the existing trash-bin ownership.
+    for (auto &[block, statements] : dead) {
+      block->erase(std::move(statements));
+    }
+    modified_ir = !worklist.empty();
   }
 
   void register_usage(Stmt *stmt) {
-    for (auto op : stmt->get_operands()) {
-      if (op) {  // might be nullptr
-        if (used.find(op->instance_id) == used.end()) {
-          used.insert(op->instance_id);
-        }
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      if (auto *operand = stmt->operand(i)) {
+        ++usage_[operand].count;
       }
     }
   }
 
   void visit(Stmt *stmt) override {
     TI_ASSERT(!stmt->erased);
-    if (phase == 0) {
-      register_usage(stmt);
-    } else {
-      if (stmt->dead_instruction_eliminable() &&
-          used.find(stmt->instance_id) == used.end()) {
-        modifier.erase(stmt);
-      }
+    register_usage(stmt);
+    if (stmt->dead_instruction_eliminable()) {
+      usage_[stmt].eliminable = true;
+      candidates_.push_back(stmt);
     }
   }
 
@@ -102,12 +108,21 @@ class DIE : public IRVisitor {
   void visit(OffloadedStmt *stmt) override {
     // TODO: A hack to make sure end_stmt is registered.
     // Ideally end_stmt should be its own Block instead.
-    if (stmt->end_stmt &&
-        used.find(stmt->end_stmt->instance_id) == used.end()) {
-      used.insert(stmt->end_stmt->instance_id);
+    if (stmt->end_stmt) {
+      ++usage_[stmt->end_stmt].count;
     }
     stmt->all_blocks_accept(this, true);
   }
+
+ private:
+  struct Usage {
+    size_t count{0};
+    // Only ordinary statements visited in this invocation can be removed.
+    // Operands outside the subtree and container statements remain pinned.
+    bool eliminable{false};
+  };
+  std::unordered_map<Stmt *, Usage> usage_;
+  std::vector<Stmt *> candidates_;
 };
 
 namespace irpass {

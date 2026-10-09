@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Dead-instruction elimination propagates unused operand dependencies through
+  a worklist and compacts affected blocks once, avoiding repeated whole-IR
+  scans while retaining side effects, container operands and offload bounds.
 - CFG forwarding and dead-store elimination share a maintained statement-use
   index, rewriting actual users instead of repeatedly traversing the IR.
   Alias, visibility and optimization-tier rules are unchanged.
