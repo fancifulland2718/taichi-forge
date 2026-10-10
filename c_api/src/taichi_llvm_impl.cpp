@@ -64,14 +64,6 @@ TiMemory LlvmRuntime::allocate_memory(
 }
 
 void LlvmRuntime::free_memory(TiMemory devmem) {
-  const taichi::lang::CompileConfig &config = executor_->get_config();
-  // For memory allocated through Device::allocate_memory_runtime(),
-  // the corresponding Device::free_memory() interface has not been
-  // implemented yet...
-  if (taichi::arch_is_cpu(config.arch)) {
-    TI_CAPI_NOT_SUPPORTED_IF(taichi::arch_is_cpu(config.arch));
-  }
-
   Runtime::free_memory(devmem);
 }
 

@@ -52,3 +52,18 @@ class AotAutodiffTest : public CapiTest {
 TEST_F(AotAutodiffTest, FieldCpu) { run_field(TI_ARCH_X64); }
 TEST_F(AotAutodiffTest, FieldCuda) { run_field(TI_ARCH_CUDA); }
 TEST_F(AotAutodiffTest, FieldVulkan) { run_field(TI_ARCH_VULKAN); }
+
+TEST_F(AotAutodiffTest, CpuMemoryRetirement) {
+  if (!ti::is_arch_available(TI_ARCH_X64)) GTEST_SKIP();
+  ti::Runtime runtime(TI_ARCH_X64);
+  for (int i = 0; i < 3; ++i) {
+    auto array = runtime.allocate_ndarray<float>({4}, {}, true);
+    ASSERT_TAICHI_SUCCESS();
+    std::vector<float> values(4, static_cast<float>(i));
+    array.write(values);
+    runtime.wait();
+    ASSERT_TAICHI_SUCCESS();
+    array.destroy();
+    ASSERT_TAICHI_SUCCESS();
+  }
+}
