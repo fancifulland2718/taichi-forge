@@ -6,6 +6,40 @@
 
 namespace taichi::lang {
 
+TEST(WholeKernelCSE, FieldGroupsRetainEquivalentIndexComparisons) {
+  SNode first_field(1, SNodeType::place);
+  SNode second_field(2, SNodeType::place);
+  first_field.dt = second_field.dt = PrimitiveType::i32;
+  auto block = std::make_unique<Block>();
+  auto base = block->push_back<ArgLoadStmt>(
+      std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+  auto three = block->push_back<ConstStmt>(TypedConstant(3));
+  auto minus_three = block->push_back<ConstStmt>(TypedConstant(-3));
+  auto index = block->push_back<BinaryOpStmt>(BinaryOpType::add, base, three);
+  auto equivalent =
+      block->push_back<BinaryOpStmt>(BinaryOpType::sub, base, minus_three);
+  index->ret_type = PrimitiveType::i32;
+  equivalent->ret_type = PrimitiveType::i32;
+  auto pointer = [&](SNode *field, Stmt *offset) {
+    auto *ptr = block->push_back<GlobalPtrStmt>(field, std::vector<Stmt *>{offset});
+    ptr->ret_type =
+        TypeFactory::get_instance().get_pointer_type(PrimitiveType::i32);
+    return ptr;
+  };
+  auto first = pointer(&first_field, index);
+  auto second = pointer(&second_field, index);
+  auto first_alias = pointer(&first_field, equivalent);
+  auto second_alias = pointer(&second_field, equivalent);
+  auto result = block->push_back<ReturnStmt>(
+      std::vector<Stmt *>{first_alias, second_alias});
+  EXPECT_TRUE(irpass::analysis::definitely_same_address(first, first_alias));
+  EXPECT_TRUE(irpass::whole_kernel_cse(block.get()));
+  EXPECT_EQ(result->operand(0), first);
+  EXPECT_EQ(result->operand(1), second);
+  EXPECT_FALSE(irpass::whole_kernel_cse(block.get()));
+  EXPECT_NO_THROW(irpass::analysis::verify(block.get()));
+}
+
 TEST(WholeKernelCSE, SameAddressPointersKeepTheirPointeeTypes) {
   for (bool tensor_first : {false, true}) {
     SCOPED_TRACE(tensor_first);

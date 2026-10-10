@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Whole-kernel CSE avoids creating empty candidate tables during ancestor-scope
+  lookups and groups global pointer candidates by field. No-op iterations skip
+  use-index construction while preserving branch-hoisting invalidation,
+  equivalent-index, type, activation and sparse-lifetime checks.
 - Constant folding and atomic demotion build batch-replacement use indexes only
   when a rewrite occurs, avoiding whole-IR collection during no-op traversals.
   Analysis results transfer ownership and avoid temporary operand vectors and

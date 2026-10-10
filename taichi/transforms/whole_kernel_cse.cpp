@@ -23,14 +23,20 @@ class WholeKernelCSE : public BasicStmtVisitor {
   size_t sparse_lookup_epoch_{0};
   size_t sparse_read_epoch_{0};
 
-  // Reverse def-use map for the current pass iteration.
-  // Rebuilt once per inner iteration; used for O(direct-users) MarkUndone.
+  // Build the reverse def-use map only when this iteration rewrites a use.
+  // Hoisting can remove entire containers, so start a fresh index next time.
+  IRNode *root_;
   StmtUseIndex uses_;
+
+  void ensure_uses() {
+    if (!uses_.valid())
+      uses_.rebuild(root_);
+  }
 
  public:
   using BasicStmtVisitor::visit;
 
-  WholeKernelCSE() {
+  explicit WholeKernelCSE(IRNode *root) : root_(root) {
     allow_undefined_visitor = true;
     invoke_default_visitor = true;
   }
@@ -58,6 +64,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
   // queued for branch hoisting. Transfer the index immediately: another
   // replacement in this traversal must see the updated def-use graph.
   void replace_uses(Stmt *replaced, Stmt *replacement) {
+    ensure_uses();
     uses_.replace_uses(replaced, replacement,
                        [&](Stmt *user) { visited_.erase(user->instance_id); });
   }
@@ -67,12 +74,18 @@ class WholeKernelCSE : public BasicStmtVisitor {
     auto hash_type =
         std::hash<std::type_index>{}(std::type_index(typeid(*stmt))) ^
         std::hash<const Type *>{}(stmt->ret_type);
-    if (stmt->is<GlobalPtrStmt>() || stmt->is<LoopUniqueStmt>()) {
+    if (auto *ptr = stmt->cast<GlobalPtrStmt>()) {
+      // Definite address equality requires the same field. Indices can be
+      // equivalent without operand identity, so leave their comparison to
+      // common_statement_eliminable() within this field's candidate group.
+      return hash_type ^ std::hash<SNode *>{}(ptr->snode);
+    }
+    if (stmt->is<LoopUniqueStmt>()) {
       // special cases in common_statement_eliminable()
       return hash_type;
     }
-    auto op = stmt->get_operands();
-    for (auto &x : op) {
+    for (int i = 0; i < stmt->num_operands(); ++i) {
+      auto *x = stmt->operand(i);
       if (x == nullptr)
         continue;
       // Hash the addresses of the operand pointers.
@@ -148,7 +161,10 @@ class WholeKernelCSE : public BasicStmtVisitor {
       return;
     }
     for (auto &scope : visible_stmts_) {
-      for (auto &prev_stmt : scope[hash_value]) {
+      auto found = scope.find(hash_value);
+      if (found == scope.end())
+        continue;
+      for (auto &prev_stmt : found->second) {
         if (common_statement_eliminable(stmt, prev_stmt)) {
           replace_uses(stmt, prev_stmt);
           erased_[stmt->parent].insert(stmt);
@@ -203,6 +219,9 @@ class WholeKernelCSE : public BasicStmtVisitor {
                  true_clause->statements[0].get(),
                  false_clause->statements[0].get())) {
         // Directly modify this because it won't invalidate any iterators.
+        // Capture operands of the moved statement (including a possible
+        // subtree) before extraction makes it temporarily absent from root_.
+        ensure_uses();
         auto common_stmt = true_clause->extract(0);
         replace_uses(false_clause->statements[0].get(), common_stmt.get());
         modifier_.insert_before(if_stmt, std::move(common_stmt));
@@ -219,6 +238,7 @@ class WholeKernelCSE : public BasicStmtVisitor {
                  true_clause->statements.back().get(),
                  false_clause->statements.back().get())) {
         // Directly modify this because it won't invalidate any iterators.
+        ensure_uses();
         auto common_stmt = true_clause->extract((int)true_clause->size() - 1);
         replace_uses(false_clause->statements.back().get(), common_stmt.get());
         modifier_.insert_after(if_stmt, std::move(common_stmt));
@@ -234,13 +254,13 @@ class WholeKernelCSE : public BasicStmtVisitor {
   }
 
   static bool run(IRNode *node) {
-    WholeKernelCSE eliminator;
+    WholeKernelCSE eliminator(node);
     bool modified = false;
     while (true) {
-      // Rebuild the reverse def-use map once per inner iteration (O(N)).
-      // Both invalidation and replacement use direct users. Batch ordinary
-      // CSE erasures once per block to avoid repeated vector compaction.
-      eliminator.uses_.rebuild(node);
+      // An iteration with no rewrites needs no reverse index. Keep the
+      // rebuild boundary for container hoisting/retirement; ordinary CSE
+      // erasures still compact each block only once.
+      eliminator.uses_.invalidate();
       node->accept(&eliminator);
       bool iteration_modified = eliminator.modifier_.modify_ir();
       for (auto &[block, stmts] : eliminator.erased_) {
