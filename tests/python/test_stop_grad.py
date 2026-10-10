@@ -84,3 +84,28 @@ def test_stop_grad2():
     # If without stop, grad x.grad[i] = i * 4
     for i in range(n):
         assert x.grad[i] == i * 2
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.adstack, offline_cache=False)
+def test_stop_grad_inside_reversed_loop():
+    x = ti.field(ti.f32, shape=2, needs_grad=True)
+    y = ti.field(ti.f32, shape=2, needs_grad=True)
+    loss = ti.field(ti.f32, shape=(), needs_grad=True)
+
+    @ti.kernel
+    def energy():
+        for i in x:
+            total = x[i] * x[i]
+            for j in range(2):
+                ti.stop_grad(x)
+                total += x[i] * x[i] + (j + 1) * y[i] * y[i]
+            loss[None] += total
+
+    x.fill(0.5)
+    y.fill(0.25)
+    with ti.ad.Tape(loss):
+        energy()
+    assert loss[None] == 1.875
+    for i in range(2):
+        assert x.grad[i] == 1
+        assert y.grad[i] == 1.5

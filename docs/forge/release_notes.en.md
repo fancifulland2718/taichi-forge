@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Reverse-mode autodiff constructs empty reverse loop bodies directly instead of
+  deep-copying and discarding forward subtrees. Loop execution metadata and
+  `stop_grad` scope markers are preserved.
 - Reverse-mode autodiff now backs up nested loop bounds across forward/reverse
   scopes, including argument and locally derived bounds. The fast tier no longer
   depends on advanced optimization to make these references valid.

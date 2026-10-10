@@ -269,9 +269,14 @@ RangeForStmt::RangeForStmt(Stmt *begin,
 }
 
 std::unique_ptr<Stmt> RangeForStmt::clone() const {
+  return clone_with_body(body->clone());
+}
+
+std::unique_ptr<RangeForStmt> RangeForStmt::clone_with_body(
+    std::unique_ptr<Block> new_body) const {
   auto new_stmt = std::make_unique<RangeForStmt>(
-      begin, end, body->clone(), is_bit_vectorized, num_cpu_threads, block_dim,
-      strictly_serialized);
+      begin, end, std::move(new_body), is_bit_vectorized, num_cpu_threads,
+      block_dim, strictly_serialized, range_hint);
   new_stmt->reversed = reversed;
   new_stmt->one_to_one = one_to_one;
   return new_stmt;

@@ -1066,6 +1066,10 @@ class RangeForStmt : public Stmt {
     reversed = !reversed;
   }
 
+  // Copy the loop header while supplying a separately constructed body.
+  std::unique_ptr<RangeForStmt> clone_with_body(
+      std::unique_ptr<Block> new_body) const;
+
   std::unique_ptr<Stmt> clone() const override;
 
   TI_STMT_DEF_FIELDS(begin,

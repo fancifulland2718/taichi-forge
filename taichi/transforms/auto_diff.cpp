@@ -1444,15 +1444,14 @@ class MakeAdjoint : public ADTransform {
   }
 
   void visit(RangeForStmt *for_stmt) override {
-    auto new_for = for_stmt->clone();
-    auto new_for_ptr = new_for->as<RangeForStmt>();
+    // The adjoint fills its own body. Cloning the forward subtree only to erase
+    // it wastes allocations and retains discarded nodes in the block trash bin.
+    auto body = std::make_unique<Block>();
+    body->stop_gradients = for_stmt->body->stop_gradients;
+    auto new_for = for_stmt->clone_with_body(std::move(body));
+    auto new_for_ptr = new_for.get();
     new_for_ptr->reversed = !new_for_ptr->reversed;
     insert_grad_stmt(std::move(new_for));
-    const int len = new_for_ptr->body->size();
-
-    for (int i = 0; i < len; i++) {
-      new_for_ptr->body->erase(0);
-    }
 
     std::vector<Stmt *> statements;
     // always make a copy since the list can be modified.
