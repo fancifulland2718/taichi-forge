@@ -183,7 +183,8 @@ class Kernel;
 //  58 - Infer finite loop AD stack capacity instead of an undersized fallback.
 //  59 - Preserve per-iteration local load values for nonlinear adjoints.
 //  60 - Allocate outer-value adjoints in their corresponding reverse loop scope.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 60;
+//  61 - Stack-free power helper loops no longer defeat finite AD stack sizing.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 61;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

@@ -112,20 +112,26 @@ class StructuredStackSize : public BasicStmtVisitor {
   }
 
   void visit(AdStackAllocaStmt *stmt) override {
-    if (stmt->max_size == 0)
+    if (stmt->max_size == 0) {
+      ++adaptive_stack_uses_;
       effects_[stmt] = {};
+    }
   }
 
   void visit(AdStackPushStmt *stmt) override {
     auto stack = stmt->stack->as<AdStackAllocaStmt>();
-    if (stack->max_size == 0)
+    if (stack->max_size == 0) {
+      ++adaptive_stack_uses_;
       append(stack, {1, 1, true});
+    }
   }
 
   void visit(AdStackPopStmt *stmt) override {
     auto stack = stmt->stack->as<AdStackAllocaStmt>();
-    if (stack->max_size == 0)
+    if (stack->max_size == 0) {
+      ++adaptive_stack_uses_;
       append(stack, {-1, 0, true});
+    }
   }
 
   void visit(IfStmt *stmt) override {
@@ -158,7 +164,15 @@ class StructuredStackSize : public BasicStmtVisitor {
   }
 
   void visit(WhileStmt *stmt) override {
-    repeat(summarize(stmt->body.get()), -1);
+    auto enclosing_exit = has_early_exit_;
+    auto enclosing_uses = adaptive_stack_uses_;
+    auto effects = summarize(stmt->body.get());
+    // Integer powers are lowered to stack-free while loops with a break.
+    // Their exits cannot skip any adaptive stack operation, and must not force
+    // unrelated finite outer loops back to the default stack capacity.
+    if (adaptive_stack_uses_ == enclosing_uses)
+      has_early_exit_ = enclosing_exit;
+    repeat(std::move(effects), -1);
   }
 
   void visit(StructForStmt *stmt) override {
@@ -173,18 +187,20 @@ class StructuredStackSize : public BasicStmtVisitor {
   // paths have been modeled; the CFG analysis remains responsible for them.
   void visit(ContinueStmt *) override {
     has_early_exit_ = true;
+    has_unmodeled_jump_ = true;
   }
   void visit(WhileControlStmt *) override {
     has_early_exit_ = true;
   }
   void visit(ReturnStmt *) override {
     has_early_exit_ = true;
+    has_unmodeled_jump_ = true;
   }
 
   static void run(IRNode *root) {
     StructuredStackSize pass;
     root->accept(&pass);
-    if (pass.has_early_exit_)
+    if (pass.has_early_exit_ || pass.has_unmodeled_jump_)
       return;
     for (auto &[stack, effect] : pass.capacities_) {
       if (effect.known && pass.effects_.find(stack) == pass.effects_.end()) {
@@ -202,7 +218,11 @@ class StructuredStackSize : public BasicStmtVisitor {
  private:
   StackEffects effects_;
   StackEffects capacities_;
+  std::size_t adaptive_stack_uses_{0};
   bool has_early_exit_{false};
+  // Unlike a while break, continue may target an enclosing loop. Do not absorb
+  // these jumps when summarizing a stack-free helper loop.
+  bool has_unmodeled_jump_{false};
 };
 
 }  // namespace

@@ -49,3 +49,42 @@ def test_matrix_reduction_stack_in_finite_nested_loops(iterations, square):
                 gradient += 2 * f if square else np.ones_like(f)
         np.testing.assert_allclose(y[0], expected, rtol=2e-5, atol=1e-6)
         np.testing.assert_allclose(x.grad.to_numpy(), seed * gradient, rtol=2e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("tier,advanced", [("fast", False), ("fast", True), ("full", True)])
+@test_utils.test(arch=[ti.cpu, ti.cuda], require=ti.extension.adstack, offline_cache=False)
+def test_matrix_stack_capacity_with_power_helper(tier, advanced):
+    ti.cfg.compile_tier = tier
+    ti.cfg.advanced_optimization = advanced
+    x = ti.Matrix.field(3, 3, ti.f32, shape=1, needs_grad=True)
+    y = ti.field(ti.f32, shape=1, needs_grad=True)
+
+    @ti.kernel
+    def energy():
+        for i in x:
+            total = 0.0
+            for j in range(2):
+                for k in range(2):
+                    for q in ti.static(range(2)):
+                        f = x[i] + (0.01 * j + 0.02 * k + 0.005 * q) * ti.Matrix.identity(ti.f32, 3)
+                        # The power helper has an early exit but no AD stack
+                        # operations. It must not invalidate the outer bound.
+                        total += (f * f).sum() + f.trace() ** 2
+            y[i] = total
+
+    for offset, seed in [(0.05, 1.0), (-0.07, -0.5)]:
+        values = (np.eye(3) + offset).astype(np.float32)
+        x.from_numpy(values[None])
+        x.grad.fill(0)
+        y.grad.fill(seed)
+        energy()
+        energy.grad()
+        expected, gradient = 0.0, np.zeros((3, 3))
+        for j in range(2):
+            for k in range(2):
+                for q in range(2):
+                    f = values + (0.01 * j + 0.02 * k + 0.005 * q) * np.eye(3)
+                    expected += (f * f).sum() + np.trace(f) ** 2
+                    gradient += 2 * f + 2 * np.trace(f) * np.eye(3)
+        np.testing.assert_allclose(y[0], expected, rtol=2e-5, atol=1e-6)
+        np.testing.assert_allclose(x.grad.to_numpy()[0], seed * gradient, rtol=2e-5, atol=1e-6)

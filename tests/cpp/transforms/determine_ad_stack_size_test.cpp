@@ -211,6 +211,27 @@ TEST_F(DetermineAdStackSizeTest, ContinueCanSkipStackPop) {
   EXPECT_EQ(stack->max_size, 7);
 }
 
+TEST_F(DetermineAdStackSizeTest, StackFreeHelperLoopPreservesOuterCapacity) {
+  IRBuilder builder;
+  auto *stack = builder.create_ad_stack(get_data_type<int>(), 0);
+  auto *loop = builder.create_range_for(builder.get_int32(0), builder.get_int32(40));
+  {
+    auto guard = builder.get_loop_guard(loop);
+    builder.ad_stack_push(stack, builder.get_int32(1));
+    auto *helper = builder.create_while_true();
+    {
+      auto helper_guard = builder.get_loop_guard(helper);
+      builder.create_break();
+    }
+  }
+  auto ir = builder.extract_ir();
+  CompileConfig config;
+  config.default_ad_stack_size = 7;
+  irpass::type_check(ir.get(), config);
+  irpass::determine_ad_stack_size(ir.get(), config);
+  EXPECT_EQ(stack->max_size, 40);
+}
+
 TEST_P(DetermineAdStackSizeTest, If) {
   constexpr int kCommonPushes = 1;
   const int kTrueBranchPushes = std::get<0>(GetParam());

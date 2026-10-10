@@ -43,7 +43,8 @@ lifetimes. The entries below describe the changes.
 - Adaptive autodiff stacks infer capacity from finite nested loop bounds and
   stack lifetimes, avoiding an undersized fallback and repeated per-stack CFG
   analysis for these cases. CFG fallback preserves explicitly sized stacks;
-  dynamic or early-exit loops retain the existing fallback behavior.
+  stack-free integer-power helper loops do not disable the analysis. Dynamic
+  or unmodeled early-exit stack paths retain the existing fallback behavior.
 - Reverse-mode autodiff constructs empty reverse loop bodies directly instead of
   deep-copying and discarding forward subtrees. Loop execution metadata and
   `stop_grad` scope markers are preserved.
