@@ -194,10 +194,11 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
     return 0
 
 
-def produce_injected_args(kernel, symbolic_args=None):
+def produce_injected_args(kernel, symbolic_args=None, *, bound_args=None):
     has_symbolic_args = symbolic_args is not None
+    bound_args = bound_args or {}
     return [
-        _produce_injected_arg(
+        bound_args[arg.name] if arg.name in bound_args else _produce_injected_arg(
             arg,
             symbolic_args[index] if has_symbolic_args else None,
             has_symbolic_args,

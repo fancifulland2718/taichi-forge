@@ -73,3 +73,26 @@ def test_ndarray_adjoint_graph_requires_explicit_deployment_bindings(tmp_path):
     module.save(tmp_path)
     with pytest.raises(RuntimeError, match="JIT Graph ndarray gradients"):
         graph.run({"x": x, "y": y})
+
+
+@test_utils.test(arch=[ti.cpu], offline_cache=False)
+def test_aot_bound_owner_without_explicit_templates(tmp_path):
+    @ti.data_oriented
+    class Energy:
+        def __init__(self):
+            self.x = ti.field(ti.f32, shape=4, needs_grad=True)
+            self.y = ti.field(ti.f32, shape=4, needs_grad=True)
+
+        @ti.kernel
+        def evaluate(self, factor: ti.f32):
+            for i in self.x:
+                self.y[i] = factor * self.x[i] * self.x[i]
+
+    energy = Energy()
+    module = ti.aot.Module()
+    module.add_kernel(energy.evaluate)
+    module.add_kernel(energy.evaluate.grad)
+    module.save(tmp_path)
+    assert (tmp_path / "__content__").read_text().splitlines() == [
+        "kernel:evaluate", "kernel:evaluate_grad"
+    ]

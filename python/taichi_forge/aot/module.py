@@ -332,10 +332,9 @@ class Module:
             template_args = {**template_args, **bound_args}
             injected_args = produce_injected_args_from_template(kernel, template_args)
         else:
-            injected_args = produce_injected_args(kernel)
-            for index, arg in enumerate(kernel.arguments):
-                if arg.name in bound_args:
-                    injected_args[index] = bound_args[arg.name]
+            # Bound self is already a compile-time value. Do not synthesize a
+            # scalar placeholder for its ti.template annotation first.
+            injected_args = produce_injected_args(kernel, bound_args=bound_args)
         key = kernel.ensure_compiled(*injected_args)
         compiled = kernel.compiled_kernels[key]
         if not self._check_kernel_export(kernel_name, compiled):
