@@ -3015,38 +3015,71 @@ void TaskCodeGenLLVM::visit(InternalFuncStmt *stmt) {
   llvm_val[stmt] = call(stmt->func_name, std::move(args));
 }
 
+namespace {
+
+// Avoid replicating runtime-helper parameter slots at every stack access.
+llvm::Value *ad_stack_top(llvm::IRBuilder<> &builder,
+                          llvm::Value *stack,
+                          size_t element_size,
+                          bool adjoint,
+                          llvm::Value *count = nullptr) {
+  static_assert(sizeof(AdStackLayout::Counter) == sizeof(uint64_t));
+  if (!count)
+    count = builder.CreateLoad(builder.getInt64Ty(), stack);
+  auto index = builder.CreateSub(count, builder.getInt64(1));
+  auto offset = builder.CreateMul(
+      index, builder.getInt64(AdStackLayout::entry_size(element_size)));
+  offset =
+      builder.CreateAdd(offset, builder.getInt64(AdStackLayout::header_size +
+                                                 (adjoint ? element_size : 0)));
+  return builder.CreateInBoundsGEP(builder.getInt8Ty(), stack, offset);
+}
+
+}  // namespace
+
 void TaskCodeGenLLVM::visit(AdStackAllocaStmt *stmt) {
   TI_ASSERT_INFO(stmt->max_size > 0,
                  "Adaptive autodiff stack's size should have been determined.");
   auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
                                    stmt->size_in_bytes());
   auto alloca = create_entry_block_alloca(type, AdStackLayout::alignment);
-  llvm_val[stmt] = builder->CreateBitCast(
-      alloca, llvm::PointerType::get(*llvm_context, 0));
-  call("stack_init", llvm_val[stmt]);
+  llvm_val[stmt] =
+      builder->CreateBitCast(alloca, llvm::PointerType::get(*llvm_context, 0));
+  builder->CreateStore(builder->getInt64(0), llvm_val[stmt]);
 }
 
 void TaskCodeGenLLVM::visit(AdStackPopStmt *stmt) {
-  call("stack_pop", llvm_val[stmt->stack]);
+  auto stack = llvm_val[stmt->stack];
+  auto count = builder->CreateLoad(builder->getInt64Ty(), stack);
+  builder->CreateStore(builder->CreateSub(count, builder->getInt64(1)), stack);
 }
 
 void TaskCodeGenLLVM::visit(AdStackPushStmt *stmt) {
   auto stack = stmt->stack->as<AdStackAllocaStmt>();
-  call("stack_push", llvm_val[stack], tlctx->get_constant(stack->max_size),
-       tlctx->get_constant(stack->element_size_in_bytes()));
-  auto primal_ptr = call("stack_top_primal", llvm_val[stack],
-                         tlctx->get_constant(stack->element_size_in_bytes()));
+  llvm::Value *count =
+      builder->CreateLoad(builder->getInt64Ty(), llvm_val[stack]);
+  count = builder->CreateAdd(count, builder->getInt64(1));
+  builder->CreateStore(count, llvm_val[stack]);
+  auto primal_ptr = ad_stack_top(*builder, llvm_val[stack],
+                                 stack->element_size_in_bytes(), false, count);
   primal_ptr = builder->CreateBitCast(
       primal_ptr,
       llvm::PointerType::get(tlctx->get_data_type(stmt->ret_type), 0));
   builder->CreateStore(llvm_val[stmt->v], primal_ptr);
+  // The primal was written in full; only its adjoint needs initialization.
+  // The generic runtime helper retains its zero-both-halves contract.
+  auto adjoint_ptr = builder->CreateInBoundsGEP(
+      builder->getInt8Ty(), primal_ptr,
+      builder->getInt64(stack->element_size_in_bytes()));
+  builder->CreateMemSet(adjoint_ptr, builder->getInt8(0),
+                        stack->element_size_in_bytes(), llvm::MaybeAlign(1));
 }
 
 void TaskCodeGenLLVM::visit(AdStackLoadTopStmt *stmt) {
   TI_ASSERT(stmt->return_ptr == false);
   auto stack = stmt->stack->as<AdStackAllocaStmt>();
-  auto primal_ptr = call("stack_top_primal", llvm_val[stack],
-                         tlctx->get_constant(stack->element_size_in_bytes()));
+  auto primal_ptr = ad_stack_top(*builder, llvm_val[stack],
+                                 stack->element_size_in_bytes(), false);
   auto primal_ty = tlctx->get_data_type(stmt->ret_type);
   primal_ptr =
       builder->CreateBitCast(primal_ptr, llvm::PointerType::get(primal_ty, 0));
@@ -3055,8 +3088,8 @@ void TaskCodeGenLLVM::visit(AdStackLoadTopStmt *stmt) {
 
 void TaskCodeGenLLVM::visit(AdStackLoadTopAdjStmt *stmt) {
   auto stack = stmt->stack->as<AdStackAllocaStmt>();
-  auto adjoint = call("stack_top_adjoint", llvm_val[stack],
-                      tlctx->get_constant(stack->element_size_in_bytes()));
+  auto adjoint = ad_stack_top(*builder, llvm_val[stack],
+                              stack->element_size_in_bytes(), true);
   auto adjoint_ty = tlctx->get_data_type(stmt->ret_type);
   adjoint =
       builder->CreateBitCast(adjoint, llvm::PointerType::get(adjoint_ty, 0));
@@ -3065,8 +3098,8 @@ void TaskCodeGenLLVM::visit(AdStackLoadTopAdjStmt *stmt) {
 
 void TaskCodeGenLLVM::visit(AdStackAccAdjointStmt *stmt) {
   auto stack = stmt->stack->as<AdStackAllocaStmt>();
-  auto adjoint_ptr = call("stack_top_adjoint", llvm_val[stack],
-                          tlctx->get_constant(stack->element_size_in_bytes()));
+  auto adjoint_ptr = ad_stack_top(*builder, llvm_val[stack],
+                                  stack->element_size_in_bytes(), true);
   auto adjoint_ty = tlctx->get_data_type(stack->ret_type);
   adjoint_ptr = builder->CreateBitCast(adjoint_ptr,
                                        llvm::PointerType::get(adjoint_ty, 0));

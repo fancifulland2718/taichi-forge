@@ -40,6 +40,10 @@ lifetimes. The entries below describe the changes.
 - Delayed IR edits batch independent insertions and erasures by block, avoiding
   repeated statement searches and array moves during scalarization. Edits that
   depend on newly inserted anchors preserve their sequential order.
+- LLVM lowers autodiff stack counters and addresses directly, avoiding repeated
+  runtime-helper expansion. Pushes initialize only the adjoint after writing the
+  complete primal value; stack layout and generic runtime-helper behavior remain
+  unchanged.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.
