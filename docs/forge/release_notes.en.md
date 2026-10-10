@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- LLVM O0 removes private scalar spill slots after runtime helper inlining,
+  reducing temporary loads/stores before machine-code generation without
+  enabling higher-tier arithmetic optimizations.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

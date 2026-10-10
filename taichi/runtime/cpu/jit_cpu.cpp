@@ -327,6 +327,7 @@ class JITSessionCPU : public JITSession {
   JITModule *add_module(std::unique_ptr<llvm::Module> M,
                         int max_reg,
                         [[maybe_unused]] JITModuleRole role) override {
+    TI_PROFILER("cpu_jit.add_module");
     TI_ASSERT(max_reg == 0);  // No need to specify max_reg on CPUs
     TI_ASSERT(M);
     std::lock_guard<std::mutex> _(mut_);
@@ -385,6 +386,7 @@ class JITSessionCPU : public JITSession {
   }
 
   void *lookup_in_module(JITDylib *lib, const std::string Name) {
+    TI_PROFILER("cpu_jit.lookup_and_materialize");
     std::lock_guard<std::mutex> _(mut_);
 #ifdef __APPLE__
     auto symbol = es_.lookup({lib}, mangle_(Name));

@@ -12,6 +12,7 @@
 #include "llvm/Transforms/Scalar/SeparateConstOffsetFromGEP.h"
 #include "llvm/Transforms/Utils/LCSSA.h"
 #include "llvm/Transforms/Utils/LoopSimplify.h"
+#include "llvm/Transforms/Utils/Mem2Reg.h"
 
 namespace taichi::lang {
 
@@ -45,6 +46,13 @@ void run_module_opt_pipeline(llvm::Module &module,
 
   llvm::ModulePassManager mpm =
       pb.buildPerModuleDefaultPipeline(opts.opt_level);
+
+  if (opts.opt_level == llvm::OptimizationLevel::O0) {
+    // Always-inlined runtime helpers introduce parameter spill slots even at
+    // O0. Remove private scalar slots before machine-code generation, without
+    // enabling the arithmetic, loop or vector optimizations of higher tiers.
+    mpm.addPass(llvm::createModuleToFunctionPassAdaptor(llvm::PromotePass()));
+  }
 
   if (opts.run_post_gep_passes) {
     // Mirror the original Taichi post-O3 tweak: LoopStrengthReduce and

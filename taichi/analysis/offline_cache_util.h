@@ -185,7 +185,8 @@ class Kernel;
 //  60 - Allocate outer-value adjoints in their corresponding reverse loop scope.
 //  61 - Stack-free power helper loops no longer defeat finite AD stack sizing.
 //  62 - Lower sparse local matrix updates before scalarization under fast math.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 62;
+//  63 - Promote private LLVM scalar slots after O0 runtime helper inlining.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 63;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
