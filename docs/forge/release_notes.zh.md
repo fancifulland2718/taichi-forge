@@ -39,6 +39,8 @@
   反向 kernel 与普通 AOT Graph 已通过 CPU、CUDA、Vulkan 独立 C API 进程验证；
   LLVM AOT 自动携带引用的 field 布局，并正确处理不连续树 ID。本次不新增
   Python Tape 编排序列化或 Vulkan 自动微分栈支持。
+- LLVM AOT 将加载的 IR 转交给可执行内核，消除 reader 保留的副本和一次模块克隆；
+  加载失败时不修改部署目录中的产物文件。
 - ZIP 产物数据源持有压缩字节，按条目读取时解压，避免预先展开整包内容；条目数据
   损坏在读取该条目时报告。
 - GFX AOT 模块持有产物数据源，仅加载请求的 kernel 或 Graph 依赖的 shader。

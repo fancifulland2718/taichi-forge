@@ -193,6 +193,46 @@ TEST_P(LlvmOfflineCacheTest, ReadWrite) {
     const auto &actual_arg_infos = kcache.args;
     EXPECT_EQ(actual_arg_infos, arg_infos);
   };
+  {
+    LlvmOfflineCache::KernelCacheData owned;
+    ASSERT_TRUE(reader->take_kernel_cache(owned, kKernelName, *llvm_ctx));
+    ASSERT_NE(owned.compiled_data.module, nullptr);
+    EXPECT_EQ(owned.args, arg_infos);
+    EXPECT_FALSE(reader->has_kernel(kKernelName));
+    EXPECT_FALSE(reader->take_kernel_cache(owned, kKernelName, *llvm_ctx));
+    reader.reset();
+    EXPECT_NE(owned.compiled_data.module->getFunction(kTaskName), nullptr);
+  }
+}
+
+TEST_P(LlvmOfflineCacheTest, ConsumeFailureLeavesArtifactFilesUntouched) {
+  const auto format = GetParam();
+  fs::path path{fs::temp_directory_path() /= std::tmpnam(nullptr)};
+  auto cleanup = make_cleanup([path]() { fs::remove_all(path); });
+  ASSERT_TRUE(fs::create_directories(path));
+  auto *ctx = tlctx_->get_this_thread_context();
+  LlvmOfflineCache::KernelCacheData cache;
+  cache.kernel_key = kKernelName;
+  cache.created_at = 1;
+  cache.last_used_at = 1;
+  cache.compiled_data.module = make_module(*ctx);
+  cache.compiled_data.tasks.emplace_back("missing_function", 1, 1);
+  LlvmOfflineCacheFileWriter writer;
+  writer.add_kernel_cache(kKernelName, std::move(cache));
+  writer.set_no_mangle();
+  writer.dump(path.u8string(), format, false);
+  const auto payload = path / (std::string(kKernelName) + (format == Format::LL ? ".ll" : ".bc"));
+  ASSERT_TRUE(fs::exists(payload));
+  const auto size = fs::file_size(payload);
+  auto reader = LlvmOfflineCacheFileReader::make(path.u8string(), format);
+  ASSERT_NE(reader, nullptr);
+  LlvmOfflineCache::KernelCacheData result;
+  EXPECT_FALSE(reader->take_kernel_cache(result, kKernelName, *ctx));
+  EXPECT_TRUE(reader->has_kernel(kKernelName));
+  EXPECT_FALSE(reader->take_kernel_cache(result, kKernelName, *ctx));
+  EXPECT_EQ(result.compiled_data.module, nullptr);
+  EXPECT_TRUE(fs::exists(payload));
+  EXPECT_EQ(fs::file_size(payload), size);
 }
 
 INSTANTIATE_TEST_SUITE_P(Format,

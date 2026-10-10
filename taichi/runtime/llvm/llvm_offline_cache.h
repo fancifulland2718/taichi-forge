@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_set>
 
 #ifdef TI_WITH_LLVM
 #include "llvm/IR/Module.h"
@@ -166,6 +167,14 @@ class LlvmOfflineCacheFileReader {
                         const std::string &key,
                         llvm::LLVMContext &llvm_ctx);
 
+  // AOT module lookup already caches the registered executable. Transfer the
+  // reader's module once instead of retaining an original and cloning it.
+  // This path never removes or rewrites artifact files on validation failure.
+  bool take_kernel_cache(LlvmOfflineCache::KernelCacheData &res,
+                         const std::string &key,
+                         llvm::LLVMContext &llvm_ctx);
+  bool has_kernel(const std::string &key) const;
+
   bool get_field_cache(LlvmOfflineCache::FieldCacheData &res,
                        int snode_tree_id);
 
@@ -192,6 +201,7 @@ class LlvmOfflineCacheFileReader {
   std::string path_;
   LlvmOfflineCache data_;
   LlvmOfflineCache::Format format_;
+  std::unordered_set<std::string> failed_kernels_;
 };
 
 class LlvmOfflineCacheFileWriter {

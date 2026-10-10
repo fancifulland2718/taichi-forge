@@ -170,6 +170,53 @@ bool LlvmOfflineCacheFileReader::get_field_cache(
   return true;
 }
 
+bool LlvmOfflineCacheFileReader::has_kernel(const std::string &key) const {
+  return data_.kernels.find(key) != data_.kernels.end();
+}
+
+bool LlvmOfflineCacheFileReader::take_kernel_cache(
+    LlvmOfflineCache::KernelCacheData &res,
+    const std::string &key,
+    llvm::LLVMContext &llvm_ctx) {
+  auto it = data_.kernels.find(key);
+  if (it == data_.kernels.end() || failed_kernels_.count(key)) return false;
+  auto &cache = it->second;
+  auto &compiled = cache.compiled_data;
+  if (!compiled.module) {
+    try {
+      compiled.module = load_module(taichi::join_path(path_, key), key, llvm_ctx);
+    } catch (const std::runtime_error &) {
+      failed_kernels_.insert(key);
+      return false;
+    }
+  }
+  bool valid = compiled.module != nullptr;
+  if (valid) {
+    for (const auto &task : compiled.tasks) {
+      auto *function = compiled.module->getFunction(task.name);
+      if (!function || function->isDeclaration()) {
+        valid = false;
+        break;
+      }
+    }
+  }
+  if (!valid) {
+    compiled.module.reset();
+    failed_kernels_.insert(key);
+    return false;
+  }
+  for (int tree_id : cache.used_snode_tree_ids) {
+    if (data_.fields.find(tree_id) == data_.fields.end()) {
+      compiled.module.reset();
+      failed_kernels_.insert(key);
+      return false;
+    }
+  }
+  res = std::move(cache);
+  data_.kernels.erase(it);
+  return true;
+}
+
 bool LlvmOfflineCacheFileReader::get_kernel_cache(
     LlvmOfflineCache::KernelCacheData &res,
     const std::string &key,

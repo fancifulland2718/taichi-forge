@@ -49,6 +49,8 @@ lifetimes. The entries below describe the changes.
 - ZIP-backed artifact sources own the compressed bytes and decompress requested
   entries individually, avoiding an expanded copy of every archive entry.
   Entry payload corruption is reported when that entry is read.
+- LLVM AOT transfers loaded IR to the executable kernel, avoiding a retained
+  reader copy and a module clone. Invalid deployments remain untouched on disk.
 - GFX AOT modules retain owned artifact sources and load shader bytes only for
   requested kernels or Graph dependencies. Directory/ZIP and in-memory `.tcm`
   deployment are verified on Vulkan, including releasing the input buffer before

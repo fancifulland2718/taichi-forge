@@ -70,9 +70,11 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
   TI_ASSERT(cache_reader_ != nullptr);
   auto *tlctx = executor_->get_llvm_context();
   LlvmOfflineCache::KernelCacheData loaded;
-  auto ok = cache_reader_->get_kernel_cache(loaded, name,
+  auto ok = cache_reader_->take_kernel_cache(loaded, name,
                                             *tlctx->get_this_thread_context());
-  TI_ERROR_IF(!ok, "Failed to load kernel={}", name);
+  if (!ok) {
+    throw aot::ArtifactLoadError("Failed to read LLVM AOT kernel: " + name);
+  }
   for (int tree_id : loaded.used_snode_tree_ids) {
     TI_ERROR_IF(!std::binary_search(snode_tree_ids_.begin(),
                                      snode_tree_ids_.end(), tree_id),
@@ -83,6 +85,7 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
 
 std::unique_ptr<aot::Kernel> LlvmAotModule::make_new_kernel(
     const std::string &name) {
+  if (!cache_reader_->has_kernel(name)) return nullptr;
   auto kernel_cache = load_kernel_from_cache(name);
   const auto kernel_name = std::move(kernel_cache.kernel_key);
   LLVM::CompiledKernelData compiled{
