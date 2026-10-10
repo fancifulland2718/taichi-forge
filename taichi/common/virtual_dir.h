@@ -12,6 +12,8 @@ struct TI_DLL_EXPORT VirtualDir {
   // Open a virtual directory based on what `path` points to. Zip files and
   // filesystem directories are supported.
   static std::unique_ptr<VirtualDir> open(const std::string &path);
+  // Owns a copy of the compressed source. Entries are decompressed and CRC
+  // checked on load_file(), so malformed unused payloads do not fail open().
   static std::unique_ptr<VirtualDir> from_zip(const void *data, size_t size);
   static std::unique_ptr<VirtualDir> from_fs_dir(const std::string &base_dir);
 

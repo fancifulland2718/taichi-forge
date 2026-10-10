@@ -46,6 +46,9 @@ lifetimes. The entries below describe the changes.
   verified through separate C API processes on CPU, CUDA and Vulkan. LLVM AOT
   includes referenced field layouts automatically and preserves nonconsecutive
   tree IDs; Python Tape orchestration and Vulkan autodiff stacks are not added.
+- ZIP-backed artifact sources own the compressed bytes and decompress requested
+  entries individually, avoiding an expanded copy of every archive entry.
+  Entry payload corruption is reported when that entry is read.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.
