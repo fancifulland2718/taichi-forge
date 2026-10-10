@@ -347,9 +347,13 @@ class PromoteSSA2LocalVar : public BasicStmtVisitor {
   void visit(Stmt *stmt) override {
     if (execute_once_)
       return;
+    // Local loads (including tensor components) are per-iteration snapshots.
+    // Without promotion, BackupSSA would retain only the last iteration's
+    // value for nonlinear adjoints in a separate reverse loop.
     if (!(stmt->is<UnaryOpStmt>() || stmt->is<BinaryOpStmt>() ||
           stmt->is<TernaryOpStmt>() || stmt->is<GlobalLoadStmt>() ||
-          stmt->is<LoopIndexStmt>() || stmt->is<AllocaStmt>())) {
+          stmt->is<LoopIndexStmt>() || stmt->is<AllocaStmt>() ||
+          stmt->is<LocalLoadStmt>())) {
       // TODO: this list may be incomplete
       return;
     }

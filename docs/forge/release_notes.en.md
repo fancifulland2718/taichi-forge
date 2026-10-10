@@ -34,6 +34,9 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Reverse-mode autodiff preserves per-iteration local load values, including
+  matrix components used by nonlinear expressions. Nested elastic-energy loops
+  no longer compute gradients using only the final iteration's matrix values.
 - Adaptive autodiff stacks infer capacity from finite nested loop bounds and
   stack lifetimes, avoiding an undersized fallback and repeated per-stack CFG
   analysis for these cases. CFG fallback preserves explicitly sized stacks;

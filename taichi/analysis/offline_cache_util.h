@@ -181,7 +181,8 @@ class Kernel;
 //       Previously cached adjoints may contain out-of-bounds stack accesses.
 //  57 - Reverse loops back up bounds defined in the forward loop's scope.
 //  58 - Infer finite loop AD stack capacity instead of an undersized fallback.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 58;
+//  59 - Preserve per-iteration local load values for nonlinear adjoints.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 59;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still
