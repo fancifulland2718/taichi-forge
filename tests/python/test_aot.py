@@ -886,7 +886,7 @@ def test_gfx_aot_multitree_metadata():
         ) as metadata_file:
             metadata = json.load(metadata_file)
 
-    assert metadata["metadata_version"] == 1
+    assert metadata["metadata_version"] == 2
     # The two explicit FieldsBuilder trees already provide valid layouts.
     # First kernel materialization must not append an unused default empty root
     # after the AOT builder has captured its artifact-local id space.
@@ -913,6 +913,35 @@ def test_module_arch_mismatch_rejected():
         match=r"same-target compilation only.*requested Arch\.vulkan.*active runtime is Arch\.x64",
     ):
         ti.aot.Module(ti.vulkan)
+
+
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_gfx_aot_kernel_aliases(tmp_path):
+    from taichi_forge.aot.conventions.gfxruntime140 import dr
+
+    @ti.kernel
+    def fill(out: ti.types.ndarray(dtype=ti.i32, ndim=1)):
+        for i in out:
+            out[i] = i + 3
+
+    graph = ti.graph.GraphBuilder()
+    graph.dispatch(fill, ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "out", ti.i32, ndim=1))
+    module = ti.aot.Module()
+    module.add_kernel(fill)
+    module.add_kernel(fill, name="fill_alias")
+    module.add_graph("fill_graph", graph.compile())
+    module.save(str(tmp_path))
+    metadata = json.loads((tmp_path / "metadata.json").read_text())
+    assert len(metadata["kernels"]) == 1
+    assert len(metadata["kernel_metadata"]) == 1
+    assert len(metadata["kernel_aliases"]) == 2
+    assert all(alias["kernel_index"] == 0 for alias in metadata["kernel_aliases"])
+    assert len(list(tmp_path.glob("*.spv"))) == 1
+    conventions = dr.from_json_metadata(metadata)
+    names = {kernel.name for kernel in conventions.kernels}
+    assert {"fill", "fill_alias"} < names
+    graphs = json.loads((tmp_path / "graphs.json").read_text())
+    assert graphs[0]["value"]["dispatches"][0]["kernel_name"] in names
 
 
 @test_utils.test(arch=[ti.vulkan])

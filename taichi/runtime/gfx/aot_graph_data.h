@@ -5,9 +5,11 @@ namespace taichi::lang {
 namespace gfx {
 class KernelImpl : public aot::Kernel {
  public:
-  explicit KernelImpl(GfxRuntime *runtime, GfxRuntime::RegisterParams &&params)
+  explicit KernelImpl(GfxRuntime *runtime, GfxRuntime::RegisterParams &&params,
+                      const GfxRuntime::KernelHandle *shared_handle = nullptr)
       : runtime_(runtime), params_(std::move(params)) {
-    handle_ = runtime_->register_taichi_kernel(params_);
+    handle_ = shared_handle ? *shared_handle
+                            : runtime_->register_taichi_kernel(params_);
     ret_type = params_.kernel_attribs.ctx_attribs.rets_type();
     ret_size = params_.kernel_attribs.ctx_attribs.rets_bytes();
     args_type = params_.kernel_attribs.ctx_attribs.args_type();
@@ -52,6 +54,10 @@ class KernelImpl : public aot::Kernel {
 
   const GfxRuntime::RegisterParams &params() {
     return params_;
+  }
+
+  GfxRuntime::KernelHandle handle() const {
+    return handle_;
   }
 
  private:

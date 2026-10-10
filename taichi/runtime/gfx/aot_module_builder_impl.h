@@ -2,6 +2,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 #include "taichi/aot/module_builder.h"
 #include "taichi/runtime/gfx/aot_utils.h"
@@ -26,6 +27,8 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
  private:
   void add_per_backend(const std::string &identifier, Kernel *kernel) override;
 
+  void add_compiled_kernel(const std::string &identifier, Kernel *kernel);
+
   void add_field_per_backend(const std::string &identifier,
                              const SNode *rep_snode,
                              bool is_scalar,
@@ -44,6 +47,8 @@ class AotModuleBuilderImpl : public AotModuleBuilder {
 
   const std::vector<spirv::CompiledSNodeStructs> &compiled_structs_;
   TaichiAotData ti_aot_data_;
+  std::unordered_map<std::string, size_t> kernel_identities_;
+  std::unordered_map<std::string, size_t> kernel_names_;
 
   KernelCompilationManager &compilation_manager_;
   const CompileConfig &config_;

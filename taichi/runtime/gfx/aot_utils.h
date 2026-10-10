@@ -16,17 +16,34 @@ struct AotKernelMetadata {
   TI_IO_DEF(num_snode_trees, used_snode_tree_ids);
 };
 
+struct AotKernelAlias {
+  std::string name;
+  std::size_t kernel_index{0};
+
+  TI_IO_DEF(name, kernel_index);
+};
+
+// Export names do not affect execution. Everything else, including task names,
+// ABI, launch attributes and tree dependencies, must agree before sharing.
+inline std::string kernel_identity(spirv::TaichiKernelAttributes attributes,
+                                   const AotKernelMetadata &metadata) {
+  attributes.name.clear();
+  return liong::json::print(liong::json::serialize(attributes)) +
+         liong::json::print(liong::json::serialize(metadata));
+}
+
 /**
  * AOT module data for the Unified Device API backend.
  */
 struct TaichiAotData {
-  static constexpr uint32_t kMetadataVersion = 1;
+  static constexpr uint32_t kMetadataVersion = 2;
 
   uint32_t metadata_version{0};
   //   BufferMetaData metadata;
   std::vector<std::vector<std::vector<uint32_t>>> spirv_codes;
   std::vector<spirv::TaichiKernelAttributes> kernels;
   std::vector<AotKernelMetadata> kernel_metadata;
+  std::vector<AotKernelAlias> kernel_aliases;
   std::vector<aot::CompiledFieldData> fields;
   std::map<std::string, uint32_t> required_caps;
   // root_buffer_size remains the first-tree compatibility view. New loaders
@@ -38,6 +55,7 @@ struct TaichiAotData {
   TI_IO_DEF(metadata_version,
             kernels,
             kernel_metadata,
+            kernel_aliases,
             fields,
             required_caps,
             root_buffer_size,

@@ -35,6 +35,7 @@ def compile_dense_field_aot_test(arch):
 
     m = ti.aot.Module()
     m.add_kernel(simple_return)
+    m.add_kernel(simple_return, name="simple_return_alias")
     m.add_kernel(init)
     m.add_kernel(ret)
     m.add_field("place", place)

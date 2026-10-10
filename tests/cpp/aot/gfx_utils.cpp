@@ -88,6 +88,22 @@ void run_dense_field_kernel(Arch arch, taichi::lang::Device *device) {
     simple_ret_kernel->launch(builder);
     gfx_runtime->synchronize();
     EXPECT_FLOAT_EQ(builder.get_ret<float>(0), 0.2);
+
+    const auto registrations = gfx_runtime->debug_registered_kernel_count();
+    auto *alias = dynamic_cast<gfx::KernelImpl *>(
+        vk_module->get_kernel("simple_return_alias"));
+    ASSERT_NE(alias, nullptr);
+    EXPECT_EQ(alias->name, "simple_return_alias");
+    EXPECT_EQ(gfx_runtime->debug_registered_kernel_count(), registrations);
+    auto *original = dynamic_cast<gfx::KernelImpl *>(simple_ret_kernel);
+    ASSERT_NE(original, nullptr);
+    EXPECT_EQ(alias->params().shared_task_spirv_source_codes,
+              original->params().shared_task_spirv_source_codes);
+    LaunchContextBuilder alias_builder(alias);
+    alias_builder.get_context().result_buffer = result_buffer;
+    alias->launch(alias_builder);
+    gfx_runtime->synchronize();
+    EXPECT_FLOAT_EQ(alias_builder.get_ret<float>(0), 0.2);
   }
 
   {

@@ -55,6 +55,20 @@ class MemoryAotDir : public io::VirtualDir {
         reinterpret_cast<const char *>(words.data()), words.size() * 4);
   }
 
+  void add_alias(bool legacy) {
+    gfx::TaichiAotData data;
+    liong::json::deserialize(liong::json::parse(files["metadata.json"]), data);
+    if (legacy) {
+      data.metadata_version = 1;
+      data.kernels.push_back(data.kernels.front());
+      data.kernels.back().name = "alias";
+      data.kernel_metadata.push_back(data.kernel_metadata.front());
+    } else {
+      data.kernel_aliases.push_back({"alias", 0});
+    }
+    files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  }
+
   std::unique_ptr<aot::Module> load() {
     return gfx::make_aot_module(gfx::AotModuleParams(this, nullptr),
                                 Arch::vulkan);
@@ -113,6 +127,46 @@ TEST(GfxAotValidation, OwnedSourcesDeferShaderReadsAndCacheFailures) {
   EXPECT_EQ(weak.lock()->reads["test_task.spv"], 1);
   module.reset();
   EXPECT_TRUE(weak.expired());
+}
+
+TEST(GfxAotValidation, AliasesShareDeferredFailuresAndLegacyEagerReads) {
+  for (bool legacy : {false, true}) {
+    auto dir = std::make_shared<MemoryAotDir>();
+    dir->add_shader({0x07230203, 0x10300, 0, 1, 0});
+    dir->add_alias(legacy);
+    ASSERT_FALSE(dir->load()->is_corrupted());
+    EXPECT_EQ(dir->reads["test_task.spv"], 1);
+    dir->reads.clear();
+    dir->files["test_task.spv"][0] = 0;
+    gfx::AotModuleParams params;
+    params.source = dir;
+    auto module = gfx::make_aot_module(params, Arch::vulkan);
+    ASSERT_FALSE(module->is_corrupted());
+    EXPECT_EQ(dir->reads["test_task.spv"], 0);
+    EXPECT_THROW(module->get_kernel("alias"), aot::ArtifactLoadError);
+    EXPECT_THROW(module->get_kernel("test"), aot::ArtifactLoadError);
+    EXPECT_EQ(dir->reads["test_task.spv"], 1);
+  }
+}
+
+TEST(GfxAotValidation, RejectsInvalidAliases) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  for (const gfx::AotKernelAlias &alias :
+       std::vector<gfx::AotKernelAlias>{{"alias", 1}, {"test", 0}, {"", 0}}) {
+    data.kernel_aliases = {alias};
+    dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+    EXPECT_TRUE(dir.load()->is_corrupted());
+  }
+  data.kernel_aliases = {{"alias", 0}, {"alias", 0}};
+  dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  EXPECT_TRUE(dir.load()->is_corrupted());
+  data.kernel_aliases = {{"alias", 0}};
+  data.metadata_version = 1;
+  dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  EXPECT_TRUE(dir.load()->is_corrupted());
 }
 
 }  // namespace

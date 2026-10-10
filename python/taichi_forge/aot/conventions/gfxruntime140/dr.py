@@ -176,6 +176,15 @@ class Metadata:
 
         self.fields: List[FieldAttributes] = [FieldAttributes(x) for x in fields]
         self.kernels: List[KernelAttributes] = [KernelAttributes(x) for x in kernels]
+        # Schema 2 stores one executable record for direct and Graph aliases.
+        # Keep the conventions API's name-based view for header generation.
+        names = {kernel.name for kernel in self.kernels}
+        for alias in j.get("kernel_aliases", []):
+            index, name = alias["kernel_index"], alias["name"]
+            if not isinstance(index, int) or not 0 <= index < len(kernels) or not name or name in names:
+                raise ValueError("Invalid GFX AOT kernel alias")
+            self.kernels.append(KernelAttributes(dict(kernels[index], name=name)))
+            names.add(name)
         self.required_caps: List[DeviceCapabilityLevel] = [DeviceCapabilityLevel(x) for x in required_caps]
         self.root_buffer_size: int = int(root_buffer_size)
 

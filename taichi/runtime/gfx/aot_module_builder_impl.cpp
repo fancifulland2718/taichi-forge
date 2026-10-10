@@ -85,6 +85,11 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
 
 void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
                                            Kernel *kernel) {
+  add_compiled_kernel(identifier, kernel);
+}
+
+void AotModuleBuilderImpl::add_compiled_kernel(const std::string &identifier,
+                                              Kernel *kernel) {
   const auto request = resolve_kernel_compile_request(
       config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot);
   const auto &ckd = compilation_manager_.load_or_compile(
@@ -100,11 +105,32 @@ void AotModuleBuilderImpl::add_per_backend(const std::string &identifier,
       identifier,
       compiled.metadata.num_snode_trees,
       ti_aot_data_.root_buffer_sizes.size());
+  const AotKernelMetadata metadata{compiled.metadata.num_snode_trees,
+                                   compiled.metadata.used_snode_tree_ids};
+  const auto identity = kernel_identity(compiled.metadata.kernel_attribs, metadata);
+  const auto existing = kernel_identities_.find(identity);
+  const size_t index = existing == kernel_identities_.end()
+                           ? ti_aot_data_.kernels.size()
+                           : existing->second;
+  if (existing != kernel_identities_.end()) {
+    TI_ERROR_IF(ti_aot_data_.spirv_codes[index] != compiled.src.spirv_src,
+                "GFX AOT kernel '{}' has conflicting shader payloads for the "
+                "same task and ABI identity.", identifier);
+  }
+  const auto [named, inserted] = kernel_names_.emplace(identifier, index);
+  TI_ERROR_IF(!inserted && named->second != index,
+              "GFX AOT export name '{}' refers to different kernels.", identifier);
+  if (!inserted) {
+    return;
+  }
+  if (existing != kernel_identities_.end()) {
+    ti_aot_data_.kernel_aliases.push_back({identifier, index});
+    return;
+  }
+  kernel_identities_.emplace(identity, index);
   ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
   ti_aot_data_.kernels.back().name = identifier;
-  ti_aot_data_.kernel_metadata.push_back(
-      {compiled.metadata.num_snode_trees,
-       compiled.metadata.used_snode_tree_ids});
+  ti_aot_data_.kernel_metadata.push_back(metadata);
   ti_aot_data_.spirv_codes.push_back(compiled.src.spirv_src);
 }
 
@@ -151,28 +177,7 @@ void AotModuleBuilderImpl::add_field_per_backend(const std::string &identifier,
 void AotModuleBuilderImpl::add_per_backend_tmpl(const std::string &identifier,
                                                 const std::string &key,
                                                 Kernel *kernel) {
-  const auto request = resolve_kernel_compile_request(
-      config_, caps_, kernel->get_compile_tier_override(), CompilePurpose::aot);
-  const auto &ckd = compilation_manager_.load_or_compile(
-      request.config(), request.device_caps(), *kernel);
-  const auto &spirv_ckd = dynamic_cast<const spirv::CompiledKernelData &>(ckd);
-
-  const auto &compiled = spirv_ckd.get_internal_data();
-  TI_ERROR_IF(
-      compiled.metadata.num_snode_trees !=
-          ti_aot_data_.root_buffer_sizes.size(),
-      "GFX AOT kernel template '{}|{}' was compiled for {} SNodeTrees, but "
-      "the artifact contains {} layouts.",
-      identifier,
-      key,
-      compiled.metadata.num_snode_trees,
-      ti_aot_data_.root_buffer_sizes.size());
-  ti_aot_data_.kernels.push_back(compiled.metadata.kernel_attribs);
-  ti_aot_data_.kernels.back().name = identifier + "__tmpl__" + key;
-  ti_aot_data_.kernel_metadata.push_back(
-      {compiled.metadata.num_snode_trees,
-       compiled.metadata.used_snode_tree_ids});
-  ti_aot_data_.spirv_codes.push_back(compiled.src.spirv_src);
+  add_compiled_kernel(identifier + "__tmpl__" + key, kernel);
 }
 
 }  // namespace gfx

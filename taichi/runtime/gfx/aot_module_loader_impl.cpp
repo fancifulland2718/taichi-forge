@@ -55,6 +55,12 @@ class AotModuleImpl : public aot::Module {
       }
     }
 
+    if (ti_aot_data_.metadata_version < 2 &&
+        !ti_aot_data_.kernel_aliases.empty()) {
+      mark_corrupted();
+      TI_WARN("Legacy GFX AOT artifact contains unexpected kernel aliases");
+      return;
+    }
     if (ti_aot_data_.metadata_version == 0) {
       // Backward-compatible view for legacy single-tree artifacts.
       ti_aot_data_.root_buffer_sizes = {ti_aot_data_.root_buffer_size};
@@ -67,7 +73,7 @@ class AotModuleImpl : public aot::Module {
           ti_aot_data_.kernels.size(),
           AotKernelMetadata{/*num_snode_trees=*/1,
                             /*used_snode_tree_ids=*/{0}});
-    } else if (ti_aot_data_.metadata_version !=
+    } else if (ti_aot_data_.metadata_version >
                TaichiAotData::kMetadataVersion) {
       mark_corrupted();
       TI_WARN("Unsupported GFX AOT metadata version {}",
@@ -125,13 +131,39 @@ class AotModuleImpl : public aot::Module {
 
     shader_codes_.resize(ti_aot_data_.kernels.size());
     shader_errors_.resize(ti_aot_data_.kernels.size());
+    std::unordered_map<std::string, size_t> identities;
+    std::vector<size_t> canonical_indices;
+    canonical_indices.reserve(ti_aot_data_.kernels.size());
     for (size_t i = 0; i < ti_aot_data_.kernels.size(); ++i) {
+      const auto identity = identities.emplace(
+          kernel_identity(ti_aot_data_.kernels[i],
+                          ti_aot_data_.kernel_metadata[i]), i).first;
+      const size_t canonical = identity->second;
+      canonical_indices.push_back(canonical);
       // Legacy exporters may repeat a kernel shared by multiple Graphs.
       // Preserve their first-match lookup behavior without repeated scans.
-      kernel_indices_.emplace(ti_aot_data_.kernels[i].name, i);
-      if (!source_ && !load_shader(*dir, i)) {
+      const bool inserted = kernel_indices_
+                                .emplace(ti_aot_data_.kernels[i].name, canonical)
+                                .second;
+      if (!inserted && ti_aot_data_.metadata_version >= 2) {
         mark_corrupted();
-        TI_WARN("{}", shader_errors_[i]);
+        TI_WARN("GFX AOT artifact contains a duplicate kernel name");
+        return;
+      }
+      if (!source_ && !load_shader(*dir, canonical)) {
+        mark_corrupted();
+        TI_WARN("{}", shader_errors_[canonical]);
+        return;
+      }
+    }
+    for (const auto &alias : ti_aot_data_.kernel_aliases) {
+      if (alias.kernel_index >= canonical_indices.size() || alias.name.empty() ||
+          !kernel_indices_
+               .emplace(alias.name, canonical_indices[alias.kernel_index])
+               .second) {
+        mark_corrupted();
+        TI_WARN("GFX AOT artifact contains an invalid kernel alias '{}': {}",
+                alias.name, alias.kernel_index);
         return;
       }
     }
@@ -221,6 +253,7 @@ class AotModuleImpl : public aot::Module {
         throw aot::ArtifactLoadError(shader_errors_[i]);
       }
       kernel.kernel_attribs = ti_aot_data_.kernels[i];
+      kernel.kernel_attribs.name = name;
       kernel.shared_task_spirv_source_codes = shader_codes_[i];
       kernel.num_snode_trees = ti_aot_data_.kernel_metadata[i].num_snode_trees;
       kernel.snode_tree_ids =
@@ -237,7 +270,13 @@ class AotModuleImpl : public aot::Module {
       TI_DEBUG("Failed to load kernel {}", name);
       return nullptr;
     }
-    return std::make_unique<KernelImpl>(runtime_, std::move(kparams));
+    const size_t index = kernel_indices_.at(name);
+    const auto registered = registered_kernels_.find(index);
+    auto kernel = std::make_unique<KernelImpl>(
+        runtime_, std::move(kparams),
+        registered == registered_kernels_.end() ? nullptr : &registered->second);
+    registered_kernels_.emplace(index, kernel->handle());
+    return kernel;
   }
 
   std::unique_ptr<aot::KernelTemplate> make_new_kernel_template(
@@ -287,6 +326,7 @@ class AotModuleImpl : public aot::Module {
       shader_codes_;
   std::vector<std::string> shader_errors_;
   std::unordered_map<std::string, size_t> kernel_indices_;
+  std::unordered_map<size_t, GfxRuntime::KernelHandle> registered_kernels_;
   GfxRuntime *runtime_{nullptr};
   Arch device_api_backend_;
 };

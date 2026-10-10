@@ -72,8 +72,12 @@ lifetimes. The entries below describe the changes.
   complete primal value; stack layout and generic runtime-helper behavior remain
   unchanged.
 - GFX AOT modules and loaded kernels share immutable SPIR-V storage, avoiding
-  duplicate host shader buffers and registration copies without changing the
-  serialized module format.
+  duplicate host shader buffers and registration copies. Schema 2 records export
+  aliases separately: compatible names in one module share shader reads, cached
+  failures and runtime registration while retaining their individual callable
+  names. Older artifact versions remain readable. Sharing requires matching ABI,
+  task metadata and resource dependencies; separate modules retain separate
+  execution registrations.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.
