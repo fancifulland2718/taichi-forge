@@ -218,6 +218,60 @@ TEST(CFGDataflow, EmptyGraphAndWordBoundaries) {
   EXPECT_EQ(output.storage_bytes(), 3 * sizeof(uint64_t));
 }
 
+TEST(CFGDataflow, GlobalStorageGroupsKeepExactAndUncertainAliases) {
+  for (int selected = 0; selected < 7; ++selected) {
+    SCOPED_TRACE(selected);
+    auto root = std::make_unique<Block>();
+    auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto index = root->push_back<ArgLoadStmt>(
+        std::vector<int>{0}, PrimitiveType::i32, false, true, 0);
+    auto field = std::make_unique<SNode>(1, SNodeType::place);
+    auto other_field = std::make_unique<SNode>(1, SNodeType::place);
+    field->dt = other_field->dt = PrimitiveType::i32;
+    auto make_addresses = [&]() -> std::vector<Stmt *> {
+      return {
+          root->push_back<GlobalPtrStmt>(field.get(), std::vector<Stmt *>{zero}),
+          root->push_back<GlobalPtrStmt>(field.get(), std::vector<Stmt *>{one}),
+          root->push_back<GlobalPtrStmt>(other_field.get(),
+                                        std::vector<Stmt *>{zero}),
+          root->push_back<GlobalTemporaryStmt>(0, PrimitiveType::i32),
+          root->push_back<GlobalTemporaryStmt>(4, PrimitiveType::i32),
+          root->push_back<ThreadLocalPtrStmt>(0, PrimitiveType::i32),
+          root->push_back<GlobalPtrStmt>(field.get(),
+                                        std::vector<Stmt *>{index})};
+    };
+    auto addresses = make_addresses();
+    auto aliases = make_addresses();
+    ControlFlowGraph cfg;
+    auto start = cfg.push_back();
+    int begin = root->size();
+    std::vector<Stmt *> stores;
+    for (auto address : addresses)
+      stores.push_back(root->push_back<GlobalStoreStmt>(address, one));
+    auto define = cfg.push_back(root.get(), begin, root->size(), false, nullptr);
+    begin = root->size();
+    root->push_back<GlobalStoreStmt>(aliases[selected], zero);
+    auto kill = cfg.push_back(root.get(), begin, root->size(), false, define);
+    begin = root->size();
+    for (auto address : addresses)
+      root->push_back<GlobalLoadStmt>(address);
+    auto use = cfg.push_back(root.get(), begin, root->size(), false, kill);
+    auto end = cfg.push_back();
+    cfg.final_node = cfg.size() - 1;
+    CFGNode::add_edge(start, define);
+    CFGNode::add_edge(define, kill);
+    CFGNode::add_edge(kill, use);
+    CFGNode::add_edge(use, end);
+    cfg.reaching_definition_analysis(false);
+    compare_reference(cfg, true);
+    for (int i = 0; i < static_cast<int>(stores.size()); ++i)
+      EXPECT_EQ(kill->reach_out.contains(stores[i]), i != selected);
+    cfg.live_variable_analysis(false, std::nullopt);
+    compare_reference(cfg, false);
+  }
+}
+
 TEST(CFGDataflow, MultiDestinationDefinitionsRequireEveryDestinationKilled) {
   for (bool lowered : {false, true}) {
     SCOPED_TRACE(lowered);

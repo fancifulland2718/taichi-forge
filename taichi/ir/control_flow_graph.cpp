@@ -58,6 +58,12 @@ class DataflowKills {
             nonlocal_.push_back(insertion.first->second);
             if (auto origin = local_tensor_origin(address))
               local_components_[origin].push_back(insertion.first->second);
+            if (auto ptr = address->cast<GlobalPtrStmt>())
+              global_fields_[ptr->snode].push_back(insertion.first->second);
+            if (auto ptr = address->cast<GlobalTemporaryStmt>())
+              global_temporaries_[ptr->offset].push_back(insertion.first->second);
+            if (auto ptr = address->cast<ThreadLocalPtrStmt>())
+              thread_locals_[ptr->offset].push_back(insertion.first->second);
           }
         }
         auto &facts = definitions_[insertion.first->second];
@@ -113,9 +119,27 @@ class DataflowKills {
         // A direct local component can definitely alias only components of
         // this AllocaStmt. Whole-tensor overlap is uncertain, not definite.
         // Keep the original predicate within the group, including dynamic
-        // offsets; nested and nonlocal pointers retain the full fallback.
+        // offsets; nested components retain the conservative fallback.
         auto group = local_components_.find(origin);
         if (group == local_components_.end())
+          return result;
+        candidates = &group->second;
+      } else if (auto ptr = address->cast<GlobalPtrStmt>()) {
+        // Definite identity requires the same storage kind and SNode. Keep
+        // the original index comparison within that field; merely overlapping
+        // or opaque addresses must never be treated as definite kills.
+        auto group = global_fields_.find(ptr->snode);
+        if (group == global_fields_.end())
+          return result;
+        candidates = &group->second;
+      } else if (auto ptr = address->cast<GlobalTemporaryStmt>()) {
+        auto group = global_temporaries_.find(ptr->offset);
+        if (group == global_temporaries_.end())
+          return result;
+        candidates = &group->second;
+      } else if (auto ptr = address->cast<ThreadLocalPtrStmt>()) {
+        auto group = thread_locals_.find(ptr->offset);
+        if (group == thread_locals_.end())
           return result;
         candidates = &group->second;
       }
@@ -132,6 +156,9 @@ class DataflowKills {
   std::vector<Stmt *> addresses_;
   std::vector<std::vector<std::size_t>> definitions_;
   std::unordered_map<Stmt *, std::vector<std::size_t>> local_components_;
+  std::unordered_map<SNode *, std::vector<std::size_t>> global_fields_;
+  std::unordered_map<std::size_t, std::vector<std::size_t>> global_temporaries_,
+      thread_locals_;
   std::vector<std::size_t> nonlocal_, required_, covered_, fact_epoch_,
       address_epoch_;
   std::unordered_map<Stmt *, std::vector<std::size_t>> aliases_;
