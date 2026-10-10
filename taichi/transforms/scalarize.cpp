@@ -1450,12 +1450,97 @@ class DedupMatrixPtr {
         fn(fb->body.get());
     }
   }
-};namespace irpass {
+};
 
-bool scalarize(IRNode *root, bool half2_optimization_enabled) {
+// AD commonly accumulates a one-hot tensor into a local matrix adjoint.
+// Preserve that compact tensor form for earlier optimizers, then update only
+// its nonzero component before scalarization expands every load/add/store.
+class SparseMatrixUpdates : public BasicStmtVisitor {
+ public:
+  using BasicStmtVisitor::visit;
+  DelayedIRModifier modifier;
+
+  void visit(Block *block) override {
+    for (int i = 2; i < (int)block->statements.size(); ++i) {
+      auto store = block->statements[i]->cast<LocalStoreStmt>();
+      auto add = block->statements[i - 1]->cast<BinaryOpStmt>();
+      auto load = block->statements[i - 2]->cast<LocalLoadStmt>();
+      if (!store || !add || !load || store->val != add ||
+          add->op_type != BinaryOpType::add || load->src != store->dest)
+        continue;
+      auto alloca = store->dest->cast<AllocaStmt>();
+      if (!alloca || alloca->is_shared)
+        continue;
+      auto tensor = alloca->ret_type.ptr_removed()->cast<TensorType>();
+      if (!tensor || !is_real(tensor->get_element_type()))
+        continue;
+      auto values = (add->lhs == load   ? add->rhs
+                     : add->rhs == load ? add->lhs
+                                        : nullptr);
+      auto matrix = values ? values->cast<MatrixInitStmt>() : nullptr;
+      if (!matrix || matrix->ret_type != alloca->ret_type.ptr_removed())
+        continue;
+      int component = -1;
+      bool multiple_components = false;
+      for (int j = 0; j < (int)matrix->values.size(); ++j) {
+        auto constant = matrix->values[j]->cast<ConstStmt>();
+        if (constant && constant->val.equal_value(0))
+          continue;
+        if (component != -1) {
+          multiple_components = true;
+          break;
+        }
+        component = j;
+      }
+      if (multiple_components)
+        continue;
+
+      // Adjacency guarantees no intervening write changes the load's value.
+      // Nonselected components are left untouched. This requires fast math:
+      // adding floating-point zero can otherwise change a signed zero.
+      if (component < 0) {
+        modifier.erase(store);
+        continue;
+      }
+      auto index = std::make_unique<ConstStmt>(TypedConstant(component));
+      auto ptr = std::make_unique<MatrixPtrStmt>(alloca, index.get());
+      ptr->ret_type = tensor->get_element_type();
+      ptr->ret_type.set_is_pointer(true);
+      auto old_value = std::make_unique<LocalLoadStmt>(ptr.get());
+      old_value->ret_type = tensor->get_element_type();
+      auto sum = std::make_unique<BinaryOpStmt>(
+          BinaryOpType::add, old_value.get(), matrix->values[component]);
+      sum->ret_type = tensor->get_element_type();
+      auto update = std::make_unique<LocalStoreStmt>(ptr.get(), sum.get());
+      modifier.insert_before(store, std::move(index));
+      modifier.insert_before(store, std::move(ptr));
+      modifier.insert_before(store, std::move(old_value));
+      modifier.insert_before(store, std::move(sum));
+      modifier.insert_before(store, std::move(update));
+      modifier.erase(store);
+    }
+    BasicStmtVisitor::visit(block);
+  }
+
+  static bool run(IRNode *root) {
+    TI_AUTO_PROF;
+    SparseMatrixUpdates pass;
+    root->accept(&pass);
+    return pass.modifier.modify_ir();
+  }
+};
+
+namespace irpass {
+
+bool scalarize(IRNode *root, bool half2_optimization_enabled, bool fast_math) {
   TI_AUTO_PROF;
   bool modified = false;
 
+  if (fast_math && SparseMatrixUpdates::run(root)) {
+    modified = true;
+    // Avoid scalarizing the now-unused dense load, sum and one-hot tensor.
+    die(root);
+  }
   modified |= Scalarize::run(root, half2_optimization_enabled);
   auto scalarizable_allocas = GatherScalarizableLocalPointers::run(root);
   modified |= ScalarizePointers::run(root, scalarizable_allocas);

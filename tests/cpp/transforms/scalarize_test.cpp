@@ -6,6 +6,52 @@
 
 namespace taichi::lang {
 
+TEST(Scalarize, SparseMatrixUpdatesRespectMathAndMemoryBoundaries) {
+  TestProgram test_prog;
+  test_prog.setup();
+  for (bool fast_math : {false, true}) {
+    for (bool shared : {false, true}) {
+      for (bool intervening_store : {false, true}) {
+        for (int nonzero_components : {0, 1, 2}) {
+          auto block = std::make_unique<Block>();
+          auto tensor =
+              TypeFactory::create_tensor_type({2, 3}, PrimitiveType::f32);
+          auto alloca = block->push_back<AllocaStmt>(tensor)->as<AllocaStmt>();
+          alloca->is_shared = shared;
+          auto zero = block->push_back<ConstStmt>(TypedConstant(0.0f));
+          auto value = block->push_back<ConstStmt>(TypedConstant(1.5f));
+          std::vector<Stmt *> components(6, zero);
+          if (nonzero_components >= 1)
+            components[5] = value;
+          if (nonzero_components == 2)
+            components[0] = value;
+          auto matrix = block->push_back<MatrixInitStmt>(components);
+          matrix->ret_type = tensor;
+          auto load = block->push_back<LocalLoadStmt>(alloca);
+          if (intervening_store)
+            block->push_back<LocalStoreStmt>(alloca, matrix);
+          auto sum =
+              block->push_back<BinaryOpStmt>(BinaryOpType::add, load, matrix);
+          block->push_back<LocalStoreStmt>(alloca, sum);
+          irpass::type_check(block.get(), CompileConfig());
+          irpass::scalarize(block.get(), false, fast_math);
+          irpass::type_check(block.get(), CompileConfig());
+          int adds = 0, stores = 0;
+          for (auto &stmt : block->statements) {
+            adds += stmt->is<BinaryOpStmt>();
+            stores += stmt->is<LocalStoreStmt>();
+          }
+          bool compact = fast_math && !shared && !intervening_store &&
+                         nonzero_components < 2;
+          EXPECT_EQ(adds, compact ? nonzero_components : 6);
+          EXPECT_EQ(stores, (compact ? nonzero_components : 6) +
+                                (intervening_store ? 6 : 0));
+        }
+      }
+    }
+  }
+}
+
 TEST(Scalarize, ScalarizeGlobalStore) {
   // Basic tests within a basic block
   TestProgram test_prog;

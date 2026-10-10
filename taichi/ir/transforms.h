@@ -61,7 +61,9 @@ namespace irpass {
 void re_id(IRNode *root);
 void flag_access(IRNode *root);
 void eliminate_immutable_local_vars(IRNode *root);
-bool scalarize(IRNode *root, bool half2_optimization_enabled = false);
+bool scalarize(IRNode *root,
+               bool half2_optimization_enabled = false,
+               bool fast_math = false);
 void lower_matrix_ptr(IRNode *root, bool force_scalarize = false);
 bool die(IRNode *root);
 bool simplify(IRNode *root, const CompileConfig &config);

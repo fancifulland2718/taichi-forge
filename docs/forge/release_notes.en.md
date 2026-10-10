@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Local matrix additions with at most one nonzero component, including matrix
+  adjoint updates, avoid expanding zero contributions into redundant loads,
+  additions and stores when the local load, addition and store are adjacent.
+  This runs at the scalarization boundary under `fast_math`, preserving the
+  earlier full-tier optimization path and strict-math behavior.
 - Reverse-mode autodiff maps outer-value adjoints to the corresponding reverse
   loop scope. Advanced optimization no longer produces invalid adjoint references
   when loads or expressions are shared across nested loops.

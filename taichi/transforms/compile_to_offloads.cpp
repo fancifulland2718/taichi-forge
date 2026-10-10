@@ -1056,7 +1056,7 @@ void offload_to_executable(IRNode *ir,
        !get_custom_cuda_library_path().empty());
   if (config.real_matrix_scalarize) {
     TI_COMPILE_PROFILER("cpp.ir.exec.scalarize.real_matrix");
-    if (irpass::scalarize(ir, half2_optimization_enabled)) {
+    if (irpass::scalarize(ir, half2_optimization_enabled, config.fast_math)) {
       irpass::die(ir);
       print("DIE");
 
@@ -1162,7 +1162,8 @@ void compile_function(IRNode *ir,
     print("Operations demoted");
 
     if (config.real_matrix_scalarize) {
-      if (irpass::scalarize(ir)) {
+      if (irpass::scalarize(ir, false /*half2_optimization_enabled*/,
+                            config.fast_math)) {
         // Remove redundant MatrixInitStmt inserted during scalarization
         irpass::die(ir);
         print("Scalarized");
