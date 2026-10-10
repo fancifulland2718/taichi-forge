@@ -177,7 +177,9 @@ class Kernel;
 //       artifacts may have been stored under another request's cached key.
 //  55 - Store LLVM modules as bitcode. Keep textual payload reading for
 //       compatibility, but separate new writes from text-only runtimes.
-constexpr std::uint32_t kOfflineCacheSchemaVersion = 55;
+//  56 - AD stack allocations include the runtime's full 64-bit counter header.
+//       Previously cached adjoints may contain out-of-bounds stack accesses.
+constexpr std::uint32_t kOfflineCacheSchemaVersion = 56;
 
 // Fast sufficient check for identical serialized configuration inputs. A
 // reordered disabled-pass list may conservatively return false; hashing still

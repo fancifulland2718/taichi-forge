@@ -34,6 +34,10 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- LLVM autodiff stacks now allocate the complete 64-bit counter header, matching
+  the runtime layout and preventing out-of-bounds adjoint accesses and incorrect
+  gradients in the fast tier. IR allocation and runtime share the layout;
+  older kernel-cache entries are invalidated without changing tier defaults.
 - SPIR-V compute shaders without ray queries skip the use-index construction
   needed only for ray-query result analysis. Code generation, GFX registration
   and AOT export avoid intermediate shader copies while preserving query

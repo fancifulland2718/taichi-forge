@@ -3020,7 +3020,7 @@ void TaskCodeGenLLVM::visit(AdStackAllocaStmt *stmt) {
                  "Adaptive autodiff stack's size should have been determined.");
   auto type = llvm::ArrayType::get(llvm::Type::getInt8Ty(*llvm_context),
                                    stmt->size_in_bytes());
-  auto alloca = create_entry_block_alloca(type, sizeof(int64));
+  auto alloca = create_entry_block_alloca(type, AdStackLayout::alignment);
   llvm_val[stmt] = builder->CreateBitCast(
       alloca, llvm::PointerType::get(*llvm_context, 0));
   call("stack_init", llvm_val[stmt]);

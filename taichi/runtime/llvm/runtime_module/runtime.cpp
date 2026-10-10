@@ -23,6 +23,7 @@
 #include <cstring>
 
 #include "taichi/inc/constants.h"
+#include "taichi/common/ad_stack.h"
 #include "taichi/inc/cuda_kernel_utils.inc.h"
 #include "taichi/math/arithmetic.h"
 #include "taichi/runtime/llvm/list_manager_constants.h"
@@ -3348,8 +3349,9 @@ void taichi_printf(LLVMRuntime *runtime, const char *format, Args &&...args) {
 extern "C" {  // local stack operations
 
 Ptr stack_top_primal(Ptr stack, std::size_t element_size) {
-  auto n = *(u64 *)stack;
-  return stack + sizeof(u64) + (n - 1) * 2 * element_size;
+  using Layout = taichi::lang::AdStackLayout;
+  auto n = *reinterpret_cast<Layout::Counter *>(stack);
+  return stack + Layout::header_size + (n - 1) * Layout::entry_size(element_size);
 }
 
 Ptr stack_top_adjoint(Ptr stack, std::size_t element_size) {
@@ -3357,19 +3359,21 @@ Ptr stack_top_adjoint(Ptr stack, std::size_t element_size) {
 }
 
 void stack_init(Ptr stack) {
-  *(u64 *)stack = 0;
+  *reinterpret_cast<taichi::lang::AdStackLayout::Counter *>(stack) = 0;
 }
 
 void stack_pop(Ptr stack) {
-  auto &n = *(u64 *)stack;
+  auto &n = *reinterpret_cast<taichi::lang::AdStackLayout::Counter *>(stack);
   n--;
 }
 
 void stack_push(Ptr stack, size_t max_num_elements, std::size_t element_size) {
-  u64 &n = *(u64 *)stack;
+  using Layout = taichi::lang::AdStackLayout;
+  auto &n = *reinterpret_cast<Layout::Counter *>(stack);
   n += 1;
   // TODO: assert n <= max_elements
-  std::memset(stack_top_primal(stack, element_size), 0, element_size * 2);
+  std::memset(stack_top_primal(stack, element_size), 0,
+              Layout::entry_size(element_size));
 }
 
 #include "internal_functions.h"

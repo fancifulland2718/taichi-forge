@@ -1,5 +1,6 @@
 #pragma once
 
+#include "taichi/common/ad_stack.h"
 #include "taichi/ir/ir.h"
 #include "taichi/ir/offloaded_task_type.h"
 #include "taichi/ir/stmt_op_types.h"
@@ -1893,11 +1894,11 @@ class AdStackAllocaStmt : public Stmt {
   }
 
   std::size_t entry_size_in_bytes() const {
-    return element_size_in_bytes() * 2;
+    return AdStackLayout::entry_size(element_size_in_bytes());
   }
 
   std::size_t size_in_bytes() const {
-    return sizeof(int32) + entry_size_in_bytes() * max_size;
+    return AdStackLayout::storage_size(element_size_in_bytes(), max_size);
   }
 
   bool has_global_side_effect() const override {

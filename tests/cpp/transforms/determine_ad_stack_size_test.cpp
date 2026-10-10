@@ -8,6 +8,18 @@
 
 namespace taichi::lang {
 
+TEST(AdStackLayoutTest, IncludesCounterAndBothValuesAtFullCapacity) {
+  AdStackAllocaStmt f32_stack(PrimitiveType::f32, 2);
+  AdStackAllocaStmt f64_stack(PrimitiveType::f64, 3);
+  AdStackAllocaStmt tensor_stack(
+      TypeFactory::create_tensor_type({2, 3}, PrimitiveType::f32), 2);
+  EXPECT_EQ(f32_stack.size_in_bytes(), 24);
+  EXPECT_EQ(f64_stack.size_in_bytes(), 56);
+  EXPECT_EQ(tensor_stack.size_in_bytes(), 104);
+  EXPECT_EQ(AdStackLayout::header_size, sizeof(AdStackLayout::Counter));
+  EXPECT_EQ(AdStackLayout::header_size % alignof(double), 0);
+}
+
 class DetermineAdStackSizeTest
     : public ::testing::TestWithParam<std::tuple<int, int>> {
  protected:
@@ -49,6 +61,7 @@ TEST_F(DetermineAdStackSizeTest, Basic) {
   EXPECT_EQ(stack2->max_size, 0);
   irpass::determine_ad_stack_size(ir_block, CompileConfig());
   EXPECT_EQ(stack->max_size, 4);
+  EXPECT_EQ(stack->size_in_bytes(), 40);
   EXPECT_EQ(stack2->max_size, 1);
 }
 
