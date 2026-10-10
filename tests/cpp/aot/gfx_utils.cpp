@@ -1,6 +1,7 @@
 #include "tests/cpp/aot/gfx_utils.h"
 
 #include "taichi/runtime/gfx/aot_module_loader_impl.h"
+#include "taichi/runtime/gfx/aot_graph_data.h"
 #include "taichi/rhi/common/host_memory_pool.h"
 
 namespace taichi::lang {
@@ -117,6 +118,30 @@ void run_dense_field_kernel(Arch arch, taichi::lang::Device *device) {
   // Retrieve data
   auto x_field = vk_module->get_snode_tree("place");
   EXPECT_NE(x_field, nullptr);
+
+  // A retained registration must own its shader bytes after module close,
+  // while copies of its parameters must share the original allocation.
+  std::weak_ptr<const std::vector<std::vector<uint32_t>>> retired_code;
+  {
+    auto *loaded =
+        dynamic_cast<gfx::KernelImpl *>(vk_module->get_kernel("simple_return"));
+    ASSERT_NE(loaded, nullptr);
+    auto retained_params = loaded->params();
+    ASSERT_TRUE(retained_params.shared_task_spirv_source_codes);
+    EXPECT_TRUE(retained_params.task_spirv_source_codes.empty());
+    EXPECT_EQ(&retained_params.spirv_codes(), &loaded->params().spirv_codes());
+    auto *code = retained_params.spirv_codes().front().data();
+    retired_code = retained_params.shared_task_spirv_source_codes;
+    vk_module.reset();
+    gfx::KernelImpl retained(gfx_runtime.get(), std::move(retained_params));
+    EXPECT_EQ(retained.params().spirv_codes().front().data(), code);
+    LaunchContextBuilder builder(&retained);
+    builder.get_context().result_buffer = result_buffer;
+    retained.launch(builder);
+    gfx_runtime->synchronize();
+    EXPECT_FLOAT_EQ(builder.get_ret<float>(0), 0.2);
+  }
+  EXPECT_TRUE(retired_code.expired());
 }
 
 void run_kernel_test1(Arch arch, taichi::lang::Device *device) {

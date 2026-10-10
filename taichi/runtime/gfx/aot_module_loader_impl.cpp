@@ -139,7 +139,9 @@ class AotModuleImpl : public aot::Module {
         }
         spirv_sources_codes.emplace_back(std::move(spirv));
       }
-      ti_aot_data_.spirv_codes.emplace_back(std::move(spirv_sources_codes));
+      shader_codes_.push_back(
+          std::make_shared<const std::vector<std::vector<uint32_t>>>(
+              std::move(spirv_sources_codes)));
     }
 
     {
@@ -208,7 +210,7 @@ class AotModuleImpl : public aot::Module {
     for (int i = 0; i < ti_aot_data_.kernels.size(); ++i) {
       if (ti_aot_data_.kernels[i].name == name) {
         kernel.kernel_attribs = ti_aot_data_.kernels[i];
-        kernel.task_spirv_source_codes = ti_aot_data_.spirv_codes[i];
+        kernel.shared_task_spirv_source_codes = shader_codes_[i];
         kernel.num_snode_trees =
             ti_aot_data_.kernel_metadata[i].num_snode_trees;
         kernel.snode_tree_ids =
@@ -261,6 +263,8 @@ class AotModuleImpl : public aot::Module {
 
   std::string module_path_;
   TaichiAotData ti_aot_data_;
+  std::vector<std::shared_ptr<const std::vector<std::vector<uint32_t>>>>
+      shader_codes_;
   GfxRuntime *runtime_{nullptr};
   Arch device_api_backend_;
 };

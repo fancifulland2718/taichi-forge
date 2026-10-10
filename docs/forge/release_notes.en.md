@@ -44,6 +44,9 @@ lifetimes. The entries below describe the changes.
   runtime-helper expansion. Pushes initialize only the adjoint after writing the
   complete primal value; stack layout and generic runtime-helper behavior remain
   unchanged.
+- GFX AOT modules and loaded kernels share immutable SPIR-V storage, avoiding
+  duplicate host shader buffers and registration copies without changing the
+  serialized module format.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

@@ -147,7 +147,8 @@ class CompiledTaichiKernel {
 
   struct Params {
     const TaichiKernelAttributes *ti_kernel_attribs{nullptr};
-    std::vector<std::vector<uint32_t>> spirv_bins;
+    // Borrowed only during synchronous pipeline construction.
+    const std::vector<std::vector<uint32_t>> *spirv_bins{nullptr};
     std::size_t num_snode_trees{0};
 
     Device *device{nullptr};
@@ -281,6 +282,16 @@ class TI_DLL_EXPORT GfxRuntime {
     std::vector<std::vector<uint32_t>> task_spirv_source_codes;
     std::size_t num_snode_trees{0};
     std::vector<int> snode_tree_ids;
+    // AOT modules and loaded kernels share immutable host code storage.
+    std::shared_ptr<const std::vector<std::vector<uint32_t>>>
+        shared_task_spirv_source_codes;
+
+    const std::vector<std::vector<uint32_t>> &spirv_codes() const {
+      TI_ASSERT(!shared_task_spirv_source_codes ||
+                task_spirv_source_codes.empty());
+      return shared_task_spirv_source_codes ? *shared_task_spirv_source_codes
+                                            : task_spirv_source_codes;
+    }
   };
 
   KernelHandle register_taichi_kernel(RegisterParams params);

@@ -1029,7 +1029,8 @@ CompiledTaichiKernel::CompiledTaichiKernel(const Params &ti_params)
   }
 
   const auto &task_attribs = ti_kernel_attribs_.tasks_attribs;
-  const auto &spirv_bins = ti_params.spirv_bins;
+  TI_ASSERT(ti_params.spirv_bins != nullptr);
+  const auto &spirv_bins = *ti_params.spirv_bins;
   TI_ASSERT(task_attribs.size() == spirv_bins.size());
   cached_resource_sets_.resize(task_attribs.size());
   buffer_binding_plans_.resize(task_attribs.size());
@@ -1713,9 +1714,9 @@ GfxRuntime::KernelHandle GfxRuntime::register_taichi_kernel(
 #endif
   params.backend_cache = backend_cache_.get();
 
-  // Registration owns this staging copy. Transfer its code buffers to the
-  // pipeline constructor; moving a const task vector would copy every word.
-  params.spirv_bins = std::move(reg_params.task_spirv_source_codes);
+  // Pipeline creation consumes the source synchronously. RegisterParams owns
+  // either the mutable staging vector or a lease on immutable AOT storage.
+  params.spirv_bins = &reg_params.spirv_codes();
   KernelHandle res;
   TI_ERROR_IF(next_ti_kernel_id_ == std::numeric_limits<int>::max(),
               "GFX kernel registration ID space exhausted; call ti.reset().");
