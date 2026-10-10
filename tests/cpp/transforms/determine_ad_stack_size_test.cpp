@@ -87,7 +87,7 @@ TEST_F(DetermineAdStackSizeTest, Loop) {
   EXPECT_EQ(stack->max_size, 1);
 }
 
-TEST_F(DetermineAdStackSizeTest, LoopInfeasible) {
+TEST_F(DetermineAdStackSizeTest, FinitePositiveLoop) {
   IRBuilder builder;
   auto *stack =
       builder.create_ad_stack(get_data_type<int>(), 0 /*adaptive size*/);
@@ -107,10 +107,108 @@ TEST_F(DetermineAdStackSizeTest, LoopInfeasible) {
   constexpr int kDefaultAdStackSize = 32;
   config.default_ad_stack_size = kDefaultAdStackSize;
   EXPECT_EQ(stack->max_size, 0);
-  // Should have a debug message here (unable to determine the necessary size
-  // for autodiff stacks).
   irpass::determine_ad_stack_size(ir_block, config);
-  EXPECT_EQ(stack->max_size, kDefaultAdStackSize);
+  EXPECT_EQ(stack->max_size, 100);
+}
+
+TEST_F(DetermineAdStackSizeTest, NestedLoopsAndStackLifetime) {
+  IRBuilder builder;
+  auto *stack = builder.create_ad_stack(get_data_type<float>(), 0);
+  builder.ad_stack_push(stack, builder.get_float32(0));
+  auto *outer = builder.create_range_for(builder.get_int32(0), builder.get_int32(2));
+  AdStackAllocaStmt *local;
+  {
+    auto outer_guard = builder.get_loop_guard(outer);
+    local = builder.create_ad_stack(get_data_type<float>(), 0);
+    auto *inner = builder.create_range_for(builder.get_int32(0), builder.get_int32(2));
+    {
+      auto inner_guard = builder.get_loop_guard(inner);
+      for (int i = 0; i < 10; ++i) {
+        builder.ad_stack_push(stack, builder.get_float32(1));
+        builder.ad_stack_push(local, builder.get_float32(1));
+      }
+    }
+  }
+  auto ir = builder.extract_ir();
+  irpass::type_check(ir.get(), CompileConfig());
+  irpass::determine_ad_stack_size(ir.get(), CompileConfig());
+  EXPECT_EQ(stack->max_size, 41);
+  EXPECT_EQ(local->max_size, 20);  // reinitialized in each outer iteration
+}
+
+TEST_F(DetermineAdStackSizeTest, EmptyLoopAndDrainedStack) {
+  IRBuilder builder;
+  auto *stack = builder.create_ad_stack(get_data_type<int>(), 0);
+  auto *empty = builder.create_range_for(builder.get_int32(4), builder.get_int32(2));
+  {
+    auto guard = builder.get_loop_guard(empty);
+    for (int i = 0; i < 10; ++i)
+      builder.ad_stack_push(stack, builder.get_int32(1));
+  }
+  auto *push = builder.create_range_for(builder.get_int32(0), builder.get_int32(64));
+  {
+    auto guard = builder.get_loop_guard(push);
+    builder.ad_stack_push(stack, builder.get_int32(1));
+  }
+  auto *pop = builder.create_range_for(builder.get_int32(0), builder.get_int32(64));
+  pop->reversed = true;
+  {
+    auto guard = builder.get_loop_guard(pop);
+    builder.ad_stack_pop(stack);
+  }
+  builder.ad_stack_push(stack, builder.get_int32(2));
+  auto ir = builder.extract_ir();
+  irpass::type_check(ir.get(), CompileConfig());
+  irpass::determine_ad_stack_size(ir.get(), CompileConfig());
+  EXPECT_EQ(stack->max_size, 64);
+}
+
+TEST_F(DetermineAdStackSizeTest, DynamicFallbackPreservesResolvedAndFixedStacks) {
+  IRBuilder builder;
+  auto *fixed = builder.create_ad_stack(get_data_type<int>(), 17);
+  auto *bounded = builder.create_ad_stack(get_data_type<int>(), 0);
+  auto *dynamic = builder.create_ad_stack(get_data_type<int>(), 0);
+  builder.ad_stack_push(fixed, builder.get_int32(1));
+  builder.ad_stack_push(bounded, builder.get_int32(1));
+  auto *end = builder.create_arg_load({0}, get_data_type<int>(), false, 0);
+  auto *loop = builder.create_range_for(builder.get_int32(0), end);
+  {
+    auto guard = builder.get_loop_guard(loop);
+    builder.ad_stack_push(dynamic, builder.get_int32(1));
+  }
+  auto ir = builder.extract_ir();
+  CompileConfig config;
+  config.default_ad_stack_size = 7;
+  irpass::type_check(ir.get(), config);
+  irpass::determine_ad_stack_size(ir.get(), config);
+  EXPECT_EQ(fixed->max_size, 17);
+  EXPECT_EQ(bounded->max_size, 1);
+  EXPECT_EQ(dynamic->max_size, 7);
+}
+
+TEST_F(DetermineAdStackSizeTest, ContinueCanSkipStackPop) {
+  IRBuilder builder;
+  auto *stack = builder.create_ad_stack(get_data_type<int>(), 0);
+  auto *cond = builder.create_arg_load({0}, get_data_type<int>(), false, 0);
+  auto *loop = builder.create_range_for(builder.get_int32(0), builder.get_int32(4));
+  {
+    auto guard = builder.get_loop_guard(loop);
+    builder.ad_stack_push(stack, builder.get_int32(1));
+    auto *branch = builder.create_if(cond);
+    {
+      auto branch_guard = builder.get_if_guard(branch, true);
+      builder.create_continue();
+    }
+    builder.ad_stack_pop(stack);
+  }
+  auto ir = builder.extract_ir();
+  CompileConfig config;
+  config.default_ad_stack_size = 7;
+  irpass::type_check(ir.get(), config);
+  irpass::determine_ad_stack_size(ir.get(), config);
+  // The structured net delta looks balanced, but continue skips the pop.
+  // Leave early-exit paths to the CFG fallback until they are modeled.
+  EXPECT_EQ(stack->max_size, 7);
 }
 
 TEST_P(DetermineAdStackSizeTest, If) {

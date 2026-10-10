@@ -1665,6 +1665,8 @@ void ControlFlowGraph::determine_ad_stack_size(int default_ad_stack_size) {
     for (int j = nodes[i]->begin_location; j < nodes[i]->end_location; j++) {
       Stmt *stmt = nodes[i]->block->statements[j].get();
       if (auto *stack = stmt->cast<AdStackAllocaStmt>()) {
+        if (stack->max_size != 0)
+          continue;
         all_stacks.insert(stack);
         max_increased_size.insert(
             std::make_pair(stack, std::vector<int>(num_nodes, 0)));
