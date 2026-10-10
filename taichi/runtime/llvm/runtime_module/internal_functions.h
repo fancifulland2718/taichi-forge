@@ -60,11 +60,35 @@ i32 test_internal_func_args(RuntimeContext *context,
 }
 
 i32 test_stack(RuntimeContext *context) {
-  auto stack = new u8[132];
-  stack_push(stack, 16, 4);
-  stack_push(stack, 16, 4);
-  stack_push(stack, 16, 4);
-  stack_push(stack, 16, 4);
+  using Layout = taichi::lang::AdStackLayout;
+  constexpr std::size_t capacity = 16;
+  alignas(Layout::alignment) u8 stack[Layout::storage_size(sizeof(float32),
+                                                         capacity)];
+  auto runtime = context->runtime;
+  std::memset(stack, 0xa5, sizeof(stack));
+  stack_init(stack);
+  for (int round = 0; round < 2; ++round) {
+    for (int i = 0; i < capacity; ++i) {
+      stack_push(stack, capacity, sizeof(float32));
+      auto primal = reinterpret_cast<float32 *>(
+          stack_top_primal(stack, sizeof(float32)));
+      auto adjoint = reinterpret_cast<float32 *>(
+          stack_top_adjoint(stack, sizeof(float32)));
+      TI_TEST_CHECK(*primal == 0 && *adjoint == 0, runtime);
+      *primal = i + 1;
+      *adjoint = -(i + 1);
+    }
+    for (int i = capacity - 1; i >= 0; --i) {
+      TI_TEST_CHECK(*reinterpret_cast<float32 *>(
+                        stack_top_primal(stack, sizeof(float32))) == i + 1,
+                    runtime);
+      TI_TEST_CHECK(*reinterpret_cast<float32 *>(
+                        stack_top_adjoint(stack, sizeof(float32))) == -(i + 1),
+                    runtime);
+      stack_pop(stack);
+    }
+    TI_TEST_CHECK(*reinterpret_cast<Layout::Counter *>(stack) == 0, runtime);
+  }
   return 0;
 }
 
