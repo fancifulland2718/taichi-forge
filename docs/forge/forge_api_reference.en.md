@@ -2288,6 +2288,55 @@ support. The deployment regression covers dense polynomial fields, separate
 primal/gradient storage, repeated seeding and ordinary AOT Graph replay. The
 C API is a separate native build; this does not change wheel SDK packaging.
 
+### Explicit ndarray gradient bindings (0.6.4)
+
+Export kernels with `ti.types.ndarray(..., needs_grad=True)` and export their
+explicit `.grad` targets. Deployment uses additive C API extensions:
+
+- `ti_launch_kernel_with_gradients_ext()` takes positional
+  `TiNdArrayGradientBinding` descriptors.
+- `ti_launch_compute_graph_with_gradients_ext()` takes named
+  `TiNamedNdArrayGradientBinding` descriptors.
+
+Each descriptor pairs a primal argument with a separate `TiNdArray` gradient.
+The existing `TiNdArray` and `TiArgument` layouts are unchanged. Every argument
+specialized with `needs_grad=True` requires a gradient binding, including the
+forward kernel. Element dtype, element shape and logical shape must match the
+primal and the exported ABI. Missing, duplicate, unknown and mismatched gradient
+bindings fail before device submission; Graph checks cover all dispatches before
+the first one runs. The original launch entry points reject a specialization
+that requires unbound gradients.
+
+The C++ wrapper exposes `Kernel::launch_with_gradients()` and
+`ComputeGraph::launch_with_gradients()` using their stored primal arguments:
+
+```cpp
+forward.push_arg(x);
+forward.push_arg(y);
+backward.push_arg(x);
+backward.push_arg(y);
+std::vector<TiNdArrayGradientBinding> grads{{0, dx.ndarray()}, {1, dy.ndarray()}};
+forward.launch_with_gradients(grads);
+backward.launch_with_gradients(grads);
+runtime.wait();
+// For a Graph whose primal arguments are named x and y:
+// graph.launch_with_gradients({{"x", dx.ndarray()}, {"y", dy.ndarray()}});
+```
+
+Before launch, initialize primal storage, clear input gradients and seed output
+gradients as required by the computation. These operations are explicit; launch
+does not clear or seed gradients. Descriptor arrays need only survive the call,
+but primal and gradient memory, the module and runtime must remain valid until
+execution completes. Rebind or release memory after synchronization.
+
+Independent native deployment tests on Windows CPU, CUDA and Vulkan cover f32
+scalar/vector/matrix elements, explicit forward/reverse calls, ordinary AOT
+Graph replay, zero and negative seeds, rebinding and retirement. This does not
+add Python `Tape` serialization, arbitrary ndarray views, or a JIT Graph gradient
+binding API. JIT Graph preparation rejects ndarray gradient specializations;
+Python direct kernel autodiff remains available. Vulkan autodiff-stack support
+is unchanged.
+
 ## Kernel and Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

@@ -592,6 +592,22 @@ Launches a Taichi kernel with the provided arguments. The arguments *must* have 
 
 Launches a Taichi compute graph with provided named arguments. The named arguments *must* have the same count, names, and types as in the source code.
 
+`structure.nd_array_gradient_binding`
+
+Forge 0.6.4 positional gradient binding. The gradient ndarray must match the primal argument's dtype, logical shape and element shape. Both allocations must remain valid until device execution completes.
+
+`structure.named_nd_array_gradient_binding`
+
+Forge 0.6.4 named gradient binding for an AOT Graph. The name identifies the primal ndarray argument.
+
+`function.launch_kernel_with_gradients_ext`
+
+Launches a kernel with explicit ndarray gradients. Every argument specialized with needs_grad requires a binding, including forward kernels. Invalid gradient bindings fail before submission. The caller initializes and seeds gradients; no clearing or Tape orchestration is implicit. Descriptor arrays only need to survive this call; device memory must survive execution.
+
+`function.launch_compute_graph_with_gradients_ext`
+
+Launches an AOT Graph with explicit named ndarray gradients. All gradient bindings are validated before the first dispatch. Memory lifetime and explicit seeding follow the kernel extension contract.
+
 `function.flush`
 
 Submits all previously invoked device commands to the offload device for execution.

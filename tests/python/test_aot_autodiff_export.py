@@ -51,3 +51,25 @@ def test_aot_bound_adjoint_and_template_export(tmp_path):
     metadata = (tmp_path / "metadata.json").read_text()
     assert "evaluate_grad__tmpl__factor=3__" in metadata
     assert "evaluate_grad" in metadata
+
+
+@test_utils.test(arch=[ti.cpu, ti.cuda, ti.vulkan], offline_cache=False)
+def test_ndarray_adjoint_graph_requires_explicit_deployment_bindings(tmp_path):
+    @ti.kernel
+    def square(x: ti.types.ndarray(dtype=ti.f32, ndim=1, needs_grad=True),
+               y: ti.types.ndarray(dtype=ti.f32, ndim=1, needs_grad=True)):
+        for i in x:
+            y[i] = x[i] * x[i]
+
+    x = ti.ndarray(ti.f32, 4, needs_grad=True)
+    y = ti.ndarray(ti.f32, 4, needs_grad=True)
+    builder = ti.graph.GraphBuilder()
+    builder.dispatch(square.grad,
+                     ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "x", ti.f32, ndim=1),
+                     ti.graph.Arg(ti.graph.ArgKind.NDARRAY, "y", ti.f32, ndim=1))
+    graph = builder.compile()
+    module = ti.aot.Module()
+    module.add_graph("backward", graph)
+    module.save(tmp_path)
+    with pytest.raises(RuntimeError, match="JIT Graph ndarray gradients"):
+        graph.run({"x": x, "y": y})

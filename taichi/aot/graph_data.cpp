@@ -473,6 +473,16 @@ const CompiledKernelData *get_or_compile_cached_kernel(
     const CompileConfig &compile_config,
     CompiledGraphJITCachedKernel &cached,
     bool cache_compiled_kernel_data) {
+  if (cached.kernel_key.empty()) {
+    // AOT has an explicit gradient binding extension. JIT Graph binding plans
+    // currently bind only the primal: fail at preparation instead of launching
+    // an adjoint with a null gradient pointer. Check only on a cache miss.
+    for (const auto &entry : dispatch.jit_callable()->nested_parameters) {
+      TI_ERROR_IF(entry.second.needs_grad,
+                  "JIT Graph ndarray gradients require explicit AOT C API "
+                  "bindings; use direct kernel calls for Python autodiff");
+    }
+  }
   auto *prog = dispatch.ti_kernel->program;
   auto execution_handle = dispatch.jit_execution_handle();
   if (execution_handle != nullptr) {
@@ -6348,6 +6358,12 @@ CompiledGraphJITCache::~CompiledGraphJITCache() {
 
 void CompiledGraph::run(
     const std::unordered_map<std::string, IValue> &args) const {
+  run(args, {});
+}
+
+void CompiledGraph::run(
+    const std::unordered_map<std::string, IValue> &args,
+    const std::unordered_map<std::string, const Ndarray *> &gradients) const {
   for (const auto &entry : args) {
     TI_ERROR_IF(entry.second.tag == ArgKind::kAccelerationStructure,
                 "AOT Graph does not support JIT-only acceleration structures");
@@ -6360,6 +6376,14 @@ void CompiledGraph::run(
     set_cuda_bounded_range_binding(dispatch, launch_ctx);
     launch_ctx.append_dispatch_label(dispatch.dispatch_label);
     init_runtime_context(dispatch.symbolic_args, args, launch_ctx);
+    for (int i = 0; i < dispatch.symbolic_args.size(); ++i) {
+      const auto &name = dispatch.symbolic_args[i].name;
+      auto grad = gradients.find(name);
+      if (grad != gradients.end()) {
+        auto *array = reinterpret_cast<const Ndarray *>(args.at(name).val);
+        launch_ctx.set_arg_ndarray_with_grad({i}, *array, *grad->second);
+      }
+    }
     TI_ERROR_IF(
         !launch_ctx.dense_storage_ptrs.empty(),
         "AOT Graph does not support runtime dense storage arguments; use an "

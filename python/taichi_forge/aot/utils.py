@@ -1,15 +1,13 @@
 from typing import Any
 
-from taichi_forge.lang._ndarray import Ndarray, ScalarNdarray
+from taichi_forge.lang import impl
+from taichi_forge.lang._ndarray import Ndarray
 from taichi_forge.lang._texture import Texture, TextureCollection
 from taichi_forge.lang.enums import Format
 from taichi_forge.lang.exception import TaichiCompilationError
 from taichi_forge.lang.matrix import (
     Matrix,
-    MatrixNdarray,
     MatrixType,
-    VectorNdarray,
-    VectorType,
 )
 from taichi_forge.types.annotations import template
 from taichi_forge.types.ndarray_type import NdarrayType
@@ -125,11 +123,7 @@ def _produce_injected_arg(arg, symbolic_arg=None, has_symbolic_arg=False):
             )
 
         shape = (2,) * ndim
-        if isinstance(dtype, VectorType):
-            return VectorNdarray(dtype.n, dtype=dtype.dtype, shape=shape)
-        if isinstance(dtype, MatrixType):
-            return MatrixNdarray(dtype.n, dtype.m, dtype=dtype.dtype, shape=shape)
-        return ScalarNdarray(dtype, shape)
+        return impl.ndarray(dtype, shape, needs_grad=bool(anno.needs_grad))
 
     if isinstance(anno, RWTextureType):
         if has_symbolic_arg:

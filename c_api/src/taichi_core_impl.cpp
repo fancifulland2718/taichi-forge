@@ -1,3 +1,6 @@
+#include <algorithm>
+#include <unordered_set>
+
 #include "taichi_core_impl.h"
 #include "taichi_opengl_impl.h"
 #include "taichi_vulkan_impl.h"
@@ -738,10 +741,73 @@ TiComputeGraph ti_get_aot_module_compute_graph(TiAotModule aot_module,
   return out;
 }
 
+
+namespace {
+bool gradient_error(const std::string &message) {
+  ti_set_last_error(TI_ERROR_INVALID_ARGUMENT, message.c_str());
+  return false;
+}
+
+bool same_ndarray_shape(const TiNdShape &a, const TiNdShape &b) {
+  return a.dim_count <= kTiNdShapeDimensionCapacity &&
+         b.dim_count == a.dim_count &&
+         std::equal(a.dims, a.dims + a.dim_count, b.dims);
+}
+
+bool validate_gradient_pair(const TiArgument &argument,
+                            const TiNdArray &gradient) {
+  if (argument.type != TI_ARGUMENT_TYPE_NDARRAY)
+    return gradient_error("Gradient target must be an ndarray");
+  const auto &primal = argument.value.ndarray;
+  if (!primal.memory || !gradient.memory)
+    return gradient_error("Primal and gradient memory must be non-null");
+  if (primal.elem_type != gradient.elem_type ||
+      !same_ndarray_shape(primal.shape, gradient.shape) ||
+      !same_ndarray_shape(primal.elem_shape, gradient.elem_shape))
+    return gradient_error("Gradient dtype and shape must match the primal");
+  return true;
+}
+
+bool validate_gradient_parameter(
+    const taichi::lang::CallableBase::Parameter &param,
+    const TiArgument *argument, const TiNdArray *gradient) {
+  if (!param.needs_grad) return true;
+  if (!argument || !gradient)
+    return gradient_error("Missing ndarray gradient binding for needs_grad argument");
+  if (!validate_gradient_pair(*argument, *gradient)) return false;
+  const auto &array = argument->value.ndarray;
+  auto type = param.get_element_type();
+  // LLVM keeps the full ndarray ABI struct; GFX reconstructs scalar/tensor
+  // parameter metadata from the serialized argument attributes.
+  if (auto *array_type = type->cast<taichi::lang::StructType>()) {
+    type = taichi::lang::DataType(array_type->get_element_type(
+        {taichi::lang::TypeFactory::DATA_PTR_POS_IN_NDARRAY})).ptr_removed();
+  }
+  using taichi::lang::PrimitiveType;
+  bool dtype_matches =
+      (array.elem_type == TI_DATA_TYPE_F16 && type == PrimitiveType::f16) ||
+      (array.elem_type == TI_DATA_TYPE_F32 && type == PrimitiveType::f32) ||
+      (array.elem_type == TI_DATA_TYPE_F64 && type == PrimitiveType::f64);
+  const auto &element_shape = param.element_shape;
+  if (!dtype_matches || element_shape.size() != array.elem_shape.dim_count ||
+      !std::equal(element_shape.begin(), element_shape.end(), array.elem_shape.dims) ||
+      array.shape.dim_count + element_shape.size() != param.total_dim)
+    return gradient_error("Primal ndarray does not match the exported gradient ABI");
+  return true;
+}
+}  // namespace
+
 void ti_launch_kernel(TiRuntime runtime,
                       TiKernel kernel,
                       uint32_t arg_count,
                       const TiArgument *args) {
+  ti_launch_kernel_with_gradients_ext(runtime, kernel, arg_count, args, 0, nullptr);
+}
+
+void ti_launch_kernel_with_gradients_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t gradient_count,
+    const TiNdArrayGradientBinding *gradients) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(kernel);
@@ -754,6 +820,35 @@ void ti_launch_kernel(TiRuntime runtime,
   }
 
   auto ti_kernel = (taichi::lang::aot::Kernel *)kernel;
+
+  if (gradient_count > 0) TI_CAPI_ARGUMENT_NULL(gradients);
+  std::vector<const TiNdArray *> gradient_args(arg_count, nullptr);
+  for (uint32_t i = 0; i < gradient_count; ++i) {
+    const auto &binding = gradients[i];
+    auto index = binding.argument_index;
+    if (index >= arg_count || gradient_args[index] != nullptr) {
+      gradient_error("Duplicate or out-of-range gradient argument index");
+      return;
+    }
+    auto param = ti_kernel->nested_parameters.find({static_cast<int>(index)});
+    if (param == ti_kernel->nested_parameters.end() || !param->second.needs_grad) {
+      gradient_error("Gradient target was not exported with needs_grad");
+      return;
+    }
+    if (!validate_gradient_pair(args[index], binding.gradient)) return;
+    gradient_args[index] = &binding.gradient;
+  }
+  for (const auto &entry : ti_kernel->nested_parameters) {
+    if (!entry.second.needs_grad) continue;
+    if (entry.first.size() != 1) {
+      gradient_error("Nested gradient arguments are not supported by this extension");
+      return;
+    }
+    auto index = static_cast<uint32_t>(entry.first[0]);
+    if (!validate_gradient_parameter(entry.second,
+            index < arg_count ? &args[index] : nullptr,
+            index < arg_count ? gradient_args[index] : nullptr)) return;
+  }
 
   Runtime &runtime2 = *((Runtime *)runtime);
   taichi::lang::LaunchContextBuilder builder(ti_kernel);
@@ -829,7 +924,14 @@ void ti_launch_kernel(TiRuntime runtime,
         std::vector<int> shape(ndarray.shape.dims,
                                ndarray.shape.dims + ndarray.shape.dim_count);
 
-        builder.set_arg_ndarray_impl({(int)i}, (intptr_t)devalloc.get(), shape);
+        std::unique_ptr<taichi::lang::DeviceAllocation> gradalloc;
+        if (gradient_args[i]) {
+          gradalloc = std::make_unique<taichi::lang::DeviceAllocation>(
+              devmem2devalloc(runtime2, gradient_args[i]->memory));
+        }
+        builder.set_arg_ndarray_impl({(int)i}, (intptr_t)devalloc.get(), shape,
+                                    (intptr_t)gradalloc.get());
+        if (gradalloc) devallocs.emplace_back(std::move(gradalloc));
 
         devallocs.emplace_back(std::move(devalloc));
         break;
@@ -894,6 +996,14 @@ void ti_launch_compute_graph(TiRuntime runtime,
                              TiComputeGraph compute_graph,
                              uint32_t arg_count,
                              const TiNamedArgument *args) {
+  ti_launch_compute_graph_with_gradients_ext(runtime, compute_graph, arg_count,
+                                            args, 0, nullptr);
+}
+
+void ti_launch_compute_graph_with_gradients_ext(
+    TiRuntime runtime, TiComputeGraph compute_graph, uint32_t arg_count,
+    const TiNamedArgument *args, uint32_t gradient_count,
+    const TiNamedNdArrayGradientBinding *gradients) {
   TI_CAPI_TRY_CATCH_BEGIN();
   TI_CAPI_ARGUMENT_NULL(runtime);
   TI_CAPI_ARGUMENT_NULL(compute_graph);
@@ -905,6 +1015,63 @@ void ti_launch_compute_graph(TiRuntime runtime,
     return;
   }
 
+
+  if (gradient_count > 0) TI_CAPI_ARGUMENT_NULL(gradients);
+  auto &graph = *(taichi::lang::aot::CompiledGraph *)compute_graph;
+  std::unordered_map<std::string, const TiArgument *> named_args;
+  for (uint32_t i = 0; i < arg_count; ++i) {
+    TI_CAPI_ARGUMENT_NULL(args[i].name);
+    if (!named_args.emplace(args[i].name, &args[i].argument).second) {
+      gradient_error("Duplicate Graph argument name");
+      return;
+    }
+  }
+  std::unordered_map<std::string, const TiNdArray *> gradient_args;
+  for (uint32_t i = 0; i < gradient_count; ++i) {
+    TI_CAPI_ARGUMENT_NULL(gradients[i].name);
+    const auto &binding = gradients[i];
+    auto arg = named_args.find(binding.name);
+    if (arg == named_args.end() ||
+        !gradient_args.emplace(binding.name, &binding.gradient).second) {
+      gradient_error("Unknown or duplicate Graph gradient name");
+      return;
+    }
+    if (!validate_gradient_pair(*arg->second, binding.gradient)) return;
+  }
+  std::unordered_set<std::string> required_gradients;
+  // Validate every dispatch before executing any of them, including a reverse
+  // dispatch that appears after otherwise valid forward work.
+  for (const auto &dispatch : graph.dispatches) {
+    if (dispatch.compiled_kernel == nullptr) {
+      ti_set_last_error(TI_ERROR_CORRUPTED_DATA,
+                        "AOT Graph contains an unresolved kernel");
+      return;
+    }
+    for (const auto &entry : dispatch.compiled_kernel->nested_parameters) {
+      if (!entry.second.needs_grad) continue;
+      if (entry.first.size() != 1 || entry.first[0] < 0 ||
+          entry.first[0] >= dispatch.symbolic_args.size()) {
+        gradient_error("Unsupported Graph gradient argument metadata");
+        return;
+      }
+      const auto &name = dispatch.symbolic_args[entry.first[0]].name;
+      required_gradients.insert(name);
+      auto arg = named_args.find(name);
+      auto grad = gradient_args.find(name);
+      if (!validate_gradient_parameter(entry.second,
+              arg == named_args.end() ? nullptr : arg->second,
+              grad == gradient_args.end() ? nullptr : grad->second)) return;
+    }
+  }
+  for (const auto &entry : gradient_args) {
+    if (!required_gradients.count(entry.first)) {
+      gradient_error("Graph gradient target was not exported with needs_grad");
+      return;
+    }
+  }
+  std::vector<taichi::lang::Ndarray> gradient_arrays;
+  gradient_arrays.reserve(gradient_count);
+  std::unordered_map<std::string, const taichi::lang::Ndarray *> gradient_views;
   Runtime &runtime2 = *((Runtime *)runtime);
   std::unordered_map<std::string, taichi::lang::aot::IValue> arg_map{};
   std::vector<taichi::lang::Ndarray> ndarrays;
@@ -1049,6 +1216,12 @@ void ti_launch_compute_graph(TiRuntime runtime,
               elem_shape, dtype);
         }
         ndarrays.emplace_back(taichi::lang::Ndarray(devalloc, dtype, shape));
+        auto grad = gradient_args.find(arg.name);
+        if (grad != gradient_args.end()) {
+          gradient_arrays.emplace_back(devmem2devalloc(runtime2, grad->second->memory),
+                                       dtype, shape);
+          gradient_views.emplace(arg.name, &gradient_arrays.back());
+        }
         arg_map.emplace(std::make_pair(
             arg.name, taichi::lang::aot::IValue::create(ndarrays.back())));
         break;
@@ -1144,7 +1317,7 @@ void ti_launch_compute_graph(TiRuntime runtime,
       }
     }
   }
-  ((taichi::lang::aot::CompiledGraph *)compute_graph)->run(arg_map);
+  graph.run(arg_map, gradient_views);
   TI_CAPI_TRY_CATCH_END();
 }
 

@@ -873,6 +873,11 @@ class ComputeGraph {
     launch(arguments.size(), arguments.data());
   }
 
+  void launch_with_gradients(const std::vector<TiNamedNdArrayGradientBinding> &gradients) const {
+    ti_launch_compute_graph_with_gradients_ext(runtime_, compute_graph_, args_.size(),
+        args_.data(), gradients.size(), gradients.data());
+  }
+
   constexpr TiComputeGraph compute_graph() const {
     return compute_graph_;
   }
@@ -954,6 +959,11 @@ class Kernel {
   }
   void launch(const std::vector<TiArgument> &arguments) const {
     launch(arguments.size(), arguments.data());
+  }
+
+  void launch_with_gradients(const std::vector<TiNdArrayGradientBinding> &gradients) const {
+    ti_launch_kernel_with_gradients_ext(runtime_, kernel_, args_.size(),
+        args_.data(), gradients.size(), gradients.data());
   }
 
   constexpr TiKernel kernel() const {

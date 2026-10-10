@@ -541,6 +541,19 @@ typedef struct TiNdArray {
   TiDataType elem_type;
 } TiNdArray;
 
+// Forge 0.6.4: separate descriptors preserve the TiNdArray/TiArgument ABI.
+// Gradient layout and type must exactly match the primal ndarray. Both memory
+// allocations must remain alive until device execution completes.
+typedef struct TiNdArrayGradientBinding {
+  uint32_t argument_index;
+  TiNdArray gradient;
+} TiNdArrayGradientBinding;
+
+typedef struct TiNamedNdArrayGradientBinding {
+  const char *name;
+  TiNdArray gradient;
+} TiNamedNdArrayGradientBinding;
+
 // BitField `TiImageUsageFlags` (1.4.0)
 //
 // Usages of an image allocation. Taichi requires kernel argument images to be
@@ -1055,6 +1068,21 @@ ti_launch_compute_graph(TiRuntime runtime,
                         TiComputeGraph compute_graph,
                         uint32_t arg_count,
                         const TiNamedArgument *args);
+
+// Forge 0.6.4: explicit ndarray adjoints for kernels exported with needs_grad.
+// Every needs_grad argument requires a binding, including forward kernels.
+// Gradients are neither cleared nor seeded automatically. Binding validation
+// precedes submission; this does not add automatic Tape orchestration.
+TI_DLL_EXPORT void TI_API_CALL ti_launch_kernel_with_gradients_ext(
+    TiRuntime runtime, TiKernel kernel, uint32_t arg_count,
+    const TiArgument *args, uint32_t gradient_count,
+    const TiNdArrayGradientBinding *gradients);
+
+// All Graph gradient bindings are validated before the first dispatch.
+TI_DLL_EXPORT void TI_API_CALL ti_launch_compute_graph_with_gradients_ext(
+    TiRuntime runtime, TiComputeGraph compute_graph, uint32_t arg_count,
+    const TiNamedArgument *args, uint32_t gradient_count,
+    const TiNamedNdArrayGradientBinding *gradients);
 
 // Function `ti_flush` (1.4.0)
 //

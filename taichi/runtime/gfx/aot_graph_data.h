@@ -21,6 +21,16 @@ class KernelImpl : public aot::Kernel {
           attrib.element_shape, attrib.format);
       parameter.name = attrib.name;
       parameter.ptype = attrib.ptype;
+      if (attrib.ptype == ParameterType::kNdarray) {
+        // The serialized ABI already records the optional grad_ptr member.
+        // Recover it without changing the artifact schema or guessing from
+        // gradient accesses (forward kernels may not access grad_ptr at all).
+        auto *array_type = args_type->get_element_type(indices)
+                               ->cast<taichi::lang::StructType>();
+        TI_ASSERT(array_type != nullptr);
+        parameter.needs_grad = array_type->elements().size() >
+                               TypeFactory::GRAD_PTR_POS_IN_NDARRAY;
+      }
       nested_parameters.emplace(indices, std::move(parameter));
     }
     for (const auto &[indices, type] :

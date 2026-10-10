@@ -41,6 +41,10 @@
   Python Tape 编排序列化或 Vulkan 自动微分栈支持。
 - LLVM AOT 将加载的 IR 转交给可执行内核，消除 reader 保留的副本和一次模块克隆；
   加载失败时不修改部署目录中的产物文件。
+- 新增内核与 AOT Graph 的显式 C API ndarray 梯度绑定，保持原参数结构布局。
+  独立部署进程已验证 CPU、CUDA、Vulkan 的 f32 标量/vector/matrix 正反向，
+  包括重复播种、重绑定及 Graph 提交前拒绝错误绑定；CPU C API ndarray 现在也能
+  经已有设备分配器正常释放。
 - ZIP 产物数据源持有压缩字节，按条目读取时解压，避免预先展开整包内容；条目数据
   损坏在读取该条目时报告。
 - GFX AOT 模块持有产物数据源，仅加载请求的 kernel 或 Graph 依赖的 shader。

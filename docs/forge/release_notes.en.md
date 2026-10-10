@@ -49,6 +49,11 @@ lifetimes. The entries below describe the changes.
 - ZIP-backed artifact sources own the compressed bytes and decompress requested
   entries individually, avoiding an expanded copy of every archive entry.
   Entry payload corruption is reported when that entry is read.
+- Add explicit C API ndarray gradient bindings for kernels and AOT Graphs,
+  preserving existing argument layouts. Separate deployment processes verify
+  f32 scalar/vector/matrix forward and reverse execution on CPU, CUDA and Vulkan,
+  including reseeding, rebinding and rejection before Graph dispatch. CPU C API
+  ndarray allocations can now be released through the existing device allocator.
 - LLVM AOT transfers loaded IR to the executable kernel, avoiding a retained
   reader copy and a module clone. Invalid deployments remain untouched on disk.
 - GFX AOT modules retain owned artifact sources and load shader bytes only for

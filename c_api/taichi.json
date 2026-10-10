@@ -600,6 +600,36 @@
                     ]
                 },
                 {
+                    "name": "nd_array_gradient_binding",
+                    "type": "structure",
+                    "since": "v0.6.4",
+                    "fields": [
+                        {
+                            "name": "argument_index",
+                            "type": "uint32_t"
+                        },
+                        {
+                            "name": "gradient",
+                            "type": "structure.nd_array"
+                        }
+                    ]
+                },
+                {
+                    "name": "named_nd_array_gradient_binding",
+                    "type": "structure",
+                    "since": "v0.6.4",
+                    "fields": [
+                        {
+                            "name": "name",
+                            "type": "const char*"
+                        },
+                        {
+                            "name": "gradient",
+                            "type": "structure.nd_array"
+                        }
+                    ]
+                },
+                {
                     "name": "get_version",
                     "type": "function",
                     "since": "v1.4.0",
@@ -958,6 +988,38 @@
                     ]
                 },
                 {
+                    "name": "launch_kernel_with_gradients_ext",
+                    "type": "function",
+                    "since": "v0.6.4",
+                    "is_device_command": true,
+                    "parameters": [
+                        {
+                            "type": "handle.runtime"
+                        },
+                        {
+                            "type": "handle.kernel"
+                        },
+                        {
+                            "name": "arg_count",
+                            "type": "uint32_t"
+                        },
+                        {
+                            "name": "args",
+                            "type": "structure.argument",
+                            "count": "arg_count"
+                        },
+                        {
+                            "name": "gradient_count",
+                            "type": "uint32_t"
+                        },
+                        {
+                            "name": "gradients",
+                            "type": "structure.nd_array_gradient_binding",
+                            "count": "gradient_count"
+                        }
+                    ]
+                },
+                {
                     "name": "launch_compute_graph",
                     "type": "function",
                     "since": "v1.4.0",
@@ -977,6 +1039,38 @@
                             "name": "args",
                             "type": "structure.named_argument",
                             "count": "arg_count"
+                        }
+                    ]
+                },
+                {
+                    "name": "launch_compute_graph_with_gradients_ext",
+                    "type": "function",
+                    "since": "v0.6.4",
+                    "is_device_command": true,
+                    "parameters": [
+                        {
+                            "type": "handle.runtime"
+                        },
+                        {
+                            "type": "handle.compute_graph"
+                        },
+                        {
+                            "name": "arg_count",
+                            "type": "uint32_t"
+                        },
+                        {
+                            "name": "args",
+                            "type": "structure.named_argument",
+                            "count": "arg_count"
+                        },
+                        {
+                            "name": "gradient_count",
+                            "type": "uint32_t"
+                        },
+                        {
+                            "name": "gradients",
+                            "type": "structure.named_nd_array_gradient_binding",
+                            "count": "gradient_count"
                         }
                     ]
                 },

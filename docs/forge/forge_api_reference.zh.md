@@ -1890,6 +1890,47 @@ LLVM 产物自动携带导出 kernel 实际引用的 SNodeTree 布局，包括�
 Vulkan 自动微分栈支持。独立部署回归覆盖稠密多项式 field、正向/梯度存储、重复播种和
 普通 AOT Graph 重放。C API 是单独的原生构建；本次不改变 wheel SDK 打包方式。
 
+### 显式 ndarray 梯度绑定（0.6.4）
+
+用 `ti.types.ndarray(..., needs_grad=True)` 声明并导出内核及其显式 `.grad`。
+独立部署使用新增 C API 扩展：
+
+- `ti_launch_kernel_with_gradients_ext()` 接收按参数位置指定的
+  `TiNdArrayGradientBinding`。
+- `ti_launch_compute_graph_with_gradients_ext()` 接收按参数名指定的
+  `TiNamedNdArrayGradientBinding`。
+
+每个描述符将正向参数与单独的 `TiNdArray` 梯度关联，原 `TiNdArray`、`TiArgument`
+结构布局不变。凡特化为 `needs_grad=True` 的参数，包括正向内核，都必须绑定梯度。
+元素类型、元素形状和逻辑形状须与正向数组及导出 ABI 相符。缺失、重复、未知或
+布局不匹配的梯度在提交设备工作前报错；Graph 在首个 dispatch 前检查全部梯度绑定。
+旧 launch 入口遇到需要梯度但未绑定的特化也会明确拒绝。
+
+C++ 包装提供 `Kernel::launch_with_gradients()` 和
+`ComputeGraph::launch_with_gradients()`，使用已有正向参数：
+
+```cpp
+forward.push_arg(x);
+forward.push_arg(y);
+backward.push_arg(x);
+backward.push_arg(y);
+std::vector<TiNdArrayGradientBinding> grads{{0, dx.ndarray()}, {1, dy.ndarray()}};
+forward.launch_with_gradients(grads);
+backward.launch_with_gradients(grads);
+runtime.wait();
+// Graph 的正向参数名为 x、y 时：
+// graph.launch_with_gradients({{"x", dx.ndarray()}, {"y", dy.ndarray()}});
+```
+
+调用前按计算语义初始化正向存储、清零输入梯度并播种输出梯度；launch 不自动执行
+清零或播种。描述符数组只需存活到调用返回，但正向/梯度内存、module 和 runtime
+须保持有效直至设备执行完成。在同步后重新绑定或释放内存。
+
+Windows CPU、CUDA、Vulkan 的独立原生部署测试覆盖 f32 标量/vector/matrix 元素、
+显式正反向、普通 AOT Graph 重放、零/负种子、重绑定和释放。本次不新增 Python
+`Tape` 序列化、任意 ndarray view 或 JIT Graph 梯度绑定入口。JIT Graph 在准备阶段
+拒绝 ndarray 梯度特化，Python 直接内核自动微分仍可用；Vulkan 自动微分栈边界不变。
+
 ## Kernel 与 Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

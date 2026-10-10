@@ -844,6 +844,9 @@ struct TI_DLL_EXPORT CompiledGraph {
   bool cuda_capture_commands_require_exact_bindings() const;
 
   void run(const std::unordered_map<std::string, IValue> &args) const;
+  // AOT deployment-only bindings; the JIT binding cache is unchanged.
+  void run(const std::unordered_map<std::string, IValue> &args,
+           const std::unordered_map<std::string, const Ndarray *> &gradients) const;
   void jit_run(const CompileConfig &compile_config,
                const std::unordered_map<std::string, IValue> &args) const;
   void jit_run_cached(const CompileConfig &compile_config,
