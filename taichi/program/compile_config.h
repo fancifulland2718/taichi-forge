@@ -1,9 +1,36 @@
 ﻿#pragma once
 
+#include <array>
 #include "taichi/rhi/arch.h"
 #include "taichi/util/lang_util.h"
 
 namespace taichi::lang {
+
+enum class CompileOption {
+  compile_tier,
+  advanced_optimization,
+  llvm_opt_level,
+  external_optimization_level,
+  fast_math,
+  full_simplify_global_iter_cap,
+  count,
+};
+
+enum class CompileOptionSource : uint8_t {
+  unspecified,
+  frontend_default,
+  environment,
+  init_keyword,
+  direct_assignment,
+  derived,
+  kernel_override,
+  export_override,
+};
+
+inline constexpr std::array<const char *, static_cast<size_t>(CompileOption::count)>
+    kCompileOptionNames{"compile_tier", "advanced_optimization", "llvm_opt_level",
+                        "external_optimization_level", "fast_math",
+                        "full_simplify_global_iter_cap"};
 
 struct CompileConfig {
   Arch arch;
@@ -553,6 +580,19 @@ struct CompileConfig {
   int gfx_cmdlist_max_dispatches{8};
 
   size_t cuda_stack_limit{0};
+
+  // Diagnostic/selection provenance, deliberately excluded from code identity.
+  // Python setters record assignments, including explicit False, 0 and 1.
+  // Native callers can mark a value explicitly with set_option_source().
+  std::array<CompileOptionSource, static_cast<size_t>(CompileOption::count)>
+      option_sources{};
+
+  CompileOptionSource option_source(CompileOption option) const {
+    return option_sources[static_cast<size_t>(option)];
+  }
+  void set_option_source(CompileOption option, CompileOptionSource source) {
+    option_sources[static_cast<size_t>(option)] = source;
+  }
 
   CompileConfig();
 

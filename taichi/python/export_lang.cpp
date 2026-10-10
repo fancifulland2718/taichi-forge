@@ -800,12 +800,20 @@ void export_lang(py::module &m) {
       .def_readwrite("tb", &DebugInfo::tb)
       .def_readwrite("src_loc", &DebugInfo::src_loc);
 
+#define TI_COMPILE_OPTION_PROPERTY(field)                                     \
+  .def_property(#field,                                                      \
+                [](const CompileConfig &cfg) { return cfg.field; },           \
+                [](CompileConfig &cfg, decltype(CompileConfig::field) value) { \
+                  cfg.field = std::move(value);                             \
+                  cfg.set_option_source(                                    \
+                      CompileOption::field, CompileOptionSource::direct_assignment); \
+                })
   py::class_<CompileConfig>(m, "CompileConfig")
       .def(py::init<>())
       .def_readwrite("arch", &CompileConfig::arch)
       .def_readwrite("opt_level", &CompileConfig::opt_level)
-      .def_readwrite("llvm_opt_level", &CompileConfig::llvm_opt_level)
-      .def_readwrite("compile_tier", &CompileConfig::compile_tier)
+      TI_COMPILE_OPTION_PROPERTY(llvm_opt_level)
+      TI_COMPILE_OPTION_PROPERTY(compile_tier)
       .def_readwrite("spirv_parallel_codegen",
                      &CompileConfig::spirv_parallel_codegen)
       .def_readwrite("spirv_skip_loop_unroll",
@@ -886,8 +894,7 @@ void export_lang(py::module &m) {
                      &CompileConfig::cache_loop_invariant_global_vars)
       .def_readwrite("tiered_full_simplify",
                      &CompileConfig::tiered_full_simplify)
-      .def_readwrite("full_simplify_global_iter_cap",
-                     &CompileConfig::full_simplify_global_iter_cap)
+      TI_COMPILE_OPTION_PROPERTY(full_simplify_global_iter_cap)
       .def_readwrite("auto_real_function",
                      &CompileConfig::auto_real_function)
       .def_readwrite("auto_real_function_threshold_us",
@@ -955,9 +962,8 @@ void export_lang(py::module &m) {
                      &CompileConfig::cuda_sparse_per_snode_pool)
       .def_readwrite("device_memory_fraction",
                      &CompileConfig::device_memory_fraction)
-      .def_readwrite("fast_math", &CompileConfig::fast_math)
-      .def_readwrite("advanced_optimization",
-                     &CompileConfig::advanced_optimization)
+      TI_COMPILE_OPTION_PROPERTY(fast_math)
+      TI_COMPILE_OPTION_PROPERTY(advanced_optimization)
       .def_readwrite("ad_stack_size", &CompileConfig::ad_stack_size)
       .def_readwrite("flatten_if", &CompileConfig::flatten_if)
       .def_readwrite("make_thread_local", &CompileConfig::make_thread_local)
@@ -1016,8 +1022,42 @@ void export_lang(py::module &m) {
       .def_readwrite("gfx_cmdlist_max_dispatches",
                      &CompileConfig::gfx_cmdlist_max_dispatches)
       .def_readwrite("cuda_stack_limit", &CompileConfig::cuda_stack_limit)
-      .def_readwrite("external_optimization_level",
-                     &CompileConfig::external_optimization_level);
+      TI_COMPILE_OPTION_PROPERTY(external_optimization_level);
+#undef TI_COMPILE_OPTION_PROPERTY
+
+  m.def("_set_compile_option_source", [](CompileConfig &cfg,
+                                          const std::string &name,
+                                          const std::string &source) {
+    CompileOptionSource value;
+    if (source == "frontend_default") {
+      value = CompileOptionSource::frontend_default;
+    } else if (source == "environment") {
+      value = CompileOptionSource::environment;
+    } else if (source == "init_keyword") {
+      value = CompileOptionSource::init_keyword;
+    } else if (source == "derived") {
+      value = CompileOptionSource::derived;
+    } else {
+      throw py::value_error("Unknown compile option source: " + source);
+    }
+    for (size_t i = 0; i < kCompileOptionNames.size(); ++i) {
+      if (name == kCompileOptionNames[i]) {
+        cfg.option_sources[i] = value;
+        return;
+      }
+    }
+  });
+  m.def("_get_compile_option_sources", [](const CompileConfig &cfg) {
+    static constexpr const char *names[] = {
+        "unspecified", "frontend_default", "environment", "init_keyword",
+        "direct_assignment", "derived", "kernel_override", "export_override"};
+    std::map<std::string, std::string> result;
+    for (size_t i = 0; i < kCompileOptionNames.size(); ++i) {
+      result[kCompileOptionNames[i]] =
+          names[static_cast<size_t>(cfg.option_sources[i])];
+    }
+    return result;
+  });
 
   m.def("reset_default_compile_config",
         [&]() { default_compile_config = CompileConfig(); });

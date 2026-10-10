@@ -76,5 +76,26 @@ TEST(KernelCompileRequest, ValidatesTheResolvedTier) {
   EXPECT_ANY_THROW(resolve_kernel_compile_request(base, {}, "invalid"));
 }
 
+TEST(KernelCompileRequest, PreservesExplicitCapAndIgnoresOriginsInCodeIdentity) {
+  CompileConfig base;
+  base.compile_tier = "full";
+  base.full_simplify_global_iter_cap = 1;
+  for (auto source : {CompileOptionSource::init_keyword,
+                      CompileOptionSource::environment,
+                      CompileOptionSource::direct_assignment}) {
+    base.set_option_source(CompileOption::full_simplify_global_iter_cap, source);
+    const auto request = resolve_kernel_compile_request(base, {});
+    EXPECT_EQ(request.config().full_simplify_global_iter_cap, 1);
+    EXPECT_FALSE(request.provenance().normalized_full_simplify_cap);
+  }
+  base.compile_tier = "balanced";
+  const auto explicit_request = resolve_kernel_compile_request(base, {});
+  base.set_option_source(CompileOption::full_simplify_global_iter_cap,
+                         CompileOptionSource::unspecified);
+  const auto implicit_request = resolve_kernel_compile_request(base, {});
+  EXPECT_EQ(get_hashed_offline_cache_key_context(explicit_request.config(), {}, nullptr),
+            get_hashed_offline_cache_key_context(implicit_request.config(), {}, nullptr));
+}
+
 }  // namespace
 }  // namespace taichi::lang

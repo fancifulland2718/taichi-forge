@@ -246,11 +246,15 @@ class _EnvironmentConfigurator:
         value = os.environ.get(name, "")
         if key in self.kwargs:
             self[key] = self.kwargs[key]
+            if isinstance(self.cfg, _ti_core.CompileConfig):
+                _ti_core._set_compile_option_source(self.cfg, key, "init_keyword")
             if value:
                 _ti_core.warn(f'Environment variable {name}={value} overridden by ti.init argument "{key}"')
             del self.kwargs[key]  # mark as recognized
         elif value:
             self[key] = _cast(value)
+            if isinstance(self.cfg, _ti_core.CompileConfig):
+                _ti_core._set_compile_option_source(self.cfg, key, "environment")
 
     def __getitem__(self, key):
         return getattr(self.cfg, key)
@@ -421,6 +425,7 @@ def init(
     # Shipped Python packages favor edit/run latency. Keep this frontend
     # default independent of the internal C++ CompileConfig constructor.
     cfg.compile_tier = "fast"
+    _ti_core._set_compile_option_source(cfg, "compile_tier", "frontend_default")
 
     spec_cfg = _SpecialConfig()
     env_comp = _EnvironmentConfigurator(kwargs, cfg)
@@ -501,6 +506,7 @@ def init(
     # same precedence as every other ti.init option.
     if not advanced_optimization_explicit:
         cfg.advanced_optimization = cfg.compile_tier != "fast"
+        _ti_core._set_compile_option_source(cfg, "advanced_optimization", "derived")
 
     _ti_core._set_check_out_of_bound_explicit(check_out_of_bound_explicit)
 

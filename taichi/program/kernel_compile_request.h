@@ -17,6 +17,8 @@ struct CompileRequestProvenance {
   CompilePurpose purpose;
   CompileTierSource tier_source;
   bool normalized_full_simplify_cap;
+  std::array<CompileOptionSource, static_cast<size_t>(CompileOption::count)>
+      option_sources{};
 };
 
 // An owned snapshot for one compilation request. Resolving a kernel override

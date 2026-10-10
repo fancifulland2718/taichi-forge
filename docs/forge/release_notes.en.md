@@ -87,6 +87,12 @@ lifetimes. The entries below describe the changes.
   and roots; freed IDs can be reused without rebinding another live module.
   Small Vulkan tests cover interleaved modules, forward/reverse Graph results
   and close/reload. This is ordinary AOT Graph support, not native Graph export.
+- Track the origins of the six shared compilation policy options (tier,
+  advanced IR optimization, LLVM/SPIR-V levels, fast math and global simplify
+  iterations). Explicit `full_simplify_global_iter_cap=1` is preserved under
+  the full tier, including environment and direct Python config assignments.
+  Provenance does not split equivalent code-cache keys. Python and native
+  components must now be paired at ABI revision 13.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

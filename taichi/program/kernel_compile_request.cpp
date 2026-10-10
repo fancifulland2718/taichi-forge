@@ -25,6 +25,8 @@ KernelCompileRequest resolve_kernel_compile_request(
                                       false};
   if (kernel_tier) {
     config.compile_tier = *kernel_tier;
+    config.set_option_source(CompileOption::compile_tier,
+                             CompileOptionSource::kernel_override);
   }
   if (config.compile_tier != "fast" && config.compile_tier != "balanced" &&
       config.compile_tier != "full") {
@@ -32,16 +34,20 @@ KernelCompileRequest resolve_kernel_compile_request(
              config.compile_tier);
   }
 
-  // Preserve Program's existing normalization. The legacy CompileConfig does
-  // not distinguish an explicitly supplied cap of 1 from its default value;
-  // record the derivation without claiming that distinction has been resolved.
+  // Only defaults may be expanded to a full fixed point. An explicit 1 is a
+  // deliberate compilation budget, just as explicit False and 0 are values.
   constexpr int kLegacyDefaultFullSimplifyGlobalIterCap = 1;
   if (config.compile_tier == "full" &&
+      config.option_source(CompileOption::full_simplify_global_iter_cap) ==
+          CompileOptionSource::unspecified &&
       config.full_simplify_global_iter_cap ==
           kLegacyDefaultFullSimplifyGlobalIterCap) {
     config.full_simplify_global_iter_cap = 0;
     provenance.normalized_full_simplify_cap = true;
+    config.set_option_source(CompileOption::full_simplify_global_iter_cap,
+                             CompileOptionSource::derived);
   }
+  provenance.option_sources = config.option_sources;
   return KernelCompileRequest(std::move(config), caps, provenance);
 }
 
