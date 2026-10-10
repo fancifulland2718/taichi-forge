@@ -4,10 +4,10 @@
 GfxRuntime::GfxRuntime(taichi::Arch arch) : Runtime(arch) {
 }
 
-Error GfxRuntime::create_aot_module(const taichi::io::VirtualDir *dir,
+Error GfxRuntime::create_aot_module(std::shared_ptr<const taichi::io::VirtualDir> dir,
                                     TiAotModule &out) {
   taichi::lang::gfx::AotModuleParams params{};
-  params.dir = dir;
+  params.source = std::move(dir);
   params.runtime = &get_gfx_runtime();
   std::unique_ptr<taichi::lang::aot::Module> aot_module =
       taichi::lang::aot::Module::load(arch, params);

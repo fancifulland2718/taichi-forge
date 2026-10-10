@@ -2,6 +2,7 @@
 
 #include <any>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <variant>
@@ -17,6 +18,13 @@ namespace taichi::lang {
 struct RuntimeContext;
 class Graph;
 namespace aot {
+
+// Payload errors may occur after metadata loading for an on-demand artifact.
+// Keep these distinguishable from a missing export or a device/driver failure.
+class ArtifactLoadError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
 
 class TI_DLL_EXPORT Field {
  public:

@@ -675,7 +675,7 @@ TiAotModule ti_create_aot_module(TiRuntime runtime,
     return TI_NULL_HANDLE;
   }
 
-  Error err = ((Runtime *)runtime)->create_aot_module(dir.get(), out);
+  Error err = ((Runtime *)runtime)->create_aot_module(std::move(dir), out);
   err.set_last_error();
 
   TI_CAPI_TRY_CATCH_END();
@@ -695,8 +695,13 @@ TiKernel ti_get_aot_module_kernel(TiAotModule aot_module, const char *name) {
   TI_CAPI_ARGUMENT_NULL_RV(aot_module);
   TI_CAPI_ARGUMENT_NULL_RV(name);
 
-  taichi::lang::aot::Kernel *kernel =
-      ((AotModule *)aot_module)->get_kernel(name);
+  taichi::lang::aot::Kernel *kernel = nullptr;
+  try {
+    kernel = ((AotModule *)aot_module)->get_kernel(name);
+  } catch (const taichi::lang::aot::ArtifactLoadError &e) {
+    ti_set_last_error(TI_ERROR_CORRUPTED_DATA, e.what());
+    return TI_NULL_HANDLE;
+  }
 
   if (kernel == nullptr) {
     ti_set_last_error(TI_ERROR_NAME_NOT_FOUND, name);
@@ -715,8 +720,13 @@ TiComputeGraph ti_get_aot_module_compute_graph(TiAotModule aot_module,
   TI_CAPI_ARGUMENT_NULL_RV(aot_module);
   TI_CAPI_ARGUMENT_NULL_RV(name);
 
-  taichi::lang::aot::CompiledGraph *cgraph =
-      ((AotModule *)aot_module)->get_cgraph(name);
+  taichi::lang::aot::CompiledGraph *cgraph = nullptr;
+  try {
+    cgraph = ((AotModule *)aot_module)->get_cgraph(name);
+  } catch (const taichi::lang::aot::ArtifactLoadError &e) {
+    ti_set_last_error(TI_ERROR_CORRUPTED_DATA, e.what());
+    return TI_NULL_HANDLE;
+  }
 
   if (cgraph == nullptr) {
     ti_set_last_error(TI_ERROR_NAME_NOT_FOUND, name);

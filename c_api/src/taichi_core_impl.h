@@ -138,12 +138,12 @@ class Runtime {
       return TI_NULL_HANDLE;
     }
     TiAotModule aot_module = TI_NULL_HANDLE;
-    Error err = create_aot_module(dir.get(), aot_module);
+    Error err = create_aot_module(std::move(dir), aot_module);
     err.set_last_error();
     return aot_module;
   }
 
-  virtual Error create_aot_module(const taichi::io::VirtualDir *dir,
+  virtual Error create_aot_module(std::shared_ptr<const taichi::io::VirtualDir> dir,
                                   TiAotModule &out) {
     TI_NOT_IMPLEMENTED
   }

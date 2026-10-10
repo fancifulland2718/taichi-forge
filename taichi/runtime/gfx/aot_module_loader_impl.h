@@ -19,6 +19,9 @@ namespace gfx {
 struct TI_DLL_EXPORT AotModuleParams {
   std::string module_path{};
   const io::VirtualDir *dir{nullptr};
+  // Owned sources support deferred shader reads. The legacy borrowed `dir`
+  // path remains eager, so its lifetime need only cover module construction.
+  std::shared_ptr<const io::VirtualDir> source;
   GfxRuntime *runtime{nullptr};
 
   AotModuleParams() = default;

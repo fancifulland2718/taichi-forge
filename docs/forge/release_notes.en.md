@@ -49,6 +49,11 @@ lifetimes. The entries below describe the changes.
 - ZIP-backed artifact sources own the compressed bytes and decompress requested
   entries individually, avoiding an expanded copy of every archive entry.
   Entry payload corruption is reported when that entry is read.
+- GFX AOT modules retain owned artifact sources and load shader bytes only for
+  requested kernels or Graph dependencies. Directory/ZIP and in-memory `.tcm`
+  deployment are verified on Vulkan, including releasing the input buffer before
+  lookup. Failed payload reads are cached and report `TI_ERROR_CORRUPTED_DATA`
+  separately from missing export names.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.

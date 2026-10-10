@@ -8,19 +8,25 @@ class MemoryAotDir : public io::VirtualDir {
  public:
   std::map<std::string, std::string> files;
   std::string short_read;
+  mutable std::map<std::string, int> reads;
 
   bool get_file_size(const std::string &path, size_t &size) const override {
     auto it = files.find(path);
-    if (it == files.end()) return false;
+    if (it == files.end())
+      return false;
     size = it->second.size();
     return true;
   }
-  size_t load_file(const std::string &path, void *dst,
+  size_t load_file(const std::string &path,
+                   void *dst,
                    size_t size) const override {
+    ++reads[path];
     auto it = files.find(path);
-    if (it == files.end()) return 0;
+    if (it == files.end())
+      return 0;
     size = std::min(size, it->second.size());
-    if (path == short_read && size) --size;
+    if (path == short_read && size)
+      --size;
     std::memcpy(dst, it->second.data(), size);
     return size;
   }
@@ -28,8 +34,7 @@ class MemoryAotDir : public io::VirtualDir {
   MemoryAotDir() {
     gfx::TaichiAotData data;
     data.metadata_version = gfx::TaichiAotData::kMetadataVersion;
-    data.required_caps = {{"spirv_version", 0x10300},
-                          {"spirv_has_int64", 1}};
+    data.required_caps = {{"spirv_version", 0x10300}, {"spirv_has_int64", 1}};
     files["metadata.json"] = liong::json::print(liong::json::serialize(data));
     files["graphs.json"] = "[]";
   }
@@ -51,7 +56,8 @@ class MemoryAotDir : public io::VirtualDir {
   }
 
   std::unique_ptr<aot::Module> load() {
-    return gfx::make_aot_module(gfx::AotModuleParams(this, nullptr), Arch::vulkan);
+    return gfx::make_aot_module(gfx::AotModuleParams(this, nullptr),
+                                Arch::vulkan);
   }
 };
 
@@ -61,7 +67,8 @@ TEST(GfxAotValidation, ExposesRequiredCapabilities) {
   ASSERT_FALSE(module->is_corrupted());
   EXPECT_EQ(module->get_required_caps().get(DeviceCapability::spirv_version),
             0x10300);
-  EXPECT_EQ(module->get_required_caps().get(DeviceCapability::spirv_has_int64), 1);
+  EXPECT_EQ(module->get_required_caps().get(DeviceCapability::spirv_has_int64),
+            1);
 }
 
 TEST(GfxAotValidation, RejectsMissingShortAndInvalidShaderReads) {
@@ -86,6 +93,26 @@ TEST(GfxAotValidation, RejectsMalformedMetadata) {
   EXPECT_TRUE(dir.load()->is_corrupted());
   dir.files["metadata.json"] = "{";
   EXPECT_TRUE(dir.load()->is_corrupted());
+}
+
+TEST(GfxAotValidation, OwnedSourcesDeferShaderReadsAndCacheFailures) {
+  auto dir = std::make_shared<MemoryAotDir>();
+  dir->add_shader({0});
+  std::weak_ptr<MemoryAotDir> weak = dir;
+  gfx::AotModuleParams params;
+  params.source = dir;
+  auto module = gfx::make_aot_module(params, Arch::vulkan);
+  ASSERT_FALSE(module->is_corrupted());
+  EXPECT_EQ(dir->reads["test_task.spv"], 0);
+  dir.reset();
+  params.source.reset();
+  ASSERT_FALSE(weak.expired());
+  EXPECT_EQ(module->get_kernel("absent"), nullptr);
+  EXPECT_THROW(module->get_kernel("test"), aot::ArtifactLoadError);
+  EXPECT_THROW(module->get_kernel("test"), aot::ArtifactLoadError);
+  EXPECT_EQ(weak.lock()->reads["test_task.spv"], 1);
+  module.reset();
+  EXPECT_TRUE(weak.expired());
 }
 
 }  // namespace

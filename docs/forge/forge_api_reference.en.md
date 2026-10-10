@@ -2248,6 +2248,24 @@ Python objects fail before compilation. Keys use the filesystem-safe
 __tmpl__ convention; signatures over 180 UTF-8 bytes use a deterministic
 SHA-256 key to avoid Windows path-length failures.
 
+### Loading GFX artifacts
+
+The GFX C API loader reads metadata and checks device capabilities when creating
+a module. It reads and registers only the shaders needed by
+`ti_get_aot_module_kernel()` or `ti_get_aot_module_compute_graph()`. Prepare these
+handles before a latency-sensitive loop; replay does not read artifact files.
+An invalid unused shader no longer prevents loading an independent valid kernel.
+Payload failures are cached until the module is recreated and report
+`TI_ERROR_CORRUPTED_DATA`; a missing exported name reports `TI_ERROR_NAME_NOT_FOUND`.
+
+Directory files must remain unchanged and available until the module is
+destroyed. Relative paths are resolved when opening the source. ZIP sources own
+compressed data and expand individual requested entries; the caller may release
+the input buffer after `ti_create_aot_module()` returns. Root buffers are still
+allocated at module creation. Module/kernel handle lifetime and synchronization
+requirements are unchanged; concurrent first lookup is not a new guarantee.
+The legacy borrowed C++ `AotModuleParams.dir` path keeps eager shader reads.
+
 ### Explicit reverse kernels
 
 `module.add_kernel(evaluate.grad, name="evaluate_backward")` exports a reverse

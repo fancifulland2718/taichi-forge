@@ -1861,6 +1861,19 @@ array 会复用一个 artifact。SOA 或结构化 ndarray view、非连续 host 
 Python 对象会在编译前明确拒绝。key 使用文件系统安全的 __tmpl__ 约定；UTF-8 signature
 超过 180 bytes 时使用确定性 SHA-256 key，避免 Windows path length 失败。
 
+### 加载 GFX 产物
+
+GFX C API loader 在创建模块时读取元数据并检查设备能力，在
+`ti_get_aot_module_kernel()` 或 `ti_get_aot_module_compute_graph()` 时才读取并注册
+相应 shader。对延迟敏感的循环应提前准备这些句柄；重放不读取产物文件。未使用 shader
+损坏不会阻止独立有效 kernel 的加载。读取失败会缓存到模块重建，报告
+`TI_ERROR_CORRUPTED_DATA`；导出名称不存在报告 `TI_ERROR_NAME_NOT_FOUND`。
+
+目录文件须在模块销毁前保持可访问且不变；相对路径在打开数据源时解析。ZIP 数据源持有
+压缩数据，按需展开条目；`ti_create_aot_module()` 返回后即可释放输入缓冲。根缓冲仍在
+模块创建时分配。模块/kernel 句柄的寿命和同步要求不变，不新增并发首次查找保证。
+旧 C++ 借用式 `AotModuleParams.dir` 路径仍在构造时读取 shader。
+
 ### 显式反向 kernel
 
 `module.add_kernel(evaluate.grad, name="evaluate_backward")` 导出反向 kernel。

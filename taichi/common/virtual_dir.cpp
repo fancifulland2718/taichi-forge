@@ -2,6 +2,7 @@
 #include "taichi/common/miniz.h"
 
 #include <limits>
+#include <filesystem>
 #include <mutex>
 #include <unordered_map>
 
@@ -16,14 +17,10 @@ struct FilesystemVirtualDir : public VirtualDir {
   }
 
   static std::unique_ptr<VirtualDir> create(const std::string &base_dir) {
-    std::string base_dir2;
-    if (base_dir.empty()) {
-      base_dir2 = "./";
-    } else if (base_dir.back() != '/') {
-      base_dir2 = base_dir + "/";
-    } else {
-      base_dir2 = base_dir;
-    }
+    // Deferred reads must not change target when the caller changes cwd.
+    std::string base_dir2 = std::filesystem::absolute(
+        base_dir.empty() ? "." : base_dir).lexically_normal().generic_string();
+    if (base_dir2.back() != '/') base_dir2 += '/';
 
     return std::unique_ptr<VirtualDir>(new FilesystemVirtualDir(base_dir2));
   }
