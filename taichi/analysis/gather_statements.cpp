@@ -26,7 +26,7 @@ class StmtSearcher : public BasicStmtVisitor {
                                  const std::function<bool(Stmt *)> &test) {
     StmtSearcher searcher(test);
     root->accept(&searcher);
-    return searcher.results_;
+    return std::move(searcher.results_);
   }
 };
 

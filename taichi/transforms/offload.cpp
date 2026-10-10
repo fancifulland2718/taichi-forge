@@ -397,7 +397,7 @@ class StmtToOffloaded : public BasicStmtVisitor {
   static std::unordered_map<Stmt *, Stmt *> run(IRNode *ir) {
     StmtToOffloaded pass;
     ir->accept(&pass);
-    return pass.stmt_to_offloaded_;
+    return std::move(pass.stmt_to_offloaded_);
   }
 
  private:
@@ -533,7 +533,7 @@ class IdentifyValuesUsedInOtherOffloads : public BasicStmtVisitor {
     IdentifyValuesUsedInOtherOffloads pass(config, stmt_to_offloaded,
                                            offloaded_ranges);
     root->accept(&pass);
-    return pass.local_to_global_;
+    return std::move(pass.local_to_global_);
   }
 
  private:

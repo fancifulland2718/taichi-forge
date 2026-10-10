@@ -11,12 +11,18 @@ namespace taichi::lang {
 // operands as well as operands that existed when the pass began.
 class BatchStmtReplacer {
  public:
-  explicit BatchStmtReplacer(IRNode *root)
-      : usages_(irpass::analysis::gather_statement_usages(root)) {
+  explicit BatchStmtReplacer(IRNode *root) : root_(root) {
   }
 
   void replace(Stmt *old_stmt, VecStatement stmts, Stmt *value) {
     TI_ASSERT(!old_stmt->is_container_statement());
+    // Most cleanup invocations do not rewrite anything. Only build the
+    // reverse operand index when a replacement actually needs it, before
+    // registering pending statements or changing any operands.
+    if (!usages_initialized_) {
+      usages_ = irpass::analysis::gather_statement_usages(root_);
+      usages_initialized_ = true;
+    }
     auto &edits = edits_[old_stmt->parent];
     TI_ASSERT(edits.find(old_stmt) == edits.end());
     for (auto &stmt : stmts.stmts) {
@@ -74,6 +80,8 @@ class BatchStmtReplacer {
   }
 
  private:
+  IRNode *root_;
+  bool usages_initialized_{false};
   std::unordered_map<Stmt *, std::vector<std::pair<Stmt *, int>>> usages_;
   std::unordered_map<Block *, std::unordered_map<Stmt *, VecStatement>> edits_;
 };

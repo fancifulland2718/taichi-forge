@@ -26,6 +26,35 @@ TEST(BatchStmtReplacer, RebindsNewStatementsAndRepeatedOperands) {
   EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
 }
 
+TEST(BatchStmtReplacer, NoopThenMultipleBatchesUpdateContainerOperands) {
+  auto root = std::make_unique<Block>();
+  auto one = root->push_back<ConstStmt>(TypedConstant(1));
+  auto condition = root->push_back<BinaryOpStmt>(BinaryOpType::add, one, one);
+  auto branch = root->push_back<IfStmt>(condition)->as<IfStmt>();
+  branch->set_true_statements(std::make_unique<Block>());
+  auto result = branch->true_statements->push_back<ReturnStmt>(
+      std::vector<Stmt *>{condition, one});
+  BatchStmtReplacer modifier(root.get());
+  EXPECT_FALSE(modifier.apply());
+
+  VecStatement first;
+  auto sum = first.push_back<BinaryOpStmt>(BinaryOpType::sub, one, one);
+  modifier.replace(condition, std::move(first), sum);
+  EXPECT_TRUE(modifier.apply());
+  EXPECT_FALSE(modifier.apply());
+
+  VecStatement second;
+  auto two = second.push_back<ConstStmt>(TypedConstant(2));
+  modifier.replace(one, std::move(second), two);
+  EXPECT_TRUE(modifier.apply());
+  EXPECT_EQ(sum->lhs, two);
+  EXPECT_EQ(sum->rhs, two);
+  EXPECT_EQ(branch->cond, sum);
+  EXPECT_EQ(result->operand(0), sum);
+  EXPECT_EQ(result->operand(1), two);
+  EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+}
+
 TEST(BatchStmtReplacer, ConstantFoldPropagatesLongChainsIntoBranches) {
   auto root = std::make_unique<Block>();
   auto one = root->push_back<ConstStmt>(TypedConstant(1));

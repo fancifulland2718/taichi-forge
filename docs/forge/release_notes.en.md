@@ -34,6 +34,11 @@ changes in both areas already in source. These include lower compilation overhea
 for large functions and fixes for backend correctness, autodiff and resource
 lifetimes. The entries below describe the changes.
 
+- Constant folding and atomic demotion build batch-replacement use indexes only
+  when a rewrite occurs, avoiding whole-IR collection during no-op traversals.
+  Analysis results transfer ownership and avoid temporary operand vectors and
+  result-container copies. Optimization rules, convergence and numerical
+  behavior remain unchanged.
 - JIT Graphs retain their build-time execution artifact, callable ABI and launch
   policy. First replay no longer selects different code or recompiles after a
   global configuration change; rebuild the Graph to adopt new compilation

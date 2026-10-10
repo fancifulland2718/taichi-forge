@@ -350,9 +350,9 @@ class UniquelyAccessedSNodeSearcher : public BasicStmtVisitor {
     root->accept(&searcher.loop_unique_stmt_searcher_);
     root->accept(&searcher);
 
-    return std::make_tuple(searcher.accessed_pointer_,
-                           searcher.accessed_arr_pointer_,
-                           searcher.accessed_matrix_pointer_);
+    return std::make_tuple(std::move(searcher.accessed_pointer_),
+                           std::move(searcher.accessed_arr_pointer_),
+                           std::move(searcher.accessed_matrix_pointer_));
   }
 };
 
@@ -418,7 +418,7 @@ class UniquelyAccessedBitStructGatherer : public BasicStmtVisitor {
   run(IRNode *root) {
     UniquelyAccessedBitStructGatherer gatherer;
     root->accept(&gatherer);
-    return gatherer.result_;
+    return std::move(gatherer.result_);
   }
 };
 

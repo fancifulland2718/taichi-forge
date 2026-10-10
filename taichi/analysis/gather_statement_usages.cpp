@@ -18,9 +18,8 @@ class GatherStatementUsages : public BasicStmtVisitor {
   }
 
   void default_visit(Stmt *stmt) {
-    auto ops = stmt->get_operands();
-    for (int i = 0; i < ops.size(); i++) {
-      auto &op = ops[i];
+    for (int i = 0; i < stmt->num_operands(); i++) {
+      auto *op = stmt->operand(i);
       if (op != nullptr) {
         stmt_usages_[op].push_back({stmt, i});
       }
@@ -39,7 +38,7 @@ class GatherStatementUsages : public BasicStmtVisitor {
       IRNode *node) {
     GatherStatementUsages pass;
     node->accept(&pass);
-    return pass.stmt_usages_;
+    return std::move(pass.stmt_usages_);
   }
 };
 

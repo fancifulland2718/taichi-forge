@@ -88,7 +88,7 @@ class ConstExprPropagation : public IRVisitor {
       const std::function<bool(Stmt *)> &is_const_seed) {
     ConstExprPropagation prop(is_const_seed);
     block->accept(&prop);
-    return prop.const_stmts_;
+    return std::move(prop.const_stmts_);
   }
 
  private:
