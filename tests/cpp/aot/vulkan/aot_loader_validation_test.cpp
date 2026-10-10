@@ -169,5 +169,26 @@ TEST(GfxAotValidation, RejectsInvalidAliases) {
   EXPECT_TRUE(dir.load()->is_corrupted());
 }
 
+TEST(GfxAotValidation, RejectsUndeclaredRootBindings) {
+  MemoryAotDir dir;
+  dir.add_shader({0x07230203, 0x10300, 0, 1, 0});
+  gfx::TaichiAotData data;
+  liong::json::deserialize(liong::json::parse(dir.files["metadata.json"]), data);
+  data.root_buffer_size = 4;
+  data.root_buffer_sizes = {4};
+  data.kernel_metadata[0] = {1, {0}};
+  spirv::TaskAttributes::BufferBind bind;
+  bind.buffer = {spirv::TaskAttributes::BufferType::Root, 0};
+  data.kernels[0].tasks_attribs[0].buffer_binds = {bind};
+  dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  EXPECT_FALSE(dir.load()->is_corrupted());
+  data.kernel_metadata[0].used_snode_tree_ids.clear();
+  dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  EXPECT_TRUE(dir.load()->is_corrupted());
+  data.kernels[0].tasks_attribs[0].buffer_binds[0].buffer.root_id.clear();
+  dir.files["metadata.json"] = liong::json::print(liong::json::serialize(data));
+  EXPECT_TRUE(dir.load()->is_corrupted());
+}
+
 }  // namespace
 }  // namespace taichi::lang

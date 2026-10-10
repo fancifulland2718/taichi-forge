@@ -2,6 +2,7 @@
 #include "taichi/program/kernel_compile_request.h"
 
 #include <fstream>
+#include <set>
 #include <type_traits>
 
 #include "taichi/aot/module_data.h"
@@ -10,6 +11,21 @@
 
 namespace taichi::lang {
 namespace gfx {
+namespace {
+
+bool is_dense_tree(const SNode *node) {
+  if (node->need_activation()) {
+    return false;
+  }
+  for (const auto &child : node->ch) {
+    if (!is_dense_tree(child.get())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
 
 AotModuleBuilderImpl::AotModuleBuilderImpl(
     const std::vector<spirv::CompiledSNodeStructs> &compiled_structs,
@@ -27,14 +43,9 @@ AotModuleBuilderImpl::AotModuleBuilderImpl(
   ti_aot_data_.root_buffer_sizes.reserve(compiled_structs.size());
   for (std::size_t tree_id = 0; tree_id < compiled_structs.size(); ++tree_id) {
     const auto &compiled = compiled_structs[tree_id];
-    TI_ERROR_IF(
-        compiled.root == nullptr ||
-            compiled.root->get_snode_tree_id() != static_cast<int>(tree_id),
-        "GFX AOT requires active SNodeTrees with contiguous artifact-local "
-        "ids [0, N). Tree slot {} is empty or has a different runtime id; "
-        "rebuild the module from a clean runtime after destroyed trees.",
-        tree_id);
-    ti_aot_data_.root_buffer_sizes.push_back(compiled.root_size);
+    // Producer IDs may contain retired slots. Only the exported resource
+    // closure is required to be active; dump assigns its compact module IDs.
+    ti_aot_data_.root_buffer_sizes.push_back(compiled.root ? compiled.root_size : 0);
   }
   if (!ti_aot_data_.root_buffer_sizes.empty()) {
     ti_aot_data_.root_buffer_size = ti_aot_data_.root_buffer_sizes.front();
@@ -69,7 +80,57 @@ void AotModuleBuilderImpl::dump(const std::string &output_dir,
   }
 
   {
-    std::string json = liong::json::print(liong::json::serialize(ti_aot_data_));
+    // Copy metadata only, never the potentially large SPIR-V payload vectors.
+    TaichiAotData artifact;
+    artifact.metadata_version = ti_aot_data_.metadata_version;
+    artifact.kernels = ti_aot_data_.kernels;
+    artifact.kernel_metadata = ti_aot_data_.kernel_metadata;
+    artifact.kernel_aliases = ti_aot_data_.kernel_aliases;
+    artifact.fields = ti_aot_data_.fields;
+    artifact.required_caps = ti_aot_data_.required_caps;
+    std::set<int> referenced;
+    for (const auto &metadata : artifact.kernel_metadata) {
+      referenced.insert(metadata.used_snode_tree_ids.begin(),
+                        metadata.used_snode_tree_ids.end());
+    }
+    for (const auto &field : artifact.fields) {
+      referenced.insert(field.snode_tree_id);
+    }
+    std::map<int, int> module_ids;
+    for (int tree_id : referenced) {
+      TI_ERROR_IF(tree_id < 0 ||
+                      static_cast<size_t>(tree_id) >= compiled_structs_.size() ||
+                      !compiled_structs_[tree_id].root,
+                  "GFX AOT references inactive SNodeTree {}.", tree_id);
+      TI_ERROR_IF(!is_dense_tree(compiled_structs_[tree_id].root),
+                  "GFX AOT resource relocation supports dense SNodeTrees; "
+                  "SNodeTree {} requires sparse runtime state.", tree_id);
+      module_ids.emplace(tree_id, static_cast<int>(artifact.root_buffer_sizes.size()));
+      artifact.root_buffer_sizes.push_back(compiled_structs_[tree_id].root_size);
+    }
+    if (!artifact.root_buffer_sizes.empty()) {
+      artifact.root_buffer_size = artifact.root_buffer_sizes.front();
+    }
+    for (auto &metadata : artifact.kernel_metadata) {
+      metadata.num_snode_trees = artifact.root_buffer_sizes.size();
+      for (int &id : metadata.used_snode_tree_ids) {
+        id = module_ids.at(id);
+      }
+    }
+    for (auto &field : artifact.fields) {
+      field.snode_tree_id = module_ids.at(field.snode_tree_id);
+    }
+    for (auto &kernel : artifact.kernels) {
+      for (auto &task : kernel.tasks_attribs) {
+        for (auto &bind : task.buffer_binds) {
+          if (bind.buffer.type == spirv::TaskAttributes::BufferType::Root) {
+            TI_ASSERT(bind.buffer.root_id.size() == 1);
+            bind.buffer.root_id[0] = module_ids.at(bind.buffer.root_id[0]);
+          }
+        }
+      }
+    }
+    std::string json = liong::json::print(liong::json::serialize(artifact));
     std::fstream f(output_dir + "/metadata.json",
                    std::ios::trunc | std::ios::out);
     f.write(json.data(), json.size());

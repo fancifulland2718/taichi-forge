@@ -117,6 +117,19 @@ class AotModuleImpl : public aot::Module {
         TI_WARN("GFX AOT kernel {} has invalid SNodeTree dependencies", i);
         return;
       }
+      for (const auto &task : ti_aot_data_.kernels[i].tasks_attribs) {
+        for (const auto &bind : task.buffer_binds) {
+          if (bind.buffer.type == spirv::TaskAttributes::BufferType::Root &&
+              (bind.buffer.root_id.size() != 1 ||
+               !std::binary_search(metadata.used_snode_tree_ids.begin(),
+                                   metadata.used_snode_tree_ids.end(),
+                                   bind.buffer.root_id.front()))) {
+            mark_corrupted();
+            TI_WARN("GFX AOT kernel {} has an undeclared root binding", i);
+            return;
+          }
+        }
+      }
     }
     for (const auto &field : ti_aot_data_.fields) {
       if (field.snode_tree_id < 0 ||

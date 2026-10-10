@@ -78,6 +78,10 @@ lifetimes. The entries below describe the changes.
   names. Older artifact versions remain readable. Sharing requires matching ABI,
   task metadata and resource dependencies; separate modules retain separate
   execution registrations.
+- GFX AOT dense exports retain only layouts referenced by exported kernels,
+  Graphs or explicitly exported fields. Producer tree-ID holes are compacted
+  into module-local IDs, with shader root bindings validated against the
+  declared dependencies. Sparse runtime state is not relocated by this path.
 - Local matrix additions with at most one nonzero component, including matrix
   adjoint updates, avoid expanding zero contributions into redundant loads,
   additions and stores when the local load, addition and store are adjacent.

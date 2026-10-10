@@ -944,6 +944,33 @@ def test_gfx_aot_kernel_aliases(tmp_path):
     assert graphs[0]["value"]["dispatches"][0]["kernel_name"] in names
 
 
+@test_utils.test(arch=[ti.vulkan], offline_cache=False)
+def test_gfx_aot_dense_resource_closure(tmp_path):
+    fields, trees = [], []
+    for count in (3, 4, 6, 5):
+        field = ti.field(ti.i32)
+        builder = ti.FieldsBuilder()
+        builder.dense(ti.i, count).place(field)
+        trees.append(builder.finalize())
+        fields.append(field)
+    trees[0].destroy()
+    used = fields[1]
+
+    @ti.kernel
+    def fill():
+        for i in used:
+            used[i] = i + 3
+
+    module = ti.aot.Module()
+    module.add_kernel(fill)
+    module.add_field("retained", fields[2])
+    module.save(str(tmp_path))
+    metadata = json.loads((tmp_path / "metadata.json").read_text())
+    assert metadata["root_buffer_sizes"] == [16, 24]
+    assert metadata["kernel_metadata"] == [{"num_snode_trees": 2, "used_snode_tree_ids": [0]}]
+    assert metadata["fields"][0]["snode_tree_id"] == 1
+
+
 @test_utils.test(arch=[ti.vulkan])
 def test_save_kernel_with_rwtexture():
     @ti.kernel
