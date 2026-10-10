@@ -102,5 +102,33 @@ TEST(CFGDeadStore, WeakenedAtomicRetainsItsInputStore) {
   EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
 }
 
+TEST(CFGDeadStore, LiveAliasUpdatePreservesPartialTensorReads) {
+  for (bool lowered : {false, true}) {
+    auto root = std::make_unique<Block>();
+    auto zero = root->push_back<ConstStmt>(TypedConstant(0));
+    auto one = root->push_back<ConstStmt>(TypedConstant(1));
+    auto type = TypeFactory::get_instance().get_tensor_type(
+        {2}, PrimitiveType::i32);
+    auto local = root->push_back<AllocaStmt>(type);
+    auto first = root->push_back<MatrixPtrStmt>(local, zero);
+    auto alias = root->push_back<MatrixPtrStmt>(local, zero);
+    auto second = root->push_back<MatrixPtrStmt>(local, one);
+    auto values = root->push_back<MatrixInitStmt>(std::vector<Stmt *>{one, one});
+    values->ret_type = type;
+    auto whole = root->push_back<LocalStoreStmt>(local, values);
+    auto before = root->push_back<LocalLoadStmt>(second);
+    auto part = root->push_back<LocalStoreStmt>(first, zero);
+    auto after = root->push_back<LocalLoadStmt>(alias);
+    root->push_back<ReturnStmt>(std::vector<Stmt *>{before, after});
+    irpass::type_check(root.get(), CompileConfig{});
+    auto cfg = irpass::analysis::build_cfg(root.get());
+    cfg->simplify_graph();
+    cfg->dead_store_elimination(lowered, std::nullopt);
+    EXPECT_FALSE(whole->erased);
+    EXPECT_FALSE(part->erased);
+    EXPECT_NO_THROW(irpass::analysis::verify(root.get()));
+  }
+}
+
 }  // namespace
 }  // namespace taichi::lang

@@ -76,6 +76,9 @@ lifetimes. The entries below describe the changes.
 - CFG dead-store elimination checks local uses and full overwrites before
   querying successor liveness, avoiding redundant alias scans while preserving
   partial tensor writes and atomic return values.
+- CFG dead-store elimination updates live-address state once per retained store,
+  avoiding a copied map and repeated identical updates while preserving partial
+  tensor coverage and the existing alias predicate.
 - CFG dataflow analysis narrows direct local tensor alias candidates to their
   owning allocation, preserving dynamic-index checks and nonlocal fallbacks.
 - CFG store/load forwarding indexes scalar local definitions to avoid repeated

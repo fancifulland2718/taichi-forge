@@ -1200,14 +1200,24 @@ bool CFGNode::dead_store_elimination(bool after_lower_access,
 
           // Remove the address from live_in_this_node if it's stored in this
           // node.
-          auto old_live_in_this_node = live_in_this_node;
-          for (auto &var : old_live_in_this_node) {
-            if (irpass::analysis::definitely_same_address(store_ptr,
-                                                          var.first)) {
-              update_container_with_alias(tensor_to_matrix_ptrs_map,
-                                          matrix_ptr_to_tensor_map,
-                                          live_in_this_node, store_ptr, true);
-            }
+          // Every matching address triggers the same idempotent update of
+          // store_ptr and its tensor relatives. Find a match before mutating
+          // the map instead of copying and scanning it for every store. A
+          // partial entry still counts here: this is address identity, not
+          // the full-coverage test used by contain_variable().
+          const bool has_live_alias =
+              live_in_this_node.count(store_ptr) != 0 ||
+              (!(store_ptr->is<AllocaStmt>() ||
+                 store_ptr->is<AdStackAllocaStmt>()) &&
+               std::any_of(live_in_this_node.begin(), live_in_this_node.end(),
+                           [&](const auto &var) {
+                             return irpass::analysis::definitely_same_address(
+                                 store_ptr, var.first);
+                           }));
+          if (has_live_alias) {
+            update_container_with_alias(tensor_to_matrix_ptrs_map,
+                                        matrix_ptr_to_tensor_map,
+                                        live_in_this_node, store_ptr, true);
           }
         }
       }
