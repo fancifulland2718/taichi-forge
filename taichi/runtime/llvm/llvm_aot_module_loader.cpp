@@ -1,5 +1,6 @@
 #include "taichi/runtime/llvm/llvm_aot_module_loader.h"
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 
@@ -49,6 +50,8 @@ LlvmAotModule::LlvmAotModule(
                                cuda_context.get_ptx_version());
   }
 
+  snode_tree_ids_ = cache_reader_->get_snode_tree_ids();
+
   const std::string graph_path = fmt::format("{}/graphs.tcb", module_path);
   read_from_binary_file(graphs_, graph_path);
 }
@@ -70,6 +73,11 @@ LlvmOfflineCache::KernelCacheData LlvmAotModule::load_kernel_from_cache(
   auto ok = cache_reader_->get_kernel_cache(loaded, name,
                                             *tlctx->get_this_thread_context());
   TI_ERROR_IF(!ok, "Failed to load kernel={}", name);
+  for (int tree_id : loaded.used_snode_tree_ids) {
+    TI_ERROR_IF(!std::binary_search(snode_tree_ids_.begin(),
+                                     snode_tree_ids_.end(), tree_id),
+                "LLVM AOT kernel {} is missing SNodeTree {}", name, tree_id);
+  }
   return loaded;
 }
 

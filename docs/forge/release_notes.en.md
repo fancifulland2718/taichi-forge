@@ -41,6 +41,11 @@ lifetimes. The entries below describe the changes.
   now checks serialized capability requirements, accepting devices with equal
   or higher capability levels and rejecting insufficient devices before root
   allocation.
+- AOT exports explicit `kernel.grad` targets, including kernel templates and
+  bound methods. Dense-field reverse kernels and ordinary AOT Graph replay are
+  verified through separate C API processes on CPU, CUDA and Vulkan. LLVM AOT
+  includes referenced field layouts automatically and preserves nonconsecutive
+  tree IDs; Python Tape orchestration and Vulkan autodiff stacks are not added.
 - LLVM O0 removes private scalar spill slots after runtime helper inlining,
   reducing temporary loads/stores before machine-code generation without
   enabling higher-tier arithmetic optimizations.

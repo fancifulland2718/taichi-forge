@@ -85,6 +85,14 @@ void LlvmAotModuleBuilder::add_per_backend(const std::string &identifier,
   kcache.kernel_key = identifier;
   kcache.compiled_data = std::move(compiled.compiled_data);
   kcache.used_snode_tree_ids = std::move(compiled.used_snode_tree_ids);
+  // A callable artifact must contain the layouts of every tree it accesses,
+  // including gradient trees. add_field() is optional name publication, not a
+  // prerequisite for making the kernel's storage dependencies deployable.
+  for (int tree_id : kcache.used_snode_tree_ids) {
+    if (cache_.fields.find(tree_id) == cache_.fields.end()) {
+      cache_.fields.emplace(tree_id, prog_->get_cached_field(tree_id));
+    }
+  }
   kcache.graph_metadata = std::move(compiled.graph_metadata);
   kcache.args.reserve(kernel->nested_parameters.size());
   for (const auto &p : kernel->nested_parameters)

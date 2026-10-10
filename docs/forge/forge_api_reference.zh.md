@@ -1861,6 +1861,22 @@ array 会复用一个 artifact。SOA 或结构化 ndarray view、非连续 host 
 Python 对象会在编译前明确拒绝。key 使用文件系统安全的 __tmpl__ 约定；UTF-8 signature
 超过 180 bytes 时使用确定性 SHA-256 key，避免 Windows path length 失败。
 
+### 显式反向 kernel
+
+`module.add_kernel(evaluate.grad, name="evaluate_backward")` 导出反向 kernel。
+省略 `name` 时使用 `evaluate_grad`，正向仍使用 `evaluate`。kernel 模板和绑定的
+data-oriented 方法也支持显式 `.grad`；导出时冻结绑定对象。同名导出不同
+specialization 会报错，重复导出相同 specialization 不增加产物。
+
+dense field 的正向与反向 kernel 可通过 CPU、CUDA、Vulkan C API 直接执行，或放入
+显式 AOT Graph。应用需要导出并按顺序调用初始化、梯度清零/播种、正向、反向和读回。
+LLVM 产物自动携带导出 kernel 实际引用的 SNodeTree 布局，包括梯度存储；C API 按
+序列化的树 ID 分配，即使编号不连续也能使用。`add_field()` 仍可显式发布 field。
+
+这复用后端现有反向实现，不序列化 Python `Tape`，不恢复已覆盖的正向历史，也不新增
+Vulkan 自动微分栈支持。独立部署回归覆盖稠密多项式 field、正向/梯度存储、重复播种和
+普通 AOT Graph 重放。C API 是单独的原生构建；本次不改变 wheel SDK 打包方式。
+
 ## Kernel 与 Graph API
 
 Dense Field 专属 layout、生命周期、并发、AD 与后端行为见

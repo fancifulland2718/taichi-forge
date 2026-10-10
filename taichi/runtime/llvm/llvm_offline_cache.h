@@ -170,6 +170,7 @@ class LlvmOfflineCacheFileReader {
                        int snode_tree_id);
 
   size_t get_num_snode_trees();
+  std::vector<int> get_snode_tree_ids() const;
 
   static std::unique_ptr<LlvmOfflineCacheFileReader> make(
       const std::string &path,

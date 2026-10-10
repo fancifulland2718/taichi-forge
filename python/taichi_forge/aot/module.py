@@ -31,6 +31,33 @@ from taichi_forge.types.texture_type import RWTextureType, TextureType
 import taichi_forge
 
 
+def _resolve_kernel(kernel_fn):
+    """Resolve an export target without silently switching an adjoint to primal."""
+    bound = None
+    if isinstance(kernel_fn, kernel_impl.Kernel):
+        kernel = kernel_fn
+    elif isinstance(kernel_fn, kernel_impl._BoundedDifferentiableMethod):
+        bound = kernel_fn
+        kernel = bound._primal
+    elif (
+        isinstance(getattr(kernel_fn, "__self__", None), kernel_impl._BoundedDifferentiableMethod)
+        and kernel_fn.__func__ is kernel_impl._BoundedDifferentiableMethod.grad
+    ):
+        bound = kernel_fn.__self__
+        kernel = bound._adjoint
+    else:
+        kernel = getattr(kernel_fn, "_primal", None)
+    if not isinstance(kernel, kernel_impl.Kernel):
+        raise TypeError("AOT export expects a Taichi kernel or kernel.grad")
+    name = kernel.func.__name__
+    if kernel.autodiff_mode == _ti_core.AutodiffMode.REVERSE:
+        name += "_grad"
+    bound_args = {}
+    if bound is not None and not bound._is_staticmethod:
+        bound_args[kernel.arguments[0].name] = bound._kernel_owner
+    return kernel, name, bound_args
+
+
 class KernelTemplate:
     def __init__(self, kernel_fn, aot_module):
         self._kernel_fn = kernel_fn
@@ -118,9 +145,7 @@ class KernelTemplate:
         )
 
     def instantiate(self, **kwargs):
-        name = self._kernel_fn.__name__
-        kernel = self._kernel_fn._primal
-        assert isinstance(kernel, kernel_impl.Kernel)
+        kernel, name, bound_args = _resolve_kernel(self._kernel_fn)
         reject_acceleration_structure_arguments(kernel, "AOT kernel templates")
         reject_texture_collection_arguments(kernel, "AOT kernel templates")
         injected_args = []
@@ -129,7 +154,7 @@ class KernelTemplate:
             arg.name
             for arg in kernel.arguments
             if isinstance(arg.annotation, (template, NdarrayType))
-        }
+        } - set(bound_args)
         provided = set(kwargs)
         missing = sorted(required - provided)
         unknown = sorted(provided - required)
@@ -144,7 +169,9 @@ class KernelTemplate:
             )
 
         for arg in kernel.arguments:
-            if isinstance(arg.annotation, template):
+            if arg.name in bound_args:
+                injected_args.append(bound_args[arg.name])
+            elif isinstance(arg.annotation, template):
                 v = kwargs[arg.name]
                 key_p += arg.name
                 key_p = self.keygen(v, key_p, self._aot_module._fields.items())
@@ -173,8 +200,12 @@ class KernelTemplate:
             )
         if key_p in self._instantiated_keys:
             return
-        kernel.ensure_compiled(*injected_args)
-        self._aot_module._aot_builder.add_kernel_template(name, key_p, kernel.kernel_cpp)
+        key = kernel.ensure_compiled(*injected_args)
+        compiled = kernel.compiled_kernels[key]
+        export_name = name + "__tmpl__" + key_p
+        if self._aot_module._check_kernel_export(export_name, compiled):
+            self._aot_module._aot_builder.add_kernel_template(name, key_p, compiled)
+            self._aot_module._exported_kernels[export_name] = compiled
         self._instantiated_keys.add(key_p)
 
         # kernel AOT
@@ -223,6 +254,7 @@ class Module:
 
         self._arch = arch
         self._kernels = []
+        self._exported_kernels = {}
         self._fields = {}
         rtm = impl.get_runtime()
         rtm._finalize_root_fb_for_aot()
@@ -266,30 +298,50 @@ class Module:
             column_num,
         )
 
+    def _check_kernel_export(self, name, compiled):
+        previous = self._exported_kernels.get(name)
+        if previous is not None and previous is not compiled:
+            raise TaichiCompilationError(f"AOT kernel name {name!r} is already bound to another specialization")
+        return previous is None
+
     def add_kernel(self, kernel_fn, template_args=None, name=None):
         """Add a taichi kernel to the AOT module.
 
         Args:
-          kernel_fn (Function): the function decorated by taichi `kernel`.
+          kernel_fn (Function): a Taichi kernel or its explicit ``.grad`` kernel.
           template_args (Dict[str, Any]): a dict where key is the template
             parameter name, and value is the instantiating arg. Note that this
             works for both :class:`~taichi_forge.types.template` and for
             `:class:`~taichi_forge.types.ndarray`.
           name (str): Name to identify this kernel in the module. If not
-            provided, uses the built-in ``__name__`` attribute of `kernel_fn`.
+            provided, uses the source function name, suffixed with ``_grad``
+            for a reverse kernel. A bound method freezes its owner at export.
+
+        Dense-field reverse kernels use the same backend autodiff restrictions
+        as JIT. Export explicit initialization, gradient clearing/seeding and
+        readback kernels; this does not serialize Tape orchestration.
 
         """
-        kernel_name = name or kernel_fn.__name__
-        kernel = kernel_fn._primal
-        assert isinstance(kernel, kernel_impl.Kernel)
+        kernel, default_name, bound_args = _resolve_kernel(kernel_fn)
+        kernel_name = name or default_name
         reject_acceleration_structure_arguments(kernel, "AOT Module.add_kernel()")
         reject_texture_collection_arguments(kernel, "AOT Module.add_kernel()")
         if template_args is not None:
+            if set(template_args) & set(bound_args):
+                raise TaichiCompilationError("Cannot override the owner of a bound AOT kernel")
+            template_args = {**template_args, **bound_args}
             injected_args = produce_injected_args_from_template(kernel, template_args)
         else:
             injected_args = produce_injected_args(kernel)
-        kernel.ensure_compiled(*injected_args)
-        self._aot_builder.add(kernel_name, kernel.kernel_cpp)
+            for index, arg in enumerate(kernel.arguments):
+                if arg.name in bound_args:
+                    injected_args[index] = bound_args[arg.name]
+        key = kernel.ensure_compiled(*injected_args)
+        compiled = kernel.compiled_kernels[key]
+        if not self._check_kernel_export(kernel_name, compiled):
+            return
+        self._aot_builder.add(kernel_name, compiled)
+        self._exported_kernels[kernel_name] = compiled
 
         # kernel AOT
         self._kernels.append(kernel)

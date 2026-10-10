@@ -2248,6 +2248,28 @@ Python objects fail before compilation. Keys use the filesystem-safe
 __tmpl__ convention; signatures over 180 UTF-8 bytes use a deterministic
 SHA-256 key to avoid Windows path-length failures.
 
+### Explicit reverse kernels
+
+`module.add_kernel(evaluate.grad, name="evaluate_backward")` exports a reverse
+kernel. Omitting `name` uses `evaluate_grad`; the primal keeps `evaluate`.
+Kernel templates and bound data-oriented methods also accept explicit `.grad`.
+Bound owners are frozen for that export. Reusing a name for a different
+specialization raises an error; repeating the same export is idempotent.
+
+Dense-field forward and reverse kernels can be deployed through the C API as
+ordinary kernels or an explicit AOT Graph on CPU, CUDA and Vulkan. Export and
+call initialization, gradient clearing/seeding, primal, reverse and readback
+in the required order. LLVM artifacts automatically include the SNodeTree
+layouts actually referenced by exported kernels, including gradient storage;
+the C API honors serialized tree IDs even when they are not consecutive.
+`add_field()` remains available for explicit field publication.
+
+This exports the existing backend reverse implementation. It does not serialize
+Python `Tape`, recover overwritten primal history, or add Vulkan autodiff-stack
+support. The deployment regression covers dense polynomial fields, separate
+primal/gradient storage, repeated seeding and ordinary AOT Graph replay. The
+C API is a separate native build; this does not change wheel SDK packaging.
+
 ## Kernel and Graph APIs
 
 Dense Field-specific layouts, lifetime, concurrency, AD, and backend behavior

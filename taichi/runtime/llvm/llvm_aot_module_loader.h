@@ -46,6 +46,10 @@ class LlvmAotModule final : public aot::Module {
     return cache_reader_->get_num_snode_trees();
   }
 
+  const std::vector<int> &get_snode_tree_ids() const {
+    return snode_tree_ids_;
+  }
+
   void set_initialized_snode_tree(int snode_tree_id) {
     initialized_snode_tree_ids.insert(snode_tree_id);
   }
@@ -83,6 +87,7 @@ class LlvmAotModule final : public aot::Module {
   std::unique_ptr<LLVM::KernelLauncher> kernel_launcher_{nullptr};
   std::unique_ptr<LlvmOfflineCacheFileReader> cache_reader_{nullptr};
   DeviceCapabilityConfig required_caps_;
+  std::vector<int> snode_tree_ids_;
 
   // To prevent repeated SNodeTree initialization
   std::unordered_set<int> initialized_snode_tree_ids;

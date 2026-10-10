@@ -146,6 +146,16 @@ size_t LlvmOfflineCacheFileReader::get_num_snode_trees() {
   return data_.fields.size();
 }
 
+std::vector<int> LlvmOfflineCacheFileReader::get_snode_tree_ids() const {
+  std::vector<int> ids;
+  ids.reserve(data_.fields.size());
+  for (const auto &[id, field] : data_.fields) {
+    ids.push_back(id);
+  }
+  std::sort(ids.begin(), ids.end());
+  return ids;
+}
+
 bool LlvmOfflineCacheFileReader::get_field_cache(
     LlvmOfflineCache::FieldCacheData &res,
     int snode_tree_id) {

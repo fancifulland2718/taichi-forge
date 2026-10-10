@@ -35,6 +35,10 @@
   构建；CUDA stream 接口明确现有默认流约定，对不支持的非默认流返回错误。
 - GFX AOT 加载拒绝未完整读取或头部无效的 SPIR-V；C API 实际检查产物声明的
   能力要求，接受能力等级相同或更高的设备，在分配根缓冲之前拒绝能力不足的设备。
+- AOT 支持显式导出 `kernel.grad`，覆盖 kernel 模板和绑定方法。dense field 的
+  反向 kernel 与普通 AOT Graph 已通过 CPU、CUDA、Vulkan 独立 C API 进程验证；
+  LLVM AOT 自动携带引用的 field 布局，并正确处理不连续树 ID。本次不新增
+  Python Tape 编排序列化或 Vulkan 自动微分栈支持。
 - LLVM O0 在 runtime helper 内联后清理私有标量槽位，减少机器码生成前的临时
   读写，不启用更高档的算术优化。
 - 延迟 IR 修改按块批量处理独立插入和删除，减少标量化中的重复语句查找和数组
